@@ -7,12 +7,15 @@
 
 import { describe, expect, test } from "bun:test";
 import {
+  type JsonValue,
   SUMMARY_LIMITS,
   SUMMARY_REFUSALS,
   type SummaryRefusal,
   type Table,
+  canonicalJson,
   entityPattern,
   firstDifference,
+  parseJson,
   parseTsv,
   renderValue,
   serializeTsv,
@@ -716,3 +719,599 @@ function generateTable(random: () => number): GeneratedTable {
     terminated === 0 ? "none" : crlf === 0 ? "lf" : crlf === terminated ? "crlf" : "mixed";
   return { text, header, rows, crByLine, format: { bom, eol, finalNewline } };
 }
+
+// ---------------------------------------------------------------------------------------------
+// JSON documents
+// ---------------------------------------------------------------------------------------------
+
+/** The six-character text of a JSON escape: a backslash, a u and four hex digits. */
+const uesc = (hex: string): string => `\\u${hex}`;
+
+/** The refusal word a JSON text gets, or null when it parsed. */
+function jsonRefusal(input: string | Uint8Array): SummaryRefusal | null {
+  const parsed = parseJson(typeof input === "string" ? enc(input) : input);
+  return parsed.ok ? null : parsed.refusal;
+}
+
+/** The value a JSON text parses to; a refusal fails the test with its word. */
+function jsonValue(text: string): JsonValue {
+  const parsed = parseJson(enc(text));
+  if (!parsed.ok) throw new Error(`${JSON.stringify(text)} refused as ${parsed.refusal}`);
+  return parsed.value.value;
+}
+
+/** A parsed value as a plain JavaScript value, for comparing against `JSON.parse`. */
+function plain(v: JsonValue): unknown {
+  switch (v.t) {
+    case "null":
+      return null;
+    case "bool":
+    case "str":
+      return v.v;
+    case "num":
+      return Number(v.v);
+    case "arr":
+      return v.v.map(plain);
+    case "obj":
+      return Object.fromEntries(v.keys.map((key) => [key, plain(v.v.get(key) as JsonValue)]));
+  }
+}
+
+describe("parseJson accepts RFC 8259 and describes it", () => {
+  test("every kind of value, at the top and nested", () => {
+    expect(jsonValue("null")).toEqual({ t: "null" });
+    expect(jsonValue("true")).toEqual({ t: "bool", v: true });
+    expect(jsonValue("false")).toEqual({ t: "bool", v: false });
+    expect(jsonValue("12")).toEqual({ t: "num", v: "12" });
+    expect(jsonValue('"x"')).toEqual({ t: "str", v: "x" });
+    expect(jsonValue("[]")).toEqual({ t: "arr", v: [] });
+    expect(jsonValue("{}")).toEqual({ t: "obj", keys: [], v: new Map() });
+    expect(jsonValue('{"a":[1,{"b":null}],"c":"d"}')).toEqual({
+      t: "obj",
+      keys: ["a", "c"],
+      v: new Map<string, JsonValue>([
+        [
+          "a",
+          {
+            t: "arr",
+            v: [
+              { t: "num", v: "1" },
+              { t: "obj", keys: ["b"], v: new Map([["b", { t: "null" }]]) },
+            ],
+          },
+        ],
+        ["c", { t: "str", v: "d" }],
+      ]),
+    });
+  });
+
+  test("space, tab, LF and CR are whitespace anywhere between tokens", () => {
+    expect(
+      canonicalJson(
+        jsonValue(
+          ' \t\r\n{ \t\r\n"a" \t\r\n: \t\r\n[ \t\r\n1 \t\r\n, \t\r\n2 \t\r\n] \t\r\n} \t\r\n',
+        ),
+      ),
+    ).toBe('{"a":[1,2]}');
+  });
+
+  test("a byte order mark is removed and recorded", () => {
+    const parsed = parseJson(enc('\u{FEFF}{"a":1}'));
+    expect(parsed.ok && parsed.value.format.bom).toBe(true);
+    expect(parsed.ok && canonicalJson(parsed.value.value)).toBe('{"a":1}');
+  });
+
+  test("DEL and every non-ASCII character are allowed inside a string; only below U+0020 is not", () => {
+    expect(jsonValue('"\u{7F}\u{E9}\u{1F600}\u{2028}"')).toEqual({
+      t: "str",
+      v: "\u{7F}\u{E9}\u{1F600}\u{2028}",
+    });
+  });
+});
+
+describe("parseJson records the layout", () => {
+  const formatOf = (text: string) => {
+    const parsed = parseJson(enc(text));
+    if (!parsed.ok) throw new Error(`refused as ${parsed.refusal}`);
+    return parsed.value.format;
+  };
+
+  test("no line break, LF, CRLF and a mixture", () => {
+    expect(formatOf("{}")).toEqual({ bom: false, eol: "none", finalNewline: false });
+    expect(formatOf("{\n}\n")).toEqual({ bom: false, eol: "lf", finalNewline: true });
+    expect(formatOf("{\r\n}\r\n")).toEqual({ bom: false, eol: "crlf", finalNewline: true });
+    expect(formatOf("{\r\n\n}")).toEqual({ bom: false, eol: "mixed", finalNewline: false });
+    expect(formatOf("{\n}\r\n")).toEqual({ bom: false, eol: "mixed", finalNewline: true });
+  });
+
+  test("a bare CR is a line break of its own kind, so the file is mixed", () => {
+    expect(formatOf("{\r}").eol).toBe("mixed");
+    expect(formatOf("{\r\r\n}").eol).toBe("mixed");
+    expect(formatOf("[\r\n1,\r2]").eol).toBe("mixed");
+  });
+
+  test("the BOM and the final newline are read independently", () => {
+    expect(formatOf("\u{FEFF}{}\n")).toEqual({ bom: true, eol: "lf", finalNewline: true });
+    expect(formatOf("\u{FEFF}{}")).toEqual({ bom: true, eol: "none", finalNewline: false });
+    expect(formatOf("{}\r\n").finalNewline).toBe(true);
+    expect(formatOf("{}\r").finalNewline).toBe(false);
+  });
+});
+
+describe("parseJson refuses, with one closed word per fault", () => {
+  test("the byte checks are the table parser's: too_large, nul_byte, invalid_utf8", () => {
+    expect(jsonRefusal(new Uint8Array(SUMMARY_LIMITS.maxBlobBytes + 1).fill(0x20))).toBe(
+      "too_large",
+    );
+    expect(jsonRefusal('{"a":"\u{0}"}')).toBe("nul_byte");
+    expect(jsonRefusal(Uint8Array.of(0x7b, 0x7d, 0x00))).toBe("nul_byte");
+    expect(jsonRefusal(Uint8Array.from([0x22, 0xff, 0x22]))).toBe("invalid_utf8");
+    expect(jsonRefusal(Uint8Array.from([0x5b, 0xc0, 0xaf, 0x5d]))).toBe("invalid_utf8");
+    // A NUL written as an escape is just text.
+    expect(jsonRefusal(String.raw`"\u0000"`)).toBeNull();
+  });
+
+  test("not_json: nothing, or only whitespace, or only a byte order mark", () => {
+    for (const text of ["", " ", "\n\t\r", "\u{FEFF}", "\u{FEFF} "]) {
+      expect(jsonRefusal(text), JSON.stringify(text)).toBe("not_json");
+    }
+  });
+
+  test("not_json: NaN, Infinity and their cousins", () => {
+    for (const text of ["NaN", "Infinity", "-Infinity", "[NaN]", '{"a":Infinity}', "undefined"]) {
+      expect(jsonRefusal(text), text).toBe("not_json");
+    }
+  });
+
+  test("not_json: trailing and leading commas, missing commas and colons, missing values", () => {
+    for (const text of [
+      "[1,]",
+      "[,1]",
+      "[,]",
+      '{"a":1,}',
+      '{,"a":1}',
+      "[1 2]",
+      '{"a":1 "b":2}',
+      '{"a" 1}',
+      '{"a"}',
+      '{"a":}',
+      "{a:1}",
+      '{1:"a"}',
+      "[1,,2]",
+      "[",
+      "{",
+      "[1",
+      '{"a":1',
+      "]",
+      "}",
+      "[}",
+      "{]",
+    ]) {
+      expect(jsonRefusal(text), text).toBe("not_json");
+    }
+  });
+
+  test("not_json: comments", () => {
+    for (const text of [
+      "// c\n{}",
+      "/* c */ {}",
+      "{} // c",
+      "{} /* c */",
+      '{"a":1 /* c */}',
+      "# c\n{}",
+    ]) {
+      expect(jsonRefusal(text), text).toBe("not_json");
+    }
+  });
+
+  test("not_json: single quotes", () => {
+    for (const text of ["'a'", "{'a':1}", "['a']", `{"a":'b'}`]) {
+      expect(jsonRefusal(text), text).toBe("not_json");
+    }
+  });
+
+  test("not_json: numbers that are not RFC 8259 numbers", () => {
+    for (const text of [
+      "01",
+      "[01]",
+      "-01",
+      "00",
+      "+1",
+      ".5",
+      "5.",
+      "1.e5",
+      "1e",
+      "1e+",
+      "-",
+      "--1",
+      "0x10",
+      "1_000",
+      "1.5.3",
+      "0b1",
+      "[1.]",
+      "- 1",
+    ]) {
+      expect(jsonRefusal(text), text).toBe("not_json");
+    }
+  });
+
+  test("not_json: literals spelled wrong or run into what follows", () => {
+    for (const text of [
+      "tru",
+      "True",
+      "nul",
+      "NULL",
+      "falsey",
+      "[truefalse]",
+      "nullnull",
+      "[1true]",
+      "{}x",
+    ]) {
+      expect(jsonRefusal(text), text).toBe("not_json");
+    }
+  });
+
+  test("not_json: content after the value", () => {
+    for (const text of [
+      "{} {}",
+      "[] ]",
+      "1 2",
+      '"a" "b"',
+      "{}\u{0}".replace("\u{0}", "x"),
+      "{},",
+      "null,",
+    ]) {
+      expect(jsonRefusal(text), text).toBe("not_json");
+    }
+    expect(jsonRefusal("{}\n\n \r\t")).toBeNull();
+  });
+
+  test("not_json: a raw control character inside a string, and every one below U+0020", () => {
+    expect(jsonRefusal('"a\nb"')).toBe("not_json");
+    expect(jsonRefusal('"a\tb"')).toBe("not_json");
+    expect(jsonRefusal('"a\rb"')).toBe("not_json");
+    expect(jsonRefusal('"a\u{1}b"')).toBe("not_json");
+    for (let code = 1; code < 0x20; code++) {
+      expect(jsonRefusal(`["${String.fromCharCode(code)}"]`), `U+${code.toString(16)}`).toBe(
+        "not_json",
+      );
+    }
+    expect(jsonRefusal(String.raw`"a\nb"`)).toBeNull();
+  });
+
+  test("not_json: bad strings and escapes", () => {
+    for (const text of [
+      '"abc',
+      '"',
+      '"a\\"',
+      String.raw`"\x41"`,
+      String.raw`"\a"`,
+      String.raw`"\'"`,
+      String.raw`"\u12G4"`,
+      String.raw`"\u12"`,
+      String.raw`"\u"`,
+      String.raw`"\U0041"`,
+      String.raw`"\ `,
+      '{"a":"b}',
+    ]) {
+      expect(jsonRefusal(text), text).toBe("not_json");
+    }
+  });
+
+  test("not_json: whitespace that is not JSON whitespace (a BOM is only a BOM at the very start)", () => {
+    expect(jsonRefusal("{}\u{FEFF}")).toBe("not_json");
+    expect(jsonRefusal("[1,\u{FEFF}2]")).toBe("not_json");
+    expect(jsonRefusal("\u{FEFF}\u{FEFF}{}")).toBe("not_json");
+    for (const space of ["\u{A0}", "\u{2028}", "\u{2003}", "\u{B}", "\u{C}", "\u{85}"]) {
+      expect(jsonRefusal(`${space}{}`), JSON.stringify(space)).toBe("not_json");
+      expect(jsonRefusal(`{}${space}`), JSON.stringify(space)).toBe("not_json");
+      expect(jsonRefusal(`[1,${space}2]`), JSON.stringify(space)).toBe("not_json");
+    }
+  });
+
+  test("duplicate_key: at the top level, nested in an object, and inside an array element", () => {
+    expect(jsonRefusal('{"a":1,"a":2}')).toBe("duplicate_key");
+    expect(jsonRefusal('{"x":{"a":1,"a":2}}')).toBe("duplicate_key");
+    expect(jsonRefusal('[{"a":1},{"b":1,"b":2}]')).toBe("duplicate_key");
+    expect(jsonRefusal('{"a":[[{"k":1,"j":2,"k":3}]]}')).toBe("duplicate_key");
+    expect(jsonRefusal('{"a":1,"b":2,"c":3,"a":4}')).toBe("duplicate_key");
+  });
+
+  test("duplicate_key: keys are compared decoded, and the same value twice is still a duplicate", () => {
+    expect(jsonRefusal(`{"a":1,"${uesc("0061")}":1}`)).toBe("duplicate_key");
+    expect(jsonRefusal(`{"${uesc("00e9")}":1,"\u{E9}":2}`)).toBe("duplicate_key");
+    expect(jsonRefusal('{"a":1,"a":1}')).toBe("duplicate_key");
+    expect(jsonRefusal('{"__proto__":1,"__proto__":2}')).toBe("duplicate_key");
+  });
+
+  test("the same key in different objects, or at different depths, is not a duplicate", () => {
+    expect(jsonRefusal('{"a":{"a":{"a":1}}}')).toBeNull();
+    expect(jsonRefusal('[{"a":1},{"a":2}]')).toBeNull();
+    expect(jsonRefusal('{"a":1,"A":2,"a ":3}')).toBeNull();
+  });
+
+  test("too_deep: 64 nested arrays are read, 65 are refused", () => {
+    const nested = (n: number) => "[".repeat(n) + "]".repeat(n);
+    expect(jsonRefusal(nested(SUMMARY_LIMITS.maxJsonDepth))).toBeNull();
+    expect(jsonRefusal(nested(SUMMARY_LIMITS.maxJsonDepth + 1))).toBe("too_deep");
+  });
+
+  test("too_deep: objects count the same, and so does a mixture", () => {
+    const objects = (n: number) => `${'{"a":'.repeat(n)}1${"}".repeat(n)}`;
+    expect(jsonRefusal(objects(64))).toBeNull();
+    expect(jsonRefusal(objects(65))).toBe("too_deep");
+    const mixed = (n: number) => `${'[{"a":'.repeat(n)}1${"}]".repeat(n)}`;
+    expect(jsonRefusal(mixed(32))).toBeNull();
+    expect(jsonRefusal(mixed(33))).toBe("too_deep");
+  });
+
+  test("too_deep: a megabyte of opening brackets is refused at once, in linear time", () => {
+    const bomb = new Uint8Array(1024 * 1024).fill(0x5b);
+    const started = performance.now();
+    expect(jsonRefusal(bomb)).toBe("too_deep");
+    const braces = new Uint8Array(1024 * 1024).fill(0x7b);
+    expect(jsonRefusal(braces)).toBe("not_json"); // a brace is followed by another brace, not a key
+    expect(jsonRefusal(enc('{"a":'.repeat(200_000)))).toBe("too_deep");
+    expect(jsonRefusal(enc("[".repeat(100_000) + "]".repeat(100_000)))).toBe("too_deep");
+    expect(performance.now() - started).toBeLessThan(1000);
+  });
+
+  test("too_many_nodes: 200,001 elements are refused, and the count includes the containers", () => {
+    const array = (n: number) => `[${"0,".repeat(n - 1)}0]`;
+    const started = performance.now();
+    // 199,999 elements plus the array are exactly 200,000 values.
+    expect(jsonRefusal(array(SUMMARY_LIMITS.maxJsonNodes - 1))).toBeNull();
+    expect(jsonRefusal(array(SUMMARY_LIMITS.maxJsonNodes))).toBe("too_many_nodes");
+    expect(jsonRefusal(array(SUMMARY_LIMITS.maxJsonNodes + 1))).toBe("too_many_nodes");
+    expect(performance.now() - started).toBeLessThan(2000);
+  });
+
+  test("too_many_nodes: object members and nested containers count too", () => {
+    const members = `{${Array.from({ length: SUMMARY_LIMITS.maxJsonNodes }, (_, i) => `"k${i}":0`).join(",")}}`;
+    expect(jsonRefusal(members)).toBe("too_many_nodes");
+    expect(jsonRefusal(`[${"[],".repeat(SUMMARY_LIMITS.maxJsonNodes)}[]]`)).toBe("too_many_nodes");
+    expect(jsonRefusal(`[${'"s",'.repeat(SUMMARY_LIMITS.maxJsonNodes)}"s"]`)).toBe(
+      "too_many_nodes",
+    );
+  });
+
+  test("when a document has several faults the first met in reading order names it", () => {
+    expect(jsonRefusal('{"a":1,"a":2,}')).toBe("duplicate_key");
+    expect(jsonRefusal('{"a":1,}"a"')).toBe("not_json");
+    expect(jsonRefusal(`${"[".repeat(65)}x`)).toBe("too_deep");
+    expect(jsonRefusal(`[x${"[".repeat(65)}`)).toBe("not_json");
+  });
+});
+
+describe("parseJson keeps numbers as written and strings as decoded", () => {
+  test("1.0, 1, 1e400, -0 and 1E+2 stay distinct tokens", () => {
+    const value = jsonValue(
+      "[1.0,1,1e400,-0,1E+2,1e2,100,0.0,-0.0,1.50,0,-1,12345678901234567890123]",
+    );
+    const tokens = (value as { v: readonly { v: string }[] }).v.map((item) => item.v);
+    expect(tokens).toEqual([
+      "1.0",
+      "1",
+      "1e400",
+      "-0",
+      "1E+2",
+      "1e2",
+      "100",
+      "0.0",
+      "-0.0",
+      "1.50",
+      "0",
+      "-1",
+      "12345678901234567890123",
+    ]);
+    expect(new Set(tokens).size).toBe(tokens.length);
+    expect(canonicalJson(value)).toBe(
+      "[1.0,1,1e400,-0,1E+2,1e2,100,0.0,-0.0,1.50,0,-1,12345678901234567890123]",
+    );
+  });
+
+  test("the six-character escape of a capital A is a plain capital A after parsing", () => {
+    const escapedA = `"${uesc("0041")}"`;
+    expect(escapedA).toHaveLength(8); // quote, backslash, u, four digits, quote: it is spelled out
+    expect(jsonValue(escapedA)).toEqual(jsonValue('"A"'));
+    expect(jsonValue(escapedA)).toEqual({ t: "str", v: "A" });
+    expect(jsonValue(`"${uesc("00e9")}"`)).toEqual(jsonValue('"\u{E9}"'));
+    expect(jsonValue(`"${uesc("00E9")}"`)).toEqual(jsonValue('"\u{E9}"'));
+    expect(jsonValue(`{"${uesc("0061")}":"${uesc("0062")}"}`)).toEqual(jsonValue('{"a":"b"}'));
+  });
+
+  test("all eight short escapes and a surrogate pair", () => {
+    expect(jsonValue(String.raw`"\"\\\/\b\f\n\r\t"`)).toEqual({ t: "str", v: '"\\/\b\f\n\r\t' });
+    expect(jsonValue(`"${uesc("d83d")}${uesc("de00")}"`)).toEqual({ t: "str", v: "\u{1F600}" });
+  });
+
+  test("a lone surrogate escape is a value, kept as the code unit, and printed back as an escape", () => {
+    const value = jsonValue(String.raw`"\ud800"`);
+    expect(value).toEqual({ t: "str", v: "\ud800" });
+    expect(canonicalJson(value)).toBe(String.raw`"\ud800"`);
+  });
+
+  test("an escaped and an unescaped spelling of a document are the same tree", () => {
+    const escaped = `{"na${uesc("006d")}e":"${uesc("0045")}EG","tag":"a\\/b"}`;
+    const plainText = '{"name":"EEG","tag":"a/b"}';
+    expect(jsonValue(escaped)).toEqual(jsonValue(plainText));
+    expect(canonicalJson(jsonValue(escaped))).toBe(plainText);
+  });
+});
+
+describe("parseJson keeps the order of keys, and a key named __proto__ is a key", () => {
+  test("keys come back in source order, not sorted", () => {
+    const value = jsonValue('{"b":1,"a":2,"c":3,"B":4}');
+    expect(value.t === "obj" && value.keys).toEqual(["b", "a", "c", "B"]);
+    expect(canonicalJson(value)).toBe('{"b":1,"a":2,"c":3,"B":4}');
+  });
+
+  test("__proto__ is held as an ordinary key and pollutes nothing", () => {
+    const value = jsonValue('{"__proto__":{"polluted":true},"a":1,"constructor":2,"toString":3}');
+    if (value.t !== "obj") throw new Error("not an object");
+    expect(value.keys).toEqual(["__proto__", "a", "constructor", "toString"]);
+    expect(value.v.get("__proto__")).toEqual({
+      t: "obj",
+      keys: ["polluted"],
+      v: new Map([["polluted", { t: "bool", v: true }]]),
+    });
+    expect(value.v.get("constructor")).toEqual({ t: "num", v: "2" });
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+    expect(Object.getPrototypeOf({})).toBe(Object.prototype);
+    expect(canonicalJson(value)).toBe(
+      '{"__proto__":{"polluted":true},"a":1,"constructor":2,"toString":3}',
+    );
+  });
+});
+
+describe("canonicalJson", () => {
+  test("no whitespace, source key order, strings re-encoded, numbers as written", () => {
+    const text = `  { "b" : [ 1 , 2.50 , "A\\/${uesc("0041")}" , true , false , null ] ,
+      "a" : { } , "c" : [ ] , "d${uesc("00e9")}" : "line\\nbreak\\t\\"q\\"" }  `;
+    expect(canonicalJson(jsonValue(text))).toBe(
+      `{"b":[1,2.50,"A/A",true,false,null],"a":{},"c":[],"d\u{E9}":"line\\nbreak\\t\\"q\\""}`,
+    );
+  });
+
+  test("two spellings of the same document have one text, and a different value has another", () => {
+    const a = canonicalJson(jsonValue('{"a": [1, 2], "b": "x"}'));
+    const b = canonicalJson(jsonValue('{"a":[1,2],"b":"\\u0078"}'));
+    expect(a).toBe(b);
+    expect(canonicalJson(jsonValue('{"a":[1,2],"b":"y"}'))).not.toBe(a);
+    expect(canonicalJson(jsonValue('{"b":"x","a":[1,2]}'))).not.toBe(a); // key order is data
+    expect(canonicalJson(jsonValue('"1"'))).not.toBe(canonicalJson(jsonValue("1")));
+    expect(canonicalJson(jsonValue("[1]"))).not.toBe(canonicalJson(jsonValue("1")));
+  });
+
+  test("parsing the canonical text gives the same tree and the same canonical text again", () => {
+    const value = jsonValue('{"a":[1.0,{"b":"\\u00e9"}],"c":{"d":null}}');
+    const text = canonicalJson(value);
+    expect(jsonValue(text)).toEqual(value);
+    expect(canonicalJson(jsonValue(text))).toBe(text);
+  });
+});
+
+describe("parseJson agrees with JSON.parse wherever JSON.parse is strict", () => {
+  const WHITESPACE = ["", "", " ", "\n", "\t", "\r\n", "  \n  "];
+  const NUMBERS = [
+    "0",
+    "-0",
+    "1",
+    "-1",
+    "10",
+    "1.5",
+    "-0.25",
+    "1e5",
+    "1E-5",
+    "2.5e+10",
+    "123456789012345678901234567890",
+    "0.0001",
+  ];
+  const STRINGS = [
+    "",
+    "a",
+    "a b",
+    "\\n",
+    "\\u0041",
+    '\\"',
+    "\\\\",
+    "\\/",
+    "\u{E9}",
+    "\\ud83d\\ude00",
+    "\\u00e9",
+    "tab\\t",
+    "{}[],:",
+    "\u{1F600}",
+  ];
+
+  function generate(random: () => number, depth: number): string {
+    const pick = <T>(items: readonly T[]): T => items[Math.floor(random() * items.length)] as T;
+    const ws = () => pick(WHITESPACE);
+    const kind = Math.floor(random() * (depth >= 4 ? 5 : 7));
+    switch (kind) {
+      case 0:
+        return "null";
+      case 1:
+        return random() < 0.5 ? "true" : "false";
+      case 2:
+        return pick(NUMBERS);
+      case 3:
+      case 4:
+        return `"${pick(STRINGS)}"`;
+      case 5: {
+        const items = Array.from({ length: Math.floor(random() * 4) }, () =>
+          generate(random, depth + 1),
+        );
+        return `[${ws()}${items.join(`${ws()},${ws()}`)}${ws()}]`;
+      }
+      default: {
+        const members = Array.from(
+          { length: Math.floor(random() * 4) },
+          (_, i) =>
+            `"k${i}${pick(["", "\\u0041", "\u{E9}"])}"${ws()}:${ws()}${generate(random, depth + 1)}`,
+        );
+        return `{${ws()}${members.join(`${ws()},${ws()}`)}${ws()}}`;
+      }
+    }
+  }
+
+  test("2,000 generated documents parse to what JSON.parse parses, and print back to a stable text", () => {
+    const random = seeded(8259);
+    for (let n = 0; n < 2000; n++) {
+      const text = `${WHITESPACE[n % WHITESPACE.length]}${generate(random, 0)}${WHITESPACE[(n + 3) % WHITESPACE.length]}`;
+      const value = jsonValue(text);
+      expect(plain(value), `case ${n}: ${text}`).toEqual(JSON.parse(text));
+      const canonical = canonicalJson(value);
+      expect(canonicalJson(jsonValue(canonical)), `case ${n}`).toBe(canonical);
+    }
+  });
+
+  test("4,000 one-character corruptions of those documents are refused exactly when JSON.parse refuses them", () => {
+    const random = seeded(1);
+    const pool = [..."[]{},:\"\\0189-.eEtfnx +/*'"].concat([
+      "\n",
+      "\t",
+      "\r",
+      "\u{A0}",
+      "\u{E9}",
+      "\u{FEFF}",
+      "\u{1F600}",
+    ]);
+    let refused = 0;
+    let read = 0;
+    for (let n = 0; n < 4000; n++) {
+      const original = generate(random, 0);
+      const at = Math.floor(random() * (original.length + 1));
+      const op = Math.floor(random() * 3);
+      const ch = pool[Math.floor(random() * pool.length)] as string;
+      // Work on code points, so a corruption never leaves half of a surrogate pair behind.
+      const points = [...original];
+      if (op === 0) points.splice(at, 0, ch);
+      else if (op === 1) points.splice(at, 1);
+      else points.splice(at, 1, ch);
+      const text = points.join("");
+
+      let strict: unknown;
+      let strictOk = true;
+      try {
+        // A leading BOM is removed by the byte checks before the grammar sees the text.
+        strict = JSON.parse(text.startsWith("\u{FEFF}") ? text.slice(1) : text);
+      } catch {
+        strictOk = false;
+      }
+      const parsed = parseJson(enc(text));
+      if (strictOk) {
+        // JSON.parse keeps the last of a repeated key; this parser refuses it and says so.
+        if (!parsed.ok) expect(parsed.refusal, JSON.stringify(text)).toBe("duplicate_key");
+        else expect(plain(parsed.value.value), JSON.stringify(text)).toEqual(strict);
+        read++;
+      } else {
+        expect(parsed.ok, JSON.stringify(text)).toBe(false);
+        refused++;
+      }
+    }
+    // Both outcomes were exercised in quantity, so neither side of the comparison is vacuous.
+    expect(refused).toBeGreaterThan(1000);
+    expect(read).toBeGreaterThan(300);
+  });
+});

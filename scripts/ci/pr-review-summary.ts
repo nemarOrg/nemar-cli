@@ -344,3 +344,274 @@ export function parseTsv(
 function startsWithQuote(cell: string): boolean {
   return cell.charCodeAt(0) === 34;
 }
+
+// ---------------------------------------------------------------------------------------------
+// JSON documents
+// ---------------------------------------------------------------------------------------------
+
+/** A refusal raised inside the recursive reader and turned back into a result at its one entry point. */
+class JsonRefusal extends Error {
+  readonly refusal: SummaryRefusal;
+  constructor(refusal: SummaryRefusal) {
+    super(refusal);
+    this.name = "JsonRefusal";
+    this.refusal = refusal;
+  }
+}
+
+const NUMBER = /-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?/y;
+
+/** The characters after a backslash that stand for one character, by their code. */
+const SIMPLE_ESCAPES: ReadonlyMap<number, string> = new Map([
+  [0x22, '"'],
+  [0x5c, "\\"],
+  [0x2f, "/"],
+  [0x62, "\b"],
+  [0x66, "\f"],
+  [0x6e, "\n"],
+  [0x72, "\r"],
+  [0x74, "\t"],
+]);
+
+/**
+ * A recursive-descent reader of RFC 8259 JSON, written by hand because `JSON.parse` does the three
+ * things the summary cannot accept: it keeps the LAST of a repeated key (a file that says two things
+ * to two readers), it turns a number into a double (`1.0`, `1` and `1e400` become values that hide
+ * a change), and it has no bound on nesting. Whitespace is exactly space, tab, LF and CR.
+ *
+ * **Depth is bounded before it is entered.** An array or object checks its level against
+ * `maxJsonDepth` the moment its opening bracket is read, before it reads anything inside, so the
+ * recursion is at most `maxJsonDepth + 1` calls deep whatever the input: a megabyte of `[` is
+ * refused at its 65th byte, in constant stack and linear time.
+ */
+class JsonReader {
+  private pos = 0;
+  private nodes = 0;
+
+  constructor(private readonly text: string) {}
+
+  document(): JsonValue {
+    this.skipSpace();
+    const value = this.value(0);
+    this.skipSpace();
+    if (this.pos < this.text.length) throw new JsonRefusal("not_json");
+    return value;
+  }
+
+  private skipSpace(): void {
+    const text = this.text;
+    let i = this.pos;
+    for (;;) {
+      const c = text.charCodeAt(i);
+      if (c === 0x20 || c === 0x09 || c === 0x0a || c === 0x0d) i++;
+      else break;
+    }
+    this.pos = i;
+  }
+
+  /** Every value, container or not, counts toward `maxJsonNodes`. */
+  private count(): void {
+    if (++this.nodes > SUMMARY_LIMITS.maxJsonNodes) throw new JsonRefusal("too_many_nodes");
+  }
+
+  /** The level a container opened at `depth` has, checked before anything inside is read. */
+  private open(depth: number): number {
+    const level = depth + 1;
+    if (level > SUMMARY_LIMITS.maxJsonDepth) throw new JsonRefusal("too_deep");
+    this.count();
+    return level;
+  }
+
+  private value(depth: number): JsonValue {
+    const c = this.text.charCodeAt(this.pos);
+    if (c === 0x7b) return this.object(depth);
+    if (c === 0x5b) return this.array(depth);
+    this.count();
+    if (c === 0x22) return { t: "str", v: this.string() };
+    if (c === 0x74) return this.literal("true", { t: "bool", v: true });
+    if (c === 0x66) return this.literal("false", { t: "bool", v: false });
+    if (c === 0x6e) return this.literal("null", { t: "null" });
+    if (c === 0x2d || (c >= 0x30 && c <= 0x39)) return this.number();
+    throw new JsonRefusal("not_json");
+  }
+
+  /** What follows a literal or a number is checked by the caller, which accepts only a delimiter. */
+  private literal(word: string, value: JsonValue): JsonValue {
+    if (!this.text.startsWith(word, this.pos)) throw new JsonRefusal("not_json");
+    this.pos += word.length;
+    return value;
+  }
+
+  private number(): JsonValue {
+    NUMBER.lastIndex = this.pos;
+    const match = NUMBER.exec(this.text);
+    if (match === null) throw new JsonRefusal("not_json");
+    this.pos += match[0].length;
+    return { t: "num", v: match[0] };
+  }
+
+  private string(): string {
+    const text = this.text;
+    let out = "";
+    let start = this.pos + 1;
+    let i = start;
+    for (;;) {
+      if (i >= text.length) throw new JsonRefusal("not_json");
+      const c = text.charCodeAt(i);
+      if (c === 0x22) {
+        this.pos = i + 1;
+        return out + text.slice(start, i);
+      }
+      if (c < 0x20) throw new JsonRefusal("not_json");
+      if (c !== 0x5c) {
+        i++;
+        continue;
+      }
+      out += text.slice(start, i);
+      const e = text.charCodeAt(i + 1);
+      const simple = SIMPLE_ESCAPES.get(e);
+      if (simple !== undefined) {
+        out += simple;
+        i += 2;
+      } else if (e === 0x75) {
+        const hex = text.slice(i + 2, i + 6);
+        if (!/^[0-9a-fA-F]{4}$/.test(hex)) throw new JsonRefusal("not_json");
+        out += String.fromCharCode(Number.parseInt(hex, 16));
+        i += 6;
+      } else {
+        throw new JsonRefusal("not_json");
+      }
+      start = i;
+    }
+  }
+
+  private array(depth: number): JsonValue {
+    const level = this.open(depth);
+    this.pos++;
+    const items: JsonValue[] = [];
+    this.skipSpace();
+    if (this.text.charCodeAt(this.pos) === 0x5d) {
+      this.pos++;
+      return { t: "arr", v: items };
+    }
+    for (;;) {
+      items.push(this.value(level));
+      this.skipSpace();
+      const c = this.text.charCodeAt(this.pos);
+      this.pos++;
+      if (c === 0x5d) return { t: "arr", v: items };
+      if (c !== 0x2c) throw new JsonRefusal("not_json");
+      this.skipSpace();
+    }
+  }
+
+  private object(depth: number): JsonValue {
+    const level = this.open(depth);
+    this.pos++;
+    const keys: string[] = [];
+    const members = new Map<string, JsonValue>();
+    this.skipSpace();
+    if (this.text.charCodeAt(this.pos) === 0x7d) {
+      this.pos++;
+      return { t: "obj", keys, v: members };
+    }
+    for (;;) {
+      if (this.text.charCodeAt(this.pos) !== 0x22) throw new JsonRefusal("not_json");
+      const key = this.string();
+      if (members.has(key)) throw new JsonRefusal("duplicate_key");
+      this.skipSpace();
+      if (this.text.charCodeAt(this.pos) !== 0x3a) throw new JsonRefusal("not_json");
+      this.pos++;
+      this.skipSpace();
+      members.set(key, this.value(level));
+      keys.push(key);
+      this.skipSpace();
+      const c = this.text.charCodeAt(this.pos);
+      this.pos++;
+      if (c === 0x7d) return { t: "obj", keys, v: members };
+      if (c !== 0x2c) throw new JsonRefusal("not_json");
+      this.skipSpace();
+    }
+  }
+}
+
+/** The layout of a JSON text: its BOM, the kind of line breaks it holds anywhere, and its last character. */
+function jsonFormat(bom: boolean, text: string): TextFormat {
+  let lf = 0;
+  let crlf = 0;
+  let bareCr = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    if (c === 0x0a) lf++;
+    else if (c === 0x0d) {
+      if (text.charCodeAt(i + 1) === 0x0a) {
+        crlf++;
+        i++;
+      } else bareCr = true;
+    }
+  }
+  const eol =
+    lf + crlf === 0 && !bareCr
+      ? "none"
+      : bareCr || (lf > 0 && crlf > 0)
+        ? "mixed"
+        : crlf > 0
+          ? "crlf"
+          : "lf";
+  return { bom, eol, finalNewline: text.endsWith("\n") };
+}
+
+/**
+ * Read a JSON document, or say in one closed word why the platform will not. The first four steps
+ * are the TSV parser's (`too_large`, `nul_byte`, `invalid_utf8`, a BOM removed and recorded); the
+ * rest is RFC 8259 and nothing more, read by {@link JsonReader}. `NaN`, `Infinity`, comments,
+ * trailing commas, single quotes, leading zeros, a raw control character in a string and anything
+ * after the value are `not_json`; a key repeated within one object, at any depth, is
+ * `duplicate_key` (keys are compared decoded, so `"a"` and the six-character escape of `a` are the
+ * same key); nesting past `maxJsonDepth` is `too_deep` and more than `maxJsonNodes` values
+ * `too_many_nodes`. Where a document has several faults the word is the first one met in reading
+ * order.
+ *
+ * Numbers stay as the text the file wrote and strings are decoded, so the six-character escape of
+ * `A` and a plain `A` are one value, while `1.0`, `1` and `1e400` are three. Equal trees therefore
+ * mean equal values to every conforming reader, which is what makes a JSON file's change summary
+ * as complete as a TSV's. Whitespace is not kept: a reindent is the cosmetic proof's business, and
+ * `format` reports only what the line breaks were.
+ */
+export function parseJson(bytes: Uint8Array): Parsed<{ value: JsonValue; format: TextFormat }> {
+  const decoded = decodeText(bytes);
+  if (!decoded.ok) return decoded;
+  const { bom, text } = decoded.value;
+  try {
+    const value = new JsonReader(text).document();
+    return { ok: true, value: { value, format: jsonFormat(bom, text) } };
+  } catch (error) {
+    // Anything but a refusal is a defect in this reader and must be loud, never a quiet refusal.
+    if (error instanceof JsonRefusal) return { ok: false, refusal: error.refusal };
+    throw error;
+  }
+}
+
+/**
+ * A value as compact JSON text: no whitespace, object keys in source order, strings re-encoded
+ * with `JSON.stringify` (so two spellings of one string have one text), numbers as written. This is
+ * the text a leaf is compared and shown as (design section 2.3), so it is injective on values.
+ */
+export function canonicalJson(v: JsonValue): string {
+  switch (v.t) {
+    case "null":
+      return "null";
+    case "bool":
+      return v.v ? "true" : "false";
+    case "num":
+      return v.v;
+    case "str":
+      return JSON.stringify(v.v);
+    case "arr":
+      return `[${v.v.map((item) => canonicalJson(item)).join(",")}]`;
+    case "obj":
+      return `{${v.keys
+        .map((key) => `${JSON.stringify(key)}:${canonicalJson(v.v.get(key) as JsonValue)}`)
+        .join(",")}}`;
+  }
+}
