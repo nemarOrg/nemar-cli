@@ -4099,7 +4099,7 @@ function bulkRelabel(
   });
 }
 
-/** The 125-table pull request, built once for every test that reads it (nothing here writes to it). */
+/** The 125-table pull request, built once for every test that reads it (nothing writes to it). */
 let bulkRepo: Repo | null = null;
 function bulk(): Repo {
   bulkRepo ??= bulkRelabel("bulk-relabel");
@@ -4548,8 +4548,8 @@ describe("the change summary", () => {
 
   /**
    * A key removed from a subject's sidecar and set, with the same value, in the root sidecar, which
-   * applies to it under BIDS inheritance; `between` is what the pull request does to the subject-level
-   * sidecar between the two.
+   * applies to it under BIDS inheritance; `between` is what the pull request does to the
+   * subject-level sidecar between the two.
    */
   const moved = (name: string, between: (dir: string) => void, setUp = true) => {
     const file = "sub-01/eeg/sub-01_task-rest_eeg.json";
@@ -4752,7 +4752,7 @@ describe("the change summary keeps to its deadline, and leaves the raw path as i
       restore();
     }
   };
-  /** The pass with 39 seconds left, which never starts the summary: what every other run must equal. */
+  /** The pass with 39 seconds left, which never starts the summary: what other runs must equal. */
   let reference: ReturnType<typeof read> | null = null;
   const tooLate = () => {
     reference ??= read(39_000);
@@ -4806,11 +4806,11 @@ describe("the change summary keeps to its deadline, and leaves the raw path as i
   }, 30_000);
 
   test("a pass that is late after the first diffs shows no illustration, though the summary ran", () => {
-    // 45 seconds: the summary starts only with 40 left (SUMMARY_LIMITS.timeReserveMs), so the cosmetic
-    // proofs and the summary have 5 seconds to be done, and 20 tables take a fraction of one.
-    // 26 seconds on the diff of CHANGES: 19 are left, under the 20 an illustration needs, and still
-    // positive, so the pass goes on and does not end timed_out. Every second lost anywhere else
-    // makes the pass later, never earlier, and it takes 19 more to end it.
+    // 45 seconds: the summary starts only with 40 left (SUMMARY_LIMITS.timeReserveMs), so the
+    // cosmetic proofs and the summary have 5 seconds to be done, and 20 tables take a fraction of
+    // one. 26 seconds on the diff of CHANGES: 19 are left, under the 20 an illustration needs, and
+    // still positive, so the pass goes on and does not end timed_out. Every second lost anywhere
+    // else makes the pass later, never earlier, and it takes 19 more to end it.
     const r = bulkRelabel("late-illustration", { files: 20 });
     const listing = gatherListing(r.dir, r.base, r.head);
     const log = callLog("late-illustration");

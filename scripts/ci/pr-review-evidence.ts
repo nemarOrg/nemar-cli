@@ -31,7 +31,7 @@
  * platform itself proved cosmetic (see {@link GitFacts.cosmeticOnlyFiles}); such a file is not
  * shown either, because there is nothing in it to read. Nor does a MODIFIED `.json` or `.tsv` file
  * the change summary accounted for (see {@link ContentFacts.summary}): the platform parsed both
- * sides and gives the reviewer every change in it exactly, as a class, so it was read without its
+ * sides and accounted for every change in it as a class, so the file counts as read without its
  * diff; a few such files are still shown as diffs, after the ones the summary did not cover.
  *
  * **One change repeated across many files is read once.** A bulk edit often makes the same change in
@@ -245,8 +245,8 @@ export interface ContentFacts {
   /**
    * True when a MODIFIED or REMOVED metadata file with a real change was not shown in full: it did
    * not fit the file or character budget, its diff was cut, or reading it failed. A file the
-   * platform proved cosmetic-only ({@link cosmeticOnlyFiles}) is not counted, and neither is one the
-   * change summary accounted for ({@link summary}).
+   * platform proved cosmetic-only ({@link cosmeticOnlyFiles}) is not counted, and neither is one
+   * the change summary accounted for ({@link summary}).
    */
   readIncomplete: boolean;
   /**
@@ -436,6 +436,9 @@ function runGit(
   const passLeft = gitDeadline === null ? Number.POSITIVE_INFINITY : gitDeadline - started;
   const callLeft = call.deadline === undefined ? Number.POSITIVE_INFINITY : call.deadline - started;
   if (passLeft <= 0) throw new EvidenceError("timed_out");
+  // For a call with no time left at all: a timeout of 0 means no timeout to `execFileSync`, so the
+  // call would run unbounded and the pass's own deadline would be ignored with it. A negative one
+  // is refused by the runtime anyway, so the zero is what this guard is for.
   if (callLeft <= 0) throw new CallExpired();
   const timeout = Math.min(passLeft, callLeft);
   const options: ExecFileSyncOptions = {
@@ -694,6 +697,10 @@ export function readBlobs(
       ...bound,
       input: Buffer.from(`${ids.join("\n")}\n`),
     });
+    // The checks on what git answers here and below (the number of lines, the shape of each line,
+    // the header of each blob, the LF after it and the end of the output) guard against output only
+    // a fake or a broken git could produce. Real git cannot be made to, and fakes are not used
+    // (.rules/testing.md), so these branches are not tested.
     const lines = answer.split("\n");
     if (lines.pop() !== "" || lines.length !== ids.length) return null;
     const selected: { id: string; size: number }[] = [];
@@ -732,6 +739,8 @@ export function readBlobs(
     }
     return at === out.length ? blobs : null;
   } catch (e) {
+    // Swallowing this too would give the same result for the pass: its budget is spent, so the next
+    // git call throws `timed_out` again at once. It is rethrown so the code says what happens.
     if (e instanceof EvidenceError) throw e;
     return null;
   }
@@ -967,7 +976,7 @@ function readListing(dir: string, baseSha: string, headSha: string): Listing {
  */
 export const MAX_ILLUSTRATION_PATCHES = 3;
 
-/** The after side a pool file is given when its blob could not be read: no parser reads it. */
+/** The after side a pool file is given when its blob could not be read: no parser accepts it. */
 const EMPTY_BYTES = new Uint8Array(0);
 
 /** What a test may set for one content pass; production passes nothing. */
@@ -1000,8 +1009,9 @@ export function gatherContent(
  * they would without one:
  *
  * - no candidate: {@link EMPTY_SUMMARY};
- * - less than `timeReserveMs` of the pass left: {@link ABANDONED_SUMMARY}, and nothing more is read.
- *   The reserve is the raw diffs' and the change log's, so the summary never costs them their time;
+ * - less than `timeReserveMs` of the pass left: {@link ABANDONED_SUMMARY}, and nothing more is
+ *   read. The reserve is the raw diffs' and the change log's, so the summary never costs them their
+ *   time;
  * - the pool's blobs could not be read, or not before the summary's deadline:
  *   {@link ABANDONED_SUMMARY}, and the pass goes on;
  * - past its deadline while it runs: abandoned by {@link summarizeChanges} itself.
@@ -1147,7 +1157,10 @@ function readContent(dir: string, listing: Listing, options: ContentOptions): Co
   const full = (): boolean => patches.length >= MAX_PATCH_FILES || budget <= 0;
   const late = (): boolean =>
     gitDeadline !== null && gitDeadline - Date.now() < FOLD_TIME_RESERVE_MS;
-  /** Read one file's diff: fold it onto the patch that already shows it, or show it if there is room. */
+  /**
+   * Read one file's diff: fold it onto the patch that already shows it, or show it if there is
+   * room.
+   */
   const showDiff = (c: RawChange): void => {
     const bytes = tryGitBytes(dir, [
       "diff",

@@ -16,7 +16,9 @@ import {
   parseTsv,
 } from "../../scripts/ci/pr-review-summary";
 
-/** What `file` holds in the pools on its own. Only for files that parse, as every test input does. */
+/**
+ * What `file` holds in the pools on its own. Only for files that parse, as every test input does.
+ */
 export function poolChars(file: PoolFile): number {
   if (file.path.endsWith(".tsv")) {
     const after = parseTsv(file.after);

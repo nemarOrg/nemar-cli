@@ -1573,10 +1573,10 @@ function sameCells(a: readonly string[], b: readonly string[]): boolean {
  * top-level keys, and for each new leaf its path, its value and its key in `byLeaf`. A file whose
  * pieces would take the total past the bound is left out as one that cannot be read, and the next
  * file is tried: a table is skipped (none of its rows is a copy, so a removal it would have
- * explained stays a removal) and a JSON document is `unreadable` (it is never a home and stops every
- * move past it). A file is counted as it is read and dropped as soon as it passes what is left, so
- * no file is held whole past the bound; a document added whole is not even flattened past it. A
- * document whose leaves pass the bound before its walk reaches a path over `maxNameChars` is
+ * explained stays a removal) and a JSON document is `unreadable` (it is never a home and stops
+ * every move past it). A file is counted as it is read and dropped as soon as it passes what is
+ * left, so no file is held whole past the bound; a document added whole is not even flattened past
+ * it. A document whose leaves pass the bound before its walk reaches a path over `maxNameChars` is
  * therefore `unreadable` rather than kept for its top-level keys alone, the stricter of the two.
  *
  * Which files fit is decided in code-unit path order, whatever the order of `files`; what fits is
@@ -1710,7 +1710,9 @@ function tablePart(file: PoolFile, room: number): PoolPart {
   return added.size === 0 ? NOTHING : { kind: "table", header, rows: added, chars };
 }
 
-/** What a JSON document adds to the leaf pool, within `room` code units (see {@link buildPools}). */
+/**
+ * What a JSON document adds to the leaf pool, within `room` code units (see {@link buildPools}).
+ */
 function jsonPart(file: PoolFile, room: number): PoolPart {
   const after = parseJson(file.after);
   if (!after.ok) return UNREADABLE;
@@ -2772,9 +2774,9 @@ export function sidecarApplies(sidecar: string, target: string): boolean {
  *
  * - a table diff reads the rows of the pool tables at `sourcedata/<D>/<the candidate's path>`
  *   (`sourcedataFor`), and no other table: a table is kept when it is such a copy of a candidate;
- * - a JSON diff asks, per removed leaf, which file of the pull request that applies to the candidate
- *   under BIDS inheritance ({@link sidecarApplies}) and has the leaf's top-level key, or is
- *   unreadable, is the nearest, and then whether THAT file is a home of the leaf (see
+ * - a JSON diff asks, per removed leaf, which file of the pull request that applies to the
+ *   candidate under BIDS inheritance ({@link sidecarApplies}) and has the leaf's top-level key, or
+ *   is unreadable, is the nearest, and then whether THAT file is a home of the leaf (see
  *   {@link diffJson}): a document is kept when it applies to some candidate.
  *
  * A file this says false for is therefore never a copy, a decider, a blocker or a home for any
@@ -4150,9 +4152,10 @@ export const EMPTY_SUMMARY: ChangeSummary = emptySummary(false, frozenSet);
 /**
  * The summary of a pull request whose summary was not made: its caller reached the line it starts
  * by with too little time left, or could not read the blobs it is made from. Abandoned and empty,
- * exactly what {@link summarizeChanges} returns past its deadline, so it accounts for nothing and
+ * so it accounts for nothing, as the result of {@link summarizeChanges} does past its deadline, and
  * leaves the review where it was without a summary; a caller can say so without faking a deadline
- * that has passed. One object shared by every caller, frozen like {@link EMPTY_SUMMARY}.
+ * that has passed. Unlike a run's own result it is one frozen object shared by every caller, like
+ * {@link EMPTY_SUMMARY}.
  */
 export const ABANDONED_SUMMARY: ChangeSummary = emptySummary(true, frozenSet);
 
@@ -4297,10 +4300,10 @@ export function summarizeChanges(input: {
  *    it appears, as `internal_mismatch`, the word for the platform's own reading not adding up.)
  * 2. Builds the pools once, from the files of `pool` that can matter to a candidate (`keep`, which
  *    is {@link poolFileMatters} unless a test passes another): any other file is never consulted,
- *    so it is not read, and takes nothing of `maxPoolChars`. {@link buildPools} gives the same pools
- *    for the files in any order (it decides which files fit `maxPoolChars` in path order, sorts the
- *    copies of one file itself, and a path listed twice contributes nothing, whichever entry comes
- *    first), so the pool needs no sorting here.
+ *    so it is not read, and takes nothing of `maxPoolChars`. {@link buildPools} gives the same
+ *    pools for the files in any order (it decides which files fit `maxPoolChars` in path order,
+ *    sorts the copies of one file itself, and a path listed twice contributes nothing, whichever
+ *    entry comes first), so the pool needs no sorting here.
  * 3. Checks the deadline BEFORE each pool file it reads, BEFORE each candidate, AFTER each file it
  *    folds in (a diff can be long), and once more after the last file, before anything is
  *    rendered. When `now()` has reached it at any of these, the WHOLE summary is abandoned: no file

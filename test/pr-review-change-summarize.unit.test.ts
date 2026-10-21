@@ -4183,7 +4183,9 @@ describe("the hidden-loss round-trip oracle", () => {
 // Pruning the pool to the files a candidate can consult changes no decision
 // ---------------------------------------------------------------------------------------------
 
-/** A summary as text, every set and map in its own order: two summaries that say the same are equal. */
+/**
+ * A summary as text, every set and map in its own order: two summaries that say the same are equal.
+ */
 const snapshot = (summary: ChangeSummary): string =>
   JSON.stringify(summary, (_key, value: unknown) =>
     value instanceof Set ? { set: [...value] } : value instanceof Map ? { map: [...value] } : value,
