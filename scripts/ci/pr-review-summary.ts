@@ -1106,6 +1106,16 @@ function characterRule(before: Name, after: Name): RelabelRule | null {
     const ch = long[i] as string;
     if (j < short.length && ch === short[j]) {
       if (!wholeRuns(gapStart, i)) return null;
+      // Text put between two digits that were one number (LA12 to LA1-2, E10 to E1.0) splits the
+      // number; text taken from between them merges two. Either way it is another name.
+      if (
+        gap !== "" &&
+        j > 0 &&
+        runClassOf(short[j - 1] as string) === "D" &&
+        runClassOf(ch) === "D"
+      ) {
+        return null;
+      }
       gaps.push(gap);
       gap = "";
       gapStart = i + 1;
@@ -1137,10 +1147,12 @@ function characterRule(before: Name, after: Name): RelabelRule | null {
  *
  * A pair gets no rule when the strings are equal, either is empty, either is longer than
  * `maxKeyChars` code points or has more than `maxRuns` runs (a long text is not a name, and an
- * unbounded search would be a way to stall the review), or both are plain numbers. Every case that
- * gets no rule is shown as a removal and an addition or as a replaced value, which is more change
- * shown, never less. So `A1` and `A10`, `sub-1` and `sub-10`, `Cz` and `FCz` get no rule of any
- * kind: `1` is not `10`, and the inserted text would join a run that was already there.
+ * unbounded search would be a way to stall the review), both are plain numbers, or the text the
+ * rule would add or remove holds a digit. Every case that gets no rule is shown as a removal and an
+ * addition or as a replaced value, which is more change shown, never less. So `A1` and `A10`,
+ * `sub-1` and `sub-10`, `Cz` and `FCz`, `A1` and `A1-A2`, `LA12` and `LA1-2` get no rule of any
+ * kind: `1` is not `10`, inserted text would join a run that was already there, and a number put
+ * in, taken out or split is another name.
  *
  * A rule says that a pair COULD be one name respelled; whether a table pairs it is decided by the
  * evidence of the rest of the row (see {@link diffTable}).
@@ -1163,9 +1175,17 @@ function relabelNames(before: Name, after: Name, opts: { chars: boolean }): Rela
   }
   if (before.runs === null || after.runs === null) return null;
   const byRuns = runRule(before.runs, after.runs);
-  if (byRuns !== null) return byRuns;
-  return opts.chars ? characterRule(before, after) : null;
+  const found = byRuns ?? (opts.chars ? characterRule(before, after) : null);
+  // A number put in or taken out is never a respelling: `A1` to `A1-A2` adds a channel to the name
+  // and `A1-A2` to `A2` drops one, and either can be a removed row and an unrelated new one that
+  // happen to share text. So a rule whose added or removed text holds a digit is no rule, whichever
+  // rule found it, and the pair is shown as a removal and an addition.
+  if (found?.gaps.some((gap) => DIGIT_TEXT.test(gap))) return null;
+  return found;
 }
+
+/** A text that holds a number character anywhere. */
+const DIGIT_TEXT = /\p{N}/u;
 
 const REPAD_WORDS = "zero padding of numbers changed";
 

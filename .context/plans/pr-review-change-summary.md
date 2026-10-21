@@ -283,6 +283,12 @@ So two files with the same logical change land in the same class whatever their 
 5. Only when `chars` is true: the shorter string is a character subsequence of the longer one (`DCEMBRACE` to `DC EMBRACE-REF`); the rule is the inserted text after each character position.
    **Whole runs** (D1): every inserted or deleted text must consist of whole runs of the longer string (the leftmost subsequence is used, and a pair that only another alignment would describe in whole runs gets no rule).
    This keeps `DCEMBRACE` to and from `DC EMBRACE-REF` (the space and `-REF` are runs of the longer name) and rejects `A1`/`A10`, `sub-2`/`sub-12`, `sub-1`/`sub-10`, `Cz`/`FCz` and `Pz`/`POz`, where the inserted text would join a run that was already there.
+   **No split numbers** (phase 2 delta review, D13): a non-empty gap between two kept characters that are both digits is no rule, in either direction, so `LA12`/`LA1-2`, `LA12`/`LA1-LA2`, `E10`/`E1.0` and `sub-12`/`sub-1-2` are removals and additions; the text would split one number into two or merge two into one.
+
+**No numbers in the added or removed text** (D14).
+A `wrap`, `strip`, `insert`, `delete` or character rule whose gap text holds a digit (`\p{N}`) is no rule, whichever rule found it: a number put in or taken out is never a respelling.
+So `A1` and `A2` removed with `A1-A2` added are two removals and an addition, and `A1-A2` to `A2` is a removal and an addition, while `A01` to `POL A01`, `GA01` to `EEGGA_01REF`, `1` to `sub-1` and `DCEMBRACE` to `DC EMBRACE-REF` keep their rules.
+This holds for cells too: a cell that gains `-A2` is `cell_replaced`.
 
 Numeric pairs (both sides match `^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$`) never get a rule: `64` to `640` is a replaced value, not "suffix 0 added".
 For cells, only `wrap`, `strip` and `repad` are rules (D5); `case`, `insert`, `delete` and character rules are for keys alone.
@@ -293,8 +299,10 @@ A rule is a function of the before value except for what `case`, `repad` and the
 **Residual, stated plainly.**
 A rule says only that a pair *could* be one name respelled.
 Whether a table pairs it is decided by the evidence of section 4.4, and a pair the rules and the evidence allow is shown to the model as a relabel with its rule and its every changed cell.
-The model still sees `insert`, `delete`, `wrap` and `strip` pairs it must judge: `A1` to `A1-A2` (a monopolar channel and a bipolar one), `FC3` to `FCC3h` (a letter matched inside a longer letter run, anchored by the digit), or `A1-A2` to `A2`, each with at least one equal cell that says something and no more changed cells than equal ones.
+The model still sees `insert`, `delete`, `wrap` and `strip` pairs it must judge, the ones whose added text holds no digit: `FC3` to `FCC3h` or `C3` to `CCP3h` (letters matched inside a longer letter run, anchored by the digit), `C3` to `C3h`, `Fz` to `Fz Cz`, each with at least one equal cell that says something and no more changed cells than equal ones.
 Those are shown exactly; they are not hidden, but the platform does not decide whether they are one row.
+The evidence is weak exactly where these pairs arise: in a real `channels.tsv`, columns such as `type`, `units` and the filter cutoffs are the same on every row, so a removed electrode and an unrelated new one have every other cell equal and the strict evidence holds (`FC3` removed with `FCC3h` added pairs as a relabel).
+The model sees the exact pair; phase 3 decides how a small, isolated relabel class is surfaced.
 
 ### 4.4 Keyed tables: the pairing order
 

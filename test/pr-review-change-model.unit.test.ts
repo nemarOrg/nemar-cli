@@ -366,6 +366,52 @@ describe("relabelRule: the real pairs from the open pull requests", () => {
   });
 });
 
+describe("relabelRule: a number is never put in, taken out, split or merged", () => {
+  test("no rule of any kind when the added or removed text holds a digit", () => {
+    for (const [a, b] of [
+      ["A1", "A1-A2"],
+      ["A2", "A1-A2"],
+      ["T3", "T3-T5"],
+      ["Fp1", "Fp1-F7"],
+      ["E1", "E1-1"],
+      ["x", "x2"],
+      ["Cz", "Cz2"],
+    ] as const) {
+      for (const chars of [false, true]) {
+        expect(relabelRule(a, b, { chars }), `${a} -> ${b}`).toBeNull();
+        expect(relabelRule(b, a, { chars }), `${b} -> ${a}`).toBeNull();
+      }
+    }
+    // Text without a digit is still a rule, whatever the name holds.
+    expect(relabelRule("A01", "POL A01", { chars: false })).toEqual(rule("wrap", ["POL ", ""]));
+    expect(relabelRule("1", "sub-1", { chars: false })).toEqual(rule("wrap", ["sub-", ""]));
+    expect(relabelRule("sub-1", "1", { chars: false })).toEqual(rule("strip", ["sub-", ""]));
+    expect(relabelRule("GA01", "EEGGA_01REF", { chars: false })?.kind).toBe("insert");
+    expect(relabelRule("DCEMBRACE", "DC EMBRACE-REF", { chars: true })?.shape).toBe("c9");
+  });
+
+  test("the character rule never puts text between two digits that were one number, or takes it out", () => {
+    for (const [a, b] of [
+      ["LA12", "LA1-2"],
+      ["LA12", "LA1-LA2"],
+      ["E10", "E1.0"],
+      ["E12", "E1.2"],
+      ["sub-12", "sub-1-2"],
+      ["E101", "E1-01"],
+      ["E11", "E1-1"],
+      ["A12", "A1 2"],
+      ["Ch12", "Ch1_2"],
+    ] as const) {
+      expect(relabelRule(a, b, { chars: true }), `${a} -> ${b}`).toBeNull();
+      expect(relabelRule(b, a, { chars: true }), `${b} -> ${a}`).toBeNull();
+    }
+    // Text between two letters, next to a number, is not inside it.
+    expect(relabelRule("DC1", "D C1", { chars: true })).toEqual(
+      rule("insert", ["", " ", "", ""], "c3"),
+    );
+  });
+});
+
 describe("relabelRule: numbers and nothing-to-say pairs never get a rule", () => {
   test("a pair of plain numbers has no rule, whatever the numbers look like", () => {
     for (const [a, b] of [
@@ -585,11 +631,13 @@ function partsOf(s: string): string[] {
 }
 
 /**
- * Whether a rule keeps the anchoring of design section 4.3: an insertion or deletion of runs keeps a
- * digit run of the shorter name, and a character rule inserts or deletes only whole runs of the
- * longer one. Every other kind holds trivially.
+ * Whether a rule keeps the anchoring of design section 4.3: no added or removed text holds a digit;
+ * an insertion or deletion of runs keeps a digit run of the shorter name; and a character rule
+ * inserts or deletes only whole runs of the longer one, never between two digits of the shorter.
+ * Every other kind holds trivially.
  */
 function anchored(found: RelabelRule, before: string, after: string): boolean {
+  if (found.gaps.some((gap) => /\p{N}/u.test(gap))) return false;
   if (found.kind !== "insert" && found.kind !== "delete") return true;
   const kept = found.kind === "insert" ? before : after;
   const whole = found.kind === "insert" ? after : before;
@@ -600,10 +648,20 @@ function anchored(found: RelabelRule, before: string, after: string): boolean {
     at += Array.from(part).length;
     boundaries.add(at);
   }
+  const keptChars = Array.from(kept);
   let position = 0;
   for (const [i, gap] of found.gaps.entries()) {
     const width = Array.from(gap).length;
     if (width > 0 && !(boundaries.has(position) && boundaries.has(position + width))) return false;
+    const between = i > 0 && i < keptChars.length;
+    if (
+      width > 0 &&
+      between &&
+      /^\p{N}$/u.test(keptChars[i - 1] as string) &&
+      /^\p{N}$/u.test(keptChars[i] as string)
+    ) {
+      return false;
+    }
     position += width + (i < found.gaps.length - 1 ? 1 : 0);
   }
   return true;
@@ -701,7 +759,9 @@ describe("relabelRule: every rule it returns rebuilds the other string from one 
     }
     // The generator reaches every kind of rule, so the property is not vacuous.
     expect([...kinds].sort()).toEqual(["case", "delete", "insert", "repad", "strip", "wrap"]);
-    expect(withRule).toBeGreaterThan(2000);
+    // 1,535 of the 6,000 tries find a rule (3,437 before digits were barred from inserted text,
+    // which this generator, with four digits in a twelve-character alphabet, hits often).
+    expect(withRule).toBeGreaterThan(1500);
   });
 });
 
@@ -1240,6 +1300,13 @@ describe("diffTable: cells of paired rows", () => {
     ]);
   });
 
+  test("a cell that gains or loses text with a number in it is a replaced value, not a template", () => {
+    expect(cell("A1", "A1-A2")).toEqual(['cell_replaced | field=v | before="A1" | after="A1-A2"']);
+    expect(cell("5 mm", "5")).toEqual([
+      'cell_templated | field=v | before="5 mm" | after="5" | rule=removed suffix " mm"',
+    ]);
+  });
+
   test("a changed number is a replaced value, not a suffix or a padding", () => {
     expect(cell("64", "640")).toEqual(['cell_replaced | field=v | before="64" | after="640"']);
     expect(cell("1", "01")).toEqual(['cell_replaced | field=v | before="1" | after="01"']);
@@ -1494,6 +1561,48 @@ describe("diffTable: keyed rows", () => {
         .map((a) => ruleWords(a.rule as RelabelRule)),
     );
     expect(rules.size).toBe(1);
+  });
+
+  test("a number split, merged, added or dropped is another channel, whatever the other cells say", () => {
+    const seven = [
+      "name",
+      "type",
+      "units",
+      "sampling_frequency",
+      "low_cutoff",
+      "high_cutoff",
+      "status",
+    ];
+    const row = (name: string) => [name, "SEEG", "uV", "1000", "0.1", "300", "good"];
+    for (const [before, after] of [
+      ["LA12", "LA1-LA2"],
+      ["LA1-LA2", "LA12"],
+      ["LA12", "LA1-2"],
+      ["LA1-2", "LA12"],
+      ["E10", "E1.0"],
+      ["A1", "A1-A2"],
+      ["A1-A2", "A2"],
+    ]) {
+      expect(
+        kindsOf(
+          diffText(
+            path,
+            tsv(seven, row("LA11"), row(before as string), row("LB1")),
+            tsv(seven, row("LA11"), row(after as string), row("LB1")),
+          ),
+        ),
+        `${before} -> ${after}`,
+      ).toEqual(["row_removed", "row_added"]);
+    }
+    expect(
+      kindsOf(
+        diffText(
+          "participants.tsv",
+          tsv(["participant_id", "age"], ["sub-12", "30"]),
+          tsv(["participant_id", "age"], ["sub-1-2", "30"]),
+        ),
+      ),
+    ).toEqual(["row_removed", "row_added"]);
   });
 
   test("the real pairs still pair when every other cell is equal and says something", () => {
@@ -1829,25 +1938,45 @@ describe("diffTable: the lookup passes find relabels the positional walk cannot"
   });
 
   test("the longest part of a key is looked up first", () => {
-    // EEG A1-A2 contains both A1-A2 and A1; the longer is its old name.
+    // EEG Fz Cz contains both Fz Cz and Fz; the longer is its old name.
     const diff = diffText(
       path,
-      tsv(header, ["A1", "EEG", "x"], ["A1-A2", "EEG", "x"]),
-      tsv(header, ["EEG A1-A2", "EEG", "x"], ["EEG A1", "EEG", "x"]),
+      tsv(header, ["Fz", "EEG", "x"], ["Fz Cz", "EEG", "x"]),
+      tsv(header, ["EEG Fz Cz", "EEG", "x"], ["EEG Fz", "EEG", "x"]),
     );
-    expect(relabels(diff)).toEqual(["A1 -> EEG A1", "A1-A2 -> EEG A1-A2"]);
+    expect(relabels(diff)).toEqual(["Fz -> EEG Fz", "Fz Cz -> EEG Fz Cz"]);
   });
 
   test("among parts of one length the leftmost is looked up first", () => {
+    const diff = diffText(
+      path,
+      tsv(header, ["Fz", "EEG", "x"], ["Cz", "EEG", "x"]),
+      tsv(header, ["Fz Cz", "EEG", "x"]),
+    );
+    expect(lines(diff)).toEqual([
+      'key_relabeled | field=name | before="Fz" | after="Fz Cz" | rule=added suffix " Cz"',
+      'row_removed | field=name | before="Cz"',
+    ]);
+  });
+
+  test("a number added to or taken from a name is no relabel: A1 and A2 removed, A1-A2 added", () => {
+    // This pair used to read as A1 relabeled to A1-A2 (suffix "-A2"), with A2 removed. A bipolar
+    // derivation is a new channel, not A1 respelled, and the text added holds a number, so no rule
+    // may describe it: both monopolar rows are removed (loss facts) and the bipolar one is added.
     const diff = diffText(
       path,
       tsv(header, ["A1", "EEG", "x"], ["A2", "EEG", "x"]),
       tsv(header, ["A1-A2", "EEG", "x"]),
     );
     expect(lines(diff)).toEqual([
-      'key_relabeled | field=name | before="A1" | after="A1-A2" | rule=added suffix "-A2"',
+      'row_removed | field=name | before="A1"',
       'row_removed | field=name | before="A2"',
+      'row_added | field=name | after="A1-A2"',
     ]);
+    // And back: A1-A2 removed with A2 added is not A1-A2 losing "A1-".
+    expect(
+      kindsOf(diffText(path, tsv(header, ["A1-A2", "EEG", "x"]), tsv(header, ["A2", "EEG", "x"]))),
+    ).toEqual(["row_removed", "row_added"]);
   });
 
   test("a lookup looks at no more than 64 candidates, the paired ones included", () => {
