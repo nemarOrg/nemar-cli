@@ -15,27 +15,41 @@ import {
   type Atom,
   CLASS_KINDS,
   type ChangeClass,
+  type ChangeSummary,
+  type ClassDisplay,
+  type ClassKind,
   DISPLAY_OF,
+  EMPTY_SUMMARY,
   type FileAtoms,
   type FileOutcome,
   KIND_WORDS,
+  type LossFacts,
   NO_LOSS,
   type PoolFile,
   ROLE_OF,
   SUMMARY_LIMITS,
+  type SummaryCandidate,
   accountedFiles,
   buildPools,
+  canonicalJson,
   classKeyOf,
   classTable,
   classify,
   diffJson,
   diffTable,
   foldIndices,
+  formatAtoms,
   lossFactsOf,
   parseJson,
   parseTsv,
   renderClasses,
+  ruleWords,
+  stripJsonSpace,
+  summarizeChanges,
+  summarizeChangesWith,
   summaryFacts,
+  verifyJsonCounts,
+  verifyTableCounts,
 } from "../scripts/ci/pr-review-summary";
 
 const enc = (text: string): Uint8Array => new TextEncoder().encode(text);
@@ -1357,4 +1371,1299 @@ describe("the facts block: numbers and the class table, the platform's words onl
       values_emptied: 0,
     });
   });
+});
+
+// ---------------------------------------------------------------------------------------------
+// summarizeChanges: a pull request's candidates, end to end
+// ---------------------------------------------------------------------------------------------
+
+const candidate = (path: string, before: string, after: string): SummaryCandidate => ({
+  path,
+  before: enc(before),
+  after: enc(after),
+});
+
+const summarize = (
+  candidates: readonly SummaryCandidate[],
+  pool: readonly PoolFile[] = [],
+): ChangeSummary => summarizeChanges({ candidates, pool, deadline: null });
+
+const refusals = (summary: ChangeSummary): string[] =>
+  summary.files.map((f) => `${f.path} ${f.refusal ?? "ok"}`);
+
+describe("summarizeChanges: one outcome per candidate, in path order", () => {
+  test("a refusal is recorded on its file and accounts for nothing; other extensions are left out", () => {
+    const summary = summarize([
+      candidate("z.tsv", tsv(["a"], ["1"]), tsv(["a"], ["2"])),
+      candidate("README.md", "a", "b"),
+      candidate("a.json", '{"a": 1}', '{"a": 2}'),
+      candidate("m.tsv", "a\tb\n1\n", tsv(["a", "b"], ["1", "2"])),
+      candidate("b.json", '{"a": 1}', '{"a": 1, "a": 2}'),
+      candidate("c.tsv.gz", "x", "y"),
+      { path: "d.tsv", before: new Uint8Array([0x61, 0x0a, 0xff, 0x0a]), after: enc("a\n1\n") },
+    ]);
+    expect(refusals(summary)).toEqual([
+      "a.json ok",
+      "b.json duplicate_key",
+      "d.tsv invalid_utf8",
+      "m.tsv ragged_row",
+      "z.tsv ok",
+    ]);
+    expect([...summary.accounted]).toEqual(["a.json", "z.tsv"]);
+    expect(summary.facts.files_summarized).toBe(2);
+    expect(summary.facts.files_not_summarized).toBe(3);
+    expect(summary.files.find((f) => f.path === "b.json")?.classKeys.size).toBe(0);
+  });
+
+  test("the before side's refusal is the one recorded, and a table's key column is kept", () => {
+    const summary = summarize([
+      candidate("x.tsv", '"q"\n', "a\tb\n1\n"),
+      candidate(
+        channels(1),
+        tsv(CHANNELS, ["A1", "EEG", "uV"]),
+        tsv(CHANNELS, ["A1", "EEG", "mV"]),
+      ),
+    ]);
+    expect(refusals(summary)).toEqual([`${channels(1)} ok`, "x.tsv quoted_cell"]);
+    expect(summary.files[0]?.keyColumn).toBe("name");
+    expect(summary.files[0]?.family).toBe("tsv");
+  });
+
+  test("a path given twice is refused every time it appears, and takes nothing from the pool", () => {
+    const path = channels(1);
+    const before = tsv(CHANNELS, ["A1", "EEG", "uV"], ["R1", "EEG", "uV"]);
+    const after = tsv(CHANNELS, ["A1", "EEG", "uV"]);
+    const summary = summarize(
+      [candidate(path, before, after), candidate(path, before, after)],
+      [pooled(`sourcedata/old/${path}`, null, tsv(CHANNELS, ["R1", "EEG", "uV"]))],
+    );
+    expect(refusals(summary)).toEqual([`${path} internal_mismatch`, `${path} internal_mismatch`]);
+    expect(summary.accounted.size).toBe(0);
+    expect(summary.loss).toEqual(NO_LOSS);
+  });
+
+  test("a diff its totality check rejects is internal_mismatch: no class, no loss fact, not accounted", () => {
+    const input = {
+      candidates: [
+        candidate(
+          channels(1),
+          tsv(CHANNELS, ["A1", "EEG", "uV"], ["A2", "EEG", "uV"]),
+          tsv(CHANNELS, ["A1", "EEG", "uV"]),
+        ),
+        candidate("task-x_eeg.json", '{"a": 1, "b": 2}', '{"a": 1}'),
+      ],
+      pool: [],
+      deadline: null,
+    };
+    const failingTable = summarizeChangesWith(input, {
+      table: () => false,
+      json: verifyJsonCounts,
+    });
+    expect(refusals(failingTable)).toEqual([
+      `${channels(1)} internal_mismatch`,
+      "task-x_eeg.json ok",
+    ]);
+    expect(failingTable.loss.rowsRemoved).toBe(0);
+    expect(failingTable.loss.keysRemoved).toBe(1);
+    expect([...failingTable.accounted]).toEqual(["task-x_eeg.json"]);
+    expect(failingTable.classes.map((c) => c.kind)).toEqual(["json_key_removed"]);
+
+    const failingJson = summarizeChangesWith(input, {
+      table: verifyTableCounts,
+      json: () => false,
+    });
+    expect(refusals(failingJson)).toEqual([
+      `${channels(1)} ok`,
+      "task-x_eeg.json internal_mismatch",
+    ]);
+    expect(failingJson.loss.keysRemoved).toBe(0);
+    expect([...failingJson.accounted]).toEqual([channels(1)]);
+
+    // The real checks pass both, and summarizeChanges is summarizeChangesWith over them.
+    const real = summarizeChanges(input);
+    expect(refusals(real)).toEqual([`${channels(1)} ok`, "task-x_eeg.json ok"]);
+    expect(real.text).toBe(
+      summarizeChangesWith(input, { table: verifyTableCounts, json: verifyJsonCounts }).text,
+    );
+  });
+
+  test("once the bytes read would pass maxTotalBytes, that file and every later one is refused too_large", () => {
+    // One buffer for both sides of the large file: half the cap plus one byte each.
+    const half = new Uint8Array(SUMMARY_LIMITS.maxTotalBytes / 2 + 1);
+    const small = (path: string) => candidate(path, tsv(["a"], ["1"]), tsv(["a"], ["2"]));
+    const summary = summarize([
+      small("a.tsv"),
+      { path: "b.tsv", before: half, after: half },
+      small("c.tsv"),
+      small("d.json".replace(".json", ".tsv")),
+    ]);
+    expect(refusals(summary)).toEqual([
+      "a.tsv ok",
+      "b.tsv too_large",
+      "c.tsv too_large",
+      "d.tsv too_large",
+    ]);
+    expect([...summary.accounted]).toEqual(["a.tsv"]);
+  });
+});
+
+describe("summarizeChanges: the deadline abandons the whole summary", () => {
+  const files = () => [
+    candidate(
+      channels(1),
+      tsv(CHANNELS, ["A1", "EEG", "uV"], ["A2", "EEG", "uV"]),
+      tsv(CHANNELS, ["A1", "EEG", "uV"]),
+    ),
+    candidate(channels(2), tsv(CHANNELS, ["A1", "EEG", "uV"]), tsv(CHANNELS, ["A1", "EEG", "mV"])),
+    candidate(channels(3), tsv(CHANNELS, ["A1", "EEG", "uV"]), tsv(CHANNELS, ["A1", "EOG", "uV"])),
+  ];
+
+  const abandonedShape = (summary: ChangeSummary) => {
+    expect(summary.abandoned).toBe(true);
+    expect(summary.accounted.size).toBe(0);
+    expect(summary.text).toBe("");
+    expect(summary.classes).toEqual([]);
+    expect(summary.files).toEqual([]);
+    expect(summary.shown.size + summary.complete.size).toBe(0);
+    expect(summary.loss).toEqual(NO_LOSS);
+    expect(summary.facts).toEqual({
+      ...EMPTY_SUMMARY.facts,
+      abandoned: true,
+    });
+  };
+
+  test("the clock is read before each file; reaching the deadline before the second abandons everything, loss facts included", () => {
+    let t = 0;
+    const summary = summarizeChanges({
+      candidates: files(),
+      pool: [],
+      deadline: 2,
+      now: () => ++t,
+    });
+    expect(t).toBe(2);
+    abandonedShape(summary);
+  });
+
+  test("a deadline already reached abandons before the first file", () => {
+    abandonedShape(summarizeChanges({ candidates: files(), pool: [], deadline: 5, now: () => 5 }));
+  });
+
+  test("a deadline not reached, or none, changes nothing, and the clock is read once per file", () => {
+    let reads = 0;
+    const timed = summarizeChanges({
+      candidates: files(),
+      pool: [],
+      deadline: 100,
+      now: () => {
+        reads++;
+        return 1;
+      },
+    });
+    expect(reads).toBe(3);
+    const untimed = summarizeChanges({
+      candidates: files(),
+      pool: [],
+      deadline: null,
+      now: () => 1e12,
+    });
+    for (const summary of [timed, untimed]) {
+      expect(summary.abandoned).toBe(false);
+      expect(summary.accounted.size).toBe(3);
+      expect(summary.loss.rowsRemoved).toBe(1);
+    }
+    expect(timed.text).toBe(untimed.text);
+  });
+
+  test("the empty summary is not abandoned and holds nothing", () => {
+    expect(EMPTY_SUMMARY.abandoned).toBe(false);
+    expect(EMPTY_SUMMARY.text).toBe("");
+    expect(EMPTY_SUMMARY.facts).toEqual({
+      abandoned: false,
+      files_summarized: 0,
+      files_not_summarized: 0,
+      files_accounted_for: 0,
+      classes_shown: 0,
+      classes_cut: 0,
+      rows_removed_not_found_elsewhere: 0,
+      rows_removed_found_verbatim_in_sourcedata: 0,
+      columns_with_values_removed: 0,
+      keys_removed_not_found_elsewhere: 0,
+      keys_moved_to_an_inherited_sidecar: 0,
+      values_emptied: 0,
+      classes: [],
+    });
+    expect(summarize([]).facts).toEqual(EMPTY_SUMMARY.facts);
+  });
+});
+
+describe("summarizeChanges: layout and respelling", () => {
+  const formatDetails = (summary: ChangeSummary) =>
+    summary.classes.filter((c) => c.kind === "format").map((c) => `${c.detail} ${c.items}`);
+
+  test("a table's layout changes come from its diff, once each", () => {
+    const summary = summarize([
+      candidate(
+        channels(1),
+        tsv(CHANNELS, ["A1", "EEG", "uV"]),
+        `\u{FEFF}${tsv(CHANNELS, ["A1", "EEG", "uV"]).replaceAll("\n", "\r\n")}`,
+      ),
+    ]);
+    expect(formatDetails(summary)).toEqual(["bom 1", "line_endings 1"]);
+    expect([...summary.accounted]).toEqual([channels(1)]);
+  });
+
+  test("a JSON document's layout changes are atoms too: byte order mark, line endings, final newline", () => {
+    const summary = summarize([candidate("x.json", '{"a": 1}', '\u{FEFF}{\r\n  "a": 1\r\n}\r\n')]);
+    expect(formatDetails(summary)).toEqual(["bom 1", "final_newline 1", "line_endings 1"]);
+    expect(summary.text).toContain("file layout changed: line endings changed");
+  });
+
+  test("equal trees whose text differs beyond whitespace are json_respelled, and shown", () => {
+    const summary = summarize([candidate("x.json", '{"a": "A/b"}', '{"a":"\\u0041\\/b"}')]);
+    expect(formatDetails(summary)).toEqual(["json_respelled 1"]);
+    expect(summary.text).toBe(
+      "C1 | x.json | file layout changed: same values, string escapes spelled differently\n    e.g. x.json",
+    );
+    expect([...summary.accounted]).toEqual(["x.json"]);
+  });
+
+  test("a reindent, a reorder or a changed value is not a respelling", () => {
+    expect(formatDetails(summarize([candidate("x.json", '{"a":"A"}', '{ "a" : "A" }')]))).toEqual(
+      [],
+    );
+    expect(
+      formatDetails(summarize([candidate("x.json", '{"a":"A"}', '{\n  "a": "A"\n}\n')])),
+    ).toEqual(["final_newline 1", "line_endings 1"]);
+    const reordered = summarize([candidate("x.json", '{"a":1,"b":2}', '{"b":2,"a":1}')]);
+    expect(reordered.classes.map((c) => c.kind)).toEqual(["json_keys_reordered"]);
+    const changed = summarize([candidate("x.json", '{"a":"A","b":1}', '{"a":"\\u0041","b":2}')]);
+    expect(changed.classes.map((c) => c.kind)).toEqual(["json_value_changed"]);
+  });
+
+  test("stripJsonSpace removes whitespace between tokens and keeps strings exactly", () => {
+    expect(stripJsonSpace('{ "a b" :\t[ 1 ,\r\n "x\\" y\\\\" ] }')).toBe(
+      '{"a b":[1,"x\\" y\\\\"]}',
+    );
+    expect(stripJsonSpace('"  "')).toBe('"  "');
+    expect(stripJsonSpace(" 1 ")).toBe("1");
+  });
+});
+
+describe("summarizeChanges: order, determinism and loss facts", () => {
+  /** A mixed run: relabels, a relocation, removals, JSON keys, and a refused file. */
+  const mixed = (): { candidates: SummaryCandidate[]; pool: PoolFile[] } => {
+    const candidates = [1, 2, 3].map((n) =>
+      candidate(
+        channels(n),
+        tsv(CHANNELS, ["A1", "EEG", "uV"], ["R1", "EEG", "uV"], [`G${n}`, "EEG", "uV"]),
+        tsv(CHANNELS, ["POL A1", "EEG", "mV"], ["NEW", "EEG", "uV"]),
+      ),
+    );
+    candidates.push(
+      candidate(
+        "sub-01/eeg/sub-01_task-x_eeg.json",
+        '{"PowerLineFrequency": 50, "Notes": "x"}',
+        "{}",
+      ),
+      candidate("broken.tsv", "a\tb\n1\n", "a\n"),
+    );
+    const pool = [
+      pooled(`sourcedata/old/${channels(1)}`, null, tsv(CHANNELS, ["R1", "EEG", "uV"])),
+      pooled(`sourcedata/old/${channels(3)}`, null, tsv(CHANNELS, ["R1", "EEG", "uV"])),
+      pooled("task-x_eeg.json", null, '{"PowerLineFrequency": 50}'),
+    ];
+    return { candidates, pool };
+  };
+
+  test("shuffled candidates and pool give the same outcomes, classes, text and facts", () => {
+    const { candidates, pool } = mixed();
+    const reference = summarize(candidates, pool);
+    const random = seeded(7);
+    for (let trial = 0; trial < 20; trial++) {
+      const shuffle = <T>(items: readonly T[]): T[] =>
+        items
+          .map((item) => [random(), item] as const)
+          .sort((a, b) => a[0] - b[0])
+          .map(([, item]) => item);
+      const again = summarize(shuffle(candidates), shuffle(pool));
+      expect(again.text).toBe(reference.text);
+      expect(again.classes.map((c) => c.key)).toEqual(reference.classes.map((c) => c.key));
+      expect(again.files).toEqual(reference.files);
+      expect(again.facts).toEqual(reference.facts);
+      expect([...again.accounted]).toEqual([...reference.accounted]);
+    }
+  });
+
+  test("the loss facts count every summarized file, accounted or not, and never a refused one", () => {
+    const { candidates, pool } = mixed();
+    const summary = summarize(candidates, pool);
+    // G1, G2 and G3 are removed everywhere; R1 has a copy for sub-01 and sub-03 only. The refused
+    // `broken.tsv` counts for nothing.
+    expect(summary.loss).toEqual({
+      rowsRemoved: 4,
+      rowsRemovedFiles: 3,
+      rowsRelocated: 2,
+      columnsRemoved: 0,
+      keysRemoved: 1,
+      keysRemovedFiles: 1,
+      keysMoved: 1,
+      valuesEmptied: 0,
+      firstBlockingPath: channels(1),
+    });
+    expect(summary.files.find((f) => f.path === "broken.tsv")?.refusal).toBe("ragged_row");
+    expect(summary.facts.rows_removed_not_found_elsewhere).toBe(4);
+    expect(summary.facts.rows_removed_found_verbatim_in_sourcedata).toBe(2);
+    expect(summary.facts.keys_moved_to_an_inherited_sidecar).toBe(1);
+
+    // A removal whose class was left out is still a loss fact.
+    const crowded = summarize([
+      candidate(
+        channels(1),
+        tsv(["name", ...COLUMNS_120], ["A1", ...COLUMNS_120.map(() => "1")]),
+        tsv(["name"], ["A1"]),
+      ),
+      candidate(
+        channels(2),
+        tsv(CHANNELS, ["A1", "EEG", "uV"], ["A2", "EEG", "uV"]),
+        tsv(CHANNELS, ["A1", "EEG", "uV"]),
+      ),
+    ]);
+    expect(crowded.facts.classes_cut).toBe(1);
+    expect(crowded.accounted.has(channels(2))).toBe(false);
+    expect(crowded.loss.rowsRemoved).toBe(1);
+    expect(crowded.loss.columnsRemoved).toBe(120);
+    expect(crowded.loss.firstBlockingPath).toBe(channels(1));
+  });
+
+  test("the facts' class table numbers the classes as the block does", () => {
+    const { candidates, pool } = mixed();
+    const summary = summarize(candidates, pool);
+    const numbers = summary.text
+      .split("\n")
+      .filter((l) => /^C[0-9]+ \| /.test(l))
+      .map((l) => l.slice(0, l.indexOf(" ")));
+    expect(summary.facts.classes.map((l) => l.slice(0, l.indexOf(" ")))).toEqual(numbers);
+    expect(summary.facts.classes_shown).toBe(numbers.length);
+    for (const line of summary.facts.classes) {
+      expect(line).toMatch(
+        /^C[0-9]+ [a-z ]+ \| [0-9]+ items? in [0-9]+ files? \| (in full|values not all shown)$/,
+      );
+    }
+  });
+});
+
+/** A small seeded generator (mulberry32): the same seed gives the same sequence on every machine. */
+function seeded(seed: number): () => number {
+  let state = seed >>> 0;
+  return () => {
+    state = (state + 0x6d2b79f5) >>> 0;
+    let t = state;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/**
+ * A pull request shaped like `nemarDatasets/on004551` #1 (design section 8.3): channel tables whose
+ * names gain `POL `, some names wrapped in `EEG ` and `-Ref`, a few rows moved verbatim to
+ * `sourcedata/channels-removed-2026-10-18/<same path>`, the kept rows reordered, and rows added.
+ */
+function on004551(
+  files: number,
+  rows: number,
+): { candidates: SummaryCandidate[]; pool: PoolFile[] } {
+  const header = ["name", "type", "units", "low_cutoff", "high_cutoff", "status"];
+  const row = (name: string) => [name, "SEEG", "uV", "0.1", "300", "good"];
+  const candidates: SummaryCandidate[] = [];
+  const pool: PoolFile[] = [];
+  for (let s = 1; s <= files; s++) {
+    const sub = String(s).padStart(3, "0");
+    const path = `sub-${sub}/ses-01/ieeg/sub-${sub}_ses-01_task-sleep_run-01_channels.tsv`;
+    const relocated = s % 2 === 0 ? ["B13", "B14", "B15"] : [];
+    const wrapped = s < files ? ["Fp1", "Fp2", "C3", "C4"] : [];
+    const prefixed = Array.from(
+      { length: rows - relocated.length - wrapped.length },
+      (_, i) => `A${i + 1}`,
+    );
+    const before = [...prefixed, ...wrapped, ...relocated].map(row);
+    const after = [
+      ...[...wrapped].reverse().map((n) => row(`EEG ${n}-Ref`)),
+      ...[...prefixed].reverse().map((n) => row(`POL ${n}`)),
+      row("POL E"),
+      row("POL DC"),
+    ];
+    candidates.push(candidate(path, tsv(header, ...before), tsv(header, ...after)));
+    if (relocated.length > 0) {
+      pool.push(
+        pooled(
+          `sourcedata/channels-removed-2026-10-18/${path}`,
+          null,
+          tsv(header, ...relocated.map(row)),
+        ),
+      );
+    }
+  }
+  return { candidates, pool };
+}
+
+describe("summarizeChanges: a bulk relabel shaped like on004551 #1", () => {
+  test("30 channel tables are five classes, every file is accounted for, and the text is short", () => {
+    const { candidates, pool } = on004551(30, 40);
+    const summary = summarize(candidates, pool);
+    expect(summary.classes.map((c) => `${c.kind} ${c.items}/${c.files.size}`)).toEqual([
+      "row_relocated 45/15",
+      "key_relabeled 1039/30",
+      "rows_reordered 30/30",
+      "key_relabeled 116/29",
+      "row_added 60/30",
+    ]);
+    expect(summary.facts.classes).toEqual([
+      "C1 rows removed and found verbatim in a row this pull request adds | 45 items in 15 files | in full",
+      "C2 rows relabeled | 1039 items in 30 files | in full",
+      "C3 row order changed | 30 items in 30 files | in full",
+      "C4 rows relabeled | 116 items in 29 files | in full",
+      "C5 rows added | 60 items in 30 files | in full",
+    ]);
+    expect(summary.accounted.size).toBe(30);
+    expect(summary.loss).toEqual({ ...NO_LOSS, rowsRelocated: 45 });
+    expect(summary.text.length).toBeLessThan(10_000);
+    const shape = "sub-*/ses-*/ieeg/sub-*_ses-*_task-*_run-*_channels.tsv";
+    expect(summary.text.split("\n").filter((l) => l.startsWith("C"))).toEqual([
+      `C1 | ${shape} | column "name" | rows removed and found verbatim in a row this pull request adds: to sourcedata/channels-removed-2026-10-18/${shape}`,
+      `C2 | ${shape} | column "name" | rows relabeled: added prefix "POL "`,
+      `C3 | ${shape} | row order changed`,
+      `C4 | ${shape} | column "name" | rows relabeled: added prefix "EEG " and suffix "-Ref"`,
+      `C5 | ${shape} | column "name" | rows added`,
+    ]);
+  });
+
+  test("125 channel tables of 200 rows each are summarized in under 2 seconds", () => {
+    const { candidates, pool } = on004551(125, 200);
+    const started = performance.now();
+    const summary = summarize(candidates, pool);
+    const elapsed = performance.now() - started;
+    expect(summary.accounted.size).toBe(125);
+    expect(summary.classes.length).toBe(5);
+    expect(elapsed).toBeLessThan(2000);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// The hidden-loss round-trip oracle
+// ---------------------------------------------------------------------------------------------
+//
+// Written apart from the module's classify, render and coverage code. It diffs every generated
+// candidate itself (with the Phase 1 and 2 parsers and diffs, whose own oracles live in
+// `pr-review-change-model.unit.test.ts`), computes the class line each atom must appear under from
+// its own copy of the rendering rules, then reads the RENDERED text back: every pair line is
+// decoded to its raw values and count. A file the summary accounts for must have every non-additive
+// atom recoverable from the text (its class line shown whole, and for a paired kind its exact pair,
+// with the exact count, among the class's pairs, with no pair left unshown and no value cut), and a
+// file whose atoms are all recoverable must be accounted for. Every rendered class's pairs must be
+// exactly the atoms' pairs. Then one pair line is deleted, and the oracle must object.
+
+const ORACLE_UNSEEN = /[\p{C}\p{Z}\p{Default_Ignorable_Code_Point}\u{2800}]/gu;
+
+/** A value as the text shows it when it is not cut: the oracle's own copy of the rule. */
+function oracleQuote(v: string): string {
+  return JSON.stringify(v).replace(ORACLE_UNSEEN, (ch) =>
+    ch === " " ? ch : `\\u{${(ch.codePointAt(0) as number).toString(16).toUpperCase()}}`,
+  );
+}
+
+const ORACLE_SIMPLE: Readonly<Record<string, string>> = {
+  '"': '"',
+  "\\": "\\",
+  "/": "/",
+  b: "\b",
+  f: "\f",
+  n: "\n",
+  r: "\r",
+  t: "\t",
+};
+
+/** Read a quoted value back from `line` at `at`: its raw text, where it ends, and whether it was cut. */
+function readQuoted(line: string, at: number): { value: string; end: number; cut: boolean } | null {
+  if (line[at] !== '"') return null;
+  let value = "";
+  let i = at + 1;
+  for (;;) {
+    if (i >= line.length) return null;
+    const c = line[i] as string;
+    if (c === '"') {
+      i++;
+      break;
+    }
+    if (c !== "\\") {
+      value += c;
+      i++;
+      continue;
+    }
+    const e = line[i + 1] as string;
+    if (e === "u" && line[i + 2] === "{") {
+      const close = line.indexOf("}", i + 3);
+      if (close < 0) return null;
+      value += String.fromCodePoint(Number.parseInt(line.slice(i + 3, close), 16));
+      i = close + 1;
+    } else if (e === "u") {
+      value += String.fromCharCode(Number.parseInt(line.slice(i + 2, i + 6), 16));
+      i += 6;
+    } else {
+      const simple = ORACLE_SIMPLE[e];
+      if (simple === undefined) return null;
+      value += simple;
+      i += 2;
+    }
+  }
+  const cut = line.startsWith("...(cut)", i);
+  return { value, end: cut ? i + "...(cut)".length : i, cut };
+}
+
+const oracleShape = (path: string): string =>
+  path.replace(/(^|[/_])([a-zA-Z]+)-[a-zA-Z0-9]+(?=[/_.])/g, "$1$2-*");
+
+/** A JSON path with every index written [*], by its own tokenizer. */
+function oracleFold(path: string): string {
+  let out = "";
+  let i = 0;
+  while (i < path.length) {
+    if (path.startsWith('["', i)) {
+      let j = i + 2;
+      while (path[j] !== '"') j += path[j] === "\\" ? 2 : 1;
+      out += path.slice(i, j + 2);
+      i = j + 2;
+    } else if (path[i] === "[") {
+      out += "[*]";
+      i = path.indexOf("]", i) + 1;
+    } else {
+      out += path[i];
+      i++;
+    }
+  }
+  return out;
+}
+
+const ORACLE_FORMAT_WORDS: Readonly<Record<string, string>> = {
+  bom: "byte order mark added or removed",
+  line_endings: "line endings changed",
+  line_ending_pattern: "which lines end in CRLF changed",
+  final_newline: "final newline added or removed",
+  json_respelled: "same values, string escapes spelled differently",
+};
+const ORACLE_VALUE_KINDS = new Set([
+  "json_value_changed",
+  "json_type_changed",
+  "json_emptied",
+  "json_filled",
+]);
+
+/** The class line, after `C<n> | `, that an atom of `path` must be shown under. */
+function expectedHeader(path: string, atom: Atom): string {
+  const parts = [oracleShape(path)];
+  if (atom.field !== null) {
+    if (!atom.kind.startsWith("json_")) parts.push(`column ${oracleQuote(atom.field)}`);
+    else {
+      const f = oracleFold(atom.field);
+      if (ORACLE_VALUE_KINDS.has(atom.kind)) {
+        parts.push(f === "" ? "the whole document" : `key ${oracleQuote(f)}`);
+      } else parts.push(f === "" ? "top level" : `under ${oracleQuote(f)}`);
+    }
+  }
+  let rule: string | null = null;
+  if ((atom.kind === "key_relabeled" || atom.kind === "cell_templated") && atom.rule !== null) {
+    rule = ruleWords({
+      ...atom.rule,
+      gaps: atom.rule.gaps.map((g) => oracleQuote(g).slice(1, -1)),
+    });
+  } else if (atom.kind === "row_relocated") rule = `to ${atom.detail}`;
+  else if (atom.kind === "json_key_renamed") rule = oracleQuote(atom.detail ?? "");
+  else if (atom.kind === "format") rule = ORACLE_FORMAT_WORDS[atom.detail ?? ""] ?? "?";
+  parts.push(rule === null ? KIND_WORDS[atom.kind] : `${KIND_WORDS[atom.kind]}: ${rule}`);
+  return parts.join(" | ");
+}
+
+/** The pair an atom must be shown as: [before, after], after null for a removal; null for no pair. */
+function expectedPair(atom: Atom): [string, string | null] | null {
+  const display: ClassDisplay = DISPLAY_OF[atom.kind];
+  if (display === "pairs") return [atom.before ?? "", atom.after ?? ""];
+  if (display === "removals") {
+    return [
+      atom.kind === "row_removed" ? (atom.before ?? "") : `${atom.detail} = ${atom.before}`,
+      null,
+    ];
+  }
+  return null;
+}
+
+interface ShownPair {
+  before: string;
+  after: string | null;
+  count: number;
+  cut: boolean;
+}
+interface ShownBlock {
+  n: number;
+  header: string;
+  pairs: ShownPair[];
+  more: number;
+}
+
+/** The text read back into class blocks, by the grammar of the fenced block alone. */
+function readBack(text: string): { blocks: ShownBlock[]; trailing: number; errors: string[] } {
+  const blocks: ShownBlock[] = [];
+  const errors: string[] = [];
+  let trailing = 0;
+  if (text === "") return { blocks, trailing, errors };
+  const lines = text.split("\n");
+  for (const [i, line] of lines.entries()) {
+    const head = /^C([0-9]+) \| (.*)$/.exec(line);
+    if (head !== null) {
+      blocks.push({ n: Number(head[1]), header: head[2] as string, pairs: [], more: 0 });
+      continue;
+    }
+    const tail = /^\(([0-9]+) more change classes not shown\)$/.exec(line);
+    if (tail !== null) {
+      if (i !== lines.length - 1) errors.push("a count line that is not the last");
+      trailing = Number(tail[1]);
+      continue;
+    }
+    const block = blocks[blocks.length - 1];
+    if (block === undefined || !line.startsWith("    ")) {
+      errors.push(`a line no grammar allows: ${JSON.stringify(line)}`);
+      continue;
+    }
+    if (line.startsWith("    e.g. ")) continue;
+    const more = /^ {4}\(([0-9]+) more distinct values not shown\)$/.exec(line);
+    if (more !== null) {
+      block.more = Number(more[1]);
+      continue;
+    }
+    const b = readQuoted(line, 4);
+    if (b === null) {
+      errors.push(`a pair line that does not read: ${JSON.stringify(line)}`);
+      continue;
+    }
+    let at = b.end;
+    let after: string | null = null;
+    let cut = b.cut;
+    if (line.startsWith(" -> ", at)) {
+      const a = readQuoted(line, at + 4);
+      if (a === null) {
+        errors.push(`a pair line whose after side does not read: ${JSON.stringify(line)}`);
+        continue;
+      }
+      after = a.value;
+      cut ||= a.cut;
+      at = a.end;
+    }
+    const count =
+      /^ x([0-9]+)(?: \(first difference at character [0-9]+: (?:U\+[0-9A-F]{4,6}|end) to (?:U\+[0-9A-F]{4,6}|end)\))?$/.exec(
+        line.slice(at),
+      );
+    if (count === null) {
+      errors.push(`a pair line with no count: ${JSON.stringify(line)}`);
+      continue;
+    }
+    block.pairs.push({ before: b.value, after, count: Number(count[1]), cut });
+  }
+  return { blocks, trailing, errors };
+}
+
+/** JSON text with whitespace outside strings removed: the oracle's own, by a regular expression. */
+const oracleStrip = (text: string): string =>
+  text.replace(/("(?:[^"\\]|\\.)*")|[ \t\n\r]+/g, (_m, str: string | undefined) => str ?? "");
+
+interface OracleCase {
+  candidates: SummaryCandidate[];
+  pool: PoolFile[];
+}
+
+/** The oracle's own reading of each candidate: its atoms, or null for a file it refuses. */
+function oracleAtoms(c: OracleCase): Map<string, Atom[] | null> {
+  const sorted = [...c.candidates].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  const times = new Map<string, number>();
+  for (const f of sorted) times.set(f.path, (times.get(f.path) ?? 0) + 1);
+  const pools = buildPools(
+    [...c.pool].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0)),
+  );
+  const out = new Map<string, Atom[] | null>();
+  const text = (bytes: Uint8Array) => new TextDecoder().decode(bytes).replace(/^\u{FEFF}/u, "");
+  for (const f of sorted) {
+    if ((times.get(f.path) ?? 0) > 1) {
+      out.set(f.path, null);
+      continue;
+    }
+    if (f.path.endsWith(".tsv")) {
+      const b = parseTsv(f.before);
+      const a = b.ok ? parseTsv(f.after) : b;
+      const d = b.ok && a.ok ? diffTable(f.path, b.value, a.value, pools.rows) : null;
+      out.set(f.path, d?.ok ? d.value.atoms : null);
+    } else if (f.path.endsWith(".json")) {
+      const b = parseJson(f.before);
+      const a = b.ok ? parseJson(f.after) : b;
+      if (!b.ok || !a.ok) {
+        out.set(f.path, null);
+        continue;
+      }
+      const d = diffJson(f.path, b.value.value, a.value.value, pools.json);
+      if (!d.ok) {
+        out.set(f.path, null);
+        continue;
+      }
+      const atoms = [...d.value.atoms, ...formatAtoms(b.value.format, a.value.format)];
+      if (
+        canonicalJson(b.value.value) === canonicalJson(a.value.value) &&
+        oracleStrip(text(f.before)) !== oracleStrip(text(f.after))
+      ) {
+        atoms.push({
+          kind: "format",
+          field: null,
+          rule: null,
+          detail: "json_respelled",
+          before: null,
+          after: null,
+        });
+      }
+      out.set(f.path, atoms);
+    }
+  }
+  return out;
+}
+
+/** Everything the oracle finds wrong with a summary whose fenced block is `text`. */
+function oracleViolations(c: OracleCase, summary: ChangeSummary, text: string): string[] {
+  const out: string[] = [];
+  const own = oracleAtoms(c);
+  for (const f of summary.files) {
+    if ((f.refusal === null) !== (own.get(f.path) != null)) {
+      out.push(`${f.path}: the summary says ${f.refusal ?? "summarized"}, the oracle disagrees`);
+    }
+  }
+  if (
+    summary.files.length !== [...c.candidates].filter((f) => /\.(tsv|json)$/.test(f.path)).length
+  ) {
+    out.push("an outcome missing or extra");
+  }
+
+  // What each class line must hold: every pair of every summarized file's atoms under it.
+  const expected = new Map<string, { kind: ClassKind; pairs: Map<string, number> }>();
+  for (const [path, atoms] of own) {
+    for (const atom of atoms ?? []) {
+      const header = expectedHeader(path, atom);
+      let entry = expected.get(header);
+      if (entry === undefined) {
+        entry = { kind: atom.kind, pairs: new Map() };
+        expected.set(header, entry);
+      }
+      if (entry.kind !== atom.kind) out.push(`two kinds under one line: ${header}`);
+      const pair = expectedPair(atom);
+      if (pair !== null) {
+        const id = JSON.stringify(pair);
+        entry.pairs.set(id, (entry.pairs.get(id) ?? 0) + 1);
+      }
+    }
+  }
+
+  const read = readBack(text);
+  out.push(...read.errors);
+  if (text.length > SUMMARY_LIMITS.maxSummaryChars) out.push("the block is over its bound");
+  if (read.blocks.length > SUMMARY_LIMITS.maxClasses) out.push("more classes than the bound");
+  if (read.trailing !== expected.size - read.blocks.length) {
+    out.push(
+      `the count line says ${read.trailing}, ${expected.size - read.blocks.length} were left out`,
+    );
+  }
+  const complete = new Set<string>();
+  const shownAt = new Map<string, ShownBlock>();
+  for (const [i, block] of read.blocks.entries()) {
+    if (block.n !== i + 1) out.push(`class ${block.n} numbered out of order`);
+    const e = expected.get(block.header);
+    if (e === undefined) {
+      // Only a line that was cut may name no class: it can be no class's whole line.
+      if (!/\.\.\.\(cut\)|\[cut\]/.test(block.header))
+        out.push(`a class line no atom has: ${block.header}`);
+      continue;
+    }
+    if (shownAt.has(block.header)) out.push(`a class line shown twice: ${block.header}`);
+    shownAt.set(block.header, block);
+    const display = DISPLAY_OF[e.kind];
+    let whole = block.more === 0;
+    if (display === "pairs" || display === "removals") {
+      for (const p of block.pairs) {
+        if (p.cut) {
+          whole = false;
+          const fits = [...e.pairs].some(([id, n]) => {
+            const [eb, ea] = JSON.parse(id) as [string, string | null];
+            const prefix = (full: string, shown: string) => full.startsWith(shown);
+            return (
+              n === p.count &&
+              prefix(eb, p.before) &&
+              (ea === null ? p.after === null : p.after !== null && prefix(ea, p.after))
+            );
+          });
+          if (!fits) out.push(`a cut pair that is no atom's: ${block.header}`);
+          continue;
+        }
+        const n = e.pairs.get(JSON.stringify([p.before, p.after]));
+        if (n !== p.count)
+          out.push(
+            `${block.header}: ${JSON.stringify([p.before, p.after])} x${p.count}, the atoms say x${n ?? 0}`,
+          );
+      }
+      // Two different pairs cut at the same place read alike; two uncut lines never may.
+      const uncut = block.pairs.filter((p) => !p.cut);
+      if (new Set(uncut.map((p) => JSON.stringify([p.before, p.after]))).size !== uncut.length) {
+        out.push(`a pair shown twice: ${block.header}`);
+      }
+      if (block.pairs.length > SUMMARY_LIMITS.maxPairsPerClass)
+        out.push(`over 12 pairs: ${block.header}`);
+      if (block.pairs.length + block.more !== e.pairs.size) {
+        out.push(
+          `${block.header}: ${block.pairs.length} pairs shown and ${block.more} more, the atoms have ${e.pairs.size}`,
+        );
+      }
+    } else if (block.pairs.length > 0 || block.more > 0)
+      out.push(`pairs under a rule class: ${block.header}`);
+    if (whole) complete.add(block.header);
+  }
+
+  // The facts' table says what the oracle read: one line per shown class, and its completeness.
+  if (summary.facts.classes.length !== read.blocks.length)
+    out.push("the facts' class table has another length");
+  for (const [i, block] of read.blocks.entries()) {
+    const e = expected.get(block.header);
+    const line = summary.facts.classes[i] ?? "";
+    const full = complete.has(block.header);
+    if (e !== undefined && !line.startsWith(`C${i + 1} ${KIND_WORDS[e.kind]} | `))
+      out.push(`facts line ${i + 1} names another kind`);
+    if (line.endsWith("| in full") !== full)
+      out.push(`facts line ${i + 1} says ${line}, the text says ${full ? "whole" : "not whole"}`);
+  }
+
+  // Accounted for exactly when every non-additive atom is recoverable from the text.
+  for (const [path, atoms] of own) {
+    let recoverable = atoms !== null;
+    for (const atom of atoms ?? []) {
+      if (ROLE_OF[atom.kind] === "additive") continue;
+      const header = expectedHeader(path, atom);
+      const block = shownAt.get(header);
+      const pair = expectedPair(atom);
+      const found =
+        block !== undefined &&
+        complete.has(header) &&
+        (pair === null ||
+          block.pairs.some(
+            (p) => !p.cut && p.before === pair[0] && p.after === pair[1] && p.count >= 1,
+          ));
+      if (!found) recoverable = false;
+      if (!found && summary.accounted.has(path)) {
+        out.push(
+          `${path} is accounted for, but its ${atom.kind} ${JSON.stringify(pair)} cannot be read from the text`,
+        );
+      }
+    }
+    if (recoverable && !summary.accounted.has(path))
+      out.push(`${path}: everything is shown, yet it is not accounted for`);
+  }
+  for (const path of summary.accounted)
+    if (!own.has(path)) out.push(`${path}: accounted for, and no candidate`);
+
+  // The loss facts, counted by the oracle from its own atoms.
+  const loss: LossFacts = { ...NO_LOSS };
+  for (const [path, atoms] of [...own].sort((a, b) => (a[0] < b[0] ? -1 : 1))) {
+    if (atoms === null) continue;
+    const n = (kind: ClassKind) => atoms.filter((a) => a.kind === kind).length;
+    const columns = atoms.filter((a) => a.kind === "column_removed" && a.detail !== "0").length;
+    loss.rowsRemoved += n("row_removed");
+    loss.rowsRemovedFiles += n("row_removed") > 0 ? 1 : 0;
+    loss.rowsRelocated += n("row_relocated");
+    loss.columnsRemoved += columns;
+    loss.keysRemoved += n("json_key_removed");
+    loss.keysRemovedFiles += n("json_key_removed") > 0 ? 1 : 0;
+    loss.keysMoved += n("json_key_moved");
+    loss.valuesEmptied += n("cell_emptied") + n("json_emptied");
+    if (loss.firstBlockingPath === null && n("row_removed") + n("json_key_removed") + columns > 0) {
+      loss.firstBlockingPath = path;
+    }
+  }
+  if (JSON.stringify(loss) !== JSON.stringify(summary.loss)) {
+    out.push(
+      `loss facts ${JSON.stringify(summary.loss)}, the oracle counts ${JSON.stringify(loss)}`,
+    );
+  }
+  return out;
+}
+
+// The generated pull requests: small alphabets that collide, so classes share shapes and fields,
+// pairs repeat across files, relabels and relocations happen, and values look alike.
+
+const O_KEYS = [
+  "A1",
+  "A10",
+  "a1",
+  "POL A1",
+  "sub-1",
+  "sub-01",
+  "A01",
+  "Cz",
+  "FCz",
+  "A1-A2",
+  "EEG A1-Ref",
+  "x",
+  "A2",
+  "GA01",
+  "EEGGA_01REF",
+  "\u{430}1",
+  "A1\u{200B}",
+];
+const O_CELLS = [
+  "n/a",
+  "",
+  "0",
+  "1",
+  "x",
+  "EEG",
+  "A1",
+  "A01",
+  "POL A1",
+  "uV",
+  "\u{B5}V",
+  "a",
+  "\u{430}",
+  "\u{E9}",
+  "e\u{301}",
+  "go\u{200B}od",
+  "good",
+  "x\u{A0}y",
+  "\u{202E}evil",
+  "...(cut)",
+];
+const O_TABLES: { path: string; key: string }[] = [
+  { path: "sub-01/eeg/sub-01_task-x_channels.tsv", key: "name" },
+  { path: "sub-02/eeg/sub-02_task-y_channels.tsv", key: "name" },
+  { path: "participants.tsv", key: "participant_id" },
+  { path: "sub-01/eeg/sub-01_task-x_events.tsv", key: "name" },
+  { path: "sub-02/eeg/sub-02_task-x_events.tsv", key: "name" },
+];
+const O_JSON = [
+  "sub-01/eeg/sub-01_task-x_eeg.json",
+  "sub-02/eeg/sub-02_task-x_eeg.json",
+  "task-x_events.json",
+  "dataset_description.json",
+];
+const O_JSON_KEYS = [
+  "Name",
+  "name",
+  "a",
+  "A",
+  "b",
+  "x1",
+  "go",
+  "go2",
+  "Level",
+  "a.b",
+  "0",
+  "k\u{200B}",
+];
+type Plain = null | boolean | number | string | Plain[] | { [key: string]: Plain };
+const O_SCALARS: Plain[] = [
+  0,
+  1,
+  "1",
+  "x",
+  "Go",
+  "good",
+  "go\u{200B}od",
+  "\u{E9}",
+  "e\u{301}",
+  "a",
+  "\u{430}",
+  null,
+  "",
+  "n/a",
+  true,
+  "A",
+];
+
+function kit(random: () => number) {
+  const pick = <T>(items: readonly T[]): T => items[Math.floor(random() * items.length)] as T;
+  const chance = (p: number): boolean => random() < p;
+  const int = (low: number, high: number): number => low + Math.floor(random() * (high - low + 1));
+  return { pick, chance, int };
+}
+
+/** A generated table pair, with the copies its removals left in the pool. */
+function oracleTable(
+  random: () => number,
+  spec: { path: string; key: string },
+  pool: PoolFile[],
+  traits: Set<string>,
+): SummaryCandidate {
+  const { pick, chance, int } = kit(random);
+  if (chance(0.04)) {
+    traits.add("refused");
+    return candidate(spec.path, "a\tb\n1\n", tsv(["a", "b"], ["1", "2"]));
+  }
+  let header = [spec.key, ...["type", "units", "c"].filter(() => chance(0.6))];
+  const longColumn = chance(0.02);
+  if (longColumn) {
+    header = [...header, "L".repeat(305)];
+    traits.add("long_field");
+  }
+  const wide = chance(0.06);
+  const rows: string[][] = [];
+  const total = wide ? 14 : int(1, 6);
+  const used = new Set<string>();
+  for (let i = 0; i < total; i++) {
+    const row = header.map(() => pick(O_CELLS));
+    let key = wide ? `W${i}` : pick(O_KEYS);
+    for (let t = 0; t < 10 && used.has(key); t++) key = pick(O_KEYS);
+    used.add(key);
+    row[0] = key;
+    if (wide && header.includes("units")) row[header.indexOf("units")] = "uV";
+    rows.push(row);
+  }
+  if (chance(0.04) && header.length > 1 && rows.length > 0) {
+    (rows[0] as string[])[1] = "v".repeat(301 + int(0, 4));
+    traits.add("long_value");
+  }
+  let afterHeader = [...header];
+  if (chance(0.12) && afterHeader.length > 1) afterHeader.splice(int(1, afterHeader.length - 1), 1);
+  if (chance(0.12) && !afterHeader.includes("e")) afterHeader.push("e");
+  if (chance(0.1)) afterHeader = [afterHeader[0] as string, ...afterHeader.slice(1).reverse()];
+  const afterRows: string[][] = [];
+  const relocated: string[][] = [];
+  for (const [i, row] of rows.entries()) {
+    const cells = new Map(header.map((h, j) => [h, row[j] as string]));
+    if (wide && cells.has("units")) {
+      cells.set("units", `w${i}`);
+      traits.add("wide");
+    } else {
+      const op = random();
+      if (op < 0.15) continue;
+      if (op < 0.3) {
+        relocated.push(row);
+        continue;
+      }
+      if (op < 0.45) cells.set(spec.key, pick(O_KEYS));
+      if (chance(0.4)) {
+        const h = pick(afterHeader);
+        if (h !== spec.key) cells.set(h, pick(O_CELLS));
+      }
+    }
+    afterRows.push(afterHeader.map((h) => cells.get(h) ?? pick(O_CELLS)));
+  }
+  for (let i = int(0, 2); i > 0; i--) {
+    afterRows.push(afterHeader.map((h) => (h === spec.key ? pick(O_KEYS) : pick(O_CELLS))));
+  }
+  if (chance(0.25)) afterRows.reverse();
+  if (relocated.length > 0 && chance(0.8)) {
+    const copies = relocated.map((r) => [...r]);
+    if (chance(0.15)) (copies[0] as string[])[0] = `${copies[0]?.[0]}!`;
+    pool.push(
+      pooled(`sourcedata/${pick(["old", "removed"])}/${spec.path}`, null, tsv(header, ...copies)),
+    );
+    traits.add("relocation_offered");
+  }
+  let after = tsv(afterHeader, ...afterRows);
+  if (chance(0.06)) {
+    after = after.replaceAll("\n", "\r\n");
+    traits.add("layout");
+  }
+  if (chance(0.04)) {
+    after = `\u{FEFF}${after}`;
+    traits.add("layout");
+  }
+  return candidate(spec.path, tsv(header, ...rows), after);
+}
+
+function oracleValue(random: () => number, depth: number): Plain {
+  const { pick, chance, int } = kit(random);
+  if (depth >= 3 || chance(0.5)) return pick(O_SCALARS);
+  if (chance(0.35)) {
+    return Array.from({ length: int(0, 3) }, () =>
+      chance(0.6) ? oracleObject(random, depth + 1) : pick(O_SCALARS),
+    );
+  }
+  return oracleObject(random, depth + 1);
+}
+function oracleObject(random: () => number, depth: number): { [key: string]: Plain } {
+  const { pick, int } = kit(random);
+  const o: { [key: string]: Plain } = {};
+  for (let i = int(0, 4); i > 0; i--) o[pick(O_JSON_KEYS)] = oracleValue(random, depth);
+  return o;
+}
+
+/** A generated JSON pair; moved keys go to the root sidecar in `sidecar`. */
+function oracleJson(
+  random: () => number,
+  path: string,
+  sidecar: { [key: string]: Plain },
+  traits: Set<string>,
+): SummaryCandidate {
+  const { pick, chance, int } = kit(random);
+  if (chance(0.03)) {
+    traits.add("refused");
+    return candidate(path, '{"a": 1}', '{"a": 1, "a": 2}');
+  }
+  if (chance(0.01)) {
+    traits.add("many_classes");
+    const keys = Array.from({ length: 125 }, (_, i) => `k${i}`);
+    return candidate(
+      path,
+      JSON.stringify(Object.fromEntries(keys.map((k) => [k, "1"]))),
+      JSON.stringify(Object.fromEntries(keys.map((k) => [k, "2"]))),
+    );
+  }
+  const before = oracleObject(random, 0);
+  if (chance(0.05)) {
+    before.arr = Array.from({ length: 14 }, (_, i) => ({ v: `a${i}` }));
+    traits.add("wide");
+  }
+  if (chance(0.03)) {
+    before.long = "q".repeat(301 + int(0, 3));
+    traits.add("long_value");
+  }
+  if (chance(0.06)) {
+    const text = JSON.stringify(before);
+    if (text.includes('"A')) {
+      traits.add("respelled");
+      return candidate(path, text, text.replace('"A', '"\\u0041'));
+    }
+  }
+  const after = JSON.parse(JSON.stringify(before)) as { [key: string]: Plain };
+  for (const key of Object.keys(after)) {
+    const op = random();
+    if (key === "arr")
+      after.arr = (after.arr as { v: string }[]).map((x, i) => ({ v: `${x.v}-${i}` }));
+    else if (key === "long") after.long = "changed";
+    else if (op < 0.15) delete after[key];
+    else if (op < 0.3) {
+      const respelled = pick([key.toUpperCase(), `${key}_`, `EEG_${key}`, pick(O_JSON_KEYS)]);
+      if (respelled !== key && !(respelled in after)) {
+        after[respelled] = after[key] as Plain;
+        delete after[key];
+      }
+    } else if (op < 0.45) after[key] = oracleValue(random, 1);
+    else if (op < 0.55) after[key] = pick([null, "", "n/a", [], {}]);
+    else if (op < 0.65 && path.endsWith("_eeg.json")) {
+      sidecar[key] = after[key] as Plain;
+      delete after[key];
+      traits.add("move_offered");
+    }
+  }
+  for (let i = int(0, 2); i > 0; i--) {
+    const key = pick(O_JSON_KEYS);
+    if (!(key in after)) after[key] = oracleValue(random, 1);
+  }
+  let text = JSON.stringify(after);
+  if (chance(0.08)) {
+    text = `${JSON.stringify(after, null, 2)}\r\n`;
+    traits.add("layout");
+  }
+  return candidate(path, JSON.stringify(before), text);
+}
+
+function generateOracleCase(random: () => number, traits: Set<string>): OracleCase {
+  const { pick, chance, int } = kit(random);
+  const candidates: SummaryCandidate[] = [];
+  const pool: PoolFile[] = [];
+  const sidecar: { [key: string]: Plain } = {};
+  const taken = new Set<string>();
+  for (let f = int(1, 4); f > 0; f--) {
+    if (chance(0.6)) {
+      const spec = pick(O_TABLES);
+      if (taken.has(spec.path)) continue;
+      taken.add(spec.path);
+      candidates.push(oracleTable(random, spec, pool, traits));
+    } else {
+      const path = pick(O_JSON);
+      if (taken.has(path)) continue;
+      taken.add(path);
+      candidates.push(oracleJson(random, path, sidecar, traits));
+    }
+  }
+  if (Object.keys(sidecar).length > 0) {
+    pool.push(pooled("task-x_eeg.json", chance(0.5) ? null : "{}", JSON.stringify(sidecar)));
+  }
+  if (chance(0.02) && candidates.length > 0) {
+    candidates.push({ ...(candidates[0] as SummaryCandidate) });
+    traits.add("duplicate_path");
+  }
+  // The candidates come in any order: the summary sorts them.
+  return { candidates: candidates.reverse(), pool };
+}
+
+describe("the hidden-loss round-trip oracle", () => {
+  test("4,500 generated pull requests: what an accounted file lost or changed is recoverable from the text, and nothing else is accounted for", () => {
+    const random = seeded(20261020);
+    const counts = new Map<string, number>();
+    const note = (trait: string, by = 1): void => {
+      counts.set(trait, (counts.get(trait) ?? 0) + by);
+    };
+    const seen = new Set<ClassKind>();
+    const violations: string[] = [];
+    let selfTests = 0;
+    for (let n = 0; n < 4500; n++) {
+      const traits = new Set<string>();
+      const c = generateOracleCase(random, traits);
+      for (const trait of traits) note(trait);
+      const summary = summarizeChanges({ candidates: c.candidates, pool: c.pool, deadline: null });
+      for (const cls of summary.classes) seen.add(cls.kind);
+      note("files", summary.files.length);
+      note("accounted", summary.accounted.size);
+      note("summarized_unaccounted", summary.facts.files_summarized - summary.accounted.size);
+      if (summary.facts.classes_cut > 0) note("classes_cut");
+      if (summary.complete.size < summary.shown.size) note("incomplete_class");
+      if (summary.loss.rowsRelocated > 0) note("relocated");
+      if (summary.loss.keysMoved > 0) note("moved");
+      if (summary.text.includes("(first difference")) note("annotated");
+      for (const v of oracleViolations(c, summary, summary.text)) {
+        violations.push(`case ${n}: ${v}\n${summary.text}`);
+      }
+      // Not vacuous: with one pair line of a class the oracle can name deleted, it must object.
+      const lines = summary.text.split("\n");
+      let header = "";
+      const deletable: number[] = [];
+      const known = new Set<string>();
+      for (const [path, atoms] of oracleAtoms(c))
+        for (const a of atoms ?? []) known.add(expectedHeader(path, a));
+      for (const [i, line] of lines.entries()) {
+        if (/^C[0-9]+ \| /.test(line)) header = line.slice(line.indexOf(" | ") + 3);
+        else if (line.startsWith('    "') && known.has(header)) deletable.push(i);
+      }
+      if (deletable.length > 0) {
+        const drop = deletable[Math.floor(random() * deletable.length)] as number;
+        const fewer = lines.filter((_, i) => i !== drop).join("\n");
+        selfTests++;
+        if (oracleViolations(c, summary, fewer).length === 0) {
+          violations.push(`case ${n}: deleting line ${drop} went unnoticed\n${summary.text}`);
+        }
+      }
+    }
+    expect(violations.slice(0, 3)).toEqual([]);
+    expect(selfTests).toBeGreaterThan(2500);
+    for (const [trait, least] of [
+      ["files", 8000],
+      ["accounted", 4000],
+      ["summarized_unaccounted", 300],
+      ["refused", 200],
+      ["wide", 200],
+      ["long_value", 150],
+      ["long_field", 30],
+      ["layout", 300],
+      ["respelled", 30],
+      ["many_classes", 15],
+      ["duplicate_path", 50],
+      ["classes_cut", 15],
+      ["incomplete_class", 300],
+      ["relocated", 300],
+      ["moved", 200],
+      ["annotated", 300],
+    ] as const) {
+      expect(counts.get(trait) ?? 0, trait).toBeGreaterThanOrEqual(least);
+    }
+    for (const kind of CLASS_KINDS) expect(seen.has(kind), kind).toBe(true);
+  }, 120_000);
 });

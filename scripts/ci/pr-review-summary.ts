@@ -2,7 +2,8 @@
  * The mechanical change summary of a dataset pull request: strict parsers, value rendering and the
  * closed vocabulary they share (ADR 0092, ADR 0107; design `.context/plans/pr-review-change-summary.md`).
  *
- * **This module is pure.** No git, no file system, no clock, and no import from the other
+ * **This module is pure.** No git, no file system, no clock of its own (the summary's deadline is
+ * read from a clock the caller passes), and no import from the other
  * `pr-review-*` modules, so everything here can be tested on bytes and strings alone and cannot
  * reach the pull request's repository. The model is shown a summary of a change instead of every
  * diff, and that is only safe if the summary loses nothing; the coverage argument (design section
@@ -34,7 +35,10 @@
  *
  * The third part groups the atoms of every file into change classes ({@link classify}): one class
  * per kind, path shape, field, rule and detail, so one edit repeated over 125 subjects is one
- * class with a count.
+ * class with a count. It renders them within fixed bounds ({@link renderClasses}), decides which
+ * files the summary accounts for ({@link accountedFiles}: only those whose every non-additive
+ * class was shown completely) and counts the loss facts ({@link lossFactsOf}).
+ * {@link summarizeChanges} runs all of it over a pull request's candidate files.
  */
 
 // The one import, and a pure one: how a path is made safe for the prompt is decided once, there.
@@ -1552,11 +1556,17 @@ export interface Atom {
  * The words a `format` atom's `detail` is one of. The state strings in `before` and `after` are
  * `present`/`absent` for a byte order mark and a final newline, the file-level word
  * (`lf`, `crlf`, `mixed`, `none`) for line endings, and the per-line pattern for a mixed table.
- * The design's `json_respelled` (a document whose tree is equal but whose escapes are spelled
- * differently) is not one of them yet: the JSON parser keeps no token text to compare, and the
- * renderer that would show it is phase 3's (design section 3.2).
+ * `json_respelled` is a JSON document whose tree is equal and whose text differs beyond the
+ * whitespace between tokens: a string escape spelled another way (`\u0041` for `A`). It carries
+ * no states (`before` and `after` are null), and only {@link summarizeChanges} adds it, because
+ * the diff reads trees and the parser keeps no token text (design section 3.2).
  */
-export type FormatDetail = "bom" | "line_endings" | "line_ending_pattern" | "final_newline";
+export type FormatDetail =
+  | "bom"
+  | "line_endings"
+  | "line_ending_pattern"
+  | "final_newline"
+  | "json_respelled";
 
 /**
  * The tallies a table diff proves itself total with (design section 6.2). The totals
@@ -3186,6 +3196,7 @@ const FORMAT_WORDS: Readonly<Record<FormatDetail, string>> = {
   line_endings: "line endings changed",
   line_ending_pattern: "which lines end in CRLF changed",
   final_newline: "final newline added or removed",
+  json_respelled: "same values, string escapes spelled differently",
 };
 
 /** The JSON kinds whose field is a leaf path; every other JSON kind with a field names its parent. */
@@ -3582,5 +3593,275 @@ export function summaryFacts(input: {
     keys_removed_not_found_elsewhere: input.loss.keysRemoved,
     keys_moved_to_an_inherited_sidecar: input.loss.keysMoved,
     values_emptied: input.loss.valuesEmptied,
+  };
+}
+
+// ---------------------------------------------------------------------------------------------
+// The summary of a pull request (design sections 5.4, 6.1 and 10.1)
+// ---------------------------------------------------------------------------------------------
+
+/** A modified `.tsv` or `.json` file the summary is asked to account for (design section 2.1). */
+export interface SummaryCandidate {
+  path: string;
+  before: Uint8Array;
+  after: Uint8Array;
+}
+
+/** Everything the summary of a pull request decided, for the evidence and the prompt. */
+export interface ChangeSummary {
+  /** The deadline was reached: nothing below is used, and nothing is accounted for. */
+  abandoned: boolean;
+  /** One outcome per `.tsv` and `.json` candidate, in the order the candidates were processed. */
+  files: readonly FileOutcome[];
+  /** Every class, in render order (the shown ones are a prefix). */
+  classes: readonly ChangeClass[];
+  /** The keys of the classes rendered, and of those rendered completely. */
+  shown: ReadonlySet<string>;
+  complete: ReadonlySet<string>;
+  /** The paths the summary accounts for (design section 6.1). */
+  accounted: ReadonlySet<string>;
+  loss: LossFacts;
+  facts: SummaryFacts & { classes: string[] };
+  /** The fenced block's text: author text inside it, escaped; "" when there is no class. */
+  text: string;
+}
+
+/** A summary with nothing in it: no candidate, or (abandoned) a pass that ran out of time. */
+function emptySummary(abandoned: boolean): ChangeSummary {
+  const outcomes: FileOutcome[] = [];
+  return {
+    abandoned,
+    files: outcomes,
+    classes: [],
+    shown: new Set(),
+    complete: new Set(),
+    accounted: new Set(),
+    loss: { ...NO_LOSS },
+    facts: {
+      ...summaryFacts({
+        abandoned,
+        outcomes,
+        accounted: new Set(),
+        shown: 0,
+        cut: 0,
+        loss: NO_LOSS,
+      }),
+      classes: [],
+    },
+    text: "",
+  };
+}
+
+/** The summary of a pull request with no candidate: not abandoned, and nothing in it. */
+export const EMPTY_SUMMARY: ChangeSummary = emptySummary(false);
+
+/**
+ * JSON text with the whitespace between its tokens removed (space, tab, LF and CR outside a
+ * string; a string is copied exactly, escapes and all). Two documents whose trees are equal and
+ * whose texts differ after this differ only in how a string was spelled, which is the
+ * `json_respelled` format class. The text must be one the parser accepted, so every string ends.
+ */
+export function stripJsonSpace(text: string): string {
+  let out = "";
+  let start = 0;
+  let inString = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    if (inString) {
+      if (c === 0x5c) i++;
+      else if (c === 0x22) inString = false;
+    } else if (c === 0x22) {
+      inString = true;
+    } else if (c === 0x20 || c === 0x09 || c === 0x0a || c === 0x0d) {
+      out += text.slice(start, i);
+      start = i + 1;
+    }
+  }
+  return out + text.slice(start);
+}
+
+/** The text of bytes the JSON parser accepted, without its byte order mark. */
+function jsonText(bytes: Uint8Array): string {
+  const text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+  return text.startsWith(BOM) ? text.slice(BOM.length) : text;
+}
+
+/** The checks a summary proves each diff total with: the real ones, unless a test passes others. */
+export interface SummaryChecks {
+  table: (diff: FileDiff<TableCounts>) => boolean;
+  json: (diff: FileDiff<JsonCounts>) => boolean;
+}
+
+/**
+ * Summarize the modified candidates of a pull request against its pools (design sections 4 to 7).
+ * Past the deadline the result is `abandoned` and accounts for nothing; see
+ * {@link summarizeChangesWith} for how a run proceeds.
+ */
+export function summarizeChanges(input: {
+  candidates: readonly SummaryCandidate[];
+  pool: readonly PoolFile[];
+  deadline: number | null;
+  now?: () => number;
+}): ChangeSummary {
+  return summarizeChangesWith(input, { table: verifyTableCounts, json: verifyJsonCounts });
+}
+
+/**
+ * {@link summarizeChanges} with the totality checks passed in, so a test can prove that a diff the
+ * check rejects is refused (`internal_mismatch`) and accounts for nothing. A run:
+ *
+ * 1. **Sorts the candidates by path, in code-unit order**, and processes them in that order. So
+ *    nothing about a run depends on the order git listed the files in: not the outcomes, not the
+ *    examples, and not which file takes a relocated row's copy. (A copy can serve only the file at
+ *    its corresponding path, so two different files never compete for one; the only order that
+ *    could matter is two candidates with ONE path, and a path given twice is refused, every time
+ *    it appears, as `internal_mismatch`, the word for the platform's own reading not adding up.)
+ * 2. Builds the pools once, from `pool` sorted by path.
+ * 3. Checks the deadline BEFORE each file. When `now()` has reached it, the WHOLE summary is
+ *    abandoned: no file is accounted for, no class or text is kept, and the loss facts are zero.
+ *    All or nothing is simpler to prove than a partial account, and an abandoned summary leaves
+ *    the review where it was without one (design section 5.4). A null deadline never abandons.
+ * 4. Reads each file whose path ends in `.tsv` or `.json`; any other path is not a candidate and is
+ *    left out. Once the bytes read (both sides of every file so far) would pass `maxTotalBytes`,
+ *    that file and EVERY later one is refused `too_large`, so what the summary holds is bounded.
+ * 5. Parses both sides (the before side's refusal first) and diffs them against the pools. A
+ *    table's layout atoms come from its diff; a JSON document's come from {@link formatAtoms}
+ *    here, plus `json_respelled` when the trees are equal and the texts differ beyond whitespace.
+ *    Any refusal, `internal_mismatch` included, is recorded on the file's outcome, and such a file
+ *    has no atoms, no class and no loss fact: it stays on the raw-diff path.
+ * 6. Groups the atoms into classes, renders them, accounts for files and counts the loss facts.
+ */
+export function summarizeChangesWith(
+  input: {
+    candidates: readonly SummaryCandidate[];
+    pool: readonly PoolFile[];
+    deadline: number | null;
+    now?: () => number;
+  },
+  checks: SummaryChecks,
+): ChangeSummary {
+  const now = input.now ?? Date.now;
+  const candidates = [...input.candidates].sort((a, b) => byCodeUnits(a.path, b.path));
+  const listed = new Map<string, number>();
+  for (const candidate of candidates) {
+    listed.set(candidate.path, (listed.get(candidate.path) ?? 0) + 1);
+  }
+  const pools = buildPools([...input.pool].sort((a, b) => byCodeUnits(a.path, b.path)));
+
+  const outcomes: FileOutcome[] = [];
+  const summarized: FileAtoms[] = [];
+  let read = 0;
+  let exhausted = false;
+  for (const candidate of candidates) {
+    if (input.deadline !== null && now() >= input.deadline) return emptySummary(true);
+    const { path } = candidate;
+    const family = path.endsWith(".tsv") ? "tsv" : path.endsWith(".json") ? "json" : null;
+    if (family === null) continue;
+    const refuse = (refusal: SummaryRefusal): void => {
+      outcomes.push({ path, family, refusal, keyColumn: null, classKeys: new Set() });
+    };
+    if ((listed.get(path) ?? 0) > 1) {
+      refuse("internal_mismatch");
+      continue;
+    }
+    const bytes = candidate.before.length + candidate.after.length;
+    if (exhausted || read + bytes > SUMMARY_LIMITS.maxTotalBytes) {
+      exhausted = true;
+      refuse("too_large");
+      continue;
+    }
+    read += bytes;
+
+    let atoms: Atom[];
+    let keyColumn: string | null = null;
+    if (family === "tsv") {
+      const before = parseTsv(candidate.before);
+      if (!before.ok) {
+        refuse(before.refusal);
+        continue;
+      }
+      const after = parseTsv(candidate.after);
+      if (!after.ok) {
+        refuse(after.refusal);
+        continue;
+      }
+      const diff = diffTableWith(path, before.value, after.value, pools.rows, checks.table);
+      if (!diff.ok) {
+        refuse(diff.refusal);
+        continue;
+      }
+      atoms = diff.value.atoms;
+      keyColumn = diff.value.keyColumn;
+    } else {
+      const before = parseJson(candidate.before);
+      if (!before.ok) {
+        refuse(before.refusal);
+        continue;
+      }
+      const after = parseJson(candidate.after);
+      if (!after.ok) {
+        refuse(after.refusal);
+        continue;
+      }
+      const diff = diffJsonWith(
+        path,
+        before.value.value,
+        after.value.value,
+        pools.json,
+        checks.json,
+      );
+      if (!diff.ok) {
+        refuse(diff.refusal);
+        continue;
+      }
+      atoms = [...diff.value.atoms, ...formatAtoms(before.value.format, after.value.format)];
+      if (
+        canonicalJson(before.value.value) === canonicalJson(after.value.value) &&
+        stripJsonSpace(jsonText(candidate.before)) !== stripJsonSpace(jsonText(candidate.after))
+      ) {
+        atoms.push({
+          kind: "format",
+          field: null,
+          rule: null,
+          detail: "json_respelled",
+          before: null,
+          after: null,
+        });
+      }
+    }
+    outcomes.push({
+      path,
+      family,
+      refusal: null,
+      keyColumn,
+      classKeys: new Set(atoms.map((atom) => classKeyOf(path, atom).key)),
+    });
+    summarized.push({ path, atoms });
+  }
+
+  const classes = classify(summarized);
+  const rendered = renderClasses(classes);
+  const accounted = accountedFiles(outcomes, classes, rendered.complete, false);
+  const loss = lossFactsOf(summarized);
+  return {
+    abandoned: false,
+    files: outcomes,
+    classes,
+    shown: rendered.shown,
+    complete: rendered.complete,
+    accounted,
+    loss,
+    facts: {
+      ...summaryFacts({
+        abandoned: false,
+        outcomes,
+        accounted,
+        shown: rendered.shown.size,
+        cut: rendered.cut,
+        loss,
+      }),
+      classes: classTable(classes, rendered.shown, rendered.complete),
+    },
+    text: rendered.text,
   };
 }
