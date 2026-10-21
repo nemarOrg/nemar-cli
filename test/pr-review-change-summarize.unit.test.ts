@@ -867,28 +867,67 @@ describe("renderClasses: the bounds", () => {
     expect(shown.has((classes[6] as ChangeClass).key)).toBe(false);
   });
 
-  test("room for the count line is kept: near the bound, the block never passes 30,000 characters", () => {
-    // Four classes of twelve long pairs, a fifth whose values grow 12 characters a step, and a
-    // short last one. Some steps put the first five within the count line's length of the bound
-    // with the last one left out; only the room kept for the count line holds the block under it.
-    const pairs = (k: number, side: string, length: number) =>
-      Array.from({ length: 12 }, (_, i) => ({ v: `${side}${k}-${i}-${"w".repeat(length)}` }));
-    const near: number[] = [];
-    for (let length = 0; length < 100; length++) {
-      const before: Record<string, unknown> = { small: "a", k4: pairs(4, "old", 0) };
-      const after: Record<string, unknown> = { small: "b", k4: pairs(4, "new", length) };
-      for (let k = 0; k < 4; k++) {
-        before[`k${k}`] = pairs(k, "old", 280);
-        after[`k${k}`] = pairs(k, "new", 280);
+  test("the block grows one character at a time through 30,000 and never passes it: the edge is exact with and without the count line", () => {
+    // Four classes of twelve pairs of 260 characters, a fifth of twelve whose after values the
+    // sweep grows, and a short class (`.small`) last. Only ONE value changes per step, by ONE
+    // character (a value is shown to 300 characters, so the twelve take turns, 280 each), so the
+    // block's length moves one character at a time. The edge is met in two places: the fifth class
+    // is the last that fits only with the room kept for the count line `(1 more change class not
+    // shown)`, and the short one fits at the very end with none kept.
+    const pairs = (k: number, side: string, lengths: readonly number[]) =>
+      lengths.map((length, i) => ({ v: `${side}${k}-${i}-${"w".repeat(length)}` }));
+    const slot = 280;
+    const grown = (grow: number): number[] =>
+      Array.from({ length: 12 }, (_, i) => Math.max(0, Math.min(slot, grow - i * slot)));
+    const block = (grow: number, small: boolean) => {
+      const before: Record<string, unknown> = { k4: pairs(4, "old", Array(12).fill(0)) };
+      const after: Record<string, unknown> = { k4: pairs(4, "new", grown(grow)) };
+      if (small) {
+        before.small = "a";
+        after.small = "b";
       }
-      const { text, cut } = rendered([
+      for (let k = 0; k < 4; k++) {
+        before[`k${k}`] = pairs(k, "old", Array(12).fill(260));
+        after[`k${k}`] = pairs(k, "new", Array(12).fill(260));
+      }
+      return rendered([
         { path: "x.json", before: JSON.stringify(before), after: JSON.stringify(after) },
       ]);
-      expect(text.length).toBeLessThanOrEqual(SUMMARY_LIMITS.maxSummaryChars);
-      if (cut === 1 && text.length > SUMMARY_LIMITS.maxSummaryChars - 60) near.push(length);
+    };
+    // The five long classes alone, which fit, and what each character of growth adds to them.
+    const base = block(0, false).text.length;
+    expect(block(0, false).shown.size).toBe(5);
+    for (const grow of [1, 137, 280, 281, 560, 1000]) {
+      expect(block(grow, false).text.length, `grow ${grow}`).toBe(base + grow);
     }
-    // The sweep reaches the edge: five classes shown, the last left out, the count line close.
-    expect(near.length).toBeGreaterThan(2);
+    const max = SUMMARY_LIMITS.maxSummaryChars;
+    const steps: { grow: number; length: number; shown: number }[] = [];
+    // From 250 characters under the edge of the fifth class to 250 over the short class's.
+    for (let grow = max - 250 - base; grow <= max + 250 - base; grow++) {
+      expect(grow, "the twelve slots are enough").toBeLessThanOrEqual(12 * slot);
+      const { text, shown } = block(grow, true);
+      expect(text.length, `grow ${grow}`).toBeLessThanOrEqual(max);
+      steps.push({ grow, length: text.length, shown: shown.size });
+    }
+    expect(steps.length).toBeGreaterThanOrEqual(400);
+    // The length moves one character at a time through 29,990 to 30,010 ...
+    const lengths = steps.map((step) => step.length);
+    for (const [i, step] of steps.entries()) {
+      const next = steps[i + 1];
+      if (next !== undefined && step.shown === next.shown && step.shown >= 5) {
+        expect(next.length - step.length, `grow ${step.grow}`).toBe(1);
+      }
+    }
+    expect(lengths.filter((n) => n === max).length).toBe(2);
+    expect(Math.max(...lengths)).toBe(max);
+    // ... and a class is dropped only when it does not fit: the last step with each count of
+    // shown classes is exactly on the bound, so nothing is held back that would have fitted.
+    expect([...new Set(steps.map((step) => step.shown))]).toEqual([6, 5, 4]);
+    for (const shown of [6, 5]) {
+      expect(steps.filter((step) => step.shown === shown).at(-1)?.length, `${shown} shown`).toBe(
+        max,
+      );
+    }
   });
 
   test("a first class too large to fit leaves the block with the count alone", () => {
