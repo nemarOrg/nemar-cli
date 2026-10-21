@@ -23,6 +23,14 @@
  * What the model is shown of a value goes through {@link renderValue}, which escapes the characters
  * that are invisible or are not text (see {@link UNSEEN}), so a value cannot forge the platform's
  * own markers.
+ *
+ * The second half of the module is the change model: for a modified table or JSON document it
+ * computes every difference as an atom with a role ({@link CLASS_KINDS}, {@link ROLE_OF}), and it
+ * asserts that the computation is TOTAL (design section 6.2): every row, column and leaf of both
+ * versions is in exactly one bucket, and the counts add up or the file is refused. Where the
+ * evidence for a pairing is doubtful, the pairing is not made: a doubtful pair is a removal and an
+ * addition, shown as such and counted as a loss, and never a quiet match. That direction is the
+ * rule of every choice in it.
  */
 
 /**
@@ -2032,4 +2040,369 @@ function cellAtom(field: string, before: string, after: string): Atom {
     }
   }
   return { kind: "cell_replaced", field, rule: null, detail: null, before, after };
+}
+
+// ---------------------------------------------------------------------------------------------
+// JSON diff (design sections 2.3, 4.6 and 4.7)
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * A BIDS file name as the inheritance rule reads it: the directory, the suffix (the last
+ * underscore-separated part), the extension, and the `key-value` entities before the suffix. A name
+ * with any other shape (a part before the suffix that is not `key-value`, no suffix, no extension)
+ * is not one this rule can reason about, and gets null: the rule then cannot say a key was kept
+ * elsewhere, so the key stays a removed key, which is a loss fact and never a quiet pass.
+ */
+function bidsName(
+  path: string,
+): { dir: string; suffix: string; extension: string; entities: ReadonlySet<string> } | null {
+  const slash = path.lastIndexOf("/");
+  const dir = slash < 0 ? "" : path.slice(0, slash);
+  const name = path.slice(slash + 1);
+  const dot = name.indexOf(".");
+  if (dot <= 0) return null;
+  const parts = name.slice(0, dot).split("_");
+  const suffix = parts[parts.length - 1] as string;
+  if (!/^[A-Za-z0-9]+$/.test(suffix)) return null;
+  const entities = new Set<string>();
+  for (const part of parts.slice(0, -1)) {
+    if (!/^[A-Za-z0-9]+-[A-Za-z0-9]+$/.test(part)) return null;
+    entities.add(part);
+  }
+  return { dir, suffix, extension: name.slice(dot), entities };
+}
+
+/**
+ * Whether the JSON file `sidecar` applies to the file `target` under BIDS inheritance, as far as
+ * this module reads it (design section 4.6): it sits in the target's directory or in an ancestor of
+ * it, it has the same suffix and the same extension, and every `key-value` entity of its name is in
+ * the target's name. A sidecar in a sibling or a deeper directory, with another suffix, or naming an
+ * entity the target does not have, applies to no file of the target's, so a key moved there has not
+ * been kept for the target.
+ */
+export function sidecarApplies(sidecar: string, target: string): boolean {
+  if (sidecar === target) return false;
+  const t = bidsName(sidecar);
+  const f = bidsName(target);
+  if (t === null || f === null) return false;
+  if (t.suffix !== f.suffix || t.extension !== f.extension) return false;
+  const inherited = t.dir === "" || f.dir === t.dir || f.dir.startsWith(`${t.dir}/`);
+  if (!inherited) return false;
+  for (const entity of t.entities) if (!f.entities.has(entity)) return false;
+  return true;
+}
+
+/** A name with case and every character that is not a letter or a digit removed: `MISC_Channel-Count` and `MiscChannelCount` fold alike. */
+function foldName(name: string): string {
+  return name.toLowerCase().replace(/[^\p{L}\p{N}]/gu, "");
+}
+
+/**
+ * The most candidates a removed key looks at for a rename by rule, among the added keys that share
+ * its parent and value. A document can hold thousands of keys with one value (`"n/a"`), and without a
+ * bound each removed one would try all the added ones. The bound only leaves a key unpaired, which
+ * shows it as a removed key and an added key: more change, never less. The cheap test (the names
+ * fold alike) is not bounded, because it is a table lookup.
+ */
+const RENAME_CANDIDATE_CAP = 64;
+
+const JSON_FATE_NONE = 0;
+const JSON_FATE_UNCHANGED = 1;
+const JSON_FATE_CHANGED = 2;
+const JSON_FATE_EMPTIED = 3;
+const JSON_FATE_FILLED = 4;
+const JSON_FATE_RENAMED = 5;
+const JSON_FATE_MOVED = 6;
+const JSON_FATE_REMOVED = 7;
+const JSON_FATE_EMPTY_REMOVED = 8;
+const JSON_FATE_ADDED = 9;
+
+/** The totality assertion of a JSON diff: see {@link diffJson}. */
+export function verifyJsonCounts(c: JsonCounts): boolean {
+  return (
+    c.conflicts === 0 &&
+    c.beforeLeaves ===
+      c.unchanged +
+        c.changed +
+        c.emptied +
+        c.filled +
+        c.renamed +
+        c.moved +
+        c.removed +
+        c.emptyRemoved &&
+    c.afterLeaves ===
+      c.afterUnchanged +
+        c.afterChanged +
+        c.afterEmptied +
+        c.afterFilled +
+        c.afterRenamed +
+        c.added &&
+    c.unchanged === c.afterUnchanged &&
+    c.changed === c.afterChanged &&
+    c.emptied === c.afterEmptied &&
+    c.filled === c.afterFilled &&
+    c.renamed === c.afterRenamed
+  );
+}
+
+/**
+ * The difference between two versions of a JSON document, as atoms, or `internal_mismatch` when the
+ * diff is not total. Both documents are flattened to leaves ({@link flattenJson}); every before leaf
+ * ends in exactly one of: unchanged, changed (value or type), emptied, filled, renamed, moved,
+ * removed (with a value, or without one); every after leaf in one of: unchanged, changed, emptied,
+ * filled, renamed, added. The counts are asserted ({@link verifyJsonCounts}).
+ *
+ * Leaves at the same path are compared first. A before leaf whose path is gone is then, in order:
+ * the same value under a sibling key whose name folds to the same (case and punctuation removed) or
+ * matches by a relabel rule (`json_key_renamed`; each added leaf is used once, candidates are taken
+ * in before order); a leaf found with the same path and value in another file of the pull request
+ * that applies to this one under BIDS inheritance ({@link sidecarApplies}; `json_key_moved`); or
+ * removed. A removed leaf whose value held nothing ({@link isMissingJson}) is a modification, not a
+ * loss, because nothing was lost.
+ *
+ * The `format` of a document (its byte order mark and line endings) is not in the parsed value, so
+ * it is not in this diff; {@link formatAtoms} gives it from the two {@link TextFormat}s the parser
+ * returned.
+ */
+export function diffJson(
+  path: string,
+  before: JsonValue,
+  after: JsonValue,
+  pool: JsonPool,
+): Parsed<FileDiff<JsonCounts>> {
+  return diffJsonWith(path, before, after, pool, verifyJsonCounts);
+}
+
+/**
+ * {@link diffJson} with the count check passed in, so a test can prove a failing check turns the
+ * file into `internal_mismatch`.
+ */
+export function diffJsonWith(
+  path: string,
+  before: JsonValue,
+  after: JsonValue,
+  pool: JsonPool,
+  verify: (counts: JsonCounts) => boolean,
+): Parsed<FileDiff<JsonCounts>> {
+  const bl = flattenJson(before);
+  const al = flattenJson(after);
+  const bFate = new Uint8Array(bl.length);
+  const aFate = new Uint8Array(al.length);
+  const pairOfBefore = new Int32Array(bl.length).fill(-1);
+  const pairs: { before: number; after: number }[] = [];
+  let conflicts = 0;
+
+  const pairLeaves = (bi: number, ai: number, fate: number): void => {
+    if (bFate[bi] !== JSON_FATE_NONE || aFate[ai] !== JSON_FATE_NONE) {
+      conflicts++;
+      return;
+    }
+    bFate[bi] = fate;
+    aFate[ai] = fate;
+    pairOfBefore[bi] = pairs.length;
+    pairs.push({ before: bi, after: ai });
+  };
+
+  // 1. Leaves at the same path.
+  const afterAt = new Map(al.map((leaf, ai) => [leaf.path, ai]));
+  for (const [bi, leaf] of bl.entries()) {
+    const ai = afterAt.get(leaf.path);
+    if (ai === undefined) continue;
+    const now = al[ai] as JsonLeaf;
+    if (leaf.value === now.value) {
+      pairLeaves(bi, ai, JSON_FATE_UNCHANGED);
+      continue;
+    }
+    const wasMissing = isMissingJson(leaf.json);
+    const isMissing = isMissingJson(now.json);
+    if (!wasMissing && isMissing) pairLeaves(bi, ai, JSON_FATE_EMPTIED);
+    else if (wasMissing && !isMissing) pairLeaves(bi, ai, JSON_FATE_FILLED);
+    else pairLeaves(bi, ai, JSON_FATE_CHANGED);
+  }
+
+  // 2. Renames: the same value under a sibling key whose name is the old name respelled.
+  type Group = {
+    items: number[];
+    first: number;
+    byFold: Map<string, number[]>;
+    pointer: Map<string, number>;
+  };
+  const groups = new Map<string, Group>();
+  for (const [ai, leaf] of al.entries()) {
+    if (aFate[ai] !== JSON_FATE_NONE || !leaf.isKey) continue;
+    const key = JSON.stringify([leaf.parent, leaf.value]);
+    let group = groups.get(key);
+    if (group === undefined) {
+      group = { items: [], first: 0, byFold: new Map(), pointer: new Map() };
+      groups.set(key, group);
+    }
+    const fold = foldName(leaf.name);
+    const bucket = group.byFold.get(fold);
+    if (bucket === undefined) group.byFold.set(fold, [group.items.length]);
+    else bucket.push(group.items.length);
+    group.items.push(ai);
+  }
+  for (const [bi, leaf] of bl.entries()) {
+    if (bFate[bi] !== JSON_FATE_NONE || !leaf.isKey) continue;
+    const group = groups.get(JSON.stringify([leaf.parent, leaf.value]));
+    if (group === undefined) continue;
+
+    // The first added leaf in after order whose name folds alike, if any.
+    const fold = foldName(leaf.name);
+    const bucket = group.byFold.get(fold) ?? [];
+    let at = group.pointer.get(fold) ?? 0;
+    while (
+      at < bucket.length &&
+      aFate[group.items[bucket[at] as number] as number] !== JSON_FATE_NONE
+    )
+      at++;
+    group.pointer.set(fold, at);
+    const byFold = at < bucket.length ? (bucket[at] as number) : group.items.length;
+
+    // An earlier one that matches by a relabel rule wins, as candidates are taken in order.
+    while (
+      group.first < group.items.length &&
+      aFate[group.items[group.first] as number] !== JSON_FATE_NONE
+    ) {
+      group.first++;
+    }
+    let chosen = byFold;
+    for (let pos = group.first, looked = 0; pos < byFold && looked < RENAME_CANDIDATE_CAP; pos++) {
+      looked++;
+      const ai = group.items[pos] as number;
+      if (aFate[ai] !== JSON_FATE_NONE) continue;
+      if (relabelRule(leaf.name, (al[ai] as JsonLeaf).name, { chars: false }) !== null) {
+        chosen = pos;
+        break;
+      }
+    }
+    if (chosen < group.items.length)
+      pairLeaves(bi, group.items[chosen] as number, JSON_FATE_RENAMED);
+  }
+
+  // 3. What is left of the before side: kept in a sidecar that applies, or removed.
+  for (const [bi, leaf] of bl.entries()) {
+    if (bFate[bi] !== JSON_FATE_NONE) continue;
+    const homes = pool.byLeaf.get(leafKey(leaf.path, leaf.value)) ?? [];
+    if (homes.some((home) => sidecarApplies(home, path))) bFate[bi] = JSON_FATE_MOVED;
+    else bFate[bi] = isMissingJson(leaf.json) ? JSON_FATE_EMPTY_REMOVED : JSON_FATE_REMOVED;
+  }
+  // 4. What is left of the after side is new.
+  for (let ai = 0; ai < al.length; ai++)
+    if (aFate[ai] === JSON_FATE_NONE) aFate[ai] = JSON_FATE_ADDED;
+
+  // Emission: every atom, and every tally, comes from here.
+  const atoms: Atom[] = [];
+  const counts: JsonCounts = {
+    beforeLeaves: bl.length,
+    afterLeaves: al.length,
+    unchanged: 0,
+    changed: 0,
+    emptied: 0,
+    filled: 0,
+    renamed: 0,
+    afterRenamed: 0,
+    moved: 0,
+    removed: 0,
+    emptyRemoved: 0,
+    added: 0,
+    afterUnchanged: 0,
+    afterChanged: 0,
+    afterEmptied: 0,
+    afterFilled: 0,
+    conflicts,
+  };
+  const keyAtom = (kind: ClassKind, leaf: JsonLeaf, side: "before" | "after"): Atom => ({
+    kind,
+    field: leaf.parent,
+    rule: null,
+    detail: leaf.name,
+    before: side === "before" ? leaf.value : null,
+    after: side === "after" ? leaf.value : null,
+  });
+
+  for (const [bi, leaf] of bl.entries()) {
+    const fate = bFate[bi];
+    const partner = (): JsonLeaf =>
+      al[(pairs[pairOfBefore[bi] as number] as { after: number }).after] as JsonLeaf;
+    if (fate === JSON_FATE_UNCHANGED) {
+      counts.unchanged++;
+    } else if (
+      fate === JSON_FATE_CHANGED ||
+      fate === JSON_FATE_EMPTIED ||
+      fate === JSON_FATE_FILLED
+    ) {
+      const now = partner();
+      const kind: ClassKind =
+        fate === JSON_FATE_EMPTIED
+          ? "json_emptied"
+          : fate === JSON_FATE_FILLED
+            ? "json_filled"
+            : leaf.json.t !== now.json.t
+              ? "json_type_changed"
+              : "json_value_changed";
+      if (fate === JSON_FATE_CHANGED) counts.changed++;
+      else if (fate === JSON_FATE_EMPTIED) counts.emptied++;
+      else counts.filled++;
+      atoms.push({
+        kind,
+        field: leaf.path,
+        rule: null,
+        detail: null,
+        before: leaf.value,
+        after: now.value,
+      });
+    } else if (fate === JSON_FATE_RENAMED) {
+      counts.renamed++;
+      atoms.push({
+        kind: "json_key_renamed",
+        field: leaf.parent,
+        rule: null,
+        detail: `${leaf.name} -> ${partner().name}`,
+        before: leaf.value,
+        after: leaf.value,
+      });
+    } else if (fate === JSON_FATE_MOVED) {
+      counts.moved++;
+      atoms.push(keyAtom("json_key_moved", leaf, "before"));
+    } else if (fate === JSON_FATE_REMOVED) {
+      counts.removed++;
+      atoms.push(keyAtom("json_key_removed", leaf, "before"));
+    } else if (fate === JSON_FATE_EMPTY_REMOVED) {
+      counts.emptyRemoved++;
+      atoms.push(keyAtom("json_empty_key_removed", leaf, "before"));
+    }
+  }
+  for (const [ai, leaf] of al.entries()) {
+    const fate = aFate[ai];
+    if (fate === JSON_FATE_UNCHANGED) counts.afterUnchanged++;
+    else if (fate === JSON_FATE_CHANGED) counts.afterChanged++;
+    else if (fate === JSON_FATE_EMPTIED) counts.afterEmptied++;
+    else if (fate === JSON_FATE_FILLED) counts.afterFilled++;
+    else if (fate === JSON_FATE_RENAMED) counts.afterRenamed++;
+    else if (fate === JSON_FATE_ADDED) {
+      counts.added++;
+      atoms.push(keyAtom("json_key_added", leaf, "after"));
+    }
+  }
+
+  // The leaves both versions have keep their relative order, or the document's keys are reordered.
+  const inBeforeOrder = [...pairs].sort((x, y) => x.before - y.before);
+  if (
+    inBeforeOrder.some(
+      (pair, i) => i > 0 && pair.after < (inBeforeOrder[i - 1] as { after: number }).after,
+    )
+  ) {
+    atoms.push({
+      kind: "json_keys_reordered",
+      field: null,
+      rule: null,
+      detail: null,
+      before: null,
+      after: null,
+    });
+  }
+
+  if (!verify(counts)) return { ok: false, refusal: "internal_mismatch" };
+  return { ok: true, value: { family: "json", keyColumn: null, atoms, counts } };
 }

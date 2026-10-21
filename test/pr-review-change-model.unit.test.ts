@@ -16,12 +16,15 @@ import {
   CLASS_KINDS,
   type ClassKind,
   type FileDiff,
+  type JsonCounts,
   type PoolFile,
   ROLE_OF,
   type RelabelRule,
   type Table,
   type TableCounts,
   buildPools,
+  diffJson,
+  diffJsonWith,
   diffTable,
   diffTableWith,
   flattenJson,
@@ -33,6 +36,8 @@ import {
   parseTsv,
   relabelRule,
   ruleWords,
+  sidecarApplies,
+  verifyJsonCounts,
   verifyTableCounts,
 } from "../scripts/ci/pr-review-summary";
 
@@ -2096,5 +2101,864 @@ describe("diffTable on generated tables", () => {
       ).toEqual(extra.map(() => "row_added"));
     }
     expect(reordered).toBeGreaterThan(200);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// The JSON change model
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * The diff of two JSON texts at a path, against a pool built from `files`, through the real parser.
+ * JSON moves consume nothing, so the pool could be shared, but a fresh one per call keeps the tests
+ * independent.
+ */
+function diffJsonText(
+  path: string,
+  before: string,
+  after: string,
+  files: PoolFile[] = [],
+): FileDiff<JsonCounts> {
+  const result = diffJson(path, json(before), json(after), buildPools(files).json);
+  if (!result.ok) throw new Error(`diff refused: ${result.refusal}`);
+  return result.value;
+}
+
+const jsonLines = (before: string, after: string, files: PoolFile[] = []): string[] =>
+  diffJsonText("sub-01/eeg/sub-01_task-x_eeg.json", before, after, files).atoms.map(line);
+
+describe("diffJson: leaves at the same path", () => {
+  test("a document that did not change has no atoms, whatever its layout", () => {
+    const diff = diffJsonText(
+      "a.json",
+      '{"a": 1, "b": [1, 2], "c": {"d": null}}',
+      '{\n  "a": 1,\n  "b": [1,2],\n  "c": {"d": null}\n}',
+    );
+    expect(diff.atoms).toEqual([]);
+    expect(diff.family).toBe("json");
+    expect(diff.keyColumn).toBeNull();
+    expect(diff.counts).toMatchObject({ beforeLeaves: 3, afterLeaves: 3, unchanged: 3 });
+  });
+
+  test("a changed value of the same type, and a changed type", () => {
+    expect(jsonLines('{"a": "x"}', '{"a": "y"}')).toEqual([
+      'json_value_changed | field=.a | before="\\"x\\"" | after="\\"y\\""',
+    ]);
+    expect(jsonLines('{"a": 1}', '{"a": 2}')).toEqual([
+      'json_value_changed | field=.a | before="1" | after="2"',
+    ]);
+    expect(jsonLines('{"a": "1"}', '{"a": 1}')).toEqual([
+      'json_type_changed | field=.a | before="\\"1\\"" | after="1"',
+    ]);
+    expect(jsonLines('{"a": true}', '{"a": "true"}')).toEqual([
+      'json_type_changed | field=.a | before="true" | after="\\"true\\""',
+    ]);
+    expect(jsonLines('{"a": 1}', '{"a": [1]}')).toEqual([
+      'json_type_changed | field=.a | before="1" | after="[1]"',
+    ]);
+  });
+
+  test("numbers are compared as written: 1.0 is not 1", () => {
+    expect(jsonLines('{"a": 1}', '{"a": 1.0}')).toEqual([
+      'json_value_changed | field=.a | before="1" | after="1.0"',
+    ]);
+    expect(jsonLines('{"a": 1e2}', '{"a": 100}')).toEqual([
+      'json_value_changed | field=.a | before="1e2" | after="100"',
+    ]);
+  });
+
+  test("a value that became missing is emptied; a missing one that got a value is filled", () => {
+    for (const empty of ["null", '""', '"n/a"', "[]", "{}", "[null]"]) {
+      expect(jsonLines('{"a": "x"}', `{"a": ${empty}}`), empty).toEqual([
+        expect.stringContaining("json_emptied | field=.a"),
+      ]);
+      expect(jsonLines(`{"a": ${empty}}`, '{"a": "x"}'), empty).toEqual([
+        expect.stringContaining("json_filled | field=.a"),
+      ]);
+    }
+    // None and 0 are values: replacing one is a change, never a fill.
+    expect(jsonLines('{"a": "None"}', '{"a": "x"}')).toEqual([
+      expect.stringContaining("json_value_changed"),
+    ]);
+    expect(jsonLines('{"a": 0}', '{"a": "x"}')).toEqual([
+      expect.stringContaining("json_type_changed"),
+    ]);
+    expect(jsonLines('{"a": "x"}', '{"a": "None"}')).toEqual([
+      expect.stringContaining("json_value_changed"),
+    ]);
+  });
+
+  test("a missing value replaced by another missing value is still a change, never a quiet pass", () => {
+    expect(jsonLines('{"a": ""}', '{"a": "n/a"}')).toEqual([
+      expect.stringContaining("json_value_changed | field=.a"),
+    ]);
+    expect(jsonLines('{"a": null}', '{"a": ""}')).toEqual([
+      expect.stringContaining("json_type_changed | field=.a"),
+    ]);
+    expect(jsonLines('{"a": []}', '{"a": {}}')).toEqual([
+      expect.stringContaining("json_type_changed | field=.a"),
+    ]);
+  });
+
+  test("a list of scalars is one value: losing an element is a changed value shown whole", () => {
+    expect(jsonLines('{"a": [1, 2, 3]}', '{"a": [1, 3]}')).toEqual([
+      'json_value_changed | field=.a | before="[1,2,3]" | after="[1,3]"',
+    ]);
+    expect(jsonLines('{"a": ["x"]}', '{"a": ["x", "y"]}')).toEqual([
+      expect.stringContaining('json_value_changed | field=.a | before="[\\"x\\"]"'),
+    ]);
+  });
+
+  test("a list of objects is diffed per index", () => {
+    expect(jsonLines('{"a": [{"k": 1}, {"k": 2}]}', '{"a": [{"k": 1}, {"k": 3}]}')).toEqual([
+      'json_value_changed | field=.a[1].k | before="2" | after="3"',
+    ]);
+    // A removed element of a list of objects is a removed key under that list.
+    expect(jsonLines('{"a": [{"k": 1}, {"k": 2}]}', '{"a": [{"k": 1}]}')).toEqual([
+      'json_key_removed | field=.a[1] | before="2" | detail="k"',
+    ]);
+  });
+
+  test("a key that needs brackets keeps its path through a change", () => {
+    expect(jsonLines('{"a.b": 1}', '{"a.b": 2}')).toEqual([
+      'json_value_changed | field=["a.b"] | before="1" | after="2"',
+    ]);
+  });
+
+  test("a scalar document changes at the root", () => {
+    expect(jsonLines("1", "2")).toEqual([
+      'json_value_changed | field= | before="1" | after="2"'.replace("field= ", "field= "),
+    ]);
+  });
+});
+
+describe("diffJson: added and removed keys", () => {
+  test("an added key is additive and names its parent, its name and its value", () => {
+    expect(jsonLines('{"a": 1}', '{"a": 1, "b": {"c": 2}}')).toEqual([
+      'json_key_added | field=.b | after="2" | detail="c"',
+    ]);
+  });
+
+  test("a removed key with a value is a removed key, shown as parent, name and value", () => {
+    expect(jsonLines('{"a": 1, "b": {"c": 2, "d": "x"}}', '{"a": 1}')).toEqual([
+      'json_key_removed | field=.b | before="2" | detail="c"',
+      'json_key_removed | field=.b | before="\\"x\\"" | detail="d"',
+    ]);
+  });
+
+  test("214 keys removed from one object share a parent, so they are one class's worth of atoms", () => {
+    const keys = Array.from({ length: 214 }, (_, i) => [`HED${i}`, `tag ${i}`]);
+    const before = JSON.stringify({ trial_type: Object.fromEntries(keys) });
+    const diff = diffJsonText("task-x_events.json", before, JSON.stringify({ trial_type: {} }));
+    // The object itself is still there, now empty.
+    expect(diff.atoms.filter((a) => a.kind === "json_key_removed")).toHaveLength(214);
+    expect(
+      new Set(diff.atoms.filter((a) => a.kind === "json_key_removed").map((a) => a.field)),
+    ).toEqual(new Set([".trial_type"]));
+    expect(diff.counts).toMatchObject({ removed: 214, added: 1 });
+  });
+
+  test("a removed key whose value held nothing is a modification, not a loss", () => {
+    for (const empty of ["null", '""', '"n/a"', "[]", "{}", '["n/a", null]']) {
+      expect(jsonLines(`{"a": 1, "b": ${empty}}`, '{"a": 1}'), empty).toEqual([
+        expect.stringContaining("json_empty_key_removed | field= | before="),
+      ]);
+    }
+    // Zero, false and None are values.
+    for (const value of ["0", "false", '"None"', '"unknown"', '{"x": 0}']) {
+      expect(jsonLines(`{"a": 1, "b": ${value}}`, '{"a": 1}')[0], value).toContain(
+        "json_key_removed",
+      );
+    }
+  });
+
+  test("a key replaced by a differently named key with another value is a removal and an addition", () => {
+    expect(jsonLines('{"a": 1}', '{"b": 2}')).toEqual([
+      'json_key_removed | field= | before="1" | detail="a"',
+      'json_key_added | field= | after="2" | detail="b"',
+    ]);
+  });
+
+  test("an object replaced by a scalar loses its children and gains a leaf", () => {
+    expect(jsonLines('{"a": {"b": 1}}', '{"a": "x"}')).toEqual([
+      'json_key_removed | field=.a | before="1" | detail="b"',
+      'json_key_added | field= | after="\\"x\\"" | detail="a"',
+    ]);
+  });
+
+  test("an empty object that grew children: the empty leaf is gone (it held nothing) and the children are new", () => {
+    expect(jsonLines('{"a": {}}', '{"a": {"b": 1}}')).toEqual([
+      'json_empty_key_removed | field= | before="{}" | detail="a"',
+      'json_key_added | field=.a | after="1" | detail="b"',
+    ]);
+  });
+
+  test("a key named __proto__ is an ordinary key", () => {
+    expect(jsonLines('{"__proto__": 1, "a": 1}', '{"a": 1}')).toEqual([
+      'json_key_removed | field= | before="1" | detail="__proto__"',
+    ]);
+  });
+});
+
+describe("diffJson: renamed keys", () => {
+  test("a key respelled by case or punctuation, with the same value under the same parent, is a rename", () => {
+    expect(jsonLines('{"MiscChannelCount": 3}', '{"MISCChannelCount": 3}')).toEqual([
+      'json_key_renamed | field= | before="3" | after="3" | detail="MiscChannelCount -> MISCChannelCount"',
+    ]);
+    expect(jsonLines('{"Sampling_Frequency": 250}', '{"SamplingFrequency": 250}')).toEqual([
+      expect.stringContaining('detail="Sampling_Frequency -> SamplingFrequency"'),
+    ]);
+    expect(jsonLines('{"a": {"x y": "v"}}', '{"a": {"X-Y": "v"}}')).toEqual([
+      'json_key_renamed | field=.a | before="\\"v\\"" | after="\\"v\\"" | detail="x y -> X-Y"',
+    ]);
+  });
+
+  test("a key renamed by a relabel rule is a rename", () => {
+    expect(jsonLines('{"Fz": 1}', '{"EEG_Fz": 1}')).toEqual([
+      expect.stringContaining('detail="Fz -> EEG_Fz"'),
+    ]);
+    expect(jsonLines('{"EEG_Fz": 1}', '{"Fz": 1}')).toEqual([
+      expect.stringContaining('detail="EEG_Fz -> Fz"'),
+    ]);
+  });
+
+  test("a rename needs the same value, and the same parent", () => {
+    expect(jsonLines('{"MiscChannelCount": 3}', '{"MISCChannelCount": 4}')).toEqual([
+      'json_key_removed | field= | before="3" | detail="MiscChannelCount"',
+      'json_key_added | field= | after="4" | detail="MISCChannelCount"',
+    ]);
+    // Different parents: the key left .a and a key appeared in .b, so nothing is a rename.
+    expect(jsonLines('{"a": {"Key": 3}, "b": {}}', '{"a": {}, "b": {"KEY": 3}}')).toEqual([
+      'json_key_removed | field=.a | before="3" | detail="Key"',
+      'json_empty_key_removed | field= | before="{}" | detail="b"',
+      'json_key_added | field= | after="{}" | detail="a"',
+      'json_key_added | field=.b | after="3" | detail="KEY"',
+    ]);
+  });
+
+  test("two names that are not one name respelled are not a rename", () => {
+    expect(jsonLines('{"Fz": 1}', '{"Pz": 1}')).toEqual([
+      expect.stringContaining("json_key_removed"),
+      expect.stringContaining("json_key_added"),
+    ]);
+    expect(jsonLines('{"count": 3}', '{"counts": 3}')).toEqual([
+      expect.stringContaining("json_key_removed"),
+      expect.stringContaining("json_key_added"),
+    ]);
+  });
+
+  test("an added key is used by at most one rename, taken in before order", () => {
+    // Both old names fold to the new one. The first in before order takes it; the second is removed.
+    expect(jsonLines('{"a_b": 1, "A-B": 1}', '{"AB": 1}')).toEqual([
+      'json_key_renamed | field= | before="1" | after="1" | detail="a_b -> AB"',
+      'json_key_removed | field= | before="1" | detail="A-B"',
+    ]);
+  });
+
+  test("among several added candidates the first in after order is taken, whichever way it matches", () => {
+    expect(jsonLines('{"x": 1}', '{"X": 1, "x_": 1}')).toEqual([
+      expect.stringContaining('detail="x -> X"'),
+      expect.stringContaining('json_key_added | field= | after="1" | detail="x_"'),
+    ]);
+    // A rule match that comes first in after order wins over a case match that comes later.
+    expect(jsonLines('{"Fz": 1}', '{"EEG_Fz": 1, "FZ": 1}')).toEqual([
+      expect.stringContaining('detail="Fz -> EEG_Fz"'),
+      expect.stringContaining('json_key_added | field= | after="1" | detail="FZ"'),
+    ]);
+  });
+
+  test("an added leaf that two removed keys both match by a rule is used by the first only", () => {
+    // A_Fz_B is Fz wrapped, and also Fz_B wrapped; once Fz has taken it, Fz_B must go on to Q_Fz_B,
+    // past the unrelated Zz before it and the used leaf in the middle.
+    expect(jsonLines('{"Fz": 1, "Fz_B": 1}', '{"Zz": 1, "A_Fz_B": 1, "Q_Fz_B": 1}')).toEqual([
+      expect.stringContaining('detail="Fz -> A_Fz_B"'),
+      expect.stringContaining('detail="Fz_B -> Q_Fz_B"'),
+      'json_key_added | field= | after="1" | detail="Zz"',
+    ]);
+  });
+
+  test("a leaf in a list of objects can be renamed under its element", () => {
+    expect(jsonLines('{"a": [{"Key": 1}]}', '{"a": [{"key": 1}]}')).toEqual([
+      expect.stringContaining('field=.a[0] | before="1" | after="1" | detail="Key -> key"'),
+    ]);
+  });
+
+  test("an element of a list is not a key and is never renamed", () => {
+    // The two elements swapped places. Nothing is a rename, so the old places are removed keys and the
+    // new places added ones: more change shown, never less.
+    expect(jsonLines('{"a": [1, {"k": 1}]}', '{"a": [{"k": 1}, 1]}')).toEqual([
+      'json_key_removed | field=.a | before="1" | detail="[0]"',
+      'json_key_removed | field=.a[1] | before="1" | detail="k"',
+      'json_key_added | field=.a[0] | after="1" | detail="k"',
+      'json_key_added | field=.a | after="1" | detail="[1]"',
+    ]);
+  });
+
+  test("thousands of keys with one value rename in linear time, and unmatched ones stay unpaired", () => {
+    const n = 4000;
+    const before = JSON.stringify(
+      Object.fromEntries(Array.from({ length: n }, (_, i) => [`key${i}`, "n/a"])),
+    );
+    const after = JSON.stringify(
+      Object.fromEntries(Array.from({ length: n }, (_, i) => [`KEY${i}`, "n/a"])),
+    );
+    const started = performance.now();
+    const diff = diffJsonText("a.json", before, after);
+    expect(diff.counts).toMatchObject({ renamed: n, removed: 0, added: 0 });
+    const hostile = JSON.stringify(
+      Object.fromEntries(Array.from({ length: n }, (_, i) => [`zz${i}`, "n/a"])),
+    );
+    const unmatched = diffJsonText("a.json", before, hostile);
+    expect(unmatched.counts.renamed).toBe(0);
+    expect(performance.now() - started).toBeLessThan(5000);
+  });
+});
+
+describe("sidecarApplies: BIDS inheritance, as far as the change model reads it", () => {
+  const file = "sub-01/ses-02/eeg/sub-01_ses-02_task-rest_run-1_eeg.json";
+
+  test("a sidecar in the file's directory or an ancestor, with the same suffix and extension and only entities the file has", () => {
+    for (const sidecar of [
+      "sub-01/ses-02/eeg/sub-01_ses-02_task-rest_eeg.json",
+      "sub-01/ses-02/eeg/sub-01_task-rest_eeg.json",
+      "sub-01/ses-02/eeg/task-rest_eeg.json",
+      "sub-01/task-rest_eeg.json",
+      "task-rest_eeg.json",
+      "eeg.json",
+      "sub-01/ses-02/eeg/eeg.json",
+      "sub-01/ses-02/eeg/run-1_eeg.json",
+      "ses-02_eeg.json",
+    ]) {
+      expect(sidecarApplies(sidecar, file), sidecar).toBe(true);
+    }
+  });
+
+  test("not another suffix, an entity the file does not have, another value, a sibling or deeper directory, or another extension", () => {
+    for (const sidecar of [
+      "task-rest_events.json", // another suffix
+      "task-rest_channels.json",
+      "task-sleep_eeg.json", // another value of an entity the file has
+      "acq-hi_eeg.json", // an entity the file does not have
+      "sub-01_task-rest_run-2_eeg.json",
+      "sub-01_task-rest_acq-a_eeg.json",
+      "sub-02/task-rest_eeg.json", // a sibling directory
+      "sub-01/eeg/task-rest_eeg.json", // a sibling of the session directory
+      "sub-01/ses-03/task-rest_eeg.json",
+      "sub-01/ses-02/eeg/deeper/task-rest_eeg.json", // deeper than the file
+      "sub-01/ses-02/eeg/task-rest_eeg.tsv", // another extension
+      "sourcedata/task-rest_eeg.json",
+      "sub-01/ses-02/eeg/sub-01_ses-02_task-rest_run-1_eeg.json", // the file itself
+      "sub-01/ses-02/eeg2/task-rest_eeg.json",
+      "sub-0/task-rest_eeg.json", // a directory that is a prefix of nothing here
+      "sub-01/ses-02/ee/task-rest_eeg.json",
+    ]) {
+      expect(sidecarApplies(sidecar, file), sidecar).toBe(false);
+    }
+  });
+
+  test("a name that is not a BIDS name applies to nothing and receives nothing", () => {
+    expect(sidecarApplies("notes_eeg.json", file)).toBe(false); // a part before the suffix is not key-value
+    expect(sidecarApplies("task-rest_eeg.json", "sub-01_notes_eeg.json")).toBe(false);
+    expect(sidecarApplies("dataset_description.json", "x/dataset_description.json")).toBe(false);
+    expect(sidecarApplies("task-rest.json", "sub-01_task-rest.json")).toBe(false); // no suffix
+    expect(sidecarApplies("noextension", "sub-01_eeg.json")).toBe(false);
+    // A single-part name is a suffix: the root eeg.json applies to every eeg sidecar below it.
+    expect(sidecarApplies("eeg.json", "sub-01/sub-01_eeg.json")).toBe(true);
+    expect(sidecarApplies("participants.json", "participants.json")).toBe(false);
+  });
+});
+
+describe("diffJson: moved keys", () => {
+  const target = "sub-01/eeg/sub-01_task-x_run-1_eeg.json";
+  const before = '{"Manufacturer": "BioSemi", "Keep": 1}';
+  const after = '{"Keep": 1}';
+  const run = (files: PoolFile[], at = target) =>
+    diffJsonText(at, before, after, files).atoms.map((a) => a.kind);
+
+  test("a removed key found with the same path and value in a sidecar that applies is moved, not lost", () => {
+    const moved = pooled("task-x_eeg.json", null, '{"Manufacturer": "BioSemi"}');
+    expect(run([moved])).toEqual(["json_key_moved"]);
+    expect(diffJsonText(target, before, after, [moved]).atoms.map(line)).toEqual([
+      'json_key_moved | field= | before="\\"BioSemi\\"" | detail="Manufacturer"',
+    ]);
+    expect(diffJsonText(target, before, after, [moved]).counts).toMatchObject({
+      moved: 1,
+      removed: 0,
+    });
+  });
+
+  test("the sidecar may be new or modified, as long as it did not already have that leaf", () => {
+    expect(
+      run([pooled("eeg.json", '{"Other": 1}', '{"Other": 1, "Manufacturer": "BioSemi"}')]),
+    ).toEqual(["json_key_moved"]);
+    expect(
+      run([pooled("eeg.json", '{"Manufacturer": "BioSemi"}', '{"Manufacturer": "BioSemi"}')]),
+    ).toEqual(["json_key_removed"]);
+    // It had the key with another value before: the new value is what it has now, so it counts.
+    expect(
+      run([pooled("eeg.json", '{"Manufacturer": "Other"}', '{"Manufacturer": "BioSemi"}')]),
+    ).toEqual(["json_key_moved"]);
+  });
+
+  test("not when the value differs, the path differs, or the file is the file itself", () => {
+    expect(run([pooled("task-x_eeg.json", null, '{"Manufacturer": "Biosemi"}')])).toEqual([
+      "json_key_removed",
+    ]);
+    expect(run([pooled("task-x_eeg.json", null, '{"manufacturer": "BioSemi"}')])).toEqual([
+      "json_key_removed",
+    ]);
+    expect(
+      run([pooled("task-x_eeg.json", null, '{"Hardware": {"Manufacturer": "BioSemi"}}')]),
+    ).toEqual(["json_key_removed"]);
+    expect(run([pooled(target, null, '{"Manufacturer": "BioSemi"}')])).toEqual([
+      "json_key_removed",
+    ]);
+  });
+
+  test("not into a different suffix, an entity the file does not have, or a sibling directory", () => {
+    const content = '{"Manufacturer": "BioSemi"}';
+    expect(run([pooled("task-x_events.json", null, content)])).toEqual(["json_key_removed"]);
+    expect(run([pooled("task-x_acq-hi_eeg.json", null, content)])).toEqual(["json_key_removed"]);
+    expect(run([pooled("task-y_eeg.json", null, content)])).toEqual(["json_key_removed"]);
+    expect(run([pooled("sub-02/task-x_eeg.json", null, content)])).toEqual(["json_key_removed"]);
+    expect(run([pooled("sub-01/eeg/deeper/task-x_eeg.json", null, content)])).toEqual([
+      "json_key_removed",
+    ]);
+    expect(run([pooled("sub-01/eeg/sub-01_task-x_run-2_eeg.json", null, content)])).toEqual([
+      "json_key_removed",
+    ]);
+  });
+
+  test("a sidecar that does not parse is skipped, so its keys are not found", () => {
+    expect(
+      run([pooled("task-x_eeg.json", null, '{"Manufacturer": "BioSemi", "Manufacturer": "x"}')]),
+    ).toEqual(["json_key_removed"]);
+  });
+
+  test("moves consume nothing: one sidecar can account for many files", () => {
+    const files = [pooled("task-x_eeg.json", null, '{"Manufacturer": "BioSemi"}')];
+    const pool = buildPools(files).json;
+    for (const at of [
+      target,
+      "sub-02/eeg/sub-02_task-x_eeg.json",
+      "sub-03/eeg/sub-03_task-x_eeg.json",
+    ]) {
+      const result = diffJson(at, json(before), json(after), pool);
+      expect(result.ok && result.value.atoms.map((a) => a.kind), at).toEqual(["json_key_moved"]);
+    }
+  });
+
+  test("a rename wins over a move: the key is still in this file", () => {
+    const diff = diffJsonText(
+      target,
+      '{"Manufacturer": "BioSemi"}',
+      '{"MANUFACTURER": "BioSemi"}',
+      [pooled("task-x_eeg.json", null, '{"Manufacturer": "BioSemi"}')],
+    );
+    expect(diff.atoms.map((a) => a.kind)).toEqual(["json_key_renamed"]);
+  });
+});
+
+describe("diffJson: order", () => {
+  test("keys that only changed order are a reorder and nothing else", () => {
+    expect(jsonLines('{"a": 1, "b": 2}', '{"b": 2, "a": 1}')).toEqual(["json_keys_reordered"]);
+    expect(jsonLines('{"x": {"a": 1, "b": 2}, "y": 1}', '{"x": {"b": 2, "a": 1}, "y": 1}')).toEqual(
+      ["json_keys_reordered"],
+    );
+    expect(jsonLines('{"x": 1, "y": 2}', '{"y": 2, "x": 1}')).toEqual(["json_keys_reordered"]);
+  });
+
+  test("adding or removing a key does not make the others a reorder; a rename keeps its place", () => {
+    expect(jsonLines('{"a": 1, "b": 2, "c": 3}', '{"a": 1, "c": 3, "d": 4}')).toEqual([
+      expect.stringContaining("json_key_removed"),
+      expect.stringContaining("json_key_added"),
+    ]);
+    expect(jsonLines('{"a": 1, "Bb": 2, "c": 3}', '{"a": 1, "BB": 2, "c": 3}')).toEqual([
+      expect.stringContaining("json_key_renamed"),
+    ]);
+    expect(jsonLines('{"a": 1, "Bb": 2, "c": 3}', '{"c": 3, "BB": 2, "a": 1}')).toEqual([
+      expect.stringContaining("json_key_renamed"),
+      "json_keys_reordered",
+    ]);
+  });
+
+  test("a reorder is reported next to the changes that came with it", () => {
+    expect(jsonLines('{"a": 1, "b": 2}', '{"b": 3, "a": 1}')).toEqual([
+      expect.stringContaining("json_value_changed | field=.b"),
+      "json_keys_reordered",
+    ]);
+  });
+});
+
+describe("diffJson: the totality assertion", () => {
+  const empty = buildPools([]).json;
+  const before = json('{"a": 1, "b": 2, "c": {"d": 3}}');
+  const after = json('{"a": 1, "b": 5, "e": 4}');
+
+  test("a count check that fails turns the file into internal_mismatch", () => {
+    expect(diffJsonWith("a.json", before, after, empty, () => false)).toEqual({
+      ok: false,
+      refusal: "internal_mismatch",
+    });
+    expect(diffJsonWith("a.json", before, after, empty, () => true).ok).toBe(true);
+  });
+
+  test("the entry point runs the real check: diffJson is diffJsonWith over verifyJsonCounts", () => {
+    expect(String(diffJson)).toContain("verifyJsonCounts");
+    expect(String(diffJson)).not.toContain("=> true");
+  });
+
+  test("the check is given the tallies of what was emitted", () => {
+    let seen: JsonCounts | null = null;
+    diffJsonWith("a.json", before, after, empty, (counts) => {
+      seen = counts;
+      return true;
+    });
+    expect(seen).toEqual({
+      beforeLeaves: 3,
+      afterLeaves: 3,
+      unchanged: 1,
+      changed: 1,
+      emptied: 0,
+      filled: 0,
+      renamed: 0,
+      afterRenamed: 0,
+      moved: 0,
+      removed: 1,
+      emptyRemoved: 0,
+      added: 1,
+      afterUnchanged: 1,
+      afterChanged: 1,
+      afterEmptied: 0,
+      afterFilled: 0,
+      conflicts: 0,
+    });
+  });
+
+  test("the real check accepts a total count and rejects each way a count can fail to add up", () => {
+    const good: JsonCounts = {
+      beforeLeaves: 12,
+      afterLeaves: 9,
+      unchanged: 3,
+      changed: 2,
+      emptied: 1,
+      filled: 1,
+      renamed: 1,
+      afterRenamed: 1,
+      moved: 1,
+      removed: 2,
+      emptyRemoved: 1,
+      added: 1,
+      afterUnchanged: 3,
+      afterChanged: 2,
+      afterEmptied: 1,
+      afterFilled: 1,
+      conflicts: 0,
+    };
+    expect(verifyJsonCounts(good)).toBe(true);
+    const broken: Partial<JsonCounts>[] = [
+      { beforeLeaves: 13 },
+      { beforeLeaves: 11 },
+      { afterLeaves: 10 },
+      { afterLeaves: 8 },
+      { removed: 3 },
+      { moved: 0 },
+      { emptyRemoved: 0 },
+      { added: 2 },
+      { afterRenamed: 2 },
+      { afterChanged: 1 },
+      { afterUnchanged: 4 },
+      { afterEmptied: 0 },
+      { afterFilled: 2 },
+      { conflicts: 1 },
+    ];
+    for (const change of broken) {
+      expect(verifyJsonCounts({ ...good, ...change }), JSON.stringify(change)).toBe(false);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// Generated JSON: the diff is total, and every leaf is accounted for
+// ---------------------------------------------------------------------------------------------
+
+type Plain = null | boolean | number | string | Plain[] | { [key: string]: Plain };
+
+const JSON_KEYS = [
+  "Name",
+  "name",
+  "MiscChannelCount",
+  "MISCChannelCount",
+  "Sampling_Frequency",
+  "SamplingFrequency",
+  "a",
+  "b",
+  "c",
+  "EEGReference",
+  "EEG_Reference",
+  "x y",
+  "a.b",
+  "0",
+  "K1",
+  "K2",
+  "__proto__",
+];
+const JSON_STRINGS = ["", "n/a", "x", "good", "None", "A1", "1", "BioSemi", " "];
+
+function randomPlain(random: () => number, depth: number): Plain {
+  const { pick, chance, int } = toolkit(random);
+  const scalar = (): Plain => {
+    switch (int(0, 5)) {
+      case 0:
+        return null;
+      case 1:
+        return chance(0.5);
+      case 2:
+        return int(0, 3);
+      default:
+        return pick(JSON_STRINGS);
+    }
+  };
+  if (depth >= 3 || chance(0.4)) return scalar();
+  if (chance(0.25)) {
+    // A list: of scalars, or of objects.
+    const length = int(0, 3);
+    if (chance(0.5)) return Array.from({ length }, scalar);
+    return Array.from({ length }, () => randomPlain(random, depth + 1));
+  }
+  const object: { [key: string]: Plain } = {};
+  for (let i = int(0, 4); i > 0; i--)
+    Object.defineProperty(object, pick(JSON_KEYS), {
+      value: randomPlain(random, depth + 1),
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
+  return object;
+}
+
+/** Every container of a value, so a mutation can pick one. */
+function containers(value: Plain, out: (Plain[] | { [key: string]: Plain })[] = []) {
+  if (value !== null && typeof value === "object") {
+    out.push(value);
+    for (const child of Array.isArray(value) ? value : Object.values(value)) containers(child, out);
+  }
+  return out;
+}
+
+function clone(value: Plain): Plain {
+  return JSON.parse(JSON.stringify(value)) as Plain;
+}
+
+/** JSON text for a plain value; `JSON.stringify` keeps a `__proto__` key defined with defineProperty. */
+const textOf = (value: Plain): string => JSON.stringify(value);
+
+function mutatePlain(random: () => number, root: Plain): Plain {
+  const { pick, chance, int, shuffled } = toolkit(random);
+  let value = clone(root);
+  for (let step = int(0, 5); step > 0; step--) {
+    const nodes = containers(value);
+    if (nodes.length === 0) {
+      value = randomPlain(random, 1);
+      continue;
+    }
+    const node = pick(nodes);
+    if (Array.isArray(node)) {
+      if (node.length > 0 && chance(0.5)) node[int(0, node.length - 1)] = randomPlain(random, 2);
+      else node.push(randomPlain(random, 2));
+      continue;
+    }
+    const keys = Object.keys(node);
+    const target = keys.length > 0 ? pick(keys) : undefined;
+    switch (int(0, 6)) {
+      case 0:
+        if (target !== undefined) delete node[target];
+        break;
+      case 1:
+        Object.defineProperty(node, pick(JSON_KEYS), {
+          value: randomPlain(random, 2),
+          enumerable: true,
+          writable: true,
+          configurable: true,
+        });
+        break;
+      case 2:
+        if (target !== undefined) node[target] = randomPlain(random, 2);
+        break;
+      case 3: {
+        // Rename a key in place, to a respelling or to another name.
+        if (target === undefined) break;
+        const renamed = pick([
+          target.toUpperCase(),
+          `${target}_`,
+          `EEG_${target}`,
+          target.replace(/_/g, ""),
+          pick(JSON_KEYS),
+        ]);
+        if (renamed === target || renamed in node) break;
+        const entries = Object.entries(node).map(
+          ([k, v]) => [k === target ? renamed : k, v] as const,
+        );
+        for (const k of keys) delete node[k];
+        for (const [k, v] of entries)
+          Object.defineProperty(node, k, {
+            value: v,
+            enumerable: true,
+            writable: true,
+            configurable: true,
+          });
+        break;
+      }
+      case 4: {
+        const entries = shuffled(Object.entries(node));
+        for (const k of keys) delete node[k];
+        for (const [k, v] of entries)
+          Object.defineProperty(node, k, {
+            value: v,
+            enumerable: true,
+            writable: true,
+            configurable: true,
+          });
+        break;
+      }
+      case 5:
+        if (target !== undefined) node[target] = pick([null, "", "n/a", [], {}]);
+        break;
+      default:
+        if (target !== undefined) node[target] = pick(["filled", 7, true]);
+    }
+  }
+  return value;
+}
+
+describe("diffJson on generated documents", () => {
+  test("1,800 generated pairs: the diff is total, every leaf has exactly one account, and it is deterministic", () => {
+    const random = seeded(8675309);
+    const { pick, chance } = toolkit(random);
+    const seen = new Set<ClassKind>();
+    let checked = 0;
+    for (let n = 0; n < 1800; n++) {
+      const root: Plain = { ...(randomPlain(random, 0) as object), Keep: 1 };
+      const next = mutatePlain(random, root);
+      const beforeText = textOf(root);
+      const afterText = textOf(next);
+      const b = parseJson(enc(beforeText));
+      const a = parseJson(enc(afterText));
+      if (!b.ok || !a.ok)
+        throw new Error(`generated text is not JSON: ${beforeText} / ${afterText}`);
+
+      // A sidecar that holds some of the removed top-level keys, applying to the file or not.
+      const file = "sub-01/eeg/sub-01_task-x_eeg.json";
+      const files: PoolFile[] = [];
+      if (chance(0.5) && root !== null && typeof root === "object" && !Array.isArray(root)) {
+        const kept: { [key: string]: Plain } = {};
+        for (const [key, value] of Object.entries(root))
+          if (chance(0.5))
+            Object.defineProperty(kept, key, {
+              value,
+              enumerable: true,
+              writable: true,
+              configurable: true,
+            });
+        const where = pick([
+          "task-x_eeg.json",
+          "eeg.json",
+          "sub-01/task-x_eeg.json",
+          "task-y_eeg.json",
+          "task-x_events.json",
+          "sub-02/task-x_eeg.json",
+        ]);
+        files.push(pooled(where, null, textOf(kept)));
+      }
+      const pool = buildPools(files).json;
+      const result = diffJson(file, b.value.value, a.value.value, pool);
+      if (!result.ok)
+        throw new Error(`case ${n} refused: ${result.refusal}\n${beforeText}\n${afterText}`);
+      checked++;
+      const { atoms, counts } = result.value;
+      for (const atom of atoms) seen.add(atom.kind);
+
+      expect(verifyJsonCounts(counts), `case ${n}`).toBe(true);
+      const beforeLeaves = flattenJson(b.value.value);
+      const afterLeaves = flattenJson(a.value.value);
+      expect(counts.beforeLeaves).toBe(beforeLeaves.length);
+      expect(counts.afterLeaves).toBe(afterLeaves.length);
+
+      // Every before leaf that is not identical in the after document has exactly one account.
+      const afterPairs = new Set(afterLeaves.map((leaf) => leafKey(leaf.path, leaf.value)));
+      const beforePaths = new Set(beforeLeaves.map((leaf) => leaf.path));
+      const lost = beforeLeaves.filter(
+        (leaf) => !afterPairs.has(leafKey(leaf.path, leaf.value)),
+      ).length;
+      const accounts: ClassKind[] = [
+        "json_value_changed",
+        "json_type_changed",
+        "json_emptied",
+        "json_filled",
+        "json_key_renamed",
+        "json_key_moved",
+        "json_key_removed",
+        "json_empty_key_removed",
+      ];
+      expect(
+        atoms.filter((x) => accounts.includes(x.kind)).length,
+        `case ${n}\n${beforeText}\n${afterText}`,
+      ).toBe(lost);
+      // Every after leaf at a new path is an addition or the new name of a rename.
+      const fresh = afterLeaves.filter((leaf) => !beforePaths.has(leaf.path)).length;
+      expect(
+        atoms.filter((x) => x.kind === "json_key_added" || x.kind === "json_key_renamed").length,
+        `case ${n}`,
+      ).toBe(fresh);
+      // The tallies are the atoms.
+      const tally = (kind: ClassKind): number => atoms.filter((x) => x.kind === kind).length;
+      expect(tally("json_key_removed"), `case ${n}`).toBe(counts.removed);
+      expect(tally("json_key_moved"), `case ${n}`).toBe(counts.moved);
+      expect(tally("json_empty_key_removed"), `case ${n}`).toBe(counts.emptyRemoved);
+      expect(tally("json_key_added"), `case ${n}`).toBe(counts.added);
+      expect(tally("json_key_renamed"), `case ${n}`).toBe(counts.renamed);
+
+      // The same leaves give no atom but possibly a reorder.
+      if (lost === 0 && fresh === 0)
+        expect(
+          atoms.every((x) => x.kind === "json_keys_reordered"),
+          `case ${n}`,
+        ).toBe(true);
+
+      const again = diffJson(file, b.value.value, a.value.value, buildPools(files).json);
+      expect(again.ok && again.value.atoms, `case ${n}`).toEqual(atoms);
+    }
+    expect(checked).toBe(1800);
+    for (const kind of [
+      "json_value_changed",
+      "json_type_changed",
+      "json_emptied",
+      "json_filled",
+      "json_key_renamed",
+      "json_key_moved",
+      "json_key_removed",
+      "json_empty_key_removed",
+      "json_key_added",
+      "json_keys_reordered",
+    ] as ClassKind[]) {
+      expect(seen.has(kind), kind).toBe(true);
+    }
+  });
+
+  test("a document diffed against itself, however it is laid out, has no atoms", () => {
+    const random = seeded(5);
+    for (let n = 0; n < 300; n++) {
+      const value = randomPlain(random, 0);
+      const compact = parseJson(enc(JSON.stringify(value)));
+      const spread = parseJson(enc(JSON.stringify(value, null, n % 3 === 0 ? 2 : "\t")));
+      if (!compact.ok || !spread.ok) throw new Error("generated text is not JSON");
+      const result = diffJson(
+        "a.json",
+        compact.value.value,
+        spread.value.value,
+        buildPools([]).json,
+      );
+      expect(result.ok && result.value.atoms, `case ${n}`).toEqual([]);
+    }
   });
 });
