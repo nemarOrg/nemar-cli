@@ -140,6 +140,11 @@ Any other `.json` entry (a type change, a symlink or a submodule at the head) is
 A `.tsv` with a side that could not be read is left out, so nothing can be found kept in it.
 A before side that could not be read is never passed as missing, which would say the file was added.)
 
+(Phase 4 review fix.
+The pool is no longer every added or modified `.tsv` and `.json`: it is pruned to the files a candidate can consult, by one predicate, `poolFileMatters(candidatePaths)` in the pure module (section 4.6).
+A table is read only when it is `sourcedata/<D>/<a candidate's path>`, and a JSON document only when it applies to some candidate under BIDS inheritance (`sidecarApplies`); since no candidate is under `sourcedata/` or `derivatives/`, nothing there is read but a candidate's sourcedata copy.
+`changeSummary` skips the blobs of every other file before `readBlobs`, and `summarizeChanges` prunes with the same predicate, so a caller that passes more is protected too.)
+
 **Not summarized, and why.**
 
 - Added files: they cannot remove anything, and today an unread added file does not set `readIncomplete`; that stays.
@@ -415,6 +420,7 @@ The caller (phase 3) still diffs the candidate files in sorted path order, so no
 (Phase 3: `summarizeChanges` sorts the candidates by path in code-unit order and diffs them in that order.
 A path given twice is refused as `internal_mismatch` every time it appears, so the one order-dependent consumption cannot happen.
 The pool itself is passed to `buildPools` unsorted, which gives the same pools in any order; a mutation run showed a sort there was dead code.
+Phase 4 review fix: `buildPools` now reads the files in path order itself, to decide which fit `maxPoolChars`, and that sort is not dead: dropping it turns the order tests red.
 Phase 3 review: a pool path listed more than once contributes nothing at all, so no row or leaf of either entry is ever a copy and the removals they would explain stay removals; keeping the first entry made the pool depend on the order of the list. A JSON path listed twice is named unreadable rather than left out, so it still stops a move past it as a nearer sidecar would: left out, a key removed from a file and set by that nearer sidecar would read as moved to a farther one.)
 
 **JSON moves.**
@@ -435,6 +441,21 @@ A nearer sidecar that the pull request CHANGED is handled above.
 An UNCHANGED sidecar between `T` and `F` (nearer to `F` than `T`) that has the top-level key also overrides the moved value, and the pure module, which reads only the files the pull request changed, cannot see it.
 The move is then shown as `json_key_moved` though the value no longer reaches `F`.
 The model prompt (section 8.4) tells the model that a moved key reaches the file only if no nearer sidecar that the pull request did not change has the same top-level key, so the model weighs that limit instead of the platform deciding it.
+
+**Bounds of the pools (Phase 4 review fix).**
+`maxTotalBytes` bounds the bytes read, not what the pools hold: a JSON leaf repeats its whole path, so a long top-level key over many tiny children made 1.75 MB of added JSON hold about 570 MiB of strings, and eight such files under `derivatives/` took a content pass to 5 GB of memory.
+Two changes close it.
+
+1. **Pruning.** A diff consults the pools for one candidate at a time, and only in two ways: a table diff reads the rows of the tables at `sourcedata/<D>/<its path>` (`sourcedataFor`); a JSON diff asks which file that applies to the candidate under `sidecarApplies` and has the leaf's top-level key, or is unreadable, is the nearest, and whether that file is a home of the leaf (`homes.includes(decider)`).
+   No other table and no JSON file that applies to no candidate is ever a copy, a decider, a blocker or a home, so `poolFileMatters(candidatePaths)` keeps exactly the tables that are a candidate's sourcedata copy and the JSON files that `sidecarApplies` to some candidate, and leaving the rest out changes no decision.
+   `.JSON` and other extensions were never pooled.
+   A test summarizes 400 generated pull requests (JSON and table candidates at the root, in subject and session directories, under `derivatives/` and `sourcedata/`; sidecars at every level holding the lost leaves, unreadable ones, ones listed twice, unchanged ones; copies at the corresponding path and at paths that are not one) with the pruned pool and with every pool file, and requires the whole `ChangeSummary` (outcomes, classes, facts, accounted, loss, text) to be identical; it is, in all 400, and dropping any one kind of consulted file (root sidecars, intermediate ones, tables, blockers) changes between 41 and 88 of them, so the comparison can see each.
+   The predicate indexes the candidates by extension, suffix and each ancestor directory, then by entity, so a pool path costs a lookup and a scan of the candidates holding its rarest entity.
+2. **`maxPoolChars`** (32 Mi UTF-16 code units, section 5.2) bounds what the pools hold, over the whole pool: a table's header and each distinct new row (cells joined with tabs); a JSON document's top-level keys and, per new leaf, its path, its value and its `byLeaf` key.
+   A file whose pieces would take the total past it is left out as one that cannot be read, and the next file is tried: a table is skipped (none of its rows is a copy, so a removal it would have explained stays a removal) and a JSON document is `unreadable` (never a home, and it stops every move past it), the same fail-closed words as a file that does not parse.
+   A file is counted while it is read and dropped as soon as it passes what is left; an added document's walk itself stops there, so a document whose leaves pass the room before its walk reaches a path over `maxNameChars` is `unreadable` rather than kept for its top-level keys, the stricter of the two.
+   Which files fit is decided in code-unit path order whatever the order of `files`; what fits is then added in the order given, which only orders the lists, so the pools still do not depend on the order of `files` (a shuffle test).
+   `summarizeChanges` checks its deadline before each pool file it reads and returns the abandoned summary when it passes there, as at every other check.
 
 ### 4.7 JSON renames
 
@@ -466,6 +487,7 @@ export const SUMMARY_LIMITS = {
   maxRuns: 24,
   maxPairingSteps: 12_000_000, // per file: the pairing passes' work, in steps of about one lookup (section 4.4)
   maxTotalBytes: 256 * 1024 * 1024, // all blobs the summary reads in one run
+  maxPoolChars: 32 * 1024 * 1024, // phase 4 review fix: what the relocation pools hold, in code units (section 4.6)
   maxSummaryChars: 30_000, // the fenced block
   maxClasses: 120, // classes rendered
   maxTrackedClasses: 5_000, // phase 3 review: classes a run may hold; a file that would pass it is refused too_large
@@ -498,7 +520,8 @@ Phase 3 review: every path is rendered by `renderValue` too, an example's file p
   (Phase 3: rendering stops at the FIRST class that does not fit `maxClasses` or `maxSummaryChars`, so the shown classes are always a prefix of the order of section 5.1 and a later, smaller class is never shown in place of an earlier one; room for the closing count line is kept from the start, so the block never exceeds `maxSummaryChars`.)
 - A paired class with more than 12 distinct pairs renders 12 and the line `(N more distinct values not shown)` (`(1 more distinct value not shown)` for one), and is incomplete.
 - A file over a per-file cap is refused; a run over `maxTotalBytes` stops reading at the cap and the files not read are refused (`too_large`).
-  (Phase 3: the pure module counts the bytes of both sides of each candidate in sorted path order; the file that would pass the cap and every later one are refused `too_large`, even a small later one. The pool's bytes are bounded by the caller's blob reader, `readBlobs`.)
+  (Phase 3: the pure module counts the bytes of both sides of each candidate in sorted path order; the file that would pass the cap and every later one are refused `too_large`, even a small later one. The pool's bytes are bounded by the caller's blob reader, `readBlobs`.
+  Phase 4 review fix: what the pools hold is bounded by `maxPoolChars`, and only the files a candidate can consult are read at all (section 4.6).)
 - **If the summary pass reaches its deadline, the whole summary is abandoned**: no file is accounted for by it, nothing of it is shown, and `change_summary.abandoned` is true in the facts.
   All-or-nothing is simpler to prove than a partial account, and an abandoned summary leaves today's behavior.
   (Phase 3: the deadline is checked before each file with the caller's clock, and since the phase 3 review also after each file is folded in and once after the last file, before rendering; an abandoned summary has no outcomes, classes or text, and its loss facts are zero.)
@@ -751,7 +774,7 @@ The README and CHANGES diffs are still shown raw, and the remaining patch budget
 
 1. the batched prefetch (unchanged);
 2. `rawEntries` (one `git diff --raw` with object ids, replacing `modesByPath`);
-3. the cosmetic proofs, now on blobs from one `cat-file --batch` instead of two `git show` processes per file;
+3. the cosmetic proofs, now on blobs from one batched read (`cat-file --batch-check` for the sizes, then `cat-file --batch`: two processes in all) instead of two `git show` processes per file;
 4. the summary, under its deadline;
 5. the raw diffs: first every wanted, non-added, non-cosmetic file that the summary did **not** account for, in review order, with `diffSignature` folding exactly as today (`MAX_PATCH_FILES` 40, `MAX_PATCH_TOTAL_CHARS` 80,000, `MAX_DIFFS_EXAMINED` 500, `FOLD_TIME_RESERVE_MS`); then, while room is left, accounted files in review order, at most `MAX_ILLUSTRATION_PATCHES` (3), whose truncation does not matter;
 6. `readIncomplete`, groups, the change log.
@@ -926,6 +949,7 @@ export const EMPTY_SUMMARY: ChangeSummary; // abandoned: false, nothing in it
 ```
 
 Phase 3 also exports the pieces `summarizeChanges` is built from, each tested on its own: `DISPLAY_OF` (how each kind is shown completely), `foldIndices`, `classKeyOf`, `classify`, `renderClasses`, `accountedFiles`, `lossFactsOf` with `NO_LOSS`, `classTable`, `summaryFacts`, `stripJsonSpace`, and `summarizeChangesWith`, which takes the two totality checks so a test can prove that a diff the check rejects is refused (`internal_mismatch`) and accounts for nothing.
+Phase 4 review fix: `poolFileMatters(candidatePaths): (path: string) => boolean` is exported (section 4.6), and `summarizeChangesWith` takes it as a third parameter, `keep`, defaulting to it, so a test can run a summary that keeps every pool file and compare.
 
 ### 10.2 `scripts/ci/pr-review-evidence.ts`
 
@@ -938,7 +962,7 @@ export interface RawEntry {
   oidAfter: string;
   path: string;
 }
-/** `git diff --raw -z --no-renames --abbrev=40`; null when git cannot say. Replaces modesByPath. */
+/** `git diff --raw -z --no-renames --no-abbrev`; null when git cannot say. Replaces modesByPath. */
 function rawEntries(dir: string, mergeBase: string, head: string): RawEntry[] | null;
 
 /**
@@ -1003,6 +1027,7 @@ export function gatherContent(dir: string, listing: Listing, options?: ContentOp
   `ABANDONED_SUMMARY` (pure module) is the one addition to `pr-review-summary.ts`: shared, frozen, abandoned and empty, so the caller says "not started" or "could not read the pool" without faking a deadline.
 - `files_read` is the size of the set of the accounted paths, every patch's own path, and the `same` paths of every patch that was not cut; it is at most `files_changed` because every member is a path of the change list, and it equals the old sum when nothing is accounted for.
 - The test helper `ShimRule` gains `fromCall`, so a test can stall the third `cat-file` and not the first two.
+- Phase 4 review fix: `changeSummary` reads only the pool files `poolFileMatters` keeps, so a file no candidate can consult costs no `cat-file` input and none of the 256 MiB; `ShimRule` gains `stdinLog`, which records what a batch call was asked about, and a real-git test shows no blob of such a file is requested.
 - Measured on the 125-table fixture of the tests (twelve rows each, 189 changed files; medians of five runs on a laptop): the content pass took 2.08 s before this phase (250 `git show` processes for the cosmetic check), 0.79 s with the batched cosmetic check alone, and 0.17 s with the summary, which accounts for the 125 tables and leaves 5 diffs to read instead of 127.
   At 200 rows a table the same three are 2.10 s, 0.81 s and 0.24 s.
   On a blob-less clone of a 20-table fixture, the content pass started 15 git processes: one `--numstat`, one `--raw`, four `cat-file`, two `ls-tree` and two `show` of `CHANGES` for the change log, and five `-U2` diffs (`README.md`, `CHANGES` and three illustrations).
@@ -1090,7 +1115,11 @@ Each case names how the design answers it; the test of section 12 that pins it i
   Every relabel pass of a file spends from one step budget (`maxPairingSteps`, section 4.4), and the keyless and JSON rename passes are linear, so no input makes one file's diff take more than about a second on a laptop; past the budget, what is unpaired is removed and added.
 - **Budget**: the content pass keeps its 120 s (`EVIDENCE_BUDGET_MS.content`); the summary starts only if more than `timeReserveMs` (40 s) remain and abandons itself at that line, which leaves the raw path its own 20 s reserve as today.
   No new budget enters the job's worst case (ADR 0107's 45.4 minutes are unchanged), and `test/pr-review-workflow.test.ts` needs no new term.
-- **Memory**: `maxTotalBytes` (256 MiB) bounds what the summary holds; the largest open pull request read 20.6 MB.
+- **Memory**: `maxTotalBytes` (256 MiB) bounds the bytes the summary reads, and `maxPoolChars` (32 Mi code units) what its pools hold; the largest open pull request read 20.6 MB.
+  (Phase 4 review fix.
+  The first sentence used to say that `maxTotalBytes` bounds what the summary holds; for the pools it did not, since a JSON leaf repeats its path: eight added 1.75 MB documents under `derivatives/` took the content pass to 2.8 s and 5.1 GB of memory, and 24 to 12 GB.
+  Measured after the fix with `/usr/bin/time -l` on a laptop: those eight and 24 documents are pruned unread, 70 ms and 92 ms with a peak of 24 and 25 MiB, about what the reader took before Phase 4 (63 ms and 98 ms, 22 MiB); seven documents of the same kind (a 587 KB list of empty objects under one long key) that do apply to a candidate, 173 ms and 239 MiB (4.1 GB before the fix); 32 tables of 7.6 MB at `sourcedata/<D>/<candidate>`, 2.2 s and 1.4 GB (3.0 GB before).
+  The worst case left is 256 MiB of hostile JSON that applies to candidates (462 documents of 587 KB): 6 to 11 s and a peak of 2.4 to 2.5 GB, and the same 2.4 GB with `maxPoolChars` set to 0, so that peak is the parser's work on 256 MiB of JSON at the read cap, not what the pools hold.)
 
 ### 12.2 Real-git tests (no mocks; the style of `test/pr-review-evidence.test.ts`)
 
