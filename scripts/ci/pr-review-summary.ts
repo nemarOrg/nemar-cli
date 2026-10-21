@@ -1706,6 +1706,21 @@ export function diffTableWith(
         (after.rows[ai] as readonly string[])[column.ai],
     );
 
+  /**
+   * The evidence a STRICT relabel stands on: every other common cell is equal AND at least one of
+   * them says something. Cells that are equal only because they are all missing, or because the
+   * table has no cell but its key (a participants table of ids alone), are equal vacuously, and a
+   * vacuous equality would pair `sub-1` removed with `sub-10` added as one participant renamed and
+   * raise no loss fact for a participant that is gone. Without that evidence the pair is left to the
+   * lenient passes, which accept only a rule that keeps the name's letters and digit values
+   * (a case change, a prefix, a zero padding), and otherwise it is a removed row and an added one.
+   */
+  const strongEvidence = (bi: number, ai: number): boolean =>
+    cellsEqual(bi, ai) &&
+    cells.some(
+      (column) => !isMissingCell((before.rows[bi] as readonly string[])[column.bi] as string),
+    );
+
   if (keyColumn !== null) {
     const afterByKey = new Map(keysAfter.map((key, ai) => [key, ai]));
     for (let bi = 0; bi < nb; bi++) {
@@ -1735,7 +1750,7 @@ export function diffTableWith(
         return { byForm, lengths };
       };
       const accept = (bi: number, ai: number): boolean => {
-        if (strict && !cellsEqual(bi, ai)) return false;
+        if (strict && !strongEvidence(bi, ai)) return false;
         const rule = relabelRule(keysBefore[bi] as string, keysAfter[ai] as string, {
           chars: false,
         });
@@ -1779,7 +1794,7 @@ export function diffTableWith(
       const gone = unpaired(bFate);
       const added = unpaired(aFate);
       const ruleOf = (bi: number, ai: number): RelabelRule | null =>
-        strict && !cellsEqual(bi, ai)
+        strict && !strongEvidence(bi, ai)
           ? null
           : relabelRule(keysBefore[bi] as string, keysAfter[ai] as string, { chars });
       let i = 0;

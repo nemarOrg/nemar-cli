@@ -1303,6 +1303,60 @@ describe("diffTable: the same change gives the same atoms whatever else is in th
   });
 });
 
+describe("diffTable: a strict relabel needs a cell that says something, not just equal cells", () => {
+  // Equal cells that are all missing, or no cell but the key, are equal vacuously. Pairing `sub-1`
+  // removed with `sub-10` added on that ground would call a participant that is gone a renamed one
+  // and raise no loss fact.
+  test("a table of ids alone: sub-1 removed and sub-10 added are a removed row and an added one", () => {
+    const diff = diffText(
+      "participants.tsv",
+      tsv(["participant_id"], ["sub-1"], ["sub-2"]),
+      tsv(["participant_id"], ["sub-2"], ["sub-10"]),
+    );
+    expect(kindsOf(diff)).toEqual(["row_removed", "row_added"]);
+  });
+
+  test("equal cells that are all missing are not evidence either", () => {
+    const diff = diffText(
+      "participants.tsv",
+      tsv(["participant_id", "age"], ["sub-1", "n/a"], ["sub-2", "n/a"]),
+      tsv(["participant_id", "age"], ["sub-2", "n/a"], ["sub-10", "n/a"]),
+    );
+    expect(kindsOf(diff)).toEqual(["row_removed", "row_added"]);
+  });
+
+  test("an equal cell that says something is evidence: the same age under the new name is a relabel", () => {
+    const diff = diffText(
+      "participants.tsv",
+      tsv(["participant_id", "age"], ["sub-1", "30"], ["sub-2", "31"]),
+      tsv(["participant_id", "age"], ["sub-2", "31"], ["sub-10", "30"]),
+    );
+    expect(kindsOf(diff)).toEqual(["key_relabeled", "rows_reordered"]);
+  });
+
+  test("a rule that keeps the name's letters and digit values still pairs without cell evidence", () => {
+    // Zero padding and case change a participant's spelling, not the participant.
+    expect(
+      kindsOf(
+        diffText(
+          "participants.tsv",
+          tsv(["participant_id"], ["sub-1"]),
+          tsv(["participant_id"], ["sub-01"]),
+        ),
+      ),
+    ).toEqual(["key_relabeled"]);
+    expect(
+      kindsOf(
+        diffText(
+          "participants.tsv",
+          tsv(["participant_id"], ["sub-a"]),
+          tsv(["participant_id"], ["SUB-A"]),
+        ),
+      ),
+    ).toEqual(["key_relabeled"]);
+  });
+});
+
 describe("diffTable: the pairing order is strict relabel, then relocation, then lenient relabel", () => {
   const path = "sub-01_channels.tsv";
   const header = ["name", "v"];
