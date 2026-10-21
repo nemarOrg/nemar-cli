@@ -9,18 +9,20 @@
  * 6.2) therefore starts from two promises made here, and every function below is written to keep
  * one of them.
  *
- * 1. **A parse loses no byte.** A table is accepted only when serializing the parse gives the input
- *    back byte for byte ({@link parseTsv}), and a JSON document only when it is plain RFC 8259 with
- *    no key repeated and every number kept as written ({@link parseJson}). Two readers can then not
- *    disagree about what the file says, and a difference the summary does not show is a difference
- *    the files do not have.
+ * 1. **A parse loses nothing a reader could tell apart.** A table is accepted only when
+ *    serializing the parse gives the input back byte for byte ({@link parseTsv}). A JSON document is
+ *    accepted only when it is plain RFC 8259 with no key repeated and every number kept as written
+ *    ({@link parseJson}); its whitespace and the spelling of its escapes are dropped, because they
+ *    carry no value, so two documents with equal trees say the same thing to every conforming
+ *    reader. A difference the summary does not show is then a difference the files do not have.
  * 2. **Anything ambiguous is a refusal, never a guess.** A file the parsers cannot read exactly
  *    stays on the raw-diff path as it is today; a refusal is one of the closed words in
  *    {@link SUMMARY_REFUSALS}, because the word is printed in a public log and an error built from a
  *    path or a message would put a contributor's text there.
  *
- * What the model is shown of a value goes through {@link renderValue}, which escapes everything a
- * reader cannot see or tell apart, so a value cannot forge the platform's own markers.
+ * What the model is shown of a value goes through {@link renderValue}, which escapes the characters
+ * that are invisible or that look like another (see {@link UNSEEN}), so a value cannot forge the
+ * platform's own markers.
  */
 
 /**
@@ -45,9 +47,9 @@ export const SUMMARY_LIMITS = {
 } as const;
 
 /**
- * Why a file was not summarized. A closed list, in the order the parsers can raise them: the first
- * five are about the bytes, the next six about a table's shape, the next four about a JSON
- * document, and the last two about the platform's own reading (`blob_missing` is a git object that
+ * Why a file was not summarized. A closed list, grouped by what it is about: the first five are
+ * about the bytes, the next six about a table's shape, the next four about a JSON document, and the
+ * last two about the platform's own reading (`blob_missing` is a git object that
  * could not be read, `internal_mismatch` is the bucket count of design section 6.2 not adding up).
  */
 export const SUMMARY_REFUSALS = [
@@ -80,6 +82,13 @@ export interface TextFormat {
    * CRLF, `mixed` otherwise, and `none` when no line is terminated.
    */
   eol: "lf" | "crlf" | "mixed" | "none";
+  /**
+   * For a table with `mixed` endings, one character per terminated line, `1` where the line ends in
+   * CRLF and `0` where it ends in LF, so two files that differ only in WHICH lines end in CRLF have
+   * different formats and the difference is not lost. Empty for every other table, and always empty
+   * for a JSON document (its whitespace is not compared).
+   */
+  crPattern: string;
   /** The text ends with a line break. */
   finalNewline: boolean;
 }
@@ -129,8 +138,15 @@ export function entityPattern(path: string): string {
   return path.replace(/(^|[/_])([a-zA-Z]+)-[a-zA-Z0-9]+(?=[/_.])/g, "$1$2-*");
 }
 
-/** Every character a reader cannot see or tell apart from another: control, format, separator, unassigned. */
-const UNSEEN = /[\p{C}\p{Z}]/gu;
+/**
+ * The characters {@link renderValue} escapes: control, format, separator, private-use and unassigned
+ * code points, every default-ignorable code point (the Hangul fillers, the variation selectors, the
+ * Mongolian free variation selectors and the like, which render as nothing but are letters or marks
+ * to Unicode) and the Braille blank U+2800. Characters that merely look like another (a Cyrillic
+ * letter for a Latin one, a precomposed letter for the same letter and a combining mark) are NOT
+ * escaped: the platform's pairing says when two values differ only so (design section 8.2).
+ */
+const UNSEEN = /[\p{C}\p{Z}\p{Default_Ignorable_Code_Point}\u{2800}]/gu;
 
 /** The marker that a value was cut. It goes after the closing quote, where a value cannot write it. */
 const CUT_MARKER = "...(cut)";
@@ -270,12 +286,27 @@ function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
  *
  * Step 11 is the precondition of the coverage argument (design section 6.2): a parse that loses no
  * byte cannot hide a difference between two versions of a file. Steps 1 to 10 make it hold for
- * every file they accept, so the guard cannot fire on real input; `check` is how a test proves it
- * would. It is the serializer the round trip uses and must not be passed in production code.
+ * every file they accept, so the guard cannot fire on real input; {@link parseTsvWith} is how a test
+ * proves it would.
+ *
+ * **A one-column table is stricter.** csv readers skip an empty line and pandas skips a line of
+ * only spaces, so in a table with one column such a line is a row here and not there. The platform
+ * would show more than the reader sees, which cannot hide a change, but "two readers cannot
+ * disagree" is the promise, so a one-column table with an empty or all-space line (the header
+ * included) is `ragged_row`. In a table with two or more columns every reader agrees.
  */
-export function parseTsv(
+export function parseTsv(bytes: Uint8Array): Parsed<Table> {
+  return parseTsvWith(bytes, serializeTsv);
+}
+
+/**
+ * {@link parseTsv} with the serializer the round trip compares against passed in. Production code
+ * calls `parseTsv`; this exists so a test can hand it a serializer that loses a byte and prove the
+ * guard fires.
+ */
+export function parseTsvWith(
   bytes: Uint8Array,
-  check: (table: Table) => Uint8Array = serializeTsv,
+  check: (table: Table) => Uint8Array,
 ): Parsed<Table> {
   const decoded = decodeText(bytes);
   if (!decoded.ok) return decoded;
@@ -317,6 +348,9 @@ export function parseTsv(
 
   // Step 9. A row past the cap is counted, not kept, so a hostile file cannot make this hold it
   // all; its width is still checked, because a ragged row anywhere is the first thing wrong.
+  if (header.length === 1 && lines.some((line) => /^ *$/.test(line))) {
+    return { ok: false, refusal: "ragged_row" };
+  }
   const rows: string[][] = [];
   let tooMany = false;
   for (let i = 1; i < lines.length; i++) {
@@ -334,7 +368,14 @@ export function parseTsv(
 
   const eol =
     terminated === 0 ? "none" : crlf === 0 ? "lf" : crlf === terminated ? "crlf" : "mixed";
-  const table: Table = { format: { bom, eol, finalNewline }, crByLine, header, rows };
+  const crPattern =
+    eol === "mixed"
+      ? crByLine
+          .slice(0, terminated)
+          .map((cr) => (cr ? "1" : "0"))
+          .join("")
+      : "";
+  const table: Table = { format: { bom, eol, crPattern, finalNewline }, crByLine, header, rows };
 
   // Step 11.
   if (!sameBytes(check(table), bytes)) return { ok: false, refusal: "no_round_trip" };
@@ -558,7 +599,7 @@ function jsonFormat(bom: boolean, text: string): TextFormat {
         : crlf > 0
           ? "crlf"
           : "lf";
-  return { bom, eol, finalNewline: text.endsWith("\n") };
+  return { bom, eol, crPattern: "", finalNewline: text.endsWith("\n") };
 }
 
 /**

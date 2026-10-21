@@ -17,6 +17,7 @@ import {
   firstDifference,
   parseJson,
   parseTsv,
+  parseTsvWith,
   renderValue,
   serializeTsv,
 } from "../scripts/ci/pr-review-summary";
@@ -129,6 +130,28 @@ describe("renderValue", () => {
 
   test("non-ASCII letters that are visible stay as they are", () => {
     expect(renderValue("café 日本 \u{430}").text).toBe('"café 日本 \u{430}"');
+  });
+
+  test("characters that render as nothing but are letters or marks to Unicode are written out too", () => {
+    // Hangul fillers, a combining grapheme joiner, a variation selector, a Mongolian free variation
+    // selector, a variation selector supplement, and the Braille blank: all draw nothing.
+    for (const ch of [
+      "\u{3164}",
+      "\u{115F}",
+      "\u{034F}",
+      "\u{FE0F}",
+      "\u{180B}",
+      "\u{E0100}",
+      "\u{2800}",
+      "\u{FFA0}",
+    ]) {
+      const hex = ch.codePointAt(0)?.toString(16).toUpperCase();
+      expect(renderValue(`go${ch}od`).text, hex).toBe(raw`"go\u{${hex}}od"`);
+    }
+    // Characters that are seen are left alone, including a letter with its accent either way.
+    expect(renderValue("\u{E9}").text).toBe('"\u{E9}"');
+    expect(renderValue("e\u{301}").text).toBe('"e\u{301}"');
+    expect(renderValue("\u{43E}").text).toBe('"\u{43E}"');
   });
 
   test("a zero-width space is written out, so good and go<ZWSP>od are told apart", () => {
@@ -338,7 +361,7 @@ describe("parseTsv accepts and describes a plain table", () => {
       ["A1", "EEG"],
       ["A2", "EMG"],
     ]);
-    expect(table.format).toEqual({ bom: false, eol: "lf", finalNewline: true });
+    expect(table.format).toEqual({ bom: false, eol: "lf", crPattern: "", finalNewline: true });
     expect(table.crByLine).toEqual([false, false, false]);
   });
 
@@ -346,7 +369,7 @@ describe("parseTsv accepts and describes a plain table", () => {
     expect(tsvTable("a\tb\n").rows).toEqual([]);
     const bare = tsvTable("a\tb");
     expect(bare.rows).toEqual([]);
-    expect(bare.format).toEqual({ bom: false, eol: "none", finalNewline: false });
+    expect(bare.format).toEqual({ bom: false, eol: "none", crPattern: "", finalNewline: false });
     expect(bare.crByLine).toEqual([false]);
   });
 
@@ -364,10 +387,16 @@ describe("parseTsv accepts and describes a plain table", () => {
     expect(table.rows).toEqual([['say "hi"', "it's"]]);
   });
 
-  test("a blank line is a row with an empty cell in a one-column table, and 'a' + LF is not 'a' + blank", () => {
+  test("a one-column table has no blank or all-space line: readers disagree about it, so it is refused", () => {
     expect(tsvTable("a\n").rows).toEqual([]);
-    expect(tsvTable("a\n\n").rows).toEqual([[""]]);
-    expect(tsvTable("a\n\n\n").rows).toEqual([[""], [""]]);
+    expect(tsvTable("a\nb\n").rows).toEqual([["b"]]);
+    // csv skips an empty line and pandas a line of only spaces; this parser would read a row.
+    expect(tsvRefusal("a\n\n")).toBe("ragged_row");
+    expect(tsvRefusal("a\n\n\n")).toBe("ragged_row");
+    expect(tsvRefusal("a\n \n1\n")).toBe("ragged_row");
+    expect(tsvRefusal(" \nb\n")).toBe("ragged_row");
+    // With two columns every reader agrees, and an empty cell is a cell.
+    expect(tsvTable("a\tb\n\t\n").rows).toEqual([["", ""]]);
   });
 
   test("the first character of a file that is a second byte order mark is data, not a second BOM", () => {
@@ -377,16 +406,37 @@ describe("parseTsv accepts and describes a plain table", () => {
   });
 });
 
+describe("two tables that differ only in which lines end in CRLF have different formats", () => {
+  test("the CR pattern of a mixed table names the lines, and no other table has one", () => {
+    const first = tsvTable("a\tb\r\n1\t2\n3\t4\n");
+    const second = tsvTable("a\tb\n1\t2\r\n3\t4\n");
+    // Same cells, same class of ending, same final newline: only WHICH lines end in CRLF differs.
+    expect(first.header).toEqual(second.header);
+    expect(first.rows).toEqual(second.rows);
+    expect(first.format.eol).toBe("mixed");
+    expect(second.format.eol).toBe("mixed");
+    expect(first.format).not.toEqual(second.format);
+    expect(first.format.crPattern).toBe("100");
+    expect(second.format.crPattern).toBe("010");
+    // An unterminated last line is not part of the pattern.
+    expect(tsvTable("a\r\n1\n2").format.crPattern).toBe("10");
+    // A table that is all LF, all CRLF or has no line ending needs no pattern.
+    expect(tsvTable("a\tb\n1\t2\n").format.crPattern).toBe("");
+    expect(tsvTable("a\tb\r\n1\t2\r\n").format.crPattern).toBe("");
+    expect(tsvTable("a\tb").format.crPattern).toBe("");
+  });
+});
+
 describe("parseTsv records the byte order mark and the line endings", () => {
   test("a BOM is removed from the first name and recorded", () => {
     const table = tsvTable("\u{FEFF}a\tb\n1\t2\n");
     expect(table.header).toEqual(["a", "b"]);
-    expect(table.format).toEqual({ bom: true, eol: "lf", finalNewline: true });
+    expect(table.format).toEqual({ bom: true, eol: "lf", crPattern: "", finalNewline: true });
   });
 
   test("CRLF throughout", () => {
     const table = tsvTable("a\tb\r\n1\t2\r\n");
-    expect(table.format).toEqual({ bom: false, eol: "crlf", finalNewline: true });
+    expect(table.format).toEqual({ bom: false, eol: "crlf", crPattern: "", finalNewline: true });
     expect(table.crByLine).toEqual([true, true]);
     expect(table.header).toEqual(["a", "b"]);
     expect(table.rows).toEqual([["1", "2"]]);
@@ -401,10 +451,10 @@ describe("parseTsv records the byte order mark and the line endings", () => {
 
   test("an unterminated last line has no ending, and the ones before it decide the style", () => {
     const lf = tsvTable("a\n1");
-    expect(lf.format).toEqual({ bom: false, eol: "lf", finalNewline: false });
+    expect(lf.format).toEqual({ bom: false, eol: "lf", crPattern: "", finalNewline: false });
     expect(lf.crByLine).toEqual([false, false]);
     const crlf = tsvTable("a\r\n1\r\n2");
-    expect(crlf.format).toEqual({ bom: false, eol: "crlf", finalNewline: false });
+    expect(crlf.format).toEqual({ bom: false, eol: "crlf", crPattern: "", finalNewline: false });
     expect(crlf.crByLine).toEqual([true, true, false]);
   });
 
@@ -500,6 +550,15 @@ describe("parseTsv refuses, with one closed word per fault", () => {
     expect(tsvRefusal("a\tb\n1\t2\n3\t'4'\n")).toBeNull();
   });
 
+  test("a ragged row after the row cap is ragged_row: the first thing wrong wins over the count", () => {
+    expect(tsvRefusal(`a\tb\n${"x\ty\n".repeat(SUMMARY_LIMITS.maxRows + 1)}p\n`)).toBe(
+      "ragged_row",
+    );
+    expect(tsvRefusal(`a\tb\n${"x\ty\n".repeat(SUMMARY_LIMITS.maxRows + 1)}`)).toBe(
+      "too_many_rows",
+    );
+  });
+
   test("too_many_rows: 200,001 data rows are refused and 200,000 are read", () => {
     const rows = (n: number) => `a\n${"x\n".repeat(n)}`;
     expect(tsvRefusal(rows(SUMMARY_LIMITS.maxRows))).toBeNull();
@@ -511,18 +570,18 @@ describe("parseTsv refuses, with one closed word per fault", () => {
     const honest = parseTsv(bytes);
     expect(honest.ok).toBe(true);
 
-    const dropsARow = parseTsv(bytes, (t) => serializeTsv({ ...t, rows: t.rows.slice(1) }));
+    const dropsARow = parseTsvWith(bytes, (t) => serializeTsv({ ...t, rows: t.rows.slice(1) }));
     expect(dropsARow).toEqual({ ok: false, refusal: "no_round_trip" });
 
-    const losesTheFinalNewline = parseTsv(bytes, (t) =>
+    const losesTheFinalNewline = parseTsvWith(bytes, (t) =>
       serializeTsv({ ...t, format: { ...t.format, finalNewline: false } }),
     );
     expect(losesTheFinalNewline).toEqual({ ok: false, refusal: "no_round_trip" });
 
-    const losesOneByte = parseTsv(bytes, (t) => serializeTsv(t).slice(0, -1));
+    const losesOneByte = parseTsvWith(bytes, (t) => serializeTsv(t).slice(0, -1));
     expect(losesOneByte).toEqual({ ok: false, refusal: "no_round_trip" });
 
-    const changesOneByte = parseTsv(bytes, (t) => {
+    const changesOneByte = parseTsvWith(bytes, (t) => {
       const out = serializeTsv(t).slice();
       out[0] = 0x58;
       return out;
@@ -530,7 +589,7 @@ describe("parseTsv refuses, with one closed word per fault", () => {
     expect(changesOneByte).toEqual({ ok: false, refusal: "no_round_trip" });
 
     // The guard is the last step: a file with an earlier fault keeps that fault's word.
-    expect(parseTsv(enc("a\ta\n"), () => new Uint8Array(0))).toEqual({
+    expect(parseTsvWith(enc("a\ta\n"), () => new Uint8Array(0))).toEqual({
       ok: false,
       refusal: "duplicate_column",
     });
@@ -539,7 +598,7 @@ describe("parseTsv refuses, with one closed word per fault", () => {
   test("the guard is handed the parsed table and a faithful serializer passes", () => {
     const bytes = enc("\u{FEFF}a\tb\r\n1\t2\n");
     let seen: Table | null = null;
-    const parsed = parseTsv(bytes, (t) => {
+    const parsed = parseTsvWith(bytes, (t) => {
       seen = t;
       return serializeTsv(t);
     });
@@ -573,7 +632,7 @@ describe("serializeTsv and parseTsv round-trip every table the parser accepts", 
       "a\tb\r\n1\t2",
       "a\tb",
       "a\n",
-      "a\n\n",
+      "a\nb\n",
       "a",
       "\u{FEFF}a\tb\n1\t2\n",
       "\u{FEFF}a\tb\r\n1\t2",
@@ -698,9 +757,11 @@ function generateTable(random: () => number): GeneratedTable {
   const finalNewline = random() < 0.7;
   const style = pick(["lf", "crlf", "mixed"] as const);
 
-  // An unterminated last line holding only an empty cell is no line at all, so it cannot be one.
-  const last = rows.length > 0 ? rows[rows.length - 1] : header;
-  if (!finalNewline && columns === 1 && last?.[0] === "") (last as string[])[0] = "x";
+  // A one-column table has no blank line (readers disagree about it, so it is refused), and an
+  // unterminated last line holding only an empty cell is no line at all.
+  if (columns === 1) {
+    for (const row of rows) if (/^ *$/.test(row[0] ?? "")) row[0] = "x";
+  }
 
   const lines = [header, ...rows];
   const crByLine: boolean[] = [];
@@ -717,7 +778,14 @@ function generateTable(random: () => number): GeneratedTable {
   });
   const eol =
     terminated === 0 ? "none" : crlf === 0 ? "lf" : crlf === terminated ? "crlf" : "mixed";
-  return { text, header, rows, crByLine, format: { bom, eol, finalNewline } };
+  const crPattern =
+    eol === "mixed"
+      ? crByLine
+          .slice(0, terminated)
+          .map((cr) => (cr ? "1" : "0"))
+          .join("")
+      : "";
+  return { text, header, rows, crByLine, format: { bom, eol, crPattern, finalNewline } };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -817,11 +885,31 @@ describe("parseJson records the layout", () => {
   };
 
   test("no line break, LF, CRLF and a mixture", () => {
-    expect(formatOf("{}")).toEqual({ bom: false, eol: "none", finalNewline: false });
-    expect(formatOf("{\n}\n")).toEqual({ bom: false, eol: "lf", finalNewline: true });
-    expect(formatOf("{\r\n}\r\n")).toEqual({ bom: false, eol: "crlf", finalNewline: true });
-    expect(formatOf("{\r\n\n}")).toEqual({ bom: false, eol: "mixed", finalNewline: false });
-    expect(formatOf("{\n}\r\n")).toEqual({ bom: false, eol: "mixed", finalNewline: true });
+    expect(formatOf("{}")).toEqual({ bom: false, eol: "none", crPattern: "", finalNewline: false });
+    expect(formatOf("{\n}\n")).toEqual({
+      bom: false,
+      eol: "lf",
+      crPattern: "",
+      finalNewline: true,
+    });
+    expect(formatOf("{\r\n}\r\n")).toEqual({
+      bom: false,
+      eol: "crlf",
+      crPattern: "",
+      finalNewline: true,
+    });
+    expect(formatOf("{\r\n\n}")).toEqual({
+      bom: false,
+      eol: "mixed",
+      crPattern: "",
+      finalNewline: false,
+    });
+    expect(formatOf("{\n}\r\n")).toEqual({
+      bom: false,
+      eol: "mixed",
+      crPattern: "",
+      finalNewline: true,
+    });
   });
 
   test("a bare CR is a line break of its own kind, so the file is mixed", () => {
@@ -831,8 +919,18 @@ describe("parseJson records the layout", () => {
   });
 
   test("the BOM and the final newline are read independently", () => {
-    expect(formatOf("\u{FEFF}{}\n")).toEqual({ bom: true, eol: "lf", finalNewline: true });
-    expect(formatOf("\u{FEFF}{}")).toEqual({ bom: true, eol: "none", finalNewline: false });
+    expect(formatOf("\u{FEFF}{}\n")).toEqual({
+      bom: true,
+      eol: "lf",
+      crPattern: "",
+      finalNewline: true,
+    });
+    expect(formatOf("\u{FEFF}{}")).toEqual({
+      bom: true,
+      eol: "none",
+      crPattern: "",
+      finalNewline: false,
+    });
     expect(formatOf("{}\r\n").finalNewline).toBe(true);
     expect(formatOf("{}\r").finalNewline).toBe(false);
   });
