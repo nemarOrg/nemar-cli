@@ -3527,11 +3527,13 @@ export const NO_LOSS: Readonly<LossFacts> = Object.freeze({
 });
 
 /**
- * A removed column held a value unless its count says exactly zero. A count that is not a number
- * cannot come from the diff; if it ever did, it would be counted as a loss, never as nothing lost.
+ * A removed column held a value unless its count is exactly the text `0`. A missing count, an empty
+ * one or one that is not a number cannot come from the diff; if one ever did, it would be counted
+ * as a loss, never as nothing lost. (Comparing as a number would not do: `Number(null)`,
+ * `Number("")` and `Number(" ")` are all 0.)
  */
 function heldValues(atom: Atom): boolean {
-  return Number(atom.detail) !== 0;
+  return atom.detail !== "0";
 }
 
 /** The loss facts of the summarized files: see {@link LossFacts}. */

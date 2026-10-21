@@ -1369,6 +1369,24 @@ describe("lossFactsOf: the loss and relocation facts of every summarized file", 
     expect(lossFactsOf(files.slice(0, 2))).toEqual({ ...NO_LOSS, valuesEmptied: 1 });
   });
 
+  test("a removed column held nothing only when its count is exactly 0: a missing or unreadable count is a loss", () => {
+    const removed = (detail: string | null): Atom => ({
+      kind: "column_removed",
+      field: "notes",
+      rule: null,
+      detail,
+      before: null,
+      after: null,
+    });
+    const facts = (detail: string | null) =>
+      lossFactsOf([{ path: "a.tsv", atoms: [removed(detail)] }]);
+    for (const detail of [null, "", " ", "abc", "1", "00"]) {
+      expect(facts(detail).columnsRemoved, JSON.stringify(detail)).toBe(1);
+      expect(facts(detail).firstBlockingPath, JSON.stringify(detail)).toBe("a.tsv");
+    }
+    expect(facts("0")).toEqual(NO_LOSS);
+  });
+
   test("relocated and moved content is counted apart from what was lost", () => {
     const facts = lossFactsOf(run());
     expect([facts.rowsRelocated, facts.keysMoved]).toEqual([1, 1]);
