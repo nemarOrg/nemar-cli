@@ -1000,11 +1000,8 @@ function matchInOrder(
       // occurrence after the previous match.
       for (let i = 0; i < long.length; i++) {
         const candidate = long[i] as Run;
-        if (
-          (starts[i] as number) >= position &&
-          candidate.cls === run.cls &&
-          candidate.text === run.text
-        ) {
+        // Equal text is equal class: a letter run and another character never share a text.
+        if ((starts[i] as number) >= position && candidate.text === run.text) {
           at = starts[i] as number;
           break;
         }
@@ -2725,8 +2722,8 @@ export function diffJsonWith(
   const nearest = (key: string): string | null => {
     let found = nearestByKey.get(key);
     if (found === undefined) {
+      // An unreadable file can be the nearest; it is never a home, so it keeps the leaf removed.
       found = nearestSidecar(path, [...(pool.byTopKey.get(key) ?? []), ...pool.unreadable]);
-      if (found !== null && pool.unreadable.has(found)) found = null;
       nearestByKey.set(key, found);
     }
     return found;
