@@ -43,6 +43,7 @@ import {
   verifyJsonCounts,
   verifyTableCounts,
 } from "../scripts/ci/pr-review-summary";
+import { documentHolding, longKeyDocument, poolChars } from "./helpers/summary-pool";
 
 const enc = (text: string): Uint8Array => new TextEncoder().encode(text);
 
@@ -1538,6 +1539,155 @@ describe("buildPools: the rows and leaves a pull request adds", () => {
     const pool = buildPools([{ path: "a.tsv", before: null, after: bytes }]);
     bytes[2] = 0x39;
     expect(rowsOf(pool, "a.tsv")).toEqual({ header: "a", rows: { "1": 1 } });
+  });
+});
+
+describe("buildPools: what the pools hold is bounded by maxPoolChars", () => {
+  const bound = SUMMARY_LIMITS.maxPoolChars;
+
+  /** Everything a pool holds, with every list sorted: equal for two pools that say the same. */
+  const contents = (pool: ReturnType<typeof buildPools>) => {
+    const lists = (map: ReadonlyMap<string, readonly string[]>) =>
+      [...map].map(([key, paths]) => [key, [...paths].sort()] as const).sort(byKey);
+    return {
+      rows: [...pool.rows.files]
+        .map(([path, file]) => [path, file.header, [...file.rows].sort(byKey)] as const)
+        .sort(byKey),
+      sourcedataFor: [...pool.rows.sourcedataFor].sort(byKey),
+      jsonFiles: [...pool.json.files]
+        .map(([path, leaves]) => [path, [...leaves]] as const)
+        .sort(byKey),
+      byLeaf: lists(pool.json.byLeaf),
+      byTopKey: lists(pool.json.byTopKey),
+      unreadable: [...pool.json.unreadable].sort(),
+    };
+  };
+  const byKey = (a: readonly [string, ...unknown[]], b: readonly [string, ...unknown[]]) =>
+    a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0;
+
+  test("a document that would hold more than the bound is unreadable and holds nothing, added or modified", () => {
+    // About 0.3 MB of JSON that would hold about 81 million code units: one long key over 40,000
+    // tiny children, each of whose paths repeats the key.
+    const text = longKeyDocument(40_000);
+    expect(text.length).toBeLessThan(400_000);
+    const added = pooled("task-x_eeg.json", null, text);
+    expect(poolChars(added)).toBeGreaterThan(2 * bound);
+    const pool = buildPools([
+      added,
+      // A modified one is walked whole and counted leaf by leaf, and is dropped the same way.
+      pooled("sub-02/sub-02_task-x_eeg.json", '{"Old": 1}', text),
+      pooled("sub-01/sub-01_task-x_eeg.json", null, '{"A": 1}'),
+    ]);
+    expect([...pool.json.unreadable].sort()).toEqual([
+      "sub-02/sub-02_task-x_eeg.json",
+      "task-x_eeg.json",
+    ]);
+    // Neither is a home, and neither lists its top-level key; the small file beside them is pooled.
+    expect([...pool.json.files.keys()]).toEqual(["sub-01/sub-01_task-x_eeg.json"]);
+    expect([...pool.json.byTopKey.keys()]).toEqual(["A"]);
+    expect([...pool.json.byLeaf.keys()]).toEqual([leafKey(".A", "1")]);
+    // The same shape that fits is pooled like any other document.
+    const small = buildPools([pooled("task-x_eeg.json", null, longKeyDocument(10))]);
+    expect(small.json.unreadable.size).toBe(0);
+    expect(small.json.files.get("task-x_eeg.json")?.size).toBe(10);
+  });
+
+  test("the bound is exact: a pool of exactly maxPoolChars is held whole, and one code unit more leaves out the file that passes it", () => {
+    // Every leaf piece counts: a path, a value written with quotes, a nested array as one value.
+    const subject = pooled("c_eeg.json", null, '{"SamplingFrequency": 500, "N": {"a": [1, "x"]}}');
+    // A one-column table holds its header and its one row "1": a header of h holds h + 1.
+    const table = (h: number) => pooled("b.tsv", null, `${"h".repeat(h)}\n1\n`);
+    const header = 500;
+    const filler = documentHolding(
+      "a_eeg.json",
+      bound - poolChars(subject) - poolChars(table(header)),
+      15_000,
+    );
+    const files = [filler, table(header), subject];
+    expect(files.reduce((n, f) => n + poolChars(f), 0)).toBe(bound);
+    const whole = buildPools(files);
+    expect(whole.json.unreadable.size).toBe(0);
+    expect([...whole.json.files.keys()]).toEqual(["a_eeg.json", "c_eeg.json"]);
+    expect([...whole.rows.files.keys()]).toEqual(["b.tsv"]);
+
+    // One code unit more, in the table's header: the subject, last in path order, no longer fits.
+    const over = buildPools([filler, table(header + 1), subject]);
+    expect([...over.json.unreadable]).toEqual(["c_eeg.json"]);
+    expect([...over.json.files.keys()]).toEqual(["a_eeg.json"]);
+    expect(over.json.byTopKey.has("SamplingFrequency")).toBe(false);
+    expect([...over.rows.files.keys()]).toEqual(["b.tsv"]);
+  });
+
+  test("a document's top-level keys are held even when it adds no leaf, and count toward the bound", () => {
+    // A modified document whose leaves are all unchanged adds no leaf, but still lists its keys.
+    const keys = Array.from({ length: 2_000 }, (_, i) => `"${String(i).padStart(1000, "k")}":0`);
+    const text = `{${keys.join(",")}}`;
+    const unchanged = pooled("b_eeg.json", text, text);
+    expect(poolChars(unchanged)).toBe(2_000 * 1000);
+    const filler = documentHolding("a_eeg.json", bound - 2_000 * 1000, 15_000);
+    expect(buildPools([filler, unchanged]).json.unreadable.size).toBe(0);
+    const tight = documentHolding("a_eeg.json", bound - 2_000 * 1000 + 1, 15_000);
+    const pool = buildPools([tight, unchanged]);
+    expect([...pool.json.unreadable]).toEqual(["b_eeg.json"]);
+    // Only the filler's own keys are listed.
+    expect([...pool.json.byTopKey.values()].flat()).toEqual(["a_eeg.json", "a_eeg.json"]);
+  });
+
+  test("an added document is walked only as far as the room left, so one past it before a path over maxNameChars is unreadable", () => {
+    // Forty thousand children past the bound, then a path of 1,027 code units at the end.
+    const long = `"Z":{"${"z".repeat(SUMMARY_LIMITS.maxNameChars)}":1}`;
+    const text = `${longKeyDocument(40_000).slice(0, -1)},${long}}`;
+    // Added, its walk stops at the bound, before it reaches the long path: unreadable.
+    const added = buildPools([pooled("task-x_eeg.json", null, text)]);
+    expect([...added.json.unreadable]).toEqual(["task-x_eeg.json"]);
+    // Modified, it is walked whole, so the long path leaves its leaves out and its keys are kept.
+    const modified = buildPools([pooled("task-x_eeg.json", "{}", text)]);
+    expect(modified.json.unreadable.size).toBe(0);
+    expect([...modified.json.byTopKey.keys()]).toEqual(["K".repeat(1000), "Z"]);
+    expect(modified.json.files.size).toBe(0);
+  });
+
+  test("a table that would pass the bound is skipped: none of its rows is a copy, and the next file is still tried", () => {
+    const copy = "sourcedata/old/sub-01/eeg/sub-01_task-x_channels.tsv";
+    const rows = Array.from({ length: 2_000 }, (_, i) => `Ch${i}\tEEG\t${"u".repeat(40)}`);
+    const table = pooled(copy, null, `name\ttype\tunits\n${rows.join("\n")}\n`);
+    const room = poolChars(table) - 1;
+    const filler = documentHolding("a_eeg.json", bound - room, 15_000);
+    const small = pooled("z_eeg.json", null, '{"A": 1}');
+    const pool = buildPools([filler, table, small]);
+    expect(pool.rows.files.has(copy)).toBe(false);
+    expect(pool.rows.sourcedataFor.size).toBe(0);
+    // Skipped, not unreadable: a table is never a sidecar. A smaller file after it still fits.
+    expect(pool.json.unreadable.size).toBe(0);
+    expect([...pool.json.files.keys()]).toEqual(["a_eeg.json", "z_eeg.json"]);
+    // One code unit more of room and it is held.
+    const roomier = documentHolding("a_eeg.json", bound - room - 1 - poolChars(small), 15_000);
+    expect(buildPools([roomier, table, small]).rows.sourcedataFor.get(copy.slice(15))).toEqual([
+      copy,
+    ]);
+  });
+
+  test("which files fit is decided in path order, whatever order they are given in", () => {
+    // Each of the two long documents fits alone, and the two together do not.
+    const first = documentHolding("a_eeg.json", Math.floor(bound * 0.6), 9_000);
+    const second = documentHolding("b_eeg.json", Math.floor(bound * 0.6), 9_000);
+    const files = [
+      first,
+      second,
+      pooled("c_eeg.json", null, '{"A": 1}'),
+      pooled("sourcedata/x/d.tsv", null, "name\nR1\n"),
+    ];
+    const reference = contents(buildPools(files));
+    expect(reference.unreadable).toEqual(["b_eeg.json"]);
+    expect(reference.jsonFiles.map(([path]) => path)).toEqual(["a_eeg.json", "c_eeg.json"]);
+    for (const order of [
+      [1, 0, 2, 3],
+      [3, 2, 1, 0],
+      [2, 1, 3, 0],
+    ]) {
+      const shuffled = order.map((i) => files[i] as PoolFile);
+      expect(contents(buildPools(shuffled))).toEqual(reference);
+    }
   });
 });
 

@@ -54,6 +54,7 @@ import {
   verifyJsonCounts,
   verifyTableCounts,
 } from "../scripts/ci/pr-review-summary";
+import { documentHolding } from "./helpers/summary-pool";
 
 const enc = (text: string): Uint8Array => new TextEncoder().encode(text);
 
@@ -2440,6 +2441,55 @@ describe("summarizeChanges: the deadline abandons the whole summary", () => {
   // comes next (before the next file, or after the loop), so no clock can trip it alone. The read
   // counts below are what pin it.
 
+  test("only the check before a pool file sees the time between two pool files: it abandons", () => {
+    const path = channels(1);
+    const [first, second] = [`sourcedata/a/${path}`, `sourcedata/b/${path}`];
+    const touched = new Set<string>();
+    // Pool files that record when their bytes are first read, in path order.
+    const watchedPool = (where: string, text: string): PoolFile => ({
+      path: where,
+      before: null,
+      get after() {
+        touched.add(where);
+        return enc(text);
+      },
+    });
+    const run = (from: string) =>
+      summarizeChanges({
+        candidates: [
+          candidate(
+            path,
+            tsv(CHANNELS, ["A1", "EEG", "uV"], ["R1", "EEG", "uV"]),
+            tsv(CHANNELS, ["A1", "EEG", "uV"]),
+          ),
+        ],
+        // Given in reverse: the pools are read in path order whatever order they come in.
+        pool: [
+          watchedPool(second, tsv(CHANNELS, ["R2", "EEG", "uV"])),
+          watchedPool(first, tsv(CHANNELS, ["R1", "EEG", "uV"])),
+        ],
+        deadline: 10,
+        now: () => (touched.has(from) && !touched.has(second) ? 10 : 0),
+      });
+    abandonedShape(run(first));
+    // Not vacuous: with the state never reached, the run goes on and finds the copy.
+    touched.clear();
+    const kept = run("never");
+    expect(kept.abandoned).toBe(false);
+    expect(kept.loss.rowsRelocated).toBe(1);
+  });
+
+  test("the clock is read once before each pool file, on top of the reads per candidate", () => {
+    const pool = [1, 3].map((n) =>
+      pooled(`sourcedata/old/${channels(n)}`, null, tsv(CHANNELS, ["Z9", "EEG", "uV"])),
+    );
+    const c = clock([9]);
+    const summary = summarizeChanges({ candidates: files(), pool, deadline: 10, now: c.now });
+    expect(summary.abandoned).toBe(false);
+    // Two pool files, then twice per candidate and once after.
+    expect(c.reads()).toBe(2 + 7);
+  });
+
   test("a deadline already reached abandons before the first file", () => {
     const c = clock([5]);
     abandonedShape(summarizeChanges({ candidates: files(), pool: [], deadline: 5, now: c.now }));
@@ -2591,6 +2641,44 @@ describe("summarizeChanges: the deadline abandons the whole summary", () => {
       expect(set.has("sub-01/x.tsv")).toBe(false);
     }
     expect([...ABANDONED_SUMMARY.accounted]).toEqual([]);
+  });
+});
+
+describe("summarizeChanges: the pool's bound is shared out in path order", () => {
+  const path = "sub-01/eeg/sub-01_task-x_eeg.json";
+  const input = [candidate(path, '{"SamplingFrequency": 500, "A": 1}', '{"A": 1}')];
+  // The subject-level sidecar, nearer to the file than the root, gains the removed value.
+  const home = pooled("sub-01/sub-01_task-x_eeg.json", null, '{"SamplingFrequency": 500}');
+
+  test("a file that fits only on its own cannot take an earlier, nearer home's room, in either order", () => {
+    // A root sidecar that applies too, and alone takes the whole bound: after the home, it no
+    // longer fits, and is unreadable; that is farther than the home, so it decides nothing.
+    const root = documentHolding("task-x_eeg.json", SUMMARY_LIMITS.maxPoolChars, 15_000);
+    for (const pool of [
+      [root, home],
+      [home, root],
+    ]) {
+      const summary = summarize(input, pool);
+      expect(summary.loss).toEqual({ ...NO_LOSS, keysMoved: 1 });
+      expect(summary.classes.map((c) => c.kind)).toEqual(["json_key_moved"]);
+    }
+  });
+
+  test("the same file sorted before the home takes the room, and the home, unreadable and nearest, stops the move", () => {
+    // `eeg.json` applies to the file as the root `task-x_eeg.json` does, and sorts first.
+    const root = documentHolding("eeg.json", SUMMARY_LIMITS.maxPoolChars, 15_000);
+    for (const pool of [
+      [root, home],
+      [home, root],
+    ]) {
+      const summary = summarize(input, pool);
+      expect(summary.loss).toEqual({
+        ...NO_LOSS,
+        keysRemoved: 1,
+        keysRemovedFiles: 1,
+        firstBlockingPath: path,
+      });
+    }
   });
 });
 

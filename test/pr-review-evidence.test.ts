@@ -4607,7 +4607,7 @@ describe("the change summary keeps to its deadline, and leaves the raw path as i
 
   test("a summary that reaches its deadline while it runs is abandoned, and the raw path is as it was", () => {
     let reads = 0;
-    // The real time for the start and the check before the first table, then past the deadline.
+    // The real time for the start and the check before the first pool file, then past the deadline.
     const midway = read(null, { now: () => (++reads <= 2 ? Date.now() : Number.MAX_SAFE_INTEGER) });
     expect(reads).toBeGreaterThanOrEqual(3);
     // It was started: the pool was read.
