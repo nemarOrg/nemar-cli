@@ -2443,10 +2443,25 @@ export function sidecarApplies(sidecar: string, target: string): boolean {
   return true;
 }
 
-/** A name with case and every character that is not a letter or a digit removed: `MISC_Channel-Count` and `MiscChannelCount` fold alike. */
+/**
+ * A name with case and punctuation removed, so `MISC_Channel-Count` and `MiscChannelCount` fold
+ * alike. Punctuation between two digits is part of a number and stays: `1.2` is not `12`, and `0.5`
+ * is not `05`, so a key renamed from one to the other is not a respelling.
+ */
 function foldName(name: string): string {
-  return name.toLowerCase().replace(/[^\p{L}\p{N}]/gu, "");
+  return name
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, (run: string, at: number, whole: string) =>
+      DIGIT_BEFORE.test(whole.slice(Math.max(0, at - 2), at)) &&
+      DIGIT_AFTER.test(whole.slice(at + run.length, at + run.length + 2))
+        ? run
+        : "",
+    );
 }
+
+/** A digit ends (or starts) the text: two code units cover a digit outside the basic plane. */
+const DIGIT_BEFORE = /\p{N}$/u;
+const DIGIT_AFTER = /^\p{N}/u;
 
 const JSON_FATE_NONE = 0;
 const JSON_FATE_UNCHANGED = 1;
@@ -2530,7 +2545,7 @@ export function verifyJsonCounts(diff: FileDiff<JsonCounts>): boolean {
  *
  * - **renamed** (`json_key_renamed`) when it is the ONLY before leaf with its parent and value, ONE
  *   after leaf has that parent and value, and the two key names fold to the same (case and
- *   punctuation removed) or match by a relabel rule. A shared value is no evidence of which key
+ *   punctuation removed, except punctuation between two digits) or match by a relabel rule. A shared value is no evidence of which key
  *   became which: with `go` and `go2` both `"Go"`, `go` removed and `go3` added is a removed key
  *   and an added one, not `go` renamed.
  * - **moved** (`json_key_moved`) when another file of the pull request that applies to this one

@@ -390,6 +390,7 @@ The model prompt (section 8.4) tells the model that a moved key reaches the file
 ### 4.7 JSON renames
 
 A removed leaf and an added leaf are a `json_key_renamed` pair when they have the same parent path and the same value, and their last names are equal after lower-casing and removing every character that is not a letter or digit, or when `relabelRule(oldName, newName, { chars: false })` holds.
+Punctuation with a digit on both sides is part of a number and is not removed by the folding (D15): `12` to `1.2` and `0.5` to `05` are a removed key and an added one, not a rename.
 In addition (D8), the shared value must be **unique within its parent** in the before document and in the after document: a shared value is no evidence of which key became which, so with `go` and `go2` both `"Go"`, `go` removed and `go3` added is `json_key_removed` plus `json_key_added`, not a rename.
 A removed leaf then has at most one candidate, and a relabel rule refuses a name over 128 characters before reading it, so the pass is linear in the document and needs neither a candidate cap nor the step budget of section 4.4.
 

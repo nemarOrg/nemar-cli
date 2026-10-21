@@ -3333,6 +3333,29 @@ describe("diffJson: renamed keys", () => {
     ]);
   });
 
+  test("punctuation between two digits is part of a number: 12 to 1.2 is not a respelling", () => {
+    expect(
+      jsonLines(
+        '{"Levels": {"12": "twelve", "3": "three"}}',
+        '{"Levels": {"1.2": "twelve", "3": "three"}}',
+      ),
+    ).toEqual([
+      'json_key_removed | field=.Levels | before="\\"twelve\\"" | detail="12"',
+      'json_key_added | field=.Levels | after="\\"twelve\\"" | detail="1.2"',
+    ]);
+    expect(jsonLines('{"Levels": {"0.5": "half"}}', '{"Levels": {"05": "half"}}')).toEqual([
+      'json_key_removed | field=.Levels | before="\\"half\\"" | detail="0.5"',
+      'json_key_added | field=.Levels | after="\\"half\\"" | detail="05"',
+    ]);
+    // Punctuation next to only one digit is still punctuation.
+    expect(jsonLines('{"Channel_1": 3}', '{"channel1": 3}')).toEqual([
+      expect.stringContaining('detail="Channel_1 -> channel1"'),
+    ]);
+    expect(jsonLines('{"Run1_Onset": 3}', '{"run1onset": 3}')).toEqual([
+      expect.stringContaining('detail="Run1_Onset -> run1onset"'),
+    ]);
+  });
+
   test("two names that are not one name respelled are not a rename", () => {
     expect(jsonLines('{"Fz": 1}', '{"Pz": 1}')).toEqual([
       expect.stringContaining("json_key_removed"),
@@ -5030,7 +5053,22 @@ function oracleMissing(v: Plain): boolean {
   if (typeof v === "object") return Object.keys(v).length === 0;
   return false;
 }
-const oracleFold = (name: string): string => name.toLowerCase().replace(/[^\p{L}\p{N}]/gu, "");
+/** Case and punctuation folded, except punctuation with a digit on both sides (design section 4.7). */
+function oracleFold(name: string): string {
+  const chars = [...name.toLowerCase()];
+  const word = (c: string | undefined): boolean => c !== undefined && /[\p{L}\p{N}]/u.test(c);
+  const digit = (c: string | undefined): boolean => c !== undefined && /\p{N}/u.test(c);
+  return chars
+    .filter((ch, i) => {
+      if (word(ch)) return true;
+      let before = i - 1;
+      while (before >= 0 && !word(chars[before])) before--;
+      let after = i + 1;
+      while (after < chars.length && !word(chars[after])) after++;
+      return digit(chars[before]) && digit(chars[after]);
+    })
+    .join("");
+}
 const typeWord = (v: Plain): string => (v === null ? "null" : Array.isArray(v) ? "arr" : typeof v);
 
 /** The JSON files a generated case may put moved keys in, and whether each applies to which file. */
