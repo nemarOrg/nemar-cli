@@ -78,6 +78,7 @@ import {
   SCREEN_OUTPUT_SCHEMA,
   SCREEN_SYSTEM_PROMPT,
   SUMMARY_FENCE_KIND,
+  V3_RULES,
   assembleReport,
   buildReviewMessages,
   buildScreenMessages,
@@ -3375,6 +3376,8 @@ describe("what the model is told, and where path text may and may not appear", (
       "changed_metadata_not_shown_in_full",
       "version_before",
       "version_after",
+      "change_summary",
+      "files_with_content_shown",
     ]) {
       expect(REVIEW_SYSTEM_PROMPT).toContain(named);
       expect(keys).toContain(named);
@@ -3422,6 +3425,41 @@ describe("the review prompt carries prompt v3's rules word for word", () => {
       '"reject" only for spam, meaning promotional content, content unrelated to the dataset, content with no purpose, or repeated links',
     );
     expect(SCREEN_SYSTEM_PROMPT).toContain('When you are unsure, answer "proceed".');
+  });
+
+  test("the prompt explains the change summary after the trust boundary, and v3's rules are unchanged", () => {
+    // The rules the prompt is built from, word for word: the paragraph added nothing to them.
+    expect(Object.values(V3_RULES)).toEqual(V3);
+    const at = (text: string) => {
+      const i = REVIEW_SYSTEM_PROMPT.indexOf(text);
+      expect(i, text).toBeGreaterThanOrEqual(0);
+      return i;
+    };
+    // Its own paragraph, after the trust boundary and the rule on what was read, before the output.
+    expect(at("Trust boundary.")).toBeLessThan(at("never by a heading.\n\nThe change summary. "));
+    expect(at("never by a heading.")).toBeLessThan(at("The change summary."));
+    expect(at("The change summary.")).toBeLessThan(at("\n\nOutput only the JSON object"));
+    const paragraph =
+      REVIEW_SYSTEM_PROMPT.split("\n\n").find((p) => p.startsWith("The change summary.")) ?? "";
+    for (const phrase of [
+      "The class table in the facts (change_summary.classes) is the platform's: its class numbers, kinds, counts and completeness are reliable.",
+      "The changed-metadata-summary block, which is there only when the summary has a class,",
+      "its text is the pull request's own and is material to review.",
+      "what is said above about a sample does not apply to a class.",
+      "A file counts as shown in full, and is counted in files_with_content_shown, when every class that removes or changes something in it is shown in full; a class that only adds need not be shown,",
+      "are counted in the facts, and the platform reports them to a person itself; say what was removed.",
+      "treat a pair that is not as a removal.",
+      "which the platform cannot see, so weigh that from the path shape.",
+      "A summary marked abandoned was not used.",
+    ]) {
+      expect(paragraph).toContain(phrase);
+    }
+    // The block it names is the one the prompt is given, under that kind.
+    expect(SUMMARY_FENCE_KIND.startsWith("changed-metadata-summary (")).toBe(true);
+    // And the groups block says what its new column counts.
+    expect(REVIEW_SYSTEM_PROMPT).toContain(
+      "with how many of each group were shown in full, how many differ only cosmetically and how many the change summary accounted for.",
+    );
   });
 });
 
