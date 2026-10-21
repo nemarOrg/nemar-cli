@@ -1536,6 +1536,31 @@ describe("renderClasses: author text cannot forge the platform's lines", () => {
     }
   });
 
+  test("a cut shape leaves its class incomplete by itself, with no example path to share the cut", () => {
+    // Through `classify` a shape is never longer than the path of an example (an entity value
+    // becomes one `*`), so a cut shape always comes with a cut example. `renderClasses` holds the
+    // shape to the rule on its own: the same real class, with its examples taken away.
+    for (const [length, whole] of [
+      [300, true],
+      [301, false],
+    ] as const) {
+      const path = `${"d".repeat(length - "/x_channels.tsv".length)}/x_channels.tsv`;
+      const [cls] = classify(
+        atomsOf([
+          {
+            path,
+            before: tsv(CHANNELS, ["A1", "EEG", "uV"]),
+            after: tsv(CHANNELS, ["A1", "EEG", "mV"]),
+          },
+        ]),
+      );
+      const bare: ChangeClass = { ...(cls as ChangeClass), examples: [], examplePathCut: false };
+      const { text, complete } = renderClasses([bare]);
+      expect(readQuoted(text, "C1 | ".length)?.cut, `${length}`).toBe(!whole);
+      expect(complete.size, `${length}`).toBe(whole ? 1 : 0);
+    }
+  });
+
   test("a cut never splits a surrogate pair: an astral character at the bound is kept or left out whole", () => {
     const lone = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
     // Code points 299 and 300 are astral, then 301 and 302: the cut falls between two pairs.
