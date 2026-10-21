@@ -743,7 +743,7 @@ describe("readBlobs and rawEntries", () => {
     expect(loggedCalls(log)).toEqual([]);
   });
 
-  test("a read that stalls past its own deadline is null, quickly, and is not timed_out; a deadline already past starts nothing", () => {
+  test("a read that stalls past its own deadline is null, quickly, and is not timed_out; a deadline in the past is null and starts no process", () => {
     const { id, dir } = blobRepo("blobs-stall", { "a.txt": "alpha\n" });
     const log = callLog("blobs-stall");
     const restore = installGitShim(root, [{ match: " cat-file ", log, sleepSeconds: 5 }]);
@@ -772,6 +772,30 @@ describe("readBlobs and rawEntries", () => {
       [id("a.txt")]: "alpha\n",
     });
   }, 30_000);
+
+  test("a deadline that is exactly now is expired, not 'no timeout': a timeout of 0 would let git run unbounded", () => {
+    // `execFileSync` takes a timeout of 0 to mean none, so a call with no time left must never be
+    // given 0. A negative timeout is refused by the runtime anyway, which is why the test above
+    // cannot tell; only a clock that stands still makes the time left exactly zero.
+    const { id, dir } = blobRepo("blobs-zero", { "a.txt": "alpha\n" });
+    const a = id("a.txt");
+    const log = callLog("blobs-zero");
+    const restore = installGitShim(root, [{ match: " cat-file ", log }]);
+    const clock = Date.now;
+    const now = clock();
+    let frozen: Map<string, Buffer> | null | string = "not run";
+    try {
+      Date.now = () => now;
+      frozen = readBlobs(dir, [a], CAPS, now);
+    } finally {
+      Date.now = clock;
+      restore();
+    }
+    expect(frozen).toBeNull();
+    expect(loggedCalls(log)).toEqual([]);
+    // The same read, a moment later, is answered: the deadline is what made it null.
+    expect(texts(readBlobs(dir, [a], CAPS, Date.now() + 60_000))).toEqual({ [a]: "alpha\n" });
+  });
 
   test("the call that reads the blobs has the deadline too: a stall in the second process is null, quickly, and not timed_out", () => {
     const { id, dir } = blobRepo("blobs-stall-second", { "a.txt": "alpha\n" });
