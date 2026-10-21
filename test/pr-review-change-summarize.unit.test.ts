@@ -37,6 +37,7 @@ import {
   classify,
   diffJson,
   diffTable,
+  entityPattern,
   foldIndices,
   formatAtoms,
   lossFactsOf,
@@ -420,8 +421,8 @@ describe("classify: examples", () => {
     );
     const [relabel] = classify(files);
     expect(relabel?.examples).toEqual([
-      `${shape(3)} row "A1" -> "POL A1"`,
-      `${shape(1)} row "A1" -> "POL A1"`,
+      `"${shape(3)}" row "A1" -> "POL A1"`,
+      `"${shape(1)}" row "A1" -> "POL A1"`,
     ]);
   });
 
@@ -434,8 +435,8 @@ describe("classify: examples", () => {
       },
     ]);
     expect(classify(files)[0]?.examples).toEqual([
-      `${shape(1)} "uV" -> "mV"`,
-      `${shape(1)} "uV" -> "V"`,
+      `"${shape(1)}" "uV" -> "mV"`,
+      `"${shape(1)}" "uV" -> "V"`,
     ]);
   });
 
@@ -454,7 +455,7 @@ describe("classify: examples", () => {
     const withExamples = classes.map((c) => c.examples.length);
     expect(withExamples.slice(0, SUMMARY_LIMITS.maxClasses).every((n) => n === 1)).toBe(true);
     expect(withExamples.slice(SUMMARY_LIMITS.maxClasses)).toEqual([0, 0, 0, 0, 0]);
-    expect(classes[0]?.examples).toEqual([`${shape(1)} "1" -> "2"`]);
+    expect(classes[0]?.examples).toEqual([`"${shape(1)}" "1" -> "2"`]);
   });
 
   test("examples are rendered: a key, a row, a column count, a layout change, a JSON key", () => {
@@ -475,12 +476,12 @@ describe("classify: examples", () => {
     ]);
     const examples = classify(files).flatMap((c) => c.examples);
     expect(examples).toEqual([
-      `${shape(1)} (2 non-missing values)`,
-      'task-x_eeg.json key "Notes"',
-      `${shape(1)} row "R1"`,
-      `${shape(1)} (lf to crlf)`,
-      'task-x_eeg.json key ".PowerLineFrequency"',
-      `${shape(1)} row "New\\u{200B}"`,
+      `"${shape(1)}" (2 non-missing values)`,
+      '"task-x_eeg.json" key "Notes"',
+      `"${shape(1)}" row "R1"`,
+      `"${shape(1)}" (lf to crlf)`,
+      '"task-x_eeg.json" key ".PowerLineFrequency"',
+      `"${shape(1)}" row "New\\u{200B}"`,
     ]);
   });
 });
@@ -593,13 +594,13 @@ describe("renderClasses: what a class looks like", () => {
     );
     expect(text).toBe(
       [
-        'C1 | sub-*/eeg/sub-*_task-*_channels.tsv | column "units" | cells replaced',
+        'C1 | "sub-*/eeg/sub-*_task-*_channels.tsv" | column "units" | cells replaced',
         '    "uV" -> "mV" x2',
-        `    e.g. ${channels(1)} "uV" -> "mV"`,
-        `    e.g. ${channels(2)} "uV" -> "mV"`,
-        'C2 | sub-*/eeg/sub-*_task-*_channels.tsv | column "name" | rows relabeled: added prefix "POL "',
-        `    e.g. ${channels(1)} row "A1" -> "POL A1"`,
-        `    e.g. ${channels(2)} row "A1" -> "POL A1"`,
+        `    e.g. "${channels(1)}" "uV" -> "mV"`,
+        `    e.g. "${channels(2)}" "uV" -> "mV"`,
+        'C2 | "sub-*/eeg/sub-*_task-*_channels.tsv" | column "name" | rows relabeled: added prefix "POL "',
+        `    e.g. "${channels(1)}" row "A1" -> "POL A1"`,
+        `    e.g. "${channels(2)}" row "A1" -> "POL A1"`,
       ].join("\n"),
     );
     expect(shown.size).toBe(2);
@@ -627,15 +628,15 @@ describe("renderClasses: what a class looks like", () => {
     ]);
     expect(text).toBe(
       [
-        'C1 | task-*_events.json | under ".HED" | keys removed',
+        'C1 | "task-*_events.json" | under ".HED" | keys removed',
         '    "stop = \\"Halt\\"" x1',
-        '    e.g. task-x_events.json key "stop"',
-        'C2 | participants.tsv | column "participant_id" | rows removed',
+        '    e.g. "task-x_events.json" key "stop"',
+        'C2 | "participants.tsv" | column "participant_id" | rows removed',
         '    "sub-02" x1',
-        '    e.g. participants.tsv row "sub-02"',
-        "C3 | sub-*/eeg/sub-*_task-*_events.tsv | rows removed",
+        '    e.g. "participants.tsv" row "sub-02"',
+        'C3 | "sub-*/eeg/sub-*_task-*_events.tsv" | rows removed',
         '    "2.0\\tstop" x1',
-        '    e.g. sub-01/eeg/sub-01_task-x_events.tsv row "2.0\\tstop"',
+        '    e.g. "sub-01/eeg/sub-01_task-x_events.tsv" row "2.0\\tstop"',
       ].join("\n"),
     );
   });
@@ -662,14 +663,14 @@ describe("renderClasses: what a class looks like", () => {
     );
     expect(text).toBe(
       [
-        'C1 | sub-*/eeg/sub-*_task-*_channels.tsv | column "name" | rows removed and found verbatim in a row this pull request adds: to sourcedata/old/sub-*/eeg/sub-*_task-*_channels.tsv',
-        `    e.g. ${path} row "R1"`,
-        'C2 | sub-*/eeg/sub-*_task-*_channels.tsv | column "type" | cells changed by a rule: zero padding of numbers changed',
-        `    e.g. ${path} "ECOG1" -> "ECOG01"`,
-        "C3 | sub-*/eeg/sub-*_task-*_channels.tsv | file layout changed: line endings changed",
-        `    e.g. ${path} (lf to crlf)`,
-        'C4 | task-*_eeg.json | top level | keys renamed: "MiscChannelCount -> MISCChannelCount"',
-        '    e.g. task-x_eeg.json key "MiscChannelCount -> MISCChannelCount"',
+        'C1 | "sub-*/eeg/sub-*_task-*_channels.tsv" | column "name" | rows removed and found verbatim in a row this pull request adds: to "sourcedata/old/sub-*/eeg/sub-*_task-*_channels.tsv"',
+        `    e.g. "${path}" row "R1"`,
+        'C2 | "sub-*/eeg/sub-*_task-*_channels.tsv" | column "type" | cells changed by a rule: zero padding of numbers changed',
+        `    e.g. "${path}" "ECOG1" -> "ECOG01"`,
+        'C3 | "sub-*/eeg/sub-*_task-*_channels.tsv" | file layout changed: line endings changed',
+        `    e.g. "${path}" (lf to crlf)`,
+        'C4 | "task-*_eeg.json" | top level | keys renamed: "MiscChannelCount -> MISCChannelCount"',
+        '    e.g. "task-x_eeg.json" key "MiscChannelCount -> MISCChannelCount"',
       ].join("\n"),
     );
     expect(complete.size).toBe(4);
@@ -685,12 +686,12 @@ describe("renderClasses: what a class looks like", () => {
       { path: "x.json", before: "1", after: '"1"' },
     ]);
     expect(text.split("\n").filter((l) => l.startsWith("C"))).toEqual([
-      'C1 | dataset_description.json | key ".Funding[*].id" | values changed',
-      "C2 | x.json | the whole document | value types changed",
-      'C3 | dataset_description.json | key ".Authors" | values changed',
+      'C1 | "dataset_description.json" | key ".Funding[*].id" | values changed',
+      'C2 | "x.json" | the whole document | value types changed',
+      'C3 | "dataset_description.json" | key ".Authors" | values changed',
     ]);
     expect(text).toContain('    "[\\"A\\"]" -> "[\\"B\\"]" x1');
-    expect(text).toContain('    "1" -> "\\"1\\"" x1\n    e.g. x.json\n');
+    expect(text).toContain('    "1" -> "\\"1\\"" x1\n    e.g. "x.json"\n');
   });
 });
 
@@ -793,7 +794,7 @@ describe("renderClasses: the bounds", () => {
     expect(cut).toBe(1);
     expect([...shown]).toEqual(classes.slice(0, 120).map((c) => c.key));
     expect(text.endsWith("\n(1 more change classes not shown)")).toBe(true);
-    expect(text).toContain('\nC120 | sub-*/eeg/sub-*_task-*_channels.tsv | column "c119" |');
+    expect(text).toContain('\nC120 | "sub-*/eeg/sub-*_task-*_channels.tsv" | column "c119" |');
     expect(text).not.toContain("C121");
   });
 
@@ -1005,7 +1006,7 @@ describe("renderClasses: author text cannot forge the platform's lines", () => {
     expect(text).toContain('    "k\\nC2 | x = 1" x1');
     expect(text).toContain('    "\\u{202E}gnp.exe = 2" x1');
     expect(text).toContain('    "tab\\there = 3" x1');
-    expect(text).toContain("sub-*/eeg/sub-*_task-x C3 | forged_channels.tsv");
+    expect(text).toContain('"sub-*/eeg/sub-*_task-x\\nC3 | forged_channels.tsv"');
     expect(text).not.toMatch(/[\u{200B}\u{202E}\u{2028}\t]/u);
     // The marker a value holds is inside its quotes; only a real cut puts one after them.
     expect(text).not.toContain('"...(cut)"...(cut)');
@@ -1023,9 +1024,153 @@ describe("renderClasses: author text cannot forge the platform's lines", () => {
     const lines = text.split("\n").filter((l) => l.startsWith("C"));
     expect(classes.length).toBe(2);
     expect(lines).toEqual([
-      'C1 | sub-*/eeg/sub-*_task-*_channels.tsv | column "name" | rows relabeled: added prefix "\\\\u{FEFF}"',
-      'C2 | sub-*/eeg/sub-*_task-*_channels.tsv | column "name" | rows relabeled: added prefix "\\u{FEFF}"',
+      'C1 | "sub-*/eeg/sub-*_task-*_channels.tsv" | column "name" | rows relabeled: added prefix "\\\\u{FEFF}"',
+      'C2 | "sub-*/eeg/sub-*_task-*_channels.tsv" | column "name" | rows relabeled: added prefix "\\u{FEFF}"',
     ]);
+  });
+
+  /** A class line read by the grammar: its number, its shape as one quoted token, and the rest. */
+  const classLine = (line: string) => {
+    const head = /^C([0-9]+) \| /.exec(line);
+    if (head === null) return null;
+    const shape = readQuoted(line, head[0].length);
+    if (shape === null) return null;
+    return { shape: shape.value, cut: shape.cut, rest: line.slice(shape.end) };
+  };
+
+  test("a path that reads like a class line is one quoted token: it adds no field and no line", () => {
+    const forged = 'sub-01/x | column "name" | rows added | y_channels.tsv';
+    const { text } = rendered([
+      {
+        path: forged,
+        before: tsv(CHANNELS, ["A1", "EEG", "uV"]),
+        after: tsv(CHANNELS, ["A1", "EEG", "mV"]),
+      },
+    ]);
+    const lines = text.split("\n");
+    for (const line of lines) expect(line).toMatch(LINE);
+    expect(lines[0]).toBe(
+      'C1 | "sub-*/x | column \\"name\\" | rows added | y_channels.tsv" | column "units" | cells replaced',
+    );
+    const read = classLine(lines[0] as string);
+    expect(read?.shape).toBe(entityPattern(forged));
+    expect(read?.rest).toBe(' | column "units" | cells replaced');
+    expect(lines[2]).toBe(
+      '    e.g. "sub-01/x | column \\"name\\" | rows added | y_channels.tsv" "uV" -> "mV"',
+    );
+  });
+
+  test("a relocation target that holds a line break and a forged class line stays one quoted token", () => {
+    const path = channels(1);
+    const where = `sourcedata/evil\nC9 | forged | rows added/${path}`;
+    const { text, classes, complete } = rendered(
+      [
+        {
+          path,
+          before: tsv(CHANNELS, ["A1", "EEG", "uV"], ["R1", "EEG", "uV"]),
+          after: tsv(CHANNELS, ["A1", "EEG", "uV"]),
+        },
+      ],
+      [pooled(where, null, tsv(CHANNELS, ["R1", "EEG", "uV"]))],
+    );
+    expect(classes.map((c) => c.kind)).toEqual(["row_relocated"]);
+    const lines = text.split("\n");
+    for (const line of lines) expect(line).toMatch(LINE);
+    expect(lines.filter((l) => l.startsWith("C")).length).toBe(1);
+    const read = classLine(lines[0] as string);
+    const target =
+      ' | column "name" | rows removed and found verbatim in a row this pull request adds: to ';
+    expect(read?.rest.startsWith(target)).toBe(true);
+    const to = readQuoted(read?.rest ?? "", target.length);
+    expect(to?.value).toBe(entityPattern(where));
+    expect((read?.rest.length ?? 0) - (to?.end ?? 0)).toBe(0);
+    expect(complete.size).toBe(1);
+  });
+
+  test("invisible characters in a path are escaped, in the shape, the target and the examples", () => {
+    const odd = "\u{3164}\u{2800}\u{34F}\u{A0}";
+    const path = `sub-01/eeg${odd}/sub-01_task-x_channels.tsv`;
+    const { text } = rendered(
+      [
+        {
+          path,
+          before: tsv(CHANNELS, ["A1", "EEG", "uV"], ["R1", "EEG", "uV"]),
+          after: tsv(CHANNELS, ["A1", "EEG", "uV"]),
+        },
+      ],
+      [pooled(`sourcedata/kept${odd}/${path}`, null, tsv(CHANNELS, ["R1", "EEG", "uV"]))],
+    );
+    const escaped = "\\u{3164}\\u{2800}\\u{34F}\\u{A0}";
+    expect(text).toBe(
+      [
+        `C1 | "sub-*/eeg${escaped}/sub-*_task-*_channels.tsv" | column "name" | rows removed and found verbatim in a row this pull request adds: to "sourcedata/kept${escaped}/sub-*/eeg${escaped}/sub-*_task-*_channels.tsv"`,
+        `    e.g. "sub-01/eeg${escaped}/sub-01_task-x_channels.tsv" row "R1"`,
+      ].join("\n"),
+    );
+    for (const ch of odd) expect(text.includes(ch), ch.codePointAt(0)?.toString(16)).toBe(false);
+  });
+
+  test("a path of 300 code points is shown whole; one of 301 is cut, and its class is incomplete", () => {
+    // `sub-<id>/eeg/sub-01_task-x_channels.tsv` is 35 characters and the id; its shape stays short.
+    const at = (length: number) => `sub-${"1".repeat(length - 35)}/eeg/sub-01_task-x_channels.tsv`;
+    for (const [length, whole] of [
+      [300, true],
+      [301, false],
+    ] as const) {
+      const path = at(length);
+      expect(path.length).toBe(length);
+      const summary = summarize([
+        candidate(path, tsv(CHANNELS, ["A1", "EEG", "uV"]), tsv(CHANNELS, ["A1", "EEG", "mV"])),
+      ]);
+      const example = summary.text.split("\n")[2] as string;
+      const token = readQuoted(example, "    e.g. ".length);
+      expect(token?.cut, `${length}`).toBe(!whole);
+      expect(token?.value, `${length}`).toBe(path.slice(0, 300));
+      expect(summary.complete.size, `${length}`).toBe(whole ? 1 : 0);
+      expect(summary.accounted.size, `${length}`).toBe(whole ? 1 : 0);
+      expect(summary.facts.classes[0]?.endsWith(whole ? "| in full" : "| not shown in full")).toBe(
+        true,
+      );
+    }
+    // The shape at the same bound (a relocation target's is tested above, with its own path).
+    for (const [length, whole] of [
+      [300, true],
+      [301, false],
+    ] as const) {
+      // A directory that is no entity: the shape is the path itself.
+      const fit = `${"d".repeat(length - "/x_channels.tsv".length)}/x_channels.tsv`;
+      expect(fit.length).toBe(length);
+      const { complete } = rendered([
+        {
+          path: fit,
+          before: tsv(CHANNELS, ["A1", "EEG", "uV"]),
+          after: tsv(CHANNELS, ["A1", "EEG", "mV"]),
+        },
+      ]);
+      expect(complete.size, `shape ${length}`).toBe(whole ? 1 : 0);
+    }
+  });
+
+  test("a cut never splits a surrogate pair: an astral character at the bound is kept or left out whole", () => {
+    const lone = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+    // Code points 299 and 300 are astral, then 301 and 302: the cut falls between two pairs.
+    const base = "sub-01/eeg/";
+    for (const astral of [299, 300, 301]) {
+      const name = `${"a".repeat(astral - 1 - base.length)}\u{1F600}\u{1F600}_channels.tsv`;
+      const path = `${base}${name}`;
+      const { text } = rendered([
+        {
+          path,
+          before: tsv(CHANNELS, ["A1", "EEG", "uV"]),
+          after: tsv(CHANNELS, ["A1", "EEG", "mV"]),
+        },
+      ]);
+      expect(lone.test(text), `${astral}`).toBe(false);
+      const example = text.split("\n").find((l) => l.startsWith("    e.g. ")) as string;
+      const token = readQuoted(example, "    e.g. ".length);
+      expect(token?.cut).toBe(true);
+      expect([...(token?.value ?? "")].length).toBe(300);
+    }
   });
 });
 
@@ -1425,7 +1570,7 @@ describe("the facts block: numbers and the class table, the platform's words onl
       },
     ]);
     expect(classTable(classes, shown, complete)).toEqual([
-      "C1 cells replaced | 13 items in 1 file | values not all shown",
+      "C1 cells replaced | 13 items in 1 file | not shown in full",
       "C2 rows relabeled | 13 items in 1 file | in full",
       "C3 rows added | 1 item in 1 file | in full",
     ]);
@@ -1867,7 +2012,7 @@ describe("summarizeChanges: layout and respelling", () => {
     const summary = summarize([candidate("x.json", '{"a": "A/b"}', '{"a":"\\u0041\\/b"}')]);
     expect(formatDetails(summary)).toEqual(["json_respelled 1"]);
     expect(summary.text).toBe(
-      "C1 | x.json | file layout changed: same values, string escapes spelled differently\n    e.g. x.json",
+      'C1 | "x.json" | file layout changed: same values, string escapes spelled differently\n    e.g. "x.json"',
     );
     expect([...summary.accounted]).toEqual(["x.json"]);
   });
@@ -2018,7 +2163,7 @@ describe("summarizeChanges: order, determinism and loss facts", () => {
     expect(summary.facts.classes_shown).toBe(numbers.length);
     for (const line of summary.facts.classes) {
       expect(line).toMatch(
-        /^C[0-9]+ [a-z ]+ \| [0-9]+ items? in [0-9]+ files? \| (in full|values not all shown)$/,
+        /^C[0-9]+ [a-z ]+ \| [0-9]+ items? in [0-9]+ files? \| (in full|not shown in full)$/,
       );
     }
   });
@@ -2100,9 +2245,11 @@ describe("summarizeChanges: a bulk relabel shaped like on004551 #1", () => {
     expect(summary.accounted.size).toBe(30);
     expect(summary.loss).toEqual({ ...NO_LOSS, rowsRelocated: 45 });
     expect(summary.text.length).toBeLessThan(10_000);
-    const shape = "sub-*/ses-*/ieeg/sub-*_ses-*_task-*_run-*_channels.tsv";
+    const shape = '"sub-*/ses-*/ieeg/sub-*_ses-*_task-*_run-*_channels.tsv"';
+    const target =
+      '"sourcedata/channels-removed-2026-10-18/sub-*/ses-*/ieeg/sub-*_ses-*_task-*_run-*_channels.tsv"';
     expect(summary.text.split("\n").filter((l) => l.startsWith("C"))).toEqual([
-      `C1 | ${shape} | column "name" | rows removed and found verbatim in a row this pull request adds: to sourcedata/channels-removed-2026-10-18/${shape}`,
+      `C1 | ${shape} | column "name" | rows removed and found verbatim in a row this pull request adds: to ${target}`,
       `C2 | ${shape} | column "name" | rows relabeled: added prefix "POL "`,
       `C3 | ${shape} | row order changed`,
       `C4 | ${shape} | column "name" | rows relabeled: added prefix "EEG " and suffix "-Ref"`,
@@ -2232,7 +2379,7 @@ const ORACLE_VALUE_KINDS = new Set([
 
 /** The class line, after `C<n> | `, that an atom of `path` must be shown under. */
 function expectedHeader(path: string, atom: Atom): string {
-  const parts = [oracleShape(path)];
+  const parts = [oracleQuote(oracleShape(path))];
   if (atom.field !== null) {
     if (!atom.kind.startsWith("json_")) parts.push(`column ${oracleQuote(atom.field)}`);
     else {
@@ -2248,7 +2395,7 @@ function expectedHeader(path: string, atom: Atom): string {
       ...atom.rule,
       gaps: atom.rule.gaps.map((g) => oracleQuote(g).slice(1, -1)),
     });
-  } else if (atom.kind === "row_relocated") rule = `to ${atom.detail}`;
+  } else if (atom.kind === "row_relocated") rule = `to ${oracleQuote(atom.detail ?? "")}`;
   else if (atom.kind === "json_key_renamed") rule = oracleQuote(atom.detail ?? "");
   else if (atom.kind === "format") rule = ORACLE_FORMAT_WORDS[atom.detail ?? ""] ?? "?";
   parts.push(rule === null ? KIND_WORDS[atom.kind] : `${KIND_WORDS[atom.kind]}: ${rule}`);
@@ -2279,6 +2426,8 @@ interface ShownBlock {
   header: string;
   pairs: ShownPair[];
   more: number;
+  /** An example's path, its first token, was cut: the class line is then not whole. */
+  exampleCut: boolean;
 }
 
 /** The text read back into class blocks, by the grammar of the fenced block alone. */
@@ -2291,7 +2440,13 @@ function readBack(text: string): { blocks: ShownBlock[]; trailing: number; error
   for (const [i, line] of lines.entries()) {
     const head = /^C([0-9]+) \| (.*)$/.exec(line);
     if (head !== null) {
-      blocks.push({ n: Number(head[1]), header: head[2] as string, pairs: [], more: 0 });
+      blocks.push({
+        n: Number(head[1]),
+        header: head[2] as string,
+        pairs: [],
+        more: 0,
+        exampleCut: false,
+      });
       continue;
     }
     const tail = /^\(([0-9]+) more change classes not shown\)$/.exec(line);
@@ -2305,7 +2460,14 @@ function readBack(text: string): { blocks: ShownBlock[]; trailing: number; error
       errors.push(`a line no grammar allows: ${JSON.stringify(line)}`);
       continue;
     }
-    if (line.startsWith("    e.g. ")) continue;
+    if (line.startsWith("    e.g. ")) {
+      // An example starts with its file's path, one quoted token.
+      const where = readQuoted(line, "    e.g. ".length);
+      if (where === null)
+        errors.push(`an example whose path does not read: ${JSON.stringify(line)}`);
+      else if (where.cut) block.exampleCut = true;
+      continue;
+    }
     const more = /^ {4}\(([0-9]+) more distinct values not shown\)$/.exec(line);
     if (more !== null) {
       block.more = Number(more[1]);
@@ -2453,14 +2615,14 @@ function oracleViolations(c: OracleCase, summary: ChangeSummary, text: string): 
     const e = expected.get(block.header);
     if (e === undefined) {
       // Only a line that was cut may name no class: it can be no class's whole line.
-      if (!/\.\.\.\(cut\)|\[cut\]/.test(block.header))
+      if (!/\.\.\.\(cut\)/.test(block.header))
         out.push(`a class line no atom has: ${block.header}`);
       continue;
     }
     if (shownAt.has(block.header)) out.push(`a class line shown twice: ${block.header}`);
     shownAt.set(block.header, block);
     const display = DISPLAY_OF[e.kind];
-    let whole = block.more === 0;
+    let whole = block.more === 0 && !block.exampleCut;
     if (display === "pairs" || display === "removals") {
       for (const p of block.pairs) {
         if (p.cut) {

@@ -3,9 +3,8 @@
  * closed vocabulary they share (ADR 0092, ADR 0107; design `.context/plans/pr-review-change-summary.md`).
  *
  * **This module is pure.** No git, no file system, no clock of its own (the summary's deadline is
- * read from a clock the caller passes), and no import from the other
- * `pr-review-*` modules, so everything here can be tested on bytes and strings alone and cannot
- * reach the pull request's repository. The model is shown a summary of a change instead of every
+ * read from a clock the caller passes), and no import at all, so everything here can be tested on
+ * bytes and strings alone and cannot reach the pull request's repository. The model is shown a summary of a change instead of every
  * diff, and that is only safe if the summary loses nothing; the coverage argument (design section
  * 6.2) therefore starts from two promises made here, and every function below is written to keep
  * one of them.
@@ -40,9 +39,6 @@
  * class was shown completely) and counts the loss facts ({@link lossFactsOf}).
  * {@link summarizeChanges} runs all of it over a pull request's candidate files.
  */
-
-// The one import, and a pure one: how a path is made safe for the prompt is decided once, there.
-import { tidyPath } from "../../shared/untrusted-text";
 
 /**
  * The bounds of the summary. Every cap is a refusal or a cut, never a silent truncation: a file
@@ -3088,6 +3084,12 @@ export interface ChangeClass {
    * shown; every later class has none, and is never shown.
    */
   examples: readonly string[];
+  /**
+   * The path of one of the examples was cut at `maxValueChars` code points. The examples only
+   * illustrate, but a path is a token of the block's grammar like the shape (design section 8.2),
+   * so a cut one cuts the class line and the class is incomplete. False when there are no examples.
+   */
+  examplePathCut: boolean;
 }
 
 /** One file's atoms, as {@link classify} groups them. */
@@ -3158,12 +3160,22 @@ function pairOf(atom: Atom): string | null {
   }
 }
 
-/** A path as the summary prints it: control and line-breaking characters made spaces, and cut. */
-const PATH_CHARS = SUMMARY_LIMITS.maxValueChars;
+/**
+ * A path as the summary prints it: one quoted token, rendered exactly as a value is
+ * ({@link renderValue}: escaped, and cut at `maxValueChars` code points with the marker after the
+ * closing quote). A path may hold ` | `, quotes, a line break, an invisible character or the
+ * platform's own words, and still cannot add a field or a line, or read as another path. A cut
+ * path cuts the class line it is on (see {@link renderClass}).
+ */
+function renderPath(path: string): { text: string; cut: boolean } {
+  return renderValue(path);
+}
 
-/** What one example of an atom says, after its file's path: see {@link ChangeClass.examples}. */
-function exampleOf(path: string, atom: Atom): string {
-  const where = tidyPath(path, PATH_CHARS);
+/**
+ * What one example of an atom says, after its file's path as {@link renderPath} gave it: see
+ * {@link ChangeClass.examples}.
+ */
+function exampleOf(where: string, atom: Atom): string {
   const value = (v: string | null): string => renderValue(v ?? "").text;
   switch (atom.kind) {
     case "key_relabeled":
@@ -3290,19 +3302,25 @@ class ClassBuilder {
 
   finish(): ChangeClass[] {
     return [...this.byKey.values()].sort(renderOrder).map((entry, i) => {
-      const sources = [...entry.examples];
-      if (sources.length < SUMMARY_LIMITS.samplesPerClass && entry.spare !== null) {
+      const sources = i < SUMMARY_LIMITS.maxClasses ? [...entry.examples] : [];
+      if (
+        i < SUMMARY_LIMITS.maxClasses &&
+        sources.length < SUMMARY_LIMITS.samplesPerClass &&
+        entry.spare !== null
+      ) {
         sources.push(entry.spare);
       }
+      const shown = sources.map((source) => ({
+        where: renderPath(source.path),
+        atom: source.atom,
+      }));
       return {
         ...entry.identity,
         files: entry.files,
         items: entry.items,
         pairs: entry.pairs,
-        examples:
-          i < SUMMARY_LIMITS.maxClasses
-            ? sources.map((source) => exampleOf(source.path, source.atom))
-            : [],
+        examples: shown.map((example) => exampleOf(example.where.text, example.atom)),
+        examplePathCut: shown.some((example) => example.where.cut),
       };
     });
   }
@@ -3397,32 +3415,39 @@ function differenceNote(
  * showing is COMPLETE (section 5.3):
  *
  * ```text
- * C<n> | <shape> | <column "x" | key "path" | under "parent"> | <kind words>[: <rule>]
+ * C<n> | "<shape>" | <column "x" | key "path" | under "parent"> | <kind words>[: <rule>]
  *     "<before>" -> "<after>" x<count>        (pairs; a removal shows one side)
  *     (<k> more distinct values not shown)
- *     e.g. <path> <what changed>
+ *     e.g. "<path>" <what changed>
  * ```
  *
- * Every author text is rendered so that nothing from the pull request can start a line or imitate
- * the platform's words: values, column names, JSON paths and a rule's added text go through
- * {@link renderValue} (quoted, escaped, cut with a marker after the closing quote), and paths
- * through `tidyPath` (control and line-breaking characters made spaces).
+ * Every author text is rendered so that nothing from the pull request can start a line, add a
+ * field or imitate the platform's words: values, column names, JSON paths, a rule's added text and
+ * every file path (the shape, a relocation's target, an example's file) go through
+ * {@link renderValue} (quoted, escaped, cut with a marker after the closing quote), so each is one
+ * quoted token.
  *
  * A class is complete when nothing on its class line was cut (the shape, the field, a rename's
- * names, a relocation's target) and, for the `pairs` and `removals` kinds, every distinct pair is
- * shown and no shown value was cut. A cut anywhere a reader needs is a reason not to account for
- * the class's files, whatever the kind: the rule of a rule kind describes its members only if the
- * reader can read which column or key it applies to. Examples only illustrate, so a cut example
+ * names, a relocation's target, and the path of any of its examples, which is a token of the same
+ * grammar) and, for the `pairs` and `removals` kinds, every distinct pair is shown and no shown
+ * value was cut. A cut anywhere a reader needs is a reason not to account for the class's files,
+ * whatever the kind: the rule of a rule kind describes its members only if the reader can read
+ * which column or key it applies to. The examples only illustrate, so a value cut in an example
  * changes nothing.
  */
 function renderClass(n: number, c: ChangeClass): { text: string; complete: boolean } {
-  let lineCut = c.shape.length > PATH_CHARS;
+  let lineCut = c.examplePathCut;
   const quoted = (v: string): string => {
     const r = renderValue(v);
     if (r.cut) lineCut = true;
     return r.text;
   };
-  const parts = [`C${n}`, tidyPath(c.shape, PATH_CHARS)];
+  const path = (p: string): string => {
+    const r = renderPath(p);
+    if (r.cut) lineCut = true;
+    return r.text;
+  };
+  const parts = [`C${n}`, path(c.shape)];
   if (c.field !== null) {
     if (!c.kind.startsWith("json_")) parts.push(`column ${quoted(c.field)}`);
     else if (JSON_VALUE_KINDS.has(c.kind)) {
@@ -3439,8 +3464,8 @@ function renderClass(n: number, c: ChangeClass): { text: string; complete: boole
     });
     rule = ruleWords({ ...c.rule, gaps });
   } else if (c.kind === "row_relocated" && c.detail !== null) {
-    if (c.detail.length > PATH_CHARS) lineCut = true;
-    rule = `to ${tidyPath(c.detail, PATH_CHARS)}`;
+    // The shape of the path the rows were found at, a path like the class's own.
+    rule = `to ${path(c.detail)}`;
   } else if (c.kind === "json_key_renamed" && c.detail !== null) {
     rule = quoted(c.detail);
   } else if (c.kind === "format" && c.detail !== null) {
@@ -3729,8 +3754,11 @@ function counted(n: number, word: string): string {
 
 /**
  * The class table of the facts block: one line per SHOWN class, `C<n> <kind words> | <items> in
- * <files> | in full` or `values not all shown`, numbered as the fenced block numbers them. Only
- * the platform's words and counts, so a value cannot forge or change it.
+ * <files> | in full` or `not shown in full`, numbered as the fenced block numbers them. Only the
+ * platform's words and counts, so a value cannot forge or change it. `not shown in full` is said of
+ * every incomplete class, whatever made it so: a pair not shown, a value cut, or a token of its
+ * class line cut (its shape, field or target, or an example's path), so the words never name a
+ * cause the block does not have.
  */
 export function classTable(
   classes: readonly ChangeClass[],
@@ -3741,7 +3769,7 @@ export function classTable(
     .filter((c) => shown.has(c.key))
     .map(
       (c, i) =>
-        `C${i + 1} ${KIND_WORDS[c.kind]} | ${counted(c.items, "item")} in ${counted(c.files.size, "file")} | ${complete.has(c.key) ? "in full" : "values not all shown"}`,
+        `C${i + 1} ${KIND_WORDS[c.kind]} | ${counted(c.items, "item")} in ${counted(c.files.size, "file")} | ${complete.has(c.key) ? "in full" : "not shown in full"}`,
     );
 }
 

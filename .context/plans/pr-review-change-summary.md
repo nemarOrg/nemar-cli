@@ -473,8 +473,8 @@ A rendered class is **complete** when:
 - an **additive** kind is never needed for coverage, rendered or not.
 
 (Phase 3, the stricter reading: a class whose class line was cut is incomplete whatever its kind, because a rule describes its members only if the reader can read which column or key it applies to.
-The line is cut when its shape or a relocation's target is over 300 characters, or when its field, a rename's names or a rule's added text is cut by `renderValue`.
-A cut example changes nothing.)
+The line is cut when its shape, a relocation's target, its field, a rename's names or a rule's added text is cut by `renderValue`.
+Phase 3 review: every path is rendered by `renderValue` too, an example's file path included, and a cut example path cuts the class line as well, since a path is a token of the block's grammar; a value cut inside an example changes nothing.)
 
 ### 5.4 At the bounds
 
@@ -622,7 +622,8 @@ change_summary: {
 }
 ```
 
-The kind words come from a closed table (`KIND_WORDS`), the counts from the platform, and the completeness from section 5.3 (`in full`, `values not all shown`); no attacker text is in this block.
+The kind words come from a closed table (`KIND_WORDS`), the counts from the platform, and the completeness from section 5.3 (`in full`, `not shown in full`); no attacker text is in this block.
+(Phase 3 review: the incomplete word was `values not all shown`; it is `not shown in full` because a class is also incomplete when a token of its line is cut, and the word must not name a cause the block does not have.)
 (Phase 3: `classTable` writes `1 item` and `1 file` in the singular; `KIND_WORDS` gives every kind its own words, so a line names its kind exactly.)
 `fence()` already breaks any `<facts>` text inside fenced material, so the class table cannot be forged from a value.
 
@@ -643,10 +644,10 @@ fence(
 Each class renders as:
 
 ```text
-C<n> | <shape> | <column "x" | key path | parent path> | <rule words>
+C<n> | "<shape>" | <column "x" | key "path" | under "parent"> | <kind words>[: <rule>]
     "<before>" -> "<after>" x<count>          (paired kinds, at most 12 lines)
     (<k> more distinct values not shown)      (when cut)
-    e.g. <path> row "<key>" -> "<new key>"    (at most 2)
+    e.g. "<path>" row "<key>" -> "<new key>"  (at most 2)
 ```
 
 **Value rendering** (`renderValue`), so that what the model sees is unambiguous:
@@ -656,18 +657,23 @@ C<n> | <shape> | <column "x" | key path | parent path> | <rule words>
 - pairs that are equal after NFC normalization but not byte for byte (a precomposed letter against the letter and a combining mark) render alike and need the annotation below too (Phase 2);
 - when a pair's two rendered texts are equal after the fence's own replacements, or differ only in escaped characters, append `(first difference at character k: U+XXXX to U+YYYY)`, computed on the raw values.
 
-Paths and shapes go through `tidyPath`, as today.
+Paths and shapes are rendered with `renderValue` too (phase 3 review; the design first said `tidyPath`): a path is always one quoted token, so ` | `, quotes, the platform's own words or an invisible character in a path cannot add a field, a line or a look-alike path.
 Nothing from the pull request can start a line: values are escaped, so a newline in a value is `\n`.
 
 **As built (phase 3).**
-The class line is `C<n> | <shape> | <field> | <kind words>[: <rule>]`, where the field part is `column "x"` for a table, `key "<leaf path>"` (or `the whole document`) for a JSON value kind, `under "<parent path>"` (or `top level`) for a JSON key kind, and absent for the kinds without a field; the rule part is the relabel rule's words, `to <target shape>` for a relocation, the quoted `old -> new` of a rename, or the format word.
-Column names, JSON paths, rename names and a rule's added text are rendered with `renderValue` (a rule's added text is put where `ruleWords` puts its quotes), so a zero-width prefix and the six characters that spell its escape read differently.
+The class line is `C<n> | "<shape>" | <field> | <kind words>[: <rule>]`, where the field part is `column "x"` for a table, `key "<leaf path>"` (or `the whole document`) for a JSON value kind, `under "<parent path>"` (or `top level`) for a JSON key kind, and absent for the kinds without a field; the rule part is the relabel rule's words, `to "<target shape>"` for a relocation, the quoted `old -> new` of a rename, or the format word.
+An example line is `e.g. "<file path>"` and what in that file changed (`row "<key>"`, `"<before>" -> "<after>"`, `key "<name>"`, a column's count, a layout change).
+The shape, a relocation's target, every example's file path, column names, JSON paths, rename names and a rule's added text are rendered with `renderValue` (a rule's added text is put where `ruleWords` puts its quotes), so each path is one quoted token and a zero-width prefix and the six characters that spell its escape read differently.
+A cut in any of them, the example paths included, makes the class incomplete (section 5.3).
 A pair line is `"<before>" -> "<after>" x<count>`, a removal's `"<text>" x<count>`; the twelve shown are the most frequent, then by text.
 A pair gets the first-difference note when its rendered texts are equal, when its raw values differ only in characters the renderer escapes, when they are equal after NFC, or when they first differ at a character outside ASCII (so a Latin `a` and a Cyrillic one are annotated, case 10 of section 11); the last condition covers the NFC one, which is kept as the design states it.
 
-### 8.3 The example, computed from `on004551` #1
+### 8.3 The example, computed from a run shaped like `on004551` #1
 
-Facts (768 characters):
+Regenerated (phase 3 review) from a real run of the summary on the `on004551`-shaped test of `test/pr-review-change-summarize.unit.test.ts`, at 125 channel tables of 200 rows: names gain `POL `, four names in every table but the last are wrapped in `EEG ` and `-Ref`, three rows of every second table move verbatim to `sourcedata/channels-removed-2026-10-18/<same path>`, the kept rows are reversed, and two rows are added.
+The real pull request has the same five classes with its own counts (1,203 relocated rows in 56 files, 14,135 and 341 relabels, 2,043 added rows); the text below is the synthetic run's, character for character.
+
+Facts (774 characters):
 
 ```json
 "change_summary": {
@@ -678,42 +684,42 @@ Facts (768 characters):
   "classes_shown": 5,
   "classes_cut": 0,
   "rows_removed_not_found_elsewhere": 0,
-  "rows_removed_found_verbatim_in_sourcedata": 1203,
+  "rows_removed_found_verbatim_in_sourcedata": 186,
   "columns_with_values_removed": 0,
   "keys_removed_not_found_elsewhere": 0,
   "keys_moved_to_an_inherited_sidecar": 0,
   "values_emptied": 0,
   "classes": [
-    "C1 rows removed and found verbatim in a row this pull request adds | 1203 items in 56 files | in full",
-    "C2 rows relabeled | 14135 items in 125 files | in full",
+    "C1 rows removed and found verbatim in a row this pull request adds | 186 items in 62 files | in full",
+    "C2 rows relabeled | 24318 items in 125 files | in full",
     "C3 row order changed | 125 items in 125 files | in full",
-    "C4 rows relabeled | 341 items in 124 files | in full",
-    "C5 rows added | 2043 items in 125 files | in full"
+    "C4 rows relabeled | 496 items in 124 files | in full",
+    "C5 rows added | 250 items in 125 files | in full"
   ]
 }
 ```
 
-Fenced block (1,617 characters):
+Fenced block (1,576 characters):
 
 ```text
-C1 | sub-*/ses-*/ieeg/sub-*_ses-*_task-*_run-*_channels.tsv | column "name" | to sourcedata/channels-removed-2026-10-18/sub-*/ses-*/ieeg/sub-*_ses-*_task-*_run-*_channels.tsv
-    e.g. sub-001/ses-01/ieeg/sub-001_ses-01_task-sleep_run-01_channels.tsv row "B43"
-    e.g. sub-003/ses-01/ieeg/sub-003_ses-01_task-sleep_run-01_channels.tsv row "B15"
-C2 | sub-*/ses-*/ieeg/sub-*_ses-*_task-*_run-*_channels.tsv | column "name" | prefix "POL " added
-    e.g. sub-001/ses-01/ieeg/sub-001_ses-01_task-sleep_run-01_channels.tsv row "A3" -> "POL A3"
-    e.g. sub-002/ses-01/ieeg/sub-002_ses-01_task-sleep_run-01_channels.tsv row "A3" -> "POL A3"
-C3 | sub-*/ses-*/ieeg/sub-*_ses-*_task-*_run-*_channels.tsv | row order changed
-    e.g. sub-001/ses-01/ieeg/sub-001_ses-01_task-sleep_run-01_channels.tsv
-    e.g. sub-002/ses-01/ieeg/sub-002_ses-01_task-sleep_run-01_channels.tsv
-C4 | sub-*/ses-*/ieeg/sub-*_ses-*_task-*_run-*_channels.tsv | column "name" | prefix "EEG " and suffix "-Ref" added
-    e.g. sub-001/ses-01/ieeg/sub-001_ses-01_task-sleep_run-01_channels.tsv row "A1" -> "EEG A1-Ref"
-    e.g. sub-002/ses-01/ieeg/sub-002_ses-01_task-sleep_run-01_channels.tsv row "A1" -> "EEG A1-Ref"
-C5 | sub-*/ses-*/ieeg/sub-*_ses-*_task-*_run-*_channels.tsv | column "name" | rows added
-    e.g. sub-001/ses-01/ieeg/sub-001_ses-01_task-sleep_run-01_channels.tsv row "POL E"
-    e.g. sub-002/ses-01/ieeg/sub-002_ses-01_task-sleep_run-01_channels.tsv row "POL E"
+C1 | "sub-*/ses-*/ieeg/sub-*_ses-*_task-*_run-*_channels.tsv" | column "name" | rows removed and found verbatim in a row this pull request adds: to "sourcedata/channels-removed-2026-10-18/sub-*/ses-*/ieeg/sub-*_ses-*_task-*_run-*_channels.tsv"
+    e.g. "sub-002/ses-01/ieeg/sub-002_ses-01_task-sleep_run-01_channels.tsv" row "B13"
+    e.g. "sub-004/ses-01/ieeg/sub-004_ses-01_task-sleep_run-01_channels.tsv" row "B13"
+C2 | "sub-*/ses-*/ieeg/sub-*_ses-*_task-*_run-*_channels.tsv" | column "name" | rows relabeled: added prefix "POL "
+    e.g. "sub-001/ses-01/ieeg/sub-001_ses-01_task-sleep_run-01_channels.tsv" row "A1" -> "POL A1"
+    e.g. "sub-002/ses-01/ieeg/sub-002_ses-01_task-sleep_run-01_channels.tsv" row "A1" -> "POL A1"
+C3 | "sub-*/ses-*/ieeg/sub-*_ses-*_task-*_run-*_channels.tsv" | row order changed
+    e.g. "sub-001/ses-01/ieeg/sub-001_ses-01_task-sleep_run-01_channels.tsv"
+    e.g. "sub-002/ses-01/ieeg/sub-002_ses-01_task-sleep_run-01_channels.tsv"
+C4 | "sub-*/ses-*/ieeg/sub-*_ses-*_task-*_run-*_channels.tsv" | column "name" | rows relabeled: added prefix "EEG " and suffix "-Ref"
+    e.g. "sub-001/ses-01/ieeg/sub-001_ses-01_task-sleep_run-01_channels.tsv" row "Fp1" -> "EEG Fp1-Ref"
+    e.g. "sub-002/ses-01/ieeg/sub-002_ses-01_task-sleep_run-01_channels.tsv" row "Fp1" -> "EEG Fp1-Ref"
+C5 | "sub-*/ses-*/ieeg/sub-*_ses-*_task-*_run-*_channels.tsv" | column "name" | rows added
+    e.g. "sub-001/ses-01/ieeg/sub-001_ses-01_task-sleep_run-01_channels.tsv" row "POL E"
+    e.g. "sub-002/ses-01/ieeg/sub-002_ses-01_task-sleep_run-01_channels.tsv" row "POL E"
 ```
 
-Total 2,385 characters (about 700 tokens), against the 80,000 characters of diffs it replaces.
+Total 2,350 characters (about 700 tokens), against the 80,000 characters of diffs it replaces in the real pull request.
 The README and CHANGES diffs are still shown raw, and the remaining patch budget shows up to three accounted files as illustration (section 8.5).
 
 ### 8.4 The system prompt
@@ -989,7 +995,7 @@ Each case names how the design answers it; the test of section 12 that pins it i
     The summary is abandoned at its deadline (all-or-nothing) and the raw path runs as today; an abandoned summary never accounts for anything.
     Within one file, the relabel passes share a step budget and the keyless and JSON rename passes are linear (section 4.4), so no input makes one file's diff slow, and what the budget leaves unpaired is removed and added. [`deadline abandons`, `pairing budget`]
 17. **A value that forges a class line or the facts.**
-    Values are escaped (no newline), paths are `tidyPath`ed, the class table is in `<facts>`, and `fence()` breaks `<facts` and `<untrusted` in fenced text. [`forged class line`]
+    Values are escaped (no newline), paths are quoted and escaped like values (phase 3 review; first `tidyPath`ed), the class table is in `<facts>`, and `fence()` breaks `<facts` and `<untrusted` in fenced text. [`forged class line`]
 18. **Steering text in a cell.**
     It reaches the model only inside the fence, where the trust-boundary rule applies as to any content. [existing fence tests]
 19. **A mode or type change riding on a content change.**
