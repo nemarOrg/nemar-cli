@@ -458,6 +458,32 @@ describe("classify: examples", () => {
     expect(classes[0]?.examples).toEqual([`"${shape(1)}" "1" -> "2"`]);
   });
 
+  test("a removed column's count is printed as written when it is a whole number, and as unknown otherwise", () => {
+    const removed = (detail: string | null, field: string): Atom => ({
+      kind: "column_removed",
+      field,
+      rule: null,
+      detail,
+      before: null,
+      after: null,
+    });
+    const details: (string | null)[] = ["0", "12", null, "", "abc", "-1", "1.5", " 3"];
+    const classes = classify([
+      { path: "a.tsv", atoms: details.map((d, i) => removed(d, `c${i}`)) },
+    ]);
+    const printed = new Map(classes.map((c) => [c.field, c.examples[0]]));
+    expect(details.map((_, i) => printed.get(`c${i}`))).toEqual([
+      '"a.tsv" (0 non-missing values)',
+      '"a.tsv" (12 non-missing values)',
+      '"a.tsv" (unknown non-missing values)',
+      '"a.tsv" (unknown non-missing values)',
+      '"a.tsv" (unknown non-missing values)',
+      '"a.tsv" (unknown non-missing values)',
+      '"a.tsv" (unknown non-missing values)',
+      '"a.tsv" (unknown non-missing values)',
+    ]);
+  });
+
   test("examples are rendered: a key, a row, a column count, a layout change, a JSON key", () => {
     const files = atomsOf([
       {

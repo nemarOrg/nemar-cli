@@ -3236,8 +3236,12 @@ function exampleOf(where: string, atom: Atom): string {
     case "json_key_moved":
     case "json_key_renamed":
       return `${where} key ${value(atom.detail)}`;
-    case "column_removed":
-      return `${where} (${atom.detail ?? "0"} non-missing values)`;
+    case "column_removed": {
+      // The count as the diff wrote it, or `unknown` for one it could not have written, never a 0
+      // that is not there: a missing or unreadable count is a loss (see `heldValues`).
+      const count = atom.detail !== null && /^[0-9]+$/.test(atom.detail) ? atom.detail : "unknown";
+      return `${where} (${count} non-missing values)`;
+    }
     case "format":
       // The states are the platform's own words, except a mixed file's per-line pattern.
       return atom.detail === "line_ending_pattern" || atom.before === null || atom.after === null
