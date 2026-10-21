@@ -74,6 +74,7 @@ import {
   assembleReport,
   buildReviewMessages,
   buildScreenMessages,
+  platformFindings,
   readScreenAnswer,
 } from "./pr-review-prompt";
 
@@ -504,6 +505,9 @@ export async function reviewPullRequest(
 
   const all = { ...listing, ...gatherContent(repoDir, listing) };
   const evidence = buildEvidence(all, facts);
+  // The removals the change summary found and nothing in the pull request keeps: the platform's
+  // own findings, decided from git before the review is asked, which can only lower its answer.
+  const platform = platformFindings(all.summary);
   const reviewMessages = buildReviewMessages({
     facts: all,
     evidence,
@@ -518,10 +522,13 @@ export async function reviewPullRequest(
     observe,
     client,
   );
-  return assembleReport(screen.output, review.output, evidence, {
-    screen: screen.usage,
-    review: review.usage,
-  });
+  return assembleReport(
+    screen.output,
+    review.output,
+    evidence,
+    { screen: screen.usage, review: review.usage },
+    platform,
+  );
 }
 
 /** Review one pull request. Never throws: every failure is a fixed word. */

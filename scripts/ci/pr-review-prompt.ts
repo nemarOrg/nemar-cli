@@ -48,6 +48,7 @@ import {
   type Patch,
   classifyPath,
 } from "./pr-review-evidence";
+import type { ChangeSummary } from "./pr-review-summary";
 
 // The prompt's text tools live in `shared/untrusted-text.ts`, shared with the publication review
 // (ADR 0102); `tidy` and `tidyPath` are re-exported so every importer of this module keeps working.
@@ -476,6 +477,70 @@ function isRecordValue(x: unknown): x is Record<string, unknown> {
 }
 
 /**
+ * The most platform findings one report carries: one for rows and columns removed, one for keys
+ * removed, and room for one more kind the platform may come to decide from its own facts. Each is
+ * placed before the models' findings, so the room left for those is at least
+ * `MAX_FINDINGS - MAX_PLATFORM_FINDINGS - 3` (the script's three text findings), which is 2.
+ */
+export const MAX_PLATFORM_FINDINGS = 3;
+
+/** `1 row`, `2 rows`: a count and its noun, in the singular for exactly one. */
+function counted(k: number, one: string, many: string): string {
+  return `${k} ${k === 1 ? one : many}`;
+}
+
+/**
+ * The findings the platform adds from what the change summary computed itself, never from a model:
+ * a removal the summary found in a table or a JSON document that this pull request does not keep
+ * elsewhere (rows copied unchanged into sourcedata at the same path, a key kept with the same value
+ * in a sidecar that applies by inheritance). A removal can be right, a privacy correction for one,
+ * so the finding is a blocker on `no_degradation`, which lowers a pass to `unknown` and sends a
+ * person to confirm it; it never fails the review and never raises anything.
+ *
+ * Rows first, then keys. The note is a fixed template over the platform's counts, so no text of the
+ * pull request is in it: only letters, digits, spaces, commas and full stops, which the report's
+ * sanitizer keeps as they are, and at most 200 characters for any count below ten billion. The path
+ * is the first file, in code-unit order, with a removal; it goes to the finding of its file's kind
+ * (a table's to the rows, a JSON document's to the keys) and the other finding names none. The
+ * report's parser checks it like any finding's path.
+ *
+ * An abandoned summary, and one that found no removal, gives none.
+ */
+export function platformFindings(summary: ChangeSummary): ReviewFinding[] {
+  const loss = summary.loss;
+  const first = loss.firstBlockingPath;
+  const out: ReviewFinding[] = [];
+  if (loss.rowsRemoved + loss.columnsRemoved > 0) {
+    const parts: string[] = [];
+    if (loss.rowsRemoved > 0) {
+      parts.push(
+        `${counted(loss.rowsRemoved, "row", "rows")} removed from ${counted(loss.rowsRemovedFiles, "table", "tables")} and not copied unchanged into sourcedata at the same path`,
+      );
+    }
+    if (loss.columnsRemoved > 0) {
+      parts.push(`${counted(loss.columnsRemoved, "column", "columns")} with values removed`);
+    }
+    out.push({
+      criterion: "no_degradation",
+      severity: "blocker",
+      code: "data_removed",
+      path: first?.endsWith(".tsv") ? first : null,
+      note: `The platform found ${parts.join(", and ")}. A person confirms a removal.`,
+    });
+  }
+  if (loss.keysRemoved > 0) {
+    out.push({
+      criterion: "no_degradation",
+      severity: "blocker",
+      code: "metadata_removed",
+      path: first?.endsWith(".json") ? first : null,
+      note: `The platform found ${counted(loss.keysRemoved, "key with a value", "keys with values")} removed from ${counted(loss.keysRemovedFiles, "JSON file", "JSON files")} and not kept, with the same value, in a sidecar that applies by inheritance. A person confirms a removal.`,
+    });
+  }
+  return out;
+}
+
+/**
  * The report of a review that ended at the facts (ADR 0107): the naming rule had already failed the
  * pull request, or could not check its dataset's new name, so no model was asked. Nothing was
  * assessed, so every criterion is `unknown`; the rules of `factsOf` fail the ones the naming fact
@@ -511,19 +576,28 @@ export function assembleFactsReport(evidence: ReviewEvidence): PrReviewReport {
  *    `description_not_misleading` is `misleading_body`, both decided by the script from the review's
  *    booleans. A text judgment that fails without a finding gets the script's own, in plain words.
  *
- * The models' findings beyond the cap are dropped here rather than failing the review, after room
- * is made for the script's added findings; everything else that does not fit is an error the caller
- * reports as `model_invalid`.
+ * `platform` holds the platform's own findings ({@link platformFindings}), which exist only for a
+ * full report: the content they come from is read only after the screen let the pull request
+ * through, so a screen report given any is refused. They go FIRST, before the models' findings, and
+ * the models' findings are cut to the room left after them and after the script's added findings,
+ * so no model output can push one out. The parser trims the last findings when it adds one for a
+ * criterion that fails with none, and it lowers a `pass` criterion that has a blocker before it
+ * trims, so a platform finding has already lowered `no_degradation` whatever is trimmed.
+ *
+ * The models' findings beyond the room are dropped here rather than failing the review; everything
+ * else that does not fit is an error the caller reports as `model_invalid`.
  */
 export function assembleReport(
   screenOutput: unknown,
   reviewOutput: unknown | null,
   evidence: ReviewEvidence,
   usage: ReviewUsage,
+  platform: readonly ReviewFinding[] = [],
 ): PrReviewReport {
   const screen = readScreenAnswer(screenOutput);
   if (screen.decision === "reject") {
     if (reviewOutput !== null || usage.review !== null) throw new PrReviewReportError("bad_stage");
+    if (platform.length > 0) throw new PrReviewReportError("bad_stage");
     return parsePrReviewReport({
       v: REPORT_VERSION,
       stage: "screen",
@@ -555,6 +629,11 @@ export function assembleReport(
   if (!isRecordValue(reviewOutput) || usage.review === null) {
     throw new PrReviewReportError("bad_stage");
   }
+  // More than the platform can make is this script's own mistake, not the model's: a plain error,
+  // which the job reports as `workflow_failed`.
+  if (platform.length > MAX_PLATFORM_FINDINGS) {
+    throw new Error("assembleReport: more platform findings than MAX_PLATFORM_FINDINGS");
+  }
   const m = reviewOutput;
   const answers = isRecordValue(m.criteria) ? m.criteria : {};
   for (const flag of [m.title_ok, m.body_ok, m.misleading_body]) {
@@ -583,8 +662,10 @@ export function assembleReport(
   if (misleading && !said(["description_misleading"])) {
     added.push({ ...UNEXPLAINED_TEXT_FINDING.misleading, path: null });
   }
+  // At least 2: the platform makes at most three findings and the script adds at most three.
+  const room = MAX_FINDINGS - platform.length - added.length;
   const findings = Array.isArray(modelFindings)
-    ? [...modelFindings.slice(0, MAX_FINDINGS - added.length), ...added]
+    ? [...platform, ...modelFindings.slice(0, room), ...added]
     : modelFindings;
 
   return parsePrReviewReport({

@@ -72,6 +72,7 @@ import {
 } from "../scripts/ci/pr-review-evidence";
 import {
   MAX_BODY_CHARS,
+  MAX_PLATFORM_FINDINGS,
   REVIEW_OUTPUT_SCHEMA,
   REVIEW_SYSTEM_PROMPT,
   SCREEN_OUTPUT_SCHEMA,
@@ -80,19 +81,31 @@ import {
   buildReviewMessages,
   buildScreenMessages,
   fence,
+  platformFindings,
   tidy,
 } from "../scripts/ci/pr-review-prompt";
-import { ABANDONED_SUMMARY, EMPTY_SUMMARY, NO_LOSS } from "../scripts/ci/pr-review-summary";
+import {
+  ABANDONED_SUMMARY,
+  type ChangeSummary,
+  EMPTY_SUMMARY,
+  type LossFacts,
+  NO_LOSS,
+} from "../scripts/ci/pr-review-summary";
 import {
   FINDING_CODES,
+  MAX_FINDINGS,
+  NOTE_MAX,
   type PrReviewReport,
   PrReviewReportError,
+  type ReviewFinding,
   factsOf,
   parseCallbackOutcome,
   parsePrReviewReport,
+  parseStoredPrReviewReport,
   renderCheck,
   verdictOf,
 } from "../shared/pr-review";
+import { sanitizeNote } from "../shared/untrusted-text";
 import {
   type StandInMessage,
   cutShortReply,
@@ -242,10 +255,15 @@ const USAGE = {
 
 /**
  * A full report from a review answer, the way the job assembles one after the screen let the pull
- * request through. `answer` is the review's output (three questions and four judgments).
+ * request through. `answer` is the review's output (three questions and four judgments), and
+ * `platform` the platform's own findings, which the job passes beside it.
  */
-function full(answer: unknown, e: ReturnType<typeof buildEvidence>): PrReviewReport {
-  return assembleReport(PROCEED, answer, e, USAGE);
+function full(
+  answer: unknown,
+  e: ReturnType<typeof buildEvidence>,
+  platform: readonly ReviewFinding[] = [],
+): PrReviewReport {
+  return assembleReport(PROCEED, answer, e, USAGE, platform);
 }
 
 /** A Messages API reply whose one text block holds `text`, streamed when the request streams. */
@@ -4852,6 +4870,421 @@ describe("the change summary keeps to its deadline, and leaves the raw path as i
       bulkTable(3),
     ]);
   }, 60_000);
+});
+
+// ---------------------------------------------------------------------------------------------
+// The change summary in the report: the platform's own findings
+// ---------------------------------------------------------------------------------------------
+
+/** The channel table and the sidecar of subject `s` in the fixtures below. */
+const tableOf = (s: string): string => `${s}/eeg/${s}_task-rest_channels.tsv`;
+const sidecarOf = (s: string): string => `${s}/eeg/${s}_task-rest_eeg.json`;
+
+/**
+ * A clean release of a dataset made of `base`, its description and its change log: the version is
+ * raised and CHANGES gains its entry, so whatever the review says of `edit`, which the release also
+ * applies, nothing else in the pull request keeps it from passing.
+ */
+function releaseChanging(
+  name: string,
+  base: Record<string, string>,
+  edit: (dir: string) => void,
+): Repo {
+  return changed(
+    name,
+    {
+      "dataset_description.json": desc("1.0.0"),
+      CHANGES: "1.0.0 2026-01-01\n - Initial release\n",
+      ...base,
+    },
+    (dir) => {
+      release(dir);
+      edit(dir);
+    },
+  );
+}
+
+/** Two subjects, each with a two-row channel table and a two-key sidecar. */
+const TWO_SUBJECTS: Record<string, string> = Object.fromEntries(
+  ["sub-01", "sub-02"].flatMap((s) => [
+    [tableOf(s), "name\ttype\nCz\tEEG\nPz\tEEG\n"],
+    [sidecarOf(s), '{"TaskName":"rest","SamplingFrequency":500}'],
+  ]),
+);
+
+/**
+ * A release of {@link TWO_SUBJECTS} that removes the `Cz` row from the tables of `rowsFrom` and the
+ * `TaskName` key from the sidecars of `keysFrom`, and keeps neither anywhere else.
+ */
+function removing(name: string, rowsFrom: readonly string[], keysFrom: readonly string[]): Repo {
+  return releaseChanging(name, TWO_SUBJECTS, (dir) => {
+    for (const s of rowsFrom) write(dir, tableOf(s), "name\ttype\nPz\tEEG\n");
+    for (const s of keysFrom) write(dir, sidecarOf(s), '{"SamplingFrequency":500}');
+  });
+}
+
+/** A summary whose loss facts are `loss` and nothing else: for counts no repository could reach. */
+function summaryLosing(loss: Partial<LossFacts>): ChangeSummary {
+  return { ...EMPTY_SUMMARY, loss: { ...NO_LOSS, ...loss } };
+}
+
+/** The word a report error carries, or a note on why there was none. */
+function reportErrorOf(fn: () => unknown): string {
+  try {
+    fn();
+  } catch (e) {
+    return e instanceof PrReviewReportError ? e.code : "not a PrReviewReportError";
+  }
+  return "no error";
+}
+
+describe("the platform's findings from the change summary", () => {
+  const facts = new Map<string, ReturnType<typeof gatherGitFacts>>();
+  /** The facts of a {@link removing} release, built once per name. */
+  const removed = (name: string, rowsFrom: readonly string[], keysFrom: readonly string[]) => {
+    let f = facts.get(name);
+    if (f === undefined) {
+      const r = removing(name, rowsFrom, keysFrom);
+      f = gatherGitFacts(r.dir, r.base, r.head);
+      facts.set(name, f);
+    }
+    return f;
+  };
+  /** A row removed from sub-01's table and a key from its sidecar: the table sorts first. */
+  const both = () => removed("pf-both", ["sub-01"], ["sub-01"]);
+  /** A model finding that names nothing the platform found, told apart by its note. */
+  const modelFinding = (i: number, criterion = "material_improvement") => ({
+    criterion,
+    severity: "note",
+    code: "other",
+    path: null,
+    note: `M${i}`,
+  });
+  /** A finding by its code, or by its note when its code is `other`. */
+  const label = (f: ReviewFinding) => (f.code === "other" ? f.note : f.code);
+
+  test("the notes are numbers in fixed words, at most 200 characters at any count", () => {
+    const notes = (loss: Partial<LossFacts>) =>
+      platformFindings(summaryLosing(loss)).map((f) => `${f.code}: ${f.note}`);
+    expect(notes({ rowsRemoved: 1, rowsRemovedFiles: 1 })).toEqual([
+      "data_removed: The platform found 1 row removed from 1 table and not copied unchanged into sourcedata at the same path. A person confirms a removal.",
+    ]);
+    expect(notes({ rowsRemoved: 2, rowsRemovedFiles: 2, columnsRemoved: 1 })).toEqual([
+      "data_removed: The platform found 2 rows removed from 2 tables and not copied unchanged into sourcedata at the same path, and 1 column with values removed. A person confirms a removal.",
+    ]);
+    // A column removed with its values is a loss by itself.
+    expect(notes({ columnsRemoved: 2 })).toEqual([
+      "data_removed: The platform found 2 columns with values removed. A person confirms a removal.",
+    ]);
+    expect(notes({ keysRemoved: 1, keysRemovedFiles: 1 })).toEqual([
+      "metadata_removed: The platform found 1 key with a value removed from 1 JSON file and not kept, with the same value, in a sidecar that applies by inheritance. A person confirms a removal.",
+    ]);
+    expect(notes({ keysRemoved: 2, keysRemovedFiles: 2 })).toEqual([
+      "metadata_removed: The platform found 2 keys with values removed from 2 JSON files and not kept, with the same value, in a sidecar that applies by inheritance. A person confirms a removal.",
+    ]);
+    // What was kept elsewhere, or emptied, is not a removal.
+    expect(notes({ rowsRelocated: 5, keysMoved: 5, valuesEmptied: 5 })).toEqual([]);
+
+    // Every count at ten digits, past anything a pull request can hold: still a fixed point of the
+    // report's sanitizer, so the note is shown exactly as it was made, and within its limit.
+    const most = 9_999_999_999;
+    const largest = platformFindings(
+      summaryLosing({
+        rowsRemoved: most,
+        rowsRemovedFiles: most,
+        columnsRemoved: most,
+        keysRemoved: most,
+        keysRemovedFiles: most,
+      }),
+    );
+    expect(largest.map((f) => f.code)).toEqual(["data_removed", "metadata_removed"]);
+    const counts = [
+      {
+        rowsRemoved: 1,
+        rowsRemovedFiles: 1,
+        columnsRemoved: 1,
+        keysRemoved: 1,
+        keysRemovedFiles: 1,
+      },
+      {
+        rowsRemoved: 2,
+        rowsRemovedFiles: 2,
+        columnsRemoved: 2,
+        keysRemoved: 2,
+        keysRemovedFiles: 2,
+      },
+    ];
+    for (const f of [...largest, ...counts.flatMap((c) => platformFindings(summaryLosing(c)))]) {
+      expect(f).toMatchObject({ criterion: "no_degradation", severity: "blocker", path: null });
+      expect(f.note.length, f.note).toBeLessThanOrEqual(NOTE_MAX);
+      expect(f.note).toMatch(/^[A-Za-z0-9 ,.]+$/);
+      expect(sanitizeNote(f.note, NOTE_MAX)).toBe(f.note);
+    }
+    for (const f of largest) expect(f.note).toContain(`${most} `);
+  });
+
+  test("the path goes to the finding of its file's kind, and the other names none", () => {
+    const found = (f: ReturnType<typeof gatherGitFacts>) =>
+      platformFindings(f.summary).map((p) => `${p.code} ${p.path}`);
+    const row = removed("pf-row", ["sub-01"], []);
+    expect(row.summary.loss.firstBlockingPath).toBe(tableOf("sub-01"));
+    expect(found(row)).toEqual([`data_removed ${tableOf("sub-01")}`]);
+    const key = removed("pf-key", [], ["sub-01"]);
+    expect(key.summary.loss.firstBlockingPath).toBe(sidecarOf("sub-01"));
+    expect(found(key)).toEqual([`metadata_removed ${sidecarOf("sub-01")}`]);
+    // Both kinds: the first path in code-unit order is a table, so the keys' finding names none.
+    expect(both().summary.loss.firstBlockingPath).toBe(tableOf("sub-01"));
+    expect(found(both())).toEqual([`data_removed ${tableOf("sub-01")}`, "metadata_removed null"]);
+    // And the other way round: sub-01's sidecar sorts before sub-02's table.
+    const keyFirst = removed("pf-key-first", ["sub-02"], ["sub-01"]);
+    expect(keyFirst.summary.loss.firstBlockingPath).toBe(sidecarOf("sub-01"));
+    expect(found(keyFirst)).toEqual([
+      "data_removed null",
+      `metadata_removed ${sidecarOf("sub-01")}`,
+    ]);
+
+    // A path the report may not show is dropped by its parser, as a model finding's is.
+    const odd = "sub-01/eeg/sub-01_task-a b_channels.tsv";
+    const r = releaseChanging("pf-odd-path", { [odd]: "name\ttype\nCz\tEEG\nPz\tEEG\n" }, (dir) =>
+      write(dir, odd, "name\ttype\nPz\tEEG\n"),
+    );
+    const oddFacts = gatherGitFacts(r.dir, r.base, r.head);
+    const platform = platformFindings(oddFacts.summary);
+    expect(platform.map((p) => `${p.code} ${p.path}`)).toEqual([`data_removed ${odd}`]);
+    const report = full(allPass, buildEvidence(oddFacts, NO_TEXT_PROBLEMS), platform);
+    expect(report.findings[0]).toMatchObject({ code: "data_removed", path: null });
+    expect(verdictOf(report)).toBe("uncertain");
+  });
+
+  test("no removal, no platform finding: nothing summarized, an abandoned summary, or every removal kept", () => {
+    expect(platformFindings(EMPTY_SUMMARY)).toEqual([]);
+    expect(platformFindings(ABANDONED_SUMMARY)).toEqual([]);
+    // A row copied unchanged into sourcedata at the same path, and a key moved, with its value, to
+    // the root sidecar, which applies to the file by inheritance.
+    const r = releaseChanging("pf-kept", TWO_SUBJECTS, (dir) => {
+      write(dir, tableOf("sub-01"), "name\ttype\nPz\tEEG\n");
+      write(dir, `sourcedata/channels-removed/${tableOf("sub-01")}`, "name\ttype\nCz\tEEG\n");
+      write(dir, sidecarOf("sub-01"), '{"SamplingFrequency":500}');
+      write(dir, "task-rest_eeg.json", '{"TaskName":"rest"}');
+    });
+    const { summary } = gatherGitFacts(r.dir, r.base, r.head);
+    expect(summary.loss).toEqual({ ...NO_LOSS, rowsRelocated: 1, keysMoved: 1 });
+    expect(platformFindings(summary)).toEqual([]);
+  });
+
+  test("platform findings come first, survive eight model findings, and only lower", () => {
+    const e = buildEvidence(both(), NO_TEXT_PROBLEMS);
+    const platform = platformFindings(both().summary);
+    expect(platform.map((f) => f.code)).toEqual(["data_removed", "metadata_removed"]);
+    const eight = Array.from({ length: MAX_FINDINGS }, (_, i) => modelFinding(i));
+    const rows: string[][] = [];
+    for (const answer of ["pass", "fail", "unknown"]) {
+      const said = reviewOutput({
+        criteria: {
+          no_degradation: answer,
+          advances_revision: "pass",
+          material_improvement: "pass",
+        },
+        findings: eight,
+      });
+      const without = full(said, e);
+      const withPlatform = full(said, e, platform);
+      expect(withPlatform.findings.map(label)).toEqual([
+        "data_removed",
+        "metadata_removed",
+        "M0",
+        "M1",
+        "M2",
+        "M3",
+        "M4",
+        "M5",
+      ]);
+      // Nothing else the review said moved.
+      expect({ ...withPlatform.criteria, no_degradation: null }).toEqual({
+        ...without.criteria,
+        no_degradation: null,
+      });
+      rows.push([
+        answer,
+        without.criteria.no_degradation,
+        verdictOf(without),
+        withPlatform.criteria.no_degradation,
+        verdictOf(withPlatform),
+      ]);
+    }
+    // The answer, then without and with the platform's findings: each a lowering or no change.
+    expect(rows).toEqual([
+      ["pass", "pass", "pass", "unknown", "uncertain"],
+      ["fail", "fail", "fail", "fail", "fail"],
+      ["unknown", "unknown", "uncertain", "unknown", "uncertain"],
+    ]);
+  });
+
+  test("they survive the most room the parser can need for criteria that fail without a finding", () => {
+    // Four criteria fail with no finding the parser keeps: two the review failed silently, and two
+    // text judgments whose findings came last and were cut for room. In a full report the screen's
+    // criterion passes and the platform's findings explain the first question, so four is the most.
+    const findings = [
+      ...Array.from({ length: 6 }, (_, i) => modelFinding(i, "no_degradation")),
+      {
+        ...modelFinding(6, "clear_title_and_description"),
+        severity: "blocker",
+        code: "title_placeholder",
+      },
+      {
+        ...modelFinding(7, "description_not_misleading"),
+        severity: "blocker",
+        code: "description_misleading",
+      },
+    ];
+    const report = full(
+      reviewOutput({
+        criteria: {
+          no_degradation: "pass",
+          advances_revision: "fail",
+          material_improvement: "fail",
+        },
+        title_ok: false,
+        misleading_body: true,
+        findings,
+      }),
+      buildEvidence(both(), NO_TEXT_PROBLEMS),
+      platformFindings(both().summary),
+    );
+    expect(report.findings.map(label)).toEqual([
+      "data_removed",
+      "metadata_removed",
+      "M0",
+      "M1",
+      "No detail given.",
+      "No detail given.",
+      "No detail given.",
+      "No detail given.",
+    ]);
+    expect(report.findings.slice(4).map((f) => f.criterion)).toEqual([
+      "advances_revision",
+      "material_improvement",
+      "clear_title_and_description",
+      "description_not_misleading",
+    ]);
+    expect(report.criteria.no_degradation).toBe("unknown");
+  });
+
+  test("a stored report re-derives the same verdict, and only a full report takes platform findings", () => {
+    const e = buildEvidence(both(), NO_TEXT_PROBLEMS);
+    const platform = platformFindings(both().summary);
+    const report = full(allPass, e, platform);
+    // The Worker stores the report and reads it back with its own parser: the lowered criterion is
+    // in the stored report, so the verdict it derives is the job's.
+    const stored = parseStoredPrReviewReport(JSON.parse(JSON.stringify(report)));
+    expect(stored).toEqual(report);
+    expect(verdictOf(report)).toBe("uncertain");
+    expect(verdictOf(stored)).toBe("uncertain");
+    expect(verdictOf(parsePrReviewReport(JSON.parse(JSON.stringify(report))))).toBe("uncertain");
+
+    // A screen report: the content the findings come from is read only after the screen.
+    const screenUsage = { screen: USAGE.screen, review: null };
+    expect(assembleReport(REJECT, null, e, screenUsage).stage).toBe("screen");
+    expect(reportErrorOf(() => assembleReport(REJECT, null, e, screenUsage, platform))).toBe(
+      "bad_stage",
+    );
+    // Findings that are not a list are the model's error, platform findings or not.
+    expect(reportErrorOf(() => full({ ...allPass, findings: "none" }, e, platform))).toBe(
+      "bad_findings",
+    );
+    // More than the platform can make is the script's own error, never the model's.
+    const most = Array.from(
+      { length: MAX_PLATFORM_FINDINGS },
+      (_, i) => platform[i % 2] as ReviewFinding,
+    );
+    expect(full(allPass, e, most).findings).toHaveLength(MAX_PLATFORM_FINDINGS);
+    expect(reportErrorOf(() => full(allPass, e, [...most, platform[0] as ReviewFinding]))).toBe(
+      "not a PrReviewReportError",
+    );
+  });
+
+  test("a removal the summary accounts for is not a pass", () => {
+    const row = removed("pf-row", ["sub-01"], []);
+    // The table counts as read: its change was accounted for exactly, the removed row included.
+    expect(row.summary.accounted.has(tableOf("sub-01"))).toBe(true);
+    expect(row.readIncomplete).toBe(false);
+    const e = buildEvidence(row, NO_TEXT_PROBLEMS);
+    expect(e.truncated).toBe(false);
+    // Without the platform's finding, the review's word would pass a row nobody kept.
+    expect(verdictOf(full(allPass, e))).toBe("pass");
+    const report = full(allPass, e, platformFindings(row.summary));
+    expect(report.criteria.no_degradation).toBe("unknown");
+    expect(verdictOf(report)).toBe("uncertain");
+  });
+
+  test("a removed row among 500 relabels is a blocker finding and the verdict is uncertain", async () => {
+    const table = tableOf("sub-01");
+    const kept = Array.from({ length: 500 }, (_, k) => `Ch${k}`);
+    const r = releaseChanging(
+      "pf-run-500",
+      { [table]: `name\ttype\n${[...kept, "Ch500"].map((n) => `${n}\tEEG`).join("\n")}\n` },
+      (dir) => write(dir, table, `name\ttype\n${kept.map((n) => `POL ${n}\tEEG`).join("\n")}\n`),
+    );
+    const prJson = join(root, "pf-run-500.json");
+    const repo = { full_name: "nemarDatasets/nm000460" };
+    writeFileSync(
+      prJson,
+      JSON.stringify({
+        state: "open",
+        title: "Prefix the channel names with POL",
+        body: "Every channel name gains the POL prefix the amplifier uses.",
+        base: { ref: "main", repo },
+        head: { sha: r.head, repo },
+      }),
+    );
+    const res = await runReview({
+      repoDir: r.dir,
+      base: r.base,
+      head: r.head,
+      fetchedHead: r.head,
+      prJson,
+    });
+    expect(res.outcome).toBe("reported");
+    if (res.outcome !== "reported") return;
+    // The review answered that nothing was lost; the platform's finding, first, says otherwise.
+    expect(STAND_IN_OUTPUT.criteria).toMatchObject({ no_degradation: "pass" });
+    expect(res.report.findings[0]).toEqual({
+      criterion: "no_degradation",
+      severity: "blocker",
+      code: "data_removed",
+      path: table,
+      note: "The platform found 1 row removed from 1 table and not copied unchanged into sourcedata at the same path. A person confirms a removal.",
+    });
+    expect(res.report.evidence.truncated).toBe(false);
+    expect(res.report.criteria.no_degradation).toBe("unknown");
+    expect(verdictOf(res.report)).toBe("uncertain");
+  });
+
+  test("a platform finding states the removal once, and the removed file still shows", () => {
+    const r = releaseChanging("pf-check-text", TWO_SUBJECTS, (dir) => {
+      write(dir, tableOf("sub-01"), "name\ttype\nPz\tEEG\n");
+      unlinkSync(join(dir, sidecarOf("sub-02")));
+    });
+    const f = gatherGitFacts(r.dir, r.base, r.head);
+    const e = buildEvidence(f, NO_TEXT_PROBLEMS);
+    const check = renderCheck({
+      kind: "reported",
+      report: full(allPass, e, platformFindings(f.summary)),
+    });
+    // The finding says it, so the fact of the removed sidecar adds no second line.
+    expect(check.text.match(/Data removed/g)).toHaveLength(1);
+    expect(check.text).toContain(
+      `- **Data removed** (\`${tableOf("sub-01")}\`), blocker: The platform found 1 row removed from 1 table and not copied unchanged into sourcedata at the same path. A person confirms a removal.`,
+    );
+    // The removed sidecar is still in the account of what changed and in the file list.
+    expect(check.summary).toContain("| Sidecars and tables | 0 | 1 | 1 |");
+    expect(check.text).toContain(`- removed \`${sidecarOf("sub-02")}\``);
+    // The control: without the platform's finding, the removed file is stated by its own fact.
+    const control = renderCheck({ kind: "reported", report: full(allPass, e) });
+    expect(control.text).toContain(
+      "- **Data removed**, concern: found from the files, not by the reviewer.",
+    );
+  });
 });
 
 describe("the content pass on the job's blob-less clone", () => {
