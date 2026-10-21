@@ -3960,6 +3960,15 @@ function frozenSet(): ReadonlySet<string> {
 export const EMPTY_SUMMARY: ChangeSummary = emptySummary(false, frozenSet);
 
 /**
+ * The summary of a pull request whose summary was not made: its caller reached the line it starts
+ * by with too little time left, or could not read the blobs it is made from. Abandoned and empty,
+ * exactly what {@link summarizeChanges} returns past its deadline, so it accounts for nothing and
+ * leaves the review where it was without a summary; a caller can say so without faking a deadline
+ * that has passed. One object shared by every caller, frozen like {@link EMPTY_SUMMARY}.
+ */
+export const ABANDONED_SUMMARY: ChangeSummary = emptySummary(true, frozenSet);
+
+/**
  * JSON text with the whitespace between its tokens removed (space, tab, LF and CR outside a
  * string; a string is copied exactly, escapes and all). Two documents whose trees are equal and
  * whose texts differ after this differ only in how a string was spelled, which is the

@@ -12,6 +12,7 @@
 
 import { describe, expect, test } from "bun:test";
 import {
+  ABANDONED_SUMMARY,
   type Atom,
   CLASS_KINDS,
   type ChangeClass,
@@ -2537,6 +2538,59 @@ describe("summarizeChanges: the deadline abandons the whole summary", () => {
     (abandoned.accounted as Set<string>).add("sub-01/x.tsv");
     expect(abandoned.accounted.size).toBe(1);
     expect(EMPTY_SUMMARY.accounted.size).toBe(0);
+  });
+
+  // The summary a caller returns when it does not start one, or cannot read what one is made of:
+  // the same three properties as the empty summary's, and abandoned.
+
+  test("the abandoned summary is abandoned and holds nothing: what a run past its deadline returns", () => {
+    expect(ABANDONED_SUMMARY.abandoned).toBe(true);
+    expect(ABANDONED_SUMMARY.text).toBe("");
+    abandonedShape(ABANDONED_SUMMARY);
+    const past = summarizeChanges({ candidates: files(), pool: [], deadline: 0, now: () => 0 });
+    expect(ABANDONED_SUMMARY.facts).toEqual(past.facts);
+    expect(ABANDONED_SUMMARY.loss).toEqual(past.loss);
+    expect(ABANDONED_SUMMARY.files).toEqual(past.files);
+    expect(ABANDONED_SUMMARY.classes).toEqual(past.classes);
+    expect(ABANDONED_SUMMARY).not.toBe(EMPTY_SUMMARY);
+    expect(EMPTY_SUMMARY.abandoned).toBe(false);
+  });
+
+  test("the abandoned summary is one shared object, so it is frozen: a caller cannot change it for the next", () => {
+    expect(Object.isFrozen(ABANDONED_SUMMARY)).toBe(true);
+    expect(Object.isFrozen(ABANDONED_SUMMARY.facts)).toBe(true);
+    expect(Object.isFrozen(ABANDONED_SUMMARY.facts.classes)).toBe(true);
+    expect(Object.isFrozen(ABANDONED_SUMMARY.loss)).toBe(true);
+    expect(Object.isFrozen(ABANDONED_SUMMARY.files)).toBe(true);
+    expect(Object.isFrozen(ABANDONED_SUMMARY.classes)).toBe(true);
+    expect(() => {
+      (ABANDONED_SUMMARY.facts.classes as string[]).push("C1 forged");
+    }).toThrow();
+    expect(() => {
+      (ABANDONED_SUMMARY as { abandoned: boolean }).abandoned = false;
+    }).toThrow();
+    expect(() => {
+      (ABANDONED_SUMMARY.facts as { files_accounted_for: number }).files_accounted_for = 3;
+    }).toThrow();
+    expect(ABANDONED_SUMMARY.abandoned).toBe(true);
+    expect(ABANDONED_SUMMARY.facts.classes).toEqual([]);
+    expect(ABANDONED_SUMMARY.facts.files_accounted_for).toBe(0);
+  });
+
+  test("the abandoned summary's sets cannot be filled through a cast", () => {
+    for (const set of [
+      ABANDONED_SUMMARY.shown,
+      ABANDONED_SUMMARY.complete,
+      ABANDONED_SUMMARY.accounted,
+    ]) {
+      const writable = set as Set<string>;
+      expect(() => writable.add("sub-01/x.tsv")).toThrow();
+      expect(() => writable.delete("sub-01/x.tsv")).toThrow();
+      expect(() => writable.clear()).toThrow();
+      expect(set.size).toBe(0);
+      expect(set.has("sub-01/x.tsv")).toBe(false);
+    }
+    expect([...ABANDONED_SUMMARY.accounted]).toEqual([]);
   });
 });
 
