@@ -1307,3 +1307,729 @@ export function buildPools(files: readonly PoolFile[]): { rows: RowPool; json: J
   }
   return { rows: { files: rows, sourcedataByName }, json: { files: jsonFiles, byLeaf } };
 }
+
+// ---------------------------------------------------------------------------------------------
+// Atoms and the shape of a diff (design sections 4.1 and 6.2)
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * One difference between two versions of a file. Raw strings throughout: the renderer escapes them
+ * when it shows them, and an atom is never shown as it is stored.
+ *
+ * What each field holds, by kind:
+ *
+ * - table cells (`cell_*`): `field` is the column, `before` and `after` the cells (null on a side
+ *   that has no value to show); `cell_templated` also carries its `rule`.
+ * - `key_relabeled`: `field` is the key column, `before` and `after` the two keys, `rule` how one
+ *   became the other.
+ * - `row_removed`, `row_added`, `row_relocated`: in a keyed table `field` is the key column and the
+ *   side holds the KEY; in a keyless table `field` is null and the side holds the whole row, its
+ *   cells joined with a tab. `row_relocated` also carries, in `detail`, the shape
+ *   ({@link entityPattern}) of the path the row was found at.
+ * - `column_removed`: `field` is the column and `detail` the count of its non-missing values, as
+ *   decimal text; a column of nothing but missing values is a removal that loses nothing.
+ *   `column_added`: `field` is the column.
+ * - `columns_reordered`: `before` and `after` are the order of the columns both versions have, joined
+ *   with a tab. `rows_reordered` carries nothing: the order of the rows is the whole fact.
+ * - `format`: `detail` is the closed word of {@link FORMAT_DETAILS} for what differs, `before` and
+ *   `after` its state on each side.
+ * - JSON value kinds (`json_value_changed`, `json_type_changed`, `json_emptied`, `json_filled`):
+ *   `field` is the leaf path, `before` and `after` the canonical texts.
+ * - JSON key kinds (`json_key_removed`, `json_empty_key_removed`, `json_key_added`,
+ *   `json_key_moved`, `json_key_renamed`): `field` is the PARENT path (so many keys of one object are
+ *   one class), `detail` the key name (`old -> new` for a rename), and `before`/`after` the value's
+ *   canonical text on the side that has it (both, for a rename).
+ * - `json_keys_reordered` carries nothing.
+ */
+export interface Atom {
+  kind: ClassKind;
+  field: string | null;
+  rule: RelabelRule | null;
+  detail: string | null;
+  before: string | null;
+  after: string | null;
+}
+
+/**
+ * The words a `format` atom's `detail` is one of. The state strings in `before` and `after` are
+ * `present`/`absent` for a byte order mark and a final newline, the file-level word
+ * (`lf`, `crlf`, `mixed`, `none`) for line endings, and the per-line pattern for a mixed table.
+ */
+export const FORMAT_DETAILS = [
+  "bom",
+  "line_endings",
+  "line_ending_pattern",
+  "final_newline",
+] as const;
+
+/**
+ * The tallies a table diff proves itself total with. Each is counted from what the diff EMITTED
+ * (an atom or a recorded pair), not from the data it was built from, so a row that fell through, or
+ * was taken twice, makes the sums fail.
+ */
+export interface TableCounts {
+  beforeRows: number;
+  afterRows: number;
+  /** Before rows paired with an after row by equal key (keyed) or equal projection (keyless). */
+  matched: number;
+  /** Before rows paired by a relabel rule (keyed) or by the half-columns rule (keyless). */
+  paired: number;
+  relocated: number;
+  removed: number;
+  /** The after side of `matched` and `paired`, counted on the after rows. */
+  afterMatched: number;
+  afterPaired: number;
+  added: number;
+  /** A row was claimed twice. Always 0 unless the diff is wrong. */
+  conflicts: number;
+  beforeColumns: number;
+  afterColumns: number;
+  commonColumns: number;
+  columnsRemoved: number;
+  columnsAdded: number;
+}
+
+/**
+ * The tallies a JSON diff proves itself total with, over leaves ({@link flattenJson}). The fields
+ * without a prefix count the BEFORE leaves by what became of them, the `after` ones count the AFTER
+ * leaves, and every fate that has a leaf on both sides is counted on each side, so a leaf claimed
+ * twice or never makes the sums fail. As for tables, each is counted from what was emitted.
+ */
+export interface JsonCounts {
+  beforeLeaves: number;
+  afterLeaves: number;
+  /** Before leaves whose path the after document has, with an equal value, a changed one (value or type), an emptied one, a filled one. */
+  unchanged: number;
+  changed: number;
+  emptied: number;
+  filled: number;
+  /** Before leaves that left their path and are the same value under a respelled sibling key. */
+  renamed: number;
+  /** Before leaves found, with their path and value, in a sidecar that applies (moved), and lost: with a value (removed), holding nothing (emptyRemoved). */
+  moved: number;
+  removed: number;
+  emptyRemoved: number;
+  /** After leaves at a path the before document did not have and that are not the new name of a rename. */
+  added: number;
+  /** The after side of the fates that pair a before leaf with an after leaf. */
+  afterUnchanged: number;
+  afterChanged: number;
+  afterEmptied: number;
+  afterFilled: number;
+  afterRenamed: number;
+  /** A leaf was claimed twice. Always 0 unless the diff is wrong. */
+  conflicts: number;
+}
+
+/** What a diff of one file is. */
+export interface FileDiff<C = TableCounts | JsonCounts> {
+  family: "tsv" | "json";
+  /** The key column a table was paired by, or null (always null for JSON). */
+  keyColumn: string | null;
+  atoms: Atom[];
+  counts: C;
+}
+
+/** Every difference of the two layouts: one atom per field of {@link TextFormat} that differs. */
+export function formatAtoms(before: TextFormat, after: TextFormat): Atom[] {
+  const atoms: Atom[] = [];
+  const word = (flag: boolean): string => (flag ? "present" : "absent");
+  const push = (detail: (typeof FORMAT_DETAILS)[number], b: string, a: string): void => {
+    atoms.push({ kind: "format", field: null, rule: null, detail, before: b, after: a });
+  };
+  if (before.bom !== after.bom) push("bom", word(before.bom), word(after.bom));
+  if (before.eol !== after.eol) push("line_endings", before.eol, after.eol);
+  if (before.crPattern !== after.crPattern) {
+    push("line_ending_pattern", before.crPattern, after.crPattern);
+  }
+  if (before.finalNewline !== after.finalNewline) {
+    push("final_newline", word(before.finalNewline), word(after.finalNewline));
+  }
+  return atoms;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Table diff (design sections 2.2, 4.4, 4.5 and 4.6)
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * The column a table's rows are identified by, from its BIDS file name and nothing else (design
+ * section 2.2). Never inferred from the data: a key chosen by looking at the values lets the author
+ * choose the key by choosing values.
+ */
+function tableKeyColumn(path: string): string | null {
+  if (path === "participants.tsv") return "participant_id";
+  if (path === "samples.tsv") return "sample_id";
+  const name = lastSegment(path);
+  if (name.endsWith("_channels.tsv") || name.endsWith("_electrodes.tsv")) return "name";
+  if (name.endsWith("_scans.tsv")) return "filename";
+  if (name.endsWith("_sessions.tsv")) return "session_id";
+  return null;
+}
+
+/** Keys that identify a row: none empty or `n/a`, and no two equal. */
+function usableKeys(keys: readonly string[]): boolean {
+  const seen = new Set<string>();
+  for (const key of keys) {
+    if (isMissingCell(key) || seen.has(key)) return false;
+    seen.add(key);
+  }
+  return true;
+}
+
+/**
+ * The most candidates a single key looks at in one lookup pass. The lookup finds the unpaired keys a
+ * key's parts could be, and a hostile table can make thousands of keys share one normalized form
+ * (every case variant of one word); without a bound each of them would scan all the others. The
+ * bound only ever leaves a key unpaired, which shows it as a removal and an addition: more change,
+ * never less.
+ */
+const LOOKUP_CANDIDATE_CAP = 64;
+
+/** A key as the lookup compares it: runs lower-cased and digits by value, with where each run starts. */
+interface LookupForm {
+  text: string;
+  offsets: number[];
+}
+
+function lookupForm(key: string): LookupForm | null {
+  if (exceedsKeyChars(key)) return null;
+  const runs = splitRuns(key);
+  if (runs === null) return null;
+  let text = "";
+  const offsets = [0];
+  for (const run of runs) {
+    text += run.norm.toLowerCase();
+    offsets.push(text.length);
+  }
+  return { text, offsets };
+}
+
+/**
+ * Every substring of a key that starts and ends on a run boundary and whose form is in `index`, with
+ * the keys that have it, longest first and then leftmost: the order the strict lookup takes them in.
+ */
+function lookupHits(
+  form: LookupForm,
+  index: ReadonlyMap<string, readonly number[]>,
+  lengths: ReadonlySet<number>,
+): readonly number[][] {
+  const hits: { length: number; start: number; keys: readonly number[] }[] = [];
+  const runs = form.offsets.length - 1;
+  for (let i = 0; i < runs; i++) {
+    for (let j = i + 1; j <= runs; j++) {
+      const length = (form.offsets[j] as number) - (form.offsets[i] as number);
+      if (!lengths.has(length)) continue;
+      const keys = index.get(form.text.slice(form.offsets[i], form.offsets[j]));
+      if (keys !== undefined) hits.push({ length, start: i, keys });
+    }
+  }
+  hits.sort((x, y) => y.length - x.length || x.start - y.start);
+  return hits.map((hit) => hit.keys as number[]);
+}
+
+/**
+ * The difference between two versions of a table, as atoms, or `internal_mismatch` when the diff is
+ * not total. Every before row ends in exactly one of: paired with an after row, relocated, removed;
+ * every after row in one of: paired, added; every column in one of: in both, removed, added. The
+ * counts are asserted ({@link verifyTableCounts}) and a file that does not add up is refused, never
+ * summarized.
+ *
+ * **Keyed tables** (the key column is in both headers, and its values are non-empty, not `n/a` and
+ * unique on both sides): rows with the same key are paired; the rest are paired in this order,
+ * strongest evidence first, each step taking only rows the one before left:
+ *
+ * 1. a key relabeled by a rule, found by lookup, with every other common cell equal;
+ * 2. the same, found by position, where character rules are allowed too;
+ * 3. relocation of what is still unpaired: a row removed here and found verbatim under
+ *    `sourcedata/` at the corresponding path;
+ * 4. a key relabeled by a rule, found by lookup and then by position, with NO condition on the other
+ *    cells (they are then compared, and every difference is shown);
+ * 5. what is left: removed and added.
+ *
+ * The order is the lesson of the first prototype: relocating before relabeling matched renamed rows
+ * to identical copies in other subjects' files and left their real removals with no copy, and
+ * relabeling on the name alone paired a few names with the wrong new row. An error in this order
+ * can only turn "relocated" into "relabeled, with changed cells" or into "removed", that is, into
+ * more visible change or a loss fact; it cannot make content vanish from the account.
+ *
+ * **Keyless tables** (every other table, and a keyed one whose keys are not usable) compare rows as
+ * a multiset projected on the columns both versions have, then relocate the unmatched rows, then pair
+ * what is left in file order only when at most half the common columns differ, so a deleted event
+ * and an unrelated new one stay a removal and an addition. Nothing is ever inferred as a key.
+ *
+ * **Relocation** consumes the copy it uses from `pool`: one copy never accounts for two removed
+ * rows, in this file or in another. The copies are taken only if the diff succeeds, so a file that
+ * is refused does not use up copies the others could have used.
+ */
+export function diffTable(
+  path: string,
+  before: Table,
+  after: Table,
+  pool: RowPool,
+): Parsed<FileDiff<TableCounts>> {
+  return diffTableWith(path, before, after, pool, verifyTableCounts);
+}
+
+/** The totality assertion of a table diff: see {@link diffTable}. */
+export function verifyTableCounts(c: TableCounts): boolean {
+  return (
+    c.conflicts === 0 &&
+    c.beforeRows === c.matched + c.paired + c.relocated + c.removed &&
+    c.afterRows === c.afterMatched + c.afterPaired + c.added &&
+    c.matched === c.afterMatched &&
+    c.paired === c.afterPaired &&
+    c.beforeColumns === c.commonColumns + c.columnsRemoved &&
+    c.afterColumns === c.commonColumns + c.columnsAdded
+  );
+}
+
+const FATE_NONE = 0;
+const FATE_MATCHED = 1;
+const FATE_PAIRED = 2;
+const FATE_RELOCATED = 3;
+const FATE_REMOVED = 4;
+const FATE_ADDED = 5;
+
+interface RowPair {
+  before: number;
+  after: number;
+  relabel: RelabelRule | null;
+}
+
+/**
+ * {@link diffTable} with the count check passed in. Production code calls `diffTable`; this exists so
+ * a test can hand it a check that fails and prove the guard turns the file into `internal_mismatch`.
+ */
+export function diffTableWith(
+  path: string,
+  before: Table,
+  after: Table,
+  pool: RowPool,
+  verify: (counts: TableCounts) => boolean,
+): Parsed<FileDiff<TableCounts>> {
+  const nb = before.rows.length;
+  const na = after.rows.length;
+
+  // Columns: in both (in before order), only before, only after.
+  const beforeColumn = new Map(before.header.map((name, i) => [name, i]));
+  const afterColumn = new Map(after.header.map((name, i) => [name, i]));
+  const common: { name: string; bi: number; ai: number }[] = [];
+  const removedColumns: { name: string; bi: number }[] = [];
+  for (const [bi, name] of before.header.entries()) {
+    const ai = afterColumn.get(name);
+    if (ai === undefined) removedColumns.push({ name, bi });
+    else common.push({ name, bi, ai });
+  }
+  const addedColumns = after.header.filter((name) => !beforeColumn.has(name));
+
+  // The key, only if it identifies rows on both sides.
+  let keyColumn: string | null = null;
+  let keysBefore: string[] = [];
+  let keysAfter: string[] = [];
+  const wanted = tableKeyColumn(path);
+  if (wanted !== null) {
+    const kb = beforeColumn.get(wanted);
+    const ka = afterColumn.get(wanted);
+    if (kb !== undefined && ka !== undefined) {
+      const bk = before.rows.map((row) => row[kb] as string);
+      const ak = after.rows.map((row) => row[ka] as string);
+      if (usableKeys(bk) && usableKeys(ak)) {
+        keyColumn = wanted;
+        keysBefore = bk;
+        keysAfter = ak;
+      }
+    }
+  }
+  const cells = common.filter((column) => column.name !== keyColumn);
+
+  const bFate = new Uint8Array(nb);
+  const aFate = new Uint8Array(na);
+  const pairOfBefore = new Int32Array(nb).fill(-1);
+  const pairs: RowPair[] = [];
+  const relocatedTo = new Map<number, string>();
+  let conflicts = 0;
+
+  /** Pair a before row with an after row; a row already claimed is a conflict, never a second claim. */
+  const pairRows = (
+    bi: number,
+    ai: number,
+    fate: typeof FATE_MATCHED | typeof FATE_PAIRED,
+    relabel: RelabelRule | null,
+  ): void => {
+    if (bFate[bi] !== FATE_NONE || aFate[ai] !== FATE_NONE) {
+      conflicts++;
+      return;
+    }
+    bFate[bi] = fate;
+    aFate[ai] = fate;
+    pairOfBefore[bi] = pairs.length;
+    pairs.push({ before: bi, after: ai, relabel });
+  };
+
+  // Relocation. The copies taken are held here and applied to the pool only when the diff succeeds.
+  const header = before.header.join("\t");
+  const candidates = pool.sourcedataByName.get(lastSegment(path)) ?? [];
+  const needle = `/${path}`;
+  const taken = new Map<string, Map<string, number>>();
+  const relocate = (bi: number): void => {
+    if (candidates.length === 0 || bFate[bi] !== FATE_NONE) return;
+    const text = (before.rows[bi] as readonly string[]).join("\t");
+    for (const target of candidates) {
+      if (target === path || !target.startsWith("sourcedata/") || !target.endsWith(needle))
+        continue;
+      const entry = pool.files.get(target);
+      if (entry === undefined || entry.header !== header) continue;
+      const used = taken.get(target)?.get(text) ?? 0;
+      if ((entry.rows.get(text) ?? 0) - used <= 0) continue;
+      const forTarget = taken.get(target) ?? new Map<string, number>();
+      forTarget.set(text, used + 1);
+      taken.set(target, forTarget);
+      bFate[bi] = FATE_RELOCATED;
+      relocatedTo.set(bi, target);
+      return;
+    }
+  };
+
+  const cellsEqual = (bi: number, ai: number): boolean =>
+    cells.every(
+      (column) =>
+        (before.rows[bi] as readonly string[])[column.bi] ===
+        (after.rows[ai] as readonly string[])[column.ai],
+    );
+
+  if (keyColumn !== null) {
+    const afterByKey = new Map(keysAfter.map((key, ai) => [key, ai]));
+    for (let bi = 0; bi < nb; bi++) {
+      const ai = afterByKey.get(keysBefore[bi] as string);
+      if (ai !== undefined) pairRows(bi, ai, FATE_MATCHED, null);
+    }
+
+    const unpaired = (fate: Uint8Array): number[] => {
+      const out: number[] = [];
+      for (let i = 0; i < fate.length; i++) if (fate[i] === FATE_NONE) out.push(i);
+      return out;
+    };
+
+    /** Steps 1 and 4: look each unpaired key's parts up among the other side's unpaired keys. */
+    const lookupPass = (strict: boolean): void => {
+      const index = (keys: readonly string[], rows: readonly number[]) => {
+        const byForm = new Map<string, number[]>();
+        const lengths = new Set<number>();
+        for (const row of rows) {
+          const form = lookupForm(keys[row] as string);
+          if (form === null) continue;
+          lengths.add(form.text.length);
+          const list = byForm.get(form.text);
+          if (list === undefined) byForm.set(form.text, [row]);
+          else list.push(row);
+        }
+        return { byForm, lengths };
+      };
+      const accept = (bi: number, ai: number): boolean => {
+        if (strict && !cellsEqual(bi, ai)) return false;
+        const rule = relabelRule(keysBefore[bi] as string, keysAfter[ai] as string, {
+          chars: false,
+        });
+        if (rule === null) return false;
+        pairRows(bi, ai, FATE_PAIRED, rule);
+        return true;
+      };
+
+      // Each added key against the gone keys: the parts of the new name are the old name.
+      const gone = index(keysBefore, unpaired(bFate));
+      for (const ai of unpaired(aFate)) {
+        const form = lookupForm(keysAfter[ai] as string);
+        if (form === null || gone.byForm.size === 0) continue;
+        let looked = 0;
+        search: for (const keys of lookupHits(form, gone.byForm, gone.lengths)) {
+          for (const bi of keys) {
+            if (bFate[bi] !== FATE_NONE) continue;
+            if (++looked > LOOKUP_CANDIDATE_CAP) break search;
+            if (accept(bi, ai)) break search;
+          }
+        }
+      }
+      // Then each gone key against the added keys: the parts of the old name are the new name.
+      const added = index(keysAfter, unpaired(aFate));
+      for (const bi of unpaired(bFate)) {
+        const form = lookupForm(keysBefore[bi] as string);
+        if (form === null || added.byForm.size === 0) continue;
+        let looked = 0;
+        search: for (const keys of lookupHits(form, added.byForm, added.lengths)) {
+          for (const ai of keys) {
+            if (aFate[ai] !== FATE_NONE) continue;
+            if (++looked > LOOKUP_CANDIDATE_CAP) break search;
+            if (accept(bi, ai)) break search;
+          }
+        }
+      }
+    };
+
+    /** Steps 2 and 4: walk the unpaired keys of both sides in file order, two pointers. */
+    const positionalPass = (strict: boolean, chars: boolean): void => {
+      const gone = unpaired(bFate);
+      const added = unpaired(aFate);
+      const ruleOf = (bi: number, ai: number): RelabelRule | null =>
+        strict && !cellsEqual(bi, ai)
+          ? null
+          : relabelRule(keysBefore[bi] as string, keysAfter[ai] as string, { chars });
+      let i = 0;
+      let j = 0;
+      while (i < gone.length && j < added.length) {
+        const here = ruleOf(gone[i] as number, added[j] as number);
+        if (here !== null) {
+          pairRows(gone[i] as number, added[j] as number, FATE_PAIRED, here);
+          i++;
+          j++;
+        } else if (j + 1 < added.length && ruleOf(gone[i] as number, added[j + 1] as number)) {
+          j++; // this added key belongs to nothing here; the next one is the gone key's
+        } else if (i + 1 < gone.length && ruleOf(gone[i + 1] as number, added[j] as number)) {
+          i++; // this gone key was removed; the next one is the added key's
+        } else {
+          i++;
+          j++;
+        }
+      }
+    };
+
+    lookupPass(true);
+    positionalPass(true, true);
+    for (const bi of unpaired(bFate)) relocate(bi);
+    lookupPass(false);
+    positionalPass(false, false);
+  } else {
+    // Keyless: a multiset match on the common columns, in before order for equal rows.
+    const project = (row: readonly string[], side: "bi" | "ai"): string =>
+      common.map((column) => row[column[side]] as string).join("\t");
+    const waiting = new Map<string, { rows: number[]; next: number }>();
+    for (let bi = 0; bi < nb; bi++) {
+      const text = project(before.rows[bi] as readonly string[], "bi");
+      const queue = waiting.get(text);
+      if (queue === undefined) waiting.set(text, { rows: [bi], next: 0 });
+      else queue.rows.push(bi);
+    }
+    for (let ai = 0; ai < na; ai++) {
+      const queue = waiting.get(project(after.rows[ai] as readonly string[], "ai"));
+      if (queue !== undefined && queue.next < queue.rows.length) {
+        pairRows(queue.rows[queue.next++] as number, ai, FATE_MATCHED, null);
+      }
+    }
+    for (let bi = 0; bi < nb; bi++) relocate(bi);
+
+    const goneRows: number[] = [];
+    for (let bi = 0; bi < nb; bi++) if (bFate[bi] === FATE_NONE) goneRows.push(bi);
+    const addedRows: number[] = [];
+    for (let ai = 0; ai < na; ai++) if (aFate[ai] === FATE_NONE) addedRows.push(ai);
+    // At most half the common columns may differ for two rows to be one row, edited.
+    const near = (bi: number, ai: number): boolean => {
+      let different = 0;
+      for (const column of common) {
+        if (
+          (before.rows[bi] as readonly string[])[column.bi] !==
+          (after.rows[ai] as readonly string[])[column.ai]
+        ) {
+          different++;
+        }
+      }
+      return different * 2 <= common.length;
+    };
+    let i = 0;
+    let j = 0;
+    while (i < goneRows.length && j < addedRows.length) {
+      if (near(goneRows[i] as number, addedRows[j] as number)) {
+        pairRows(goneRows[i] as number, addedRows[j] as number, FATE_PAIRED, null);
+        i++;
+        j++;
+      } else if (
+        j + 1 < addedRows.length &&
+        near(goneRows[i] as number, addedRows[j + 1] as number)
+      ) {
+        j++;
+      } else if (
+        i + 1 < goneRows.length &&
+        near(goneRows[i + 1] as number, addedRows[j] as number)
+      ) {
+        i++;
+      } else {
+        i++;
+        j++;
+      }
+    }
+  }
+
+  // What is left was neither paired nor relocated: removed and added.
+  for (let bi = 0; bi < nb; bi++) if (bFate[bi] === FATE_NONE) bFate[bi] = FATE_REMOVED;
+  for (let ai = 0; ai < na; ai++) if (aFate[ai] === FATE_NONE) aFate[ai] = FATE_ADDED;
+
+  // Emission: every atom, and every tally, comes from here.
+  const atoms: Atom[] = [];
+  const counts: TableCounts = {
+    beforeRows: nb,
+    afterRows: na,
+    matched: 0,
+    paired: 0,
+    relocated: 0,
+    removed: 0,
+    afterMatched: 0,
+    afterPaired: 0,
+    added: 0,
+    conflicts,
+    beforeColumns: before.header.length,
+    afterColumns: after.header.length,
+    commonColumns: common.length,
+    columnsRemoved: 0,
+    columnsAdded: 0,
+  };
+
+  for (const column of removedColumns) {
+    let present = 0;
+    for (const row of before.rows) if (!isMissingCell(row[column.bi] as string)) present++;
+    atoms.push({
+      kind: "column_removed",
+      field: column.name,
+      rule: null,
+      detail: String(present),
+      before: null,
+      after: null,
+    });
+    counts.columnsRemoved++;
+  }
+  for (const name of addedColumns) {
+    atoms.push({
+      kind: "column_added",
+      field: name,
+      rule: null,
+      detail: null,
+      before: null,
+      after: null,
+    });
+    counts.columnsAdded++;
+  }
+  const orderBefore = common.map((column) => column.name);
+  const orderAfter = [...common].sort((x, y) => x.ai - y.ai).map((column) => column.name);
+  if (orderBefore.some((name, i) => name !== orderAfter[i])) {
+    atoms.push({
+      kind: "columns_reordered",
+      field: null,
+      rule: null,
+      detail: null,
+      before: orderBefore.join("\t"),
+      after: orderAfter.join("\t"),
+    });
+  }
+  atoms.push(...formatAtoms(before.format, after.format));
+
+  /** What a row is called in an atom: its key in a keyed table, the whole row in a keyless one. */
+  const nameOf = (rows: Table["rows"], keys: readonly string[], row: number): string =>
+    keyColumn === null ? (rows[row] as readonly string[]).join("\t") : (keys[row] as string);
+
+  for (let bi = 0; bi < nb; bi++) {
+    const fate = bFate[bi];
+    if (fate === FATE_MATCHED || fate === FATE_PAIRED) {
+      if (fate === FATE_MATCHED) counts.matched++;
+      else counts.paired++;
+      const pair = pairs[pairOfBefore[bi] as number] as RowPair;
+      if (pair.relabel !== null) {
+        atoms.push({
+          kind: "key_relabeled",
+          field: keyColumn,
+          rule: pair.relabel,
+          detail: null,
+          before: keysBefore[bi] as string,
+          after: keysAfter[pair.after] as string,
+        });
+      }
+      for (const column of keyColumn === null ? common : cells) {
+        const b = (before.rows[bi] as readonly string[])[column.bi] as string;
+        const a = (after.rows[pair.after] as readonly string[])[column.ai] as string;
+        if (b !== a) atoms.push(cellAtom(column.name, b, a));
+      }
+    } else if (fate === FATE_RELOCATED) {
+      counts.relocated++;
+      atoms.push({
+        kind: "row_relocated",
+        field: keyColumn,
+        rule: null,
+        detail: entityPattern(relocatedTo.get(bi) as string),
+        before: nameOf(before.rows, keysBefore, bi),
+        after: null,
+      });
+    } else if (fate === FATE_REMOVED) {
+      counts.removed++;
+      atoms.push({
+        kind: "row_removed",
+        field: keyColumn,
+        rule: null,
+        detail: null,
+        before: nameOf(before.rows, keysBefore, bi),
+        after: null,
+      });
+    }
+  }
+  for (let ai = 0; ai < na; ai++) {
+    const fate = aFate[ai];
+    if (fate === FATE_MATCHED) counts.afterMatched++;
+    else if (fate === FATE_PAIRED) counts.afterPaired++;
+    else if (fate === FATE_ADDED) {
+      counts.added++;
+      atoms.push({
+        kind: "row_added",
+        field: keyColumn,
+        rule: null,
+        detail: null,
+        before: null,
+        after: nameOf(after.rows, keysAfter, ai),
+      });
+    }
+  }
+
+  // The rows both versions have keep their relative order, or the table is reordered.
+  const inBeforeOrder = [...pairs].sort((x, y) => x.before - y.before);
+  if (
+    inBeforeOrder.some((pair, i) => i > 0 && pair.after < (inBeforeOrder[i - 1] as RowPair).after)
+  ) {
+    atoms.push({
+      kind: "rows_reordered",
+      field: null,
+      rule: null,
+      detail: null,
+      before: null,
+      after: null,
+    });
+  }
+
+  if (!verify(counts)) return { ok: false, refusal: "internal_mismatch" };
+
+  // The diff stands, so the copies it relocated against are used up.
+  for (const [target, rows] of taken) {
+    const entry = pool.files.get(target) as RowPoolFile;
+    for (const [text, used] of rows) entry.rows.set(text, (entry.rows.get(text) as number) - used);
+  }
+  return { ok: true, value: { family: "tsv", keyColumn, atoms, counts } };
+}
+
+/**
+ * The atom for one table cell that is not equal on the two sides. Only a rule that says the cell was
+ * wrapped, stripped, repadded or recased is a template; an insertion, a deletion or a character rule
+ * is for names, so in a cell it is a replaced value. Two missing cells that differ (`n/a` and empty)
+ * are a replaced value too: calling the change anything gentler would hide that the file says
+ * something else.
+ */
+function cellAtom(field: string, before: string, after: string): Atom {
+  const missingBefore = isMissingCell(before);
+  const missingAfter = isMissingCell(after);
+  if (!missingBefore && missingAfter) {
+    return { kind: "cell_emptied", field, rule: null, detail: null, before, after };
+  }
+  if (missingBefore && !missingAfter) {
+    return { kind: "cell_filled", field, rule: null, detail: null, before, after };
+  }
+  if (!missingBefore && !missingAfter) {
+    const rule = relabelRule(before, after, { chars: false });
+    if (rule !== null && ["wrap", "strip", "repad", "case"].includes(rule.kind)) {
+      return { kind: "cell_templated", field, rule, detail: null, before, after };
+    }
+  }
+  return { kind: "cell_replaced", field, rule: null, detail: null, before, after };
+}

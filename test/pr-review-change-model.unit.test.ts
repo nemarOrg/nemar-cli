@@ -12,19 +12,28 @@
 
 import { describe, expect, test } from "bun:test";
 import {
+  type Atom,
   CLASS_KINDS,
   type ClassKind,
+  type FileDiff,
   type PoolFile,
   ROLE_OF,
   type RelabelRule,
+  type Table,
+  type TableCounts,
   buildPools,
+  diffTable,
+  diffTableWith,
   flattenJson,
+  formatAtoms,
   isMissingCell,
   isMissingJson,
   leafKey,
   parseJson,
+  parseTsv,
   relabelRule,
   ruleWords,
+  verifyTableCounts,
 } from "../scripts/ci/pr-review-summary";
 
 const enc = (text: string): Uint8Array => new TextEncoder().encode(text);
@@ -812,5 +821,1280 @@ describe("buildPools: the rows and leaves a pull request adds", () => {
     const pool = buildPools([{ path: "a.tsv", before: null, after: bytes }]);
     bytes[2] = 0x39;
     expect(rowsOf(pool, "a.tsv")).toEqual({ header: "a", rows: { "1": 1 } });
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// The table change model
+// ---------------------------------------------------------------------------------------------
+
+/** A table from text, through the real parser. */
+function table(text: string): Table {
+  const parsed = parseTsv(enc(text));
+  if (!parsed.ok) throw new Error(`test input is not a table (${parsed.refusal})`);
+  return parsed.value;
+}
+
+/** Tab-separated text from rows of cells, with LF endings and a final newline. */
+function tsv(...rows: string[][]): string {
+  return `${rows.map((row) => row.join("\t")).join("\n")}\n`;
+}
+
+/**
+ * The diff of two table texts at a path, against a pool built from `files`. A fresh pool each call,
+ * because a diff uses up the copies it relocates against.
+ */
+function diffText(
+  path: string,
+  before: string,
+  after: string,
+  files: PoolFile[] = [],
+): FileDiff<TableCounts> {
+  const result = diffTable(path, table(before), table(after), buildPools(files).rows);
+  if (!result.ok) throw new Error(`diff refused: ${result.refusal}`);
+  return result.value;
+}
+
+/** An atom as one line, for expectations that read like the class line a person would see. */
+function line(atom: Atom): string {
+  const parts: string[] = [atom.kind];
+  if (atom.field !== null) parts.push(`field=${atom.field}`);
+  if (atom.before !== null) parts.push(`before=${JSON.stringify(atom.before)}`);
+  if (atom.after !== null) parts.push(`after=${JSON.stringify(atom.after)}`);
+  if (atom.detail !== null) parts.push(`detail=${JSON.stringify(atom.detail)}`);
+  if (atom.rule !== null) parts.push(`rule=${ruleWords(atom.rule)}`);
+  return parts.join(" | ");
+}
+
+const lines = (diff: FileDiff): string[] => diff.atoms.map(line);
+const kindsOf = (diff: FileDiff): ClassKind[] => diff.atoms.map((a) => a.kind);
+
+describe("diffTable: the key column comes from the file name, and only if it identifies rows", () => {
+  const same = (path: string, header: string[]) => {
+    const text = tsv(
+      header,
+      header.map((_, i) => `v${i}`),
+      header.map((_, i) => `w${i}`),
+    );
+    return diffText(path, text, text);
+  };
+
+  test("each key column of design section 2.2", () => {
+    expect(same("participants.tsv", ["participant_id", "age"]).keyColumn).toBe("participant_id");
+    expect(same("sub-01/eeg/sub-01_task-x_channels.tsv", ["name", "type"]).keyColumn).toBe("name");
+    expect(same("sub-01/eeg/sub-01_electrodes.tsv", ["name", "x"]).keyColumn).toBe("name");
+    expect(same("sub-01/sub-01_scans.tsv", ["filename", "acq_time"]).keyColumn).toBe("filename");
+    expect(same("sub-01/sub-01_sessions.tsv", ["session_id", "age"]).keyColumn).toBe("session_id");
+    expect(same("samples.tsv", ["sample_id", "type"]).keyColumn).toBe("sample_id");
+  });
+
+  test("any other table has no key, however key-like its first column", () => {
+    expect(
+      same("sub-01/eeg/sub-01_task-x_events.tsv", ["onset", "trial_type"]).keyColumn,
+    ).toBeNull();
+    expect(same("phenotype/iq.tsv", ["participant_id", "iq"]).keyColumn).toBeNull();
+    // participants.tsv and samples.tsv are the ROOT files; one deeper is a different table.
+    expect(same("sourcedata/participants.tsv", ["participant_id", "age"]).keyColumn).toBeNull();
+    expect(same("derivatives/samples.tsv", ["sample_id", "type"]).keyColumn).toBeNull();
+    // A name that merely ends like a channels file does not have the underscore of one.
+    expect(same("channels.tsv", ["name", "type"]).keyColumn).toBeNull();
+    expect(same("sub-01_xchannels.tsv", ["name", "type"]).keyColumn).toBeNull();
+  });
+
+  test("the key is used only when its values are non-empty, not n/a, and unique on BOTH sides", () => {
+    const path = "sub-01_channels.tsv";
+    const header = ["name", "type"];
+    const good = tsv(header, ["A1", "EEG"], ["A2", "EEG"]);
+    expect(diffText(path, good, good).keyColumn).toBe("name");
+    for (const bad of [
+      tsv(header, ["A1", "EEG"], ["A1", "EMG"]), // a repeated key
+      tsv(header, ["A1", "EEG"], ["", "EEG"]), // an empty key
+      tsv(header, ["A1", "EEG"], ["n/a", "EEG"]), // a missing key
+    ]) {
+      expect(diffText(path, bad, good).keyColumn, "bad before").toBeNull();
+      expect(diffText(path, good, bad).keyColumn, "bad after").toBeNull();
+    }
+    // The key column in only one header: keyless.
+    expect(diffText(path, good, tsv(["label", "type"], ["A1", "EEG"])).keyColumn).toBeNull();
+    expect(diffText(path, tsv(["label", "type"], ["A1", "EEG"]), good).keyColumn).toBeNull();
+    // A table with no rows has no key values to doubt.
+    expect(diffText(path, tsv(header), tsv(header)).keyColumn).toBe("name");
+  });
+});
+
+describe("diffTable: a table that did not change has nothing to say", () => {
+  test("equal bytes give no atom, and every row is matched", () => {
+    const text = tsv(["name", "type"], ["A1", "EEG"], ["A2", "EMG"]);
+    for (const path of ["sub-01_channels.tsv", "events.tsv"]) {
+      const diff = diffText(path, text, text);
+      expect(diff.atoms).toEqual([]);
+      expect(diff.family).toBe("tsv");
+      expect(diff.counts).toMatchObject({
+        beforeRows: 2,
+        afterRows: 2,
+        matched: 2,
+        paired: 0,
+        removed: 0,
+        added: 0,
+      });
+    }
+  });
+
+  test("a header with no rows, and a table with only a header change", () => {
+    expect(diffText("e.tsv", tsv(["a", "b"]), tsv(["a", "b"])).atoms).toEqual([]);
+    expect(lines(diffText("e.tsv", tsv(["a", "b"]), tsv(["a", "c"])))).toEqual([
+      'column_removed | field=b | detail="0"',
+      "column_added | field=c",
+    ]);
+  });
+});
+
+describe("diffTable: columns", () => {
+  test("a removed column carries how many non-missing values it held; n/a and empty do not count", () => {
+    const diff = diffText(
+      "events.tsv",
+      tsv(["onset", "note", "tag"], ["1", "x", "n/a"], ["2", "n/a", ""], ["3", "y", "None"]),
+      tsv(["onset"], ["1"], ["2"], ["3"]),
+    );
+    expect(lines(diff)).toEqual([
+      'column_removed | field=note | detail="2"',
+      'column_removed | field=tag | detail="1"',
+    ]);
+    expect(diff.counts).toMatchObject({
+      beforeColumns: 3,
+      afterColumns: 1,
+      commonColumns: 1,
+      columnsRemoved: 2,
+      columnsAdded: 0,
+    });
+  });
+
+  test("an added column is an atom and its values are not compared", () => {
+    const diff = diffText(
+      "events.tsv",
+      tsv(["onset"], ["1"], ["2"]),
+      tsv(["onset", "note"], ["1", "x"], ["2", "y"]),
+    );
+    expect(lines(diff)).toEqual(["column_added | field=note"]);
+  });
+
+  test("the order of the columns both versions have is one atom, naming both orders", () => {
+    const diff = diffText(
+      "events.tsv",
+      tsv(["a", "b", "c"], ["1", "2", "3"]),
+      tsv(["c", "a", "b"], ["3", "1", "2"]),
+    );
+    expect(lines(diff)).toEqual(['columns_reordered | before="a\\tb\\tc" | after="c\\ta\\tb"']);
+    // Adding a column between two that kept their order does not reorder them.
+    expect(
+      kindsOf(
+        diffText("events.tsv", tsv(["a", "b"], ["1", "2"]), tsv(["a", "z", "b"], ["1", "9", "2"])),
+      ),
+    ).toEqual(["column_added"]);
+  });
+
+  test("a renamed column is a removal of the old and an addition of the new, never a quiet match", () => {
+    const diff = diffText(
+      "events.tsv",
+      tsv(["onset", "kind"], ["1", "go"]),
+      tsv(["onset", "type"], ["1", "go"]),
+    );
+    expect(kindsOf(diff)).toEqual(["column_removed", "column_added"]);
+  });
+});
+
+describe("diffTable: cells of paired rows", () => {
+  const cell = (before: string, after: string): string[] =>
+    lines(diffText("events.tsv", tsv(["id", "v"], ["1", before]), tsv(["id", "v"], ["1", after])));
+
+  test("a changed value, an emptied cell, a filled cell", () => {
+    expect(cell("good", "bad")).toEqual(['cell_replaced | field=v | before="good" | after="bad"']);
+    expect(cell("good", "n/a")).toEqual(['cell_emptied | field=v | before="good" | after="n/a"']);
+    expect(cell("good", "")).toEqual(['cell_emptied | field=v | before="good" | after=""']);
+    expect(cell("n/a", "good")).toEqual(['cell_filled | field=v | before="n/a" | after="good"']);
+    expect(cell("", "good")).toEqual(['cell_filled | field=v | before="" | after="good"']);
+  });
+
+  test("n/a and empty are both missing, so one becoming the other is a replaced value, not a quiet pass", () => {
+    expect(cell("n/a", "")).toEqual(['cell_replaced | field=v | before="n/a" | after=""']);
+    expect(cell("", "n/a")).toEqual(['cell_replaced | field=v | before="" | after="n/a"']);
+  });
+
+  test("None, unknown and NA are values: overwriting one is a replacement, never a fill", () => {
+    expect(cell("None", "F")).toEqual(['cell_replaced | field=v | before="None" | after="F"']);
+    expect(cell("unknown", "n/a")).toEqual([
+      'cell_emptied | field=v | before="unknown" | after="n/a"',
+    ]);
+    expect(cell("NA", "5")).toEqual(['cell_replaced | field=v | before="NA" | after="5"']);
+  });
+
+  test("a cell changed by wrap, strip, repad or case is a template with its rule", () => {
+    expect(cell("Cz", "CZ")).toEqual([
+      'cell_templated | field=v | before="Cz" | after="CZ" | rule=letter case changed',
+    ]);
+    expect(cell("A01", "A1")).toEqual([
+      'cell_templated | field=v | before="A01" | after="A1" | rule=zero padding of numbers changed',
+    ]);
+    expect(cell("5", "5 mm")).toEqual([
+      'cell_templated | field=v | before="5" | after="5 mm" | rule=added suffix " mm"',
+    ]);
+    expect(cell("'G1'    ", "'G1'")).toEqual([
+      'cell_templated | field=v | before="\'G1\'    " | after="\'G1\'" | rule=removed suffix "    "',
+    ]);
+  });
+
+  test("an insertion, a deletion and a character rule are for names: in a cell they are a replaced value", () => {
+    expect(cell("GA01", "EEGGA_01REF")).toEqual([
+      'cell_replaced | field=v | before="GA01" | after="EEGGA_01REF"',
+    ]);
+    expect(cell("EEGGA_01REF", "GA01")).toEqual([
+      'cell_replaced | field=v | before="EEGGA_01REF" | after="GA01"',
+    ]);
+    expect(cell("DCEMBRACE", "DC EMBRACE-REF")).toEqual([
+      'cell_replaced | field=v | before="DCEMBRACE" | after="DC EMBRACE-REF"',
+    ]);
+  });
+
+  test("a changed number is a replaced value, not a suffix or a padding", () => {
+    expect(cell("64", "640")).toEqual(['cell_replaced | field=v | before="64" | after="640"']);
+    expect(cell("1", "01")).toEqual(['cell_replaced | field=v | before="1" | after="01"']);
+    expect(cell("1.5", "1.50")).toEqual(['cell_replaced | field=v | before="1.5" | after="1.50"']);
+  });
+
+  test("whitespace is data: a cell gaining a trailing space is a change", () => {
+    expect(cell("good", "good ")).toEqual([
+      'cell_templated | field=v | before="good" | after="good " | rule=added suffix " "',
+    ]);
+  });
+
+  test("a cell is compared in the column it is in, not at its position", () => {
+    const diff = diffText(
+      "events.tsv",
+      tsv(["id", "a", "b"], ["1", "x", "y"]),
+      tsv(["b", "id", "a"], ["z", "1", "x"]),
+    );
+    expect(lines(diff)).toEqual(
+      expect.arrayContaining(['cell_replaced | field=b | before="y" | after="z"']),
+    );
+    expect(kindsOf(diff)).toEqual(["columns_reordered", "cell_replaced"]);
+  });
+});
+
+describe("diffTable: keyed rows", () => {
+  const path = "sub-01_task-x_channels.tsv";
+  const header = ["name", "type"];
+
+  test("a row with a key only the before side has is removed, and one only the after side has is added", () => {
+    const diff = diffText(
+      path,
+      tsv(header, ["A1", "EEG"], ["A2", "EEG"], ["Z9", "EMG"]),
+      tsv(header, ["A1", "EEG"], ["A2", "EEG"], ["Q7", "EOG"]),
+    );
+    expect(lines(diff)).toEqual([
+      'row_removed | field=name | before="Z9"',
+      'row_added | field=name | after="Q7"',
+    ]);
+    expect(diff.counts).toMatchObject({
+      matched: 2,
+      removed: 1,
+      added: 1,
+      paired: 0,
+      relocated: 0,
+    });
+  });
+
+  test("a key kept is the same row: its other cells are compared, and moving it is a reorder", () => {
+    const diff = diffText(
+      path,
+      tsv(header, ["A1", "EEG"], ["A2", "EEG"], ["A3", "EEG"]),
+      tsv(header, ["A3", "EEG"], ["A1", "EMG"], ["A2", "EEG"]),
+    );
+    expect(lines(diff)).toEqual([
+      'cell_replaced | field=type | before="EEG" | after="EMG"',
+      "rows_reordered",
+    ]);
+  });
+
+  test("rows that only moved are a reorder and nothing else", () => {
+    const diff = diffText(
+      path,
+      tsv(header, ["A1", "EEG"], ["A2", "EEG"]),
+      tsv(header, ["A2", "EEG"], ["A1", "EEG"]),
+    );
+    expect(lines(diff)).toEqual(["rows_reordered"]);
+  });
+
+  test("a removed row among kept rows does not make the others a reorder", () => {
+    const diff = diffText(
+      path,
+      tsv(header, ["A1", "EEG"], ["A2", "EEG"], ["A3", "EEG"]),
+      tsv(header, ["A1", "EEG"], ["A3", "EEG"]),
+    );
+    expect(lines(diff)).toEqual(['row_removed | field=name | before="A2"']);
+  });
+
+  test("the real prefix: every name gained POL, with the number's padding changed, other cells equal", () => {
+    const before = tsv(header, ["A1", "EEG"], ["A2", "EEG"], ["A10", "EEG"]);
+    const after = tsv(header, ["POL A01", "EEG"], ["POL A02", "EEG"], ["POL A10", "EEG"]);
+    const diff = diffText(path, before, after);
+    expect(lines(diff)).toEqual([
+      'key_relabeled | field=name | before="A1" | after="POL A01" | rule=added prefix "POL ", zero padding of numbers changed',
+      'key_relabeled | field=name | before="A2" | after="POL A02" | rule=added prefix "POL ", zero padding of numbers changed',
+      'key_relabeled | field=name | before="A10" | after="POL A10" | rule=added prefix "POL "',
+    ]);
+    expect(diff.counts).toMatchObject({ matched: 0, paired: 3, removed: 0, added: 0 });
+  });
+
+  test("the real wrap on both sides: EEG and -Ref around a name", () => {
+    const diff = diffText(
+      path,
+      tsv(header, ["Fp1", "EEG"], ["Fz", "EEG"]),
+      tsv(header, ["EEG Fp1-Ref", "EEG"], ["EEG Fz-Ref", "EEG"]),
+    );
+    expect(kindsOf(diff)).toEqual(["key_relabeled", "key_relabeled"]);
+    expect((diff.atoms[0] as Atom).rule).toEqual({
+      kind: "wrap",
+      gaps: ["EEG ", "-Ref"],
+      shape: "",
+      repadded: false,
+    });
+  });
+
+  test("the real insert: GA01 became EEGGA_01REF, found by position with every other cell equal", () => {
+    const diff = diffText(
+      path,
+      tsv(header, ["GA01", "EEG"], ["GA02", "EEG"]),
+      tsv(header, ["EEGGA_01REF", "EEG"], ["EEGGA_02REF", "EEG"]),
+    );
+    expect(kindsOf(diff)).toEqual(["key_relabeled", "key_relabeled"]);
+    expect((diff.atoms[0] as Atom).rule).toEqual({
+      kind: "insert",
+      gaps: ["EEG", "_", "REF"],
+      shape: "LD",
+      repadded: false,
+    });
+    expect(diff.counts).toMatchObject({ paired: 2, removed: 0, added: 0 });
+  });
+
+  test("the real characters: DCEMBRACE became DC EMBRACE-REF, paired because every other cell is equal", () => {
+    const diff = diffText(
+      path,
+      tsv(header, ["DCEMBRACE", "EEG"]),
+      tsv(header, ["DC EMBRACE-REF", "EEG"]),
+    );
+    expect(kindsOf(diff)).toEqual(["key_relabeled"]);
+    expect((diff.atoms[0] as Atom).rule?.shape).toBe("c9");
+  });
+
+  test("a character rule needs the other cells to be equal: with one changed, it is a removal and an addition", () => {
+    const diff = diffText(
+      path,
+      tsv(header, ["DCEMBRACE", "EEG"]),
+      tsv(header, ["DC EMBRACE-REF", "EMG"]),
+    );
+    expect(kindsOf(diff)).toEqual(["row_removed", "row_added"]);
+  });
+
+  test("a key changed into something unrelated gets no rule: the old row is removed, the new one added", () => {
+    const diff = diffText(path, tsv(header, ["A1", "EEG"]), tsv(header, ["Q7", "EEG"]));
+    expect(lines(diff)).toEqual([
+      'row_removed | field=name | before="A1"',
+      'row_added | field=name | after="Q7"',
+    ]);
+  });
+
+  test("a relabeled row whose other cells changed too shows the key and the cells", () => {
+    // Lenient pairing: the name alone is a prefix, the type is not equal, so it pairs last.
+    const diff = diffText(path, tsv(header, ["Fz", "EEG"]), tsv(header, ["EEG Fz", "EMG"]));
+    expect(lines(diff)).toEqual([
+      'key_relabeled | field=name | before="Fz" | after="EEG Fz" | rule=added prefix "EEG "',
+      'cell_replaced | field=type | before="EEG" | after="EMG"',
+    ]);
+  });
+
+  test("a removed row among 500 relabeled rows is still a row_removed atom", () => {
+    const names = Array.from({ length: 501 }, (_, i) => `A${i + 1}`);
+    const before = tsv(header, ...names.map((n) => [n, "EEG"]));
+    // The row for A250 is gone; every other name gained the prefix POL.
+    const after = tsv(header, ...names.filter((n) => n !== "A250").map((n) => [`POL ${n}`, "EEG"]));
+    const diff = diffText(path, before, after);
+    const removed = diff.atoms.filter((a) => a.kind === "row_removed");
+    expect(removed.map(line)).toEqual(['row_removed | field=name | before="A250"']);
+    expect(diff.atoms.filter((a) => a.kind === "key_relabeled")).toHaveLength(500);
+    expect(diff.counts).toMatchObject({ paired: 500, removed: 1, added: 0 });
+    // Every relabel is the same rule, so they are one class; the removal is not among them.
+    const rules = new Set(
+      diff.atoms
+        .filter((a) => a.kind === "key_relabeled")
+        .map((a) => ruleWords(a.rule as RelabelRule)),
+    );
+    expect(rules.size).toBe(1);
+  });
+
+  test("a removed row whose key looks like a relabeled one is still removed when its cells differ and nothing is left to pair", () => {
+    const diff = diffText(
+      path,
+      tsv(header, ["A1", "EEG"], ["B1", "EMG"]),
+      tsv(header, ["POL A1", "EEG"]),
+    );
+    expect(lines(diff)).toEqual([
+      'key_relabeled | field=name | before="A1" | after="POL A1" | rule=added prefix "POL "',
+      'row_removed | field=name | before="B1"',
+    ]);
+  });
+});
+
+describe("diffTable: the same change gives the same atoms whatever else is in the file", () => {
+  const path = "sub-01_task-x_channels.tsv";
+  const header = ["name", "type", "units"];
+
+  test("different unrelated rows, offsets and row counts around one relabel, one removal and one cell edit", () => {
+    const changed = (extra: string[][]) => {
+      const before = tsv(
+        header,
+        ...extra,
+        ["A1", "EEG", "uV"],
+        ["B7", "EEG", "uV"],
+        ["C3", "EEG", "uV"],
+      );
+      const after = tsv(header, ...extra, ["POL A01", "EEG", "uV"], ["C3", "EMG", "uV"]);
+      return diffText(path, before, after).atoms;
+    };
+    const base = changed([]);
+    expect(base.map(line)).toEqual([
+      'key_relabeled | field=name | before="A1" | after="POL A01" | rule=added prefix "POL ", zero padding of numbers changed',
+      'row_removed | field=name | before="B7"',
+      'cell_replaced | field=type | before="EEG" | after="EMG"',
+    ]);
+    expect(changed([["Z1", "EEG", "uV"]])).toEqual(base);
+    expect(
+      changed([
+        ["Z1", "EEG", "uV"],
+        ["Z2", "ECG", "mV"],
+        ["Z3", "n/a", "n/a"],
+      ]),
+    ).toEqual(base);
+    expect(changed(Array.from({ length: 40 }, (_, i) => [`Y${i}`, "EEG", "uV"]))).toEqual(base);
+  });
+
+  test("the same keyless edit in two files with different rows around it", () => {
+    const edit = (rows: string[][]) =>
+      diffText(
+        "events.tsv",
+        tsv(["onset", "duration", "trial_type"], ...rows, ["5", "1", "go"]),
+        tsv(["onset", "duration", "trial_type"], ...rows, ["5", "1", "stop"]),
+      ).atoms;
+    const base = edit([]);
+    expect(base.map(line)).toEqual([
+      'cell_replaced | field=trial_type | before="go" | after="stop"',
+    ]);
+    expect(
+      edit([
+        ["1", "1", "x"],
+        ["2", "1", "y"],
+      ]),
+    ).toEqual(base);
+    expect(edit(Array.from({ length: 30 }, (_, i) => [String(i), "1", "z"]))).toEqual(base);
+  });
+});
+
+describe("diffTable: the pairing order is strict relabel, then relocation, then lenient relabel", () => {
+  const path = "sub-01_channels.tsv";
+  const header = ["name", "v"];
+
+  test("strict before lenient: the candidate whose other cells are equal is the one paired, not the first", () => {
+    // Both Cz and cz are the case-only relabel of CZ; only cz has the same value, so only it is the
+    // same row. Pairing the first in file order would call v 1 -> 2 an edit and remove the right row.
+    const diff = diffText(path, tsv(header, ["Cz", "1"], ["cz", "2"]), tsv(header, ["CZ", "2"]));
+    expect(lines(diff)).toEqual([
+      'row_removed | field=name | before="Cz"',
+      'key_relabeled | field=name | before="cz" | after="CZ" | rule=letter case changed',
+    ]);
+  });
+
+  test("strict by position before lenient: the pair whose cells are equal wins over the nearer name", () => {
+    const diff = diffText(
+      path,
+      tsv(header, ["GA01", "1"], ["GA02", "2"]),
+      tsv(header, ["EEGGA_02REF", "2"], ["EEGGA_01REF", "1"]),
+    );
+    // Each new name is the relabel of BOTH old names' shapes; the equal value says which.
+    expect(lines(diff)).toEqual([
+      expect.stringContaining('before="GA01" | after="EEGGA_01REF"'),
+      expect.stringContaining('before="GA02" | after="EEGGA_02REF"'),
+      "rows_reordered",
+    ]);
+  });
+
+  test("relocation before lenient relabel: a removed row found verbatim in sourcedata is not paired with a look-alike", () => {
+    const copy = pooled(`sourcedata/removed/${path}`, null, tsv(header, ["A1", "7"]));
+    // A1 was removed and kept in sourcedata. POL A1 is a NEW row that happens to wrap the name.
+    const diff = diffText(
+      path,
+      tsv(header, ["A1", "7"], ["B1", "1"]),
+      tsv(header, ["B1", "1"], ["POL A1", "9"]),
+      [copy],
+    );
+    expect(lines(diff)).toEqual([
+      'row_relocated | field=name | before="A1" | detail="sourcedata/removed/sub-*_channels.tsv"',
+      'row_added | field=name | after="POL A1"',
+    ]);
+    // Without the copy the same rows are paired by the name alone: the lenient pass.
+    const without = diffText(
+      path,
+      tsv(header, ["A1", "7"], ["B1", "1"]),
+      tsv(header, ["B1", "1"], ["POL A1", "9"]),
+    );
+    expect(lines(without)).toEqual([
+      'key_relabeled | field=name | before="A1" | after="POL A1" | rule=added prefix "POL "',
+      'cell_replaced | field=v | before="7" | after="9"',
+      "rows_reordered",
+    ]);
+  });
+
+  test("strict relabel before relocation: a renamed row is paired even when an identical copy exists elsewhere", () => {
+    // The first prototype relocated first and matched renamed rows to identical copies in other
+    // subjects' files. Here the row is relabeled (every other cell equal), and the copy stays unused.
+    const copies = [pooled(`sourcedata/removed/${path}`, null, tsv(header, ["A1", "7"]))];
+    const diff = diffText(path, tsv(header, ["A1", "7"]), tsv(header, ["POL A1", "7"]), copies);
+    expect(lines(diff)).toEqual([
+      'key_relabeled | field=name | before="A1" | after="POL A1" | rule=added prefix "POL "',
+    ]);
+    expect(diff.counts.relocated).toBe(0);
+  });
+});
+
+describe("diffTable: keyless tables", () => {
+  const path = "sub-01_task-x_events.tsv";
+  const header = ["onset", "duration", "trial_type"];
+
+  test("rows are a multiset on the common columns: order does not matter, duplicates count", () => {
+    const diff = diffText(
+      path,
+      tsv(header, ["1", "1", "go"], ["1", "1", "go"], ["2", "1", "stop"]),
+      tsv(header, ["2", "1", "stop"], ["1", "1", "go"]),
+    );
+    // One go was removed; the rest moved.
+    expect(lines(diff)).toEqual(['row_removed | before="1\\t1\\tgo"', "rows_reordered"]);
+    expect(diff.counts).toMatchObject({ matched: 2, removed: 1 });
+  });
+
+  test("a deleted event and an unrelated new event are a removal and an addition, not an edit", () => {
+    const diff = diffText(
+      path,
+      tsv(header, ["1", "1", "go"], ["5", "1", "stop"]),
+      tsv(header, ["1", "1", "go"], ["9", "2", "rest"]),
+    );
+    expect(lines(diff)).toEqual([
+      'row_removed | before="5\\t1\\tstop"',
+      'row_added | after="9\\t2\\trest"',
+    ]);
+  });
+
+  test("a pair is accepted only when at most half the common columns differ", () => {
+    const four = ["a", "b", "c", "d"];
+    const run = (after: string[]) =>
+      diffText("t.tsv", tsv(four, ["1", "2", "3", "4"]), tsv(four, after));
+    // Two of four differ: exactly half, so one row, edited in two cells.
+    expect(kindsOf(run(["1", "2", "x", "y"]))).toEqual(["cell_replaced", "cell_replaced"]);
+    // Three of four differ: more than half, so removed and added.
+    expect(kindsOf(run(["1", "x", "y", "z"]))).toEqual(["row_removed", "row_added"]);
+    // One of two differs: half. One of one: more than half.
+    expect(
+      kindsOf(diffText("t.tsv", tsv(["a", "b"], ["1", "2"]), tsv(["a", "b"], ["1", "x"]))),
+    ).toEqual(["cell_replaced"]);
+    expect(kindsOf(diffText("t.tsv", tsv(["a"], ["1"]), tsv(["a"], ["x"])))).toEqual([
+      "row_removed",
+      "row_added",
+    ]);
+  });
+
+  test("an edited onset pairs the row, and the cell is shown", () => {
+    const diff = diffText(path, tsv(header, ["1", "1", "go"]), tsv(header, ["1.5", "1", "go"]));
+    expect(lines(diff)).toEqual(['cell_replaced | field=onset | before="1" | after="1.5"']);
+  });
+
+  test("pairing skips a row that belongs to nothing so the ones after it still pair", () => {
+    const diff = diffText(
+      path,
+      tsv(header, ["1", "1", "go"], ["7", "7", "gone"], ["3", "1", "stop"]),
+      tsv(header, ["1", "1", "go"], ["3", "1", "stop"]),
+    );
+    // The middle row matched nothing, but the others are kept; no spurious pairs.
+    expect(lines(diff)).toEqual(['row_removed | before="7\\t7\\tgone"']);
+    const edited = diffText(
+      path,
+      tsv(header, ["5", "1", "go"], ["7", "7", "gone"], ["3", "1", "stop"]),
+      tsv(header, ["5.5", "1", "go"], ["3", "1", "stop"]),
+    );
+    expect(lines(edited)).toEqual([
+      'cell_replaced | field=onset | before="5" | after="5.5"',
+      'row_removed | before="7\\t7\\tgone"',
+    ]);
+  });
+
+  test("a column only one version has is not part of the row identity, and the column is reported", () => {
+    const diff = diffText(
+      path,
+      tsv([...header, "note"], ["1", "1", "go", "x"]),
+      tsv(header, ["1", "1", "go"]),
+    );
+    expect(lines(diff)).toEqual(['column_removed | field=note | detail="1"']);
+  });
+
+  test("a keyed file whose keys are not usable is diffed as a multiset and loses nothing", () => {
+    const diff = diffText(
+      "sub-01_channels.tsv",
+      tsv(["name", "type"], ["A1", "EEG"], ["A1", "EMG"]),
+      tsv(["name", "type"], ["A1", "EMG"]),
+    );
+    expect(diff.keyColumn).toBeNull();
+    expect(lines(diff)).toEqual(['row_removed | before="A1\\tEEG"']);
+  });
+});
+
+describe("diffTable: relocation is exact and corresponding", () => {
+  const path = "sub-01/eeg/sub-01_channels.tsv";
+  const header = ["name", "type"];
+  const before = tsv(header, ["A1", "EEG"], ["A2", "EEG"], ["A3", "EEG"]);
+  const after = tsv(header, ["A1", "EEG"]);
+  const target = `sourcedata/removed/${path}`;
+
+  test("a removed row found verbatim at the corresponding sourcedata path is relocated, naming the shape it went to", () => {
+    const diff = diffText(path, before, after, [
+      pooled(target, null, tsv(header, ["A2", "EEG"], ["A3", "EEG"])),
+    ]);
+    expect(lines(diff)).toEqual([
+      'row_relocated | field=name | before="A2" | detail="sourcedata/removed/sub-*/eeg/sub-*_channels.tsv"',
+      'row_relocated | field=name | before="A3" | detail="sourcedata/removed/sub-*/eeg/sub-*_channels.tsv"',
+    ]);
+    expect(diff.counts).toMatchObject({ matched: 1, relocated: 2, removed: 0 });
+  });
+
+  test("a copy that differs in one byte is not a relocation", () => {
+    for (const changed of [
+      ["A2", "EEG "],
+      ["A2", "EEg"],
+      ["a2", "EEG"],
+      ["A2", "EEG\u{200B}"],
+    ]) {
+      const diff = diffText(path, before, after, [
+        pooled(target, null, tsv(header, changed, ["A3", "EEG"])),
+      ]);
+      expect(kindsOf(diff), JSON.stringify(changed)).toEqual(["row_removed", "row_relocated"]);
+    }
+  });
+
+  test("a copy in a file that was already there is not new, so it proves nothing", () => {
+    const same = tsv(header, ["A2", "EEG"], ["A3", "EEG"]);
+    const diff = diffText(path, before, after, [pooled(target, same, same)]);
+    expect(kindsOf(diff)).toEqual(["row_removed", "row_removed"]);
+  });
+
+  test("a copy under a path that does not correspond is not a relocation", () => {
+    const rows = tsv(header, ["A2", "EEG"], ["A3", "EEG"]);
+    for (const elsewhere of [
+      "sourcedata/removed/sub-01/eeg/sub-02_channels.tsv", // another subject's file
+      "sourcedata/removed/sub-01/sub-01_channels.tsv", // a shorter path
+      `sourcedata/removed/${path}.bak`, // a different name
+      `sourcedata/removed/x${path}`, // the directory name differs
+      "sourcedata/removed/channels.tsv",
+      "other/removed/sub-01/eeg/sub-01_channels.tsv", // not under sourcedata
+      `derivatives/${path}`,
+      `notsourcedata/removed/${path}`,
+      `Sourcedata/removed/${path}`,
+      path, // the file itself
+    ]) {
+      const diff = diffText(path, before, after, [pooled(elsewhere, null, rows)]);
+      expect(kindsOf(diff), elsewhere).toEqual(["row_removed", "row_removed"]);
+    }
+  });
+
+  test("any directory under sourcedata may hold the corresponding path, however deep", () => {
+    const rows = tsv(header, ["A2", "EEG"], ["A3", "EEG"]);
+    for (const where of [
+      `sourcedata/${path}`,
+      `sourcedata/a/${path}`,
+      `sourcedata/a/b/c/${path}`,
+    ]) {
+      const diff = diffText(path, before, after, [pooled(where, null, rows)]);
+      expect(kindsOf(diff), where).toEqual(["row_relocated", "row_relocated"]);
+    }
+  });
+
+  test("a copy under a different header is not a relocation, even with the same cells in another order", () => {
+    for (const other of [
+      tsv(["name", "type", "units"], ["A2", "EEG", "uV"], ["A3", "EEG", "uV"]),
+      tsv(["type", "name"], ["EEG", "A2"], ["EEG", "A3"]),
+      tsv(["Name", "type"], ["A2", "EEG"], ["A3", "EEG"]),
+    ]) {
+      const diff = diffText(path, before, after, [pooled(target, null, other)]);
+      expect(kindsOf(diff)).toEqual(["row_removed", "row_removed"]);
+    }
+  });
+
+  test("two identical removed rows and one copy give one relocated row and one removed", () => {
+    const events = "sub-01_events.tsv";
+    const hdr = ["onset", "trial_type"];
+    const diff = diffText(
+      events,
+      tsv(hdr, ["1", "go"], ["1", "go"], ["2", "stop"]),
+      tsv(hdr, ["2", "stop"]),
+      [pooled(`sourcedata/removed/${events}`, null, tsv(hdr, ["1", "go"]))],
+    );
+    expect(kindsOf(diff)).toEqual(["row_relocated", "row_removed"]);
+    expect(diff.counts).toMatchObject({ matched: 1, relocated: 1, removed: 1 });
+    // Two copies: both relocated.
+    const both = diffText(
+      events,
+      tsv(hdr, ["1", "go"], ["1", "go"], ["2", "stop"]),
+      tsv(hdr, ["2", "stop"]),
+      [pooled(`sourcedata/removed/${events}`, null, tsv(hdr, ["1", "go"], ["1", "go"]))],
+    );
+    expect(kindsOf(both)).toEqual(["row_relocated", "row_relocated"]);
+  });
+
+  test("one copy is never used twice, across files either", () => {
+    const hdr = ["name", "type"];
+    const pool = buildPools([
+      pooled("sourcedata/old/sub-01/x_channels.tsv", null, tsv(hdr, ["A2", "EEG"])),
+    ]).rows;
+    // sub-01/x_channels.tsv and x_channels.tsv both correspond to that one file.
+    const first = diffTable(
+      "sub-01/x_channels.tsv",
+      table(tsv(hdr, ["A1", "EEG"], ["A2", "EEG"])),
+      table(tsv(hdr, ["A1", "EEG"])),
+      pool,
+    );
+    const second = diffTable(
+      "x_channels.tsv",
+      table(tsv(hdr, ["A1", "EEG"], ["A2", "EEG"])),
+      table(tsv(hdr, ["A1", "EEG"])),
+      pool,
+    );
+    expect(first.ok && kindsOf(first.value)).toEqual(["row_relocated"]);
+    expect(second.ok && kindsOf(second.value)).toEqual(["row_removed"]);
+  });
+
+  test("a diff that is refused does not use up the copies it found", () => {
+    const hdr = ["name", "type"];
+    const pool = buildPools([pooled(`sourcedata/old/${path}`, null, tsv(hdr, ["A2", "EEG"]))]).rows;
+    const refused = diffTableWith(path, table(before), table(after), pool, () => false);
+    expect(refused).toEqual({ ok: false, refusal: "internal_mismatch" });
+    expect(pool.files.get(`sourcedata/old/${path}`)?.rows.get("A2\tEEG")).toBe(1);
+    const used = diffTable(path, table(before), table(after), pool);
+    expect(used.ok && used.value.counts.relocated).toBe(1);
+    expect(pool.files.get(`sourcedata/old/${path}`)?.rows.get("A2\tEEG")).toBe(0);
+  });
+
+  test("a keyless removed row is relocated by its whole row text", () => {
+    const events = "sub-01_events.tsv";
+    const hdr = ["onset", "trial_type"];
+    const diff = diffText(events, tsv(hdr, ["1", "go"], ["2", "stop"]), tsv(hdr, ["1", "go"]), [
+      pooled(`sourcedata/x/${events}`, null, tsv(hdr, ["2", "stop"])),
+    ]);
+    expect(lines(diff)).toEqual([
+      'row_relocated | before="2\\tstop" | detail="sourcedata/x/sub-*_events.tsv"',
+    ]);
+  });
+});
+
+describe("diffTable: the layout of the file", () => {
+  const same = tsv(["a", "b"], ["1", "2"]);
+
+  test("a byte order mark, line endings and the final newline are one atom each, with both states", () => {
+    expect(lines(diffText("e.tsv", same, `\u{FEFF}${same}`))).toEqual([
+      'format | before="absent" | after="present" | detail="bom"',
+    ]);
+    expect(lines(diffText("e.tsv", same, same.replace(/\n/g, "\r\n")))).toEqual([
+      'format | before="lf" | after="crlf" | detail="line_endings"',
+    ]);
+    expect(lines(diffText("e.tsv", same, same.slice(0, -1)))).toEqual([
+      'format | before="present" | after="absent" | detail="final_newline"',
+    ]);
+  });
+
+  test("mixed line endings: WHICH lines end in CRLF is a difference of its own", () => {
+    const a = "a\tb\r\n1\t2\n3\t4\n";
+    const b = "a\tb\n1\t2\r\n3\t4\n";
+    expect(lines(diffText("e.tsv", a, b))).toEqual([
+      'format | before="100" | after="010" | detail="line_ending_pattern"',
+    ]);
+    // Mixed to LF changes the class of ending and the pattern.
+    expect(lines(diffText("e.tsv", a, "a\tb\n1\t2\n3\t4\n"))).toEqual([
+      'format | before="mixed" | after="lf" | detail="line_endings"',
+      'format | before="100" | after="" | detail="line_ending_pattern"',
+    ]);
+  });
+
+  test("a layout change does not touch the rows: they stay matched", () => {
+    const diff = diffText("e.tsv", same, `\u{FEFF}${same.replace(/\n/g, "\r\n")}`);
+    expect(diff.atoms.map((a) => a.detail)).toEqual(["bom", "line_endings"]);
+    expect(diff.counts.matched).toBe(1);
+  });
+
+  test("formatAtoms of equal layouts is empty and of every field differing is four atoms in a fixed order", () => {
+    const base = { bom: false, eol: "lf", crPattern: "", finalNewline: true } as const;
+    expect(formatAtoms(base, base)).toEqual([]);
+    const all = formatAtoms(base, {
+      bom: true,
+      eol: "mixed",
+      crPattern: "01",
+      finalNewline: false,
+    });
+    expect(all.map((a) => a.detail)).toEqual([
+      "bom",
+      "line_endings",
+      "line_ending_pattern",
+      "final_newline",
+    ]);
+  });
+});
+
+describe("diffTable: the totality assertion", () => {
+  const path = "sub-01_channels.tsv";
+  const header = ["name", "type"];
+  const before = table(tsv(header, ["A1", "EEG"], ["A2", "EEG"], ["A3", "EEG"]));
+  const after = table(tsv(header, ["A1", "EEG"], ["Q9", "EEG"]));
+  const emptyPool = buildPools([]).rows;
+
+  test("a count check that fails turns the file into internal_mismatch, never into a summary", () => {
+    expect(diffTableWith(path, before, after, emptyPool, () => false)).toEqual({
+      ok: false,
+      refusal: "internal_mismatch",
+    });
+    expect(diffTableWith(path, before, after, emptyPool, () => true).ok).toBe(true);
+  });
+
+  test("the entry point runs the real check: diffTable is diffTableWith over verifyTableCounts", () => {
+    // The guard cannot fire on real input, so no input proves the wiring; the source of the entry
+    // point is the only place the wiring is visible. A diffTable that passed a check that always
+    // holds would turn every internal_mismatch into a summary, and this is what notices.
+    expect(String(diffTable)).toContain("verifyTableCounts");
+    expect(String(diffTable)).not.toContain("=> true");
+  });
+
+  test("the check is given the tallies of what was emitted", () => {
+    let seen: TableCounts | null = null;
+    diffTableWith(path, before, after, emptyPool, (counts) => {
+      seen = counts;
+      return true;
+    });
+    expect(seen).toEqual({
+      beforeRows: 3,
+      afterRows: 2,
+      matched: 1,
+      paired: 0,
+      relocated: 0,
+      removed: 2,
+      afterMatched: 1,
+      afterPaired: 0,
+      added: 1,
+      conflicts: 0,
+      beforeColumns: 2,
+      afterColumns: 2,
+      commonColumns: 2,
+      columnsRemoved: 0,
+      columnsAdded: 0,
+    });
+  });
+
+  test("the real check accepts a total count and rejects each way a count can fail to add up", () => {
+    const good: TableCounts = {
+      beforeRows: 10,
+      afterRows: 9,
+      matched: 4,
+      paired: 3,
+      relocated: 2,
+      removed: 1,
+      afterMatched: 4,
+      afterPaired: 3,
+      added: 2,
+      conflicts: 0,
+      beforeColumns: 5,
+      afterColumns: 6,
+      commonColumns: 4,
+      columnsRemoved: 1,
+      columnsAdded: 2,
+    };
+    expect(verifyTableCounts(good)).toBe(true);
+    const broken: Partial<TableCounts>[] = [
+      { beforeRows: 11 },
+      { beforeRows: 9 },
+      { afterRows: 10 },
+      { afterRows: 8 },
+      { removed: 2 },
+      { relocated: 1 },
+      { added: 1 },
+      { matched: 5 },
+      { afterPaired: 2 },
+      { conflicts: 1 },
+      { beforeColumns: 6 },
+      { afterColumns: 5 },
+      { columnsRemoved: 2 },
+      { columnsAdded: 1 },
+      { commonColumns: 5 },
+    ];
+    for (const change of broken) {
+      expect(verifyTableCounts({ ...good, ...change }), JSON.stringify(change)).toBe(false);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// Generated tables: the diff is total, and it never hides a change
+// ---------------------------------------------------------------------------------------------
+
+interface Layout {
+  bom: boolean;
+  /** "lf", "crlf" or "mixed" (the first line CRLF, the rest LF). */
+  eol: "lf" | "crlf" | "mixed";
+  finalNewline: boolean;
+}
+
+/** Text from a header and rows in the given layout. */
+function render(header: string[], rows: string[][], layout: Layout): string {
+  const lines = [header, ...rows].map((cells) => cells.join("\t"));
+  let text = "";
+  lines.forEach((content, i) => {
+    text += content;
+    const last = i === lines.length - 1;
+    if (!last || layout.finalNewline) {
+      text += layout.eol === "crlf" || (layout.eol === "mixed" && i === 0) ? "\r\n" : "\n";
+    }
+  });
+  return `${layout.bom ? "\u{FEFF}" : ""}${text}`;
+}
+
+/** A tool kit over a seeded generator: pick, chance, shuffle. */
+function toolkit(random: () => number) {
+  const pick = <T>(items: readonly T[]): T => items[Math.floor(random() * items.length)] as T;
+  const chance = (p: number): boolean => random() < p;
+  const int = (low: number, high: number): number => low + Math.floor(random() * (high - low + 1));
+  const shuffled = <T>(items: readonly T[]): T[] => {
+    const out = [...items];
+    for (let i = out.length - 1; i > 0; i--) {
+      const j = Math.floor(random() * (i + 1));
+      [out[i], out[j]] = [out[j] as T, out[i] as T];
+    }
+    return out;
+  };
+  return { pick, chance, int, shuffled };
+}
+
+const VALUES = [
+  "EEG",
+  "EMG",
+  "uV",
+  "n/a",
+  "",
+  "1",
+  "01",
+  "64",
+  "640",
+  "A1",
+  "a1",
+  "x y",
+  "good",
+  "bad",
+  "None",
+  "'G1'    ",
+  "'G1'",
+];
+const NAMES = [
+  "A1",
+  "A2",
+  "A01",
+  "Cz",
+  "cz",
+  "CZ",
+  "Fp1",
+  "EEG Fp1-Ref",
+  "POL A01",
+  "GA01",
+  "EEGGA_01REF",
+  "DCEMBRACE",
+  "DC EMBRACE-REF",
+  "B7",
+  "a1",
+  "POL A1",
+];
+const TABLE_FILES: { path: string; key: string | null }[] = [
+  { path: "sub-01/eeg/sub-01_task-x_channels.tsv", key: "name" },
+  { path: "participants.tsv", key: "participant_id" },
+  { path: "sub-01/sub-01_scans.tsv", key: "filename" },
+  { path: "sub-01/eeg/sub-01_electrodes.tsv", key: "name" },
+  { path: "sub-01/eeg/sub-01_task-x_events.tsv", key: null },
+  { path: "phenotype/iq.tsv", key: null },
+];
+const OTHER_COLUMNS = ["type", "units", "onset", "duration", "status", "note", "x"];
+
+interface GeneratedTables {
+  path: string;
+  before: string;
+  after: string;
+  pool: PoolFile[];
+  beforeRows: string[][];
+  afterRows: string[][];
+  beforeHeader: string[];
+  afterHeader: string[];
+}
+
+function generateTables(random: () => number): GeneratedTables {
+  const { pick, chance, int, shuffled } = toolkit(random);
+  const file = pick(TABLE_FILES);
+  const keyName = file.key ?? "id";
+  const extra = shuffled(OTHER_COLUMNS).slice(0, int(0, 4));
+  const beforeHeader = chance(0.8) ? [keyName, ...extra] : shuffled([keyName, ...extra]);
+  const cell = (column: string): string => (column === keyName ? pick(NAMES) : pick(VALUES));
+
+  const count = int(0, 10);
+  const duplicate = chance(0.12);
+  const used = new Set<string>();
+  const beforeRows: string[][] = [];
+  for (let i = 0; i < count; i++) {
+    const row = beforeHeader.map(cell);
+    const at = beforeHeader.indexOf(keyName);
+    while (!duplicate && used.has(row[at] as string)) row[at] = `${pick(NAMES)}-${int(0, 99)}`;
+    used.add(row[at] as string);
+    beforeRows.push(row);
+  }
+
+  // The after table: edit a copy of the before rows.
+  let afterHeader = [...beforeHeader];
+  if (chance(0.2) && afterHeader.length > 1) {
+    const drop = pick(afterHeader.filter((c) => c !== keyName));
+    afterHeader = afterHeader.filter((c) => c !== drop);
+  }
+  if (chance(0.2)) afterHeader.push("added_column");
+  if (chance(0.05)) afterHeader[afterHeader.length - 1] = "renamed_column";
+  if (chance(0.15)) afterHeader = shuffled(afterHeader);
+  const mutateKey = (key: string): string => {
+    switch (int(0, 4)) {
+      case 0:
+        return `POL ${key}`;
+      case 1:
+        return key.toUpperCase();
+      case 2:
+        return `EEG ${key}-Ref`;
+      case 3:
+        return key.replace(/[0-9]+/, (d) => `0${d}`);
+      default:
+        return `${key}x`;
+    }
+  };
+  const removedForCopies: string[][] = [];
+  let carried: string[][] = [];
+  for (const row of beforeRows) {
+    if (chance(0.2)) {
+      removedForCopies.push(row);
+      continue;
+    }
+    const next = [...row];
+    const at = beforeHeader.indexOf(keyName);
+    if (chance(0.25)) next[at] = mutateKey(next[at] as string);
+    for (let i = 0; i < next.length; i++) if (i !== at && chance(0.15)) next[i] = pick(VALUES);
+    carried.push(next);
+    if (chance(0.05)) carried.push([...next]);
+  }
+  for (let i = int(0, 3); i > 0; i--)
+    carried.push(beforeHeader.map((c) => (c === keyName ? `N${int(0, 999)}` : pick(VALUES))));
+  if (chance(0.3)) carried = shuffled(carried);
+  const afterRows = carried.map((row) =>
+    afterHeader.map((column) => {
+      const at = beforeHeader.indexOf(column);
+      return at >= 0 ? (row[at] as string) : pick(VALUES);
+    }),
+  );
+
+  const layout = (): Layout => ({
+    bom: chance(0.1),
+    eol: pick(["lf", "lf", "lf", "crlf", "mixed"] as const),
+    finalNewline: chance(0.9),
+  });
+  const beforeLayout = layout();
+  const afterLayout = chance(0.5) ? beforeLayout : layout();
+
+  const pool: PoolFile[] = [];
+  if (removedForCopies.length > 0 && chance(0.6)) {
+    const copies = removedForCopies
+      .filter(() => chance(0.7))
+      .map((row) => (chance(0.25) ? row.map((c, i) => (i === 0 ? `${c}!` : c)) : row));
+    pool.push(
+      pooled(
+        `sourcedata/removed/${file.path}`,
+        null,
+        render(beforeHeader, copies, { bom: false, eol: "lf", finalNewline: true }),
+      ),
+    );
+  }
+  if (chance(0.3))
+    pool.push(
+      pooled(
+        `sourcedata/other/${file.path}`,
+        null,
+        render(beforeHeader, removedForCopies, { bom: false, eol: "lf", finalNewline: true }),
+      ),
+    );
+
+  return {
+    path: file.path,
+    before: render(beforeHeader, beforeRows, beforeLayout),
+    after: render(afterHeader, afterRows, afterLayout),
+    pool,
+    beforeRows,
+    afterRows,
+    beforeHeader,
+    afterHeader,
+  };
+}
+
+/** The rows projected on the columns both headers have, as a multiset keyed by text. */
+function projected(header: string[], rows: string[][], columns: string[]): Map<string, number> {
+  const map = new Map<string, number>();
+  for (const row of rows) {
+    const text = columns.map((c) => row[header.indexOf(c)]).join("\t");
+    map.set(text, (map.get(text) ?? 0) + 1);
+  }
+  return map;
+}
+
+describe("diffTable on generated tables", () => {
+  test("1,800 generated pairs: the diff is always total, its tallies match its atoms, and it is deterministic", () => {
+    const random = seeded(2024);
+    let checked = 0;
+    let skipped = 0;
+    const seen = new Set<ClassKind>();
+    for (let n = 0; n < 1800; n++) {
+      const g = generateTables(random);
+      const b = parseTsv(enc(g.before));
+      const a = parseTsv(enc(g.after));
+      if (!b.ok || !a.ok) {
+        skipped++;
+        continue;
+      }
+      const result = diffTable(g.path, b.value, a.value, buildPools(g.pool).rows);
+      if (!result.ok)
+        throw new Error(`case ${n} refused: ${result.refusal}\n${g.before}\n---\n${g.after}`);
+      const { atoms, counts } = result.value;
+      checked++;
+      for (const atom of atoms) seen.add(atom.kind);
+
+      // Total: the real assertion, and the sums it is made of, against the real row counts.
+      expect(verifyTableCounts(counts), `case ${n}`).toBe(true);
+      expect(counts.beforeRows, `case ${n}`).toBe(b.value.rows.length);
+      expect(counts.afterRows, `case ${n}`).toBe(a.value.rows.length);
+      expect(counts.matched + counts.paired + counts.relocated + counts.removed, `case ${n}`).toBe(
+        b.value.rows.length,
+      );
+      expect(counts.afterMatched + counts.afterPaired + counts.added, `case ${n}`).toBe(
+        a.value.rows.length,
+      );
+
+      // The tallies are the atoms.
+      const tally = (kind: ClassKind): number => atoms.filter((x) => x.kind === kind).length;
+      expect(tally("row_removed"), `case ${n}`).toBe(counts.removed);
+      expect(tally("row_relocated"), `case ${n}`).toBe(counts.relocated);
+      expect(tally("row_added"), `case ${n}`).toBe(counts.added);
+      expect(tally("column_removed"), `case ${n}`).toBe(counts.columnsRemoved);
+      expect(tally("column_added"), `case ${n}`).toBe(counts.columnsAdded);
+      expect(tally("key_relabeled"), `case ${n}`).toBeLessThanOrEqual(counts.paired);
+
+      // Deterministic: a second run against a fresh pool says the same.
+      const again = diffTable(g.path, b.value, a.value, buildPools(g.pool).rows);
+      expect(again.ok && again.value.atoms, `case ${n}`).toEqual(atoms);
+
+      // Nothing is hidden: if the rows differ on the columns both versions have, a row atom says so.
+      const common = g.beforeHeader.filter((c) => g.afterHeader.includes(c));
+      const before = projected(g.beforeHeader, g.beforeRows, common);
+      const after = projected(g.afterHeader, g.afterRows, common);
+      const same =
+        before.size === after.size && [...before].every(([text, k]) => after.get(text) === k);
+      const rowKinds: ClassKind[] = [
+        "row_removed",
+        "row_relocated",
+        "row_added",
+        "key_relabeled",
+        "cell_replaced",
+        "cell_emptied",
+        "cell_filled",
+        "cell_templated",
+      ];
+      const rowAtoms = atoms.filter((x) => rowKinds.includes(x.kind));
+      if (same) expect(rowAtoms, `case ${n}: equal rows, but ${rowAtoms.map(line)}`).toEqual([]);
+      else
+        expect(
+          rowAtoms.length,
+          `case ${n}: different rows, no atom\n${g.before}\n---\n${g.after}`,
+        ).toBeGreaterThan(0);
+    }
+    expect(skipped).toBeLessThan(180);
+    expect(checked).toBeGreaterThan(1500);
+    // The generator reaches the interesting kinds, so the checks above are not vacuous.
+    for (const kind of [
+      "row_removed",
+      "row_added",
+      "row_relocated",
+      "key_relabeled",
+      "cell_replaced",
+      "cell_emptied",
+      "cell_filled",
+      "cell_templated",
+      "column_removed",
+      "column_added",
+      "columns_reordered",
+      "rows_reordered",
+      "format",
+    ] as ClassKind[]) {
+      expect(seen.has(kind), kind).toBe(true);
+    }
+  });
+
+  test("a table diffed against itself has no atoms, however it is laid out", () => {
+    const random = seeded(77);
+    let checked = 0;
+    for (let n = 0; n < 400; n++) {
+      const g = generateTables(random);
+      const parsed = parseTsv(enc(g.before));
+      if (!parsed.ok) continue;
+      const result = diffTable(g.path, parsed.value, parsed.value, buildPools(g.pool).rows);
+      expect(result.ok && result.value.atoms, `case ${n}`).toEqual([]);
+      checked++;
+    }
+    expect(checked).toBeGreaterThan(300);
+  });
+
+  test("shuffled rows with unique keys are only a reorder; appended rows are only additions", () => {
+    const random = seeded(31337);
+    const { shuffled, int } = toolkit(random);
+    let reordered = 0;
+    for (let n = 0; n < 300; n++) {
+      const header = ["name", "type"];
+      const rows = Array.from({ length: int(2, 9) }, (_, i) => [
+        `K${i}`,
+        VALUES[i % VALUES.length] as string,
+      ]);
+      const layout: Layout = { bom: false, eol: "lf", finalNewline: true };
+      const path = "sub-01_channels.tsv";
+      const order = shuffled(rows);
+      const moved = diffText(path, render(header, rows, layout), render(header, order, layout));
+      const sameOrder = order.every((row, i) => row === rows[i]);
+      expect(
+        moved.atoms.map((a) => a.kind),
+        `case ${n}`,
+      ).toEqual(sameOrder ? [] : ["rows_reordered"]);
+      if (!sameOrder) reordered++;
+      const extra = Array.from({ length: int(1, 3) }, (_, i) => [`Z${i}`, "EEG"]);
+      const grown = diffText(
+        path,
+        render(header, rows, layout),
+        render(header, [...rows, ...extra], layout),
+      );
+      expect(
+        grown.atoms.map((a) => a.kind),
+        `case ${n}`,
+      ).toEqual(extra.map(() => "row_added"));
+    }
+    expect(reordered).toBeGreaterThan(200);
   });
 });
