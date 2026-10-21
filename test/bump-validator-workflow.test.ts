@@ -115,6 +115,22 @@ describe("bump-validator.yml", () => {
     expect(openAt).toBeGreaterThan(compareAt);
   });
 
+  test("a Deno runtime is set up before the comparison runs", () => {
+    const setupAt = steps.findIndex((step) => step.uses?.startsWith("denoland/setup-deno"));
+    const compareAt = steps.findIndex((step) => step.run?.includes("compare-gating.sh"));
+    expect(setupAt).toBeGreaterThanOrEqual(0);
+    expect(setupAt).toBeLessThan(compareAt);
+  });
+
+  test("the pull request body is written before the pull request is opened", () => {
+    const writeAt = steps.findIndex((step) => step.name === "Write the pull request body");
+    const openAt = steps.findIndex((step) =>
+      step.uses?.startsWith("peter-evans/create-pull-request"),
+    );
+    expect(writeAt).toBeGreaterThanOrEqual(0);
+    expect(writeAt).toBeLessThan(openAt);
+  });
+
   test("an incomplete comparison fails the job: the script is not asked to accept a partial result", () => {
     const compare = stepNamed("Compare the reference datasets across the two releases");
     expect(compare?.run).toContain('--out "$RUNNER_TEMP/validator-compare"');
