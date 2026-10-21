@@ -3610,20 +3610,19 @@ export function lossFactsOf(files: readonly FileAtoms[]): LossFacts {
 
 /**
  * The files the summary accounts for (design section 6.1): a file is accounted for when it parsed
- * on both sides with no refusal (so its table round-tripped and its diff was total), the pass was
- * not abandoned, and EVERY class that holds one of its atoms and is not additive was shown
- * completely. Additive classes are never needed: new content removes nothing. A class this
- * function does not know, or a path that appears twice with different fates, accounts for
- * nothing: every doubt here falls toward the raw-diff path.
+ * on both sides with no refusal (so its table round-tripped and its diff was total) and EVERY class
+ * that holds one of its atoms and is not additive was shown completely. Additive classes are never
+ * needed: new content removes nothing. A class this function does not know, or a path that appears
+ * twice with different fates, accounts for nothing: every doubt here falls toward the raw-diff
+ * path. An abandoned run never gets here: {@link summarizeChanges} returns the abandoned summary,
+ * which accounts for nothing, before anything is accounted for.
  */
 export function accountedFiles(
   outcomes: readonly FileOutcome[],
   classes: readonly ChangeClass[],
   complete: ReadonlySet<string>,
-  abandoned: boolean,
 ): Set<string> {
   const accounted = new Set<string>();
-  if (abandoned) return accounted;
   const kindOf = new Map(classes.map((c) => [c.key, c.kind]));
   const refused = new Set<string>();
   for (const outcome of outcomes) {
@@ -3958,7 +3957,7 @@ export function summarizeChangesWith(
 
   const classes = classify(summarized);
   const rendered = renderClasses(classes);
-  const accounted = accountedFiles(outcomes, classes, rendered.complete, false);
+  const accounted = accountedFiles(outcomes, classes, rendered.complete);
   const loss = lossFactsOf(summarized);
   return {
     abandoned: false,

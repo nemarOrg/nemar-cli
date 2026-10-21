@@ -1097,7 +1097,6 @@ function account(
   options: {
     pool?: readonly PoolFile[];
     refused?: readonly FileOutcome[];
-    abandoned?: boolean;
   } = {},
 ) {
   const atoms = atomsOf(files, options.pool ?? []);
@@ -1109,7 +1108,7 @@ function account(
     classes,
     outcomes,
     ...r,
-    accounted: accountedFiles(outcomes, classes, r.complete, options.abandoned ?? false),
+    accounted: accountedFiles(outcomes, classes, r.complete),
   };
 }
 
@@ -1233,7 +1232,9 @@ describe("accountedFiles: a file is accounted for only when every non-additive c
     expect([...accounted]).toEqual([channels(1)]);
   });
 
-  test("a refused file accounts for nothing, and an abandoned pass for no file at all", () => {
+  // An abandoned pass accounts for nothing; that is summarizeChanges's to decide, and the deadline
+  // tests below prove it with an injected clock.
+  test("a refused file accounts for nothing", () => {
     const refused: FileOutcome = {
       path: channels(3),
       family: "tsv",
@@ -1249,7 +1250,6 @@ describe("accountedFiles: a file is accounted for only when every non-additive c
       },
     ];
     expect([...account(files, { refused: [refused] }).accounted]).toEqual([channels(1)]);
-    expect(account(files, { abandoned: true }).accounted.size).toBe(0);
   });
 
   test("a refusal is never accounted for, even when its class keys would all be complete", () => {
@@ -1261,7 +1261,7 @@ describe("accountedFiles: a file is accounted for only when every non-additive c
       },
     ]);
     const withRefusal = outcomes.map((o) => ({ ...o, refusal: "internal_mismatch" as const }));
-    expect(accountedFiles(withRefusal, classes, complete, false).size).toBe(0);
+    expect(accountedFiles(withRefusal, classes, complete).size).toBe(0);
   });
 
   test("a class the function does not know, or a path listed twice with different fates, accounts for nothing", () => {
@@ -1273,7 +1273,7 @@ describe("accountedFiles: a file is accounted for only when every non-additive c
       },
     ]);
     const unknown = outcomes.map((o) => ({ ...o, classKeys: new Set([...o.classKeys, "[]"]) }));
-    expect(accountedFiles(unknown, classes, complete, false).size).toBe(0);
+    expect(accountedFiles(unknown, classes, complete).size).toBe(0);
     const twice = [
       ...outcomes,
       {
@@ -1282,7 +1282,7 @@ describe("accountedFiles: a file is accounted for only when every non-additive c
         classKeys: new Set<string>(),
       },
     ];
-    expect(accountedFiles(twice, classes, complete, false).size).toBe(0);
+    expect(accountedFiles(twice, classes, complete).size).toBe(0);
   });
 });
 
