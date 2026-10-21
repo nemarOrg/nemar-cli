@@ -49,7 +49,7 @@ import {
   type Patch,
   classifyPath,
 } from "./pr-review-evidence";
-import type { ChangeSummary } from "./pr-review-summary";
+import { type ChangeSummary, SUMMARY_LIMITS } from "./pr-review-summary";
 
 // The prompt's text tools live in `shared/untrusted-text.ts`, shared with the publication review
 // (ADR 0102); `tidy` and `tidyPath` are re-exported so every importer of this module keeps working.
@@ -328,6 +328,38 @@ function repeatNote(p: Patch): string {
   }: ${named}${rest})`;
 }
 
+/**
+ * The kind of the fenced block that describes the change summary's classes: one class line per
+ * class shown, with its values and examples. The words in parentheses name the parts of a line.
+ */
+export const SUMMARY_FENCE_KIND =
+  "changed-metadata-summary (class, path shape, field, rule, values, examples)";
+
+/**
+ * The change summary as the facts block carries it, outside every fence: its counts and its class
+ * table, whose lines are the platform's words and counts only (`classTable` in the summary module).
+ * Built key by key rather than spread, so a field the summary gains later reaches the model only
+ * through a reviewed edit here, and a path or a value (the summary's `loss` names one) never does.
+ */
+function changeSummaryFacts(s: ChangeSummary) {
+  const f = s.facts;
+  return {
+    abandoned: f.abandoned,
+    files_summarized: f.files_summarized,
+    files_not_summarized: f.files_not_summarized,
+    files_accounted_for: f.files_accounted_for,
+    classes_shown: f.classes_shown,
+    classes_cut: f.classes_cut,
+    rows_removed_not_found_elsewhere: f.rows_removed_not_found_elsewhere,
+    rows_removed_found_verbatim_in_sourcedata: f.rows_removed_found_verbatim_in_sourcedata,
+    columns_with_values_removed: f.columns_with_values_removed,
+    keys_removed_not_found_elsewhere: f.keys_removed_not_found_elsewhere,
+    keys_moved_to_an_inherited_sidecar: f.keys_moved_to_an_inherited_sidecar,
+    values_emptied: f.values_emptied,
+    classes: [...f.classes],
+  };
+}
+
 /** The two messages sent to the review. */
 export function buildReviewMessages(input: {
   facts: GitFacts;
@@ -339,6 +371,9 @@ export function buildReviewMessages(input: {
   const { facts, evidence, pr, fromFork, nonce } = input;
   const trusted = {
     files_changed: evidence.files_changed,
+    // The files read: a diff shown in full, or a file the change summary accounted for, each once.
+    // The name predates the summary and is kept, so the prompt the model was calibrated on still
+    // names it.
     files_with_content_shown: evidence.files_read,
     change_list_cut_short: facts.listCut,
     changed_metadata_not_shown_in_full: facts.readIncomplete,
@@ -352,6 +387,7 @@ export function buildReviewMessages(input: {
     subjects_after: evidence.subjects_after,
     opened_from_a_fork: fromFork,
     changed_per_area: evidence.areas,
+    change_summary: changeSummaryFacts(facts.summary),
   };
 
   const listed = facts.changes
@@ -361,7 +397,7 @@ export function buildReviewMessages(input: {
   const grouped = facts.groups
     .map(
       (g) =>
-        `${g.status}\t${g.files} files\t${g.shown} shown in full\t${g.cosmeticOnly} cosmetic only\t${tidyPath(g.pattern, MAX_PATH_CHARS)}`,
+        `${g.status}\t${g.files} files\t${g.shown} shown in full\t${g.cosmeticOnly} cosmetic only\t${g.summarized} accounted for by the summary\t${tidyPath(g.pattern, MAX_PATH_CHARS)}`,
     )
     .join("\n");
   const omitted =
@@ -375,15 +411,23 @@ export function buildReviewMessages(input: {
     )
     .join("\n\n");
 
+  // The summary's own block, only when it has a class to show (or a line counting the ones it could
+  // not): its text is the pull request's values and paths, already escaped by the summary so none
+  // can start a line, and fenced like any content. An abandoned summary has no text, and the facts
+  // say it was abandoned.
+  const summary = facts.summary.text;
   const user = [
     `<facts>\n${JSON.stringify(trusted, null, 2)}\n</facts>`,
     fence("pull-request", nonce, requestText(pr, facts.commits)),
     fence("changed-files (status, area, path)", nonce, listed || "(none)"),
     fence(
-      "changed-metadata-groups (status, count, shown in full, cosmetic only, path shape)",
+      "changed-metadata-groups (status, count, shown in full, cosmetic only, accounted for by the summary, path shape)",
       nonce,
       (grouped || "(none)") + omitted,
     ),
+    ...(summary === ""
+      ? []
+      : [fence(SUMMARY_FENCE_KIND, nonce, tidy(summary, SUMMARY_LIMITS.maxSummaryChars))]),
     fence("content-of-changed-metadata-files", nonce, diffs || "(none shown)"),
     "Review this pull request now.",
   ].join("\n\n");
