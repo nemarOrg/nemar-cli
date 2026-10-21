@@ -888,40 +888,23 @@ function normalizeRun(run: { cls: RunClass; text: string }): string {
 /**
  * Whether a string holds a digit run whose zeros may be part of a number rather than its padding
  * (see {@link Name.numbersAsText}): a digit run directly before or after a `.` or a `,`, also at
- * the edge of the string, or a digit run JOINED to another, that is, one whose nearest run on its
- * left or on its right that is not one other character is a digit run.
+ * the edge of the string, or two digit runs JOINED, with nothing but runs of one other character
+ * between them. One pass from the left finds a join at its second digit run, whose nearest run on
+ * the left that is not one other character is the first.
  */
 function holdsNumberText(runs: readonly Run[]): boolean {
-  const joined = joinedDigitRuns(runs);
-  return runs.some(
-    (run, i) =>
-      run.cls === "D" &&
-      (joined[i] === true ||
-        DECIMAL_MARKS.has(runs[i - 1]?.text ?? "") ||
-        DECIMAL_MARKS.has(runs[i + 1]?.text ?? "")),
-  );
-}
-
-/**
- * For each run, whether it is a digit run joined to another digit run (see {@link holdsNumberText}):
- * the nearest run on its left or on its right that is not one other character is a digit run. Two
- * passes, one from each end, each remembering the class of the last such run it passed.
- */
-function joinedDigitRuns(parts: readonly { cls: RunClass }[]): boolean[] {
-  const joined = parts.map(() => false);
   let last: RunClass | null = null;
-  for (let i = 0; i < parts.length; i++) {
-    const cls = (parts[i] as { cls: RunClass }).cls;
-    if (cls === "D" && last === "D") joined[i] = true;
-    if (cls !== "O") last = cls;
+  for (let i = 0; i < runs.length; i++) {
+    const run = runs[i] as Run;
+    if (run.cls === "D") {
+      if (last === "D") return true;
+      const mark =
+        DECIMAL_MARKS.has(runs[i - 1]?.text ?? "") || DECIMAL_MARKS.has(runs[i + 1]?.text ?? "");
+      if (mark) return true;
+    }
+    if (run.cls !== "O") last = run.cls;
   }
-  last = null;
-  for (let i = parts.length - 1; i >= 0; i--) {
-    const cls = (parts[i] as { cls: RunClass }).cls;
-    if (cls === "D" && last === "D") joined[i] = true;
-    if (cls !== "O") last = cls;
-  }
-  return joined;
+  return false;
 }
 
 /**
