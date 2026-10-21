@@ -12,7 +12,7 @@
  * - Network access for first run or when updating
  */
 
-import { existsSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "bun";
@@ -375,6 +375,67 @@ export function withValidatorVersion(report: string): string {
     throw new Error("The BIDS validator's JSON report is not an object");
   }
   return JSON.stringify({ ...parsed, validatorVersion: VALIDATOR_VERSION });
+}
+
+/**
+ * The file the validator is asked to write its report to, found among the pass-through arguments
+ * of `nemar dataset validate`: `--outfile <file>`, `--outfile=<file>` or `-o <file>`. The last one
+ * wins. The value is the next argument whatever it looks like, because that is how the validator
+ * reads it, and a flag with nothing after it names no file.
+ */
+export function reportFileFromArgs(args: string[]): string | undefined {
+  let file: string | undefined;
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === "--outfile" || arg === "-o") {
+      const value = args[i + 1];
+      if (value) {
+        file = value;
+        i++;
+      }
+    } else if (arg.startsWith("--outfile=") && arg.length > "--outfile=".length) {
+      file = arg.slice("--outfile=".length);
+    }
+  }
+  return file;
+}
+
+/**
+ * Add the validator release to the report file the validator wrote for `--outfile`, so a report on
+ * disk names its release just as one on stdout does. A `--json` report gets the key that
+ * withValidatorVersion adds and stays on one line. A text report gets the Validator line that the
+ * console report ends with. A target that is not a regular file, such as /dev/null, holds no
+ * report to add to and is left alone. A missing file throws: the validator exited as if it had
+ * written a report, and it wrote none.
+ */
+export function addValidatorVersionToReport(reportPath: string, json: boolean): void {
+  try {
+    if (!statSync(reportPath).isFile()) return;
+  } catch (error) {
+    if ((error as { code?: string }).code === "ENOENT") {
+      throw new Error(`The BIDS validator exited normally but wrote no report to ${reportPath}`);
+    }
+    throw error;
+  }
+
+  const report = readFileSync(reportPath, "utf-8");
+  if (json) {
+    let stamped: string;
+    try {
+      stamped = withValidatorVersion(report);
+    } catch {
+      throw new Error(
+        `The BIDS validator's report file does not hold a JSON report: ${reportPath}`,
+      );
+    }
+    writeFileSync(reportPath, stamped);
+    return;
+  }
+  const separator = report === "" || report.endsWith("\n") ? "" : "\n";
+  writeFileSync(
+    reportPath,
+    `${report}${separator}Validator: @bids/validator ${VALIDATOR_VERSION}\n`,
+  );
 }
 
 /**

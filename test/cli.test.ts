@@ -25,11 +25,13 @@ import {
   copyFileSync,
   existsSync,
   mkdirSync,
+  mkdtempSync,
   readFileSync,
   rmSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { spawn } from "bun";
 import { ABSENT_DATASET_ID } from "../backend/src/services/datasetId";
@@ -581,6 +583,113 @@ describe("CLI Dataset Validate", () => {
       }
     }
   });
+});
+
+// `--outfile` is the validator's own flag, passed through. The validator then writes its report
+// to that file and prints nothing to stdout, so the release has to be added to the file, and an
+// empty stdout is not a failure. These run the real CLI and the real validator.
+describe("CLI Dataset Validate with a report file", () => {
+  const bidsMinimal = join(import.meta.dir, "fixtures/bids-minimal");
+
+  /** Every directory a test creates, removed when these tests finish. */
+  const created: string[] = [];
+  afterAll(() => {
+    for (const dir of created) rmSync(dir, { recursive: true, force: true });
+  });
+  function freshDir(prefix: string): string {
+    const dir = mkdtempSync(join(tmpdir(), prefix));
+    created.push(dir);
+    return dir;
+  }
+
+  test("--json --outfile puts the report, with the release that produced it, in the file alone", async () => {
+    const report = join(freshDir("validate-report-"), "report.json");
+    const { stdout, exitCode } = await runCli([
+      "dataset",
+      "validate",
+      bidsMinimal,
+      "--json",
+      "--outfile",
+      report,
+    ]);
+
+    expect(exitCode).toBe(0);
+    expect(stdout).toBe("");
+    const written = readFileSync(report, "utf-8");
+    expect(written).not.toContain("\n");
+    const result = JSON.parse(written);
+    expect(result.issues.issues).toEqual(expect.any(Array));
+    expect(result.summary).toBeDefined();
+    expect(result.validatorVersion).toBe(validatorPin.version);
+  }, 120_000);
+
+  test("--outfile=<path> in text mode ends the report file with the Validator line", async () => {
+    const report = join(freshDir("validate-report-"), "report.txt");
+    const { exitCode } = await runCli(["dataset", "validate", bidsMinimal, `--outfile=${report}`]);
+
+    expect(exitCode).toBe(0);
+    const written = readFileSync(report, "utf-8");
+    expect(written).toContain("Summary:");
+    expect(written.trimEnd().split("\n").at(-1)).toBe(
+      `Validator: @bids/validator ${validatorPin.version}`,
+    );
+  }, 120_000);
+
+  test("a dataset with errors still exits 16, and its report file names the release", async () => {
+    const dataset = freshDir("validate-invalid-");
+    writeFileSync(
+      join(dataset, "dataset_description.json"),
+      JSON.stringify({ Name: "Invalid dataset" }),
+    );
+    const report = join(freshDir("validate-report-"), "report.json");
+    const { stdout, exitCode } = await runCli([
+      "dataset",
+      "validate",
+      dataset,
+      "--json",
+      "-o",
+      report,
+    ]);
+
+    expect(exitCode).toBe(16);
+    expect(stdout).toBe("");
+    const result = JSON.parse(readFileSync(report, "utf-8"));
+    expect(
+      result.issues.issues.some((issue: { severity: string }) => issue.severity === "error"),
+    ).toBe(true);
+    expect(result.validatorVersion).toBe(validatorPin.version);
+  }, 120_000);
+
+  test("--outfile /dev/null discards the report of a valid dataset and still exits 0", async () => {
+    const { stdout, exitCode } = await runCli([
+      "dataset",
+      "validate",
+      bidsMinimal,
+      "--json",
+      "--outfile",
+      "/dev/null",
+    ]);
+
+    expect(exitCode).toBe(0);
+    expect(stdout).toBe("");
+  }, 120_000);
+
+  test("--json never writes an error to stdout, where a consumer would read it as the report", async () => {
+    // --debug INFO makes the validator print log lines to stdout ahead of the JSON, so stdout is
+    // not a JSON report and the CLI refuses it.
+    const { stdout, stderr, exitCode } = await runCli([
+      "dataset",
+      "validate",
+      bidsMinimal,
+      "--json",
+      "--debug",
+      "INFO",
+    ]);
+
+    expect(exitCode).toBe(1);
+    expect(stdout).toBe("");
+    expect(stderr).toContain("did not print a JSON report");
+  }, 120_000);
 });
 
 describe("CLI Dataset Upload", () => {

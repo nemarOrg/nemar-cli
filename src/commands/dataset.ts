@@ -79,10 +79,12 @@ import {
   type BidsValidationResult,
   VALIDATOR_ERRORS_FOUND_EXIT,
   VALIDATOR_VERSION,
+  addValidatorVersionToReport,
   checkDenoInstalled,
   formatValidationResult,
   getValidatorVersion,
   isValidatorCacheStale,
+  reportFileFromArgs,
   runBidsValidatorDirect,
   updateValidatorCache,
   validateBidsDataset,
@@ -477,6 +479,8 @@ datasetCommand
 
     // Collect extra args (unknown flags passed through to bids-validator)
     const extraArgs = collectPassthroughArgs();
+    // With --outfile the validator writes its report to that file and prints nothing to stdout.
+    const reportFile = reportFileFromArgs(extraArgs);
 
     // Run validation with spinner, then show native output
     const spinner = ora("Validating BIDS dataset...").start();
@@ -493,8 +497,11 @@ datasetCommand
         forceReload,
       });
 
-      // No output + non-zero exit = real failure (e.g. deno error)
-      if (!stdout.trim() && exitCode !== 0) {
+      // No output + non-zero exit = real failure (e.g. deno error). A run that writes its report
+      // to a file has no stdout by design, so there exit 16 means errors found, not a failure.
+      const errorsFoundInFile =
+        reportFile !== undefined && exitCode === VALIDATOR_ERRORS_FOUND_EXIT;
+      if (!stdout.trim() && exitCode !== 0 && !errorsFoundInFile) {
         spinner.fail("Validation failed");
         if (stderr.trim()) {
           const relevantStderr = stderr
@@ -519,10 +526,20 @@ datasetCommand
         process.exit(exitCode);
       }
 
+      // The report went to a file, so name the release in that file too.
+      if (reportFile) {
+        addValidatorVersionToReport(resolve(reportFile), Boolean(options.json));
+      }
+
       spinner.succeed("Validation complete");
 
       if (options.json) {
-        console.log(withValidatorVersion(stdout));
+        if (!reportFile) {
+          console.log(withValidatorVersion(stdout));
+        } else if (stdout.trim()) {
+          // The report is in the file, so stdout is empty by design; pass on anything else as it is.
+          console.log(stdout);
+        }
       } else {
         if (stdout.trim()) {
           console.log(stdout);
@@ -533,7 +550,8 @@ datasetCommand
       process.exit(exitCode);
     } catch (error) {
       spinner.fail("Validation failed");
-      console.log(chalk.red((error as Error).message));
+      // stderr, so stdout carries a report or nothing: a --json consumer never reads an error as one.
+      console.error(chalk.red((error as Error).message));
       process.exit(1);
     }
   });

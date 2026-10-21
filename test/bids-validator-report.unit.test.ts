@@ -1,22 +1,41 @@
 /**
  * The offline half of the validation report checks: the Validator line of the text report, the
- * rule that a `--json` report is only ever a JSON object with the release added to it, and the
- * choice of the line that says why a validator run failed.
+ * rule that a `--json` report is only ever a JSON object with the release added to it, the choice
+ * of the line that says why a validator run failed, and how a report file named by `--outfile`
+ * is found and given the release.
  *
- * These call the real functions on real strings, with no validator run and no network. The
- * failure inputs have the shape of stderr that validator 3.0.2 wrote in real runs.
+ * These call the real functions on real strings and real files in temporary directories, with no
+ * validator run and no network. The failure inputs have the shape of stderr that validator 3.0.2
+ * wrote in real runs.
  */
 
-import { describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { BidsValidationResult } from "../src/lib/bids-validator";
 import {
+  addValidatorVersionToReport,
   formatValidationResult,
+  reportFileFromArgs,
   validatorFailureReason,
   withValidatorVersion,
 } from "../src/lib/bids-validator";
 import validatorPin from "../validator-version.json" with { type: "json" };
 
 const ESC = "\u001b";
+
+/** Every directory a test creates, removed when the file's tests finish. */
+const created: string[] = [];
+afterAll(() => {
+  for (const dir of created) rmSync(dir, { recursive: true, force: true });
+});
+
+function freshDir(): string {
+  const dir = mkdtempSync(join(tmpdir(), "validator-report-"));
+  created.push(dir);
+  return dir;
+}
 
 function resultFor(validatorVersion: string): BidsValidationResult {
   return {
@@ -128,5 +147,82 @@ describe("validatorFailureReason", () => {
     expect(validatorFailureReason("")).toBeUndefined();
     expect(validatorFailureReason("  \n\t\n")).toBeUndefined();
     expect(validatorFailureReason("    at async main (file:///x.ts:1:1)\n")).toBeUndefined();
+  });
+});
+
+describe("reportFileFromArgs", () => {
+  test("finds the file in each form the validator accepts", () => {
+    expect(reportFileFromArgs(["--outfile", "r.json"])).toBe("r.json");
+    expect(reportFileFromArgs(["--outfile=r.json"])).toBe("r.json");
+    expect(reportFileFromArgs(["-o", "r.json"])).toBe("r.json");
+  });
+
+  test("finds nothing when the flag is absent or has no value after it", () => {
+    expect(reportFileFromArgs(["--json"])).toBeUndefined();
+    expect(reportFileFromArgs(["--outfile"])).toBeUndefined();
+    expect(reportFileFromArgs(["--max-rows", "1000", "-o"])).toBeUndefined();
+    expect(reportFileFromArgs(["--outfile="])).toBeUndefined();
+    expect(reportFileFromArgs([])).toBeUndefined();
+  });
+
+  test("takes the last of several and skips other flags with their values", () => {
+    expect(reportFileFromArgs(["-o", "a.json", "--max-rows", "5", "--outfile=b.json"])).toBe(
+      "b.json",
+    );
+    expect(reportFileFromArgs(["--max-rows", "1000"])).toBeUndefined();
+  });
+});
+
+describe("addValidatorVersionToReport", () => {
+  const release = `Validator: @bids/validator ${validatorPin.version}`;
+
+  function reportFile(name: string, content: string): string {
+    const path = join(freshDir(), name);
+    writeFileSync(path, content);
+    return path;
+  }
+
+  test("a JSON report keeps its fields, gains the release, and stays on one line", () => {
+    const path = reportFile(
+      "report.json",
+      '{"issues":{"issues":[],"codeMessages":{}},"summary":{}}',
+    );
+    addValidatorVersionToReport(path, true);
+    const written = readFileSync(path, "utf-8");
+    expect(written).not.toContain("\n");
+    expect(JSON.parse(written)).toEqual({
+      issues: { issues: [], codeMessages: {} },
+      summary: {},
+      validatorVersion: validatorPin.version,
+    });
+  });
+
+  test("a text report that ends in a newline gets the Validator line straight after it", () => {
+    const path = reportFile("report.txt", "Summary:\n  Files: 7\n\n");
+    addValidatorVersionToReport(path, false);
+    expect(readFileSync(path, "utf-8")).toBe(`Summary:\n  Files: 7\n\n${release}\n`);
+  });
+
+  test("a text report without a final newline gets one before the Validator line", () => {
+    const path = reportFile("report.txt", "Summary:\n  Files: 7");
+    addValidatorVersionToReport(path, false);
+    expect(readFileSync(path, "utf-8")).toBe(`Summary:\n  Files: 7\n${release}\n`);
+  });
+
+  test("a missing report file is a failure: the validator exited as if it had written one", () => {
+    const missing = join(freshDir(), "never-written.json");
+    expect(() => addValidatorVersionToReport(missing, true)).toThrow("wrote no report");
+    expect(() => addValidatorVersionToReport(missing, false)).toThrow("wrote no report");
+  });
+
+  test("a JSON report file that is not a JSON object is refused and left as it was", () => {
+    const path = reportFile("report.json", "not a report");
+    expect(() => addValidatorVersionToReport(path, true)).toThrow("does not hold a JSON report");
+    expect(readFileSync(path, "utf-8")).toBe("not a report");
+  });
+
+  test("a target that is not a regular file, such as /dev/null, has no report to add to", () => {
+    expect(() => addValidatorVersionToReport("/dev/null", true)).not.toThrow();
+    expect(() => addValidatorVersionToReport("/dev/null", false)).not.toThrow();
   });
 });
