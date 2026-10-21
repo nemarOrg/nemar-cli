@@ -2918,6 +2918,38 @@ describe("one change repeated across files is read once", () => {
     expect(facts.readIncomplete).toBe(true);
   }, 120_000);
 
+  test("the same cap holds for added files: MAX_DIFFS_EXAMINED are examined, one diff call each, and the rest stay unread", () => {
+    // Added files never fail the read, so the cap is the only thing that stops the search.
+    const n = MAX_DIFFS_EXAMINED + 10;
+    const added = (i: number) => `sub-${100 + i}/eeg/sub-${100 + i}_task-rest_eeg.json`;
+    const dir = newBigDataset("fold-added-cap", 3);
+    const r = branch(dir, () => {
+      for (let i = 0; i < n; i++) write(dir, added(i), fixed);
+    });
+    const listing = gatherListing(r.dir, r.base, r.head);
+    const log = callLog("fold-added-cap");
+    const restore = installGitShim(root, [{ match: " -U2 ", log }]);
+    let content: ReturnType<typeof gatherContent>;
+    try {
+      content = gatherContent(r.dir, listing);
+    } finally {
+      restore();
+    }
+    // The first added file is the one patch; the next MAX_DIFFS_EXAMINED - 1 ride on it.
+    expect(content.patches.map((p) => p.path)).toEqual([added(0)]);
+    expect(content.patches[0]?.same).toEqual(
+      Array.from({ length: MAX_DIFFS_EXAMINED - 1 }, (_, i) => added(i + 1)),
+    );
+    // One diff call per file examined, and none for the ten past the cap.
+    expect(loggedCalls(log)).toHaveLength(MAX_DIFFS_EXAMINED);
+    expect(content.groups.find((g) => g.pattern === SHAPE)).toMatchObject({
+      status: "added",
+      files: n,
+      shown: MAX_DIFFS_EXAMINED,
+    });
+    expect(content.readIncomplete).toBe(false);
+  }, 120_000);
+
   test("the review is told which change repeats and in how many files", () => {
     const dir = newBigDataset("fold-prompt", 60);
     const r = branch(dir, () => {
