@@ -3,7 +3,7 @@
 **Status:** design for implementation, not yet an ADR.
 **Date:** 2026-10-20.
 **Binds on:** ADR 0092 and ADR 0107 (read both first, and the amendment of 2026-10-20 in 0107).
-**Records as:** ADR 0108 when slice 1 merges (section 14 says what it must say).
+**Records as:** ADR 0109 when slice 1 merges (section 14 says what it must say); 0108 went to the BIDS validator's release policy on `dev` while this design was built.
 
 This document decides how the review job describes a large change to the model without the model reading every diff, and how it protects what the original authors wrote.
 A worker implements it from this file.
@@ -1487,7 +1487,7 @@ Ordered steps (one commit each, tests in the same commit):
 8. `pr-review-calibrate.ts`: `--evidence-only` and the columns.
    Tests: `test/pr-review-calibrate.test.ts`.
 9. Hostile fixture builder `test/fixtures/pr-review-hostile/` and its test (set B).
-10. ADR 0108 ("A large change is read as an exact, platform-computed summary"), added to the decisions index; it records sections 6, 7 and the Owner Question answers.
+10. ADR 0109 ("A large change is read as an exact, platform-computed summary"; numbered 0109 because ADR 0108, the BIDS validator's release policy, reached `dev` first), added to the decisions index; it records sections 6, 7 and the Owner Question answers.
 11. Run set A with `--evidence-only` and the model calibration of section 12.4 before the check is required.
 
 Gates: `bun run typecheck`, `bun run lint`, `bun test` (root, which runs `test/` and `backend/test/` together), and the workflow parity test untouched (no workflow change in this slice).
