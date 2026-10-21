@@ -4884,10 +4884,16 @@ describe("the content pass on the job's blob-less clone", () => {
     );
     expect(calls.filter((c) => c.startsWith("diff --numstat"))).toHaveLength(1);
     expect(calls.filter((c) => c.startsWith("diff --raw"))).toHaveLength(1);
-    expect(calls.filter((c) => c.startsWith("cat-file")).length).toBeLessThanOrEqual(4);
+    // Two processes for the cosmetic proofs, two for the summary's pool: no more, no fewer.
+    expect(calls.filter((c) => c.startsWith("cat-file"))).toEqual([
+      "cat-file --batch-check",
+      "cat-file --batch",
+      "cat-file --batch-check",
+      "cat-file --batch",
+    ]);
     expect(calls.filter((c) => /^show \S+\.(json|tsv)$/.test(c))).toEqual([]);
     // The README and CHANGES, which nothing else covers, and three illustrations.
-    expect(calls.filter((c) => c.startsWith("diff -U2")).length).toBeLessThanOrEqual(2 + 3);
+    expect(calls.filter((c) => c.startsWith("diff -U2"))).toHaveLength(2 + 3);
   }, 30_000);
 
   test("when the prefetch cannot fetch either, nothing is proven cosmetic and nothing is accounted for", () => {
