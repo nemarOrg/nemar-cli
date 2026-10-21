@@ -4143,3 +4143,998 @@ describe("the diffs are bounded in time on large and hostile input", () => {
 // 4.7. The generators draw from small alphabets where names collide (A1, A10, a1, sub-1, sub-01),
 // so the diff is forced to choose, and each oracle proves it is not vacuous by catching a diff
 // with one atom dropped.
+
+/** A multiset of strings. */
+function bag(items: Iterable<string>): Map<string, number> {
+  const out = new Map<string, number>();
+  for (const item of items) out.set(item, (out.get(item) ?? 0) + 1);
+  return out;
+}
+function sameBag(a: Map<string, number>, b: Map<string, number>): boolean {
+  if (a.size !== b.size) return false;
+  for (const [k, n] of a) if (b.get(k) !== n) return false;
+  return true;
+}
+/** Take one of `item` from the bag, or say there was none. */
+function takeOne(from: Map<string, number>, item: string): boolean {
+  const n = from.get(item) ?? 0;
+  if (n <= 0) return false;
+  from.set(item, n - 1);
+  return true;
+}
+const missingCell = (v: string): boolean => v === "" || v === "n/a";
+
+/** Every ordering of 0..n-1 (n is at most 7 here). */
+function* orderings(n: number): Generator<number[]> {
+  const a = Array.from({ length: n }, (_, i) => i);
+  const c = new Array<number>(n).fill(0);
+  yield [...a];
+  let i = 0;
+  while (i < n) {
+    if ((c[i] as number) < i) {
+      const k = i % 2 === 0 ? 0 : (c[i] as number);
+      [a[k], a[i]] = [a[i] as number, a[k] as number];
+      yield [...a];
+      c[i] = (c[i] as number) + 1;
+      i = 0;
+    } else {
+      c[i] = 0;
+      i++;
+    }
+  }
+}
+
+/** A table side as the oracle holds it: a header and rows of cells. */
+interface Sheet {
+  header: string[];
+  rows: string[][];
+}
+
+/** The rows a pool file adds, read from its text with nothing of the module: the oracle's own pool. */
+function oraclePoolRows(file: PoolFile): { header: string; rows: Map<string, number> } | null {
+  const read = (bytes: Uint8Array | null): Sheet | null => {
+    if (bytes === null) return null;
+    const lines = new TextDecoder().decode(bytes).split("\n");
+    if (lines[lines.length - 1] === "") lines.pop();
+    const [head, ...body] = lines;
+    if (head === undefined) return null;
+    return { header: head.split("\t"), rows: body.map((line) => line.split("\t")) };
+  };
+  const after = read(file.after);
+  if (after === null) return null;
+  const before = read(file.before);
+  const known =
+    before !== null && before.header.join("\t") === after.header.join("\t")
+      ? bag(before.rows.map((r) => r.join("\t")))
+      : new Map<string, number>();
+  const rows = new Map<string, number>();
+  for (const row of after.rows) {
+    const text = row.join("\t");
+    if (!takeOne(known, text)) rows.set(text, (rows.get(text) ?? 0) + 1);
+  }
+  return { header: after.header.join("\t"), rows };
+}
+
+/** EQ (equal and not missing) and DIFF over the named columns of two rows. */
+function evidenceOf(
+  b: Sheet,
+  br: string[],
+  a: Sheet,
+  ar: string[],
+  columns: string[],
+): { equal: number; differ: number } {
+  let equal = 0;
+  let differ = 0;
+  for (const column of columns) {
+    const x = br[b.header.indexOf(column)] as string;
+    const y = ar[a.header.indexOf(column)] as string;
+    if (x !== y) differ++;
+    else if (!missingCell(x)) equal++;
+  }
+  return { equal, differ };
+}
+
+/** Whether only the zero padding of digit runs that do not touch a `.` or `,` differs. */
+function onlyStandalonePadding(b: string, a: string): boolean {
+  const pb = partsOf(b);
+  const pa = partsOf(a);
+  if (pb.length !== pa.length) return false;
+  for (let i = 0; i < pb.length; i++) {
+    if (pb[i] === pa[i]) continue;
+    if (!/^[0-9]+$/.test(pb[i] as string) || !/^[0-9]+$/.test(pa[i] as string)) return false;
+    if (byValue(pb[i] as string) !== byValue(pa[i] as string)) return false;
+    for (const near of [pb[i - 1], pb[i + 1], pa[i - 1], pa[i + 1]]) {
+      if (near === "." || near === ",") return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Everything the oracle finds wrong with a table diff, as words. `available` is the oracle's own
+ * account of the pool copies left for this file, and is used up by the relocations it checks.
+ */
+function tableViolations(
+  path: string,
+  b: Sheet,
+  a: Sheet,
+  atoms: readonly Atom[],
+  keyColumn: string | null,
+  available: Map<string, Map<string, number>>,
+): string[] {
+  const out: string[] = [];
+  const common = b.header.filter((c) => a.header.includes(c));
+  // Columns.
+  for (const column of b.header) {
+    if (a.header.includes(column)) continue;
+    const present = b.rows.filter(
+      (r) => !missingCell(r[b.header.indexOf(column)] as string),
+    ).length;
+    const found = atoms.filter((x) => x.kind === "column_removed" && x.field === column);
+    if (found.length !== 1 || found[0]?.detail !== String(present)) out.push("column_removed");
+  }
+  const addedColumns = a.header.filter((c) => !b.header.includes(c));
+  if (
+    !sameBag(
+      bag(addedColumns),
+      bag(atoms.filter((x) => x.kind === "column_added").map((x) => x.field as string)),
+    )
+  )
+    out.push("column_added");
+  if (atoms.some((x) => x.kind === "column_removed" && a.header.includes(x.field as string)))
+    out.push("column_removed_still_there");
+
+  // Cell atoms: their kind must match what the two values are.
+  const cellAtoms = atoms.filter((x) => x.kind.startsWith("cell_"));
+  for (const x of cellAtoms) {
+    const before = x.before as string;
+    const after = x.after as string;
+    const expected =
+      !missingCell(before) && missingCell(after)
+        ? "cell_emptied"
+        : missingCell(before) && !missingCell(after)
+          ? "cell_filled"
+          : null;
+    if (expected !== null && x.kind !== expected) out.push("cell_kind");
+    if (expected === null && (x.kind === "cell_emptied" || x.kind === "cell_filled"))
+      out.push("cell_kind");
+    if (x.kind === "cell_templated") {
+      const rule = x.rule as RelabelRule;
+      if (!["wrap", "strip", "repad"].includes(rule.kind) || !rebuilds(rule, before, after))
+        out.push("cell_template_rule");
+    }
+  }
+  const cellBag = bag(cellAtoms.map((x) => JSON.stringify([x.field, x.before, x.after])));
+
+  // Relocations: each a verbatim, unused copy at sourcedata/<one directory>/<path>, under the
+  // header the row had before.
+  const fullRowOf = (x: Atom): string | null => {
+    if (keyColumn === null) return x.before;
+    const row = b.rows.find((r) => r[b.header.indexOf(keyColumn)] === x.before);
+    return row === undefined ? null : row.join("\t");
+  };
+  for (const x of atoms.filter((y) => y.kind === "row_relocated")) {
+    const text = fullRowOf(x);
+    let found = false;
+    for (const [target, rows] of available) {
+      const middle = target.slice("sourcedata/".length, target.length - path.length - 1);
+      const corresponds =
+        target.startsWith("sourcedata/") &&
+        target.endsWith(`/${path}`) &&
+        middle.length > 0 &&
+        !middle.includes("/");
+      if (!corresponds || text === null) continue;
+      if (takeOne(rows, `${b.header.join("\t")}\u{0}${text}`)) {
+        found = true;
+        break;
+      }
+    }
+    if (!found) out.push("relocated_without_copy");
+  }
+
+  if (keyColumn !== null) {
+    const ki = b.header.indexOf(keyColumn);
+    const ka = a.header.indexOf(keyColumn);
+    const beforeByKey = new Map(b.rows.map((r) => [r[ki] as string, r]));
+    const afterByKey = new Map(a.rows.map((r) => [r[ka] as string, r]));
+    const addedKeys = new Set(
+      atoms.filter((x) => x.kind === "row_added").map((x) => x.after as string),
+    );
+    const relabels = atoms.filter((x) => x.kind === "key_relabeled");
+    const relabelTargets = new Set(relabels.map((x) => x.after as string));
+    // Undo: every after key that is not new and not a relabel's target was its own before key.
+    const pairsOf = new Map<string, string>();
+    for (const key of afterByKey.keys())
+      if (!addedKeys.has(key) && !relabelTargets.has(key)) pairsOf.set(key, key);
+    for (const x of relabels) pairsOf.set(x.before as string, x.after as string);
+    const gone = atoms
+      .filter((x) => x.kind === "row_removed" || x.kind === "row_relocated")
+      .map((x) => x.before as string);
+    const rebuilt = [...pairsOf.keys(), ...gone].sort();
+    const truth = [...beforeByKey.keys()].sort();
+    if (JSON.stringify(rebuilt) !== JSON.stringify(truth)) {
+      out.push("keyed_keys");
+      return out;
+    }
+    const others = common.filter((c) => c !== keyColumn);
+    const expected: string[] = [];
+    for (const [bk, ak] of pairsOf) {
+      const br = beforeByKey.get(bk);
+      const ar = afterByKey.get(ak);
+      if (br === undefined || ar === undefined) {
+        out.push("keyed_pair_missing");
+        continue;
+      }
+      for (const c of others) {
+        const x = br[b.header.indexOf(c)] as string;
+        const y = ar[a.header.indexOf(c)] as string;
+        if (x !== y) expected.push(JSON.stringify([c, x, y]));
+      }
+    }
+    if (!sameBag(bag(expected), cellBag)) out.push("keyed_cells");
+    // Every relabel is exact, anchored, and stands on its evidence.
+    for (const x of relabels) {
+      const rule = x.rule as RelabelRule;
+      const before = x.before as string;
+      const after = x.after as string;
+      if (!rebuilds(rule, before, after) || !anchored(rule, before, after))
+        out.push("relabel_rule");
+      if (rule.kind === "repad" && !onlyStandalonePadding(before, after)) out.push("repad_decimal");
+      const br = beforeByKey.get(before);
+      const ar = afterByKey.get(after);
+      if (br === undefined || ar === undefined) continue;
+      const { equal, differ } = evidenceOf(b, br, a, ar, others);
+      if (rule.kind !== "case" && rule.kind !== "repad" && (equal < 1 || equal < differ))
+        out.push("relabel_without_evidence");
+      if (rule.shape.startsWith("c") && differ > 0) out.push("character_rule_not_strict");
+    }
+  } else {
+    if (atoms.some((x) => x.kind === "key_relabeled")) out.push("keyless_relabel");
+    const left = bag(b.rows.map((r) => r.join("\t")));
+    for (const x of atoms.filter((y) => y.kind === "row_removed" || y.kind === "row_relocated"))
+      if (!takeOne(left, x.before as string)) out.push("keyless_removed_absent");
+    const right = bag(a.rows.map((r) => r.join("\t")));
+    for (const x of atoms.filter((y) => y.kind === "row_added"))
+      if (!takeOne(right, x.after as string)) out.push("keyless_added_absent");
+    const expand = (m: Map<string, number>): string[][] =>
+      [...m].flatMap(([text, n]) => Array.from({ length: n }, () => text.split("\t")));
+    const pb = expand(left);
+    const pa = expand(right);
+    if (pb.length !== pa.length) {
+      out.push("keyless_counts");
+      return out;
+    }
+    // Some one-to-one pairing of what is left explains the cell atoms exactly, and every pair in
+    // it that differs at all is near (design section 4.5).
+    let explained = false;
+    for (const order of orderings(pb.length)) {
+      const cells: string[] = [];
+      let near = true;
+      pb.forEach((br, i) => {
+        const ar = pa[order[i] as number] as string[];
+        const { equal, differ } = evidenceOf(b, br, a, ar, common);
+        if (differ > 0 && (differ * 2 > common.length || equal < differ)) near = false;
+        for (const c of common) {
+          const x = br[b.header.indexOf(c)] as string;
+          const y = ar[a.header.indexOf(c)] as string;
+          if (x !== y) cells.push(JSON.stringify([c, x, y]));
+        }
+      });
+      if (near && sameBag(bag(cells), cellBag)) {
+        explained = true;
+        break;
+      }
+    }
+    if (!explained) out.push("keyless_not_reconstructible");
+  }
+  return out;
+}
+
+const ORACLE_KEYS = [
+  "A1",
+  "A10",
+  "a1",
+  "POL A1",
+  "sub-1",
+  "sub-01",
+  "sub-10",
+  "A01",
+  "Cz",
+  "FCz",
+  "CZ",
+  "A1-A2",
+  "EEG A1",
+  "x",
+  "A2",
+  "GA01",
+  "EEGGA_01REF",
+  "DCEMBRACE",
+  "DC EMBRACE-REF",
+  "A1.05",
+  "A1.5",
+];
+const ORACLE_CELLS = ["n/a", "", "0", "1", "x", "EEG", "X", "1.0"];
+const ORACLE_FILES: { path: string; key: string | null }[] = [
+  { path: "sub-01/eeg/sub-01_task-x_channels.tsv", key: "name" },
+  { path: "participants.tsv", key: "participant_id" },
+  { path: "sub-01/sub-01_scans.tsv", key: "filename" },
+  { path: "sub-01/sub-01_sessions.tsv", key: "session_id" },
+  { path: "sub-01/eeg/sub-01_task-x_events.tsv", key: null },
+  { path: "phenotype/iq.tsv", key: null },
+];
+
+interface OracleTableFile {
+  path: string;
+  before: Sheet;
+  after: Sheet;
+}
+
+/** One generated case: one or two files, sometimes the same path twice, and one shared pool. */
+function generateOracleTables(random: () => number): {
+  files: OracleTableFile[];
+  pool: PoolFile[];
+  traits: Set<string>;
+} {
+  const { pick, chance, int, shuffled } = toolkit(random);
+  const traits = new Set<string>();
+  const pool: PoolFile[] = [];
+  const files: OracleTableFile[] = [];
+  const count = chance(0.25) ? 2 : 1;
+  for (let f = 0; f < count; f++) {
+    const sameAgain = f === 1 && chance(0.3);
+    const spec = sameAgain
+      ? (ORACLE_FILES.find((x) => x.path === files[0]?.path) ?? pick(ORACLE_FILES))
+      : pick(ORACLE_FILES);
+    if (f === 1) traits.add(sameAgain ? "same_path_twice" : "two_files_one_pool");
+    const keyName = spec.key ?? "name";
+    let header = [
+      ...(chance(0.9) ? [keyName] : []),
+      ...["type", "units", "c", "d"].filter(() => chance(0.45)),
+    ];
+    if (header.length === 0) header = ["c"];
+    if (chance(0.15)) header = shuffled(header);
+    if (header.length === 1) traits.add("one_column");
+    const keyAt = header.indexOf(keyName);
+    const uniqueKeys = chance(0.6);
+    const used = new Set<string>();
+    const rows: string[][] = [];
+    const total = chance(0.08) ? 0 : int(1, 6);
+    if (total === 0) traits.add("header_only");
+    for (let i = 0; i < total; i++) {
+      if (rows.length > 0 && chance(0.2)) {
+        rows.push([...(pick(rows) as string[])]);
+        traits.add("whole_row_duplicate");
+        continue;
+      }
+      const row = header.map(() => pick(ORACLE_CELLS));
+      if (keyAt >= 0) {
+        let key = chance(0.06) ? pick(["", "n/a"]) : pick(ORACLE_KEYS);
+        if (uniqueKeys) for (let t = 0; t < 20 && used.has(key); t++) key = pick(ORACLE_KEYS);
+        if (key === "" || key === "n/a") traits.add("missing_key");
+        if (used.has(key)) traits.add("duplicate_key");
+        used.add(key);
+        row[keyAt] = key;
+      }
+      rows.push(row);
+    }
+    let afterHeader = [...header];
+    if (chance(0.15) && afterHeader.length > 1) {
+      afterHeader.splice(int(0, afterHeader.length - 1), 1);
+      traits.add("column_removed");
+    }
+    if (chance(0.15)) {
+      const extra = pick(["e", "type", "units", keyName]);
+      if (!afterHeader.includes(extra)) {
+        afterHeader.push(extra);
+        traits.add("column_added");
+      }
+    }
+    if (chance(0.15)) {
+      afterHeader = shuffled(afterHeader);
+      traits.add("columns_shuffled");
+    }
+    const afterRows: string[][] = [];
+    const relocated: string[][] = [];
+    let renamed = 0;
+    for (const row of rows) {
+      const op = random();
+      if (op < 0.2) continue; // deleted
+      if (op < 0.4) {
+        relocated.push(row);
+        continue;
+      }
+      const cells = new Map(header.map((h, i) => [h, row[i] as string]));
+      if (op < 0.55 && keyAt >= 0) {
+        cells.set(keyName, pick(ORACLE_KEYS));
+        renamed++;
+      }
+      if (chance(0.3)) {
+        const h = pick(afterHeader);
+        if (h !== keyName) cells.set(h, pick(ORACLE_CELLS));
+      }
+      afterRows.push(afterHeader.map((h) => cells.get(h) ?? pick(ORACLE_CELLS)));
+    }
+    if (renamed > 1) traits.add("several_renames");
+    for (let i = int(0, 3); i > 0; i--) {
+      if (afterRows.length > 0 && chance(0.2)) afterRows.push([...(pick(afterRows) as string[])]);
+      else
+        afterRows.push(
+          afterHeader.map((h) => (h === keyName ? pick(ORACLE_KEYS) : pick(ORACLE_CELLS))),
+        );
+    }
+    const finalRows = chance(0.3) ? shuffled(afterRows) : afterRows;
+    files.push({
+      path: spec.path,
+      before: { header, rows },
+      after: { header: afterHeader, rows: finalRows },
+    });
+    // The copies: under the corresponding path, sometimes broken, sometimes elsewhere.
+    if (relocated.length > 0 || chance(0.2)) {
+      const mode = random();
+      const where =
+        mode < 0.7
+          ? `sourcedata/${pick(["removed", "old", "x y"])}/${spec.path}`
+          : mode < 0.8
+            ? `sourcedata/${spec.path}`
+            : mode < 0.9
+              ? `sourcedata/a/b/${spec.path}`
+              : `derivatives/old/${spec.path}`;
+      if (
+        !where.startsWith("sourcedata/removed") &&
+        !where.startsWith("sourcedata/old") &&
+        !where.startsWith("sourcedata/x y")
+      )
+        traits.add("copy_elsewhere");
+      let copyHeader = header;
+      let copies = relocated.map((r) => [...r]);
+      if (chance(0.1) && header.length > 1) {
+        copyHeader = [...header].reverse();
+        traits.add("copy_other_header");
+      }
+      if (chance(0.15) && copies.length > 0) {
+        const r = pick(copies);
+        r[0] = `${r[0]}!`;
+        traits.add("copy_one_byte_off");
+      }
+      if (chance(0.15) && rows.length > 0) {
+        copies.push([...(pick(rows) as string[])]);
+        traits.add("copy_of_kept_row");
+      }
+      if (chance(0.2)) copies = [...copies, ...copies];
+      if (!pool.some((p) => p.path === where))
+        pool.push(pooled(where, null, tsv(copyHeader, ...copies)));
+    }
+  }
+  return { files, pool, traits };
+}
+
+describe("reconstruction oracle: tables", () => {
+  test("6,000 generated cases: the before rows are recovered from the after rows and the atoms, and every relocation is a verbatim unused copy", () => {
+    const random = seeded(20261020);
+    const traits = new Map<string, number>();
+    const seen = new Set<ClassKind>();
+    let diffs = 0;
+    let skipped = 0;
+    let selfTests = 0;
+    const violations: string[] = [];
+    for (let n = 0; n < 6000; n++) {
+      const generated = generateOracleTables(random);
+      const tables = generated.files.map((f) => ({
+        f,
+        b: parseTsv(enc(tsv(f.before.header, ...f.before.rows))),
+        a: parseTsv(enc(tsv(f.after.header, ...f.after.rows))),
+      }));
+      if (tables.some((t) => !t.b.ok || !t.a.ok)) {
+        skipped++;
+        continue;
+      }
+      for (const trait of generated.traits) traits.set(trait, (traits.get(trait) ?? 0) + 1);
+      const pool = buildPools(generated.pool).rows;
+      // The oracle's own account of the copies, keyed by header and row text, per target.
+      const available = new Map<string, Map<string, number>>();
+      for (const file of generated.pool) {
+        const rows = oraclePoolRows(file);
+        if (rows === null) continue;
+        const keyed = new Map<string, number>();
+        for (const [text, k] of rows.rows) keyed.set(`${rows.header}\u{0}${text}`, k);
+        available.set(file.path, keyed);
+      }
+      for (const { f, b, a } of tables) {
+        if (!b.ok || !a.ok) continue;
+        const result = diffTable(f.path, b.value, a.value, pool);
+        if (!result.ok) {
+          violations.push(`case ${n}: refused ${result.refusal}`);
+          continue;
+        }
+        diffs++;
+        const diff = result.value;
+        for (const atom of diff.atoms) seen.add(atom.kind);
+        if (!verifyTableCounts(diff)) violations.push(`case ${n}: counts`);
+        if (diff.atoms.some((x) => x.kind === "row_relocated"))
+          traits.set("relocated", (traits.get("relocated") ?? 0) + 1);
+        if (diff.keyColumn === null && diff.atoms.some((x) => x.kind.startsWith("cell_")))
+          traits.set("keyless_edit", (traits.get("keyless_edit") ?? 0) + 1);
+        const snapshot = new Map([...available].map(([k, v]) => [k, new Map(v)]));
+        const found = tableViolations(
+          f.path,
+          f.before,
+          f.after,
+          diff.atoms,
+          diff.keyColumn,
+          available,
+        );
+        for (const v of found)
+          violations.push(
+            `case ${n} ${f.path}: ${v}\n${JSON.stringify(f)}\n${JSON.stringify(generated.pool.map((p) => p.path))}\n${diff.atoms.map(line).join("\n")}`,
+          );
+
+        // The oracle is not vacuous: with any one accounted atom dropped it must object.
+        const accounted = diff.atoms
+          .map((x, i) => [x, i] as const)
+          .filter(
+            ([x]) =>
+              [
+                "row_removed",
+                "row_added",
+                "row_relocated",
+                "key_relabeled",
+                "column_removed",
+                "column_added",
+              ].includes(x.kind) || x.kind.startsWith("cell_"),
+          );
+        if (accounted.length > 0) {
+          const [, drop] = accounted[Math.floor(random() * accounted.length)] as readonly [
+            Atom,
+            number,
+          ];
+          const fewer = diff.atoms.filter((_, i) => i !== drop);
+          const caught = tableViolations(
+            f.path,
+            f.before,
+            f.after,
+            fewer,
+            diff.keyColumn,
+            snapshot,
+          );
+          selfTests++;
+          if (caught.length === 0)
+            violations.push(
+              `case ${n}: dropping ${diff.atoms[drop]?.kind} went unnoticed\n${JSON.stringify(f)}`,
+            );
+        }
+      }
+    }
+    expect(violations.slice(0, 3)).toEqual([]);
+    expect(skipped).toBeLessThan(600);
+    expect(diffs).toBeGreaterThan(6000);
+    expect(selfTests).toBeGreaterThan(4000);
+    // The distribution reaches the shapes where a diff can go wrong.
+    for (const [trait, least] of [
+      ["whole_row_duplicate", 300],
+      ["missing_key", 100],
+      ["duplicate_key", 300],
+      ["two_files_one_pool", 400],
+      ["same_path_twice", 150],
+      ["several_renames", 300],
+      ["one_column", 150],
+      ["header_only", 200],
+      ["column_removed", 300],
+      ["column_added", 300],
+      ["columns_shuffled", 300],
+      ["copy_elsewhere", 200],
+      ["copy_other_header", 100],
+      ["copy_one_byte_off", 100],
+      ["copy_of_kept_row", 100],
+      ["relocated", 500],
+      ["keyless_edit", 200],
+    ] as const) {
+      expect(traits.get(trait) ?? 0, trait).toBeGreaterThanOrEqual(least);
+    }
+    for (const kind of [
+      "row_removed",
+      "row_added",
+      "row_relocated",
+      "key_relabeled",
+      "cell_replaced",
+      "cell_emptied",
+      "cell_filled",
+      "cell_templated",
+      "column_removed",
+      "column_added",
+      "columns_reordered",
+      "rows_reordered",
+    ] as ClassKind[]) {
+      expect(seen.has(kind), kind).toBe(true);
+    }
+  }, 60_000);
+});
+
+// ---------------------------------------------------------------------------------------------
+
+/** A leaf as the JSON oracle reads it, from the plain value and nothing of the module. */
+interface OracleLeaf {
+  value: string;
+  parent: string;
+  name: string;
+  top: string | null;
+}
+
+const ORACLE_BARE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const oracleSegment = (key: string): string =>
+  ORACLE_BARE.test(key) ? `.${key}` : `[${JSON.stringify(key)}]`;
+
+function oracleCanonical(v: Plain): string {
+  if (Array.isArray(v)) return `[${v.map(oracleCanonical).join(",")}]`;
+  if (v !== null && typeof v === "object")
+    return `{${Object.keys(v)
+      .map((k) => `${JSON.stringify(k)}:${oracleCanonical(v[k] as Plain)}`)
+      .join(",")}}`;
+  return JSON.stringify(v);
+}
+
+function oracleLeaves(root: Plain): Map<string, OracleLeaf> {
+  const out = new Map<string, OracleLeaf>();
+  const walk = (v: Plain, path: string, parent: string, name: string, top: string | null): void => {
+    if (v !== null && typeof v === "object" && !Array.isArray(v) && Object.keys(v).length > 0) {
+      for (const k of Object.keys(v))
+        walk(v[k] as Plain, path + oracleSegment(k), path, k, path === "" ? k : top);
+      return;
+    }
+    if (Array.isArray(v) && v.some((x) => x !== null && typeof x === "object")) {
+      v.forEach((x, i) => walk(x, `${path}[${i}]`, path, `[${i}]`, top));
+      return;
+    }
+    out.set(path, { value: oracleCanonical(v), parent, name, top });
+  };
+  walk(root, "", "", "", null);
+  return out;
+}
+
+function oracleMissing(v: Plain): boolean {
+  if (v === null || v === "" || v === "n/a") return true;
+  if (Array.isArray(v)) return v.every(oracleMissing);
+  if (typeof v === "object") return Object.keys(v).length === 0;
+  return false;
+}
+const oracleFold = (name: string): string => name.toLowerCase().replace(/[^\p{L}\p{N}]/gu, "");
+const typeWord = (v: Plain): string => (v === null ? "null" : Array.isArray(v) ? "arr" : typeof v);
+
+/** The JSON files a generated case may put moved keys in, and whether each applies to which file. */
+const ORACLE_SIDECARS: { path: string; appliesTo: readonly string[] }[] = [
+  {
+    path: "task-x_eeg.json",
+    appliesTo: ["sub-01/eeg/sub-01_task-x_eeg.json", "sub-02/eeg/sub-02_task-x_eeg.json"],
+  },
+  { path: "sub-01/sub-01_task-x_eeg.json", appliesTo: ["sub-01/eeg/sub-01_task-x_eeg.json"] },
+  { path: "sub-02/eeg/sub-02_task-x_eeg.json", appliesTo: [] },
+  { path: "task-x_channels.json", appliesTo: [] },
+  { path: "sub-01/eeg/sub-01_task-x_run-1_eeg.json", appliesTo: [] },
+];
+
+/** Everything the oracle finds wrong with a JSON diff. */
+function jsonViolations(
+  path: string,
+  before: Plain,
+  after: Plain,
+  atoms: readonly Atom[],
+  sidecars: { path: string; before: Plain | null; after: Plain }[],
+): string[] {
+  const out: string[] = [];
+  const bl = oracleLeaves(before);
+  const al = oracleLeaves(after);
+  // The path a key atom names, resolved against the side that has it: a key named "[0]" and the
+  // index 0, and the root and a key named "", are told apart by which one that side holds.
+  const resolve = (leaves: Map<string, OracleLeaf>, parent: string, name: string): string => {
+    const candidates = [parent + oracleSegment(name)];
+    if (/^\[[0-9]+\]$/.test(name)) candidates.push(parent + name);
+    if (parent === "" && name === "") candidates.push("");
+    return candidates.find((c) => leaves.has(c)) ?? (candidates[0] as string);
+  };
+  const rebuilt = new Map([...al].map(([p, leaf]) => [p, leaf.value]));
+  for (const x of atoms) {
+    switch (x.kind) {
+      case "json_key_added": {
+        const p = resolve(al, x.field as string, x.detail as string);
+        if (rebuilt.get(p) !== x.after || bl.has(p)) out.push("added");
+        rebuilt.delete(p);
+        break;
+      }
+      case "json_value_changed":
+      case "json_type_changed":
+      case "json_emptied":
+      case "json_filled": {
+        const p = x.field as string;
+        if (rebuilt.get(p) !== x.after) out.push("changed_after");
+        rebuilt.set(p, x.before as string);
+        const was = JSON.parse(x.before as string) as Plain;
+        const now = JSON.parse(x.after as string) as Plain;
+        const kind =
+          !oracleMissing(was) && oracleMissing(now)
+            ? "json_emptied"
+            : oracleMissing(was) && !oracleMissing(now)
+              ? "json_filled"
+              : typeWord(was) !== typeWord(now)
+                ? "json_type_changed"
+                : "json_value_changed";
+        if (kind !== x.kind) out.push(`kind ${x.kind} should be ${kind}`);
+        break;
+      }
+      case "json_key_renamed": {
+        const [oldName, newName] = (x.detail as string).split(" -> ") as [string, string];
+        const np = resolve(al, x.field as string, newName);
+        const op = resolve(bl, x.field as string, oldName);
+        if (rebuilt.get(np) !== x.after || x.before !== x.after) out.push("renamed_after");
+        rebuilt.delete(np);
+        if (rebuilt.has(op)) out.push("renamed_over");
+        rebuilt.set(op, x.before as string);
+        const shared = (leaves: Map<string, OracleLeaf>) =>
+          [...leaves.values()].filter((l) => l.parent === x.field && l.value === x.before).length;
+        if (shared(bl) !== 1 || shared(al) !== 1) out.push("renamed_shared_value");
+        if (
+          oracleFold(oldName) !== oracleFold(newName) &&
+          relabelRule(oldName, newName, { chars: false }) === null
+        )
+          out.push("renamed_unrelated_names");
+        break;
+      }
+      case "json_key_removed":
+      case "json_key_moved":
+      case "json_empty_key_removed": {
+        const p = resolve(bl, x.field as string, x.detail as string);
+        if (rebuilt.has(p)) out.push("removed_still_there");
+        rebuilt.set(p, x.before as string);
+        const missing = oracleMissing(JSON.parse(x.before as string) as Plain);
+        if (x.kind === "json_empty_key_removed" && !missing) out.push("empty_removed_had_value");
+        if (x.kind === "json_key_removed" && missing) out.push("removed_held_nothing");
+        if (x.kind === "json_key_moved") {
+          const top = bl.get(p)?.top ?? null;
+          const keepsTop =
+            after === null ||
+            typeof after !== "object" ||
+            Array.isArray(after) ||
+            top === null ||
+            Object.prototype.hasOwnProperty.call(after, top);
+          if (keepsTop) out.push("moved_but_shadowed");
+          const home = sidecars.some((s) => {
+            const applies =
+              ORACLE_SIDECARS.find((o) => o.path === s.path)?.appliesTo.includes(path) ?? false;
+            const now = oracleLeaves(s.after).get(p);
+            const then = s.before === null ? undefined : oracleLeaves(s.before).get(p);
+            return applies && now?.value === x.before && then?.value !== x.before;
+          });
+          if (!home) out.push("moved_nowhere");
+        }
+        break;
+      }
+      case "json_keys_reordered":
+        break;
+      default:
+        out.push(`foreign ${x.kind}`);
+    }
+  }
+  const same =
+    rebuilt.size === bl.size && [...bl].every(([p, leaf]) => rebuilt.get(p) === leaf.value);
+  if (!same) out.push("not_reconstructible");
+  return out;
+}
+
+const ORACLE_JSON_KEYS = [
+  "Name",
+  "name",
+  "na-me",
+  "a",
+  "A",
+  "b",
+  "x1",
+  "x10",
+  "x01",
+  "go",
+  "go2",
+  "Level",
+  "K1",
+  "a.b",
+  "0",
+  "[0]",
+];
+const ORACLE_JSON_SCALARS: Plain[] = [0, false, "None", null, "n/a", "", "x", 1, "1", " ", "Go"];
+
+function oracleValue(random: () => number, depth: number): Plain {
+  const { pick, chance, int } = toolkit(random);
+  if (depth >= 3 || chance(0.45)) return pick(ORACLE_JSON_SCALARS);
+  if (chance(0.3)) {
+    const nested = chance(0.5);
+    return Array.from({ length: int(0, 3) }, () =>
+      nested && chance(0.6) ? oracleObject(random, depth + 1) : pick(ORACLE_JSON_SCALARS),
+    );
+  }
+  return oracleObject(random, depth + 1);
+}
+function oracleObject(random: () => number, depth: number): { [key: string]: Plain } {
+  const { pick, int } = toolkit(random);
+  const o: { [key: string]: Plain } = {};
+  for (let i = int(0, 4); i > 0; i--) o[pick(ORACLE_JSON_KEYS)] = oracleValue(random, depth);
+  return o;
+}
+
+describe("reconstruction oracle: JSON", () => {
+  test("6,000 generated cases: the before leaves are recovered from the after leaves and the atoms, and every rename and move stands", () => {
+    const random = seeded(4242);
+    const { pick, chance, int } = toolkit(random);
+    const traits = new Map<string, number>();
+    const note = (trait: string): void => {
+      traits.set(trait, (traits.get(trait) ?? 0) + 1);
+    };
+    const seen = new Set<ClassKind>();
+    const violations: string[] = [];
+    let diffs = 0;
+    let selfTests = 0;
+    const targets = ["sub-01/eeg/sub-01_task-x_eeg.json", "sub-02/eeg/sub-02_task-x_eeg.json"];
+    for (let n = 0; n < 6000; n++) {
+      // One or two files share one pool of sidecars.
+      const files = chance(0.3) ? targets : [pick(targets)];
+      if (files.length === 2) note("shared_pool");
+      const sidecarAfter = new Map<string, { [key: string]: Plain }>();
+      const cases: { path: string; before: Plain; after: Plain }[] = [];
+      for (const path of files) {
+        let before: Plain;
+        if (chance(0.08)) {
+          before = chance(0.5)
+            ? pick(ORACLE_JSON_SCALARS)
+            : [pick(ORACLE_JSON_SCALARS), oracleObject(random, 1)];
+          note("non_object_root");
+        } else before = oracleObject(random, 0);
+        let after: Plain = JSON.parse(JSON.stringify(before)) as Plain;
+        if (after !== null && typeof after === "object" && !Array.isArray(after)) {
+          const doc = after;
+          let renames = 0;
+          for (const key of Object.keys(doc)) {
+            const op = random();
+            if (op < 0.15) {
+              delete doc[key];
+            } else if (op < 0.38) {
+              const respelled = pick([
+                key.toUpperCase(),
+                `${key}_`,
+                `EEG_${key}`,
+                key.replace(/-/g, ""),
+                pick(ORACLE_JSON_KEYS),
+              ]);
+              if (respelled !== key && !(respelled in doc)) {
+                const value = doc[key] as Plain;
+                delete doc[key];
+                doc[respelled] = value;
+                renames++;
+              }
+            } else if (op < 0.46) {
+              doc[key] = oracleValue(random, 1);
+              note("value_changed");
+            } else if (op < 0.58) {
+              // Moved whole to a sidecar.
+              const where = pick(ORACLE_SIDECARS).path;
+              const side = sidecarAfter.get(where) ?? {};
+              side[key] = doc[key] as Plain;
+              sidecarAfter.set(where, side);
+              delete doc[key];
+              note("moved_whole");
+            } else if (op < 0.68) {
+              // A nested leaf moved while this file keeps the top-level key: shadowed.
+              const value = doc[key];
+              if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+                const inner = Object.keys(value);
+                if (inner.length > 0) {
+                  const sub = pick(inner);
+                  const where = pick(ORACLE_SIDECARS).path;
+                  const side = sidecarAfter.get(where) ?? {};
+                  side[key] = { [sub]: value[sub] as Plain };
+                  sidecarAfter.set(where, side);
+                  delete value[sub];
+                  note("nested_move_shadowed");
+                }
+              }
+            } else if (op < 0.74) {
+              doc[key] = pick([null, "", "n/a", [], {}]);
+              note("emptied");
+            }
+          }
+          if (renames > 1) note("several_renames");
+          for (let i = int(0, 2); i > 0; i--) {
+            const key = pick(ORACLE_JSON_KEYS);
+            if (!(key in doc)) doc[key] = chance(0.3) ? "Go" : oracleValue(random, 1);
+          }
+          // A value shared by siblings, so a respelled key has a look-alike.
+          if (chance(0.15)) {
+            const values = Object.values(doc);
+            if (values.length > 0) {
+              doc[pick(ORACLE_JSON_KEYS)] = pick(values) as Plain;
+              note("shared_value");
+            }
+          }
+        } else {
+          after = chance(0.5) ? oracleObject(random, 0) : oracleValue(random, 1);
+        }
+        if (typeWord(before) !== typeWord(after)) note("root_type_changed");
+        cases.push({ path, before, after });
+      }
+      const sidecars = [...sidecarAfter].map(([path, value]) => ({
+        path,
+        before: chance(0.5) ? null : ({} as Plain),
+        after: chance(0.2) ? ({ ...value, ...oracleObject(random, 1) } as Plain) : (value as Plain),
+      }));
+      const pool = buildPools(
+        sidecars.map((s) =>
+          pooled(s.path, s.before === null ? null : textOf(s.before), textOf(s.after)),
+        ),
+      ).json;
+      for (const c of cases) {
+        const result = diffJson(c.path, json(textOf(c.before)), json(textOf(c.after)), pool);
+        if (!result.ok) {
+          violations.push(`case ${n}: refused ${result.refusal}`);
+          continue;
+        }
+        diffs++;
+        const atoms = result.value.atoms;
+        for (const atom of atoms) seen.add(atom.kind);
+        if (atoms.filter((x) => x.kind === "json_key_renamed").length > 1)
+          note("several_renames_found");
+        if (atoms.some((x) => x.field?.includes("[") ?? false)) note("array_paths");
+        if (!verifyJsonCounts(result.value)) violations.push(`case ${n}: counts`);
+        for (const v of jsonViolations(c.path, c.before, c.after, atoms, sidecars))
+          violations.push(
+            `case ${n} ${c.path}: ${v}\n${textOf(c.before)}\n${textOf(c.after)}\n${JSON.stringify(sidecars)}\n${atoms.map(line).join("\n")}`,
+          );
+        const droppable = atoms
+          .map((x, i) => [x, i] as const)
+          .filter(([x]) => x.kind !== "json_keys_reordered");
+        if (droppable.length > 0) {
+          const [, drop] = droppable[Math.floor(random() * droppable.length)] as readonly [
+            Atom,
+            number,
+          ];
+          selfTests++;
+          if (
+            jsonViolations(
+              c.path,
+              c.before,
+              c.after,
+              atoms.filter((_, i) => i !== drop),
+              sidecars,
+            ).length === 0
+          )
+            violations.push(`case ${n}: dropping ${atoms[drop]?.kind} went unnoticed`);
+        }
+      }
+    }
+    expect(violations.slice(0, 3)).toEqual([]);
+    expect(diffs).toBeGreaterThan(7000);
+    expect(selfTests).toBeGreaterThan(4500);
+    for (const [trait, least] of [
+      ["shared_pool", 1000],
+      ["non_object_root", 300],
+      ["root_type_changed", 150],
+      ["several_renames", 200],
+      ["several_renames_found", 40],
+      ["moved_whole", 1000],
+      ["nested_move_shadowed", 300],
+      ["shared_value", 500],
+      ["emptied", 500],
+      ["value_changed", 1000],
+      ["array_paths", 300],
+    ] as const) {
+      expect(traits.get(trait) ?? 0, trait).toBeGreaterThanOrEqual(least);
+    }
+    for (const kind of [
+      "json_value_changed",
+      "json_type_changed",
+      "json_emptied",
+      "json_filled",
+      "json_key_renamed",
+      "json_key_moved",
+      "json_key_removed",
+      "json_empty_key_removed",
+      "json_key_added",
+      "json_keys_reordered",
+    ] as ClassKind[]) {
+      expect(seen.has(kind), kind).toBe(true);
+    }
+  }, 60_000);
+});
