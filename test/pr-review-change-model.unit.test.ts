@@ -382,6 +382,9 @@ describe("relabelRule: a number is never put in, taken out, split or merged", ()
         expect(relabelRule(b, a, { chars }), `${b} -> ${a}`).toBeNull();
       }
     }
+    // Any number character counts, not only ASCII digits: a superscript two is a number.
+    expect(relabelRule("Cz", "Cz\u{B2}", { chars: true })).toBeNull();
+    expect(relabelRule("Cz", "\u{661}-Cz", { chars: true })).toBeNull();
     // Text without a digit is still a rule, whatever the name holds.
     expect(relabelRule("A01", "POL A01", { chars: false })).toEqual(rule("wrap", ["POL ", ""]));
     expect(relabelRule("1", "sub-1", { chars: false })).toEqual(rule("wrap", ["sub-", ""]));
@@ -405,9 +408,15 @@ describe("relabelRule: a number is never put in, taken out, split or merged", ()
       expect(relabelRule(a, b, { chars: true }), `${a} -> ${b}`).toBeNull();
       expect(relabelRule(b, a, { chars: true }), `${b} -> ${a}`).toBeNull();
     }
-    // Text between two letters, next to a number, is not inside it.
+    // Text with a digit on one side only is not inside a number: before a letter, after a letter.
     expect(relabelRule("DC1", "D C1", { chars: true })).toEqual(
       rule("insert", ["", " ", "", ""], "c3"),
+    );
+    expect(relabelRule("DC1E", "D C1 E", { chars: true })).toEqual(
+      rule("insert", ["", " ", "", " ", ""], "c4"),
+    );
+    expect(relabelRule("DC1", "D C 1", { chars: true })).toEqual(
+      rule("insert", ["", " ", " ", ""], "c3"),
     );
   });
 });
