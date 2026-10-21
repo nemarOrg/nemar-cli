@@ -29,7 +29,10 @@
  * `truncated`, which stops a clean pass about nothing being lost. An unread ADDED file does not:
  * a new file cannot remove anything. Nor does a MODIFIED `.json` or `.tsv` file whose change the
  * platform itself proved cosmetic (see {@link GitFacts.cosmeticOnlyFiles}); such a file is not
- * shown either, because there is nothing in it to read.
+ * shown either, because there is nothing in it to read. Nor does a MODIFIED `.json` or `.tsv` file
+ * the change summary accounted for (see {@link ContentFacts.summary}): the platform parsed both
+ * sides and gives the reviewer every change in it exactly, as a class, so it was read without its
+ * diff; a few such files are still shown as diffs, after the ones the summary did not cover.
  *
  * **One change repeated across many files is read once.** A bulk edit often makes the same change in
  * every subject's sidecar. A file whose diff is exactly one already shown, line for line (see
@@ -56,7 +59,15 @@ import {
   SEMVER,
 } from "../../shared/pr-review";
 import { shouldAnnex } from "../../src/lib/git-annex/policy";
-import { SUMMARY_LIMITS } from "./pr-review-summary";
+import {
+  ABANDONED_SUMMARY,
+  type ChangeSummary,
+  EMPTY_SUMMARY,
+  type PoolFile,
+  SUMMARY_LIMITS,
+  type SummaryCandidate,
+  summarizeChanges,
+} from "./pr-review-summary";
 
 export { MAX_MODEL_FILES };
 export type { ChangelogEntry };
@@ -233,7 +244,8 @@ export interface ContentFacts {
   /**
    * True when a MODIFIED or REMOVED metadata file with a real change was not shown in full: it did
    * not fit the file or character budget, its diff was cut, or reading it failed. A file the
-   * platform proved cosmetic-only ({@link cosmeticOnlyFiles}) is not counted.
+   * platform proved cosmetic-only ({@link cosmeticOnlyFiles}) is not counted, and neither is one the
+   * change summary accounted for ({@link summary}).
    */
   readIncomplete: boolean;
   /**
@@ -262,6 +274,14 @@ export interface ContentFacts {
    * as `changelog_entry`, and a version without an entry cannot advance the revision.
    */
   changelogEntry: ChangelogEntry;
+  /**
+   * The change summary of the modified `.tsv` and `.json` files (`pr-review-summary.ts`): what each
+   * changed, as exact classes, and the files it accounts for, which count as read. `EMPTY_SUMMARY`
+   * when there was nothing to summarize; abandoned, and accounting for nothing, when the pass had
+   * too little time left to start it or to finish it, or could not read the blobs it needs, which
+   * leaves everything else exactly as it is without a summary.
+   */
+  summary: ChangeSummary;
 }
 
 /** Everything the full review is shown: the listing and the content pass together. */
@@ -296,6 +316,8 @@ export interface PathGroup {
   shown: number;
   /** How many of the group's files differ only cosmetically. */
   cosmeticOnly: number;
+  /** How many of the group's files the change summary accounted for (a file can also be shown). */
+  summarized: number;
 }
 
 /** The most path shapes reported, largest first within a status; the files of any others are counted in `groupsOmittedFiles`. */
@@ -938,16 +960,111 @@ function readListing(dir: string, baseSha: string, headSha: string): Listing {
 }
 
 /**
- * Read what only the full review is shown, for a listing {@link gatherListing} made: the cosmetic
- * proofs, the diffs of the changed metadata files that fit the budget, and the change log. Called
- * only when the screen let the pull request through, and bounded by its share of
- * {@link EVIDENCE_BUDGET_MS}.
+ * At most this many files the change summary accounted for are also shown as a diff, after every
+ * file it did not account for and only while there is room: an illustration of what the summary
+ * says, whose cut or absence changes nothing about what was read.
  */
-export function gatherContent(dir: string, listing: Listing): ContentFacts {
-  return withinBudget("content", () => readContent(dir, listing));
+export const MAX_ILLUSTRATION_PATCHES = 3;
+
+/** The after side a pool file is given when its blob could not be read: no parser reads it. */
+const EMPTY_BYTES = new Uint8Array(0);
+
+/** What a test may set for one content pass; production passes nothing. */
+export interface ContentOptions {
+  /**
+   * The clock the change summary is started and stopped by: `Date.now` unless given. Only the
+   * summary reads it; every git call's timeout and the search for repeats keep the real clock.
+   */
+  now?: () => number;
 }
 
-function readContent(dir: string, listing: Listing): ContentFacts {
+/**
+ * Read what only the full review is shown, for a listing {@link gatherListing} made: the cosmetic
+ * proofs, the change summary, the diffs of the changed metadata files that fit the budget, and the
+ * change log. Called only when the screen let the pull request through, and bounded by its share of
+ * {@link EVIDENCE_BUDGET_MS}.
+ */
+export function gatherContent(
+  dir: string,
+  listing: Listing,
+  options: ContentOptions = {},
+): ContentFacts {
+  return withinBudget("content", () => readContent(dir, listing, options));
+}
+
+/**
+ * The change summary of the candidates: the modified `.tsv` and `.json` files that were compared
+ * for a cosmetic change, are not cosmetic, and are not the README or the change log. Every other
+ * outcome is a summary that accounts for nothing, so the raw diffs read the pull request exactly as
+ * they would without one:
+ *
+ * - no candidate: {@link EMPTY_SUMMARY};
+ * - less than `timeReserveMs` of the pass left: {@link ABANDONED_SUMMARY}, and nothing more is read.
+ *   The reserve is the raw diffs' and the change log's, so the summary never costs them their time;
+ * - the pool's blobs could not be read, or not before the summary's deadline:
+ *   {@link ABANDONED_SUMMARY}, and the pass goes on;
+ * - past its deadline while it runs: abandoned by {@link summarizeChanges} itself.
+ *
+ * The pool is every added or modified `.tsv` and `.json` file anywhere in the tree, in path order,
+ * `sourcedata/` and `derivatives/` included: where a removed row or key may have been kept, and
+ * which sidecars a moved key may have reached. A JSON path whose blob is not a regular file at the
+ * head (a type change, a symlink, a submodule), or could not be read, is in the pool as a document
+ * that cannot be read, so it still stops a key from being read as moved past it. A table that
+ * cannot be read is left out, so nothing can be found kept in it. A side that could not be read is
+ * never handed on as a missing one, which would say the file was added.
+ */
+function changeSummary(
+  dir: string,
+  entries: ReadonlyMap<string, RawEntry> | null,
+  checkedBlobs: ReadonlyMap<string, Buffer>,
+  candidates: readonly SummaryCandidate[],
+  now: () => number,
+): ChangeSummary {
+  if (entries === null || candidates.length === 0) return EMPTY_SUMMARY;
+  const deadline = gitDeadline === null ? null : gitDeadline - SUMMARY_LIMITS.timeReserveMs;
+  if (deadline !== null && now() >= deadline) return ABANDONED_SUMMARY;
+
+  const sides: { entry: RawEntry; regular: boolean }[] = [];
+  for (const entry of [...entries.values()].sort((a, b) => codeUnitOrder(a.path, b.path))) {
+    const json = entry.path.endsWith(".json");
+    if (entry.status === "removed" || (!json && !entry.path.endsWith(".tsv"))) continue;
+    const regular =
+      (entry.status === "added" || entry.status === "modified") &&
+      REGULAR_FILE_MODES.has(entry.modeAfter);
+    if (regular || json) sides.push({ entry, regular });
+  }
+  // The blobs the cosmetic proofs already read are not read again, and count toward the bound.
+  let held = 0;
+  for (const blob of checkedBlobs.values()) held += blob.length;
+  const poolBlobs = readBlobs(
+    dir,
+    sides
+      .filter((side) => side.regular)
+      .flatMap(({ entry }) =>
+        entry.status === "modified" ? [entry.oidBefore, entry.oidAfter] : [entry.oidAfter],
+      )
+      .filter((id) => !checkedBlobs.has(id)),
+    { maxBytes: SUMMARY_LIMITS.maxBlobBytes, maxTotalBytes: SUMMARY_LIMITS.maxTotalBytes - held },
+    deadline ?? undefined,
+  );
+  if (poolBlobs === null) return ABANDONED_SUMMARY;
+  const blobOf = (id: string): Buffer | undefined => checkedBlobs.get(id) ?? poolBlobs.get(id);
+  const pool: PoolFile[] = [];
+  for (const { entry, regular } of sides) {
+    const after = regular ? blobOf(entry.oidAfter) : undefined;
+    const before = entry.status === "modified" ? blobOf(entry.oidBefore) : null;
+    if (after === undefined || before === undefined) {
+      if (entry.path.endsWith(".json")) {
+        pool.push({ path: entry.path, before: null, after: EMPTY_BYTES });
+      }
+      continue;
+    }
+    pool.push({ path: entry.path, before, after });
+  }
+  return summarizeChanges({ candidates, pool, deadline, now });
+}
+
+function readContent(dir: string, listing: Listing, options: ContentOptions): ContentFacts {
   const { mergeBase } = listing;
   const headSha = listing.head;
   const wanted = readableChanges(listing.changes);
@@ -998,39 +1115,32 @@ function readContent(dir: string, listing: Listing): ContentFacts {
       { maxBytes: SUMMARY_LIMITS.maxTotalBytes, maxTotalBytes: SUMMARY_LIMITS.maxTotalBytes },
     ) ?? new Map<string, Buffer>();
   const cosmeticOnly = new Set<string>();
+  const candidates: SummaryCandidate[] = [];
   for (const { path, entry } of checked) {
     const before = checkedBlobs.get(entry.oidBefore);
     const after = checkedBlobs.get(entry.oidAfter);
+    if (before === undefined || after === undefined) continue;
     // As latin1, so bytes that are not valid UTF-8 still differ (see tryGitBytes).
-    if (
-      before !== undefined &&
-      after !== undefined &&
-      isCosmeticChange(path, before.toString("latin1"), after.toString("latin1"))
-    ) {
+    if (isCosmeticChange(path, before.toString("latin1"), after.toString("latin1"))) {
       cosmeticOnly.add(path);
+    } else if (classifyPath(path) !== "readme_and_changes") {
+      // The README and the change log are prose, read as diffs, never as tables or documents.
+      candidates.push({ path, before, after });
     }
   }
+  const summary = changeSummary(dir, entries, checkedBlobs, candidates, options.now ?? Date.now);
+  const accounted = summary.accounted;
 
   const patches: Patch[] = [];
   const read = new Map<string, Patch>();
   // The patch that already shows a change, by status and the hash of its diff's signature.
   const shownBy = new Map<string, Patch>();
   let budget = MAX_PATCH_TOTAL_CHARS;
-  // The read budget goes to files that are not cosmetic-only, and to each DISTINCT change once: a
-  // file whose diff is exactly one already shown is covered by it and costs nothing.
-  const toRead = wanted.filter((c) => !cosmeticOnly.has(c.path));
-  for (const c of toRead.slice(0, MAX_DIFFS_EXAMINED)) {
-    // The search for repeats is optional, the first diffs are not: once the patches are full, the
-    // search goes on only while time is left. When little is, the files not yet examined stay unread
-    // (which fails closed, as always) instead of the pass running out of time and the whole review
-    // with it.
-    if (
-      (patches.length >= MAX_PATCH_FILES || budget <= 0) &&
-      gitDeadline !== null &&
-      gitDeadline - Date.now() < FOLD_TIME_RESERVE_MS
-    ) {
-      break;
-    }
+  const full = (): boolean => patches.length >= MAX_PATCH_FILES || budget <= 0;
+  const late = (): boolean =>
+    gitDeadline !== null && gitDeadline - Date.now() < FOLD_TIME_RESERVE_MS;
+  /** Read one file's diff: fold it onto the patch that already shows it, or show it if there is room. */
+  const showDiff = (c: RawChange): void => {
     const bytes = tryGitBytes(dir, [
       "diff",
       "-U2",
@@ -1042,7 +1152,7 @@ function readContent(dir: string, listing: Listing): ContentFacts {
       "--",
       c.path,
     ]);
-    if (bytes === null || bytes === "") continue;
+    if (bytes === null || bytes === "") return;
     const signature = diffSignature(bytes);
     // What the model reads is the text, as before: the same bytes decoded as UTF-8.
     const diff = Buffer.from(bytes, "latin1").toString("utf8");
@@ -1054,20 +1164,56 @@ function readContent(dir: string, listing: Listing): ContentFacts {
     if (same !== undefined) {
       same.same.push(c.path);
       read.set(c.path, same);
-      continue;
+      return;
     }
-    if (patches.length >= MAX_PATCH_FILES || budget <= 0) continue;
+    if (full()) return;
     const { text, truncated } = clip(diff, Math.min(MAX_PATCH_FILE_CHARS, budget));
     budget -= text.length;
     const patch: Patch = { path: c.path, text, truncated, same: [] };
     patches.push(patch);
     read.set(c.path, patch);
     if (key !== null) shownBy.set(key, patch);
+  };
+  // The read budget goes to files that are not cosmetic-only, and to each DISTINCT change once: a
+  // file whose diff is exactly one already shown is covered by it and costs nothing. It goes first
+  // to the removed and modified files the summary did not account for, which nothing else covers;
+  // then to a few it did, as illustrations; then to the added files. With nothing accounted for,
+  // that is the files in review order, read exactly as they were before the summary existed.
+  const toRead = wanted.filter((c) => !cosmeticOnly.has(c.path));
+  const first = toRead.filter((c) => c.status !== "added" && !accounted.has(c.path));
+  const illustrations = toRead
+    .filter((c) => c.status !== "added" && accounted.has(c.path))
+    .slice(0, MAX_ILLUSTRATION_PATCHES);
+  const added = toRead.filter((c) => c.status === "added");
+  // The search for repeats is optional, the first diffs are not: once the patches are full, the
+  // search goes on only while time is left. When little is, the files not yet examined stay unread
+  // (which fails closed, as always) instead of the pass running out of time and the whole review
+  // with it. At most MAX_DIFFS_EXAMINED files are examined, the illustrations not counted.
+  let examined = 0;
+  const goOn = (): boolean => examined < MAX_DIFFS_EXAMINED && !(full() && late());
+  for (const c of first) {
+    if (!goOn()) break;
+    examined++;
+    showDiff(c);
+  }
+  // An illustration is shown only into room that is left, never in place of a file that needed
+  // reading, and only while the pass is not short of time; one that repeats a change already shown
+  // folds onto it as any diff does.
+  for (const c of illustrations) {
+    if (full() || late()) break;
+    showDiff(c);
+  }
+  for (const c of added) {
+    if (!goOn()) break;
+    examined++;
+    showDiff(c);
   }
 
+  // Covered: added, cosmetic, accounted for by the summary, or shown in full.
   const readIncomplete = wanted.some((c) => {
     if (c.status === "added") return false;
     if (cosmeticOnly.has(c.path)) return false;
+    if (accounted.has(c.path)) return false;
     const patch = read.get(c.path);
     return patch === undefined || patch.truncated;
   });
@@ -1082,11 +1228,13 @@ function readContent(dir: string, listing: Listing): ContentFacts {
       files: 0,
       shown: 0,
       cosmeticOnly: 0,
+      summarized: 0,
     };
     g.files++;
     const patch = read.get(c.path);
     if (patch !== undefined && !patch.truncated) g.shown++;
     if (cosmeticOnly.has(c.path)) g.cosmeticOnly++;
+    if (accounted.has(c.path)) g.summarized++;
     groupMap.set(key, g);
   }
   // Removed shapes first: that is where a loss hides, and the cut must never take them.
@@ -1099,6 +1247,7 @@ function readContent(dir: string, listing: Listing): ContentFacts {
     groups: ordered.slice(0, MAX_GROUPS),
     groupsOmittedFiles: ordered.slice(MAX_GROUPS).reduce((n, g) => n + g.files, 0),
     changelogEntry: changelogEntryFor(dir, mergeBase, headSha, listing.versionAfter),
+    summary,
   };
 }
 
@@ -1147,12 +1296,26 @@ function listedEvidence(listing: Listing, text: TextFacts) {
 export function buildEvidence(facts: GitFacts, text: TextFacts): ReviewEvidence {
   return {
     ...listedEvidence(facts, text),
-    // Each file a diff stands for counts as read, the file it was shown for and the ones it repeats;
-    // a diff that was cut stands for no other file.
-    files_read: facts.patches.reduce((n, p) => n + (p.truncated ? 1 : 1 + p.same.length), 0),
+    files_read: filesRead(facts),
     truncated: facts.listCut || facts.readIncomplete,
     changelog_entry: facts.changelogEntry,
   };
+}
+
+/**
+ * How many changed files were read: the files the change summary accounted for, the file each diff
+ * was shown for, and the files a diff shown in full repeats in (a diff that was cut stands for no
+ * other file, though its own file still counts). A set, so a file that was both accounted for and
+ * shown counts once. Every member is a path of the change list, so the count never exceeds
+ * `files_changed`; with nothing accounted for it is the count of the diffs and their repeats.
+ */
+function filesRead(facts: ContentFacts): number {
+  const read = new Set<string>(facts.summary.accounted);
+  for (const patch of facts.patches) {
+    read.add(patch.path);
+    if (!patch.truncated) for (const path of patch.same) read.add(path);
+  }
+  return read.size;
 }
 
 /**
