@@ -1207,6 +1207,33 @@ describe("renderClasses: author text cannot forge the platform's lines", () => {
     expect(complete.size).toBe(classes.length);
   });
 
+  test("format, private-use and unassigned characters that are not default-ignorable are escaped too, never shown raw", () => {
+    // The Arabic number sign, the Arabic pound mark above, an interlinear annotation anchor and
+    // the Kaithi number sign are format characters (\p{Cf}) that Unicode does NOT make
+    // default-ignorable, so only the category itself keeps them out of the block; a private-use
+    // character (\p{Co}) and a noncharacter (\p{Cn}, unassigned for good) are in the same case.
+    const chars = ["\u{600}", "\u{890}", "\u{FFF9}", "\u{110BD}", "\u{E000}", "\u{FFFE}"];
+    for (const ch of chars) {
+      expect(/^[\p{Cf}\p{Co}\p{Cn}]$/u.test(ch), ch.codePointAt(0)?.toString(16)).toBe(true);
+      expect(/^\p{Default_Ignorable_Code_Point}$/u.test(ch), ch.codePointAt(0)?.toString(16)).toBe(
+        false,
+      );
+    }
+    const { text, complete, classes } = rendered([
+      {
+        path: channels(1),
+        before: tsv(CHANNELS, ...chars.map((ch, i) => [`A${i}`, "EEG", `a${ch}b`])),
+        after: tsv(CHANNELS, ...chars.map((_, i) => [`A${i}`, "EEG", `n${i}`])),
+      },
+    ]);
+    for (const [i, ch] of chars.entries()) {
+      const hex = (ch.codePointAt(0) as number).toString(16).toUpperCase();
+      expect(text, hex).toContain(`    "a\\u{${hex}}b" -> "n${i}" x1\n`);
+      expect(text.includes(ch), `${hex} raw`).toBe(false);
+    }
+    expect(complete.size).toBe(classes.length);
+  });
+
   test("a rule's added text is escaped like a value: a zero-width prefix and its spelled-out escape are two classes that read differently", () => {
     const { text, classes } = rendered([
       {
@@ -2978,6 +3005,12 @@ function oracleViolations(c: OracleCase, summary: ChangeSummary, text: string): 
   const read = readBack(text);
   out.push(...read.errors);
   if (text.length > SUMMARY_LIMITS.maxSummaryChars) out.push("the block is over its bound");
+  // Nothing the platform escapes may be shown raw (control, format, separator, private-use,
+  // unassigned and default-ignorable characters, the Braille blank); only the line breaks between
+  // lines and U+0020 are the block's own. `search` ignores the global flag's lastIndex.
+  if (text.replaceAll("\n", "").replaceAll(" ", "").search(ORACLE_UNSEEN) >= 0) {
+    out.push("an invisible character is shown raw");
+  }
   if (read.blocks.length > SUMMARY_LIMITS.maxClasses) out.push("more classes than the bound");
   if (read.trailing !== expected.size - read.blocks.length) {
     out.push(
@@ -3148,6 +3181,11 @@ const O_CELLS = [
   "x\u{A0}y",
   "\u{202E}evil",
   "...(cut)",
+  // Format characters that are not default-ignorable: only the category keeps them out of the text.
+  "\u{600}",
+  "\u{890}",
+  "\u{FFF9}",
+  "\u{110BD}",
 ];
 const O_TABLES: { path: string; key: string }[] = [
   { path: "sub-01/eeg/sub-01_task-x_channels.tsv", key: "name" },
