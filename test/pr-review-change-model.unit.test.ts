@@ -17,6 +17,7 @@ import {
   type ClassKind,
   type FileDiff,
   type JsonCounts,
+  type JsonValue,
   type PoolFile,
   ROLE_OF,
   type RelabelRule,
@@ -3051,9 +3052,7 @@ describe("diffJson: leaves at the same path", () => {
   });
 
   test("a scalar document changes at the root", () => {
-    expect(jsonLines("1", "2")).toEqual([
-      'json_value_changed | field= | before="1" | after="2"'.replace("field= ", "field= "),
-    ]);
+    expect(jsonLines("1", "2")).toEqual(['json_value_changed | field= | before="1" | after="2"']);
   });
 });
 
@@ -3172,33 +3171,54 @@ describe("diffJson: renamed keys", () => {
     ]);
   });
 
-  test("an added key is used by at most one rename, taken in before order", () => {
-    // Both old names fold to the new one. The first in before order takes it; the second is removed.
+  test("a shared value is no evidence of a rename: the value must be the only one of its parent on each side", () => {
+    // go2 holds the same value as go, so go removed and go3 added are a removal and an addition.
+    expect(
+      jsonLines(
+        '{"trial_type": {"Levels": {"go": "Go", "go2": "Go"}}}',
+        '{"trial_type": {"Levels": {"go2": "Go", "go3": "Go"}}}',
+      ),
+    ).toEqual([
+      'json_key_removed | field=.trial_type.Levels | before="\\"Go\\"" | detail="go"',
+      'json_key_added | field=.trial_type.Levels | after="\\"Go\\"" | detail="go3"',
+    ]);
+    // Two old names that both fold to the new one: neither is the rename.
     expect(jsonLines('{"a_b": 1, "A-B": 1}', '{"AB": 1}')).toEqual([
-      'json_key_renamed | field= | before="1" | after="1" | detail="a_b -> AB"',
+      'json_key_removed | field= | before="1" | detail="a_b"',
       'json_key_removed | field= | before="1" | detail="A-B"',
+      'json_key_added | field= | after="1" | detail="AB"',
     ]);
-  });
-
-  test("among several added candidates the first in after order is taken, whichever way it matches", () => {
+    // Two new names that both could be the old one: neither is.
     expect(jsonLines('{"x": 1}', '{"X": 1, "x_": 1}')).toEqual([
-      expect.stringContaining('detail="x -> X"'),
-      expect.stringContaining('json_key_added | field= | after="1" | detail="x_"'),
+      'json_key_removed | field= | before="1" | detail="x"',
+      'json_key_added | field= | after="1" | detail="X"',
+      'json_key_added | field= | after="1" | detail="x_"',
     ]);
-    // A rule match that comes first in after order wins over a case match that comes later.
-    expect(jsonLines('{"Fz": 1}', '{"EEG_Fz": 1, "FZ": 1}')).toEqual([
-      expect.stringContaining('detail="Fz -> EEG_Fz"'),
-      expect.stringContaining('json_key_added | field= | after="1" | detail="FZ"'),
+    // A value repeated under ANOTHER parent does not count against a rename.
+    expect(
+      jsonLines('{"a": {"Key": 1}, "b": {"z": 1}}', '{"a": {"KEY": 1}, "b": {"z": 1}}'),
+    ).toEqual([expect.stringContaining('detail="Key -> KEY"')]);
+  });
+
+  test("several keys renamed at once, each with its own value, are each a rename", () => {
+    expect(
+      jsonLines(
+        '{"Sampling_Frequency": 250, "Misc_Channel_Count": 3, "EEG_Reference": "Cz"}',
+        '{"SamplingFrequency": 250, "MiscChannelCount": 3, "EEGReference": "Cz"}',
+      ),
+    ).toEqual([
+      expect.stringContaining('detail="Sampling_Frequency -> SamplingFrequency"'),
+      expect.stringContaining('detail="Misc_Channel_Count -> MiscChannelCount"'),
+      expect.stringContaining('detail="EEG_Reference -> EEGReference"'),
     ]);
   });
 
-  test("an added leaf that two removed keys both match by a rule is used by the first only", () => {
-    // A_Fz_B is Fz wrapped, and also Fz_B wrapped; once Fz has taken it, Fz_B must go on to Q_Fz_B,
-    // past the unrelated Zz before it and the used leaf in the middle.
-    expect(jsonLines('{"Fz": 1, "Fz_B": 1}', '{"Zz": 1, "A_Fz_B": 1, "Q_Fz_B": 1}')).toEqual([
-      expect.stringContaining('detail="Fz -> A_Fz_B"'),
-      expect.stringContaining('detail="Fz_B -> Q_Fz_B"'),
-      'json_key_added | field= | after="1" | detail="Zz"',
+  test("a value that moved to another key and was overwritten at its old key is a change, not a rename", () => {
+    // b's old value 1 is now under a, but a was there before with another value: b is removed and
+    // a changed, because the after leaf with value 1 is already the partner of a's change.
+    expect(jsonLines('{"a": 2, "b": 1}', '{"a": 1}')).toEqual([
+      'json_value_changed | field=.a | before="2" | after="1"',
+      'json_key_removed | field= | before="1" | detail="b"',
     ]);
   });
 
@@ -3219,23 +3239,24 @@ describe("diffJson: renamed keys", () => {
     ]);
   });
 
-  test("thousands of keys with one value rename in linear time, and unmatched ones stay unpaired", () => {
+  test("thousands of keys renamed, each with its own value, rename in linear time; one shared value renames none", () => {
     const n = 4000;
     const before = JSON.stringify(
-      Object.fromEntries(Array.from({ length: n }, (_, i) => [`key${i}`, "n/a"])),
+      Object.fromEntries(Array.from({ length: n }, (_, i) => [`key${i}`, `v${i}`])),
     );
     const after = JSON.stringify(
-      Object.fromEntries(Array.from({ length: n }, (_, i) => [`KEY${i}`, "n/a"])),
+      Object.fromEntries(Array.from({ length: n }, (_, i) => [`KEY${i}`, `v${i}`])),
     );
     const started = performance.now();
     const diff = diffJsonText("a.json", before, after);
     expect(diff.counts).toMatchObject({ renamed: n, removed: 0, added: 0 });
-    const hostile = JSON.stringify(
-      Object.fromEntries(Array.from({ length: n }, (_, i) => [`zz${i}`, "n/a"])),
-    );
-    const unmatched = diffJsonText("a.json", before, hostile);
-    expect(unmatched.counts.renamed).toBe(0);
-    expect(performance.now() - started).toBeLessThan(5000);
+    const shared = (prefix: string) =>
+      JSON.stringify(
+        Object.fromEntries(Array.from({ length: n }, (_, i) => [`${prefix}${i}`, "x"])),
+      );
+    const unmatched = diffJsonText("a.json", shared("key"), shared("KEY"));
+    expect(unmatched.counts).toMatchObject({ renamed: 0, removed: n, added: n });
+    expect(performance.now() - started).toBeLessThan(3000);
   });
 });
 
@@ -3279,6 +3300,11 @@ describe("sidecarApplies: BIDS inheritance, as far as the change model reads it"
     ]) {
       expect(sidecarApplies(sidecar, file), sidecar).toBe(false);
     }
+  });
+
+  test("the extension is everything after the first dot, as in BIDS", () => {
+    expect(sidecarApplies("task-rest_eeg.x.json", "sub-01/sub-01_task-rest_eeg.x.json")).toBe(true);
+    expect(sidecarApplies("task-rest_eeg.json", "sub-01/sub-01_task-rest_eeg.x.json")).toBe(false);
   });
 
   test("a name that is not a BIDS name applies to nothing and receives nothing", () => {
@@ -3373,6 +3399,67 @@ describe("diffJson: moved keys", () => {
     }
   });
 
+  test("a nested leaf is not moved while this file keeps its top-level key: inheritance merges one level deep", () => {
+    // The file still has trial_type, so its whole trial_type replaces the sidecar's: the level the
+    // sidecar now holds does not reach this file.
+    const file = "sub-01/eeg/sub-01_task-rest_events.json";
+    const sidecar = pooled(
+      "task-rest_events.json",
+      '{"onset": {"Units": "s"}}',
+      '{"onset": {"Units": "s"}, "trial_type": {"Levels": {"stop": "Stop trial"}}}',
+    );
+    const before = '{"trial_type": {"Levels": {"go": "Go trial", "stop": "Stop trial"}}}';
+    expect(
+      diffJsonText(file, before, '{"trial_type": {"Levels": {"go": "Go trial"}}}', [
+        sidecar,
+      ]).atoms.map(line),
+    ).toEqual([
+      'json_key_removed | field=.trial_type.Levels | before="\\"Stop trial\\"" | detail="stop"',
+    ]);
+    // Once the file drops trial_type altogether, the sidecar's applies, and the leaf is moved.
+    expect(
+      diffJsonText(file, before, '{"onset": {"Units": "s"}}', [
+        pooled(
+          "task-rest_events.json",
+          "{}",
+          '{"trial_type": {"Levels": {"go": "Go trial", "stop": "Stop trial"}}}',
+        ),
+      ]).atoms.map((a) => a.kind),
+    ).toEqual(["json_key_moved", "json_key_moved", "json_key_added"]);
+    // A list of objects is one top-level key too: an element moved out of a list the file keeps
+    // is lost for this file.
+    expect(
+      diffJsonText(
+        "sub-01/eeg/sub-01_task-x_eeg.json",
+        '{"Arr": [{"a": 1}, {"a": 2}]}',
+        '{"Arr": [{"a": 1}]}',
+        [pooled("task-x_eeg.json", "{}", '{"Arr": [{"a": 9}, {"a": 2}]}')],
+      ).atoms.map((a) => a.kind),
+    ).toEqual(["json_key_removed"]);
+  });
+
+  test("nothing is moved out of a document that is not an object, or into one that is not", () => {
+    const file = "sub-01/eeg/sub-01_task-x_eeg.json";
+    // The file became a list: it has no top-level keys for a sidecar to merge under.
+    expect(
+      diffJsonText(file, '{"Manufacturer": "BioSemi"}', "[]", [
+        pooled("task-x_eeg.json", null, '{"Manufacturer": "BioSemi"}'),
+      ]).atoms.map((a) => a.kind),
+    ).toEqual(["json_key_removed", "json_key_added"]);
+    // A scalar document's one leaf has no key at all.
+    expect(
+      diffJsonText(file, "5", '{"a": 1}', [pooled("task-x_eeg.json", null, "5")]).atoms.map(
+        (a) => a.kind,
+      ),
+    ).toEqual(["json_key_removed", "json_key_added"]);
+    // A sidecar that is a scalar holds no key a removed one could have moved to.
+    expect(
+      diffJsonText(file, '{"Manufacturer": "BioSemi", "K": 1}', '{"K": 1}', [
+        pooled("task-x_eeg.json", null, '"BioSemi"'),
+      ]).atoms.map((a) => a.kind),
+    ).toEqual(["json_key_removed"]);
+  });
+
   test("a rename wins over a move: the key is still in this file", () => {
     const diff = diffJsonText(
       target,
@@ -3428,18 +3515,15 @@ describe("diffJson: the totality assertion", () => {
     expect(diffJsonWith("a.json", before, after, empty, () => true).ok).toBe(true);
   });
 
-  test("the entry point runs the real check: diffJson is diffJsonWith over verifyJsonCounts", () => {
-    expect(String(diffJson)).toContain("verifyJsonCounts");
-    expect(String(diffJson)).not.toContain("=> true");
-  });
-
-  test("the check is given the tallies of what was emitted", () => {
-    let seen: JsonCounts | null = null;
-    diffJsonWith("a.json", before, after, empty, (counts) => {
-      seen = counts;
+  test("the check is handed the very diff that is returned, once, with the tallies of the fates", () => {
+    const seen: FileDiff<JsonCounts>[] = [];
+    const result = diffJsonWith("a.json", before, after, empty, (diff) => {
+      seen.push(diff);
       return true;
     });
-    expect(seen).toEqual({
+    expect(seen).toHaveLength(1);
+    expect(result.ok && result.value).toBe(seen[0] as FileDiff<JsonCounts>);
+    expect(seen[0]?.counts).toEqual({
       beforeLeaves: 3,
       afterLeaves: 3,
       unchanged: 1,
@@ -3460,36 +3544,97 @@ describe("diffJson: the totality assertion", () => {
     });
   });
 
-  test("the real check accepts a total count and rejects each way a count can fail to add up", () => {
-    const good: JsonCounts = {
-      beforeLeaves: 12,
-      afterLeaves: 9,
-      unchanged: 3,
-      changed: 2,
-      emptied: 1,
-      filled: 1,
-      renamed: 1,
-      afterRenamed: 1,
-      moved: 1,
-      removed: 2,
-      emptyRemoved: 1,
-      added: 1,
-      afterUnchanged: 3,
-      afterChanged: 2,
-      afterEmptied: 1,
-      afterFilled: 1,
-      conflicts: 0,
+  test("the entry point is the real check, once per diff: on a corpus diffJson equals diffJsonWith over verifyJsonCounts", () => {
+    const random = seeded(707);
+    let calls = 0;
+    const counting = (diff: FileDiff<JsonCounts>): boolean => {
+      calls++;
+      return verifyJsonCounts(diff);
     };
-    expect(verifyJsonCounts(good)).toBe(true);
+    for (let n = 0; n < 300; n++) {
+      const root = randomPlain(random, 0);
+      const b = json(textOf(root));
+      const a = json(textOf(mutatePlain(random, root)));
+      expect(diffJson("a.json", b, a, empty), `case ${n}`).toEqual(
+        diffJsonWith("a.json", b, a, empty, counting),
+      );
+    }
+    expect(calls).toBe(300);
+  });
+
+  test("a document the parser would never produce reaches the guard through the entry point", () => {
+    // parseJson refuses a repeated key; a value built by hand can hold one. Two before leaves then
+    // share one path, both claim the one after leaf there, and the second claim is a conflict.
+    const one = json("1");
+    const twice: JsonValue = { t: "obj", keys: ["a", "a"], v: new Map([["a", one]]) };
+    expect(diffJson("a.json", twice, json('{"a": 1}'), empty)).toEqual({
+      ok: false,
+      refusal: "internal_mismatch",
+    });
+    expect(diffJsonWith("a.json", twice, json('{"a": 1}'), empty, () => true).ok).toBe(true);
+  });
+
+  /** Atoms that say exactly what a set of JSON tallies says, for the check's truth table. */
+  const atomsFor = (c: JsonCounts): Atom[] => {
+    const many = (kind: ClassKind, count: number): Atom[] =>
+      Array.from({ length: count }, () => ({
+        kind,
+        field: "",
+        rule: null,
+        detail: "k",
+        before: "1",
+        after: null,
+      }));
+    return [
+      ...many("json_value_changed", c.changed - 1),
+      ...many("json_type_changed", 1),
+      ...many("json_emptied", c.emptied),
+      ...many("json_filled", c.filled),
+      ...many("json_key_renamed", c.renamed),
+      ...many("json_key_moved", c.moved),
+      ...many("json_key_removed", c.removed),
+      ...many("json_empty_key_removed", c.emptyRemoved),
+      ...many("json_key_added", c.added),
+      ...many("json_keys_reordered", 1),
+    ];
+  };
+  const good: JsonCounts = {
+    beforeLeaves: 12,
+    afterLeaves: 9,
+    unchanged: 3,
+    changed: 2,
+    emptied: 1,
+    filled: 1,
+    renamed: 1,
+    afterRenamed: 1,
+    moved: 1,
+    removed: 2,
+    emptyRemoved: 1,
+    added: 1,
+    afterUnchanged: 3,
+    afterChanged: 2,
+    afterEmptied: 1,
+    afterFilled: 1,
+    conflicts: 0,
+  };
+  const diffOf = (c: JsonCounts, atoms = atomsFor(c)): FileDiff<JsonCounts> => ({
+    family: "json",
+    keyColumn: null,
+    atoms,
+    counts: c,
+  });
+
+  test("the real check accepts a total diff whose atoms say what its tallies say", () => {
+    expect(verifyJsonCounts(diffOf(good))).toBe(true);
+    expect(verifyJsonCounts(diffOf(good, [...atomsFor(good)].reverse()))).toBe(true);
+  });
+
+  test("it rejects every way the tallies can fail to add up", () => {
     const broken: Partial<JsonCounts>[] = [
       { beforeLeaves: 13 },
       { beforeLeaves: 11 },
       { afterLeaves: 10 },
       { afterLeaves: 8 },
-      { removed: 3 },
-      { moved: 0 },
-      { emptyRemoved: 0 },
-      { added: 2 },
       { afterRenamed: 2 },
       { afterChanged: 1 },
       { afterUnchanged: 4 },
@@ -3498,7 +3643,85 @@ describe("diffJson: the totality assertion", () => {
       { conflicts: 1 },
     ];
     for (const change of broken) {
-      expect(verifyJsonCounts({ ...good, ...change }), JSON.stringify(change)).toBe(false);
+      expect(verifyJsonCounts(diffOf({ ...good, ...change })), JSON.stringify(change)).toBe(false);
+    }
+  });
+
+  test("it rejects each of the five one-to-one clauses on its own, with every sum still holding", () => {
+    // Each moves one before leaf from removed to the fate under test, so the before sum holds, and
+    // takes one after leaf from the after side of that fate to `added`, so the after sum holds.
+    for (const [fate, afterFate] of [
+      ["unchanged", "afterUnchanged"],
+      ["changed", "afterChanged"],
+      ["emptied", "afterEmptied"],
+      ["filled", "afterFilled"],
+      ["renamed", "afterRenamed"],
+    ] as const) {
+      const c: JsonCounts = {
+        ...good,
+        [fate]: good[fate] + 1,
+        removed: good.removed - 1,
+        [afterFate]: good[afterFate] - 1,
+        added: good.added + 1,
+      };
+      expect(
+        c.unchanged +
+          c.changed +
+          c.emptied +
+          c.filled +
+          c.renamed +
+          c.moved +
+          c.removed +
+          c.emptyRemoved,
+      ).toBe(c.beforeLeaves);
+      expect(
+        c.afterUnchanged +
+          c.afterChanged +
+          c.afterEmptied +
+          c.afterFilled +
+          c.afterRenamed +
+          c.added,
+      ).toBe(c.afterLeaves);
+      expect(verifyJsonCounts(diffOf(c)), fate).toBe(false);
+    }
+  });
+
+  test("it rejects an atom dropped, added or of a kind a JSON diff never emits", () => {
+    const base = atomsFor(good);
+    for (const kind of [
+      "json_value_changed",
+      "json_type_changed",
+      "json_emptied",
+      "json_filled",
+      "json_key_renamed",
+      "json_key_moved",
+      "json_key_removed",
+      "json_empty_key_removed",
+      "json_key_added",
+    ] as ClassKind[]) {
+      const at = base.findIndex((atom) => atom.kind === kind);
+      expect(
+        verifyJsonCounts(
+          diffOf(
+            good,
+            base.filter((_, i) => i !== at),
+          ),
+        ),
+        `without ${kind}`,
+      ).toBe(false);
+      expect(verifyJsonCounts(diffOf(good, [...base, { ...(base[0] as Atom), kind }])), kind).toBe(
+        false,
+      );
+    }
+    for (const kind of [
+      "json_keys_reordered",
+      "row_removed",
+      "cell_replaced",
+      "format",
+    ] as ClassKind[]) {
+      expect(verifyJsonCounts(diffOf(good, [...base, { ...(base[0] as Atom), kind }])), kind).toBe(
+        false,
+      );
     }
   });
 });
@@ -3703,7 +3926,7 @@ describe("diffJson on generated documents", () => {
       const { atoms, counts } = result.value;
       for (const atom of atoms) seen.add(atom.kind);
 
-      expect(verifyJsonCounts(counts), `case ${n}`).toBe(true);
+      expect(verifyJsonCounts(result.value), `case ${n}`).toBe(true);
       const beforeLeaves = flattenJson(b.value.value);
       const afterLeaves = flattenJson(a.value.value);
       expect(counts.beforeLeaves).toBe(beforeLeaves.length);
@@ -3788,6 +4011,10 @@ describe("diffJson on generated documents", () => {
   });
 });
 
+// ---------------------------------------------------------------------------------------------
+// Bounded time: no input makes one file's diff take more than a few seconds
+// ---------------------------------------------------------------------------------------------
+
 describe("the diffs are bounded in time on large and hostile input", () => {
   const channels = "sub-01/eeg/sub-01_task-x_channels.tsv";
   const noPool = buildPools([]);
@@ -3837,6 +4064,19 @@ describe("the diffs are bounded in time on large and hostile input", () => {
     const second = timed(() => diffTable(events, big(before), big(edited), noPool.rows));
     expect(second.value.ok && kindCount(second.value.value, "cell_replaced")).toBe(n);
     expect(second.ms).toBeLessThan(3000);
+  }, 30_000);
+
+  test("90,000 removed and 90,000 added JSON keys sharing one value diff in well under 3 seconds", () => {
+    const n = 90_000;
+    const before: Record<string, string> = {};
+    const after: Record<string, string> = {};
+    for (let i = 0; i < n; i++) before[`k${"a".repeat(40)}${i}`] = "n/a";
+    for (let i = 0; i < n; i++) after[`K${"a".repeat(40)}-${i}x`] = "n/a";
+    const b = json(JSON.stringify(before));
+    const a = json(JSON.stringify(after));
+    const { value, ms } = timed(() => diffJson("x_eeg.json", b, a, noPool.json));
+    expect(value.ok && value.value.counts).toMatchObject({ renamed: 0, emptyRemoved: n, added: n });
+    expect(ms).toBeLessThan(3000);
   }, 30_000);
 
   test("a table that spends the whole pairing budget stops pairing: what is left is removed and added, the same on every run", () => {
