@@ -1680,6 +1680,44 @@ describe("buildPools: what the pools hold is bounded by maxPoolChars", () => {
     expect(over.json.byTopKey.has("K".repeat(1000))).toBe(false);
   });
 
+  test("a document kept for its top-level keys alone spends them too: a side that does not parse, or a path over maxNameChars on either", () => {
+    const keyChars = 2_000 * 1000;
+    const plain = wideDocument(2_000);
+    const long = wideDocument(2_000, true);
+    expect(flattenJson(json(plain))?.length).toBe(2_000);
+    expect(flattenJson(json(long))).toBeNull();
+    const cases: { name: string; before: string; after: string }[] = [
+      { name: "the earlier side does not parse", before: "{", after: plain },
+      { name: "the path over the bound is on the later side", before: "{}", after: long },
+      { name: "the path over the bound is on the earlier side", before: long, after: plain },
+    ];
+    const outcomes = cases.map(({ name, before, after }) => {
+      // First in path order, so the file after it shows whether its keys were spent.
+      const keysOnly = pooled("a_eeg.json", before, after);
+      const fits = buildPools([keysOnly, documentHolding("b_eeg.json", bound - keyChars, 15_000)]);
+      const over = buildPools([
+        keysOnly,
+        documentHolding("b_eeg.json", bound - keyChars + 1, 15_000),
+      ]);
+      return {
+        name,
+        fits: jsonOutcome(fits),
+        over: jsonOutcome(over),
+        listed: over.json.byTopKey.get(wideKey(1_999)),
+      };
+    });
+    // Its keys are listed and it is never a home, so the only file with leaves is the filler; the
+    // filler fits exactly what is left, and one code unit more is the one that is unreadable.
+    expect(outcomes).toEqual(
+      cases.map(({ name }) => ({
+        name,
+        fits: { unreadable: [], homes: ["b_eeg.json"], topKeys: 2_002 },
+        over: { unreadable: ["b_eeg.json"], homes: [], topKeys: 2_000 },
+        listed: ["a_eeg.json"],
+      })),
+    );
+  });
+
   test("an added document is walked only as far as the room left, so one past it before a path over maxNameChars is unreadable", () => {
     // Forty thousand children past the bound, then a path of 1,027 code units at the end.
     const long = `"Z":{"${"z".repeat(SUMMARY_LIMITS.maxNameChars)}":1}`;
