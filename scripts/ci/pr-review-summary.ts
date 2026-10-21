@@ -3806,6 +3806,66 @@ export interface SummaryChecks {
   json: (diff: FileDiff<JsonCounts>) => boolean;
 }
 
+/** Both sides of a candidate parsed, or the first refusal: the before side's, then the after side's. */
+function parseBoth<T>(
+  parse: (bytes: Uint8Array) => Parsed<T>,
+  candidate: SummaryCandidate,
+): Parsed<{ before: T; after: T }> {
+  const before = parse(candidate.before);
+  if (!before.ok) return before;
+  const after = parse(candidate.after);
+  if (!after.ok) return after;
+  return { ok: true, value: { before: before.value, after: after.value } };
+}
+
+/**
+ * The atoms of one candidate, or why it was refused (step 5 of {@link summarizeChangesWith}): both
+ * sides parsed, then diffed against the pools. A table's layout atoms come from its diff; a JSON
+ * document's come from {@link formatAtoms} here, plus `json_respelled` when the trees are equal and
+ * the texts differ beyond whitespace.
+ */
+function summarizeFile(
+  candidate: SummaryCandidate,
+  family: "tsv" | "json",
+  pools: { rows: RowPool; json: JsonPool },
+  checks: SummaryChecks,
+): Parsed<{ atoms: Atom[]; keyColumn: string | null }> {
+  const { path } = candidate;
+  if (family === "tsv") {
+    const sides = parseBoth(parseTsv, candidate);
+    if (!sides.ok) return sides;
+    const diff = diffTableWith(
+      path,
+      sides.value.before,
+      sides.value.after,
+      pools.rows,
+      checks.table,
+    );
+    if (!diff.ok) return diff;
+    return { ok: true, value: { atoms: diff.value.atoms, keyColumn: diff.value.keyColumn } };
+  }
+  const sides = parseBoth(parseJson, candidate);
+  if (!sides.ok) return sides;
+  const { before, after } = sides.value;
+  const diff = diffJsonWith(path, before.value, after.value, pools.json, checks.json);
+  if (!diff.ok) return diff;
+  const atoms = [...diff.value.atoms, ...formatAtoms(before.format, after.format)];
+  if (
+    canonicalJson(before.value) === canonicalJson(after.value) &&
+    stripJsonSpace(jsonText(candidate.before)) !== stripJsonSpace(jsonText(candidate.after))
+  ) {
+    atoms.push({
+      kind: "format",
+      field: null,
+      rule: null,
+      detail: "json_respelled",
+      before: null,
+      after: null,
+    });
+  }
+  return { ok: true, value: { atoms, keyColumn: null } };
+}
+
 /**
  * Summarize the modified candidates of a pull request against its pools (design sections 4 to 7).
  * Past the deadline the result is `abandoned` and accounts for nothing; see
@@ -3840,11 +3900,10 @@ export function summarizeChanges(input: {
  * 4. Reads each file whose path ends in `.tsv` or `.json`; any other path is not a candidate and is
  *    left out. Once the bytes read (both sides of every file so far) would pass `maxTotalBytes`,
  *    that file and EVERY later one is refused `too_large`, so what the summary holds is bounded.
- * 5. Parses both sides (the before side's refusal first) and diffs them against the pools. A
- *    table's layout atoms come from its diff; a JSON document's come from {@link formatAtoms}
- *    here, plus `json_respelled` when the trees are equal and the texts differ beyond whitespace.
- *    Any refusal, `internal_mismatch` included, is recorded on the file's outcome, and such a file
- *    has no atoms, no class and no loss fact: it stays on the raw-diff path.
+ * 5. Parses both sides (the before side's refusal first) and diffs them against the pools
+ *    ({@link summarizeFile}). Any refusal, `internal_mismatch` included, is recorded on the file's
+ *    outcome, and such a file has no atoms, no class and no loss fact: it stays on the raw-diff
+ *    path.
  * 6. Groups the atoms into classes, renders them, accounts for files and counts the loss facts.
  */
 export function summarizeChangesWith(
@@ -3888,63 +3947,12 @@ export function summarizeChangesWith(
     }
     read += bytes;
 
-    let atoms: Atom[];
-    let keyColumn: string | null = null;
-    if (family === "tsv") {
-      const before = parseTsv(candidate.before);
-      if (!before.ok) {
-        refuse(before.refusal);
-        continue;
-      }
-      const after = parseTsv(candidate.after);
-      if (!after.ok) {
-        refuse(after.refusal);
-        continue;
-      }
-      const diff = diffTableWith(path, before.value, after.value, pools.rows, checks.table);
-      if (!diff.ok) {
-        refuse(diff.refusal);
-        continue;
-      }
-      atoms = diff.value.atoms;
-      keyColumn = diff.value.keyColumn;
-    } else {
-      const before = parseJson(candidate.before);
-      if (!before.ok) {
-        refuse(before.refusal);
-        continue;
-      }
-      const after = parseJson(candidate.after);
-      if (!after.ok) {
-        refuse(after.refusal);
-        continue;
-      }
-      const diff = diffJsonWith(
-        path,
-        before.value.value,
-        after.value.value,
-        pools.json,
-        checks.json,
-      );
-      if (!diff.ok) {
-        refuse(diff.refusal);
-        continue;
-      }
-      atoms = [...diff.value.atoms, ...formatAtoms(before.value.format, after.value.format)];
-      if (
-        canonicalJson(before.value.value) === canonicalJson(after.value.value) &&
-        stripJsonSpace(jsonText(candidate.before)) !== stripJsonSpace(jsonText(candidate.after))
-      ) {
-        atoms.push({
-          kind: "format",
-          field: null,
-          rule: null,
-          detail: "json_respelled",
-          before: null,
-          after: null,
-        });
-      }
+    const file = summarizeFile(candidate, family, pools, checks);
+    if (!file.ok) {
+      refuse(file.refusal);
+      continue;
     }
+    const { atoms, keyColumn } = file.value;
     outcomes.push({
       path,
       family,
