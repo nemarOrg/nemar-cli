@@ -129,7 +129,7 @@ describe("the vocabulary of a class", () => {
   });
 
   test("the paired kinds are exactly the design's, and additive display is additive role", () => {
-    const shownBy = (display: string) =>
+    const shownBy = (display: string): string[] =>
       CLASS_KINDS.filter((kind) => DISPLAY_OF[kind] === display).sort();
     expect(shownBy("pairs")).toEqual(
       [

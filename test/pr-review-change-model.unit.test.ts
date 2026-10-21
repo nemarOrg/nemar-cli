@@ -2788,7 +2788,7 @@ describe("diffTable: relocation is exact and corresponding", () => {
       );
     };
     // Both paths end in participants.tsv, but the copy is at sourcedata/x/<phenotype/participants.tsv>.
-    const expected = {
+    const expected: Record<string, false | ClassKind[]> = {
       "participants.tsv": ["row_removed"],
       "phenotype/participants.tsv": ["row_relocated"],
     };
