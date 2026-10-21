@@ -420,6 +420,26 @@ describe("classify: one class per kind, shape, field, rule and detail", () => {
     expect(text).not.toContain("[1]");
   });
 
+  test("a table's column name is the author's text and is never folded: columns x[0] and x[1] are two classes", () => {
+    const columns = ["name", "x[0]", "x[1]"];
+    const files = atomsOf([
+      {
+        path: path1,
+        before: tsv(columns, ["A1", "1", "1"]),
+        after: tsv(columns, ["A1", "2", "2"]),
+      },
+    ]);
+    const classes = classify(files);
+    expect(classes.map((c) => `${c.kind} ${c.field} ${c.items}`)).toEqual([
+      "cell_replaced x[0] 1",
+      "cell_replaced x[1] 1",
+    ]);
+    const lines = renderClasses(classes)
+      .text.split("\n")
+      .filter((line) => line.startsWith("C"));
+    expect(lines.map((line) => line.split(" | ")[2])).toEqual(['column "x[0]"', 'column "x[1]"']);
+  });
+
   test("the class key holds the shape and the kind: the same column edit under another shape, or of another kind, is another class", () => {
     const files = atomsOf([
       {
