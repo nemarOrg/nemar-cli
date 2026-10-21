@@ -122,7 +122,7 @@ The platform reproduced every number from git alone.
 
 A changed path is a **summary candidate** when all of these hold:
 
-- its status in `git diff --raw -z --no-renames --abbrev=40 <mergeBase> <head>` is `M` (not `A`, `D` or `T`);
+- its status in `git diff --raw -z --no-renames --no-abbrev <mergeBase> <head>` is `M` (not `A`, `D` or `T`);
 - `classifyPath` puts it in `dataset_description`, `participants` or `sidecars` (the readable areas less `readme_and_changes`, which Part B reads as prose);
 - both modes are `100644` or `100755` and equal;
 - the path ends in `.tsv` or `.json` (lower case, as the BIDS names are);
