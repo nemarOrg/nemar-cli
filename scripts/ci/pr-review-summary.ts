@@ -62,8 +62,9 @@ export const SUMMARY_LIMITS = {
   maxTotalBytes: 256 * 1024 * 1024, // all blobs the summary reads in one run
   maxSummaryChars: 30_000, // the fenced block
   maxClasses: 120, // classes rendered
-  // Distinct classes a run may hold: the fold that would make one more abandons the whole
-  // summary, as the deadline does, so a run's memory is bounded by its classes, not its atoms.
+  // Distinct classes a run may hold. A file whose atoms would make more is refused `too_large`
+  // whole, and the run goes on with the next file, so what a run holds is bounded by its classes,
+  // not its atoms, and one file with thousands of distinct changes costs only that file.
   maxTrackedClasses: 5_000,
   maxPairsPerClass: 12, // distinct value pairs rendered per class
   maxValueChars: 300, // per rendered value
@@ -3280,10 +3281,12 @@ function renderOrder(a: Building, b: Building): number {
  * folded in: what a run holds is its classes (their counts, pairs and at most three atoms each, for
  * the examples), never every atom of every file.
  *
- * `fold` computes each atom's class key once and hands the file's keys back. It returns null when
- * the file would make the run hold more than `limit` classes; the builder is then unusable, and the
- * summary abandons the run. `finish` sorts the classes into render order and renders the examples
- * of the first `maxClasses` only, since no later class can be shown.
+ * `fold` takes a file whole or not at all. It first computes each atom's class key, once, and
+ * counts the classes the file would add; when the run would then hold more than `limit` classes it
+ * returns null and the builder is exactly as it was, so the summary can refuse that one file and
+ * go on. Otherwise it folds the atoms in, with the keys it already computed, and hands the file's
+ * keys back. `finish` sorts the classes into render order and renders the examples of the first
+ * `maxClasses` only, since no later class can be shown.
  */
 class ClassBuilder {
   private readonly byKey = new Map<string, Building>();
@@ -3291,13 +3294,27 @@ class ClassBuilder {
   constructor(private readonly limit: number) {}
 
   fold(path: string, atoms: readonly Atom[]): Set<string> | null {
-    const keys = new Set<string>();
+    // First the file's classes, without touching the builder: one identity per distinct key, and
+    // how many of them the run does not hold yet.
     const shape = entityPattern(path);
+    const ofFile = new Map<string, ClassIdentity>();
+    const identities: ClassIdentity[] = [];
+    let added = 0;
     for (const atom of atoms) {
-      const identity = classIdentity(shape, atom);
+      const computed = classIdentity(shape, atom);
+      let identity = ofFile.get(computed.key);
+      if (identity === undefined) {
+        identity = computed;
+        ofFile.set(computed.key, computed);
+        if (!this.byKey.has(computed.key) && this.byKey.size + ++added > this.limit) return null;
+      }
+      identities.push(identity);
+    }
+    // Then the fold, with the keys computed above.
+    for (const [i, atom] of atoms.entries()) {
+      const identity = identities[i] as ClassIdentity;
       let entry = this.byKey.get(identity.key);
       if (entry === undefined) {
-        if (this.byKey.size >= this.limit) return null;
         entry = {
           identity,
           files: new Set(),
@@ -3308,7 +3325,6 @@ class ClassBuilder {
         };
         this.byKey.set(identity.key, entry);
       }
-      keys.add(identity.key);
       const newFile = !entry.files.has(path);
       entry.files.add(path);
       entry.items++;
@@ -3320,7 +3336,7 @@ class ClassBuilder {
         entry.spare = { path, atom };
       }
     }
-    return keys;
+    return new Set(ofFile.keys());
   }
 
   finish(): ChangeClass[] {
@@ -3763,10 +3779,7 @@ export function accountedFiles(
  * counts and the platform's own words: no path, value or name from the pull request.
  */
 export interface SummaryFacts {
-  /**
-   * The run was abandoned, either at its deadline or because it would have held more than
-   * `maxTrackedClasses` classes: every other number is then zero and nothing is accounted for.
-   */
+  /** The run reached its deadline: every other number is then zero and nothing is accounted for. */
   abandoned: boolean;
   /** Candidates that parsed on both sides with a total diff. */
   files_summarized: number;
@@ -3851,10 +3864,7 @@ export interface SummaryCandidate {
  * throughout: {@link EMPTY_SUMMARY} is one shared object, and no reader may change a summary.
  */
 export interface ChangeSummary {
-  /**
-   * The run was abandoned: the deadline was reached, or the files would have made more than
-   * `maxTrackedClasses` classes. Nothing below is used, and nothing is accounted for.
-   */
+  /** The deadline was reached: nothing below is used, and nothing is accounted for. */
   abandoned: boolean;
   /** One outcome per `.tsv` and `.json` candidate, in the order the candidates were processed. */
   files: readonly FileOutcome[];
@@ -3871,10 +3881,7 @@ export interface ChangeSummary {
   text: string;
 }
 
-/**
- * A summary with nothing in it: no candidate, or (abandoned) a pass that ran out of time or would
- * have held too many classes.
- */
+/** A summary with nothing in it: no candidate, or (abandoned) a pass that ran out of time. */
 function emptySummary(abandoned: boolean): ChangeSummary {
   const outcomes: readonly FileOutcome[] = Object.freeze([]);
   return Object.freeze({
@@ -3956,12 +3963,29 @@ function parseBoth<T>(
 }
 
 /**
- * The atoms of one candidate, or why it was refused (step 5 of {@link summarizeChangesWith}): both
- * sides parsed, then diffed against the pools. A table's layout atoms come from its diff; a JSON
- * document's come from {@link formatAtoms} here, plus `json_respelled` when the trees are equal and
- * the texts differ beyond whitespace.
+ * One candidate summarized, or why it was refused (steps 5 and 6 of {@link summarizeChangesWith}):
+ * both sides parsed, diffed against the pools, and the atoms folded into the run's classes. A
+ * table's layout atoms come from its diff; a JSON document's come from {@link formatAtoms} here,
+ * plus `json_respelled` when the trees are equal and the texts differ beyond whitespace. A file
+ * whose atoms would make the run hold more than `maxTrackedClasses` classes is `too_large`, and
+ * nothing of it is folded.
  */
 function summarizeFile(
+  candidate: SummaryCandidate,
+  family: "tsv" | "json",
+  pools: { rows: RowPool; json: JsonPool },
+  checks: SummaryChecks,
+  builder: ClassBuilder,
+): Parsed<{ atoms: Atom[]; keyColumn: string | null; classKeys: ReadonlySet<string> }> {
+  const file = fileAtoms(candidate, family, pools, checks);
+  if (!file.ok) return file;
+  const classKeys = builder.fold(candidate.path, file.value.atoms);
+  if (classKeys === null) return { ok: false, refusal: "too_large" };
+  return { ok: true, value: { ...file.value, classKeys } };
+}
+
+/** The atoms of one candidate, or why it was refused: see {@link summarizeFile}. */
+function fileAtoms(
   candidate: SummaryCandidate,
   family: "tsv" | "json",
   pools: { rows: RowPool; json: JsonPool },
@@ -4005,8 +4029,8 @@ function summarizeFile(
 
 /**
  * Summarize the modified candidates of a pull request against its pools (design sections 4 to 7).
- * Past the deadline, or past `maxTrackedClasses` classes, the result is `abandoned` and accounts
- * for nothing; see {@link summarizeChangesWith} for how a run proceeds.
+ * Past the deadline the result is `abandoned` and accounts for nothing; see
+ * {@link summarizeChangesWith} for how a run proceeds.
  */
 export function summarizeChanges(input: {
   candidates: readonly SummaryCandidate[];
@@ -4045,9 +4069,9 @@ export function summarizeChanges(input: {
  *    path.
  * 6. Folds each summarized file into the classes ({@link ClassBuilder}) and adds its loss facts as
  *    it goes, then drops its atoms, so a run never holds every atom of every file. A file whose
- *    atoms would make more than `maxTrackedClasses` classes abandons the WHOLE summary, exactly as
- *    the deadline does: what a run can hold is bounded, and a run past the bound leaves the review
- *    where it was without a summary.
+ *    atoms would make the run hold more than `maxTrackedClasses` classes is refused `too_large`
+ *    whole (no atom, no class, no loss fact) and the run goes on, so which file is refused is
+ *    decided by the sorted order alone.
  * 7. Renders the classes, and accounts for files.
  */
 export function summarizeChangesWith(
@@ -4093,14 +4117,12 @@ export function summarizeChangesWith(
     }
     read += bytes;
 
-    const file = summarizeFile(candidate, family, pools, checks);
+    const file = summarizeFile(candidate, family, pools, checks, builder);
     if (!file.ok) {
       refuse(file.refusal);
       continue;
     }
-    const { atoms, keyColumn } = file.value;
-    const classKeys = builder.fold(path, atoms);
-    if (classKeys === null) return emptySummary(true);
+    const { atoms, keyColumn, classKeys } = file.value;
     outcomes.push({ path, family, refusal: null, keyColumn, classKeys });
     addLossFacts(loss, { path, atoms });
     if (expired()) return emptySummary(true);

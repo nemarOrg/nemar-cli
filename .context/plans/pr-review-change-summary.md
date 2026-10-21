@@ -455,7 +455,7 @@ export const SUMMARY_LIMITS = {
   maxTotalBytes: 256 * 1024 * 1024, // all blobs the summary reads in one run
   maxSummaryChars: 30_000, // the fenced block
   maxClasses: 120, // classes rendered
-  maxTrackedClasses: 5_000, // phase 3 review: classes a run may hold; one more abandons the summary
+  maxTrackedClasses: 5_000, // phase 3 review: classes a run may hold; a file that would pass it is refused too_large
   maxPairsPerClass: 12, // distinct value pairs rendered per class
   maxValueChars: 300, // per rendered value
   samplesPerClass: 2,
@@ -489,8 +489,9 @@ Phase 3 review: every path is rendered by `renderValue` too, an example's file p
 - **If the summary pass reaches its deadline, the whole summary is abandoned**: no file is accounted for by it, nothing of it is shown, and `change_summary.abandoned` is true in the facts.
   All-or-nothing is simpler to prove than a partial account, and an abandoned summary leaves today's behavior.
   (Phase 3: the deadline is checked before each file with the caller's clock, and since the phase 3 review also after each file is folded in and once after the last file, before rendering; an abandoned summary has no outcomes, classes or text, and its loss facts are zero.)
-- **A run that would hold more than `maxTrackedClasses` classes is abandoned the same way** (phase 3 review): all or nothing, with the deadline's shape.
-  The files are folded into their classes one at a time and each file's loss facts are added as it is folded, so a run holds its classes (counts, pairs and at most three atoms each, for the examples), never every atom of every file; the examples are rendered only for the first `maxClasses` classes, the only ones that can be shown.
+- **A file whose atoms would make the run hold more than `maxTrackedClasses` classes is refused `too_large`, whole, and the run goes on** (phase 3 review): no atom, class or loss fact of it is kept, it is never accounted for and stays on the raw-diff path, and since the files are folded in sorted path order, which file is refused depends on nothing else.
+  (A first version abandoned the whole run, as the deadline does; one JSON document with thousands of changed leaves then cost every other file its summary.)
+  The files are folded into their classes one at a time, each file's keys computed once and counted before anything of it is folded, and each file's loss facts are added as it is folded, so a run holds its classes (counts, pairs and at most three atoms each, for the examples), never every atom of every file; the examples are rendered only for the first `maxClasses` classes, the only ones that can be shown.
 
 ---
 

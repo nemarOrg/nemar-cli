@@ -1803,7 +1803,7 @@ describe("summarizeChanges: one outcome per candidate, in path order", () => {
   });
 });
 
-describe("summarizeChanges: the deadline, or too many classes, abandons the whole summary", () => {
+describe("summarizeChanges: the deadline abandons the whole summary", () => {
   const files = () => [
     candidate(
       channels(1),
@@ -1893,38 +1893,6 @@ describe("summarizeChanges: the deadline, or too many classes, abandons the whol
       now: refused.now,
     });
     expect(refused.reads()).toBe(8);
-  });
-
-  /** A channel table at sub-0n whose listed columns all change: one class per column. */
-  const columnsChanged = (n: number, columns: readonly string[]) =>
-    candidate(
-      channels(n),
-      tsv(["name", ...columns], ["A1", ...columns.map(() => "1")]),
-      tsv(["name", ...columns], ["A1", ...columns.map(() => "2")]),
-    );
-  const named = (count: number, from = 0) =>
-    Array.from({ length: count }, (_, i) => `c${String(from + i).padStart(5, "0")}`);
-
-  test("5,000 distinct classes are summarized; the file that would make one more abandons everything, as the deadline does", () => {
-    const max = SUMMARY_LIMITS.maxTrackedClasses;
-    const kept = summarize([columnsChanged(1, named(max))]);
-    expect(kept.abandoned).toBe(false);
-    expect(kept.classes.length).toBe(max);
-    expect(kept.facts.classes_shown + kept.facts.classes_cut).toBe(max);
-    abandonedShape(summarize([columnsChanged(1, named(max + 1))]));
-    // Counted over the run, not per file: the third file's one new class is the 5,001st.
-    const half = max / 2;
-    const run = [columnsChanged(1, named(half)), columnsChanged(2, named(half, half))];
-    expect(summarize(run).classes.length).toBe(max);
-    abandonedShape(summarize([...run, columnsChanged(3, named(1, max))]));
-  });
-
-  test("a class in many files is one class: the bound counts classes, never atoms or files", () => {
-    const max = SUMMARY_LIMITS.maxTrackedClasses;
-    const summary = summarize([1, 2, 3].map((n) => columnsChanged(n, named(max))));
-    expect(summary.abandoned).toBe(false);
-    expect(summary.classes.length).toBe(max);
-    expect(summary.classes.every((c) => c.files.size === 3 && c.items === 3)).toBe(true);
   });
 
   test("the empty summary is not abandoned and holds nothing", () => {
@@ -2030,6 +1998,114 @@ describe("summarizeChanges: a decimal mark in the added text is never a padding"
     expect(summary.text).toContain('\n    "A05" x1\n');
     expect(summary.loss.rowsRemoved).toBe(1);
     expect(summary.loss.firstBlockingPath).toBe(channels(2));
+  });
+});
+
+describe("summarizeChanges: a file that would pass maxTrackedClasses is refused, and the run goes on", () => {
+  /** A channel table at sub-0n whose listed columns all change: one class per column. */
+  const columnsChanged = (n: number, columns: readonly string[]) =>
+    candidate(
+      channels(n),
+      tsv(["name", ...columns], ["A1", ...columns.map(() => "1")]),
+      tsv(["name", ...columns], ["A1", ...columns.map(() => "2")]),
+    );
+  const named = (count: number, from = 0) =>
+    Array.from({ length: count }, (_, i) => `c${String(from + i).padStart(5, "0")}`);
+  /** A small file after the large ones in path order, with one class of its own. */
+  const later = candidate(
+    "zz.tsv",
+    tsv(["onset", "trial_type"], ["1", "go"]),
+    tsv(["onset", "trial_type"], ["1", "stop"]),
+  );
+
+  test("5,000 distinct classes in one file are summarized", () => {
+    const max = SUMMARY_LIMITS.maxTrackedClasses;
+    const kept = summarize([columnsChanged(1, named(max))]);
+    expect(kept.abandoned).toBe(false);
+    expect(refusals(kept)).toEqual([`${channels(1)} ok`]);
+    expect(kept.classes.length).toBe(max);
+    expect(kept.facts.classes_shown + kept.facts.classes_cut).toBe(max);
+  });
+
+  test("5,001 in one file refuse that file too_large: nothing of it is kept, and a later small file is summarized and accounted for", () => {
+    const max = SUMMARY_LIMITS.maxTrackedClasses;
+    const summary = summarize([
+      columnsChanged(1, named(max + 1)),
+      later,
+      // A removal in the refused file would be a loss fact if any of it were kept.
+      candidate(
+        channels(2),
+        tsv(CHANNELS, ["A1", "EEG", "uV"], ["A2", "EEG", "uV"]),
+        tsv(CHANNELS, ["A1", "EEG", "uV"]),
+      ),
+    ]);
+    expect(summary.abandoned).toBe(false);
+    expect(refusals(summary)).toEqual([
+      `${channels(1)} too_large`,
+      `${channels(2)} ok`,
+      "zz.tsv ok",
+    ]);
+    expect(summary.files[0]?.classKeys.size).toBe(0);
+    expect(summary.classes.map((c) => c.kind).sort()).toEqual(["cell_replaced", "row_removed"]);
+    expect([...summary.accounted].sort()).toEqual([channels(2), "zz.tsv"]);
+    expect(summary.loss.rowsRemoved).toBe(1);
+    expect(summary.facts.files_not_summarized).toBe(1);
+  });
+
+  test("two files that pass the bound together: the second in path order is refused, the first kept whole", () => {
+    const max = SUMMARY_LIMITS.maxTrackedClasses;
+    const first = columnsChanged(1, named(max - 10));
+    const second = columnsChanged(2, named(20, max));
+    const summary = summarize([second, first, later]);
+    expect(refusals(summary)).toEqual([
+      `${channels(1)} ok`,
+      `${channels(2)} too_large`,
+      "zz.tsv ok",
+    ]);
+    // The first file's classes and the later file's one: 4,991. The second file added none.
+    expect(summary.classes.length).toBe(max - 9);
+    expect(summary.classes.every((c) => !c.files.has(channels(2)))).toBe(true);
+    // Its classes shared with the first file would not have counted: one that adds no class fits.
+    const shared = columnsChanged(2, named(20));
+    const both = summarize([first, shared]);
+    expect(refusals(both)).toEqual([`${channels(1)} ok`, `${channels(2)} ok`]);
+  });
+
+  test("which file is refused depends on path order alone: shuffled candidates give the same summary", () => {
+    const max = SUMMARY_LIMITS.maxTrackedClasses;
+    const candidates = [
+      columnsChanged(1, named(max - 10)),
+      columnsChanged(2, named(20, max)),
+      columnsChanged(3, named(5, 2 * max)),
+      later,
+    ];
+    const reference = summarize(candidates);
+    const random = seeded(51);
+    for (let trial = 0; trial < 5; trial++) {
+      const shuffled = candidates
+        .map((c) => [random(), c] as const)
+        .sort((a, b) => a[0] - b[0])
+        .map(([, c]) => c);
+      const again = summarize(shuffled);
+      expect(refusals(again)).toEqual(refusals(reference));
+      expect(again.classes.map((c) => c.key)).toEqual(reference.classes.map((c) => c.key));
+      expect(again.text).toBe(reference.text);
+      expect(again.facts).toEqual(reference.facts);
+    }
+    expect(refusals(reference)).toEqual([
+      `${channels(1)} ok`,
+      `${channels(2)} too_large`,
+      `${channels(3)} ok`,
+      "zz.tsv ok",
+    ]);
+  });
+
+  test("a class in many files is one class: the bound counts classes, never atoms or files", () => {
+    const max = SUMMARY_LIMITS.maxTrackedClasses;
+    const summary = summarize([1, 2, 3].map((n) => columnsChanged(n, named(max))));
+    expect(summary.abandoned).toBe(false);
+    expect(summary.classes.length).toBe(max);
+    expect(summary.classes.every((c) => c.files.size === 3 && c.items === 3)).toBe(true);
   });
 });
 
