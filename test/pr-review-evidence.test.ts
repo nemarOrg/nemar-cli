@@ -19,6 +19,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:tes
 import { execFileSync } from "node:child_process";
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -63,7 +64,9 @@ import {
   gatherGitFacts,
   gatherListing,
   parseNameStatus,
+  parseRawEntries,
   pathPattern,
+  readBlobs,
 } from "../scripts/ci/pr-review-evidence";
 import {
   MAX_BODY_CHARS,
@@ -113,7 +116,7 @@ function git(dir: string, ...args: string[]): string {
   return execFileSync("git", ["-C", dir, ...args], { encoding: "utf8", env: GIT_ENV }).trim();
 }
 
-function write(dir: string, rel: string, content: string) {
+function write(dir: string, rel: string, content: string | Buffer) {
   const full = join(dir, rel);
   mkdirSync(dirname(full), { recursive: true });
   writeFileSync(full, content);
@@ -579,6 +582,296 @@ describe("each evidence pass reads git within a time budget", () => {
     const err = new EvidenceError("timed_out");
     expect(mapError(err)).toBe("evidence_unavailable");
     expect(describeError(err)).toBe("EvidenceError: timed_out");
+  });
+});
+
+/** The lines a shim rule's `log` recorded, or none when the rule never matched. */
+function loggedCalls(log: string): string[] {
+  return existsSync(log) ? readFileSync(log, "utf8").split("\n").filter(Boolean) : [];
+}
+
+/** A fresh path for a shim rule's `log`. */
+function callLog(name: string): string {
+  return join(root, `${name}-${Math.random().toString(36).slice(2)}.log`);
+}
+
+describe("readBlobs and rawEntries", () => {
+  const ZERO = "0".repeat(40);
+  const CAPS = { maxBytes: 1024, maxTotalBytes: 1024 * 1024 };
+
+  /** A repository whose one commit holds `files`, with each file's blob id. */
+  function blobRepo(name: string, files: Record<string, string | Buffer>) {
+    const dir = join(root, name);
+    mkdirSync(dir, { recursive: true });
+    git(dir, "init", "-q", "-b", "main");
+    for (const [rel, content] of Object.entries(files)) write(dir, rel, content);
+    git(dir, "add", "-A");
+    git(dir, "commit", "-q", "-m", "blobs");
+    const id = (rel: string) => git(dir, "rev-parse", `HEAD:${rel}`);
+    return { dir, id };
+  }
+
+  /** The blobs as text, by id, so a failed expectation prints what was read. */
+  const texts = (blobs: Map<string, Buffer> | null) =>
+    blobs === null
+      ? null
+      : Object.fromEntries([...blobs].map(([k, v]) => [k, v.toString("latin1")]));
+
+  test("a missing blob is absent while the others are read: an id nobody wrote, and an object whose file is gone", () => {
+    const { dir, id } = blobRepo("blobs-missing", { "a.txt": "alpha\n", "b.txt": "beta\n" });
+    const a = id("a.txt");
+    const b = id("b.txt");
+    unlinkSync(join(dir, ".git", "objects", b.slice(0, 2), b.slice(2)));
+    const nobody = "1234567890abcdef1234567890abcdef12345678";
+    expect(texts(readBlobs(dir, [nobody, a, b], CAPS))).toEqual({ [a]: "alpha\n" });
+  });
+
+  test("a blob one byte over maxBytes is absent and one exactly at it is read, and the reading goes on past it", () => {
+    const { id, dir } = blobRepo("blobs-per-cap", {
+      "ten.txt": "0123456789",
+      "eleven.txt": "0123456789A",
+      "after.txt": "x",
+    });
+    const caps = { maxBytes: 10, maxTotalBytes: 1000 };
+    const blobs = readBlobs(dir, [id("eleven.txt"), id("ten.txt"), id("after.txt")], caps);
+    expect(texts(blobs)).toEqual({ [id("ten.txt")]: "0123456789", [id("after.txt")]: "x" });
+  });
+
+  test("the total cap keeps a prefix in the order given: the blob that would pass it and every later one are absent, a smaller one too", () => {
+    const { id, dir } = blobRepo("blobs-total-cap", {
+      "a.txt": "aaaa",
+      "b.txt": "bbbb",
+      "c.txt": "cccc",
+      "d.txt": "d",
+    });
+    const caps = { maxBytes: 100, maxTotalBytes: 9 };
+    const order = ["a.txt", "b.txt", "c.txt", "d.txt"].map(id);
+    expect(texts(readBlobs(dir, order, caps))).toEqual({
+      [id("a.txt")]: "aaaa",
+      [id("b.txt")]: "bbbb",
+    });
+    // Another order keeps another prefix: the cap follows the order, not the sizes.
+    expect(
+      texts(readBlobs(dir, [id("d.txt"), id("c.txt"), id("a.txt"), id("b.txt")], caps)),
+    ).toEqual({ [id("d.txt")]: "d", [id("c.txt")]: "cccc", [id("a.txt")]: "aaaa" });
+    // Exactly at the total, everything is read.
+    expect(readBlobs(dir, order, { maxBytes: 100, maxTotalBytes: 13 })?.size).toBe(4);
+  });
+
+  test("an id given more than once costs the total cap once", () => {
+    const { id, dir } = blobRepo("blobs-dedupe", { "a.txt": "aaaaa", "b.txt": "bbbbb" });
+    const a = id("a.txt");
+    const blobs = readBlobs(dir, [a, a, a, id("b.txt"), a], { maxBytes: 100, maxTotalBytes: 10 });
+    expect(texts(blobs)).toEqual({ [a]: "aaaaa", [id("b.txt")]: "bbbbb" });
+  });
+
+  test("the zero id, a short or upper-case id, HEAD and a rev:path are never asked: no cat-file starts", () => {
+    const { id, dir } = blobRepo("blobs-not-ids", { "a.txt": "alpha\n" });
+    const a = id("a.txt");
+    const commit = git(dir, "rev-parse", "HEAD");
+    const log = callLog("blobs-not-ids");
+    const restore = installGitShim(root, [{ match: " cat-file ", log }]);
+    let none: Map<string, Buffer> | null;
+    let control: Map<string, Buffer> | null;
+    let before: string[];
+    try {
+      none = readBlobs(
+        dir,
+        [ZERO, a.slice(0, 7), a.toUpperCase(), "HEAD", "HEAD:a.txt", `${commit}:a.txt`, ` ${a}`],
+        CAPS,
+      );
+      before = loggedCalls(log);
+      control = readBlobs(dir, [a], CAPS);
+    } finally {
+      restore();
+    }
+    expect(texts(none)).toEqual({});
+    expect(before).toEqual([]);
+    // Not vacuous: the same id in its full form is asked about, by the two processes.
+    expect(texts(control)).toEqual({ [a]: "alpha\n" });
+    expect(loggedCalls(log).map((c) => c.split("never ")[1]?.trim())).toEqual([
+      "cat-file --batch-check",
+      "cat-file --batch",
+    ]);
+  });
+
+  test("a tree, a commit and a tag are not blobs: they are absent, and a blob beside them is read", () => {
+    const { id, dir } = blobRepo("blobs-not-blobs", { "a.txt": "alpha\n", "d/b.txt": "beta\n" });
+    git(dir, "tag", "-a", "v1", "-m", "a tag");
+    const tree = git(dir, "rev-parse", "HEAD^{tree}");
+    const subtree = git(dir, "rev-parse", "HEAD:d");
+    const commit = git(dir, "rev-parse", "HEAD");
+    const tag = git(dir, "rev-parse", "v1");
+    expect(git(dir, "cat-file", "-t", tag)).toBe("tag");
+    const blobs = readBlobs(dir, [tree, subtree, commit, tag, id("a.txt")], CAPS);
+    expect(texts(blobs)).toEqual({ [id("a.txt")]: "alpha\n" });
+  });
+
+  test("the bytes are exact: an empty blob, NUL, CR, bytes that are not UTF-8, and no final newline", () => {
+    const files: Record<string, Buffer> = {
+      "empty.txt": Buffer.alloc(0),
+      "nul.bin": Buffer.from([0x00, 0x61, 0x00, 0x0a, 0x00]),
+      "cr.txt": Buffer.from("a\r\nb\rc\r\n\r\n", "latin1"),
+      "latin1.tsv": Buffer.from([0x63, 0x61, 0x66, 0xe9, 0xff, 0xfe, 0x0a]),
+      "open.txt": Buffer.from("no final newline"),
+      "newlines.txt": Buffer.from("\n\n\n"),
+    };
+    const { id, dir } = blobRepo("blobs-exact", files);
+    const ids = Object.keys(files).map(id);
+    const blobs = readBlobs(dir, ids, CAPS);
+    expect(blobs?.size).toBe(ids.length);
+    for (const rel of Object.keys(files)) {
+      expect(blobs?.get(id(rel))?.equals(files[rel] as Buffer), rel).toBe(true);
+    }
+    expect(blobs?.get(id("empty.txt"))?.length).toBe(0);
+  });
+
+  test("nothing to read starts no process and is an empty answer, not 'could not say'", () => {
+    const { dir } = blobRepo("blobs-nothing", { "a.txt": "a" });
+    const log = callLog("blobs-nothing");
+    const restore = installGitShim(root, [{ match: " cat-file ", log }]);
+    try {
+      expect(readBlobs(dir, [], CAPS)).toEqual(new Map());
+      expect(readBlobs(dir, [ZERO, ZERO], CAPS)).toEqual(new Map());
+    } finally {
+      restore();
+    }
+    expect(loggedCalls(log)).toEqual([]);
+  });
+
+  test("a read that stalls past its own deadline is null, quickly, and is not timed_out; a deadline already past starts nothing", () => {
+    const { id, dir } = blobRepo("blobs-stall", { "a.txt": "alpha\n" });
+    const log = callLog("blobs-stall");
+    const restore = installGitShim(root, [{ match: " cat-file ", log, sleepSeconds: 5 }]);
+    let stalled: Map<string, Buffer> | null | string = "not run";
+    let past: Map<string, Buffer> | null | string = "not run";
+    let started = 0;
+    let elapsed = 0;
+    let calls: string[] = [];
+    try {
+      started = Date.now();
+      stalled = readBlobs(dir, [id("a.txt")], CAPS, Date.now() + 300);
+      elapsed = Date.now() - started;
+      calls = loggedCalls(log);
+      past = readBlobs(dir, [id("a.txt")], CAPS, Date.now() - 1);
+    } finally {
+      restore();
+    }
+    expect(stalled).toBeNull();
+    expect(elapsed).toBeLessThan(3_000);
+    // The first process was started and stopped at the deadline; no second one followed it.
+    expect(calls).toHaveLength(1);
+    expect(past).toBeNull();
+    expect(loggedCalls(log)).toHaveLength(1);
+    // The same read with time to spare is answered: the stall was what made it null.
+    expect(texts(readBlobs(dir, [id("a.txt")], CAPS, Date.now() + 60_000))).toEqual({
+      [id("a.txt")]: "alpha\n",
+    });
+  });
+
+  test("parseRawEntries reads what git writes: added, modified, removed, a type change and a submodule", () => {
+    const dir = join(root, "raw-entries");
+    mkdirSync(dir, { recursive: true });
+    git(dir, "init", "-q", "-b", "main");
+    write(dir, "m.json", '{"a":1}');
+    write(dir, "d.json", "{}");
+    write(dir, "t.json", "{}");
+    write(dir, "x.json", "{}");
+    git(dir, "add", "-A");
+    git(dir, "commit", "-q", "-m", "files");
+    const first = git(dir, "rev-parse", "HEAD");
+    git(dir, "update-index", "--add", "--cacheinfo", `160000,${first},vendor/sub`);
+    git(dir, "commit", "-q", "-m", "a submodule");
+    const base = git(dir, "rev-parse", "HEAD");
+    write(dir, "m.json", '{"a":2}');
+    unlinkSync(join(dir, "d.json"));
+    unlinkSync(join(dir, "t.json"));
+    symlinkSync("x.json", join(dir, "t.json"));
+    write(dir, "n.json", "{}");
+    chmodSync(join(dir, "x.json"), 0o755);
+    git(dir, "add", "m.json", "d.json", "t.json", "n.json", "x.json");
+    git(dir, "update-index", "--cacheinfo", `160000,${base},vendor/sub`);
+    git(dir, "commit", "-q", "-m", "changes");
+    const head = git(dir, "rev-parse", "HEAD");
+    const raw = execFileSync(
+      "git",
+      ["-C", dir, "diff", "--raw", "-z", "--no-renames", "--no-abbrev", base, head],
+      { encoding: "utf8", env: GIT_ENV },
+    );
+    const blob = (rev: string, path: string) => git(dir, "rev-parse", `${rev}:${path}`);
+    const entries = parseRawEntries(raw);
+    expect(entries === null ? null : [...entries.values()]).toEqual([
+      {
+        status: "removed",
+        modeBefore: "100644",
+        modeAfter: "000000",
+        oidBefore: blob(base, "d.json"),
+        oidAfter: ZERO,
+        path: "d.json",
+      },
+      {
+        status: "modified",
+        modeBefore: "100644",
+        modeAfter: "100644",
+        oidBefore: blob(base, "m.json"),
+        oidAfter: blob(head, "m.json"),
+        path: "m.json",
+      },
+      {
+        status: "added",
+        modeBefore: "000000",
+        modeAfter: "100644",
+        oidBefore: ZERO,
+        oidAfter: blob(head, "n.json"),
+        path: "n.json",
+      },
+      {
+        status: "typechange",
+        modeBefore: "100644",
+        modeAfter: "120000",
+        oidBefore: blob(base, "t.json"),
+        oidAfter: blob(head, "t.json"),
+        path: "t.json",
+      },
+      {
+        status: "modified",
+        modeBefore: "160000",
+        modeAfter: "160000",
+        oidBefore: first,
+        oidAfter: base,
+        path: "vendor/sub",
+      },
+      {
+        status: "modified",
+        modeBefore: "100644",
+        modeAfter: "100755",
+        oidBefore: blob(base, "x.json"),
+        oidAfter: blob(head, "x.json"),
+        path: "x.json",
+      },
+    ]);
+  });
+
+  test("parseRawEntries refuses whatever git did not write: the whole answer is null", () => {
+    const a = "a".repeat(40);
+    const b = "b".repeat(40);
+    const ok = `:100644 100644 ${a} ${b} M\0x.json\0`;
+    expect(parseRawEntries(ok)?.get("x.json")?.status).toBe("modified");
+    expect(parseRawEntries("")).toEqual(new Map());
+    const refused: [string, string][] = [
+      ["an unknown status", `${ok}:100644 100644 ${a} ${b} X\0y.json\0`],
+      ["a rename, which --no-renames never writes", `${ok}:100644 100644 ${a} ${b} R100\0y.json\0`],
+      ["a 64-hex id", `${ok}:100644 100644 ${a}${"c".repeat(24)} ${b} M\0y.json\0`],
+      ["an abbreviated id", `${ok}:100644 100644 ${a.slice(0, 7)} ${b} M\0y.json\0`],
+      ["an upper-case id", `${ok}:100644 100644 ${a.toUpperCase()} ${b} M\0y.json\0`],
+      ["a mode that is not six octal digits", `${ok}:100648 100644 ${a} ${b} M\0y.json\0`],
+      ["a path given twice", `${ok}${ok}`],
+      ["an empty path", `${ok}:100644 100644 ${a} ${b} M\0\0`],
+      ["a token with no path after it", `${ok}:100644 100644 ${a} ${b} M\0`],
+      ["no final NUL", ok.slice(0, -1)],
+      ["text after the status", `${ok}:100644 100644 ${a} ${b} M \0y.json\0`],
+    ];
+    for (const [name, raw] of refused) expect(parseRawEntries(raw), name).toBeNull();
   });
 });
 

@@ -38,7 +38,7 @@
  * that diff was shown in full. The match is exact, so a change that differs in one byte is shown.
  */
 
-import { execFileSync } from "node:child_process";
+import { type ExecFileSyncOptions, execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { hasVisibleText } from "../../shared/naming-rule";
 import {
@@ -365,17 +365,63 @@ export function childEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEn
   return { ...kept, GIT_CONFIG_NOSYSTEM: "1", GIT_TERMINAL_PROMPT: "0" };
 }
 
+/** The most output one git call may produce unless it says otherwise. */
+const MAX_GIT_OUTPUT = 256 * 1024 * 1024;
+
+/** What one git call may add to the pass's bounds (see {@link runGit}). */
+interface GitCallOptions {
+  /** Bytes written to the call's standard input; without them its input is closed. */
+  input?: Buffer;
+  /**
+   * When this one call must be over (epoch ms), on top of the pass's budget. A call past it is
+   * {@link CallExpired}, never `timed_out`: the pass itself still has time.
+   */
+  deadline?: number;
+  /** The most output the call may produce; {@link MAX_GIT_OUTPUT} unless given. */
+  maxBuffer?: number;
+}
+
 /**
- * One git call, bounded by what is left of the pass's budget. Running out, before the call or
- * during it, is {@link EvidenceError} `timed_out`, which no caller swallows; any other failure is
- * thrown as git's own error, for the caller to turn into its word.
+ * A call reached its own deadline ({@link GitCallOptions.deadline}) before the pass's budget ran
+ * out. Not an {@link EvidenceError}: what an expired call means is its caller's to say, and
+ * {@link tryGit} and {@link tryGitBytes} turn it into null like any other failure.
  */
-function runGit(dir: string, args: string[], encoding: "utf8" | "latin1"): string {
-  let timeout: number | undefined;
-  if (gitDeadline !== null) {
-    timeout = gitDeadline - Date.now();
-    if (timeout <= 0) throw new EvidenceError("timed_out");
-  }
+class CallExpired extends Error {}
+
+/**
+ * One git call, bounded by what is left of the pass's budget and by its own deadline, if it has
+ * one. Running out of the pass's budget, before the call or during it, is {@link EvidenceError}
+ * `timed_out`, which no caller swallows; running out of the call's own deadline first is
+ * {@link CallExpired}; any other failure is thrown as git's own error, for the caller to turn into
+ * its word.
+ */
+function runGit(
+  dir: string,
+  args: string[],
+  encoding: "utf8" | "latin1",
+  call?: GitCallOptions,
+): string;
+function runGit(dir: string, args: string[], encoding: "buffer", call?: GitCallOptions): Buffer;
+function runGit(
+  dir: string,
+  args: string[],
+  encoding: "utf8" | "latin1" | "buffer",
+  call: GitCallOptions = {},
+): string | Buffer {
+  const started = Date.now();
+  const passLeft = gitDeadline === null ? Number.POSITIVE_INFINITY : gitDeadline - started;
+  const callLeft = call.deadline === undefined ? Number.POSITIVE_INFINITY : call.deadline - started;
+  if (passLeft <= 0) throw new EvidenceError("timed_out");
+  if (callLeft <= 0) throw new CallExpired();
+  const timeout = Math.min(passLeft, callLeft);
+  const options: ExecFileSyncOptions = {
+    encoding,
+    maxBuffer: call.maxBuffer ?? MAX_GIT_OUTPUT,
+    env: childEnv(),
+    stdio: [call.input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
+    ...(call.input === undefined ? {} : { input: call.input }),
+    ...(Number.isFinite(timeout) ? { timeout } : {}),
+  };
   try {
     return execFileSync(
       "git",
@@ -391,16 +437,12 @@ function runGit(dir: string, args: string[], encoding: "utf8" | "latin1"): strin
         "protocol.ext.allow=never",
         ...args,
       ],
-      {
-        encoding,
-        maxBuffer: 256 * 1024 * 1024,
-        env: childEnv(),
-        stdio: ["ignore", "pipe", "pipe"],
-        ...(timeout === undefined ? {} : { timeout }),
-      },
+      options,
     );
   } catch (e) {
-    if ((e as { code?: unknown }).code === "ETIMEDOUT") throw new EvidenceError("timed_out");
+    if ((e as { code?: unknown }).code === "ETIMEDOUT") {
+      throw callLeft < passLeft ? new CallExpired() : new EvidenceError("timed_out");
+    }
     throw e;
   }
 }
@@ -525,25 +567,150 @@ export function pathPattern(path: string): string {
 /** A regular file: the only kind whose text can be compared for a cosmetic change. */
 const REGULAR_FILE_MODES: ReadonlySet<string> = new Set(["100644", "100755"]);
 
+/** The object id git writes for the side of a change that does not exist. */
+const ZERO_OID = "0".repeat(40);
+
 /**
- * The modes of every changed path, old and new, from `git diff --raw`. Null when git could not
- * say, in which case no file is treated as cosmetic.
+ * One changed path as `git diff --raw` names it: its status, the mode and the object id on each
+ * side (`000000` and {@link ZERO_OID} for a side that does not exist). A type change (`T`: a
+ * regular file to a symlink, say) is its own status here, though the change list calls it
+ * modified. A submodule keeps its mode, `160000`.
  */
-function modesByPath(
-  dir: string,
-  mergeBase: string,
-  headSha: string,
-): Map<string, { before: string; after: string }> | null {
-  const raw = tryGit(dir, ["diff", "--raw", "-z", "--no-renames", mergeBase, headSha]);
-  if (raw === null) return null;
-  const parts = raw.split("\0");
-  const out = new Map<string, { before: string; after: string }>();
-  for (let i = 0; i + 1 < parts.length; i += 2) {
-    const meta = parts[i]?.match(/^:(\d{6}) (\d{6}) /);
-    const path = parts[i + 1];
-    if (meta?.[1] && meta[2] && path) out.set(path, { before: meta[1], after: meta[2] });
+export interface RawEntry {
+  status: "added" | "modified" | "removed" | "typechange";
+  modeBefore: string;
+  modeAfter: string;
+  oidBefore: string;
+  oidAfter: string;
+  path: string;
+}
+
+/** One meta token of `git diff --raw -z --no-abbrev`: two modes, two full ids, one status. */
+const RAW_META = /^:([0-7]{6}) ([0-7]{6}) ([0-9a-f]{40}) ([0-9a-f]{40}) ([AMDT])$/;
+const RAW_STATUS: Readonly<Record<string, RawEntry["status"]>> = {
+  A: "added",
+  M: "modified",
+  D: "removed",
+  T: "typechange",
+};
+
+/**
+ * Parse `git diff --raw -z --no-renames --no-abbrev` output, by path. Null when any of it is not
+ * what that command writes: a meta token of another shape (an abbreviated or a 64-hex id, a status
+ * other than A, M, D or T), an empty path, a path given twice, or a token with no path after it.
+ * Null is "git could not say", which its caller treats as knowing no mode and no id at all.
+ */
+export function parseRawEntries(raw: string): Map<string, RawEntry> | null {
+  const out = new Map<string, RawEntry>();
+  if (raw === "") return out;
+  if (!raw.endsWith("\0")) return null;
+  const parts = raw.slice(0, -1).split("\0");
+  if (parts.length % 2 !== 0) return null;
+  for (let i = 0; i < parts.length; i += 2) {
+    const m = RAW_META.exec(parts[i] as string);
+    const path = parts[i + 1] as string;
+    if (m === null || path === "" || out.has(path)) return null;
+    out.set(path, {
+      status: RAW_STATUS[m[5] as string] as RawEntry["status"],
+      modeBefore: m[1] as string,
+      modeAfter: m[2] as string,
+      oidBefore: m[3] as string,
+      oidAfter: m[4] as string,
+      path,
+    });
   }
   return out;
+}
+
+/**
+ * The status, modes and object ids of every changed path (see {@link parseRawEntries}). Full ids,
+ * never abbreviations, so a repository whose ids are not 40-hex fails the parse instead of handing
+ * out ids that name nothing. Null when git could not say, in which case no file is proven cosmetic.
+ */
+function rawEntries(dir: string, mergeBase: string, head: string): Map<string, RawEntry> | null {
+  const raw = tryGit(dir, ["diff", "--raw", "-z", "--no-renames", "--no-abbrev", mergeBase, head]);
+  return raw === null ? null : parseRawEntries(raw);
+}
+
+/**
+ * Read blobs by their ids with two processes: `git cat-file --batch-check` for every id's type and
+ * size (no content), then `git cat-file --batch` for the blobs within the caps. Only full ids are
+ * asked about: an id that is not 40 lowercase hex, and the zero id, are dropped before any process
+ * starts, so no name a revision could resolve (`HEAD`, `rev:path`) ever reaches git's input. Ids
+ * are taken once each, in the order first given.
+ *
+ * A blob over `maxBytes` is left out, and so is every id from the first blob that would bring the
+ * total past `maxTotalBytes`, a smaller later one included (the prefix rule the summary keeps for
+ * its own bytes). An id git says is `missing`, or names a tree, a commit or a tag, is left out too.
+ * Left out is never an empty buffer: its caller reads it as a file it could not read.
+ *
+ * Null when the answer cannot be trusted or was not had: output of another shape, a call that
+ * failed, or one past `deadline` (its own, on top of the pass's budget). Null is "could not say",
+ * which is not "every blob was missing". Running out of the pass's budget is still
+ * {@link EvidenceError} `timed_out`, thrown.
+ */
+export function readBlobs(
+  dir: string,
+  oids: readonly string[],
+  caps: { maxBytes: number; maxTotalBytes: number },
+  deadline?: number,
+): Map<string, Buffer> | null {
+  const ids: string[] = [];
+  const seen = new Set<string>();
+  for (const oid of oids) {
+    if (!SHA40.test(oid) || oid === ZERO_OID || seen.has(oid)) continue;
+    seen.add(oid);
+    ids.push(oid);
+  }
+  const blobs = new Map<string, Buffer>();
+  if (ids.length === 0) return blobs;
+  const bound = deadline === undefined ? {} : { deadline };
+  try {
+    const answer = runGit(dir, ["cat-file", "--batch-check"], "utf8", {
+      ...bound,
+      input: Buffer.from(`${ids.join("\n")}\n`),
+    });
+    const lines = answer.split("\n");
+    if (lines.pop() !== "" || lines.length !== ids.length) return null;
+    const selected: { id: string; size: number }[] = [];
+    let total = 0;
+    let exhausted = false;
+    for (let i = 0; i < ids.length; i++) {
+      const id = ids[i] as string;
+      const line = lines[i] as string;
+      if (line === `${id} missing`) continue;
+      const m = /^([0-9a-f]{40}) (blob|tree|commit|tag) (0|[1-9][0-9]*)$/.exec(line);
+      if (m === null || m[1] !== id) return null;
+      if (m[2] !== "blob" || exhausted) continue;
+      const size = Number(m[3]);
+      if (size > caps.maxBytes) continue;
+      if (total + size > caps.maxTotalBytes) {
+        exhausted = true;
+        continue;
+      }
+      total += size;
+      selected.push({ id, size });
+    }
+    if (selected.length === 0) return blobs;
+    const out = runGit(dir, ["cat-file", "--batch"], "buffer", {
+      ...bound,
+      input: Buffer.from(`${selected.map((s) => s.id).join("\n")}\n`),
+      maxBuffer: total + selected.length * 128 + 65_536,
+    });
+    let at = 0;
+    for (const { id, size } of selected) {
+      const nl = out.indexOf(0x0a, at);
+      if (nl < 0 || out.toString("latin1", at, nl) !== `${id} blob ${size}`) return null;
+      const end = nl + 1 + size;
+      if (end >= out.length || out[end] !== 0x0a) return null;
+      blobs.set(id, out.subarray(nl + 1, end));
+      at = end + 1;
+    }
+    return at === out.length ? blobs : null;
+  } catch (e) {
+    if (e instanceof EvidenceError) throw e;
+    return null;
+  }
 }
 
 /** JSON text with the whitespace outside strings removed: two texts that agree are the same token stream. */
@@ -800,14 +967,14 @@ function readContent(dir: string, listing: Listing): ContentFacts {
     mergeBase,
     headSha,
   ]);
-  const modes = modesByPath(dir, mergeBase, headSha);
+  const entries = rawEntries(dir, mergeBase, headSha);
   let cosmeticChecks = 0;
   const cosmeticOnly = new Set<string>();
   for (const c of wanted) {
-    if (c.status !== "modified" || modes === null) continue;
+    if (c.status !== "modified" || entries === null) continue;
     if (!c.path.endsWith(".json") && !c.path.endsWith(".tsv")) continue;
-    const m = modes.get(c.path);
-    if (!m || m.before !== m.after || !REGULAR_FILE_MODES.has(m.before)) continue;
+    const m = entries.get(c.path);
+    if (!m || m.modeBefore !== m.modeAfter || !REGULAR_FILE_MODES.has(m.modeBefore)) continue;
     if (cosmeticChecks >= MAX_COSMETIC_CHECKS) continue;
     cosmeticChecks++;
     const before = tryGitBytes(dir, ["show", `${mergeBase}:${c.path}`]);
