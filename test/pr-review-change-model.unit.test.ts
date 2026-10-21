@@ -1566,6 +1566,29 @@ describe("buildPools: what the pools hold is bounded by maxPoolChars", () => {
   const byKey = (a: readonly [string, ...unknown[]], b: readonly [string, ...unknown[]]) =>
     a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0;
 
+  /** The key of the `i`-th top-level key of {@link wideDocument}: 1,000 code units. */
+  const wideKey = (i: number) => String(i).padStart(1000, "k");
+
+  /**
+   * `count` top-level keys of 1,000 code units each, every value 0, so the keys alone hold
+   * `count` x 1,000. With `nested`, the last value is an object whose one key makes its path
+   * 1,032 code units, over `maxNameChars`.
+   */
+  const wideDocument = (count: number, nested = false): string => {
+    const keys = Array.from({ length: count }, (_, i) => {
+      const value = nested && i === count - 1 ? `{"${"z".repeat(30)}":0}` : "0";
+      return `"${wideKey(i)}":${value}`;
+    });
+    return `{${keys.join(",")}}`;
+  };
+
+  /** What a pool says about the JSON files, in a form that compares whole. */
+  const jsonOutcome = (pool: ReturnType<typeof buildPools>) => ({
+    unreadable: [...pool.json.unreadable].sort(),
+    homes: [...pool.json.files.keys()].sort(),
+    topKeys: pool.json.byTopKey.size,
+  });
+
   test("a document that would hold more than the bound is unreadable and holds nothing, added or modified", () => {
     // About 0.3 MB of JSON that would hold about 81 million code units: one long key over 40,000
     // tiny children, each of whose paths repeats the key.
@@ -1632,6 +1655,29 @@ describe("buildPools: what the pools hold is bounded by maxPoolChars", () => {
     expect([...pool.json.unreadable]).toEqual(["b_eeg.json"]);
     // Only the filler's own keys are listed.
     expect([...pool.json.byTopKey.values()].flat()).toEqual(["a_eeg.json", "a_eeg.json"]);
+  });
+
+  test("the top-level keys of a modified document that adds no leaf are spent: the files read after it have that much less room", () => {
+    // The document is FIRST in path order, so a file after it shows whether its keys were spent.
+    const keyChars = 2_000 * 1000;
+    const text = wideDocument(2_000);
+    const unchanged = pooled("a_eeg.json", text, text);
+    expect(poolChars(unchanged)).toBe(keyChars);
+
+    // An added document holding exactly what is left fits, and the keys of both are listed.
+    const fits = buildPools([unchanged, documentHolding("b_eeg.json", bound - keyChars, 15_000)]);
+    expect(jsonOutcome(fits)).toEqual({ unreadable: [], homes: ["b_eeg.json"], topKeys: 2_002 });
+    expect(fits.json.byTopKey.get(wideKey(0))).toEqual(["a_eeg.json"]);
+    expect(fits.json.byTopKey.get("K".repeat(1000))).toEqual(["b_eeg.json"]);
+
+    // One code unit more, and it is the one that cannot be read; the first document's keys stay.
+    const over = buildPools([
+      unchanged,
+      documentHolding("b_eeg.json", bound - keyChars + 1, 15_000),
+    ]);
+    expect(jsonOutcome(over)).toEqual({ unreadable: ["b_eeg.json"], homes: [], topKeys: 2_000 });
+    expect(over.json.byTopKey.get(wideKey(1_999))).toEqual(["a_eeg.json"]);
+    expect(over.json.byTopKey.has("K".repeat(1000))).toBe(false);
   });
 
   test("an added document is walked only as far as the room left, so one past it before a path over maxNameChars is unreadable", () => {
