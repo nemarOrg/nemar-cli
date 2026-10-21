@@ -339,6 +339,7 @@ A mistake in this order can only turn "relocated" into "relabeled with changed c
 2. Multiset match: each after row takes the earliest unconsumed equal before row; the matched before indices, in after order, decide `rows_reordered`.
 3. Relocation of each unmatched before row (full before row).
 4. Two-pointer pairing of the remaining before and after rows, in file order, accepting a pair only when **at most half** of the common columns differ **and** EQ is at least DIFF, where EQ counts only the equal common cells that are not missing (D6); a paired row's differing cells become cell atoms.
+   (The first condition follows from the second, since EQ + DIFF is at most the number of common columns; it stays as the statement of what an edit is.)
    It spends from the same step budget as section 4.4.
 5. What is left: `row_removed` and `row_added`.
 
@@ -382,7 +383,7 @@ The model prompt (section 8.4) tells the model that a moved key reaches the file
 
 A removed leaf and an added leaf are a `json_key_renamed` pair when they have the same parent path and the same value, and their last names are equal after lower-casing and removing every character that is not a letter or digit, or when `relabelRule(oldName, newName, { chars: false })` holds.
 In addition (D8), the shared value must be **unique within its parent** in the before document and in the after document: a shared value is no evidence of which key became which, so with `go` and `go2` both `"Go"`, `go` removed and `go3` added is `json_key_removed` plus `json_key_added`, not a rename.
-A removed leaf then has at most one candidate, so the pass is linear and needs no candidate cap; it spends from the step budget of section 4.4.
+A removed leaf then has at most one candidate, and a relabel rule refuses a name over 128 characters before reading it, so the pass is linear in the document and needs neither a candidate cap nor the step budget of section 4.4.
 
 ---
 

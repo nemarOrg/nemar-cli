@@ -2152,6 +2152,8 @@ export function diffTableWith(
         if (cell !== a[column.ai]) differ++;
         else if (!isMissingCell(cell)) equal++;
       }
+      // The first condition follows from the second (EQ + DIFF is at most the column count); it is
+      // kept because it is the design's own statement of what an edit is.
       return differ * 2 <= cells.length && equal >= differ;
     };
     const goneRows = unpairedRows(bFate);
@@ -2523,9 +2525,9 @@ export function verifyJsonCounts(diff: FileDiff<JsonCounts>): boolean {
  *   (`json_empty_key_removed`) when the value held nothing ({@link isMissingJson}), because nothing
  *   was lost.
  *
- * Renames spend from the same `maxPairingSteps` budget as a table diff; past it what is left stays
- * removed and added. The `format` of a document (its byte order mark and line endings) is not in the
- * parsed value, so it is not in this diff; {@link formatAtoms} gives it from the two
+ * The rename pass is linear by construction (one candidate per leaf), so unlike a table diff it
+ * needs no step budget. The `format` of a document (its byte order mark and line endings) is not
+ * in the parsed value, so it is not in this diff; {@link formatAtoms} gives it from the two
  * {@link TextFormat}s the parser returned.
  */
 export function diffJson(
@@ -2585,7 +2587,9 @@ export function diffJsonWith(
   }
 
   // 2. Renames: the one leaf with a parent and value on each side, under a respelled key. With the
-  // value unique on both sides a before leaf has at most one candidate, so this is linear.
+  // value unique on both sides a before leaf has at most one candidate, and a relabel rule refuses a
+  // name over `maxKeyChars` before it reads it, so the pass is linear in the document and needs no
+  // step budget.
   const groupOf = (leaf: JsonLeaf): string => JSON.stringify([leaf.parent, leaf.value]);
   const beforeInGroup = new Map<string, number>();
   for (const leaf of bl) {
@@ -2598,7 +2602,6 @@ export function diffJsonWith(
     const group = groupOf(leaf);
     afterOfGroup.set(group, afterOfGroup.has(group) ? -1 : ai);
   }
-  let steps = 0;
   for (const [bi, leaf] of bl.entries()) {
     if (bFate[bi] !== JSON_FATE_NONE || !leaf.isKey) continue;
     const group = groupOf(leaf);
@@ -2606,8 +2609,6 @@ export function diffJsonWith(
     if (beforeInGroup.get(group) !== 1 || ai === undefined || ai < 0) continue;
     const now = al[ai] as JsonLeaf;
     if (aFate[ai] !== JSON_FATE_NONE || !now.isKey) continue;
-    if (steps >= SUMMARY_LIMITS.maxPairingSteps) break;
-    steps += candidateSteps(leaf.name.length + now.name.length, 0);
     if (
       foldName(leaf.name) === foldName(now.name) ||
       relabelRule(leaf.name, now.name, { chars: false }) !== null
