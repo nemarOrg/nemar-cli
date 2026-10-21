@@ -13,11 +13,18 @@ what merged, and this file says what it meant.
 Newest first. Dates are the tag's publication date, UTC. Backfilled from 0.9.16 onward;
 earlier releases are described only by their generated notes.
 
-## Unreleased
+## 0.10.22 - 2026-10-20
 
-The Brain Imaging Data Structure (BIDS) validator moves from 2.4.1 to 3.0.2, and one dataset's publication gate verdict changes under it, so read the first production behavior change below before releasing.
+The Worker's report parser now accepts three finding codes that nothing emits yet.
+This release has no migration and sets no new Worker secret or variable.
+It moves the Brain Imaging Data Structure (BIDS) validator from 2.4.1 to 3.0.2, which changes one dataset's publication gate verdict; see Production behavior changes below before releasing.
 
 ### Changed
+
+- **The review report accepts `original_text_altered`, `original_field_altered` and `recording_replaced` (epic #1851, S0).**
+  They are for the rules on what a contributor may change of the original authors' content, which a later release adds.
+  The review script runs from `main` as soon as a release lands while the Worker deploys separately, so a script that emitted a code the Worker did not know would have its report refused as `report_invalid`.
+  The codes are therefore accepted, labeled for the check ("Original text changed", "Original field changed", "Recorded data changed") and kept out of the codes the review model is offered, one release before anything emits them.
 
 - **The BIDS validator is pinned at 3.0.2, and a monthly pull request moves the pin to the newest stable release (issue #1036).**
   The pin was 2.4.1, and the bump workflow selected only the 2.x line, so the pin could not move to 3.x by itself.
