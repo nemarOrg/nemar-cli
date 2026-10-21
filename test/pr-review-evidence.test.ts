@@ -773,6 +773,34 @@ describe("readBlobs and rawEntries", () => {
     });
   }, 30_000);
 
+  test("the call that reads the blobs has the deadline too: a stall in the second process is null, quickly, and not timed_out", () => {
+    const { id, dir } = blobRepo("blobs-stall-second", { "a.txt": "alpha\n" });
+    const a = id("a.txt");
+    const log = callLog("blobs-stall-second");
+    // The log first, so the call that is stopped while the later rule holds it is still recorded.
+    // Only the second cat-file stalls: the first, which asks for the sizes, answers at once.
+    const restore = installGitShim(root, [
+      { match: " cat-file ", log },
+      { match: " cat-file ", sleepSeconds: 5, fromCall: 2 },
+    ]);
+    let stalled: Map<string, Buffer> | null | string = "not run";
+    let elapsed = 0;
+    let calls: string[] = [];
+    try {
+      const started = Date.now();
+      stalled = readBlobs(dir, [a], CAPS, Date.now() + 1_500);
+      elapsed = Date.now() - started;
+      calls = loggedCalls(log).map((c) => c.split("never ")[1]?.trim() ?? "");
+    } finally {
+      restore();
+    }
+    expect(stalled).toBeNull();
+    expect(elapsed).toBeLessThan(4_000);
+    expect(calls).toEqual(["cat-file --batch-check", "cat-file --batch"]);
+    // The same read, nothing stalling, is answered: the second process is what made it null.
+    expect(texts(readBlobs(dir, [a], CAPS, Date.now() + 60_000))).toEqual({ [a]: "alpha\n" });
+  }, 30_000);
+
   test("parseRawEntries reads what git writes: added, modified, removed, a type change and a submodule", () => {
     const dir = join(root, "raw-entries");
     mkdirSync(dir, { recursive: true });
