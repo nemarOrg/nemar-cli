@@ -1752,6 +1752,33 @@ describe("buildPools: what the pools hold is bounded by maxPoolChars", () => {
     ]);
   });
 
+  test("a row new in several copies is held once, so a table fits by its distinct rows and not by its copies", () => {
+    const copy = "sourcedata/old/sub-01/eeg/sub-01_task-x_channels.tsv";
+    const header = "name\ttype\tunits";
+    const row = (extra: number) => `Ch1\tEEG\t${"u".repeat(40 + extra)}`;
+    // The one new row, twice: the pool holds the header and the row's text, once.
+    const twice = (extra: number) =>
+      pooled(copy, null, `${header}\n${row(extra)}\n${row(extra)}\n`);
+    const held = twice(0);
+    expect(poolChars(held)).toBe(header.length + row(0).length);
+    // The filler leaves exactly that much room, so the pool is full.
+    const filler = documentHolding("a_eeg.json", bound - poolChars(held), 15_000);
+    expect(poolChars(filler) + poolChars(held)).toBe(bound);
+    const fits = buildPools([filler, held]);
+    const kept = fits.rows.files.get(copy);
+    expect(kept?.header).toBe(header);
+    expect(Object.fromEntries(kept?.rows ?? [])).toEqual({ [row(0)]: 2 });
+    expect(fits.rows.sourcedataFor.get(copy.slice(15))).toEqual([copy]);
+
+    // One more character of row text, and the table is one over what is left: it is skipped.
+    const longer = twice(1);
+    expect(poolChars(longer)).toBe(poolChars(held) + 1);
+    const skipped = buildPools([filler, longer]);
+    expect(skipped.rows.files.size).toBe(0);
+    expect(skipped.rows.sourcedataFor.size).toBe(0);
+    expect(skipped.json.unreadable.size).toBe(0);
+  });
+
   test("which files fit is decided in path order, whatever order they are given in", () => {
     // Each of the two long documents fits alone, and the two together do not.
     const first = documentHolding("a_eeg.json", Math.floor(bound * 0.6), 9_000);
