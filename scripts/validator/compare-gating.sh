@@ -4,22 +4,27 @@
 # not a git-annex pointer.
 #
 # Usage: compare-gating.sh --old <version> --new <version> --out <dir>
-#          [--ids "<dataset ids>"] [--local <dir>]... [--canary]
+#          [--ids "<dataset ids>"] [--local <dir>]... [--canary] [--allow-partial]
 #
 # Each dataset is validated with the flags the central workflow passes (--json --ignoreWarnings),
-# once per release. Validation runs from a scratch directory, never from inside a dataset, so Deno
-# does not read a configuration file from the dataset.
+# once per release, from a scratch directory so that Deno never reads a configuration file from a
+# dataset. A release's result counts only when the validator exits 0 (valid) or 16 (errors found)
+# and its report is a JSON object with a list of issues. Anything else is a failed validation.
 #
 # Writes into <dir>:
 #   summary.md          the section the bump pull request body carries
 #   results.tsv         one row per dataset: status, gating error counts, changed, note
 #   diff-<id>.txt       the gating errors that differ, for each changed dataset
+#   run/                the raw reports, stderr and annex lists, kept as evidence
 #
 # A dataset that cannot be cloned or validated is listed as not compared. It is never reported as
-# unchanged, because an absent result is not evidence that nothing changed.
+# unchanged. The script then exits 1, so an incomplete comparison fails the job that runs it;
+# --allow-partial accepts a partial comparison for a manual run.
 set -uo pipefail
 
 REFERENCE_IDS="xx099900 xx099901 xx099902 xx099903 xx099904 xx099905 xx099906 nm000103 nm000104 nm000105 nm000106 nm000107"
+VALIDATOR_ERRORS_FOUND=16
+MAX_DIFF_LINES=40
 
 OLD=""
 NEW=""
@@ -27,21 +32,30 @@ OUT=""
 IDS="$REFERENCE_IDS"
 LOCALS=()
 CANARY=0
+ALLOW_PARTIAL=0
+
+need_value() {
+  if [ "$#" -lt 2 ]; then
+    echo "compare-gating.sh: $1 needs a value" >&2
+    exit 2
+  fi
+}
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --old) OLD="$2"; shift 2 ;;
-    --new) NEW="$2"; shift 2 ;;
-    --out) OUT="$2"; shift 2 ;;
-    --ids) IDS="$2"; shift 2 ;;
-    --local) LOCALS+=("$2"); shift 2 ;;
+    --old) need_value "$@"; OLD="$2"; shift 2 ;;
+    --new) need_value "$@"; NEW="$2"; shift 2 ;;
+    --out) need_value "$@"; OUT="$2"; shift 2 ;;
+    --ids) need_value "$@"; IDS="$2"; shift 2 ;;
+    --local) need_value "$@"; LOCALS+=("$2"); shift 2 ;;
     --canary) CANARY=1; shift ;;
+    --allow-partial) ALLOW_PARTIAL=1; shift ;;
     *) echo "compare-gating.sh: unknown argument: $1" >&2; exit 2 ;;
   esac
 done
 
 if [ -z "$OLD" ] || [ -z "$NEW" ] || [ -z "$OUT" ]; then
-  echo "usage: compare-gating.sh --old <version> --new <version> --out <dir> [--ids \"...\"] [--local <dir>]... [--canary]" >&2
+  echo "usage: compare-gating.sh --old <version> --new <version> --out <dir> [--ids \"...\"] [--local <dir>]... [--canary] [--allow-partial]" >&2
   exit 2
 fi
 for tool in deno jq git; do
@@ -51,24 +65,43 @@ for tool in deno jq git; do
   fi
 done
 
-mkdir -p "$OUT"
-OUT=$(cd "$OUT" && pwd)
+if ! mkdir -p "$OUT" 2>/dev/null || ! OUT=$(cd "$OUT" && pwd); then
+  echo "compare-gating.sh: cannot use the output directory $OUT" >&2
+  exit 1
+fi
 RUN="$OUT/run"
 DATA="$OUT/data"
-mkdir -p "$RUN" "$DATA"
-printf 'dataset\tstatus\tgating_old\tgating_new\tchanged\tnote\n' > "$OUT/results.tsv"
+if ! mkdir -p "$RUN" "$DATA" || ! printf 'dataset\tstatus\tgating_old\tgating_new\tchanged\tnote\n' > "$OUT/results.tsv"; then
+  echo "compare-gating.sh: cannot write into $OUT" >&2
+  exit 1
+fi
 
-# A layout that a release can change: a data file that is an unfetched git-annex link, with a
-# sidecar next to it. The central workflow filters the data file's error, not the sidecar's.
+ESC=$(printf '\033')
+
+# One line that says why a validation or clone failed: the last line of stderr that is neither a
+# download progress line nor blank, with colour codes and tabs removed.
+failure_note() {
+  local text
+  text=$(grep -v -E '^(Download|[[:space:]]*$)' "$1" 2>/dev/null | tail -n 1 | sed "s/${ESC}\[[0-9;]*[A-Za-z]//g" | tr '\t' ' ' | cut -c1-200)
+  printf '%s' "${text:-no message on stderr}"
+}
+
+# The two layouts a release can change, both with a sidecar beside the data file. A symlink is an
+# unfetched git-annex link: the central workflow filters the data file's error, not the sidecar's.
+# A pointer is a small file holding an annex pointer, which the central workflow filters.
 make_canary() {
-  local d="$1"
+  local d="$1" kind="$2"
   rm -rf "$d"
-  mkdir -p "$d/sub-01/emg"
+  mkdir -p "$d/sub-01/emg" || return 1
   printf '%s\n' '{"Name":"canary","BIDSVersion":"1.10.0","DatasetType":"raw"}' > "$d/dataset_description.json"
   printf 'participant_id\nsub-01\n' > "$d/participants.tsv"
   printf '%s\n' '{"SamplingFrequency":1000,"EMGChannelCount":1,"RecordingDuration":1,"EMGReference":"Other","PowerLineFrequency":50,"SoftwareFilters":"n/a"}' > "$d/sub-01/emg/sub-01_task-x_emg.json"
   printf 'name\ttype\tunits\tsampling_frequency\nEMG1\tEMG\tuV\t1000\n' > "$d/sub-01/emg/sub-01_task-x_channels.tsv"
-  ln -s ../../.git/annex/objects/missing.bdf "$d/sub-01/emg/sub-01_task-x_emg.bdf"
+  if [ "$kind" = symlink ]; then
+    ln -s ../../.git/annex/objects/missing.bdf "$d/sub-01/emg/sub-01_task-x_emg.bdf"
+  else
+    printf '%s\n' '/annex/objects/SHA256E-s1024--0000000000000000000000000000000000000000000000000000000000000000.bdf' > "$d/sub-01/emg/sub-01_task-x_emg.bdf"
+  fi
 }
 
 # Each target is "id|absolute path".
@@ -79,21 +112,32 @@ for id in $IDS; do
     rm -rf "$dir"
     if ! GIT_TERMINAL_PROMPT=0 git clone --depth 1 --quiet "https://github.com/nemarDatasets/$id.git" "$dir" 2>"$RUN/$id.clone.err"; then
       rm -rf "$dir"
-      printf '%s\tnot_compared\t-\t-\t-\tcould not clone nemarDatasets/%s\n' "$id" "$id" >> "$OUT/results.tsv"
+      printf '%s\tnot_compared\t-\t-\t-\tclone failed: %s\n' "$id" "$(failure_note "$RUN/$id.clone.err")" >> "$OUT/results.tsv"
       continue
     fi
   fi
   TARGETS+=("$id|$dir")
 done
 for loc in ${LOCALS[@]+"${LOCALS[@]}"}; do
-  dir=$(cd "$loc" && pwd)
+  if ! dir=$(cd "$loc" 2>/dev/null && pwd); then
+    echo "compare-gating.sh: no such directory: $loc" >&2
+    exit 1
+  fi
   TARGETS+=("$(basename "$dir")|$dir")
 done
 if [ "$CANARY" = 1 ]; then
   dir="$DATA/canary-emg-annex-sidecar"
-  make_canary "$dir"
+  make_canary "$dir" symlink || { echo "compare-gating.sh: cannot create $dir" >&2; exit 1; }
   TARGETS+=("canary-emg-annex-sidecar|$dir")
+  dir="$DATA/canary-emg-annex-pointer"
+  make_canary "$dir" pointer || { echo "compare-gating.sh: cannot create $dir" >&2; exit 1; }
+  TARGETS+=("canary-emg-annex-pointer|$dir")
 fi
+
+# A release's report is usable only when it is a JSON object whose issues are a list.
+report_ok() {
+  jq -e '(.issues.issues | type) == "array"' "$1" >/dev/null 2>&1
+}
 
 # Gating errors: the error codes at locations that are not git-annex pointers, as sorted lines.
 gate() {
@@ -115,15 +159,25 @@ for target in ${TARGETS[@]+"${TARGETS[@]}"}; do
       find . -type l -not -path './.git/*' | sed 's|^\.||'
       find . -type f -not -path './.git/*' -size -1024c -exec grep -l '^/annex/objects/' {} + 2>/dev/null | sed 's|^\./|/|'
     } | sort -u ) > "$RUN/$ID.annex.txt"
-  jq -R -s 'split("\n") | map(select(length > 0))' "$RUN/$ID.annex.txt" > "$ANNEX"
 
   status="compared"
   note="-"
+  if ! jq -R -s 'split("\n") | map(select(length > 0))' "$RUN/$ID.annex.txt" > "$ANNEX" 2>/dev/null; then
+    status="not_compared"
+    note="could not list the annex pointers"
+  fi
   for ver in "$OLD" "$NEW"; do
-    ( cd "$RUN" && deno run -A "jsr:@bids/validator@$ver" "$dir" --json --ignoreWarnings > "$RUN/$ID.$ver.json" 2> "$RUN/$ID.$ver.err" )
-    if ! jq -e . "$RUN/$ID.$ver.json" >/dev/null 2>&1; then
+    [ "$status" = "compared" ] || break
+    # Run from the scratch directory, never from inside a dataset. NO_COLOR keeps the messages plain.
+    ( cd "$RUN" && NO_COLOR=1 deno run --node-modules-dir=none -A "jsr:@bids/validator@$ver" "$dir" --json --ignoreWarnings > "$RUN/$ID.$ver.json" 2> "$RUN/$ID.$ver.err" )
+    rc=$?
+    echo "$rc" > "$RUN/$ID.$ver.rc"
+    if [ "$rc" != 0 ] && [ "$rc" != "$VALIDATOR_ERRORS_FOUND" ]; then
       status="not_compared"
-      note="no report from $ver: $(head -c 160 "$RUN/$ID.$ver.err" | tr '\n\t' '  ')"
+      note="validator $ver exited $rc: $(failure_note "$RUN/$ID.$ver.err")"
+    elif ! report_ok "$RUN/$ID.$ver.json"; then
+      status="not_compared"
+      note="the $ver report is not a JSON object with a list of issues"
     fi
   done
 
@@ -131,18 +185,21 @@ for target in ${TARGETS[@]+"${TARGETS[@]}"}; do
   g_new="-"
   changed="-"
   if [ "$status" = "compared" ]; then
-    gate "$OLD" "$RUN/$ID.$OLD.gating"
-    gate "$NEW" "$RUN/$ID.$NEW.gating"
-    g_old=$(wc -l < "$RUN/$ID.$OLD.gating" | tr -d ' ')
-    g_new=$(wc -l < "$RUN/$ID.$NEW.gating" | tr -d ' ')
-    if diff -q "$RUN/$ID.$OLD.gating" "$RUN/$ID.$NEW.gating" >/dev/null 2>&1; then
-      changed="no"
+    if gate "$OLD" "$RUN/$ID.$OLD.gating" && gate "$NEW" "$RUN/$ID.$NEW.gating"; then
+      g_old=$(wc -l < "$RUN/$ID.$OLD.gating" | tr -d ' ')
+      g_new=$(wc -l < "$RUN/$ID.$NEW.gating" | tr -d ' ')
+      if diff -q "$RUN/$ID.$OLD.gating" "$RUN/$ID.$NEW.gating" >/dev/null 2>&1; then
+        changed="no"
+      else
+        changed="yes"
+        {
+          echo "Gating errors that differ: '<' is $OLD, '>' is $NEW."
+          diff "$RUN/$ID.$OLD.gating" "$RUN/$ID.$NEW.gating"
+        } > "$OUT/diff-$ID.txt"
+      fi
     else
-      changed="yes"
-      {
-        echo "Gating errors that differ: '<' is $OLD, '>' is $NEW."
-        diff "$RUN/$ID.$OLD.gating" "$RUN/$ID.$NEW.gating"
-      } > "$OUT/diff-$ID.txt"
+      status="not_compared"
+      note="could not read the gating errors"
     fi
   fi
   printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$ID" "$status" "$g_old" "$g_new" "$changed" "$note" >> "$OUT/results.tsv"
@@ -152,6 +209,7 @@ done
 compared=$(awk -F'\t' 'NR > 1 && $2 == "compared"' "$OUT/results.tsv" | wc -l | tr -d ' ')
 changed_count=$(awk -F'\t' 'NR > 1 && $5 == "yes"' "$OUT/results.tsv" | wc -l | tr -d ' ')
 total=$(awk 'NR > 1' "$OUT/results.tsv" | wc -l | tr -d ' ')
+not_compared_count=$((total - compared))
 {
   echo "## Reference datasets"
   echo
@@ -169,14 +227,27 @@ total=$(awk 'NR > 1' "$OUT/results.tsv" | wc -l | tr -d ' ')
   fi
   for f in "$OUT"/diff-*.txt; do
     [ -e "$f" ] || continue
+    lines=$(wc -l < "$f" | tr -d ' ')
     echo
     echo "### $(basename "$f" .txt | sed 's/^diff-//')"
     echo
     echo '```diff'
-    head -n 40 "$f"
+    head -n "$MAX_DIFF_LINES" "$f"
     echo '```'
+    if [ "$lines" -gt "$MAX_DIFF_LINES" ]; then
+      echo
+      echo "$((lines - MAX_DIFF_LINES)) more lines are not shown. The complete comparison is in the validator-compare artifact of this run."
+    fi
   done
 } > "$OUT/summary.md"
 
 echo "compared $compared of $total datasets; $changed_count changed; summary in $OUT/summary.md"
+if [ "$total" -eq 0 ]; then
+  echo "compare-gating.sh: nothing to compare" >&2
+  exit 1
+fi
+if [ "$not_compared_count" -gt 0 ] && [ "$ALLOW_PARTIAL" = 0 ]; then
+  echo "compare-gating.sh: $not_compared_count dataset(s) not compared; see $OUT/summary.md. Pass --allow-partial to accept a partial comparison." >&2
+  exit 1
+fi
 exit 0
