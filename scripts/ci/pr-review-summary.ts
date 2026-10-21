@@ -3364,9 +3364,16 @@ const JSON_VALUE_KINDS: ReadonlySet<ClassKind> = new Set([
   "json_filled",
 ]);
 
-/** The last line of a summary that could not show every class. */
+/** The last line of a summary that could not show every class; never written for none. */
 function moreClassesLine(n: number): string {
-  return `(${n} more change classes not shown)`;
+  return n === 1 ? "(1 more change class not shown)" : `(${n} more change classes not shown)`;
+}
+
+/** The line under a class whose distinct pairs were not all shown; never written for none. */
+function morePairsLine(n: number): string {
+  return n === 1
+    ? "    (1 more distinct value not shown)"
+    : `    (${n} more distinct values not shown)`;
 }
 
 /** A value with every character {@link renderValue} would escape removed, spaces kept. */
@@ -3417,7 +3424,7 @@ function differenceNote(
  * ```text
  * C<n> | "<shape>" | <column "x" | key "path" | under "parent"> | <kind words>[: <rule>]
  *     "<before>" -> "<after>" x<count>        (pairs; a removal shows one side)
- *     (<k> more distinct values not shown)
+ *     (<k> more distinct values not shown)        (`1 more distinct value` for one)
  *     e.g. "<path>" <what changed>
  * ```
  *
@@ -3496,7 +3503,7 @@ function renderClass(n: number, c: ChangeClass): { text: string; complete: boole
       lines.push(`    ${b.text} -> ${a.text} x${count}${note === null ? "" : ` (${note})`}`);
     }
     if (ordered.length > shown.length) {
-      lines.push(`    (${ordered.length - shown.length} more distinct values not shown)`);
+      lines.push(morePairsLine(ordered.length - shown.length));
       pairsComplete = false;
     }
   }
@@ -3521,7 +3528,8 @@ export interface RenderedClasses {
  * 5.2 to 5.4). A class renders whole or not at all, and rendering STOPS at the first class that
  * does not fit: the classes shown are always a prefix of the order, so a loss class can never be
  * left out while a later class is shown, and no class's showing depends on the size of the ones
- * after it. When any class is left out, the block ends with `(N more change classes not shown)`;
+ * after it. When any class is left out, the block ends with `(N more change classes not shown)`
+ * (`(1 more change class not shown)` for one);
  * room for that line is kept from the start, so the text never exceeds `maxSummaryChars`.
  */
 export function renderClasses(classes: readonly ChangeClass[]): RenderedClasses {

@@ -478,9 +478,9 @@ Phase 3 review: every path is rendered by `renderValue` too, an example's file p
 
 ### 5.4 At the bounds
 
-- A class that does not fit is not rendered, its number does not appear, and `classes_cut` counts it; the fenced block ends with `(N more change classes not shown)`.
+- A class that does not fit is not rendered, its number does not appear, and `classes_cut` counts it; the fenced block ends with `(N more change classes not shown)` (`(1 more change class not shown)` for one, phase 3 review).
   (Phase 3: rendering stops at the FIRST class that does not fit `maxClasses` or `maxSummaryChars`, so the shown classes are always a prefix of the order of section 5.1 and a later, smaller class is never shown in place of an earlier one; room for the closing count line is kept from the start, so the block never exceeds `maxSummaryChars`.)
-- A paired class with more than 12 distinct pairs renders 12 and the line `(N more distinct values not shown)`, and is incomplete.
+- A paired class with more than 12 distinct pairs renders 12 and the line `(N more distinct values not shown)` (`(1 more distinct value not shown)` for one), and is incomplete.
 - A file over a per-file cap is refused; a run over `maxTotalBytes` stops reading at the cap and the files not read are refused (`too_large`).
   (Phase 3: the pure module counts the bytes of both sides of each candidate in sorted path order; the file that would pass the cap and every later one are refused `too_large`, even a small later one. The pool's bytes are bounded by the caller's blob reader, `readBlobs`.)
 - **If the summary pass reaches its deadline, the whole summary is abandoned**: no file is accounted for by it, nothing of it is shown, and `change_summary.abandoned` is true in the facts.

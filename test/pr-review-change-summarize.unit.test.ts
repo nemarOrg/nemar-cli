@@ -581,7 +581,8 @@ const channels = (n: number) => `sub-0${n}/eeg/sub-0${n}_task-x_channels.tsv`;
  * Every line of a block is one of the platform's own: a class line, an indented line under it, or
  * the last line that counts the classes left out. Nothing a value holds can start a line.
  */
-const LINE = /^(C[0-9]+ \| | {4}(?:"|\(|e\.g\. )|\([0-9]+ more change classes not shown\)$)/;
+const LINE =
+  /^(C[0-9]+ \| | {4}(?:"|\(|e\.g\. )|\(1 more change class not shown\)$|\([0-9]+ more change classes not shown\)$)/;
 
 describe("renderClasses: what a class looks like", () => {
   test("a class line, its pairs with their counts, and its examples", () => {
@@ -711,8 +712,15 @@ describe("renderClasses: the bounds", () => {
     expect(text.split("\n").filter((l) => l.includes(" -> ") && !l.includes("e.g.")).length).toBe(
       12,
     );
-    expect(text).not.toContain("more distinct values");
+    expect(text).not.toContain("more distinct value");
     expect(complete.has((classes[0] as ChangeClass).key)).toBe(true);
+  });
+
+  test("one distinct pair left out is counted in the singular, and the class is incomplete", () => {
+    const { text, complete, classes } = distinctValues(13);
+    expect(text).toContain("\n    (1 more distinct value not shown)\n");
+    expect(text).not.toContain("more distinct values");
+    expect(complete.has((classes[0] as ChangeClass).key)).toBe(false);
   });
 
   test("more than 12 distinct pairs show 12, then how many more, and the class is incomplete", () => {
@@ -793,7 +801,8 @@ describe("renderClasses: the bounds", () => {
     expect(shown.size).toBe(SUMMARY_LIMITS.maxClasses);
     expect(cut).toBe(1);
     expect([...shown]).toEqual(classes.slice(0, 120).map((c) => c.key));
-    expect(text.endsWith("\n(1 more change classes not shown)")).toBe(true);
+    expect(text.endsWith("\n(1 more change class not shown)")).toBe(true);
+    expect(text).not.toContain("change classes not shown");
     expect(text).toContain('\nC120 | "sub-*/eeg/sub-*_task-*_channels.tsv" | column "c119" |');
     expect(text).not.toContain("C121");
   });
@@ -2449,7 +2458,7 @@ function readBack(text: string): { blocks: ShownBlock[]; trailing: number; error
       });
       continue;
     }
-    const tail = /^\(([0-9]+) more change classes not shown\)$/.exec(line);
+    const tail = /^\(([0-9]+) more change class(?:es)? not shown\)$/.exec(line);
     if (tail !== null) {
       if (i !== lines.length - 1) errors.push("a count line that is not the last");
       trailing = Number(tail[1]);
@@ -2468,7 +2477,7 @@ function readBack(text: string): { blocks: ShownBlock[]; trailing: number; error
       else if (where.cut) block.exampleCut = true;
       continue;
     }
-    const more = /^ {4}\(([0-9]+) more distinct values not shown\)$/.exec(line);
+    const more = /^ {4}\(([0-9]+) more distinct values? not shown\)$/.exec(line);
     if (more !== null) {
       block.more = Number(more[1]);
       continue;
