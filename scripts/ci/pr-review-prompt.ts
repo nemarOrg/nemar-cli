@@ -240,8 +240,11 @@ export const REVIEW_FINDING_CRITERIA: readonly Criterion[] = CRITERIA.filter(
 );
 
 /**
- * The codes the review may use. The screen's `spam`, the empty description and the naming rule are
- * decided by the script from facts, never by a model, so the review is not offered them.
+ * The codes the review may use. The screen's `spam`, the facts the script decides before or beside
+ * the models (the empty description, a description cut short, the naming rule and an unreadable
+ * name) and the findings the platform adds from what it computed itself (what the original authors
+ * published, what was recorded) are decided by the script, never by a model, so the review is not
+ * offered them.
  */
 export const REVIEW_FINDING_CODES: readonly FindingCode[] = FINDING_CODES.filter(
   (c) =>

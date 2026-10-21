@@ -1147,34 +1147,46 @@ describe("the codes for what the original authors published and what was recorde
   // The script will decide these from platform facts; until it does, the Worker only has to accept
   // them, because the review script runs from `main` as soon as it is released while the Worker
   // deploys separately.
-  const platformCodes = ["original_text_altered", "original_field_altered", "recording_replaced"];
+  const platformCodes: [string, string][] = [
+    ["original_text_altered", "Original text changed"],
+    ["original_field_altered", "Original field changed"],
+    ["recording_replaced", "Recorded data changed"],
+  ];
 
-  test.each(platformCodes)("%s is accepted, stored, round-tripped and rendered", (code) => {
-    const raw = report({
-      criteria: {
-        no_degradation: "unknown",
-        advances_revision: "pass",
-        material_improvement: "pass",
-      },
-      findings: [
-        {
-          criterion: "no_degradation",
-          severity: "blocker",
-          code,
-          path: null,
-          note: "A fixed note.",
+  test.each(platformCodes)(
+    "%s is accepted, parsed back, round-tripped and rendered",
+    (code, label) => {
+      const raw = report({
+        criteria: {
+          no_degradation: "unknown",
+          advances_revision: "pass",
+          material_improvement: "pass",
         },
-      ],
-    });
-    expect(refusal(raw)).toBe("accepted");
-    expect(parseStoredPrReviewReport(raw).findings[0]?.code).toBe(code);
-    const outcome = parseCallbackOutcome({ outcome: "reported", report: raw, error: undefined });
-    expect(outcome.kind).toBe("reported");
-    expect(conclusionOf(outcome)).toBe("action_required");
-    const { text } = renderCheck(outcome);
-    expect(text).toContain("A fixed note.");
-    expect(text).not.toContain(code);
-  });
+        findings: [
+          {
+            criterion: "no_degradation",
+            severity: "blocker",
+            code,
+            path: null,
+            note: "A fixed note.",
+          },
+        ],
+      });
+      expect(refusal(raw)).toBe("accepted");
+      expect(parseStoredPrReviewReport(raw).findings[0]?.code).toBe(code);
+      const outcome = parseCallbackOutcome({ outcome: "reported", report: raw, error: undefined });
+      expect(outcome.kind).toBe("reported");
+      expect(conclusionOf(outcome)).toBe("action_required");
+      const { text } = renderCheck(outcome);
+      expect(text).toContain("A fixed note.");
+      expect(text).toContain(label);
+      expect(text).not.toContain(code);
+      // The pull request's comment says the same, in the same words.
+      const comment = renderComment(outcome, "0123456789abcdef0123456789abcdef01234567");
+      expect(comment).toContain(label);
+      expect(comment).not.toContain(code);
+    },
+  );
 
   test("a code outside the vocabulary is still refused", () => {
     const raw = report({
