@@ -3960,10 +3960,12 @@ export function summarizeChanges(input: {
  * 2. Builds the pools once, from `pool`. {@link buildPools} gives the same pools for the files in
  *    any order (it sorts the copies of one file itself, and a path listed twice contributes
  *    nothing, whichever entry comes first), so the pool needs no sorting here.
- * 3. Checks the deadline BEFORE each file. When `now()` has reached it, the WHOLE summary is
- *    abandoned: no file is accounted for, no class or text is kept, and the loss facts are zero.
- *    All or nothing is simpler to prove than a partial account, and an abandoned summary leaves
- *    the review where it was without one (design section 5.4). A null deadline never abandons.
+ * 3. Checks the deadline BEFORE each file, AFTER each file it folds in (a diff can be long), and
+ *    once more after the last file, before anything is rendered. When `now()` has reached it at
+ *    any of the three, the WHOLE summary is abandoned: no file is accounted for, no class or text
+ *    is kept, and the loss facts are zero. All or nothing is simpler to prove than a partial
+ *    account, and an abandoned summary leaves the review where it was without one (design section
+ *    5.4). A null deadline never abandons, and the clock is then never read.
  * 4. Reads each file whose path ends in `.tsv` or `.json`; any other path is not a candidate and is
  *    left out. Once the bytes read (both sides of every file so far) would pass `maxTotalBytes`,
  *    that file and EVERY later one is refused `too_large`, so what the summary holds is bounded.
@@ -3988,6 +3990,7 @@ export function summarizeChangesWith(
   checks: SummaryChecks,
 ): ChangeSummary {
   const now = input.now ?? Date.now;
+  const expired = (): boolean => input.deadline !== null && now() >= input.deadline;
   const candidates = [...input.candidates].sort((a, b) => byCodeUnits(a.path, b.path));
   const listed = new Map<string, number>();
   for (const candidate of candidates) {
@@ -4001,7 +4004,7 @@ export function summarizeChangesWith(
   let read = 0;
   let exhausted = false;
   for (const candidate of candidates) {
-    if (input.deadline !== null && now() >= input.deadline) return emptySummary(true);
+    if (expired()) return emptySummary(true);
     const { path } = candidate;
     const family = path.endsWith(".tsv") ? "tsv" : path.endsWith(".json") ? "json" : null;
     if (family === null) continue;
@@ -4030,7 +4033,9 @@ export function summarizeChangesWith(
     if (classKeys === null) return emptySummary(true);
     outcomes.push({ path, family, refusal: null, keyColumn, classKeys });
     addLossFacts(loss, { path, atoms });
+    if (expired()) return emptySummary(true);
   }
+  if (expired()) return emptySummary(true);
 
   const classes = builder.finish();
   const rendered = renderClasses(classes);

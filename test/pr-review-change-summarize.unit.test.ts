@@ -1674,20 +1674,71 @@ describe("summarizeChanges: the deadline, or too many classes, abandons the whol
     });
   };
 
-  test("the clock is read before each file; reaching the deadline before the second abandons everything, loss facts included", () => {
-    let t = 0;
-    const summary = summarizeChanges({
-      candidates: files(),
-      pool: [],
-      deadline: 2,
-      now: () => ++t,
-    });
-    expect(t).toBe(2);
+  /** A clock that gives `times` in order, then the last one again, and counts its reads. */
+  const clock = (times: readonly number[]) => {
+    let reads = 0;
+    return {
+      now: () => times[Math.min(reads++, times.length - 1)] as number,
+      reads: () => reads,
+    };
+  };
+
+  test("reached at the check before a file: the run is abandoned there, loss facts included", () => {
+    // Before the first file, after its fold, before the second.
+    const c = clock([0, 0, 10]);
+    const summary = summarizeChanges({ candidates: files(), pool: [], deadline: 10, now: c.now });
+    expect(c.reads()).toBe(3);
+    abandonedShape(summary);
+  });
+
+  test("reached at the check after a file's fold: the run is abandoned before the next file", () => {
+    const c = clock([0, 10]);
+    const summary = summarizeChanges({ candidates: files(), pool: [], deadline: 10, now: c.now });
+    expect(c.reads()).toBe(2);
+    abandonedShape(summary);
+  });
+
+  test("reached only at the check after the last file: the run is still abandoned, before rendering", () => {
+    // Three files: before and after each, then the last check.
+    const c = clock([0, 0, 0, 0, 0, 0, 10]);
+    const summary = summarizeChanges({ candidates: files(), pool: [], deadline: 10, now: c.now });
+    expect(c.reads()).toBe(7);
     abandonedShape(summary);
   });
 
   test("a deadline already reached abandons before the first file", () => {
-    abandonedShape(summarizeChanges({ candidates: files(), pool: [], deadline: 5, now: () => 5 }));
+    const c = clock([5]);
+    abandonedShape(summarizeChanges({ candidates: files(), pool: [], deadline: 5, now: c.now }));
+    expect(c.reads()).toBe(1);
+  });
+
+  test("a deadline never reached, or none, changes nothing; the clock is read twice per file and once after", () => {
+    const c = clock([9]);
+    const timed = summarizeChanges({ candidates: files(), pool: [], deadline: 10, now: c.now });
+    expect(c.reads()).toBe(7);
+    const untimed = clock([1e12]);
+    const free = summarizeChanges({
+      candidates: files(),
+      pool: [],
+      deadline: null,
+      now: untimed.now,
+    });
+    expect(untimed.reads()).toBe(0);
+    for (const summary of [timed, free]) {
+      expect(summary.abandoned).toBe(false);
+      expect(summary.accounted.size).toBe(3);
+      expect(summary.loss.rowsRemoved).toBe(1);
+    }
+    expect(timed.text).toBe(free.text);
+    // A refused file is not folded, so it is read for once, before it.
+    const refused = clock([9]);
+    summarizeChanges({
+      candidates: [...files(), candidate("broken.tsv", "a\tb\n1\n", "a\n")],
+      pool: [],
+      deadline: 10,
+      now: refused.now,
+    });
+    expect(refused.reads()).toBe(8);
   });
 
   /** A channel table at sub-0n whose listed columns all change: one class per column. */
@@ -1720,32 +1771,6 @@ describe("summarizeChanges: the deadline, or too many classes, abandons the whol
     expect(summary.abandoned).toBe(false);
     expect(summary.classes.length).toBe(max);
     expect(summary.classes.every((c) => c.files.size === 3 && c.items === 3)).toBe(true);
-  });
-
-  test("a deadline not reached, or none, changes nothing, and the clock is read once per file", () => {
-    let reads = 0;
-    const timed = summarizeChanges({
-      candidates: files(),
-      pool: [],
-      deadline: 100,
-      now: () => {
-        reads++;
-        return 1;
-      },
-    });
-    expect(reads).toBe(3);
-    const untimed = summarizeChanges({
-      candidates: files(),
-      pool: [],
-      deadline: null,
-      now: () => 1e12,
-    });
-    for (const summary of [timed, untimed]) {
-      expect(summary.abandoned).toBe(false);
-      expect(summary.accounted.size).toBe(3);
-      expect(summary.loss.rowsRemoved).toBe(1);
-    }
-    expect(timed.text).toBe(untimed.text);
   });
 
   test("the empty summary is not abandoned and holds nothing", () => {

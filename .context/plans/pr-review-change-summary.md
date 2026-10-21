@@ -485,7 +485,7 @@ A cut example changes nothing.)
   (Phase 3: the pure module counts the bytes of both sides of each candidate in sorted path order; the file that would pass the cap and every later one are refused `too_large`, even a small later one. The pool's bytes are bounded by the caller's blob reader, `readBlobs`.)
 - **If the summary pass reaches its deadline, the whole summary is abandoned**: no file is accounted for by it, nothing of it is shown, and `change_summary.abandoned` is true in the facts.
   All-or-nothing is simpler to prove than a partial account, and an abandoned summary leaves today's behavior.
-  (Phase 3: the deadline is checked before each file with the caller's clock; an abandoned summary has no outcomes, classes or text, and its loss facts are zero.)
+  (Phase 3: the deadline is checked before each file with the caller's clock, and since the phase 3 review also after each file is folded in and once after the last file, before rendering; an abandoned summary has no outcomes, classes or text, and its loss facts are zero.)
 - **A run that would hold more than `maxTrackedClasses` classes is abandoned the same way** (phase 3 review): all or nothing, with the deadline's shape.
   The files are folded into their classes one at a time and each file's loss facts are added as it is folded, so a run holds its classes (counts, pairs and at most three atoms each, for the examples), never every atom of every file; the examples are rendered only for the first `maxClasses` classes, the only ones that can be shown.
 
