@@ -1086,6 +1086,49 @@ describe("renderClasses: the bounds", () => {
     }
   });
 
+  test("with two or three classes after the edge, the room kept is the plural count line's, to the character", () => {
+    // The same five long classes, then two or three short ones. The fifth fits exactly when the
+    // block plus `(N more change classes not shown)` is 30,000: one character more and it is left
+    // out. A count line two characters short (the singular word) would let it through and pass
+    // the bound.
+    const pairs = (k: number, side: string, lengths: readonly number[]) =>
+      lengths.map((length, i) => ({ v: `${side}${k}-${i}-${"w".repeat(length)}` }));
+    const slot = 280;
+    const grown = (grow: number): number[] =>
+      Array.from({ length: 12 }, (_, i) => Math.max(0, Math.min(slot, grow - i * slot)));
+    const block = (grow: number, trailing: number) => {
+      const before: Record<string, unknown> = { k4: pairs(4, "old", Array(12).fill(0)) };
+      const after: Record<string, unknown> = { k4: pairs(4, "new", grown(grow)) };
+      for (let t = 0; t < trailing; t++) {
+        before[`small${t}`] = "a";
+        after[`small${t}`] = "b";
+      }
+      for (let k = 0; k < 4; k++) {
+        before[`k${k}`] = pairs(k, "old", Array(12).fill(260));
+        after[`k${k}`] = pairs(k, "new", Array(12).fill(260));
+      }
+      return rendered([
+        { path: "x.json", before: JSON.stringify(before), after: JSON.stringify(after) },
+      ]);
+    };
+    const base = block(0, 0).text.length;
+    const max = SUMMARY_LIMITS.maxSummaryChars;
+    for (const trailing of [2, 3]) {
+      const count = `(${trailing} more change classes not shown)`;
+      const edge = max - 1 - count.length - base;
+      for (let grow = edge - 20; grow <= edge + 20; grow++) {
+        const { text, shown, cut } = block(grow, trailing);
+        expect(text.length, `${trailing} after, grow ${grow}`).toBeLessThanOrEqual(max);
+        expect(shown.size, `${trailing} after, grow ${grow}`).toBe(grow <= edge ? 5 : 4);
+        expect(cut).toBe(grow <= edge ? trailing : trailing + 1);
+        if (grow === edge) {
+          expect(text.length).toBe(max);
+          expect(text.endsWith(`\n${count}`)).toBe(true);
+        }
+      }
+    }
+  });
+
   test("a first class too large to fit leaves the block with the count alone", () => {
     const pairs = Array.from({ length: 12 }, (_, i) => ({ v: `${i}${"\u{200B}".repeat(299)}` }));
     const bigBefore = { a: pairs, b: pairs, c: pairs, d: pairs, e: pairs, f: pairs };
