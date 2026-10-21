@@ -659,3 +659,463 @@ export function canonicalJson(v: JsonValue): string {
         .join(",")}}`;
   }
 }
+
+// ---------------------------------------------------------------------------------------------
+// The vocabulary of a change (design section 4.1)
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * Every kind of difference the change model can find between two versions of a file, in the order
+ * of the design's table (section 4.1): the loss kinds first, then the relocated, the modifications
+ * and the additive kinds, which is also the order a class renders in (section 5.1). The words are
+ * the platform's own and are printed in a public log, so none of them is built from author text.
+ *
+ * - `column_removed`, `row_removed`, `json_key_removed`: content of the before side that the after
+ *   side does not have and that no rule below accounts for. These are the platform's loss facts.
+ * - `row_relocated`, `json_key_moved`: content that left the file but is verbatim elsewhere in the
+ *   same pull request (design section 4.6); information, not a loss.
+ * - `key_relabeled`, `cell_templated`, `cell_replaced`, `cell_emptied`, `json_value_changed`,
+ *   `json_type_changed`, `json_emptied`, `json_key_renamed`, `json_empty_key_removed`,
+ *   `rows_reordered`, `columns_reordered`, `json_keys_reordered`, `format`: the content is still
+ *   there but different, or only its order or layout changed. Each is shown exactly.
+ * - `column_added`, `row_added`, `cell_filled`, `json_key_added`, `json_filled`: new content, or a
+ *   missing value filled in. They remove nothing, so coverage never needs them shown.
+ */
+export const CLASS_KINDS = [
+  "column_removed",
+  "row_removed",
+  "json_key_removed",
+  "row_relocated",
+  "json_key_moved",
+  "key_relabeled",
+  "cell_templated",
+  "cell_replaced",
+  "cell_emptied",
+  "json_value_changed",
+  "json_type_changed",
+  "json_emptied",
+  "json_key_renamed",
+  "json_empty_key_removed",
+  "rows_reordered",
+  "columns_reordered",
+  "json_keys_reordered",
+  "format",
+  "column_added",
+  "row_added",
+  "cell_filled",
+  "json_key_added",
+  "json_filled",
+] as const;
+export type ClassKind = (typeof CLASS_KINDS)[number];
+
+/** What a kind means for the review: see {@link CLASS_KINDS}. */
+export type ClassRole = "loss" | "relocated" | "modification" | "additive";
+
+/**
+ * The role of every kind. It is a `Record` over {@link ClassKind}, so a kind added to the list
+ * without a role does not compile: a new kind that silently defaulted to "additive" would be a kind
+ * coverage never needed shown, which is the one mistake this table exists to make impossible.
+ */
+export const ROLE_OF: Readonly<Record<ClassKind, ClassRole>> = {
+  column_removed: "loss",
+  row_removed: "loss",
+  json_key_removed: "loss",
+  row_relocated: "relocated",
+  json_key_moved: "relocated",
+  key_relabeled: "modification",
+  cell_templated: "modification",
+  cell_replaced: "modification",
+  cell_emptied: "modification",
+  json_value_changed: "modification",
+  json_type_changed: "modification",
+  json_emptied: "modification",
+  json_key_renamed: "modification",
+  json_empty_key_removed: "modification",
+  rows_reordered: "modification",
+  columns_reordered: "modification",
+  json_keys_reordered: "modification",
+  format: "modification",
+  column_added: "additive",
+  row_added: "additive",
+  cell_filled: "additive",
+  json_key_added: "additive",
+  json_filled: "additive",
+};
+
+/**
+ * A table cell that holds no value: exactly `n/a` or nothing. The set is deliberately narrow. A
+ * wider one (`None`, `unknown`, `NA`) would turn the overwrite of a real value into "filled", which
+ * is additive and needs no display, so the narrower the set the more a change is shown.
+ */
+export function isMissingCell(v: string): boolean {
+  return v === "" || v === "n/a";
+}
+
+/**
+ * A JSON value that holds nothing: `null`, `""`, `"n/a"`, `[]`, `{}`, or an array whose every
+ * element is itself one of these. Narrow for the same reason as {@link isMissingCell}: `0`, `false`,
+ * `"None"` and `{"a": null}` are values.
+ */
+export function isMissingJson(v: JsonValue): boolean {
+  switch (v.t) {
+    case "null":
+      return true;
+    case "str":
+      return v.v === "" || v.v === "n/a";
+    case "arr":
+      return v.v.every(isMissingJson);
+    case "obj":
+      return v.keys.length === 0;
+    default:
+      return false;
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Relabel rules (design section 4.3)
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * One exact description of how a name or a cell became another, written so that it is a function of
+ * the BEFORE value: a class that holds one rule describes every member of the class completely, and
+ * a member the rule does not describe has a different rule or none.
+ */
+export interface RelabelRule {
+  /**
+   * `case`: only letter case changed. `wrap` and `strip`: text was added around the value, or
+   * removed from around it. `repad`: only the zero padding of numbers changed. `insert` and
+   * `delete`: text was added to or removed from between the parts of the value.
+   */
+  kind: "case" | "wrap" | "strip" | "repad" | "insert" | "delete";
+  /**
+   * `wrap`/`strip`: the text before and the text after, `[prefix, suffix]`. `insert`/`delete`: the
+   * text added or removed before each kept part and after the last one, so one more than the number
+   * of kept parts. `case`/`repad`: empty.
+   */
+  gaps: readonly string[];
+  /**
+   * `insert`/`delete`: the kept parts, one letter each, `L` for a run of letters, `D` for a run of
+   * digits and `O` for one other character; or `c<n>` for a character rule that keeps `n`
+   * characters. Empty for every other kind.
+   */
+  shape: string;
+  /** A number kept its value but changed its zero padding (`1` to `01`). */
+  repadded: boolean;
+}
+
+/**
+ * Both sides are plain decimal numbers. Such a pair never gets a rule: `64` to `640` is a replaced
+ * value, not "a 0 was added", and a rule would file a changed measurement under a name that sounds
+ * like formatting.
+ */
+const NUMERIC_TEXT = /^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/;
+const ASCII_DIGITS = /^[0-9]+$/;
+const LETTER = /^\p{L}$/u;
+const NUMBER_CHARACTER = /^\p{N}$/u;
+
+type RunClass = "L" | "D" | "O";
+
+/** A part of a name: a run of letters, a run of digits, or one other character. */
+interface Run {
+  cls: RunClass;
+  text: string;
+  /**
+   * What two runs are compared by. Letters and other characters: exactly their text. Digits:
+   * their value, so `01` and `1` are one number, but only for ASCII digits; any other digit
+   * (Arabic-Indic, a superscript, a fraction) is compared as the text it is, because it has no
+   * value this module can vouch for.
+   */
+  norm: string;
+}
+
+function normalizeRun(cls: RunClass, text: string): string {
+  return cls === "D" && ASCII_DIGITS.test(text) ? text.replace(/^0+(?=[0-9])/, "") : text;
+}
+
+function runClassOf(ch: string): RunClass {
+  if (LETTER.test(ch)) return "L";
+  if (NUMBER_CHARACTER.test(ch)) return "D";
+  return "O";
+}
+
+/** Whether a string is longer than `maxKeyChars` code points, without counting a long one in full. */
+function exceedsKeyChars(s: string): boolean {
+  const max = SUMMARY_LIMITS.maxKeyChars;
+  if (s.length <= max) return false;
+  if (s.length > 2 * max) return true;
+  let points = 0;
+  for (const _ of s) if (++points > max) return true;
+  return false;
+}
+
+/**
+ * Split a name into runs, or null when it has more than `maxRuns` of them. The caller has already
+ * bounded the length in code points.
+ */
+function splitRuns(s: string): Run[] | null {
+  const runs: Run[] = [];
+  let cls: RunClass | null = null;
+  let text = "";
+  const flush = (): void => {
+    if (cls !== null) runs.push({ cls, text, norm: normalizeRun(cls, text) });
+  };
+  for (const ch of s) {
+    const next = runClassOf(ch);
+    // Letters and digits extend the run they are in; every other character is a run of its own.
+    if (cls === next && next !== "O") {
+      text += ch;
+      continue;
+    }
+    flush();
+    if (runs.length >= SUMMARY_LIMITS.maxRuns) return null;
+    cls = next;
+    text = ch;
+  }
+  flush();
+  return runs;
+}
+
+function sameRun(a: Run, b: Run): boolean {
+  return a.cls === b.cls && a.norm === b.norm;
+}
+
+/** The leftmost offset at which all of `short` appears among the runs of `long`, or -1. */
+function findContiguous(short: readonly Run[], long: readonly Run[]): number {
+  for (let k = 0; k + short.length <= long.length; k++) {
+    let all = true;
+    for (let i = 0; i < short.length && all; i++) {
+      all = sameRun(short[i] as Run, long[k + i] as Run);
+    }
+    if (all) return k;
+  }
+  return -1;
+}
+
+/**
+ * Match the runs of `short` against the TEXT of `long`, in order, and return the text left over
+ * between the matches (one more gap than there are runs), or null when they do not all match.
+ *
+ * A digit run matches only a whole digit run of the same value. A letter run or another character
+ * matches an occurrence of its text, preferably one that starts and ends where a run of `long`
+ * does, else the first occurrence after the previous match: `GA` is in `EEGGA` only as its tail, and
+ * that is how `GA01` becomes `EEGGA_01REF`. The choice is greedy and never backs up, so a name that
+ * could only match by a different earlier choice gets no rule, which shows MORE change (a removal
+ * and an addition), never less. Whatever choice is made, the gaps and the matched text rebuild
+ * `long` exactly, so the rule is an exact description either way.
+ */
+function matchInOrder(
+  short: readonly Run[],
+  long: readonly Run[],
+): { gaps: string[]; repadded: boolean } | null {
+  const text = long.map((run) => run.text).join("");
+  const starts: number[] = [];
+  const boundary = new Set<number>();
+  let offset = 0;
+  for (const run of long) {
+    starts.push(offset);
+    boundary.add(offset);
+    offset += run.text.length;
+  }
+  boundary.add(offset);
+
+  const gaps: string[] = [];
+  let position = 0;
+  let repadded = false;
+  for (const run of short) {
+    let at = -1;
+    let length = run.text.length;
+    if (run.cls === "D") {
+      for (let i = 0; i < long.length; i++) {
+        const candidate = long[i] as Run;
+        if (
+          (starts[i] as number) >= position &&
+          candidate.cls === "D" &&
+          candidate.norm === run.norm
+        ) {
+          at = starts[i] as number;
+          length = candidate.text.length;
+          if (candidate.text !== run.text) repadded = true;
+          break;
+        }
+      }
+    } else {
+      let first = -1;
+      for (let q = text.indexOf(run.text, position); q !== -1; q = text.indexOf(run.text, q + 1)) {
+        if (first === -1) first = q;
+        if (boundary.has(q) && boundary.has(q + length)) {
+          at = q;
+          break;
+        }
+      }
+      if (at === -1) at = first;
+    }
+    if (at === -1) return null;
+    gaps.push(text.slice(position, at));
+    position = at + length;
+  }
+  gaps.push(text.slice(position));
+  return { gaps, repadded };
+}
+
+/** The rules over runs: `repad`, `wrap`/`strip`, then `insert`/`delete`. */
+function runRule(before: readonly Run[], after: readonly Run[]): RelabelRule | null {
+  if (before.length === after.length) {
+    // Same number of parts: only a number's padding can be the whole difference.
+    let repadded = false;
+    for (let i = 0; i < before.length; i++) {
+      const b = before[i] as Run;
+      const a = after[i] as Run;
+      if (!sameRun(b, a)) return null;
+      if (b.text !== a.text) repadded = true;
+    }
+    return repadded ? { kind: "repad", gaps: [], shape: "", repadded: true } : null;
+  }
+
+  const beforeShorter = before.length < after.length;
+  const short = beforeShorter ? before : after;
+  const long = beforeShorter ? after : before;
+
+  const k = findContiguous(short, long);
+  if (k >= 0) {
+    const prefix = long
+      .slice(0, k)
+      .map((run) => run.text)
+      .join("");
+    const suffix = long
+      .slice(k + short.length)
+      .map((run) => run.text)
+      .join("");
+    const repadded = short.some((run, i) => run.text !== (long[k + i] as Run).text);
+    return { kind: beforeShorter ? "wrap" : "strip", gaps: [prefix, suffix], shape: "", repadded };
+  }
+
+  const matched = matchInOrder(short, long);
+  // A match with nothing between the parts cannot happen for names with fewer runs; refusing it
+  // costs nothing and keeps a rule from claiming an insertion that inserted nothing.
+  if (matched === null || matched.gaps.every((gap) => gap === "")) return null;
+  return {
+    kind: beforeShorter ? "insert" : "delete",
+    gaps: matched.gaps,
+    shape: short.map((run) => run.cls).join(""),
+    repadded: matched.repadded,
+  };
+}
+
+/**
+ * The last rule: the shorter string is a subsequence of the longer one, character by character.
+ * The leftmost subsequence is used, so the result depends only on the two strings. It is the rule
+ * for `DCEMBRACE` becoming `DC EMBRACE-REF`, where no part of the first survives whole.
+ */
+function characterRule(before: string, after: string): RelabelRule | null {
+  const b = Array.from(before);
+  const a = Array.from(after);
+  if (b.length === a.length) return null;
+  const beforeShorter = b.length < a.length;
+  const short = beforeShorter ? b : a;
+  const long = beforeShorter ? a : b;
+  const gaps: string[] = [];
+  let gap = "";
+  let j = 0;
+  for (const ch of long) {
+    if (j < short.length && ch === short[j]) {
+      gaps.push(gap);
+      gap = "";
+      j++;
+    } else {
+      gap += ch;
+    }
+  }
+  if (j < short.length) return null;
+  gaps.push(gap);
+  return {
+    kind: beforeShorter ? "insert" : "delete",
+    gaps,
+    shape: `c${short.length}`,
+    repadded: false,
+  };
+}
+
+/**
+ * The first rule that says how `before` became `after`, or null. In order: `case` (equal once both
+ * are lower-cased); then, over the runs of each string (a maximal run of letters, a maximal run of
+ * digits, or one other character; digits compared by value, so `01` is `1`), `repad`, `wrap` or
+ * `strip` (the shorter string's runs sit contiguously in the longer one), and `insert` or `delete`
+ * (they sit in order, with text between them); and only when `opts.chars` is set, the character
+ * rule. Cells never ask for characters: a changed character in a cell is a replaced value.
+ *
+ * A pair gets no rule when the strings are equal, either is empty, either is longer than
+ * `maxKeyChars` code points or has more than `maxRuns` runs (a long text is not a name, and an
+ * unbounded search would be a way to stall the review), or both are plain numbers. Every case that
+ * gets no rule is shown as a removal and an addition or as a replaced value, which is more change
+ * shown, never less. One consequence worth knowing: `A1` to `A10` has no run rule (`1` is not `10`)
+ * but, with characters allowed, `A10` is `A1` with a `0` inserted at the end; a keyed table asks for
+ * that only when every other cell of the row is equal.
+ */
+export function relabelRule(
+  before: string,
+  after: string,
+  opts: { chars: boolean },
+): RelabelRule | null {
+  if (before === after || before === "" || after === "") return null;
+  if (exceedsKeyChars(before) || exceedsKeyChars(after)) return null;
+  if (NUMERIC_TEXT.test(before) && NUMERIC_TEXT.test(after)) return null;
+  if (before.toLowerCase() === after.toLowerCase()) {
+    return { kind: "case", gaps: [], shape: "", repadded: false };
+  }
+  const b = splitRuns(before);
+  const a = splitRuns(after);
+  if (b === null || a === null) return null;
+  const byRuns = runRule(b, a);
+  if (byRuns !== null) return byRuns;
+  return opts.chars ? characterRule(before, after) : null;
+}
+
+const REPAD_WORDS = "zero padding of numbers changed";
+
+/** `a`, `a and b`, `a, b and c`. */
+function joinWords(parts: readonly string[]): string {
+  if (parts.length <= 1) return parts.join("");
+  return `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}`;
+}
+
+/**
+ * A rule in plain English, for the class line. Deterministic, and injective enough that two rules
+ * that read the same differ only in text the rule itself holds. The only author text in it is the
+ * gap strings, which are written between straight double quotes exactly as they are, with no
+ * escaping: the renderer that puts the line in front of the model escapes the whole line, so doing
+ * it here too would show the escapes twice. A gap that itself holds a double quote therefore reads
+ * ambiguously; the class key is the rule's own fields, not this text, so two such rules still
+ * stay two classes.
+ */
+export function ruleWords(rule: RelabelRule): string {
+  const tail = rule.repadded ? `, ${REPAD_WORDS}` : "";
+  switch (rule.kind) {
+    case "case":
+      return "letter case changed";
+    case "repad":
+      return REPAD_WORDS;
+    case "wrap":
+    case "strip": {
+      const [prefix = "", suffix = ""] = rule.gaps;
+      const parts: string[] = [];
+      if (prefix !== "") parts.push(`prefix "${prefix}"`);
+      if (suffix !== "") parts.push(`suffix "${suffix}"`);
+      return `${rule.kind === "wrap" ? "added" : "removed"} ${joinWords(parts)}${tail}`;
+    }
+    case "insert":
+    case "delete": {
+      const characters = /^c[0-9]+$/.test(rule.shape);
+      const unit = characters ? "character" : "run";
+      const places: string[] = [];
+      rule.gaps.forEach((gap, i) => {
+        if (gap === "") return;
+        places.push(`"${gap}" ${i === 0 ? "at the start" : `after ${unit} ${i}`}`);
+      });
+      const kept = characters
+        ? `characters kept: ${rule.shape.slice(1)}`
+        : `runs kept: ${[...rule.shape].map((c) => (c === "L" ? "letters" : c === "D" ? "digits" : "a character")).join(", ")}`;
+      const verb = rule.kind === "insert" ? "inserted" : "deleted";
+      return `${verb} ${joinWords(places)} (${kept})${tail}`;
+    }
+  }
+}
