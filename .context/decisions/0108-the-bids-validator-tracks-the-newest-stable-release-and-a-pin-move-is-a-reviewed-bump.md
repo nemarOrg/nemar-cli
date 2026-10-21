@@ -22,7 +22,7 @@ Every validation report the CLI writes names the release that produced it.
 
 A new major version reaches a pull request without a code change, and the browser build can use the same release as the CLI.
 A major version can change which datasets pass, so each bump is a review decision rather than an automatic one, and a reference set of about a dozen datasets is a sample: a change that only shows on other layouts is found by the full run, not by the monthly pull request.
-The central filter removes findings at annex-pointer locations only, so a finding that a release reports at a sidecar file, because its data file is an unfetched annex link, is not removed by it; the comparison is what finds those.
+The central filter removes findings at annex-pointer locations only, so a finding that a release reports at a sidecar file is not removed by it. A link to a git-annex key, which is what an unfetched annex file is, was read as present by the release compared and changed nothing; a link to no key was reported as broken with its sidecar as orphaned, so the comparison carries that layout as a detector and not as a layout that exists.
 The validator version appears in the CLI's reports now; the central workflow's check-run gets it from the dispatch payload when that workflow is changed to print it.
 
 ## Alternatives considered
