@@ -33,6 +33,7 @@ import {
 import { dirname, join } from "node:path";
 import { spawn } from "bun";
 import { ABSENT_DATASET_ID } from "../backend/src/services/datasetId";
+import validatorPin from "../validator-version.json" with { type: "json" };
 import { LIVE_TARGET_BLOCKED, TEST_CONFIG, sleep } from "./setup";
 
 /**
@@ -470,20 +471,35 @@ describe("CLI Dataset Validate", () => {
     const { stdout, exitCode } = await runCli(["dataset", "validate", testDatasetDir]);
 
     expect(exitCode).toBe(0);
-    // Native bids-validator text output includes a Summary table
+    // Native bids-validator text output includes a Summary table, and names the release it came from
     expect(stdout).toContain("Summary:");
+    expect(stdout).toContain(`Validator: @bids/validator ${validatorPin.version}`);
   });
 
-  test("nemar dataset validate --json outputs JSON", async () => {
+  test("nemar dataset validate --json outputs the report alone, with the release that produced it", async () => {
     const { stdout, exitCode } = await runCli(["dataset", "validate", testDatasetDir, "--json"]);
 
     expect(exitCode).toBe(0);
-    // Raw bids-validator JSON output has { issues: { issues: [...] }, summary: {...} }
-    const jsonMatch = stdout.match(/\{[\s\S]*\}/);
-    expect(jsonMatch).not.toBeNull();
-    const result = JSON.parse(jsonMatch![0]);
-    expect(result.issues).toBeDefined();
+    // The whole of stdout is one JSON object: { issues: { issues: [...] }, summary: {...}, validatorVersion }
+    const result = JSON.parse(stdout);
+    expect(result.issues.issues).toEqual(expect.any(Array));
     expect(result.summary).toBeDefined();
+    expect(result.validatorVersion).toBe(validatorPin.version);
+  });
+
+  test("nemar dataset validate --json with a flag the validator rejects fails and prints no report", async () => {
+    const { stdout, stderr, exitCode } = await runCli([
+      "dataset",
+      "validate",
+      testDatasetDir,
+      "--json",
+      "--flag-that-does-not-exist",
+    ]);
+
+    expect(exitCode).not.toBe(0);
+    expect(exitCode).not.toBe(16);
+    expect(() => JSON.parse(stdout)).toThrow();
+    expect(stderr).toContain("flag-that-does-not-exist");
   });
 
   test("nemar dataset validate with non-existent path fails", async () => {

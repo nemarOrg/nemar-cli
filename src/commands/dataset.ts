@@ -77,6 +77,7 @@ import { isAwsCliAvailable } from "../lib/aws-cli.js";
 import { type BidsFilterResult, buildBidsFilterArgs, chooseGetFilter } from "../lib/bids-filter.js";
 import {
   type BidsValidationResult,
+  VALIDATOR_ERRORS_FOUND_EXIT,
   VALIDATOR_VERSION,
   checkDenoInstalled,
   formatValidationResult,
@@ -508,13 +509,24 @@ datasetCommand
         process.exit(1);
       }
 
-      // Has output: validation ran (exit 0 = valid, exit 1 = errors found)
+      // 0 means valid and 16 means the validator found errors. Any other exit is a failed run: its
+      // own output (usage text, a crash) is shown instead of a report.
+      if (exitCode !== 0 && exitCode !== VALIDATOR_ERRORS_FOUND_EXIT) {
+        spinner.fail("Validation failed");
+        console.error(
+          stderr.trim() || stdout.trim() || `BIDS validator exited with code ${exitCode}`,
+        );
+        process.exit(exitCode);
+      }
+
       spinner.succeed("Validation complete");
 
-      if (stdout.trim()) {
-        console.log(options.json ? withValidatorVersion(stdout) : stdout);
-      }
-      if (!options.json) {
+      if (options.json) {
+        console.log(withValidatorVersion(stdout));
+      } else {
+        if (stdout.trim()) {
+          console.log(stdout);
+        }
         console.log(`Validator: @bids/validator ${VALIDATOR_VERSION}`);
       }
 

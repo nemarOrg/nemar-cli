@@ -23,6 +23,9 @@ export const VALIDATOR_VERSION = validatorPin.version;
 const VALIDATOR_JSR_SPECIFIER = `${validatorPin.specifier}@${VALIDATOR_VERSION}`;
 const STALE_THRESHOLD_MS = 24 * 60 * 60 * 1000; // 1 day — pin changes monthly via bump-validator.yml
 
+/** The validator's exit code when it finds errors in a dataset. 0 means valid; any other exit is a failed run. */
+export const VALIDATOR_ERRORS_FOUND_EXIT = 16;
+
 /**
  * BIDS validation issue from the validator
  */
@@ -141,6 +144,7 @@ export async function updateValidatorCache(): Promise<string | null> {
       cmd: [
         "deno",
         "run",
+        "--node-modules-dir=none",
         `--reload=${VALIDATOR_JSR_SPECIFIER}`,
         "-ERWN",
         VALIDATOR_JSR_SPECIFIER,
@@ -251,18 +255,26 @@ export async function validateBidsDataset(
     cmd: ["deno", ...args],
     stdout: "pipe",
     stderr: "pipe",
+    // Plain messages: colour codes would hide the validator's own "error:" line from the failure below.
+    env: { ...process.env, NO_COLOR: "1" },
   });
 
   const stdout = await new Response(proc.stdout).text();
   const stderr = await new Response(proc.stderr).text();
   const exitCode = await proc.exited;
 
-  // Handle errors
-  if (exitCode !== 0 && !stdout.trim()) {
+  // 0 means valid and 16 means the validator found errors. Any other exit is a failed run, and the
+  // last line it wrote says why.
+  if (exitCode !== 0 && exitCode !== VALIDATOR_ERRORS_FOUND_EXIT) {
+    const lastLine = stderr
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .pop();
     throw new Error(
-      stderr.includes("error:")
-        ? stderr.split("\n").find((l) => l.includes("error:")) || "Validation failed"
-        : `Validation failed with exit code ${exitCode}`,
+      lastLine
+        ? `BIDS validator failed (exit ${exitCode}): ${lastLine}`
+        : `BIDS validator failed with exit code ${exitCode}`,
     );
   }
 
@@ -281,7 +293,11 @@ export async function validateBidsDataset(
     throw new Error(`Failed to parse validator output: ${stdout.slice(0, 200)}`);
   }
 
-  const issues = result.issues.issues || [];
+  // A report without a list of issues is not a clean report: refuse it rather than read it as valid.
+  if (!Array.isArray(result?.issues?.issues)) {
+    throw new Error("The BIDS validator's report has no list of issues");
+  }
+  const issues = result.issues.issues;
   const errorCount = issues.filter((i) => i.severity === "error").length;
   const warningCount = issues.filter((i) => i.severity === "warning").length;
 
@@ -321,19 +337,20 @@ export async function runBidsValidatorDirect(
 
 /**
  * Add the validator version to a `--json` report. The report is the validator's own JSON object,
- * so the version is one more top-level key. Output that is not a JSON object is returned unchanged.
+ * so the version is one more top-level key, and the report stays on one line. Output that is not a
+ * JSON object is refused: a `--json` consumer must not read it as a report.
  */
 export function withValidatorVersion(report: string): string {
   let parsed: unknown;
   try {
     parsed = JSON.parse(report);
   } catch {
-    return report;
+    throw new Error("The BIDS validator did not print a JSON report");
   }
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-    return report;
+    throw new Error("The BIDS validator's JSON report is not an object");
   }
-  return JSON.stringify({ ...parsed, validatorVersion: VALIDATOR_VERSION }, null, 2);
+  return JSON.stringify({ ...parsed, validatorVersion: VALIDATOR_VERSION });
 }
 
 /**
