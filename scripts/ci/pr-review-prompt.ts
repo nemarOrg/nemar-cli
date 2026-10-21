@@ -38,6 +38,7 @@ import {
   type ReviewUsage,
   SCREEN_MODELS,
   SEVERITIES,
+  isOneOf,
   parsePrReviewReport,
 } from "../../shared/pr-review";
 import { fence as fenceUntrusted, tidy, tidyPath } from "../../shared/untrusted-text";
@@ -584,8 +585,9 @@ export function assembleFactsReport(evidence: ReviewEvidence): PrReviewReport {
  * criterion that fails with none, and it lowers a `pass` criterion that has a blocker before it
  * trims, so a platform finding has already lowered `no_degradation` whatever is trimmed.
  *
- * The models' findings beyond the room are dropped here rather than failing the review; everything
- * else that does not fit is an error the caller reports as `model_invalid`.
+ * The models' findings beyond the room are dropped here rather than failing the review, and a
+ * dropped one still lowers what it would have lowered had it fit; everything else that does not fit
+ * is an error the caller reports as `model_invalid`.
  */
 export function assembleReport(
   screenOutput: unknown,
@@ -667,22 +669,44 @@ export function assembleReport(
   const findings = Array.isArray(modelFindings)
     ? [...platform, ...modelFindings.slice(0, room), ...added]
     : modelFindings;
+  const criteria: Record<Criterion, unknown> = {
+    genuine_contribution: "pass",
+    no_degradation: answers.no_degradation,
+    advances_revision: answers.advances_revision,
+    material_improvement: answers.material_improvement,
+    clear_title_and_description: titleOk && bodyOk ? "pass" : "fail",
+    description_not_misleading: misleading ? "fail" : "pass",
+  };
+  // A model finding cut for room still does what the parser does with a finding before it trims
+  // any: a steering finding makes the report a steering attempt, and a blocker lowers a `pass` of
+  // its criterion to `unknown`. Without this, making room for the platform's or the script's
+  // findings could raise a verdict: a steering finding cut from the end of eight would no longer
+  // fail the review. It only ever lowers. `genuine_contribution`, which a full report keeps at
+  // `pass`, is not a criterion a review finding may name, so it is never lowered here; anything
+  // that is not a finding is skipped, as the cut skipped it before.
+  let steering: unknown = m.steering;
+  if (Array.isArray(modelFindings)) {
+    for (const f of modelFindings.slice(room)) {
+      if (!isRecordValue(f)) continue;
+      if (f.code === "steering_attempt" && steering === false) steering = true;
+      if (
+        f.severity === "blocker" &&
+        isOneOf(REVIEW_FINDING_CRITERIA, f.criterion) &&
+        criteria[f.criterion] === "pass"
+      ) {
+        criteria[f.criterion] = "unknown";
+      }
+    }
+  }
 
   return parsePrReviewReport({
     v: REPORT_VERSION,
     stage: "full",
     models: { screen: SCREEN_MODEL, review: REVIEW_MODEL },
-    criteria: {
-      genuine_contribution: "pass",
-      no_degradation: answers.no_degradation,
-      advances_revision: answers.advances_revision,
-      material_improvement: answers.material_improvement,
-      clear_title_and_description: titleOk && bodyOk ? "pass" : "fail",
-      description_not_misleading: misleading ? "fail" : "pass",
-    },
+    criteria,
     findings,
     summary: m.summary,
-    steering: m.steering,
+    steering,
     evidence,
     usage,
   });

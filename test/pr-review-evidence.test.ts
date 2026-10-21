@@ -5203,6 +5203,84 @@ describe("the platform's findings from the change summary", () => {
     );
   });
 
+  test("a model finding cut for room still lowers: a steering finding fails, a blocker lowers its pass", () => {
+    const e = buildEvidence(both(), NO_TEXT_PROBLEMS);
+    const platform = platformFindings(both().summary);
+    // Six findings fit after the platform's two; the seventh and eighth are cut.
+    const six = Array.from({ length: 6 }, (_, i) => modelFinding(i));
+    const filler = modelFinding(6);
+    const steer = {
+      ...modelFinding(7, "description_not_misleading"),
+      severity: "concern",
+      code: "steering_attempt",
+    };
+    const steered = reviewOutput({ findings: [...six, filler, steer] });
+    // The control: without the platform's findings the steering finding fits, and fails the review.
+    expect(full(steered, e).steering).toBe(true);
+    expect(verdictOf(full(steered, e))).toBe("fail");
+    const cut = full(steered, e, platform);
+    expect(cut.findings.map(label)).toEqual([
+      "data_removed",
+      "metadata_removed",
+      ...six.map(label),
+    ]);
+    expect(cut.steering).toBe(true);
+    expect(verdictOf(cut)).toBe("fail");
+    // The steering finding was a concern: like the parser, the cut lowers nothing for one.
+    expect(cut.criteria.description_not_misleading).toBe("pass");
+
+    // A blocker cut for room lowers its criterion's pass, as the parser does with one that fits.
+    const blocker = (i: number, criterion: string) => ({
+      ...modelFinding(i, criterion),
+      severity: "blocker",
+      code: "changes_log_mismatch",
+    });
+    const blocked = reviewOutput({ findings: [...six, filler, blocker(7, "advances_revision")] });
+    expect(full(blocked, e).criteria.advances_revision).toBe("unknown");
+    const lowered = full(blocked, e, platform);
+    expect(lowered.findings.map(label)).not.toContain("changes_log_mismatch");
+    expect(lowered.criteria.advances_revision).toBe("unknown");
+    expect(lowered.criteria.material_improvement).toBe("pass");
+    expect(lowered.criteria.genuine_contribution).toBe("pass");
+
+    // It only lowers: a fail stays a fail and an unknown stays unknown; a steering flag the review
+    // set stays set; the screen's criterion, which a full report keeps at pass, is never touched;
+    // and an item that is not a finding is skipped, as the cut skipped it before.
+    const only = full(
+      reviewOutput({
+        criteria: {
+          no_degradation: "pass",
+          advances_revision: "fail",
+          material_improvement: "unknown",
+        },
+        steering: true,
+        findings: [
+          ...six,
+          null,
+          "not a finding",
+          blocker(8, "advances_revision"),
+          blocker(9, "material_improvement"),
+          blocker(10, "genuine_contribution"),
+        ],
+      }),
+      e,
+      platform,
+    );
+    expect(only.criteria).toMatchObject({
+      genuine_contribution: "pass",
+      advances_revision: "fail",
+      material_improvement: "unknown",
+    });
+    expect(only.steering).toBe(true);
+    expect(verdictOf(only)).toBe("fail");
+
+    // The same gap, closed for the script's own added findings: a failed title with no finding of
+    // the review's takes one place, and the review's eighth finding, a steering one, is cut.
+    const titled = full(reviewOutput({ title_ok: false, findings: [...six, filler, steer] }), e);
+    expect(titled.findings.map(label)).toEqual([...six.map(label), "M6", "title_not_descriptive"]);
+    expect(titled.steering).toBe(true);
+  });
+
   test("a removal the summary accounts for is not a pass", () => {
     const row = removed("pf-row", ["sub-01"], []);
     // The table counts as read: its change was accounted for exactly, the removed row included.
