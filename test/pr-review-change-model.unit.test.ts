@@ -4404,6 +4404,45 @@ describe("the diffs are bounded in time on large and hostile input", () => {
     expect(ms).toBeLessThan(3000);
   }, 30_000);
 
+  test("candidate pairs on many-run keys are charged by their run pairs, and the worst stays fast", () => {
+    // 100,000 keys of 23 runs against keys of 24 runs: every pair tried matches run against run and
+    // then tries characters, and fails at the last digit. Charged one step per 8 pairs of runs, the
+    // tries spend the budget midway through the walk by position, in well under 3 seconds (about
+    // 0.75 s measured), so the nine real insertions at the end, which only that walk finds, stay a
+    // removal and an addition. Charged by characters alone the budget would last and they would pair.
+    const tag = (i: number): string => {
+      let out = "";
+      for (let k = 0, n = i; k < 4; k++, n = Math.floor(n / 26))
+        out += String.fromCharCode(97 + (n % 26));
+      return out;
+    };
+    const before = ["name\ttype"];
+    const after = ["name\ttype"];
+    for (let i = 0; i < 100_000; i++) {
+      before.push(`${"x1".repeat(10)}x9${tag(i)}\tE`);
+      after.push(`${"xxxxx1".repeat(10)}xxxxx8-${tag(i)}Q\tE`);
+    }
+    for (let i = 1; i <= 9; i++) {
+      before.push(`GA0${i}\tE`);
+      after.push(`EEGGA_0${i}REF\tE`);
+    }
+    const { value, ms } = timed(() => diffTable(channels, big(before), big(after), noPool.rows));
+    expect(ms).toBeLessThan(3000);
+    expect(value.ok).toBe(true);
+    if (!value.ok) return;
+    expect(kindCount(value.value, "key_relabeled")).toBe(0);
+    expect(
+      value.value.atoms.filter((a) => a.kind === "row_removed").map((a) => a.before),
+    ).toContain("GA01");
+    // The same nine insertions alone pair, so it is the budget that stopped them.
+    const alone = diffText(
+      channels,
+      tsv(["name", "type"], ...Array.from({ length: 9 }, (_, i) => [`GA0${i + 1}`, "E"])),
+      tsv(["name", "type"], ...Array.from({ length: 9 }, (_, i) => [`EEGGA_0${i + 1}REF`, "E"])),
+    );
+    expect(kindCount(alone, "key_relabeled")).toBe(9);
+  }, 30_000);
+
   test("candidate pairs on long keys are charged by size, so they spend the budget too", () => {
     // 7,000 added keys each look up a 100-letter word that 1,000 gone keys share, and try 64 of them;
     // every try fails on its cells. Charged by the size of the keys, those tries spend the whole

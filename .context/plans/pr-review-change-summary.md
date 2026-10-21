@@ -329,9 +329,10 @@ So a table of ids alone, or of `n/a`, has no evidence, and `1` removed with `sub
 
 **Bounds** (D10).
 A lookup looks at no more than 64 candidates, counting the ones already paired, and passes a paired prefix of a candidate list with a cursor that only moves forward, so the work of one lookup does not grow with what was paired before it.
-All pairing passes of one file (the four relabel passes, and the keyless pairing of section 4.5) share one step budget, `maxPairingSteps` (section 5.2): a substring looked up costs one step, a candidate pair tried costs a fixed part plus one step per 8 characters of the two keys and per 8 compared cells, a keyless pair compared one step plus one per 8 cells.
+All pairing passes of one file (the four relabel passes, and the keyless pairing of section 4.5) share one step budget, `maxPairingSteps` (section 5.2): a substring looked up costs one step, a candidate pair tried costs a fixed part plus one step per 8 characters of the two keys and per 8 compared cells, and one per 8 pairs of runs (the rules match the runs of one name against the runs of the other; D16), a keyless pair compared one step plus one per 8 cells.
+Rule 4 finds the occurrence of a letter or other run that starts and ends on run boundaries among the runs of the longer name (such an occurrence is always a whole run), so its cost does not grow with how often the text repeats.
 When the budget is spent no further pair is made, and whatever is unpaired is removed and added, exactly as if no rule had held: the budget can only show more change, it never pairs a row it did not check, and it is spent in the same order on every run.
-Measured: 100,000 case variants of one word relabel in about 0.2 s, a hostile table that spends the whole budget takes under 1 s, and a legitimate 200,000-row relabel uses about a quarter of the budget.
+Measured on a laptop: 100,000 case variants of one word relabel in about 0.2 s; the costliest crafted tables that fit in 8 MiB spend the whole budget in about 0.75 s (100,000 keys of 23 runs tried against keys of 24, each failing only at its last digit) and 0.76 s (keys whose every substring is looked up and missed); legitimate 200,000-row relabels use 28% of the budget (a prefix stripped) to 66% (a prefix added with every age changed, so only the lenient pass pairs them).
 
 Every pair, kept keys included, then has its common non-key cells compared (section 4.1), and the after positions of the paired rows, taken in before order, decide `rows_reordered`.
 

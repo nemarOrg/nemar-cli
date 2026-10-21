@@ -966,14 +966,11 @@ function matchInOrder(
 ): { gaps: string[]; repadded: boolean } | null {
   const text = long.map((run) => run.text).join("");
   const starts: number[] = [];
-  const boundary = new Set<number>();
   let offset = 0;
   for (const run of long) {
     starts.push(offset);
-    boundary.add(offset);
     offset += run.text.length;
   }
-  boundary.add(offset);
 
   const gaps: string[] = [];
   let position = 0;
@@ -996,15 +993,23 @@ function matchInOrder(
         }
       }
     } else {
-      let first = -1;
-      for (let q = text.indexOf(run.text, position); q !== -1; q = text.indexOf(run.text, q + 1)) {
-        if (first === -1) first = q;
-        if (boundary.has(q) && boundary.has(q + length)) {
-          at = q;
+      // An occurrence that starts and ends where runs of `long` do is a whole run of `long` with
+      // this text: a letter run is maximal (a letter next to it would have joined it), and any other
+      // character is a run of its own. So it is found among the runs, never by scanning every
+      // occurrence of the text, which a hostile name can make hundreds; failing that, the first
+      // occurrence after the previous match.
+      for (let i = 0; i < long.length; i++) {
+        const candidate = long[i] as Run;
+        if (
+          (starts[i] as number) >= position &&
+          candidate.cls === run.cls &&
+          candidate.text === run.text
+        ) {
+          at = starts[i] as number;
           break;
         }
       }
-      if (at === -1) at = first;
+      if (at === -1) at = text.indexOf(run.text, position);
     }
     if (at === -1) return null;
     gaps.push(text.slice(position, at));
@@ -1685,14 +1690,15 @@ const LOOKUP_CANDIDATE_CAP = 64;
 /**
  * What the pairing passes spend of `maxPairingSteps`. A step is about the cost of one substring
  * looked up in an index (a slice and a map lookup). A candidate pair tried costs its evidence (one
- * comparison per cell) and its relabel rule (work in proportion to the two names), so it is charged
- * by size: a fixed part, and one step per 8 characters of the two keys and per 8 compared cells.
- * The weights follow measured costs, so the budget bounds time, not a count of attempts that can be
- * cheap or dear.
+ * comparison per cell) and its relabel rule, whose work grows with the characters of the two names
+ * (case, the character rule) and with the product of their run counts (matching the runs of one
+ * against the runs of the other), so it is charged by all three: a fixed part, one step per 8
+ * characters and compared cells, and one per 8 pairs of runs. The weights follow measured costs,
+ * so the budget bounds time, not a count of attempts that can be cheap or dear.
  */
 const PROBE_STEPS = 1;
-function candidateSteps(keyChars: number, cellCount: number): number {
-  return 4 + ((keyChars + cellCount) >> 3);
+function candidateSteps(keyChars: number, cellCount: number, runPairs: number): number {
+  return 4 + ((keyChars + cellCount) >> 3) + (runPairs >> 3);
 }
 function nearSteps(cellCount: number): number {
   return 1 + (cellCount >> 3);
@@ -2047,7 +2053,10 @@ export function diffTableWith(
     ): RelabelRule | null => {
       const b = nameBefore(bi);
       const a = nameAfter(ai);
-      if (!spend(candidateSteps(b.text.length + a.text.length, cells.length))) return null;
+      const runPairs = (b.runs?.length ?? 0) * (a.runs?.length ?? 0);
+      if (!spend(candidateSteps(b.text.length + a.text.length, cells.length, runPairs))) {
+        return null;
+      }
       const { equal, differ } = evidence(bi, ai);
       if (strict && differ > 0) return null;
       const rule = relabelNames(b, a, { chars });
