@@ -5194,11 +5194,12 @@ describe("the platform's findings from the change summary", () => {
     ]);
   });
 
-  test("they survive the most room the parser can need for criteria that fail without a finding", () => {
-    // Four criteria fail: two the review failed silently, and two text judgments whose findings
-    // came last. In a full report the screen's criterion passes and the platform's findings explain
-    // the first question, so four is the most. The review's two reasons are kept before its other
-    // findings, and the parser explains the other two in the places left for them.
+  test("with platform findings the parser explains at most two criteria, after the review's reasons", () => {
+    // Four criteria fail: two questions the review failed silently, and two text judgments whose
+    // reasons came last. The platform's findings explain the first question and a failed text
+    // judgment always carries a reason, the review's or the script's, so the parser is left at
+    // most the two other questions. The review's reasons keep their places before its other
+    // findings, and the parser explains the two questions in the places left for them.
     const findings = [
       ...Array.from({ length: 6 }, (_, i) => modelFinding(i, "no_degradation")),
       {
@@ -5243,6 +5244,42 @@ describe("the platform's findings from the change summary", () => {
       "material_improvement",
     ]);
     expect(report.criteria.no_degradation).toBe("unknown");
+
+    // The same reasons filed under another criterion explain neither text judgment: the script
+    // gives its own two, so the parser still explains only the two questions, never four.
+    const misfiled = full(
+      reviewOutput({
+        criteria: {
+          no_degradation: "pass",
+          advances_revision: "fail",
+          material_improvement: "fail",
+        },
+        title_ok: false,
+        misleading_body: true,
+        findings: [
+          ...findings.slice(0, 6),
+          { ...modelFinding(6, "no_degradation"), severity: "blocker", code: "title_placeholder" },
+          {
+            ...modelFinding(7, "no_degradation"),
+            severity: "blocker",
+            code: "description_misleading",
+          },
+        ],
+      }),
+      buildEvidence(both(), NO_TEXT_PROBLEMS),
+      platformFindings(both().summary),
+    );
+    expect(misfiled.findings.map((f) => `${f.criterion} ${label(f)}`)).toEqual([
+      "no_degradation data_removed",
+      "no_degradation metadata_removed",
+      "no_degradation M0",
+      "no_degradation M1",
+      "clear_title_and_description title_not_descriptive",
+      "description_not_misleading description_misleading",
+      "advances_revision No detail given.",
+      "material_improvement No detail given.",
+    ]);
+    expect(misfiled.findings[5]?.note).toBe("The description contradicts the title or itself.");
   });
 
   test("a stored report re-derives the same verdict, and only a full report takes platform findings", () => {
@@ -6066,13 +6103,16 @@ describe("the change summary in the prompt", () => {
         [path, refusal],
       ]);
       const { facts, blocks } = reviewPrompt(f);
+      // Only the description is accounted for: a refused file is never counted as read.
       expect(facts.change_summary).toMatchObject({
         files_summarized: 1,
         files_not_summarized: 1,
+        files_accounted_for: 1,
         rows_removed_not_found_elsewhere: 0,
         columns_with_values_removed: 0,
         keys_removed_not_found_elsewhere: 0,
       });
+      expect([...f.summary.accounted]).toEqual(["dataset_description.json"]);
       expect(platformFindings(f.summary)).toEqual([]);
       // The removal is in its file's diff, shown in full, and the prompt says that judging it is
       // the review's: the platform reports nothing, so a review that sees no loss passes it.
