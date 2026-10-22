@@ -1106,6 +1106,13 @@ export interface RecordingChange {
   oidAfter: string;
   /** The path is in the recordings area. Entered by the caller so this module never imports the policy. */
   recordingArea: boolean;
+  /**
+   * The path is in an area the review reads: not below `sourcedata/`, `derivatives/` or `code/`
+   * (the scope of ADR 0092). A replacement or a type change counts only here; a key moved and a
+   * side that could not be read count wherever the path is. Entered by the caller, which passes
+   * every changed path, so a key that left `derivatives/` for the raw tree is still seen to move.
+   */
+  readArea: boolean;
   before: PointerProbe | null;
   after: PointerProbe | null;
 }
@@ -1206,7 +1213,8 @@ export interface RecordingFacts {
  * The facts of the recordings a pull request touched (design B2.4, as decided in D3). Each changed
  * path is read as two sides ({@link annexSide}; a null probe is a side that does not exist) and the
  * paths are taken in code-unit order, so the answer never depends on the order the caller listed
- * them. For a path that exists on both sides:
+ * them. The caller passes every changed path. For a path that exists on both sides and is in an
+ * area the review reads (`readArea`):
  *
  * - both annexed, with different keys: `replaced`; with the same key (a locked link made an unlocked
  *   pointer, or a link whose `../` depth changed): nothing;
@@ -1215,12 +1223,18 @@ export interface RecordingFacts {
  * - neither annexed: `replaced` only for `git` to `git` inside the recordings area with different
  *   blob ids; anywhere else, nothing.
  *
+ * Below `sourcedata/`, `derivatives/` or `code/` a path on both sides is no fact at all: the review
+ * does not read those areas, and what changed there is not what the authors recorded.
+ *
  * A removed path that was annexed, matched against the added annexed paths with the same key (a
  * multiset, one added path consumed per match), is `moved`, and a matched path is counted as
- * nothing else. An unmatched removal or addition is Part A's loss fact, not a recording fact.
+ * nothing else. The match runs over every path given, whatever its area: a pointer moved with its
+ * key is the same recording wherever it went, so a set of links moved from `derivatives/` into the
+ * raw tree is `moved`, and not an unexplained addition. An unmatched removal or addition is Part A's
+ * loss fact, not a recording fact.
  *
- * A path with an `unreadable` side adds 1 to `unread` (once, whether one side or both) and nothing
- * else: it is unknown, never clean, and the caller says what unknown does.
+ * A path with an `unreadable` side, in any area, adds 1 to `unread` (once, whether one side or
+ * both) and nothing else: it is unknown, never clean, and the caller says what unknown does.
  */
 export function recordingFacts(
   changes: readonly RecordingChange[],
@@ -1241,6 +1255,7 @@ export function recordingFacts(
       if (now?.kind === "annexed") addedKeys.set(now.key, (addedKeys.get(now.key) ?? 0) + 1);
       continue;
     }
+    if (!change.readArea) continue;
     if (was.kind === "annexed" && now.kind === "annexed") {
       if (was.key !== now.key) facts.replaced++;
     } else if (was.kind === "annexed" || now.kind === "annexed") {

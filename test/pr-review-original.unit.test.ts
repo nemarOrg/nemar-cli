@@ -1842,7 +1842,10 @@ const keyOf = (n: number): string => `SHA256E-s${1000 + n}--${n.toString(16).pad
 /** The first three characters of a git mode name its file type. */
 const typeOfMode = (mode: string): string => mode.slice(0, 3);
 
-/** One changed path, its status and zero ids as `git diff --raw` would write them. */
+/**
+ * One changed path, its status and zero ids as `git diff --raw` would write them. Whether the path
+ * is in an area the review reads is decided from its first directory, as a caller decides it.
+ */
 function recording(
   path: string,
   was: Side | null,
@@ -1865,6 +1868,7 @@ function recording(
     oidBefore: was?.oid ?? "0".repeat(40),
     oidAfter: now?.oid ?? "0".repeat(40),
     recordingArea,
+    readArea: !/^(?:sourcedata|derivatives|code)\//.test(path),
     before: was?.probe ?? null,
     after: now?.probe ?? null,
   };
@@ -2073,13 +2077,78 @@ describe("recordingFacts: the shapes of set A", () => {
     expect(recordingFacts(changes)).toEqual(noRecordingChange({ typeChanged: 5 }));
   });
 
-  test("15 removed and 15 added links with equal keys are 15 moved and nothing else (on004306)", () => {
+  test("15 links removed from derivatives and added in the raw tree with equal keys are 15 moved (on004306)", () => {
     const changes: RecordingChange[] = [];
     for (let n = 0; n < 15; n++) {
-      changes.push(recording(`sub-${n}/eeg/sub-${n}_eeg.edf`, locked(keyOf(n)), null, true));
-      changes.push(recording(`raw/sub-${n}_eeg.edf`, null, locked(keyOf(n), 2), true));
+      changes.push(
+        recording(`derivatives/eeglab/sub-${n}/sub-${n}_eeg.fdt`, locked(keyOf(n), 4), null),
+      );
+      changes.push(recording(`sub-${n}/eeg/sub-${n}_eeg.fdt`, null, locked(keyOf(n), 3), true));
     }
+    expect(changes[0]?.readArea).toBe(false);
+    expect(changes[1]?.readArea).toBe(true);
     expect(recordingFacts(changes)).toEqual(noRecordingChange({ moved: 15 }));
+  });
+});
+
+describe("recordingFacts: the areas the review reads", () => {
+  test("a pointer moved from derivatives/ into the recordings area is moved and nothing else", () => {
+    const key = keyOf(30);
+    expect(
+      recordingFacts([
+        recording("derivatives/pipeline/sub-01_eeg.fdt", locked(key, 3), null),
+        recording("sub-01/eeg/sub-01_eeg.fdt", null, locked(key, 2), true),
+      ]),
+    ).toEqual(noRecordingChange({ moved: 1 }));
+  });
+
+  test("a pointer moved from the recordings area into derivatives/ is moved too", () => {
+    const key = keyOf(31);
+    expect(
+      recordingFacts([
+        recording("sub-01/eeg/sub-01_eeg.fdt", locked(key, 2), null, true),
+        recording("derivatives/pipeline/sub-01_eeg.fdt", null, unlocked(key)),
+      ]),
+    ).toEqual(noRecordingChange({ moved: 1 }));
+  });
+
+  test("an annexed file replaced under derivatives/ or sourcedata/ is not replaced", () => {
+    expect(
+      recordingFacts([
+        recording("derivatives/pipeline/sub-01_eeg.edf", locked(keyOf(32)), locked(keyOf(33))),
+        recording("sourcedata/raw/sub-01.bdf", locked(keyOf(34)), unlocked(keyOf(35))),
+        recording("sourcedata/raw/sub-02.bdf", plain("old", "large"), plain("new", "large"), true),
+      ]),
+    ).toEqual(noRecordingChange());
+    // The same change in the raw tree is a replacement.
+    expect(
+      recordingFacts([
+        recording("sub-01/eeg/sub-01_eeg.edf", locked(keyOf(32)), locked(keyOf(33)), true),
+      ]),
+    ).toEqual(noRecordingChange({ replaced: 1 }));
+  });
+
+  test("a type change under code/ is not a type change of a recording", () => {
+    expect(
+      recordingFacts([recording("code/fixtures/sample.edf", locked(keyOf(36)), plain("inline"))]),
+    ).toEqual(noRecordingChange());
+    expect(
+      recordingFacts([
+        recording("sub-01/eeg/sample.edf", locked(keyOf(36)), plain("inline"), true),
+      ]),
+    ).toEqual(noRecordingChange({ typeChanged: 1 }));
+  });
+
+  test("a side that could not be read is unread in any area", () => {
+    expect(
+      recordingFacts([
+        recording("sourcedata/raw/sub-01.bdf", { ...locked(keyOf(37)), probe: "unreadable" }, null),
+        recording("derivatives/x/sub-01.edf", locked(keyOf(38)), {
+          ...plain("x"),
+          probe: "unreadable",
+        }),
+      ]),
+    ).toEqual(noRecordingChange({ unread: 2 }));
   });
 });
 
