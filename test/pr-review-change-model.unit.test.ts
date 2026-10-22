@@ -4244,11 +4244,55 @@ describe("diffJson: renamed keys", () => {
     ]);
   });
 
+  // A number pairs only with a number (issue #1879): a name that is not one but folds to one, by a
+  // space, a bracket, a quote, an underscore, another dash or another percent, is a different key.
+  test.each([
+    ["-1 with a space after it, to 1", "-1 ", "1"],
+    ["-1 with a space before it, to 1", " -1", "1"],
+    ["- 1 (a space after the sign), to 1", "- 1", "1"],
+    ["(-1) to 1", "(-1)", "1"],
+    ["'-1' to 1", "'-1'", "1"],
+    ["-1_ to 1", "-1_", "1"],
+    ["-0.5 with a space after it, to 0.5", "-0.5 ", "0.5"],
+    ["1e-3 with a space after it, to 1e3", "1e-3 ", "1e3"],
+    [".5_ to 5", ".5_", "5"],
+    ["an en dash and 1, to 1", "–1", "1"],
+    ["a hyphen (U+2010) and 1, to 1", "‐1", "1"],
+    ["a fullwidth hyphen-minus and 1, to 1", "－1", "1"],
+    ["a small hyphen-minus and 1, to 1", "﹣1", "1"],
+    ["5 % (a space before the percent), to 5", "5 %", "5"],
+    ["5 and two percent signs, to 5", "5%%", "5"],
+    ["a percent sign and 5, to 5", "%5", "5"],
+    ["5 and a fullwidth percent sign, to 5", "5％", "5"],
+    ["5 and a per mille sign, to 5", "5‰", "5"],
+    ["5 and a prime, to 5", "5′", "5"],
+    ["#1 to 1", "#1", "1"],
+    ["1* to 1", "1*", "1"],
+    ["1? to 1", "1?", "1"],
+    ["1.2_ to 1.2 (refused although harmless: more change shown)", "1.2_", "1.2"],
+  ])(
+    "%s, either way, is a removed key and an added key: a number pairs only with a number",
+    (_label, was, now) => {
+      expect(levelKey(was, now)).toEqual([
+        ["json_key_removed", ".Levels", was],
+        ["json_key_added", ".Levels", now],
+      ]);
+      expect(levelKey(now, was)).toEqual([
+        ["json_key_removed", ".Levels", now],
+        ["json_key_added", ".Levels", was],
+      ]);
+    },
+  );
+
   test.each([
     ["1E3", "1e3"],
     ["Level_1", "LEVEL1"],
     ["MISC_Channel-Count", "MiscChannelCount"],
     ["my-key-2", "my_key_2"],
+    // A sign inside a longer name is punctuation and folds: a known limit, accepted.
+    ["Level -1", "Level 1"],
+    // Both are numbers once trimmed, and the same number.
+    [" 1", "1"],
   ])("%j to %j, either way, is still a rename", (was, now) => {
     expect(levelKey(was, now)).toEqual([["json_key_renamed", ".Levels", `${was} -> ${now}`]]);
     expect(levelKey(now, was)).toEqual([["json_key_renamed", ".Levels", `${now} -> ${was}`]]);
@@ -6232,15 +6276,18 @@ function oracleMissing(v: Plain): boolean {
   if (typeof v === "object") return Object.keys(v).length === 0;
   return false;
 }
+/** A name in lower case without white space at either end, as the oracle reads it. */
+const oracleTrimmed = (name: string): string => name.toLowerCase().replace(/^\s+|\s+$/gu, "");
+
 /**
- * A name as the oracle folds it (design section 4.7, issue #1879), in lower case. A name that is a
- * number (a sign, digits with at most one point, an exponent, a percent) is kept as written. Any
- * other name loses each punctuation or separator character, unless the nearest characters on both
- * sides that are not punctuation or separators are digits, and keeps everything else: letters,
- * digits, symbols and combining marks.
+ * A name as the oracle folds it (design section 4.7, issue #1879), in lower case and trimmed. A
+ * name that is a number (a sign, digits with at most one point, an exponent, a percent) is kept as
+ * written. Any other name loses each punctuation or separator character, unless the nearest
+ * characters on both sides that are not punctuation or separators are digits, and keeps everything
+ * else: letters, digits, symbols and combining marks.
  */
 function oracleFold(name: string): string {
-  const lower = name.toLowerCase();
+  const lower = oracleTrimmed(name);
   if (oracleIsNumber(lower)) return lower;
   const chars = [...lower];
   const gap = (c: string | undefined): boolean => c !== undefined && /[\p{P}\p{Z}\s]/u.test(c);
@@ -6270,9 +6317,14 @@ function oracleIsNumber(text: string): boolean {
   return exponent === undefined || (exponent !== "" && digits(exponent));
 }
 
-/** Two key names are one name respelled: they fold alike, to something. */
+/**
+ * Two key names are one name respelled: they fold alike, to something, and both are numbers or
+ * neither is (a number is never respelled into a name that only folds to it).
+ */
 const oracleRespelled = (was: string, now: string): boolean =>
-  oracleFold(was) !== "" && oracleFold(was) === oracleFold(now);
+  oracleFold(was) !== "" &&
+  oracleFold(was) === oracleFold(now) &&
+  oracleIsNumber(oracleTrimmed(was)) === oracleIsNumber(oracleTrimmed(now));
 const typeWord = (v: Plain): string => (v === null ? "null" : Array.isArray(v) ? "arr" : typeof v);
 
 /** The JSON files a generated case may put moved keys in, and whether each applies to which file. */
@@ -6483,7 +6535,10 @@ const oracleIsLeaf = (v: Plain): boolean =>
   Array.isArray(v)
     ? !v.some((x) => x !== null && typeof x === "object")
     : v === null || typeof v !== "object" || Object.keys(v).length === 0;
-/** The respellings of a key by case or punctuation alone that `doc` does not hold yet. */
+/**
+ * The respellings of a key by case or punctuation alone that `doc` does not hold yet. A space at
+ * the end is the one respelling a number has: `1 ` is still the number 1.
+ */
 const oracleRespellings = (key: string, doc: { [key: string]: Plain }): string[] =>
   [
     key.toUpperCase(),
@@ -6491,6 +6546,7 @@ const oracleRespellings = (key: string, doc: { [key: string]: Plain }): string[]
     `${key}_`,
     `_${key}`,
     `${key.slice(0, 1)}_${key.slice(1)}`,
+    `${key} `,
   ].filter((c) => c !== key && !(c in doc) && oracleRespelled(key, c));
 const ORACLE_JSON_SCALARS: Plain[] = [0, false, "None", null, "n/a", "", "x", 1, "1", " ", "Go"];
 
@@ -6602,6 +6658,7 @@ describe("reconstruction oracle: JSON", () => {
                 `${key.slice(0, 1)}_${key.slice(1)}`,
                 pick(ORACLE_JSON_KEYS),
                 ORACLE_JSON_LOOKALIKES[key] ?? pick(ORACLE_JSON_KEYS),
+                ` ${key}`,
               ]);
               if (respelled !== key && !(respelled in doc)) {
                 const value = doc[key] as Plain;

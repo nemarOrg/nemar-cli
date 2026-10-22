@@ -2844,25 +2844,30 @@ export function poolFileMatters(candidates: readonly string[]): (path: string) =
 }
 
 /**
- * A name in lower case with its punctuation and separators removed, so `MISC_Channel-Count` and
- * `MiscChannelCount` fold alike. Only Unicode punctuation and separators (and white space) are
- * removed. Everything else stays and must match as written: a symbol (`+`, `<`, `>`, `=`, `$`, `^`,
- * `~`, `|` and the like), a combining mark (`cafe` with a combining acute is not `cafe`) and any
- * other character, because changing one of them changes a code.
+ * A name in lower case, trimmed, with its punctuation and separators removed, so
+ * `MISC_Channel-Count` and `MiscChannelCount` fold alike. Only Unicode punctuation and separators
+ * (and white space) are removed; `-` and the other dashes are punctuation, so they fold too, except
+ * in a name that is a number. Everything else stays and must match as written: a symbol (`+`, `<`,
+ * `>`, `=`, `$`, `^`, `~`, `|` and the other math and currency symbols), a combining mark (`cafe`
+ * with a combining acute is not `cafe`) and any other character, because changing one of them
+ * changes a code.
  *
- * - A name that is a number literal (an optional sign, digits with at most one point, an optional
- *   exponent, an optional `%`) is returned in lower case and nothing else: `-1` is not `1`, `.5` is
- *   not `5`, `1e-3` is not `1e3`, `5%` is not `5`, while `1E3` and `1e3` fold alike.
+ * - A name that is a number literal once trimmed ({@link isNumberLiteral}) is returned trimmed and
+ *   in lower case and nothing else: `-1` is not `1`, `.5` is not `5`, `1e-3` is not `1e3`, `5%` is
+ *   not `5`, while `1E3` and `1e3`, or ` 1` and `1`, fold alike.
  * - In any other name, punctuation between two digits is part of a number and stays: `v1.2` is not
  *   `v12`.
  *
- * A name made only of punctuation folds to the empty string, and the rename pass never pairs on
- * an empty fold: `-` to `_` is a removed key and an added one. A known limit, accepted: a sign or a
- * point INSIDE a longer name is punctuation like any other and folds (`Level -1` and `Level 1` fold
- * alike); the summary shows both names exactly as written.
+ * The rename pass pairs two names only when they fold to the same non-empty name AND both are
+ * number literals or neither is. So a name of punctuation alone is never renamed (`-` to `_`), and
+ * a number is never renamed to a name that only folds to it: `-1 `, `(-1)`, `-1_`, `#1` or `5 %`
+ * against `1` or `5` is a removed key and an added one. This refuses some harmless respellings
+ * (`1.2_` to `1.2` is shown as a removal and an addition): more change shown, never less. A known
+ * limit, accepted: a sign or a point INSIDE a longer name is punctuation like any other and folds
+ * (`Level -1` and `Level 1` fold alike); the summary shows both names exactly as written.
  */
 function foldName(name: string): string {
-  const lower = name.toLowerCase();
+  const lower = numberText(name);
   if (NUMBER_LITERAL.test(lower)) return lower;
   return lower.replace(/[\p{P}\p{Z}\s]+/gu, (run: string, at: number, whole: string) =>
     DIGIT_BEFORE.test(whole.slice(Math.max(0, at - 2), at)) &&
@@ -2878,6 +2883,15 @@ function foldName(name: string): string {
  * characters and a failed test backtracks at most once over the name: linear, not quadratic.
  */
 const NUMBER_LITERAL = /^[+-]?(?:\p{N}+(?:\.\p{N}*)?|\.\p{N}+)(?:e[+-]?\p{N}+)?%?$/u;
+/** A name as the number test reads it: in lower case, without white space at either end. */
+const numberText = (name: string): string => name.toLowerCase().trim();
+/**
+ * Whether a key name is a number literal once trimmed: `-1`, ` 1`, `1E3` and `5%` are, `- 1`,
+ * `(-1)` and `5 %` are not.
+ */
+function isNumberLiteral(name: string): boolean {
+  return NUMBER_LITERAL.test(numberText(name));
+}
 /** A digit ends (or starts) the text: two code units cover a digit outside the basic plane. */
 const DIGIT_BEFORE = /\p{N}$/u;
 const DIGIT_AFTER = /^\p{N}/u;
@@ -2965,13 +2979,14 @@ export function verifyJsonCounts(diff: FileDiff<JsonCounts>): boolean {
  *
  * - **renamed** (`json_key_renamed`) when it is the ONLY leaf of the before side that step one left
  *   unpaired with its parent and value, ONE unpaired after leaf has that parent and value, and the
- *   two key names fold to the same non-empty name ({@link foldName}: case, punctuation and
+ *   two key names fold to the same non-empty name ({@link foldName}: trimmed, case, punctuation and
  *   separators removed, except punctuation between two digits; a number literal such as `-1` or
- *   `.5` compared as written; symbols and marks kept). An unchanged sibling with the same value does
- *   not count against it (`MiscChannelCount` to `MISCChannelCount` beside other counts of `0` is a
- *   rename), but two removed keys with one value, or two added ones, are no evidence of which became
- *   which, and a respelling that is not a case-and-punctuation one (`x1` to `1`, `go` to `go3`, `-1`
- *   to `1`) is a removed key and an added one.
+ *   `.5` compared as written; symbols and marks kept) and are both number literals or neither. An
+ *   unchanged sibling with the same value does not count against it (`MiscChannelCount` to
+ *   `MISCChannelCount` beside other counts of `0` is a rename), but two removed keys with one value,
+ *   or two added ones, are no evidence of which became which, and a respelling that is not a
+ *   case-and-punctuation one (`x1` to `1`, `go` to `go3`, `-1` to `1`, `-1_` to `1`) is a removed
+ *   key and an added one.
  * - **moved** (`json_key_moved`) when this file's after document is an object that no longer has
  *   the leaf's top-level key at all, and the NEAREST file of the pull request that applies to this
  *   one under BIDS inheritance ({@link sidecarApplies}) and has that top-level key holds the leaf,
@@ -3048,13 +3063,14 @@ export function diffJsonWith(
   }
 
   // 2. Renames: the one REMOVED leaf and the one ADDED leaf with a parent and value, under a key
-  // respelled by case and punctuation alone ({@link foldName}, and never on an empty fold). Only the
-  // leaves step 1 left unpaired are counted: a sibling that is unchanged holds the same value without
-  // being a candidate, so it is no reason to doubt which key became which. A leaf step 3 later
-  // explains as moved still counts here, so a rename beside a moved look-alike is shown as a removal
-  // and an addition: more change shown, never less. With the value unique among the removed leaves
-  // and among the added ones a before leaf has at most one candidate, and a fold is linear in its
-  // name, so the pass is linear in the document and needs no step budget.
+  // respelled by case and punctuation alone ({@link foldName}, never on an empty fold, and a number
+  // only to a number). Only the leaves step 1 left unpaired are counted: a sibling that is unchanged
+  // holds the same value without being a candidate, so it is no reason to doubt which key became
+  // which. A leaf step 3 later explains as moved still counts here, so a rename beside a moved
+  // look-alike is shown as a removal and an addition: more change shown, never less. With the value
+  // unique among the removed leaves and among the added ones a before leaf has at most one
+  // candidate, and a fold and the number test are linear in the name, so the pass is linear in the
+  // document and needs no step budget.
   const groupOf = (leaf: JsonLeaf): string => JSON.stringify([leaf.parent, leaf.value]);
   const beforeInGroup = new Map<string, number>();
   for (const [bi, leaf] of bl.entries()) {
@@ -3077,7 +3093,12 @@ export function diffJsonWith(
     const now = al[ai] as JsonLeaf;
     if (aFate[ai] !== JSON_FATE_NONE || !now.isKey) continue;
     const folded = foldName(leaf.name);
-    if (folded !== "" && folded === foldName(now.name)) pairLeaves(bi, ai, JSON_FATE_RENAMED);
+    if (
+      folded !== "" &&
+      folded === foldName(now.name) &&
+      isNumberLiteral(leaf.name) === isNumberLiteral(now.name)
+    )
+      pairLeaves(bi, ai, JSON_FATE_RENAMED);
   }
 
   // 3. What is left of the before side: kept in a sidecar that applies, or removed. A non-object
