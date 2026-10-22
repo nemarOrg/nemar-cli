@@ -1266,8 +1266,10 @@ Neither changes a rule in Phase 6.
 **Removals in a file the summary refused.**
 Four pull requests have a refused file that deletes a line: `on006233` #2 (1 file shown, 346 incomplete, its listing is cut too), `on003620` #1 (43 shown, 1 incomplete), `on004588` #1 (1 incomplete), `on003195` #1 (1 shown).
 Across set A: 45 files are shown in full, 348 are in a pull request whose content is incomplete, 0 are HIDDEN.
-HIDDEN is a tripwire, not an expected outcome: a refused file with a deleted line is unread, so a correct pass reports it incomplete.
-It appears only when the pass wrongly counts such a file as read, which is how the binary-diff hole would have shown up, and a file counts as shown only when its patch holds at least as many `-` lines as git's own count of deleted lines (a binary file never does).
+HIDDEN is a tripwire, not an expected outcome: a refused file with a deleted line is either shown in full or left unread, and an unread one keeps the content incomplete.
+A file counts as shown only when its patch is not cut and holds at least as many `-` lines as git's own count of deleted lines (a binary file never does).
+HIDDEN appears when the pass counts such a file as read without all of them in the patch, which is how the binary-diff hole would have shown up.
+The run fixes the git configuration for every git it starts (no global or system configuration), so a setting such as `diff.algorithm` in an operator's `~/.gitconfig` cannot make git's count and the patch disagree.
 `on004588` #1 is the label template's case of a removal only the model can see, and `on003620` #1 and `on003195` #1 are in its blocking group.
 
 **Set B, the hostile set.**
