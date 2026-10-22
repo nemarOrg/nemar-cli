@@ -5030,6 +5030,28 @@ describe("the platform's findings from the change summary", () => {
     expect(notes({ keysRemoved: 2, keysRemovedFiles: 2 })).toEqual([
       "metadata_removed: The platform found 2 keys with values removed from 2 JSON files and not kept, with the same value, in a sidecar that applies by inheritance. A person confirms a removal.",
     ]);
+    // Every count different, so each one is told apart from the others by where it appears.
+    const distinct = {
+      rowsRemoved: 7,
+      rowsRemovedFiles: 3,
+      columnsRemoved: 2,
+      keysRemoved: 5,
+      keysRemovedFiles: 4,
+    };
+    expect(notes(distinct)).toEqual([
+      "data_removed: The platform found 7 rows removed from 3 tables and not copied unchanged into sourcedata at the same path, and 2 columns with values removed. A person confirms a removal.",
+      "metadata_removed: The platform found 5 keys with values removed from 4 JSON files and not kept, with the same value, in a sidecar that applies by inheritance. A person confirms a removal.",
+    ]);
+    // The singular and the plural are chosen for each count on its own.
+    expect(notes({ rowsRemoved: 3, rowsRemovedFiles: 1, columnsRemoved: 1 })).toEqual([
+      "data_removed: The platform found 3 rows removed from 1 table and not copied unchanged into sourcedata at the same path, and 1 column with values removed. A person confirms a removal.",
+    ]);
+    expect(notes({ rowsRemoved: 1, rowsRemovedFiles: 1, columnsRemoved: 2 })).toEqual([
+      "data_removed: The platform found 1 row removed from 1 table and not copied unchanged into sourcedata at the same path, and 2 columns with values removed. A person confirms a removal.",
+    ]);
+    expect(notes({ keysRemoved: 3, keysRemovedFiles: 1 })).toEqual([
+      "metadata_removed: The platform found 3 keys with values removed from 1 JSON file and not kept, with the same value, in a sidecar that applies by inheritance. A person confirms a removal.",
+    ]);
     // What was kept elsewhere, or emptied, is not a removal.
     expect(notes({ rowsRelocated: 5, keysMoved: 5, valuesEmptied: 5 })).toEqual([]);
 
@@ -5061,6 +5083,7 @@ describe("the platform's findings from the change summary", () => {
         keysRemoved: 2,
         keysRemovedFiles: 2,
       },
+      distinct,
     ];
     for (const f of [...largest, ...counts.flatMap((c) => platformFindings(summaryLosing(c)))]) {
       expect(f).toMatchObject({ criterion: "no_degradation", severity: "blocker", path: null });
