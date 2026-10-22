@@ -23,12 +23,12 @@
  * title and description from `DIR/<dataset>-<number>.pr.json`; it never runs `gh`, and it checks
  * that the clone holds both commits without fetching either. That check, and `--offline`, rely on
  * git honoring `GIT_NO_LAZY_FETCH`, so a run with `--clones` refuses a git older than 2.45.0, which
- * would fetch (see {@link honorsNoLazyFetch}). **`--offline`** (only with
- * `--clones`) also keeps git from fetching anything else: a clone that lacks a blob of the one diff
- * the content pass prefetches (from the merge base to the head) is `objects_missing` before any
- * pass runs, and any other object the review reads and the clone lacks (an unchanged
- * `dataset_description.json` or change log the listing reads) is not fetched, so that pull request
- * ends as `evidence_unavailable`. It sets `GIT_NO_LAZY_FETCH` for the run and restores it after;
+ * would fetch (see {@link honorsNoLazyFetch}). **`--offline`** (only with `--clones`) also keeps
+ * git from fetching anything else: a clone that lacks a blob of the one diff the content pass
+ * prefetches (from the merge base to the head) is `objects_missing` before any pass runs, and any
+ * other object the review reads and the clone lacks (an unchanged `dataset_description.json` the
+ * listing reads, or a change log the content pass reads) is not fetched, so that pull request ends
+ * as `evidence_unavailable`. It sets `GIT_NO_LAZY_FETCH` for the run and restores it after;
  * `--offline` changes only git, never the model calls. In every mode, the git a run starts reads
  * neither the operator's nor the system's git configuration, and no variable that would point it
  * at another repository (see {@link scopeRunEnvironment}), so its numbers do not depend on the
@@ -498,10 +498,10 @@ function isOwnRepository(dir: string): boolean {
  *   to the head, which `--numstat` reads in full) must be in the clone already, asked without
  *   fetching, else `objects_missing`. So a clone short of a blob of that diff is a closed word, not
  *   a failure in the middle of a pass. An object outside that diff that the review still reads (an
- *   unchanged `dataset_description.json` or change log the listing reads) is not checked here; the
- *   pass cannot fetch it either, so the pull request ends as `evidence_unavailable`. (The merge
- *   base, not the base: the review diffs from the merge base, and the files the base's branch
- *   changed since are never read.)
+ *   unchanged `dataset_description.json` the listing reads, or a change log the content pass
+ *   reads) is not checked here; no pass can fetch it either, so the pull request ends as
+ *   `evidence_unavailable`. (The merge base, not the base: the review diffs from the merge base,
+ *   and the files the base's branch changed since are never read.)
  * - The pull request's text is `DIR/<dataset>-<number>.pr.json`, an object, else `clone_missing`;
  *   with `needsText` false (a run that reads no text) it is not read at all.
  */

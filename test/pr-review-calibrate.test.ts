@@ -1213,6 +1213,13 @@ describe("frozen clones: --clones and --offline", () => {
   }
 
   test("--offline never fetches: a clone missing a blob is objects_missing", async () => {
+    // The variable as the shell running the tests has it, most often unset: every run must leave it
+    // exactly so, and the test puts it back so whatever happens.
+    const previous = process.env.GIT_NO_LAZY_FETCH;
+    const putBack = () => {
+      if (previous === undefined) Reflect.deleteProperty(process.env, "GIT_NO_LAZY_FETCH");
+      else process.env.GIT_NO_LAZY_FETCH = previous;
+    };
     const f = blobLessFrozen("offline");
     const sidecar = "sub-01/eeg/sub-01_task-rest_eeg.json";
     expect(holds(f.clone, f.blob(f.head, sidecar))).toBe(false);
@@ -1226,6 +1233,7 @@ describe("frozen clones: --clones and --offline", () => {
       "--json",
     ]);
     expect((JSON.parse(first.out) as CalibrationRow[])[0]?.error).toBe("objects_missing");
+    expect(process.env.GIT_NO_LAZY_FETCH === previous).toBe(true);
     expect(holds(f.clone, f.blob(f.head, sidecar))).toBe(false);
     expect(holds(f.clone, f.blob(f.base, sidecar))).toBe(false);
 
@@ -1238,13 +1246,6 @@ describe("frozen clones: --clones and --offline", () => {
     expect(holds(f.clone, f.blob(f.head, sidecar))).toBe(true);
     const description = f.blob(f.head, "dataset_description.json");
     expect(holds(f.clone, description)).toBe(false);
-    // The variable as the shell running the tests has it, most often unset: every run must leave it
-    // exactly so, and the test puts it back so whatever happens.
-    const previous = process.env.GIT_NO_LAZY_FETCH;
-    const putBack = () => {
-      if (previous === undefined) Reflect.deleteProperty(process.env, "GIT_NO_LAZY_FETCH");
-      else process.env.GIT_NO_LAZY_FETCH = previous;
-    };
     let second: Awaited<ReturnType<typeof calibrate>>;
     let third: Awaited<ReturnType<typeof calibrate>>;
     let online: Awaited<ReturnType<typeof calibrate>>;
@@ -1255,7 +1256,7 @@ describe("frozen clones: --clones and --offline", () => {
       expect(process.env.GIT_NO_LAZY_FETCH).toBe("0");
       putBack();
       third = await calibrate(["--pr", "nm000460#2", "--clones", f.clones, "--offline"]);
-      expect(process.env.GIT_NO_LAZY_FETCH).toBe(previous);
+      expect(process.env.GIT_NO_LAZY_FETCH === previous).toBe(true);
       // Neither offline run fetched the description.
       expect(holds(f.clone, description)).toBe(false);
       // The control runs with fetching allowed, so a shell that turns it off does not decide it.
