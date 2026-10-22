@@ -464,20 +464,23 @@ Two changes close it.
 ### 4.7 JSON renames
 
 A removed leaf and an added leaf are a `json_key_renamed` pair when both are keys (not list positions) with the same parent path and the same value, and their last names fold to the same, non-empty text.
-The fold lower-cases a name and removes its runs of Unicode punctuation and separators (`_`, `-`, `.`, spaces, quotes and the like).
-Letters, digits, signs, symbols (`+`, `<`, `$`) and combining marks stay and must match.
-A name that is a number literal (`-1`, `+3`, `.5`, `1.2`, `1e-3`, `5%`) is only lower-cased, never folded: a changed sign, point or exponent is a changed code, so `-1` to `1`, `.5` to `5` and `1e-3` to `1e3` are a removed key and an added one.
-Punctuation with a digit on both sides is part of a number and is not removed by the folding (D15): `12` to `1.2` and `0.5` to `05` are a removed key and an added one, not a rename.
+The fold trims a name, lower-cases it, and removes its runs of Unicode punctuation and separators: `_`, `-` (a hyphen or dash is punctuation), `.`, `%`, `#`, `*`, `?`, `/`, quotes, brackets and spaces.
+Letters, digits, combining marks and symbols (`+`, `<`, `=`, `$`) stay and must match.
+A name that is a number literal (`-1`, `+3`, `.5`, `1.2`, `1e-3`, `5%`) is only trimmed and lower-cased, never folded, and it pairs only with another number literal: a changed sign, point, exponent or percent sign is a changed code.
+So `-1` to `1`, `.5` to `5` and `1e-3` to `1e3` are a removed key and an added one, and so are `-1 ` (with a space), `(-1)` and `5 %` to the bare number on the other side; `1E3` to `1e3` is a rename.
+Punctuation with a digit on both sides, in a name that is not a bare number, is part of a number and is not removed by the folding (D15): `v1.2` to `v12` is a removed key and an added one, not a rename.
 A name made only of punctuation folds to nothing and is never renamed (`-` to `_`).
-A sign or point in a name that is not a bare number (`Level -1` to `Level 1`) is punctuation like any other and folds; the summary shows both names exactly.
-In addition (D8, narrowed on 2026-10-22, issue #1879), the shared value must be **unique among the parent's removed leaves and among its added leaves**: two removed keys with one value, or two added ones, are no evidence of which became which, so `Foo` and `Bar` (both `0`) removed and `FOO` added is `json_key_removed` twice plus `json_key_added`, not a rename.
-"Removed" and "added" mean the leaves the first pairing (same path, value changed there) left unpaired, so a leaf that a later pass explains as a move still counts: `Foo` and `Bar` (both `1`) removed, `FOO` added and `Bar` gained by a sidecar leaves `Foo` a removed key, which over-blocks and never hides.
+A sign or point in a name that is not a bare number (`Level -1` to `Level 1`, `x-1` to `x1`) is punctuation like any other and folds; the summary shows both names exactly.
+In addition (D8, narrowed on 2026-10-22, issue #1879), the shared value must be **unique among the parent's removed leaves and among its added leaves**.
+Two removed keys with one value, or two added ones, are no evidence of which became which, so `Foo` and `Bar` (both `0`) removed and `FOO` added is `json_key_removed` twice plus `json_key_added`, not a rename.
+"Removed" and "added" mean the leaves the first pairing (same path, value changed there) left unpaired, so a leaf that a later pass explains as a move still counts.
+`Foo` and `Bar` (both `1`) removed, `FOO` added and `Bar` gained by a sidecar leaves `Foo` a removed key, which over-blocks and never hides.
 A sibling that is unchanged, or whose value changed at its own path, is not a candidate and does not count: `MiscChannelCount` to `MISCChannelCount` beside other counts of `0` is a rename.
 Only case and punctuation make a respelling a rename.
 A key that gained or lost a prefix, a suffix or a digit (`Fz` to `EEG_Fz`, `x1` to `1`, `go` to `go3`) is a removed key and an added one: the relabel rules of section 4.3 apply to table cells, not to JSON keys.
 (Before the narrowing the value had to be unique within its whole parent, and a relabel rule could also pair two keys.
 The first measurement on the real code, section 12.4, showed that blocking `MiscChannelCount` to `MISCChannelCount` in four of 86 pull requests, the very case that motivated rename detection.)
-A removed leaf has at most one candidate, so the pass is linear in the document and needs neither a candidate cap nor the step budget of section 4.4.
+A removed leaf has at most one candidate and the number-literal test is linear in the name, so the pass is linear in the document and needs neither a candidate cap nor the step budget of section 4.4.
 
 ---
 
@@ -1202,7 +1205,7 @@ Applied one at a time, each must turn a named test red (the repository's practic
 - render a value without escaping `\p{Cf}`;
 - count a file in `files_read` twice;
 - in a JSON rename group, count every leaf of the parent (not only the unpaired ones), let a relabel rule pair two keys, let the added side keep its last candidate, ignore the removed-side count, or compare the folded names always equal;
-- fold signs, symbols or combining marks away, fold a number literal, drop the digit exception, or accept an empty fold, in the JSON key fold.
+- fold signs, symbols or combining marks away, fold a number literal, drop the digit exception, accept an empty fold, skip the trim, or pair a number literal with a name that is not one, in the JSON key fold.
 
 ### 12.4 Calibration
 
@@ -1266,8 +1269,13 @@ With `--without-summary` (the pass as it was before the summary existed) 31 pull
 - **Q2 (D8, unique value): narrow.**
   D8 as first written defeated the case that motivated rename detection (section 1.1).
   Section 4.7 now says what was built in #1879: the value is unique among the parent's removed leaves and among its added leaves, and only case and punctuation make a respelling a rename.
-  Measured on set A after the change: blocking loss 18 (was 20); two of the four pull requests above (`on005420` #1, `on003195` #1) no longer block, and `on003194` #1 and `on006126` #1 lose the renamed keys (29 to 0, 93 to 3) and keep a platform finding for another removal, as in the prototype; `on004745` #1 is back to 10 removed keys, nine of them `x1` to `x10` without the `x`, shown exactly; accounted for and truncated do not move.
-  A review of the change found that the fold also removed signs, symbols and combining marks, so `-1` to `1`, `<5` to `>5` and `5%` to `5` read as renames; it now removes punctuation and separators only and compares a number literal as written (section 4.7), and set A does not move.
+  Measured on set A after the change: blocking loss 18 (was 20).
+  Two of the four pull requests above (`on005420` #1, `on003195` #1) no longer block.
+  `on003194` #1 and `on006126` #1 lose the renamed keys (29 to 0, 93 to 3) and keep a platform finding for another removal, as in the prototype.
+  `on004745` #1 is back to 10 removed keys, nine of them `x1` to `x10` without the `x`, shown exactly.
+  Accounted for and truncated do not move.
+  Two reviews of the change found that the fold was too wide (it also removed signs, symbols and combining marks, and a bare number could pair with a decorated one, so `-1` to `1`, `<5` to `>5`, `5%` to `5` and `-1 ` to `1` read as renames) and that the number test could backtrack on long names.
+  It now removes punctuation and separators only, compares a number literal as written and only with another number literal (section 4.7), and set A does not move.
   Not chosen: keeping D8, so that each of the four stays a platform blocker.
 
 **Removals in a file the summary refused.**
