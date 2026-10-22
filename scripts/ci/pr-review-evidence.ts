@@ -251,6 +251,13 @@ export interface ContentFacts {
    */
   readIncomplete: boolean;
   /**
+   * How many files made {@link readIncomplete} true: the modified and removed metadata files that
+   * are not cosmetic-only, not accounted for by the summary and not shown in full. Counted with the
+   * one predicate `readIncomplete` is decided by, which is exactly `unreadFiles > 0`, so the two
+   * cannot disagree. For the calibration's numbers: neither the report nor the prompt carries it.
+   */
+  unreadFiles: number;
+  /**
    * How many MODIFIED metadata files the platform proved differ only cosmetically. Decided from
    * the two blobs, not by the model, and only for a regular file whose mode did not change:
    *  - a `.json` file whose text is identical once whitespace outside strings is removed (a
@@ -1242,14 +1249,16 @@ function readContent(dir: string, listing: Listing, options: ContentOptions): Co
     showDiff(c);
   }
 
-  // Covered: added, cosmetic, accounted for by the summary, or shown in full.
-  const readIncomplete = wanted.some((c) => {
+  // Covered: added, cosmetic, accounted for by the summary, or shown in full. One predicate counts
+  // the files that are not and decides whether any is, so the count and the flag cannot drift.
+  const unreadFiles = wanted.filter((c) => {
     if (c.status === "added") return false;
     if (cosmeticOnly.has(c.path)) return false;
     if (accounted.has(c.path)) return false;
     const patch = read.get(c.path);
     return patch === undefined || patch.truncated;
-  });
+  }).length;
+  const readIncomplete = unreadFiles > 0;
 
   const groupMap = new Map<string, PathGroup>();
   for (const c of wanted) {
@@ -1276,6 +1285,7 @@ function readContent(dir: string, listing: Listing, options: ContentOptions): Co
   return {
     patches,
     readIncomplete,
+    unreadFiles,
     cosmeticOnlyFiles: cosmeticOnly.size,
     groups: ordered.slice(0, MAX_GROUPS),
     groupsOmittedFiles: ordered.slice(MAX_GROUPS).reduce((n, g) => n + g.files, 0),
