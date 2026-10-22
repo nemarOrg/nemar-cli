@@ -10,9 +10,9 @@
  *
  * Beyond the normal mode, the tests cover:
  *  - pinned commits, fetched by id, and `--clones` (frozen clones read in place: what makes a clone,
- *    the commits it must hold, and that checking them never fetches);
- *  - `--offline` (nothing is fetched, `GIT_NO_LAZY_FETCH` is put back as it was, and a git older
- *    than 2.44 is refused);
+ *    the commits it must hold, that checking them never fetches, and a git older than 2.45, which
+ *    would, refused);
+ *  - `--offline` (nothing is fetched, and the run's git environment is put back as it was);
  *  - `--evidence-only` and `--without-summary` (no model and no key, the evidence table and its
  *    totals, the refused files that delete a line and HIDDEN as exit 1, no path or value printed);
  *  - the frozen set A: its manifest, its stored baseline and the label template for the model
@@ -1196,65 +1196,70 @@ describe("frozen clones: --clones and --offline", () => {
     expect(tmpdir()).not.toContain("no-such-tmpdir");
   });
 
-  test("--offline needs git 2.44 or later, and refuses an older one without printing its version", async () => {
+  test("--clones needs git 2.45 or later, and refuses an older one without printing its version", async () => {
     expect(parseGitVersion("git version 2.39.5 (Apple Git-154)")).toEqual({
       major: 2,
       minor: 39,
       patch: 5,
     });
-    expect(parseGitVersion("git version 2.44.0\n")).toEqual({ major: 2, minor: 44, patch: 0 });
+    expect(parseGitVersion("git version 2.45.0\n")).toEqual({ major: 2, minor: 45, patch: 0 });
     expect(parseGitVersion("git version 2.45.1.windows.1")).toEqual({
       major: 2,
       minor: 45,
       patch: 1,
     });
+    expect(parseGitVersion("git version 2.46.0.rc1")).toEqual({ major: 2, minor: 46, patch: 0 });
+    expect(parseGitVersion("git version 2.47.0-rc0")).toEqual({ major: 2, minor: 47, patch: 0 });
+    expect(parseGitVersion("git version 2.48.1.dirty")).toEqual({ major: 2, minor: 48, patch: 1 });
     expect(parseGitVersion("git version 3.0")).toEqual({ major: 3, minor: 0, patch: 0 });
-    for (const bad of ["", "git version", "version 2.44.0", "git version 2.44x", "hub 2.44.0"]) {
+    for (const bad of ["", "git version", "version 2.45.0", "git version 2.45x", "hub 2.45.0"]) {
       expect(parseGitVersion(bad), bad).toBeNull();
     }
     const honors = (line: string) => {
       const v = parseGitVersion(line);
       return v !== null && honorsNoLazyFetch(v);
     };
+    // 2.45.0 is the first release whose notes name the variable; the maintenance releases of
+    // 2.44 are refused, on purpose.
     expect(honors("git version 2.39.5 (Apple Git-154)")).toBe(false);
     expect(honors("git version 2.43.7")).toBe(false);
-    expect(honors("git version 2.44.0")).toBe(true);
+    expect(honors("git version 2.44.0")).toBe(false);
+    expect(honors("git version 2.44.1")).toBe(false);
+    expect(honors("git version 2.45.0")).toBe(true);
+    expect(honors("git version 2.50.1 (Apple Git-155)")).toBe(true);
+    expect(honors("git version 2.46.0.rc1")).toBe(true);
+    expect(honors("git version 2.48.1.dirty")).toBe(true);
     expect(honors("git version 2.56.0")).toBe(true);
     expect(honors("git version 3.0.0")).toBe(true);
     expect(honors("git version 1.99.0")).toBe(false);
 
-    // A stand-in git first on PATH for one run: it says 2.43.0 when asked its version, and hands
-    // every other call to the real git.
+    // A stand-in git first on PATH for each run: it says 2.44.1 when asked its version, and hands
+    // every other call to the real git. --clones alone is refused, and with --offline too.
     const real = Bun.which("git");
     expect(real).not.toBeNull();
     const bin = join(root, "old-git-bin");
     mkdirSync(bin, { recursive: true });
     writeFileSync(
       join(bin, "git"),
-      `#!/bin/sh\nif [ "$1" = "--version" ]; then echo 'git version 2.43.0'; exit 0; fi\nexec '${real}' "$@"\n`,
+      `#!/bin/sh\nif [ "$1" = "--version" ]; then echo 'git version 2.44.1'; exit 0; fi\nexec '${real}' "$@"\n`,
     );
     chmodSync(join(bin, "git"), 0o755);
     const clones = mkdtempSync(join(root, "old-git-clones-"));
-    const saved = process.env.PATH;
-    process.env.PATH = `${bin}:${saved ?? ""}`;
-    let r: Awaited<ReturnType<typeof calibrate>>;
-    try {
-      r = await calibrate([
-        "--pr",
-        "nm000460#2",
-        "--clones",
-        clones,
-        "--offline",
-        "--evidence-only",
-      ]);
-    } finally {
-      process.env.PATH = saved;
+    for (const extra of [[], ["--evidence-only"], ["--offline", "--evidence-only"]]) {
+      const saved = process.env.PATH;
+      process.env.PATH = `${bin}:${saved ?? ""}`;
+      let r: Awaited<ReturnType<typeof calibrate>>;
+      try {
+        r = await calibrate(["--pr", "nm000460#2", "--clones", clones, ...extra]);
+      } finally {
+        process.env.PATH = saved;
+      }
+      expect(r.code, extra.join(" ")).toBe(2);
+      expect(r.said).toContain("--clones needs git 2.45 or later");
+      expect(r.said).not.toContain("2.44");
+      expect(r.said).not.toContain(root);
+      expect(r.out).toBe("");
     }
-    expect(r.code).toBe(2);
-    expect(r.said).toContain("--offline needs git 2.44 or later");
-    expect(r.said).not.toContain("2.43");
-    expect(r.said).not.toContain(root);
-    expect(r.out).toBe("");
   });
 });
 

@@ -21,13 +21,14 @@
  * **`--clones DIR`** reads each pull request from a clone already made, `DIR/<dataset>-<number>`,
  * at its pinned commits or the ones in `DIR/<dataset>-<number>.shas` (`<base> <head>`), with its
  * title and description from `DIR/<dataset>-<number>.pr.json`; it never runs `gh`, and it checks
- * that the clone holds both commits without fetching either. **`--offline`** (only with
+ * that the clone holds both commits without fetching either. That check, and `--offline`, rely on
+ * git honoring `GIT_NO_LAZY_FETCH`, so a run with `--clones` refuses a git older than 2.45.0, which
+ * would fetch (see {@link honorsNoLazyFetch}). **`--offline`** (only with
  * `--clones`) also keeps git from fetching anything else: a clone that lacks a blob of the one diff
  * the content pass prefetches (from the merge base to the head) is `objects_missing` before any
  * pass runs, and any other object the review reads and the clone lacks (an unchanged
  * `dataset_description.json` or change log the listing reads) is not fetched, so that pull request
- * ends as `evidence_unavailable`. It sets `GIT_NO_LAZY_FETCH` for the run and restores it after,
- * and refuses to run on a git older than 2.44, which ignores the variable and would fetch;
+ * ends as `evidence_unavailable`. It sets `GIT_NO_LAZY_FETCH` for the run and restores it after;
  * `--offline` changes only git, never the model calls. In every mode, the git a run starts reads
  * neither the operator's nor the system's git configuration, and no variable that would point it
  * at another repository (see {@link scopeRunEnvironment}), so its numbers do not depend on the
@@ -1162,7 +1163,7 @@ export interface GitVersion {
 }
 
 /**
- * The version in `git --version`'s output (`git version 2.44.0`, `git version 2.39.5 (Apple
+ * The version in `git --version`'s output (`git version 2.45.0`, `git version 2.39.5 (Apple
  * Git-154)`, `git version 2.45.1.windows.1`), or null when the output does not start that way. A
  * missing patch number reads as 0. Pure.
  */
@@ -1172,9 +1173,15 @@ export function parseGitVersion(output: string): GitVersion | null {
   return { major: Number(m[1]), minor: Number(m[2]), patch: Number(m[3] ?? 0) };
 }
 
-/** Whether git honors `GIT_NO_LAZY_FETCH`, which it does from 2.44 on. */
+/**
+ * Whether git honors `GIT_NO_LAZY_FETCH`, read from its version: from 2.45.0 on, the first release
+ * whose notes name the variable (and `--no-lazy-fetch`). A git before it ignores the variable and
+ * fetches what a partial clone lacks, silently. Some maintenance releases of older lines carry the
+ * variable too; they are refused ON PURPOSE, since telling them apart would mean trusting a list of
+ * versions, and the cost of the safe side is a refusal, never a fetch.
+ */
 export function honorsNoLazyFetch(v: GitVersion): boolean {
-  return v.major > 2 || (v.major === 2 && v.minor >= 44);
+  return v.major > 2 || (v.major === 2 && v.minor >= 45);
 }
 
 /** The git this process would start, read from `git --version`; null when it cannot be read. */
@@ -1224,7 +1231,7 @@ function readPullRequest(t: CalibrationTarget, root: string): FetchedPullRequest
  * calibrate posts nothing in any mode; then the arguments; then, unless `--evidence-only`, the
  * variables that would point the model client elsewhere. An evidence run makes no client, so a
  * shell with them set is no danger to a key it never reads. Then the flags that need one another,
- * and, with `--offline`, a git older than 2.44 (see {@link honorsNoLazyFetch}).
+ * and, with `--clones`, a git older than 2.45.0 (see {@link honorsNoLazyFetch}).
  */
 export async function calibrateMain(
   argv: readonly string[],
@@ -1320,13 +1327,15 @@ export async function calibrateMain(
   }
   if (withoutSummary && !evidenceOnly) return usage("--without-summary is for --evidence-only");
   if (offline && clones === null) return usage("--offline reads only --clones, which is not given");
-  // A git before 2.44 ignores GIT_NO_LAZY_FETCH and would fetch, silently. Its version is never
-  // printed: the words are closed, and the refusal is the same for a version that cannot be read.
-  if (offline) {
+  // A git before 2.45.0 ignores GIT_NO_LAZY_FETCH and would fetch, silently: offline, and when a
+  // clone is checked for its commits, which happens with every --clones (--offline needs it). Its
+  // version is never printed: the words are closed, and the refusal is the same for a version that
+  // cannot be read.
+  if (clones !== null) {
     const version = gitVersion();
     if (version === null || !honorsNoLazyFetch(version)) {
       return usage(
-        "--offline needs git 2.44 or later, which keeps a clone from fetching; this git is older, or its version could not be read",
+        "--clones needs git 2.45 or later, which keeps a clone from fetching; this git is older, or its version could not be read",
       );
     }
   }
