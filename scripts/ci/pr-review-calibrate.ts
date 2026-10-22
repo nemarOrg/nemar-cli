@@ -1126,6 +1126,13 @@ export async function calibrateMain(
       const lines = text.split("\n");
       for (const [n, line] of lines.entries()) {
         if (line.trim() === "" || line.trim().startsWith("#")) continue;
+        // A line of a label template a person has not labeled yet: its outcome is still `?`. Said
+        // by its number, as every bad line is, and never by its text.
+        if (line.trim().split(/\s+/)[1] === "?") {
+          return usage(
+            `line ${n + 1} of the pull request file is not labeled yet: replace its ? with pass, fail or uncertain`,
+          );
+        }
         const t = parseTarget(line);
         if (t === null)
           return usage(`line ${n + 1} of the pull request file is not like nm000153#2 pass`);

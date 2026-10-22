@@ -1,0 +1,19 @@
+# Labels for the model calibration of the review on its new prompt: the pre-enforcement gate of
+# ADR 0107 (no false pass on a blocking problem, at most 10 percent false fails among the pull
+# requests labeled pass, no screen reject and no steering flag on a legitimate pull request). The
+# owner's step before the review check is required. Neither CI nor the platform runs it: it calls
+# the Anthropic API with the operator's own key, and every review costs money.
+#
+# Format: one pull request per line, `<dataset>#<number> <label> <base> <head>`, with the two
+# commits copied from set-a.txt (or from set B's set-b.txt for a synthetic case). <label> is what a
+# person expects the review to answer: pass, fail or uncertain. A line whose label is still `?` is
+# not labeled yet, and calibrate refuses the whole file until every `?` is replaced. Blank lines
+# and lines that start with `#` are skipped; a comment line heads each group of entries.
+#
+# Run on a labeled copy, from the frozen clones:
+#   ANTHROPIC_API_KEY=... bun run scripts/ci/pr-review-calibrate.ts --offline --clones DIR \
+#     --prs labels.txt
+# `--offline` changes only git; the reviews run one after another, and a large one can take about
+# 21 minutes.
+#
+# The entries are added from the evidence run of set A.

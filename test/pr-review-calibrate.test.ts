@@ -1434,6 +1434,92 @@ describe("--evidence-only: the review's evidence passes, and no model", () => {
   });
 });
 
+describe("the frozen set A and the label template", () => {
+  const fixture = (name: string) =>
+    readFileSync(join(import.meta.dir, "fixtures", "pr-review-canary", name), "utf8");
+  const entriesOf = (text: string) =>
+    text.split("\n").filter((l) => l.trim() !== "" && !l.trim().startsWith("#"));
+
+  test("the canary manifest is 86 distinct pinned pull requests", async () => {
+    const manifest = fixture("set-a.txt");
+    const entries = entriesOf(manifest);
+    expect(entries).toHaveLength(86);
+    // A dataset id, a number and two commit ids, and nothing else: no title, no login, no address.
+    for (const line of entries) {
+      expect(line).toMatch(/^(?:nm|on)\d{6}#\d+ [0-9a-f]{40} [0-9a-f]{40}$/);
+      const t = parseTarget(line);
+      expect(t?.pin).toBeDefined();
+      expect(t?.expected).toBeNull();
+    }
+    expect(manifest).not.toContain("@");
+    expect(new Set(entries.map((l) => l.split(" ")[0])).size).toBe(86);
+    // One dataset has three open pull requests, told apart by their numbers.
+    expect(entries.filter((l) => l.startsWith("nm000501#"))).toHaveLength(3);
+    // calibrate reads it whole: from an empty directory of clones, each line is clone_missing.
+    const clones = mkdtempSync(join(root, "no-clones-"));
+    const r = await calibrate([
+      "--prs",
+      join(import.meta.dir, "fixtures", "pr-review-canary", "set-a.txt"),
+      "--clones",
+      clones,
+      "--offline",
+      "--evidence-only",
+      "--json",
+    ]);
+    expect(r.code).toBe(1);
+    const rows = JSON.parse(r.out) as EvidenceRow[];
+    expect(rows).toHaveLength(86);
+    expect(new Set(rows.map((x) => x.error))).toEqual(new Set(["clone_missing"]));
+  });
+
+  test("the label template parses only once every ? is replaced", async () => {
+    const template = fixture("model-labels.template.txt");
+    // As committed it holds only its header: the entries are added from the evidence run.
+    expect(entriesOf(template)).toEqual([]);
+    const pinned = entriesOf(fixture("set-a.txt")).slice(0, 3);
+    const unlabeled = pinned.map((l) => {
+      const [ref, base, head] = l.split(" ");
+      return `${ref} ? ${base} ${head}`;
+    });
+    const clones = mkdtempSync(join(root, "label-clones-"));
+    const file = join(root, "labels.txt");
+    const runWith = async (entries: string[]) => {
+      writeFileSync(file, `${template}\n# a group\n${entries.join("\n")}\n`);
+      return calibrate(["--prs", file, "--clones", clones, "--offline", "--json"]);
+    };
+    const headerLines = template.split("\n").length;
+    // Nothing labeled: refused at the first entry, by its line number, and nothing is read.
+    const none = await runWith(unlabeled);
+    expect(none.code).toBe(2);
+    expect(none.said).toContain(
+      `line ${headerLines + 2} of the pull request file is not labeled yet`,
+    );
+    expect(none.out).toBe("");
+    for (const l of pinned) expect(none.said).not.toContain(l.split(" ")[1] as string);
+    // One labeled, two not: still refused, at the first one that is not.
+    const labeled = unlabeled.map((l) => l.replace(" ? ", " pass "));
+    const some = await runWith([labeled[0] as string, ...unlabeled.slice(1)]);
+    expect(some.code).toBe(2);
+    expect(some.said).toContain(
+      `line ${headerLines + 3} of the pull request file is not labeled yet`,
+    );
+    // Every one labeled: the file parses, and each pull request is read (here, from no clone).
+    const all = await runWith([
+      labeled[0] as string,
+      unlabeled[1]?.replace(" ? ", " fail ") as string,
+      unlabeled[2]?.replace(" ? ", " uncertain ") as string,
+    ]);
+    expect(all.code).toBe(1);
+    const rows = JSON.parse(all.out) as CalibrationRow[];
+    expect(rows.map((x) => [x.expected, x.error])).toEqual([
+      ["pass", "clone_missing"],
+      ["fail", "clone_missing"],
+      ["uncertain", "clone_missing"],
+    ]);
+    expect(requests).toHaveLength(0);
+  });
+});
+
 describe("the run: its arguments, its output, and its exit code", () => {
   test("every pull request with a verdict is exit 0; any without one is exit 1", () => {
     const row = (verdict: CalibrationRow["verdict"]): CalibrationRow =>
