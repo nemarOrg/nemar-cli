@@ -26,16 +26,22 @@ import {
   CalibrationReadError,
   type CalibrationRow,
   type CalibrationTarget,
+  type EvidenceRow,
   type FetchedPullRequest,
   calibrateMain,
   calibrateOne,
+  evidenceExitCode,
+  evidenceRowOf,
   exitCodeOf,
   fetchPinned,
   fetchPullRequest,
   parseTarget,
+  refusedDeletions,
+  renderEvidenceTable,
   renderTable,
 } from "../scripts/ci/pr-review-calibrate";
-import { childEnv, gatherListing } from "../scripts/ci/pr-review-evidence";
+import { childEnv, gatherContent, gatherListing } from "../scripts/ci/pr-review-evidence";
+import { CLASS_KINDS, SUMMARY_REFUSALS } from "../scripts/ci/pr-review-summary";
 import { type StandInMessage, replyFor, standInMessage } from "./helpers/anthropic-sse";
 import { installGitShim, readEnvLog } from "./helpers/git-shim";
 
@@ -805,62 +811,81 @@ describe("reading a pull request from GitHub, as the workflow does", () => {
       gh.restore();
     }
   });
+
+  test("--evidence-only reads pinned commits by id without --clones, and gh is never asked", async () => {
+    const gh = standInGitHub("evidence-pinned", "{}");
+    const file = join(root, "evidence-pinned-prs.txt");
+    writeFileSync(file, `nm000460#2 ${gh.base} ${gh.head}\n`);
+    const out: string[] = [];
+    let code: number;
+    try {
+      code = await calibrateMain(["--prs", file, "--evidence-only", "--json"], (l) => out.push(l));
+    } finally {
+      gh.restore();
+    }
+    expect(code).toBe(0);
+    expect(existsSync(gh.ghEnv)).toBe(false);
+    const rows = JSON.parse(out.join("\n")) as EvidenceRow[];
+    expect(rows[0]).toMatchObject({ pr: "nm000460#2", error: null });
+    expect(rows[0]?.evidence?.files).toBe(3);
+    expect(requests).toHaveLength(0);
+  });
 });
 
+/** A `gh` first on PATH that records that it ran; returns where, and how to take it away. */
+function watchedGh(name: string) {
+  const bin = join(root, `${name}-gh-bin`);
+  mkdirSync(bin, { recursive: true });
+  const ran = join(bin, "ran.txt");
+  writeFileSync(join(bin, "gh"), `#!/bin/sh\necho ran >> '${ran}'\nexit 1\n`);
+  chmodSync(join(bin, "gh"), 0o755);
+  const saved = process.env.PATH;
+  process.env.PATH = `${bin}:${saved ?? ""}`;
+  return {
+    ran,
+    restore: () => {
+      process.env.PATH = saved;
+    },
+  };
+}
+
+/** Run calibrateMain with its output and its messages kept. */
+async function calibrate(argv: string[]) {
+  const out: string[] = [];
+  const said: string[] = [];
+  const quiet = console.error;
+  console.error = (...a: unknown[]) => void said.push(a.map(String).join(" "));
+  try {
+    const code = await calibrateMain(argv, (l) => out.push(l));
+    return { code, out: out.join("\n"), said: said.join("\n") };
+  } finally {
+    console.error = quiet;
+  }
+}
+
+/**
+ * A directory of frozen clones: `nm000460-2` and `nm000460-3`, full clones of one pull request,
+ * with `.shas` and `.pr.json` beside them. The title fails the naming rule, so a run in the normal
+ * mode ends at the facts and asks no model.
+ */
+function frozenClones(name: string, shas: (base: string, head: string) => string) {
+  const { dir, base, head } = localPullRequest(`${name}-source`)(target());
+  const clones = join(root, `${name}-clones`);
+  mkdirSync(clones, { recursive: true });
+  for (const n of [2, 3]) {
+    execFileSync("git", ["clone", "-q", "--no-checkout", dir, join(clones, `nm000460-${n}`)], {
+      env: GIT_ENV,
+    });
+    writeFileSync(join(clones, `nm000460-${n}.shas`), shas(base, head));
+    writeFileSync(
+      join(clones, `nm000460-${n}.pr.json`),
+      JSON.stringify({ title: "Lee2019 EEG update", body: SECRET }),
+    );
+  }
+  return { clones, base, head };
+}
+
 describe("frozen clones: --clones and --offline", () => {
-  /** A `gh` first on PATH that records that it ran; returns where, and how to take it away. */
-  function watchedGh(name: string) {
-    const bin = join(root, `${name}-gh-bin`);
-    mkdirSync(bin, { recursive: true });
-    const ran = join(bin, "ran.txt");
-    writeFileSync(join(bin, "gh"), `#!/bin/sh\necho ran >> '${ran}'\nexit 1\n`);
-    chmodSync(join(bin, "gh"), 0o755);
-    const saved = process.env.PATH;
-    process.env.PATH = `${bin}:${saved ?? ""}`;
-    return {
-      ran,
-      restore: () => {
-        process.env.PATH = saved;
-      },
-    };
-  }
-
-  /** Run calibrateMain with its output and its messages kept. */
-  async function calibrate(argv: string[]) {
-    const out: string[] = [];
-    const said: string[] = [];
-    const quiet = console.error;
-    console.error = (...a: unknown[]) => void said.push(a.map(String).join(" "));
-    try {
-      const code = await calibrateMain(argv, (l) => out.push(l));
-      return { code, out: out.join("\n"), said: said.join("\n") };
-    } finally {
-      console.error = quiet;
-    }
-  }
-
-  /**
-   * A directory of frozen clones: `nm000460-2` and `nm000460-3`, full clones of one pull request,
-   * with `.shas` and `.pr.json` beside them. The title fails the naming rule, so a run in the normal
-   * mode ends at the facts and asks no model.
-   */
-  function frozenClones(name: string, shas: (base: string, head: string) => string) {
-    const { dir, base, head } = localPullRequest(`${name}-source`)(target());
-    const clones = join(root, `${name}-clones`);
-    mkdirSync(clones, { recursive: true });
-    for (const n of [2, 3]) {
-      execFileSync("git", ["clone", "-q", "--no-checkout", dir, join(clones, `nm000460-${n}`)], {
-        env: GIT_ENV,
-      });
-      writeFileSync(join(clones, `nm000460-${n}.shas`), shas(base, head));
-      writeFileSync(
-        join(clones, `nm000460-${n}.pr.json`),
-        JSON.stringify({ title: "Lee2019 EEG update", body: SECRET }),
-      );
-    }
-    return { clones, base, head };
-  }
-
   test("--clones reads pinned commits and never runs gh", async () => {
     // The .shas files name the head twice: no change at all. The pin on the first line names the
     // pull request's own base and head, three files.
@@ -1038,6 +1063,374 @@ describe("frozen clones: --clones and --offline", () => {
     });
     expect(holds(f.clone, description)).toBe(true);
     expect(requests).toHaveLength(0);
+  });
+});
+
+/**
+ * A pull request made of `base` and one change of it, as a reader that hands it over: the commits
+ * a frozen set would pin, and no text.
+ */
+function localChange(
+  name: string,
+  base: Record<string, string>,
+  edit: (dir: string) => void,
+): { dir: string; base: string; head: string; read: () => FetchedPullRequest } {
+  const dir = join(root, name);
+  mkdirSync(dir, { recursive: true });
+  git(dir, "init", "-q", "-b", "main");
+  write(dir, "dataset_description.json", JSON.stringify({ Name: "Resting EEG", Version: "1.0.0" }));
+  write(dir, "CHANGES", "1.0.0 2026-01-01\n - Initial release\n");
+  for (const [rel, text] of Object.entries(base)) write(dir, rel, text);
+  git(dir, "add", "-A");
+  git(dir, "commit", "-q", "-m", "initial");
+  const b = git(dir, "rev-parse", "HEAD");
+  git(dir, "checkout", "-q", "-b", "contrib");
+  write(dir, "dataset_description.json", JSON.stringify({ Name: "Resting EEG", Version: "1.1.0" }));
+  write(dir, "CHANGES", "1.1.0 2026-10-16\n - Fixed\n1.0.0 2026-01-01\n - Initial release\n");
+  edit(dir);
+  git(dir, "add", "-A");
+  git(dir, "commit", "-q", "-m", "change");
+  const h = git(dir, "rev-parse", "HEAD");
+  git(dir, "checkout", "-q", "main");
+  return { dir, base: b, head: h, read: () => ({ dir, base: b, head: h, pr: {} }) };
+}
+
+/** The channel table of subject `s`. */
+const channels = (s: string) => `${s}/eeg/${s}_task-rest_channels.tsv`;
+
+/** Run calibrateMain in evidence mode on one reader, with its JSON rows parsed. */
+async function evidenceRows(
+  read: () => FetchedPullRequest,
+  extra: string[] = [],
+): Promise<{ code: number; rows: EvidenceRow[] }> {
+  const out: string[] = [];
+  const code = await calibrateMain(
+    ["--pr", "nm000460#2", "--evidence-only", "--json", ...extra],
+    (l) => out.push(l),
+    read,
+  );
+  return { code, rows: JSON.parse(out.join("\n")) as EvidenceRow[] };
+}
+
+describe("--evidence-only: the review's evidence passes, and no model", () => {
+  const KEY = "sk-ant-SECRET-VALUE";
+
+  /** Run `fn` with the SDK pointed at the stand-in, a gateway token set, and no key at all. */
+  async function withRedirectsAndNoKey<T>(fn: () => Promise<T>): Promise<T> {
+    const names = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN"] as const;
+    const saved = Object.fromEntries(names.map((k) => [k, process.env[k]]));
+    Reflect.deleteProperty(process.env, "ANTHROPIC_API_KEY");
+    process.env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${server.port}`;
+    process.env.ANTHROPIC_AUTH_TOKEN = "oauth-SECRET-VALUE";
+    try {
+      return await fn();
+    } finally {
+      for (const k of names) {
+        if (saved[k] === undefined) Reflect.deleteProperty(process.env, k);
+        else process.env[k] = saved[k];
+      }
+    }
+  }
+
+  test("--evidence-only needs no key, reads a local repository and prints closed words and numbers", async () => {
+    const { clones } = frozenClones("eo-local", (b, h) => `${b} ${h}\n`);
+    // An evidence run reads no text: the pull request's own file is not needed.
+    rmSync(join(clones, "nm000460-2.pr.json"));
+    const r = await withRedirectsAndNoKey(() =>
+      calibrate(["--pr", "nm000460#2", "--clones", clones, "--evidence-only"]),
+    );
+    expect(r.code).toBe(0);
+    expect(r.said).toBe("");
+    expect(requests).toHaveLength(0);
+    const lines = r.out.split("\n");
+    expect(lines[0]).toMatch(
+      /^PR +FILES +WANTED +COSMETIC +SUMMARIZED +REFUSED +ACCOUNTED +CLASSES +CUT +CHARS +PATCHES +READ +UNREAD +TRUNCATED +LOSS r\/c\/k +FINDINGS +REFUSED-DELETED s\/i\/h +SECONDS listing\|content$/,
+    );
+    // Three files changed and read: the description and the sidecar accounted for by the summary
+    // in two classes, CHANGES shown, and both accounted files shown as illustrations too.
+    expect(lines[1]).toMatch(
+      /^nm000460#2 +3 +3 +0 +2 +0 +2 +2 +0 +\d+ +3 +3 +0 +no +0\/0\/0 +0 +0\/0\/0 +\d+\.\d\|\d+\.\d$/,
+    );
+    expect(r.out).toContain("1 pull request, 0 without evidence.");
+    expect(r.out).toContain("0 truncated (0 list cut, 0 content not read in full)");
+    expect(r.out).not.toContain(SECRET);
+    expect(r.out).not.toContain(clones);
+    expect(r.out).not.toContain("SECRET-VALUE");
+  });
+
+  test("the normal mode still refuses the redirect variables; --evidence-only refuses neither", async () => {
+    const pr = localChange("eo-redirect", {}, () => {});
+    const normal = await withRedirectsAndNoKey(async () => {
+      const said: string[] = [];
+      const quiet = console.error;
+      console.error = (...a: unknown[]) => void said.push(a.map(String).join(" "));
+      try {
+        return { code: await calibrateMain(["--pr", "nm000460#2"], () => {}, pr.read), said };
+      } finally {
+        console.error = quiet;
+      }
+    });
+    expect(normal.code).toBe(2);
+    expect(normal.said.join("\n")).toContain("ANTHROPIC_BASE_URL and ANTHROPIC_AUTH_TOKEN are set");
+    const evidence = await withRedirectsAndNoKey(() => evidenceRows(pr.read));
+    expect(evidence.code).toBe(0);
+    expect(evidence.rows[0]?.evidence?.files).toBe(2);
+    expect(requests).toHaveLength(0);
+  });
+
+  test("in --evidence-only a pasted key, a flag value or a --clones path is never printed", async () => {
+    const lines = join(root, "eo-secret-prs.txt");
+    writeFileSync(lines, `nm000153#2\n${KEY}\n`);
+    for (const argv of [
+      ["--evidence-only", "--bogus", KEY],
+      ["--evidence-only", `--${KEY}`],
+      [`--evidence-only=${KEY}`, "--pr", "nm000153#2"],
+      [`--without-summary=${KEY}`, "--evidence-only", "--pr", "nm000153#2"],
+      ["--evidence-only", "--pr", KEY],
+      ["--evidence-only", "--pr", "nm000153#2", "--clones", join(root, KEY)],
+      ["--evidence-only", "--clones", KEY, "--pr", "nm000153#2"],
+      ["--evidence-only", "--prs", lines],
+      ["--evidence-only", "--prs", join(root, KEY)],
+      ["--without-summary", "--pr", "nm000153#2", KEY],
+    ]) {
+      const r = await calibrate(argv);
+      expect(r.code, JSON.stringify(argv)).toBe(2);
+      expect(r.said + r.out, JSON.stringify(argv)).not.toContain(KEY);
+    }
+    // A run that succeeds from a directory named like a key does not print the name either.
+    const { clones } = frozenClones(KEY, (b, h) => `${b} ${h}\n`);
+    expect(clones).toContain(KEY);
+    for (const extra of [[], ["--json"]]) {
+      const r = await calibrate([
+        "--pr",
+        "nm000460#2",
+        "--clones",
+        clones,
+        "--evidence-only",
+        ...extra,
+      ]);
+      expect(r.code).toBe(0);
+      expect(r.said + r.out).not.toContain(KEY);
+    }
+  });
+
+  test("a callback token still refuses --evidence-only, before anything is read", async () => {
+    let read = 0;
+    process.env.PR_REVIEW_CALLBACK_TOKEN = "callback-SECRET-TOKEN";
+    const said: string[] = [];
+    const quiet = console.error;
+    console.error = (...a: unknown[]) => void said.push(a.map(String).join(" "));
+    let code: number;
+    try {
+      code = await calibrateMain(
+        ["--pr", "nm000153#2", "--evidence-only"],
+        () => {},
+        () => {
+          read++;
+          throw new CalibrationReadError("gh_failed");
+        },
+      );
+    } finally {
+      console.error = quiet;
+      Reflect.deleteProperty(process.env, "PR_REVIEW_CALLBACK_TOKEN");
+    }
+    expect(code).toBe(2);
+    expect(said.join("\n")).toContain("callback token is set");
+    expect(said.join("\n")).not.toContain("SECRET-TOKEN");
+    expect(read).toBe(0);
+  });
+
+  test("--without-summary needs --evidence-only", async () => {
+    const r = await calibrate(["--pr", "nm000153#2", "--without-summary"]);
+    expect(r.code).toBe(2);
+    expect(r.said).toContain("--without-summary is for --evidence-only");
+  });
+
+  test("a refused file with deleted lines is shown or incomplete; HIDDEN is exit 1", async () => {
+    // Shown: a ragged row refuses the table, and its small diff, with the removed Cz row, is shown
+    // in full. A refused table that deletes no line is not counted.
+    const shown = localChange(
+      "eo-refused-shown",
+      {
+        [channels("sub-01")]: "name\ttype\nCz\tEEG\nPz\tEEG\n",
+        [channels("sub-02")]: "name\ttype\nCz\tEEG\n",
+      },
+      (dir) => {
+        write(dir, channels("sub-01"), "name\ttype\nPz\tEEG\textra\n");
+        write(dir, channels("sub-02"), "name\ttype\nCz\tEEG\nPz\tEEG\textra\n");
+      },
+    );
+    const a = await evidenceRows(shown.read);
+    expect(a.code).toBe(0);
+    expect(a.rows[0]?.refusedBy).toEqual({ ragged_row: 2 });
+    expect(a.rows[0]?.refusedDeleted).toEqual({ shown: 1, incomplete: 0, hidden: 0 });
+    expect(a.rows[0]?.evidence?.readIncomplete).toBe(false);
+
+    // Incomplete: a table with a NUL byte (git writes it as binary, with no line counts) and a
+    // ragged table whose diff is cut at the per-file limit; neither is read, and the pull request
+    // says its content was not read in full.
+    const rows = Array.from({ length: 700 }, (_, i) => `E${i}\tEEG\textra`).join("\n");
+    const incomplete = localChange(
+      "eo-refused-incomplete",
+      {
+        [channels("sub-01")]: "name\ttype\nCz\tEEG\nPz\tE\0EG\n",
+        [channels("sub-02")]: `name\ttype\nCz\tEEG\n${rows.replaceAll("\textra", "")}\n`,
+      },
+      (dir) => {
+        write(dir, channels("sub-01"), "name\ttype\nPz\tE\0EG\n");
+        write(dir, channels("sub-02"), `name\ttype\n${rows}\n`);
+      },
+    );
+    const b = await evidenceRows(incomplete.read);
+    expect(b.code).toBe(0);
+    expect(b.rows[0]?.refusedBy).toEqual({ nul_byte: 1, ragged_row: 1 });
+    expect(b.rows[0]?.refusedDeleted).toEqual({ shown: 0, incomplete: 2, hidden: 0 });
+    expect(b.rows[0]?.evidence?.readIncomplete).toBe(true);
+    expect(b.rows[0]?.evidence?.unread).toBe(2);
+
+    // HIDDEN cannot be built from a real pass (that is the point); a pass's facts doctored to show
+    // no diff and to claim everything read are what it would look like.
+    const listing = gatherListing(shown.dir, shown.base, shown.head);
+    const facts = { ...listing, ...gatherContent(shown.dir, listing) };
+    expect(refusedDeletions(shown.dir, facts)).toEqual({ shown: 1, incomplete: 0, hidden: 0 });
+    expect(
+      refusedDeletions(shown.dir, { ...facts, patches: [], readIncomplete: false, unreadFiles: 0 }),
+    ).toEqual({ shown: 0, incomplete: 0, hidden: 1 });
+    const hidden: EvidenceRow = {
+      ...(a.rows[0] as EvidenceRow),
+      refusedDeleted: { shown: 0, incomplete: 0, hidden: 1 },
+    };
+    expect(evidenceExitCode([a.rows[0] as EvidenceRow])).toBe(0);
+    expect(evidenceExitCode([a.rows[0] as EvidenceRow, hidden])).toBe(1);
+    const table = renderEvidenceTable([hidden]).join("\n");
+    expect(table).toContain("0/0/1 HIDDEN");
+    expect(table).toContain("files shown 0, incomplete 0, HIDDEN 1");
+  });
+
+  test("no path or value reaches the table or the JSON", async () => {
+    const SUB = "sub-SECRETSUBJECT";
+    const table = `${SUB}/eeg/${SUB}_task-SECRETTASK_channels.tsv`;
+    const sidecar = `${SUB}/eeg/${SUB}_task-SECRETTASK_eeg.json`;
+    const pr = localChange(
+      "eo-no-text",
+      {
+        [table]: "name\ttype\nSECRETROW\tSECRETTYPE\nPz\tEEG\n",
+        [sidecar]: JSON.stringify({ SECRETKEY: "SECRETVALUE", TaskName: "SECRETTASK" }),
+        [channels("sub-02")]: "name\ttype\nSECRETRAGGED\tEEG\n",
+      },
+      (dir) => {
+        write(dir, table, "name\ttype\nPOL SECRETROW\tSECRETTYPE\nPz\tSECRETNEW\n");
+        write(dir, sidecar, JSON.stringify({ TaskName: "SECRETTASK2" }));
+        write(dir, channels("sub-02"), "name\ttype\nSECRETRAGGED\tEEG\textra\n");
+      },
+    );
+    const out: string[] = [];
+    for (const extra of [[], ["--json"]]) {
+      await calibrateMain(
+        ["--pr", "nm000460#2", "--evidence-only", ...extra],
+        (l) => out.push(l),
+        pr.read,
+      );
+    }
+    const text = out.join("\n");
+    expect(text).not.toContain("SECRET");
+    // And every string in the rows is the pull request's name, a closed word, or a key.
+    const { rows } = await evidenceRows(pr.read);
+    const allowed = new Set<string>(["nm000460#2", ...CLASS_KINDS, ...SUMMARY_REFUSALS]);
+    const strings: string[] = [];
+    const walk = (v: unknown): void => {
+      if (typeof v === "string") strings.push(v);
+      else if (Array.isArray(v)) v.forEach(walk);
+      else if (v !== null && typeof v === "object") Object.values(v).forEach(walk);
+    };
+    walk(rows);
+    expect(strings.filter((s) => !allowed.has(s))).toEqual([]);
+    expect(Object.keys(rows[0]?.refusedBy ?? {})).toEqual(["ragged_row"]);
+    expect(rows[0]?.classes?.length).toBeGreaterThan(0);
+    expect(rows[0]?.evidence?.rowsRemoved).toBe(0);
+    expect(rows[0]?.evidence?.keysRemoved).toBe(1);
+  });
+
+  test("--without-summary reads as the raw path alone", async () => {
+    // 45 tables whose names gain a prefix, each with its own names, so no two diffs are alike: the
+    // summary accounts for all of them, while the raw path shows at most 40 diffs.
+    const base: Record<string, string> = {};
+    const edits: Record<string, string> = {};
+    for (let s = 1; s <= 45; s++) {
+      const id = `sub-${String(s).padStart(2, "0")}`;
+      const names = ["Fp1", "Fp2", "Cz"].map((n) => `${n}${id}`);
+      base[channels(id)] = `name\ttype\n${names.map((n) => `${n}\tEEG`).join("\n")}\n`;
+      edits[channels(id)] = `name\ttype\n${names.map((n) => `POL ${n}\tEEG`).join("\n")}\n`;
+    }
+    const pr = localChange("eo-without-summary", base, (dir) => {
+      for (const [rel, text] of Object.entries(edits)) write(dir, rel, text);
+    });
+    const without = (await evidenceRows(pr.read, ["--without-summary"])).rows[0] as EvidenceRow;
+    expect(without.evidence).toMatchObject({
+      files: 47,
+      summaryAbandoned: true,
+      summarized: 0,
+      accounted: 0,
+      classes: 0,
+      patches: 40,
+      // The description, CHANGES and 38 tables are shown; seven tables are not.
+      unread: 7,
+      readIncomplete: true,
+      truncated: true,
+    });
+    expect(without.classes).toEqual([]);
+    // The same as the content pass gives with a clock that has run out, the raw path alone.
+    const listing = gatherListing(pr.dir, pr.base, pr.head);
+    const raw = gatherContent(pr.dir, listing, { now: () => Number.POSITIVE_INFINITY });
+    expect(raw.summary.abandoned).toBe(true);
+    expect([without.evidence?.unread, without.evidence?.patches]).toEqual([
+      raw.unreadFiles,
+      raw.patches.length,
+    ]);
+    // The control: with the summary every table is accounted for and nothing is unread.
+    const withSummary = (await evidenceRows(pr.read)).rows[0] as EvidenceRow;
+    expect(withSummary.evidence).toMatchObject({
+      summaryAbandoned: false,
+      summarized: 46,
+      accounted: 46,
+      unread: 0,
+      readIncomplete: false,
+    });
+    expect(
+      withSummary.classes?.map((c) => `${c.kind} ${c.items}/${c.files} ${c.complete}`).sort(),
+    ).toEqual(["json_value_changed 1/1 true", "key_relabeled 135/45 true"]);
+  });
+
+  test("the normal mode prints the evidence columns in a second table", async () => {
+    const row = await withStandIn(() =>
+      calibrateOne(target("pass"), root, localPullRequest("eo-normal")),
+    );
+    expect(row.verdict).toBe("pass");
+    expect(row.evidence).toMatchObject({ files: 3, wanted: 3, summarized: 2, accounted: 2 });
+    const evidence = renderEvidenceTable([evidenceRowOf(row)]);
+    expect(evidence[1]).toMatch(
+      /^nm000460#2 +3 +3 +0 +2 +0 +2 +2 +0 +\d+ +3 +3 +0 +no +0\/0\/0 +0 +- +\d+\.\d\|\d+\.\d$/,
+    );
+    expect(evidence.join("\n")).toContain("Removals in refused files: not counted in this mode.");
+    // The review's own table is unchanged, and the evidence table follows it.
+    const out: string[] = [];
+    const code = await calibrateMain(
+      ["--pr", "nm000153#2"],
+      (l) => out.push(l),
+      () => {
+        throw new CalibrationReadError("gh_failed");
+      },
+    );
+    expect(code).toBe(1);
+    expect(out[0]).toMatch(
+      /^PR +FILES +FACTS +SCREEN +REVIEW \(lost rev better text honest\) +STEERING +VERDICT +CHECK +TOKENS/,
+    );
+    expect(out[1]).toMatch(/^nm000153#2 +- +none +- +- +- +no verdict \(gh_failed\)/);
+    const evidenceHeader = out.findIndex((l) => l.startsWith("PR") && l.includes("SUMMARIZED"));
+    const reviewNote = out.findIndex((l) => l.startsWith("Review columns, after the facts:"));
+    expect(reviewNote).toBeGreaterThan(0);
+    expect(evidenceHeader).toBe(reviewNote + 2);
+    expect(out[evidenceHeader + 1]).toMatch(/^nm000153#2 +no evidence \(gh_failed\)$/);
   });
 });
 

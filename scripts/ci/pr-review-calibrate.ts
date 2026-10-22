@@ -25,6 +25,17 @@
  * review needs is `objects_missing`, never a fetch. It sets `GIT_NO_LAZY_FETCH` (git 2.44 or later)
  * for the run and restores it after; `--offline` changes only git, never the model calls.
  *
+ * **`--evidence-only`** asks no model and needs no key: it runs the review's two evidence passes
+ * (`gatherListing`, `gatherContent`) and `buildEvidence` on each pull request, as the review would
+ * after its screen, and prints what they came to in a table of numbers and closed words (see
+ * {@link renderEvidenceTable}): how many files were read, summarized, refused and by what refusal,
+ * accounted for, left unread, what the summary's classes are (kind, counts, completeness), its loss
+ * facts, and how long each pass took. A pinned pull request is fetched by its ids with no `gh`.
+ * **`--without-summary`** (only with `--evidence-only`) never starts the change summary, so the
+ * same passes read the pull request as they did before the summary existed. The normal mode prints
+ * the same evidence numbers in a second table under the first, for the pull requests whose content
+ * the review read.
+ *
  * **It measures what production does, because it runs what production runs.** Each pull request
  * goes through `reviewPullRequest` in `pr-review.ts`: the same facts, the same screen and review,
  * the same models, budgets and prompts, the same report assembly. Only the dispatch's own checks
@@ -39,7 +50,8 @@
  *
  * **The operator's key reaches only the API.** It refuses to run while `ANTHROPIC_BASE_URL` or
  * `ANTHROPIC_AUTH_TOKEN` is set (a shell that points the SDK at a gateway would hand it the key),
- * and says which by name, never by value. Every child it starts, its own `gh` and `git` and the
+ * and says which by name, never by value; `--evidence-only` makes no model client at all, so it
+ * refuses neither, but it still refuses to run where the callback token is set. Every child it starts, its own `gh` and `git` and the
  * `git` the review's evidence reader runs on a contributor's objects, is started with
  * {@link childEnv} (`pr-review-evidence.ts`): this process's environment without any `ANTHROPIC_*`
  * variable, without any `ACTIONS_ID_TOKEN_REQUEST_*` variable (the request for an identity token,
@@ -55,7 +67,9 @@
  * whether the review flagged steering, which the gate allows on no legitimate pull request.
  *
  * Exits 0 when every pull request reached a verdict, 1 when any did not (the table says why, in a
- * closed word), and 2 for bad arguments or an environment it refuses to run in.
+ * closed word), and 2 for bad arguments or an environment it refuses to run in. With
+ * `--evidence-only`, 0 when every pull request was read and no removal in a file the summary
+ * refused is HIDDEN (see {@link refusedDeletions}), 1 otherwise.
  */
 
 import { execFileSync } from "node:child_process";
@@ -74,13 +88,25 @@ import {
   verdictOf,
 } from "../../shared/pr-review";
 import {
+  type EvidenceStats,
+  MAX_REVIEWABLE_FILES,
   STAGE_BUDGETS,
   type StageObservation,
+  evidenceStats,
   isFromFork,
   mapError,
   reviewPullRequest,
+  timed,
 } from "./pr-review";
-import { childEnv } from "./pr-review-evidence";
+import {
+  type GitFacts,
+  type TextFacts,
+  buildEvidence,
+  childEnv,
+  gatherContent,
+  gatherListing,
+} from "./pr-review-evidence";
+import { type ClassKind, SUMMARY_REFUSALS, type SummaryRefusal } from "./pr-review-summary";
 
 /** The base and head commits a pull request is read at, both full ids. */
 export interface PinnedCommits {
@@ -131,6 +157,11 @@ export interface CalibrationRow {
   screenSeconds: number | null;
   reviewSeconds: number | null;
   costUsd: number | null;
+  /**
+   * What the content pass came to, when the review read the content (after its screen let the pull
+   * request through); null otherwise. Numbers and booleans only.
+   */
+  evidence: EvidenceStats | null;
 }
 
 const PR_REF = /^(?:nemarDatasets\/)?((?:nm|xx|on)\d{6})#(\d{1,9})$/;
@@ -179,9 +210,22 @@ const REFUSED_FLAGS = new Set([
  * The flags the script accepts. With {@link REFUSED_FLAGS} they are the only flags a message ever
  * names: any other name may be a key pasted after two dashes, and a message is no place to print one.
  */
-const ACCEPTED_FLAGS = ["pr", "prs", "json", "clones", "offline"] as const;
+const ACCEPTED_FLAGS = [
+  "pr",
+  "prs",
+  "json",
+  "clones",
+  "offline",
+  "evidence-only",
+  "without-summary",
+] as const;
 /** The accepted flags that take no value. */
-const SWITCHES: ReadonlySet<string> = new Set(["json", "offline"]);
+const SWITCHES: ReadonlySet<string> = new Set([
+  "json",
+  "offline",
+  "evidence-only",
+  "without-summary",
+]);
 const KNOWN_FLAGS: ReadonlySet<string> = new Set<string>([...ACCEPTED_FLAGS, ...REFUSED_FLAGS]);
 
 /**
@@ -482,6 +526,7 @@ export async function calibrateOne(
     screenSeconds: null,
     reviewSeconds: null,
     costUsd: null,
+    evidence: null,
   };
   let fetched: FetchedPullRequest;
   try {
@@ -514,6 +559,9 @@ export async function calibrateOne(
         fromFork: isFromFork(fetched.pr),
       },
       observe,
+      (s) => {
+        row.evidence = s;
+      },
     );
     row.files = report.evidence.files_changed;
     row.facts = factWords(report);
@@ -542,6 +590,365 @@ export async function calibrateOne(
           review_output: row.reviewTokens?.output_tokens ?? 0,
         });
   return row;
+}
+
+// ---------------------------------------------------------------------------------------------
+// --evidence-only: the review's evidence passes alone, with no model
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * The text facts of a run that reads no pull request text: none of them wrong. `buildEvidence`
+ * copies them into the evidence and reads them for nothing else, so the counts do not depend on it.
+ */
+const NEUTRAL_TEXT: TextFacts = {
+  descriptionEmpty: false,
+  descriptionCut: false,
+  titleProblem: null,
+  nameProblem: null,
+};
+
+/** One class of the change summary as the evidence rows carry it: its kind and counts, no path. */
+export interface EvidenceClass {
+  kind: ClassKind;
+  items: number;
+  files: number;
+  complete: boolean;
+}
+
+/**
+ * The modified and removed files the summary REFUSED (so no loss fact counts them) whose diff
+ * deletes at least one line, by what the review was given of each: `shown` (a diff not cut, its
+ * own or one it repeats), `incomplete` (not shown, and the evidence says the content was not read
+ * in full, so the pull request cannot pass on it) or `hidden` (neither: a removal the review could
+ * not see and was not told about, which must never happen).
+ */
+export interface RefusedDeletions {
+  shown: number;
+  incomplete: number;
+  hidden: number;
+}
+
+/** The evidence numbers without the passes' times, which a row carries apart. */
+export type EvidenceCounts = Omit<EvidenceStats, "listingMs" | "contentMs">;
+
+/**
+ * What the evidence passes came to for one pull request, in numbers and closed words only: no
+ * path, no value and no text of the pull request. `timings` is the one part that changes from run
+ * to run, kept under one key so a stored baseline can drop it.
+ */
+export interface EvidenceRow {
+  pr: string;
+  /** Why there is no evidence: a read error, a run error, or `too_large`; null when it was read. */
+  error: string | null;
+  evidence: EvidenceCounts | null;
+  /** How many candidates the summary refused, by its closed word; null when not counted. */
+  refusedBy: Partial<Record<SummaryRefusal, number>> | null;
+  /** The classes the summary showed, in its order; null when not counted. */
+  classes: EvidenceClass[] | null;
+  refusedDeleted: RefusedDeletions | null;
+  timings: { listingMs: number; contentMs: number } | null;
+}
+
+/** How many candidates the summary refused, by refusal, in the order of {@link SUMMARY_REFUSALS}. */
+function refusalTally(facts: GitFacts): Partial<Record<SummaryRefusal, number>> {
+  const counts = new Map<SummaryRefusal, number>();
+  for (const o of facts.summary.files) {
+    if (o.refusal !== null) counts.set(o.refusal, (counts.get(o.refusal) ?? 0) + 1);
+  }
+  const out: Partial<Record<SummaryRefusal, number>> = {};
+  for (const word of SUMMARY_REFUSALS) {
+    const n = counts.get(word);
+    if (n !== undefined) out[word] = n;
+  }
+  return out;
+}
+
+/** The classes the summary showed, in render order, as kind and counts. */
+function classesOf(facts: GitFacts): EvidenceClass[] {
+  const { summary } = facts;
+  return summary.classes
+    .filter((c) => summary.shown.has(c.key))
+    .map((c) => ({
+      kind: c.kind,
+      items: c.items,
+      files: c.files.size,
+      complete: summary.complete.has(c.key),
+    }));
+}
+
+/**
+ * Sort the files the summary refused that delete a line ({@link RefusedDeletions}). Which delete a
+ * line is asked of git once, `git diff --numstat` from the merge base to the head over those paths
+ * alone (a binary file, `-` deleted, counts as deleting). What the review was given of each is read
+ * from the content pass's own facts: a diff not cut that stands for it, else the pass's
+ * `readIncomplete`. Run on blobs the content pass already read, so it fetches nothing.
+ */
+export function refusedDeletions(dir: string, facts: GitFacts): RefusedDeletions {
+  const out: RefusedDeletions = { shown: 0, incomplete: 0, hidden: 0 };
+  const refused = facts.summary.files.filter((o) => o.refusal !== null).map((o) => o.path);
+  if (refused.length === 0) return out;
+  let raw: string;
+  try {
+    raw = run("git", [
+      "--literal-pathspecs",
+      "-C",
+      dir,
+      "-c",
+      "core.hooksPath=/dev/null",
+      "-c",
+      "core.fsmonitor=false",
+      "-c",
+      "protocol.ext.allow=never",
+      "diff",
+      "--numstat",
+      "-z",
+      "--no-renames",
+      "--no-ext-diff",
+      "--no-textconv",
+      facts.mergeBase,
+      facts.head,
+      "--",
+      ...refused,
+    ]);
+  } catch {
+    throw new CalibrationReadError("objects_missing");
+  }
+  const shownInFull = new Set<string>();
+  for (const p of facts.patches) {
+    if (p.truncated) continue;
+    shownInFull.add(p.path);
+    for (const path of p.same) shownInFull.add(path);
+  }
+  for (const record of raw.split("\0")) {
+    if (record === "") continue;
+    const m = /^(\d+|-)\t(\d+|-)\t(.+)$/s.exec(record);
+    if (m === null) throw new CalibrationReadError("objects_missing");
+    if (m[2] !== "-" && Number(m[2]) === 0) continue;
+    if (shownInFull.has(m[3] as string)) out.shown++;
+    else if (facts.readIncomplete) out.incomplete++;
+    else out.hidden++;
+  }
+  return out;
+}
+
+/**
+ * The evidence of one pull request, as the review reads it after its screen, with no model asked:
+ * the listing and the content pass, each timed, the evidence built from them, and the numbers of
+ * {@link EvidenceRow}. A pull request over the review's file limit is `too_large`, as the review
+ * would make it. `withoutSummary` gives the content pass a clock that has always run out, so the
+ * change summary is never started and the pass reads the pull request as it did before the summary
+ * existed. Never throws: what went wrong is a closed word in the row.
+ */
+export function evidenceOne(
+  t: CalibrationTarget,
+  root: string,
+  read: (t: CalibrationTarget, root: string) => FetchedPullRequest,
+  opts: { withoutSummary: boolean },
+): EvidenceRow {
+  const row: EvidenceRow = {
+    pr: `${t.dataset}#${t.number}`,
+    error: null,
+    evidence: null,
+    refusedBy: null,
+    classes: null,
+    refusedDeleted: null,
+    timings: null,
+  };
+  let fetched: FetchedPullRequest;
+  try {
+    fetched = read(t, root);
+  } catch (e) {
+    row.error = e instanceof CalibrationReadError ? e.code : "not_readable";
+    return row;
+  }
+  try {
+    const { dir, base, head } = fetched;
+    const { value: listing, ms: listingMs } = timed(() => gatherListing(dir, base, head));
+    if (listing.changes.length > MAX_REVIEWABLE_FILES) {
+      row.error = "too_large";
+      return row;
+    }
+    const options = opts.withoutSummary ? { now: () => Number.POSITIVE_INFINITY } : {};
+    const { value: content, ms: contentMs } = timed(() => gatherContent(dir, listing, options));
+    const all: GitFacts = { ...listing, ...content };
+    const stats = evidenceStats(all, buildEvidence(all, NEUTRAL_TEXT), { listingMs, contentMs });
+    const { listingMs: _listing, contentMs: _content, ...counts } = stats;
+    const refusedDeleted = refusedDeletions(dir, all);
+    row.evidence = counts;
+    row.refusedBy = refusalTally(all);
+    row.classes = classesOf(all);
+    row.refusedDeleted = refusedDeleted;
+    row.timings = { listingMs, contentMs };
+  } catch (e) {
+    row.error = e instanceof CalibrationReadError ? e.code : mapError(e);
+  }
+  return row;
+}
+
+/** The evidence row of a normal run: its numbers, and `-` for what only an evidence run counts. */
+export function evidenceRowOf(r: CalibrationRow): EvidenceRow {
+  if (r.evidence === null) {
+    return {
+      pr: r.pr,
+      error: r.error,
+      evidence: null,
+      refusedBy: null,
+      classes: null,
+      refusedDeleted: null,
+      timings: null,
+    };
+  }
+  const { listingMs, contentMs, ...counts } = r.evidence;
+  return {
+    pr: r.pr,
+    error: null,
+    evidence: counts,
+    refusedBy: null,
+    classes: null,
+    refusedDeleted: null,
+    timings: { listingMs, contentMs },
+  };
+}
+
+/** The exit code of an evidence run: 1 when a pull request was not read or a removal is HIDDEN. */
+export function evidenceExitCode(rows: readonly EvidenceRow[]): 0 | 1 {
+  return rows.some((r) => r.error !== null || (r.refusedDeleted?.hidden ?? 0) > 0) ? 1 : 0;
+}
+
+const seconds = (ms: number): string => (ms / 1000).toFixed(1);
+
+/** `no`, `list`, `content` or `list+content`: what made the evidence truncated. */
+function truncatedWord(e: EvidenceCounts): string {
+  if (e.listCut && e.readIncomplete) return "list+content";
+  if (e.listCut) return "list";
+  if (e.readIncomplete) return "content";
+  return "no";
+}
+
+/**
+ * The evidence table, one pull request per line, with a header and totals. Pure; numbers and
+ * closed words only. Columns: the files changed, wanted (in the areas the review reads), proven
+ * cosmetic, summarized and refused by the summary, accounted for, the classes it showed and cut
+ * and the characters of its block, the diffs shown, the files read and left unread, what made the
+ * evidence truncated, the rows, columns and keys removed and not kept (LOSS r/c/k), the platform's
+ * findings, the refused files that delete a line (shown/incomplete/hidden), and the two passes'
+ * seconds. A cell the run did not count (the normal mode counts no refusal) is `-`.
+ */
+export function renderEvidenceTable(rows: readonly EvidenceRow[]): string[] {
+  const cells = rows.map((r) => {
+    const e = r.evidence;
+    if (e === null) {
+      return [r.pr, `no evidence (${r.error ?? "content not read"})`];
+    }
+    const d = r.refusedDeleted;
+    return [
+      r.pr,
+      String(e.files),
+      String(e.wanted),
+      String(e.cosmetic),
+      e.summaryAbandoned ? "abandoned" : String(e.summarized),
+      String(e.refused),
+      String(e.accounted),
+      String(e.classes),
+      String(e.cut),
+      String(e.summaryChars),
+      String(e.patches),
+      String(e.read),
+      String(e.unread),
+      truncatedWord(e),
+      `${e.rowsRemoved}/${e.columnsRemoved}/${e.keysRemoved}`,
+      String(e.platformFindings),
+      d === null ? "-" : `${d.shown}/${d.incomplete}/${d.hidden}${d.hidden > 0 ? " HIDDEN" : ""}`,
+      r.timings === null ? "-" : `${seconds(r.timings.listingMs)}|${seconds(r.timings.contentMs)}`,
+    ];
+  });
+  const header = [
+    "PR",
+    "FILES",
+    "WANTED",
+    "COSMETIC",
+    "SUMMARIZED",
+    "REFUSED",
+    "ACCOUNTED",
+    "CLASSES",
+    "CUT",
+    "CHARS",
+    "PATCHES",
+    "READ",
+    "UNREAD",
+    "TRUNCATED",
+    "LOSS r/c/k",
+    "FINDINGS",
+    "REFUSED-DELETED s/i/h",
+    "SECONDS listing|content",
+  ];
+  const widths = header.map((h, i) => Math.max(h.length, ...cells.map((c) => (c[i] ?? "").length)));
+  const line = (c: string[]) =>
+    c
+      .map((x, i) => x.padEnd(widths[i] ?? 0))
+      .join("  ")
+      .trimEnd();
+  return [line(header), ...cells.map(line), "", ...evidenceTotals(rows)];
+}
+
+/** The totals under the evidence table. */
+function evidenceTotals(rows: readonly EvidenceRow[]): string[] {
+  const read = rows.filter((r) => r.evidence !== null);
+  const total = (f: (e: EvidenceCounts) => number) =>
+    read.reduce((n, r) => n + f(r.evidence as EvidenceCounts), 0);
+  const count = (f: (e: EvidenceCounts) => boolean) =>
+    read.filter((r) => f(r.evidence as EvidenceCounts)).length;
+  const errors = new Map<string, number>();
+  for (const r of rows) {
+    if (r.evidence === null && r.error !== null) {
+      errors.set(r.error, (errors.get(r.error) ?? 0) + 1);
+    }
+  }
+  const refusals = new Map<string, number>();
+  let refusalsCounted = false;
+  for (const r of rows) {
+    if (r.refusedBy === null) continue;
+    refusalsCounted = true;
+    for (const [word, n] of Object.entries(r.refusedBy)) {
+      refusals.set(word, (refusals.get(word) ?? 0) + (n ?? 0));
+    }
+  }
+  const byReason = refusalsCounted
+    ? ` (${[...refusals.entries()].map(([w, n]) => `${w} ${n}`).join(", ") || "none"})`
+    : "";
+  const deleted = rows.filter((r) => r.refusedDeleted !== null);
+  const withDeleted = deleted.filter((r) => {
+    const d = r.refusedDeleted as RefusedDeletions;
+    return d.shown + d.incomplete + d.hidden > 0;
+  });
+  const sumDeleted = (k: keyof RefusedDeletions) =>
+    deleted.reduce((n, r) => n + (r.refusedDeleted as RefusedDeletions)[k], 0);
+  const withTimes = rows.filter((r) => r.timings !== null);
+  const slowest = (k: "listingMs" | "contentMs"): string => {
+    let top: EvidenceRow | null = null;
+    for (const r of withTimes) {
+      if (top === null || (r.timings?.[k] ?? 0) > (top.timings?.[k] ?? 0)) top = r;
+    }
+    return top?.timings ? `${seconds(top.timings[k])} s (${top.pr})` : "-";
+  };
+  const allMs = withTimes.reduce(
+    (n, r) => n + (r.timings?.listingMs ?? 0) + (r.timings?.contentMs ?? 0),
+    0,
+  );
+  const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
+  const notRead = rows.length - read.length;
+  return [
+    `${plural(rows.length, "pull request", "pull requests")}, ${notRead} without evidence${
+      errors.size > 0 ? ` (${[...errors.entries()].map(([w, n]) => `${w} ${n}`).join(", ")})` : ""
+    }.`,
+    `Files: ${total((e) => e.files)} changed, ${total((e) => e.wanted)} wanted, ${total((e) => e.cosmetic)} cosmetic, ${total((e) => e.summarized)} summarized, ${total((e) => e.refused)} refused${byReason}, ${total((e) => e.accounted)} accounted for, ${total((e) => e.read)} read, ${total((e) => e.unread)} unread.`,
+    `Pull requests: ${count((e) => e.truncated)} truncated (${count((e) => e.listCut)} list cut, ${count((e) => e.readIncomplete)} content not read in full), ${count((e) => e.summaryAbandoned)} with the summary abandoned, ${count((e) => e.platformFindings > 0)} with a blocking loss (a platform finding), ${count((e) => e.cut > 0)} with a class cut.`,
+    deleted.length === 0
+      ? "Removals in refused files: not counted in this mode."
+      : `Removals in refused files: ${withDeleted.length} pull requests have a refused file that deletes a line; files shown ${sumDeleted("shown")}, incomplete ${sumDeleted("incomplete")}, HIDDEN ${sumDeleted("hidden")}.`,
+    `Seconds: slowest listing ${slowest("listingMs")}, slowest content ${slowest("contentMs")}, all passes ${seconds(allMs)}.`,
+    "LOSS r/c/k = rows, columns with values and keys removed and not kept elsewhere; REFUSED-DELETED s/i/h = files the summary refused that delete a line, shown in full, in a pull request whose content is incomplete, or HIDDEN (neither, exit 1); TRUNCATED says what made the evidence truncated.",
+  ];
 }
 
 const SHORT: Record<string, string> = {
@@ -626,9 +1033,11 @@ export function renderTable(rows: readonly CalibrationRow[]): string[] {
 function usage(why: string): number {
   console.error(`pr-review-calibrate: ${why}`);
   console.error(
-    "usage: pr-review-calibrate.ts (--pr nm000153#2 ... | --prs FILE) [--clones DIR [--offline]] [--json]\n" +
+    "usage: pr-review-calibrate.ts (--pr nm000153#2 ... | --prs FILE) [--clones DIR [--offline]]\n" +
+      "                              [--evidence-only [--without-summary]] [--json]\n" +
       "       FILE: one pull request per line, optionally followed by pass, fail or uncertain,\n" +
-      "       and optionally by its base and head commits (full ids), which need --clones",
+      "       and optionally by its base and head commits (full ids), which need --clones\n" +
+      "       or --evidence-only",
   );
   return 2;
 }
@@ -643,24 +1052,30 @@ export function exitCodeOf(rows: readonly CalibrationRow[]): 0 | 1 {
 }
 
 /**
+ * Where a pull request comes from when no `--clones` is given: fetched at its pinned commits by id
+ * (a run that reads no text, `--evidence-only`), else read with `gh` and fetched as the workflow
+ * fetches it.
+ */
+function readPullRequest(t: CalibrationTarget, root: string): FetchedPullRequest {
+  return t.pin === undefined ? fetchPullRequest(t, root) : fetchPinned(t, root);
+}
+
+/**
  * Read the arguments, refuse what would post or leak the key, calibrate, and print. `read` is where
- * each pull request comes from, as for {@link calibrateOne}.
+ * each pull request comes from when no `--clones` is given, as for {@link calibrateOne}.
+ *
+ * The refusals come in this order: the callback token first, before an argument is read, because
+ * calibrate posts nothing in any mode; then the arguments; then, unless `--evidence-only`, the
+ * variables that would point the model client elsewhere. An evidence run makes no client, so a
+ * shell with them set is no danger to a key it never reads.
  */
 export async function calibrateMain(
   argv: readonly string[],
   out: (line: string) => void = (l) => console.log(l),
-  read: (t: CalibrationTarget, root: string) => FetchedPullRequest = fetchPullRequest,
+  read: (t: CalibrationTarget, root: string) => FetchedPullRequest = readPullRequest,
 ): Promise<number> {
   if (process.env.PR_REVIEW_CALLBACK_TOKEN) {
     return usage("a review's callback token is set here; calibrate posts nothing and will not run");
-  }
-  const redirecting = ["ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN"].filter(
-    (name) => process.env[name] !== undefined,
-  );
-  if (redirecting.length > 0) {
-    return usage(
-      `${redirecting.join(" and ")} ${redirecting.length === 1 ? "is" : "are"} set; unset ${redirecting.length === 1 ? "it" : "them"} so the key goes only to the Anthropic API`,
-    );
   }
   const targets: CalibrationTarget[] = [];
   const switches = new Set<string>();
@@ -724,11 +1139,27 @@ export async function calibrateMain(
   if (targets.length === 0) return usage("name at least one pull request");
   const json = switches.has("json");
   const offline = switches.has("offline");
-  if (offline && clones === null) return usage("--offline reads only --clones, which is not given");
-  if (clones === null && targets.some((t) => t.pin !== undefined)) {
-    return usage("a pull request with pinned commits is read from --clones");
+  const evidenceOnly = switches.has("evidence-only");
+  const withoutSummary = switches.has("without-summary");
+  if (!evidenceOnly) {
+    const redirecting = ["ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN"].filter(
+      (name) => process.env[name] !== undefined,
+    );
+    if (redirecting.length > 0) {
+      return usage(
+        `${redirecting.join(" and ")} ${redirecting.length === 1 ? "is" : "are"} set; unset ${redirecting.length === 1 ? "it" : "them"} so the key goes only to the Anthropic API`,
+      );
+    }
   }
-  const reader = clones === null ? read : cloneReader(clones, offline, true);
+  if (withoutSummary && !evidenceOnly) return usage("--without-summary is for --evidence-only");
+  if (offline && clones === null) return usage("--offline reads only --clones, which is not given");
+  if (clones === null && !evidenceOnly && targets.some((t) => t.pin !== undefined)) {
+    return usage(
+      "a pull request with pinned commits is read from --clones or with --evidence-only",
+    );
+  }
+  // An evidence run reads no text, so a clone needs no `.pr.json` and a pin needs no `gh`.
+  const reader = clones === null ? read : cloneReader(clones, offline, !evidenceOnly);
   // A pull request named twice is calibrated once. Its second read would run `git remote add` in
   // the directory the first made and fail, and its row would say fetch_failed for no fault of the
   // pull request's. The first mention wins, and with it the outcome expected of the pull request.
@@ -753,10 +1184,21 @@ export async function calibrateMain(
   if (offline) process.env.GIT_NO_LAZY_FETCH = "1";
   const root = mkdtempSync(join(tmpdir(), "pr-review-calibrate-"));
   try {
+    if (evidenceOnly) {
+      // No model client is made on this path, so no key is read and nothing is sent.
+      const rows = once.map((t) => evidenceOne(t, root, reader, { withoutSummary }));
+      if (json) out(JSON.stringify(rows, null, 2));
+      else for (const line of renderEvidenceTable(rows)) out(line);
+      return evidenceExitCode(rows);
+    }
     const rows: CalibrationRow[] = [];
     for (const t of once) rows.push(await calibrateOne(t, root, reader));
     if (json) out(JSON.stringify(rows, null, 2));
-    else for (const line of renderTable(rows)) out(line);
+    else {
+      for (const line of renderTable(rows)) out(line);
+      out("");
+      for (const line of renderEvidenceTable(rows.map(evidenceRowOf))) out(line);
+    }
     return exitCodeOf(rows);
   } finally {
     rmSync(root, { recursive: true, force: true });
