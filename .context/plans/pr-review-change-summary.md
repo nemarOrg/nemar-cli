@@ -1519,6 +1519,46 @@ New `test/pr-review-original.unit.test.ts` (pure functions) and a `describe("ori
 
 Mutations: drop the protected-line filter (protect nothing), widen "minor" to any edit, compare README by path instead of document, take the highest tag instead of the lowest, skip the ancestor check, treat `Authors` as a set.
 
+
+### As built (Phase 7: `scripts/ci/pr-review-original.ts`)
+
+The facts of B2 are one pure module with no git, file system or clock; Phase 8 reads the blobs, the entries and the tags and passes bytes in.
+Where the text above and this note differ, this note is what was built.
+
+**Measured on set A** (86 frozen pull requests, the strict merge-base anchor because the archive carries no tags; baseline `test/fixtures/pr-review-canary/set-a-original.json`, recomputed from the clones with tolerance 0, counts and closed words only).
+
+- 29 pull requests change a README with git-deleted lines; 27 of them are not alterations (line endings or a final newline); the two that are, `nm000501` #3 and `on002578` #2, are flagged (under the merge-base anchor `on002578` #2 is flagged where the first-tag anchor would excuse it).
+- 64 pull requests change CHANGES and none alters it.
+- `on006126` #1 has `ReferencesAndLinks` removed, `on007353` #1 has a minor `Funding` edit, and the eight `[""]`-to-`[]` or empty-field pull requests alter nothing.
+- Four pull requests alter an author field: `nm000424` #2, `nm000501` #2 and `nm000513` #2 (`Name`, changed by the platform's own account) and `on006126` #1.
+- Recordings: 59 replaced in `on003343` #3, 41 type changes in `on003029` #1, 5 in `on004703` #1, 15 pointers moved with their key in `on004306` #1, and nothing else; no side was unreadable.
+- The two tripwire facts below are zero on every pull request.
+
+**What was decided where B1 to B7 are silent or differ.**
+
+- *Documents* (B2.1.1): a README or CHANGES part is a root file whose name matches the pattern; sorted in code-unit order; a part with a NUL byte is binary and is skipped when its blob is identical on both sides (so a `README.pdf` beside `README.md` does not make every edit unknown), otherwise the document is refused `binary`; each part starts a paragraph.
+- *Normalization* (B2.1.2) removes more than the two artifacts named there: trailing spaces and tabs, a lone CR (a line break, as in CommonMark), a BOM, and blank lines, whose positions are first recorded as paragraph breaks.
+  A non-UTF-8 side is read as ISO-8859-1 and sets `notUtf8`.
+- *Protected lines* (B2.1.4): for a README, the first `min(count in the anchor, count in the base)` occurrences of each distinct line, so a duplicate line is protected only as often as the anchor holds it; for CHANGES every base line.
+- *The edit-distance cap* (B2.1.3): past 2,000 the module refuses the pair (`edit_distance_cap`) instead of counting every protected line as altered, so Phase 8 maps it to `unknown`; a pure insertion is never capped.
+  Limits: 4 MiB and 20,000 lines per side, 16 parts, 32 tags tried.
+- *Minor edits* pair the j-th removed line of a hunk (of any kind) with its j-th inserted line, and only a protected README line can be minor; CHANGES allows none.
+  Whole-line moves are matched against the inserted lines that no minor edit took, and `movedLines` counts them (the B4 note needs a count).
+- *Facts added to `ProseFacts`*: `protectedLines`, `movedLines`, `notUtf8`, `partsBefore`, `partsAfter`, and two tripwires that the design did not have.
+  `hidingMarkupInserted` counts inserted lines (a minor edit's replacement included) that open a comment or close one (`<!--`, `-->`), or open or close one of eight elements that hide or script text, or carry a `hidden` attribute or `display:none`; an arrow written `-->` also counts.
+  `shownPartReplaced` is true when a protected line that is kept moves out of the README the platform shows into another root part, which also covers a new `README.md` shadowing the original `README`.
+  Without them every original line can survive verbatim while the rendered README no longer shows it.
+  Phase 8 maps both to `unknown`.
+- *Author fields* (B2.2): top-level keys only; a missing value (`isMissingJson`) on both sides is no change; value to missing is `removed`; arrays must keep the old elements as an element-wise prefix (appended is `grown`, reordered or inserted in the middle is altered); a root that is not an object, or a refused parse, is `unparsed`, never clean.
+- *Recordings* (B2.4): decided by what each side is (annexed, git, link), not by the status letter or the recordings area alone, because an unlocked pointer replaced by its content is status M and `on004703`'s `_events.tsv` is a sidecar.
+  `replaced` and `typeChanged` count only in the areas the review reads (outside `sourcedata/`, `derivatives/` and `code/`, as for every other fact); a pointer moved with the same key is `moved` wherever it sits, so the 15 links of `on004306` #1 that leave `derivatives/` are matched.
+- *Provenance* (B3): `parseVersionTags` and `chooseAnchor` are pure; a check that cannot be answered stops at the merge base and never moves on to the next tag.
+- *Participants* (B2.3): read off the summary's classes; `json_type_changed` counts, `json_key_renamed` does not (a `Levels` code respelled by case alone is shown by Part A and counts 0 here); an abandoned summary, a participants file that the summary never saw, or a type change is unknown.
+
+**For Phase 8 to decide.**
+How `edit_distance_cap`, `hidingMarkupInserted`, `shownPartReplaced` and an unreadable side reach the verdict (all `unknown`); the platform account's own `Name` changes (the module has no exemption: four rows above); which of four possible Part B findings takes the one platform-finding slot; `OriginalContentFacts`, which carries the pass-level state; and the B4 note numbers (`movedLines`, `protectedAltered`).
+B6.6 is milder than written: a heading converted from Markdown to RST is mostly a minor edit, and the reflowed lines are what fail.
+
 ---
 
 ## 13. Owner Questions
