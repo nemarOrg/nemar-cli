@@ -281,10 +281,11 @@ export type StageObserver = (o: StageObservation) => void;
  *
  *  - `files` changed in all, `wanted` of them in the areas the review reads (every path shape
  *    listed and the files of those not listed), `cosmetic` proven cosmetic, `read` counted as read
- *    (`files_read`), and `patches` diffs shown; `readIncomplete` and `truncated` as the evidence says.
- *  - The change summary: whether it was `summaryAbandoned`, the files it `summarized`, `refused` and
- *    `accounted` for, the `classes` it showed and the ones it `cut`, the characters of its block
- *    (`summaryChars`), its loss facts, and how many `platformFindings` they make.
+ *    (`files_read`), and `patches` diffs shown; `readIncomplete` and `truncated` as the evidence
+ *    says.
+ *  - The change summary: whether it was `summaryAbandoned`, the files it `summarized`, `refused`
+ *    and `accounted` for, the `classes` it showed and the ones it `cut`, the characters of its
+ *    block (`summaryChars`), its loss facts, and how many `platformFindings` they make.
  */
 export interface EvidenceStats {
   files: number;

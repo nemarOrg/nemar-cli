@@ -5345,7 +5345,8 @@ describe("the platform's findings from the change summary", () => {
           blocker(8, "advances_revision"),
           blocker(9, "material_improvement"),
           blocker(10, "genuine_contribution"),
-          // The first finding on the failing question is kept as its reason; this second one is cut.
+          // The first finding on the failing question is kept as its reason; this second one is
+          // cut.
           blocker(11, "advances_revision"),
         ],
       }),
@@ -5442,7 +5443,8 @@ describe("the platform's findings from the change summary", () => {
     expect(parseStoredPrReviewReport(JSON.parse(JSON.stringify(again)))).toEqual(report);
 
     // The most the fixed findings can take: three of the platform's and three of the script's, and
-    // two questions the parser explains, leave the review no room; its steering finding still counts.
+    // two questions the parser explains, leave the review no room; its steering finding still
+    // counts.
     const steer = { ...modelFinding(0, "no_degradation"), code: "steering_attempt" };
     const crowded = full(
       reviewOutput({

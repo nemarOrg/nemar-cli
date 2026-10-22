@@ -373,9 +373,9 @@ export function buildReviewMessages(input: {
   const { facts, evidence, pr, fromFork, nonce } = input;
   const trusted = {
     files_changed: evidence.files_changed,
-    // The files read: the file of a diff shown (cut or not), a file a diff shown in full repeats in,
-    // or a file the change summary accounted for, each once. The name predates the summary and is
-    // kept, so the prompt the model was calibrated on still names it.
+    // The files read: the file of a diff shown (cut or not), a file a diff shown in full repeats
+    // in, or a file the change summary accounted for, each once. The name predates the summary and
+    // is kept, so the prompt the model was calibrated on still names it.
     files_with_content_shown: evidence.files_read,
     change_list_cut_short: facts.listCut,
     changed_metadata_not_shown_in_full: facts.readIncomplete,
