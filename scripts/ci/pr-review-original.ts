@@ -26,7 +26,13 @@
  */
 
 import { firstReadme } from "../../shared/readme-candidates";
-import { SUMMARY_LIMITS } from "./pr-review-summary";
+import {
+  type JsonValue,
+  SUMMARY_LIMITS,
+  canonicalJson,
+  isMissingJson,
+  parseJson,
+} from "./pr-review-summary";
 
 // ---------------------------------------------------------------------------------------------
 // Limits and closed words
@@ -727,8 +733,8 @@ function cutExample(text: string): string {
  * The part the platform shows is the first of `README_CANDIDATES` present, compared with exact
  * case as git stores names, while the document's own names are matched without regard to case: a
  * `readme.md` is in the document but is never the shown part. When no part of a side is a candidate,
- * every part of that side counts as shown, so a side with no shown README never makes the fact true
- * by itself.
+ * every part of that side counts as shown: a head with no candidate hides nothing, and a candidate
+ * added beside a base that had none hides every original part it does not hold.
  */
 export function proseFacts(input: {
   document: DocumentKind;
@@ -912,4 +918,158 @@ export function proseAltered(facts: ProseFacts): boolean {
     facts.moved ||
     (facts.document === "readme" && facts.insertedInsideParagraph > 0)
   );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Author fields of the dataset description (design B2.2)
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * The top-level keys of `dataset_description.json` that the original authors own (design B1), in
+ * the order every list of them is written. A closed list of names, none with an underscore, so a
+ * fact naming them can go into a note. The tool-managed keys (`BIDSVersion`, `GeneratedBy` and the
+ * like) are Part A's to show and are not here, and neither is anything below the top level.
+ */
+export const AUTHOR_OWNED_KEYS = [
+  "Name",
+  "Authors",
+  "License",
+  "ReferencesAndLinks",
+  "Funding",
+  "Acknowledgements",
+  "HowToAcknowledge",
+  "DatasetDOI",
+  "EthicsApprovals",
+] as const;
+export type AuthorOwnedKey = (typeof AUTHOR_OWNED_KEYS)[number];
+
+/**
+ * The author-owned keys whose strings may take a minor edit (a typo fixed in a grant number or a
+ * link). `Name`, `Authors`, `License` and `DatasetDOI` take none: one character of a license or a
+ * DOI is a different license or a different DOI, and an author's name is theirs.
+ */
+export const MINOR_EDIT_KEYS: readonly AuthorOwnedKey[] = [
+  "Funding",
+  "Acknowledgements",
+  "HowToAcknowledge",
+  "EthicsApprovals",
+  "ReferencesAndLinks",
+];
+
+/** What a pull request did to the author-owned keys, each list in {@link AUTHOR_OWNED_KEYS} order. */
+export interface AuthorFieldFacts {
+  /** Keys changed beyond what design B1 permits. */
+  altered: AuthorOwnedKey[];
+  /** Keys that held a value and hold none now: deleted, or emptied to a missing value. */
+  removed: AuthorOwnedKey[];
+  /** Keys with a string, or an array element, changed by a minor edit (permitted). */
+  minor: AuthorOwnedKey[];
+  /** Arrays whose old elements are all kept, in order, at the start, with new ones after (permitted). */
+  grown: AuthorOwnedKey[];
+  /** Keys that held no value and hold one now (permitted). */
+  added: AuthorOwnedKey[];
+  /** One side could not be read, did not parse, or is not a JSON object: unknown, never clean. */
+  unparsed: boolean;
+}
+
+/** One side of the dataset description: its bytes, no file at all, or bytes that could not be read. */
+export type DescriptionSide = Uint8Array | "absent" | "unreadable";
+
+/** The top-level members of a side, empty when there is no file, null when they cannot be known. */
+function descriptionKeys(side: DescriptionSide): ReadonlyMap<string, JsonValue> | null {
+  if (side === "absent") return new Map();
+  if (side === "unreadable") return null;
+  const parsed = parseJson(side);
+  if (!parsed.ok || parsed.value.value.t !== "obj") return null;
+  return parsed.value.value.v;
+}
+
+/** A key that is not there, or holds a missing value (`isMissingJson`: null, `""`, `[]`, `[""]`...). */
+function holdsNothing(value: JsonValue | undefined): boolean {
+  return value === undefined || isMissingJson(value);
+}
+
+/** What changed in one author-owned key: nothing, or the lists of {@link AuthorFieldFacts} it joins. */
+function fieldChange(
+  key: AuthorOwnedKey,
+  before: JsonValue | undefined,
+  after: JsonValue | undefined,
+): ("altered" | "removed" | "minor" | "grown" | "added")[] {
+  if (holdsNothing(before)) return holdsNothing(after) ? [] : ["added"];
+  if (holdsNothing(after)) return ["removed"];
+  const was = before as JsonValue;
+  const now = after as JsonValue;
+  if (canonicalJson(was) === canonicalJson(now)) return [];
+  const minorAllowed = MINOR_EDIT_KEYS.includes(key);
+  const compare = (x: JsonValue, y: JsonValue): "same" | "minor" | "different" => {
+    if (canonicalJson(x) === canonicalJson(y)) return "same";
+    if (minorAllowed && x.t === "str" && y.t === "str" && isMinorEdit(x.v, y.v)) return "minor";
+    return "different";
+  };
+  if (was.t === "str" && now.t === "str") {
+    return compare(was, now) === "minor" ? ["minor"] : ["altered"];
+  }
+  if (was.t !== "arr" && now.t !== "arr") return ["altered"];
+  // A lone string beside an array is read as the array of that one string, so a string that became
+  // a list starting with it has grown. Missing elements are dropped on both sides first, so a
+  // placeholder `""` removed or added is no change.
+  const elements = (v: JsonValue): JsonValue[] | null =>
+    v.t === "arr" ? v.v.filter((item) => !isMissingJson(item)) : v.t === "str" ? [v] : null;
+  const old = elements(was);
+  const fresh = elements(now);
+  if (old === null || fresh === null || old.length > fresh.length) return ["altered"];
+  let minor = false;
+  for (let i = 0; i < old.length; i++) {
+    const verdict = compare(old[i] as JsonValue, fresh[i] as JsonValue);
+    if (verdict === "different") return ["altered"];
+    if (verdict === "minor") minor = true;
+  }
+  const out: ("grown" | "minor")[] = [];
+  if (fresh.length > old.length) out.push("grown");
+  if (minor) out.push("minor");
+  return out;
+}
+
+/**
+ * The facts of the author-owned keys of `dataset_description.json` (design B2.2) between the merge
+ * base and the head. Both sides go through Part A's strict parser; a side that cannot be read,
+ * does not parse, or is not an object gives `unparsed` with every list empty, which the caller
+ * treats as unknown and never as clean.
+ *
+ * Per key, "missing" is a key that is absent or holds a missing value: missing to missing is no
+ * change (`[""]` to `[]`); missing to a value is `added`; a value to missing is `removed`; an equal
+ * value is no change. Two strings are `minor` when the key is one of {@link MINOR_EDIT_KEYS} and
+ * the edit is within {@link isMinorEdit}, and `altered` otherwise. Two arrays, with missing elements
+ * dropped, must start with every old element in order (equal, or a minor edit for a minor-edit
+ * key): then the key is `grown` when new elements follow, and `minor` when an element took a
+ * minor edit; anything else is `altered`, so an author list reordered, or an author inserted
+ * before an old one, is altered, and one appended is grown. Every other change is `altered`.
+ */
+export function authorFieldFacts(
+  before: DescriptionSide,
+  after: DescriptionSide,
+): AuthorFieldFacts {
+  const facts: AuthorFieldFacts = {
+    altered: [],
+    removed: [],
+    minor: [],
+    grown: [],
+    added: [],
+    unparsed: false,
+  };
+  const was = descriptionKeys(before);
+  const now = descriptionKeys(after);
+  if (was === null || now === null) return { ...facts, unparsed: true };
+  for (const key of AUTHOR_OWNED_KEYS) {
+    for (const list of fieldChange(key, was.get(key), now.get(key))) facts[list].push(key);
+  }
+  return facts;
+}
+
+/**
+ * Whether the facts are an alteration of what the authors published: a key altered or removed.
+ * Unparsed facts are not an alteration here; they are unknown, which is the caller's to say.
+ */
+export function authorFieldsAltered(facts: AuthorFieldFacts): boolean {
+  return facts.altered.length > 0 || facts.removed.length > 0;
 }

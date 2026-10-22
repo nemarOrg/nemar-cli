@@ -8,9 +8,13 @@
 
 import { describe, expect, test } from "bun:test";
 import {
+  AUTHOR_OWNED_KEYS,
   type AlignOp,
+  type AuthorFieldFacts,
+  type DescriptionSide,
   type DocumentKind,
   type DocumentPart,
+  MINOR_EDIT_KEYS,
   ORIGINAL_LIMITS,
   PROSE_REFUSALS,
   type ProseDocument,
@@ -18,6 +22,8 @@ import {
   type ProseRead,
   alignLines,
   assembleDocument,
+  authorFieldFacts,
+  authorFieldsAltered,
   decodeProse,
   hidesText,
   isDocumentName,
@@ -1503,5 +1509,277 @@ describe("proseFacts: properties over seeded random READMEs", () => {
       }
     }
     expect(reported).toBeGreaterThan(150);
+  });
+});
+
+/** A dataset description as a contributor's tool writes it: indented JSON. */
+function description(fields: Record<string, unknown>): Uint8Array {
+  return encoder.encode(`${JSON.stringify(fields, null, 2)}\n`);
+}
+
+/** Facts with nothing changed, for tests to override. */
+function noFieldChange(overrides: Partial<AuthorFieldFacts> = {}): AuthorFieldFacts {
+  return {
+    altered: [],
+    removed: [],
+    minor: [],
+    grown: [],
+    added: [],
+    unparsed: false,
+    ...overrides,
+  };
+}
+
+const DESCRIPTION = {
+  Name: "Visual oddball EEG",
+  BIDSVersion: "1.8.0",
+  DatasetType: "raw",
+  License: "CC-BY-4.0",
+  Authors: ["Ada Lovelace", "Alan Turing", "Grace Hopper"],
+  Funding: [
+    "This work was supported by the National Institute of Mental Health grant R01MH000000 to the lab.",
+  ],
+  ReferencesAndLinks: ["https://example.org/paper"],
+  DatasetDOI: "doi:10.18112/openneuro.ds000000.v1.0.0",
+  GeneratedBy: [{ Name: "a converter", Version: "1.0" }],
+};
+
+/** The description with some fields replaced (`undefined` deletes a key). */
+function changed(fields: Record<string, unknown>): Uint8Array {
+  const out: Record<string, unknown> = { ...DESCRIPTION };
+  for (const [key, value] of Object.entries(fields)) {
+    if (value === undefined) delete out[key];
+    else out[key] = value;
+  }
+  return description(out);
+}
+
+describe("author-owned fields: the closed lists", () => {
+  test("the nine author-owned keys and the five that take a minor edit, none with an underscore", () => {
+    expect([...AUTHOR_OWNED_KEYS]).toEqual([
+      "Name",
+      "Authors",
+      "License",
+      "ReferencesAndLinks",
+      "Funding",
+      "Acknowledgements",
+      "HowToAcknowledge",
+      "DatasetDOI",
+      "EthicsApprovals",
+    ]);
+    expect([...MINOR_EDIT_KEYS]).toEqual([
+      "Funding",
+      "Acknowledgements",
+      "HowToAcknowledge",
+      "EthicsApprovals",
+      "ReferencesAndLinks",
+    ]);
+    for (const key of AUTHOR_OWNED_KEYS) expect(key).toMatch(/^[A-Za-z]+$/);
+    for (const key of ["Name", "Authors", "License", "DatasetDOI"] as const) {
+      expect(MINOR_EDIT_KEYS.includes(key), key).toBe(false);
+    }
+  });
+});
+
+describe("authorFieldFacts", () => {
+  test("empty placeholders removed are not an alteration (on004022)", () => {
+    const before = description({
+      ...DESCRIPTION,
+      Acknowledgements: "",
+      HowToAcknowledge: "",
+      Funding: [""],
+      EthicsApprovals: [],
+    });
+    const after = changed({ Funding: undefined });
+    const facts = authorFieldFacts(before, after);
+    expect(facts).toEqual(noFieldChange());
+    expect(authorFieldsAltered(facts)).toBe(false);
+  });
+
+  test('an empty placeholder normalized from [""] to [] is not an alteration (on004855)', () => {
+    const facts = authorFieldFacts(
+      changed({ ReferencesAndLinks: [""] }),
+      changed({ ReferencesAndLinks: [] }),
+    );
+    expect(facts).toEqual(noFieldChange());
+  });
+
+  test("a link removed from ReferencesAndLinks is removed, and removed fails (on006126)", () => {
+    for (const after of [
+      changed({ ReferencesAndLinks: [] }),
+      changed({ ReferencesAndLinks: undefined }),
+    ]) {
+      const facts = authorFieldFacts(description(DESCRIPTION), after);
+      expect(facts).toEqual(noFieldChange({ removed: ["ReferencesAndLinks"] }));
+      expect(authorFieldsAltered(facts)).toBe(true);
+    }
+  });
+
+  test("a Funding typo fixed within the minor bound is minor (on007353)", () => {
+    const fixed = DESCRIPTION.Funding[0] as string;
+    const typo =
+      "This work was suported by the Natinal Institue of Mentl Helth grant R01MH00000 to the lab";
+    expect(levenshteinWithin(typo, fixed, 20)).toBe(7);
+    const facts = authorFieldFacts(changed({ Funding: [typo] }), description(DESCRIPTION));
+    expect(facts).toEqual(noFieldChange({ minor: ["Funding"] }));
+    expect(authorFieldsAltered(facts)).toBe(false);
+    // The same fix as a lone string is minor too, and a rewritten sentence is not.
+    expect(authorFieldFacts(changed({ Funding: typo }), changed({ Funding: fixed })).minor).toEqual(
+      ["Funding"],
+    );
+    expect(
+      authorFieldFacts(
+        description(DESCRIPTION),
+        changed({ Funding: ["Funded by a private donor."] }),
+      ).altered,
+    ).toEqual(["Funding"]);
+  });
+
+  test("License changed by one character fails: it takes no minor edit", () => {
+    const facts = authorFieldFacts(description(DESCRIPTION), changed({ License: "CC-BY-4.1" }));
+    expect(facts).toEqual(noFieldChange({ altered: ["License"] }));
+    expect(authorFieldsAltered(facts)).toBe(true);
+  });
+
+  test("an author appended is grown; reordered, inserted in the middle or respelled is altered", () => {
+    const [ada, alan, grace] = DESCRIPTION.Authors as [string, string, string];
+    const appended = authorFieldFacts(
+      description(DESCRIPTION),
+      changed({ Authors: [ada, alan, grace, "Katherine Johnson"] }),
+    );
+    expect(appended).toEqual(noFieldChange({ grown: ["Authors"] }));
+    expect(authorFieldsAltered(appended)).toBe(false);
+    for (const authors of [
+      [alan, ada, grace],
+      [ada, "Katherine Johnson", alan, grace],
+      ["Katherine Johnson", ada, alan, grace],
+      [ada, alan, "Grace B. Hopper"],
+      [ada, alan],
+    ]) {
+      const facts = authorFieldFacts(description(DESCRIPTION), changed({ Authors: authors }));
+      expect(facts, JSON.stringify(authors)).toEqual(noFieldChange({ altered: ["Authors"] }));
+    }
+  });
+
+  test("missing elements are dropped before an array is compared", () => {
+    const [ada, alan, grace] = DESCRIPTION.Authors as [string, string, string];
+    expect(
+      authorFieldFacts(
+        description(DESCRIPTION),
+        changed({ Authors: [ada, "", alan, "n/a", grace] }),
+      ),
+    ).toEqual(noFieldChange());
+    expect(
+      authorFieldFacts(
+        changed({ Authors: ["", ada, alan, grace] }),
+        changed({ Authors: [ada, alan, grace, "Katherine Johnson"] }),
+      ),
+    ).toEqual(noFieldChange({ grown: ["Authors"] }));
+  });
+
+  test("an array grown and with an element minor-edited is both, in a minor-edit key", () => {
+    const fixed = DESCRIPTION.Funding[0] as string;
+    const facts = authorFieldFacts(
+      changed({ Funding: [fixed.replace("supported", "suported")] }),
+      changed({ Funding: [fixed, "A second grant."] }),
+    );
+    expect(facts).toEqual(noFieldChange({ minor: ["Funding"], grown: ["Funding"] }));
+  });
+
+  test("a lone string is a one-element array beside an array, and nothing else is", () => {
+    expect(
+      authorFieldFacts(
+        changed({ Authors: "Ada Lovelace" }),
+        changed({ Authors: ["Ada Lovelace"] }),
+      ),
+    ).toEqual(noFieldChange());
+    expect(
+      authorFieldFacts(
+        changed({ Authors: "Ada Lovelace" }),
+        changed({ Authors: ["Ada Lovelace", "Alan Turing"] }),
+      ),
+    ).toEqual(noFieldChange({ grown: ["Authors"] }));
+    expect(
+      authorFieldFacts(changed({ Funding: "Grant 1" }), changed({ Funding: { grant: "Grant 1" } })),
+    ).toEqual(noFieldChange({ altered: ["Funding"] }));
+    expect(authorFieldFacts(changed({ Name: "Study" }), changed({ Name: 7 }))).toEqual(
+      noFieldChange({ altered: ["Name"] }),
+    );
+  });
+
+  test("a key added where there was none, or a missing value replaced, is added", () => {
+    const facts = authorFieldFacts(
+      changed({ HowToAcknowledge: "" }),
+      changed({ HowToAcknowledge: "Please cite the paper.", EthicsApprovals: ["IRB 2020-01"] }),
+    );
+    expect(facts).toEqual(noFieldChange({ added: ["HowToAcknowledge", "EthicsApprovals"] }));
+    expect(authorFieldsAltered(facts)).toBe(false);
+  });
+
+  test("Name and DatasetDOI changed are altered; tool-managed keys and nested names are not looked at", () => {
+    expect(
+      authorFieldFacts(
+        description(DESCRIPTION),
+        changed({
+          Name: "Visual oddball EEG (revised)",
+          DatasetDOI: "doi:10.18112/openneuro.ds000000.v1.0.1",
+        }),
+      ),
+    ).toEqual(noFieldChange({ altered: ["Name", "DatasetDOI"] }));
+    expect(
+      authorFieldFacts(
+        description(DESCRIPTION),
+        changed({
+          BIDSVersion: "1.9.0",
+          GeneratedBy: [{ Name: "another tool" }],
+          DatasetType: "derivative",
+        }),
+      ),
+    ).toEqual(noFieldChange());
+  });
+
+  test("key order and whitespace are no change, and the lists follow the closed order", () => {
+    const reversed = Object.fromEntries(Object.entries(DESCRIPTION).reverse());
+    expect(
+      authorFieldFacts(description(DESCRIPTION), encoder.encode(JSON.stringify(reversed))),
+    ).toEqual(noFieldChange());
+    const facts = authorFieldFacts(
+      description(DESCRIPTION),
+      description({ ...reversed, License: "CC0", Name: "Other" }),
+    );
+    expect(facts.altered).toEqual(["Name", "License"]);
+  });
+
+  test("a description added is every value added; one deleted is every value removed", () => {
+    expect(authorFieldFacts("absent", description(DESCRIPTION))).toEqual(
+      noFieldChange({
+        added: ["Name", "Authors", "License", "ReferencesAndLinks", "Funding", "DatasetDOI"],
+      }),
+    );
+    const deleted = authorFieldFacts(description(DESCRIPTION), "absent");
+    expect(deleted).toEqual(
+      noFieldChange({
+        removed: ["Name", "Authors", "License", "ReferencesAndLinks", "Funding", "DatasetDOI"],
+      }),
+    );
+    expect(authorFieldsAltered(deleted)).toBe(true);
+    expect(authorFieldFacts("absent", "absent")).toEqual(noFieldChange());
+  });
+
+  test("a side that cannot be read, does not parse or is not an object is unparsed, never clean", () => {
+    const unparsed = noFieldChange({ unparsed: true });
+    for (const [label, bad] of [
+      ["unreadable", "unreadable"],
+      ["trailing comma", encoder.encode('{"Name": "x",}')],
+      ["duplicate key", encoder.encode('{"License": "CC0", "License": "CC-BY-4.0"}')],
+      ["not UTF-8", new Uint8Array([0x7b, 0x22, 0xe9, 0x22, 0x3a, 0x31, 0x7d])],
+      ["array root", encoder.encode('["Name"]')],
+      ["string root", encoder.encode('"Name"')],
+    ] as [string, DescriptionSide][]) {
+      expect(authorFieldFacts(description(DESCRIPTION), bad), label).toEqual(unparsed);
+      expect(authorFieldFacts(bad, description(DESCRIPTION)), label).toEqual(unparsed);
+    }
+    // Unknown is not an alteration here: the caller says what unknown does.
+    expect(authorFieldsAltered(unparsed)).toBe(false);
   });
 });
