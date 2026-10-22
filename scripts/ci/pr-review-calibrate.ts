@@ -28,7 +28,10 @@
  * `dataset_description.json` or change log the listing reads) is not fetched, so that pull request
  * ends as `evidence_unavailable`. It sets `GIT_NO_LAZY_FETCH` for the run and restores it after,
  * and refuses to run on a git older than 2.44, which ignores the variable and would fetch;
- * `--offline` changes only git, never the model calls.
+ * `--offline` changes only git, never the model calls. In every mode, the git a run starts reads
+ * neither the operator's nor the system's git configuration, and no variable that would point it
+ * at another repository (see {@link scopeRunEnvironment}), so its numbers do not depend on the
+ * machine.
  *
  * **`--evidence-only`** asks no model and needs no key: it runs the review's two evidence passes
  * (`gatherListing`, `gatherContent`) and `buildEvidence` on each pull request, as the review would
@@ -271,6 +274,51 @@ function run(cmd: string, args: string[], cwd?: string): string {
     maxBuffer: 64 * 1024 * 1024,
     stdio: ["ignore", "pipe", "pipe"],
   });
+}
+
+/**
+ * The variables that would point git at another repository than the one a call names with `-C`.
+ * A run removes them, so every git it starts finds the clone's own repository or none.
+ */
+const REPOSITORY_VARIABLES = [
+  "GIT_DIR",
+  "GIT_WORK_TREE",
+  "GIT_COMMON_DIR",
+  "GIT_OBJECT_DIRECTORY",
+  "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+] as const;
+
+/**
+ * Set this process's environment for one run, and return the function that puts it back exactly as
+ * it was, a variable that was unset included. Every git the run starts, the evidence reader's
+ * included, is started with {@link childEnv}, which reads this environment at each call, so these
+ * reach all of them:
+ * - `GIT_CONFIG_GLOBAL=/dev/null` and `GIT_CONFIG_NOSYSTEM=1`: no git reads the operator's or the
+ *   system's configuration, so every git of the run reads the same one. A `diff.algorithm` the
+ *   reader read and the deletion count of {@link refusedDeletions} did not would make the two
+ *   disagree about a diff shown in full, and the counts, a stored baseline among them, would
+ *   depend on the machine;
+ * - `GIT_NO_LAZY_FETCH=1` when `offline`, so no git fetches;
+ * - none of {@link REPOSITORY_VARIABLES}, so no git reads a repository other than the one it names.
+ */
+export function scopeRunEnvironment(offline: boolean): () => void {
+  const wanted: [string, string | null][] = [
+    ["GIT_CONFIG_GLOBAL", "/dev/null"],
+    ["GIT_CONFIG_NOSYSTEM", "1"],
+    ...(offline ? [["GIT_NO_LAZY_FETCH", "1"] as [string, string]] : []),
+    ...REPOSITORY_VARIABLES.map((name): [string, null] => [name, null]),
+  ];
+  const saved = wanted.map(([name]) => [name, process.env[name]] as const);
+  for (const [name, value] of wanted) {
+    if (value === null) Reflect.deleteProperty(process.env, name);
+    else process.env[name] = value;
+  }
+  return () => {
+    for (const [name, value] of saved) {
+      if (value === undefined) Reflect.deleteProperty(process.env, name);
+      else process.env[name] = value;
+    }
+  };
 }
 
 export interface FetchedPullRequest {
@@ -1306,14 +1354,13 @@ export async function calibrateMain(
     );
   }
 
-  // Offline, no git this run starts may fetch: every child is started with childEnv(), which reads
-  // this process's environment at each call, so setting the variable here reaches the evidence
-  // reader's git too. It is set only once the temporary directory exists, inside the `try` whose
-  // `finally` puts it back as it was, so a run that fails before or after leaves it as it found it.
-  const savedLazyFetch = process.env.GIT_NO_LAZY_FETCH;
+  // The run's own environment for git (see scopeRunEnvironment): set only once the temporary
+  // directory exists, inside the `try` whose `finally` puts it back as it was before anything else,
+  // so a run that fails at any point leaves the environment as it found it.
   const root = mkdtempSync(join(tmpdir(), "pr-review-calibrate-"));
+  let restore: (() => void) | null = null;
   try {
-    if (offline) process.env.GIT_NO_LAZY_FETCH = "1";
+    restore = scopeRunEnvironment(offline);
     if (evidenceOnly) {
       // No model client is made on this path, so no key is read and nothing is sent.
       const rows = once.map((t) => evidenceOne(t, root, reader, { withoutSummary }));
@@ -1331,11 +1378,8 @@ export async function calibrateMain(
     }
     return exitCodeOf(rows);
   } finally {
+    restore?.();
     rmSync(root, { recursive: true, force: true });
-    if (offline) {
-      if (savedLazyFetch === undefined) Reflect.deleteProperty(process.env, "GIT_NO_LAZY_FETCH");
-      else process.env.GIT_NO_LAZY_FETCH = savedLazyFetch;
-    }
   }
 }
 

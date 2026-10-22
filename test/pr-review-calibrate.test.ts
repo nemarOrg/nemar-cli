@@ -51,6 +51,7 @@ import {
   refusedDeletions,
   renderEvidenceTable,
   renderTable,
+  scopeRunEnvironment,
 } from "../scripts/ci/pr-review-calibrate";
 import { childEnv, gatherContent, gatherListing } from "../scripts/ci/pr-review-evidence";
 import { CLASS_KINDS, SUMMARY_REFUSALS } from "../scripts/ci/pr-review-summary";
@@ -1629,6 +1630,163 @@ describe("--evidence-only: the review's evidence passes, and no model", () => {
     expect(whole).toEqual(chunked);
     expect(calls).toHaveLength(3);
     expect(readFileSync(log, "utf8").trim().split("\n")).toHaveLength(4);
+  });
+
+  /**
+   * A seeded table of `rows` short rows over `kinds` values, and a head that deletes, replaces or
+   * inserts after each row (a third each) and ends with a ragged row, so the summary refuses it.
+   * Deterministic: the same seed is the same bytes.
+   */
+  function seededEdit(seed: number, rows: number, kinds: number): { base: string; head: string } {
+    let state = seed >>> 0;
+    const next = (n: number): number => {
+      state = (Math.imul(state, 1103515245) + 12345) >>> 0;
+      return (state >>> 8) % n;
+    };
+    const base = ["n\tt"];
+    for (let i = 0; i < rows; i++) base.push(`${next(kinds)}\tx`);
+    const head = ["n\tt"];
+    for (const line of base.slice(1)) {
+      const r = next(3);
+      if (r === 0) continue;
+      if (r === 1) {
+        head.push(`${next(kinds)}\tx`);
+        continue;
+      }
+      head.push(line, `${next(kinds)}\tx`);
+    }
+    head.push("X\tx\textra");
+    return { base: `${base.join("\n")}\n`, head: `${head.join("\n")}\n` };
+  }
+
+  /** How many lines a diff's text deletes: its `-` lines after its first `@@` line. */
+  const deletedIn = (text: string): number => {
+    const lines = text.split("\n");
+    return lines
+      .slice(lines.findIndex((l) => l.startsWith("@@")) + 1)
+      .filter((l) => l.startsWith("-")).length;
+  };
+
+  test("every git of a run reads one configuration: an operator's diff.algorithm hides nothing", async () => {
+    const table = channels("sub-01");
+    const { base, head } = seededEdit(2, 800, 4);
+    const pr = localChange("rd-histogram", { [table]: base }, (dir) => write(dir, table, head));
+    const histogram = join(root, "histogram.gitconfig");
+    writeFileSync(histogram, "[diff]\n\talgorithm = histogram\n");
+    // Not vacuous: git's default algorithm counts more deleted lines than the reader's own diff
+    // holds when the reader reads the operator's histogram configuration, and that diff is shown
+    // in full; counted apart from the run, with the reader called directly.
+    const numstat = git(pr.dir, "diff", "--numstat", pr.base, pr.head, "--", table).split("\t");
+    const counted = Number(numstat[1]);
+    const previous = process.env.GIT_CONFIG_GLOBAL;
+    process.env.GIT_CONFIG_GLOBAL = histogram;
+    let readerPatch: { text: string; truncated: boolean } | undefined;
+    let refusal: string | null | undefined;
+    try {
+      const listing = gatherListing(pr.dir, pr.base, pr.head);
+      const facts = { ...listing, ...gatherContent(pr.dir, listing) };
+      readerPatch = facts.patches.find((p) => p.path === table);
+      refusal = facts.summary.files.find((o) => o.path === table)?.refusal;
+    } finally {
+      if (previous === undefined) Reflect.deleteProperty(process.env, "GIT_CONFIG_GLOBAL");
+      else process.env.GIT_CONFIG_GLOBAL = previous;
+    }
+    expect(refusal).toBe("ragged_row");
+    expect(readerPatch?.truncated).toBe(false);
+    expect(deletedIn(readerPatch?.text ?? "")).toBeLessThan(counted);
+
+    // The run, with the operator's configuration set: every git it starts reads the same one, so
+    // the table's diff holds every line git counts deleted, and it is shown.
+    const before = process.env.GIT_CONFIG_GLOBAL;
+    process.env.GIT_CONFIG_GLOBAL = histogram;
+    let r: Awaited<ReturnType<typeof evidenceRows>>;
+    let after: string | undefined;
+    try {
+      r = await evidenceRows(pr.read);
+      after = process.env.GIT_CONFIG_GLOBAL;
+    } finally {
+      if (before === undefined) Reflect.deleteProperty(process.env, "GIT_CONFIG_GLOBAL");
+      else process.env.GIT_CONFIG_GLOBAL = before;
+    }
+    expect(r.rows[0]?.refusedBy).toEqual({ ragged_row: 1 });
+    expect(r.rows[0]?.refusedDeleted).toEqual({ shown: 1, incomplete: 0, hidden: 0 });
+    expect(r.code).toBe(0);
+    expect(after).toBe(histogram);
+  });
+
+  test("a run's git environment is put back exactly, set or unset, even when the run throws", async () => {
+    const names = [
+      "GIT_CONFIG_GLOBAL",
+      "GIT_CONFIG_NOSYSTEM",
+      "GIT_NO_LAZY_FETCH",
+      "GIT_DIR",
+      "GIT_WORK_TREE",
+      "GIT_COMMON_DIR",
+      "GIT_OBJECT_DIRECTORY",
+      "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    ] as const;
+    // Values git accepts, none of them what a run sets: a boolean that is false, a path that is not
+    // /dev/null, and repository paths no git of the run may read.
+    const set: Record<(typeof names)[number], string> = {
+      GIT_CONFIG_GLOBAL: join(root, "operator.gitconfig"),
+      GIT_CONFIG_NOSYSTEM: "0",
+      GIT_NO_LAZY_FETCH: "false",
+      GIT_DIR: join(root, "elsewhere.git"),
+      GIT_WORK_TREE: join(root, "elsewhere"),
+      GIT_COMMON_DIR: join(root, "elsewhere.git"),
+      GIT_OBJECT_DIRECTORY: join(root, "elsewhere.git", "objects"),
+      GIT_ALTERNATE_OBJECT_DIRECTORIES: join(root, "other.git", "objects"),
+    };
+    const outer = Object.fromEntries(names.map((n) => [n, process.env[n]]));
+    const snapshot = () => Object.fromEntries(names.map((n) => [n, process.env[n]]));
+    const during = {
+      GIT_CONFIG_GLOBAL: "/dev/null",
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_NO_LAZY_FETCH: "1",
+      GIT_DIR: undefined,
+      GIT_WORK_TREE: undefined,
+      GIT_COMMON_DIR: undefined,
+      GIT_OBJECT_DIRECTORY: undefined,
+      GIT_ALTERNATE_OBJECT_DIRECTORIES: undefined,
+    };
+    const { clones } = frozenClones("env-restore", (b, h) => `${b} ${h}\n`);
+    try {
+      // Every variable set before, then every variable unset before.
+      for (const state of ["set", "unset"] as const) {
+        for (const n of names) {
+          if (state === "set") process.env[n] = set[n];
+          else Reflect.deleteProperty(process.env, n);
+        }
+        const expected = snapshot();
+        // The helper alone.
+        const restore = scopeRunEnvironment(true);
+        expect(snapshot()).toEqual(during);
+        restore();
+        expect(snapshot()).toEqual(expected);
+        const online = scopeRunEnvironment(false);
+        expect(snapshot()).toEqual({ ...during, GIT_NO_LAZY_FETCH: expected.GIT_NO_LAZY_FETCH });
+        online();
+        expect(snapshot()).toEqual(expected);
+        // A run that throws once it has read the pull request: what it printed is handed to an
+        // output that throws, and the run's environment is the scoped one until then.
+        const seen: Record<string, string | undefined>[] = [];
+        const run = calibrateMain(
+          ["--pr", "nm000460#2", "--clones", clones, "--offline", "--evidence-only", "--json"],
+          () => {
+            seen.push(snapshot());
+            throw new Error("output refused");
+          },
+        );
+        await expect(run).rejects.toThrow("output refused");
+        expect(seen).toEqual([during]);
+        expect(snapshot()).toEqual(expected);
+      }
+    } finally {
+      for (const n of names) {
+        if (outer[n] === undefined) Reflect.deleteProperty(process.env, n);
+        else process.env[n] = outer[n];
+      }
+    }
   });
 
   test("no path or value reaches the table or the JSON", async () => {
