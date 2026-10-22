@@ -8,6 +8,7 @@
 
 import { describe, expect, test } from "bun:test";
 import {
+  ALTERS_PARTICIPANT_VALUE,
   AUTHOR_OWNED_KEYS,
   type AlignOp,
   type AuthorFieldFacts,
@@ -16,6 +17,7 @@ import {
   type DocumentPart,
   MINOR_EDIT_KEYS,
   ORIGINAL_LIMITS,
+  PARTICIPANT_FILES,
   PROSE_REFUSALS,
   type PointerProbe,
   type ProseDocument,
@@ -38,12 +40,22 @@ import {
   minorBound,
   normalizeProse,
   parseVersionTags,
+  participantValuesAltered,
   proseAltered,
   proseFacts,
   protectedMask,
   recordingFacts,
 } from "../scripts/ci/pr-review-original";
-import { SUMMARY_LIMITS } from "../scripts/ci/pr-review-summary";
+import {
+  ABANDONED_SUMMARY,
+  CLASS_KINDS,
+  type ChangeSummary,
+  type ClassKind,
+  EMPTY_SUMMARY,
+  ROLE_OF,
+  SUMMARY_LIMITS,
+  summarizeChanges,
+} from "../scripts/ci/pr-review-summary";
 
 const encoder = new TextEncoder();
 
@@ -2625,5 +2637,485 @@ describe("chooseAnchor", () => {
       commit: sha(2),
     });
     expect(asked).toEqual([sha(1), sha(2)]);
+  });
+});
+
+/** Tab-separated text from rows of cells, with LF endings and a final newline. */
+function tsv(...rows: string[][]): string {
+  return `${rows.map((row) => row.join("\t")).join("\n")}\n`;
+}
+
+/** A JSON document as a contributor's tool writes it: indented, with a final newline. */
+function json(value: unknown): string {
+  return `${JSON.stringify(value, null, 2)}\n`;
+}
+
+/** A file whose text changed, as the change summary is asked about it. */
+interface Edit {
+  path: string;
+  before: string;
+  after: string;
+}
+
+/** The real change summary of these edits: the real parsers, diffs and classes, on real bytes. */
+function summaryOf(edits: readonly Edit[]): ChangeSummary {
+  return summarizeChanges({
+    candidates: edits.map(({ path, before, after }) => ({
+      path,
+      before: encoder.encode(before),
+      after: encoder.encode(after),
+    })),
+    pool: [],
+    deadline: null,
+  });
+}
+
+/** The files of `edits` as the change list names them: all modified. */
+const modifiedFiles = (edits: readonly Edit[]): { path: string; status: string }[] =>
+  edits.map(({ path }) => ({ path, status: "modified" }));
+
+/** The participant values altered by these edits, all modified and none cosmetic. */
+function alteredBy(edits: readonly Edit[]): number | null {
+  return participantValuesAltered(summaryOf(edits), modifiedFiles(edits), new Set());
+}
+
+const PARTICIPANTS_TSV = "participants.tsv";
+const PARTICIPANTS_JSON = "participants.json";
+const NO_COSMETIC: ReadonlySet<string> = new Set();
+
+/** A participants table of subjects with a `sex` column, one row per value. */
+const sexTable = (...values: string[]): string =>
+  tsv(["participant_id", "sex"], ...values.map((value, i) => [`sub-0${i + 1}`, value]));
+
+describe("which kinds alter a participant value", () => {
+  test("the participant files are the two root names", () => {
+    expect([...PARTICIPANT_FILES]).toEqual(["participants.tsv", "participants.json"]);
+  });
+
+  test("the table has an entry for every kind, and exactly the seven value kinds are true", () => {
+    expect(Object.keys(ALTERS_PARTICIPANT_VALUE).sort()).toEqual([...CLASS_KINDS].sort());
+    const altering = CLASS_KINDS.filter((kind) => ALTERS_PARTICIPANT_VALUE[kind]);
+    const expected: ClassKind[] = [
+      "cell_replaced",
+      "cell_templated",
+      "key_relabeled",
+      "cell_emptied",
+      "json_value_changed",
+      "json_emptied",
+      "json_type_changed",
+    ];
+    expect([...altering].sort()).toEqual(expected.sort());
+    for (const kind of CLASS_KINDS) {
+      expect(typeof ALTERS_PARTICIPANT_VALUE[kind], kind).toBe("boolean");
+    }
+  });
+
+  test("a value kind is a modification, and no loss, relocated or additive kind is one", () => {
+    for (const kind of CLASS_KINDS) {
+      if (ALTERS_PARTICIPANT_VALUE[kind]) expect(ROLE_OF[kind], kind).toBe("modification");
+      if (ROLE_OF[kind] !== "modification")
+        expect(ALTERS_PARTICIPANT_VALUE[kind], kind).toBe(false);
+    }
+  });
+});
+
+describe("participantValuesAltered: participants.tsv", () => {
+  test("None changed to F is one value per changed cell", () => {
+    const one: Edit = {
+      path: PARTICIPANTS_TSV,
+      before: sexTable("None", "M"),
+      after: sexTable("F", "M"),
+    };
+    expect(summaryOf([one]).classes.map((c) => c.kind)).toEqual(["cell_replaced"]);
+    expect(alteredBy([one])).toBe(1);
+    expect(
+      alteredBy([
+        {
+          path: PARTICIPANTS_TSV,
+          before: sexTable("None", "None", "None"),
+          after: sexTable("F", "F", "F"),
+        },
+      ]),
+    ).toBe(3);
+  });
+
+  test("n/a changed to F, or an empty cell filled, adds a value and alters none", () => {
+    for (const missing of ["n/a", ""]) {
+      const edit: Edit = {
+        path: PARTICIPANTS_TSV,
+        before: sexTable(missing, "M"),
+        after: sexTable("F", "M"),
+      };
+      expect(
+        summaryOf([edit]).classes.map((c) => c.kind),
+        missing,
+      ).toEqual(["cell_filled"]);
+      expect(alteredBy([edit]), missing).toBe(0);
+    }
+  });
+
+  test("a value emptied counts, because the author's value is gone", () => {
+    const edit: Edit = {
+      path: PARTICIPANTS_TSV,
+      before: sexTable("F", "M"),
+      after: sexTable("n/a", "M"),
+    };
+    expect(summaryOf([edit]).classes.map((c) => c.kind)).toEqual(["cell_emptied"]);
+    expect(alteredBy([edit])).toBe(1);
+  });
+
+  test("a participant id re-padded counts: the row is the same person under another name", () => {
+    const edit: Edit = {
+      path: PARTICIPANTS_TSV,
+      before: tsv(["participant_id", "sex"], ["sub-1", "F"], ["sub-2", "M"]),
+      after: tsv(["participant_id", "sex"], ["sub-01", "F"], ["sub-02", "M"]),
+    };
+    expect(summaryOf([edit]).classes.map((c) => c.kind)).toEqual(["key_relabeled"]);
+    expect(alteredBy([edit])).toBe(2);
+  });
+
+  test("cells rewritten by one rule count, one per cell", () => {
+    const edit: Edit = {
+      path: PARTICIPANTS_TSV,
+      before: tsv(["participant_id", "site"], ["sub-01", "S1"], ["sub-02", "S2"], ["sub-03", "S3"]),
+      after: tsv(
+        ["participant_id", "site"],
+        ["sub-01", "S01"],
+        ["sub-02", "S02"],
+        ["sub-03", "S03"],
+      ),
+    };
+    expect(summaryOf([edit]).classes.map((c) => c.kind)).toEqual(["cell_templated"]);
+    expect(alteredBy([edit])).toBe(3);
+  });
+
+  test("a new row and a new column add values and alter none", () => {
+    const edit: Edit = {
+      path: PARTICIPANTS_TSV,
+      before: sexTable("F"),
+      after: tsv(["participant_id", "sex", "age"], ["sub-01", "F", "30"], ["sub-02", "M", "31"]),
+    };
+    expect(
+      summaryOf([edit])
+        .classes.map((c) => c.kind)
+        .sort(),
+    ).toEqual(["column_added", "row_added"]);
+    expect(alteredBy([edit])).toBe(0);
+  });
+
+  test("a removal is Part A's loss fact and not counted here", () => {
+    const edit: Edit = {
+      path: PARTICIPANTS_TSV,
+      before: tsv(["participant_id", "sex", "age"], ["sub-01", "F", "3"], ["sub-02", "M", "4"]),
+      after: tsv(["participant_id", "sex"], ["sub-01", "F"]),
+    };
+    expect(
+      summaryOf([edit])
+        .classes.map((c) => c.kind)
+        .sort(),
+    ).toEqual(["column_removed", "row_removed"]);
+    expect(alteredBy([edit])).toBe(0);
+  });
+
+  test("a reorder or a layout change keeps every value", () => {
+    const rows = tsv(["participant_id", "sex"], ["sub-01", "F"], ["sub-02", "M"]);
+    const reordered = tsv(["participant_id", "sex"], ["sub-02", "M"], ["sub-01", "F"]);
+    const crlf = rows.replace(/\n/g, "\r\n");
+    for (const after of [reordered, crlf]) {
+      const edit: Edit = { path: PARTICIPANTS_TSV, before: rows, after };
+      expect(summaryOf([edit]).classes.length).toBe(1);
+      expect(alteredBy([edit])).toBe(0);
+    }
+  });
+
+  test("a cell replaced and a value added in one file count only the replaced one", () => {
+    expect(
+      alteredBy([
+        {
+          path: PARTICIPANTS_TSV,
+          before: sexTable("None", "n/a", "M"),
+          after: sexTable("F", "F", "M"),
+        },
+      ]),
+    ).toBe(1);
+  });
+});
+
+describe("participantValuesAltered: participants.json", () => {
+  const levels = (female: string, male: string): string =>
+    json({ sex: { Description: "sex", Levels: { M: male, F: female } } });
+
+  test("a Levels entry rewritten counts", () => {
+    const edit: Edit = {
+      path: PARTICIPANTS_JSON,
+      before: levels("female", "male"),
+      after: levels("female", "Male"),
+    };
+    expect(summaryOf([edit]).classes.map((c) => c.kind)).toEqual(["json_value_changed"]);
+    expect(alteredBy([edit])).toBe(1);
+    expect(
+      alteredBy([
+        {
+          path: PARTICIPANTS_JSON,
+          before: levels("female", "male"),
+          after: levels("Female", "Male"),
+        },
+      ]),
+    ).toBe(2);
+  });
+
+  test("a value whose type changed counts", () => {
+    const edit: Edit = {
+      path: PARTICIPANTS_JSON,
+      before: json({ age: { Units: "years", MinValue: 0 } }),
+      after: json({ age: { Units: "years", MinValue: "0" } }),
+    };
+    expect(summaryOf([edit]).classes.map((c) => c.kind)).toEqual(["json_type_changed"]);
+    expect(alteredBy([edit])).toBe(1);
+  });
+
+  test("a description emptied counts", () => {
+    const edit: Edit = {
+      path: PARTICIPANTS_JSON,
+      before: json({ age: { Description: "age in years" } }),
+      after: json({ age: { Description: "" } }),
+    };
+    expect(summaryOf([edit]).classes.map((c) => c.kind)).toEqual(["json_emptied"]);
+    expect(alteredBy([edit])).toBe(1);
+  });
+
+  test("a value filled, a key added, a key removed or renamed, and a reorder do not count", () => {
+    const edits: [ClassKind, Edit][] = [
+      [
+        "json_filled",
+        {
+          path: PARTICIPANTS_JSON,
+          before: json({ age: { Description: "" } }),
+          after: json({ age: { Description: "age in years" } }),
+        },
+      ],
+      [
+        "json_key_added",
+        {
+          path: PARTICIPANTS_JSON,
+          before: json({ age: { Description: "age" } }),
+          after: json({ age: { Description: "age", Units: "years" } }),
+        },
+      ],
+      [
+        "json_key_removed",
+        {
+          path: PARTICIPANTS_JSON,
+          before: json({ age: { Description: "age", Units: "years" } }),
+          after: json({ age: { Description: "age" } }),
+        },
+      ],
+      [
+        "json_key_renamed",
+        {
+          path: PARTICIPANTS_JSON,
+          before: json({ sex: { Levels: { M: "male" } } }),
+          after: json({ sex: { Levels: { m: "male" } } }),
+        },
+      ],
+      [
+        "json_empty_key_removed",
+        {
+          path: PARTICIPANTS_JSON,
+          before: json({ age: { Description: "age", Units: "" } }),
+          after: json({ age: { Description: "age" } }),
+        },
+      ],
+      [
+        "json_keys_reordered",
+        {
+          path: PARTICIPANTS_JSON,
+          before: json({ a: { Description: "x" }, b: { Description: "y" } }),
+          after: json({ b: { Description: "y" }, a: { Description: "x" } }),
+        },
+      ],
+    ];
+    for (const [kind, edit] of edits) {
+      expect(
+        summaryOf([edit]).classes.map((c) => c.kind),
+        kind,
+      ).toEqual([kind]);
+      expect(alteredBy([edit]), kind).toBe(0);
+    }
+  });
+});
+
+describe("participantValuesAltered: which files and which summaries", () => {
+  const tsvEdit: Edit = {
+    path: PARTICIPANTS_TSV,
+    before: sexTable("None", "M"),
+    after: sexTable("F", "M"),
+  };
+  const jsonEdit: Edit = {
+    path: PARTICIPANTS_JSON,
+    before: json({ sex: { Levels: { M: "male" } } }),
+    after: json({ sex: { Levels: { M: "Male" } } }),
+  };
+
+  test("both files together are summed, and a nested participants file is not a root file", () => {
+    const nested: Edit = { ...tsvEdit, path: "sub-01/participants.tsv" };
+    const both = [tsvEdit, jsonEdit];
+    expect(alteredBy(both)).toBe(2);
+    // The nested file's class has another shape and adds nothing.
+    const summary = summaryOf([...both, nested]);
+    expect(summary.classes.map((c) => c.shape).sort()).toEqual([
+      "participants.json",
+      "participants.tsv",
+      "sub-*/participants.tsv",
+    ]);
+    expect(participantValuesAltered(summary, modifiedFiles([...both, nested]), NO_COSMETIC)).toBe(
+      2,
+    );
+    expect(alteredBy([nested])).toBe(0);
+    // Other tables named like it, or below another directory, are not root files either.
+    for (const path of [
+      "Participants.tsv",
+      "participants_old.tsv",
+      "ses-01/participants.tsv",
+      "derivatives/participants.tsv",
+      "participants.json.tsv",
+    ]) {
+      expect(alteredBy([{ ...tsvEdit, path }]), path).toBe(0);
+    }
+    for (const path of ["Participants.json", "derivatives/participants.json"]) {
+      expect(alteredBy([{ ...jsonEdit, path }]), path).toBe(0);
+    }
+  });
+
+  test("a nested participants file is not one the summary has to have seen", () => {
+    const changes = [{ path: "sub-01/participants.tsv", status: "modified" }];
+    expect(participantValuesAltered(EMPTY_SUMMARY, changes, NO_COSMETIC)).toBe(0);
+    const typechange = [{ path: "sub-01/participants.tsv", status: "typechange" }];
+    expect(participantValuesAltered(EMPTY_SUMMARY, typechange, NO_COSMETIC)).toBe(0);
+  });
+
+  test("a participants file the summary refused is unknown, not zero", () => {
+    const ragged: Edit = {
+      path: PARTICIPANTS_TSV,
+      before: sexTable("F"),
+      after: "participant_id\tsex\nsub-01\tF\textra\n",
+    };
+    const summary = summaryOf([ragged]);
+    expect(summary.files.map((f) => f.refusal)).toEqual(["ragged_row"]);
+    expect(participantValuesAltered(summary, modifiedFiles([ragged]), NO_COSMETIC)).toBeNull();
+    // A JSON file that does not parse is refused the same way.
+    const broken: Edit = { path: PARTICIPANTS_JSON, before: json({ a: 1 }), after: '{"a": 1,}' };
+    expect(alteredBy([broken])).toBeNull();
+    // One refused file makes the count unknown even when the other file's count is clear.
+    expect(alteredBy([tsvEdit, broken])).toBeNull();
+    // A refusal elsewhere is not a participants file's: it does not make the count unknown.
+    const elsewhere: Edit = { path: "events.tsv", before: "a\tb\n1\t2\n", after: "a\tb\n1\n" };
+    const withOther = summaryOf([tsvEdit, elsewhere]);
+    expect(withOther.files.map((f) => f.refusal)).toContain("ragged_row");
+    expect(participantValuesAltered(withOther, modifiedFiles([tsvEdit]), NO_COSMETIC)).toBe(1);
+  });
+
+  test("a participants file modified twice in one list is refused whole, and so unknown", () => {
+    const summary = summaryOf([tsvEdit, tsvEdit]);
+    expect(summary.files.map((f) => f.refusal)).toEqual(["internal_mismatch", "internal_mismatch"]);
+    expect(participantValuesAltered(summary, modifiedFiles([tsvEdit]), NO_COSMETIC)).toBeNull();
+  });
+
+  test("an abandoned summary is unknown, however it was made", () => {
+    const past = summarizeChanges({
+      candidates: [
+        {
+          path: PARTICIPANTS_TSV,
+          before: encoder.encode(tsvEdit.before),
+          after: encoder.encode(tsvEdit.after),
+        },
+      ],
+      pool: [],
+      deadline: 0,
+      now: () => 0,
+    });
+    expect(past.abandoned).toBe(true);
+    expect(participantValuesAltered(past, modifiedFiles([tsvEdit]), NO_COSMETIC)).toBeNull();
+    expect(
+      participantValuesAltered(ABANDONED_SUMMARY, modifiedFiles([tsvEdit]), NO_COSMETIC),
+    ).toBeNull();
+    // Even a pull request that touches no participants file has no count from a summary not made.
+    expect(participantValuesAltered(ABANDONED_SUMMARY, [], NO_COSMETIC)).toBeNull();
+    expect(participantValuesAltered(past, [], new Set([PARTICIPANTS_TSV]))).toBeNull();
+  });
+
+  test("a participants file the summary never saw is unknown, unless it is cosmetic", () => {
+    for (const path of PARTICIPANT_FILES) {
+      const changes = [{ path, status: "modified" }];
+      // The summary holds no outcome for it: it was not a candidate, or not read.
+      expect(participantValuesAltered(EMPTY_SUMMARY, changes, NO_COSMETIC), path).toBeNull();
+      expect(
+        participantValuesAltered(
+          summaryOf([{ ...tsvEdit, path: "events.tsv" }]),
+          changes,
+          NO_COSMETIC,
+        ),
+        path,
+      ).toBeNull();
+      // The platform proved it differs only in layout: there is nothing to count.
+      expect(participantValuesAltered(EMPTY_SUMMARY, changes, new Set([path])), path).toBe(0);
+    }
+    // One file seen and the other not is unknown; with the other cosmetic it is the seen count.
+    const seen = summaryOf([tsvEdit]);
+    const both = [
+      { path: PARTICIPANTS_TSV, status: "modified" },
+      { path: PARTICIPANTS_JSON, status: "modified" },
+    ];
+    expect(participantValuesAltered(seen, both, NO_COSMETIC)).toBeNull();
+    expect(participantValuesAltered(seen, both, new Set([PARTICIPANTS_JSON]))).toBe(1);
+    // A cosmetic path that is not a participants file excuses nothing.
+    expect(participantValuesAltered(seen, both, new Set(["events.tsv"]))).toBeNull();
+  });
+
+  test("a cosmetic file is zero even if the summary refused it", () => {
+    const ragged: Edit = {
+      path: PARTICIPANTS_TSV,
+      before: "participant_id\tsex\nsub-01\tF\textra\n",
+      after: "participant_id\tsex\r\nsub-01\tF\textra\r\n",
+    };
+    const summary = summaryOf([ragged]);
+    expect(summary.files[0]?.refusal).not.toBeNull();
+    const changes = modifiedFiles([ragged]);
+    expect(participantValuesAltered(summary, changes, new Set([PARTICIPANTS_TSV]))).toBe(0);
+    expect(participantValuesAltered(summary, changes, NO_COSMETIC)).toBeNull();
+  });
+
+  test("a type change of a root participants file is unknown, cosmetic or not", () => {
+    const seen = summaryOf([jsonEdit]);
+    for (const path of PARTICIPANT_FILES) {
+      const changes = [{ path, status: "typechange" }];
+      expect(participantValuesAltered(seen, changes, NO_COSMETIC), path).toBeNull();
+      expect(participantValuesAltered(seen, changes, new Set([path])), path).toBeNull();
+    }
+  });
+
+  test("a participants file added or removed alters no recorded value, and is never unknown for it", () => {
+    for (const status of ["added", "removed"]) {
+      for (const path of PARTICIPANT_FILES) {
+        expect(
+          participantValuesAltered(EMPTY_SUMMARY, [{ path, status }], NO_COSMETIC),
+          `${status} ${path}`,
+        ).toBe(0);
+      }
+    }
+    // Beside a modified file that was summarized, the count is that file's alone.
+    const changes = [
+      { path: PARTICIPANTS_TSV, status: "modified" },
+      { path: PARTICIPANTS_JSON, status: "removed" },
+    ];
+    expect(participantValuesAltered(summaryOf([tsvEdit]), changes, NO_COSMETIC)).toBe(1);
+  });
+
+  test("nothing changed in any participants file is zero, whatever else the pull request did", () => {
+    const events: Edit = { path: "events.tsv", before: "a\tb\n1\t2\n", after: "a\tb\n1\t3\n" };
+    const summary = summaryOf([events]);
+    expect(summary.classes.length).toBeGreaterThan(0);
+    expect(participantValuesAltered(summary, modifiedFiles([events]), NO_COSMETIC)).toBe(0);
+    expect(participantValuesAltered(EMPTY_SUMMARY, [], NO_COSMETIC)).toBe(0);
   });
 });

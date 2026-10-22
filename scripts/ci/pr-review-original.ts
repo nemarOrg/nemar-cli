@@ -27,6 +27,8 @@
 
 import { firstReadme } from "../../shared/readme-candidates";
 import {
+  type ChangeSummary,
+  type ClassKind,
   type JsonValue,
   SUMMARY_LIMITS,
   canonicalJson,
@@ -1383,4 +1385,94 @@ export function chooseAnchor(
     if (answer === null) return { anchor: "merge_base", reason: "check_failed" };
   }
   return { anchor: "merge_base", reason: "no_ancestor" };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Participants: values the original authors recorded about their subjects (design B2.3)
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * The two root files that hold what the authors recorded about their participants. A class of the
+ * change summary is about one of them when its `shape` (the path with every BIDS entity value
+ * written `*`) is exactly one of these names: a root path has no entity to fold, and a nested
+ * `sub-01/participants.tsv` has a shape that begins `sub-*` and then a slash, which is no root file.
+ */
+export const PARTICIPANT_FILES = ["participants.tsv", "participants.json"] as const;
+
+/**
+ * Whether a change of each kind, in a participants file, alters a value the authors recorded (design
+ * B2.3 and D6): a cell or a JSON value replaced, rewritten by a rule or emptied, a row relabeled
+ * (the participant's own id), or a value's type changed. The other kinds are not: a removal is
+ * Part A's loss fact, a row or a key that was found elsewhere verbatim is kept, an addition or a
+ * fill takes nothing away, a rename of a JSON key (case and punctuation only) and a reorder or a
+ * layout change leave every value as it was. A `Record` over {@link ClassKind}, as `ROLE_OF` is of
+ * its roles: a kind added to the summary without an entry here does not compile, because a kind
+ * that defaulted to `false` would let a new way of changing a value pass unseen.
+ */
+export const ALTERS_PARTICIPANT_VALUE: Readonly<Record<ClassKind, boolean>> = {
+  column_removed: false,
+  row_removed: false,
+  json_key_removed: false,
+  row_relocated: false,
+  json_key_moved: false,
+  key_relabeled: true,
+  cell_templated: true,
+  cell_replaced: true,
+  cell_emptied: true,
+  json_value_changed: true,
+  json_type_changed: true,
+  json_emptied: true,
+  json_key_renamed: false,
+  json_empty_key_removed: false,
+  rows_reordered: false,
+  columns_reordered: false,
+  json_keys_reordered: false,
+  format: false,
+  column_added: false,
+  row_added: false,
+  cell_filled: false,
+  json_key_added: false,
+  json_filled: false,
+};
+
+/**
+ * How many participant values a pull request changed (design B2.3), from the classes of the change
+ * summary: the sum of `items` over the classes whose shape is a root participants file and whose
+ * kind is one of {@link ALTERS_PARTICIPANT_VALUE}. Null when the count cannot be known, which is
+ * never zero:
+ *
+ * - the summary was abandoned, so it holds no class at all;
+ * - a root participants file changed type (`typechange`);
+ * - a root participants file was modified, is not in `cosmetic` (the files the platform proved
+ *   differ only in layout, a set the caller decides), and has no outcome in the summary without a
+ *   refusal: the summary never saw it, or refused it (ragged rows, a cap, an unread blob), so its
+ *   classes, if any, are not all of its changes. Two outcomes for one path are read as both
+ *   needed, so any refusal among them is unknown.
+ *
+ * A participants file added or removed contributes nothing: an addition changes no value the
+ * authors recorded, and a removal is Part A's loss fact.
+ */
+export function participantValuesAltered(
+  summary: ChangeSummary,
+  changes: readonly { path: string; status: string }[],
+  cosmetic: ReadonlySet<string>,
+): number | null {
+  if (summary.abandoned) return null;
+  for (const file of PARTICIPANT_FILES) {
+    for (const change of changes) {
+      if (change.path !== file || change.status === "added" || change.status === "removed")
+        continue;
+      if (change.status === "typechange") return null;
+      if (cosmetic.has(file)) continue;
+      const outcomes = summary.files.filter((outcome) => outcome.path === file);
+      if (outcomes.length === 0 || outcomes.some((outcome) => outcome.refusal !== null))
+        return null;
+    }
+  }
+  let altered = 0;
+  for (const changeClass of summary.classes) {
+    const participants = (PARTICIPANT_FILES as readonly string[]).includes(changeClass.shape);
+    if (participants && ALTERS_PARTICIPANT_VALUE[changeClass.kind]) altered += changeClass.items;
+  }
+  return altered;
 }
