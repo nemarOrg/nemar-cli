@@ -73,7 +73,7 @@ All numbers in this document come from a throwaway prototype run on real data, n
 | Today's content pass, largest | 14.3 s (`on007353` #1), 11.7 s (`on006910` #1); most of it is starting two `git show` processes per cosmetic check, not fetching (section 12.1) |
 
 These are the prototype's numbers.
-Phase 6 ran the real code on the same 86 frozen pull requests and measured them again; four of them moved (accounted for 5,482, truncated 15, newly complete 17 of which 9 carry no blocking loss fact, blocking loss 20), each for a decided rule, and the table of section 12.4 ("Measured on the real code") lists every difference.
+Phase 6 ran the real code on the same 86 frozen pull requests and measured them again; five numbers moved (accounted for 5,482, truncated 15, newly complete 17 of which 9 carry no blocking loss fact, blocking loss 20, largest fenced block 6,940 characters), each for a decided rule or a definition, and the table of section 12.4 ("Measured on the real code") lists every difference.
 The prototype counted every candidate as `summarized` and folded a cut listing into `readIncomplete`; the real code keeps `summarized` (parsed without refusal, 5,514 here) apart from `refused` (393) and `listCut` apart from `readIncomplete`, so those two rows above agree with the real code only after that change of definition.
 
 **`nemarDatasets/on004551` #1** (307 files: 125 modified `*_channels.tsv`, 124 added `coordsystem.json`, 56 added `sourcedata/channels-removed-2026-10-18/.../*_channels.tsv`, README, CHANGES).
@@ -1221,12 +1221,13 @@ The clones themselves stay outside the repository (a git pack holds committer ad
 | Accounted for | 5,495 | **5,482** (all of the 13 in `on005415` #1 are gone) |
 | Truncated | 14 (7 list cut) | **15** (7 list cut, 9 content not read in full, `on006233` #2 in both) |
 | Content not read in full without the summary | 31 | 31 |
-| Newly complete, of which with no blocking loss fact | 18, 11 | **17, 9** |
+| Newly complete (content not read in full without the summary, read in full with it, listing not cut), of which with no blocking loss fact | 18, 11 | **17, 9** |
 | Blocking loss (a platform finding) | 17 | **20** |
 | Most classes in one pull request, largest fenced block | 22, 6,958 characters | 22, 6,940 characters |
-| Slowest listing, slowest content pass, all 86 passes | | under 0.3 s, under 4 s (`on006233` #2), about 26 s, on local blobs |
+| Slowest listing, slowest content pass, all 86 passes | | 0.1 to 0.2 s, 3 to 6 s (`on006233` #2), 26 to 34 s, on local blobs |
 
-The times are of local blobs; the production pass also fetches (section 12.1), which this run does not measure.
+The times are of local blobs on a laptop that was loaded by other work, so they vary from run to run; the production pass also fetches (section 12.1), which this run does not measure.
+The guard on time is the scale test's 60 s per pass, not these numbers.
 
 **Every pull request that differs from the prototype, and why.**
 No row is a regression: each is a rule decided in the design, reported here with the numbers it moves.
@@ -1265,13 +1266,16 @@ Neither changes a rule in Phase 6.
 **Removals in a file the summary refused.**
 Four pull requests have a refused file that deletes a line: `on006233` #2 (1 file shown, 346 incomplete, its listing is cut too), `on003620` #1 (43 shown, 1 incomplete), `on004588` #1 (1 incomplete), `on003195` #1 (1 shown).
 Across set A: 45 files are shown in full, 348 are in a pull request whose content is incomplete, 0 are HIDDEN.
+HIDDEN is a tripwire, not an expected outcome: a refused file with a deleted line is unread, so a correct pass reports it incomplete.
+It appears only when the pass wrongly counts such a file as read, which is how the binary-diff hole would have shown up, and a file counts as shown only when its patch holds at least as many `-` lines as git's own count of deleted lines (a binary file never does).
 `on004588` #1 is the label template's case of a removal only the model can see, and `on003620` #1 and `on003195` #1 are in its blocking group.
 
 **Set B, the hostile set.**
 24 synthetic pull requests (22 cases; 16 and 21 are split in two) built by `test/fixtures/pr-review-hostile/build.ts`, each a real repository read by the real passes.
-One oracle independent of the code under test (brute force on raw bytes) holds for every case: a file shown in full shows every lost line; an accounted file with a loss carries a loss class and a platform finding; a file neither shown nor accounted keeps `readIncomplete` true; no pair of values looks equal after the fence; the fenced block is well formed.
+One oracle independent of the code under test (brute force on raw bytes) holds for every case: a file shown in full shows every lost line; an accounted file with a loss carries a loss class and a platform finding; a file neither shown nor accounted keeps `readIncomplete` true; a pair of values that reads as one value after the fence, first differs at a character outside ASCII, or differs only in escaped characters carries the first-difference note; the fenced block is well formed.
 Through the calibration script: 10 pull requests carry a blocking loss (cases 1, 2, 3, 4, 5, 8, 12, 15, 16b, 20), 4 are truncated (7, 11, 16b, 21b), 7 have a refused file that deletes a line, 0 are HIDDEN.
 Two defects were found and fixed in this phase by the cases that predicted them: a diff git writes as `Binary files differ` (a NUL byte in a table) counted as a read, so a removed row in it left `readIncomplete` false (case 7); and two values that differ only by `<facts>` against `</facts>` showed as equal text with no note (case 22).
+The first fix has a side effect worth stating: a modified or removed binary file in a read area (a `README.pdf`) now keeps the content incomplete, where its one-line `Binary files differ` diff used to count as read. That fails closed, as every unknown does.
 A 2,000-file partial clone (1,000 relabeled tables, 500 sidecars with a changed value, 500 ragged tables, 300 copies) reads in about 4 s.
 
 **The model calibration is the owner's step.**
