@@ -104,7 +104,7 @@ No new budget enters the job: ADR 0107's 45.4 minutes are unchanged.
 
 ## Alternatives considered
 
-- **Raise the diff budgets:** 125 distinct diffs of up to 394 lines fit no prompt, and the output ceiling is already filled by thinking.
+- **Raise the diff budgets:** 114 distinct diffs of 127 to 394 lines (in 125 modified tables) fit no prompt, and the output ceiling is already filled by thinking.
 - **Fold near-identical diffs:** masking the lines or values that differ is exactly what lets a one-byte change hide; ADR 0107's folding is exact for that reason.
 - **Give the model a tool to open files:** ADR 0092 and ADR 0107 give it none.
 - **Group by each file's set of classes:** the files of one bulk edit rarely share all their classes, so it gives dozens of groups where classes give five.
