@@ -4225,15 +4225,15 @@ describe("diffJson: renamed keys", () => {
   // A sign, a point, an exponent, a percent, a symbol or a combining mark changes a code as much as
   // x1 to 1 does (issue #1879), so a person looks; a name of punctuation alone folds to nothing.
   test.each([
-    ["-1", "1"],
-    ["+", "-"],
-    ["<5", ">5"],
-    [".5", "5"],
-    ["1e-3", "1e3"],
-    ["5%", "5"],
-    ["cafe\u0301", "cafe"],
-    ["-", "_"],
-  ])("%j to %j, either way, is a removed key and an added key, not a rename", (was, now) => {
+    ["-1 to 1", "-1", "1"],
+    ["+ to -", "+", "-"],
+    ["<5 to >5", "<5", ">5"],
+    [".5 to 5", ".5", "5"],
+    ["1e-3 to 1e3", "1e-3", "1e3"],
+    ["5% to 5", "5%", "5"],
+    ["cafe with a combining acute, to cafe", "cafe\u0301", "cafe"],
+    ["- to _ (punctuation alone)", "-", "_"],
+  ])("%s, either way, is a removed key and an added key, not a rename", (_label, was, now) => {
     expect(levelKey(was, now)).toEqual([
       ["json_key_removed", ".Levels", was],
       ["json_key_added", ".Levels", now],
@@ -6570,6 +6570,7 @@ function oracleObject(random: () => number, depth: number): { [key: string]: Pla
 
 describe("reconstruction oracle: JSON", () => {
   test("the oracle asks no rename of the document root: a scalar root that became a key, or the reverse, is no rename", () => {
+    // Belt and suspenders: the empty-fold refusal alone already clears the root (its name is "").
     const pool = buildPools([]).json;
     for (const [before, after] of [
       [1, { _: 1 }],
