@@ -2944,11 +2944,14 @@ export function verifyJsonCounts(diff: FileDiff<JsonCounts>): boolean {
  *
  * Leaves at the same path are compared first. A before leaf whose path is gone is then, in order:
  *
- * - **renamed** (`json_key_renamed`) when it is the ONLY before leaf with its parent and value, ONE
- *   after leaf has that parent and value, and the two key names fold to the same (case and
- *   punctuation removed, except punctuation between two digits) or match by a relabel rule. A shared value is no evidence of which key
- *   became which: with `go` and `go2` both `"Go"`, `go` removed and `go3` added is a removed key
- *   and an added one, not `go` renamed.
+ * - **renamed** (`json_key_renamed`) when it is the ONLY leaf of the before side that step one left
+ *   unpaired with its parent and value, ONE unpaired after leaf has that parent and value, and the
+ *   two key names fold to the same (case and punctuation removed, except punctuation between two
+ *   digits). An unchanged sibling with the same value does not count against it
+ *   (`MiscChannelCount` to `MISCChannelCount` beside other counts of `0` is a rename), but two
+ *   removed keys with one value, or two added ones, are no evidence of which became which, and a
+ *   respelling that is not a case-and-punctuation one (`x1` to `1`, `go` to `go3`) is a removed key
+ *   and an added one.
  * - **moved** (`json_key_moved`) when this file's after document is an object that no longer has
  *   the leaf's top-level key at all, and the NEAREST file of the pull request that applies to this
  *   one under BIDS inheritance ({@link sidecarApplies}) and has that top-level key holds the leaf,
@@ -3024,19 +3027,23 @@ export function diffJsonWith(
     else pairLeaves(bi, ai, JSON_FATE_CHANGED);
   }
 
-  // 2. Renames: the one leaf with a parent and value on each side, under a respelled key. With the
-  // value unique on both sides a before leaf has at most one candidate, and a relabel rule refuses a
-  // name over `maxKeyChars` before it reads it, so the pass is linear in the document and needs no
+  // 2. Renames: the one REMOVED leaf and the one ADDED leaf with a parent and value, under a key
+  // respelled by case and punctuation alone. Only the leaves step 1 left unpaired are counted: a
+  // sibling that is unchanged holds the same value without being a candidate, so it is no reason to
+  // doubt which key became which. With the value unique among the removed leaves and among the added
+  // ones a before leaf has at most one candidate, so the pass is linear in the document and needs no
   // step budget.
   const groupOf = (leaf: JsonLeaf): string => JSON.stringify([leaf.parent, leaf.value]);
   const beforeInGroup = new Map<string, number>();
-  for (const leaf of bl) {
+  for (const [bi, leaf] of bl.entries()) {
+    if (bFate[bi] !== JSON_FATE_NONE) continue;
     const group = groupOf(leaf);
     beforeInGroup.set(group, (beforeInGroup.get(group) ?? 0) + 1);
   }
-  // The index of the one after leaf of each group, or -1 when the group has more than one.
+  // The index of the one unpaired after leaf of each group, or -1 when the group has more than one.
   const afterOfGroup = new Map<string, number>();
   for (const [ai, leaf] of al.entries()) {
+    if (aFate[ai] !== JSON_FATE_NONE) continue;
     const group = groupOf(leaf);
     afterOfGroup.set(group, afterOfGroup.has(group) ? -1 : ai);
   }
@@ -3047,12 +3054,7 @@ export function diffJsonWith(
     if (beforeInGroup.get(group) !== 1 || ai === undefined || ai < 0) continue;
     const now = al[ai] as JsonLeaf;
     if (aFate[ai] !== JSON_FATE_NONE || !now.isKey) continue;
-    if (
-      foldName(leaf.name) === foldName(now.name) ||
-      relabelRule(leaf.name, now.name, { chars: false }) !== null
-    ) {
-      pairLeaves(bi, ai, JSON_FATE_RENAMED);
-    }
+    if (foldName(leaf.name) === foldName(now.name)) pairLeaves(bi, ai, JSON_FATE_RENAMED);
   }
 
   // 3. What is left of the before side: kept in a sidecar that applies, or removed. A non-object
