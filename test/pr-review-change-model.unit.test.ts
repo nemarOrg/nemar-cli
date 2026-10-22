@@ -6393,15 +6393,17 @@ function jsonViolations(
   if (!same) out.push("not_reconstructible");
   // Completeness of renames: the one unpaired before key and the one unpaired after key that share
   // a parent and a value, and whose names fold alike, ARE a rename. (Names shaped like an index are
-  // left out: whether such a name is a key or an array element is not told by its text.)
+  // left out: whether such a name is a key or an array element is not told by its text. The root is
+  // left out too: it is no key, whatever the other side holds.)
   const indexShaped = (name: string): boolean => /^\[[0-9]+\]$/.test(name);
   for (const [leafPath, leaf] of bl) {
-    if (al.has(leafPath) || indexShaped(leaf.name)) continue;
+    if (leafPath === "" || al.has(leafPath) || indexShaped(leaf.name)) continue;
     const sameValue = (l: OracleLeaf) => l.parent === leaf.parent && l.value === leaf.value;
     if ([...bl].filter(([q, l]) => !al.has(q) && sameValue(l)).length !== 1) continue;
     const candidates = [...al].filter(([q, l]) => !bl.has(q) && sameValue(l));
-    const only = candidates[0]?.[1];
-    if (candidates.length !== 1 || only === undefined || indexShaped(only.name)) continue;
+    const [onlyPath, only] = candidates[0] ?? [];
+    if (candidates.length !== 1 || only === undefined || onlyPath === "" || indexShaped(only.name))
+      continue;
     if (!oracleRespelled(leaf.name, only.name)) continue;
     const wanted = `${leaf.name} -> ${only.name}`;
     if (
@@ -6431,7 +6433,47 @@ const ORACLE_JSON_KEYS = [
   "a.b",
   "0",
   "[0]",
+  "1.2",
+  "12",
+  "v1.2",
+  "v12",
+  "-1",
+  "1",
+  "<5",
+  ">5",
+  "-",
+  "_",
 ];
+/**
+ * Keys of ORACLE_JSON_KEYS that a respelling may turn into one another although they are not one
+ * name respelled: a point between two digits, a sign, a symbol, or a name of punctuation alone.
+ */
+const ORACLE_JSON_LOOKALIKES: Record<string, string> = {
+  "1.2": "12",
+  "12": "1.2",
+  "v1.2": "v12",
+  v12: "v1.2",
+  "-1": "1",
+  "1": "-1",
+  "<5": ">5",
+  ">5": "<5",
+  "-": "_",
+  _: "-",
+};
+/** The value walks no further: what the oracle reads as one leaf (see {@link oracleLeaves}). */
+const oracleIsLeaf = (v: Plain): boolean =>
+  Array.isArray(v)
+    ? !v.some((x) => x !== null && typeof x === "object")
+    : v === null || typeof v !== "object" || Object.keys(v).length === 0;
+/** The respellings of a key by case or punctuation alone that `doc` does not hold yet. */
+const oracleRespellings = (key: string, doc: { [key: string]: Plain }): string[] =>
+  [
+    key.toUpperCase(),
+    key.toLowerCase(),
+    `${key}_`,
+    `_${key}`,
+    `${key.slice(0, 1)}_${key.slice(1)}`,
+  ].filter((c) => c !== key && !(c in doc) && oracleRespelled(key, c));
 const ORACLE_JSON_SCALARS: Plain[] = [0, false, "None", null, "n/a", "", "x", 1, "1", " ", "Go"];
 
 function oracleValue(random: () => number, depth: number): Plain {
@@ -6453,6 +6495,21 @@ function oracleObject(random: () => number, depth: number): { [key: string]: Pla
 }
 
 describe("reconstruction oracle: JSON", () => {
+  test("the oracle asks no rename of the document root: a scalar root that became a key, or the reverse, is no rename", () => {
+    const pool = buildPools([]).json;
+    for (const [before, after] of [
+      [1, { _: 1 }],
+      [{ _: 1 }, 1],
+      [{ "": 1 }, 1],
+      [[1, 2], { "-": [1, 2] }],
+    ] as [Plain, Plain][]) {
+      const result = diffJson("a.json", json(textOf(before)), json(textOf(after)), pool);
+      if (!result.ok) throw new Error(`diff refused: ${result.refusal}`);
+      expect(result.value.atoms.map((a) => a.kind)).not.toContain("json_key_renamed");
+      expect(jsonViolations("a.json", before, after, result.value.atoms, [])).toEqual([]);
+    }
+  });
+
   test("6,000 generated cases: the before leaves are recovered from the after leaves and the atoms, and every rename and move stands", () => {
     const random = seeded(4242);
     const { pick, chance, int } = toolkit(random);
@@ -6479,17 +6536,25 @@ describe("reconstruction oracle: JSON", () => {
             : [pick(ORACLE_JSON_SCALARS), oracleObject(random, 1)];
           note("non_object_root");
         } else before = oracleObject(random, 0);
-        // A value shared by siblings on BOTH sides, so a respelled key has an unchanged look-alike.
+        // A respelled key beside an unchanged look-alike: a new key, left alone below, that holds the
+        // same leaf as a key that is then respelled by case or punctuation.
+        let twin: string | null = null;
+        let source: string | null = null;
         if (
           before !== null &&
           typeof before === "object" &&
           !Array.isArray(before) &&
-          chance(0.1)
+          chance(0.2)
         ) {
-          const values = Object.values(before);
-          if (values.length > 0) {
-            before[pick(ORACLE_JSON_KEYS)] = pick(values) as Plain;
-            note("shared_value_unchanged");
+          const doc = before;
+          const sources = Object.keys(doc).filter(
+            (k) => oracleIsLeaf(doc[k] as Plain) && oracleRespellings(k, doc).length > 0,
+          );
+          const twins = ORACLE_JSON_KEYS.filter((k) => !(k in doc));
+          if (sources.length > 0 && twins.length > 0) {
+            source = pick(sources);
+            twin = pick(twins);
+            doc[twin] = doc[source] as Plain;
           }
         }
         let after: Plain = JSON.parse(JSON.stringify(before)) as Plain;
@@ -6497,6 +6562,15 @@ describe("reconstruction oracle: JSON", () => {
           const doc = after;
           let renames = 0;
           for (const key of Object.keys(doc)) {
+            if (key === twin) continue;
+            const respellings = key === source ? oracleRespellings(key, doc) : [];
+            if (respellings.length > 0) {
+              const value = doc[key] as Plain;
+              delete doc[key];
+              doc[pick(respellings)] = value;
+              renames++;
+              continue;
+            }
             const op = random();
             if (op < 0.15) {
               delete doc[key];
@@ -6509,6 +6583,7 @@ describe("reconstruction oracle: JSON", () => {
                 key.toLowerCase(),
                 `${key.slice(0, 1)}_${key.slice(1)}`,
                 pick(ORACLE_JSON_KEYS),
+                ORACLE_JSON_LOOKALIKES[key] ?? pick(ORACLE_JSON_KEYS),
               ]);
               if (respelled !== key && !(respelled in doc)) {
                 const value = doc[key] as Plain;
@@ -6560,6 +6635,27 @@ describe("reconstruction oracle: JSON", () => {
               note("shared_value");
             }
           }
+          // One key below the root respelled by case or punctuation, so renames under a parent other
+          // than the root are found complete by the oracle and not by hand tests alone.
+          const nested: [{ [key: string]: Plain }, string][] = [];
+          const collect = (v: Plain, depth: number): void => {
+            if (Array.isArray(v)) for (const x of v) collect(x, depth + 1);
+            else if (v !== null && typeof v === "object") {
+              for (const k of Object.keys(v)) {
+                const child = v[k] as Plain;
+                if (depth > 0 && oracleIsLeaf(child) && oracleRespellings(k, v).length > 0)
+                  nested.push([v, k]);
+                collect(child, depth + 1);
+              }
+            }
+          };
+          collect(doc, 0);
+          if (nested.length > 0) {
+            const [parent, key] = pick(nested);
+            const value = parent[key] as Plain;
+            delete parent[key];
+            parent[pick(oracleRespellings(key, parent))] = value;
+          }
         } else {
           after = chance(0.5) ? oracleObject(random, 0) : oracleValue(random, 1);
         }
@@ -6597,8 +6693,19 @@ describe("reconstruction oracle: JSON", () => {
         diffs++;
         const atoms = result.value.atoms;
         for (const atom of atoms) seen.add(atom.kind);
-        if (atoms.filter((x) => x.kind === "json_key_renamed").length > 1)
-          note("several_renames_found");
+        const renames = atoms.filter((x) => x.kind === "json_key_renamed");
+        if (renames.length > 1) note("several_renames_found");
+        if (renames.some((x) => x.field !== "")) note("nested_rename_found");
+        // The case the rename rule keeps a rename for: a sibling that is unchanged (the same path and
+        // value on both sides) holds the renamed key's value.
+        const bLeaves = oracleLeaves(c.before);
+        const aLeaves = oracleLeaves(c.after);
+        const besideLookalike = (x: Atom): boolean =>
+          [...bLeaves].some(
+            ([p, l]) =>
+              l.parent === x.field && l.value === x.before && aLeaves.get(p)?.value === l.value,
+          );
+        if (renames.some(besideLookalike)) note("rename_beside_unchanged_lookalike");
         if (atoms.some((x) => x.field?.includes("[") ?? false)) note("array_paths");
         if (!verifyJsonCounts(result.value)) violations.push(`case ${n}: counts`);
         for (const v of jsonViolations(c.path, c.before, c.after, atoms, sidecars))
@@ -6635,12 +6742,13 @@ describe("reconstruction oracle: JSON", () => {
       ["non_object_root", 300],
       ["root_type_changed", 150],
       ["several_renames", 200],
-      ["several_renames_found", 20],
+      ["several_renames_found", 230],
+      ["nested_rename_found", 840],
       ["moved_whole", 1000],
       ["nested_move_shadowed", 300],
       ["nearer_sets_moved_key", 200],
       ["shared_value", 500],
-      ["shared_value_unchanged", 300],
+      ["rename_beside_unchanged_lookalike", 500],
       ["emptied", 500],
       ["value_changed", 1000],
       ["array_paths", 300],
