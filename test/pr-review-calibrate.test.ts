@@ -27,11 +27,13 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, relative } from "node:path";
 import {
   CalibrationReadError,
   type CalibrationRow,
@@ -941,8 +943,8 @@ describe("frozen clones: --clones and --offline", () => {
       ["nm000460#2", "objects_missing"],
     ]);
     // A directory beside the clones that is not a repository is missing too, even when a
-    // repository encloses it: git is asked with the clones directory as its ceiling, so it cannot
-    // find the one above.
+    // repository encloses it: the repository git finds must have the clone's own directory as its
+    // top level, and the one above does not.
     git(clones, "init", "-q");
     mkdirSync(join(clones, "nm000460-5"));
     writeFileSync(join(clones, "nm000460-5.shas"), `${base} ${base}\n`);
@@ -976,6 +978,149 @@ describe("frozen clones: --clones and --offline", () => {
       ["nm000460#2", null],
     ]);
     expect(rows[1]?.evidence?.files).toBe(3);
+  });
+
+  /**
+   * A full clone of the pull request's source at `dir`, made with git so it holds both commits: a
+   * repository that encloses whatever is put inside it, and that a clone must never borrow.
+   */
+  function enclosingRepository(source: string, dir: string, bare = false): void {
+    execFileSync("git", ["clone", "-q", ...(bare ? ["--bare"] : ["--no-checkout"]), source, dir], {
+      env: GIT_ENV,
+    });
+  }
+
+  /** Evidence rows of one run over `prs` in `clones`, by pull request and error. */
+  async function errorsOf(clones: string, prs: string[]): Promise<[string, string | null][]> {
+    const r = await calibrate([
+      ...prs.flatMap((p) => ["--pr", p]),
+      "--clones",
+      clones,
+      "--evidence-only",
+      "--json",
+    ]);
+    return (JSON.parse(r.out) as EvidenceRow[]).map((x) => [x.pr, x.error]);
+  }
+
+  /**
+   * Frozen clones beside a full clone of their source, `enclosing`, which holds both commits: what a
+   * clone that is not its own repository could borrow.
+   */
+  function borrowable(name: string) {
+    const { clones, base, head } = frozenClones(name, (b, h) => `${b} ${h}\n`);
+    const source = join(root, `${name}-source`);
+    const enclosing = join(root, `${name}-enclosing`);
+    enclosingRepository(source, enclosing);
+    expect(git(enclosing, "cat-file", "-t", head)).toBe("commit");
+    return { clones, source, enclosing, shas: `${base} ${head}\n` };
+  }
+
+  test("a link into another repository is no clone, nor is a directory inside a bare one", async () => {
+    const { clones, source, enclosing, shas } = borrowable("clones-linked");
+    // A clone that is a link to an empty directory inside a repository that holds the commits.
+    mkdirSync(join(enclosing, "empty"));
+    symlinkSync(join(enclosing, "empty"), join(clones, "nm000460-7"));
+    writeFileSync(join(clones, "nm000460-7.shas"), shas);
+    // A clone that is a link to a directory inside a bare repository that holds the commits.
+    const bare = join(root, "clones-linked-enclosing.git");
+    enclosingRepository(source, bare, true);
+    mkdirSync(join(bare, "inside"));
+    symlinkSync(join(bare, "inside"), join(clones, "nm000460-13"));
+    writeFileSync(join(clones, "nm000460-13.shas"), shas);
+    expect(await errorsOf(clones, ["nm000460#7", "nm000460#13", "nm000460#2"])).toEqual([
+      ["nm000460#7", "clone_missing"],
+      ["nm000460#13", "clone_missing"],
+      ["nm000460#2", null],
+    ]);
+  });
+
+  test("a ':' in the clones path lets no clone borrow the repository above it", async () => {
+    // A clones directory whose path holds a ':' (a list separator to git's variables), inside a
+    // repository that holds the commits, with an empty `.git` for a clone.
+    const { enclosing, shas } = borrowable("clones-colon");
+    const colon = join(enclosing, "set:a-clones");
+    mkdirSync(join(colon, "nm000460-6", ".git"), { recursive: true });
+    writeFileSync(join(colon, "nm000460-6.shas"), shas);
+    expect(await errorsOf(colon, ["nm000460#6"])).toEqual([["nm000460#6", "clone_missing"]]);
+  });
+
+  test("GIT_DIR lends no clone a repository: the run takes it away", async () => {
+    // GIT_DIR naming the repository that holds the commits, and a clone that is an empty directory.
+    const { clones, enclosing, shas } = borrowable("clones-git-dir");
+    mkdirSync(join(clones, "nm000460-8"));
+    writeFileSync(join(clones, "nm000460-8.shas"), shas);
+    const saved = process.env.GIT_DIR;
+    process.env.GIT_DIR = join(enclosing, ".git");
+    let rows: [string, string | null][];
+    let after: string | undefined;
+    try {
+      rows = await errorsOf(clones, ["nm000460#8", "nm000460#2"]);
+      after = process.env.GIT_DIR;
+    } finally {
+      if (saved === undefined) Reflect.deleteProperty(process.env, "GIT_DIR");
+      else process.env.GIT_DIR = saved;
+    }
+    expect(rows).toEqual([
+      ["nm000460#8", "clone_missing"],
+      ["nm000460#2", null],
+    ]);
+    expect(after).toBe(join(enclosing, ".git"));
+  });
+
+  test("a real clone reads however it is reached: relative, linked, a slash, a worktree, bare", async () => {
+    const { clones, base, head } = frozenClones("clones-spelled", (b, h) => `${b} ${h}\n`);
+    const source = join(root, "clones-spelled-source");
+    const shas = `${base} ${head}\n`;
+    // A linked worktree, whose `.git` is a file.
+    git(
+      join(clones, "nm000460-2"),
+      "worktree",
+      "add",
+      "-q",
+      "--detach",
+      "--no-checkout",
+      join(clones, "nm000460-9"),
+      head,
+    );
+    expect(readFileSync(join(clones, "nm000460-9", ".git"), "utf8")).toStartWith("gitdir: ");
+    writeFileSync(join(clones, "nm000460-9.shas"), shas);
+    // A link to a real clone.
+    symlinkSync(join(clones, "nm000460-2"), join(clones, "nm000460-10"));
+    writeFileSync(join(clones, "nm000460-10.shas"), shas);
+    // A bare clone.
+    enclosingRepository(source, join(clones, "nm000460-11"), true);
+    writeFileSync(join(clones, "nm000460-11.shas"), shas);
+    // The ones that are not: an empty `.git` directory and a `.git` file that names nothing.
+    mkdirSync(join(clones, "nm000460-12", ".git"), { recursive: true });
+    writeFileSync(join(clones, "nm000460-12.shas"), shas);
+    mkdirSync(join(clones, "nm000460-14"));
+    writeFileSync(join(clones, "nm000460-14", ".git"), `gitdir: ${join(root, "no-such-gitdir")}\n`);
+    writeFileSync(join(clones, "nm000460-14.shas"), shas);
+    const prs = ["2", "9", "10", "11", "12", "14"].map((n) => `nm000460#${n}`);
+    const expected: [string, string | null][] = [
+      ["nm000460#2", null],
+      ["nm000460#9", null],
+      ["nm000460#10", null],
+      ["nm000460#11", null],
+      ["nm000460#12", "clone_missing"],
+      ["nm000460#14", "clone_missing"],
+    ];
+    // The clones directory as it was made, relative to the working directory, through a link
+    // (the temporary directory is itself behind one on macOS, `/var` and `/tmp` both), and with
+    // a trailing slash.
+    const linked = join(root, "clones-spelled-link");
+    symlinkSync(root, linked);
+    const spellings = [
+      clones,
+      relative(process.cwd(), clones),
+      join(linked, "clones-spelled-clones"),
+      `${clones}/`,
+    ];
+    expect(new Set(spellings).size).toBe(4);
+    expect(realpathSync(spellings[2] as string)).toBe(realpathSync(clones));
+    for (const spelled of spellings) {
+      expect(await errorsOf(spelled, prs), spelled).toEqual(expected);
+    }
   });
 
   test("pins need --clones, --offline needs --clones, and --pr names no commits", async () => {

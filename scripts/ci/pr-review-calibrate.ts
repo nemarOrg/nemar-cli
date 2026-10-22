@@ -83,9 +83,9 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import {
   type Criterion,
   type PrReviewReport,
@@ -455,13 +455,42 @@ function readShas(path: string): PinnedCommits | null {
 }
 
 /**
+ * Whether `dir` is a repository of its own, and not a directory inside another one that git would
+ * find by searching up from it. Asked of git and compared by real path, after resolving links on
+ * both sides: a working tree's top level (`rev-parse --show-toplevel`) must be `dir` itself, and a
+ * bare repository (`--is-bare-repository` prints `true`) must have `dir` as its git directory
+ * (`--absolute-git-dir`). Anything else, a failure of git included, is not. A working tree whose
+ * `.git` is a file (a linked worktree) is one; an empty `.git` directory or a `.git` file that names
+ * nothing is not. The git is started with this process's environment, which a run has stripped of
+ * every variable that would name another repository ({@link scopeRunEnvironment}).
+ */
+function isOwnRepository(dir: string): boolean {
+  try {
+    if (!statSync(dir).isDirectory()) return false;
+    const real = realpathSync(dir);
+    const ask = (flag: string): string =>
+      execFileSync("git", ["-C", dir, "rev-parse", flag], {
+        encoding: "utf8",
+        env: offlineEnv(),
+        stdio: ["ignore", "pipe", "ignore"],
+      }).replace(/\n$/, "");
+    if (ask("--is-bare-repository") === "true") {
+      return realpathSync(ask("--absolute-git-dir")) === real;
+    }
+    return realpathSync(ask("--show-toplevel")) === real;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Where each pull request comes from with `--clones DIR`: the clone `DIR/<dataset>-<number>`, made
  * before (for a frozen set, by the recipe in its manifest), read in place and never fetched into by
  * this function.
  *
- * - The clone must be a directory that is a repository of its own, else `clone_missing`. git is
- *   asked, with `GIT_CEILING_DIRECTORIES` set to `DIR`, so its search cannot leave the clone's own
- *   directory: an empty `.git`, or none, is not taken for a repository that encloses `DIR`.
+ * - The clone must be a directory that is a repository of its own ({@link isOwnRepository}), else
+ *   `clone_missing`: an empty `.git`, none, or a link into another repository's tree is not taken
+ *   for the repository that encloses it.
  * - The commits are the line's pin, else the ones in `DIR/<dataset>-<number>.shas`, else `no_commit`.
  * - Both must be commits the clone holds, asked without fetching (in every mode, not only
  *   `offline`), else `objects_missing`.
@@ -484,20 +513,7 @@ export function cloneReader(
   return (t) => {
     const name = `${t.dataset}-${t.number}`;
     const dir = join(clones, name);
-    let isRepo = false;
-    try {
-      if (statSync(dir).isDirectory()) {
-        // Throws when git finds no repository between the clone's directory and the ceiling.
-        execFileSync("git", ["-C", dir, "rev-parse", "--git-dir"], {
-          env: { ...offlineEnv(), GIT_CEILING_DIRECTORIES: resolve(clones) },
-          stdio: ["ignore", "ignore", "ignore"],
-        });
-        isRepo = true;
-      }
-    } catch {
-      isRepo = false;
-    }
-    if (!isRepo) throw new CalibrationReadError("clone_missing");
+    if (!isOwnRepository(dir)) throw new CalibrationReadError("clone_missing");
     const pin = t.pin ?? readShas(join(clones, `${name}.shas`));
     if (pin === null) throw new CalibrationReadError("no_commit");
     for (const sha of [pin.base, pin.head]) {
