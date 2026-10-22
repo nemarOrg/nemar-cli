@@ -4198,6 +4198,46 @@ describe("diffJson: renamed keys", () => {
     ]);
   });
 
+  /** The atoms of one key of a Levels map respelled from `was` to `now`, beside a key that stays. */
+  const levelKey = (was: string, now: string) =>
+    diffJsonText(
+      "task-x_events.json",
+      JSON.stringify({ Levels: { [was]: "Left", x: "Right" } }),
+      JSON.stringify({ Levels: { [now]: "Left", x: "Right" } }),
+    ).atoms.map((a) => [a.kind, a.field, a.detail]);
+
+  // A sign, a point, an exponent, a percent, a symbol or a combining mark changes a code as much as
+  // x1 to 1 does (issue #1879), so a person looks; a name of punctuation alone folds to nothing.
+  test.each([
+    ["-1", "1"],
+    ["+", "-"],
+    ["<5", ">5"],
+    [".5", "5"],
+    ["1e-3", "1e3"],
+    ["5%", "5"],
+    ["cafe\u0301", "cafe"],
+    ["-", "_"],
+  ])("%j to %j, either way, is a removed key and an added key, not a rename", (was, now) => {
+    expect(levelKey(was, now)).toEqual([
+      ["json_key_removed", ".Levels", was],
+      ["json_key_added", ".Levels", now],
+    ]);
+    expect(levelKey(now, was)).toEqual([
+      ["json_key_removed", ".Levels", now],
+      ["json_key_added", ".Levels", was],
+    ]);
+  });
+
+  test.each([
+    ["1E3", "1e3"],
+    ["Level_1", "LEVEL1"],
+    ["MISC_Channel-Count", "MiscChannelCount"],
+    ["my-key-2", "my_key_2"],
+  ])("%j to %j, either way, is still a rename", (was, now) => {
+    expect(levelKey(was, now)).toEqual([["json_key_renamed", ".Levels", `${was} -> ${now}`]]);
+    expect(levelKey(now, was)).toEqual([["json_key_renamed", ".Levels", `${now} -> ${was}`]]);
+  });
+
   test("two names that are not one name respelled are not a rename", () => {
     expect(jsonLines('{"Fz": 1}', '{"Pz": 1}')).toEqual([
       expect.stringContaining("json_key_removed"),
@@ -4738,6 +4778,20 @@ describe("diffJson: moved keys", () => {
       [pooled("task-x_eeg.json", null, '{"Manufacturer": "BioSemi"}')],
     );
     expect(diff.atoms.map((a) => a.kind)).toEqual(["json_key_renamed"]);
+  });
+
+  test("a leaf that step 1 left unpaired counts for uniqueness even when a later pass moves it", () => {
+    // Bar moved to a sidecar, and Foo was respelled FOO with the same value. The rename pass runs
+    // before the move pass, so Bar still shares Foo's value there and Foo is not renamed: more
+    // change shown (a blocking removal), never less.
+    const diff = diffJsonText(target, '{"Foo": 1, "Bar": 1}', '{"FOO": 1}', [
+      pooled("task-x_eeg.json", null, '{"Bar": 1}'),
+    ]);
+    expect(diff.atoms.map(line)).toEqual([
+      'json_key_removed | field= | before="1" | detail="Foo"',
+      'json_key_moved | field= | before="1" | detail="Bar"',
+      'json_key_added | field= | after="1" | detail="FOO"',
+    ]);
   });
 });
 
@@ -6147,22 +6201,47 @@ function oracleMissing(v: Plain): boolean {
   if (typeof v === "object") return Object.keys(v).length === 0;
   return false;
 }
-/** Case and punctuation folded, except punctuation with a digit on both sides (design section 4.7). */
+/**
+ * A name as the oracle folds it (design section 4.7, issue #1879), in lower case. A name that is a
+ * number (a sign, digits with at most one point, an exponent, a percent) is kept as written. Any
+ * other name loses each punctuation or separator character, unless the nearest characters on both
+ * sides that are not punctuation or separators are digits, and keeps everything else: letters,
+ * digits, symbols and combining marks.
+ */
 function oracleFold(name: string): string {
-  const chars = [...name.toLowerCase()];
-  const word = (c: string | undefined): boolean => c !== undefined && /[\p{L}\p{N}]/u.test(c);
+  const lower = name.toLowerCase();
+  if (oracleIsNumber(lower)) return lower;
+  const chars = [...lower];
+  const gap = (c: string | undefined): boolean => c !== undefined && /[\p{P}\p{Z}\s]/u.test(c);
   const digit = (c: string | undefined): boolean => c !== undefined && /\p{N}/u.test(c);
   return chars
     .filter((ch, i) => {
-      if (word(ch)) return true;
+      if (!gap(ch)) return true;
       let before = i - 1;
-      while (before >= 0 && !word(chars[before])) before--;
+      while (before >= 0 && gap(chars[before])) before--;
       let after = i + 1;
-      while (after < chars.length && !word(chars[after])) after++;
+      while (after < chars.length && gap(chars[after])) after++;
       return digit(chars[before]) && digit(chars[after]);
     })
     .join("");
 }
+
+/** Whether a lower-case name reads as a number: `-1`, `+3`, `.5`, `1.`, `1.2`, `1e-3`, `5%`. */
+function oracleIsNumber(text: string): boolean {
+  const digits = (s: string): boolean => [...s].every((c) => /\p{N}/u.test(c));
+  const unsigned = (s: string): string => (s.startsWith("+") || s.startsWith("-") ? s.slice(1) : s);
+  const parts = (text.endsWith("%") ? text.slice(0, -1) : text).split("e");
+  if (parts.length > 2) return false;
+  const [whole, fraction, ...more] = unsigned(parts[0] as string).split(".");
+  if (more.length > 0 || !digits(whole as string) || !digits(fraction ?? "")) return false;
+  if (`${whole}${fraction ?? ""}` === "") return false;
+  const exponent = parts[1] === undefined ? undefined : unsigned(parts[1]);
+  return exponent === undefined || (exponent !== "" && digits(exponent));
+}
+
+/** Two key names are one name respelled: they fold alike, to something. */
+const oracleRespelled = (was: string, now: string): boolean =>
+  oracleFold(was) !== "" && oracleFold(was) === oracleFold(now);
 const typeWord = (v: Plain): string => (v === null ? "null" : Array.isArray(v) ? "arr" : typeof v);
 
 /** The JSON files a generated case may put moved keys in, and whether each applies to which file. */
@@ -6246,7 +6325,7 @@ function jsonViolations(
             ([leafPath, l]) => !other.has(leafPath) && l.parent === x.field && l.value === x.before,
           ).length;
         if (unpaired(bl, al) !== 1 || unpaired(al, bl) !== 1) out.push("renamed_shared_value");
-        if (oracleFold(oldName) !== oracleFold(newName)) out.push("renamed_unrelated_names");
+        if (!oracleRespelled(oldName, newName)) out.push("renamed_unrelated_names");
         break;
       }
       case "json_key_removed":
@@ -6310,7 +6389,7 @@ function jsonViolations(
     const candidates = [...al].filter(([q, l]) => !bl.has(q) && sameValue(l));
     const only = candidates[0]?.[1];
     if (candidates.length !== 1 || only === undefined || indexShaped(only.name)) continue;
-    if (oracleFold(leaf.name) !== oracleFold(only.name)) continue;
+    if (!oracleRespelled(leaf.name, only.name)) continue;
     const wanted = `${leaf.name} -> ${only.name}`;
     if (
       !atoms.some(
