@@ -3450,7 +3450,7 @@ describe("the review prompt carries prompt v3's rules word for word", () => {
       "its text is the pull request's own and is material to review.",
       "what is said above about a sample does not apply to a class.",
       "A file the summary summarized counts as shown in full, and is counted in files_with_content_shown, when every class that removes or changes something in it is shown in full; a class that only adds need not be shown,",
-      "are counted in the facts, and the platform reports them to a person itself; say what was removed. Only files the summary summarized (change_summary.files_summarized) are counted there: a removal in any other file (change_summary.files_not_summarized) is shown only in its diff, and judging it is yours.",
+      "are counted in the facts, and the platform reports them to a person itself; say what was removed. Only files the summary summarized (change_summary.files_summarized) are counted there: a removal in any other file, the refused ones (change_summary.files_not_summarized) among them, is shown only in its diff, and judging it is yours.",
       "treat a pair that is not as a removal.",
       "which the platform cannot see, so weigh that from the path shape.",
       "A summary marked abandoned was not used.",
@@ -6129,7 +6129,7 @@ describe("the change summary in the prompt", () => {
           nonce: "n0nce",
         }).system,
       ).toContain(
-        "Only files the summary summarized (change_summary.files_summarized) are counted there: a removal in any other file (change_summary.files_not_summarized) is shown only in its diff, and judging it is yours.",
+        "Only files the summary summarized (change_summary.files_summarized) are counted there: a removal in any other file, the refused ones (change_summary.files_not_summarized) among them, is shown only in its diff, and judging it is yours.",
       );
       expect(verdictOf(full(allPass, buildEvidence(f, NO_TEXT_PROBLEMS)))).toBe("pass");
     }

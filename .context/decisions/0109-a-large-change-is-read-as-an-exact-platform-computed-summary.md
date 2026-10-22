@@ -97,10 +97,10 @@ No new budget enters the job: ADR 0107's 45.4 minutes are unchanged.
 
 - A bulk pull request like `on004551` #1 can now pass `no_degradation`: its 125 tables are 5 classes and about 2,400 characters, and every number in them matches its author's own account.
   With the prototype, the pull requests with unread content fell from 31 to 14 of 86, 7 of those over the 400-name cut; 17 carry an unrelocated or unkept removal and need a person for it.
-- A removal in a file the summary summarized is a platform blocker, at 3 files or at 3,000, whether or not that file was also shown as a diff.
-  A removal in a file the summary refused is read from its diff by the model, as before the summary existed, and when that diff is not shown in full the pull request is incomplete, as before.
+- An unrelocated or unkept removal in a file the summary summarized is a platform blocker, at 3 files or at 3,000, whether or not that file was also shown as a diff.
+  A removal in a file the summary did not summarize is read from its diff by the model, as before the summary existed, and when that diff is not shown in full the pull request is incomplete, as before.
 - The prompt is a calibrated one, changed: the model calibration of ADR 0107 is required again before the check is required.
-- The longest review message, system prompt included, grows to 258,351 characters, under the 300,000 a test holds it to.
+- The longest review message, system prompt included, grows to 258,381 characters, under the 300,000 a test holds it to.
 - Two values that the fence makes equal (a `<facts>` and a `</facts>`) show as equal text with no note on where they differ, because the note is computed before the fence.
   No loss can hide this way, since a removal is an atom of its own with a finding; the calibration phase adds the case to its hostile fixtures and fixes it there.
 
