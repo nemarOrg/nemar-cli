@@ -25,6 +25,9 @@
  *    leave open goes the way that reports more, never the way that could call an alteration clean.
  */
 
+import { firstReadme } from "../../shared/readme-candidates";
+import { SUMMARY_LIMITS } from "./pr-review-summary";
+
 // ---------------------------------------------------------------------------------------------
 // Limits and closed words
 // ---------------------------------------------------------------------------------------------
@@ -564,4 +567,349 @@ export function alignLines(
   let distance = 0;
   for (const op of middle) if (op !== "equal") distance++;
   return { ops, distance };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Prose facts: README and CHANGES (design B2.1, items 4 and 5)
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * Which lines of the merge-base document are the original authors' (design B2.1, item 4), as one
+ * flag per base line.
+ *
+ * For CHANGES, every line: its history is kept whole, and a new entry goes beside the old ones.
+ * For the README, the lines that are in the anchor document, the README at the first version tag
+ * that is an ancestor of the merge base: for each distinct text, the first
+ * `min(anchor count, base count)` of its occurrences in the base. Which copy of a repeated line is
+ * the original is not rebalanced: the first copies are, so removing a later copy that is in fact
+ * the original reads as an alteration (a rare false fail, never a false pass).
+ *
+ * With no anchor (null) every base line is protected. That is the strict side, and every failure to
+ * find an anchor (no tag, no README at the tag, an anchor document that could not be read) falls
+ * back to it.
+ */
+export function protectedMask(
+  document: DocumentKind,
+  base: readonly string[],
+  anchor: readonly string[] | null,
+): boolean[] {
+  if (document === "changes" || anchor === null) return base.map(() => true);
+  const left = new Map<string, number>();
+  for (const line of anchor) left.set(line, (left.get(line) ?? 0) + 1);
+  return base.map((line) => {
+    const count = left.get(line) ?? 0;
+    if (count === 0) return false;
+    left.set(line, count - 1);
+    return true;
+  });
+}
+
+/**
+ * What a pull request did to one document, in counts and booleans (design B2.1, item 5). A line
+ * here is a normalized line (see {@link normalizeProse}); "protected" is {@link protectedMask}'s.
+ * The comparison pairs lines inside a hunk, a maximal run of removed and inserted lines between two
+ * kept ones: the j-th removed line with the j-th inserted line, whatever either is.
+ */
+export interface ProseFacts {
+  document: DocumentKind;
+  /** Where protection came from: the first version tag's README, or every merge-base line. */
+  anchor: "first_version_tag" | "merge_base";
+  /**
+   * Every protected line is kept verbatim and in order, with insertions only between paragraphs:
+   * nothing altered, moved or minor-edited, and no line inserted inside an original paragraph.
+   */
+  preserved: boolean;
+  /** Merge-base lines that are protected. */
+  protectedLines: number;
+  /** Protected lines removed, or replaced beyond a minor edit, whose text is nowhere new. */
+  protectedAltered: number;
+  /** Protected lines replaced by a minor edit (README only; CHANGES allows none). */
+  minorEdits: number;
+  /** Lines removed or replaced that are not protected: text added after the anchor. */
+  laterAltered: number;
+  /** Some protected line left its place and its exact text was inserted elsewhere. */
+  moved: boolean;
+  /** How many protected lines did so. */
+  movedLines: number;
+  /**
+   * Runs of new lines placed between two protected lines of one original paragraph, the earlier
+   * kept (verbatim or by a minor edit) and the later one not the start of a paragraph.
+   */
+  insertedInsideParagraph: number;
+  /** Lines of the head that are not kept from the base, the new text of minor edits included. */
+  insertedLines: number;
+  /** Both sides have line breaks, and they are not of the same kind (LF, CRLF, CR or mixed). */
+  lineEndingsChanged: boolean;
+  /** A part on both sides ended without a line break at the base and ends with one at the head. */
+  finalNewlineAdded: boolean;
+  /** The base or the head holds a part that is not UTF-8 and was read as ISO-8859-1. */
+  notUtf8: boolean;
+  /** Parts at the base and at the head, binary ones included. */
+  partsBefore: number;
+  partsAfter: number;
+  /**
+   * Inserted lines, minor-edit replacements included, that hold markup able to hide what follows
+   * or surrounds it: see {@link hidesText}. Wrapping original paragraphs in such markup keeps every
+   * protected line verbatim, so without this fact it would read as preserved.
+   */
+  hidingMarkupInserted: number;
+  /**
+   * A protected line the platform showed at the base is kept, but in a part it no longer shows: a
+   * new `README.md` beside the original `README` hides the original from every reader of the
+   * shown README while the document, read whole, is preserved.
+   */
+  shownPartReplaced: boolean;
+  /**
+   * Up to `maxExamples` protected lines that were not kept, the altered ones first and then the
+   * moved ones, each cut to `maxValueChars + 1` code points (so a renderer can tell it was cut)
+   * without splitting a surrogate pair. Author text: for the fenced block only.
+   */
+  examples: string[];
+}
+
+/** Elements whose content a reader of the rendered README does not see. */
+const HIDING_TAG =
+  /<\/?(details|script|style|template|noscript|textarea|iframe|object)(?![A-Za-z0-9-])/i;
+
+/** An attribute or a style inside one tag that hides the element. */
+const HIDING_ATTRIBUTE = /\bhidden\b|display\s*:\s*none/i;
+
+/**
+ * Whether a line holds markup that can hide text: the start or end of an HTML comment, the opening
+ * or closing tag of an element whose content is not shown (`details`, `script`, `style`,
+ * `template`, `noscript`, `textarea`, `iframe`, `object`), or a tag carrying `hidden` or
+ * `display: none`. A tag name must be whole, so `<s>` or `<strong>` is not `<script>` or `<style>`.
+ * Inline code is not exempt: the fact is a tripwire a person clears, and a person reads code spans
+ * better than a rule does. Each tag is read only up to its own `>`, so a hostile line costs one
+ * pass, never a backtracking search.
+ */
+export function hidesText(line: string): boolean {
+  if (line.includes("<!--") || line.includes("-->") || HIDING_TAG.test(line)) return true;
+  // A tag runs from a `<` followed by a letter to the next `>` or `<`, or to the end of the line.
+  let tag = -1;
+  for (let k = 0; k <= line.length; k++) {
+    const unit = k < line.length ? line.charCodeAt(k) : -1;
+    if (unit !== 0x3c && unit !== 0x3e && unit !== -1) continue;
+    if (tag >= 0 && HIDING_ATTRIBUTE.test(line.slice(tag, k))) return true;
+    tag = unit === 0x3c && /[A-Za-z]/.test(line.charAt(k + 1)) ? k : -1;
+  }
+  return false;
+}
+
+/** At most `maxValueChars + 1` code points of a line, never half a surrogate pair. */
+function cutExample(text: string): string {
+  const max = SUMMARY_LIMITS.maxValueChars + 1;
+  let end = 0;
+  for (let points = 0; end < text.length && points < max; points++) {
+    end += (text.codePointAt(end) as number) > 0xffff ? 2 : 1;
+  }
+  return text.slice(0, end);
+}
+
+/**
+ * The facts of one document (design B2.1), from its parts at the merge base, at the head, and at
+ * the anchor (the first version tag; null when there is none). Either side may have no part at all:
+ * a README added is all insertion, one removed all removal.
+ *
+ * Both sides are assembled (a part unchanged between them may be binary, see
+ * {@link assembleDocument}) and aligned; a refusal of either side, or an alignment over the cap, is
+ * the refusal, never a partial result. The anchor matters only for the README, and an anchor
+ * document that cannot be read, or has no part, protects every merge-base line instead.
+ *
+ * Inside each hunk the j-th removed line is paired with the j-th inserted line. A removed protected
+ * line is a minor edit when its partner is within {@link isMinorEdit} (README only); otherwise it is
+ * `moved` when its exact text is among the inserted lines of the document not yet taken (each taken
+ * once, by the protected lines in base order, after the minor edits took theirs), and
+ * `protectedAltered` when it is not. A run of extra inserted lines (past the last pair of a hunk) is
+ * `insertedInsideParagraph` when the base lines on either side of it are protected, the later one
+ * does not start a paragraph, and the earlier one is kept verbatim or by a minor edit.
+ *
+ * The part the platform shows is the first of `README_CANDIDATES` present, compared with exact
+ * case as git stores names, while the document's own names are matched without regard to case: a
+ * `readme.md` is in the document but is never the shown part. When no part of a side is a candidate,
+ * every part of that side counts as shown, so a side with no shown README never makes the fact true
+ * by itself.
+ */
+export function proseFacts(input: {
+  document: DocumentKind;
+  base: readonly DocumentPart[];
+  head: readonly DocumentPart[];
+  anchor: readonly DocumentPart[] | null;
+}): { ok: true; facts: ProseFacts } | { ok: false; refusal: ProseRefusal } {
+  const { document } = input;
+  const readme = document === "readme";
+  const baseOids = new Set(input.base.map((part) => part.oid));
+  const skip = new Set(input.head.map((part) => part.oid).filter((oid) => baseOids.has(oid)));
+  const baseRead = assembleDocument(document, input.base, skip);
+  if (!baseRead.ok) return { ok: false, refusal: baseRead.refusal };
+  const headRead = assembleDocument(document, input.head, skip);
+  if (!headRead.ok) return { ok: false, refusal: headRead.refusal };
+  let anchorLines: string[] | null = null;
+  if (readme && input.anchor !== null && input.anchor.length > 0) {
+    const anchorRead = assembleDocument(document, input.anchor, skip);
+    if (anchorRead.ok) anchorLines = anchorRead.value.lines.map((line) => line.text);
+  }
+  const base = baseRead.value.lines;
+  const head = headRead.value.lines;
+  const isProtected = protectedMask(
+    document,
+    base.map((line) => line.text),
+    anchorLines,
+  );
+  const alignment = alignLines(
+    base.map((line) => line.text),
+    head.map((line) => line.text),
+  );
+  if (alignment === null) return { ok: false, refusal: "edit_distance_cap" };
+
+  const kept = new Array<boolean>(base.length).fill(false); // verbatim or by a minor edit
+  const pairs: [number, number][] = []; // base and head index of every line kept
+  const takenByMinor = new Set<number>();
+  const inserted: number[] = [];
+  const pending: number[] = []; // removed protected lines that are not minor edits, in base order
+  let minorEdits = 0;
+  let laterAltered = 0;
+  let insertedInsideParagraph = 0;
+  const { ops } = alignment;
+  let i = 0;
+  let j = 0;
+  let at = 0;
+  while (at < ops.length) {
+    if (ops[at] === "equal") {
+      kept[i] = true;
+      pairs.push([i, j]);
+      i++;
+      j++;
+      at++;
+      continue;
+    }
+    const before = i - 1;
+    const removedHere: number[] = [];
+    const insertedHere: number[] = [];
+    for (; at < ops.length && ops[at] !== "equal"; at++) {
+      if (ops[at] === "delete") removedHere.push(i++);
+      else insertedHere.push(j++);
+    }
+    for (const line of insertedHere) inserted.push(line);
+    removedHere.forEach((removed, k) => {
+      if (!isProtected[removed]) {
+        laterAltered++;
+        return;
+      }
+      const partner = insertedHere[k];
+      const baseText = (base[removed] as ProseLine).text;
+      if (
+        readme &&
+        partner !== undefined &&
+        isMinorEdit(baseText, (head[partner] as ProseLine).text)
+      ) {
+        minorEdits++;
+        kept[removed] = true;
+        pairs.push([removed, partner]);
+        takenByMinor.add(partner);
+        return;
+      }
+      pending.push(removed);
+    });
+    if (insertedHere.length > removedHere.length) {
+      const earlier =
+        removedHere.length > 0 ? (removedHere[removedHere.length - 1] as number) : before;
+      const after = i;
+      if (
+        earlier >= 0 &&
+        after < base.length &&
+        isProtected[earlier] &&
+        isProtected[after] &&
+        !(base[after] as ProseLine).paragraphStart &&
+        kept[earlier]
+      ) {
+        insertedInsideParagraph++;
+      }
+    }
+  }
+
+  const pool = new Map<string, number>();
+  for (const line of inserted) {
+    if (takenByMinor.has(line)) continue;
+    const text = (head[line] as ProseLine).text;
+    pool.set(text, (pool.get(text) ?? 0) + 1);
+  }
+  const altered: string[] = [];
+  const moved: string[] = [];
+  for (const removed of pending) {
+    const text = (base[removed] as ProseLine).text;
+    const left = pool.get(text) ?? 0;
+    if (left > 0) {
+      pool.set(text, left - 1);
+      moved.push(text);
+    } else altered.push(text);
+  }
+
+  let shownPartReplaced = false;
+  if (readme) {
+    const shownBase = firstReadme(input.base.map((part) => part.name));
+    const shownHead = firstReadme(input.head.map((part) => part.name));
+    const shown = (name: string | null, part: string): boolean => name === null || part === name;
+    shownPartReplaced = pairs.some(
+      ([b, h]) =>
+        isProtected[b] &&
+        shown(shownBase, (base[b] as ProseLine).part) &&
+        !shown(shownHead, (head[h] as ProseLine).part),
+    );
+  }
+  let finalNewlineAdded = false;
+  for (const [name, ends] of baseRead.value.finalBreak) {
+    if (!ends && headRead.value.finalBreak.get(name) === true) finalNewlineAdded = true;
+  }
+  const beforeBreaks = baseRead.value.breaks;
+  const afterBreaks = headRead.value.breaks;
+  const protectedAltered = altered.length;
+  const movedLines = moved.length;
+  const hidingMarkupInserted = inserted.filter((line) =>
+    hidesText((head[line] as ProseLine).text),
+  ).length;
+  return {
+    ok: true,
+    facts: {
+      document,
+      anchor: anchorLines === null ? "merge_base" : "first_version_tag",
+      preserved:
+        protectedAltered === 0 &&
+        movedLines === 0 &&
+        insertedInsideParagraph === 0 &&
+        minorEdits === 0,
+      protectedLines: isProtected.filter(Boolean).length,
+      protectedAltered,
+      minorEdits,
+      laterAltered,
+      moved: movedLines > 0,
+      movedLines,
+      insertedInsideParagraph,
+      insertedLines: inserted.length,
+      lineEndingsChanged:
+        beforeBreaks !== "none" && afterBreaks !== "none" && beforeBreaks !== afterBreaks,
+      finalNewlineAdded,
+      notUtf8: baseRead.value.notUtf8 || headRead.value.notUtf8,
+      partsBefore: input.base.length,
+      partsAfter: input.head.length,
+      hidingMarkupInserted,
+      shownPartReplaced,
+      examples: [...altered, ...moved].slice(0, ORIGINAL_LIMITS.maxExamples).map(cutExample),
+    },
+  };
+}
+
+/**
+ * Whether the facts of a document are an alteration of the original authors' text: the one
+ * definition of the trigger the platform fails a review on. A protected line altered or moved
+ * fails either document; a line inserted inside an original paragraph fails only the README,
+ * because CHANGES takes a new entry anywhere. Minor edits, later text and the tripwire facts are
+ * not alterations here; the caller decides what the tripwires do.
+ */
+export function proseAltered(facts: ProseFacts): boolean {
+  return (
+    facts.protectedAltered > 0 ||
+    facts.moved ||
+    (facts.document === "readme" && facts.insertedInsideParagraph > 0)
+  );
 }
