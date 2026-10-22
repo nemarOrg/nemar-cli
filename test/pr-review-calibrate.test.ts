@@ -20,7 +20,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
   CalibrationReadError,
@@ -1473,9 +1473,25 @@ describe("the frozen set A and the label template", () => {
   });
 
   test("the label template parses only once every ? is replaced", async () => {
-    const template = fixture("model-labels.template.txt");
-    // As committed it holds only its header: the entries are added from the evidence run.
-    expect(entriesOf(template)).toEqual([]);
+    const full = fixture("model-labels.template.txt");
+    // Its entries: 40 distinct pull requests of set A, each unlabeled and at the commits set A pins.
+    const templateEntries = entriesOf(full);
+    expect(templateEntries).toHaveLength(40);
+    const setA = new Map(
+      entriesOf(fixture("set-a.txt")).map((l) => {
+        const [ref, base, head] = l.split(" ");
+        return [ref, `${base} ${head}`];
+      }),
+    );
+    for (const l of templateEntries) {
+      const [ref, mark, ...commits] = l.split(" ");
+      expect(mark).toBe("?");
+      expect(setA.get(ref)).toBe(commits.join(" "));
+    }
+    expect(new Set(templateEntries.map((l) => l.split(" ")[0])).size).toBe(40);
+    expect(full).not.toContain("@");
+    // The header is everything before its first entry; the cases below put their own entries after it.
+    const template = full.slice(0, full.indexOf(templateEntries[0] as string));
     const pinned = entriesOf(fixture("set-a.txt")).slice(0, 3);
     const unlabeled = pinned.map((l) => {
       const [ref, base, head] = l.split(" ");
@@ -1516,8 +1532,119 @@ describe("the frozen set A and the label template", () => {
       ["fail", "clone_missing"],
       ["uncertain", "clone_missing"],
     ]);
+    // The template itself, as committed, is refused at its first entry; with every ? replaced it is
+    // 40 pull requests, each read from its clone (here, none).
+    const asCommitted = join(root, "template-as-committed.txt");
+    writeFileSync(asCommitted, full);
+    const refused = await calibrate(["--prs", asCommitted, "--clones", clones, "--offline"]);
+    expect(refused.code).toBe(2);
+    expect(refused.said).toContain(
+      `line ${headerLines} of the pull request file is not labeled yet`,
+    );
+    const labeledAll = join(root, "template-labeled.txt");
+    writeFileSync(labeledAll, full.replaceAll(" ? ", " pass "));
+    const everyOne = await calibrate([
+      "--prs",
+      labeledAll,
+      "--clones",
+      clones,
+      "--offline",
+      "--json",
+    ]);
+    expect(everyOne.code).toBe(1);
+    expect(JSON.parse(everyOne.out) as CalibrationRow[]).toHaveLength(40);
     expect(requests).toHaveLength(0);
   });
+
+  test("the set A baseline holds only pull request names, closed words, numbers and booleans", () => {
+    const text = fixture("set-a-evidence.json");
+    expect(text).not.toContain("@");
+    const rows = JSON.parse(text) as EvidenceRow[];
+    // The same 86 pull requests as the manifest, in its order, without the passes' times.
+    expect(rows.map((r) => r.pr)).toEqual(
+      entriesOf(fixture("set-a.txt")).map((l) => l.split(" ")[0]),
+    );
+    for (const r of rows) {
+      expect(Object.keys(r).sort()).toEqual([
+        "classes",
+        "error",
+        "evidence",
+        "pr",
+        "refusedBy",
+        "refusedDeleted",
+      ]);
+      expect(r.error).toBeNull();
+      for (const v of Object.values(r.evidence ?? {})) {
+        expect(["number", "boolean"]).toContain(typeof v);
+      }
+      for (const word of Object.keys(r.refusedBy ?? {})) {
+        expect(SUMMARY_REFUSALS as readonly string[]).toContain(word);
+      }
+      for (const c of r.classes ?? []) {
+        expect(Object.keys(c).sort()).toEqual(["complete", "files", "items", "kind"]);
+        expect(CLASS_KINDS as readonly string[]).toContain(c.kind);
+      }
+      expect(Object.keys(r.refusedDeleted ?? {}).sort()).toEqual(["hidden", "incomplete", "shown"]);
+    }
+  });
+
+  test("the set A baseline adds up to the numbers design section 12.4 records", () => {
+    const rows = JSON.parse(fixture("set-a-evidence.json")) as EvidenceRow[];
+    const e = rows.map((r) => r.evidence as NonNullable<EvidenceRow["evidence"]>);
+    const total = (f: (x: (typeof e)[number]) => number) => e.reduce((n, x) => n + f(x), 0);
+    const count = (f: (x: (typeof e)[number]) => boolean) => e.filter(f).length;
+    expect(total((x) => x.files)).toBe(9208);
+    expect(total((x) => x.wanted)).toBe(7356);
+    expect(total((x) => x.summarized)).toBe(5514);
+    expect(total((x) => x.refused)).toBe(393);
+    expect(total((x) => x.accounted)).toBe(5482);
+    expect(count((x) => x.truncated)).toBe(15);
+    expect(count((x) => x.listCut)).toBe(7);
+    expect(count((x) => x.readIncomplete)).toBe(9);
+    expect(count((x) => x.summaryAbandoned)).toBe(0);
+    expect(count((x) => x.platformFindings > 0)).toBe(20);
+    expect(count((x) => x.cut > 0)).toBe(0);
+    const refusedBy: Record<string, number> = {};
+    for (const r of rows) {
+      for (const [word, n] of Object.entries(r.refusedBy ?? {})) {
+        refusedBy[word] = (refusedBy[word] ?? 0) + (n ?? 0);
+      }
+    }
+    expect(refusedBy).toEqual({ invalid_utf8: 391, ragged_row: 1, empty_column_name: 1 });
+    const deleted = rows.map((r) => r.refusedDeleted as NonNullable<EvidenceRow["refusedDeleted"]>);
+    expect(deleted.reduce((n, d) => n + d.shown, 0)).toBe(45);
+    expect(deleted.reduce((n, d) => n + d.incomplete, 0)).toBe(348);
+    expect(deleted.reduce((n, d) => n + d.hidden, 0)).toBe(0);
+  });
+
+  // The frozen clones are not in the repository (a git pack holds committer addresses); a machine
+  // that made them has them, by default under ~/.local/share/nemar-canary/set-a, and then the real
+  // code is run on them and must give the baseline back, numbers and closed words alike. Any change
+  // to a rule that moves one of the 86 pull requests turns this red, and is then a decision to
+  // re-record the baseline, not a drift.
+  const clonesOfSetA =
+    process.env.PR_REVIEW_SET_A_CLONES ??
+    join(homedir(), ".local", "share", "nemar-canary", "set-a");
+  test.skipIf(!existsSync(join(clonesOfSetA, "targets.txt")))(
+    "the real code on the frozen clones gives the baseline back, timings aside",
+    async () => {
+      const r = await calibrate([
+        "--evidence-only",
+        "--offline",
+        "--clones",
+        clonesOfSetA,
+        "--prs",
+        join(import.meta.dir, "fixtures", "pr-review-canary", "set-a.txt"),
+        "--json",
+      ]);
+      expect(r.code).toBe(0);
+      const rows = (JSON.parse(r.out) as EvidenceRow[]).map(
+        ({ timings: _timings, ...rest }) => rest,
+      );
+      expect(rows).toEqual(JSON.parse(fixture("set-a-evidence.json")));
+    },
+    300_000,
+  );
 });
 
 describe("the run: its arguments, its output, and its exit code", () => {
