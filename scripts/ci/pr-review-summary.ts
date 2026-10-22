@@ -2872,8 +2872,12 @@ function foldName(name: string): string {
   );
 }
 
-/** A number written as a key, in lower case: `-1`, `+3`, `.5`, `1.2`, `1e-3`, `5%`. */
-const NUMBER_LITERAL = /^[+-]?(?:\p{N}+\.?\p{N}*|\.\p{N}+)(?:e[+-]?\p{N}+)?%?$/u;
+/**
+ * A number written as a key, in lower case: `-1`, `+3`, `.5`, `1.2`, `1e-3`, `5%`. The digits after
+ * the point are reached only through the point, so no two runs of digits compete for the same
+ * characters and a failed test backtracks at most once over the name: linear, not quadratic.
+ */
+const NUMBER_LITERAL = /^[+-]?(?:\p{N}+(?:\.\p{N}*)?|\.\p{N}+)(?:e[+-]?\p{N}+)?%?$/u;
 /** A digit ends (or starts) the text: two code units cover a digit outside the basic plane. */
 const DIGIT_BEFORE = /\p{N}$/u;
 const DIGIT_AFTER = /^\p{N}/u;
@@ -3049,8 +3053,8 @@ export function diffJsonWith(
   // being a candidate, so it is no reason to doubt which key became which. A leaf step 3 later
   // explains as moved still counts here, so a rename beside a moved look-alike is shown as a removal
   // and an addition: more change shown, never less. With the value unique among the removed leaves
-  // and among the added ones a before leaf has at most one candidate, so the pass is linear in the
-  // document and needs no step budget.
+  // and among the added ones a before leaf has at most one candidate, and a fold is linear in its
+  // name, so the pass is linear in the document and needs no step budget.
   const groupOf = (leaf: JsonLeaf): string => JSON.stringify([leaf.parent, leaf.value]);
   const beforeInGroup = new Map<string, number>();
   for (const [bi, leaf] of bl.entries()) {

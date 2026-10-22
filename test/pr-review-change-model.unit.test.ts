@@ -4370,6 +4370,24 @@ describe("diffJson: renamed keys", () => {
     expect(unmatched.counts).toMatchObject({ renamed: 0, removed: n, added: n });
     expect(performance.now() - started).toBeLessThan(3000);
   });
+
+  test("a key of a long run of digits and then a letter is folded in linear time: 3,000 such keys respelled are 3,000 renames", () => {
+    // Whether a name is a number is asked of every key on both sides; a test that backtracks over
+    // a run of digits is quadratic in the name, and 3,000 names of 990 digits then took seconds.
+    const n = 3000;
+    const digits = "1".repeat(990);
+    const doc = (letter: string) =>
+      JSON.stringify(
+        Object.fromEntries(Array.from({ length: n }, (_, i) => [`${digits}${letter}${i}`, i])),
+      );
+    const before = doc("a");
+    const after = doc("A");
+    const started = performance.now();
+    const diff = diffJsonText("a.json", before, after);
+    const elapsed = performance.now() - started;
+    expect(diff.counts).toMatchObject({ renamed: n, removed: 0, added: 0 });
+    expect(elapsed).toBeLessThan(2000);
+  });
 });
 
 describe("sidecarApplies: BIDS inheritance, as far as the change model reads it", () => {
