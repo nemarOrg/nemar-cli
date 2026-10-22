@@ -6156,6 +6156,59 @@ describe("the change summary in the prompt", () => {
     }
   });
 
+  test('a table with a NUL byte is not read by its "Binary files differ" line', () => {
+    const table = tableOf("sub-01");
+    // A NUL byte in a cell: the summary refuses the table, and git calls it binary, so its diff is
+    // one line that names the file and shows none of its content, the removed Cz row included.
+    const r = releaseChanging(
+      "nul-table",
+      { [table]: "name\ttype\tunits\nCz\tEEG\tuV\nPz\tEEG\tu\0V\n" },
+      (dir) => write(dir, table, "name\ttype\tunits\nPz\tEEG\tu\0V\n"),
+    );
+    expect(
+      git(r.dir, "diff", "-U2", "--no-ext-diff", "--no-textconv", r.base, r.head, "--", table),
+    ).toMatch(/^Binary files a\/\S+ and b\/\S+ differ$/m);
+    const f = gatherGitFacts(r.dir, r.base, r.head);
+    expect(f.summary.files.map((o) => [o.path, o.refusal])).toEqual([
+      ["dataset_description.json", null],
+      [table, "nul_byte"],
+    ]);
+    // No patch stands for the table, so it is not read, and what was not read is said.
+    expect(f.patches.map((p) => p.path)).not.toContain(table);
+    expect(f.readIncomplete).toBe(true);
+    const e = buildEvidence(f, NO_TEXT_PROBLEMS);
+    expect(e.truncated).toBe(true);
+    expect(verdictOf(full(allPass, e))).toBe("uncertain");
+
+    // The control without the NUL byte: a ragged row refuses the same table, git shows its diff,
+    // and the removed row is in it, so the table is read.
+    const ragged = releaseChanging(
+      "nul-free-table",
+      { [table]: "name\ttype\tunits\nCz\tEEG\tuV\nPz\tEEG\tuV\n" },
+      (dir) => write(dir, table, "name\ttype\tunits\nPz\tEEG\tuV\textra\n"),
+    );
+    const g = gatherGitFacts(ragged.dir, ragged.base, ragged.head);
+    expect(g.summary.files.find((o) => o.path === table)?.refusal).toBe("ragged_row");
+    const shown = g.patches.find((p) => p.path === table);
+    expect(shown?.text).toContain("-Cz\tEEG\tuV");
+    expect(shown?.truncated).toBe(false);
+    expect(g.readIncomplete).toBe(false);
+
+    // The control with the NUL byte and only the mode changed: git prints the two modes and no
+    // "Binary files" line, because the content is the same, so the diff shows all there is.
+    const mode = releaseChanging(
+      "nul-mode-only",
+      { [table]: "name\ttype\tunits\nCz\tEEG\tuV\nPz\tEEG\tu\0V\n" },
+      (dir) => chmodSync(join(dir, table), 0o755),
+    );
+    const h = gatherGitFacts(mode.dir, mode.base, mode.head);
+    const modePatch = h.patches.find((p) => p.path === table);
+    expect(modePatch?.text).toContain("new mode 100755");
+    expect(modePatch?.text).not.toContain("Binary files");
+    expect(modePatch?.truncated).toBe(false);
+    expect(h.readIncomplete).toBe(false);
+  });
+
   test("an abandoned summary says so in the facts, with no block and no finding", () => {
     const r = bulk();
     const listing = gatherListing(r.dir, r.base, r.head);

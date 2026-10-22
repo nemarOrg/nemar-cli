@@ -244,7 +244,8 @@ export interface ContentFacts {
   patches: Patch[];
   /**
    * True when a MODIFIED or REMOVED metadata file with a real change was not shown in full: it did
-   * not fit the file or character budget, its diff was cut, or reading it failed. A file the
+   * not fit the file or character budget, its diff was cut, reading it failed, or git wrote its diff
+   * as binary, which shows none of its content. A file the
    * platform proved cosmetic-only ({@link cosmeticOnlyFiles}) is not counted, and neither is one
    * the change summary accounted for ({@link summary}).
    */
@@ -979,6 +980,17 @@ export const MAX_ILLUSTRATION_PATCHES = 3;
 /** The after side a pool file is given when its blob could not be read: no parser accepts it. */
 const EMPTY_BYTES = new Uint8Array(0);
 
+/**
+ * The line git writes in place of a diff it takes for binary: a file with a NUL byte in either
+ * version, a `.tsv` or a `.json` among them. It names the file and shows none of its content, so a
+ * row removed from such a table is in no line the reviewer could read. Such a diff makes no patch:
+ * the file stays unread (a modified or removed one keeps the content incomplete) and takes no slot.
+ * A change of mode alone prints no such line, because the content is the same, and stays shown.
+ * Only git writes a line that starts this way: every line of a text diff's content starts with a
+ * space, `+`, `-`, `@` or `\`, and a path with a line break in it is quoted.
+ */
+const BINARY_DIFF = /^Binary files .* differ$/m;
+
 /** What a test may set for one content pass; production passes nothing. */
 export interface ContentOptions {
   /**
@@ -1159,7 +1171,7 @@ function readContent(dir: string, listing: Listing, options: ContentOptions): Co
     gitDeadline !== null && gitDeadline - Date.now() < FOLD_TIME_RESERVE_MS;
   /**
    * Read one file's diff: fold it onto the patch that already shows it, or show it if there is
-   * room.
+   * room. A diff git wrote as binary is no read at all: see {@link BINARY_DIFF}.
    */
   const showDiff = (c: RawChange): void => {
     const bytes = tryGitBytes(dir, [
@@ -1173,7 +1185,7 @@ function readContent(dir: string, listing: Listing, options: ContentOptions): Co
       "--",
       c.path,
     ]);
-    if (bytes === null || bytes === "") return;
+    if (bytes === null || bytes === "" || BINARY_DIFF.test(bytes)) return;
     const signature = diffSignature(bytes);
     // What the model reads is the text, as before: the same bytes decoded as UTF-8.
     const diff = Buffer.from(bytes, "latin1").toString("utf8");
