@@ -3432,7 +3432,7 @@ describe("the review prompt carries prompt v3's rules word for word", () => {
 
   test("the prompt explains the change summary after the trust boundary, and v3's rules are unchanged", () => {
     // The rules the prompt is built from, word for word: the paragraph added nothing to them.
-    expect(Object.values(V3_RULES)).toEqual(V3);
+    expect<string[]>(Object.values(V3_RULES)).toEqual(V3);
     const at = (text: string) => {
       const i = REVIEW_SYSTEM_PROMPT.indexOf(text);
       expect(i, text).toBeGreaterThanOrEqual(0);
@@ -5001,7 +5001,10 @@ describe("the platform's findings from the change summary", () => {
   /** A row removed from sub-01's table and a key from its sidecar: the table sorts first. */
   const both = () => removed("pf-both", ["sub-01"], ["sub-01"]);
   /** A model finding that names nothing the platform found, told apart by its note. */
-  const modelFinding = (i: number, criterion = "material_improvement") => ({
+  const modelFinding = (
+    i: number,
+    criterion: ReviewFinding["criterion"] = "material_improvement",
+  ): ReviewFinding => ({
     criterion,
     severity: "note",
     code: "other",
@@ -5257,7 +5260,8 @@ describe("the platform's findings from the change summary", () => {
     // A screen report: the content the findings come from is read only after the screen, so even
     // one platform finding is refused.
     const screenUsage = { screen: USAGE.screen, review: null };
-    expect(assembleReport(REJECT, null, e, screenUsage).stage).toBe("screen");
+    const screenReport = assembleReport(REJECT, null, e, screenUsage);
+    expect(screenReport.v === 2 && screenReport.stage).toBe("screen");
     expect(reportErrorOf(() => assembleReport(REJECT, null, e, screenUsage, platform))).toBe(
       "bad_stage",
     );
@@ -5297,6 +5301,7 @@ describe("the platform's findings from the change summary", () => {
     expect(full(steered, e).steering).toBe(true);
     expect(verdictOf(full(steered, e))).toBe("fail");
     const cut = full(steered, e, platform);
+    if (cut.v !== 2) throw new Error("no version 2 report");
     expect(cut.findings.map(label)).toEqual([
       "data_removed",
       "metadata_removed",
@@ -5308,7 +5313,7 @@ describe("the platform's findings from the change summary", () => {
     expect(cut.criteria.description_not_misleading).toBe("pass");
 
     // A blocker cut for room lowers its criterion's pass, as the parser does with one that fits.
-    const blocker = (i: number, criterion: string) => ({
+    const blocker = (i: number, criterion: ReviewFinding["criterion"]) => ({
       ...modelFinding(i, criterion),
       severity: "blocker",
       code: "changes_log_mismatch",
@@ -5316,6 +5321,7 @@ describe("the platform's findings from the change summary", () => {
     const blocked = reviewOutput({ findings: [...six, filler, blocker(7, "advances_revision")] });
     expect(full(blocked, e).criteria.advances_revision).toBe("unknown");
     const lowered = full(blocked, e, platform);
+    if (lowered.v !== 2) throw new Error("no version 2 report");
     expect(lowered.findings.map(label)).not.toContain("changes_log_mismatch");
     expect(lowered.criteria.advances_revision).toBe("unknown");
     expect(lowered.criteria.material_improvement).toBe("pass");
@@ -5362,7 +5368,7 @@ describe("the platform's findings from the change summary", () => {
   });
 
   /** A blocker of the review's on `criterion`, with its own code and the note `M<i>`. */
-  const reason = (i: number, criterion: string, code = "other") => ({
+  const reason = (i: number, criterion: ReviewFinding["criterion"], code = "other") => ({
     ...modelFinding(i, criterion),
     severity: "blocker",
     code,
@@ -5692,7 +5698,7 @@ const NO_SUMMARY_FACTS = {
   keys_removed_not_found_elsewhere: 0,
   keys_moved_to_an_inherited_sidecar: 0,
   values_emptied: 0,
-  classes: [],
+  classes: [] as string[],
 };
 
 /**
