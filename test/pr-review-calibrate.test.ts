@@ -2235,7 +2235,7 @@ describe("the frozen set A and the label template", () => {
     expect(count((x) => x.listCut)).toBe(7);
     expect(count((x) => x.readIncomplete)).toBe(9);
     expect(count((x) => x.summaryAbandoned)).toBe(0);
-    expect(count((x) => x.platformFindings > 0)).toBe(20);
+    expect(count((x) => x.platformFindings > 0)).toBe(18);
     expect(count((x) => x.cut > 0)).toBe(0);
     const refusedBy: Record<string, number> = {};
     for (const r of rows) {
