@@ -1260,3 +1260,127 @@ export function recordingFacts(
   }
   return facts;
 }
+
+// ---------------------------------------------------------------------------------------------
+// Provenance: which version tag anchors what is original (design B3)
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * A version tag of the dataset repository: its name (`v1.2.3`, the digits as written), its three
+ * numbers as the digit strings written (a version number is arbitrarily long, so none is ever
+ * converted to a `Number`), and the commit it points at: the peeled commit of an annotated tag, or
+ * the commit a lightweight tag names.
+ */
+export interface VersionTag {
+  name: string;
+  version: [string, string, string];
+  commit: string;
+}
+
+/** One line of `git ls-remote --tags`: an id, a tab, and a `v<major>.<minor>.<patch>` tag ref. */
+const TAG_LINE = /^([0-9a-f]{40})\trefs\/tags\/v(\d+)\.(\d+)\.(\d+)(\^\{\})?$/;
+
+/** The digits of a number without its leading zeros (but never fewer than one digit). */
+function significantDigits(digits: string): string {
+  let start = 0;
+  while (start < digits.length - 1 && digits.charCodeAt(start) === 0x30) start++;
+  return start === 0 ? digits : digits.slice(start);
+}
+
+/** Two numbers written in digits, by value: the longer is the larger, then digit by digit. */
+function compareDigits(a: string, b: string): number {
+  const x = significantDigits(a);
+  const y = significantDigits(b);
+  if (x.length !== y.length) return x.length - y.length;
+  return x < y ? -1 : x > y ? 1 : 0;
+}
+
+/** Ascending by (major, minor, patch) by value, then by name in code-unit order. */
+function compareVersionTags(a: VersionTag, b: VersionTag): number {
+  for (let i = 0; i < 3; i++) {
+    const order = compareDigits(a.version[i] as string, b.version[i] as string);
+    if (order !== 0) return order;
+  }
+  return a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
+}
+
+/**
+ * The version tags in the text `git ls-remote --tags` wrote, lowest version first (design B3). A
+ * line counts only if it is exactly a 40-hex id, a tab and `refs/tags/v<n>.<n>.<n>`, with the
+ * peeled suffix `^{}` allowed; everything else is ignored: a pre-release (`v1.0.0-rc1`), a capital
+ * `V`, a 64-hex id, a ref that is not a tag, a line with a carriage return, a blank line. The
+ * commit of a tag is its peeled id when the listing has one, else its plain id. A name that the
+ * listing gives two different plain ids, or two different peeled ids, is not one tag the platform
+ * can name a commit of and is dropped. Versions compare by value, so `v1.10.0` is above `v1.9.0`,
+ * and as digit strings with no limit on their length (`v1.02.3` and `v1.2.3` are one version, told
+ * apart by name).
+ */
+export function parseVersionTags(lsRemote: string): VersionTag[] {
+  const seen = new Map<
+    string,
+    { version: [string, string, string]; plain: Set<string>; peeled: Set<string> }
+  >();
+  for (const line of lsRemote.split("\n")) {
+    const match = TAG_LINE.exec(line);
+    if (match === null) continue;
+    const id = match[1] as string;
+    const major = match[2] as string;
+    const minor = match[3] as string;
+    const patch = match[4] as string;
+    const peeledLine = match[5] !== undefined;
+    const name = `v${major}.${minor}.${patch}`;
+    let entry = seen.get(name);
+    if (entry === undefined) {
+      entry = { version: [major, minor, patch], plain: new Set(), peeled: new Set() };
+      seen.set(name, entry);
+    }
+    (peeledLine ? entry.peeled : entry.plain).add(id);
+  }
+  const tags: VersionTag[] = [];
+  for (const [name, { version, plain, peeled }] of seen) {
+    if (plain.size > 1 || peeled.size > 1) continue;
+    const commit = [...peeled, ...plain][0];
+    if (commit !== undefined) tags.push({ name, version, commit });
+  }
+  return tags.sort(compareVersionTags);
+}
+
+/**
+ * Where protection comes from (design B3): the lowest version tag whose commit is an ancestor of
+ * the merge base, or the merge base itself with the reason there was no tag to use:
+ *
+ * - `no_tag`: the listing holds no version tag;
+ * - `no_ancestor`: every tag was tried and none is an ancestor of the merge base;
+ * - `check_failed`: the ancestor check could not be answered for a tag (it errored, or timed out);
+ * - `too_many_tags`: `maxTagsTried` tags were tried and none was an ancestor.
+ */
+export type AnchorChoice =
+  | { anchor: "first_version_tag"; tag: VersionTag; commit: string }
+  | { anchor: "merge_base"; reason: "no_tag" | "no_ancestor" | "check_failed" | "too_many_tags" };
+
+/**
+ * The anchor for a set of version tags, trying them lowest first (the order is decided here, not
+ * trusted from the caller). `isAncestor` answers for a tag's commit: true chooses that tag, false
+ * moves on to the next, and null, the check could NOT be answered, stops the search with
+ * `merge_base` and `check_failed`. A null is never read as "not an ancestor": that would move on to
+ * a later, higher tag, and a failed check would then silently protect less of the README. At most
+ * `maxTagsTried` tags are tried; past them the answer is `too_many_tags`, so a repository with
+ * thousands of tags costs a bounded number of checks.
+ */
+export function chooseAnchor(
+  tags: readonly VersionTag[],
+  isAncestor: (commit: string) => boolean | null,
+): AnchorChoice {
+  if (tags.length === 0) return { anchor: "merge_base", reason: "no_tag" };
+  const ordered = [...tags].sort(compareVersionTags);
+  for (let tried = 0; tried < ordered.length; tried++) {
+    if (tried >= ORIGINAL_LIMITS.maxTagsTried) {
+      return { anchor: "merge_base", reason: "too_many_tags" };
+    }
+    const tag = ordered[tried] as VersionTag;
+    const answer = isAncestor(tag.commit);
+    if (answer === true) return { anchor: "first_version_tag", tag, commit: tag.commit };
+    if (answer === null) return { anchor: "merge_base", reason: "check_failed" };
+  }
+  return { anchor: "merge_base", reason: "no_ancestor" };
+}

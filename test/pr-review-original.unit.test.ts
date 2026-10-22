@@ -23,11 +23,13 @@ import {
   type ProseRead,
   type RecordingChange,
   type RecordingFacts,
+  type VersionTag,
   alignLines,
   annexSide,
   assembleDocument,
   authorFieldFacts,
   authorFieldsAltered,
+  chooseAnchor,
   decodeProse,
   hidesText,
   isDocumentName,
@@ -35,6 +37,7 @@ import {
   levenshteinWithin,
   minorBound,
   normalizeProse,
+  parseVersionTags,
   proseAltered,
   proseFacts,
   protectedMask,
@@ -2286,5 +2289,341 @@ describe("recordingFacts: sides that could not be read", () => {
 
   test("nothing changed is nothing", () => {
     expect(recordingFacts([])).toEqual(noRecordingChange());
+  });
+});
+
+/** A 40-hex object id for the n-th object of a test. */
+const sha = (n: number): string => n.toString(16).padStart(40, "0");
+
+/** The text `git ls-remote --tags` writes for these `[id, ref]` lines. */
+function lsRemote(...lines: [string, string][]): string {
+  return `${lines.map(([id, ref]) => `${id}\t${ref}`).join("\n")}\n`;
+}
+
+/** An annotated tag's two lines: the tag object, then the commit it peels to. */
+function annotated(name: string, tagObject: string, commit: string): [string, string][] {
+  return [
+    [tagObject, `refs/tags/${name}`],
+    [commit, `refs/tags/${name}^{}`],
+  ];
+}
+
+/** The tag named `vA.B.C` with this commit, as `parseVersionTags` returns it. */
+function versionTag(a: string, b: string, c: string, commit: string): VersionTag {
+  return { name: `v${a}.${b}.${c}`, version: [a, b, c], commit };
+}
+
+/** An ancestor check that answers from a table and records the commits it was asked about. */
+function asking(answers: Record<string, boolean | null>): {
+  isAncestor: (commit: string) => boolean | null;
+  asked: string[];
+} {
+  const asked: string[] = [];
+  return {
+    asked,
+    isAncestor: (commit) => {
+      asked.push(commit);
+      const answer = answers[commit];
+      if (answer === undefined) throw new Error(`unexpected commit ${commit}`);
+      return answer;
+    },
+  };
+}
+
+describe("parseVersionTags", () => {
+  test("version tags are listed lowest first, and the order is by value, not by text", () => {
+    const tags = parseVersionTags(
+      lsRemote(
+        [sha(1), "refs/tags/v2.0.0"],
+        [sha(2), "refs/tags/v1.10.0"],
+        [sha(3), "refs/tags/v1.9.0"],
+        [sha(4), "refs/tags/v1.9.10"],
+        [sha(5), "refs/tags/v1.9.2"],
+        [sha(6), "refs/tags/v0.12.0"],
+        [sha(7), "refs/tags/v10.0.0"],
+      ),
+    );
+    expect(tags.map((tag) => tag.name)).toEqual([
+      "v0.12.0",
+      "v1.9.0",
+      "v1.9.2",
+      "v1.9.10",
+      "v1.10.0",
+      "v2.0.0",
+      "v10.0.0",
+    ]);
+    expect(tags[4]).toEqual({ name: "v1.10.0", version: ["1", "10", "0"], commit: sha(2) });
+  });
+
+  test("an annotated tag's commit is its peeled id, whichever line comes first", () => {
+    const commit = sha(100);
+    const tagObject = sha(200);
+    for (const lines of [
+      annotated("v1.0.0", tagObject, commit),
+      [...annotated("v1.0.0", tagObject, commit)].reverse(),
+    ]) {
+      expect(parseVersionTags(lsRemote(...lines))).toEqual([versionTag("1", "0", "0", commit)]);
+    }
+    // A lightweight tag names the commit itself, and a peeled line alone is enough.
+    expect(parseVersionTags(lsRemote([commit, "refs/tags/v1.0.0"]))).toEqual([
+      versionTag("1", "0", "0", commit),
+    ]);
+    expect(parseVersionTags(lsRemote([commit, "refs/tags/v1.0.0^{}"]))).toEqual([
+      versionTag("1", "0", "0", commit),
+    ]);
+  });
+
+  test("a name given two different ids is dropped; the same id twice is one tag", () => {
+    expect(
+      parseVersionTags(
+        lsRemote(
+          [sha(1), "refs/tags/v1.0.0"],
+          [sha(2), "refs/tags/v1.0.0"],
+          [sha(3), "refs/tags/v1.1.0"],
+          [sha(3), "refs/tags/v1.1.0"],
+        ),
+      ),
+    ).toEqual([versionTag("1", "1", "0", sha(3))]);
+    // Two different peeled commits for one name are as ambiguous as two plain ids.
+    expect(
+      parseVersionTags(
+        lsRemote(
+          [sha(1), "refs/tags/v1.0.0"],
+          [sha(2), "refs/tags/v1.0.0^{}"],
+          [sha(3), "refs/tags/v1.0.0^{}"],
+        ),
+      ),
+    ).toEqual([]);
+    // One plain id and one peeled id are an annotated tag, not a conflict.
+    expect(
+      parseVersionTags(lsRemote([sha(1), "refs/tags/v1.0.0"], [sha(2), "refs/tags/v1.0.0^{}"])),
+    ).toEqual([versionTag("1", "0", "0", sha(2))]);
+  });
+
+  test("a line that is not exactly an id, a tab and a version tag is ignored", () => {
+    const good = `${sha(1)}\trefs/tags/v1.0.0`;
+    const garbage = [
+      `${sha(2)}\trefs/tags/v1.0.0-rc1`,
+      `${sha(2)}\trefs/tags/V1.0.0`,
+      `${sha(2)}\trefs/tags/1.0.0`,
+      `${sha(2)}\trefs/tags/v1.0`,
+      `${sha(2)}\trefs/tags/v1.0.0.1`,
+      `${sha(2)}\trefs/tags/v1.0.x`,
+      `${sha(2)}\trefs/tags/v1.0.0^{}^{}`,
+      `${sha(2)}\trefs/tags/v1.0.0^{}x`,
+      `${sha(2)}\trefs/tags/release/v1.0.0`,
+      `${sha(2)}\trefs/tags/v-1.0.0`,
+      `${sha(2)}\trefs/tags/v١.٠.٠`,
+      `${sha(2)}\trefs/heads/v1.0.0`,
+      `${sha(2)}\trefs/remotes/origin/v1.0.0`,
+      `${sha(2)}\tHEAD`,
+      `${sha(2)} refs/tags/v1.0.0`,
+      `${sha(2)}\t\trefs/tags/v1.0.0`,
+      `${sha(2)}\trefs/tags/v1.0.0 `,
+      ` ${sha(2)}\trefs/tags/v1.0.0`,
+      `${sha(0xabcdef).toUpperCase()}\trefs/tags/v1.0.0`,
+      `${sha(2).slice(1)}\trefs/tags/v1.0.0`,
+      `${"a".repeat(64)}\trefs/tags/v1.0.0`,
+      `${sha(2)}0\trefs/tags/v1.0.0`,
+      "refs/tags/v1.0.0",
+      "",
+      "\t",
+      "not a ref at all",
+    ];
+    expect(parseVersionTags([...garbage, good, ...garbage].join("\n"))).toEqual([
+      versionTag("1", "0", "0", sha(1)),
+    ]);
+    expect(parseVersionTags(garbage.join("\n"))).toEqual([]);
+    expect(parseVersionTags("")).toEqual([]);
+  });
+
+  test("a CRLF-terminated line is not a match, so the listing is read as LF only", () => {
+    const text = `${sha(1)}\trefs/tags/v1.0.0\r\n${sha(2)}\trefs/tags/v1.1.0\n`;
+    expect(parseVersionTags(text)).toEqual([versionTag("1", "1", "0", sha(2))]);
+  });
+
+  test("leading zeros do not change a version's value, and the name breaks the tie", () => {
+    const tags = parseVersionTags(
+      lsRemote(
+        [sha(1), "refs/tags/v1.2.3"],
+        [sha(2), "refs/tags/v1.02.3"],
+        [sha(3), "refs/tags/v01.2.3"],
+        [sha(4), "refs/tags/v1.2.03"],
+        [sha(5), "refs/tags/v1.009.0"],
+        [sha(6), "refs/tags/v1.8.0"],
+        [sha(7), "refs/tags/v00.000.0"],
+        [sha(8), "refs/tags/v0.0.0"],
+      ),
+    );
+    expect(tags.map((tag) => tag.name)).toEqual([
+      "v0.0.0",
+      "v00.000.0",
+      "v01.2.3",
+      "v1.02.3",
+      "v1.2.03",
+      "v1.2.3",
+      "v1.8.0",
+      "v1.009.0",
+    ]);
+    // The numbers are kept as written.
+    expect(tags.find((tag) => tag.name === "v1.02.3")?.version).toEqual(["1", "02", "3"]);
+  });
+
+  test("a version number of ten thousand digits parses and sorts, with no conversion to a Number", () => {
+    const huge = "9".repeat(10_000);
+    const larger = `1${"0".repeat(10_000)}`; // 10,001 digits
+    const nearlyLarger = `1${"0".repeat(9_999)}`; // 10,000 digits
+    const paddedSeven = `${"0".repeat(5_000)}7`;
+    const tags = parseVersionTags(
+      lsRemote(
+        [sha(1), `refs/tags/v1.${larger}.0`],
+        [sha(2), `refs/tags/v1.${huge}.0`],
+        [sha(3), `refs/tags/v1.${nearlyLarger}.0`],
+        [sha(4), `refs/tags/v1.${paddedSeven}.0`],
+        [sha(5), "refs/tags/v1.7.0"],
+        [sha(6), `refs/tags/v${huge}.0.0`],
+      ),
+    );
+    // 7, then 7 again (the padded spelling is the lower name), then 10,000 digits starting with 1,
+    // 10,000 nines, 10,001 digits, and last the huge major version.
+    expect(tags.map((tag) => tag.commit)).toEqual([sha(4), sha(5), sha(3), sha(2), sha(1), sha(6)]);
+    expect(tags[4]?.version[1]).toBe(larger);
+  });
+});
+
+describe("chooseAnchor", () => {
+  const v100 = versionTag("1", "0", "0", sha(1));
+  const v110 = versionTag("1", "1", "0", sha(2));
+  const v200 = versionTag("2", "0", "0", sha(3));
+
+  test("the lowest tag that is an ancestor is chosen, not the highest", () => {
+    const { isAncestor, asked } = asking({ [sha(1)]: true, [sha(2)]: true, [sha(3)]: true });
+    expect(chooseAnchor([v100, v110, v200], isAncestor)).toEqual({
+      anchor: "first_version_tag",
+      tag: v100,
+      commit: sha(1),
+    });
+    // The search stops at the first answer, and asks about the commit, not the name.
+    expect(asked).toEqual([sha(1)]);
+  });
+
+  test("the lowest version is tried first, whatever order the tags are given in", () => {
+    const { isAncestor, asked } = asking({ [sha(1)]: false, [sha(2)]: true, [sha(3)]: true });
+    for (const tags of [
+      [v200, v110, v100],
+      [v110, v200, v100],
+      [v100, v200, v110],
+    ]) {
+      asked.length = 0;
+      expect(chooseAnchor(tags, isAncestor)).toEqual({
+        anchor: "first_version_tag",
+        tag: v110,
+        commit: sha(2),
+      });
+      expect(asked).toEqual([sha(1), sha(2)]);
+    }
+    // v1.10.0 is above v1.9.0, so the order is by value here too.
+    const nine = versionTag("1", "9", "0", sha(4));
+    const ten = versionTag("1", "10", "0", sha(5));
+    const both = asking({ [sha(4)]: true, [sha(5)]: true });
+    expect(chooseAnchor([ten, nine], both.isAncestor)).toMatchObject({ commit: sha(4) });
+  });
+
+  test("a tag that is not an ancestor is skipped for the next one", () => {
+    const { isAncestor, asked } = asking({ [sha(1)]: false, [sha(2)]: false, [sha(3)]: true });
+    expect(chooseAnchor([v100, v110, v200], isAncestor)).toEqual({
+      anchor: "first_version_tag",
+      tag: v200,
+      commit: sha(3),
+    });
+    expect(asked).toEqual([sha(1), sha(2), sha(3)]);
+  });
+
+  test("a check that could not be answered stops the search; it is not read as not an ancestor", () => {
+    // `null` first: the lowest tag could not be checked, so no later tag is tried.
+    const first = asking({ [sha(1)]: null, [sha(2)]: true, [sha(3)]: true });
+    expect(chooseAnchor([v100, v110, v200], first.isAncestor)).toEqual({
+      anchor: "merge_base",
+      reason: "check_failed",
+    });
+    expect(first.asked).toEqual([sha(1)]);
+    // `null` after a `false`: the answer is still check_failed, and the search ends there.
+    const later = asking({ [sha(1)]: false, [sha(2)]: null, [sha(3)]: true });
+    expect(chooseAnchor([v100, v110, v200], later.isAncestor)).toEqual({
+      anchor: "merge_base",
+      reason: "check_failed",
+    });
+    expect(later.asked).toEqual([sha(1), sha(2)]);
+  });
+
+  test("no tag is no_tag, and every tag tried and not an ancestor is no_ancestor", () => {
+    expect(chooseAnchor([], () => true)).toEqual({ anchor: "merge_base", reason: "no_tag" });
+    const { isAncestor, asked } = asking({ [sha(1)]: false, [sha(2)]: false, [sha(3)]: false });
+    expect(chooseAnchor([v100, v110, v200], isAncestor)).toEqual({
+      anchor: "merge_base",
+      reason: "no_ancestor",
+    });
+    expect(asked).toEqual([sha(1), sha(2), sha(3)]);
+  });
+
+  test("thirty-two tags none of which is an ancestor are no_ancestor; thirty-three are too_many_tags", () => {
+    const many = (count: number): VersionTag[] =>
+      Array.from({ length: count }, (_, n) => versionTag("1", String(n), "0", sha(n + 1)));
+    const never = (log: string[]) => (commit: string) => {
+      log.push(commit);
+      return false;
+    };
+    const at32: string[] = [];
+    expect(chooseAnchor(many(ORIGINAL_LIMITS.maxTagsTried), never(at32))).toEqual({
+      anchor: "merge_base",
+      reason: "no_ancestor",
+    });
+    expect(at32).toHaveLength(32);
+    const at33: string[] = [];
+    expect(chooseAnchor(many(ORIGINAL_LIMITS.maxTagsTried + 1), never(at33))).toEqual({
+      anchor: "merge_base",
+      reason: "too_many_tags",
+    });
+    // The 33rd tag is never asked about, so the number of checks is bounded.
+    expect(at33).toHaveLength(32);
+    const bounded: string[] = [];
+    expect(chooseAnchor(many(5_000), never(bounded))).toEqual({
+      anchor: "merge_base",
+      reason: "too_many_tags",
+    });
+    expect(bounded).toHaveLength(32);
+  });
+
+  test("an ancestor among the first thirty-two is found, and one past them is not looked for", () => {
+    const many = Array.from({ length: 40 }, (_, n) => versionTag("1", String(n), "0", sha(n + 1)));
+    const last = asking(Object.fromEntries(many.map((tag, n) => [tag.commit, n === 31])));
+    expect(chooseAnchor(many, last.isAncestor)).toMatchObject({
+      anchor: "first_version_tag",
+      commit: sha(32),
+    });
+    // The only ancestor is the 33rd tag: it is never tried.
+    const beyond = asking(Object.fromEntries(many.map((tag, n) => [tag.commit, n === 32])));
+    expect(chooseAnchor(many, beyond.isAncestor)).toEqual({
+      anchor: "merge_base",
+      reason: "too_many_tags",
+    });
+  });
+
+  test("a listing goes through both functions: the peeled commit is asked about", () => {
+    const text = lsRemote(
+      ...annotated("v1.0.0", sha(900), sha(1)),
+      ...annotated("v1.1.0", sha(901), sha(2)),
+      [sha(3), "refs/tags/v2.0.0"],
+      [sha(4), "refs/tags/v2.0.0-rc1"],
+      [sha(5), "refs/heads/main"],
+    );
+    const { isAncestor, asked } = asking({ [sha(1)]: false, [sha(2)]: true, [sha(3)]: true });
+    const choice = chooseAnchor(parseVersionTags(text), isAncestor);
+    expect(choice).toEqual({
+      anchor: "first_version_tag",
+      tag: versionTag("1", "1", "0", sha(2)),
+      commit: sha(2),
+    });
+    expect(asked).toEqual([sha(1), sha(2)]);
   });
 });
