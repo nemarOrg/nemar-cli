@@ -4146,6 +4146,17 @@ describe("diffJson: renamed keys", () => {
       'json_key_added | field=.value.Levels | after="\\"Left\\"" | detail="1"',
       'json_key_added | field=.value.Levels | after="\\"Right\\"" | detail="2"',
     ]);
+    // go and go3 do not fold alike (a digit is part of the name), so go removed and go3 added are a
+    // removal and an addition, even with no other removed or added key holding the value.
+    expect(
+      jsonLines(
+        '{"trial_type": {"Levels": {"go": "Go", "go2": "Go"}}}',
+        '{"trial_type": {"Levels": {"go2": "Go", "go3": "Go"}}}',
+      ),
+    ).toEqual([
+      'json_key_removed | field=.trial_type.Levels | before="\\"Go\\"" | detail="go"',
+      'json_key_added | field=.trial_type.Levels | after="\\"Go\\"" | detail="go3"',
+    ]);
   });
 
   test("an unchanged sibling that holds the same value does not stop a rename", () => {
@@ -4188,6 +4199,11 @@ describe("diffJson: renamed keys", () => {
     expect(jsonLines('{"Levels": {"0.5": "half"}}', '{"Levels": {"05": "half"}}')).toEqual([
       'json_key_removed | field=.Levels | before="\\"half\\"" | detail="0.5"',
       'json_key_added | field=.Levels | after="\\"half\\"" | detail="05"',
+    ]);
+    // A name that is not a number keeps a point between two digits too: v1.2 is not v12.
+    expect(jsonLines('{"Levels": {"v1.2": "x"}}', '{"Levels": {"v12": "x"}}')).toEqual([
+      'json_key_removed | field=.Levels | before="\\"x\\"" | detail="v1.2"',
+      'json_key_added | field=.Levels | after="\\"x\\"" | detail="v12"',
     ]);
     // Punctuation next to only one digit is still punctuation.
     expect(jsonLines('{"Channel_1": 3}', '{"channel1": 3}')).toEqual([
@@ -4250,17 +4266,6 @@ describe("diffJson: renamed keys", () => {
   });
 
   test("a shared value is no evidence of a rename: the value must be the only one among the removed keys and among the added keys of its parent", () => {
-    // go and go3 do not fold alike (a digit is part of the name), so go removed and go3 added are a
-    // removal and an addition, whoever else holds the value.
-    expect(
-      jsonLines(
-        '{"trial_type": {"Levels": {"go": "Go", "go2": "Go"}}}',
-        '{"trial_type": {"Levels": {"go2": "Go", "go3": "Go"}}}',
-      ),
-    ).toEqual([
-      'json_key_removed | field=.trial_type.Levels | before="\\"Go\\"" | detail="go"',
-      'json_key_added | field=.trial_type.Levels | after="\\"Go\\"" | detail="go3"',
-    ]);
     // Two old names that both fold to the new one: neither is the rename.
     expect(jsonLines('{"a_b": 1, "A-B": 1}', '{"AB": 1}')).toEqual([
       'json_key_removed | field= | before="1" | detail="a_b"',
@@ -4273,10 +4278,18 @@ describe("diffJson: renamed keys", () => {
       'json_key_added | field= | after="1" | detail="X"',
       'json_key_added | field= | after="1" | detail="x_"',
     ]);
-    // A value repeated under ANOTHER parent does not count against a rename.
-    expect(
-      jsonLines('{"a": {"Key": 1}, "b": {"z": 1}}', '{"a": {"KEY": 1}, "b": {"z": 1}}'),
-    ).toEqual([expect.stringContaining('detail="Key -> KEY"')]);
+    // A value removed, or added, under ANOTHER parent does not count against a rename: the value is
+    // unique among the removed and the added keys of each parent, not of the document.
+    expect(jsonLines('{"a": {"Key": 1}, "b": {"z": 1}}', '{"a": {"KEY": 1}, "b": {}}')).toEqual([
+      'json_key_renamed | field=.a | before="1" | after="1" | detail="Key -> KEY"',
+      'json_key_removed | field=.b | before="1" | detail="z"',
+      'json_key_added | field= | after="{}" | detail="b"',
+    ]);
+    expect(jsonLines('{"a": {"Key": 1}, "b": {}}', '{"a": {"KEY": 1}, "b": {"z": 1}}')).toEqual([
+      'json_key_renamed | field=.a | before="1" | after="1" | detail="Key -> KEY"',
+      'json_empty_key_removed | field= | before="{}" | detail="b"',
+      'json_key_added | field=.b | after="1" | detail="z"',
+    ]);
   });
 
   test("several keys renamed at once, each with its own value, are each a rename", () => {
