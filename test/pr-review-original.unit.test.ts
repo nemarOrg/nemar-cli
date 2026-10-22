@@ -17,10 +17,14 @@ import {
   MINOR_EDIT_KEYS,
   ORIGINAL_LIMITS,
   PROSE_REFUSALS,
+  type PointerProbe,
   type ProseDocument,
   type ProseFacts,
   type ProseRead,
+  type RecordingChange,
+  type RecordingFacts,
   alignLines,
+  annexSide,
   assembleDocument,
   authorFieldFacts,
   authorFieldsAltered,
@@ -34,6 +38,7 @@ import {
   proseAltered,
   proseFacts,
   protectedMask,
+  recordingFacts,
 } from "../scripts/ci/pr-review-original";
 import { SUMMARY_LIMITS } from "../scripts/ci/pr-review-summary";
 
@@ -637,12 +642,12 @@ function oneSided(a: readonly string[], b: readonly string[]): boolean {
   return prefix + suffix === a.length || prefix + suffix === b.length;
 }
 
-/** The same lines in a seeded random order (Fisher-Yates). */
-function shuffled(lines: readonly string[], random: () => number): string[] {
+/** The same items in a seeded random order (Fisher-Yates). */
+function shuffled<T>(lines: readonly T[], random: () => number): T[] {
   const out = [...lines];
   for (let i = out.length - 1; i > 0; i--) {
     const j = Math.floor(random() * (i + 1));
-    [out[i], out[j]] = [out[j] as string, out[i] as string];
+    [out[i], out[j]] = [out[j] as T, out[i] as T];
   }
   return out;
 }
@@ -1781,5 +1786,505 @@ describe("authorFieldFacts", () => {
     }
     // Unknown is not an alteration here: the caller says what unknown does.
     expect(authorFieldsAltered(unparsed)).toBe(false);
+  });
+});
+
+/** A side of a changed path: its mode, its blob id and what the caller read of it. */
+interface Side {
+  mode: string;
+  oid: string;
+  probe: PointerProbe;
+}
+
+const SYMLINK = "120000";
+const REGULAR = "100644";
+const SUBMODULE = "160000";
+
+/** A side holding these bytes, with the git id of those bytes; the probe is the bytes themselves. */
+function sideOf(mode: string, content: string | Uint8Array): Side {
+  const bytes = typeof content === "string" ? encoder.encode(content) : content;
+  return { mode, oid: gitOid(bytes), probe: bytes };
+}
+
+/** The target git-annex writes for `key`, with `depth` directories above the root of the dataset. */
+function annexTarget(key: string, depth = 1): string {
+  return `${"../".repeat(depth)}.git/annex/objects/Xj/9P/${key}/${key}`;
+}
+
+/** A locked annexed file: a symlink to the key. */
+const locked = (key: string, depth = 1): Side => sideOf(SYMLINK, annexTarget(key, depth));
+/** An unlocked annexed file: a regular blob holding a pointer. */
+const unlocked = (key: string): Side => sideOf(REGULAR, `/annex/objects/${key}\n`);
+/** A regular file git holds, as a probe of its bytes, or of `large` when the caller never read it. */
+const plain = (content: string, probe: PointerProbe | null = null): Side => ({
+  ...sideOf(REGULAR, content),
+  probe: probe ?? encoder.encode(content),
+});
+
+/** The key of the n-th recording: the same n gives the same key, a different n a different one. */
+const keyOf = (n: number): string => `SHA256E-s${1000 + n}--${n.toString(16).padStart(8, "0")}.edf`;
+
+/** The first three characters of a git mode name its file type. */
+const typeOfMode = (mode: string): string => mode.slice(0, 3);
+
+/** One changed path, its status and zero ids as `git diff --raw` would write them. */
+function recording(
+  path: string,
+  was: Side | null,
+  now: Side | null,
+  recordingArea = false,
+): RecordingChange {
+  const status =
+    was === null
+      ? "added"
+      : now === null
+        ? "removed"
+        : typeOfMode(was.mode) !== typeOfMode(now.mode)
+          ? "typechange"
+          : "modified";
+  return {
+    path,
+    status,
+    modeBefore: was?.mode ?? "000000",
+    modeAfter: now?.mode ?? "000000",
+    oidBefore: was?.oid ?? "0".repeat(40),
+    oidAfter: now?.oid ?? "0".repeat(40),
+    recordingArea,
+    before: was?.probe ?? null,
+    after: now?.probe ?? null,
+  };
+}
+
+/** The recording facts of nothing changed, for tests to override. */
+function noRecordingChange(
+  overrides: Partial<RecordingFacts & { unread: number }> = {},
+): RecordingFacts & { unread: number } {
+  return { replaced: 0, typeChanged: 0, moved: 0, unread: 0, ...overrides };
+}
+
+describe("annexSide", () => {
+  test("a git-annex symlink is annexed, and its key is the last component of its target", () => {
+    const key = "SHA256E-s10--abc.edf";
+    const target = `../../.git/annex/objects/xx/yy/${key}/${key}`;
+    expect(annexSide(SYMLINK, encoder.encode(target))).toEqual({ kind: "annexed", key });
+    // The key grammar: a backend, size-style fields, two hyphens and a name that is not empty.
+    for (const name of [
+      "MD5E-s1048576-S1048576-C1--0123456789abcdef.nii.gz",
+      "URL--https&c%%example.org%data.edf",
+      "WORM-s10-m1700000000--sub-01_task-x_eeg.edf",
+    ]) {
+      expect(
+        annexSide(SYMLINK, encoder.encode(`.git/annex/objects/ab/cd/${name}/${name}`)),
+      ).toEqual({ kind: "annexed", key: name });
+    }
+  });
+
+  test("a link that is not into the annex objects, or does not end in a key, is a plain link", () => {
+    for (const target of [
+      "../shared/data.edf",
+      "sub-01/eeg/data.edf",
+      "../.git/annex/objects/", // nothing after the objects directory
+      "../.git/annex/objects", // the objects directory itself
+      "../.git/annex/objects/Xj/9P/SHA256E-s10--abc.edf/", // empty last component
+      "../.git/annex/objects/Xj/9P/sha256e-s10--abc.edf", // lower-case backend
+      "../.git/annex/objects/Xj/9P/SHA256E-s10-abc.edf", // one hyphen, not two
+      "../.git/annex/objects/Xj/9P/SHA256E-s10--", // no name after the hyphens
+      "../.git/xannex/objects/Xj/9P/SHA256E-s10--abc.edf", // not the component `annex`
+      "../.git/annex/objectsx/Xj/9P/SHA256E-s10--abc.edf",
+      "../.git/annex/other/SHA256E-s10--abc.edf",
+      "SHA256E-s10--abc.edf/annex/objects", // the key is not last
+    ]) {
+      expect(annexSide(SYMLINK, encoder.encode(target)), target).toEqual({ kind: "link" });
+    }
+  });
+
+  test("an unlocked pointer is a small regular blob starting /annex/objects/, whose key is its first line's last component", () => {
+    const key = "SHA256E-s10--abc.edf";
+    for (const mode of [REGULAR, "100755"]) {
+      expect(annexSide(mode, encoder.encode(`/annex/objects/${key}\n`)), mode).toEqual({
+        kind: "annexed",
+        key,
+      });
+    }
+    // No final newline, a deeper path, and anything after the first line are all the same key.
+    for (const text of [
+      `/annex/objects/${key}`,
+      `/annex/objects/Xj/9P/${key}/${key}\n`,
+      `/annex/objects/${key}\nanything else\n`,
+    ]) {
+      expect(annexSide(REGULAR, encoder.encode(text)), text).toEqual({ kind: "annexed", key });
+    }
+    // Not a pointer: another start, an empty key, a key that is not one, or a BOM before the slash.
+    for (const text of [
+      `annex/objects/${key}\n`,
+      " /annex/objects/SHA256E-s10--abc.edf\n",
+      "/annex/objects/\n",
+      "/annex/objects/readme.txt\n",
+      "# not a pointer\n/annex/objects/SHA256E-s10--abc.edf\n",
+      "",
+    ]) {
+      expect(annexSide(REGULAR, encoder.encode(text)), JSON.stringify(text)).toEqual({
+        kind: "git",
+      });
+    }
+    expect(
+      annexSide(
+        REGULAR,
+        new Uint8Array([0xef, 0xbb, 0xbf, ...encoder.encode(`/annex/objects/${key}`)]),
+      ),
+    ).toEqual({ kind: "git" });
+  });
+
+  test("a regular blob holding a link target is git, whatever the target says", () => {
+    const key = "SHA256E-s10--abc.edf";
+    expect(annexSide(REGULAR, encoder.encode(annexTarget(key)))).toEqual({ kind: "git" });
+    expect(annexSide(REGULAR, encoder.encode(`../.git/annex/objects/${key}`))).toEqual({
+      kind: "git",
+    });
+  });
+
+  test("a submodule is other, an unknown mode is other, and a regular file is git", () => {
+    expect(annexSide(SUBMODULE, "large")).toEqual({ kind: "other" });
+    expect(annexSide(SUBMODULE, encoder.encode("/annex/objects/SHA256E-s10--abc.edf"))).toEqual({
+      kind: "other",
+    });
+    // A submodule has no blob to read, so a failed read of it is not a failed read of content.
+    expect(annexSide(SUBMODULE, "unreadable")).toEqual({ kind: "other" });
+    for (const mode of ["040000", "000000", "100664", "120001", ""]) {
+      expect(annexSide(mode, encoder.encode(annexTarget("SHA256E-s10--abc.edf"))), mode).toEqual({
+        kind: "other",
+      });
+    }
+    expect(annexSide(REGULAR, encoder.encode("onset\tduration\n"))).toEqual({ kind: "git" });
+  });
+
+  test("a probe that could not be read is unreadable, never large and never git", () => {
+    for (const mode of [SYMLINK, REGULAR, "100755"]) {
+      expect(annexSide(mode, "unreadable"), mode).toEqual({ kind: "unreadable" });
+    }
+  });
+
+  test("a large probe is not decoded: a regular file is git, a symlink a link", () => {
+    expect(annexSide(REGULAR, "large")).toEqual({ kind: "git" });
+    expect(annexSide("100755", "large")).toEqual({ kind: "git" });
+    expect(annexSide(SYMLINK, "large")).toEqual({ kind: "link" });
+  });
+
+  test("bytes over the pointer bound are large, whatever they say", () => {
+    const key = "SHA256E-s10--abc.edf";
+    const atBound = encoder.encode(
+      `/annex/objects/${key}\n${"x".repeat(1_023 - 1 - 15 - key.length)}`,
+    );
+    expect(atBound.length).toBe(ORIGINAL_LIMITS.pointerMaxBytes);
+    expect(annexSide(REGULAR, atBound)).toEqual({ kind: "annexed", key });
+    const over = new Uint8Array(ORIGINAL_LIMITS.pointerMaxBytes + 1);
+    over.set(atBound);
+    expect(annexSide(REGULAR, over)).toEqual({ kind: "git" });
+    // A megabyte that ends in a valid annex link is still not read.
+    const megabyte = encoder.encode(
+      `${"../".repeat(350_000)}.git/annex/objects/xx/yy/${key}/${key}`,
+    );
+    expect(megabyte.length).toBeGreaterThan(1024 * 1024);
+    expect(annexSide(SYMLINK, megabyte)).toEqual({ kind: "link" });
+  });
+
+  test("hostile key text: a NUL or malformed UTF-8 is no key, and a newline cannot end one early", () => {
+    const key = "SHA256E-s10--abc.edf";
+    // A NUL anywhere in the last component is outside the grammar.
+    expect(
+      annexSide(SYMLINK, encoder.encode(`.git/annex/objects/xx/yy/${key}\0/${key}\0`)),
+    ).toEqual({
+      kind: "link",
+    });
+    expect(annexSide(SYMLINK, encoder.encode(`.git/annex/objects/xx/yy/${key}/${key}\0x`))).toEqual(
+      {
+        kind: "link",
+      },
+    );
+    // A malformed byte is not replaced by U+FFFD: it would let two different keys read as one.
+    const bad = new Uint8Array([
+      ...encoder.encode(`.git/annex/objects/xx/yy/${key}/SHA256E-s1--a`),
+      0xff,
+    ]);
+    expect(annexSide(SYMLINK, bad)).toEqual({ kind: "link" });
+    // A newline is a character of the last component, so the key is the whole of it and a forged
+    // second key after the newline cannot make the first one look equal to another path's.
+    const forged = `${key}\nSHA256E-s99--forged.edf`;
+    expect(annexSide(SYMLINK, encoder.encode(`.git/annex/objects/xx/yy/${forged}`))).toEqual({
+      kind: "annexed",
+      key: forged,
+    });
+    // In a pointer the first line ends at the newline, and the text after it is not read.
+    expect(annexSide(REGULAR, encoder.encode(`/annex/objects/${forged}`))).toEqual({
+      kind: "annexed",
+      key,
+    });
+  });
+});
+
+describe("recordingFacts: the shapes of set A", () => {
+  test("59 annexed recordings with a new key are 59 replaced (on003343)", () => {
+    const changes = Array.from({ length: 59 }, (_, n) =>
+      recording(
+        `sub-${n}/eeg/sub-${n}_task-x_eeg.edf`,
+        locked(keyOf(n)),
+        locked(keyOf(1000 + n)),
+        true,
+      ),
+    );
+    expect(recordingFacts(changes)).toEqual(noRecordingChange({ replaced: 59 }));
+  });
+
+  test("41 annexed recordings that became regular git files are 41 type changes (on003029)", () => {
+    const changes = Array.from({ length: 41 }, (_, n) => {
+      const path = `sub-${n}/eeg/sub-${n}_task-x_eeg.edf`;
+      const now = plain(`recording ${n}`);
+      const change = recording(path, locked(keyOf(n)), now, true);
+      expect(change.status).toBe("typechange");
+      return change;
+    });
+    expect(recordingFacts(changes)).toEqual(noRecordingChange({ typeChanged: 41 }));
+  });
+
+  test("5 annexed events files that became regular files count by kind, outside the recordings area (on004703)", () => {
+    const changes = Array.from({ length: 5 }, (_, n) =>
+      recording(
+        `sub-${n}/eeg/sub-${n}_task-x_events.tsv`,
+        locked(keyOf(n)),
+        plain("onset\tduration\n"),
+        false,
+      ),
+    );
+    expect(recordingFacts(changes)).toEqual(noRecordingChange({ typeChanged: 5 }));
+  });
+
+  test("15 removed and 15 added links with equal keys are 15 moved and nothing else (on004306)", () => {
+    const changes: RecordingChange[] = [];
+    for (let n = 0; n < 15; n++) {
+      changes.push(recording(`sub-${n}/eeg/sub-${n}_eeg.edf`, locked(keyOf(n)), null, true));
+      changes.push(recording(`raw/sub-${n}_eeg.edf`, null, locked(keyOf(n), 2), true));
+    }
+    expect(recordingFacts(changes)).toEqual(noRecordingChange({ moved: 15 }));
+  });
+});
+
+describe("recordingFacts: what is a replacement and what is not", () => {
+  test("a link that only changed its depth is the same object: no replacement", () => {
+    const key = keyOf(1);
+    expect(recordingFacts([recording("a_eeg.edf", locked(key, 1), locked(key, 3), true)])).toEqual(
+      noRecordingChange(),
+    );
+    expect(recordingFacts([recording("a_eeg.edf", locked(key, 4), locked(key, 0), true)])).toEqual(
+      noRecordingChange(),
+    );
+  });
+
+  test("a locked file made an unlocked pointer with the same key, and the reverse, is no change", () => {
+    const key = keyOf(2);
+    expect(recordingFacts([recording("a_eeg.edf", locked(key), unlocked(key), true)])).toEqual(
+      noRecordingChange(),
+    );
+    expect(recordingFacts([recording("a_eeg.edf", unlocked(key), locked(key), true)])).toEqual(
+      noRecordingChange(),
+    );
+    // With a different key it is a replacement, whichever way the file is held.
+    expect(
+      recordingFacts([recording("a_eeg.edf", locked(keyOf(2)), unlocked(keyOf(3)), true)]),
+    ).toEqual(noRecordingChange({ replaced: 1 }));
+    expect(
+      recordingFacts([recording("a_eeg.edf", unlocked(keyOf(2)), unlocked(keyOf(3)), true)]),
+    ).toEqual(noRecordingChange({ replaced: 1 }));
+  });
+
+  test("an unlocked pointer replaced by its content is a type change though git calls it modified", () => {
+    const change = recording("a_eeg.edf", unlocked(keyOf(4)), plain("the data itself"), true);
+    expect(change.status).toBe("modified");
+    expect(recordingFacts([change])).toEqual(noRecordingChange({ typeChanged: 1 }));
+    const reverse = recording("a_eeg.edf", plain("the data itself"), unlocked(keyOf(4)), true);
+    expect(reverse.status).toBe("modified");
+    expect(recordingFacts([reverse])).toEqual(noRecordingChange({ typeChanged: 1 }));
+  });
+
+  test("annexed to a plain link, to a submodule, or the reverse, is a type change", () => {
+    const stray: Side = sideOf(SYMLINK, "../shared/data.edf");
+    const submodule: Side = { mode: SUBMODULE, oid: "1".repeat(40), probe: "large" };
+    for (const [was, now] of [
+      [locked(keyOf(5)), stray],
+      [stray, locked(keyOf(5))],
+      [locked(keyOf(5)), submodule],
+      [submodule, unlocked(keyOf(5))],
+    ] as [Side, Side][]) {
+      expect(recordingFacts([recording("a_eeg.edf", was, now)])).toEqual(
+        noRecordingChange({ typeChanged: 1 }),
+      );
+    }
+  });
+
+  test("a symlink that is not annexed, or a submodule, changing is not a recording fact", () => {
+    const a = sideOf(SYMLINK, "../shared/a.edf");
+    const b = sideOf(SYMLINK, "../shared/b.edf");
+    expect(recordingFacts([recording("link_eeg.edf", a, b, true)])).toEqual(noRecordingChange());
+    expect(recordingFacts([recording("link_eeg.edf", a, null, true)])).toEqual(noRecordingChange());
+    expect(recordingFacts([recording("link_eeg.edf", null, a, true)])).toEqual(noRecordingChange());
+    const old: Side = { mode: SUBMODULE, oid: "1".repeat(40), probe: "large" };
+    const moved: Side = { mode: SUBMODULE, oid: "2".repeat(40), probe: "large" };
+    expect(recordingFacts([recording("vendor/lib", old, moved, true)])).toEqual(
+      noRecordingChange(),
+    );
+  });
+
+  test("git to git is a replacement only in the recordings area, and only with new content", () => {
+    const old = plain("old recording", "large");
+    const fresh = plain("new recording", "large");
+    expect(recordingFacts([recording("a_eeg.edf", old, fresh, true)])).toEqual(
+      noRecordingChange({ replaced: 1 }),
+    );
+    // Outside the area (a README, a sidecar), a regular file edited is the business of Part A.
+    expect(recordingFacts([recording("README", old, fresh, false)])).toEqual(noRecordingChange());
+    // Inside it but the same blob, as when only the mode changed: nothing is replaced.
+    expect(recordingFacts([recording("a_eeg.edf", old, { ...old, mode: "100755" }, true)])).toEqual(
+      noRecordingChange(),
+    );
+    // Small files are probed as bytes and large ones are not; both are git to git.
+    expect(
+      recordingFacts([recording("a_eeg.edf", plain("small"), plain("smaller"), true)]),
+    ).toEqual(noRecordingChange({ replaced: 1 }));
+  });
+
+  test("an added or removed recording is not a replacement, a type change or a move by itself", () => {
+    expect(
+      recordingFacts([
+        recording("new_eeg.edf", null, locked(keyOf(6)), true),
+        recording("gone_eeg.edf", locked(keyOf(7)), null, true),
+        recording("plain_eeg.edf", null, plain("data", "large"), true),
+        recording("plain2_eeg.edf", plain("data", "large"), null, true),
+      ]),
+    ).toEqual(noRecordingChange());
+  });
+
+  test("a key moved to a path that also changed another way is one move and one other fact", () => {
+    // `a` leaves, and `b` gains its key; `c` is replaced. The move is not also a replacement.
+    expect(
+      recordingFacts([
+        recording("a_eeg.edf", locked(keyOf(8)), null, true),
+        recording("b_eeg.edf", null, unlocked(keyOf(8)), true),
+        recording("c_eeg.edf", locked(keyOf(9)), locked(keyOf(10)), true),
+      ]),
+    ).toEqual(noRecordingChange({ moved: 1, replaced: 1 }));
+  });
+
+  test("keys are matched as a multiset: one added path takes one removed path", () => {
+    const key = keyOf(11);
+    // Two removed with one key and one added with it: one move, whichever way they are listed.
+    const twoGone = [
+      recording("a_eeg.edf", locked(key), null, true),
+      recording("b_eeg.edf", locked(key), null, true),
+      recording("c_eeg.edf", null, locked(key), true),
+    ];
+    expect(recordingFacts(twoGone)).toEqual(noRecordingChange({ moved: 1 }));
+    expect(recordingFacts([...twoGone].reverse())).toEqual(noRecordingChange({ moved: 1 }));
+    // One removed and two added: one move again.
+    expect(
+      recordingFacts([
+        recording("a_eeg.edf", locked(key), null, true),
+        recording("b_eeg.edf", null, locked(key), true),
+        recording("c_eeg.edf", null, unlocked(key), true),
+      ]),
+    ).toEqual(noRecordingChange({ moved: 1 }));
+    // Two and two: two moves.
+    expect(
+      recordingFacts([
+        recording("a_eeg.edf", locked(key), null, true),
+        recording("b_eeg.edf", locked(key), null, true),
+        recording("c_eeg.edf", null, locked(key), true),
+        recording("d_eeg.edf", null, locked(key), true),
+      ]),
+    ).toEqual(noRecordingChange({ moved: 2 }));
+  });
+
+  test("a removed key that is not added, or a path added by another key, is not moved", () => {
+    expect(
+      recordingFacts([
+        recording("a_eeg.edf", locked(keyOf(12)), null, true),
+        recording("b_eeg.edf", null, locked(keyOf(13)), true),
+        // A key that exists on both sides of one path is not a removal.
+        recording("c_eeg.edf", locked(keyOf(14)), locked(keyOf(14)), true),
+        recording("d_eeg.edf", null, locked(keyOf(14)), true),
+      ]),
+    ).toEqual(noRecordingChange());
+  });
+
+  test("the answer does not depend on the order the paths are listed in", () => {
+    const random = mulberry32(5);
+    const changes: RecordingChange[] = [];
+    for (let n = 0; n < 40; n++) {
+      changes.push(recording(`p${n}_eeg.edf`, locked(keyOf(n)), locked(keyOf(n + 100)), true));
+      changes.push(recording(`q${n}_eeg.edf`, locked(keyOf(n + 200)), null, true));
+      changes.push(recording(`r${n}_eeg.edf`, null, locked(keyOf(n + 200)), true));
+      changes.push(recording(`s${n}_eeg.edf`, unlocked(keyOf(n)), plain(`v${n}`), true));
+    }
+    const expected = noRecordingChange({ replaced: 40, moved: 40, typeChanged: 40 });
+    expect(recordingFacts(changes)).toEqual(expected);
+    for (let round = 0; round < 5; round++) {
+      expect(recordingFacts(shuffled(changes, random))).toEqual(expected);
+    }
+  });
+});
+
+describe("recordingFacts: sides that could not be read", () => {
+  test("an unreadable side is counted as unread and adds nothing else", () => {
+    const key = keyOf(20);
+    expect(
+      recordingFacts([
+        recording("a_eeg.edf", { ...locked(key), probe: "unreadable" }, locked(keyOf(21)), true),
+        recording("b_eeg.edf", locked(keyOf(22)), { ...plain("x"), probe: "unreadable" }, true),
+      ]),
+    ).toEqual(noRecordingChange({ unread: 2 }));
+    // Both sides of one path unreadable is one path, counted once.
+    expect(
+      recordingFacts([
+        recording(
+          "c_eeg.edf",
+          { ...locked(key), probe: "unreadable" },
+          { ...locked(key), probe: "unreadable" },
+          true,
+        ),
+      ]),
+    ).toEqual(noRecordingChange({ unread: 1 }));
+  });
+
+  test("an unreadable side takes no part in matching moves", () => {
+    const key = keyOf(23);
+    // The removed path is readable and the added one is not: its key is unknown, so no move.
+    expect(
+      recordingFacts([
+        recording("a_eeg.edf", locked(key), null, true),
+        recording("b_eeg.edf", null, { ...locked(key), probe: "unreadable" }, true),
+      ]),
+    ).toEqual(noRecordingChange({ unread: 1 }));
+    // Nor does an unreadable path hide a replacement elsewhere.
+    expect(
+      recordingFacts([
+        recording("a_eeg.edf", { ...locked(key), probe: "unreadable" }, locked(keyOf(24)), true),
+        recording("b_eeg.edf", locked(keyOf(25)), locked(keyOf(26)), true),
+      ]),
+    ).toEqual(noRecordingChange({ unread: 1, replaced: 1 }));
+  });
+
+  test("a large probe is a fact about the blob: a large file on both sides is git, not unread", () => {
+    // A recording of gigabytes that is a regular file in git is `git`, and its id decides.
+    const old = plain("a", "large");
+    const fresh = plain("b", "large");
+    expect(recordingFacts([recording("a_eeg.edf", old, fresh, true)])).toEqual(
+      noRecordingChange({ replaced: 1 }),
+    );
+    // And the same large file against an annex link is a type change.
+    expect(recordingFacts([recording("a_eeg.edf", locked(keyOf(27)), old, true)])).toEqual(
+      noRecordingChange({ typeChanged: 1 }),
+    );
+  });
+
+  test("nothing changed is nothing", () => {
+    expect(recordingFacts([])).toEqual(noRecordingChange());
   });
 });

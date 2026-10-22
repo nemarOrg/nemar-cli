@@ -1073,3 +1073,190 @@ export function authorFieldFacts(
 export function authorFieldsAltered(facts: AuthorFieldFacts): boolean {
   return facts.altered.length > 0 || facts.removed.length > 0;
 }
+
+// ---------------------------------------------------------------------------------------------
+// Recordings: annexed content that changed (design B2.4)
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * What the caller read of one side of a changed path to tell whether git-annex holds its content:
+ * the blob's bytes when the blob is no longer than `pointerMaxBytes` (a symlink target, or an
+ * unlocked pointer, is far shorter), `large` when it is longer (a recording of gigabytes is never
+ * fetched, and a blob over the bound cannot be a pointer), or `unreadable` when the caller tried
+ * and could not read it. A failed read is never `large`: one is a fact about the blob and the other
+ * is a fact about the caller, and only the first lets a path be called plain git content.
+ */
+export type PointerProbe = Uint8Array | "large" | "unreadable";
+
+/**
+ * One changed path as `git diff --raw` names it (the fields of `RawEntry` in the evidence module,
+ * which this module never imports; the shapes are compared by the compiler where they meet), with
+ * what the caller knows about it: whether the path is in the recordings area of the annex policy,
+ * and the probe of each side that exists (null for a side that does not: `before` of an added path,
+ * `after` of a removed one).
+ */
+export interface RecordingChange {
+  path: string;
+  status: "added" | "modified" | "removed" | "typechange";
+  modeBefore: string;
+  modeAfter: string;
+  oidBefore: string;
+  oidAfter: string;
+  /** The path is in the recordings area. Entered by the caller so this module never imports the policy. */
+  recordingArea: boolean;
+  before: PointerProbe | null;
+  after: PointerProbe | null;
+}
+
+/**
+ * What one side of a changed path is: content git-annex holds under a key (`annexed`), a regular
+ * file git holds itself (`git`), a symbolic link that is not an annex link (`link`), anything else,
+ * a submodule above all (`other`), or a side whose bytes could not be read (`unreadable`).
+ */
+export type AnnexSide =
+  | { kind: "annexed"; key: string }
+  | { kind: "git" }
+  | { kind: "link" }
+  | { kind: "other" }
+  | { kind: "unreadable" };
+
+/**
+ * The key grammar of a git-annex object: a backend name, optional `-s<size>`-style fields, `--`,
+ * then the rest of the name. Applied to the LAST component of a link target or a pointer line, so
+ * what a key is does not depend on how many directories sit above it.
+ */
+const ANNEX_KEY = /^[A-Z0-9]+(-[A-Za-z][0-9]+)*--[^/\0]+$/;
+
+/** The text of bytes when they are strict UTF-8, else null: a malformed byte is never replaced. */
+function strictUtf8(bytes: Uint8Array): string | null {
+  try {
+    return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The key of an annex symlink, or null when the target is not one. The target (the probe, decoded as
+ * strict UTF-8) must hold the components `annex` and `objects` one after the other with something
+ * after them, and its last component must be a key. Only the last component is the key: a link
+ * that gained or lost a `../` is the same object, and a link into another directory is not.
+ */
+function linkKey(bytes: Uint8Array): string | null {
+  const target = strictUtf8(bytes);
+  if (target === null) return null;
+  const components = target.split("/");
+  const last = components.length - 1;
+  let inObjects = false;
+  for (let i = 0; i + 1 < last; i++) {
+    if (components[i] === "annex" && components[i + 1] === "objects") inObjects = true;
+  }
+  const name = components[last] as string;
+  return inObjects && ANNEX_KEY.test(name) ? name : null;
+}
+
+/**
+ * The key of an unlocked annex pointer, or null when the bytes are not one: the first line (up to
+ * the first LF, which is not part of it) must start with `/annex/objects/`, and its last component
+ * must be a key. Whatever follows the first line is not read.
+ */
+function pointerKey(bytes: Uint8Array): string | null {
+  const lf = bytes.indexOf(0x0a);
+  const line = strictUtf8(lf === -1 ? bytes : bytes.subarray(0, lf));
+  if (line === null || !line.startsWith("/annex/objects/")) return null;
+  const name = line.slice(line.lastIndexOf("/") + 1);
+  return ANNEX_KEY.test(name) ? name : null;
+}
+
+/**
+ * What one side of a changed path is (design B2.4), from its git mode and its probe. A submodule
+ * (160000) has no blob to read and is `other` whatever the probe says. A probe of `unreadable` is
+ * `unreadable`, for every other mode. A symlink (120000) is `annexed` when its target is an annex
+ * link ({@link linkKey}), else `link`; a regular file (100644, 100755) is `annexed` when it is an
+ * unlocked pointer ({@link pointerKey}), else `git`; every other mode is `other`. A probe of `large`
+ * (or bytes over `pointerMaxBytes`, which a caller should have sent as `large`) is not an annex
+ * link and not a pointer, and nothing is decoded: a symlink is then a `link` and a regular file
+ * `git`. The bytes are never trusted past the key grammar, so NUL, a newline or a megabyte of
+ * text in a target gives a `link` or `git` side and never a key.
+ */
+export function annexSide(mode: string, probe: PointerProbe): AnnexSide {
+  if (mode === "160000") return { kind: "other" };
+  if (probe === "unreadable") return { kind: "unreadable" };
+  const symlink = mode === "120000";
+  if (!symlink && !REGULAR_MODE.test(mode)) return { kind: "other" };
+  const bytes = probe === "large" || probe.length > ORIGINAL_LIMITS.pointerMaxBytes ? null : probe;
+  const key = bytes === null ? null : symlink ? linkKey(bytes) : pointerKey(bytes);
+  if (key !== null) return { kind: "annexed", key };
+  return { kind: symlink ? "link" : "git" };
+}
+
+/** What a pull request did to recorded content, in counts (design B2.4). */
+export interface RecordingFacts {
+  /** Annexed content whose key changed, or a recordings-area file git holds with new content. */
+  replaced: number;
+  /** A path annexed on one side and not on the other: annexed to git, to a link, or the reverse. */
+  typeChanged: number;
+  /** A removed annexed key found again, key for key, at an added path (one added path per key). */
+  moved: number;
+}
+
+/**
+ * The facts of the recordings a pull request touched (design B2.4, as decided in D3). Each changed
+ * path is read as two sides ({@link annexSide}; a null probe is a side that does not exist) and the
+ * paths are taken in code-unit order, so the answer never depends on the order the caller listed
+ * them. For a path that exists on both sides:
+ *
+ * - both annexed, with different keys: `replaced`; with the same key (a locked link made an unlocked
+ *   pointer, or a link whose `../` depth changed): nothing;
+ * - annexed on one side only: `typeChanged`, decided by what each side IS and not by the status
+ *   `typechange`, so an unlocked pointer replaced by its content (status modified) counts;
+ * - neither annexed: `replaced` only for `git` to `git` inside the recordings area with different
+ *   blob ids; anywhere else, nothing.
+ *
+ * A removed path that was annexed, matched against the added annexed paths with the same key (a
+ * multiset, one added path consumed per match), is `moved`, and a matched path is counted as
+ * nothing else. An unmatched removal or addition is Part A's loss fact, not a recording fact.
+ *
+ * A path with an `unreadable` side adds 1 to `unread` (once, whether one side or both) and nothing
+ * else: it is unknown, never clean, and the caller says what unknown does.
+ */
+export function recordingFacts(
+  changes: readonly RecordingChange[],
+): RecordingFacts & { unread: number } {
+  const ordered = [...changes].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  const facts = { replaced: 0, typeChanged: 0, moved: 0, unread: 0 };
+  const removedKeys: string[] = [];
+  const addedKeys = new Map<string, number>();
+  for (const change of ordered) {
+    const was = change.before === null ? null : annexSide(change.modeBefore, change.before);
+    const now = change.after === null ? null : annexSide(change.modeAfter, change.after);
+    if (was?.kind === "unreadable" || now?.kind === "unreadable") {
+      facts.unread++;
+      continue;
+    }
+    if (was === null || now === null) {
+      if (was?.kind === "annexed") removedKeys.push(was.key);
+      if (now?.kind === "annexed") addedKeys.set(now.key, (addedKeys.get(now.key) ?? 0) + 1);
+      continue;
+    }
+    if (was.kind === "annexed" && now.kind === "annexed") {
+      if (was.key !== now.key) facts.replaced++;
+    } else if (was.kind === "annexed" || now.kind === "annexed") {
+      facts.typeChanged++;
+    } else if (
+      change.recordingArea &&
+      was.kind === "git" &&
+      now.kind === "git" &&
+      change.oidBefore !== change.oidAfter
+    ) {
+      facts.replaced++;
+    }
+  }
+  for (const key of removedKeys) {
+    const left = addedKeys.get(key) ?? 0;
+    if (left === 0) continue;
+    addedKeys.set(key, left - 1);
+    facts.moved++;
+  }
+  return facts;
+}
