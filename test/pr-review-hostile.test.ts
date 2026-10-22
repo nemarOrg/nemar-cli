@@ -150,6 +150,17 @@ function offRoute(r: Run): string | null {
   }
 }
 
+/** The lines of the prompt's change summary block, inside its fence. */
+function summaryBlock(prompt: string): string[] {
+  const lines = prompt.split("\n");
+  const open = lines.findIndex((l) =>
+    l.startsWith(`<untrusted-${NONCE} kind="changed-metadata-summary`),
+  );
+  if (open < 0) return [];
+  const close = lines.indexOf(`</untrusted-${NONCE}>`, open);
+  return lines.slice(open + 1, close < 0 ? undefined : close);
+}
+
 const CASES = HOSTILE_CASES.map((make) => {
   const c = make();
   return [c.id, c.route, c] as const;
@@ -179,6 +190,14 @@ describe("set B: every hostile case takes its route, and no loss is hidden", () 
       // The case loses something, so the oracle had something to look for.
       expect(r.verdict.lostUnits).toBeGreaterThan(0);
       expect(offRoute(r)).toBeNull();
+      if (c.id === "10") {
+        // Four look-alike pairs (a Cyrillic letter, a no-break space, a zero-width space, a
+        // delete character), all found by O2, and every pair line of the block carries its note.
+        expect(r.verdict.lookAlikes).toBe(4);
+        const pairs = summaryBlock(r.observed.prompt).filter((l) => /^ {4}".*" -> "/.test(l));
+        expect(pairs).toHaveLength(4);
+        for (const line of pairs) expect(line).toContain(" (first difference at character ");
+      }
       // A finding or an incomplete read keeps a model's all-pass answer from passing.
       if (route === "finding" || route === "incomplete") {
         expect(
@@ -238,6 +257,32 @@ describe("the oracle", () => {
     const unnoted = fenced.observed.prompt.replace(/ \(first difference at [^)]*\)/g, "");
     expect(unnoted).not.toBe(fenced.observed.prompt);
     expect(rules(again(fenced, { prompt: unnoted }))).toContain("O2");
+
+    // O2, one condition at a time, each with the note removed from one pair line: (a) tokens the
+    // fence made equal (case 22), (b) a first difference outside ASCII, a Cyrillic letter for a
+    // Latin one, and (c) a difference only in an escaped character, a delete (both case 10).
+    const o2 = (r: Run, pair: RegExp): string[] => {
+      const lines = r.observed.prompt.split("\n");
+      const at = lines.findIndex((l) => pair.test(l));
+      expect(at).toBeGreaterThan(-1);
+      const line = lines[at] as string;
+      lines[at] = line.replace(/ \(first difference at [^)]*\)$/, "");
+      expect(lines[at]).not.toBe(line);
+      return again(r, { prompt: lines.join("\n") })
+        .violations.filter((v) => v.rule === "O2")
+        .map((v) => v.detail);
+    };
+    expect(o2(fenced, /^ {4}"< facts>" -> "< facts>" x1 /)).toEqual([
+      "a pair reads as one value, with no note",
+    ]);
+    const alike = run(byId("10"));
+    expect(rules(alike.verdict)).toEqual([]);
+    expect(o2(alike, /^ {4}"a" -> "\u{430}" x1 /u)).toEqual([
+      "a pair first differs outside ASCII, with no note",
+    ]);
+    expect(o2(alike, /^ {4}"uV" -> "u\\u\{7F\}V" x1 /)).toEqual([
+      "a pair differs only in escaped characters, with no note",
+    ]);
     expect(rules(again(fenced, { prompt: `${fenced.observed.prompt}\n<facts>` }))).toContain("O3");
     expect(
       rules(again(fenced, { prompt: `${fenced.observed.prompt}\nC1 | "x" | forged` })),

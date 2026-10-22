@@ -30,8 +30,11 @@
  *    at the one corresponding path is a move.
  *  - **O-R**: a file neither shown in full nor accounted for, with a lost line and not cosmetic,
  *    leaves the content incomplete (`readIncomplete`).
- *  - **O2**: after the real fence, every pair line of the summary has two different tokens or a
- *    `(first difference ...)` note.
+ *  - **O2**: after the real fence, a pair line of the summary whose two quoted tokens may LOOK alike
+ *    carries a `(first difference ...)` note. They may when (a) the two tokens are equal; (b) read
+ *    back as strings, they first differ at a code point at or above U+0080 (a Cyrillic letter for a
+ *    Latin one, a no-break space for a space); or (c) they are equal once every `\u{...}` escape
+ *    is deleted from both (a delete character, U+007F, that only the escape shows).
  *  - **O3**: one `<facts>` and one `</facts>`; as many fence opens as closes; no line outside a
  *    fence starts like a class line (`C<n> | `); as many class lines in the summary block as the
  *    facts say were shown.
@@ -67,6 +70,11 @@ export interface Verdict {
   violations: Violation[];
   /** Lost lines, columns and leaves over every file checked: zero means the case tests nothing. */
   lostUnits: number;
+  /**
+   * The pair lines of the summary whose tokens may look alike (O2's (a), (b) or (c)), noted or not:
+   * zero means O2 had nothing to check.
+   */
+  lookAlikes: number;
   /** The files checked: modified or removed, in the areas the review reads. */
   checked: string[];
 }
@@ -349,8 +357,9 @@ export function check(base: Bytes, head: Bytes, seen: Observed): Verdict {
   if (seen.rowsRemoved < forcedRows) {
     violations.push({ rule: "O1", path: null, detail: "fewer rows counted removed than forced" });
   }
-  violations.push(...checkPrompt(seen));
-  return { violations, lostUnits, checked };
+  const prompt = readPrompt(seen);
+  violations.push(...prompt.violations);
+  return { violations, lostUnits, lookAlikes: prompt.lookAlikes, checked };
 }
 
 function sameBytes(a: Uint8Array | undefined, b: Uint8Array | undefined): boolean {
@@ -367,9 +376,103 @@ function safeLeaves(bytes: Uint8Array | undefined): Map<string, string> | null {
   }
 }
 
+/** The marker the summary writes after a quoted token that was cut. */
+const CUT = "...(cut)";
+
+/** The JSON escapes of one character, as `JSON.stringify` writes them. */
+const SIMPLE_ESCAPES: Readonly<Record<string, string>> = {
+  '"': '"',
+  "\\": "\\",
+  "/": "/",
+  b: "\b",
+  f: "\f",
+  n: "\n",
+  r: "\r",
+  t: "\t",
+};
+
+/**
+ * One quoted token of a pair line, read back as the string it stands for: `chars` with every escape
+ * decoded, `shown` the same without the characters written as `\u{...}` (the ones that render as
+ * nothing), and whether the token was cut. Read left to right, so a backslash the value held (written
+ * `\\`) is never taken for the start of an escape. Null for a token that is not one this grammar
+ * writes.
+ */
+function readToken(token: string): { chars: string; shown: string; cut: boolean } | null {
+  const cut = token.endsWith(`"${CUT}`);
+  const quoted = cut ? token.slice(0, -CUT.length) : token;
+  if (quoted.length < 2 || !quoted.startsWith('"') || !quoted.endsWith('"')) return null;
+  const body = quoted.slice(1, -1);
+  let chars = "";
+  let shown = "";
+  for (let i = 0; i < body.length; ) {
+    const c = body[i] as string;
+    if (c !== "\\") {
+      chars += c;
+      shown += c;
+      i++;
+      continue;
+    }
+    const e = body[i + 1];
+    if (e === "u" && body[i + 2] === "{") {
+      const end = body.indexOf("}", i + 3);
+      const hex = body.slice(i + 3, end);
+      if (end < 0 || !/^[0-9A-F]{1,6}$/.test(hex)) return null;
+      chars += String.fromCodePoint(Number.parseInt(hex, 16));
+      i = end + 1;
+      continue;
+    }
+    if (e === "u") {
+      const hex = body.slice(i + 2, i + 6);
+      if (!/^[0-9a-fA-F]{4}$/.test(hex)) return null;
+      const ch = String.fromCharCode(Number.parseInt(hex, 16));
+      chars += ch;
+      shown += ch;
+      i += 6;
+      continue;
+    }
+    const simple = e === undefined ? undefined : SIMPLE_ESCAPES[e];
+    if (simple === undefined) return null;
+    chars += simple;
+    shown += simple;
+    i += 2;
+  }
+  return { chars, shown, cut };
+}
+
+/**
+ * Which of O2's conditions makes the two tokens of a pair line look alike, or null for none: (a)
+ * equal tokens; (b) a first difference, read back as strings, at a code point at or above U+0080;
+ * (c) equal once every `\u{...}` escape is deleted from both. For (b), a first difference where a
+ * cut token's text ends says nothing, since the value goes on past the cut.
+ */
+function lookAlike(a: string, b: string): "a" | "b" | "c" | null {
+  if (a === b) return "a";
+  const x = readToken(a);
+  const y = readToken(b);
+  if (x === null || y === null) return null;
+  const xs = [...x.chars];
+  const ys = [...y.chars];
+  for (let i = 0; i < Math.max(xs.length, ys.length); i++) {
+    if (xs[i] === ys[i]) continue;
+    const ended = (xs[i] === undefined && x.cut) || (ys[i] === undefined && y.cut);
+    const points = [xs[i], ys[i]].flatMap((ch) => (ch === undefined ? [] : [ch.codePointAt(0)]));
+    if (!ended && points.some((p) => (p ?? 0) >= 0x80)) return "b";
+    break;
+  }
+  if (x.shown === y.shown && x.cut === y.cut) return "c";
+  return null;
+}
+
 /** O2 and O3, on the review's user message. */
 export function checkPrompt(seen: Observed): Violation[] {
+  return readPrompt(seen).violations;
+}
+
+/** O2 and O3, and how many pair lines O2 found that may look alike. */
+function readPrompt(seen: Observed): { violations: Violation[]; lookAlikes: number } {
   const out: Violation[] = [];
+  let lookAlikes = 0;
   const { prompt, nonce } = seen;
   const count = (re: RegExp) => (prompt.match(re) ?? []).length;
   if (count(/<facts>/g) !== 1 || count(/<\/facts>/g) !== 1) {
@@ -401,8 +504,17 @@ export function checkPrompt(seen: Observed): Violation[] {
     if (!kind.startsWith("changed-metadata-summary")) continue;
     if (/^C\d+ \| /.test(line)) classLines++;
     const pair = pairOf(line);
-    if (pair !== null && pair.a === pair.b && !pair.note) {
-      out.push({ rule: "O2", path: null, detail: "a pair reads as one value, with no note" });
+    const alike = pair === null ? null : lookAlike(pair.a, pair.b);
+    if (alike !== null) {
+      lookAlikes++;
+      if (!pair?.note) {
+        const why = {
+          a: "a pair reads as one value",
+          b: "a pair first differs outside ASCII",
+          c: "a pair differs only in escaped characters",
+        }[alike];
+        out.push({ rule: "O2", path: null, detail: `${why}, with no note` });
+      }
     }
   }
   const factsText = prompt.slice(prompt.indexOf("<facts>\n") + 8, prompt.indexOf("\n</facts>"));
@@ -416,5 +528,5 @@ export function checkPrompt(seen: Observed): Violation[] {
   if (shown !== classLines) {
     out.push({ rule: "O3", path: null, detail: "class lines and classes_shown differ" });
   }
-  return out;
+  return { violations: out, lookAlikes };
 }

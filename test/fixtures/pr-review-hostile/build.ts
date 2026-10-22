@@ -388,7 +388,7 @@ function case10(): HostileCase {
   const t = ch("sub-01");
   return edited(
     "10",
-    "look-alike values: a zero-width space, a Cyrillic letter, a no-break space",
+    "look-alike values: a zero-width space, a Cyrillic letter, a no-break space, a delete character",
     "summary",
     [t],
     {
@@ -401,7 +401,7 @@ function case10(): HostileCase {
     {
       [t]: tsv(
         ["name", "type", "units", "status", "notes"],
-        ["Cz", "EEG", "uV", "go​od", "a b"],
+        ["Cz", "EEG", "u\u{7F}V", "go​od", "a b"],
         ["Pz", "EEG", "uV", "good", "а"],
       ),
     },
