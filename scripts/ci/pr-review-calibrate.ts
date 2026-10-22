@@ -618,9 +618,10 @@ export interface EvidenceClass {
 /**
  * The modified and removed files the summary REFUSED (so no loss fact counts them) whose diff
  * deletes at least one line, by what the review was given of each: `shown` (a diff not cut, its
- * own or one it repeats), `incomplete` (not shown, and the evidence says the content was not read
- * in full, so the pull request cannot pass on it) or `hidden` (neither: a removal the review could
- * not see and was not told about, which must never happen).
+ * own or one it repeats, that holds as many deleted lines as git counts for the file), `incomplete`
+ * (not shown, and the evidence says the content was not read in full, so the pull request cannot
+ * pass on it) or `hidden` (neither: a removal the review could not see and was not told about,
+ * which must never happen).
  */
 export interface RefusedDeletions {
   shown: number;
@@ -677,56 +678,113 @@ function classesOf(facts: GitFacts): EvidenceClass[] {
 }
 
 /**
- * Sort the files the summary refused that delete a line ({@link RefusedDeletions}). Which delete a
- * line is asked of git once, `git diff --numstat` from the merge base to the head over those paths
- * alone (a binary file, `-` deleted, counts as deleting). What the review was given of each is read
- * from the content pass's own facts: a diff not cut that stands for it, else the pass's
- * `readIncomplete`. Run on blobs the content pass already read, so it fetches nothing.
+ * About how many bytes of paths one `git diff --numstat` of {@link refusedDeletions} is handed. A
+ * pull request can refuse tens of thousands of files, and one call with every path would pass the
+ * system's limit on a command's arguments and fail as `objects_missing`; `git diff` reads no list
+ * of paths from a file, so the paths are split into calls of about this size.
  */
-export function refusedDeletions(dir: string, facts: GitFacts): RefusedDeletions {
+export const REFUSED_NUMSTAT_CHUNK_BYTES = 100_000;
+
+/** `paths` in order, in runs of at most `maxBytes` bytes (and at least one path each). */
+function chunkPaths(paths: readonly string[], maxBytes: number): string[][] {
+  const chunks: string[][] = [];
+  let chunk: string[] = [];
+  let bytes = 0;
+  for (const path of paths) {
+    const size = Buffer.byteLength(path) + 1;
+    if (chunk.length > 0 && bytes + size > maxBytes) {
+      chunks.push(chunk);
+      chunk = [];
+      bytes = 0;
+    }
+    chunk.push(path);
+    bytes += size;
+  }
+  if (chunk.length > 0) chunks.push(chunk);
+  return chunks;
+}
+
+/**
+ * How many lines a diff's text deletes: its lines that start with `-` after its first `@@` line.
+ * A deleted line whose own text starts with `--` prints as `---` and is counted; the header's
+ * `--- a/<path>` comes before the first `@@` and is not. A diff with no `@@` line (git's one line
+ * for a binary diff, or a change of mode alone) deletes none.
+ */
+function deletedLinesShown(text: string): number {
+  const lines = text.split("\n");
+  const hunk = lines.findIndex((line) => line.startsWith("@@"));
+  if (hunk < 0) return 0;
+  let n = 0;
+  for (const line of lines.slice(hunk + 1)) if (line.startsWith("-")) n++;
+  return n;
+}
+
+/**
+ * Sort the files the summary refused that delete a line ({@link RefusedDeletions}). Which delete a
+ * line, and how many, is asked of git: `git diff --numstat` from the merge base to the head over
+ * those paths alone, in calls of at most `chunkBytes` bytes of paths (a binary file, `-` deleted,
+ * counts as deleting). What the review was given of each is read from the content pass's own
+ * facts and decided from the content of the diff, not from its being there: a file is shown only
+ * when the diff not cut that stands for it (its own, or the one it is folded onto) holds at least
+ * as many deleted lines as git counts. A binary file is never shown, since git prints no line of
+ * it, and neither is a file whose diff holds fewer deleted lines than its count. A file not shown
+ * is incomplete when the pass's `readIncomplete` says so, and hidden otherwise. Run on blobs the
+ * content pass already read, so it fetches nothing.
+ */
+export function refusedDeletions(
+  dir: string,
+  facts: GitFacts,
+  chunkBytes: number = REFUSED_NUMSTAT_CHUNK_BYTES,
+): RefusedDeletions {
   const out: RefusedDeletions = { shown: 0, incomplete: 0, hidden: 0 };
   const refused = facts.summary.files.filter((o) => o.refusal !== null).map((o) => o.path);
   if (refused.length === 0) return out;
-  let raw: string;
-  try {
-    raw = run("git", [
-      "--literal-pathspecs",
-      "-C",
-      dir,
-      "-c",
-      "core.hooksPath=/dev/null",
-      "-c",
-      "core.fsmonitor=false",
-      "-c",
-      "protocol.ext.allow=never",
-      "diff",
-      "--numstat",
-      "-z",
-      "--no-renames",
-      "--no-ext-diff",
-      "--no-textconv",
-      facts.mergeBase,
-      facts.head,
-      "--",
-      ...refused,
-    ]);
-  } catch {
-    throw new CalibrationReadError("objects_missing");
-  }
-  const shownInFull = new Set<string>();
+  // The diff not cut that stands for each file, and how many deleted lines it holds.
+  const shownBy = new Map<string, number>();
   for (const p of facts.patches) {
     if (p.truncated) continue;
-    shownInFull.add(p.path);
-    for (const path of p.same) shownInFull.add(path);
+    const deleted = deletedLinesShown(p.text);
+    shownBy.set(p.path, deleted);
+    for (const path of p.same) shownBy.set(path, deleted);
   }
-  for (const record of raw.split("\0")) {
-    if (record === "") continue;
-    const m = /^(\d+|-)\t(\d+|-)\t(.+)$/s.exec(record);
-    if (m === null) throw new CalibrationReadError("objects_missing");
-    if (m[2] !== "-" && Number(m[2]) === 0) continue;
-    if (shownInFull.has(m[3] as string)) out.shown++;
-    else if (facts.readIncomplete) out.incomplete++;
-    else out.hidden++;
+  for (const chunk of chunkPaths(refused, chunkBytes)) {
+    let raw: string;
+    try {
+      raw = run("git", [
+        "--literal-pathspecs",
+        "-C",
+        dir,
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        "protocol.ext.allow=never",
+        "diff",
+        "--numstat",
+        "-z",
+        "--no-renames",
+        "--no-ext-diff",
+        "--no-textconv",
+        facts.mergeBase,
+        facts.head,
+        "--",
+        ...chunk,
+      ]);
+    } catch {
+      throw new CalibrationReadError("objects_missing");
+    }
+    for (const record of raw.split("\0")) {
+      if (record === "") continue;
+      const m = /^(\d+|-)\t(\d+|-)\t(.+)$/s.exec(record);
+      if (m === null) throw new CalibrationReadError("objects_missing");
+      const deleted = m[2] as string;
+      if (deleted !== "-" && Number(deleted) === 0) continue;
+      const inDiff = shownBy.get(m[3] as string);
+      if (deleted !== "-" && inDiff !== undefined && inDiff >= Number(deleted)) out.shown++;
+      else if (facts.readIncomplete) out.incomplete++;
+      else out.hidden++;
+    }
   }
   return out;
 }

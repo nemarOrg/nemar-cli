@@ -1307,6 +1307,139 @@ describe("--evidence-only: the review's evidence passes, and no model", () => {
     expect(table).toContain("files shown 0, incomplete 0, HIDDEN 1");
   });
 
+  test("a refused file is shown only when a diff not cut holds every line it deletes", () => {
+    // Three refused tables (a ragged row each). The first two delete the same two rows and add the
+    // same one, so the second's diff is folded onto the first's; the third deletes a row whose
+    // first cell is `--`, which its diff prints as `---`.
+    const pr = localChange(
+      "rd-content",
+      {
+        [channels("sub-01")]: "name\ttype\nCz\tEEG\nPz\tEEG\n",
+        [channels("sub-02")]: "name\ttype\nCz\tEEG\nPz\tEEG\n",
+        [channels("sub-03")]: "name\ttype\n--\tEEG\nCz\tEEG\n",
+      },
+      (dir) => {
+        write(dir, channels("sub-01"), "name\ttype\nPz\tEEG\textra\n");
+        write(dir, channels("sub-02"), "name\ttype\nPz\tEEG\textra\n");
+        write(dir, channels("sub-03"), "name\ttype\nCz\tEEG\textra\n");
+      },
+    );
+    const listing = gatherListing(pr.dir, pr.base, pr.head);
+    const facts = { ...listing, ...gatherContent(pr.dir, listing) };
+    expect(facts.summary.files.filter((o) => o.refusal !== null).map((o) => o.path)).toEqual([
+      channels("sub-01"),
+      channels("sub-02"),
+      channels("sub-03"),
+    ]);
+    expect(facts.patches.find((p) => p.path === channels("sub-01"))?.same).toEqual([
+      channels("sub-02"),
+    ]);
+    expect(facts.patches.find((p) => p.path === channels("sub-03"))?.text).toContain(
+      "\n---\tEEG\n",
+    );
+    expect(facts.readIncomplete).toBe(false);
+    // The real pass: every deleted line is in a diff not cut, its own or the one it is folded onto.
+    expect(refusedDeletions(pr.dir, facts)).toEqual({ shown: 3, incomplete: 0, hidden: 0 });
+
+    // The same facts, with one diff's text replaced. A diff that is only git's line for a binary
+    // file shows no deleted line, so its file is not shown although its patch is not cut: HIDDEN
+    // when the content is called complete (exit 1), incomplete when it is not.
+    const third = channels("sub-03");
+    const withText = (path: string, text: string) =>
+      facts.patches.map((p) => (p.path === path ? { ...p, text } : p));
+    const binary = withText(
+      third,
+      `diff --git a/${third} b/${third}\nBinary files a/${third} and b/${third} differ\n`,
+    );
+    const hidden = refusedDeletions(pr.dir, { ...facts, patches: binary });
+    expect(hidden).toEqual({ shown: 2, incomplete: 0, hidden: 1 });
+    const row: EvidenceRow = {
+      pr: "nm000460#2",
+      error: null,
+      evidence: null,
+      refusedBy: null,
+      classes: null,
+      refusedDeleted: hidden,
+      timings: null,
+    };
+    expect(evidenceExitCode([row])).toBe(1);
+    expect(
+      refusedDeletions(pr.dir, { ...facts, patches: binary, readIncomplete: true, unreadFiles: 1 }),
+    ).toEqual({ shown: 2, incomplete: 1, hidden: 0 });
+
+    // A diff that holds one deleted line fewer than git counts: the file it stands for, and the one
+    // folded onto it, are not shown.
+    const first = facts.patches.find((p) => p.path === channels("sub-01"));
+    const lines = (first?.text ?? "").split("\n");
+    const cz = lines.indexOf("-Cz\tEEG");
+    expect(cz).toBeGreaterThan(lines.findIndex((l) => l.startsWith("@@")));
+    const short = withText(channels("sub-01"), lines.filter((_, i) => i !== cz).join("\n"));
+    expect(refusedDeletions(pr.dir, { ...facts, patches: short })).toEqual({
+      shown: 1,
+      incomplete: 0,
+      hidden: 2,
+    });
+
+    // A binary file (git counts its deleted lines as `-`) is never shown, whatever text a diff that
+    // claims to stand for it holds: git prints no line of it.
+    const nul = localChange(
+      "rd-binary",
+      { [channels("sub-01")]: "name\ttype\nCz\tEEG\nPz\tE\0EG\n" },
+      (dir) => write(dir, channels("sub-01"), "name\ttype\nPz\tE\0EG\n"),
+    );
+    const nulListing = gatherListing(nul.dir, nul.base, nul.head);
+    const nulFacts = { ...nulListing, ...gatherContent(nul.dir, nulListing) };
+    expect(refusedDeletions(nul.dir, nulFacts)).toEqual({ shown: 0, incomplete: 1, hidden: 0 });
+    const table = channels("sub-01");
+    const claimed = {
+      path: table,
+      text: `diff --git a/${table} b/${table}\n--- a/${table}\n+++ b/${table}\n@@ -1,3 +1,2 @@\n name\ttype\n-Cz\tEEG\n Pz\tE\0EG\n`,
+      truncated: false,
+      same: [],
+    };
+    expect(
+      refusedDeletions(nul.dir, {
+        ...nulFacts,
+        patches: [...nulFacts.patches, claimed],
+        readIncomplete: false,
+        unreadFiles: 0,
+      }),
+    ).toEqual({ shown: 0, incomplete: 0, hidden: 1 });
+  });
+
+  test("the refused paths are counted in chunks, and every chunk counts", () => {
+    // Six refused tables, each deleting rows of its own: six diffs, each shown in full.
+    const tables = Array.from({ length: 6 }, (_, i) => channels(`sub-0${i + 1}`));
+    const pr = localChange(
+      "rd-chunks",
+      Object.fromEntries(tables.map((t, i) => [t, `name\ttype\nC${i}\tEEG\nP${i}\tEEG\n`])),
+      (dir) => {
+        for (const [i, t] of tables.entries()) write(dir, t, `name\ttype\nP${i}\tEEG\textra\n`);
+      },
+    );
+    const listing = gatherListing(pr.dir, pr.base, pr.head);
+    const facts = { ...listing, ...gatherContent(pr.dir, listing) };
+    expect(facts.summary.files.filter((o) => o.refusal !== null)).toHaveLength(6);
+    // Each path is 40 bytes and a separator: two to a chunk of 100 bytes, so three calls.
+    expect(tables.every((t) => t.length === 40)).toBe(true);
+    const log = join(root, "rd-chunks-numstat.log");
+    const restore = installGitShim(root, [{ match: " --numstat -z ", log }]);
+    let chunked: ReturnType<typeof refusedDeletions>;
+    let whole: ReturnType<typeof refusedDeletions>;
+    let calls: string[];
+    try {
+      chunked = refusedDeletions(pr.dir, facts, 100);
+      calls = readFileSync(log, "utf8").trim().split("\n");
+      whole = refusedDeletions(pr.dir, facts);
+    } finally {
+      restore();
+    }
+    expect(chunked).toEqual({ shown: 6, incomplete: 0, hidden: 0 });
+    expect(whole).toEqual(chunked);
+    expect(calls).toHaveLength(3);
+    expect(readFileSync(log, "utf8").trim().split("\n")).toHaveLength(4);
+  });
+
   test("no path or value reaches the table or the JSON", async () => {
     const SUB = "sub-SECRETSUBJECT";
     const table = `${SUB}/eeg/${SUB}_task-SECRETTASK_channels.tsv`;
