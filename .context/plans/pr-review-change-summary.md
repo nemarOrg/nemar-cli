@@ -265,7 +265,7 @@ Each summarized file yields atoms of these kinds, each with a **role**.
 | `json_value_changed` | modification | A leaf's value changed, type kept |
 | `json_type_changed` | modification | A leaf's value changed type (`"1"` to `1`) |
 | `json_emptied` | modification | A non-missing leaf became missing |
-| `json_key_renamed` | modification | A leaf moved to a sibling key with the same value, unique among its parent's removed leaves and among its added leaves, whose name folds to the same (case and punctuation, section 4.7) |
+| `json_key_renamed` | modification | A leaf moved to a sibling key with the same value, unique among its parent's removed leaves and among its added leaves, whose name folds to the same non-empty text (case and punctuation, section 4.7) |
 | `json_empty_key_removed` | modification | A leaf whose value was missing was removed |
 | `rows_reordered`, `columns_reordered`, `json_keys_reordered` | modification | Order changed, content kept (for tables, decided over every paired row, so a keyless row paired as an edit counts too) |
 | `format` | modification | BOM, line endings, final newline, `json_respelled`, (slice 4) `encoding_repaired` |
@@ -463,12 +463,20 @@ Two changes close it.
 
 ### 4.7 JSON renames
 
-A removed leaf and an added leaf are a `json_key_renamed` pair when they have the same parent path and the same value, and their last names are equal after lower-casing and removing every character that is not a letter or digit.
+A removed leaf and an added leaf are a `json_key_renamed` pair when both are keys (not list positions) with the same parent path and the same value, and their last names fold to the same, non-empty text.
+The fold lower-cases a name and removes its runs of Unicode punctuation and separators (`_`, `-`, `.`, spaces, quotes and the like).
+Letters, digits, signs, symbols (`+`, `<`, `$`) and combining marks stay and must match.
+A name that is a number literal (`-1`, `+3`, `.5`, `1.2`, `1e-3`, `5%`) is only lower-cased, never folded: a changed sign, point or exponent is a changed code, so `-1` to `1`, `.5` to `5` and `1e-3` to `1e3` are a removed key and an added one.
 Punctuation with a digit on both sides is part of a number and is not removed by the folding (D15): `12` to `1.2` and `0.5` to `05` are a removed key and an added one, not a rename.
+A name made only of punctuation folds to nothing and is never renamed (`-` to `_`).
+A sign or point in a name that is not a bare number (`Level -1` to `Level 1`) is punctuation like any other and folds; the summary shows both names exactly.
 In addition (D8, narrowed on 2026-10-22, issue #1879), the shared value must be **unique among the parent's removed leaves and among its added leaves**: two removed keys with one value, or two added ones, are no evidence of which became which, so `Foo` and `Bar` (both `0`) removed and `FOO` added is `json_key_removed` twice plus `json_key_added`, not a rename.
+"Removed" and "added" mean the leaves the first pairing (same path, value changed there) left unpaired, so a leaf that a later pass explains as a move still counts: `Foo` and `Bar` (both `1`) removed, `FOO` added and `Bar` gained by a sidecar leaves `Foo` a removed key, which over-blocks and never hides.
 A sibling that is unchanged, or whose value changed at its own path, is not a candidate and does not count: `MiscChannelCount` to `MISCChannelCount` beside other counts of `0` is a rename.
-Only case and punctuation make a respelling a rename. A key that gained or lost a prefix, a suffix or a digit (`Fz` to `EEG_Fz`, `x1` to `1`, `go` to `go3`) is a removed key and an added one: the relabel rules of section 4.3 apply to table cells, not to JSON keys.
-(Before the narrowing the value had to be unique within its whole parent, and a relabel rule could also pair two keys. The first measurement on the real code, section 12.4, showed that blocking `MiscChannelCount` to `MISCChannelCount` in four of 86 pull requests, the very case that motivated rename detection.)
+Only case and punctuation make a respelling a rename.
+A key that gained or lost a prefix, a suffix or a digit (`Fz` to `EEG_Fz`, `x1` to `1`, `go` to `go3`) is a removed key and an added one: the relabel rules of section 4.3 apply to table cells, not to JSON keys.
+(Before the narrowing the value had to be unique within its whole parent, and a relabel rule could also pair two keys.
+The first measurement on the real code, section 12.4, showed that blocking `MiscChannelCount` to `MISCChannelCount` in four of 86 pull requests, the very case that motivated rename detection.)
 A removed leaf has at most one candidate, so the pass is linear in the document and needs neither a candidate cap nor the step budget of section 4.4.
 
 ---
@@ -1192,7 +1200,9 @@ Applied one at a time, each must turn a named test red (the repository's practic
 - account files of an abandoned summary;
 - put platform findings last, or let the model's findings be sliced after them;
 - render a value without escaping `\p{Cf}`;
-- count a file in `files_read` twice.
+- count a file in `files_read` twice;
+- in a JSON rename group, count every leaf of the parent (not only the unpaired ones), let a relabel rule pair two keys, let the added side keep its last candidate, ignore the removed-side count, or compare the folded names always equal;
+- fold signs, symbols or combining marks away, fold a number literal, drop the digit exception, or accept an empty fold, in the JSON key fold.
 
 ### 12.4 Calibration
 
@@ -1256,7 +1266,8 @@ With `--without-summary` (the pass as it was before the summary existed) 31 pull
 - **Q2 (D8, unique value): narrow.**
   D8 as first written defeated the case that motivated rename detection (section 1.1).
   Section 4.7 now says what was built in #1879: the value is unique among the parent's removed leaves and among its added leaves, and only case and punctuation make a respelling a rename.
-  Measured on set A after the change: blocking loss 18 (was 20), the four pull requests above no longer block, and `on004745` #1 is back to 10 removed keys, nine of them `x1` to `x10` without the `x`, shown exactly; accounted for and truncated do not move.
+  Measured on set A after the change: blocking loss 18 (was 20); two of the four pull requests above (`on005420` #1, `on003195` #1) no longer block, and `on003194` #1 and `on006126` #1 lose the renamed keys (29 to 0, 93 to 3) and keep a platform finding for another removal, as in the prototype; `on004745` #1 is back to 10 removed keys, nine of them `x1` to `x10` without the `x`, shown exactly; accounted for and truncated do not move.
+  A review of the change found that the fold also removed signs, symbols and combining marks, so `-1` to `1`, `<5` to `>5` and `5%` to `5` read as renames; it now removes punctuation and separators only and compares a number literal as written (section 4.7), and set A does not move.
   Not chosen: keeping D8, so that each of the four stays a platform blocker.
 
 **Removals in a file the summary refused.**
@@ -1266,7 +1277,7 @@ HIDDEN is a tripwire, not an expected outcome: a refused file with a deleted lin
 A file counts as shown only when its patch is not cut and holds at least as many `-` lines as git's own count of deleted lines (a binary file never does).
 HIDDEN appears when the pass counts such a file as read without all of them in the patch, which is how the binary-diff hole would have shown up.
 The run fixes the git configuration for every git it starts (no global or system configuration), so a setting such as `diff.algorithm` in an operator's `~/.gitconfig` cannot make git's count and the patch disagree.
-`on004588` #1 is the label template's case of a removal only the model can see, and `on003620` #1 and `on003195` #1 are in its blocking group.
+`on004588` #1 and `on003195` #1 are the label template's cases of a removal only the model can see (the second is shown in full), and `on003620` #1 is in its blocking group.
 
 **Set B, the hostile set.**
 24 synthetic pull requests (22 cases; 16 and 21 are split in two) built by `test/fixtures/pr-review-hostile/build.ts`, each a real repository read by the real passes.

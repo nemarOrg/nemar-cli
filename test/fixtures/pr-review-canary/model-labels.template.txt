@@ -73,5 +73,7 @@ nm000157#4 ? 8a759d180e795a63c38ecbbca2740c113d1c4f33 ad373b0e4b9c9ec92fd60eaff6
 # A removal in a file the summary refused, with no platform finding (2). The model is the only
 # reader of the removal, from the raw diff. One of these is shown in full, the other is not and
 # cannot pass.
+# (on006233#2 also has such a removal, but its file listing is cut, so it cannot pass whatever the
+# model says, and it is left out.)
 on003195#1 ? dea6fe72703cc54348a22e6d93aac795f0df74df 838d36bb5b8f0d7db46eb69da0fc6fd6a007a8e1
 on004588#1 ? 1b74c341388495242262bc2e6613242ed2b6859a 2c0e67fbef5fe835b92eee8cbccd6f97933920f9
