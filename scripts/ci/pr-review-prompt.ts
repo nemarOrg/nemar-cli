@@ -620,30 +620,39 @@ export function assembleFactsReport(evidence: ReviewEvidence): PrReviewReport {
  * left for the review is what eight leaves after `fixed` and after one place for each such
  * criterion, and the review's findings that explain a failing criterion are kept before the rest:
  *
- *  - a criterion that fails and that no finding of `fixed` names is failing; the review's FIRST
- *    finding that names it is its pick, and a failing criterion the review names nowhere is one the
- *    parser will explain;
- *  - the room is `MAX_FINDINGS - fixed.length - (the criteria the parser will explain)`; the picks
- *    are kept first, then the review's other findings in its order until the room is full, and the
- *    kept ones stay in the review's order.
+ *  - `reasons` are the review's own reasons for failed text judgments, each found in place of one
+ *    of the script's (see `assembleReport`): they are always kept, and their criteria are explained;
+ *  - a criterion that fails and that no finding of `fixed` and no reason names is failing; the
+ *    review's FIRST finding that names it is its pick, and a failing criterion the review names
+ *    nowhere is one the parser will explain;
+ *  - the room is `MAX_FINDINGS - fixed.length - (the criteria the parser will explain)`; the reasons
+ *    and the picks are kept first, then the review's other findings in its order until the room is
+ *    full, and the kept ones stay in the review's order.
  *
- * The picks always fit: at most three platform findings explain `no_degradation`, at most three of
- * the script's explain the two text criteria, and a full report's `genuine_contribution` passes, so
- * `fixed` and the failing criteria are at most eight together. Then the parser trims nothing and
- * adds a finding only where the review gave none, so its output parses back to itself, and a
- * criterion the review explained keeps the review's reason. With no failing criterion left
+ * The reasons and the picks always fit: at most three platform findings explain `no_degradation`,
+ * the script's findings and the reasons are at most three together (one for each text judgment's
+ * slot) and explain the two text criteria, and a full report's `genuine_contribution` passes, so
+ * `fixed`, the reasons and the failing criteria are at most eight together. Then the parser trims
+ * nothing and adds a finding only where the review gave none, so its output parses back to itself,
+ * and a criterion the review explained keeps the review's reason. With no failing criterion left
  * unexplained this keeps exactly the review's first findings, as a plain cut would.
  */
 function keepModelFindings(
   modelFindings: readonly unknown[],
   criteria: Readonly<Record<Criterion, unknown>>,
   fixed: readonly ReviewFinding[],
+  reasons: readonly number[],
 ): { kept: unknown[]; cut: unknown[] } {
-  const picks: number[] = [];
+  const picks: number[] = [...reasons];
+  const explains = (i: number, c: Criterion): boolean => {
+    const f = modelFindings[i];
+    return isRecordValue(f) && f.criterion === c;
+  };
   let unexplained = 0;
   for (const c of CRITERIA) {
     if (criteria[c] !== "fail" || fixed.some((f) => f.criterion === c)) continue;
-    const i = modelFindings.findIndex((f) => isRecordValue(f) && f.criterion === c);
+    if (reasons.some((i) => explains(i, c))) continue;
+    const i = modelFindings.findIndex((_, at) => explains(at, c));
     if (i >= 0) picks.push(i);
     else unexplained++;
   }
@@ -738,23 +747,51 @@ export function assembleReport(
   const misleading = m.misleading_body === true;
 
   const modelFindings: unknown = m.findings;
-  const said = (codes: readonly FindingCode[]): boolean =>
-    Array.isArray(modelFindings) &&
-    modelFindings.some((f) => isRecordValue(f) && codes.includes(f.code as FindingCode));
+  // Each failed text judgment carries one reason: the review's own, when it gave one on that
+  // judgment's criterion with one of its codes, or else the script's. The review's is then kept
+  // whatever room is left (`reasons`), so the script's is never left out for a reason the report
+  // goes on to drop; a code filed under another criterion explains nothing here.
   const added: ReviewFinding[] = [];
-  if (!titleOk && !said(["title_placeholder", "title_not_descriptive"])) {
-    added.push({ ...UNEXPLAINED_TEXT_FINDING.title, path: null });
+  const reasons: number[] = [];
+  const explain = (
+    codes: readonly FindingCode[],
+    criterion: Criterion,
+    script: Omit<ReviewFinding, "path">,
+  ): void => {
+    const at = Array.isArray(modelFindings)
+      ? modelFindings.findIndex(
+          (f) =>
+            isRecordValue(f) && f.criterion === criterion && codes.includes(f.code as FindingCode),
+        )
+      : -1;
+    if (at >= 0) reasons.push(at);
+    else added.push({ ...script, path: null });
+  };
+  if (!titleOk) {
+    explain(
+      ["title_placeholder", "title_not_descriptive"],
+      "clear_title_and_description",
+      UNEXPLAINED_TEXT_FINDING.title,
+    );
   }
   // A description the review failed is either empty, which is a fact and is named as one, or there
   // but unreadable. Either way the failed criterion carries its reason, so the parser never has to
   // fill in "No detail given".
   if (!bodyOk && evidence.description_empty) {
     added.push({ ...UNEXPLAINED_TEXT_FINDING.empty, path: null });
-  } else if (!bodyOk && !said(["description_placeholder"])) {
-    added.push({ ...UNEXPLAINED_TEXT_FINDING.body, path: null });
+  } else if (!bodyOk) {
+    explain(
+      ["description_placeholder"],
+      "clear_title_and_description",
+      UNEXPLAINED_TEXT_FINDING.body,
+    );
   }
-  if (misleading && !said(["description_misleading"])) {
-    added.push({ ...UNEXPLAINED_TEXT_FINDING.misleading, path: null });
+  if (misleading) {
+    explain(
+      ["description_misleading"],
+      "description_not_misleading",
+      UNEXPLAINED_TEXT_FINDING.misleading,
+    );
   }
   const criteria: Record<Criterion, unknown> = {
     genuine_contribution: "pass",
@@ -765,7 +802,7 @@ export function assembleReport(
     description_not_misleading: misleading ? "fail" : "pass",
   };
   const { kept, cut } = Array.isArray(modelFindings)
-    ? keepModelFindings(modelFindings, criteria, [...platform, ...added])
+    ? keepModelFindings(modelFindings, criteria, [...platform, ...added], reasons)
     : { kept: [], cut: [] };
   const findings = Array.isArray(modelFindings) ? [...platform, ...kept, ...added] : modelFindings;
   // A model finding cut for room still does what the parser does with a finding before it trims

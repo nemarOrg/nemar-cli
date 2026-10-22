@@ -5595,6 +5595,159 @@ describe("the platform's findings from the change summary", () => {
     expect(report.steering).toBe(true);
   });
 
+  test("a failed title keeps the review's reason when the platform adds findings", () => {
+    const e = buildEvidence(both(), NO_TEXT_PROBLEMS);
+    // The title and the description both fail; the review explains the title, last, and the
+    // script explains the description. Its finding names the same criterion as the review's.
+    const said = reviewOutput({
+      title_ok: false,
+      body_ok: false,
+      findings: [
+        ...Array.from({ length: 5 }, (_, i) => modelFinding(i, "no_degradation")),
+        reason(5, "clear_title_and_description", "title_placeholder"),
+      ],
+    });
+    expect(full(said, e).findings.map(label)).toEqual([
+      "M0",
+      "M1",
+      "M2",
+      "M3",
+      "M4",
+      "title_placeholder",
+      "description_placeholder",
+    ]);
+    const report = full(said, e, platformFindings(both().summary));
+    expect(report.findings.map(label)).toEqual([
+      "data_removed",
+      "metadata_removed",
+      "M0",
+      "M1",
+      "M2",
+      "M3",
+      "title_placeholder",
+      "description_placeholder",
+    ]);
+    expect(parsePrReviewReport(JSON.parse(JSON.stringify(report)))).toEqual(report);
+  });
+
+  test("a title reason filed under another criterion explains nothing: the script gives its own", () => {
+    const e = buildEvidence(both(), NO_TEXT_PROBLEMS);
+    const report = full(
+      reviewOutput({
+        title_ok: false,
+        findings: [{ ...modelFinding(0, "no_degradation"), code: "title_placeholder" }],
+      }),
+      e,
+    );
+    expect(report.findings.map((f) => `${f.criterion} ${label(f)}`)).toEqual([
+      "no_degradation title_placeholder",
+      "clear_title_and_description title_not_descriptive",
+    ]);
+    expect(renderCheck({ kind: "reported", report }).text).not.toContain("No detail given");
+  });
+
+  test("the review's reason takes the place of the script's finding, wherever it comes", () => {
+    const e = buildEvidence(both(), NO_TEXT_PROBLEMS);
+    const platform = platformFindings(both().summary);
+    const notes = Array.from({ length: 7 }, (_, i) => modelFinding(i, "no_degradation"));
+    // The review gives its reason for the failed title eighth: it is kept, and the script adds none.
+    const given = full(
+      reviewOutput({
+        title_ok: false,
+        findings: [...notes, reason(7, "clear_title_and_description", "title_not_descriptive")],
+      }),
+      e,
+      platform,
+    );
+    expect(given.findings.map(label)).toEqual([
+      "data_removed",
+      "metadata_removed",
+      "M0",
+      "M1",
+      "M2",
+      "M3",
+      "M4",
+      "title_not_descriptive",
+    ]);
+    expect(given.findings.at(-1)?.note).toBe("M7");
+    // The control: without a reason of the review's, the script's own finding takes that place.
+    const none = full(reviewOutput({ title_ok: false, findings: notes }), e, platform);
+    expect(none.findings.map(label)).toEqual([
+      "data_removed",
+      "metadata_removed",
+      "M0",
+      "M1",
+      "M2",
+      "M3",
+      "M4",
+      "title_not_descriptive",
+    ]);
+    expect(none.findings.at(-1)?.note).toBe("The title does not say in plain words what changed.");
+  });
+
+  test("the review's reasons, the platform's findings and every failing criterion fit in eight", () => {
+    const e = buildEvidence(both(), NO_TEXT_PROBLEMS);
+    const platform = platformFindings(both().summary);
+    // The title fails and so does the description: the review explains both, last; the two other
+    // questions fail, one with a reason and one with none. Earlier findings name the same text
+    // criteria without being the reasons, so they must not be taken for them.
+    const said = reviewOutput({
+      criteria: { no_degradation: "pass", advances_revision: "fail", material_improvement: "fail" },
+      title_ok: false,
+      misleading_body: true,
+      findings: [
+        modelFinding(0, "no_degradation"),
+        modelFinding(1, "no_degradation"),
+        modelFinding(2, "clear_title_and_description"),
+        modelFinding(3, "description_not_misleading"),
+        reason(4, "clear_title_and_description", "title_placeholder"),
+        reason(5, "description_not_misleading", "description_misleading"),
+        reason(6, "advances_revision", "changes_log_mismatch"),
+        modelFinding(7, "no_degradation"),
+      ],
+    });
+    const two = full(said, e, platform);
+    expect(two.findings.map(label)).toEqual([
+      "data_removed",
+      "metadata_removed",
+      "M0",
+      "M1",
+      "title_placeholder",
+      "description_misleading",
+      "changes_log_mismatch",
+      "No detail given.",
+    ]);
+    expect(two.findings.at(-1)?.criterion).toBe("material_improvement");
+    expect(parsePrReviewReport(JSON.parse(JSON.stringify(two)))).toEqual(two);
+    // Three platform findings leave one place for the review's other findings.
+    const three = full(said, e, [...platform, platform[0] as ReviewFinding]);
+    expect(three.findings.map(label)).toEqual([
+      "data_removed",
+      "metadata_removed",
+      "data_removed",
+      "M0",
+      "title_placeholder",
+      "description_misleading",
+      "changes_log_mismatch",
+      "No detail given.",
+    ]);
+    expect(parsePrReviewReport(JSON.parse(JSON.stringify(three)))).toEqual(three);
+    // The description fails too, and the script explains it: its finding and the review's two
+    // reasons take three places between them, and the bound still holds.
+    const all = full({ ...said, body_ok: false }, e, [...platform, platform[0] as ReviewFinding]);
+    expect(all.findings.map(label)).toEqual([
+      "data_removed",
+      "metadata_removed",
+      "data_removed",
+      "title_placeholder",
+      "description_misleading",
+      "changes_log_mismatch",
+      "description_placeholder",
+      "No detail given.",
+    ]);
+    expect(parsePrReviewReport(JSON.parse(JSON.stringify(all)))).toEqual(all);
+  });
+
   test("a removal the summary accounts for is not a pass", () => {
     const row = removed("pf-row", ["sub-01"], []);
     // The table counts as read: its change was accounted for exactly, the removed row included.
