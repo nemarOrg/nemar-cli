@@ -526,8 +526,8 @@ function isRecordValue(x: unknown): x is Record<string, unknown> {
 /**
  * The most platform findings one report carries: one for rows and columns removed, one for keys
  * removed, and room for one more kind the platform may come to decide from its own facts. Each is
- * placed before the models' findings, so the room left for those is at least
- * `MAX_FINDINGS - MAX_PLATFORM_FINDINGS - 3` (the script's three text findings), which is 2.
+ * placed before the models' findings, which keep what room is left ({@link keepModelFindings});
+ * with at most three, a model finding that explains a failing criterion always keeps its place.
  */
 export const MAX_PLATFORM_FINDINGS = 3;
 
@@ -612,6 +612,53 @@ export function assembleFactsReport(evidence: ReviewEvidence): PrReviewReport {
 }
 
 /**
+ * Which of the review's findings a full report keeps, and which it cuts, when the platform's
+ * findings and the script's own (`fixed`) take their places first.
+ *
+ * The parser gives a criterion that fails with no finding one of its own, "No detail given.", and
+ * makes room for it by trimming the report's LAST findings, which are the script's. So the room
+ * left for the review is what eight leaves after `fixed` and after one place for each such
+ * criterion, and the review's findings that explain a failing criterion are kept before the rest:
+ *
+ *  - a criterion that fails and that no finding of `fixed` names is failing; the review's FIRST
+ *    finding that names it is its pick, and a failing criterion the review names nowhere is one the
+ *    parser will explain;
+ *  - the room is `MAX_FINDINGS - fixed.length - (the criteria the parser will explain)`; the picks
+ *    are kept first, then the review's other findings in its order until the room is full, and the
+ *    kept ones stay in the review's order.
+ *
+ * The picks always fit: at most three platform findings explain `no_degradation`, at most three of
+ * the script's explain the two text criteria, and a full report's `genuine_contribution` passes, so
+ * `fixed` and the failing criteria are at most eight together. Then the parser trims nothing and
+ * adds a finding only where the review gave none, so its output parses back to itself, and a
+ * criterion the review explained keeps the review's reason. With no failing criterion left
+ * unexplained this keeps exactly the review's first findings, as a plain cut would.
+ */
+function keepModelFindings(
+  modelFindings: readonly unknown[],
+  criteria: Readonly<Record<Criterion, unknown>>,
+  fixed: readonly ReviewFinding[],
+): { kept: unknown[]; cut: unknown[] } {
+  const picks: number[] = [];
+  let unexplained = 0;
+  for (const c of CRITERIA) {
+    if (criteria[c] !== "fail" || fixed.some((f) => f.criterion === c)) continue;
+    const i = modelFindings.findIndex((f) => isRecordValue(f) && f.criterion === c);
+    if (i >= 0) picks.push(i);
+    else unexplained++;
+  }
+  const room = Math.max(0, MAX_FINDINGS - fixed.length - unexplained);
+  // Every pick fits (see above); were one not to, the report would hold more than eight findings
+  // and the parser would refuse it, which fails closed.
+  const chosen = new Set(picks);
+  for (let i = 0; i < modelFindings.length && chosen.size < room; i++) chosen.add(i);
+  const kept: unknown[] = [];
+  const cut: unknown[] = [];
+  modelFindings.forEach((f, i) => (chosen.has(i) ? kept : cut).push(f));
+  return { kept, cut };
+}
+
+/**
  * Join what the models said with what git and the API said, and validate the result with the same
  * parser the Worker will use.
  *
@@ -626,12 +673,11 @@ export function assembleFactsReport(evidence: ReviewEvidence): PrReviewReport {
  * `platform` holds the platform's own findings ({@link platformFindings}), which exist only for a
  * full report: the content they come from is read only after the screen let the pull request
  * through, so a screen report given any is refused. They go FIRST, before the models' findings, and
- * the models' findings are cut to the room left after them and after the script's added findings,
- * so no model output can push one out. The parser trims the last findings when it adds one for a
- * criterion that fails with none, and it lowers a `pass` criterion that has a blocker before it
- * trims, so a platform finding has already lowered `no_degradation` whatever is trimmed.
+ * the models' findings are cut to the room left after them, after the script's added findings and
+ * after a place for each criterion the parser will have to explain ({@link keepModelFindings}), so
+ * no model output can push one out and the parser has nothing left to trim.
  *
- * The models' findings beyond the room are dropped here rather than failing the review, and a
+ * The models' findings that do not fit are dropped here rather than failing the review, and a
  * dropped one still lowers what it would have lowered had it fit; everything else that does not fit
  * is an error the caller reports as `model_invalid`.
  */
@@ -710,11 +756,6 @@ export function assembleReport(
   if (misleading && !said(["description_misleading"])) {
     added.push({ ...UNEXPLAINED_TEXT_FINDING.misleading, path: null });
   }
-  // At least 2: the platform makes at most three findings and the script adds at most three.
-  const room = MAX_FINDINGS - platform.length - added.length;
-  const findings = Array.isArray(modelFindings)
-    ? [...platform, ...modelFindings.slice(0, room), ...added]
-    : modelFindings;
   const criteria: Record<Criterion, unknown> = {
     genuine_contribution: "pass",
     no_degradation: answers.no_degradation,
@@ -723,6 +764,10 @@ export function assembleReport(
     clear_title_and_description: titleOk && bodyOk ? "pass" : "fail",
     description_not_misleading: misleading ? "fail" : "pass",
   };
+  const { kept, cut } = Array.isArray(modelFindings)
+    ? keepModelFindings(modelFindings, criteria, [...platform, ...added])
+    : { kept: [], cut: [] };
+  const findings = Array.isArray(modelFindings) ? [...platform, ...kept, ...added] : modelFindings;
   // A model finding cut for room still does what the parser does with a finding before it trims
   // any: a steering finding makes the report a steering attempt, and a blocker lowers a `pass` of
   // its criterion to `unknown`. Without this, making room for the platform's or the script's
@@ -732,7 +777,7 @@ export function assembleReport(
   // that is not a finding is skipped, as the cut skipped it before.
   let steering: unknown = m.steering;
   if (Array.isArray(modelFindings)) {
-    for (const f of modelFindings.slice(room)) {
+    for (const f of cut) {
       if (!isRecordValue(f)) continue;
       if (f.code === "steering_attempt" && steering === false) steering = true;
       if (

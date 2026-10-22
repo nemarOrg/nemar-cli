@@ -46,8 +46,10 @@ The path is the summary's first file, in code-unit order, with a removal; it goe
 At most three platform findings exist (the third is kept for the original-content rules), and only a full report takes them: a screen report given one is refused.
 
 They come first.
-The report's findings are the platform's, then the model's cut to `8 - platform - added`, which is at least 2, then the script's own findings for a failed text judgment, so no model output can push a platform finding out.
-The parser lowers a `pass` criterion that has a blocker before it trims findings to explain a criterion that fails without one; in a full report at most four criteria can need that room once a platform finding explains `no_degradation`, so at least four leading findings survive, and the platform's are at indices 0 and 1.
+The report's findings are the platform's, then the review's that fit, then the script's own findings for a failed text judgment, so no model output can push a platform finding out.
+The parser gives a criterion that fails with no finding one of its own and makes room for it by trimming the report's last findings, which are the script's, so the room left for the review is what eight leaves after the platform's and the script's findings and after one place for each failing criterion that no finding names.
+The review's first finding on each failing criterion that the platform's and the script's findings do not name is kept before its other findings, and the kept ones stay in the review's order; with every failing criterion explained, that is the review's first findings, as a plain cut keeps.
+At most three platform findings explain `no_degradation`, at most three of the script's explain the two text criteria, and a full report's `genuine_contribution` passes, so those findings and the failing criteria are at most eight together: every reason the review gave for a failing criterion fits, the parser trims nothing, and a report parses back to itself.
 A model finding cut for room still does what the parser does with one that fits: a steering finding makes the report a steering attempt, and a blocker lowers its criterion's `pass` to `unknown`, never `genuine_contribution`, which a full report keeps at `pass`.
 Without that carry, the room made for platform findings could raise a verdict: a steering finding cut from the end of eight would no longer fail the review.
 So the verdict can only be lowered, and the stored report holds the lowered criterion, so the Worker's re-derivation gives the job's verdict.
@@ -93,7 +95,6 @@ No new budget enters the job: ADR 0107's 45.4 minutes are unchanged.
 - A removal is never passed on the model's word, at 3 files or at 3,000, whether or not its file was also shown as a diff.
 - The prompt is a calibrated one, changed: the model calibration of ADR 0107 is required again before the check is required.
 - The longest review message, system prompt included, grows to 258,123 characters, under the 300,000 a test holds it to.
-- The check text can read "Other: No detail given." where a model's own finding was cut for room, because the script's text findings look at every finding the model gave; the verdict is unaffected, and this predates the summary.
 - Two values that the fence makes equal (a `<facts>` and a `</facts>`) show as equal text with no note on where they differ, because the note is computed before the fence.
   No loss can hide this way, since a removal is an atom of its own with a finding; the calibration phase adds the case to its hostile fixtures and fixes it there.
 

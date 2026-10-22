@@ -5168,9 +5168,10 @@ describe("the platform's findings from the change summary", () => {
   });
 
   test("they survive the most room the parser can need for criteria that fail without a finding", () => {
-    // Four criteria fail with no finding the parser keeps: two the review failed silently, and two
-    // text judgments whose findings came last and were cut for room. In a full report the screen's
-    // criterion passes and the platform's findings explain the first question, so four is the most.
+    // Four criteria fail: two the review failed silently, and two text judgments whose findings
+    // came last. In a full report the screen's criterion passes and the platform's findings explain
+    // the first question, so four is the most. The review's two reasons are kept before its other
+    // findings, and the parser explains the other two in the places left for them.
     const findings = [
       ...Array.from({ length: 6 }, (_, i) => modelFinding(i, "no_degradation")),
       {
@@ -5203,16 +5204,16 @@ describe("the platform's findings from the change summary", () => {
       "metadata_removed",
       "M0",
       "M1",
-      "No detail given.",
-      "No detail given.",
+      "title_placeholder",
+      "description_misleading",
       "No detail given.",
       "No detail given.",
     ]);
     expect(report.findings.slice(4).map((f) => f.criterion)).toEqual([
-      "advances_revision",
-      "material_improvement",
       "clear_title_and_description",
       "description_not_misleading",
+      "advances_revision",
+      "material_improvement",
     ]);
     expect(report.criteria.no_degradation).toBe("unknown");
   });
@@ -5308,6 +5309,8 @@ describe("the platform's findings from the change summary", () => {
           blocker(8, "advances_revision"),
           blocker(9, "material_improvement"),
           blocker(10, "genuine_contribution"),
+          // The first finding on the failing question is kept as its reason; this second one is cut.
+          blocker(11, "advances_revision"),
         ],
       }),
       e,
@@ -5326,6 +5329,232 @@ describe("the platform's findings from the change summary", () => {
     const titled = full(reviewOutput({ title_ok: false, findings: [...six, filler, steer] }), e);
     expect(titled.findings.map(label)).toEqual([...six.map(label), "M6", "title_not_descriptive"]);
     expect(titled.steering).toBe(true);
+  });
+
+  /** A blocker of the review's on `criterion`, with its own code and the note `M<i>`. */
+  const reason = (i: number, criterion: string, code = "other") => ({
+    ...modelFinding(i, criterion),
+    severity: "blocker",
+    code,
+  });
+
+  test("platform findings do not push out the model's only reason for a failing criterion", () => {
+    const e = buildEvidence(both(), NO_TEXT_PROBLEMS);
+    // Two questions fail, and the review says why only in its seventh and eighth findings.
+    const said = reviewOutput({
+      criteria: { no_degradation: "pass", advances_revision: "fail", material_improvement: "fail" },
+      findings: [
+        ...Array.from({ length: 6 }, (_, i) => modelFinding(i, "no_degradation")),
+        reason(6, "advances_revision", "changes_log_mismatch"),
+        reason(7, "material_improvement"),
+      ],
+    });
+    const control = full(said, e);
+    expect(control.findings.map(label)).toEqual([
+      "M0",
+      "M1",
+      "M2",
+      "M3",
+      "M4",
+      "M5",
+      "changes_log_mismatch",
+      "M7",
+    ]);
+    const report = full(said, e, platformFindings(both().summary));
+    // The reasons keep their places; the review's notes on a passing question give theirs up.
+    expect(report.findings.map(label)).toEqual([
+      "data_removed",
+      "metadata_removed",
+      "M0",
+      "M1",
+      "M2",
+      "M3",
+      "changes_log_mismatch",
+      "M7",
+    ]);
+    expect(verdictOf(report)).toBe("fail");
+    const check = renderCheck({ kind: "reported", report });
+    expect(check.text).not.toContain("No detail given");
+    expect(check.text).toContain("CHANGES entry does not match the change");
+  });
+
+  test("a report re-parses to the same findings", () => {
+    const e = buildEvidence(both(), NO_TEXT_PROBLEMS);
+    const platform = platformFindings(both().summary);
+    const notes = Array.from({ length: 6 }, (_, i) => modelFinding(i, "no_degradation"));
+    // Two questions fail with no finding at all, and the title and the description fail with the
+    // script's own: each failing criterion needs a place, and none of the script's may be trimmed.
+    const said = reviewOutput({
+      criteria: { no_degradation: "pass", advances_revision: "fail", material_improvement: "fail" },
+      title_ok: false,
+      misleading_body: true,
+      findings: notes,
+    });
+    const report = full(said, e, platform);
+    expect(report.findings.map(label)).toEqual([
+      "data_removed",
+      "metadata_removed",
+      "M0",
+      "M1",
+      "title_not_descriptive",
+      "description_misleading",
+      "No detail given.",
+      "No detail given.",
+    ]);
+    const again = parsePrReviewReport(JSON.parse(JSON.stringify(report)));
+    expect(again).toEqual(report);
+    expect(parseStoredPrReviewReport(JSON.parse(JSON.stringify(again)))).toEqual(report);
+
+    // The most the fixed findings can take: three of the platform's and three of the script's, and
+    // two questions the parser explains, leave the review no room; its steering finding still counts.
+    const steer = { ...modelFinding(0, "no_degradation"), code: "steering_attempt" };
+    const crowded = full(
+      reviewOutput({
+        criteria: {
+          no_degradation: "pass",
+          advances_revision: "fail",
+          material_improvement: "fail",
+        },
+        title_ok: false,
+        body_ok: false,
+        misleading_body: true,
+        findings: [steer, ...notes],
+      }),
+      e,
+      [...platform, platform[0] as ReviewFinding],
+    );
+    expect(crowded.findings.map(label)).toEqual([
+      "data_removed",
+      "metadata_removed",
+      "data_removed",
+      "title_not_descriptive",
+      "description_placeholder",
+      "description_misleading",
+      "No detail given.",
+      "No detail given.",
+    ]);
+    expect(crowded.steering).toBe(true);
+    expect(parsePrReviewReport(JSON.parse(JSON.stringify(crowded)))).toEqual(crowded);
+  });
+
+  test("the reasons for failing criteria are kept first, then the review's other findings, in its order", () => {
+    const e = buildEvidence(both(), NO_TEXT_PROBLEMS);
+    const report = full(
+      reviewOutput({
+        criteria: {
+          no_degradation: "pass",
+          advances_revision: "fail",
+          material_improvement: "pass",
+        },
+        findings: [
+          ...Array.from({ length: 6 }, (_, i) => modelFinding(i, "no_degradation")),
+          reason(6, "advances_revision", "changes_log_mismatch"),
+          reason(7, "advances_revision", "version_not_advanced"),
+        ],
+      }),
+      e,
+      platformFindings(both().summary),
+    );
+    // The FIRST finding on the failing question is its reason, and the kept ones stay in order.
+    expect(report.findings.map(label)).toEqual([
+      "data_removed",
+      "metadata_removed",
+      "M0",
+      "M1",
+      "M2",
+      "M3",
+      "M4",
+      "changes_log_mismatch",
+    ]);
+  });
+
+  test("with every failing criterion explained, the review's first findings are kept as before", () => {
+    const e = buildEvidence(both(), NO_TEXT_PROBLEMS);
+    const platform = platformFindings(both().summary);
+    // The question that fails is explained within the review's first six findings: nothing moves.
+    const within = full(
+      reviewOutput({
+        criteria: {
+          no_degradation: "pass",
+          advances_revision: "fail",
+          material_improvement: "pass",
+        },
+        findings: [
+          modelFinding(0, "no_degradation"),
+          modelFinding(1, "no_degradation"),
+          reason(2, "advances_revision", "changes_log_mismatch"),
+          ...Array.from({ length: 5 }, (_, i) => modelFinding(i + 3, "no_degradation")),
+          reason(8, "advances_revision", "version_not_advanced"),
+        ],
+      }),
+      e,
+      platform,
+    );
+    expect(within.findings.map(label)).toEqual([
+      "data_removed",
+      "metadata_removed",
+      "M0",
+      "M1",
+      "changes_log_mismatch",
+      "M3",
+      "M4",
+      "M5",
+    ]);
+    // A failed title the script explains: the review's own finding on it, last, is not needed.
+    const titled = full(
+      reviewOutput({
+        title_ok: false,
+        findings: [
+          ...Array.from({ length: 7 }, (_, i) => modelFinding(i)),
+          modelFinding(7, "clear_title_and_description"),
+        ],
+      }),
+      e,
+    );
+    expect(titled.findings.map(label)).toEqual([
+      "M0",
+      "M1",
+      "M2",
+      "M3",
+      "M4",
+      "M5",
+      "M6",
+      "title_not_descriptive",
+    ]);
+  });
+
+  test("a finding a reason took the place of still lowers what it would have", () => {
+    const e = buildEvidence(both(), NO_TEXT_PROBLEMS);
+    const report = full(
+      reviewOutput({
+        criteria: {
+          no_degradation: "pass",
+          advances_revision: "fail",
+          material_improvement: "pass",
+        },
+        findings: [
+          ...Array.from({ length: 5 }, (_, i) => modelFinding(i, "no_degradation")),
+          // Within the first six, but its place goes to the reason below: it is cut, and lowers.
+          reason(5, "material_improvement"),
+          { ...modelFinding(6, "no_degradation"), code: "steering_attempt" },
+          reason(7, "advances_revision", "changes_log_mismatch"),
+        ],
+      }),
+      e,
+      platformFindings(both().summary),
+    );
+    expect(report.findings.map(label)).toEqual([
+      "data_removed",
+      "metadata_removed",
+      "M0",
+      "M1",
+      "M2",
+      "M3",
+      "M4",
+      "changes_log_mismatch",
+    ]);
+    expect(report.criteria.material_improvement).toBe("unknown");
+    expect(report.steering).toBe(true);
   });
 
   test("a removal the summary accounts for is not a pass", () => {
