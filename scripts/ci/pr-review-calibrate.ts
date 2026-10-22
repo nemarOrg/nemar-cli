@@ -10,10 +10,20 @@
  *
  *   bun run scripts/ci/pr-review-calibrate.ts --pr nm000153#2 --pr nemarDatasets/nm000456#1
  *   bun run scripts/ci/pr-review-calibrate.ts --prs FILE [--json]
+ *   bun run scripts/ci/pr-review-calibrate.ts --prs FILE --clones DIR [--offline] [--json]
  *
  * FILE holds one pull request per line, `nm000153#2`, optionally followed by the outcome a person
- * expects (`pass`, `fail` or `uncertain`), which adds an agreement column. Blank lines and lines that
- * start with `#` are skipped.
+ * expects (`pass`, `fail` or `uncertain`), which adds an agreement column, and optionally by the
+ * base and head commits to read it at (`nm000153#2 pass <base> <head>`, full ids): a frozen set of
+ * pull requests is read at the commits it was frozen at, not wherever the pull request has moved
+ * since. Blank lines and lines that start with `#` are skipped. Pinned commits come only from FILE.
+ *
+ * **`--clones DIR`** reads each pull request from a clone already made, `DIR/<dataset>-<number>`,
+ * at its pinned commits or the ones in `DIR/<dataset>-<number>.shas` (`<base> <head>`), with its
+ * title and description from `DIR/<dataset>-<number>.pr.json`; it never runs `gh`. **`--offline`**
+ * (only with `--clones`) also keeps git from fetching anything: a clone that lacks an object the
+ * review needs is `objects_missing`, never a fetch. It sets `GIT_NO_LAZY_FETCH` (git 2.44 or later)
+ * for the run and restores it after; `--offline` changes only git, never the model calls.
  *
  * **It measures what production does, because it runs what production runs.** Each pull request
  * goes through `reviewPullRequest` in `pr-review.ts`: the same facts, the same screen and review,
@@ -49,7 +59,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -72,11 +82,21 @@ import {
 } from "./pr-review";
 import { childEnv } from "./pr-review-evidence";
 
-/** One pull request to calibrate on, and what a person expects of it, if they said. */
+/** The base and head commits a pull request is read at, both full ids. */
+export interface PinnedCommits {
+  base: string;
+  head: string;
+}
+
+/**
+ * One pull request to calibrate on, what a person expects of it, if they said, and the commits to
+ * read it at, if the line named them (absent otherwise).
+ */
 export interface CalibrationTarget {
   dataset: string;
   number: number;
   expected: Verdict | null;
+  pin?: PinnedCommits;
 }
 
 /** What one pull request came to, in closed words and numbers. */
@@ -117,16 +137,26 @@ const PR_REF = /^(?:nemarDatasets\/)?((?:nm|xx|on)\d{6})#(\d{1,9})$/;
 const SHA40 = /^[0-9a-f]{40}$/;
 const VERDICT_WORDS = ["pass", "fail", "uncertain"] as const;
 
-/** Read `nm000153#2` (or `nemarDatasets/nm000153#2`) and an optional expected outcome. */
+/**
+ * Read `nm000153#2` (or `nemarDatasets/nm000153#2`), an optional expected outcome, and optionally the
+ * base and head commits after it, both full ids: `nm000153#2 [pass] [<base> <head>]`. One commit
+ * alone is refused, as is anything else after the reference.
+ */
 export function parseTarget(line: string): CalibrationTarget | null {
-  const [ref, expected, ...rest] = line.trim().split(/\s+/);
-  if (ref === undefined || rest.length > 0) return null;
+  const [ref, ...rest] = line.trim().split(/\s+/);
+  if (ref === undefined) return null;
   const m = ref.match(PR_REF);
   if (!m?.[1] || !m[2]) return null;
-  if (expected !== undefined && !(VERDICT_WORDS as readonly string[]).includes(expected)) {
-    return null;
-  }
-  return { dataset: m[1], number: Number(m[2]), expected: (expected as Verdict) ?? null };
+  const expected =
+    rest[0] !== undefined && (VERDICT_WORDS as readonly string[]).includes(rest[0])
+      ? (rest.shift() as Verdict)
+      : null;
+  const target: CalibrationTarget = { dataset: m[1], number: Number(m[2]), expected };
+  if (rest.length === 0) return target;
+  const [base, head, ...more] = rest;
+  if (base === undefined || head === undefined || more.length > 0) return null;
+  if (!SHA40.test(base) || !SHA40.test(head)) return null;
+  return { ...target, pin: { base, head } };
 }
 
 /** The review's own arguments, and anything that would name somewhere to post. All refused. */
@@ -149,15 +179,24 @@ const REFUSED_FLAGS = new Set([
  * The flags the script accepts. With {@link REFUSED_FLAGS} they are the only flags a message ever
  * names: any other name may be a key pasted after two dashes, and a message is no place to print one.
  */
-const ACCEPTED_FLAGS = ["pr", "prs", "json"] as const;
+const ACCEPTED_FLAGS = ["pr", "prs", "json", "clones", "offline"] as const;
+/** The accepted flags that take no value. */
+const SWITCHES: ReadonlySet<string> = new Set(["json", "offline"]);
 const KNOWN_FLAGS: ReadonlySet<string> = new Set<string>([...ACCEPTED_FLAGS, ...REFUSED_FLAGS]);
 
 /**
  * Why a pull request could not be read before its review began, as a closed word for the table:
  * `gh` failed or answered with something that is not a pull request, the pull request names no
- * base or head commit, or git could not fetch them.
+ * base or head commit, or git could not fetch them; with `--clones`, the clone (or a file beside
+ * it the run needs) is not there, or the clone lacks an object the review needs.
  */
-export const CALIBRATION_READ_ERRORS = ["gh_failed", "no_commit", "fetch_failed"] as const;
+export const CALIBRATION_READ_ERRORS = [
+  "gh_failed",
+  "no_commit",
+  "fetch_failed",
+  "clone_missing",
+  "objects_missing",
+] as const;
 export type CalibrationReadErrorCode = (typeof CALIBRATION_READ_ERRORS)[number];
 
 export class CalibrationReadError extends Error {
@@ -252,6 +291,149 @@ function fetchInto(dir: string, t: CalibrationTarget, base: string): void {
     `+refs/pull/${t.number}/head:refs/remotes/pr/head`,
     base,
   ]);
+}
+
+/**
+ * A pull request at the commits its line pins, fetched by id, blob-less, from the dataset's
+ * repository: `git init`, the promisor remote, `git fetch origin <base> <head>`, and
+ * `refs/remotes/pr/head` set to the head, as {@link fetchInto} leaves it. No `gh`: the pull
+ * request's text is not read, so this serves only a run that needs none (`--evidence-only`). A
+ * head that was force-pushed away is no longer reachable on GitHub and is `fetch_failed`.
+ */
+export function fetchPinned(t: CalibrationTarget, root: string): FetchedPullRequest {
+  if (t.pin === undefined) throw new CalibrationReadError("no_commit");
+  const { base, head } = t.pin;
+  const dir = join(root, `${t.dataset}-${t.number}`);
+  try {
+    run("git", ["init", "-q", dir]);
+    run("git", ["-C", dir, "config", "core.hooksPath", "/dev/null"]);
+    run("git", [
+      "-C",
+      dir,
+      "remote",
+      "add",
+      "origin",
+      `https://github.com/nemarDatasets/${t.dataset}.git`,
+    ]);
+    run("git", ["-C", dir, "config", "extensions.partialClone", "origin"]);
+    run("git", ["-C", dir, "fetch", "-q", "--no-tags", "--filter=blob:none", "origin", base, head]);
+    run("git", ["-C", dir, "update-ref", "refs/remotes/pr/head", head]);
+  } catch {
+    throw new CalibrationReadError("fetch_failed");
+  }
+  return { dir, base, head, pr: {} };
+}
+
+/** The environment a git call that must not fetch is run with: {@link childEnv} and no lazy fetch. */
+function offlineEnv(): NodeJS.ProcessEnv {
+  return { ...childEnv(), GIT_CONFIG_GLOBAL: "/dev/null", GIT_NO_LAZY_FETCH: "1" };
+}
+
+/** Whether a git call in `dir` succeeds without fetching anything. */
+function gitHolds(dir: string, args: string[]): boolean {
+  try {
+    execFileSync("git", ["-C", dir, ...args], {
+      env: offlineEnv(),
+      maxBuffer: 256 * 1024 * 1024,
+      stdio: ["ignore", "ignore", "ignore"],
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** The `<base> <head>` of a `.shas` file, or null when it is not exactly two full ids. */
+function readShas(path: string): PinnedCommits | null {
+  let text: string;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch {
+    return null;
+  }
+  const m = /^([0-9a-f]{40}) ([0-9a-f]{40})\n?$/.exec(text);
+  return m?.[1] && m[2] ? { base: m[1], head: m[2] } : null;
+}
+
+/**
+ * Where each pull request comes from with `--clones DIR`: the clone `DIR/<dataset>-<number>`, made
+ * before (for a frozen set, by the recipe in its manifest), read in place and never fetched into by
+ * this function.
+ *
+ * - The clone must be a directory with a `.git`, else `clone_missing`. (Checked by the path, not by
+ *   asking git, which would find a repository in a directory above.)
+ * - The commits are the line's pin, else the ones in `DIR/<dataset>-<number>.shas`, else `no_commit`.
+ * - Both must be commits the clone holds, asked without fetching, else `objects_missing`.
+ * - `offline`: every blob the content pass's one prefetch would fetch (the diff from the merge base
+ *   to the head, which `--numstat` reads in full) must be in the clone already, asked without
+ *   fetching, else `objects_missing`. So a clone short of a blob is a closed word, not a failure in
+ *   the middle of a pass. (The merge base, not the base: the review diffs from the merge base, and
+ *   the files the base's branch changed since are never read.)
+ * - The pull request's text is `DIR/<dataset>-<number>.pr.json`, an object, else `clone_missing`;
+ *   with `needsText` false (a run that reads no text) it is not read at all.
+ */
+export function cloneReader(
+  clones: string,
+  offline: boolean,
+  needsText: boolean,
+): (t: CalibrationTarget) => FetchedPullRequest {
+  return (t) => {
+    const name = `${t.dataset}-${t.number}`;
+    const dir = join(clones, name);
+    let isRepo = false;
+    try {
+      isRepo = statSync(dir).isDirectory() && existsSync(join(dir, ".git"));
+    } catch {
+      isRepo = false;
+    }
+    if (!isRepo) throw new CalibrationReadError("clone_missing");
+    const pin = t.pin ?? readShas(join(clones, `${name}.shas`));
+    if (pin === null) throw new CalibrationReadError("no_commit");
+    for (const sha of [pin.base, pin.head]) {
+      if (!gitHolds(dir, ["cat-file", "-e", `${sha}^{commit}`])) {
+        throw new CalibrationReadError("objects_missing");
+      }
+    }
+    if (offline) {
+      let mergeBase = "";
+      try {
+        mergeBase = execFileSync("git", ["-C", dir, "merge-base", pin.base, pin.head], {
+          encoding: "utf8",
+          env: offlineEnv(),
+          stdio: ["ignore", "pipe", "ignore"],
+        }).trim();
+      } catch {
+        throw new CalibrationReadError("objects_missing");
+      }
+      if (
+        !SHA40.test(mergeBase) ||
+        !gitHolds(dir, [
+          "diff",
+          "--numstat",
+          "--no-color",
+          "--no-ext-diff",
+          "--no-textconv",
+          mergeBase,
+          pin.head,
+        ])
+      ) {
+        throw new CalibrationReadError("objects_missing");
+      }
+    }
+    let pr: Record<string, unknown> = {};
+    if (needsText) {
+      try {
+        const parsed: unknown = JSON.parse(readFileSync(join(clones, `${name}.pr.json`), "utf8"));
+        if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+          throw new Error();
+        }
+        pr = parsed as Record<string, unknown>;
+      } catch {
+        throw new CalibrationReadError("clone_missing");
+      }
+    }
+    return { dir, base: pin.base, head: pin.head, pr };
+  };
 }
 
 function sum(tokens: Array<StageTokens | null>): StageTokens | null {
@@ -444,8 +626,9 @@ export function renderTable(rows: readonly CalibrationRow[]): string[] {
 function usage(why: string): number {
   console.error(`pr-review-calibrate: ${why}`);
   console.error(
-    "usage: pr-review-calibrate.ts (--pr nm000153#2 ... | --prs FILE) [--json]\n" +
-      "       FILE: one pull request per line, optionally followed by pass, fail or uncertain",
+    "usage: pr-review-calibrate.ts (--pr nm000153#2 ... | --prs FILE) [--clones DIR [--offline]] [--json]\n" +
+      "       FILE: one pull request per line, optionally followed by pass, fail or uncertain,\n" +
+      "       and optionally by its base and head commits (full ids), which need --clones",
   );
   return 2;
 }
@@ -480,21 +663,23 @@ export async function calibrateMain(
     );
   }
   const targets: CalibrationTarget[] = [];
-  let json = false;
+  const switches = new Set<string>();
+  let clones: string | null = null;
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i] as string;
     // Only the flag's name is read, and it is said only if the script knows it. What follows an `=`
     // is a value, and a value is never echoed: it may be a token, and a refusal is no place to
     // print one. An unknown name is no safer, since a key pasted after two dashes is one.
     const name = arg.startsWith("--") ? (arg.slice(2).split("=", 1)[0] ?? "") : null;
-    if (name === null) return usage("arguments are flags: --pr, --prs and --json");
+    if (name === null)
+      return usage("arguments are flags: --pr, --prs, --clones, --json and the like");
     if (!KNOWN_FLAGS.has(name)) return usage("unknown flag");
     if (REFUSED_FLAGS.has(name)) {
       return usage(`--${name} is refused: calibrate posts nothing and reviews no dispatch`);
     }
     if (arg.includes("=")) return usage("write a flag and its value as two arguments");
-    if (name === "json") {
-      json = true;
+    if (SWITCHES.has(name)) {
+      switches.add(name);
       continue;
     }
     const value = argv[i + 1];
@@ -503,7 +688,19 @@ export async function calibrateMain(
     if (name === "pr") {
       const t = parseTarget(value);
       if (t === null) return usage("--pr needs a pull request like nm000153#2");
+      // Pinned commits come from the file of a frozen set, never from an argument.
+      if (t.pin !== undefined) return usage("--pr names no commits; pin them in a --prs file");
       targets.push(t);
+    } else if (name === "clones") {
+      // The directory is checked here and never named: a path is the operator's, not the table's.
+      let isDirectory = false;
+      try {
+        isDirectory = statSync(value).isDirectory();
+      } catch {
+        isDirectory = false;
+      }
+      if (!isDirectory) return usage("--clones is not a directory that can be read");
+      clones = value;
     } else if (name === "prs") {
       let text: string;
       try {
@@ -525,6 +722,13 @@ export async function calibrateMain(
     }
   }
   if (targets.length === 0) return usage("name at least one pull request");
+  const json = switches.has("json");
+  const offline = switches.has("offline");
+  if (offline && clones === null) return usage("--offline reads only --clones, which is not given");
+  if (clones === null && targets.some((t) => t.pin !== undefined)) {
+    return usage("a pull request with pinned commits is read from --clones");
+  }
+  const reader = clones === null ? read : cloneReader(clones, offline, true);
   // A pull request named twice is calibrated once. Its second read would run `git remote add` in
   // the directory the first made and fail, and its row would say fetch_failed for no fault of the
   // pull request's. The first mention wins, and with it the outcome expected of the pull request.
@@ -542,15 +746,24 @@ export async function calibrateMain(
     );
   }
 
+  // Offline, no git this run starts may fetch: every child is started with childEnv(), which reads
+  // this process's environment at each call, so setting the variable here reaches the evidence
+  // reader's git too. It is put back as it was, whatever the run came to.
+  const savedLazyFetch = process.env.GIT_NO_LAZY_FETCH;
+  if (offline) process.env.GIT_NO_LAZY_FETCH = "1";
   const root = mkdtempSync(join(tmpdir(), "pr-review-calibrate-"));
   try {
     const rows: CalibrationRow[] = [];
-    for (const t of once) rows.push(await calibrateOne(t, root, read));
+    for (const t of once) rows.push(await calibrateOne(t, root, reader));
     if (json) out(JSON.stringify(rows, null, 2));
     else for (const line of renderTable(rows)) out(line);
     return exitCodeOf(rows);
   } finally {
     rmSync(root, { recursive: true, force: true });
+    if (offline) {
+      if (savedLazyFetch === undefined) Reflect.deleteProperty(process.env, "GIT_NO_LAZY_FETCH");
+      else process.env.GIT_NO_LAZY_FETCH = savedLazyFetch;
+    }
   }
 }
 

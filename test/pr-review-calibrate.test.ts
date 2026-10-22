@@ -11,7 +11,15 @@
 
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
@@ -22,6 +30,7 @@ import {
   calibrateMain,
   calibrateOne,
   exitCodeOf,
+  fetchPinned,
   fetchPullRequest,
   parseTarget,
   renderTable,
@@ -194,6 +203,41 @@ describe("which pull requests it reads", () => {
       expect(parseTarget(bad), bad).toBeNull();
     }
   });
+
+  test("a pull request may carry its pinned base and head; one commit alone is refused", () => {
+    const base = "a".repeat(40);
+    const head = "b".repeat(40);
+    expect(parseTarget(`on004551#1 ${base} ${head}`)).toEqual({
+      dataset: "on004551",
+      number: 1,
+      expected: null,
+      pin: { base, head },
+    });
+    expect(parseTarget(`nemarDatasets/on004551#1 fail ${base}  ${head}`)).toEqual({
+      dataset: "on004551",
+      number: 1,
+      expected: "fail",
+      pin: { base, head },
+    });
+    // No pin is no key at all, so a target without one reads as it always did.
+    expect(Object.keys(parseTarget("on004551#1 pass") ?? {})).toEqual([
+      "dataset",
+      "number",
+      "expected",
+    ]);
+    for (const bad of [
+      `on004551#1 ${base}`,
+      `on004551#1 pass ${base}`,
+      `on004551#1 ${base} ${head} ${head}`,
+      `on004551#1 ${base} ${head} pass`,
+      `on004551#1 ${base.slice(1)} ${head}`,
+      `on004551#1 ${base} ${head.toUpperCase()}`,
+      `on004551#1 ? ${base} ${head}`,
+      `on004551#1 ${base} HEAD`,
+    ]) {
+      expect(parseTarget(bad), bad).toBeNull();
+    }
+  });
 });
 
 describe("it posts nothing, and the key reaches only the API", () => {
@@ -281,6 +325,10 @@ describe("it posts nothing, and the key reaches only the API", () => {
       ["--pr", "nm000153#2", KEY],
       ["--prs", join(root, KEY)],
       ["--prs", lines],
+      ["--pr", "nm000153#2", "--clones", join(root, KEY)],
+      ["--pr", "nm000153#2", "--clones", KEY],
+      [`--clones=${KEY}`, "--pr", "nm000153#2"],
+      [`--offline=${KEY}`, "--pr", "nm000153#2"],
       [KEY],
     ]) {
       const r = await refused(argv);
@@ -731,6 +779,265 @@ describe("reading a pull request from GitHub, as the workflow does", () => {
     } finally {
       gh.restore();
     }
+  });
+
+  test("pinned commits are fetched by id, blob-less, and gh is never asked", () => {
+    const gh = standInGitHub("fetch-pinned", "{}");
+    const into = mkdtempSync(join(root, "into-"));
+    try {
+      const fetched = fetchPinned({ ...target(), pin: { base: gh.base, head: gh.head } }, into);
+      expect([fetched.base, fetched.head]).toEqual([gh.base, gh.head]);
+      // No text was read: there is no gh call that could have read it.
+      expect(fetched.pr).toEqual({});
+      expect(existsSync(gh.ghEnv)).toBe(false);
+      expect(git(fetched.dir, "config", "extensions.partialClone")).toBe("origin");
+      expect(git(fetched.dir, "rev-parse", "refs/remotes/pr/head")).toBe(gh.head);
+      expect(git(fetched.dir, "cat-file", "-t", gh.base)).toBe("commit");
+      const listing = gatherListing(fetched.dir, fetched.base, fetched.head);
+      expect(listing.changes).toHaveLength(3);
+      // A head GitHub no longer has (force-pushed away) cannot be fetched.
+      const gone = mkdtempSync(join(root, "into-"));
+      expect(() =>
+        fetchPinned({ ...target(), pin: { base: gh.base, head: "e".repeat(40) } }, gone),
+      ).toThrow(new CalibrationReadError("fetch_failed"));
+      expect(existsSync(gh.ghEnv)).toBe(false);
+    } finally {
+      gh.restore();
+    }
+  });
+});
+
+describe("frozen clones: --clones and --offline", () => {
+  /** A `gh` first on PATH that records that it ran; returns where, and how to take it away. */
+  function watchedGh(name: string) {
+    const bin = join(root, `${name}-gh-bin`);
+    mkdirSync(bin, { recursive: true });
+    const ran = join(bin, "ran.txt");
+    writeFileSync(join(bin, "gh"), `#!/bin/sh\necho ran >> '${ran}'\nexit 1\n`);
+    chmodSync(join(bin, "gh"), 0o755);
+    const saved = process.env.PATH;
+    process.env.PATH = `${bin}:${saved ?? ""}`;
+    return {
+      ran,
+      restore: () => {
+        process.env.PATH = saved;
+      },
+    };
+  }
+
+  /** Run calibrateMain with its output and its messages kept. */
+  async function calibrate(argv: string[]) {
+    const out: string[] = [];
+    const said: string[] = [];
+    const quiet = console.error;
+    console.error = (...a: unknown[]) => void said.push(a.map(String).join(" "));
+    try {
+      const code = await calibrateMain(argv, (l) => out.push(l));
+      return { code, out: out.join("\n"), said: said.join("\n") };
+    } finally {
+      console.error = quiet;
+    }
+  }
+
+  /**
+   * A directory of frozen clones: `nm000460-2` and `nm000460-3`, full clones of one pull request,
+   * with `.shas` and `.pr.json` beside them. The title fails the naming rule, so a run in the normal
+   * mode ends at the facts and asks no model.
+   */
+  function frozenClones(name: string, shas: (base: string, head: string) => string) {
+    const { dir, base, head } = localPullRequest(`${name}-source`)(target());
+    const clones = join(root, `${name}-clones`);
+    mkdirSync(clones, { recursive: true });
+    for (const n of [2, 3]) {
+      execFileSync("git", ["clone", "-q", "--no-checkout", dir, join(clones, `nm000460-${n}`)], {
+        env: GIT_ENV,
+      });
+      writeFileSync(join(clones, `nm000460-${n}.shas`), shas(base, head));
+      writeFileSync(
+        join(clones, `nm000460-${n}.pr.json`),
+        JSON.stringify({ title: "Lee2019 EEG update", body: SECRET }),
+      );
+    }
+    return { clones, base, head };
+  }
+
+  test("--clones reads pinned commits and never runs gh", async () => {
+    // The .shas files name the head twice: no change at all. The pin on the first line names the
+    // pull request's own base and head, three files.
+    const { clones, base, head } = frozenClones("clones-read", (_, h) => `${h} ${h}\n`);
+    const file = join(root, "clones-read-prs.txt");
+    writeFileSync(file, `nm000460#2 fail ${base} ${head}\nnm000460#3\n`);
+    const gh = watchedGh("clones-read");
+    let r: Awaited<ReturnType<typeof calibrate>>;
+    try {
+      r = await calibrate(["--prs", file, "--clones", clones, "--json"]);
+    } finally {
+      gh.restore();
+    }
+    expect(r.code).toBe(0);
+    const rows = JSON.parse(r.out) as CalibrationRow[];
+    expect(rows.map((x) => [x.pr, x.files, x.stage, x.facts, x.verdict, x.error])).toEqual([
+      ["nm000460#2", 3, "facts", ["title_author_year"], "fail", null],
+      ["nm000460#3", 0, "facts", ["title_author_year"], "fail", null],
+    ]);
+    expect(existsSync(gh.ran)).toBe(false);
+    expect(requests).toHaveLength(0);
+    expect(r.out).not.toContain(SECRET);
+    expect(r.out).not.toContain(clones);
+  });
+
+  test("a clone that is not there, a pull request with no commits, and a commit the clone lacks each say so", async () => {
+    const { clones, base } = frozenClones("clones-missing", (b, h) => `${b} ${h}\n`);
+    rmSync(join(clones, "nm000460-3.shas"));
+    const file = join(root, "clones-missing-prs.txt");
+    writeFileSync(
+      file,
+      `nm000460#4\nnm000460#3\nnm000460#2 ${base} ${"e".repeat(40)}\nnemarDatasets/nm000460#2\n`,
+    );
+    const r = await calibrate(["--prs", file, "--clones", clones, "--json"]);
+    expect(r.code).toBe(1);
+    const rows = JSON.parse(r.out) as CalibrationRow[];
+    expect(rows.map((x) => [x.pr, x.error])).toEqual([
+      ["nm000460#4", "clone_missing"],
+      ["nm000460#3", "no_commit"],
+      ["nm000460#2", "objects_missing"],
+    ]);
+    // A directory beside the clones that is not a repository is missing too, even when a
+    // repository encloses it: git is not asked, so it cannot find the one above.
+    git(clones, "init", "-q");
+    mkdirSync(join(clones, "nm000460-5"));
+    writeFileSync(join(clones, "nm000460-5.shas"), `${base} ${base}\n`);
+    const five = await calibrate(["--pr", "nm000460#5", "--clones", clones, "--json"]);
+    expect((JSON.parse(five.out) as CalibrationRow[])[0]?.error).toBe("clone_missing");
+  });
+
+  test("pins need --clones, --offline needs --clones, and --pr names no commits", async () => {
+    const pinned = join(root, "pinned-prs.txt");
+    writeFileSync(pinned, `nm000460#2 ${"a".repeat(40)} ${"b".repeat(40)}\n`);
+    const clones = mkdtempSync(join(root, "empty-clones-"));
+    for (const [argv, words] of [
+      [["--prs", pinned], "pinned commits is read from --clones"],
+      [["--pr", "nm000460#2", "--offline"], "--offline reads only --clones"],
+      [
+        ["--pr", `nm000460#2 ${"a".repeat(40)} ${"b".repeat(40)}`, "--clones", clones],
+        "--pr names no commits",
+      ],
+      [
+        ["--pr", "nm000460#2", "--clones", join(root, "no-such-dir")],
+        "--clones is not a directory",
+      ],
+    ] as const) {
+      const r = await calibrate([...argv]);
+      expect(r.code, words).toBe(2);
+      expect(r.said, words).toContain(words);
+      expect(r.said).not.toContain(root);
+    }
+  });
+
+  /**
+   * A blob-less clone of a pull request that changes only the sidecar, made the way the review job
+   * makes one, from a bare origin over `file://`: the listing still reads `dataset_description.json`
+   * at both ends, a blob the pull request does not change.
+   */
+  function blobLessFrozen(name: string) {
+    const src = join(root, `${name}-src`);
+    mkdirSync(src, { recursive: true });
+    git(src, "init", "-q", "-b", "main");
+    write(
+      src,
+      "dataset_description.json",
+      JSON.stringify({ Name: "Resting EEG", Version: "1.0.0" }),
+    );
+    write(src, "CHANGES", "1.0.0 2026-01-01\n - Initial release\n");
+    write(src, "sub-01/eeg/sub-01_task-rest_eeg.json", JSON.stringify({ SamplingFrequency: 256 }));
+    git(src, "add", "-A");
+    git(src, "commit", "-q", "-m", "initial");
+    const base = git(src, "rev-parse", "HEAD");
+    git(src, "checkout", "-q", "-b", "contrib");
+    write(src, "sub-01/eeg/sub-01_task-rest_eeg.json", JSON.stringify({ SamplingFrequency: 512 }));
+    git(src, "commit", "-q", "-am", "fix");
+    const head = git(src, "rev-parse", "HEAD");
+    const bare = join(root, `${name}-origin.git`);
+    execFileSync("git", ["clone", "-q", "--bare", src, bare], { env: GIT_ENV });
+    git(bare, "config", "uploadpack.allowFilter", "true");
+    git(bare, "config", "uploadpack.allowAnySHA1InWant", "true");
+    const clones = join(root, `${name}-clones`);
+    const clone = join(clones, "nm000460-2");
+    mkdirSync(clone, { recursive: true });
+    git(clone, "init", "-q", "-b", "main");
+    git(clone, "config", "extensions.partialClone", "origin");
+    git(clone, "remote", "add", "origin", `file://${bare}`);
+    git(clone, "fetch", "-q", "--no-tags", "--filter=blob:none", "origin", base, head);
+    writeFileSync(join(clones, "nm000460-2.shas"), `${base} ${head}\n`);
+    writeFileSync(
+      join(clones, "nm000460-2.pr.json"),
+      JSON.stringify({ title: "Lee2019 EEG update", body: "b" }),
+    );
+    const blob = (rev: string, path: string) => git(src, "rev-parse", `${rev}:${path}`);
+    return { clones, clone, base, head, blob };
+  }
+
+  /** Whether the clone holds the object, asked so that asking cannot fetch it. */
+  function holds(clone: string, oid: string): boolean {
+    try {
+      execFileSync("git", ["-C", clone, "cat-file", "-e", oid], {
+        env: { ...GIT_ENV, GIT_NO_LAZY_FETCH: "1" },
+        stdio: "ignore",
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  test("--offline never fetches: a clone missing a blob is objects_missing", async () => {
+    const f = blobLessFrozen("offline");
+    const sidecar = "sub-01/eeg/sub-01_task-rest_eeg.json";
+    expect(holds(f.clone, f.blob(f.head, sidecar))).toBe(false);
+    // Missing the blobs the content pass would fetch: refused before any pass, and nothing fetched.
+    const first = await calibrate([
+      "--pr",
+      "nm000460#2",
+      "--clones",
+      f.clones,
+      "--offline",
+      "--json",
+    ]);
+    expect((JSON.parse(first.out) as CalibrationRow[])[0]?.error).toBe("objects_missing");
+    expect(holds(f.clone, f.blob(f.head, sidecar))).toBe(false);
+    expect(holds(f.clone, f.blob(f.base, sidecar))).toBe(false);
+
+    // Fetch what the prefetch would: the two sides of the sidecar. dataset_description.json, which
+    // the pull request does not change, is still not in the clone, and the listing reads it.
+    execFileSync("git", ["-C", f.clone, "diff", "--numstat", f.base, f.head], { env: GIT_ENV });
+    expect(holds(f.clone, f.blob(f.head, sidecar))).toBe(true);
+    const description = f.blob(f.head, "dataset_description.json");
+    expect(holds(f.clone, description)).toBe(false);
+    // A value of the variable from before the run, which the run must put back.
+    process.env.GIT_NO_LAZY_FETCH = "0";
+    let second: Awaited<ReturnType<typeof calibrate>>;
+    try {
+      second = await calibrate(["--pr", "nm000460#2", "--clones", f.clones, "--offline", "--json"]);
+      expect(process.env.GIT_NO_LAZY_FETCH).toBe("0");
+    } finally {
+      Reflect.deleteProperty(process.env, "GIT_NO_LAZY_FETCH");
+    }
+    // The evidence reader's own git could not fetch the description either: no read, no fetch.
+    expect((JSON.parse(second.out) as CalibrationRow[])[0]?.error).toBe("evidence_unavailable");
+    expect(holds(f.clone, description)).toBe(false);
+    const third = await calibrate(["--pr", "nm000460#2", "--clones", f.clones, "--offline"]);
+    expect(third.code).toBe(1);
+    expect(process.env.GIT_NO_LAZY_FETCH).toBeUndefined();
+
+    // The control: without --offline the same clone fetches the description when the listing asks,
+    // and the review goes on to the facts.
+    const online = await calibrate(["--pr", "nm000460#2", "--clones", f.clones, "--json"]);
+    expect((JSON.parse(online.out) as CalibrationRow[])[0]).toMatchObject({
+      stage: "facts",
+      error: null,
+    });
+    expect(holds(f.clone, description)).toBe(true);
+    expect(requests).toHaveLength(0);
   });
 });
 
