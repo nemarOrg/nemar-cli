@@ -305,3 +305,263 @@ export function assembleDocument(
   }
   return { ok: true, value: { lines, breaks, notUtf8, finalBreak } };
 }
+
+// ---------------------------------------------------------------------------------------------
+// Distances: the minor edit of one line (design B2.1, "Minor edit")
+// ---------------------------------------------------------------------------------------------
+
+/** A string's code points: an astral character is one, a combining mark is one of its own. */
+function codePoints(s: string): Int32Array {
+  const out = new Int32Array(s.length);
+  let n = 0;
+  for (let i = 0; i < s.length; i++) {
+    const cp = s.codePointAt(i) as number;
+    out[n++] = cp;
+    if (cp > 0xffff) i++;
+  }
+  return out.subarray(0, n);
+}
+
+/** How many code points a string holds, without copying it. */
+function codePointLength(s: string): number {
+  let n = 0;
+  for (let i = 0; i < s.length; i++) {
+    if ((s.codePointAt(i) as number) > 0xffff) i++;
+    n++;
+  }
+  return n;
+}
+
+/**
+ * The most a line may change and still be a minor edit: a tenth of the longer of the two lines,
+ * rounded down and counted in code points, but never less than `minorFloor` (3) or more than
+ * `minorCeiling` (20). The `Funding` typo fix measured on set A (7 in about 100 characters) is
+ * within it; a rewritten sentence is not.
+ */
+export function minorBound(a: string, b: string): number {
+  const longer = Math.max(codePointLength(a), codePointLength(b));
+  return Math.min(
+    ORIGINAL_LIMITS.minorCeiling,
+    Math.max(ORIGINAL_LIMITS.minorFloor, Math.floor(longer / 10)),
+  );
+}
+
+/**
+ * The Levenshtein distance between two strings in code points when it is at most `k`, and `k + 1`
+ * when it is more. Only the band of `2k + 1` diagonals around the main one is computed, and the
+ * computation stops at the first row whose every cell is past `k`, so the cost is linear in the
+ * length of the strings for the small `k` a minor edit allows, and a megabyte line against a short
+ * one costs nothing (their lengths alone differ by more than `k`). Counting code points and not
+ * UTF-16 code units is what makes an astral character one edit, as a reader counts it; a
+ * combining mark is a code point of its own, and so an edit of its own.
+ */
+export function levenshteinWithin(a: string, b: string, k: number): number {
+  if (a === b) return 0;
+  const cap = k + 1;
+  let x = codePoints(a);
+  let y = codePoints(b);
+  if (x.length > y.length) [x, y] = [y, x];
+  if (y.length - x.length > k) return cap;
+  // A common prefix and suffix cost nothing and are cut first.
+  let start = 0;
+  while (start < x.length && x[start] === y[start]) start++;
+  let endX = x.length;
+  let endY = y.length;
+  while (endX > start && x[endX - 1] === y[endY - 1]) {
+    endX--;
+    endY--;
+  }
+  x = x.subarray(start, endX);
+  y = y.subarray(start, endY);
+  const n = x.length;
+  const m = y.length;
+  if (n === 0) return Math.min(m, cap);
+  // Row i holds the cells of columns i - k to i + k, column j at index j - i + k.
+  const width = 2 * k + 1;
+  let prev = new Int32Array(width).fill(cap);
+  let cur = new Int32Array(width);
+  for (let j = 0; j <= Math.min(m, k); j++) prev[j + k] = j;
+  for (let i = 1; i <= n; i++) {
+    cur.fill(cap);
+    let best = cap;
+    const last = Math.min(m, i + k);
+    for (let j = Math.max(0, i - k); j <= last; j++) {
+      const t = j - i + k;
+      let value = i; // column 0: i deletions
+      if (j > 0) {
+        const replace = (prev[t] as number) + (x[i - 1] === y[j - 1] ? 0 : 1);
+        const remove = t + 1 < width ? (prev[t + 1] as number) + 1 : cap;
+        const insert = t > 0 ? (cur[t - 1] as number) + 1 : cap;
+        value = Math.min(replace, remove, insert, cap);
+      }
+      cur[t] = value;
+      if (value < best) best = value;
+    }
+    // Every path to the end crosses this row, and no step lowers a distance.
+    if (best > k) return cap;
+    [prev, cur] = [cur, prev];
+  }
+  return Math.min(prev[m - n + k] as number, cap);
+}
+
+/** Whether `b` is a minor edit of `a`: their distance is within {@link minorBound}. */
+export function isMinorEdit(a: string, b: string): boolean {
+  const bound = minorBound(a, b);
+  return levenshteinWithin(a, b, bound) <= bound;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Alignment: Myers' diff of two line sequences (design B2.1, item 3)
+// ---------------------------------------------------------------------------------------------
+
+/** One step of an edit script: a line kept, a line of the first side removed, or one inserted. */
+export type AlignOp = "equal" | "delete" | "insert";
+
+/** A shortest edit script and its length, the number of lines removed plus inserted. */
+export interface Alignment {
+  ops: AlignOp[];
+  distance: number;
+}
+
+/**
+ * The work an alignment did, for a test to bound: one step per diagonal tried and one per line
+ * matched along a diagonal, so about one comparison each. It is added to, never reset, so one
+ * meter can be passed to several calls.
+ */
+export interface AlignMeter {
+  steps: number;
+}
+
+/**
+ * The middle of an alignment by Myers' greedy algorithm ("An O(ND) Difference Algorithm and Its
+ * Variations", 1986), or null when the distance is more than `maxD`. Both sides are non-empty and
+ * already interned. The work is O((N + M) D) and the memory one slice of the furthest-reaching
+ * frontier per distance, each holding only the diagonals of its parity: about two million numbers
+ * (8 MB) at `maxD` 2,000, which is what keeps the cap a bound on memory as well as time.
+ *
+ * The tie-break is pinned, because it decides which lines a hunk pairs: the path goes down (an
+ * insertion) iff `k == -d || (k != d && V[k - 1] < V[k + 1])`, and the backtrack repeats the same
+ * rule over the stored slices, so it retraces exactly the path that was found.
+ */
+function myersMiddle(
+  x: Int32Array,
+  y: Int32Array,
+  maxD: number,
+  meter: AlignMeter | undefined,
+): AlignOp[] | null {
+  const n = x.length;
+  const m = y.length;
+  let steps = 0;
+  try {
+    // The distance is at least the difference in length, so a larger one is over the cap at once.
+    if (Math.abs(n - m) > maxD) return null;
+    const offset = maxD + 1;
+    const v = new Int32Array(2 * maxD + 3);
+    const trace: Int32Array[] = [];
+    for (let d = 0; d <= maxD; d++) {
+      const slice = new Int32Array(d + 1);
+      for (let k = -d; k <= d; k += 2) {
+        steps++;
+        const down =
+          k === -d || (k !== d && (v[offset + k - 1] as number) < (v[offset + k + 1] as number));
+        let px = down ? (v[offset + k + 1] as number) : (v[offset + k - 1] as number) + 1;
+        let py = px - k;
+        while (px < n && py < m && x[px] === y[py]) {
+          px++;
+          py++;
+          steps++;
+        }
+        v[offset + k] = px;
+        slice[(k + d) >> 1] = px;
+        if (px >= n && py >= m) {
+          trace.push(slice);
+          return backtrack(trace, n, m);
+        }
+      }
+      trace.push(slice);
+    }
+    return null;
+  } finally {
+    if (meter) meter.steps += steps;
+  }
+}
+
+/** The script of the path {@link myersMiddle} found, from the slices it stored, in forward order. */
+function backtrack(trace: readonly Int32Array[], n: number, m: number): AlignOp[] {
+  const ops: AlignOp[] = [];
+  let x = n;
+  let y = m;
+  for (let d = trace.length - 1; d > 0; d--) {
+    const prev = trace[d - 1] as Int32Array;
+    const at = (k: number): number => prev[(k + d - 1) >> 1] as number;
+    const k = x - y;
+    const down = k === -d || (k !== d && at(k - 1) < at(k + 1));
+    const prevK = down ? k + 1 : k - 1;
+    const prevX = at(prevK);
+    const moved = down ? prevX : prevX + 1;
+    for (; x > moved; x--, y--) ops.push("equal");
+    ops.push(down ? "insert" : "delete");
+    x = prevX;
+    y = prevX - prevK;
+  }
+  for (; x > 0; x--) ops.push("equal");
+  return ops.reverse();
+}
+
+/**
+ * A shortest edit script turning the lines `a` into the lines `b`, or null when it would remove
+ * and insert more than `maxD` lines together. Lines are compared exactly, as interned numbers. A
+ * common prefix and suffix are matched first; when nothing is left on one side the middle is pure
+ * insertion or pure removal and its script is immediate and never capped, so a README that only
+ * gained a long new section is never refused, however long the section. Otherwise the middle goes
+ * through Myers' algorithm with the cap; `meter`, when given, counts its work.
+ */
+export function alignLines(
+  a: readonly string[],
+  b: readonly string[],
+  maxD: number = ORIGINAL_LIMITS.maxEditDistance,
+  meter?: AlignMeter,
+): Alignment | null {
+  const ids = new Map<string, number>();
+  const intern = (lines: readonly string[]): Int32Array =>
+    Int32Array.from(lines, (line) => {
+      let id = ids.get(line);
+      if (id === undefined) {
+        id = ids.size;
+        ids.set(line, id);
+      }
+      return id;
+    });
+  const x = intern(a);
+  const y = intern(b);
+  let prefix = 0;
+  while (prefix < x.length && prefix < y.length && x[prefix] === y[prefix]) prefix++;
+  let suffix = 0;
+  while (
+    prefix + suffix < x.length &&
+    prefix + suffix < y.length &&
+    x[x.length - 1 - suffix] === y[y.length - 1 - suffix]
+  ) {
+    suffix++;
+  }
+  const n = x.length - prefix - suffix;
+  const m = y.length - prefix - suffix;
+  let middle: AlignOp[] | null;
+  if (n === 0) middle = new Array<AlignOp>(m).fill("insert");
+  else if (m === 0) middle = new Array<AlignOp>(n).fill("delete");
+  else {
+    middle = myersMiddle(
+      x.subarray(prefix, prefix + n),
+      y.subarray(prefix, prefix + m),
+      maxD,
+      meter,
+    );
+  }
+  if (middle === null) return null;
+  const ops: AlignOp[] = new Array<AlignOp>(prefix).fill("equal");
+  for (const op of middle) ops.push(op);
+  for (let i = 0; i < suffix; i++) ops.push("equal");
+  let distance = 0;
+  for (const op of middle) if (op !== "equal") distance++;
+  return { ops, distance };
+}

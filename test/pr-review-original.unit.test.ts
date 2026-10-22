@@ -8,18 +8,45 @@
 
 import { describe, expect, test } from "bun:test";
 import {
+  type AlignOp,
   type DocumentPart,
   ORIGINAL_LIMITS,
   PROSE_REFUSALS,
   type ProseDocument,
   type ProseRead,
+  alignLines,
   assembleDocument,
   decodeProse,
   isDocumentName,
+  isMinorEdit,
+  levenshteinWithin,
+  minorBound,
   normalizeProse,
 } from "../scripts/ci/pr-review-original";
 
 const encoder = new TextEncoder();
+
+/** A seeded generator (mulberry32), so a random test fails the same way every time it fails. */
+function mulberry32(seed: number): () => number {
+  let state = seed >>> 0;
+  return () => {
+    state = (state + 0x6d2b79f5) >>> 0;
+    let t = state;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/** One element of `items`, chosen by `random`. */
+function pick<T>(random: () => number, items: readonly T[]): T {
+  return items[Math.floor(random() * items.length)] as T;
+}
+
+/** `count` distinct lines that share nothing with another prefix's. */
+function distinctLines(prefix: string, count: number): string[] {
+  return Array.from({ length: count }, (_, i) => `${prefix} ${i}`);
+}
 
 /** The id git gives a blob of these bytes. */
 function gitOid(bytes: Uint8Array): string {
@@ -405,5 +432,295 @@ describe("assembleDocument", () => {
     expect(() =>
       assembleDocument("readme", [part("README", "x"), part("README", "y")], NO_SKIP),
     ).toThrow();
+  });
+});
+
+/** The Levenshtein distance over code points, every cell computed: the oracle for the banded one. */
+function fullLevenshtein(a: string, b: string): number {
+  const x = Array.from(a);
+  const y = Array.from(b);
+  let row = Array.from({ length: y.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= x.length; i++) {
+    const next = [i];
+    for (let j = 1; j <= y.length; j++) {
+      next[j] = Math.min(
+        (row[j - 1] as number) + (x[i - 1] === y[j - 1] ? 0 : 1),
+        (row[j] as number) + 1,
+        (next[j - 1] as number) + 1,
+      );
+    }
+    row = next;
+  }
+  return row[y.length] as number;
+}
+
+/** A string of `count` code points, each one from `alphabet`. */
+function randomText(random: () => number, alphabet: readonly string[], count: number): string {
+  return Array.from({ length: count }, () => pick(random, alphabet)).join("");
+}
+
+describe("minorBound and isMinorEdit", () => {
+  test("the bound is a tenth of the longer line in code points, never under 3 or over 20", () => {
+    const table: [number, number][] = [
+      [0, 3],
+      [1, 3],
+      [29, 3],
+      [39, 3],
+      [40, 4],
+      [49, 4],
+      [50, 5],
+      [99, 9],
+      [100, 10],
+      [199, 19],
+      [200, 20],
+      [201, 20],
+      [10_000, 20],
+    ];
+    for (const [length, bound] of table) {
+      expect(minorBound("a".repeat(length), "b"), String(length)).toBe(bound);
+      expect(minorBound("b", "a".repeat(length)), String(length)).toBe(bound);
+    }
+  });
+
+  test("an astral character is one code point of the length, not two code units", () => {
+    // Forty astral characters are eighty UTF-16 code units, which would give a bound of 8.
+    expect(minorBound("𝒜".repeat(40), "")).toBe(4);
+    expect(minorBound("e\u{301}".repeat(20), "")).toBe(4);
+  });
+
+  test("an edit exactly at the bound is minor, and one more is not", () => {
+    for (const length of [30, 100, 150, 1_000]) {
+      const line = "a".repeat(length);
+      const bound = minorBound(line, line);
+      const edited = (count: number) => "b".repeat(count) + line.slice(count);
+      expect(isMinorEdit(line, edited(bound)), String(length)).toBe(true);
+      expect(isMinorEdit(line, edited(bound + 1)), String(length)).toBe(false);
+    }
+  });
+
+  test("a typo fix is minor; a rewritten sentence and a case change of a sentence are not", () => {
+    const fixed = "Participants were recruited from the community and gave written consent.";
+    expect(
+      isMinorEdit("Participants were recruted from the comunity and gave writen consent.", fixed),
+    ).toBe(true);
+    expect(isMinorEdit(fixed, "Volunteers came from a hospital and consented verbally.")).toBe(
+      false,
+    );
+    expect(isMinorEdit(fixed, fixed.toUpperCase())).toBe(false);
+  });
+
+  test("a short negation in a line of forty characters is within the bound: the accepted cost", () => {
+    // The owner kept minor edits as information the model judges (design B2, Owner Question B2).
+    expect(
+      isMinorEdit(
+        "The recordings in this dataset are valid.",
+        "The recordings in this dataset are not valid.",
+      ),
+    ).toBe(true);
+    expect(isMinorEdit("The data are valid.", "The data are not valid.")).toBe(false);
+  });
+});
+
+describe("levenshteinWithin", () => {
+  test("the distance when it is at most k, and k + 1 when it is more", () => {
+    expect(levenshteinWithin("kitten", "sitting", 3)).toBe(3);
+    expect(levenshteinWithin("kitten", "sitting", 20)).toBe(3);
+    expect(levenshteinWithin("kitten", "sitting", 2)).toBe(3);
+    expect(levenshteinWithin("kitten", "sitting", 0)).toBe(1);
+    expect(levenshteinWithin("same", "same", 0)).toBe(0);
+    expect(levenshteinWithin("", "abc", 5)).toBe(3);
+    expect(levenshteinWithin("", "abc", 1)).toBe(2);
+    expect(levenshteinWithin("abc", "", 3)).toBe(3);
+  });
+
+  test("an astral character is one edit and a combining mark is one edit of its own", () => {
+    expect(levenshteinWithin("😀", "a", 5)).toBe(1);
+    expect(levenshteinWithin("𝒜b", "b", 5)).toBe(1);
+    expect(levenshteinWithin("😀x", "😃x", 5)).toBe(1);
+    // A precomposed letter against a letter and a combining accent: one replaced, one removed.
+    expect(levenshteinWithin("\u{E9}", "e\u{301}", 5)).toBe(2);
+  });
+
+  test("it equals the full distance capped at k + 1 over seeded random strings", () => {
+    const random = mulberry32(0x1859);
+    const alphabet = ["a", "b", "c", "\u{301}", "\u{E9}", "😀", "😃", "𝒜"];
+    for (let trial = 0; trial < 400; trial++) {
+      const a = randomText(random, alphabet, Math.floor(random() * 24));
+      const b =
+        random() < 0.5
+          ? randomText(random, alphabet, Math.floor(random() * 24))
+          : Array.from(a)
+              .map((ch) => (random() < 0.15 ? pick(random, alphabet) : ch))
+              .join("");
+      const full = fullLevenshtein(a, b);
+      for (const k of [0, 1, 2, 3, 5, 10, 20]) {
+        expect(levenshteinWithin(a, b, k), `${JSON.stringify(a)} ${JSON.stringify(b)} ${k}`).toBe(
+          Math.min(full, k + 1),
+        );
+      }
+    }
+  });
+
+  test("a megabyte line costs nothing against a short one and one linear pass against another", () => {
+    const body = "a".repeat(1024 * 1024);
+    let started = performance.now();
+    expect(levenshteinWithin(body, "short", 20)).toBe(21);
+    expect(performance.now() - started).toBeLessThan(2_000);
+    // Different first and last characters, so no prefix or suffix can be cut: the band is walked.
+    started = performance.now();
+    expect(levenshteinWithin(`x${body}y`, `z${body}w`, 20)).toBe(2);
+    expect(levenshteinWithin(`x${body}y`, `${body}`, 20)).toBe(2);
+    expect(performance.now() - started).toBeLessThan(20_000);
+  });
+});
+
+/** The length of a longest common subsequence, every cell computed: the oracle for alignLines. */
+function lcsLength(a: readonly string[], b: readonly string[]): number {
+  let row = new Array<number>(b.length + 1).fill(0);
+  for (let i = 1; i <= a.length; i++) {
+    const next = [0];
+    for (let j = 1; j <= b.length; j++) {
+      next[j] =
+        a[i - 1] === b[j - 1]
+          ? (row[j - 1] as number) + 1
+          : Math.max(row[j] as number, next[j - 1] as number);
+    }
+    row = next;
+  }
+  return row[b.length] as number;
+}
+
+/** `b` rebuilt from `a` and a script, or a thrown error where the script is not one for them. */
+function replay(a: readonly string[], b: readonly string[], ops: readonly AlignOp[]): string[] {
+  const out: string[] = [];
+  let i = 0;
+  let j = 0;
+  for (const op of ops) {
+    if (op === "equal") {
+      if (a[i] !== b[j] || i >= a.length)
+        throw new Error(`equal op on different lines at ${i}, ${j}`);
+      out.push(a[i] as string);
+      i++;
+      j++;
+    } else if (op === "delete") i++;
+    else out.push(b[j++] as string);
+  }
+  if (i !== a.length || j !== b.length) throw new Error("the script does not cover both sides");
+  return out;
+}
+
+/** Whether nothing is left of one side once the common prefix and suffix are matched. */
+function oneSided(a: readonly string[], b: readonly string[]): boolean {
+  let prefix = 0;
+  while (prefix < a.length && prefix < b.length && a[prefix] === b[prefix]) prefix++;
+  let suffix = 0;
+  while (
+    prefix + suffix < a.length &&
+    prefix + suffix < b.length &&
+    a[a.length - 1 - suffix] === b[b.length - 1 - suffix]
+  ) {
+    suffix++;
+  }
+  return prefix + suffix === a.length || prefix + suffix === b.length;
+}
+
+/** The same lines in a seeded random order (Fisher-Yates). */
+function shuffled(lines: readonly string[], random: () => number): string[] {
+  const out = [...lines];
+  for (let i = out.length - 1; i > 0; i--) {
+    const j = Math.floor(random() * (i + 1));
+    [out[i], out[j]] = [out[j] as string, out[i] as string];
+  }
+  return out;
+}
+
+describe("alignLines", () => {
+  test("the script is a shortest one, against an independent LCS over seeded random sequences", () => {
+    const random = mulberry32(0x7353);
+    for (let trial = 0; trial < 600; trial++) {
+      const alphabet = "abcdef".slice(0, 1 + Math.floor(random() * 6)).split("");
+      const a = Array.from({ length: Math.floor(random() * 30) }, () => pick(random, alphabet));
+      const b = Array.from({ length: Math.floor(random() * 30) }, () => pick(random, alphabet));
+      const label = `${a.join("")} ${b.join("")}`;
+      const alignment = alignLines(a, b, a.length + b.length);
+      if (alignment === null) throw new Error(`capped below its own size: ${label}`);
+      expect(replay(a, b, alignment.ops), label).toEqual(b);
+      const lcs = lcsLength(a, b);
+      expect(alignment.distance, label).toBe(a.length + b.length - 2 * lcs);
+      expect(alignment.ops.filter((op) => op === "equal").length, label).toBe(lcs);
+      // At its own distance the script is found; one less is over the cap unless a side is empty.
+      expect(alignLines(a, b, alignment.distance), label).toEqual(alignment);
+      if (alignment.distance > 0) {
+        expect(alignLines(a, b, alignment.distance - 1) === null, label).toBe(!oneSided(a, b));
+      }
+    }
+  });
+
+  test("the tie-break is pinned, so the same pull request always pairs the same lines", () => {
+    expect(alignLines(["x"], ["y"])?.ops).toEqual(["delete", "insert"]);
+    expect(alignLines(["a", "b"], ["b", "a"])?.ops).toEqual(["delete", "equal", "insert"]);
+    expect(alignLines(["b", "a"], ["c", "b"])?.ops).toEqual(["insert", "equal", "delete"]);
+    expect(alignLines(["a", "a"], ["b", "a", "c"])?.ops).toEqual([
+      "insert",
+      "equal",
+      "delete",
+      "insert",
+    ]);
+  });
+
+  test("lines are compared exactly, with no normalization of their own", () => {
+    expect(alignLines(["a "], ["a"])?.distance).toBe(2);
+    expect(alignLines(["A"], ["a"])?.distance).toBe(2);
+  });
+
+  test("an edit distance of exactly 2,000 is aligned and 2,001 is capped", () => {
+    const aligned = alignLines(distinctLines("old", 1000), distinctLines("new", 1000));
+    expect(aligned?.distance).toBe(2000);
+    expect(alignLines(distinctLines("old", 1001), distinctLines("new", 1000))).toBeNull();
+    // The same boundary at a small cap, where it is easy to read.
+    expect(alignLines(["a"], ["b"], 2)?.distance).toBe(2);
+    expect(alignLines(["a"], ["b"], 1)).toBeNull();
+  });
+
+  test("pure insertion or pure removal is never capped, however long", () => {
+    const base = distinctLines("original", 10);
+    const appended = [...base, ...distinctLines("new section", 5_000)];
+    const end = alignLines(base, appended);
+    expect(end?.distance).toBe(5_000);
+    expect(end?.ops.slice(0, 10)).toEqual(new Array(10).fill("equal"));
+    const middle = [...base.slice(0, 5), ...distinctLines("inserted", 5_000), ...base.slice(5)];
+    expect(alignLines(base, middle, 0)?.distance).toBe(5_000);
+    expect(alignLines(appended, base, 0)?.distance).toBe(5_000);
+  });
+
+  test("20,000 shuffled lines stop at the cap after a bounded number of steps", () => {
+    const random = mulberry32(0x20000);
+    const lines = distinctLines("line", 20_000);
+    const meter = { steps: 0 };
+    const started = performance.now();
+    expect(alignLines(lines, shuffled(lines, random), undefined, meter)).toBeNull();
+    const elapsed = performance.now() - started;
+    const maxD = ORIGINAL_LIMITS.maxEditDistance;
+    // One step per diagonal tried at each distance up to the cap, and at most one per matching
+    // cell: with distinct lines a line matches exactly one other, so 20,000 cells at most.
+    expect(meter.steps).toBeLessThanOrEqual(((maxD + 1) * (maxD + 2)) / 2 + lines.length);
+    expect(meter.steps).toBeGreaterThan(((maxD + 1) * (maxD + 2)) / 2 - 1);
+    expect(elapsed).toBeLessThan(10_000);
+  });
+
+  test("a two-line alphabet, the most matches per diagonal, stays within the O((N + M) D) bound", () => {
+    const random = mulberry32(0x2);
+    const a = Array.from({ length: 20_000 }, () => (random() < 0.5 ? "0" : "1"));
+    const b = Array.from({ length: 20_000 }, () => (random() < 0.5 ? "0" : "1"));
+    const meter = { steps: 0 };
+    const started = performance.now();
+    expect(alignLines(a, b, undefined, meter)).toBeNull();
+    const maxD = ORIGINAL_LIMITS.maxEditDistance;
+    // A diagonal's furthest point only moves forward, so each of the 2D + 1 diagonals walks at most
+    // N matching lines in all.
+    expect(meter.steps).toBeLessThanOrEqual(
+      ((maxD + 1) * (maxD + 2)) / 2 + (2 * maxD + 1) * a.length,
+    );
+    expect(performance.now() - started).toBeLessThan(10_000);
   });
 });
