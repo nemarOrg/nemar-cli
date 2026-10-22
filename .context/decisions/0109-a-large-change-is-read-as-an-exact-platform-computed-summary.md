@@ -36,7 +36,9 @@ No evidence field, report version, Worker parser or check sentence changes.
 ### Loss facts and platform findings
 
 Rows removed, columns removed with values and JSON keys removed with values are loss facts, unless the same content appears elsewhere in the pull request: a row verbatim under `sourcedata/<anything>/<the same path>`, or a key with the same value in a sidecar that applies by Brain Imaging Data Structure (BIDS) inheritance.
-An unkept removal adds a platform finding: a finding the job builds from the summary's counts, never from a model, a `blocker` on `no_degradation` with an existing code.
+A removed row with no such copy is unrelocated, a removed key with no such sidecar is unkept, and a column removed with its values is always a loss.
+The summary counts them only in the files it summarized: a file it refuses (a ragged row, a repeated key, a file over a cap) has no atoms, so a removal in it is not a loss fact.
+An unrelocated or unkept removal in a summarized file adds a platform finding: a finding the job builds from the summary's counts, never from a model, a `blocker` on `no_degradation` with an existing code.
 
 - `data_removed`: "The platform found N rows removed from T tables and not copied unchanged into sourcedata at the same path, and C columns with values removed. A person confirms a removal." Either part stands alone when the other is zero, and a count of one is singular.
 - `metadata_removed`: "The platform found K keys with values removed from J JSON files and not kept, with the same value, in a sidecar that applies by inheritance. A person confirms a removal."
@@ -63,10 +65,11 @@ A new fenced block, `changed-metadata-summary`, holds the class descriptions bet
 Every value and path in it is quoted and escaped by the summary, so nothing in it can start a line, and the fence breaks a forged `<facts>` or closing tag as it does for any content.
 The groups block gains a sixth column: how many files of the shape the summary accounted for.
 The system prompt gains one paragraph after the trust boundary and one clause in the groups sentence.
+The paragraph says that only the files the summary summarized are counted in the facts, and that a removal in any other file is shown only in its diff and is the review's to judge; a file counts as shown in full through the summary only when the summary summarized it.
 
 ### Owner answers of 2026-10-20
 
-- A1: an unkept removal blocks `no_degradation`; it is lowered to `unknown`, and a person confirms.
+- A1: an unrelocated or unkept removal blocks `no_degradation`; it is lowered to `unknown`, and a person confirms.
 - A2: relocation counts only verbatim into `sourcedata/<anything>/<the same path>`, and for JSON the same key and value in a sidecar that applies by inheritance.
 - A3: emptying a value is shown exactly and does not block.
 - A4: removing a JSON key whose value was already missing is not a loss.
@@ -79,7 +82,7 @@ Until then only its three finding codes are in force: the Worker accepts them, a
 ### Release order
 
 Whatever widens what counts as read ships in the same release as the finding that covers what it no longer shows.
-The evidence reader counted accounted files as read one phase before the prompt and the platform findings existed, and in that window an unkept removal in an accounted file read as complete with no finding.
+The evidence reader counted accounted files as read one phase before the prompt and the platform findings existed, and in that window an unrelocated or unkept removal in an accounted file read as complete with no finding.
 The window was never released: the summary, the coverage rule, the prompt and the platform findings reach `dev` together, when the epic merges.
 
 ### Cost
@@ -91,10 +94,11 @@ No new budget enters the job: ADR 0107's 45.4 minutes are unchanged.
 ## Consequences
 
 - A bulk pull request like `on004551` #1 can now pass `no_degradation`: its 125 tables are 5 classes and about 2,400 characters, and every number in them matches its author's own account.
-  With the prototype, the pull requests with unread content fell from 31 to 14 of 86, 7 of those over the 400-name cut; 17 carry an unkept removal and need a person for it.
-- A removal is never passed on the model's word, at 3 files or at 3,000, whether or not its file was also shown as a diff.
+  With the prototype, the pull requests with unread content fell from 31 to 14 of 86, 7 of those over the 400-name cut; 17 carry an unrelocated or unkept removal and need a person for it.
+- A removal in a file the summary summarized is a platform blocker, at 3 files or at 3,000, whether or not that file was also shown as a diff.
+  A removal in a file the summary refused is read from its diff by the model, as before the summary existed, and when that diff is not shown in full the pull request is incomplete, as before.
 - The prompt is a calibrated one, changed: the model calibration of ADR 0107 is required again before the check is required.
-- The longest review message, system prompt included, grows to 258,123 characters, under the 300,000 a test holds it to.
+- The longest review message, system prompt included, grows to 258,351 characters, under the 300,000 a test holds it to.
 - Two values that the fence makes equal (a `<facts>` and a `</facts>`) show as equal text with no note on where they differ, because the note is computed before the fence.
   No loss can hide this way, since a removal is an atom of its own with a finding; the calibration phase adds the case to its hostile fixtures and fixes it there.
 
@@ -107,7 +111,7 @@ No new budget enters the job: ADR 0107's 45.4 minutes are unchanged.
 - **Ordered row diffs:** quadratic on hostile input, and they read a reorder as a loss.
 - **Store the summary in the report:** it is input to the model, not to the verdict, and what decides already reaches the verdict through `truncated` and the platform findings.
 - **A new evidence field for the loss counts:** it would let the check and the calibration read them, but it changes the evidence keys every reader parses for no change in any verdict; it waits for its own phase.
-- **Fold an unkept removal into `truncated`:** the check would then say some files were not shown, which is false and gives the author nothing to fix.
+- **Fold an unrelocated or unkept removal into `truncated`:** the check would then say some files were not shown, which is false and gives the author nothing to fix.
 - **Always render the summary block, as "(none)":** a block with nothing in it adds a fence for every small pull request and nothing for the model to read.
 - **A blocking path per kind of loss:** a second path field on the loss facts; the path is attributed by the file's kind instead, which is sound because tables yield only row and column removals and JSON documents only key removals.
 

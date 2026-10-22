@@ -3448,8 +3448,8 @@ describe("the review prompt carries prompt v3's rules word for word", () => {
       "The changed-metadata-summary block, which is there only when the summary has a class,",
       "its text is the pull request's own and is material to review.",
       "what is said above about a sample does not apply to a class.",
-      "A file counts as shown in full, and is counted in files_with_content_shown, when every class that removes or changes something in it is shown in full; a class that only adds need not be shown,",
-      "are counted in the facts, and the platform reports them to a person itself; say what was removed.",
+      "A file the summary summarized counts as shown in full, and is counted in files_with_content_shown, when every class that removes or changes something in it is shown in full; a class that only adds need not be shown,",
+      "are counted in the facts, and the platform reports them to a person itself; say what was removed. Only files the summary summarized (change_summary.files_summarized) are counted there: a removal in any other file (change_summary.files_not_summarized) is shown only in its diff, and judging it is yours.",
       "treat a pair that is not as a removal.",
       "which the platform cannot see, so weigh that from the path shape.",
       "A summary marked abandoned was not used.",
@@ -5836,6 +5836,72 @@ describe("the change summary in the prompt", () => {
     expect(user).not.toContain("changed-metadata-summary");
     expect([opens, closes]).toEqual([4, 4]);
     expect(facts.change_summary).toEqual(NO_SUMMARY_FACTS);
+  });
+
+  test("a removal in a file the summary refuses is counted nowhere and is the review's to judge from its diff", () => {
+    const table = tableOf("sub-01");
+    const sidecar = sidecarOf("sub-01");
+    const base = {
+      [table]: "name\ttype\tunits\nCz\tEEG\tuV\nPz\tEEG\tuV\n",
+      [sidecar]: '{"TaskName":"rest","SamplingFrequency":500,"PowerLineFrequency":60}',
+    };
+    // The Cz row removed from a table a ragged line makes unreadable, and TaskName removed from a
+    // sidecar that also repeats a key: each file is refused, so nothing of it is counted.
+    for (const [name, path, refusal, edit, removed] of [
+      [
+        "ps-refused-ragged",
+        table,
+        "ragged_row",
+        (dir: string) => write(dir, table, "name\ttype\tunits\nPz\tEEG\tuV\textra\n"),
+        "-Cz\tEEG\tuV",
+      ],
+      [
+        "ps-refused-duplicate",
+        sidecar,
+        "duplicate_key",
+        (dir: string) =>
+          write(
+            dir,
+            sidecar,
+            '{"SamplingFrequency":500,"SamplingFrequency":500,"PowerLineFrequency":60}',
+          ),
+        '-{"TaskName":"rest","SamplingFrequency":500,"PowerLineFrequency":60}',
+      ],
+    ] as const) {
+      const r = releaseChanging(name, base, edit);
+      const f = gatherGitFacts(r.dir, r.base, r.head);
+      expect(f.summary.files.map((o) => [o.path, o.refusal])).toEqual([
+        ["dataset_description.json", null],
+        [path, refusal],
+      ]);
+      const { facts, blocks } = reviewPrompt(f);
+      expect(facts.change_summary).toMatchObject({
+        files_summarized: 1,
+        files_not_summarized: 1,
+        rows_removed_not_found_elsewhere: 0,
+        columns_with_values_removed: 0,
+        keys_removed_not_found_elsewhere: 0,
+      });
+      expect(platformFindings(f.summary)).toEqual([]);
+      // The removal is in its file's diff, shown in full, and the prompt says that judging it is
+      // the review's: the platform reports nothing, so a review that sees no loss passes it.
+      const content = blocks.get("content-of-changed-metadata-files") ?? "";
+      expect(content).toContain(`### ${path}\n`);
+      expect(content).toContain(removed);
+      expect(f.readIncomplete).toBe(false);
+      expect(
+        buildReviewMessages({
+          facts: f,
+          evidence: buildEvidence(f, NO_TEXT_PROBLEMS),
+          pr: { title: "t", body: "b" },
+          fromFork: false,
+          nonce: "n0nce",
+        }).system,
+      ).toContain(
+        "Only files the summary summarized (change_summary.files_summarized) are counted there: a removal in any other file (change_summary.files_not_summarized) is shown only in its diff, and judging it is yours.",
+      );
+      expect(verdictOf(full(allPass, buildEvidence(f, NO_TEXT_PROBLEMS)))).toBe("pass");
+    }
   });
 
   test("an abandoned summary says so in the facts, with no block and no finding", () => {
