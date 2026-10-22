@@ -5322,6 +5322,27 @@ describe("the platform's findings from the change summary", () => {
     expect(reportErrorOf(() => full(allPass, e, tooMany))).toBe("not a PrReviewReportError");
   });
 
+  test("a platform finding that is not a blocker on no_degradation is the script's own error", () => {
+    const e = buildEvidence(both(), NO_TEXT_PROBLEMS);
+    const [rows] = platformFindings(both().summary) as [ReviewFinding];
+    // The room for the review's findings counts on each platform finding explaining the first
+    // question: one on another criterion, or one that would not lower it, is refused outright.
+    const stray: ReviewFinding[] = [
+      { ...rows, criterion: "material_improvement" },
+      { ...rows, criterion: "clear_title_and_description" },
+      { ...rows, severity: "concern" },
+      { ...rows, severity: "note" },
+    ];
+    for (const f of stray) {
+      expect(() => full(allPass, e, [rows, f]), `${f.criterion} ${f.severity}`).toThrow(
+        "not a blocker on no_degradation",
+      );
+      expect(reportErrorOf(() => full(allPass, e, [f]))).toBe("not a PrReviewReportError");
+    }
+    // The control: the platform's own findings pass the check.
+    expect(full(allPass, e, [rows]).findings[0]).toEqual(rows);
+  });
+
   test("a model finding cut for room still lowers: a steering finding fails, a blocker lowers its pass", () => {
     const e = buildEvidence(both(), NO_TEXT_PROBLEMS);
     const platform = platformFindings(both().summary);

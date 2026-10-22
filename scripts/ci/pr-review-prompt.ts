@@ -634,8 +634,10 @@ export function assembleFactsReport(evidence: ReviewEvidence): PrReviewReport {
  * slot) and explain the two text criteria, and a full report's `genuine_contribution` passes, so
  * `fixed`, the reasons and the failing criteria are at most eight together. Then the parser trims
  * nothing and adds a finding only where the review gave none, so its output parses back to itself,
- * and a criterion the review explained keeps the review's reason. With no failing criterion left
- * unexplained this keeps exactly the review's first findings, as a plain cut would.
+ * and a criterion the review explained keeps the review's reason. When the findings a plain cut
+ * would keep (the review's first, as many as eight leaves after `fixed`) already explain every
+ * failing criterion and hold every reason, this keeps exactly those findings, as the plain cut
+ * would.
  */
 function keepModelFindings(
   modelFindings: readonly unknown[],
@@ -732,10 +734,15 @@ export function assembleReport(
   if (!isRecordValue(reviewOutput) || usage.review === null) {
     throw new PrReviewReportError("bad_stage");
   }
-  // More than the platform can make is this script's own mistake, not the model's: a plain error,
-  // which the job reports as `workflow_failed`.
+  // More than the platform can make, or one that is not a blocker on `no_degradation`, is this
+  // script's own mistake, not the model's: a plain error, which the job reports as
+  // `workflow_failed`. The room for the review's findings counts on every platform finding
+  // explaining `no_degradation` (see keepModelFindings).
   if (platform.length > MAX_PLATFORM_FINDINGS) {
     throw new Error("assembleReport: more platform findings than MAX_PLATFORM_FINDINGS");
+  }
+  if (platform.some((f) => f.criterion !== "no_degradation" || f.severity !== "blocker")) {
+    throw new Error("assembleReport: a platform finding that is not a blocker on no_degradation");
   }
   const m = reviewOutput;
   const answers = isRecordValue(m.criteria) ? m.criteria : {};
