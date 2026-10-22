@@ -35,6 +35,8 @@ import {
   exitCodeOf,
   fetchPinned,
   fetchPullRequest,
+  honorsNoLazyFetch,
+  parseGitVersion,
   parseTarget,
   refusedDeletions,
   renderEvidenceTable,
@@ -928,12 +930,41 @@ describe("frozen clones: --clones and --offline", () => {
       ["nm000460#2", "objects_missing"],
     ]);
     // A directory beside the clones that is not a repository is missing too, even when a
-    // repository encloses it: git is not asked, so it cannot find the one above.
+    // repository encloses it: git is asked with the clones directory as its ceiling, so it cannot
+    // find the one above.
     git(clones, "init", "-q");
     mkdirSync(join(clones, "nm000460-5"));
     writeFileSync(join(clones, "nm000460-5.shas"), `${base} ${base}\n`);
     const five = await calibrate(["--pr", "nm000460#5", "--clones", clones, "--json"]);
     expect((JSON.parse(five.out) as CalibrationRow[])[0]?.error).toBe("clone_missing");
+  });
+
+  test("an empty .git is no clone, even inside a repository that holds the commits", async () => {
+    const { clones, base, head } = frozenClones("clones-ceiling", (b, h) => `${b} ${h}\n`);
+    // The clones directory is itself a repository holding the pull request's commits, so a search
+    // for a repository that left a clone's own directory would find them there and read it.
+    git(clones, "init", "-q");
+    git(clones, "fetch", "-q", join(clones, "nm000460-2"), "+refs/*:refs/enclosing/*");
+    expect(git(clones, "cat-file", "-t", head)).toBe("commit");
+    mkdirSync(join(clones, "nm000460-6", ".git"), { recursive: true });
+    writeFileSync(join(clones, "nm000460-6.shas"), `${base} ${head}\n`);
+    const r = await calibrate([
+      "--pr",
+      "nm000460#6",
+      "--pr",
+      "nm000460#2",
+      "--clones",
+      clones,
+      "--evidence-only",
+      "--json",
+    ]);
+    // The empty .git is clone_missing; a real clone in the same directory still reads.
+    const rows = JSON.parse(r.out) as EvidenceRow[];
+    expect(rows.map((x) => [x.pr, x.error])).toEqual([
+      ["nm000460#6", "clone_missing"],
+      ["nm000460#2", null],
+    ]);
+    expect(rows[1]?.evidence?.files).toBe(3);
   });
 
   test("pins need --clones, --offline needs --clones, and --pr names no commits", async () => {
@@ -962,9 +993,10 @@ describe("frozen clones: --clones and --offline", () => {
   /**
    * A blob-less clone of a pull request that changes only the sidecar, made the way the review job
    * makes one, from a bare origin over `file://`: the listing still reads `dataset_description.json`
-   * at both ends, a blob the pull request does not change.
+   * at both ends, a blob the pull request does not change. With `headToo` false only the base is
+   * fetched, so the head commit is in the origin and not in the clone.
    */
-  function blobLessFrozen(name: string) {
+  function blobLessFrozen(name: string, headToo = true) {
     const src = join(root, `${name}-src`);
     mkdirSync(src, { recursive: true });
     git(src, "init", "-q", "-b", "main");
@@ -992,14 +1024,23 @@ describe("frozen clones: --clones and --offline", () => {
     git(clone, "init", "-q", "-b", "main");
     git(clone, "config", "extensions.partialClone", "origin");
     git(clone, "remote", "add", "origin", `file://${bare}`);
-    git(clone, "fetch", "-q", "--no-tags", "--filter=blob:none", "origin", base, head);
+    git(
+      clone,
+      "fetch",
+      "-q",
+      "--no-tags",
+      "--filter=blob:none",
+      "origin",
+      base,
+      ...(headToo ? [head] : []),
+    );
     writeFileSync(join(clones, "nm000460-2.shas"), `${base} ${head}\n`);
     writeFileSync(
       join(clones, "nm000460-2.pr.json"),
       JSON.stringify({ title: "Lee2019 EEG update", body: "b" }),
     );
     const blob = (rev: string, path: string) => git(src, "rev-parse", `${rev}:${path}`);
-    return { clones, clone, base, head, blob };
+    return { clones, clone, bare, base, head, blob };
   }
 
   /** Whether the clone holds the object, asked so that asking cannot fetch it. */
@@ -1063,6 +1104,130 @@ describe("frozen clones: --clones and --offline", () => {
     });
     expect(holds(f.clone, description)).toBe(true);
     expect(requests).toHaveLength(0);
+  });
+
+  test("--clones without --offline never fetches a commit to check it: one the clone lacks is objects_missing", async () => {
+    // The origin holds the head; the clone holds only the base, and would fetch the head lazily if
+    // asked for it with fetching allowed. The variable is set to allow it, so only the check's own
+    // environment can keep the fetch from happening.
+    const f = blobLessFrozen("clones-no-fetch", false);
+    git(f.bare, "cat-file", "-e", `${f.head}^{commit}`);
+    expect(holds(f.clone, f.base)).toBe(true);
+    expect(holds(f.clone, f.head)).toBe(false);
+    const previous = process.env.GIT_NO_LAZY_FETCH;
+    process.env.GIT_NO_LAZY_FETCH = "0";
+    let r: Awaited<ReturnType<typeof calibrate>>;
+    try {
+      r = await calibrate([
+        "--pr",
+        "nm000460#2",
+        "--clones",
+        f.clones,
+        "--evidence-only",
+        "--json",
+      ]);
+    } finally {
+      if (previous === undefined) Reflect.deleteProperty(process.env, "GIT_NO_LAZY_FETCH");
+      else process.env.GIT_NO_LAZY_FETCH = previous;
+    }
+    expect((JSON.parse(r.out) as EvidenceRow[])[0]?.error).toBe("objects_missing");
+    expect(holds(f.clone, f.head)).toBe(false);
+  });
+
+  test("--offline leaves GIT_NO_LAZY_FETCH as it found it when the temporary directory cannot be made", async () => {
+    const clones = mkdtempSync(join(root, "no-tmpdir-clones-"));
+    const saved = { lazy: process.env.GIT_NO_LAZY_FETCH, tmp: process.env.TMPDIR };
+    // A value of the variable from before the run, other than the run's own `1`: git reads it as a
+    // boolean, and refuses to start at all on a value that is not one.
+    process.env.GIT_NO_LAZY_FETCH = "false";
+    process.env.TMPDIR = join(root, "no-such-tmpdir");
+    let outcome: string;
+    let after: string | undefined;
+    try {
+      try {
+        const r = await calibrate([
+          "--pr",
+          "nm000460#2",
+          "--clones",
+          clones,
+          "--offline",
+          "--evidence-only",
+        ]);
+        outcome = `exit ${r.code}`;
+      } catch {
+        outcome = "threw";
+      }
+      after = process.env.GIT_NO_LAZY_FETCH;
+    } finally {
+      if (saved.tmp === undefined) Reflect.deleteProperty(process.env, "TMPDIR");
+      else process.env.TMPDIR = saved.tmp;
+      if (saved.lazy === undefined) Reflect.deleteProperty(process.env, "GIT_NO_LAZY_FETCH");
+      else process.env.GIT_NO_LAZY_FETCH = saved.lazy;
+    }
+    expect(outcome).toBe("threw");
+    expect(after).toBe("false");
+    expect(tmpdir()).not.toContain("no-such-tmpdir");
+  });
+
+  test("--offline needs git 2.44 or later, and refuses an older one without printing its version", async () => {
+    expect(parseGitVersion("git version 2.39.5 (Apple Git-154)")).toEqual({
+      major: 2,
+      minor: 39,
+      patch: 5,
+    });
+    expect(parseGitVersion("git version 2.44.0\n")).toEqual({ major: 2, minor: 44, patch: 0 });
+    expect(parseGitVersion("git version 2.45.1.windows.1")).toEqual({
+      major: 2,
+      minor: 45,
+      patch: 1,
+    });
+    expect(parseGitVersion("git version 3.0")).toEqual({ major: 3, minor: 0, patch: 0 });
+    for (const bad of ["", "git version", "version 2.44.0", "git version 2.44x", "hub 2.44.0"]) {
+      expect(parseGitVersion(bad), bad).toBeNull();
+    }
+    const honors = (line: string) => {
+      const v = parseGitVersion(line);
+      return v !== null && honorsNoLazyFetch(v);
+    };
+    expect(honors("git version 2.39.5 (Apple Git-154)")).toBe(false);
+    expect(honors("git version 2.43.7")).toBe(false);
+    expect(honors("git version 2.44.0")).toBe(true);
+    expect(honors("git version 2.56.0")).toBe(true);
+    expect(honors("git version 3.0.0")).toBe(true);
+    expect(honors("git version 1.99.0")).toBe(false);
+
+    // A stand-in git first on PATH for one run: it says 2.43.0 when asked its version, and hands
+    // every other call to the real git.
+    const real = Bun.which("git");
+    expect(real).not.toBeNull();
+    const bin = join(root, "old-git-bin");
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(
+      join(bin, "git"),
+      `#!/bin/sh\nif [ "$1" = "--version" ]; then echo 'git version 2.43.0'; exit 0; fi\nexec '${real}' "$@"\n`,
+    );
+    chmodSync(join(bin, "git"), 0o755);
+    const clones = mkdtempSync(join(root, "old-git-clones-"));
+    const saved = process.env.PATH;
+    process.env.PATH = `${bin}:${saved ?? ""}`;
+    let r: Awaited<ReturnType<typeof calibrate>>;
+    try {
+      r = await calibrate([
+        "--pr",
+        "nm000460#2",
+        "--clones",
+        clones,
+        "--offline",
+        "--evidence-only",
+      ]);
+    } finally {
+      process.env.PATH = saved;
+    }
+    expect(r.code).toBe(2);
+    expect(r.said).toContain("--offline needs git 2.44 or later");
+    expect(r.said).not.toContain("2.43");
+    expect(r.said).not.toContain(root);
+    expect(r.out).toBe("");
   });
 });
 

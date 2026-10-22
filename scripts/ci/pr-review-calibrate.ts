@@ -20,10 +20,15 @@
  *
  * **`--clones DIR`** reads each pull request from a clone already made, `DIR/<dataset>-<number>`,
  * at its pinned commits or the ones in `DIR/<dataset>-<number>.shas` (`<base> <head>`), with its
- * title and description from `DIR/<dataset>-<number>.pr.json`; it never runs `gh`. **`--offline`**
- * (only with `--clones`) also keeps git from fetching anything: a clone that lacks an object the
- * review needs is `objects_missing`, never a fetch. It sets `GIT_NO_LAZY_FETCH` (git 2.44 or later)
- * for the run and restores it after; `--offline` changes only git, never the model calls.
+ * title and description from `DIR/<dataset>-<number>.pr.json`; it never runs `gh`, and it checks
+ * that the clone holds both commits without fetching either. **`--offline`** (only with
+ * `--clones`) also keeps git from fetching anything else: a clone that lacks a blob of the one diff
+ * the content pass prefetches (from the merge base to the head) is `objects_missing` before any
+ * pass runs, and any other object the review reads and the clone lacks (an unchanged
+ * `dataset_description.json` or change log the listing reads) is not fetched, so that pull request
+ * ends as `evidence_unavailable`. It sets `GIT_NO_LAZY_FETCH` for the run and restores it after,
+ * and refuses to run on a git older than 2.44, which ignores the variable and would fetch;
+ * `--offline` changes only git, never the model calls.
  *
  * **`--evidence-only`** asks no model and needs no key: it runs the review's two evidence passes
  * (`gatherListing`, `gatherContent`) and `buildEvidence` on each pull request, as the review would
@@ -51,8 +56,9 @@
  * **The operator's key reaches only the API.** It refuses to run while `ANTHROPIC_BASE_URL` or
  * `ANTHROPIC_AUTH_TOKEN` is set (a shell that points the SDK at a gateway would hand it the key),
  * and says which by name, never by value; `--evidence-only` makes no model client at all, so it
- * refuses neither, but it still refuses to run where the callback token is set. Every child it starts, its own `gh` and `git` and the
- * `git` the review's evidence reader runs on a contributor's objects, is started with
+ * refuses neither, but it still refuses to run where the callback token is set. Every child it
+ * starts, its own `gh` and `git` and the `git` the review's evidence reader runs on a
+ * contributor's objects, is started with
  * {@link childEnv} (`pr-review-evidence.ts`): this process's environment without any `ANTHROPIC_*`
  * variable, without any `ACTIONS_ID_TOKEN_REQUEST_*` variable (the request for an identity token,
  * which an Actions runner puts in a step's environment) and without the review's callback token.
@@ -73,9 +79,9 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import {
   type Criterion,
   type PrReviewReport,
@@ -404,15 +410,20 @@ function readShas(path: string): PinnedCommits | null {
  * before (for a frozen set, by the recipe in its manifest), read in place and never fetched into by
  * this function.
  *
- * - The clone must be a directory with a `.git`, else `clone_missing`. (Checked by the path, not by
- *   asking git, which would find a repository in a directory above.)
+ * - The clone must be a directory that is a repository of its own, else `clone_missing`. git is
+ *   asked, with `GIT_CEILING_DIRECTORIES` set to `DIR`, so its search cannot leave the clone's own
+ *   directory: an empty `.git`, or none, is not taken for a repository that encloses `DIR`.
  * - The commits are the line's pin, else the ones in `DIR/<dataset>-<number>.shas`, else `no_commit`.
- * - Both must be commits the clone holds, asked without fetching, else `objects_missing`.
+ * - Both must be commits the clone holds, asked without fetching (in every mode, not only
+ *   `offline`), else `objects_missing`.
  * - `offline`: every blob the content pass's one prefetch would fetch (the diff from the merge base
  *   to the head, which `--numstat` reads in full) must be in the clone already, asked without
- *   fetching, else `objects_missing`. So a clone short of a blob is a closed word, not a failure in
- *   the middle of a pass. (The merge base, not the base: the review diffs from the merge base, and
- *   the files the base's branch changed since are never read.)
+ *   fetching, else `objects_missing`. So a clone short of a blob of that diff is a closed word, not
+ *   a failure in the middle of a pass. An object outside that diff that the review still reads (an
+ *   unchanged `dataset_description.json` or change log the listing reads) is not checked here; the
+ *   pass cannot fetch it either, so the pull request ends as `evidence_unavailable`. (The merge
+ *   base, not the base: the review diffs from the merge base, and the files the base's branch
+ *   changed since are never read.)
  * - The pull request's text is `DIR/<dataset>-<number>.pr.json`, an object, else `clone_missing`;
  *   with `needsText` false (a run that reads no text) it is not read at all.
  */
@@ -426,7 +437,14 @@ export function cloneReader(
     const dir = join(clones, name);
     let isRepo = false;
     try {
-      isRepo = statSync(dir).isDirectory() && existsSync(join(dir, ".git"));
+      if (statSync(dir).isDirectory()) {
+        // Throws when git finds no repository between the clone's directory and the ceiling.
+        execFileSync("git", ["-C", dir, "rev-parse", "--git-dir"], {
+          env: { ...offlineEnv(), GIT_CEILING_DIRECTORIES: resolve(clones) },
+          stdio: ["ignore", "ignore", "ignore"],
+        });
+        isRepo = true;
+      }
     } catch {
       isRepo = false;
     }
@@ -1088,6 +1106,38 @@ export function renderTable(rows: readonly CalibrationRow[]): string[] {
   ];
 }
 
+/** A git version: its major, minor and patch numbers. */
+export interface GitVersion {
+  major: number;
+  minor: number;
+  patch: number;
+}
+
+/**
+ * The version in `git --version`'s output (`git version 2.44.0`, `git version 2.39.5 (Apple
+ * Git-154)`, `git version 2.45.1.windows.1`), or null when the output does not start that way. A
+ * missing patch number reads as 0. Pure.
+ */
+export function parseGitVersion(output: string): GitVersion | null {
+  const m = /^git version (\d+)\.(\d+)(?:\.(\d+))?(?:[.\s-]|$)/.exec(output.trim());
+  if (m === null) return null;
+  return { major: Number(m[1]), minor: Number(m[2]), patch: Number(m[3] ?? 0) };
+}
+
+/** Whether git honors `GIT_NO_LAZY_FETCH`, which it does from 2.44 on. */
+export function honorsNoLazyFetch(v: GitVersion): boolean {
+  return v.major > 2 || (v.major === 2 && v.minor >= 44);
+}
+
+/** The git this process would start, read from `git --version`; null when it cannot be read. */
+function gitVersion(): GitVersion | null {
+  try {
+    return parseGitVersion(run("git", ["--version"]));
+  } catch {
+    return null;
+  }
+}
+
 function usage(why: string): number {
   console.error(`pr-review-calibrate: ${why}`);
   console.error(
@@ -1125,7 +1175,8 @@ function readPullRequest(t: CalibrationTarget, root: string): FetchedPullRequest
  * The refusals come in this order: the callback token first, before an argument is read, because
  * calibrate posts nothing in any mode; then the arguments; then, unless `--evidence-only`, the
  * variables that would point the model client elsewhere. An evidence run makes no client, so a
- * shell with them set is no danger to a key it never reads.
+ * shell with them set is no danger to a key it never reads. Then the flags that need one another,
+ * and, with `--offline`, a git older than 2.44 (see {@link honorsNoLazyFetch}).
  */
 export async function calibrateMain(
   argv: readonly string[],
@@ -1144,8 +1195,11 @@ export async function calibrateMain(
     // is a value, and a value is never echoed: it may be a token, and a refusal is no place to
     // print one. An unknown name is no safer, since a key pasted after two dashes is one.
     const name = arg.startsWith("--") ? (arg.slice(2).split("=", 1)[0] ?? "") : null;
-    if (name === null)
-      return usage("arguments are flags: --pr, --prs, --clones, --json and the like");
+    if (name === null) {
+      return usage(
+        "arguments are flags: --pr, --prs, --clones, --offline, --evidence-only, --without-summary and --json",
+      );
+    }
     if (!KNOWN_FLAGS.has(name)) return usage("unknown flag");
     if (REFUSED_FLAGS.has(name)) {
       return usage(`--${name} is refused: calibrate posts nothing and reviews no dispatch`);
@@ -1218,6 +1272,16 @@ export async function calibrateMain(
   }
   if (withoutSummary && !evidenceOnly) return usage("--without-summary is for --evidence-only");
   if (offline && clones === null) return usage("--offline reads only --clones, which is not given");
+  // A git before 2.44 ignores GIT_NO_LAZY_FETCH and would fetch, silently. Its version is never
+  // printed: the words are closed, and the refusal is the same for a version that cannot be read.
+  if (offline) {
+    const version = gitVersion();
+    if (version === null || !honorsNoLazyFetch(version)) {
+      return usage(
+        "--offline needs git 2.44 or later, which keeps a clone from fetching; this git is older, or its version could not be read",
+      );
+    }
+  }
   if (clones === null && !evidenceOnly && targets.some((t) => t.pin !== undefined)) {
     return usage(
       "a pull request with pinned commits is read from --clones or with --evidence-only",
@@ -1244,11 +1308,12 @@ export async function calibrateMain(
 
   // Offline, no git this run starts may fetch: every child is started with childEnv(), which reads
   // this process's environment at each call, so setting the variable here reaches the evidence
-  // reader's git too. It is put back as it was, whatever the run came to.
+  // reader's git too. It is set only once the temporary directory exists, inside the `try` whose
+  // `finally` puts it back as it was, so a run that fails before or after leaves it as it found it.
   const savedLazyFetch = process.env.GIT_NO_LAZY_FETCH;
-  if (offline) process.env.GIT_NO_LAZY_FETCH = "1";
   const root = mkdtempSync(join(tmpdir(), "pr-review-calibrate-"));
   try {
+    if (offline) process.env.GIT_NO_LAZY_FETCH = "1";
     if (evidenceOnly) {
       // No model client is made on this path, so no key is read and nothing is sent.
       const rows = once.map((t) => evidenceOne(t, root, reader, { withoutSummary }));

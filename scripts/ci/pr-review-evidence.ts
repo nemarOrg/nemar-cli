@@ -245,9 +245,9 @@ export interface ContentFacts {
   /**
    * True when a MODIFIED or REMOVED metadata file with a real change was not shown in full: it did
    * not fit the file or character budget, its diff was cut, reading it failed, or git wrote its diff
-   * as binary, which shows none of its content. A file the
-   * platform proved cosmetic-only ({@link cosmeticOnlyFiles}) is not counted, and neither is one
-   * the change summary accounted for ({@link summary}).
+   * as binary, which shows none of its content. A file the platform proved cosmetic-only
+   * ({@link cosmeticOnlyFiles}) is not counted, and neither is one the change summary accounted for
+   * ({@link summary}).
    */
   readIncomplete: boolean;
   /**
