@@ -7,6 +7,16 @@
  * way the Messages API does, streamed (`helpers/anthropic-sse.ts`). What is checked is what the
  * table says, what it never says (a pull request's text, a model's words), and that nothing is
  * posted anywhere.
+ *
+ * Beyond the normal mode, the tests cover:
+ *  - pinned commits, fetched by id, and `--clones` (frozen clones read in place: what makes a clone,
+ *    the commits it must hold, and that checking them never fetches);
+ *  - `--offline` (nothing is fetched, `GIT_NO_LAZY_FETCH` is put back as it was, and a git older
+ *    than 2.44 is refused);
+ *  - `--evidence-only` and `--without-summary` (no model and no key, the evidence table and its
+ *    totals, the refused files that delete a line and HIDDEN as exit 1, no path or value printed);
+ *  - the frozen set A: its manifest, its stored baseline and the label template for the model
+ *    calibration, and, when the archive of its clones is on this machine, a run over it.
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
@@ -1073,31 +1083,47 @@ describe("frozen clones: --clones and --offline", () => {
     expect(holds(f.clone, f.blob(f.head, sidecar))).toBe(false);
     expect(holds(f.clone, f.blob(f.base, sidecar))).toBe(false);
 
-    // Fetch what the prefetch would: the two sides of the sidecar. dataset_description.json, which
-    // the pull request does not change, is still not in the clone, and the listing reads it.
-    execFileSync("git", ["-C", f.clone, "diff", "--numstat", f.base, f.head], { env: GIT_ENV });
+    // Fetch what the prefetch would: the two sides of the sidecar, fetched lazily, which is allowed
+    // here whatever the shell running the tests says. dataset_description.json, which the pull
+    // request does not change, is still not in the clone, and the listing reads it.
+    execFileSync("git", ["-C", f.clone, "diff", "--numstat", f.base, f.head], {
+      env: { ...GIT_ENV, GIT_NO_LAZY_FETCH: "0" },
+    });
     expect(holds(f.clone, f.blob(f.head, sidecar))).toBe(true);
     const description = f.blob(f.head, "dataset_description.json");
     expect(holds(f.clone, description)).toBe(false);
-    // A value of the variable from before the run, which the run must put back.
-    process.env.GIT_NO_LAZY_FETCH = "0";
+    // The variable as the shell running the tests has it, most often unset: every run must leave it
+    // exactly so, and the test puts it back so whatever happens.
+    const previous = process.env.GIT_NO_LAZY_FETCH;
+    const putBack = () => {
+      if (previous === undefined) Reflect.deleteProperty(process.env, "GIT_NO_LAZY_FETCH");
+      else process.env.GIT_NO_LAZY_FETCH = previous;
+    };
     let second: Awaited<ReturnType<typeof calibrate>>;
+    let third: Awaited<ReturnType<typeof calibrate>>;
+    let online: Awaited<ReturnType<typeof calibrate>>;
     try {
+      // A value of the variable from before the run other than the run's own, which it must put back.
+      process.env.GIT_NO_LAZY_FETCH = "0";
       second = await calibrate(["--pr", "nm000460#2", "--clones", f.clones, "--offline", "--json"]);
       expect(process.env.GIT_NO_LAZY_FETCH).toBe("0");
+      putBack();
+      third = await calibrate(["--pr", "nm000460#2", "--clones", f.clones, "--offline"]);
+      expect(process.env.GIT_NO_LAZY_FETCH).toBe(previous);
+      // Neither offline run fetched the description.
+      expect(holds(f.clone, description)).toBe(false);
+      // The control runs with fetching allowed, so a shell that turns it off does not decide it.
+      process.env.GIT_NO_LAZY_FETCH = "0";
+      online = await calibrate(["--pr", "nm000460#2", "--clones", f.clones, "--json"]);
     } finally {
-      Reflect.deleteProperty(process.env, "GIT_NO_LAZY_FETCH");
+      putBack();
     }
     // The evidence reader's own git could not fetch the description either: no read, no fetch.
     expect((JSON.parse(second.out) as CalibrationRow[])[0]?.error).toBe("evidence_unavailable");
-    expect(holds(f.clone, description)).toBe(false);
-    const third = await calibrate(["--pr", "nm000460#2", "--clones", f.clones, "--offline"]);
     expect(third.code).toBe(1);
-    expect(process.env.GIT_NO_LAZY_FETCH).toBeUndefined();
 
     // The control: without --offline the same clone fetches the description when the listing asks,
     // and the review goes on to the facts.
-    const online = await calibrate(["--pr", "nm000460#2", "--clones", f.clones, "--json"]);
     expect((JSON.parse(online.out) as CalibrationRow[])[0]).toMatchObject({
       stage: "facts",
       error: null,

@@ -1754,7 +1754,20 @@ describe("renderClasses: pairs that may look alike are annotated with their firs
       seed = (seed * 1103515245 + 12345) >>> 0;
       return seed % n;
     };
-    const words = ["<facts", "</facts", "< /facts", "<untrusted", "</ UNTRUSTED", "<Facts>"];
+    // Tags with a blank between `<` (or `</`) and the word, of every kind the fence's `\s*` takes:
+    // a space, a tab, a line feed and a no-break space, so a copy that took only spaces would differ.
+    const words = [
+      "<facts",
+      "</facts",
+      "< /facts",
+      "<\tfacts",
+      "</\nFACTS",
+      "<untrusted",
+      "< untrusted",
+      "</ UNTRUSTED",
+      "<\u{A0}untrusted",
+      "<Facts>",
+    ];
     let changed = 0;
     for (let i = 0; i < 5_000; i++) {
       let s = "";

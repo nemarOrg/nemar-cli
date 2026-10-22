@@ -401,8 +401,8 @@ function case10(): HostileCase {
     {
       [t]: tsv(
         ["name", "type", "units", "status", "notes"],
-        ["Cz", "EEG", "u\u{7F}V", "go​od", "a b"],
-        ["Pz", "EEG", "uV", "good", "а"],
+        ["Cz", "EEG", "u\u{7F}V", "go\u{200B}od", "a\u{A0}b"],
+        ["Pz", "EEG", "uV", "good", "\u{430}"],
       ),
     },
   );

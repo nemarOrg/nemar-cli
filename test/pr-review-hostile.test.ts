@@ -6,12 +6,20 @@
  *
  * The pass criterion is the design's: every case ends with the content incomplete, a blocking
  * platform finding, or the change shown exactly, and no case is accounted for with a loss hidden.
- * Each case also names the one of those routes it must take, so a change of route is a failure
- * too, and must lose something, so no case passes by testing nothing. Four self-tests doctor a real
- * run in the way each rule guards against and show the oracle objects.
+ * The tests:
+ *  - one test that the set is the design's cases;
+ *  - one test per case (`case <id> takes the route <route>`): the oracle finds no violation, the
+ *    case loses something (so it does not pass by testing nothing), it takes the route it names (so
+ *    a change of route is a failure too), and a finding or an incomplete read keeps a model's
+ *    all-pass answer from passing; case 10 also has every look-alike pair line noted;
+ *  - one self-test of the oracle, which doctors real runs the way each rule guards against and
+ *    shows the oracle objects: O-D (a diff that shows none of its lines), O1 (no loss class, no
+ *    finding, too few rows counted), O-R (an unread file called read), O2 (for each of its three
+ *    conditions) and O3 (a forged facts block, a class line outside every fence);
+ *  - one test that the builder writes set B as clones `pr-review-calibrate.ts` reads, offline.
  *
- * Every repository is built in one temporary directory, removed after the file whether the tests
- * passed or not.
+ * Each case is built and run once, whichever test asks first. Every repository is built in one
+ * temporary directory, removed after the file whether the tests passed or not.
  */
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
@@ -81,8 +89,19 @@ interface Run {
 
 const bytesOf = (t: Tree) => new Map([...t].map(([path, file]) => [path, file.bytes]));
 
+/** Each case's run, by id: a case is built and run once per file, whichever test asks first. */
+const runs = new Map<string, Run>();
+
 /** One case through the real reader, summary, findings and prompt, then the oracle. */
 function run(c: HostileCase): Run {
+  const done = runs.get(c.id);
+  if (done !== undefined) return done;
+  const r = runOnce(c);
+  runs.set(c.id, r);
+  return r;
+}
+
+function runOnce(c: HostileCase): Run {
   const repo = buildCase(c, root);
   const listing = gatherListing(repo.dir, repo.base, repo.head);
   const content = gatherContent(
@@ -296,10 +315,27 @@ describe("set B as calibrate reads it", () => {
     const lines = writeSetB(out);
     expect(lines.filter((l) => !l.startsWith("#"))).toHaveLength(CASES.length);
     const printed: string[] = [];
-    const code = await calibrateMain(
-      ["--prs", join(out, "set-b.txt"), "--clones", out, "--offline", "--evidence-only", "--json"],
-      (l) => printed.push(l),
-    );
+    // calibrate refuses to run where a review's callback token is set; a shell that has one must
+    // not decide this test, so it is cleared for the run and put back after.
+    const token = process.env.PR_REVIEW_CALLBACK_TOKEN;
+    Reflect.deleteProperty(process.env, "PR_REVIEW_CALLBACK_TOKEN");
+    let code: number;
+    try {
+      code = await calibrateMain(
+        [
+          "--prs",
+          join(out, "set-b.txt"),
+          "--clones",
+          out,
+          "--offline",
+          "--evidence-only",
+          "--json",
+        ],
+        (l) => printed.push(l),
+      );
+    } finally {
+      if (token !== undefined) process.env.PR_REVIEW_CALLBACK_TOKEN = token;
+    }
     const rows = JSON.parse(printed.join("\n")) as EvidenceRow[];
     expect(rows).toHaveLength(CASES.length);
     expect(rows.filter((r) => r.error !== null)).toEqual([]);
