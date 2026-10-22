@@ -6355,8 +6355,19 @@ describe("the worst case fits", () => {
       fromFork: true,
       nonce: "n".repeat(32),
     });
-    // The change summary's block is in it, at its character bound.
+    // The change summary's block is in it, at its character bound and whole.
+    expect(worstSummary.text).toHaveLength(30_000);
     expect(review.user).toContain(`kind="${SUMMARY_FENCE_KIND}">\n${worstSummary.text}\n`);
+    // And so is every class line of the facts, the longest the platform can write, the first and
+    // the last among them: the size bound below is measured with all of them in.
+    const classLines = worstSummary.facts.classes;
+    expect(classLines).toHaveLength(SUMMARY_LIMITS.maxClasses);
+    const sent = JSON.parse(
+      review.user.slice(review.user.indexOf("<facts>") + 7, review.user.indexOf("</facts>")),
+    );
+    expect(sent.change_summary.classes).toEqual(classLines);
+    expect(review.user).toContain(JSON.stringify(classLines[0]));
+    expect(review.user).toContain(JSON.stringify(classLines.at(-1)));
     expect(facts.patches.reduce((n, x) => n + x.text.length, 0)).toBe(MAX_PATCH_TOTAL_CHARS);
     expect(screen.user.length + SCREEN_SYSTEM_PROMPT.length).toBeLessThan(40_000);
     expect(review.user.length + REVIEW_SYSTEM_PROMPT.length).toBeLessThan(300_000);
