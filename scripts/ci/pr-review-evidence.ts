@@ -993,10 +993,16 @@ const EMPTY_BYTES = new Uint8Array(0);
  * row removed from such a table is in no line the reviewer could read. Such a diff makes no patch:
  * the file stays unread (a modified or removed one keeps the content incomplete) and takes no slot.
  * A change of mode alone prints no such line, because the content is the same, and stays shown.
- * Only git writes a line that starts this way: every line of a text diff's content starts with a
- * space, `+`, `-`, `@` or `\`, and a path with a line break in it is quoted.
+ *
+ * Matched only as a whole line between line feeds (or the start or end of the output), the way
+ * git writes it: git ends every line it writes with a line feed, every line of a text diff's
+ * content starts with a space, `+`, `-`, `@` or `\`, and a path with a line break or another
+ * control character in it is quoted. A carriage return is not a line break here: a cell that holds
+ * a bare carriage return followed by these words is still inside one diff line that starts with a
+ * space, `+` or `-`, so it cannot forge this line (a match that took a carriage return for the
+ * start of a line, as the `m` flag does, would leave such a text table unread).
  */
-const BINARY_DIFF = /^Binary files .* differ$/m;
+const BINARY_DIFF = /(?:^|\n)Binary files [^\n]* differ(?:\n|$)/;
 
 /** What a test may set for one content pass; production passes nothing. */
 export interface ContentOptions {
