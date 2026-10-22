@@ -39,6 +39,7 @@ import {
   __setStageBudgetsForTests,
   callStage,
   describeError,
+  evidenceStats,
   isSpendLimit,
   main,
   mapError,
@@ -6005,6 +6006,94 @@ describe("the evidence observer", () => {
       "data_removed",
       "metadata_removed",
     ]);
+  });
+
+  test("every number the stats carry comes from its own field", () => {
+    // The release above fills most of these with the same small number or with zero, so a field
+    // read from the wrong place would still be right there. Here every count is a different prime.
+    const r = stats();
+    const real = gatherGitFacts(r.dir, r.base, r.head);
+    expect(real.patches).toHaveLength(4);
+    const group = real.groups[0] as (typeof real.groups)[number];
+    const summary: ChangeSummary = {
+      ...EMPTY_SUMMARY,
+      abandoned: true,
+      facts: {
+        abandoned: false,
+        files_summarized: 43,
+        files_not_summarized: 47,
+        files_accounted_for: 53,
+        classes_shown: 59,
+        classes_cut: 61,
+        rows_removed_not_found_elsewhere: 67,
+        rows_removed_found_verbatim_in_sourcedata: 71,
+        columns_with_values_removed: 73,
+        keys_removed_not_found_elsewhere: 79,
+        keys_moved_to_an_inherited_sidecar: 83,
+        values_emptied: 89,
+        classes: [],
+      },
+      loss: {
+        rowsRemoved: 107,
+        rowsRemovedFiles: 109,
+        rowsRelocated: 113,
+        columnsRemoved: 127,
+        keysRemoved: 131,
+        keysRemovedFiles: 137,
+        keysMoved: 139,
+        valuesEmptied: 149,
+        firstBlockingPath: null,
+      },
+      text: "x".repeat(151),
+    };
+    const facts = {
+      ...real,
+      groups: [29, 31].map((files) => ({ ...group, files })),
+      groupsOmittedFiles: 37,
+      cosmeticOnlyFiles: 41,
+      summary,
+    };
+    const evidence = {
+      ...buildEvidence(real, NO_TEXT_PROBLEMS),
+      files_changed: 101,
+      files_read: 103,
+    };
+    const stat = (readIncomplete: boolean, truncated: boolean) =>
+      evidenceStats({ ...facts, readIncomplete }, { ...evidence, truncated });
+
+    // Only the two flags are told apart by being different, so they are read both ways round.
+    const stated = stat(false, true);
+    expect(stated).toEqual({
+      files: 101,
+      wanted: 29 + 31 + 37,
+      cosmetic: 41,
+      read: 103,
+      patches: 4,
+      readIncomplete: false,
+      truncated: true,
+      summaryAbandoned: true,
+      summarized: 43,
+      refused: 47,
+      accounted: 53,
+      classes: 59,
+      cut: 61,
+      summaryChars: 151,
+      rowsRemoved: 107,
+      rowsRemovedFiles: 109,
+      rowsRelocated: 113,
+      columnsRemoved: 127,
+      keysRemoved: 131,
+      keysRemovedFiles: 137,
+      keysMoved: 139,
+      valuesEmptied: 149,
+      // One finding for the rows and columns, one for the keys.
+      platformFindings: 2,
+    });
+    expect(stat(true, false)).toEqual({ ...stated, readIncomplete: true, truncated: false });
+    // The fixture does its job only while no two counts are alike.
+    const counts = Object.values(stated).filter((v) => typeof v === "number");
+    expect(new Set(counts).size).toBe(counts.length);
+    expect(counts).toHaveLength(20);
   });
 
   test("it is not told anything when the review ends at the facts or at the screen", async () => {
