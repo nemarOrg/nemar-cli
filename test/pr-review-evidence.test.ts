@@ -5231,25 +5231,31 @@ describe("the platform's findings from the change summary", () => {
     expect(verdictOf(stored)).toBe("uncertain");
     expect(verdictOf(parsePrReviewReport(JSON.parse(JSON.stringify(report))))).toBe("uncertain");
 
-    // A screen report: the content the findings come from is read only after the screen.
+    // A screen report: the content the findings come from is read only after the screen, so even
+    // one platform finding is refused.
     const screenUsage = { screen: USAGE.screen, review: null };
     expect(assembleReport(REJECT, null, e, screenUsage).stage).toBe("screen");
     expect(reportErrorOf(() => assembleReport(REJECT, null, e, screenUsage, platform))).toBe(
       "bad_stage",
     );
+    expect(
+      reportErrorOf(() =>
+        assembleReport(REJECT, null, e, screenUsage, [platform[0] as ReviewFinding]),
+      ),
+    ).toBe("bad_stage");
     // Findings that are not a list are the model's error, platform findings or not.
     expect(reportErrorOf(() => full({ ...allPass, findings: "none" }, e, platform))).toBe(
       "bad_findings",
     );
-    // More than the platform can make is the script's own error, never the model's.
-    const most = Array.from(
-      { length: MAX_PLATFORM_FINDINGS },
-      (_, i) => platform[i % 2] as ReviewFinding,
-    );
-    expect(full(allPass, e, most).findings).toHaveLength(MAX_PLATFORM_FINDINGS);
-    expect(reportErrorOf(() => full(allPass, e, [...most, platform[0] as ReviewFinding]))).toBe(
-      "not a PrReviewReportError",
-    );
+    // More than the platform can make is the script's own error, never the model's. The limit is
+    // three: ADR 0109 says so, and so does the room `keepModelFindings` reckons the report has, so
+    // a change to it has to be a change to those, and this line is where it is noticed.
+    expect(MAX_PLATFORM_FINDINGS).toBe(3);
+    const most = Array.from({ length: 3 }, (_, i) => platform[i % 2] as ReviewFinding);
+    expect(full(allPass, e, most).findings).toHaveLength(3);
+    const tooMany = [...most, platform[0] as ReviewFinding];
+    expect(tooMany).toHaveLength(4);
+    expect(reportErrorOf(() => full(allPass, e, tooMany))).toBe("not a PrReviewReportError");
   });
 
   test("a model finding cut for room still lowers: a steering finding fails, a blocker lowers its pass", () => {
