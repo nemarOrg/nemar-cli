@@ -25,6 +25,7 @@ import {
   type ProseDocument,
   type ProseFacts,
   type ProseRead,
+  REVIEW_LEFT_OUT_DIRS,
   type RecordingChange,
   type RecordingFacts,
   type VersionTag,
@@ -36,6 +37,7 @@ import {
   chooseAnchor,
   decodeProse,
   hidesText,
+  inReviewedScope,
   isDocumentName,
   isMinorEdit,
   levenshteinWithin,
@@ -2086,7 +2088,7 @@ const typeOfMode = (mode: string): string => mode.slice(0, 3);
 
 /**
  * One changed path, its status and zero ids as `git diff --raw` would write them. Whether the path
- * is in an area the review reads is decided from its first directory, as a caller decides it.
+ * is in the reviewed scope comes from the module's own predicate, as a caller takes it.
  */
 function recording(
   path: string,
@@ -2110,7 +2112,7 @@ function recording(
     oidBefore: was?.oid ?? "0".repeat(40),
     oidAfter: now?.oid ?? "0".repeat(40),
     recordingArea,
-    readArea: !/^(?:sourcedata|derivatives|code)\//.test(path),
+    inReviewedScope: inReviewedScope(path),
     before: was?.probe ?? null,
     after: now?.probe ?? null,
   };
@@ -2373,13 +2375,30 @@ describe("recordingFacts: the shapes of set A", () => {
       );
       changes.push(recording(`sub-${n}/eeg/sub-${n}_eeg.fdt`, null, locked(keyOf(n), 3), true));
     }
-    expect(changes[0]?.readArea).toBe(false);
-    expect(changes[1]?.readArea).toBe(true);
+    expect(changes[0]?.inReviewedScope).toBe(false);
+    expect(changes[1]?.inReviewedScope).toBe(true);
     expect(recordingFacts(changes)).toEqual(noRecordingChange({ moved: 15 }));
   });
 });
 
-describe("recordingFacts: the areas the review reads", () => {
+describe("recordingFacts: the reviewed scope", () => {
+  test("the scope leaves out exactly sourcedata/, derivatives/ and code/ at the top", () => {
+    expect([...REVIEW_LEFT_OUT_DIRS]).toEqual(["sourcedata", "derivatives", "code"]);
+    for (const path of ["sourcedata/raw/x.bdf", "derivatives/a/b.edf", "code/run.py"]) {
+      expect(inReviewedScope(path), path).toBe(false);
+    }
+    for (const path of [
+      "sub-01/eeg/x.edf",
+      "README",
+      "sub-01/derivatives/x.edf",
+      "sourcedata.tsv",
+      "codebook.json",
+      "Derivatives/x.edf",
+    ]) {
+      expect(inReviewedScope(path), path).toBe(true);
+    }
+  });
+
   test("a pointer moved from derivatives/ into the recordings area is moved and nothing else", () => {
     const key = keyOf(30);
     expect(

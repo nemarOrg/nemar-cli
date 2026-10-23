@@ -60,6 +60,7 @@ import {
   type RecordingFacts,
   authorFieldFacts,
   authorFieldsAltered,
+  inReviewedScope,
   isDocumentName,
   proseAltered,
   proseFacts,
@@ -227,9 +228,6 @@ function readmeDeletedLines(numstat: string): number {
   return deleted;
 }
 
-/** The areas the review does not read (ADR 0092): changes there are no replacement or type change. */
-const LEFT_OUT_AREAS: ReadonlySet<string> = new Set(["sourcedata", "derivatives", "code"]);
-
 /** The probe of one side of a changed path for {@link recordingFacts}. */
 function probeOf(
   oid: string,
@@ -243,10 +241,9 @@ function probeOf(
 }
 
 /**
- * The recording facts over every changed path. Each path's areas come from `classifyPath`, the
- * review's own reading of a path: the recordings area for a change git holds, and the areas the
- * review reads (all but `sourcedata/`, `derivatives/` and `code/`) for a replacement or a type change.
- * A move is matched over every path, as the module does.
+ * The recording facts over every changed path. The recordings area comes from `classifyPath`, the
+ * review's own reading of a path, and the reviewed scope from the module's `inReviewedScope`; a
+ * move is matched over every path, as the module does.
  */
 function recordingRow(
   dir: string,
@@ -273,7 +270,7 @@ function recordingRow(
     oidBefore: entry.oidBefore,
     oidAfter: entry.oidAfter,
     recordingArea: classifyPath(entry.path) === "recordings",
-    readArea: !LEFT_OUT_AREAS.has(classifyPath(entry.path)),
+    inReviewedScope: inReviewedScope(entry.path),
     before:
       entry.status === "added"
         ? null

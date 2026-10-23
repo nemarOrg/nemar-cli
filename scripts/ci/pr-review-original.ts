@@ -1267,6 +1267,18 @@ export function authorFieldsAltered(facts: AuthorFieldFacts): boolean {
 export type PointerProbe = Uint8Array | "large" | "unreadable";
 
 /**
+ * The top-level directories the review leaves out: changes below them are not read and not
+ * summarized (design section 14, "Deliberately out of scope"). One list, for this module, the
+ * set A reader and their tests, so the scope is never written twice.
+ */
+export const REVIEW_LEFT_OUT_DIRS = ["sourcedata", "derivatives", "code"] as const;
+
+/** Whether a path is in the reviewed scope: not below one of {@link REVIEW_LEFT_OUT_DIRS}. */
+export function inReviewedScope(path: string): boolean {
+  return !REVIEW_LEFT_OUT_DIRS.some((dir) => path.startsWith(`${dir}/`));
+}
+
+/**
  * One changed path as `git diff --raw` names it (the fields of `RawEntry` in the evidence module,
  * which this module never imports; the shapes are compared by the compiler where they meet), with
  * what the caller knows about it: whether the path is in the recordings area of the annex policy,
@@ -1283,12 +1295,14 @@ export interface RecordingChange {
   /** The path is in the recordings area. Entered by the caller so this module never imports the policy. */
   recordingArea: boolean;
   /**
-   * The path is in an area the review reads: not below `sourcedata/`, `derivatives/` or `code/`
-   * (the scope of ADR 0092). A replacement or a type change counts only here; a key moved and a
+   * The path is in the reviewed scope, {@link inReviewedScope} of the path: not below one of
+   * {@link REVIEW_LEFT_OUT_DIRS}. A replacement or a type change counts only here; a key moved and a
    * side that could not be read count wherever the path is. Entered by the caller, which passes
    * every changed path, so a key that left `derivatives/` for the raw tree is still seen to move.
+   * This is NOT the evidence module's `READABLE_AREAS`, the narrower set of areas whose files the
+   * review reads in full: a recording is in the reviewed scope and is never read in full.
    */
-  readArea: boolean;
+  inReviewedScope: boolean;
   before: PointerProbe | null;
   after: PointerProbe | null;
 }
@@ -1419,8 +1433,8 @@ export interface RecordingFacts {
  * decided by what the side is, never by the area of its path or by the status `typechange`). Each
  * changed path is read as two sides ({@link annexSide}; a null probe is a side that does not exist) and the
  * paths are taken in code-unit order, so the answer never depends on the order the caller listed
- * them. The caller passes every changed path. For a path that exists on both sides and is in an
- * area the review reads (`readArea`):
+ * them. The caller passes every changed path. For a path that exists on both sides and is in the
+ * reviewed scope (`inReviewedScope`):
  *
  * - both annexed, with different keys: `replaced`; with the same key (a locked link made an unlocked
  *   pointer, or a link whose `../` depth changed): nothing;
@@ -1463,7 +1477,7 @@ export function recordingFacts(
       if (now?.kind === "annexed") addedKeys.set(now.key, (addedKeys.get(now.key) ?? 0) + 1);
       continue;
     }
-    if (!change.readArea) continue;
+    if (!change.inReviewedScope) continue;
     if (was.kind === "annexed" && now.kind === "annexed") {
       if (was.key !== now.key) facts.replaced++;
     } else if (was.kind === "annexed" || now.kind === "annexed") {
