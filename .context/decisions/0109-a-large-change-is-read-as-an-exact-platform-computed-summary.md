@@ -111,7 +111,7 @@ No new budget enters the job: ADR 0107's 45.4 minutes are unchanged.
   The value must be unique among the parent's removed and among its added leaves (design 4.7).
   A change to either rule moves the baseline test (it runs where the frozen clones exist, not in CI), which then fails until the baseline is recorded again.
 - The Part B facts are measured on the same 86 pull requests with the strict merge-base anchor: 27 of the 29 READMEs that show deleted lines are only line-ending, final-newline or trailing-whitespace artifacts and are not alterations, and the two real ones are flagged.
-  Three facts the design did not have, markup that hides original text, a README that shadows or loses the shown one, and new lines that join an original paragraph, are zero on set A except the last (one pull request, already altered).
+  Three facts the design did not have are measured there: markup that hides original text and a README that shadows or loses the shown one are zero, and new lines that join an original paragraph occur in two pull requests (one altered anyway, one a CHANGES entry).
   The module refuses an alignment past an edit distance of 2,000 instead of counting every protected line as altered, so a very large README rewrite will be `unknown` and a person looks.
   The facts are tripwires and not a proof against hostile Markdown; the raw diff and the model stay in the loop.
 - A diff git writes as binary (a NUL byte in a table) is no read at all: the file stays unread and a removed row in it keeps the content incomplete.
