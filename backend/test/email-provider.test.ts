@@ -27,27 +27,8 @@ import {
   sendEmail,
   sendRevocationEmail,
 } from "../src/services/email";
+import { bindingError, recordingBinding } from "./helpers/cloudflare-email";
 import { withFakeResend } from "./helpers/resend";
-
-type BindingMessage = Parameters<CloudflareSendEmail["send"]>[0];
-
-/** A `send_email` binding that records what it is handed, or throws what it is told to. */
-function recordingBinding(failure?: () => unknown) {
-  const sent: BindingMessage[] = [];
-  const binding: CloudflareSendEmail = {
-    async send(message) {
-      sent.push(message);
-      if (failure) throw failure();
-      return { messageId: "<recorded@staging.nemar.test>" };
-    },
-  };
-  return { binding, sent };
-}
-
-/** An error the way the binding raises one: an Error with a `code`. */
-function bindingError(code: string | undefined, message = "refused"): Error {
-  return Object.assign(new Error(message), code ? { code } : {});
-}
 
 const FROM = "NEMAR Staging <noreply@staging.nemar.test>";
 const REPLY_TO = "support@staging.nemar.test";
