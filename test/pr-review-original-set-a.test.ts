@@ -226,6 +226,31 @@ describe("the set A baseline of original facts", () => {
     expect(where(any)).toEqual(["on003029#1", "on003343#3", "on004306#1", "on004703#1"]);
   });
 
+  test("new lines joined to an original paragraph: one README, already altered, and one CHANGES", () => {
+    const joined = (document: "readme" | "changes"): string[] =>
+      where((r) => {
+        const facts = r[document];
+        return facts !== null && facts.refusal === null && facts.joinedInsertedRuns > 0;
+      });
+    expect(joined("readme")).toEqual(["nm000501#3"]);
+    expect(joined("changes")).toEqual(["on003620#1"]);
+    // None of the 27 README changes that git shows as deletions and that alter nothing.
+    const artifacts = rows.filter(
+      (r) =>
+        (r.readmeGitDeleted ?? 0) > 0 &&
+        r.readme !== null &&
+        r.readme.refusal === null &&
+        !r.readme.proseAltered,
+    );
+    expect(artifacts).toHaveLength(27);
+    for (const r of artifacts) {
+      expect(
+        r.readme !== null && r.readme.refusal === null && r.readme.joinedInsertedRuns,
+        r.pr,
+      ).toBe(0);
+    }
+  });
+
   test("the tripwires are quiet on set A: no hiding markup inserted, no shown part replaced", () => {
     const documents = rows.flatMap((r) => [r.readme, r.changes]);
     for (const d of documents) {
