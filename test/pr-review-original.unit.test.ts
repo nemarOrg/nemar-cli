@@ -382,6 +382,35 @@ describe("normalizeProse", () => {
     ]);
   });
 
+  test("an ordered marker other than 1, or a marker with nothing after it, starts no paragraph inside one", () => {
+    const flags = (text: string) => normalizeProse(text).lines.map((line) => line.paragraphStart);
+    // micromark with GFM renders each of these as one paragraph: CommonMark lets only a bullet, or
+    // exactly 1. or 1), with text after it interrupt a paragraph.
+    expect(flags("Line one.\n2. INSERTED.\nLine two.\n")).toEqual([true, false, false]);
+    expect(flags("The study began in\n2019. The study enrolled forty adults.\n")).toEqual([
+      true,
+      false,
+    ]);
+    expect(flags("foo\n01. bar\n")).toEqual([true, false]);
+    expect(flags("foo\n1.\nbar\n")).toEqual([true, false, false]);
+    expect(flags("foo\n*\nbar\n")).toEqual([true, false, false]);
+    expect(flags("foo\n2. a\n3. b\n")).toEqual([true, false, false]);
+    // A bullet, or 1) or 1., with text after it does interrupt one.
+    expect(flags("foo\n1) bar\n")).toEqual([true, true]);
+    expect(flags("foo\n1. bar\n2. baz\n")).toEqual([true, true, true]);
+    expect(flags("foo\n-\tbar\n")).toEqual([true, true]);
+    // Where no paragraph is open the others start one too: on the first line, after a blank line
+    // or a heading, after an item, or after a line that continues an item with no blank line.
+    expect(flags("2. x\n")).toEqual([true]);
+    expect(flags("Text.\n\n2. x\n")).toEqual([true, true]);
+    expect(flags("# H\n2. x\n")).toEqual([true, true]);
+    expect(flags("Items:\n- a\n2019. b\n")).toEqual([true, true, true]);
+    expect(flags("Items:\n1. a\nb\nc\n2. d\n")).toEqual([true, true, false, false, true]);
+    // A blank line or a heading closes the list: a plain line after it opens a paragraph again.
+    expect(flags("1. a\n\nfoo\n2. b\n")).toEqual([true, true, false]);
+    expect(flags("- a\n# H\nText.\n2. b\n")).toEqual([true, true, true, false]);
+  });
+
   test("the block flags cost one pass over 4 MiB of headings, list items or a hostile line", () => {
     const size = 4 * 1024 * 1024;
     const fill = (unit: string): string => unit.repeat(Math.ceil(size / unit.length));
@@ -1742,6 +1771,24 @@ describe("proseFacts: a run is inside a paragraph only when no blank line sets i
       expect(facts.insertedInsideParagraph, head).toBe(0);
       expect(altered, head).toBe(false);
     }
+  });
+
+  test("a line opening with 2. or a year inside an original paragraph is in it, and altered", () => {
+    const base = "Line one of the text.\nLine two of the text.\n";
+    const numbered = judged(base, "Line one of the text.\n2. INSERTED.\nLine two of the text.\n");
+    expect(numbered.facts.insertedInsideParagraph).toBe(1);
+    expect(numbered.altered).toBe(true);
+    // An original line opening with a year is in its paragraph: a line put above it is inside.
+    const year = "The study began in\n2019. The study enrolled forty adults.\n";
+    const above = judged(
+      year,
+      "The study began in\nA new line.\n2019. The study enrolled forty adults.\n",
+    );
+    expect(above.facts.insertedInsideParagraph).toBe(1);
+    expect(above.altered).toBe(true);
+    // The control: a bullet with text after it is a block of its own, between the two lines.
+    const bullet = judged(base, "Line one of the text.\n- INSERTED.\nLine two of the text.\n");
+    expect(bullet.facts.insertedInsideParagraph).toBe(0);
   });
 
   test("a heading put between two lines of an original paragraph is a new block, joined to the line below", () => {

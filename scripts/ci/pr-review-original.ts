@@ -183,6 +183,13 @@ const ATX_HEADING = /^ {0,3}#{1,6}(\s|$)/;
  */
 const LIST_ITEM = /^ {0,3}([-*+]|\d{1,9}[.)])(\s|$)/;
 
+/**
+ * A list item that can interrupt a paragraph: a `-`, `*` or `+`, or exactly `1.` or `1)`, then a
+ * blank and some text. CommonMark lets no other item interrupt one: `2.`, `01.` or `2019.` in the
+ * middle of a paragraph, or a marker with nothing after it, is that paragraph's text.
+ */
+const INTERRUPTING_ITEM = /^ {0,3}([-*+]|1[.)])[ \t]+\S/;
+
 /** The code units {@link normalizeProse} read, for a test to bound. Added to, never reset. */
 export interface NormalizeMeter {
   units: number;
@@ -203,11 +210,15 @@ function isTrailingBlank(unit: number): boolean {
  * only way they can be decided. Nothing else changes: case, inner whitespace, leading indentation
  * and a no-break space are all significant.
  *
- * Two kinds of line start a block in rendered Markdown whatever is around them, and so start a
- * paragraph here too: an ATX heading ({@link ATX_HEADING}), and the line after it, and a list item
- * ({@link LIST_ITEM}). A README written with no blank lines around its headings is then read as the
- * sections it renders as. Nothing else of Markdown is parsed: fenced code, tables, setext headings
- * and block quotes are not, and every other line is governed by blank lines alone.
+ * Two kinds of line start a block in rendered Markdown, and so start a paragraph here too: an ATX
+ * heading ({@link ATX_HEADING}), and the line after it, and a list item ({@link LIST_ITEM}). A list
+ * item that cannot interrupt a paragraph (anything but {@link INTERRUPTING_ITEM}) starts one only
+ * where no paragraph is open to interrupt: on the first line, after a blank line or a heading, or
+ * inside a list, which an item opens and a blank line or a heading closes. A README written with
+ * no blank lines around its headings is then read as the sections it renders as, and a line that
+ * opens with a year (`2019. The study`) inside a paragraph stays in it. Nothing else of Markdown is
+ * parsed: fenced code, tables, setext headings and block quotes are not, and every other line is
+ * governed by blank lines alone.
  *
  * This removes exactly the two artifacts measured on set A (a final newline added and CRLF turned
  * into LF) and the trailing whitespace a mass cleanup touches; `breaks` and `endsWithBreak` keep
@@ -229,6 +240,7 @@ export function normalizeProse(
   const lines: { text: string; paragraphStart: boolean }[] = [];
   let paragraphStart = true;
   let afterHeading = false;
+  let inList = false;
   let lf = 0;
   let crlf = 0;
   let cr = 0;
@@ -241,10 +253,12 @@ export function normalizeProse(
     }
     const line = text.slice(from, end);
     const heading = ATX_HEADING.test(line);
-    lines.push({
-      text: line,
-      paragraphStart: paragraphStart || afterHeading || heading || LIST_ITEM.test(line),
-    });
+    const item =
+      LIST_ITEM.test(line) &&
+      (paragraphStart || afterHeading || inList || INTERRUPTING_ITEM.test(line));
+    lines.push({ text: line, paragraphStart: paragraphStart || afterHeading || heading || item });
+    // A line of an item, its own or one that continues it with no blank line, keeps a list open.
+    inList = item || (inList && !heading && !paragraphStart);
     paragraphStart = false;
     afterHeading = heading;
   };
