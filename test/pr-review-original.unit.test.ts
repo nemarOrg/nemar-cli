@@ -42,6 +42,7 @@ import {
   isMinorEdit,
   levenshteinWithin,
   minorBound,
+  minorEditHides,
   normalizeProse,
   parseVersionTags,
   participantValuesAltered,
@@ -1388,8 +1389,9 @@ describe("proseFacts: the tripwires", () => {
     });
     const facts = readme({ "README.md": ORIGINAL }, { "README.md": head });
     expect(facts.minorEdits).toBe(2);
-    // The two edited lines are next to each other: one run, read as one text.
-    expect(facts.hidingMarkupInserted).toBe(1);
+    // The two edited lines are next to each other: one run, read as one text, and each edit adds
+    // a `<` or a `>`, so each counts once more on its own.
+    expect(facts.hidingMarkupInserted).toBe(3);
     expect(facts.joinedInsertedRuns).toBe(0);
   });
 
@@ -1426,10 +1428,94 @@ describe("proseFacts: the tripwires", () => {
     const head = `# Methods\n\n[x]:<>"${first}\n${second}"\n`;
     const facts = readme({ "README.md": base }, { "README.md": head });
     expect(facts.minorEdits).toBe(2);
-    // The new text of a minor edit is no inserted run of its own, but it is read for markup.
+    // The new text of a minor edit is no inserted run of its own, but it is read for markup: the
+    // run once, and the first edit once more, being a definition that adds brackets.
     expect(facts.joinedInsertedRuns).toBe(0);
-    expect(facts.hidingMarkupInserted).toBe(1);
+    expect(facts.hidingMarkupInserted).toBe(2);
     expect(proseAltered(facts)).toBe(false);
+  });
+
+  // One original paragraph of two long lines, every line protected (no tag): each attack below
+  // makes the paragraph render as nothing (a footnote definition, a link definition, an image, a
+  // tag around it) with edits inside the minor bound, so no other fact moves.
+  const LINE_ONE = "The participants completed both sessions of the oddball task on separate days.";
+  const LINE_TWO = "Sessions were scheduled at least one week apart, at the same time of the day.";
+  const TWO_LINES = `# Methods\n\n${LINE_ONE}\n${LINE_TWO}\n`;
+
+  test("the attacks rest on two lines of 78 and 77 characters, all within the minor bound", () => {
+    expect([LINE_ONE.length, LINE_TWO.length]).toEqual([78, 77]);
+  });
+
+  for (const [label, head, hiding] of [
+    [
+      "a footnote definition before the first line",
+      `# Methods\n\n[^a]: ${LINE_ONE}\n${LINE_TWO}\n`,
+      1,
+    ],
+    [
+      "a link definition around each line",
+      `# Methods\n\n[a]: <${LINE_ONE}>\n[b]: <${LINE_TWO}>\n`,
+      2,
+    ],
+    ["an image around each line", `# Methods\n\n![${LINE_ONE}]()\n![${LINE_TWO}]()\n`, 2],
+    ["a tag around the first line", `# Methods\n\n<a ${LINE_ONE}>\n${LINE_TWO}\n`, 1],
+  ] as [string, string, number][]) {
+    test(`minor edits that make an original paragraph ${label} trip the markup fact`, () => {
+      const facts = readme({ "README.md": TWO_LINES }, { "README.md": head });
+      expect(facts.protectedAltered + facts.movedLines).toBe(0);
+      expect(facts.minorEdits).toBeGreaterThan(0);
+      expect(proseAltered(facts)).toBe(false);
+      expect(facts.hidingMarkupInserted).toBe(hiding);
+    });
+  }
+
+  test("a minor edit adding no bracket or angle bracket, an exclamation mark or a parenthesis, does not", () => {
+    const head = `# Methods\n\n${LINE_ONE.replace("both", "(both)")}\n${LINE_TWO.replace(".", "!")}\n`;
+    const facts = readme({ "README.md": TWO_LINES }, { "README.md": head });
+    expect(facts.minorEdits).toBe(2);
+    expect(facts.hidingMarkupInserted).toBe(0);
+    expect(minorEditHides("see [1] and x", "see x and [1]")).toBe(false);
+    expect(minorEditHides("a < b", "a < c")).toBe(false);
+    for (const added of ["a [b", "a b]", "a <b", "a b>"]) {
+      expect(minorEditHides("a b", added), added).toBe(true);
+    }
+    expect(minorEditHides("[x]: /a", "[x]: /b")).toBe(true);
+    expect(minorEditHides("![a](b)", "![a](c)")).toBe(true);
+  });
+
+  test("a definition, a footnote, an image, a badge or a table in a new paragraph is not hiding", () => {
+    for (const line of [
+      "[1]: https://example.org/x",
+      "[^1]: A note on the montage.",
+      '<img src="montage.png" alt="Montage">',
+      "[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.1.svg)](https://doi.org/10.5281/zenodo.1)",
+      "![Montage](montage.png)",
+      "<table><tr><td>Session</td><td>1</td></tr></table>",
+    ]) {
+      const head = `${ORIGINAL}\n## References\n\n${line}\n`;
+      const facts = readme({ "README.md": ORIGINAL }, { "README.md": head });
+      expect(facts.hidingMarkupInserted, line).toBe(0);
+      expect(facts.preserved, line).toBe(true);
+    }
+    // All of them together in one new section, as a real README has them.
+    const section = `${ORIGINAL}\n## References\n\n[1]: https://example.org/x\n[^1]: A note.\n\n<img src="m.png">\n`;
+    expect(readme({ "README.md": ORIGINAL }, { "README.md": section }).hidingMarkupInserted).toBe(
+      0,
+    );
+  });
+
+  test("the same lines attached to an original paragraph are hiding", () => {
+    for (const line of [
+      "[1]: https://example.org/x",
+      "[^1]: A note on the montage.",
+      "[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.1.svg)](https://doi.org/10.5281/zenodo.1)",
+      "![Montage](montage.png)",
+    ]) {
+      // Directly above the Participants paragraph, with no blank line between.
+      const head = edited((lines) => lines.splice(7, 0, line));
+      const facts = readme({ "README.md": ORIGINAL }, { "README.md": head });
+      expect(facts.hidingMarkupInserted, line).toBe(1);
+    }
   });
 
   test("a joined run counts once however many protected lines it touches, and a blank line unjoins it", () => {

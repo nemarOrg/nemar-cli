@@ -684,11 +684,15 @@ export interface ProseFacts {
   partsBefore: number;
   partsAfter: number;
   /**
-   * Runs of consecutive head lines that are not kept verbatim (inserted lines and the new text of
-   * minor edits together) whose markup can hide what follows or surrounds it: see
-   * {@link hidesText}, which reads a run as one text, so a tag split across lines is still one tag.
-   * Wrapping original paragraphs in such markup keeps every protected line verbatim, so without
-   * this fact it would read as preserved.
+   * Places where new markup can hide original text, counted two ways and added together. Each run
+   * of consecutive head lines that are not kept verbatim (inserted lines and the new text of minor
+   * edits together) counts once when {@link hidesText} finds markup in it (it reads the run as one
+   * text, so a tag split across lines is one tag), or when one of its new lines is a link or
+   * footnote definition, or a line the platform drops as an image, inside an original paragraph.
+   * And each minor edit counts once when its new text can hide the line it replaces
+   * ({@link minorEditHides}). Wrapping original paragraphs in such markup keeps every protected
+   * line verbatim or within a minor edit, so without this fact it would read as preserved. A
+   * definition, a footnote or an image in a paragraph of its own is ordinary and not counted.
    */
   hidingMarkupInserted: number;
   /**
@@ -733,8 +737,53 @@ const HIDING_ELEMENTS: ReadonlySet<string> = new Set([
 /** An attribute or a style inside one tag that hides the element. */
 const HIDING_ATTRIBUTE = /\bhidden\b|display\s*:\s*none/i;
 
-/** The start of a Markdown link reference definition: up to three spaces, `[label]` and a colon. */
-const LINK_DEFINITION = /^ {0,3}\[[^\]]+\]:/;
+/**
+ * The start of a Markdown link reference definition or a GFM footnote definition: up to three
+ * spaces, `[label]` or `[^label]`, and a colon. The label may be empty here, which no renderer
+ * takes as a definition: the pattern errs toward flagging.
+ */
+const DEFINITION = /^ {0,3}\[\^?[^\]]*\]:/;
+
+// A line that is only an image, or only a link around an image. Both patterns are the platform's
+// own, ported from nemarOrg/website `src/lib/markdown.ts` (STANDALONE_IMAGE_RE, LINKED_IMAGE_RE),
+// whose renderer drops such a line before rendering, so its text is never shown. Each class is a
+// negated one that stops at its closing bracket, so neither can backtrack on a long line.
+const STANDALONE_IMAGE = /^[ \t]*!\[[^\]]*\]\([^)]*\)[ \t]*$/;
+const LINKED_IMAGE = /^[ \t]*\[!\[[^\]]*\]\([^)]*\)\]\([^)]*\)[ \t]*$/;
+
+/** Whether a line is a link or footnote definition, or a line the platform drops as an image. */
+function definesOrIsAnImage(line: string): boolean {
+  return DEFINITION.test(line) || STANDALONE_IMAGE.test(line) || LINKED_IMAGE.test(line);
+}
+
+/** The characters a minor edit may not add: with them it can wrap the line in a tag or a link. */
+const WRAPPING_CHARACTERS = [0x3c, 0x3e, 0x5b, 0x5d]; // < > [ ]
+
+/** How many of each of {@link WRAPPING_CHARACTERS} a line holds, in one pass. */
+function wrappingCounts(line: string): number[] {
+  const counts = [0, 0, 0, 0];
+  for (let i = 0; i < line.length; i++) {
+    const at = WRAPPING_CHARACTERS.indexOf(line.charCodeAt(i));
+    if (at >= 0) counts[at] = (counts[at] as number) + 1;
+  }
+  return counts;
+}
+
+/**
+ * Whether the new text of a minor edit can hide the original line it replaces: it is a link or
+ * footnote definition, or a line the platform drops as an image (see {@link definesOrIsAnImage}),
+ * or the edit adds one of `<`, `>`, `[` or `]` (the new line holds more of it than the old one).
+ * Three characters are within the minor bound of any line, so without this a footnote label, a
+ * link destination in angle brackets, an image's brackets or a tag around the line would each make
+ * an original line render as nothing and still read as a minor edit. `!`, `(` and `)` are not
+ * counted: an exclamation mark or a parenthesis added to prose is the edit a minor edit is for.
+ */
+export function minorEditHides(before: string, after: string): boolean {
+  if (definesOrIsAnImage(after)) return true;
+  const was = wrappingCounts(before);
+  const now = wrappingCounts(after);
+  return now.some((count, at) => count > (was[at] as number));
+}
 
 /** Whether a UTF-16 code unit is an ASCII letter. */
 function isAsciiLetter(unit: number): boolean {
@@ -754,7 +803,7 @@ function isTagNameUnit(unit: number): boolean {
  * nothing.
  */
 function opensLinkDefinition(line: string): boolean {
-  const start = LINK_DEFINITION.exec(line);
+  const start = DEFINITION.exec(line);
   if (start === null) return false;
   let at = start[0].length;
   const skipBlanks = (): void => {
@@ -1026,9 +1075,35 @@ export function proseFacts(input: {
     return runs;
   };
   const startsParagraph = (line: number): boolean => (head[line] as ProseLine).paragraphStart;
-  const hidingMarkupInserted = runsOf((line) => notKept.has(line)).filter(([first, last]) =>
-    hidesText(head.slice(first, last + 1).map((line) => line.text)),
+  // The head's paragraphs: one starts at every line that starts a paragraph (the first line of a
+  // part among them), and one is an original paragraph when it holds a kept protected line. A new
+  // line in such a paragraph is attached to the original text, which renders as one block with it.
+  const paragraphOf = new Int32Array(head.length);
+  const holdsOriginal: boolean[] = [];
+  for (let line = 0; line < head.length; line++) {
+    if (line === 0 || startsParagraph(line)) holdsOriginal.push(false);
+    paragraphOf[line] = holdsOriginal.length - 1;
+    if (keptProtected.has(line)) holdsOriginal[holdsOriginal.length - 1] = true;
+  }
+  const attached = (line: number): boolean => holdsOriginal[paragraphOf[line] as number] === true;
+  const isNew = (line: number): boolean => notKept.has(line) && !takenByMinor.has(line);
+  // A run of lines not kept hides when its markup does, or when one of its new lines is a
+  // definition or a dropped image inside an original paragraph; a minor edit hides on its own.
+  const hidingRuns = runsOf((line) => notKept.has(line)).filter(([first, last]) => {
+    if (hidesText(head.slice(first, last + 1).map((line) => line.text))) return true;
+    for (let line = first; line <= last; line++) {
+      if (isNew(line) && attached(line) && definesOrIsAnImage((head[line] as ProseLine).text)) {
+        return true;
+      }
+    }
+    return false;
+  }).length;
+  const hidingMinorEdits = pairs.filter(
+    ([b, h]) =>
+      takenByMinor.has(h) &&
+      minorEditHides((base[b] as ProseLine).text, (head[h] as ProseLine).text),
   ).length;
+  const hidingMarkupInserted = hidingRuns + hidingMinorEdits;
   const joinedInsertedRuns = runsOf((line) => notKept.has(line) && !takenByMinor.has(line)).filter(
     ([first, last]) =>
       (!startsParagraph(first) && keptProtected.has(first - 1)) ||
