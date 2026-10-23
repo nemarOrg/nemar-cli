@@ -4049,6 +4049,33 @@ describe("originalContentFacts: the documents", () => {
       laterAltered: 0,
     });
     expect(strict.changes).toEqual(facts.changes);
+    expect(facts.paths).toEqual({ readme: "README.md", changes: "CHANGES", participants: null });
+  });
+
+  test("a finding's README is the part the platform showed at the merge base; CHANGES its first part", () => {
+    const head = (names: string[]) => names.map((name) => part(name, "Text.\n"));
+    const pathsOf = (base: string[], changesBase: string[], changed: string[]) =>
+      originalContentFacts(
+        contentInput({
+          changes: changed.map(modified),
+          documents: {
+            readme: { base: head(base), head: head(base) },
+            changes: { base: head(changesBase), head: head(changesBase) },
+          },
+        }),
+      ).paths;
+    // README.md comes before README in the platform's order, whatever the code-unit order says.
+    expect(
+      pathsOf(["README", "README.md"], ["CHANGES.md", "CHANGELOG"], ["README", "CHANGES.md"]),
+    ).toEqual({ readme: "README.md", changes: "CHANGELOG", participants: null });
+    // A README the platform does not show (a lower-case name) is none to point at.
+    expect(pathsOf(["readme.md"], [], ["readme.md"]).readme).toBeNull();
+    // A document that did not change names nothing, even when it has parts.
+    expect(pathsOf(["README.md"], ["CHANGES"], ["sub-01/eeg/x.json"])).toEqual({
+      readme: null,
+      changes: null,
+      participants: null,
+    });
   });
 });
 
@@ -4115,6 +4142,22 @@ describe("originalContentFacts: the description, the participants and the record
         ).participantValues,
       ).toBe(0);
     }
+    // The first participants file modified or retyped is the one a finding names.
+    expect(
+      originalContentFacts(
+        contentInput({
+          changes: [
+            { path: PARTICIPANTS_TSV, status: "added" },
+            { path: PARTICIPANTS_JSON, status: "typechange" },
+          ],
+        }),
+      ).paths.participants,
+    ).toBe(PARTICIPANTS_JSON);
+    expect(
+      originalContentFacts(
+        contentInput({ changes: [modified(PARTICIPANTS_JSON), modified(PARTICIPANTS_TSV)] }),
+      ).paths.participants,
+    ).toBe(PARTICIPANTS_TSV);
     // A summary that read the file counts its changed values.
     const edit: Edit = {
       path: PARTICIPANTS_TSV,
@@ -4172,6 +4215,7 @@ describe("originalContentFacts: the description, the participants and the record
       authorFields: null,
       participantValues: 0,
       recordings: noRecordingChange(),
+      paths: { readme: null, changes: null, participants: null },
     });
   });
 });
@@ -4186,6 +4230,7 @@ describe("the facts of an abandoned pass", () => {
       authorFields: null,
       participantValues: 0,
       recordings: noRecordingChange(),
+      paths: { readme: null, changes: null, participants: null },
     });
   });
 
@@ -4194,6 +4239,7 @@ describe("the facts of an abandoned pass", () => {
     expect(Object.isFrozen(ORIGINAL_ABANDONED.readme)).toBe(true);
     expect(Object.isFrozen(ORIGINAL_ABANDONED.changes)).toBe(true);
     expect(Object.isFrozen(ORIGINAL_ABANDONED.recordings)).toBe(true);
+    expect(Object.isFrozen(ORIGINAL_ABANDONED.paths)).toBe(true);
     const writable = ORIGINAL_ABANDONED as { -readonly [K in keyof OriginalContentFacts]: unknown };
     expect(() => {
       writable.abandoned = false;

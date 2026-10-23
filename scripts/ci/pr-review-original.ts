@@ -1886,6 +1886,25 @@ export interface OriginalContentFacts {
    */
   readonly participantValues: number | null;
   readonly recordings: Readonly<RecordingFacts & { unread: number }>;
+  /**
+   * The root files a finding about each kind of change may name, or null. Each is a name the
+   * module's own patterns accept (a README or CHANGES part, a participants file), so none can carry
+   * more of a contributor's text than such a name.
+   */
+  readonly paths: Readonly<OriginalPaths>;
+}
+
+/** The root files of {@link OriginalContentFacts.paths}. */
+export interface OriginalPaths {
+  /**
+   * When any README part changed: the part the platform showed at the merge base (the first of
+   * `README_CANDIDATES` present, with exact case), or null when it showed none.
+   */
+  readme: string | null;
+  /** When any CHANGES part changed: the first part at the merge base, in code-unit order. */
+  changes: string | null;
+  /** The first root participants file, in {@link PARTICIPANT_FILES} order, modified or retyped. */
+  participants: string | null;
 }
 
 /** A document no part of which changed: one object, shared and frozen. */
@@ -1904,6 +1923,7 @@ export const ORIGINAL_ABANDONED: OriginalContentFacts = Object.freeze({
   authorFields: null,
   participantValues: 0,
   recordings: Object.freeze({ replaced: 0, typeChanged: 0, moved: 0, unread: 0 }),
+  paths: Object.freeze({ readme: null, changes: null, participants: null }),
 });
 
 /**
@@ -1959,11 +1979,18 @@ export function originalContentFacts(input: OriginalContentInput): OriginalConte
       ? { status: "compared", facts: result.facts }
       : { status: "refused", refusal: result.refusal };
   };
-  const participantsChanged = input.changes.some(
-    (change) =>
-      (PARTICIPANT_FILES as readonly string[]).includes(change.path) &&
-      (change.status === "modified" || change.status === "typechange"),
+  const participantsChanged = PARTICIPANT_FILES.filter((file) =>
+    input.changes.some(
+      (change) =>
+        change.path === file && (change.status === "modified" || change.status === "typechange"),
+    ),
   );
+  const baseNames = (document: DocumentKind): string[] =>
+    changed(document)
+      ? input.documents[document].base
+          .map((part) => part.name)
+          .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
+      : [];
   const descriptionChanged = input.changes.some(
     (change) => change.path === "dataset_description.json",
   );
@@ -1975,9 +2002,15 @@ export function originalContentFacts(input: OriginalContentInput): OriginalConte
     authorFields: descriptionChanged
       ? authorFieldFacts(input.description.before, input.description.after)
       : null,
-    participantValues: participantsChanged
-      ? participantValuesAltered(input.summary, input.changes, input.cosmetic)
-      : 0,
+    participantValues:
+      participantsChanged.length > 0
+        ? participantValuesAltered(input.summary, input.changes, input.cosmetic)
+        : 0,
     recordings: recordingFacts(input.recordings),
+    paths: {
+      readme: firstReadme(baseNames("readme")),
+      changes: baseNames("changes")[0] ?? null,
+      participants: participantsChanged[0] ?? null,
+    },
   };
 }

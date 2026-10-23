@@ -75,6 +75,8 @@ import {
   readBlobsSized,
 } from "../scripts/ci/pr-review-evidence";
 import {
+  AUTHOR_OWNED_KEYS,
+  type AuthorFieldFacts,
   ORIGINAL_ABANDONED,
   type OriginalContentFacts,
   type ProseFacts,
@@ -92,6 +94,8 @@ import {
   buildReviewMessages,
   buildScreenMessages,
   fence,
+  originalLowersToFail,
+  originalVerdict,
   platformFindings,
   tidy,
 } from "../scripts/ci/pr-review-prompt";
@@ -108,10 +112,12 @@ import {
   FINDING_CODES,
   MAX_FINDINGS,
   NOTE_MAX,
+  ORIGINAL_CONTENT_PARAGRAPH,
   type PrReviewReport,
   PrReviewReportError,
   type ReviewFinding,
   factsOf,
+  findingLines,
   parseCallbackOutcome,
   parsePrReviewReport,
   parseStoredPrReviewReport,
@@ -269,14 +275,15 @@ const USAGE = {
 /**
  * A full report from a review answer, the way the job assembles one after the screen let the pull
  * request through. `answer` is the review's output (three questions and four judgments), and
- * `platform` the platform's own findings, which the job passes beside it.
+ * `platform` the platform's own findings, which the job passes beside it with `lowerToFail`.
  */
 function full(
   answer: unknown,
   e: ReturnType<typeof buildEvidence>,
   platform: readonly ReviewFinding[] = [],
+  lowerToFail = false,
 ): PrReviewReport {
-  return assembleReport(PROCEED, answer, e, USAGE, platform);
+  return assembleReport(PROCEED, answer, e, USAGE, platform, lowerToFail);
 }
 
 /** A Messages API reply whose one text block holds `text`, streamed when the request streams. */
@@ -5966,6 +5973,473 @@ describe("the platform's findings from the change summary", () => {
     expect(control.text).toContain(
       "- **Data removed**, concern: found from the files, not by the reviewer.",
     );
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// The original authors' content: the verdict, its findings and the fail no review can raise
+// ---------------------------------------------------------------------------------------------
+
+/** The facts of a compared document that changed nothing, for tests to override. */
+function proseOf(over: Partial<ProseFacts> = {}): ProseFacts {
+  return {
+    document: "readme",
+    anchor: "merge_base",
+    preserved: true,
+    protectedLines: 4,
+    protectedAltered: 0,
+    minorEdits: 0,
+    laterAltered: 0,
+    moved: false,
+    movedLines: 0,
+    insertedInsideParagraph: 0,
+    joinedInsertedRuns: 0,
+    insertedLines: 0,
+    lineEndingsChanged: false,
+    finalNewlineAdded: false,
+    notUtf8: false,
+    partsBefore: 1,
+    partsAfter: 1,
+    hidingMarkupInserted: 0,
+    shownPartReplaced: false,
+    examples: [],
+    ...over,
+  };
+}
+
+const compared = (over: Partial<ProseFacts> = {}) => ({
+  status: "compared" as const,
+  facts: proseOf(over),
+});
+const changesCompared = (over: Partial<ProseFacts> = {}) =>
+  compared({ document: "changes", ...over });
+
+/** Author-field facts with nothing changed, for tests to override. */
+function fieldsOf(over: Partial<AuthorFieldFacts> = {}): AuthorFieldFacts {
+  return { altered: [], removed: [], minor: [], grown: [], added: [], unparsed: false, ...over };
+}
+
+/** The facts of a pass that compared what changed and found nothing, for tests to override. */
+function originalOf(over: Partial<OriginalContentFacts> = {}): OriginalContentFacts {
+  return {
+    abandoned: false,
+    anchorLookup: "not_needed",
+    readme: { status: "unchanged" },
+    changes: { status: "unchanged" },
+    authorFields: null,
+    participantValues: 0,
+    recordings: { replaced: 0, typeChanged: 0, moved: 0, unread: 0 },
+    paths: { readme: "README.md", changes: "CHANGES", participants: "participants.tsv" },
+    ...over,
+  };
+}
+
+/** What a verdict decides, without the paths: the candidates and the fail. */
+const decided = (o: OriginalContentFacts | null) => {
+  const { paths: _paths, ...rest } = originalVerdict(o);
+  return rest;
+};
+const NOTHING = {
+  text: null,
+  fields: null,
+  recordings: null,
+  undecided: null,
+  lowersToFail: false,
+};
+
+describe("the verdict of the original content", () => {
+  test("no facts and nothing found decide nothing", () => {
+    expect(decided(null)).toEqual(NOTHING);
+    expect(decided(originalOf())).toEqual(NOTHING);
+    expect(originalLowersToFail(null)).toBe(false);
+  });
+
+  test("an abandoned pass is undecided and nothing else, whatever it holds", () => {
+    expect(decided(ORIGINAL_ABANDONED)).toEqual({ ...NOTHING, undecided: "abandoned" });
+    // Facts an abandoned pass cannot have had are not read: it is never a fail and never clean.
+    const loud = originalOf({
+      abandoned: true,
+      readme: compared({ protectedAltered: 3 }),
+      authorFields: fieldsOf({ altered: ["Name"] }),
+      participantValues: null,
+      recordings: { replaced: 2, typeChanged: 0, moved: 0, unread: 1 },
+    });
+    expect(decided(loud)).toEqual({ ...NOTHING, undecided: "abandoned" });
+    expect(originalLowersToFail(loud)).toBe(false);
+  });
+
+  test("README lines altered or moved, or put inside an original paragraph, fail as text", () => {
+    expect(decided(originalOf({ readme: compared({ protectedAltered: 2 }) }))).toEqual({
+      ...NOTHING,
+      text: { readmeLines: 2, readmeInside: 0, changesLines: 0 },
+      lowersToFail: true,
+    });
+    expect(
+      originalVerdict(originalOf({ readme: compared({ moved: true, movedLines: 3 }) })).text,
+    ).toEqual({ readmeLines: 3, readmeInside: 0, changesLines: 0 });
+    expect(
+      originalVerdict(originalOf({ readme: compared({ insertedInsideParagraph: 1 }) })).text,
+    ).toEqual({ readmeLines: 0, readmeInside: 1, changesLines: 0 });
+  });
+
+  test("existing CHANGES lines altered or moved fail as text; a new line anywhere in CHANGES does not", () => {
+    expect(
+      originalVerdict(originalOf({ changes: changesCompared({ protectedAltered: 1 }) })).text,
+    ).toEqual({ readmeLines: 0, readmeInside: 0, changesLines: 1 });
+    expect(
+      originalVerdict(originalOf({ changes: changesCompared({ moved: true, movedLines: 2 }) }))
+        .text,
+    ).toEqual({ readmeLines: 0, readmeInside: 0, changesLines: 2 });
+    expect(
+      decided(originalOf({ changes: changesCompared({ insertedInsideParagraph: 4 }) })),
+    ).toEqual(NOTHING);
+  });
+
+  test("an author field altered or removed, or a participant value changed, fails as fields", () => {
+    // The keys come in the closed list's order, whichever list holds them.
+    const keys = originalVerdict(
+      originalOf({ authorFields: fieldsOf({ altered: ["License"], removed: ["Name"] }) }),
+    );
+    expect(keys.fields).toEqual({ keys: ["Name", "License"], participants: 0 });
+    expect(keys.lowersToFail).toBe(true);
+    expect(decided(originalOf({ participantValues: 37 }))).toEqual({
+      ...NOTHING,
+      fields: { keys: [], participants: 37 },
+      lowersToFail: true,
+    });
+  });
+
+  test("a recording replaced or turned into a git file is unknown, never a fail", () => {
+    const facts = originalOf({ recordings: { replaced: 2, typeChanged: 3, moved: 0, unread: 0 } });
+    expect(decided(facts)).toEqual({ ...NOTHING, recordings: 5 });
+  });
+
+  test("what could not be compared is undecided, never clean and never a fail", () => {
+    const other: OriginalContentFacts[] = [
+      originalOf({ participantValues: null }),
+      originalOf({ authorFields: fieldsOf({ unparsed: true }) }),
+      originalOf({ recordings: { replaced: 0, typeChanged: 0, moved: 0, unread: 1 } }),
+      originalOf({ readme: { status: "refused", refusal: "edit_distance_cap" } }),
+      originalOf({ changes: { status: "refused", refusal: "binary" } }),
+    ];
+    for (const o of other) expect(decided(o)).toEqual({ ...NOTHING, undecided: "other" });
+    const markup: OriginalContentFacts[] = [
+      originalOf({ readme: compared({ hidingMarkupInserted: 1 }) }),
+      originalOf({ readme: compared({ shownPartReplaced: true }) }),
+      originalOf({ changes: changesCompared({ hidingMarkupInserted: 2 }) }),
+    ];
+    for (const o of markup) expect(decided(o)).toEqual({ ...NOTHING, undecided: "markup" });
+    // Something not compared outranks markup: the note says the larger gap.
+    expect(
+      originalVerdict(
+        originalOf({ readme: compared({ hidingMarkupInserted: 1 }), participantValues: null }),
+      ).undecided,
+    ).toBe("other");
+  });
+
+  test("what the model may judge is information only", () => {
+    const information: OriginalContentFacts[] = [
+      originalOf({ readme: compared({ joinedInsertedRuns: 2, insertedLines: 3 }) }),
+      originalOf({ changes: changesCompared({ joinedInsertedRuns: 1 }) }),
+      originalOf({ readme: compared({ minorEdits: 2, preserved: false }) }),
+      originalOf({ readme: compared({ laterAltered: 5, anchor: "first_version_tag" }) }),
+      originalOf({ readme: compared({ lineEndingsChanged: true, finalNewlineAdded: true }) }),
+      originalOf({ readme: compared({ notUtf8: true }) }),
+      originalOf({
+        authorFields: fieldsOf({ minor: ["Funding"], grown: ["Authors"], added: ["License"] }),
+      }),
+      originalOf({ recordings: { replaced: 0, typeChanged: 0, moved: 15, unread: 0 } }),
+    ];
+    for (const o of information) expect(decided(o)).toEqual(NOTHING);
+  });
+
+  test("a finding points at the README the platform showed, the CHANGES part, or the file of the fields", () => {
+    const paths = (o: OriginalContentFacts) => originalVerdict(o).paths;
+    expect(paths(originalOf({ readme: compared({ protectedAltered: 1 }) })).text).toBe("README.md");
+    expect(paths(originalOf({ changes: changesCompared({ protectedAltered: 1 }) })).text).toBe(
+      "CHANGES",
+    );
+    // Both: the README's. No README the platform showed: CHANGES, if it changed.
+    const both = {
+      readme: compared({ protectedAltered: 1 }),
+      changes: changesCompared({ protectedAltered: 1 }),
+    };
+    expect(paths(originalOf(both)).text).toBe("README.md");
+    expect(
+      paths(
+        originalOf({ ...both, paths: { readme: null, changes: "CHANGES", participants: null } }),
+      ).text,
+    ).toBe("CHANGES");
+    expect(paths(originalOf({ authorFields: fieldsOf({ removed: ["Funding"] }) })).fields).toBe(
+      "dataset_description.json",
+    );
+    expect(paths(originalOf({ participantValues: 2 })).fields).toBe("participants.tsv");
+  });
+});
+
+describe("the platform's findings from the original content", () => {
+  const N = 9_999_999;
+  const T = { readme: compared({ protectedAltered: 2 }) };
+  const F = { authorFields: fieldsOf({ altered: ["Name"] }) };
+  const R = { recordings: { replaced: 3, typeChanged: 0, moved: 0, unread: 0 } };
+  const U = { participantValues: null };
+  const partB = { T, F, R, U } as const;
+  const PART_A: [string, ChangeSummary][] = [
+    ["none", EMPTY_SUMMARY],
+    ["rows", summaryLosing({ rowsRemoved: 1, rowsRemovedFiles: 1 })],
+    ["keys", summaryLosing({ keysRemoved: 1, keysRemovedFiles: 1 })],
+    [
+      "both",
+      summaryLosing({ rowsRemoved: 1, rowsRemovedFiles: 1, keysRemoved: 1, keysRemovedFiles: 1 }),
+    ],
+  ];
+  /** The Part B findings of `o` alone, with every place left for them. */
+  const only = (o: OriginalContentFacts) => platformFindings(EMPTY_SUMMARY, o);
+  const notesOf = (o: OriginalContentFacts) => only(o).map((f) => f.note);
+  /** A pull request that changed nothing worth a fact: a clean release, read once. */
+  let cleanRepo: Repo | null = null;
+  const clean = () => {
+    cleanRepo ??= releaseChanging("ob-clean", {}, () => {});
+    return buildEvidence(
+      gatherGitFacts(cleanRepo.dir, cleanRepo.base, cleanRepo.head),
+      NO_TEXT_PROBLEMS,
+    );
+  };
+
+  test("each note is fixed words over counts, the singular for one", () => {
+    expect(notesOf(originalOf({ readme: compared({ protectedAltered: 1 }) }))).toEqual([
+      "1 line the original authors published in README was removed, reworded or moved. Keep it; put your account in CHANGES or a new section, or ask a NEMAR administrator to correct one.",
+    ]);
+    expect(
+      notesOf(
+        originalOf({ readme: compared({ protectedAltered: 2, moved: true, movedLines: 1 }) }),
+      ),
+    ).toEqual([
+      "3 lines the original authors published in README were removed, reworded or moved. Keep them; put your account in CHANGES or a new section, or ask a NEMAR administrator to correct one.",
+    ]);
+    expect(notesOf(originalOf({ readme: compared({ insertedInsideParagraph: 2 }) }))).toEqual([
+      "New lines were put inside 2 paragraphs the original authors published in README. Add text between paragraphs instead, or ask a NEMAR administrator to change one.",
+    ]);
+    expect(notesOf(originalOf({ changes: changesCompared({ protectedAltered: 1 }) }))).toEqual([
+      "1 existing line of CHANGES was removed, edited or moved. CHANGES keeps its history: add a new entry for this version instead.",
+    ]);
+    expect(
+      notesOf(
+        originalOf({
+          readme: compared({ protectedAltered: 4 }),
+          changes: changesCompared({ protectedAltered: 2 }),
+        }),
+      ),
+    ).toEqual([
+      "4 lines the original authors published in README and 2 existing lines of CHANGES were removed, reworded or moved. Keep them; add a new CHANGES entry, or ask a NEMAR administrator.",
+    ]);
+    const keys = (altered: AuthorFieldFacts["altered"], participants = 0) =>
+      notesOf(originalOf({ authorFields: fieldsOf({ altered }), participantValues: participants }));
+    expect(keys(["Name"])).toEqual([
+      "The dataset description's Name changed. Keep what the authors published: add new information, or ask a NEMAR administrator to correct a field.",
+    ]);
+    expect(keys(["Name", "License"])).toEqual([
+      "The dataset description's Name and License changed. Keep what the authors published: add new information, or ask a NEMAR administrator to correct a field.",
+    ]);
+    expect(keys(["Name", "Authors", "License"])).toEqual([
+      "The dataset description's Name, Authors and License changed. Keep what the authors published: add new information, or ask a NEMAR administrator to correct a field.",
+    ]);
+    expect(keys(["Name", "Authors", "License", "Funding"])).toEqual([
+      "4 fields of the dataset description changed. Keep what the authors published: add new information, or ask a NEMAR administrator to correct it.",
+    ]);
+    expect(keys(["Name"], 1)).toEqual([
+      "1 field of the dataset description and 1 participant value changed. Keep what the authors published: add new information, or ask a NEMAR administrator to correct it.",
+    ]);
+    expect(keys([], 37)).toEqual([
+      "37 participant values changed. Keep the values the authors recorded: add new information, or ask a NEMAR administrator to correct a value.",
+    ]);
+    expect(
+      notesOf(originalOf({ recordings: { replaced: 1, typeChanged: 0, moved: 0, unread: 0 } })),
+    ).toEqual([
+      "1 annexed file has new content or moved in or out of the annex. A NEMAR administrator confirms a change to recorded data; describe it in CHANGES.",
+    ]);
+    expect(
+      notesOf(originalOf({ recordings: { replaced: 59, typeChanged: 41, moved: 0, unread: 0 } })),
+    ).toEqual([
+      "100 annexed files, recordings among them, have new content or moved in or out of the annex. A NEMAR administrator confirms a change to recorded data; describe it in CHANGES.",
+    ]);
+    expect(notesOf(ORIGINAL_ABANDONED)).toEqual([
+      "The platform could not finish comparing this pull request with what the authors published. A person looks.",
+    ]);
+    expect(notesOf(originalOf(U))).toEqual([
+      "Part of this pull request could not be compared with what the original authors published, such as a file too large or unreadable to compare. A person looks.",
+    ]);
+    expect(notesOf(originalOf({ readme: compared({ hidingMarkupInserted: 1 }) }))).toEqual([
+      "New README or CHANGES markup can hide text the original authors published, or the README shown is no longer theirs. A person looks.",
+    ]);
+    // One place left for the text and the fields: one finding that counts both.
+    const merged = platformFindings(
+      PART_A[3]?.[1] as ChangeSummary,
+      originalOf({ ...T, ...F, participantValues: 2 }),
+    );
+    expect(merged[2]).toEqual({
+      criterion: "no_degradation",
+      severity: "blocker",
+      code: "original_text_altered",
+      path: "README.md",
+      note: "2 lines of README or CHANGES and 3 fields or participant values the original authors published were changed. Keep them, add a CHANGES entry, or ask a NEMAR administrator.",
+    });
+  });
+
+  test("every note at seven-digit counts and with any of the nine key names fits NOTE_MAX and is shown as made", () => {
+    const facts: OriginalContentFacts[] = [
+      originalOf({ readme: compared({ protectedAltered: N }) }),
+      originalOf({ readme: compared({ insertedInsideParagraph: N }) }),
+      originalOf({ changes: changesCompared({ protectedAltered: N }) }),
+      originalOf({
+        readme: compared({ protectedAltered: N }),
+        changes: changesCompared({ protectedAltered: N }),
+      }),
+      originalOf({ participantValues: N }),
+      originalOf({ recordings: { replaced: N, typeChanged: 0, moved: 0, unread: 0 } }),
+      ORIGINAL_ABANDONED,
+      originalOf(U),
+      originalOf({ readme: compared({ shownPartReplaced: true }) }),
+    ];
+    for (let mask = 1; mask < 1 << AUTHOR_OWNED_KEYS.length; mask++) {
+      const altered = AUTHOR_OWNED_KEYS.filter((_, i) => (mask & (1 << i)) !== 0);
+      for (const participants of [0, N]) {
+        facts.push(
+          originalOf({ authorFields: fieldsOf({ altered }), participantValues: participants }),
+        );
+        // With one place left, the same fields merged with text at seven digits.
+        facts.push(
+          originalOf({
+            ...T,
+            readme: compared({ protectedAltered: N }),
+            authorFields: fieldsOf({ altered }),
+            participantValues: participants,
+          }),
+        );
+      }
+    }
+    expect(facts.length).toBe(9 + 511 * 4);
+    let longest = 0;
+    for (const o of facts) {
+      for (const summary of [EMPTY_SUMMARY, PART_A[3]?.[1] as ChangeSummary]) {
+        for (const f of platformFindings(summary, o)) {
+          longest = Math.max(longest, f.note.length);
+          expect(f.note.length, f.note).toBeLessThanOrEqual(NOTE_MAX);
+          expect(f.note, f.note).toMatch(/^[A-Za-z0-9 ,.;:']+$/);
+          expect(sanitizeNote(f.note, NOTE_MAX)).toBe(f.note);
+        }
+      }
+    }
+    // The bound is near: a longer template would show here first.
+    expect(longest).toBeGreaterThan(190);
+  });
+
+  test("every slot combination: Part A first and whole, at most three, the fail explained, the undecided stated, and the stored report re-derives it", () => {
+    const e = clean();
+    expect(verdictOf(full(allPass, e))).toBe("pass");
+    let combinations = 0;
+    for (const [aName, summary] of PART_A) {
+      const partA = platformFindings(summary);
+      for (let mask = 0; mask < 16; mask++) {
+        const present = (["T", "F", "R", "U"] as const).filter((_, i) => (mask & (1 << i)) !== 0);
+        const o = originalOf(Object.assign({}, ...present.map((k) => partB[k])));
+        const platform = platformFindings(summary, o);
+        const lowerToFail = originalLowersToFail(o);
+        const name = `${aName} ${present.join("") || "-"}`;
+        combinations++;
+        expect(platform.length, name).toBeLessThanOrEqual(MAX_PLATFORM_FINDINGS);
+        expect(platform.slice(0, partA.length), name).toEqual(partA);
+        const ours = platform.slice(partA.length).map((f) => f.code);
+        // The places left, in the order text, fields, recordings, undecided; one place for both
+        // the text and the fields holds them together.
+        const places = MAX_PLATFORM_FINDINGS - partA.length;
+        const order = [
+          present.includes("T") && "original_text_altered",
+          present.includes("F") && "original_field_altered",
+          present.includes("R") && "recording_replaced",
+          present.includes("U") && "evidence_incomplete",
+        ].filter((c): c is ReviewFinding["code"] => c !== false);
+        const expected =
+          places === 1 && present.includes("T") && present.includes("F")
+            ? ["original_text_altered"]
+            : order.slice(0, places);
+        expect(ours, name).toEqual(expected);
+        expect(lowerToFail, name).toBe(present.includes("T") || present.includes("F"));
+        if (lowerToFail) {
+          expect(
+            ours.some((c) => c === "original_text_altered" || c === "original_field_altered"),
+            name,
+          ).toBe(true);
+        }
+        if (present.length > 0) expect(ours.length, name).toBeGreaterThan(0);
+        for (const f of platform) {
+          expect([f.criterion, f.severity], name).toEqual(["no_degradation", "blocker"]);
+        }
+        // Through the report the job posts and the row the Worker stores.
+        const report = full(allPass, e, platform, lowerToFail);
+        const stored = parseStoredPrReviewReport(JSON.parse(JSON.stringify(report)));
+        expect(stored, name).toEqual(report);
+        const verdict = lowerToFail ? "fail" : platform.length > 0 ? "uncertain" : "pass";
+        expect([verdictOf(report), verdictOf(stored)], name).toEqual([verdict, verdict]);
+        expect(report.findings.slice(0, platform.length), name).toEqual(platform);
+      }
+    }
+    expect(combinations).toBe(64);
+  });
+
+  test("lowerToFail fails a valid answer of the review, and only a full report with the finding that explains it", () => {
+    const e = clean();
+    const altered = originalOf(T);
+    const platform = platformFindings(EMPTY_SUMMARY, altered);
+    for (const answer of ["pass", "unknown", "fail"]) {
+      const said = reviewOutput({
+        criteria: {
+          no_degradation: answer,
+          advances_revision: "pass",
+          material_improvement: "pass",
+        },
+      });
+      const report = full(said, e, platform, true);
+      expect(report.criteria.no_degradation, answer).toBe("fail");
+      expect(verdictOf(report), answer).toBe("fail");
+      // Without the flag the same finding only lowers a pass.
+      expect(full(said, e, platform).criteria.no_degradation, answer).toBe(
+        answer === "pass" ? "unknown" : answer,
+      );
+    }
+    // The check says what to do instead, once.
+    const lines = findingLines(full(allPass, e, platform, true));
+    expect(lines.filter((l) => l === ORIGINAL_CONTENT_PARAGRAPH)).toHaveLength(1);
+    // A review that gave no valid answer stays an invalid review: the fail lowers an answer, it
+    // does not stand in for one.
+    for (const invalid of ["maybe", undefined, 3]) {
+      const said = reviewOutput({
+        criteria: {
+          no_degradation: invalid,
+          advances_revision: "pass",
+          material_improvement: "pass",
+        },
+      });
+      expect(
+        reportErrorOf(() => full(said, e, platform, true)),
+        String(invalid),
+      ).toBe("bad_criteria");
+    }
+    // A screen report carries no content facts: the flag is refused like a platform finding.
+    const screenUsage = { screen: USAGE.screen, review: null };
+    expect(reportErrorOf(() => assembleReport(REJECT, null, e, screenUsage, [], true))).toBe(
+      "bad_stage",
+    );
+    // The flag with no finding that says why is the script's own error, never the model's.
+    for (const without of [
+      [],
+      platformFindings(PART_A[1]?.[1] as ChangeSummary),
+      platformFindings(EMPTY_SUMMARY, originalOf({ ...R, ...U })),
+    ]) {
+      expect(reportErrorOf(() => full(allPass, e, without, true))).toBe(
+        "not a PrReviewReportError",
+      );
+    }
   });
 });
 

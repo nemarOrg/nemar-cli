@@ -29,6 +29,7 @@ import {
   FINDING_CODES,
   type FindingCode,
   MAX_FINDINGS,
+  ORIGINAL_ALTERED_CODES,
   type PrReviewReport,
   PrReviewReportError,
   REPORT_VERSION,
@@ -49,6 +50,15 @@ import {
   type Patch,
   classifyPath,
 } from "./pr-review-evidence";
+import {
+  AUTHOR_OWNED_KEYS,
+  type AuthorOwnedKey,
+  type DocumentResult,
+  type OriginalContentFacts,
+  type ProseFacts,
+  authorFieldsAltered,
+  proseAltered,
+} from "./pr-review-original";
 import { type ChangeSummary, SUMMARY_LIMITS } from "./pr-review-summary";
 
 // The prompt's text tools live in `shared/untrusted-text.ts`, shared with the publication review
@@ -524,10 +534,11 @@ function isRecordValue(x: unknown): x is Record<string, unknown> {
 }
 
 /**
- * The most platform findings one report carries: one for rows and columns removed, one for keys
- * removed, and room for one more kind the platform may come to decide from its own facts. Each is
- * placed before the models' findings, which keep what room is left ({@link keepModelFindings});
- * with at most three, a model finding that explains a failing criterion always keeps its place.
+ * The most platform findings one report carries: at most one for rows and columns removed and one
+ * for keys removed (the change summary's), and what is left for what the pull request changed of
+ * the original authors' content (at least one; see {@link originalFindings}). Each is placed before
+ * the models' findings, which keep what room is left ({@link keepModelFindings}); with at most
+ * three, a model finding that explains a failing criterion always keeps its place.
  */
 export const MAX_PLATFORM_FINDINGS = 3;
 
@@ -537,12 +548,15 @@ function counted(k: number, one: string, many: string): string {
 }
 
 /**
- * The findings the platform adds from what the change summary computed itself, never from a model:
- * a removal the summary found in a table or a JSON document that this pull request does not keep
- * elsewhere (rows copied unchanged into sourcedata at the same path, a key kept with the same value
- * in a sidecar that applies by inheritance). A removal can be right, a privacy correction for one,
- * so the finding is a blocker on `no_degradation`, which lowers a pass to `unknown` and sends a
- * person to confirm it; it never fails the review and never raises anything.
+ * The findings the platform adds from what it computed itself, never from a model. First the
+ * change summary's: a removal the summary found in a table or a JSON document that this pull
+ * request does not keep elsewhere (rows copied unchanged into sourcedata at the same path, a key
+ * kept with the same value in a sidecar that applies by inheritance). A removal can be right, a
+ * privacy correction for one, so the finding is a blocker on `no_degradation`, which lowers a pass
+ * to `unknown` and sends a person to confirm it; it never fails the review and never raises
+ * anything. Then, in the places left, the findings about the original authors' content
+ * ({@link originalFindings}), when the caller gives its facts; without them (`null`, as every
+ * caller that reads no content passes) there are none.
  *
  * Rows first, then keys. The note is a fixed template over the platform's counts, so no text of the
  * pull request is in it: only letters, digits, spaces, commas and full stops, which the report's
@@ -553,7 +567,10 @@ function counted(k: number, one: string, many: string): string {
  *
  * An abandoned summary, and one that found no removal, gives none.
  */
-export function platformFindings(summary: ChangeSummary): ReviewFinding[] {
+export function platformFindings(
+  summary: ChangeSummary,
+  original: OriginalContentFacts | null = null,
+): ReviewFinding[] {
   const loss = summary.loss;
   const first = loss.firstBlockingPath;
   const out: ReviewFinding[] = [];
@@ -584,7 +601,231 @@ export function platformFindings(summary: ChangeSummary): ReviewFinding[] {
       note: `The platform found ${counted(loss.keysRemoved, "key with a value", "keys with values")} removed from ${counted(loss.keysRemovedFiles, "JSON file", "JSON files")} and not kept, with the same value, in a sidecar that applies by inheritance. A person confirms a removal.`,
     });
   }
-  return out;
+  return [
+    ...out,
+    ...originalFindings(originalVerdict(original), MAX_PLATFORM_FINDINGS - out.length),
+  ];
+}
+
+// ---------------------------------------------------------------------------------------------
+// The original authors' content: what the platform does about it
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * What the platform does about what a pull request changed of the content its original authors
+ * published, decided from `OriginalContentFacts` alone (`pr-review-original.ts`): the findings it
+ * may add, each with the numbers its note needs, and whether `no_degradation` fails. Every effect
+ * only lowers, and a model can raise none of them.
+ *
+ * - `text` fails: a README line the original authors published removed, reworded beyond a minor
+ *   edit or moved, or new lines put inside one of their paragraphs; an existing CHANGES line
+ *   removed, edited or moved (`proseAltered`, the one definition of the trigger).
+ * - `fields` fails: an author-owned field of `dataset_description.json` altered or removed, or a
+ *   participant value the authors recorded changed.
+ * - `recordings` is unknown: annexed content replaced, or a path moved in or out of the annex. A
+ *   person confirms a change to recorded data.
+ * - `undecided` is unknown: `abandoned` when the pass that reads the bytes was abandoned, and then
+ *   nothing else is used, so it is never clean and never a fail; `other` when something could not
+ *   be compared (a document refused, the description unparsed, participant values unknown, a side
+ *   of a changed path unread); `markup` when new markup can hide original text in README or
+ *   CHANGES, or the README the platform shows is no longer the one it showed.
+ *
+ * Everything else the facts hold is for the model to read and the platform does nothing with:
+ * minor edits, edits of text added after the anchor, new lines joined to an original paragraph,
+ * line endings, a final newline, a part that is not UTF-8, the permitted edits of author fields,
+ * and recordings moved with their key (which never cancel Part A's removal facts). Null facts, from
+ * a caller that read no content, decide nothing.
+ */
+export interface OriginalVerdict {
+  text: {
+    /** README lines the original authors published that were altered or moved. */
+    readmeLines: number;
+    /** Runs of new lines put inside one of their README paragraphs. */
+    readmeInside: number;
+    /** Existing CHANGES lines that were altered or moved. */
+    changesLines: number;
+  } | null;
+  fields: {
+    /** The author-owned keys altered or removed, in `AUTHOR_OWNED_KEYS` order. */
+    keys: AuthorOwnedKey[];
+    /** Participant values changed. */
+    participants: number;
+  } | null;
+  /** Annexed files with new content, or moved in or out of the annex. */
+  recordings: number | null;
+  undecided: "abandoned" | "other" | "markup" | null;
+  /** Where a finding about each may point (`OriginalContentFacts.paths`). */
+  paths: { text: string | null; fields: string | null };
+  /** `text` or `fields` is there: `no_degradation` fails whatever the review says. */
+  lowersToFail: boolean;
+}
+
+/** The verdict of the original content: see {@link OriginalVerdict}. */
+export function originalVerdict(o: OriginalContentFacts | null): OriginalVerdict {
+  const nothing: OriginalVerdict = {
+    text: null,
+    fields: null,
+    recordings: null,
+    undecided: null,
+    paths: { text: null, fields: null },
+    lowersToFail: false,
+  };
+  if (o === null) return nothing;
+  if (o.abandoned) return { ...nothing, undecided: "abandoned" };
+  const compared = (d: DocumentResult): ProseFacts | null =>
+    d.status === "compared" ? d.facts : null;
+  const readme = compared(o.readme);
+  const changes = compared(o.changes);
+  const readmeAltered = readme !== null && proseAltered(readme);
+  const changesAltered = changes !== null && proseAltered(changes);
+  const text =
+    readmeAltered || changesAltered
+      ? {
+          readmeLines: readmeAltered ? readme.protectedAltered + readme.movedLines : 0,
+          readmeInside: readmeAltered ? readme.insertedInsideParagraph : 0,
+          changesLines: changesAltered ? changes.protectedAltered + changes.movedLines : 0,
+        }
+      : null;
+  const author = o.authorFields;
+  const altered = author !== null && authorFieldsAltered(author);
+  const keys = altered
+    ? AUTHOR_OWNED_KEYS.filter((k) => author.altered.includes(k) || author.removed.includes(k))
+    : [];
+  const participants = o.participantValues ?? 0;
+  const fields = keys.length > 0 || participants > 0 ? { keys, participants } : null;
+  const replaced = o.recordings.replaced + o.recordings.typeChanged;
+  const other =
+    o.readme.status === "refused" ||
+    o.changes.status === "refused" ||
+    author?.unparsed === true ||
+    o.participantValues === null ||
+    o.recordings.unread > 0;
+  const markup =
+    (readme !== null && (readme.hidingMarkupInserted > 0 || readme.shownPartReplaced)) ||
+    (changes !== null && changes.hidingMarkupInserted > 0);
+  return {
+    text,
+    fields,
+    recordings: replaced > 0 ? replaced : null,
+    undecided: other ? "other" : markup ? "markup" : null,
+    paths: {
+      // A note about the README points at the part the platform showed, one about CHANGES alone at
+      // its first part.
+      text: readmeAltered ? (o.paths.readme ?? o.paths.changes) : o.paths.changes,
+      fields: keys.length > 0 ? "dataset_description.json" : o.paths.participants,
+    },
+    lowersToFail: text !== null || fields !== null,
+  };
+}
+
+/** Whether the original content fails `no_degradation` whatever the review says. */
+export function originalLowersToFail(o: OriginalContentFacts | null): boolean {
+  return originalVerdict(o).lowersToFail;
+}
+
+/** `was` for one, `were` for more. */
+function were(k: number): string {
+  return k === 1 ? "was" : "were";
+}
+
+/** `Name`, `Name and License`, `Name, Authors and License`. */
+function named(keys: readonly string[]): string {
+  if (keys.length <= 1) return keys.join("");
+  return `${keys.slice(0, -1).join(", ")} and ${keys[keys.length - 1]}`;
+}
+
+/** The note of a `text` finding: the README, CHANGES, or both. */
+function textNote(t: NonNullable<OriginalVerdict["text"]>): string {
+  const readme = counted(t.readmeLines, "line", "lines");
+  const changes = counted(t.changesLines, "existing line", "existing lines");
+  if (t.readmeLines > 0 && t.changesLines > 0) {
+    return `${readme} the original authors published in README and ${changes} of CHANGES were removed, reworded or moved. Keep them; add a new CHANGES entry, or ask a NEMAR administrator.`;
+  }
+  if (t.readmeLines > 0) {
+    return `${readme} the original authors published in README ${were(t.readmeLines)} removed, reworded or moved. Keep ${t.readmeLines === 1 ? "it" : "them"}; put your account in CHANGES or a new section, or ask a NEMAR administrator to correct one.`;
+  }
+  if (t.readmeInside > 0) {
+    return `New lines were put inside ${counted(t.readmeInside, "paragraph", "paragraphs")} the original authors published in README. Add text between paragraphs instead, or ask a NEMAR administrator to change one.`;
+  }
+  return `${changes} of CHANGES ${were(t.changesLines)} removed, edited or moved. CHANGES keeps its history: add a new entry for this version instead.`;
+}
+
+/** The note of a `fields` finding: the keys by name when three or fewer, else counts. */
+function fieldsNote(f: NonNullable<OriginalVerdict["fields"]>): string {
+  const keep = "Keep what the authors published: add new information, or ask a NEMAR administrator";
+  if (f.keys.length === 0) {
+    return `${counted(f.participants, "participant value", "participant values")} changed. Keep the values the authors recorded: add new information, or ask a NEMAR administrator to correct a value.`;
+  }
+  if (f.participants === 0 && f.keys.length <= 3) {
+    return `The dataset description's ${named(f.keys)} changed. ${keep} to correct a field.`;
+  }
+  const values =
+    f.participants > 0
+      ? ` and ${counted(f.participants, "participant value", "participant values")}`
+      : "";
+  return `${counted(f.keys.length, "field", "fields")} of the dataset description${values} changed. ${keep} to correct it.`;
+}
+
+/** The note of one finding for both: the only place left holds the text and the fields together. */
+function textAndFieldsNote(
+  t: NonNullable<OriginalVerdict["text"]>,
+  f: NonNullable<OriginalVerdict["fields"]>,
+): string {
+  // A run of lines put inside a paragraph counts as one line changed.
+  const lines = t.readmeLines + t.changesLines + t.readmeInside;
+  const values = f.keys.length + f.participants;
+  return `${counted(lines, "line", "lines")} of README or CHANGES and ${counted(values, "field or participant value", "fields or participant values")} the original authors published were changed. Keep them, add a CHANGES entry, or ask a NEMAR administrator.`;
+}
+
+/** The note of a `recordings` finding. */
+function recordingsNote(files: number): string {
+  const what =
+    files === 1 ? "1 annexed file has" : `${files} annexed files, recordings among them, have`;
+  return `${what} new content or moved in or out of the annex. A NEMAR administrator confirms a change to recorded data; describe it in CHANGES.`;
+}
+
+/** The note of an `undecided` finding, for each reason. */
+const UNDECIDED_NOTE: Record<NonNullable<OriginalVerdict["undecided"]>, string> = {
+  abandoned:
+    "The platform could not finish comparing this pull request with what the authors published. A person looks.",
+  other:
+    "Part of this pull request could not be compared with what the original authors published, such as a file too large or unreadable to compare. A person looks.",
+  markup:
+    "New README or CHANGES markup can hide text the original authors published, or the README shown is no longer theirs. A person looks.",
+};
+
+/**
+ * The findings of {@link OriginalVerdict} that fit in `places`, each a blocker on
+ * `no_degradation`, most important first: the text, the fields, the recordings, what could not be
+ * decided. When one place is left and the text and the fields both have a finding, the place holds
+ * one `original_text_altered` finding that counts both, so neither fail goes unstated. The notes
+ * are fixed words over counts and the nine author-owned key names (none with an underscore), so no
+ * text of the pull request is in them, and each stays within `NOTE_MAX` at any count below ten
+ * million; a path is a root name the facts chose, which the report's parser checks like any.
+ */
+function originalFindings(v: OriginalVerdict, places: number): ReviewFinding[] {
+  const finding = (code: FindingCode, path: string | null, note: string): ReviewFinding => ({
+    criterion: "no_degradation",
+    severity: "blocker",
+    code,
+    path,
+    note,
+  });
+  if (places === 1 && v.text !== null && v.fields !== null) {
+    return [finding("original_text_altered", v.paths.text, textAndFieldsNote(v.text, v.fields))];
+  }
+  const all: ReviewFinding[] = [];
+  if (v.text !== null) all.push(finding("original_text_altered", v.paths.text, textNote(v.text)));
+  if (v.fields !== null) {
+    all.push(finding("original_field_altered", v.paths.fields, fieldsNote(v.fields)));
+  }
+  if (v.recordings !== null) {
+    all.push(finding("recording_replaced", null, recordingsNote(v.recordings)));
+  }
+  if (v.undecided !== null) {
+    all.push(finding("evidence_incomplete", null, UNDECIDED_NOTE[v.undecided]));
+  }
+  return all.slice(0, Math.max(0, places));
 }
 
 /**
@@ -691,6 +932,13 @@ function keepModelFindings(
  * The models' findings that do not fit are dropped here rather than failing the review, and a
  * dropped one still lowers what it would have lowered had it fit; everything else that does not fit
  * is an error the caller reports as `model_invalid`.
+ *
+ * `lowerToFail` ({@link originalLowersToFail}) says the original authors' content was altered:
+ * the review's `no_degradation`, when it is a valid answer, becomes `fail` before anything else
+ * reads it, and the platform finding that says why is among `platform`. Only a full report can
+ * carry it, like the platform's findings. A review whose answer is not valid stays invalid
+ * (`model_invalid`): the fail is a lowering of an answer, never one in place of an answer. Without
+ * the finding that explains it, the flag is this script's own mistake.
  */
 export function assembleReport(
   screenOutput: unknown,
@@ -698,11 +946,12 @@ export function assembleReport(
   evidence: ReviewEvidence,
   usage: ReviewUsage,
   platform: readonly ReviewFinding[] = [],
+  lowerToFail = false,
 ): PrReviewReport {
   const screen = readScreenAnswer(screenOutput);
   if (screen.decision === "reject") {
     if (reviewOutput !== null || usage.review !== null) throw new PrReviewReportError("bad_stage");
-    if (platform.length > 0) throw new PrReviewReportError("bad_stage");
+    if (platform.length > 0 || lowerToFail) throw new PrReviewReportError("bad_stage");
     return parsePrReviewReport({
       v: REPORT_VERSION,
       stage: "screen",
@@ -743,6 +992,9 @@ export function assembleReport(
   }
   if (platform.some((f) => f.criterion !== "no_degradation" || f.severity !== "blocker")) {
     throw new Error("assembleReport: a platform finding that is not a blocker on no_degradation");
+  }
+  if (lowerToFail && !platform.some((f) => ORIGINAL_ALTERED_CODES.includes(f.code))) {
+    throw new Error("assembleReport: lowerToFail without the platform finding that explains it");
   }
   const m = reviewOutput;
   const answers = isRecordValue(m.criteria) ? m.criteria : {};
@@ -802,7 +1054,10 @@ export function assembleReport(
   }
   const criteria: Record<Criterion, unknown> = {
     genuine_contribution: "pass",
-    no_degradation: answers.no_degradation,
+    no_degradation:
+      lowerToFail && isOneOf(CRITERION_RESULTS, answers.no_degradation)
+        ? "fail"
+        : answers.no_degradation,
     advances_revision: answers.advances_revision,
     material_improvement: answers.material_improvement,
     clear_title_and_description: titleOk && bodyOk ? "pass" : "fail",
