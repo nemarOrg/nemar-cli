@@ -623,8 +623,11 @@ export interface ProseFacts {
   /** Where protection came from: the first version tag's README, or every merge-base line. */
   anchor: "first_version_tag" | "merge_base";
   /**
-   * Every protected line is kept verbatim and in order, with insertions only between paragraphs:
-   * nothing altered, moved or minor-edited, and no line inserted inside an original paragraph.
+   * Every protected line is kept verbatim and in order: none altered, moved or minor-edited, and
+   * no run of new lines between two lines of one original paragraph (`insertedInsideParagraph` is
+   * 0). It says nothing of new lines placed directly before or after an original paragraph with no
+   * blank line between, which the rendered README reads as part of that paragraph: that is
+   * `joinedInsertedRuns`, which this fact does not consider.
    */
   preserved: boolean;
   /** Merge-base lines that are protected. */
@@ -644,6 +647,17 @@ export interface ProseFacts {
    * kept (verbatim or by a minor edit) and the later one not the start of a paragraph.
    */
   insertedInsideParagraph: number;
+  /**
+   * Runs of new head lines (lines that are not kept, and not the new text of a minor edit) that
+   * touch a kept protected line with no blank line between, so the head reads them as one
+   * paragraph with it: the run's first line does not start a paragraph and the head line before it
+   * is a kept protected line, or the head line after the run is a kept protected line that does not
+   * start a paragraph. A run joined at both ends counts once. Markdown can turn an original
+   * paragraph into something that renders as nothing this way (the open title of a link reference
+   * definition before it, a quote closing after it), which no base-side fact sees. Not part of
+   * {@link proseAltered} or `preserved`: what it does is the caller's to decide.
+   */
+  joinedInsertedRuns: number;
   /** Lines of the head that are not kept from the base, the new text of minor edits included. */
   insertedLines: number;
   /** Both sides have line breaks, and they are not of the same kind (LF, CRLF, CR or mixed). */
@@ -656,9 +670,11 @@ export interface ProseFacts {
   partsBefore: number;
   partsAfter: number;
   /**
-   * Inserted lines, minor-edit replacements included, that hold markup able to hide what follows
-   * or surrounds it: see {@link hidesText}. Wrapping original paragraphs in such markup keeps every
-   * protected line verbatim, so without this fact it would read as preserved.
+   * Runs of consecutive head lines that are not kept verbatim (inserted lines and the new text of
+   * minor edits together) whose markup can hide what follows or surrounds it: see
+   * {@link hidesText}, which reads a run as one text, so a tag split across lines is still one tag.
+   * Wrapping original paragraphs in such markup keeps every protected line verbatim, so without
+   * this fact it would read as preserved.
    */
   hidingMarkupInserted: number;
   /**
@@ -675,33 +691,131 @@ export interface ProseFacts {
   examples: string[];
 }
 
-/** Elements whose content a reader of the rendered README does not see. */
-const HIDING_TAG =
-  /<\/?(details|script|style|template|noscript|textarea|iframe|object)(?![A-Za-z0-9-])/i;
+/**
+ * Elements whose content a reader of the rendered README does not see, or sees only on request:
+ * named by their whole tag name, so `<s>` is not `<script>` and `<details2>` is not `<details>`.
+ */
+const HIDING_ELEMENTS: ReadonlySet<string> = new Set([
+  "details",
+  "script",
+  "style",
+  "template",
+  "noscript",
+  "textarea",
+  "iframe",
+  "object",
+  "dialog",
+  "title",
+  "datalist",
+  "noembed",
+  "noframes",
+  "video",
+  "audio",
+  "canvas",
+  "map",
+]);
 
 /** An attribute or a style inside one tag that hides the element. */
 const HIDING_ATTRIBUTE = /\bhidden\b|display\s*:\s*none/i;
 
+/** The start of a Markdown link reference definition: up to three spaces, `[label]` and a colon. */
+const LINK_DEFINITION = /^ {0,3}\[[^\]]+\]:/;
+
+/** Whether a UTF-16 code unit is an ASCII letter. */
+function isAsciiLetter(unit: number): boolean {
+  return (unit >= 0x41 && unit <= 0x5a) || (unit >= 0x61 && unit <= 0x7a);
+}
+
+/** Whether a UTF-16 code unit can continue an HTML tag name. */
+function isTagNameUnit(unit: number): boolean {
+  return isAsciiLetter(unit) || (unit >= 0x30 && unit <= 0x39) || unit === 0x2d;
+}
+
 /**
- * Whether a line holds markup that can hide text: the start or end of an HTML comment, the opening
- * or closing tag of an element whose content is not shown (`details`, `script`, `style`,
- * `template`, `noscript`, `textarea`, `iframe`, `object`), or a tag carrying `hidden` or
- * `display: none`. A tag name must be whole, so `<s>` or `<strong>` is not `<script>` or `<style>`.
- * Inline code is not exempt: the fact is a tripwire a person clears, and a person reads code spans
- * better than a rule does. Each tag is read only up to its own `>`, so a hostile line costs one
- * pass, never a backtracking search.
+ * Whether a line is a link reference definition that leaves what follows to be read as part of
+ * it: a title opened (`"`, `'` or `(`) and not closed on the line, or nothing at all after the
+ * colon (the destination is then taken from the next line). `[x]: <> "` before an original
+ * paragraph, and `"` after it, make the paragraph the title of a definition, which renders as
+ * nothing.
  */
-export function hidesText(line: string): boolean {
-  if (line.includes("<!--") || line.includes("-->") || HIDING_TAG.test(line)) return true;
-  // A tag runs from a `<` followed by a letter to the next `>` or `<`, or to the end of the line.
-  let tag = -1;
-  for (let k = 0; k <= line.length; k++) {
-    const unit = k < line.length ? line.charCodeAt(k) : -1;
-    if (unit !== 0x3c && unit !== 0x3e && unit !== -1) continue;
-    if (tag >= 0 && HIDING_ATTRIBUTE.test(line.slice(tag, k))) return true;
-    tag = unit === 0x3c && /[A-Za-z]/.test(line.charAt(k + 1)) ? k : -1;
+function opensLinkDefinition(line: string): boolean {
+  const start = LINK_DEFINITION.exec(line);
+  if (start === null) return false;
+  let at = start[0].length;
+  const skipBlanks = (): void => {
+    while (at < line.length && (line.charCodeAt(at) === 0x20 || line.charCodeAt(at) === 0x09)) at++;
+  };
+  skipBlanks();
+  if (at === line.length) return true;
+  if (line.charCodeAt(at) === 0x3c) {
+    const close = line.indexOf(">", at + 1);
+    if (close < 0) return true;
+    at = close + 1;
+  } else {
+    while (at < line.length && line.charCodeAt(at) !== 0x20 && line.charCodeAt(at) !== 0x09) at++;
   }
-  return false;
+  skipBlanks();
+  const opener = line.charAt(at);
+  if (opener !== '"' && opener !== "'" && opener !== "(") return false;
+  return line.indexOf(opener === "(" ? ")" : opener, at + 1) < 0;
+}
+
+/**
+ * Whether a text holds HTML that can hide what it touches: the start or the end of a comment, a
+ * processing instruction (`<?`), a declaration or bogus comment (`<!` and a letter) or a CDATA
+ * section (`<![`), the opening or closing tag of one of {@link HIDING_ELEMENTS}, a tag carrying
+ * `hidden` or `display: none`, or a tag (or a quoted attribute value inside one) left open at the
+ * end of the text, which makes whatever follows part of the tag. One pass over the text: each tag
+ * is read once, to its `>` outside quotes, and nothing backtracks.
+ */
+function markupHides(text: string): boolean {
+  if (text.includes("<!--") || text.includes("-->")) return true;
+  let from = 0;
+  for (;;) {
+    const lt = text.indexOf("<", from);
+    if (lt < 0) return false;
+    const next = text.charCodeAt(lt + 1);
+    if (next === 0x3f) return true; // <?
+    if (next === 0x21) {
+      const after = text.charCodeAt(lt + 2);
+      if (after === 0x5b || isAsciiLetter(after)) return true; // <![CDATA[ or <!x
+      from = lt + 2;
+      continue;
+    }
+    const closing = next === 0x2f;
+    const nameStart = closing ? lt + 2 : lt + 1;
+    if (!isAsciiLetter(text.charCodeAt(nameStart))) {
+      from = lt + 1;
+      continue;
+    }
+    let nameEnd = nameStart + 1;
+    while (nameEnd < text.length && isTagNameUnit(text.charCodeAt(nameEnd))) nameEnd++;
+    if (HIDING_ELEMENTS.has(text.slice(nameStart, nameEnd).toLowerCase())) return true;
+    let quote = 0;
+    let end = nameEnd;
+    for (; end < text.length; end++) {
+      const unit = text.charCodeAt(end);
+      if (quote !== 0) {
+        if (unit === quote) quote = 0;
+      } else if (unit === 0x22 || unit === 0x27) quote = unit;
+      else if (unit === 0x3e) break;
+    }
+    if (end >= text.length) return true;
+    if (!closing && HIDING_ATTRIBUTE.test(text.slice(lt, end))) return true;
+    from = end + 1;
+  }
+}
+
+/**
+ * Whether a run of consecutive new lines holds markup that can hide text: a link reference
+ * definition left open on one of its lines ({@link opensLinkDefinition}), or HTML that hides in the
+ * run read as one text, its lines joined by a space ({@link markupHides}), so a tag split across
+ * lines (`<div` then `hidden>`) is read as the one tag it is. Inline code is not exempt: the fact
+ * is a tripwire a person clears, and a person reads code spans better than a rule does. The cost
+ * is one pass over the run, whatever it holds.
+ */
+export function hidesText(run: readonly string[]): boolean {
+  return run.some(opensLinkDefinition) || markupHides(run.join(" "));
 }
 
 /** At most `maxValueChars + 1` code points of a line, never half a surrogate pair. */
@@ -873,8 +987,32 @@ export function proseFacts(input: {
   const afterBreaks = headRead.value.breaks;
   const protectedAltered = altered.length;
   const movedLines = moved.length;
-  const hidingMarkupInserted = inserted.filter((line) =>
-    hidesText((head[line] as ProseLine).text),
+  // Head lines by what they are: kept protected lines (verbatim or by a minor edit) and lines not
+  // kept, which are the inserted lines and the new text of minor edits.
+  const keptProtected = new Set<number>();
+  for (const [b, h] of pairs) if (isProtected[b]) keptProtected.add(h);
+  const notKept = new Set(inserted);
+  const runsOf = (member: (line: number) => boolean): [number, number][] => {
+    const runs: [number, number][] = [];
+    let start = -1;
+    for (let line = 0; line <= head.length; line++) {
+      const inRun = line < head.length && member(line);
+      if (inRun && start < 0) start = line;
+      if (!inRun && start >= 0) {
+        runs.push([start, line - 1]);
+        start = -1;
+      }
+    }
+    return runs;
+  };
+  const startsParagraph = (line: number): boolean => (head[line] as ProseLine).paragraphStart;
+  const hidingMarkupInserted = runsOf((line) => notKept.has(line)).filter(([first, last]) =>
+    hidesText(head.slice(first, last + 1).map((line) => line.text)),
+  ).length;
+  const joinedInsertedRuns = runsOf((line) => notKept.has(line) && !takenByMinor.has(line)).filter(
+    ([first, last]) =>
+      (!startsParagraph(first) && keptProtected.has(first - 1)) ||
+      (keptProtected.has(last + 1) && !startsParagraph(last + 1)),
   ).length;
   return {
     ok: true,
@@ -893,6 +1031,7 @@ export function proseFacts(input: {
       moved: movedLines > 0,
       movedLines,
       insertedInsideParagraph,
+      joinedInsertedRuns,
       insertedLines: inserted.length,
       lineEndingsChanged:
         beforeBreaks !== "none" && afterBreaks !== "none" && beforeBreaks !== afterBreaks,
@@ -1210,8 +1349,9 @@ export interface RecordingFacts {
 }
 
 /**
- * The facts of the recordings a pull request touched (design B2.4, as decided in D3). Each changed
- * path is read as two sides ({@link annexSide}; a null probe is a side that does not exist) and the
+ * The facts of the recordings a pull request touched (design B2.4; whether a side is annexed is
+ * decided by what the side is, never by the area of its path or by the status `typechange`). Each
+ * changed path is read as two sides ({@link annexSide}; a null probe is a side that does not exist) and the
  * paths are taken in code-unit order, so the answer never depends on the order the caller listed
  * them. The caller passes every changed path. For a path that exists on both sides and is in an
  * area the review reads (`readArea`):
@@ -1416,7 +1556,7 @@ export const PARTICIPANT_FILES = ["participants.tsv", "participants.json"] as co
 
 /**
  * Whether a change of each kind, in a participants file, alters a value the authors recorded (design
- * B2.3 and D6): a cell or a JSON value replaced, rewritten by a rule or emptied, a row relabeled
+ * B2.3, with a change of a JSON value's type counted as a changed value): a cell or a JSON value replaced, rewritten by a rule or emptied, a row relabeled
  * (the participant's own id), or a value's type changed. The other kinds are not: a removal is
  * Part A's loss fact, a row or a key that was found elsewhere verbatim is kept, an addition or a
  * fill takes nothing away, a rename of a JSON key (case and punctuation only) and a reorder or a

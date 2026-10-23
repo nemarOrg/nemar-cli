@@ -824,6 +824,7 @@ function untouched(protectedLines: number, overrides: Partial<ProseFacts> = {}):
     moved: false,
     movedLines: 0,
     insertedInsideParagraph: 0,
+    joinedInsertedRuns: 0,
     insertedLines: 0,
     lineEndingsChanged: false,
     finalNewlineAdded: false,
@@ -964,6 +965,7 @@ describe("proseFacts: the cases of design B7", () => {
       untouched(ORIGINAL_PROTECTED, {
         preserved: false,
         protectedAltered: 1,
+        joinedInsertedRuns: 1,
         insertedLines: 1,
         examples: [ORIGINAL_LINES[7] as string],
       }),
@@ -978,6 +980,7 @@ describe("proseFacts: the cases of design B7", () => {
       untouched(ORIGINAL_PROTECTED, {
         preserved: false,
         insertedInsideParagraph: 1,
+        joinedInsertedRuns: 1,
         insertedLines: 1,
       }),
     );
@@ -995,7 +998,7 @@ describe("proseFacts: the cases of design B7", () => {
     // The base line after it starts a paragraph, so no original paragraph is split.
     const head = edited((lines) => lines.splice(9, 0, "Consent forms are kept by the lab."));
     expect(readme({ "README.md": ORIGINAL }, { "README.md": head })).toEqual(
-      untouched(ORIGINAL_PROTECTED, { insertedLines: 1 }),
+      untouched(ORIGINAL_PROTECTED, { joinedInsertedRuns: 1, insertedLines: 1 }),
     );
   });
 
@@ -1010,6 +1013,7 @@ describe("proseFacts: the cases of design B7", () => {
         preserved: false,
         minorEdits: 1,
         insertedInsideParagraph: 1,
+        joinedInsertedRuns: 1,
         insertedLines: 2,
       }),
     );
@@ -1045,6 +1049,7 @@ describe("proseFacts: the cases of design B7", () => {
       untouched(ORIGINAL_PROTECTED, {
         preserved: false,
         protectedAltered: 1,
+        joinedInsertedRuns: 1,
         insertedLines: 2,
         examples: [ORIGINAL_LINES[7] as string],
       }),
@@ -1099,6 +1104,7 @@ describe("proseFacts: the cases of design B7", () => {
         document: "changes",
         preserved: false,
         protectedAltered: 1,
+        joinedInsertedRuns: 1,
         insertedLines: 1,
         examples: ["  - Fixed event onsets."],
       }),
@@ -1220,7 +1226,9 @@ describe("proseFacts: the adversarial cases of design B6", () => {
       "README.md": "Second\npart\n",
     };
     const facts = readme(base, head);
-    expect(facts).toEqual(untouched(4, { partsBefore: 2, partsAfter: 2, insertedLines: 1 }));
+    expect(facts).toEqual(
+      untouched(4, { partsBefore: 2, partsAfter: 2, joinedInsertedRuns: 1, insertedLines: 1 }),
+    );
   });
 
   test("a final newline added to a renamed part is not one added to the same part", () => {
@@ -1239,6 +1247,8 @@ describe("proseFacts: the tripwires", () => {
     const facts = readme({ "README.md": ORIGINAL }, { "README.md": head });
     expect(facts.protectedAltered + facts.movedLines + facts.minorEdits).toBe(0);
     expect(facts.hidingMarkupInserted).toBe(2);
+    // Each marker touches the paragraph it wraps, with no blank line between.
+    expect(facts.joinedInsertedRuns).toBe(2);
     // Not an alteration by itself: what the tripwire does is the caller's to decide.
     expect(proseAltered(facts)).toBe(false);
   });
@@ -1258,7 +1268,69 @@ describe("proseFacts: the tripwires", () => {
     });
     const facts = readme({ "README.md": ORIGINAL }, { "README.md": head });
     expect(facts.minorEdits).toBe(2);
-    expect(facts.hidingMarkupInserted).toBe(2);
+    // The two edited lines are next to each other: one run, read as one text.
+    expect(facts.hidingMarkupInserted).toBe(1);
+    expect(facts.joinedInsertedRuns).toBe(0);
+  });
+
+  test("a paragraph made the open title of a link definition is joined and trips the markup fact", () => {
+    // `[x]: <> "` right before the paragraph and `"` right after it, no blank line between: the
+    // rendered README shows nothing of the paragraph, while every protected line is verbatim.
+    const head = edited((lines) => {
+      lines.splice(9, 0, '"');
+      lines.splice(7, 0, '[x]: <> "');
+    });
+    const facts = readme({ "README.md": ORIGINAL }, { "README.md": head });
+    expect(facts.preserved).toBe(true);
+    expect(facts.insertedInsideParagraph).toBe(0);
+    expect(facts.joinedInsertedRuns).toBe(2);
+    expect(facts.hidingMarkupInserted).toBe(1);
+    expect(proseAltered(facts)).toBe(false);
+  });
+
+  test("a paragraph made the open title attribute of a link is joined and trips the markup fact", () => {
+    const head = edited((lines) => {
+      lines.splice(9, 0, '"></a>');
+      lines.splice(7, 0, '<a title="');
+    });
+    const facts = readme({ "README.md": ORIGINAL }, { "README.md": head });
+    expect(facts.joinedInsertedRuns).toBe(2);
+    expect(facts.hidingMarkupInserted).toBe(1);
+  });
+
+  test("the same title opened and closed by two minor edits trips the markup fact", () => {
+    const first =
+      "The recordings were made in a quiet, electrically shielded room at the university hospital.";
+    const second = "Each session lasted about ninety minutes, with breaks between the blocks.";
+    const base = `# Methods\n\n${first}\n${second}\n`;
+    const head = `# Methods\n\n[x]:<>"${first}\n${second}"\n`;
+    const facts = readme({ "README.md": base }, { "README.md": head });
+    expect(facts.minorEdits).toBe(2);
+    // The new text of a minor edit is no inserted run of its own, but it is read for markup.
+    expect(facts.joinedInsertedRuns).toBe(0);
+    expect(facts.hidingMarkupInserted).toBe(1);
+    expect(proseAltered(facts)).toBe(false);
+  });
+
+  test("a joined run counts once however many protected lines it touches, and a blank line unjoins it", () => {
+    // Between two paragraphs, touching both: one run.
+    const both = edited((lines) => lines.splice(9, 1, "A bridge sentence."));
+    expect(readme({ "README.md": ORIGINAL }, { "README.md": both }).joinedInsertedRuns).toBe(1);
+    // The same sentence as a paragraph of its own: not joined.
+    const apart = edited((lines) => lines.splice(9, 0, "", "A paragraph of its own."));
+    expect(readme({ "README.md": ORIGINAL }, { "README.md": apart }).joinedInsertedRuns).toBe(0);
+    // A sentence right after the last original line, with no blank line, is joined to it too.
+    const appended = `${ORIGINAL}More text after the last line.\n`;
+    expect(readme({ "README.md": ORIGINAL }, { "README.md": appended }).joinedInsertedRuns).toBe(1);
+  });
+
+  test("a run joined only to lines added after the tag is not counted", () => {
+    const later = `${ORIGINAL}\n## Notes\n\nA later note.\n`;
+    const head = `${ORIGINAL}\n## Notes\n\nA later note.\nA sentence added to it.\n`;
+    const facts = readme({ "README.md": later }, { "README.md": head }, { "README.md": ORIGINAL });
+    expect(facts.joinedInsertedRuns).toBe(0);
+    // Without the tag the note is protected, and the same sentence is joined to it.
+    expect(readme({ "README.md": later }, { "README.md": head }).joinedInsertedRuns).toBe(1);
   });
 
   test("a new README.md beside the original README hides it from the shown README", () => {
@@ -1320,18 +1392,61 @@ describe("hidesText", () => {
       "<textarea>",
       "<iframe src=x>",
       "<object data=x>",
+      "<dialog open>",
+      "<title>",
+      "<datalist>",
+      "<noembed>",
+      "<noframes>",
+      "<video src=x>",
+      "<audio>",
+      "<canvas>",
+      "<map name=x>",
       "<div hidden>",
       '<p class="x" hidden="">',
       '<span style="display:none">',
       '<div style="display : none">',
       '<span style="visibility: hidden">',
-      "<div\thidden",
     ]) {
-      expect(hidesText(line), line).toBe(true);
+      expect(hidesText([line]), line).toBe(true);
     }
   });
 
-  test("other markup, a code span and plain words are not", () => {
+  test("a processing instruction, a declaration, a bogus comment and CDATA hide what follows", () => {
+    for (const line of ["<?php", "a <? b", "<!DOCTYPE html>", "<!x", "<![CDATA[", "x <![if]>"]) {
+      expect(hidesText([line]), line).toBe(true);
+    }
+  });
+
+  test("a tag or a quoted attribute left open at the end of a run takes what follows into the tag", () => {
+    for (const line of ["<div", "<div\thidden", '<a title="', "<a title='x", "text <span"]) {
+      expect(hidesText([line]), line).toBe(true);
+    }
+  });
+
+  test("a run is read as one text: a tag split across lines is one tag", () => {
+    expect(hidesText(["<div", "hidden>"])).toBe(true);
+    expect(hidesText(['<span style="display:', 'none">'])).toBe(true);
+    // Closed on the next line with nothing that hides: the run as a whole hides nothing.
+    expect(hidesText(["<div", 'class="note">'])).toBe(false);
+  });
+
+  test("a link reference definition whose title is left open hides the lines after it", () => {
+    for (const line of [
+      '[x]: <> "',
+      "[x]: /url 'open",
+      "[x]: /url (open",
+      '   [label]: <https://example.org> "a title that goes on',
+      "[x]:",
+      "[x]:   ",
+      "[x]: <",
+    ]) {
+      expect(hidesText([line]), JSON.stringify(line)).toBe(true);
+    }
+    // On any line of the run, not only the first.
+    expect(hidesText(["a new sentence.", '[x]: <> "'])).toBe(true);
+  });
+
+  test("other markup, closed definitions, a code span and plain words are not", () => {
     for (const line of [
       "`<s>`",
       "<s>struck</s>",
@@ -1340,22 +1455,48 @@ describe("hidesText", () => {
       "<summary>Notes</summary>",
       "<objects>",
       "<detailsx>",
+      "<details2>",
+      "<detailsfoo>",
+      "<mapping>",
+      "<titles>",
+      '<a href="https://example.org">a link</a>',
+      "<br/>",
+      "p<0.05 and 5 < 6",
       "This was hidden in plain sight.",
       "a < b and hidden > c",
       "Set display: none in the stylesheet.",
       "<br> hidden",
+      '[x]: /url "a closed title"',
+      "[x]: /url",
+      "[x]: <https://example.org> (closed)",
+      '    [x]: <> "',
       "",
     ]) {
-      expect(hidesText(line), line).toBe(false);
+      expect(hidesText([line]), JSON.stringify(line)).toBe(false);
     }
   });
 
-  test("a hostile line of unclosed tags is read in one pass", () => {
-    const hostile = `${"<a ".repeat(400_000)}hidden`;
-    const started = performance.now();
-    expect(hidesText(hostile)).toBe(true);
-    expect(hidesText("<a ".repeat(400_000))).toBe(false);
-    expect(performance.now() - started).toBeLessThan(10_000);
+  test("hostile runs of 4 MiB are each read in one pass", () => {
+    const size = 4 * 1024 * 1024;
+    // Whole units only, so a closed tag is never cut in half at the end.
+    const fill = (unit: string): string => unit.repeat(Math.ceil(size / unit.length));
+    const cases: [string, boolean][] = [
+      [fill("<a "), true],
+      [fill("<a>"), false],
+      [fill("<b x=1>"), false],
+      [`<a title="${fill("x")}`, true],
+      [`[${fill("a")}`, false],
+      [`[x]: <${fill("a")}`, true],
+      [`<a ${fill("display  ")}>`, false],
+      [`<a ${fill("hidde ")}>`, false],
+      [fill("< "), false],
+      [fill("<!"), false],
+    ];
+    for (const [text, hides] of cases) {
+      const started = performance.now();
+      expect(hidesText([text]), text.slice(0, 12)).toBe(hides);
+      expect(performance.now() - started, text.slice(0, 12)).toBeLessThan(2_000);
+    }
   });
 });
 

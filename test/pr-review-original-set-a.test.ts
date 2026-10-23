@@ -48,6 +48,7 @@ const DOCUMENT_KEYS = [
   "hidingMarkupInserted",
   "insertedInsideParagraph",
   "insertedLines",
+  "joinedInsertedRuns",
   "laterAltered",
   "lineEndingsChanged",
   "minorEdits",
