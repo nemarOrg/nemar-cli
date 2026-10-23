@@ -1583,6 +1583,59 @@ The facts are tripwires, not a proof: Markdown and HTML can be bent in more ways
 
 B6.6 is milder than written: a heading converted from Markdown to RST is mostly a minor edit, and the reflowed lines are what fail.
 
+
+### As built (Phase 8: the integration)
+
+Part B is read in the content pass, acted on by the platform, and reported to the model as what the platform did.
+Where the text above, the Phase 7 note and this note differ, this note is what was built.
+
+**What runs.**
+- A Part B step follows the change summary in the content pass and precedes the raw diffs.
+  It is all-or-nothing and shares the pass's time and byte budgets: it starts only if the summary's clock has `timeReserveMs` left, and a failed tree listing, a batch that cannot be trusted, or running out of time gives an abandoned result, which is `unknown`.
+  The facts stage and the listing pass are unchanged, so a spam-stopped or naming-ended review starts no Part B work.
+- The tag lookup is in the content pass, only when a root README part changed and the caller allows it (`versionTags`, off for `--offline` calibration, whose clones point at GitHub).
+  `git ls-remote --tags origin refs/tags/v*` (15 s, 1 MiB), then `chooseAnchor` with `git merge-base --is-ancestor` under `GIT_NO_LAZY_FETCH=1` (5 s over at most 32 tags), then `git ls-tree -z` of the chosen tag's commit under `GIT_NO_LAZY_FETCH=1`, then the anchor's README blobs in a read of their own (4 MiB), so a failed lazy fetch gives the stricter anchor and does not abandon Part B.
+  Every failure falls back to the merge base, recorded as `lookup_failed`, `no_tag`, `no_ancestor`, `check_failed` (a tag commit the clone does not hold is this), `too_many_tags` or `tag_tree_unreadable`.
+  A found tag whose README cannot be read keeps `first_version_tag` as the lookup word and reads the README facts against the merge base.
+- One sized batch reads the README and CHANGES parts of both sides, the description sides and every probe side of the changed paths that no earlier read took (probes: no size is `unreadable`, above 1,023 bytes is `large`), within what is left of the 256 MiB; the summary's pool hands on its small blobs so nothing is read twice.
+- The verdict (`originalVerdict`) is one pure function: a README or CHANGES line altered or moved, a line put inside an original paragraph, an author-owned field altered or removed and a participant value changed are a fail (the script lowers `no_degradation` to `fail` before the report is parsed, `lowerToFail`, and only for a valid model answer); a replaced or retyped recording, a participants table that could not be counted, an unparsed description, an unread side, any refusal (the edit-distance cap included), hiding markup and a lost or shadowed shown README are `unknown`; the abandoned pass is `unknown` and nothing else of Part B is used; the rest (minor edits, later text, line endings, a final newline, added or grown fields, moved pointers, joined runs) is information.
+  A moved recording never cancels a removal fact of Part A.
+- Part B gets the platform-finding places that Part A leaves (`3 - Part A's`, at least one) in the order text, fields, recordings, undecided; with one place left, text and fields merge into one `original_text_altered` finding.
+  Notes are fixed templates of numbers and closed key names, at most 195 characters at seven-digit counts and over every subset of the nine key names, with singular forms for a count of one, and a count form for four or more keys; a finding's path is the README part shown at the merge base (else the first CHANGES part), the description, or the first changed participants file, recorded on the facts.
+  Recordings and undecided facts have no path.
+- The model is told by an `original_content` block of the facts, placed immediately before `change_summary`, and one system-prompt paragraph; counts are zero unless a document was compared, an abandoned pass says `not_decided` everywhere, and no text of a file ever enters the block.
+- The check shows the B4 paragraph once, only when a finding is `original_text_altered` or `original_field_altered`.
+- Calibration prints a `PART-B` word and `B t/f/p/r` per pull request and a totals line from the same verdict the review uses; `--offline` never lists tags in either mode; `--without-summary` leaves Part B abandoned by its own start check.
+
+**Measured on set A** (86 frozen pull requests, offline, so the merge-base anchor; `set-a-evidence.json` re-recorded, and a test ties every row of it to `set-a-original.json`).
+Every earlier number is unchanged: 5,482 files accounted for, 15 truncated, 18 with a platform blocker of Part A, 0 abandoned, 0 hidden.
+- Part B fails 9 pull requests (text 2, fields 4, participants 3): `nm000501` #3 and `on002578` #2 (original README lines; the second only because there is no tag offline), `nm000424` #2, `nm000501` #2, `nm000513` #2 (`Name`, opened by the platform's own account, which the Worker exempts in production) and `on006126` #1 (`ReferencesAndLinks`), and `on005420` #1 (37 participant values), `on004588` #1 (5 re-padded ids), `on005628` #1 (2 values in `participants.json`).
+- 5 are `unknown` only: `on003343` #3, `on003029` #1 and `on004703` #1 (recordings), `on003620` #1 and `on003195` #1 (a participants table that could not be counted: a ragged row, an empty column name).
+- 2 are information (`on007353` #1, a minor `Funding` edit; `on004306` #1, moved pointers) and 70 are clear, which includes the 27 artifact READMEs, the 64 CHANGES changes and the eight empty-field pull requests.
+- The plan expected 7 or 8 fails; `on005628` #1 is the ninth, and `on003195` #1 the fifth unknown, both from the approved participant-value rule (any change of a non-missing participant value fails, including text in `participants.json`).
+
+**Decided as built.**
+- The facts record the three paths (README part, CHANGES part, participants file) so a finding names a file the builder, not the verdict, chose.
+- A README with only lines put inside a paragraph, together with altered CHANGES lines, uses the README-paragraph note; the merged text-and-fields note counts README lines, CHANGES lines and inside-paragraph runs, and fields plus participant values.
+- Caps in the batch: 4 MiB for a document part, 8 MiB for a description side, 1,023 bytes for a probe; a part over its cap is `unreadable`, and a duplicated name in a root tree abandons Part B instead of throwing.
+- `EvidenceStats` gained the Part B numbers and `originalFindings` and `originalFails`; `platformFindings` stays Part A's count, so the label template's 18 holds.
+- The "pool files no candidate can consult are never read" pin was narrowed to the first four `cat-file` processes, because Part B probes every changed side.
+
+**Corrections to the text above.**
+- B4's author-field note (210 characters with three names) cannot hold nine names; the count form does.
+- B4's "recording files" is "annexed files" (`on004703`'s are sidecars); "first published" is true only of the README (the other parts are compared with the merge base); `readme_preserved` is not a fact (false on minor edits).
+- B3 step 1 and slice 2 step 2 put the lookup in the listing pass; it is in the content pass because the facts stage may read only trees, commits, names and the description, and a spam-stopped review should not pay for it.
+- B3 step 3 and B5 say the anchor blobs join the batch; they have a read of their own, because the batch is all-or-nothing.
+- B2.4 says no blob is read beyond the pointers; every changed side needs a size check.
+- 10.3 and B4 give `platformFindings(summary, original)` and `assembleReport(..., lowerToFail)`; both are as built, with `original` defaulting to null.
+- B4's `on004588` #1 outcome is a fail from five participant values; its table parses.
+- `classifyPath` places `CHANGELOG*` in "other", so the model never sees its diff, while Part B protects it.
+
+**Left to the owner.**
+- The model calibration of ADR 0107 on the changed prompt (`model-labels.template.txt`, 40 reviews; it costs money and needs labels), before the review check is required.
+- An optional online run that measures the tag anchor on set A (`--evidence-only --clones DIR` without `--offline`; network, no money).
+- The facts, the findings, the prompt paragraph and the calibration reach `main` in one release (the prompt must not say the platform acted before it does); no workflow changes, so nothing to sync to `nemarDatasets/.github`.
+
 ---
 
 ## 13. Owner Questions
