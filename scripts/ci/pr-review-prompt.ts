@@ -674,8 +674,10 @@ function counted(k: number, one: string, many: string): string {
  * caller that reads no content passes) there are none.
  *
  * Rows first, then keys. The note is a fixed template over the platform's counts, so no text of the
- * pull request is in it: only letters, digits, spaces, commas and full stops, which the report's
- * sanitizer keeps as they are, and at most 200 characters for any count below ten billion. The path
+ * pull request is in it: Part A's notes hold only letters, digits, spaces, commas and full stops,
+ * which the report's sanitizer keeps as they are, and at most 200 characters for any count below
+ * ten billion (Part B's notes also hold `;`, `:` and an apostrophe, which it keeps too, and are at
+ * most 195 characters; see {@link originalFindings}). The path
  * is the first file, in code-unit order, with a removal; it goes to the finding of its file's kind
  * (a table's to the rows, a JSON document's to the keys) and the other finding names none. The
  * report's parser checks it like any finding's path.

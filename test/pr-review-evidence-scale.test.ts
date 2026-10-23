@@ -79,4 +79,8 @@ test("a 2,000-file pull request is read within the passes' 60 seconds, and 1,500
   expect(content.summary.loss.rowsRemoved).toBe(0);
   // The 500 refused tables are read as diffs, 40 shown and the rest unread.
   expect(content.unreadFiles).toBe(460);
+  // Part B ran in the same pass and its budget: not abandoned, and nothing of it left unread.
+  expect(content.original.abandoned).toBe(false);
+  expect(content.original.recordings.unread).toBe(0);
+  expect(content.original.readme).toEqual({ status: "unchanged" });
 }, 180_000);

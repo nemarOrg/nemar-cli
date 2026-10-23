@@ -1354,6 +1354,18 @@ function tagAnchor(
 }
 
 /**
+ * The bytes Part B's batch may still read: what the pass's `maxTotalBytes` (256 MiB) leaves after
+ * the blobs the cosmetic proofs read (`checked`) and the bytes the summary's pool read
+ * (`pooledBytes`), and never less than none. One number for the whole pass, so Part B cannot read
+ * past what the summary was allowed.
+ */
+export function partBBytesLeft(checked: ReadonlyMap<string, Buffer>, pooledBytes: number): number {
+  let held = pooledBytes;
+  for (const blob of checked.values()) held += blob.length;
+  return Math.max(0, SUMMARY_LIMITS.maxTotalBytes - held);
+}
+
+/**
  * Part B of the content pass: what the pull request changed of the content its original authors
  * published, read from git and handed to `originalContentFacts` (`pr-review-original.ts`), which
  * decides everything from the bytes. Run after the change summary and before the raw diffs, under
@@ -1434,14 +1446,12 @@ function originalContent(
       want(entry.oidAfter, ORIGINAL_LIMITS.pointerMaxBytes);
     }
   }
-  let heldBytes = read.pooled.bytes;
-  for (const blob of read.checked.values()) heldBytes += blob.length;
   const batch = readBlobsSized(
     dir,
     [...wanted.keys()],
     {
       maxBytes: (oid) => wanted.get(oid) ?? 0,
-      maxTotalBytes: Math.max(0, SUMMARY_LIMITS.maxTotalBytes - heldBytes),
+      maxTotalBytes: partBBytesLeft(read.checked, read.pooled.bytes),
     },
     line ?? undefined,
   );
