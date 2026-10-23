@@ -627,18 +627,57 @@ export function alignLines(
  * every copy errs the other way: removing a copy added after the tag reads as an alteration, a rare
  * false fail, which is the side to err on.
  *
- * With no anchor (null) every base line is protected. That is the strict side, and every failure to
- * find an anchor (no tag, no README at the tag, an anchor document that could not be read) falls
- * back to it.
+ * A README line is also protected when it is an original line minor-edited since the tag: the
+ * anchor is aligned with the base as {@link proseFacts} aligns two sides, and inside each hunk the
+ * j-th removed anchor line is paired with the j-th inserted base line; a pair within
+ * {@link isMinorEdit} protects the base line. Without this, a typo merged after the tag (a minor
+ * edit, information) would make the line later text, and a second pull request could then rewrite
+ * it freely. Edits that add up past the minor bound against the anchor line (several merged minor
+ * edits of one line) leave it unprotected: the accepted limit, since the bound is what tells an
+ * edit of the original line from a new line.
+ *
+ * With no anchor (null), an anchor with no line, or an anchor too far from the base to align
+ * (more than `maxEditDistance` lines apart), every base line is protected. That is the strict side,
+ * and every failure to find an anchor (no tag, no README at the tag, an anchor document that could
+ * not be read) falls back to it. `meter`, when given, counts the alignment's work.
  */
 export function protectedMask(
   document: DocumentKind,
   base: readonly string[],
   anchor: readonly string[] | null,
+  meter?: AlignMeter,
 ): boolean[] {
-  if (document === "changes" || anchor === null) return base.map(() => true);
+  if (document === "changes" || anchor === null || anchor.length === 0) {
+    return base.map(() => true);
+  }
+  const alignment = alignLines(anchor, base, ORIGINAL_LIMITS.maxEditDistance, meter);
+  if (alignment === null) return base.map(() => true);
   const original = new Set(anchor);
-  return base.map((line) => original.has(line));
+  const mask = base.map((line) => original.has(line));
+  const { ops } = alignment;
+  let a = 0;
+  let b = 0;
+  let at = 0;
+  while (at < ops.length) {
+    if (ops[at] === "equal") {
+      a++;
+      b++;
+      at++;
+      continue;
+    }
+    const removed: number[] = [];
+    const inserted: number[] = [];
+    for (; at < ops.length && ops[at] !== "equal"; at++) {
+      if (ops[at] === "delete") removed.push(a++);
+      else inserted.push(b++);
+    }
+    for (let k = 0; k < Math.min(removed.length, inserted.length); k++) {
+      const was = anchor[removed[k] as number] as string;
+      const now = inserted[k] as number;
+      if (isMinorEdit(was, base[now] as string)) mask[now] = true;
+    }
+  }
+  return mask;
 }
 
 /**

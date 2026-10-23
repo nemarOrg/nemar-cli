@@ -940,6 +940,81 @@ describe("protectedMask", () => {
     expect(protectedMask("readme", ["a", "a", "a"], ["a", "a"])).toEqual([true, true, true]);
   });
 
+  test("an original line minor-edited since the tag is protected, paired within its hunk", () => {
+    const anchor = ["# Methods", "Each recording lasted ten minutes."];
+    expect(
+      protectedMask(
+        "readme",
+        ["# Methods", "Each recordng lasted ten minutes.", "A later line."],
+        anchor,
+      ),
+    ).toEqual([true, true, false]);
+    // Pairs are made inside a hunk, not by line number: a line added above shifts every index.
+    expect(
+      protectedMask(
+        "readme",
+        ["A new first line.", "# Methods", "Each recordng lasted ten minutes."],
+        anchor,
+      ),
+    ).toEqual([false, true, true]);
+    // Edits that add up past the minor bound against the anchor line leave it unprotected.
+    expect(
+      protectedMask("readme", ["# Methods", "Each recordng lastd tn minuts."], anchor),
+    ).toEqual([true, false]);
+  });
+
+  test("an anchor with no line, or too far from the base to align, protects every base line", () => {
+    expect(protectedMask("readme", ["a", "b"], [])).toEqual([true, true]);
+    expect(
+      protectedMask("readme", distinctLines("base", 1000), distinctLines("anchor", 1001)),
+    ).toEqual(new Array(1000).fill(true));
+    // Twenty thousand lines against the same lines shuffled: capped after bounded work.
+    const random = mulberry32(0x1882);
+    const lines = distinctLines("line", 20_000);
+    const meter = { steps: 0 };
+    const started = performance.now();
+    const mask = protectedMask("readme", shuffled(lines, random), lines, meter);
+    expect(mask.every(Boolean)).toBe(true);
+    const maxD = ORIGINAL_LIMITS.maxEditDistance;
+    expect(meter.steps).toBeLessThanOrEqual(((maxD + 1) * (maxD + 2)) / 2 + lines.length);
+    expect(performance.now() - started).toBeLessThan(10_000);
+  });
+
+  test("a typo merged after the tag does not let a second pull request rewrite the line", () => {
+    const anchor = "# Methods\n\nEach recording lasted ten minutes.\nThe room was dark.\n";
+    const afterTypo = anchor.replace("recording", "recordng");
+    const rewritten = anchor.replace(
+      "Each recording lasted ten minutes.",
+      "Recordings were of variable length.",
+    );
+    // Step two, with step one merged: the rewrite of the minor-edited line still fails.
+    const twoStep = readme(
+      { "README.md": afterTypo },
+      { "README.md": rewritten },
+      { "README.md": anchor },
+    );
+    expect(twoStep.protectedAltered).toBe(1);
+    expect(twoStep.laterAltered).toBe(0);
+    expect(proseAltered(twoStep)).toBe(true);
+    // The control: the same rewrite without step one fails too.
+    const direct = readme(
+      { "README.md": anchor },
+      { "README.md": rewritten },
+      { "README.md": anchor },
+    );
+    expect(direct.protectedAltered).toBe(1);
+    // A line added after the tag stays later text: rewriting it is information.
+    const noted = `${anchor}\n## Notes\n\nA note added later.\n`;
+    const later = readme(
+      { "README.md": noted },
+      { "README.md": noted.replace("A note added later.", "Another note.") },
+      { "README.md": anchor },
+    );
+    expect(later.laterAltered).toBe(1);
+    expect(later.protectedAltered).toBe(0);
+    expect(proseAltered(later)).toBe(false);
+  });
+
   test("the original copy is protected even when a later copy was added above it", () => {
     // The anchor holds b then a; a copy of a was added above b later. Removing the original a
     // (the last line) is an alteration, never later text: counting copies protected the wrong one.

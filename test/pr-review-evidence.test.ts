@@ -8013,6 +8013,39 @@ describe("original content", () => {
       });
     });
 
+    test("a typo merged after the tag still protects its line: a later rewrite of it is altered", () => {
+      const dir = join(root, "oc-two-step-source");
+      mkdirSync(dir, { recursive: true });
+      git(dir, "init", "-q", "-b", "main");
+      write(dir, "dataset_description.json", desc("1.0.0"));
+      write(dir, "CHANGES", "1.0.0 2026-01-01\n - Initial release\n");
+      write(dir, "README.md", FIRST);
+      git(dir, "add", "-A");
+      git(dir, "commit", "-q", "-m", "first version");
+      git(dir, "tag", "-a", "v1.0.0", "-m", "v1.0.0");
+      // Step one, merged after the tag: a minor edit, which was information.
+      write(dir, "README.md", FIRST.replace("recording", "recordng"));
+      git(dir, "commit", "-q", "-am", "a typo");
+      // Step two: the pull request rewrites the line the typo touched.
+      const r = branch(dir, () =>
+        write(
+          dir,
+          "README.md",
+          FIRST.replace(
+            "Each recording lasted ten minutes.",
+            "Recordings were of variable length.",
+          ),
+        ),
+      );
+      const { original } = fromClone("oc-two-step", r);
+      expect(original.anchorLookup).toBe("first_version_tag");
+      expect(compared(original.readme)).toMatchObject({
+        anchor: "first_version_tag",
+        protectedAltered: 1,
+        laterAltered: 0,
+      });
+    });
+
     test("with no version tag every merge-base line is protected", () => {
       const r = taggedDataset("oc-no-tag-source", writeReadme(CURATION_REWORDED), {});
       const { original } = fromClone("oc-no-tag", r);
