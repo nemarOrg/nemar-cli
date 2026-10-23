@@ -20,9 +20,11 @@ let root: string;
 beforeAll(() => {
   root = mkdtempSync(join(tmpdir(), "pr-review-scale-"));
 });
+// Removing every repository the tests made takes seconds on a loaded runner, past the default
+// 5 s of a hook, so the hook gets room of its own.
 afterAll(() => {
   rmSync(root, { recursive: true, force: true });
-});
+}, 120_000);
 
 const pad = (n: number) => String(n).padStart(4, "0");
 const CH = "name\ttype\tunits\tlow_cutoff\thigh_cutoff";

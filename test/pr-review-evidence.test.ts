@@ -235,9 +235,11 @@ function branch(dir: string, edit: () => void, branchName = "contrib"): Repo {
 beforeAll(() => {
   root = mkdtempSync(join(tmpdir(), "pr-review-"));
 });
+// Removing every repository the tests made takes seconds on a loaded runner, past the default
+// 5 s of a hook, so the hook gets room of its own.
 afterAll(() => {
   rmSync(root, { recursive: true, force: true });
-});
+}, 120_000);
 
 // ---------------------------------------------------------------------------------------------
 // A stand-in for api.anthropic.com, spoken to by the real SDK
