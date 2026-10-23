@@ -85,6 +85,7 @@ import {
   MAX_BODY_CHARS,
   MAX_PLATFORM_FINDINGS,
   type OriginalContentBlock,
+  REVIEW_FINDING_CODES,
   REVIEW_OUTPUT_SCHEMA,
   REVIEW_SYSTEM_PROMPT,
   SCREEN_OUTPUT_SCHEMA,
@@ -2374,6 +2375,63 @@ describe("renames, and the edges of what the model is shown", () => {
     });
     const listedRows = user.split("\n").filter((l) => /^added\tother\textra\/f-/.test(l));
     expect(listedRows).toHaveLength(MAX_MODEL_FILES);
+  });
+
+  test("a review finding with a code only the script may give is an invalid answer, kept or cut", () => {
+    const dir = newDataset("script-codes");
+    const r = branch(dir, () => appendSection(dir));
+    const e = buildEvidence(gatherGitFacts(r.dir, r.base, r.head), NO_TEXT_PROBLEMS);
+    const finding = (code: string, i = 0) => ({
+      criterion: "no_degradation",
+      severity: "note",
+      code,
+      path: null,
+      note: `finding ${i}`,
+    });
+    const scriptOnly = FINDING_CODES.filter((c) => !REVIEW_FINDING_CODES.includes(c));
+    expect(scriptOnly).toContain("original_text_altered");
+    expect(scriptOnly).toContain("original_field_altered");
+    expect(scriptOnly).toContain("recording_replaced");
+    expect(scriptOnly).toHaveLength(13);
+    const others = Array.from({ length: 8 }, (_, i) => finding("other", i));
+    for (const code of scriptOnly) {
+      let thrown: unknown = null;
+      try {
+        full({ ...allPass, findings: [finding(code)] }, e);
+      } catch (err) {
+        thrown = err;
+      }
+      expect(thrown instanceof PrReviewReportError ? thrown.code : thrown, code).toBe(
+        "bad_findings",
+      );
+      expect(mapError(thrown), code).toBe("model_invalid");
+      // As the ninth finding, which the room would cut, it is still no valid answer.
+      expect(
+        reportErrorOf(() => full({ ...allPass, findings: [...others, finding(code)] }, e)),
+        code,
+      ).toBe("bad_findings");
+    }
+    // Every code the review is offered is still taken.
+    for (const code of REVIEW_FINDING_CODES) {
+      expect(
+        reportErrorOf(() => full({ ...allPass, findings: [finding(code)] }, e)),
+        code,
+      ).toBe("no error");
+    }
+    // The platform's own finding with such a code is the report's, and a stored report holding it
+    // still parses.
+    const platform: ReviewFinding[] = [
+      {
+        criterion: "no_degradation",
+        severity: "blocker",
+        code: "original_text_altered",
+        path: "README.md",
+        note: "1 line the original authors published in README was removed, reworded or moved.",
+      },
+    ];
+    const report = full(allPass, e, platform, true);
+    expect(report.criteria.no_degradation).toBe("fail");
+    expect(parseStoredPrReviewReport(JSON.parse(JSON.stringify(report)))).toEqual(report);
   });
 
   test("a ninth finding is dropped, not a reason to refuse the whole answer", () => {

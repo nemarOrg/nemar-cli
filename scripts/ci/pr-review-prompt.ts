@@ -1123,6 +1123,21 @@ export function assembleReport(
   const misleading = m.misleading_body === true;
 
   const modelFindings: unknown = m.findings;
+  // A code only the script may give (the platform's findings, the facts it decides before or
+  // beside the models) is never the review's to give: the schema does not offer one, and an answer
+  // that holds one anyway is not a valid answer (`model_invalid`), kept or not. The stored-report
+  // parser still takes every code, since the platform's own findings carry them.
+  if (
+    Array.isArray(modelFindings) &&
+    modelFindings.some(
+      (f) =>
+        isRecordValue(f) &&
+        isOneOf(FINDING_CODES, f.code) &&
+        !REVIEW_FINDING_CODES.includes(f.code as FindingCode),
+    )
+  ) {
+    throw new PrReviewReportError("bad_findings");
+  }
   // Each failed text judgment carries one reason: the review's own, when it gave one on that
   // judgment's criterion with one of its codes, or else the script's. The review's is then kept
   // whatever room is left (`reasons`), so the script's is never left out for a reason the report
