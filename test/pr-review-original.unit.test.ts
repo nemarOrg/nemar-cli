@@ -380,6 +380,25 @@ describe("normalizeProse", () => {
       false,
       false,
     ]);
+    // Up to three spaces before a marker it is a list item; four make the line the paragraph's
+    // text. micromark with GFM renders `Text.` then `   - a` as a paragraph and a list, and with
+    // four spaces as one paragraph; the same for `1.`.
+    for (const marker of ["-", "1."]) {
+      for (const indent of [0, 1, 2, 3]) {
+        expect(flags(`Text.\n${" ".repeat(indent)}${marker} a\n`), `${indent} ${marker}`).toEqual([
+          true,
+          true,
+        ]);
+      }
+      for (const indent of [4, 5, 8]) {
+        expect(flags(`Text.\n${" ".repeat(indent)}${marker} a\n`), `${indent} ${marker}`).toEqual([
+          true,
+          false,
+        ]);
+      }
+    }
+    // Inside a list too: micromark renders `- a` then `    2. c` as one item whose text holds both.
+    expect(flags("- a\n    2. c\n")).toEqual([true, false]);
   });
 
   test("an ordered marker other than 1, or a marker with nothing after it, starts no paragraph inside one", () => {
@@ -1789,6 +1808,18 @@ describe("proseFacts: a run is inside a paragraph only when no blank line sets i
     // The control: a bullet with text after it is a block of its own, between the two lines.
     const bullet = judged(base, "Line one of the text.\n- INSERTED.\nLine two of the text.\n");
     expect(bullet.facts.insertedInsideParagraph).toBe(0);
+  });
+
+  test("a line put right under a heading the README never separated is joined, not inside", () => {
+    // The line after a heading starts a paragraph: micromark with GFM renders the heading, then the
+    // new line and the original one as one paragraph.
+    const { facts, altered } = judged(
+      "## Methods\nEEG at 500 Hz.\n",
+      "## Methods\nA new line.\nEEG at 500 Hz.\n",
+    );
+    expect(facts.insertedInsideParagraph).toBe(0);
+    expect(facts.joinedInsertedRuns).toBe(1);
+    expect(altered).toBe(false);
   });
 
   test("a heading put between two lines of an original paragraph is a new block, joined to the line below", () => {
@@ -4960,6 +4991,33 @@ describe("originalContentFacts: the description, the participants and the record
     );
     expect(facts.participantValues).toBe(1);
     expect(facts.paths.participants).toBe(PARTICIPANTS_JSON);
+  });
+
+  test("the file named is a participants file even when a class of another file comes first", () => {
+    // Two events files with the same cell replaced: one class over two files, which the summary
+    // orders before the participants class of one file.
+    const events = (subject: string): Edit => ({
+      path: `${subject}/eeg/${subject}_task-x_events.tsv`,
+      before: tsv(["onset", "trial_type"], ["1", "go"]),
+      after: tsv(["onset", "trial_type"], ["1", "stop"]),
+    });
+    const tsvValue: Edit = {
+      path: PARTICIPANTS_TSV,
+      before: sexTable("None", "M"),
+      after: sexTable("F", "M"),
+    };
+    const summary = summaryOf([events("sub-01"), events("sub-02"), tsvValue]);
+    const first = summary.classes[0];
+    expect(first?.shape).not.toBe(PARTICIPANTS_TSV);
+    expect(first !== undefined && ALTERS_PARTICIPANT_VALUE[first.kind]).toBe(true);
+    const facts = originalContentFacts(
+      contentInput({
+        changes: [modified(PARTICIPANTS_TSV), modified("sub-01/eeg/sub-01_task-x_events.tsv")],
+        summary,
+      }),
+    );
+    expect(facts.participantValues).toBe(1);
+    expect(facts.paths.participants).toBe(PARTICIPANTS_TSV);
   });
 
   test("the recordings are recordingFacts of every changed path", () => {

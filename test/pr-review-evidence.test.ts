@@ -7432,7 +7432,7 @@ describe("the original content in the prompt", () => {
       "The original_content facts compare this pull request with what the original authors published:",
       "the README with the README at the dataset's first version tag when anchor is first_version_tag, otherwise every README line at the merge base;",
       "and, with the merge base, CHANGES, the author fields of dataset_description.json (",
-      "the participant values and the annexed files.",
+      "the participant values and the data files.",
       "A contributor may add to this content but not alter it.",
       "The platform has already acted on every alteration counted there and on every part marked not_decided, so do not repeat those as findings.",
       "Minor edits of original README lines, edits of README text added after the anchor and author fields edited slightly are yours to judge from the diffs:",
@@ -8552,6 +8552,37 @@ describe("original content", () => {
   });
 
   describe("sizes, scope and trees", () => {
+    test("Part B's batch may read only what the proofs and the summary's pool left of the pass", () => {
+      const before = "participant_id\tsex\nsub-01\tM\nsub-02\tF\n";
+      const after = "participant_id\tsex\nsub-01\tF\nsub-02\tF\n";
+      const kept = `${before}sub-03\tM\n`;
+      // A sidecar only reformatted: the cosmetic proofs read both sides of it.
+      const sidecar = "task-rest_eeg.json";
+      const compact = JSON.stringify({ SamplingFrequency: 500, PowerLineFrequency: 60 });
+      const pretty = JSON.stringify(JSON.parse(compact), null, 2);
+      const r = changed(
+        "oc-meter",
+        { "participants.tsv": before, "README.md": "# Title\n\nText.\n", [sidecar]: compact },
+        (dir) => {
+          write(dir, "participants.tsv", after);
+          write(dir, "README.md", "# Title\n\nText.\n\nMore text.\n");
+          write(dir, sidecar, pretty);
+          // A table where a removed row may have been kept, added: only the summary's pool reads it.
+          write(dir, "sourcedata/raw/participants.tsv", kept);
+        },
+      );
+      const meter = { maxTotalBytes: -1 };
+      const listing = gatherListing(r.dir, r.base, r.head);
+      const content = gatherContent(r.dir, listing, { versionTags: false, partBMeter: meter });
+      expect(content.original.participantValues).toBe(1);
+      expect(compared(content.original.readme).insertedLines).toBe(1);
+      expect(content.cosmeticOnlyFiles).toBe(1);
+      // The proofs read both sides of the sidecar and of participants.tsv, the summary's pool the
+      // table under sourcedata: the batch may read that much less.
+      const held = compact.length + pretty.length + before.length + after.length + kept.length;
+      expect(meter.maxTotalBytes).toBe(SUMMARY_LIMITS.maxTotalBytes - held);
+    });
+
     test("a recording git holds that is over 1,023 bytes is large, never unreadable, and its change is replaced", () => {
       const path = "sub-01/eeg/sub-01_task-rest_eeg.edf";
       const r = changed("oc-large-source", { [path]: "a".repeat(5_000) }, (dir) =>
@@ -8882,6 +8913,49 @@ describe("original content", () => {
       });
       expect(report.findings).toEqual([]);
       expect(report.criteria.no_degradation).toBe("pass");
+      expect(verdictOf(report)).toBe("pass");
+      // The same section with no blank lines, as the README writes its own: each heading, and the
+      // line after it, start a block, so nothing lands inside an original paragraph.
+      const dense = releaseChanging(
+        "ov-headings-dense",
+        { "README.md": "## Methods\nEEG at 500 Hz.\n## License\nCC0\n" },
+        (dir) =>
+          write(
+            dir,
+            "README.md",
+            "## Methods\nEEG at 500 Hz.\n## Acknowledgments\nThanks to the lab.\n## License\nCC0\n",
+          ),
+      );
+      expect(reportOf(dense.dir, dense).findings).toEqual([]);
+    });
+
+    // Plain prose: no heading, no list marker, no blank line, so only the both-sides rule decides.
+    const PLAIN =
+      "Two volunteers rested with their eyes closed.\nEach recording lasted ten minutes.\nThe room was kept dark.\n";
+
+    test("in plain prose a sentence put between two original lines fails the review", () => {
+      const r = releaseChanging("ov-plain-inside", { "README.md": PLAIN }, (dir) =>
+        write(
+          dir,
+          "README.md",
+          PLAIN.replace("closed.\n", "closed.\nThe lab was quiet that week.\n"),
+        ),
+      );
+      const report = reportOf(r.dir, r);
+      expect(codes(report)).toEqual(["original_text_altered"]);
+      expect(verdictOf(report)).toBe("fail");
+    });
+
+    test("in plain prose a paragraph set off by blank lines between two original lines passes", () => {
+      const r = releaseChanging("ov-plain-apart", { "README.md": PLAIN }, (dir) =>
+        write(
+          dir,
+          "README.md",
+          PLAIN.replace("closed.\n", "closed.\n\nThe lab was quiet that week.\n\n"),
+        ),
+      );
+      const report = reportOf(r.dir, r);
+      expect(report.findings).toEqual([]);
       expect(verdictOf(report)).toBe("pass");
     });
 

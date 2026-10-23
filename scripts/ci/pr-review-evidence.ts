@@ -1101,6 +1101,11 @@ export interface ContentOptions {
    * protected from the merge base, the stricter side.
    */
   versionTags?: boolean;
+  /**
+   * When given, set to the most Part B's one batch of blobs may read in all ({@link partBBytesLeft}
+   * of what the cosmetic proofs and the summary's pool read), for a test to see the bound applied.
+   */
+  partBMeter?: { maxTotalBytes: number };
 }
 
 /**
@@ -1395,7 +1400,7 @@ function originalContent(
   entries: ReadonlyMap<string, RawEntry> | null,
   read: { checked: ReadonlyMap<string, Buffer>; pooled: PooledSummary },
   cosmetic: ReadonlySet<string>,
-  options: { now: () => number; versionTags: boolean },
+  options: { now: () => number; versionTags: boolean; meter?: { maxTotalBytes: number } },
 ): OriginalContentFacts {
   const line = gitDeadline === null ? null : gitDeadline - SUMMARY_LIMITS.timeReserveMs;
   if (line !== null && options.now() >= line) return ORIGINAL_ABANDONED;
@@ -1446,13 +1451,12 @@ function originalContent(
       want(entry.oidAfter, ORIGINAL_LIMITS.pointerMaxBytes);
     }
   }
+  const maxTotalBytes = partBBytesLeft(read.checked, read.pooled.bytes);
+  if (options.meter) options.meter.maxTotalBytes = maxTotalBytes;
   const batch = readBlobsSized(
     dir,
     [...wanted.keys()],
-    {
-      maxBytes: (oid) => wanted.get(oid) ?? 0,
-      maxTotalBytes: partBBytesLeft(read.checked, read.pooled.bytes),
-    },
+    { maxBytes: (oid) => wanted.get(oid) ?? 0, maxTotalBytes },
     line ?? undefined,
   );
   if (batch === null) return ORIGINAL_ABANDONED;
@@ -1586,7 +1590,7 @@ function readContent(dir: string, listing: Listing, options: ContentOptions): Co
     entries,
     { checked: checkedBlobs, pooled },
     cosmeticOnly,
-    { now, versionTags: options.versionTags ?? true },
+    { now, versionTags: options.versionTags ?? true, meter: options.partBMeter },
   );
 
   const patches: Patch[] = [];

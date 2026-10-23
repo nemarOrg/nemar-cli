@@ -297,7 +297,7 @@ export type StageObserver = (o: StageObservation) => void;
  *    README was compared with the README at a version tag (`anchorFromTag`), the README lines
  *    altered, the runs of new lines put inside an original paragraph, the minor edits and the
  *    later text altered, the CHANGES lines altered, the author fields altered and the ones edited
- *    slightly, the participant values altered (0 when they could not be counted), the annexed files
+ *    slightly, the participant values altered (0 when they could not be counted), the data files
  *    replaced, moved and not read; which parts were not decided (`readmeNotDecided`,
  *    `changesNotDecided`, `authorFieldsNotDecided`, `participantsNotDecided`), whether any part
  *    could not be compared or carries markup that can hide text (`originalUndecided`); and what the

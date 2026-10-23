@@ -296,8 +296,9 @@ describe("the evidence baseline of set A says what the original baseline says", 
    * The Part B numbers of the evidence rows that one row of the original baseline stands for. A
    * document is `refused` when its facts have a refusal, and then every number of it is 0; the
    * README and CHANGES lines altered are the protected lines altered and the protected lines moved;
-   * the author fields altered are the keys altered or removed, once each; the annexed files replaced
-   * are the keys replaced and the files turned into git files. The participant values are not in the
+   * the author fields altered are the keys altered or removed, once each; the data files replaced
+   * are the recordings replaced (annexed keys, and git files in the recordings area) and those
+   * annexed on one side only. The participant values are not in the
    * original baseline (the pure facts take them from the change summary), so they are not here.
    */
   function expectedPartB(r: OriginalRow) {

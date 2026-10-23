@@ -160,7 +160,8 @@ export function decodeProse(bytes: Uint8Array): { text: string; notUtf8: boolean
 export interface NormalizedText {
   /**
    * The lines that are not blank, without their trailing spaces and tabs. `paragraphStart` is set
-   * on the first line of the text and on every line that followed a blank one.
+   * on the first line of the text, on every line that followed a blank one, and on the blocks
+   * {@link normalizeProse} reads: a heading, the line after it, and a list item that starts one.
    */
   lines: { text: string; paragraphStart: boolean }[];
   breaks: LineBreaks;
@@ -291,7 +292,10 @@ export function normalizeProse(
 /** One normalized line of a document, with the part it came from. */
 export interface ProseLine {
   text: string;
-  /** The line follows a blank line, or is the first line of its part. */
+  /**
+   * The line starts a paragraph: it is the first line of its part, follows a blank line, or starts
+   * a block {@link normalizeProse} reads (a heading, the line after it, a list item).
+   */
   paragraphStart: boolean;
   /** The name of the part the line is in. */
   part: string;
@@ -814,7 +818,7 @@ export interface ProseFacts {
    * Every protected line is kept verbatim and in order: none altered, moved or minor-edited, and
    * no run of new lines between two lines of one original paragraph (`insertedInsideParagraph` is
    * 0). It says nothing of new lines placed directly before or after an original paragraph with no
-   * blank line between, which the rendered README reads as part of that paragraph: that is
+   * paragraph start between, which the rendered README reads as part of that paragraph: that is
    * `joinedInsertedRuns`, which this fact does not consider.
    */
   preserved: boolean;
@@ -833,23 +837,24 @@ export interface ProseFacts {
   /**
    * Runs of new lines placed inside an original paragraph: between two protected lines that were
    * adjacent in one paragraph at the base (the earlier kept, verbatim or by a minor edit), and in
-   * the head joined to both, with no blank line before the run's first line or after its last. A
-   * run set off by a blank line on either side is not inside: joined on one side it is a joined
-   * run (`joinedInsertedRuns`), on neither a new paragraph. So a section added between two lines a
+   * the head joined to both: neither the run's first line nor the line after its last starts a
+   * paragraph (a blank line, a heading, a list item; see {@link ProseLine.paragraphStart}). A run
+   * set off on either side is not inside: joined on one side it is a joined run
+   * (`joinedInsertedRuns`), on neither a new paragraph. So a section added between two lines a
    * README never separated (a heading right after its text) is an addition, not an alteration.
    */
   insertedInsideParagraph: number;
   /**
    * Runs of new head lines (lines that are not kept, and not the new text of a minor edit) that
-   * sit in a head paragraph holding original text: the paragraph (consecutive head lines with no
-   * blank line between, new lines included, a part's first line always starting one) holds at
-   * least one kept protected line, verbatim or minor-edited. Each such run counts once, however
-   * many original lines it touches, and wherever in the paragraph it is: directly at an original
-   * line, or beyond a later line that is itself joined to one. A paragraph made only of new lines
-   * is not joined. Markdown can turn an original paragraph into something that renders as nothing
-   * this way (the open title of a link reference definition, a footnote definition above it), which
-   * no base-side fact sees. Not part of {@link proseAltered} or `preserved`: what it does is the
-   * caller's to decide.
+   * sit in a head paragraph holding original text: the paragraph (consecutive head lines from one
+   * that starts a paragraph to the next, new lines included; see {@link ProseLine.paragraphStart})
+   * holds at least one kept protected line, verbatim or minor-edited. Each such run counts once,
+   * however many original lines it touches, and wherever in the paragraph it is: directly at an
+   * original line, or beyond a later line that is itself joined to one. A paragraph made only of
+   * new lines is not joined. Markdown can turn an original paragraph into something that renders
+   * as nothing this way (the open title of a link reference definition, a footnote definition
+   * above it), which no base-side fact sees. Not part of {@link proseAltered} or `preserved`: what
+   * it does is the caller's to decide.
    */
   joinedInsertedRuns: number;
   /** Lines of the head that are not kept from the base, the new text of minor edits included. */
@@ -1107,7 +1112,8 @@ function cutExample(text: string): string {
  * is `insertedInsideParagraph` when the base lines on either side of it are protected, the later
  * one does not start a paragraph at the base, the earlier one is kept verbatim or by a minor edit,
  * and in the head neither the run's first line nor the line after the run starts a paragraph: the
- * run is read inside the paragraph only when no blank line sets it off on either side.
+ * run is read inside the paragraph only when nothing sets it off on either side (a blank line, a
+ * heading, a list item).
  *
  * The part the platform shows is the first of `README_CANDIDATES` present, compared with exact case
  * as git stores names, while the document's own names are matched without regard to case: a
