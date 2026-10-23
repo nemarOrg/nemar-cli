@@ -9,6 +9,7 @@
 
 import { datasetLandingUrl } from "../../../shared/datacite-constants.js";
 import { escapeHtml } from "../lib/escape";
+import { htmlToText } from "../lib/html-to-text";
 import { STALENESS_LIMIT_DAYS } from "./staleness";
 
 /** Fallback sender when FROM_EMAIL env var is unset. Mirrors the FROM_EMAIL set
@@ -619,6 +620,9 @@ async function sendViaCloudflare(
       to,
       subject,
       html,
+      // Resend gets the HTML alone; this provider is sent a text part too, for clients and
+      // spam filters that prefer one.
+      text: htmlToText(html),
       ...(replyTo ? { replyTo: parseMailbox(replyTo) } : {}),
     });
     if (!timeoutMs) {
