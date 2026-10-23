@@ -663,13 +663,15 @@ export interface ProseFacts {
   insertedInsideParagraph: number;
   /**
    * Runs of new head lines (lines that are not kept, and not the new text of a minor edit) that
-   * touch a kept protected line with no blank line between, so the head reads them as one
-   * paragraph with it: the run's first line does not start a paragraph and the head line before it
-   * is a kept protected line, or the head line after the run is a kept protected line that does not
-   * start a paragraph. A run joined at both ends counts once. Markdown can turn an original
-   * paragraph into something that renders as nothing this way (the open title of a link reference
-   * definition before it, a quote closing after it), which no base-side fact sees. Not part of
-   * {@link proseAltered} or `preserved`: what it does is the caller's to decide.
+   * sit in a head paragraph holding original text: the paragraph (consecutive head lines with no
+   * blank line between, new lines included, a part's first line always starting one) holds at
+   * least one kept protected line, verbatim or minor-edited. Each such run counts once, however
+   * many original lines it touches, and wherever in the paragraph it is: directly at an original
+   * line, or beyond a later line that is itself joined to one. A paragraph made only of new lines
+   * is not joined. Markdown can turn an original paragraph into something that renders as nothing
+   * this way (the open title of a link reference definition, a footnote definition above it), which
+   * no base-side fact sees. Not part of {@link proseAltered} or `preserved`: what it does is the
+   * caller's to decide.
    */
   joinedInsertedRuns: number;
   /** Lines of the head that are not kept from the base, the new text of minor edits included. */
@@ -900,7 +902,7 @@ function cutExample(text: string): string {
  * Both sides are assembled (a part unchanged between them may be binary, see
  * {@link assembleDocument}) and aligned; a refusal of either side, or an alignment over the cap, is
  * the refusal, never a partial result. The anchor matters only for the README, and an anchor
- * document that cannot be read, or has no part, protects every merge-base line instead.
+ * document that cannot be read, has no part, or has no line protects every merge-base line instead.
  *
  * Inside each hunk the j-th removed line is paired with the j-th inserted line. A removed protected
  * line is a minor edit when its partner is within {@link isMinorEdit} (README only); otherwise it is
@@ -934,7 +936,11 @@ export function proseFacts(input: {
   let anchorLines: string[] | null = null;
   if (readme && input.anchor !== null && input.anchor.length > 0) {
     const anchorRead = assembleDocument(document, input.anchor, skip);
-    if (anchorRead.ok) anchorLines = anchorRead.value.lines.map((line) => line.text);
+    // An anchor with no line at all (empty, or only blank lines) protects nothing it could name,
+    // so it is treated as no anchor: every merge-base line is protected.
+    if (anchorRead.ok && anchorRead.value.lines.length > 0) {
+      anchorLines = anchorRead.value.lines.map((line) => line.text);
+    }
   }
   const base = baseRead.value.lines;
   const head = headRead.value.lines;
@@ -1061,16 +1067,18 @@ export function proseFacts(input: {
   const keptProtected = new Set<number>();
   for (const [b, h] of pairs) if (isProtected[b]) keptProtected.add(h);
   const notKept = new Set(inserted);
-  const runsOf = (member: (line: number) => boolean): [number, number][] => {
+  // Maximal runs of consecutive head lines that `member` holds, cut at every paragraph start too
+  // when `byParagraph`, so that each run then lies in one paragraph.
+  const runsOf = (member: (line: number) => boolean, byParagraph = false): [number, number][] => {
     const runs: [number, number][] = [];
     let start = -1;
     for (let line = 0; line <= head.length; line++) {
       const inRun = line < head.length && member(line);
-      if (inRun && start < 0) start = line;
-      if (!inRun && start >= 0) {
+      if (start >= 0 && (!inRun || (byParagraph && startsParagraph(line)))) {
         runs.push([start, line - 1]);
         start = -1;
       }
+      if (inRun && start < 0) start = line;
     }
     return runs;
   };
@@ -1104,11 +1112,7 @@ export function proseFacts(input: {
       minorEditHides((base[b] as ProseLine).text, (head[h] as ProseLine).text),
   ).length;
   const hidingMarkupInserted = hidingRuns + hidingMinorEdits;
-  const joinedInsertedRuns = runsOf((line) => notKept.has(line) && !takenByMinor.has(line)).filter(
-    ([first, last]) =>
-      (!startsParagraph(first) && keptProtected.has(first - 1)) ||
-      (keptProtected.has(last + 1) && !startsParagraph(last + 1)),
-  ).length;
+  const joinedInsertedRuns = runsOf(isNew, true).filter(([first]) => attached(first)).length;
   return {
     ok: true,
     facts: {

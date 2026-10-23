@@ -1006,6 +1006,8 @@ describe("proseFacts: the cases of design B7", () => {
     const anchors: Files[] = [
       {},
       { "README.md": new Uint8Array([0x41, 0x00]) }, // binary, and not a blob of either side
+      { "README.md": "" }, // a README with no line at all
+      { "README.md": "\n  \n\t\n" }, // only blank lines
     ];
     for (const anchor of anchors) {
       expect(readme(base, head, anchor)).toEqual(strict);
@@ -1530,6 +1532,43 @@ describe("proseFacts: the tripwires", () => {
     expect(readme({ "README.md": ORIGINAL }, { "README.md": appended }).joinedInsertedRuns).toBe(1);
   });
 
+  test("a run beyond a later line joined to an original paragraph is joined too", () => {
+    // The tag has the title, L1 and L2, and a second paragraph. A later line X was added directly
+    // above L1. A footnote definition put directly above X makes X, L1 and L2 its text: the run
+    // touches only X, which is not protected, but it sits in the paragraph that holds L1 and L2.
+    const anchor = "# Title\n\nFirst original line.\nSecond original line.\n\nSecond paragraph.\n";
+    const base =
+      "# Title\n\nA later line.\nFirst original line.\nSecond original line.\n\nSecond paragraph.\n";
+    const head =
+      "# Title\n\n[^1]: note\nA later line.\nFirst original line.\nSecond original line.\n\nSecond paragraph.\n";
+    const facts = readme({ "README.md": base }, { "README.md": head }, { "README.md": anchor });
+    expect(facts.preserved).toBe(true);
+    expect(facts.joinedInsertedRuns).toBe(1);
+    expect(facts.hidingMarkupInserted).toBe(1);
+  });
+
+  test("a run at the start of the document joins the first paragraph; a new part starts its own", () => {
+    const top = `New first line.\n${ORIGINAL}`;
+    expect(readme({ "README.md": ORIGINAL }, { "README.md": top }).joinedInsertedRuns).toBe(1);
+    // A part's first line starts a paragraph: a new part's lines join no original paragraph.
+    const facts = readme(
+      { README: "Original line one.\nOriginal line two.\n" },
+      { README: "Original line one.\nOriginal line two.\n", "README.txt": "A new line.\n" },
+    );
+    expect(facts.joinedInsertedRuns).toBe(0);
+    // Two new paragraphs between original ones, one of them two lines long: none joined.
+    const between = edited((lines) =>
+      lines.splice(9, 0, "", "New one.", "New two.", "", "New three."),
+    );
+    expect(readme({ "README.md": ORIGINAL }, { "README.md": between }).joinedInsertedRuns).toBe(0);
+    // A run that is cut by a paragraph start counts once per paragraph it is in.
+    const split = edited((lines) => lines.splice(9, 0, "Joined line.", "", "Own paragraph."));
+    expect(readme({ "README.md": ORIGINAL }, { "README.md": split }).joinedInsertedRuns).toBe(1);
+    // And the other way round: its own paragraph first, then a line joined to the next heading.
+    const reverse = edited((lines) => lines.splice(10, 0, "Own paragraph.", "", "Joined line."));
+    expect(readme({ "README.md": ORIGINAL }, { "README.md": reverse }).joinedInsertedRuns).toBe(1);
+  });
+
   test("a run joined only to lines added after the tag is not counted", () => {
     const later = `${ORIGINAL}\n## Notes\n\nA later note.\n`;
     const head = `${ORIGINAL}\n## Notes\n\nA later note.\nA sentence added to it.\n`;
@@ -1874,9 +1913,10 @@ describe("proseFacts: properties over seeded random READMEs", () => {
       }
       const remaining = head.filter((lines) => lines.length > 0);
       // Protection recomputed here as the definition states it, not with the module's helper: a
-      // base line is protected when its text is anywhere in the anchor, every line with no anchor.
+      // base line is protected when its text is anywhere in the anchor, and every line is when
+      // there is no anchor or the anchor has no line.
       const protectedTexts = baseLines.filter(
-        (line) => anchorLines === null || anchorLines.includes(line),
+        (line) => anchorLines === null || anchorLines.length === 0 || anchorLines.includes(line),
       );
       const headLines = remaining.flat();
       const facts = readme(
