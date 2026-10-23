@@ -41,6 +41,7 @@ import {
   assembleDocument,
   authorFieldFacts,
   authorFieldsAltered,
+  blankCodeSpans,
   chooseAnchor,
   decodeProse,
   hidesText,
@@ -1696,18 +1697,54 @@ describe("proseFacts: the tripwires", () => {
     );
   });
 
-  test("the same lines attached to an original paragraph are hiding", () => {
+  test("next to an original paragraph a footnote definition hides it; a complete link definition or an image does not", () => {
+    // Directly above the Participants paragraph, with no blank line between.
+    const above = (line: string) =>
+      readme(
+        { "README.md": ORIGINAL },
+        { "README.md": edited((lines) => lines.splice(7, 0, line)) },
+      );
+    expect(above("[^1]: A note on the montage.").hidingMarkupInserted).toBe(1);
     for (const line of [
       "[1]: https://example.org/x",
-      "[^1]: A note on the montage.",
       "[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.1.svg)](https://doi.org/10.5281/zenodo.1)",
       "![Montage](montage.png)",
     ]) {
-      // Directly above the Participants paragraph, with no blank line between.
-      const head = edited((lines) => lines.splice(7, 0, line));
-      const facts = readme({ "README.md": ORIGINAL }, { "README.md": head });
-      expect(facts.hidingMarkupInserted, line).toBe(1);
+      const facts = above(line);
+      expect(facts.hidingMarkupInserted, line).toBe(0);
+      expect(facts.joinedInsertedRuns, line).toBe(1);
     }
+    // An open title or destination still hides, attached or not.
+    expect(above('[1]: <> "an open title').hidingMarkupInserted).toBe(1);
+    expect(above("[1]: <https://example.org").hidingMarkupInserted).toBe(1);
+  });
+
+  test("a reference appended to an original reference block, or a badge under the title, is ordinary", () => {
+    const references = "# Title\n\n## References\n\n[1]: https://doi.org/10.1000/a\n";
+    const appended = `${references}[2]: https://doi.org/10.1000/b\n`;
+    const facts = readme({ "README.md": references }, { "README.md": appended });
+    expect(facts.hidingMarkupInserted).toBe(0);
+    expect(proseAltered(facts)).toBe(false);
+    const badged =
+      "# Title\n[![DOI](https://zenodo.org/badge/x.svg)](https://doi.org/x)\n\nText.\n";
+    const badge = readme({ "README.md": "# Title\n\nText.\n" }, { "README.md": badged });
+    expect(badge.hidingMarkupInserted).toBe(0);
+    expect(proseAltered(badge)).toBe(false);
+  });
+
+  test("a less-than sign in inline code is no tag; in a code block line it still reads as one", () => {
+    for (const line of [
+      "Use `a<b` to compare.",
+      "A test: ``x<y and `z` ``.",
+      "p < 0.05 in all sessions.",
+    ]) {
+      const head = edited((lines) => lines.splice(9, 0, line));
+      const facts = readme({ "README.md": ORIGINAL }, { "README.md": head });
+      expect(facts.hidingMarkupInserted, line).toBe(0);
+    }
+    // Lines are read one at a time, so a fenced block's line is no code span: it flags.
+    const fenced = `${ORIGINAL}\n\`\`\`\nif a<b\n\`\`\`\n`;
+    expect(readme({ "README.md": ORIGINAL }, { "README.md": fenced }).hidingMarkupInserted).toBe(1);
   });
 
   test("a joined run counts once however many protected lines it touches, and a blank line unjoins it", () => {
@@ -1842,6 +1879,28 @@ describe("proseFacts: the tripwires", () => {
 });
 
 describe("hidesText", () => {
+  test("code spans are blanked from opener to closer, a run with no closer is left as it is", () => {
+    expect(blankCodeSpans("Use `a<b` here")).toBe("Use       here");
+    expect(blankCodeSpans("``a`b<c`` then")).toBe("          then");
+    expect(blankCodeSpans("an `open <b span")).toBe("an `open <b span");
+    expect(blankCodeSpans("``a<b` mismatched")).toBe("``a<b` mismatched");
+    expect(blankCodeSpans("`a` <b `c`")).toBe("    <b    ");
+    expect(blankCodeSpans("no code")).toBe("no code");
+    expect(hidesText(["Use `a<b` here"])).toBe(false);
+    expect(hidesText(["Use `a` <b here"])).toBe(true);
+  });
+
+  test("blanking code spans stays one pass on 4 MiB of backticks", () => {
+    const size = 4 * 1024 * 1024;
+    const fill = (unit: string): string => unit.repeat(Math.ceil(size / unit.length));
+    for (const text of [fill("` `` ``` "), fill("`a<b` "), fill("``x` "), fill("`"), fill("x`")]) {
+      const started = performance.now();
+      blankCodeSpans(text);
+      hidesText([text]);
+      expect(performance.now() - started, text.slice(0, 8)).toBeLessThan(5_000);
+    }
+  });
+
   test("comments, hiding elements and hiding attributes are markup that hides", () => {
     for (const line of [
       "<!--",

@@ -747,12 +747,15 @@ export interface ProseFacts {
    * Places where new markup can hide original text, counted two ways and added together. Each run
    * of consecutive head lines that are not kept verbatim (inserted lines and the new text of minor
    * edits together) counts once when {@link hidesText} finds markup in it (it reads the run as one
-   * text, so a tag split across lines is one tag), or when one of its new lines is a link or
-   * footnote definition, or a line the platform drops as an image, inside an original paragraph.
-   * And each minor edit counts once when its new text can hide the line it replaces
+   * text, so a tag split across lines is one tag), or when one of its new lines is a footnote
+   * definition inside an original paragraph (a footnote definition takes the lines after it as its
+   * text). And each minor edit counts once when its new text can hide the line it replaces
    * ({@link minorEditHides}). Wrapping original paragraphs in such markup keeps every protected
    * line verbatim or within a minor edit, so without this fact it would read as preserved. A
-   * definition, a footnote or an image in a paragraph of its own is ordinary and not counted.
+   * complete link definition or an image line next to an original paragraph is ordinary and not
+   * counted (a definition ends on its line and cannot interrupt a paragraph; an image line and the
+   * text beside it render as one visible paragraph), and neither is a footnote in a paragraph of
+   * its own.
    */
   hidingMarkupInserted: number;
   /**
@@ -810,6 +813,9 @@ const DEFINITION = /^ {0,3}\[\^?[^\]]*\]:/;
 // negated one that stops at its closing bracket, so neither can backtrack on a long line.
 const STANDALONE_IMAGE = /^[ \t]*!\[[^\]]*\]\([^)]*\)[ \t]*$/;
 const LINKED_IMAGE = /^[ \t]*\[!\[[^\]]*\]\([^)]*\)\]\([^)]*\)[ \t]*$/;
+
+/** The start of a GFM footnote definition: up to three spaces, `[^label]` and a colon. */
+const FOOTNOTE = /^ {0,3}\[\^[^\]]*\]:/;
 
 /** Whether a line is a link or footnote definition, or a line the platform drops as an image. */
 function definesOrIsAnImage(line: string): boolean {
@@ -931,15 +937,62 @@ function markupHides(text: string): boolean {
 }
 
 /**
+ * A line with its inline code spans blanked out: a run of backticks opens a span that the next run
+ * of exactly as many backticks closes (CommonMark), and everything from the opener to the closer
+ * becomes spaces; a run with no closer is left as it is. Inline code renders as literal text, so
+ * `a<b` inside it is no tag. Linear: the runs are listed once, and for each length a pointer into
+ * that length's runs only moves forward. A code block's lines are not spans and are not blanked
+ * (a fenced `if a<b` still reads as an open tag), which flags more, never less.
+ */
+export function blankCodeSpans(line: string): string {
+  if (!line.includes("`")) return line;
+  const runs: [number, number][] = []; // start and length of each backtick run
+  for (let i = 0; i < line.length; ) {
+    if (line.charCodeAt(i) !== 0x60) {
+      i++;
+      continue;
+    }
+    let end = i;
+    while (end < line.length && line.charCodeAt(end) === 0x60) end++;
+    runs.push([i, end - i]);
+    i = end;
+  }
+  const byLength = new Map<number, number[]>(); // run indexes of each length, in order
+  runs.forEach(([, length], k) => {
+    const list = byLength.get(length);
+    if (list === undefined) byLength.set(length, [k]);
+    else list.push(k);
+  });
+  const next = new Map<number, number>(); // how far each length's list has been passed
+  let out = "";
+  let copied = 0;
+  for (let k = 0; k < runs.length; k++) {
+    const [start, length] = runs[k] as [number, number];
+    if (start < copied) continue;
+    const list = byLength.get(length) as number[];
+    let at = next.get(length) ?? 0;
+    while (at < list.length && (list[at] as number) <= k) at++;
+    next.set(length, at);
+    if (at >= list.length) continue;
+    const closer = list[at] as number;
+    const [closeStart] = runs[closer] as [number, number];
+    out += line.slice(copied, start) + " ".repeat(closeStart + length - start);
+    copied = closeStart + length;
+    k = closer;
+  }
+  return out + line.slice(copied);
+}
+
+/**
  * Whether a run of consecutive new lines holds markup that can hide text: a link reference
  * definition left open on one of its lines ({@link opensLinkDefinition}), or HTML that hides in the
- * run read as one text, its lines joined by a space ({@link markupHides}), so a tag split across
- * lines (`<div` then `hidden>`) is read as the one tag it is. Inline code is not exempt: the fact
- * is a tripwire a person clears, and a person reads code spans better than a rule does. The cost
- * is one pass over the run, whatever it holds.
+ * run read as one text, its lines joined by a space and their inline code blanked
+ * ({@link blankCodeSpans}, {@link markupHides}), so a tag split across lines (`<div` then
+ * `hidden>`) is read as the one tag it is, and `a<b` in a code span is no tag. The cost is one pass
+ * over the run, whatever it holds.
  */
 export function hidesText(run: readonly string[]): boolean {
-  return run.some(opensLinkDefinition) || markupHides(run.join(" "));
+  return run.some(opensLinkDefinition) || markupHides(run.map(blankCodeSpans).join(" "));
 }
 
 /** At most `maxValueChars + 1` code points of a line, never half a surrogate pair. */
@@ -1160,12 +1213,12 @@ export function proseFacts(input: {
   }
   const attached = (line: number): boolean => holdsOriginal[paragraphOf[line] as number] === true;
   const isNew = (line: number): boolean => notKept.has(line) && !takenByMinor.has(line);
-  // A run of lines not kept hides when its markup does, or when one of its new lines is a
-  // definition or a dropped image inside an original paragraph; a minor edit hides on its own.
+  // A run of lines not kept hides when its markup does, or when one of its new lines is a footnote
+  // definition inside an original paragraph; a minor edit hides on its own.
   const hidingRuns = runsOf((line) => notKept.has(line)).filter(([first, last]) => {
     if (hidesText(head.slice(first, last + 1).map((line) => line.text))) return true;
     for (let line = first; line <= last; line++) {
-      if (isNew(line) && attached(line) && definesOrIsAnImage((head[line] as ProseLine).text)) {
+      if (isNew(line) && attached(line) && FOOTNOTE.test((head[line] as ProseLine).text)) {
         return true;
       }
     }
