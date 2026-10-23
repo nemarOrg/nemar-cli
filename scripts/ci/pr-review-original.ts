@@ -168,6 +168,15 @@ export interface NormalizedText {
   overLimit: boolean;
 }
 
+/** An ATX heading line: up to three spaces, one to six `#`, then a blank or the end of the line. */
+const ATX_HEADING = /^ {0,3}#{1,6}(\s|$)/;
+
+/**
+ * A list item line: up to three spaces, `-`, `*`, `+` or one to nine digits and `.` or `)`, then a
+ * blank or the end of the line.
+ */
+const LIST_ITEM = /^ {0,3}([-*+]|\d{1,9}[.)])(\s|$)/;
+
 /** The code units {@link normalizeProse} read, for a test to bound. Added to, never reset. */
 export interface NormalizeMeter {
   units: number;
@@ -188,6 +197,12 @@ function isTrailingBlank(unit: number): boolean {
  * only way they can be decided. Nothing else changes: case, inner whitespace, leading indentation
  * and a no-break space are all significant.
  *
+ * Two kinds of line start a block in rendered Markdown whatever is around them, and so start a
+ * paragraph here too: an ATX heading ({@link ATX_HEADING}), and the line after it, and a list item
+ * ({@link LIST_ITEM}). A README written with no blank lines around its headings is then read as the
+ * sections it renders as. Nothing else of Markdown is parsed: fenced code, tables, setext headings
+ * and block quotes are not, and every other line is governed by blank lines alone.
+ *
  * This removes exactly the two artifacts measured on set A (a final newline added and CRLF turned
  * into LF) and the trailing whitespace a mass cleanup touches; `breaks` and `endsWithBreak` keep
  * what was removed so the caller can say it.
@@ -207,6 +222,7 @@ export function normalizeProse(
   const over: NormalizedText = { lines: [], breaks: "none", endsWithBreak: false, overLimit: true };
   const lines: { text: string; paragraphStart: boolean }[] = [];
   let paragraphStart = true;
+  let afterHeading = false;
   let lf = 0;
   let crlf = 0;
   let cr = 0;
@@ -217,8 +233,14 @@ export function normalizeProse(
       paragraphStart = true;
       return;
     }
-    lines.push({ text: text.slice(from, end), paragraphStart });
+    const line = text.slice(from, end);
+    const heading = ATX_HEADING.test(line);
+    lines.push({
+      text: line,
+      paragraphStart: paragraphStart || afterHeading || heading || LIST_ITEM.test(line),
+    });
     paragraphStart = false;
+    afterHeading = heading;
   };
   let start = 0;
   for (let i = 0; i < text.length; i++) {

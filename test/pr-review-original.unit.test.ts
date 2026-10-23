@@ -341,6 +341,54 @@ describe("normalizeProse", () => {
     expect(whole.units).toBe(4);
   });
 
+  test("a heading, the line after it and a list item start a paragraph; nothing else of Markdown is read", () => {
+    const flags = (text: string) => normalizeProse(text).lines.map((line) => line.paragraphStart);
+    expect(flags("Intro.\n## Methods\nText.\nMore text.\n")).toEqual([true, true, true, false]);
+    expect(flags("Intro.\n#\nText.\n")).toEqual([true, true, true]);
+    expect(flags("Items:\n- a\n* b\n+ c\n1. d\n22) e\ncontinued\n")).toEqual([
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+    ]);
+    // Not a heading or a list item: no blank after the marker, four spaces, seven #, ten digits.
+    expect(flags("Text.\n#hashtag\n    # code\n####### seven\n-dash\n1234567890. big\n")).toEqual([
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+    ]);
+    // Setext headings, block quotes, fences and tables are not read: blank lines alone govern them.
+    expect(flags("Title\n=====\n> quote\n```\n| a | b |\n")).toEqual([
+      true,
+      false,
+      false,
+      false,
+      false,
+    ]);
+  });
+
+  test("the block flags cost one pass over 4 MiB of headings, list items or a hostile line", () => {
+    const size = 4 * 1024 * 1024;
+    const fill = (unit: string): string => unit.repeat(Math.ceil(size / unit.length));
+    for (const text of [
+      fill("#\n"),
+      fill("- \n"),
+      fill("1) x\n"),
+      `#${" ".repeat(size)}x`,
+      fill("   1234567890"),
+    ]) {
+      const started = performance.now();
+      normalizeProse(text);
+      expect(performance.now() - started, text.slice(0, 6)).toBeLessThan(10_000);
+    }
+  });
+
   test("a single break is named too: one LF is lf, one CRLF is crlf", () => {
     expect(normalizeProse("a\n").breaks).toBe("lf");
     expect(normalizeProse("a\r\n").breaks).toBe("crlf");
@@ -1329,7 +1377,8 @@ describe("proseFacts: the cases of design B7", () => {
         document: "changes",
         preserved: false,
         protectedAltered: 1,
-        joinedInsertedRuns: 1,
+        // The edited entry is a list item: a block of its own, joined to no paragraph.
+        joinedInsertedRuns: 0,
         insertedLines: 1,
         examples: ["  - Fixed event onsets."],
       }),
@@ -1379,8 +1428,8 @@ describe("proseFacts: a run is inside a paragraph only when no blank line sets i
     const head = "## Sessions\n- rest\n- task\n- recovery\n\n## License\nCC0\n";
     const { facts, altered } = judged(base, head);
     expect(facts.insertedInsideParagraph).toBe(0);
-    // Joined to the list above it: information.
-    expect(facts.joinedInsertedRuns).toBe(1);
+    // A list item is a block of its own: joined to no paragraph.
+    expect(facts.joinedInsertedRuns).toBe(0);
     expect(altered).toBe(false);
   });
 
@@ -1389,7 +1438,8 @@ describe("proseFacts: a run is inside a paragraph only when no blank line sets i
     const head = "# Title\n\nIntro text.\n\n## Funding\n\nFunded by a grant.\n## License\nCC0\n";
     const { facts, altered } = judged(base, head);
     expect(facts.insertedInsideParagraph).toBe(0);
-    expect(facts.joinedInsertedRuns).toBe(1);
+    // The heading below it starts a block, so the new text joins no original paragraph.
+    expect(facts.joinedInsertedRuns).toBe(0);
     expect(altered).toBe(false);
   });
 
@@ -1426,6 +1476,73 @@ describe("proseFacts: a run is inside a paragraph only when no blank line sets i
     expect(facts.minorEdits).toBe(1);
     expect(facts.insertedInsideParagraph).toBe(1);
     expect(altered).toBe(true);
+  });
+
+  test("in a README with no blank lines, a section or a list item added before a heading is not inside", () => {
+    const dense = "## Methods\nEEG at 500 Hz.\n## License\nCC0\n";
+    const section = judged(
+      dense,
+      "## Methods\nEEG at 500 Hz.\n## Acknowledgments\nThanks to the lab.\n## License\nCC0\n",
+    );
+    expect(section.facts.insertedInsideParagraph).toBe(0);
+    expect(section.facts.joinedInsertedRuns).toBe(0);
+    expect(section.altered).toBe(false);
+    const list = "## Sessions\n- rest\n- task\n## License\nCC0\n";
+    const item = judged(list, "## Sessions\n- rest\n- task\n- recovery\n## License\nCC0\n");
+    expect(item.facts.insertedInsideParagraph).toBe(0);
+    expect(item.altered).toBe(false);
+  });
+
+  test("list items added to a dense list, at its end or between its items, are not inside", () => {
+    const base = "Sessions:\n- rest\n- task\n- recovery\n";
+    for (const head of [
+      "Sessions:\n- rest\n- task\n- recovery\n- follow-up\n- debrief\n",
+      "Sessions:\n- rest\n- practice\n- task\n- recovery\n",
+      "Sessions:\n- rest\n1. practice\n- task\n- recovery\n",
+    ]) {
+      const { facts, altered } = judged(base, head);
+      expect(facts.insertedInsideParagraph, head).toBe(0);
+      expect(altered, head).toBe(false);
+    }
+  });
+
+  test("a heading put between two lines of an original paragraph is a new block, joined to the line below", () => {
+    const base = "Line one of the text.\nLine two of the text.\nLine three of the text.\n";
+    const { facts, altered } = judged(
+      base,
+      "Line one of the text.\nLine two of the text.\n## Notes\nA note.\nLine three of the text.\n",
+    );
+    expect(facts.insertedInsideParagraph).toBe(0);
+    // The heading is a block of its own; the note after it reads as one paragraph with the
+    // original third line: one joined run, information.
+    expect(facts.joinedInsertedRuns).toBe(1);
+    expect(altered).toBe(false);
+    // Plain text with no heading or list marker is still inside, and altered.
+    const plain = judged(
+      base,
+      "Line one of the text.\nLine two of the text.\nA note.\nLine three of the text.\n",
+    );
+    expect(plain.facts.insertedInsideParagraph).toBe(1);
+    expect(plain.altered).toBe(true);
+  });
+
+  test("CHANGES written as list items takes a new entry anywhere, and an edited entry still fails", () => {
+    const changes = "- 1.0.1 fixed event onsets\n- 1.0.0 initial release\n";
+    for (const head of [
+      `- 1.0.2 added a derivative\n${changes}`,
+      "- 1.0.1 fixed event onsets\n- 1.0.0.1 a backport\n- 1.0.0 initial release\n",
+    ]) {
+      const facts = factsOf("changes", { CHANGES: changes }, { CHANGES: head });
+      expect(facts.insertedInsideParagraph, head).toBe(0);
+      expect(proseAltered(facts), head).toBe(false);
+    }
+    const edited = factsOf(
+      "changes",
+      { CHANGES: changes },
+      { CHANGES: changes.replace("onsets", "onset") },
+    );
+    expect(edited.protectedAltered).toBe(1);
+    expect(proseAltered(edited)).toBe(true);
   });
 
   test("a run that starts a new part in the head is never inside the paragraph it came between", () => {
@@ -1782,8 +1899,14 @@ describe("proseFacts: the tripwires", () => {
   });
 
   test("a run at the start of the document joins the first paragraph; a new part starts its own", () => {
-    const top = `New first line.\n${ORIGINAL}`;
-    expect(readme({ "README.md": ORIGINAL }, { "README.md": top }).joinedInsertedRuns).toBe(1);
+    const plain = "First original line.\nSecond original line.\n";
+    const top = `New first line.\n${plain}`;
+    expect(readme({ "README.md": plain }, { "README.md": top }).joinedInsertedRuns).toBe(1);
+    // Above a heading it is no part of the heading's block: not joined.
+    const aboveHeading = `New first line.\n${ORIGINAL}`;
+    expect(
+      readme({ "README.md": ORIGINAL }, { "README.md": aboveHeading }).joinedInsertedRuns,
+    ).toBe(0);
     // A part's first line starts a paragraph: a new part's lines join no original paragraph.
     const facts = readme(
       { README: "Original line one.\nOriginal line two.\n" },
@@ -1798,8 +1921,9 @@ describe("proseFacts: the tripwires", () => {
     // A run that is cut by a paragraph start counts once per paragraph it is in.
     const split = edited((lines) => lines.splice(9, 0, "Joined line.", "", "Own paragraph."));
     expect(readme({ "README.md": ORIGINAL }, { "README.md": split }).joinedInsertedRuns).toBe(1);
-    // And the other way round: its own paragraph first, then a line joined to the next heading.
-    const reverse = edited((lines) => lines.splice(10, 0, "Own paragraph.", "", "Joined line."));
+    // And the other way round: its own paragraph first, then a line joined to the original line
+    // below it (above a heading it would join nothing: a heading starts a block).
+    const reverse = edited((lines) => lines.splice(12, 0, "Own paragraph.", "", "Joined line."));
     expect(readme({ "README.md": ORIGINAL }, { "README.md": reverse }).joinedInsertedRuns).toBe(1);
   });
 
