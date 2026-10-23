@@ -10,6 +10,7 @@ import { z } from "zod";
 import { escapeHtml } from "../lib/escape";
 import {
   type EmailDeliveryEnv,
+  type ResolvedEmailProvider,
   applyDevWrap,
   isEmailDeliveryAllowed,
   parseEmailPreferences,
@@ -275,7 +276,7 @@ interface ResendBatchResponseItem {
  * Send broadcast emails via Resend batch API in chunks of 100, or, when
  * EMAIL_PROVIDER=cloudflare (staging), one message per allowed recipient through the
  * same single-send path as every other mail (sequential: the allow-listed set is
- * tiny there; announcements move to a Queue in a later phase of epic #1893).
+ * tiny there; announcements move to a Queue in phase 2 of epic #1893).
  * Records result in the broadcast_emails audit table.
  *
  * `env` (issue #957) is the SAME delivery-level fence services/email.ts's
@@ -303,26 +304,15 @@ export async function sendBroadcast(
   isDev?: boolean,
   env?: EmailDeliveryEnv,
 ): Promise<BroadcastResult> {
-  // Guard: the provider must be configured before iterating recipients. A
-  // missing or blank Resend key (or a Cloudflare provider with no binding)
-  // would silently record every recipient as a failure while returning 200
-  // to the caller.
-  let provider: ReturnType<typeof resolveEmailProvider> = "resend";
-  let providerError: string | null = null;
-  try {
-    provider = resolveEmailProvider(env);
-  } catch (error) {
-    providerError = error instanceof Error ? error.message : String(error);
-  }
-  if (providerError || (provider === "resend" && (!resendApiKey || !resendApiKey.trim()))) {
-    console.error(
-      `[broadcast] ${providerError ?? "RESEND_API_KEY is not configured"}; aborting send`,
-      {
-        group: params.group,
-        subject: params.subject,
-        recipientCount: params.recipients.length,
-      },
-    );
+  // Guard: the provider must be configured before iterating recipients. A missing or blank
+  // Resend key, an unusable EMAIL_PROVIDER, or a Cloudflare provider with no binding would
+  // silently record every recipient as a failure while returning 200 to the caller.
+  const unconfigured = (reason: string): BroadcastResult => {
+    console.error(`[broadcast] ${reason}; aborting send`, {
+      group: params.group,
+      subject: params.subject,
+      recipientCount: params.recipients.length,
+    });
     return {
       broadcast_id: -1,
       recipient_count: 0,
@@ -331,6 +321,15 @@ export async function sendBroadcast(
       suppressed_count: 0,
       error: "email_service_unconfigured",
     };
+  };
+  let resolved: ResolvedEmailProvider;
+  try {
+    resolved = resolveEmailProvider(env);
+  } catch (error) {
+    return unconfigured(error instanceof Error ? error.message : String(error));
+  }
+  if (resolved.provider === "resend" && !resendApiKey?.trim()) {
+    return unconfigured("RESEND_API_KEY is not configured");
   }
 
   const allowedRecipients = params.recipients.filter((to) => isEmailDeliveryAllowed(to, env));
@@ -350,7 +349,7 @@ export async function sendBroadcast(
   const failedRecipients: string[] = [];
   let totalSent = 0;
 
-  if (provider === "cloudflare") {
+  if (resolved.provider === "cloudflare") {
     // sendEmail applies the fence and the [DEV] wrap itself, so it is handed the unwrapped
     // subject and body.
     for (const to of allowedRecipients) {
@@ -367,7 +366,7 @@ export async function sendBroadcast(
 
   // Send in chunks of BATCH_SIZE -- only the allow-listed subset. The Cloudflare path above
   // has already sent them one at a time, so it hands this loop nothing.
-  const batchRecipients = provider === "cloudflare" ? [] : allowedRecipients;
+  const batchRecipients = resolved.provider === "cloudflare" ? [] : allowedRecipients;
   for (let i = 0; i < batchRecipients.length; i += BATCH_SIZE) {
     const chunk = batchRecipients.slice(i, i + BATCH_SIZE);
     const batch: ResendBatchItem[] = chunk.map((email) => ({

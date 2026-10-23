@@ -49,25 +49,27 @@ const revoke = (env: EmailDeliveryEnv, to = ALLOWED) =>
 describe("resolveEmailProvider", () => {
   const { binding } = recordingBinding();
 
-  test("Resend unless EMAIL_PROVIDER says cloudflare", () => {
-    expect(resolveEmailProvider(undefined)).toBe("resend");
-    expect(resolveEmailProvider({})).toBe("resend");
-    expect(resolveEmailProvider({ EMAIL_PROVIDER: "resend" })).toBe("resend");
-    expect(resolveEmailProvider({ EMAIL_PROVIDER: "" })).toBe("resend");
-    expect(resolveEmailProvider({ EMAIL_PROVIDER: "ses" })).toBe("resend");
+  test("unset, empty and resend are Resend", () => {
+    expect(resolveEmailProvider(undefined)).toEqual({ provider: "resend" });
+    expect(resolveEmailProvider({})).toEqual({ provider: "resend" });
+    expect(resolveEmailProvider({ EMAIL_PROVIDER: "" })).toEqual({ provider: "resend" });
+    expect(resolveEmailProvider({ EMAIL_PROVIDER: "  " })).toEqual({ provider: "resend" });
+    expect(resolveEmailProvider({ EMAIL_PROVIDER: " Resend " })).toEqual({ provider: "resend" });
   });
 
   test("a binding alone does not switch the provider", () => {
-    expect(resolveEmailProvider({ EMAIL: binding })).toBe("resend");
+    expect(resolveEmailProvider({ EMAIL: binding })).toEqual({ provider: "resend" });
   });
 
-  test("cloudflare is read trimmed and case-insensitively", () => {
-    expect(resolveEmailProvider({ EMAIL_PROVIDER: "cloudflare", EMAIL: binding })).toBe(
-      "cloudflare",
-    );
-    expect(resolveEmailProvider({ EMAIL_PROVIDER: "  Cloudflare ", EMAIL: binding })).toBe(
-      "cloudflare",
-    );
+  test("cloudflare carries its binding, read trimmed and case-insensitively", () => {
+    expect(resolveEmailProvider({ EMAIL_PROVIDER: "cloudflare", EMAIL: binding })).toEqual({
+      provider: "cloudflare",
+      binding,
+    });
+    expect(resolveEmailProvider({ EMAIL_PROVIDER: "  Cloudflare ", EMAIL: binding })).toEqual({
+      provider: "cloudflare",
+      binding,
+    });
   });
 
   test("cloudflare without the binding throws rather than falling back to Resend", () => {
@@ -75,6 +77,14 @@ describe("resolveEmailProvider", () => {
       EmailProviderConfigError,
     );
   });
+
+  for (const typo of ["cloudfare", "ses", "cloud flare", "true"]) {
+    test(`an unknown value (${JSON.stringify(typo)}) throws and never means Resend`, () => {
+      expect(() => resolveEmailProvider({ EMAIL_PROVIDER: typo, EMAIL: binding })).toThrow(
+        EmailProviderConfigError,
+      );
+    });
+  }
 });
 
 describe("parseMailbox", () => {
@@ -135,9 +145,25 @@ describe("a send through the Cloudflare binding", () => {
 
   test("a missing binding throws a configuration error and Resend is not reached", async () => {
     await withFakeResend(async (calls) => {
-      await expect(revoke(stagingEnv(undefined))).rejects.toBeInstanceOf(EmailProviderConfigError);
+      const error = await revoke(stagingEnv(undefined)).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(EmailProviderConfigError);
+      // Nothing was sent, so a caller that reports to a person may say so.
+      expect(isCertainNonDelivery(error)).toBe(true);
       expect(calls.length).toBe(0);
     });
+  });
+
+  test("a mistyped EMAIL_PROVIDER throws through a real wrapper and sends nothing", async () => {
+    const { binding, sent } = recordingBinding();
+    await withFakeResend(async (calls) => {
+      const error = await revoke({ ...stagingEnv(binding), EMAIL_PROVIDER: "cloudfare" }).catch(
+        (e: unknown) => e,
+      );
+      expect(error).toBeInstanceOf(EmailProviderConfigError);
+      expect(isCertainNonDelivery(error)).toBe(true);
+      expect(calls.length).toBe(0);
+    });
+    expect(sent.length).toBe(0);
   });
 
   test("without EMAIL_PROVIDER the same env still goes to Resend (production is unchanged)", async () => {

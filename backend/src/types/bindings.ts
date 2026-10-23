@@ -103,11 +103,12 @@ export interface Bindings {
    *  Service for EMAIL_PROVIDER=cloudflare), otherwise the send is rejected
    *  (caught and logged per-site). */
   FROM_EMAIL?: string;
-  /** Which provider sends mail (epic #1893, ADR 0110): exactly "cloudflare"
-   *  (case-insensitive) sends through the EMAIL binding; anything else, or
-   *  unset, is Resend. Set only in [env.dev] while staging proves the move.
-   *  "cloudflare" with no EMAIL binding is a configuration error, never a
-   *  silent fallback to Resend (services/email.ts resolveEmailProvider). */
+  /** Which provider sends mail (epic #1893, ADR 0110): "cloudflare"
+   *  (case-insensitive) sends through the EMAIL binding; unset, empty or
+   *  "resend" is Resend. Set only in [env.dev] while staging proves the move.
+   *  Any other value, and "cloudflare" with no EMAIL binding, is a
+   *  configuration error, never a silent fallback to Resend
+   *  (services/email.ts resolveEmailProvider). */
   EMAIL_PROVIDER?: string;
   /** Cloudflare Email Service `send_email` binding. In [env.dev] it is
    *  restricted to the staging sender addresses, so the dev worker cannot

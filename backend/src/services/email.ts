@@ -113,18 +113,23 @@ export interface CloudflareSendEmail {
 export interface EmailDeliveryEnv {
   ENVIRONMENT?: string;
   DEV_EMAIL_ALLOWLIST?: string;
-  /** `cloudflare` sends through the `EMAIL` binding; anything else, or unset, is Resend. */
+  /** `cloudflare` sends through the `EMAIL` binding; unset or `resend` is Resend; anything else is a
+   *  configuration error. */
   EMAIL_PROVIDER?: string;
   /** The Cloudflare Email Service `send_email` binding. */
   EMAIL?: CloudflareSendEmail;
 }
 
-export type EmailProvider = "cloudflare" | "resend";
+/** The provider a send goes through; the Cloudflare case carries its binding. */
+export type ResolvedEmailProvider =
+  | { provider: "cloudflare"; binding: CloudflareSendEmail }
+  | { provider: "resend" };
 
 /**
- * Thrown when `EMAIL_PROVIDER=cloudflare` but no `EMAIL` binding is present. Never
- * answered by falling back to Resend: a staging worker that was told to send through
- * Cloudflare must not reach a provider whose key it still holds. Nothing was sent.
+ * Thrown when EMAIL_PROVIDER names no known provider, or is `cloudflare` with no `EMAIL`
+ * binding. Never answered by falling back to Resend: a staging worker that was told to send
+ * through Cloudflare, or whose setting has a typo, must not reach a provider whose key it
+ * still holds. Nothing was sent.
  */
 export class EmailProviderConfigError extends Error {
   constructor(message: string) {
@@ -134,18 +139,25 @@ export class EmailProviderConfigError extends Error {
 }
 
 /**
- * Which provider a send goes through. `cloudflare` only when EMAIL_PROVIDER (trimmed,
- * case-insensitive) says so, so production, which sets nothing, stays on Resend.
- * `cloudflare` without the binding throws {@link EmailProviderConfigError}.
+ * Which provider a send goes through. EMAIL_PROVIDER is read trimmed and case-insensitively:
+ * unset or empty and `resend` are Resend (production sets nothing), `cloudflare` is Cloudflare
+ * and needs the binding. Any other value, and `cloudflare` without the binding, throws
+ * {@link EmailProviderConfigError}, so a typo cannot silently send through Resend.
  */
-export function resolveEmailProvider(env: EmailDeliveryEnv | undefined): EmailProvider {
-  if ((env?.EMAIL_PROVIDER ?? "").trim().toLowerCase() !== "cloudflare") return "resend";
+export function resolveEmailProvider(env: EmailDeliveryEnv | undefined): ResolvedEmailProvider {
+  const setting = (env?.EMAIL_PROVIDER ?? "").trim().toLowerCase();
+  if (setting === "" || setting === "resend") return { provider: "resend" };
+  if (setting !== "cloudflare") {
+    throw new EmailProviderConfigError(
+      `EMAIL_PROVIDER is "${setting.slice(0, 40)}", which is not a known provider (resend or cloudflare)`,
+    );
+  }
   if (!env?.EMAIL) {
     throw new EmailProviderConfigError(
       "EMAIL_PROVIDER is cloudflare but the EMAIL send_email binding is not configured",
     );
   }
-  return "cloudflare";
+  return { provider: "cloudflare", binding: env.EMAIL };
 }
 
 /**
@@ -446,6 +458,7 @@ const CLOUDFLARE_NON_DELIVERY_CODES: ReadonlySet<string> = new Set([
   "E_ACCOUNT_SUSPENDED",
   "E_SENDER_DOMAIN_NOT_AVAILABLE",
   "E_CONTENT_TOO_LARGE",
+  // Single recipient per send, and Cloudflare documents this as the recipient server rejecting it.
   "E_DELIVERY_FAILED",
   "E_RATE_LIMIT_EXCEEDED",
   "E_DAILY_LIMIT_EXCEEDED",
@@ -475,14 +488,19 @@ function cloudflareSendFailure(error: unknown, message: string): Error {
 
 /**
  * Whether a failed {@link sendEmail} certainly delivered nothing: the provider ANSWERED with a
- * refusal ({@link EmailRejectedError}: a Resend 4xx or a definite Cloudflare code), or the dev
+ * refusal ({@link EmailRejectedError}: a Resend 4xx or a definite Cloudflare code), the provider
+ * setting is unusable ({@link EmailProviderConfigError}, thrown before any call), or the dev
  * fence refused the recipient before any request
  * ({@link DevEmailFenceError}). Anything else (a timeout, a dropped connection, a 5xx) may have
  * been accepted and only the answer lost, so a caller that reports to a person must not say
  * "nothing was sent" for it. One classification for the sweep's report and the comment route.
  */
 export function isCertainNonDelivery(error: unknown): boolean {
-  return error instanceof EmailRejectedError || error instanceof DevEmailFenceError;
+  return (
+    error instanceof EmailRejectedError ||
+    error instanceof DevEmailFenceError ||
+    error instanceof EmailProviderConfigError
+  );
 }
 
 /**
@@ -525,10 +543,10 @@ export async function sendEmail(
   }
 
   const wrapped = applyDevWrap(subject, html, isDev);
-  const binding = resolveEmailProvider(deliveryEnv) === "cloudflare" ? deliveryEnv?.EMAIL : null;
-  if (binding) {
+  const resolved = resolveEmailProvider(deliveryEnv);
+  if (resolved.provider === "cloudflare") {
     await sendViaCloudflare(
-      binding,
+      resolved.binding,
       to,
       wrapped.subject,
       wrapped.html,

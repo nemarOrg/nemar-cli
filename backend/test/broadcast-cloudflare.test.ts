@@ -122,6 +122,18 @@ describe("sendBroadcast on the Cloudflare provider", () => {
     expect(lines.join("\n")).toContain("b***@nemar.test");
   });
 
+  test("a mistyped EMAIL_PROVIDER aborts as unconfigured and sends nothing", async () => {
+    const { binding, sent } = recordingBinding();
+    const result = await broadcast(
+      freshDb(),
+      ["a@nemar.test"],
+      { ...stagingEnv(binding), EMAIL_PROVIDER: "cloudfare" },
+      "re_key_present",
+    );
+    expect(result.error).toBe("email_service_unconfigured");
+    expect(sent.length).toBe(0);
+  });
+
   test("an all-suppressed broadcast calls the binding zero times", async () => {
     const { binding, sent } = recordingBinding();
     const result = await broadcast(
