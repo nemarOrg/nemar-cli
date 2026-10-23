@@ -30,7 +30,6 @@ import {
   type ChangeSummary,
   type ClassKind,
   type JsonValue,
-  SUMMARY_LIMITS,
   canonicalJson,
   isMissingJson,
   parseJson,
@@ -62,7 +61,6 @@ export const ORIGINAL_LIMITS = {
   // these two (design B2.1).
   minorFloor: 3,
   minorCeiling: 20,
-  maxExamples: 3, // removed original lines kept for the fenced block
   pointerMaxBytes: 1_023, // an unlocked annex pointer is a regular blob shorter than 1 KiB
   maxTagsTried: 32, // version tags tried for an ancestor of the merge base
 } as const;
@@ -894,12 +892,6 @@ export interface ProseFacts {
    * Also true when the base had a README the platform shows and the head has none it can show.
    */
   shownPartReplaced: boolean;
-  /**
-   * Up to `maxExamples` protected lines that were not kept, the altered ones first and then the
-   * moved ones, each cut to `maxValueChars + 1` code points (so a renderer can tell it was cut)
-   * without splitting a surrogate pair. Author text: for the fenced block only.
-   */
-  examples: string[];
 }
 
 /**
@@ -1082,16 +1074,6 @@ function markupHides(text: string): boolean {
  */
 export function hidesText(run: readonly string[]): boolean {
   return run.some(opensLinkDefinition) || markupHides(run.join(" "));
-}
-
-/** At most `maxValueChars + 1` code points of a line, never half a surrogate pair. */
-function cutExample(text: string): string {
-  const max = SUMMARY_LIMITS.maxValueChars + 1;
-  let end = 0;
-  for (let points = 0; end < text.length && points < max; points++) {
-    end += (text.codePointAt(end) as number) > 0xffff ? 2 : 1;
-  }
-  return text.slice(0, end);
 }
 
 /**
@@ -1359,7 +1341,6 @@ export function proseFacts(input: {
       partsAfter: input.head.length,
       hidingMarkupInserted,
       shownPartReplaced,
-      examples: [...altered, ...moved].slice(0, ORIGINAL_LIMITS.maxExamples).map(cutExample),
     },
   };
 }

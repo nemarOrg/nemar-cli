@@ -6102,7 +6102,6 @@ function proseOf(over: Partial<ProseFacts> = {}): ProseFacts {
     partsAfter: 1,
     hidingMarkupInserted: 0,
     shownPartReplaced: false,
-    examples: [],
     ...over,
   };
 }

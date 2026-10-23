@@ -66,7 +66,6 @@ import {
   type ClassKind,
   EMPTY_SUMMARY,
   ROLE_OF,
-  SUMMARY_LIMITS,
   summarizeChanges,
 } from "../scripts/ci/pr-review-summary";
 
@@ -135,7 +134,6 @@ describe("the limits and the refusal words", () => {
       maxMinorPairCodePoints: 4 * 1024 * 1024,
       minorFloor: 3,
       minorCeiling: 20,
-      maxExamples: 3,
       pointerMaxBytes: 1_023,
       maxTagsTried: 32,
     });
@@ -1023,7 +1021,6 @@ function untouched(protectedLines: number, overrides: Partial<ProseFacts> = {}):
     partsAfter: 1,
     hidingMarkupInserted: 0,
     shownPartReplaced: false,
-    examples: [],
     ...overrides,
   };
 }
@@ -1387,14 +1384,13 @@ describe("proseFacts: the cases of design B7", () => {
     expect(proseAltered(facts)).toBe(false);
   });
 
-  test("removing an original paragraph is an alteration, with the removed lines as examples", () => {
+  test("removing an original paragraph is an alteration", () => {
     const head = edited((lines) => lines.splice(7, 3));
     const facts = readme({ "README.md": ORIGINAL }, { "README.md": head });
     expect(facts).toEqual(
       untouched(ORIGINAL_PROTECTED, {
         preserved: false,
         protectedAltered: 2,
-        examples: [ORIGINAL_LINES[7] as string, ORIGINAL_LINES[8] as string],
       }),
     );
     expect(proseAltered(facts)).toBe(true);
@@ -1430,10 +1426,6 @@ describe("proseFacts: the cases of design B7", () => {
     expect(facts.protectedLines).toBe(ORIGINAL_PROTECTED + 3);
     expect(facts.protectedAltered).toBe(2);
     expect(facts.laterAltered).toBe(0);
-    expect(facts.examples).toEqual([
-      "- Events were re-aligned to the photodiode.",
-      "- Channel labels were made BIDS compliant.",
-    ]);
     expect(proseAltered(facts)).toBe(true);
   });
 
@@ -1478,7 +1470,6 @@ describe("proseFacts: the cases of design B7", () => {
         protectedAltered: 1,
         joinedInsertedRuns: 1,
         insertedLines: 1,
-        examples: [ORIGINAL_LINES[7] as string],
       }),
     );
     expect(proseAltered(facts)).toBe(true);
@@ -1562,7 +1553,6 @@ describe("proseFacts: the cases of design B7", () => {
         protectedAltered: 1,
         joinedInsertedRuns: 1,
         insertedLines: 2,
-        examples: [ORIGINAL_LINES[7] as string],
       }),
     );
   });
@@ -1579,7 +1569,6 @@ describe("proseFacts: the cases of design B7", () => {
         moved: true,
         movedLines: 2,
         insertedLines: 2,
-        examples: [ORIGINAL_LINES[10] as string, ORIGINAL_LINES[12] as string],
       }),
     );
     expect(proseAltered(facts)).toBe(true);
@@ -1595,7 +1584,6 @@ describe("proseFacts: the cases of design B7", () => {
         moved: true,
         movedLines: 1,
         insertedLines: 1,
-        examples: [ORIGINAL_LINES[0] as string],
       }),
     );
     expect(proseAltered(facts)).toBe(true);
@@ -1666,7 +1654,6 @@ describe("proseFacts: the cases of design B7", () => {
         // The edited entry is a list item: a block of its own, joined to no paragraph.
         joinedInsertedRuns: 0,
         insertedLines: 1,
-        examples: ["  - Fixed event onsets."],
       }),
     );
     expect(proseAltered(typo)).toBe(true);
@@ -1918,7 +1905,6 @@ describe("proseFacts: the adversarial cases of design B6", () => {
     const facts = readme({ "README.md": ORIGINAL }, {});
     expect(facts.protectedAltered).toBe(ORIGINAL_PROTECTED);
     expect(facts.partsAfter).toBe(0);
-    expect(facts.examples.length).toBe(ORIGINAL_LIMITS.maxExamples);
     expect(proseAltered(facts)).toBe(true);
   });
 
@@ -1955,11 +1941,6 @@ describe("proseFacts: the adversarial cases of design B6", () => {
     const facts = readme({ "README.md": twice }, { "README.md": head });
     expect(facts.movedLines).toBe(1);
     expect(facts.protectedAltered).toBe(2);
-    expect(facts.examples).toEqual([
-      "## Notes",
-      ORIGINAL_LINES[2] as string,
-      ORIGINAL_LINES[2] as string,
-    ]);
     expect(proseAltered(facts)).toBe(true);
   });
 
@@ -2636,15 +2617,6 @@ describe("proseFacts: bounds and refusals", () => {
       anchor: null,
     });
     expect(link).toEqual({ ok: false, refusal: "not_regular" });
-  });
-
-  test("an example is cut after 301 code points, never inside a surrogate pair", () => {
-    const long = "x".repeat(1_000);
-    const astral = "\u{1F600}".repeat(400);
-    const facts = readme({ "README.md": `${long}\n\n${astral}\n` }, { "README.md": "" });
-    const max = SUMMARY_LIMITS.maxValueChars + 1;
-    expect(facts.examples).toEqual(["x".repeat(max), "\u{1F600}".repeat(max)]);
-    expect(Array.from(facts.examples[1] as string).length).toBe(max);
   });
 });
 
