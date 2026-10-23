@@ -94,6 +94,14 @@ function distinctLines(prefix: string, count: number): string[] {
   return Array.from({ length: count }, (_, i) => `${prefix} ${i}`);
 }
 
+/** `count` lines of `length` random letters from `seed`: no two are a minor edit of each other. */
+function farLines(count: number, length: number, seed: number): string[] {
+  const random = mulberry32(seed);
+  return Array.from({ length: count }, () =>
+    Array.from({ length }, () => String.fromCharCode(97 + Math.floor(random() * 26))).join(""),
+  );
+}
+
 /** The id git gives a blob of these bytes. */
 function gitOid(bytes: Uint8Array): string {
   const hasher = new Bun.CryptoHasher("sha1");
@@ -123,6 +131,8 @@ describe("the limits and the refusal words", () => {
       maxDocumentParts: 16,
       maxDocumentLines: 20_000,
       maxEditDistance: 2_000,
+      maxMinorPairs: 4_096,
+      maxMinorPairCodePoints: 4 * 1024 * 1024,
       minorFloor: 3,
       minorCeiling: 20,
       maxExamples: 3,
@@ -1076,6 +1086,235 @@ describe("protectedMask", () => {
     expect(facts.laterAltered).toBe(0);
     expect(facts.preserved).toBe(false);
     expect(proseAltered(facts)).toBe(true);
+  });
+  // Lines far from one another (random letters, never a minor edit of each other), and one edit.
+  const FAR = farLines(70, 60, 0x1882);
+  const typo = (line: string, at = 3): string =>
+    `${line.slice(0, at)}${line[at] === "Z" ? "Y" : "Z"}${line.slice(at + 1)}`;
+  const TOP = "# Methods";
+  const END = "## Recording";
+
+  test("an edited original line next to a new line of its hunk is protected", () => {
+    const anchor = [TOP, "Each recording lasted ten minutes.", END];
+    // The hunk removes the anchor line and inserts two: a new sentence, then the edited line.
+    const base = [TOP, "A sentence merged later.", "Each recordng lasted ten minutes.", END];
+    expect(protectedMask("readme", base, anchor)).toEqual([true, false, true, true]);
+    // New lines at both ends of a hunk of two edited lines.
+    const [a, b] = FAR as [string, string];
+    expect(
+      protectedMask(
+        "readme",
+        [TOP, "New first.", typo(a), typo(b), "New last.", END],
+        [TOP, a, b, END],
+      ),
+    ).toEqual([true, false, true, true, false, true]);
+  });
+
+  test("a typo merged beside a new line still keeps a later rewrite of the line from passing", () => {
+    const anchor = "# Methods\n\nEach recording lasted ten minutes.\nThe room was dark.\n";
+    // Merged after the tag: a new sentence above the line, and a typo in it.
+    const merged = anchor.replace("Each recording", "A sentence merged later.\nEach recordng");
+    const rewritten = merged.replace(
+      "Each recordng lasted ten minutes.",
+      "Recordings were of variable length.",
+    );
+    const facts = readme(
+      { "README.md": merged },
+      { "README.md": rewritten },
+      { "README.md": anchor },
+    );
+    expect(facts.anchor).toBe("first_version_tag");
+    expect(facts.protectedAltered).toBe(1);
+    expect(facts.laterAltered).toBe(0);
+    expect(proseAltered(facts)).toBe(true);
+  });
+
+  test("one anchor line protects every edited copy of it; a line near two anchor lines is protected", () => {
+    const [a] = FAR as [string];
+    // The line copied and each copy edited in its own place.
+    expect(protectedMask("readme", [TOP, typo(a, 3), typo(a, 40), END], [TOP, a, END])).toEqual([
+      true,
+      true,
+      true,
+      true,
+    ]);
+    // The anchor holding the line twice, the base once, edited.
+    expect(protectedMask("readme", [TOP, typo(a), END], [TOP, a, a, END])).toEqual([
+      true,
+      true,
+      true,
+    ]);
+    const ten = "Each recording lasted ten minutes.";
+    const two = "Each recording lasted two minutes.";
+    const near = "Each recording lasted tn minutes.";
+    expect(isMinorEdit(ten, near) && isMinorEdit(two, near)).toBe(true);
+    expect(protectedMask("readme", [TOP, near, END], [TOP, ten, two, END])).toEqual([
+      true,
+      true,
+      true,
+    ]);
+  });
+
+  test("an anchor line removed in one hunk does not shift the pairs of the next", () => {
+    const [a, b, c, d] = FAR as [string, string, string, string];
+    // Two hunks: b removed on its own, then d edited.
+    expect(protectedMask("readme", [a, c, typo(d)], [a, b, c, d])).toEqual([true, true, true]);
+  });
+
+  test("past the pair cap a hunk is paired from its start and from its end", () => {
+    const lines = FAR.slice(0, 65);
+    const edits = lines.map((line) => typo(line));
+    const anchor = [TOP, ...lines, END];
+    expect(lines.length * (lines.length + 1)).toBeGreaterThan(ORIGINAL_LIMITS.maxMinorPairs);
+    const all = edits.map(() => true);
+    // A new line above the edited ones: the pairs from the end find every edit.
+    expect(protectedMask("readme", [TOP, "New first.", ...edits, END], anchor)).toEqual([
+      true,
+      false,
+      ...all,
+      true,
+    ]);
+    // A new line below them: the pairs from the start do.
+    expect(protectedMask("readme", [TOP, ...edits, "New last.", END], anchor)).toEqual([
+      true,
+      ...all,
+      false,
+      true,
+    ]);
+    // New lines at both ends: neither does, the accepted limit.
+    expect(
+      protectedMask("readme", [TOP, "New first.", ...edits, "New last.", END], anchor),
+    ).toEqual([true, false, ...edits.map(() => false), false, true]);
+    // Under the cap the same shape has every pair tried, and every edit is found.
+    const fewer = lines.slice(0, 60);
+    expect(fewer.length * (fewer.length + 2)).toBeLessThanOrEqual(ORIGINAL_LIMITS.maxMinorPairs);
+    expect(
+      protectedMask(
+        "readme",
+        [TOP, "New first.", ...fewer.map((line) => typo(line)), "New last.", END],
+        [TOP, ...fewer, END],
+      ),
+    ).toEqual([true, false, ...fewer.map(() => true), false, true]);
+  });
+
+  // Two long lines of random letters, each a thousand-letter block repeated `blocks` times.
+  const longPair = (seed: number, blocks: number): [string, string] => {
+    const [x, y] = farLines(2, 1_000, seed) as [string, string];
+    return [x.repeat(blocks), y.repeat(blocks)];
+  };
+
+  test("a hunk whose pairs would take more code points than the budget is paired from its ends", () => {
+    const budget = ORIGINAL_LIMITS.maxMinorPairCodePoints;
+    // Four pairs of 1.1 million code points each are past the budget, so the edits between two
+    // new lines are not found.
+    const [x, y] = longPair(1, 1_100);
+    expect(4 * x.length).toBeGreaterThan(budget);
+    expect(
+      protectedMask(
+        "readme",
+        [TOP, "New first.", typo(x), typo(y), "New last.", END],
+        [TOP, x, y, END],
+      ),
+    ).toEqual([true, false, false, false, false, true]);
+    // Half as long, the hunk is within it: every pair is tried.
+    const [u, v] = longPair(2, 550);
+    expect(4 * u.length).toBeLessThanOrEqual(budget);
+    expect(
+      protectedMask(
+        "readme",
+        [TOP, "New first.", typo(u), typo(v), "New last.", END],
+        [TOP, u, v, END],
+      ),
+    ).toEqual([true, false, true, true, false, true]);
+  });
+
+  test("the budget is spent across hunks: a later hunk past what is left is paired from its ends", () => {
+    const [u, v] = longPair(3, 550);
+    const [w, z] = longPair(4, 550);
+    // Each hunk is within the budget alone, not both together.
+    expect(4 * u.length).toBeLessThanOrEqual(ORIGINAL_LIMITS.maxMinorPairCodePoints);
+    expect(8 * u.length).toBeGreaterThan(ORIGINAL_LIMITS.maxMinorPairCodePoints);
+    const base = [TOP, "N1.", typo(u), typo(v), "N2.", END, "N3.", typo(w), typo(z), "N4.", TOP];
+    expect(protectedMask("readme", base, [TOP, u, v, END, w, z, TOP])).toEqual([
+      true,
+      false,
+      true,
+      true,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false,
+      true,
+    ]);
+  });
+
+  test("hostile hunks stay bounded in steps and time", () => {
+    const maxD = ORIGINAL_LIMITS.maxEditDistance;
+    // Two thousand lines against two thousand others: past the alignment's cap, every base line
+    // protected and no pair tried.
+    let meter = { steps: 0 };
+    let started = performance.now();
+    const capped = protectedMask("readme", farLines(2_000, 60, 5), farLines(2_000, 60, 6), meter);
+    expect(capped.every(Boolean)).toBe(true);
+    expect(meter.steps).toBeLessThanOrEqual(((maxD + 1) * (maxD + 2)) / 2 + 4_000);
+    expect(performance.now() - started).toBeLessThan(10_000);
+    // A thousand edited lines: the largest hunk the alignment takes, past the pair cap, every
+    // edit found by the pairs from the start.
+    const thousand = farLines(1_000, 60, 7);
+    meter = { steps: 0 };
+    started = performance.now();
+    const paired = protectedMask(
+      "readme",
+      thousand.map((line) => typo(line)),
+      thousand,
+      meter,
+    );
+    expect(paired.every(Boolean)).toBe(true);
+    expect(meter.steps).toBeLessThanOrEqual(((maxD + 1) * (maxD + 2)) / 2 + 2_000);
+    expect(performance.now() - started).toBeLessThan(10_000);
+    // Sixty-four against sixty-four lines of 65,535 code points, near copies of one line that differ
+    // in 22 places spread along them, so no pair is a minor edit and no banded distance stops
+    // early: past the budget, paired from the start only (as many lines on each side).
+    const random = mulberry32(0x40);
+    const length = 65_535;
+    const shared = Array.from({ length }, () =>
+      String.fromCharCode(97 + Math.floor(random() * 26)),
+    );
+    const copy = (tag: number): string => {
+      const letters = [...shared];
+      letters[0] = String.fromCharCode(0x100 + tag);
+      for (let e = 0; e < 21; e++) {
+        letters[Math.floor(((e + 0.5) * length) / 21)] = String.fromCharCode(0x4e00 + tag * 32 + e);
+      }
+      return letters.join("");
+    };
+    const anchor = Array.from({ length: 64 }, (_, i) => copy(i));
+    const base = Array.from({ length: 64 }, (_, i) => copy(i + 64));
+    started = performance.now();
+    expect(protectedMask("readme", base, anchor).some(Boolean)).toBe(false);
+    expect(performance.now() - started).toBeLessThan(10_000);
+  });
+
+  test("an anchor too far from the base to align, or with no line, leaves the facts on the merge base", () => {
+    const base = `${farLines(1_100, 60, 8).join("\n\n")}\n`;
+    const head = `${base}\nA new line.\n`;
+    const far = readme(
+      { "README.md": base },
+      { "README.md": head },
+      {
+        "README.md": `${farLines(1_100, 60, 9).join("\n\n")}\n`,
+      },
+    );
+    expect(far.anchor).toBe("merge_base");
+    expect(far.protectedLines).toBe(1_100);
+    const blank = readme({ "README.md": base }, { "README.md": head }, { "README.md": "\n\n" });
+    expect(blank.anchor).toBe("merge_base");
+    // The control: the base as its own anchor aligns.
+    expect(readme({ "README.md": base }, { "README.md": head }, { "README.md": base }).anchor).toBe(
+      "first_version_tag",
+    );
   });
 });
 

@@ -8152,6 +8152,41 @@ describe("original content", () => {
       });
     });
 
+    test("a typo and a new line beside it, merged after the tag, still protect the line", () => {
+      const dir = join(root, "oc-three-step-source");
+      mkdirSync(dir, { recursive: true });
+      git(dir, "init", "-q", "-b", "main");
+      write(dir, "dataset_description.json", desc("1.0.0"));
+      write(dir, "CHANGES", "1.0.0 2026-01-01\n - Initial release\n");
+      write(dir, "README.md", FIRST);
+      git(dir, "add", "-A");
+      git(dir, "commit", "-q", "-m", "first version");
+      git(dir, "tag", "-a", "v1.0.0", "-m", "v1.0.0");
+      // Step one, merged: a typo in the line.
+      const typo = FIRST.replace("recording", "recordng");
+      write(dir, "README.md", typo);
+      git(dir, "commit", "-q", "-am", "a typo");
+      // Step two, merged: a new sentence right above it, in the same hunk against the tag.
+      const added = typo.replace("Each recordng", "The room was kept dark.\nEach recordng");
+      write(dir, "README.md", added);
+      git(dir, "commit", "-q", "-am", "a sentence");
+      // Step three, the pull request: the line rewritten.
+      const r = branch(dir, () =>
+        write(
+          dir,
+          "README.md",
+          added.replace("Each recordng lasted ten minutes.", "Recordings were of variable length."),
+        ),
+      );
+      const { original } = fromClone("oc-three-step", r);
+      expect(original.anchorLookup).toBe("first_version_tag");
+      expect(compared(original.readme)).toMatchObject({
+        anchor: "first_version_tag",
+        protectedAltered: 1,
+        laterAltered: 0,
+      });
+    });
+
     test("a lightweight tag anchors like an annotated one", () => {
       const r = taggedDataset("oc-light-source", writeReadme(ORIGINAL_REMOVED), {});
       // `git tag` with no -a: a ref straight at the first version's commit, no tag object.

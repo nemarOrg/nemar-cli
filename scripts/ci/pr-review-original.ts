@@ -52,6 +52,12 @@ export const ORIGINAL_LIMITS = {
   maxDocumentLines: 20_000, // one side, counted after normalization (blank lines are not lines)
   // Lines removed plus lines inserted past which two sides are not aligned at all.
   maxEditDistance: 2_000,
+  // Removed times inserted lines of one anchor hunk up to which every pair is tried for a minor
+  // edit; past it, lines are paired from the start and from the end of the hunk.
+  maxMinorPairs: 4_096,
+  // Code points of the shorter line of each pair, summed over the hunks whose every pair is tried,
+  // past which a hunk is paired from its ends too: about one document's worth of banded distance.
+  maxMinorPairCodePoints: 4 * 1024 * 1024,
   // The minor-edit bound of one line is a tenth of the longer line, in code points, kept between
   // these two (design B2.1).
   minorFloor: 3,
@@ -403,7 +409,11 @@ function codePointLength(s: string): number {
  * within it; a rewritten sentence is not.
  */
 export function minorBound(a: string, b: string): number {
-  const longer = Math.max(codePointLength(a), codePointLength(b));
+  return boundOfLonger(Math.max(codePointLength(a), codePointLength(b)));
+}
+
+/** {@link minorBound} from the length of the longer line, in code points. */
+function boundOfLonger(longer: number): number {
   return Math.min(
     ORIGINAL_LIMITS.minorCeiling,
     Math.max(ORIGINAL_LIMITS.minorFloor, Math.floor(longer / 10)),
@@ -650,13 +660,20 @@ export function alignLines(
  * false fail, which is the side to err on.
  *
  * A README line is also protected when it is an original line minor-edited since the tag: the
- * anchor is aligned with the base as {@link proseFacts} aligns two sides, and inside each hunk the
- * j-th removed anchor line is paired with the j-th inserted base line; a pair within
- * {@link isMinorEdit} protects the base line. Without this, a typo merged after the tag (a minor
- * edit, information) would make the line later text, and a second pull request could then rewrite
- * it freely. Edits that add up past the minor bound against the anchor line (several merged minor
- * edits of one line) leave it unprotected: the accepted limit, since the bound is what tells an
- * edit of the original line from a new line.
+ * anchor is aligned with the base as {@link proseFacts} aligns two sides, and inside each hunk an
+ * inserted base line is protected when it is within {@link isMinorEdit} of any removed anchor line
+ * of the same hunk, so a new line merged next to the edited one does not hide the edit, and one
+ * anchor line can protect several base lines (a line copied and each copy edited). When the hunk
+ * has more than `maxMinorPairs` removed times inserted lines, or when trying every pair would take
+ * the code points of the shorter lines, summed over every hunk so tried, past
+ * `maxMinorPairCodePoints`, only the k-th line from the start of each side is tried with the
+ * other's k-th, and the k-th from the end with the k-th from the end: an edited line with new
+ * lines on both sides of it in such a hunk is then not protected, the accepted limit. A pair whose
+ * lengths alone differ by more than the bound is never computed.
+ * Without this, a typo merged after the tag (a minor edit, information) would make the line later
+ * text, and a second pull request could then rewrite it freely. Edits that add up past the minor
+ * bound against the anchor line (several merged minor edits of one line) leave it unprotected:
+ * the accepted limit, since the bound is what tells an edit of the original line from a new line.
  *
  * With no anchor (null), an anchor with no line, or an anchor too far from the base to align
  * (more than `maxEditDistance` lines apart), every base line is protected. That is the strict side,
@@ -669,13 +686,26 @@ export function protectedMask(
   anchor: readonly string[] | null,
   meter?: AlignMeter,
 ): boolean[] {
-  if (document === "changes" || anchor === null || anchor.length === 0) {
-    return base.map(() => true);
-  }
+  return anchoredMask(document, base, anchor, meter).mask;
+}
+
+/**
+ * {@link protectedMask}, and whether the anchor decided it: false when every base line is
+ * protected for want of an anchor that could be aligned, which the facts then call `merge_base`.
+ */
+function anchoredMask(
+  document: DocumentKind,
+  base: readonly string[],
+  anchor: readonly string[] | null,
+  meter?: AlignMeter,
+): { mask: boolean[]; anchored: boolean } {
+  const everyLine = { mask: base.map(() => true), anchored: false };
+  if (document === "changes" || anchor === null || anchor.length === 0) return everyLine;
   const alignment = alignLines(anchor, base, ORIGINAL_LIMITS.maxEditDistance, meter);
-  if (alignment === null) return base.map(() => true);
+  if (alignment === null) return everyLine;
   const original = new Set(anchor);
   const mask = base.map((line) => original.has(line));
+  const budget = { codePoints: ORIGINAL_LIMITS.maxMinorPairCodePoints };
   const { ops } = alignment;
   let a = 0;
   let b = 0;
@@ -693,13 +723,64 @@ export function protectedMask(
       if (ops[at] === "delete") removed.push(a++);
       else inserted.push(b++);
     }
-    for (let k = 0; k < Math.min(removed.length, inserted.length); k++) {
-      const was = anchor[removed[k] as number] as string;
-      const now = inserted[k] as number;
-      if (isMinorEdit(was, base[now] as string)) mask[now] = true;
+    protectMinorEdits(anchor, base, removed, inserted, mask, budget);
+  }
+  return { mask, anchored: true };
+}
+
+/**
+ * Within one hunk of the anchor's alignment with the base, sets `mask` for each inserted base line
+ * that is a minor edit of a removed anchor line, as {@link protectedMask} states it: every pair
+ * while the hunk is within `maxMinorPairs` and its pairs within what is left of `budget`, which
+ * they then spend, and otherwise the pairs counted from the start and from the end. A line already
+ * protected is not tried again, and a pair whose code point lengths differ by more than the bound
+ * is not computed.
+ */
+function protectMinorEdits(
+  anchor: readonly string[],
+  base: readonly string[],
+  removed: readonly number[],
+  inserted: readonly number[],
+  mask: boolean[],
+  budget: { codePoints: number },
+): void {
+  if (removed.length === 0 || inserted.length === 0) return;
+  const removedLengths = removed.map((line) => codePointLength(anchor[line] as string));
+  const insertedLengths = inserted.map((line) => codePointLength(base[line] as string));
+  // Whether the pair's lengths alone allow a minor edit.
+  const fits = (r: number, i: number): boolean => {
+    const was = removedLengths[r] as number;
+    const is = insertedLengths[i] as number;
+    return Math.abs(was - is) <= boundOfLonger(Math.max(was, is));
+  };
+  const tryPair = (r: number, i: number): void => {
+    const now = inserted[i] as number;
+    if (mask[now] || !fits(r, i)) return;
+    if (isMinorEdit(anchor[removed[r] as number] as string, base[now] as string)) mask[now] = true;
+  };
+  if (removed.length * inserted.length <= ORIGINAL_LIMITS.maxMinorPairs) {
+    let total = 0;
+    for (let i = 0; i < inserted.length; i++) {
+      for (let r = 0; r < removed.length; r++) {
+        if (fits(r, i))
+          total += Math.min(removedLengths[r] as number, insertedLengths[i] as number);
+      }
+    }
+    if (total <= budget.codePoints) {
+      budget.codePoints -= total;
+      for (let i = 0; i < inserted.length; i++) {
+        for (let r = 0; r < removed.length; r++) tryPair(r, i);
+      }
+      return;
     }
   }
-  return mask;
+  // With as many lines on each side, the pairs from the end are the pairs from the start.
+  const shift = removed.length - inserted.length;
+  const paired = Math.min(removed.length, inserted.length);
+  for (let k = 0; k < paired; k++) {
+    tryPair(k, k);
+    if (shift !== 0) tryPair(removed.length - 1 - k, inserted.length - 1 - k);
+  }
 }
 
 /**
@@ -710,7 +791,10 @@ export function protectedMask(
  */
 export interface ProseFacts {
   document: DocumentKind;
-  /** Where protection came from: the first version tag's README, or every merge-base line. */
+  /**
+   * Where protection came from: the first version tag's README, or every merge-base line, which is
+   * also the word when the tag's README has no line or is too far from the base to align.
+   */
   anchor: "first_version_tag" | "merge_base";
   /**
    * Every protected line is kept verbatim and in order: none altered, moved or minor-edited, and
@@ -1044,7 +1128,7 @@ export function proseFacts(input: {
   }
   const base = baseRead.value.lines;
   const head = headRead.value.lines;
-  const isProtected = protectedMask(
+  const { mask: isProtected, anchored } = anchoredMask(
     document,
     base.map((line) => line.text),
     anchorLines,
@@ -1232,7 +1316,7 @@ export function proseFacts(input: {
     ok: true,
     facts: {
       document,
-      anchor: anchorLines === null ? "merge_base" : "first_version_tag",
+      anchor: anchored ? "first_version_tag" : "merge_base",
       preserved:
         protectedAltered === 0 &&
         movedLines === 0 &&
@@ -1940,9 +2024,9 @@ export function participantValuesAltered(
  * - `no_tag`, `no_ancestor`, `check_failed`, `too_many_tags`: the reasons of {@link AnchorChoice}.
  *
  * Every word but `first_version_tag` leaves the README with no anchor, so every merge-base line is
- * protected (the stricter side). A tag whose README could not be read keeps `first_version_tag`
- * here while the README's own facts say `merge_base`: this word is about the search, the facts'
- * `anchor` about what protected the lines.
+ * protected (the stricter side). A tag whose README could not be read, has no line or is too far
+ * from the merge base to align keeps `first_version_tag` here while the README's own facts say
+ * `merge_base`: this word is about the search, the facts' `anchor` about what protected the lines.
  */
 export const ANCHOR_LOOKUPS = [
   "not_needed",
