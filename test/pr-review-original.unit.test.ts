@@ -200,7 +200,10 @@ describe("document names", () => {
 
 describe("decodeProse", () => {
   test("UTF-8 is read as UTF-8, and a leading byte order mark is dropped", () => {
-    expect(decodeProse(encoder.encode("café ☃ 𝒜"))).toEqual({ text: "café ☃ 𝒜", notUtf8: false });
+    expect(decodeProse(encoder.encode("caf\u{E9} \u{2603} \u{1D49C}"))).toEqual({
+      text: "caf\u{E9} \u{2603} \u{1D49C}",
+      notUtf8: false,
+    });
     expect(decodeProse(encoder.encode("\u{FEFF}Title"))).toEqual({
       text: "Title",
       notUtf8: false,
@@ -215,6 +218,17 @@ describe("decodeProse", () => {
     // windows-1252 would read 0x80 as the euro sign and 0x9F as Y with a diaeresis.
     expect(decoded.text).toBe("caf\u{E9} \u{80}\u{9F}");
     expect(decoded.text).not.toContain("\u{20AC}");
+  });
+
+  test("a lone 0xEF that does not start a byte order mark is a character of an ISO-8859-1 text", () => {
+    expect(decodeProse(new Uint8Array([0xef, 0x41, 0xe9]))).toEqual({
+      text: "\u{EF}A\u{E9}",
+      notUtf8: true,
+    });
+    expect(decodeProse(new Uint8Array([0xef, 0xbb, 0x41]))).toEqual({
+      text: "\u{EF}\u{BB}A",
+      notUtf8: true,
+    });
   });
 
   test("a byte order mark before bytes that are not UTF-8 is still dropped", () => {
@@ -295,6 +309,13 @@ describe("normalizeProse", () => {
     expect(normalizeProse("a\r").endsWithBreak).toBe(true);
     expect(normalizeProse("").endsWithBreak).toBe(false);
     expect(normalizeProse("a\nb").lines).toEqual(normalizeProse("a\nb\n").lines);
+  });
+
+  test("a single break is named too: one LF is lf, one CRLF is crlf", () => {
+    expect(normalizeProse("a\n").breaks).toBe("lf");
+    expect(normalizeProse("a\r\n").breaks).toBe("crlf");
+    expect(normalizeProse("one\ntwo").breaks).toBe("lf");
+    expect(normalizeProse("one\r\ntwo").breaks).toBe("crlf");
   });
 
   test("with a line bound, reading stops at the first line past it", () => {
@@ -417,7 +438,7 @@ describe("assembleDocument", () => {
   });
 
   test("a NUL byte is binary, unless the part is the same blob on both sides and is skipped", () => {
-    const pdf = part("README.pdf", new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x00, 0x01]));
+    const pdf = part("README.pdf", new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x00, 0x41]));
     const text = part("README.md", "# Title\n");
     expect(assembleDocument("readme", [text, pdf], NO_SKIP)).toEqual({
       ok: false,
@@ -551,7 +572,7 @@ describe("minorBound and isMinorEdit", () => {
 
   test("an astral character is one code point of the length, not two code units", () => {
     // Forty astral characters are eighty UTF-16 code units, which would give a bound of 8.
-    expect(minorBound("𝒜".repeat(40), "")).toBe(4);
+    expect(minorBound("\u{1D49C}".repeat(40), "")).toBe(4);
     expect(minorBound("e\u{301}".repeat(20), "")).toBe(4);
   });
 
@@ -601,16 +622,16 @@ describe("levenshteinWithin", () => {
   });
 
   test("an astral character is one edit and a combining mark is one edit of its own", () => {
-    expect(levenshteinWithin("😀", "a", 5)).toBe(1);
-    expect(levenshteinWithin("𝒜b", "b", 5)).toBe(1);
-    expect(levenshteinWithin("😀x", "😃x", 5)).toBe(1);
+    expect(levenshteinWithin("\u{1F600}", "a", 5)).toBe(1);
+    expect(levenshteinWithin("\u{1D49C}b", "b", 5)).toBe(1);
+    expect(levenshteinWithin("\u{1F600}x", "\u{1F603}x", 5)).toBe(1);
     // A precomposed letter against a letter and a combining accent: one replaced, one removed.
     expect(levenshteinWithin("\u{E9}", "e\u{301}", 5)).toBe(2);
   });
 
   test("it equals the full distance capped at k + 1 over seeded random strings", () => {
     const random = mulberry32(0x1859);
-    const alphabet = ["a", "b", "c", "\u{301}", "\u{E9}", "😀", "😃", "𝒜"];
+    const alphabet = ["a", "b", "c", "\u{301}", "\u{E9}", "\u{1F600}", "\u{1F603}", "\u{1D49C}"];
     for (let trial = 0; trial < 400; trial++) {
       const a = randomText(random, alphabet, Math.floor(random() * 24));
       const b =
@@ -1123,6 +1144,54 @@ describe("proseFacts: the cases of design B7", () => {
     expect(proseAltered(facts)).toBe(true);
   });
 
+  test("one protected line moved and nothing else changed is moved, and moved fails", () => {
+    // The title goes from the top to a paragraph of its own at the end.
+    const head = `${edited((lines) => lines.splice(0, 2))}\n${ORIGINAL_LINES[0]}\n`;
+    const facts = readme({ "README.md": ORIGINAL }, { "README.md": head });
+    expect(facts).toEqual(
+      untouched(ORIGINAL_PROTECTED, {
+        preserved: false,
+        moved: true,
+        movedLines: 1,
+        insertedLines: 1,
+        examples: [ORIGINAL_LINES[0] as string],
+      }),
+    );
+    expect(proseAltered(facts)).toBe(true);
+  });
+
+  test("a single LF turned into a single CRLF is a line-ending change", () => {
+    const facts = readme({ README: "one\ntwo" }, { README: "one\r\ntwo" });
+    expect(facts).toEqual(untouched(2, { lineEndingsChanged: true }));
+  });
+
+  test("Markdown headings rewritten as reStructuredText are minor edits and new underlines", () => {
+    // Design B6.6: the heading lines lose their `#` within the minor bound, and each underline is a
+    // new line joined to its heading. Nothing is altered; the model is shown the minor edits.
+    const markdown = "# Title\n\nFirst paragraph.\n\n## Section\n\nSecond paragraph.\n";
+    const rst = "Title\n=====\n\nFirst paragraph.\n\nSection\n-------\n\nSecond paragraph.\n";
+    const facts = readme({ "README.md": markdown }, { "README.rst": rst });
+    expect(facts).toEqual(
+      untouched(4, {
+        preserved: false,
+        minorEdits: 2,
+        joinedInsertedRuns: 2,
+        insertedLines: 4,
+      }),
+    );
+    expect(proseAltered(facts)).toBe(false);
+  });
+
+  test("a list item reflowed onto one line is still an alteration", () => {
+    const base =
+      "## Notes\n\n- The recordings of the second session were made\n  with a different amplifier.\n";
+    const head =
+      "## Notes\n\n- The recordings of the second session were made with a different amplifier.\n";
+    const facts = readme({ "README.md": base }, { "README.md": head });
+    expect(facts.protectedAltered).toBeGreaterThan(0);
+    expect(proseAltered(facts)).toBe(true);
+  });
+
   test("README.md renamed to README.rst, or README to README.md, with the same text is preserved", () => {
     expect(readme({ "README.md": ORIGINAL }, { "README.rst": ORIGINAL })).toEqual(
       untouched(ORIGINAL_PROTECTED),
@@ -1214,7 +1283,7 @@ describe("proseFacts: the adversarial cases of design B6", () => {
 
   test("a README re-encoded from ISO-8859-1 to UTF-8 with a byte order mark compares its text", () => {
     const latin = new Uint8Array([...encoder.encode("Caf"), 0xe9, ...encoder.encode(" study\n")]);
-    const facts = readme({ README: latin }, { README: "\u{FEFF}Café study\n" });
+    const facts = readme({ README: latin }, { README: "\u{FEFF}Caf\u{E9} study\n" });
     expect(facts).toEqual(untouched(1, { notUtf8: true }));
   });
 
@@ -1403,6 +1472,18 @@ describe("proseFacts: the tripwires", () => {
     expect(facts.shownPartReplaced).toBe(true);
   });
 
+  test("a protected line kept by a minor edit, moved out of the shown README, trips it too", () => {
+    // The only original line survives as a minor edit, in README, which README.md now shadows.
+    const line = "The recordings were made in a quiet, electrically shielded room.";
+    const facts = readme(
+      { "README.md": `${line}\n` },
+      { README: `${line.replace("quiet", "quite")}\n`, "README.md": "# A new introduction\n" },
+    );
+    expect(facts.minorEdits).toBe(1);
+    expect(facts.protectedAltered + facts.movedLines).toBe(0);
+    expect(facts.shownPartReplaced).toBe(true);
+  });
+
   test("a shown README renamed to a name the platform does not show is a shown part lost", () => {
     for (const name of ["readme.md", "README.MD", "Readme.md", "readme"]) {
       const facts = readme({ "README.md": ORIGINAL }, { [name]: ORIGINAL });
@@ -1583,8 +1664,8 @@ describe("proseFacts: bounds and refusals", () => {
   });
 
   test("a binary part that changed refuses the document; one that did not is skipped", () => {
-    const pdfBefore = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x00, 0x01]);
-    const pdfAfter = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x00, 0x02]);
+    const pdfBefore = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x00, 0x41]);
+    const pdfAfter = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x00, 0x42]);
     const changed = proseFacts({
       document: "readme",
       base: parts({ "README.md": ORIGINAL, "README.pdf": pdfBefore }),
@@ -1613,10 +1694,10 @@ describe("proseFacts: bounds and refusals", () => {
 
   test("an example is cut after 301 code points, never inside a surrogate pair", () => {
     const long = "x".repeat(1_000);
-    const astral = "😀".repeat(400);
+    const astral = "\u{1F600}".repeat(400);
     const facts = readme({ "README.md": `${long}\n\n${astral}\n` }, { "README.md": "" });
     const max = SUMMARY_LIMITS.maxValueChars + 1;
-    expect(facts.examples).toEqual(["x".repeat(max), "😀".repeat(max)]);
+    expect(facts.examples).toEqual(["x".repeat(max), "\u{1F600}".repeat(max)]);
     expect(Array.from(facts.examples[1] as string).length).toBe(max);
   });
 });
@@ -2759,6 +2840,19 @@ describe("parseVersionTags", () => {
     expect(tags[4]).toEqual({ name: "v1.10.0", version: ["1", "10", "0"], commit: sha(2) });
   });
 
+  test("leading zeros do not count: v1.0009.0 is below v1.10.0 and v1.0010.0 above v1.9.0", () => {
+    const tags = parseVersionTags(
+      lsRemote(
+        [sha(1), "refs/tags/v1.10.0"],
+        [sha(2), "refs/tags/v1.0009.0"],
+        [sha(3), "refs/tags/v1.0010.0"],
+        [sha(4), "refs/tags/v1.9.0"],
+      ),
+    );
+    // 1.9 (twice, told apart by name) below 1.10 (twice, told apart by name).
+    expect(tags.map((tag) => tag.name)).toEqual(["v1.0009.0", "v1.9.0", "v1.0010.0", "v1.10.0"]);
+  });
+
   test("an annotated tag's commit is its peeled id, whichever line comes first", () => {
     const commit = sha(100);
     const tagObject = sha(200);
@@ -2817,7 +2911,7 @@ describe("parseVersionTags", () => {
       `${sha(2)}\trefs/tags/v1.0.0^{}x`,
       `${sha(2)}\trefs/tags/release/v1.0.0`,
       `${sha(2)}\trefs/tags/v-1.0.0`,
-      `${sha(2)}\trefs/tags/v١.٠.٠`,
+      `${sha(2)}\trefs/tags/v\u{661}.\u{660}.\u{660}`,
       `${sha(2)}\trefs/heads/v1.0.0`,
       `${sha(2)}\trefs/remotes/origin/v1.0.0`,
       `${sha(2)}\tHEAD`,
@@ -3411,6 +3505,28 @@ describe("participantValuesAltered: which files and which summaries", () => {
     const summary = summaryOf([tsvEdit, tsvEdit]);
     expect(summary.files.map((f) => f.refusal)).toEqual(["internal_mismatch", "internal_mismatch"]);
     expect(participantValuesAltered(summary, modifiedFiles([tsvEdit]), NO_COSMETIC)).toBeNull();
+  });
+
+  test("two outcomes for one participants file, one of them refused, are unknown", () => {
+    // Built from two real summaries, so each outcome is one the summary really gives: the file read
+    // once cleanly and once refused. Any refusal among a path's outcomes makes the count unknown.
+    const clean = summaryOf([tsvEdit]);
+    const ragged = summaryOf([
+      {
+        path: PARTICIPANTS_TSV,
+        before: sexTable("F"),
+        after: "participant_id\tsex\nsub-01\tF\tx\n",
+      },
+    ]);
+    expect(clean.files.map((f) => f.refusal)).toEqual([null]);
+    expect(ragged.files.map((f) => f.refusal)).toEqual(["ragged_row"]);
+    for (const files of [
+      [...clean.files, ...ragged.files],
+      [...ragged.files, ...clean.files],
+    ]) {
+      const both: ChangeSummary = { ...clean, files };
+      expect(participantValuesAltered(both, modifiedFiles([tsvEdit]), NO_COSMETIC)).toBeNull();
+    }
   });
 
   test("an abandoned summary is unknown, however it was made", () => {

@@ -1431,9 +1431,9 @@ export interface RecordingFacts {
 /**
  * The facts of the recordings a pull request touched (design B2.4; whether a side is annexed is
  * decided by what the side is, never by the area of its path or by the status `typechange`). Each
- * changed path is read as two sides ({@link annexSide}; a null probe is a side that does not exist) and the
- * paths are taken in code-unit order, so the answer never depends on the order the caller listed
- * them. The caller passes every changed path. For a path that exists on both sides and is in the
+ * changed path is read as two sides ({@link annexSide}; a null probe is a side that does not exist).
+ * Every fact is a count, and moves are matched over a multiset of keys, so the order the caller
+ * lists the paths in changes nothing. The caller passes every changed path. For a path that exists on both sides and is in the
  * reviewed scope (`inReviewedScope`):
  *
  * - both annexed, with different keys: `replaced`; with the same key (a locked link made an unlocked
@@ -1461,11 +1461,10 @@ export interface RecordingFacts {
 export function recordingFacts(
   changes: readonly RecordingChange[],
 ): RecordingFacts & { unread: number } {
-  const ordered = [...changes].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
   const facts = { replaced: 0, typeChanged: 0, moved: 0, unread: 0 };
   const removedKeys: string[] = [];
   const addedKeys = new Map<string, number>();
-  for (const change of ordered) {
+  for (const change of changes) {
     const was = change.before === null ? null : annexSide(change.modeBefore, change.before);
     const now = change.after === null ? null : annexSide(change.modeAfter, change.after);
     if (was?.kind === "unreadable" || now?.kind === "unreadable") {
