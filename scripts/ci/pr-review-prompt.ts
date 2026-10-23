@@ -423,7 +423,8 @@ export interface OriginalContentBlock {
 
 /**
  * The `original_content` facts of {@link OriginalContentFacts}, or null for null (a caller that
- * read no content has no such facts, and its messages are as they were). Pure.
+ * read no content has none, and builds no block). The review's own facts always hold theirs
+ * ({@link GitFacts}), so its messages always carry the block. Pure.
  *
  * A pass that was abandoned compared nothing, so every part it would have compared is
  * `not_decided`, the participant count is null and every other number is 0: the words say the
@@ -431,6 +432,9 @@ export interface OriginalContentBlock {
  * refused is `not_decided` the same way. `anchor` is what protected the README's lines, so a tag
  * whose README could not be read says `merge_base`.
  */
+export function originalContentBlock(o: OriginalContentFacts): OriginalContentBlock;
+export function originalContentBlock(o: null): null;
+export function originalContentBlock(o: OriginalContentFacts | null): OriginalContentBlock | null;
 export function originalContentBlock(o: OriginalContentFacts | null): OriginalContentBlock | null {
   if (o === null) return null;
   // What was compared; null for a part that was not, and for every part of an abandoned pass.
@@ -489,7 +493,6 @@ export function buildReviewMessages(input: {
   nonce: string;
 }): { system: string; user: string } {
   const { facts, evidence, pr, fromFork, nonce } = input;
-  const original = originalContentBlock(facts.original);
   const trusted = {
     files_changed: evidence.files_changed,
     // The files read: the file of a diff shown (cut or not), a file a diff shown in full repeats
@@ -510,7 +513,7 @@ export function buildReviewMessages(input: {
     changed_per_area: evidence.areas,
     // What the pull request changed of the original authors' content, in closed words and numbers.
     // Before the change summary, which stays last: the facts the model is calibrated on end there.
-    ...(original === null ? {} : { original_content: original }),
+    original_content: originalContentBlock(facts.original),
     change_summary: changeSummaryFacts(facts.summary),
   };
 

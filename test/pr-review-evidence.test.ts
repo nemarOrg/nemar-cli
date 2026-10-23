@@ -7423,6 +7423,28 @@ describe("the evidence observer", () => {
       keysMoved: 0,
       valuesEmptied: 0,
       platformFindings: 2,
+      // The release touches the description (the version) and CHANGES (the entry) and nothing the
+      // original authors published: Part B compared both and found nothing.
+      originalAbandoned: false,
+      anchorFromTag: false,
+      readmeAlteredLines: 0,
+      readmeInsideParagraph: 0,
+      readmeMinorEdits: 0,
+      readmeLaterAltered: 0,
+      readmeNotDecided: false,
+      changesAlteredLines: 0,
+      changesNotDecided: false,
+      authorFieldsAltered: 0,
+      authorFieldsEdited: 0,
+      authorFieldsNotDecided: false,
+      participantValuesAltered: 0,
+      participantsNotDecided: false,
+      recordingsReplaced: 0,
+      recordingsMoved: 0,
+      recordingsUnread: 0,
+      originalUndecided: false,
+      originalFindings: 0,
+      originalFails: 0,
       listingMs: expect.any(Number),
       contentMs: expect.any(Number),
     });
@@ -7479,6 +7501,31 @@ describe("the evidence observer", () => {
       },
       text: "x".repeat(151),
     };
+    // Part B: every count a different number too, from facts built by hand. The README alters 5 lines
+    // and moves 8, CHANGES alters 7 and moves 9, three author keys are altered or removed, five are
+    // edited slightly and two are added or grown.
+    const partB = originalOf({
+      anchorLookup: "first_version_tag",
+      readme: compared({
+        anchor: "first_version_tag",
+        protectedAltered: 5,
+        moved: true,
+        movedLines: 8,
+        insertedInsideParagraph: 17,
+        minorEdits: 19,
+        laterAltered: 23,
+      }),
+      changes: changesCompared({ protectedAltered: 7, moved: true, movedLines: 9 }),
+      authorFields: fieldsOf({
+        altered: ["Name"],
+        removed: ["Authors", "Funding"],
+        minor: ["License", "DatasetDOI", "EthicsApprovals", "HowToAcknowledge", "Acknowledgements"],
+        added: ["ReferencesAndLinks"],
+        grown: ["Authors"],
+      }),
+      participantValues: 181,
+      recordings: { replaced: 22, typeChanged: 6, moved: 191, unread: 193 },
+    });
     const facts = {
       ...real,
       groups: [29, 31].map((files) => ({ ...group, files })),
@@ -7486,6 +7533,7 @@ describe("the evidence observer", () => {
       cosmeticOnlyFiles: 41,
       unreadFiles: 157,
       summary,
+      original: partB,
     };
     const evidence = {
       ...buildEvidence(real, NO_TEXT_PROBLEMS),
@@ -7529,15 +7577,113 @@ describe("the evidence observer", () => {
       valuesEmptied: 149,
       // One finding for the rows and columns, one for the keys.
       platformFindings: 2,
+      originalAbandoned: false,
+      anchorFromTag: true,
+      readmeAlteredLines: 5 + 8,
+      readmeInsideParagraph: 17,
+      readmeMinorEdits: 19,
+      readmeLaterAltered: 23,
+      readmeNotDecided: false,
+      changesAlteredLines: 7 + 9,
+      changesNotDecided: false,
+      authorFieldsAltered: 3,
+      authorFieldsEdited: 5,
+      authorFieldsNotDecided: false,
+      participantValuesAltered: 181,
+      participantsNotDecided: false,
+      recordingsReplaced: 22 + 6,
+      recordingsMoved: 191,
+      recordingsUnread: 193,
+      originalUndecided: true,
+      // Part A fills two of the three places; the text and the fields share the one left, and the
+      // fail is the platform's whatever the review says.
+      originalFindings: 1,
+      originalFails: 1,
       listingMs: 163,
       contentMs: 167,
     });
     expect(stat(true, false, false)).toEqual({ ...stated, readIncomplete: true, truncated: false });
     expect(stat(false, false, true)).toEqual({ ...stated, listCut: true, truncated: false });
-    // The fixture does its job only while no two counts are alike.
-    const counts = Object.values(stated).filter((v) => typeof v === "number");
+    // The fixture does its job only while no two counts are alike, the two that are 0 or 1 by their
+    // nature aside.
+    const counts = Object.values(stated).filter((v) => typeof v === "number" && v > 1);
     expect(new Set(counts).size).toBe(counts.length);
-    expect(counts).toHaveLength(23);
+    expect(counts).toHaveLength(34);
+  });
+
+  test("each part of Part B that is not decided is told apart in the stats", () => {
+    const real = gatherGitFacts(stats().dir, stats().base, stats().head);
+    const evidence = buildEvidence(real, NO_TEXT_PROBLEMS);
+    const of = (original: OriginalContentFacts) =>
+      evidenceStats({ ...real, original }, evidence, { listingMs: 1, contentMs: 2 });
+    const flags = (s: EvidenceStats) => ({
+      originalAbandoned: s.originalAbandoned,
+      readmeNotDecided: s.readmeNotDecided,
+      changesNotDecided: s.changesNotDecided,
+      authorFieldsNotDecided: s.authorFieldsNotDecided,
+      participantsNotDecided: s.participantsNotDecided,
+      originalUndecided: s.originalUndecided,
+    });
+    const none = {
+      originalAbandoned: false,
+      readmeNotDecided: false,
+      changesNotDecided: false,
+      authorFieldsNotDecided: false,
+      participantsNotDecided: false,
+      originalUndecided: false,
+    };
+    expect(flags(of(originalOf()))).toEqual(none);
+    const refused = { status: "refused", refusal: "binary" } as const;
+    expect(flags(of(originalOf({ readme: refused })))).toEqual({
+      ...none,
+      readmeNotDecided: true,
+      originalUndecided: true,
+    });
+    expect(flags(of(originalOf({ changes: refused })))).toEqual({
+      ...none,
+      changesNotDecided: true,
+      originalUndecided: true,
+    });
+    expect(flags(of(originalOf({ authorFields: fieldsOf({ unparsed: true }) })))).toEqual({
+      ...none,
+      authorFieldsNotDecided: true,
+      originalUndecided: true,
+    });
+    expect(flags(of(originalOf({ participantValues: null })))).toEqual({
+      ...none,
+      participantsNotDecided: true,
+      originalUndecided: true,
+    });
+    // Annexed files that could not be read are undecided without a part of their own.
+    expect(
+      flags(of(originalOf({ recordings: { replaced: 0, typeChanged: 0, moved: 0, unread: 1 } }))),
+    ).toEqual({ ...none, originalUndecided: true });
+    // Markup that can hide text is undecided too, and no part is named for it.
+    expect(flags(of(originalOf({ readme: compared({ hidingMarkupInserted: 1 }) })))).toEqual({
+      ...none,
+      originalUndecided: true,
+    });
+    // An abandoned pass: every part is not decided, and the pass is told apart from them.
+    expect(flags(of(ORIGINAL_ABANDONED))).toEqual({
+      originalAbandoned: true,
+      readmeNotDecided: true,
+      changesNotDecided: true,
+      authorFieldsNotDecided: true,
+      participantsNotDecided: true,
+      originalUndecided: false,
+    });
+    expect(of(ORIGINAL_ABANDONED)).toMatchObject({ originalFindings: 1, originalFails: 0 });
+    // The fail is the verdict's: an abandoned pass is never one, an alteration always is.
+    expect(of(originalOf({ participantValues: 1 }))).toMatchObject({
+      originalFindings: 1,
+      originalFails: 1,
+    });
+    expect(
+      of(originalOf({ recordings: { replaced: 1, typeChanged: 0, moved: 0, unread: 0 } })),
+    ).toMatchObject({
+      originalFindings: 1,
+      originalFails: 0,
+    });
   });
 
   test("unreadFiles counts exactly the wanted files that are not covered, and readIncomplete is unreadFiles > 0", () => {
