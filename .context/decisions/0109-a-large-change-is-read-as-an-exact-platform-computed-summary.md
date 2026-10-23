@@ -80,7 +80,7 @@ The paragraph says that only the files the summary summarized are counted in the
 
 Part B, what a contributor may change of the original authors' content (questions B1 to B7), was answered with the design's defaults the same day.
 Its facts are computed by a pure module (design, "As built (Phase 7)") and acted on by the job (design, "As built (Phase 8)").
-A changed original README or CHANGES line, a changed author-owned field or a changed participant value sets `no_degradation` to `fail` before the report is parsed, a lowering the script is allowed to make like every platform finding, and a model cannot raise it; a replaced recording, anything that could not be compared and an abandoned pass are `unknown`; the check then tells the author to use CHANGES, a new section or an administrator.
+A README or CHANGES line altered beyond a minor edit, moved or removed, an author-owned field altered or removed, or a changed participant value sets `no_degradation` to `fail` before the report is parsed, a lowering the script is allowed to make like every platform finding, and a model cannot raise it; a replaced recording, anything that could not be compared and an abandoned pass are `unknown`; the check then tells the author to use CHANGES, a new section or an administrator.
 The README is compared with the one at the dataset's first version tag when the job can list the tags and holds the tag's commit, and otherwise every line at the merge base is protected, so a failed lookup is never leniency.
 
 ### Release order
@@ -103,7 +103,7 @@ No new budget enters the job: ADR 0107's 45.4 minutes are unchanged.
 - An unrelocated or unkept removal in a file the summary summarized is a platform blocker, at 3 files or at 3,000, whether or not that file was also shown as a diff.
   A removal in a file the summary did not summarize is read from its diff by the model, as before the summary existed, and when that diff is not shown in full the pull request is incomplete, as before.
 - The prompt is a calibrated one, changed: the model calibration of ADR 0107 is required again before the check is required.
-- The longest review message, system prompt included, grows to 261,018 characters (it was 258,381 before Part B), under the 300,000 a test holds it to.
+- The longest review message, system prompt included, grows to 261,139 characters (it was 258,381 before Part B), under the 300,000 a test holds it to.
 - Two values that the fence makes equal (a `<facts>` and a `</facts>`) used to show as equal text with no note on where they differ, because the note was computed before the fence.
   No loss could hide this way, since a removal is an atom of its own with a finding; the calibration phase fixed it (`fencedForm` in the summary module, held equal to the prompt's fence by a test over generated text).
 - Measured on the real code, not the prototype (design section 12.4, 86 frozen pull requests, no network, no model): 5,482 of 9,208 changed files are accounted for, 15 pull requests are truncated (7 of them by the 400-name cut), and 18 carry a platform blocker.

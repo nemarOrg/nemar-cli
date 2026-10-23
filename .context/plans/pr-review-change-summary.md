@@ -1543,22 +1543,26 @@ The facts are tripwires, not a proof: Markdown and HTML can be bent in more ways
 - *Normalization* (B2.1.2) removes more than the two artifacts named there: trailing spaces and tabs, a lone CR (a line break, as in CommonMark), a BOM, and blank lines, whose positions are first recorded as paragraph breaks.
   A non-UTF-8 side is read as ISO-8859-1 and sets `notUtf8`.
   Lines are counted while splitting and the work stops at the cap, so a flood of short lines costs about as much as its bytes.
-- *Protected lines* (B2.1.4): for a README, every base line whose text occurs anywhere in the anchor; for CHANGES every base line.
-  An anchor document with no lines at all counts as no anchor (every base line is protected), like a first version without a README.
+- *Protected lines* (B2.1.4): for a README, every base line whose text occurs anywhere in the anchor, and every base line that replaces an anchor line by a minor edit (the anchor is aligned with the base and the hunks are paired as for minor edits), so a typo fixed after the tag does not leave its line open to a rewrite; for CHANGES every base line.
+  An anchor document with no lines, and an alignment past the edit-distance cap, count as no anchor (every base line is protected), like a first version without a README.
+  Edits that add up past the minor bound relative to the anchor stop protecting the line.
   Counting copies ("the first k occurrences") can protect the wrong copy of a duplicated line and call a deleted original clean, so a duplicate that was added later is protected too (a rare false fail).
 - *The edit-distance cap* (B2.1.3): past 2,000 the module refuses the pair (`edit_distance_cap`) instead of counting every protected line as altered, so Phase 8 maps it to `unknown`.
   A pure insertion or a pure removal is never capped.
   Limits: 4 MiB and 20,000 lines per side, 16 parts, 32 tags tried.
 - *Minor edits* pair the j-th removed line of a hunk (of any kind) with its j-th inserted line, and only a protected README line can be minor; CHANGES allows none.
   Whole-line moves are matched against the inserted lines that no minor edit took, and `movedLines` counts them (the B4 note needs a count).
+- *Paragraphs and lines put inside them*: blank lines separate paragraphs, and an ATX heading, the line after it and a list item each start one; fenced code, tables, setext headings and block quotes are not parsed, so plain lines are governed by blank lines alone.
+  A run of new lines is *inside* an original paragraph only when the head shows no blank line before it and none after it, between two kept original lines that were adjacent in one paragraph; a blank-separated section inserted into an unbroken README is not inside, and neither is a section or a list item added in a README without blank lines around its headings.
 - *Facts added to `ProseFacts`*: `protectedLines`, `movedLines`, `notUtf8`, `partsBefore`, `partsAfter`, and three tripwires that the design did not have, because without them every original line can survive verbatim while the rendered README no longer shows it.
   `hidingMarkupInserted` reads each run of new head lines as one text and counts the runs that open a comment or close one (`<!--`, `-->`), open a processing instruction, a `<!` declaration or CDATA, leave a tag or a quoted attribute open, or open a link reference definition whose title or destination stays open.
   It also counts a run that opens or closes one of 17 elements that hide or script text (`details`, `script`, `style`, `template`, `noscript`, `textarea`, `iframe`, `object`, `dialog`, `title`, `datalist`, `noembed`, `noframes`, `video`, `audio`, `canvas`, `map`), or carries a `hidden` attribute or `display:none`; an arrow written `-->` counts too.
-  A run that is attached to an original paragraph (see `joinedInsertedRuns`) is also counted when one of its lines is a complete link reference definition, a footnote definition or a standalone image, because such a line swallows the paragraph it touches; in a new paragraph of its own they are ordinary and are not counted.
+  A run that is attached to an original paragraph (see `joinedInsertedRuns`) is also counted when one of its lines is a footnote definition, which swallows the paragraph it touches, or leaves a link definition open.
+  A complete link reference definition and an image line are ordinary there (a reference appended to a reference block, a badge under the title), and so is code in backticks: inline code is blanked before any markup check, so `a<b` and `p < 0.05` are not open tags, while a fenced line `if a<b` still is (fences are not parsed).
   The replacement text of a minor edit is counted when it is such a definition or image, or when it adds a `<`, `>`, `[` or `]` that the original line did not have (an added exclamation mark or comma is an ordinary typo fix).
   Strike-through (`<s>`, `<del>`, `~~`) is not counted: it renders visible and marked as deleted.
   `shownPartReplaced` is true when a protected line that is kept moves out of the README the platform shows into another root part (which also covers a new `README.md` shadowing the original `README`), or when the base had a shown README and the head has none (`README.md` renamed to `readme.md`).
-  `joinedInsertedRuns` counts the runs of new lines that sit in a head paragraph which also holds a kept original line, with no blank line between, which is how a line placed before or after a paragraph becomes part of it in the rendering.
+  `joinedInsertedRuns` counts the runs of new lines that sit in a head paragraph which also holds a kept original line, with no blank line between (a heading or a list item starts its own paragraph), which is how a line placed before or after a paragraph becomes part of it in the rendering.
   It is not part of `proseAltered`, because appending to a paragraph is permitted; Phase 8 decides what it means with the numbers above, and a new entry written without a blank line in CHANGES is ordinary and must not make a pull request unknown.
 - *Author fields* (B2.2): top-level keys only.
   A missing value (`isMissingJson`) on both sides is no change; value to missing is `removed`; value to value follows the key.
@@ -1601,9 +1605,12 @@ Where the text above, the Phase 7 note and this note differ, this note is what w
 - The verdict (`originalVerdict`) is one pure function: a README or CHANGES line altered or moved, a line put inside an original paragraph, an author-owned field altered or removed and a participant value changed are a fail (the script lowers `no_degradation` to `fail` before the report is parsed, `lowerToFail`, and only for a valid model answer); a replaced or retyped recording, a participants table that could not be counted, an unparsed description, an unread side, any refusal (the edit-distance cap included), hiding markup and a lost or shadowed shown README are `unknown`; the abandoned pass is `unknown` and nothing else of Part B is used; the rest (minor edits, later text, line endings, a final newline, added or grown fields, moved pointers, joined runs) is information.
   A moved recording never cancels a removal fact of Part A.
 - Part B gets the platform-finding places that Part A leaves (`3 - Part A's`, at least one) in the order text, fields, recordings, undecided; with one place left, text and fields merge into one `original_text_altered` finding.
-  Notes are fixed templates of numbers and closed key names, at most 195 characters at seven-digit counts and over every subset of the nine key names, with singular forms for a count of one, and a count form for four or more keys; a finding's path is the README part shown at the merge base (else the first CHANGES part), the description, or the first changed participants file, recorded on the facts.
+  Notes are fixed templates of numbers and closed key names, at most 195 characters at seven-digit counts and over every subset of the nine key names, with singular forms for a count of one, and a count form for four or more keys.
+  The recordings note says "data files", because a plain-git file in the recordings area counts too.
+  A finding's path is the README part shown at the merge base (else the first README document part, else the first CHANGES part), the description, or the participants file whose class was counted, recorded on the facts.
   Recordings and undecided facts have no path.
-- The model is told by an `original_content` block of the facts, placed immediately before `change_summary`, and one system-prompt paragraph; counts are zero unless a document was compared, an abandoned pass says `not_decided` everywhere, and no text of a file ever enters the block.
+- The model is told by an `original_content` block of the facts, placed immediately before `change_summary`, and one system-prompt paragraph; the README and CHANGES counts are zero unless that document was compared, an abandoned pass says `not_decided` everywhere, and no text of a file ever enters the block.
+- A model finding that carries a code only the script may emit (the original-content codes, `recording_replaced`, and the other codes outside the review's schema) makes the answer `model_invalid`, so a model that escapes its schema cannot make the check show the original-content paragraph.
 - The check shows the B4 paragraph once, only when a finding is `original_text_altered` or `original_field_altered`.
 - Calibration prints a `PART-B` word and `B t/f/p/r` per pull request and a totals line from the same verdict the review uses; `--offline` never lists tags in either mode; `--without-summary` leaves Part B abandoned by its own start check.
 
@@ -1611,7 +1618,8 @@ Where the text above, the Phase 7 note and this note differ, this note is what w
 Every earlier number is unchanged: 5,482 files accounted for, 15 truncated, 18 with a platform blocker of Part A, 0 abandoned, 0 hidden.
 - Part B fails 9 pull requests (text 2, fields 4, participants 3): `nm000501` #3 and `on002578` #2 (original README lines; the second only because there is no tag offline), `nm000424` #2, `nm000501` #2, `nm000513` #2 (`Name`, opened by the platform's own account, which the Worker exempts in production) and `on006126` #1 (`ReferencesAndLinks`), and `on005420` #1 (37 participant values), `on004588` #1 (5 re-padded ids), `on005628` #1 (2 values in `participants.json`).
 - 5 are `unknown` only: `on003343` #3, `on003029` #1 and `on004703` #1 (recordings), `on003620` #1 and `on003195` #1 (a participants table that could not be counted: a ragged row, an empty column name).
-- 2 are information (`on007353` #1, a minor `Funding` edit; `on004306` #1, moved pointers) and 70 are clear, which includes the 27 artifact READMEs, the 64 CHANGES changes and the eight empty-field pull requests.
+- 2 are information (`on007353` #1, a minor `Funding` edit; `on004306` #1, moved pointers) and 70 are clear.
+  None of the three kinds that the design worried about is flagged by its own part: the 27 artifact READMEs, the 64 CHANGES changes and the eight empty-field pull requests (some of them are held or failed for another part, so they are not all among the 70).
 - The plan expected 7 or 8 fails; `on005628` #1 is the ninth, and `on003195` #1 the fifth unknown, both from the approved participant-value rule (any change of a non-missing participant value fails, including text in `participants.json`).
 
 **Decided as built.**
@@ -1623,7 +1631,7 @@ Every earlier number is unchanged: 5,482 files accounted for, 15 truncated, 18 w
 
 **Corrections to the text above.**
 - B4's author-field note (210 characters with three names) cannot hold nine names; the count form does.
-- B4's "recording files" is "annexed files" (`on004703`'s are sidecars); "first published" is true only of the README (the other parts are compared with the merge base); `readme_preserved` is not a fact (false on minor edits).
+- B4's "recording files" is "data files" (`on004703`'s are sidecars); "first published" is true only of the README (the other parts are compared with the merge base); `readme_preserved` is not a fact (false on minor edits).
 - B3 step 1 and slice 2 step 2 put the lookup in the listing pass; it is in the content pass because the facts stage may read only trees, commits, names and the description, and a spam-stopped review should not pay for it.
 - B3 step 3 and B5 say the anchor blobs join the batch; they have a read of their own, because the batch is all-or-nothing.
 - B2.4 says no blob is read beyond the pointers; every changed side needs a size check.
