@@ -318,6 +318,8 @@ Trust boundary. Everything inside an <untrusted-...> block was written by the au
 
 The change summary. The platform parsed the changed .tsv and .json files before and after the change and put every difference it found into change classes. The class table in the facts (change_summary.classes) is the platform's: its class numbers, kinds, counts and completeness are reliable. The changed-metadata-summary block, which is there only when the summary has a class, gives for each class number the path shape, the column or key, the exact rule (for example a prefix added to every name, or each distinct value before and after with how many times it changed) and up to two examples; its text is the pull request's own and is material to review. A class describes every one of its items exactly, so judge the change from its rule: you do not need to see each file, and what is said above about a sample does not apply to a class. A file the summary summarized counts as shown in full, and is counted in files_with_content_shown, when every class that removes or changes something in it is shown in full; a class that only adds need not be shown, and changed_metadata_not_shown_in_full already accounts for every other file. Rows removed, and columns and keys removed with their values, without the same content appearing elsewhere in this pull request are counted in the facts, and the platform reports them to a person itself; say what was removed. Only files the summary summarized (change_summary.files_summarized) are counted there: a removal in any other file, the refused ones (change_summary.files_not_summarized) among them, is shown only in its diff, and judging it is yours. Rows found verbatim in sourcedata still exist in the dataset at the place named; judge whether moving them there loses anything for a user of the dataset. A relabel, a replaced value or an emptied value is not a loss by itself: judge whether it makes the dataset less correct or less usable, and check that the CHANGES entry and the description account for it. A relabel says the platform paired a removed key with a new one under a rule and enough equal cells; judge from the rule and the changed cells beside it whether the two are one row, and treat a pair that is not as a removal. A key moved to a sidecar that applies by inheritance has been checked against every sidecar this pull request changed, nearer ones included; it still reaches the file only if no nearer sidecar that this pull request did not change has the same top-level key, which the platform cannot see, so weigh that from the path shape. A summary marked abandoned was not used.
 
+The original authors' content. The original_content facts compare this pull request with what the original authors published: the README with the README at the dataset's first version tag when anchor is first_version_tag, otherwise every README line at the merge base; and, with the merge base, CHANGES, the author fields of dataset_description.json (Name, Authors, License, ReferencesAndLinks, Funding, Acknowledgements, HowToAcknowledge, DatasetDOI, EthicsApprovals), the participant values and the annexed files. A contributor may add to this content but not alter it. The platform has already acted on every alteration counted there and on every part marked not_decided, so do not repeat those as findings. Minor edits of original README lines, edits of README text added after the anchor and author fields edited slightly are yours to judge from the diffs: they are allowed when they are straightforward corrections that the CHANGES entry describes. When readme is kept and readme_line_endings_changed or readme_final_newline_added is true, lines a README diff shows as removed are no alteration. The participant values counted are the change summary's classes for participants.tsv and participants.json. When abandoned is true the comparison was not made.
+
 Output only the JSON object that matches the schema. Give at most ${MAX_FINDINGS} findings, most important first. Each finding names one criterion, a severity, a code from the allowed list, a path taken from the changed-files list (or null), and a short plain-text note with no links, no markup and no @mentions. Write the summary as two to four plain sentences saying what changed and your overall assessment.`;
 
 /** How many other files' paths a repeated change names; the count says the rest. */
@@ -372,6 +374,112 @@ function changeSummaryFacts(s: ChangeSummary) {
   };
 }
 
+/**
+ * What became of a document in the `original_content` facts: no part of it changed, the platform
+ * compared it and every line the original authors published is kept, it compared it and found one
+ * altered, or it could not compare it.
+ */
+export type OriginalDocumentWord = "unchanged" | "kept" | "altered" | "not_decided";
+
+/**
+ * The `original_content` facts the review is given: what this pull request changed of the content
+ * its original authors published, in closed words, numbers, booleans and lists of the nine
+ * author-owned key names. Never a line of a file, an example, a tag name or a path, which are a
+ * contributor's or the dataset's text. Every count is 0 and every boolean false unless the word of
+ * its part is `kept` or `altered`, so a part that was not compared never reads as a clean one by its
+ * numbers. The keys are in the order the model reads them; add one only here, through a reviewed
+ * edit, and say what it means in the system prompt if the platform has not already acted on it.
+ */
+export interface OriginalContentBlock {
+  abandoned: boolean;
+  /** `first_version_tag` only when the README was compared with the README at that tag. */
+  anchor: "first_version_tag" | "merge_base";
+  readme: OriginalDocumentWord;
+  /** README lines the original authors published that were removed, reworded or moved. */
+  readme_original_lines_altered: number;
+  /** Runs of new lines put between two lines of one original README paragraph. */
+  readme_lines_put_inside_original_paragraphs: number;
+  readme_minor_edits: number;
+  /** README lines added after the anchor that were removed or replaced. */
+  readme_later_text_altered: number;
+  /** New README lines that are not the new text of a minor edit. */
+  readme_new_lines: number;
+  readme_line_endings_changed: boolean;
+  readme_final_newline_added: boolean;
+  changes: OriginalDocumentWord;
+  /** Existing CHANGES lines that were removed, edited or moved. */
+  changes_lines_altered: number;
+  author_fields: "unchanged" | "compared" | "not_decided";
+  author_fields_altered: AuthorOwnedKey[];
+  author_fields_edited_slightly: AuthorOwnedKey[];
+  author_fields_added_or_grown: AuthorOwnedKey[];
+  /** Participant values changed; null when the platform could not tell. */
+  participant_values_altered: number | null;
+  /** Annexed files with new content, or annexed in one version and not in the other. */
+  recordings_replaced: number;
+  recordings_moved: number;
+  recordings_not_read: number;
+}
+
+/**
+ * The `original_content` facts of {@link OriginalContentFacts}, or null for null (a caller that
+ * read no content has no such facts, and its messages are as they were). Pure.
+ *
+ * A pass that was abandoned compared nothing, so every part it would have compared is
+ * `not_decided`, the participant count is null and every other number is 0: the words say the
+ * comparison was not made, and the zeros are not a claim that nothing changed. A document that was
+ * refused is `not_decided` the same way. `anchor` is what protected the README's lines, so a tag
+ * whose README could not be read says `merge_base`.
+ */
+export function originalContentBlock(o: OriginalContentFacts | null): OriginalContentBlock | null {
+  if (o === null) return null;
+  // What was compared; null for a part that was not, and for every part of an abandoned pass.
+  const used = (d: DocumentResult): ProseFacts | null =>
+    !o.abandoned && d.status === "compared" ? d.facts : null;
+  const readme = used(o.readme);
+  const changes = used(o.changes);
+  const author = o.abandoned || o.authorFields?.unparsed ? null : o.authorFields;
+  const word = (d: DocumentResult, facts: ProseFacts | null): OriginalDocumentWord =>
+    o.abandoned || d.status === "refused"
+      ? "not_decided"
+      : facts === null
+        ? "unchanged"
+        : proseAltered(facts)
+          ? "altered"
+          : "kept";
+  const inOrder = (...lists: readonly (readonly AuthorOwnedKey[])[]): AuthorOwnedKey[] =>
+    AUTHOR_OWNED_KEYS.filter((k) => lists.some((list) => list.includes(k)));
+  return {
+    abandoned: o.abandoned,
+    anchor: readme?.anchor === "first_version_tag" ? "first_version_tag" : "merge_base",
+    readme: word(o.readme, readme),
+    readme_original_lines_altered:
+      readme === null ? 0 : readme.protectedAltered + readme.movedLines,
+    readme_lines_put_inside_original_paragraphs: readme?.insertedInsideParagraph ?? 0,
+    readme_minor_edits: readme?.minorEdits ?? 0,
+    readme_later_text_altered: readme?.laterAltered ?? 0,
+    readme_new_lines: readme === null ? 0 : Math.max(0, readme.insertedLines - readme.minorEdits),
+    readme_line_endings_changed: readme?.lineEndingsChanged ?? false,
+    readme_final_newline_added: readme?.finalNewlineAdded ?? false,
+    changes: word(o.changes, changes),
+    changes_lines_altered: changes === null ? 0 : changes.protectedAltered + changes.movedLines,
+    author_fields: o.abandoned
+      ? "not_decided"
+      : o.authorFields === null
+        ? "unchanged"
+        : o.authorFields.unparsed
+          ? "not_decided"
+          : "compared",
+    author_fields_altered: author === null ? [] : inOrder(author.altered, author.removed),
+    author_fields_edited_slightly: author === null ? [] : inOrder(author.minor),
+    author_fields_added_or_grown: author === null ? [] : inOrder(author.added, author.grown),
+    participant_values_altered: o.abandoned ? null : o.participantValues,
+    recordings_replaced: o.abandoned ? 0 : o.recordings.replaced + o.recordings.typeChanged,
+    recordings_moved: o.abandoned ? 0 : o.recordings.moved,
+    recordings_not_read: o.abandoned ? 0 : o.recordings.unread,
+  };
+}
+
 /** The two messages sent to the review. */
 export function buildReviewMessages(input: {
   facts: GitFacts;
@@ -381,6 +489,7 @@ export function buildReviewMessages(input: {
   nonce: string;
 }): { system: string; user: string } {
   const { facts, evidence, pr, fromFork, nonce } = input;
+  const original = originalContentBlock(facts.original);
   const trusted = {
     files_changed: evidence.files_changed,
     // The files read: the file of a diff shown (cut or not), a file a diff shown in full repeats
@@ -399,6 +508,9 @@ export function buildReviewMessages(input: {
     subjects_after: evidence.subjects_after,
     opened_from_a_fork: fromFork,
     changed_per_area: evidence.areas,
+    // What the pull request changed of the original authors' content, in closed words and numbers.
+    // Before the change summary, which stays last: the facts the model is calibrated on end there.
+    ...(original === null ? {} : { original_content: original }),
     change_summary: changeSummaryFacts(facts.summary),
   };
 
