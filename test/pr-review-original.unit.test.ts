@@ -848,12 +848,27 @@ describe("protectedMask", () => {
     expect(protectedMask("readme", ["a", "b"], null)).toEqual([true, true]);
   });
 
-  test("a README line is protected when the anchor has it, the first copies first", () => {
+  test("a README line is protected when its text is in the anchor, every copy of it", () => {
     expect(protectedMask("readme", ["a", "new", "b"], ["a", "b"])).toEqual([true, false, true]);
-    // One copy at the anchor protects one copy at the base: the first, and no rebalancing.
-    expect(protectedMask("readme", ["a", "x", "a"], ["a"])).toEqual([true, false, false]);
+    // Copies are not counted: one copy at the anchor protects every copy at the base.
+    expect(protectedMask("readme", ["a", "x", "a"], ["a"])).toEqual([true, false, true]);
     expect(protectedMask("readme", ["a"], ["a", "a"])).toEqual([true]);
-    expect(protectedMask("readme", ["a", "a", "a"], ["a", "a"])).toEqual([true, true, false]);
+    expect(protectedMask("readme", ["a", "a", "a"], ["a", "a"])).toEqual([true, true, true]);
+  });
+
+  test("the original copy is protected even when a later copy was added above it", () => {
+    // The anchor holds b then a; a copy of a was added above b later. Removing the original a
+    // (the last line) is an alteration, never later text: counting copies protected the wrong one.
+    const facts = readme(
+      { "README.md": "a\n\nb\n\na\n" },
+      { "README.md": "a\n\nb\n" },
+      { "README.md": "b\n\na\n" },
+    );
+    expect(facts.protectedLines).toBe(3);
+    expect(facts.protectedAltered).toBe(1);
+    expect(facts.laterAltered).toBe(0);
+    expect(facts.preserved).toBe(false);
+    expect(proseAltered(facts)).toBe(true);
   });
 });
 
@@ -1182,9 +1197,10 @@ describe("proseFacts: the adversarial cases of design B6", () => {
     expect(facts).toEqual(untouched(0, { partsBefore: 0, insertedLines: ORIGINAL_PROTECTED }));
   });
 
-  test("a line added after the anchor that repeats an original one is not protected", () => {
-    // The original line appears once at the tag and twice at the base; removing the later copy
-    // removes text added after the tag. Protecting by set instead of by count would fail it.
+  test("a later copy of an original line is protected too, so removing it is an alteration", () => {
+    // The original line appears once at the tag and twice at the base. Which copy is the original
+    // cannot be told from the text, so both are protected: removing the later one fails, the rare
+    // false fail on the conservative side.
     const repeated = `${ORIGINAL}\n## Notes\n\n${ORIGINAL_LINES[12]}\n`;
     const head = `${ORIGINAL}\n## Notes\n\nSee the recording section.\n`;
     const facts = readme(
@@ -1192,9 +1208,10 @@ describe("proseFacts: the adversarial cases of design B6", () => {
       { "README.md": head },
       { "README.md": ORIGINAL },
     );
-    expect(facts.protectedAltered).toBe(0);
-    expect(facts.laterAltered).toBe(1);
-    expect(proseAltered(facts)).toBe(false);
+    expect(facts.protectedLines).toBe(ORIGINAL_PROTECTED + 1);
+    expect(facts.protectedAltered).toBe(1);
+    expect(facts.laterAltered).toBe(0);
+    expect(proseAltered(facts)).toBe(true);
   });
 
   test("two copies of a protected line removed and one put back elsewhere: one moved, one altered", () => {
@@ -1644,15 +1661,11 @@ describe("proseFacts: properties over seeded random READMEs", () => {
         else lines.splice(at, 1, `Replacement ${edit}`);
       }
       const remaining = head.filter((lines) => lines.length > 0);
-      // Protection recomputed here, as the definition states it: an anchor copy for each base copy.
-      const left = new Map<string, number>();
-      for (const line of anchorLines ?? []) left.set(line, (left.get(line) ?? 0) + 1);
-      const protectedTexts = baseLines.filter((line) => {
-        if (anchorLines === null) return true;
-        const count = left.get(line) ?? 0;
-        left.set(line, count - 1);
-        return count > 0;
-      });
+      // Protection recomputed here as the definition states it, not with the module's helper: a
+      // base line is protected when its text is anywhere in the anchor, every line with no anchor.
+      const protectedTexts = baseLines.filter(
+        (line) => anchorLines === null || anchorLines.includes(line),
+      );
       const headLines = remaining.flat();
       const facts = readme(
         { README: joinParagraphs(paragraphs) },

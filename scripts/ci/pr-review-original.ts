@@ -21,7 +21,7 @@
  *    looks), never into "clean". The words are printed in a public log, so none is built from a path
  *    or a contributor's text.
  * 2. **Where a reading is doubtful, the reading that flags is the one taken.** Protection falls back
- *    to the stricter side, duplicate lines are matched without rebalancing, and a choice the rules
+ *    to the stricter side, every copy of an original line is protected, and a choice the rules
  *    leave open goes the way that reports more, never the way that could call an alteration clean.
  */
 
@@ -586,11 +586,13 @@ export function alignLines(
  * flag per base line.
  *
  * For CHANGES, every line: its history is kept whole, and a new entry goes beside the old ones.
- * For the README, the lines that are in the anchor document, the README at the first version tag
- * that is an ancestor of the merge base: for each distinct text, the first
- * `min(anchor count, base count)` of its occurrences in the base. Which copy of a repeated line is
- * the original is not rebalanced: the first copies are, so removing a later copy that is in fact
- * the original reads as an alteration (a rare false fail, never a false pass).
+ * For the README, every line whose text is in the anchor document, the README at the first version
+ * tag that is an ancestor of the merge base: every copy of that text, however many the anchor has.
+ * Which copy of a repeated line is the original cannot be told from the text, and counting copies
+ * would have to guess: protecting the first ones can leave the original unprotected when a later
+ * copy was added above it, and its removal would then read as later text (a false pass). Protecting
+ * every copy errs the other way: removing a copy added after the tag reads as an alteration, a rare
+ * false fail, which is the side to err on.
  *
  * With no anchor (null) every base line is protected. That is the strict side, and every failure to
  * find an anchor (no tag, no README at the tag, an anchor document that could not be read) falls
@@ -602,14 +604,8 @@ export function protectedMask(
   anchor: readonly string[] | null,
 ): boolean[] {
   if (document === "changes" || anchor === null) return base.map(() => true);
-  const left = new Map<string, number>();
-  for (const line of anchor) left.set(line, (left.get(line) ?? 0) + 1);
-  return base.map((line) => {
-    const count = left.get(line) ?? 0;
-    if (count === 0) return false;
-    left.set(line, count - 1);
-    return true;
-  });
+  const original = new Set(anchor);
+  return base.map((line) => original.has(line));
 }
 
 /**
