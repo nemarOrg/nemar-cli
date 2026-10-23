@@ -2664,6 +2664,12 @@ export async function sendAnonymityFindingsEmail(
 export const IDENTIFIER_SWEEP_EMAIL_TIMEOUT_MS = 15_000;
 
 /**
+ * How long one per-recipient send of a broadcast on the Cloudflare provider waits for the
+ * binding, so a hung call fails that recipient instead of holding the admin request.
+ */
+export const BROADCAST_SEND_TIMEOUT_MS = 10_000;
+
+/**
  * What the identifier sweep's weekly report says (ADR 0088). Structurally the
  * report `identifier-sweep-report.ts` renders, re-declared here so `email.ts`
  * does not import a sweep; the dependency runs the other way.

@@ -9,6 +9,7 @@
 import { z } from "zod";
 import { escapeHtml } from "../lib/escape";
 import {
+  BROADCAST_SEND_TIMEOUT_MS,
   type EmailDeliveryEnv,
   type ResolvedEmailProvider,
   applyDevWrap,
@@ -276,7 +277,8 @@ interface ResendBatchResponseItem {
  * Send broadcast emails via Resend batch API in chunks of 100, or, when
  * EMAIL_PROVIDER=cloudflare (staging), one message per allowed recipient through the
  * same single-send path as every other mail (sequential: the allow-listed set is
- * tiny there; announcements move to a Queue in phase 2 of epic #1893).
+ * tiny there, and each send is bounded by `sendTimeoutMs` so a hung binding cannot hold the
+ * admin request; announcements move to a Queue in phase 2 of epic #1893).
  * Records result in the broadcast_emails audit table.
  *
  * `env` (issue #957) is the SAME delivery-level fence services/email.ts's
@@ -303,6 +305,7 @@ export async function sendBroadcast(
   replyTo?: string,
   isDev?: boolean,
   env?: EmailDeliveryEnv,
+  sendTimeoutMs: number = BROADCAST_SEND_TIMEOUT_MS,
 ): Promise<BroadcastResult> {
   // Guard: the provider must be configured before iterating recipients. A missing or blank
   // Resend key, an unusable EMAIL_PROVIDER, or a Cloudflare provider with no binding would
@@ -354,7 +357,17 @@ export async function sendBroadcast(
     // subject and body.
     for (const to of allowedRecipients) {
       try {
-        await sendEmail(to, params.subject, html, resendApiKey, fromEmail, replyTo, isDev, env);
+        await sendEmail(
+          to,
+          params.subject,
+          html,
+          resendApiKey,
+          fromEmail,
+          replyTo,
+          isDev,
+          env,
+          sendTimeoutMs,
+        );
         totalSent++;
       } catch (error) {
         failedRecipients.push(to);

@@ -10,7 +10,7 @@
 import type { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
 import { sendBroadcast } from "../src/services/broadcast";
-import type { EmailDeliveryEnv } from "../src/services/email";
+import type { CloudflareSendEmail, EmailDeliveryEnv } from "../src/services/email";
 import { bindingError, recordingBinding } from "./helpers/cloudflare-email";
 import { freshDb, realD1 } from "./helpers/d1";
 import { withFakeResend } from "./helpers/resend";
@@ -120,6 +120,39 @@ describe("sendBroadcast on the Cloudflare provider", () => {
     expect(result.failed_recipients).toEqual(["bad@nemar.test"]);
     expect(lines.join("\n")).not.toContain("bad@nemar.test");
     expect(lines.join("\n")).toContain("b***@nemar.test");
+  });
+
+  test("a recipient whose send hangs past the bound is failed, not waited on", async () => {
+    const sent: unknown[] = [];
+    const binding: CloudflareSendEmail = {
+      send: (message) => {
+        sent.push(message.to);
+        return message.to === "slow@nemar.test"
+          ? new Promise(() => {})
+          : Promise.resolve({ messageId: "<ok@staging.nemar.test>" });
+      },
+    };
+    const db = freshDb();
+    const result = await sendBroadcast(
+      realD1(db),
+      "",
+      FROM,
+      {
+        sentById: seedSender(db),
+        group: "admins",
+        subject: "Maintenance window",
+        bodyMarkdown: "Hello",
+        recipients: ["a@nemar.test", "slow@nemar.test", "c@nemar.test"],
+      },
+      REPLY_TO,
+      true,
+      stagingEnv(binding),
+      25,
+    );
+    expect(sent).toEqual(["a@nemar.test", "slow@nemar.test", "c@nemar.test"]);
+    expect(result.recipient_count).toBe(2);
+    expect(result.failed_recipients).toEqual(["slow@nemar.test"]);
+    expect(result.failure_count).toBe(1);
   });
 
   test("a mistyped EMAIL_PROVIDER aborts as unconfigured and sends nothing", async () => {
