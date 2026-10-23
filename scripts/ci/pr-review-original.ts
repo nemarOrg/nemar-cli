@@ -769,15 +769,19 @@ export interface ProseFacts {
    * Places where new markup can hide original text, counted two ways and added together. Each run
    * of consecutive head lines that are not kept verbatim (inserted lines and the new text of minor
    * edits together) counts once when {@link hidesText} finds markup in it (it reads the run as one
-   * text, so a tag split across lines is one tag), or when one of its new lines is a footnote
-   * definition inside an original paragraph (a footnote definition takes the lines after it as its
-   * text). And each minor edit counts once when its new text can hide the line it replaces
+   * text, so a tag split across lines is one tag), or when one of its new lines, inside an original
+   * paragraph, is a footnote definition (which takes the lines after it as its text) or a link
+   * definition whose next head line starts with `"`, `'` or `(` (CommonMark takes that line, and
+   * every line to the closing mark, as the definition's title, which renders as nothing), or when
+   * it starts with such a line right under a kept link definition. The title test is coarse, the
+   * safe side: a title closed before the end of its line is none, and still counts. And each
+   * minor edit counts once when its new text can hide the line it replaces
    * ({@link minorEditHides}). Wrapping original paragraphs in such markup keeps every protected
    * line verbatim or within a minor edit, so without this fact it would read as preserved. A
-   * complete link definition or an image line next to an original paragraph is ordinary and not
-   * counted (a definition ends on its line and cannot interrupt a paragraph; an image line and the
-   * text beside it render as one visible paragraph), and neither is a footnote in a paragraph of
-   * its own.
+   * complete link definition followed by any other line, and an image line, next to an original
+   * paragraph are ordinary and not counted (the definition cannot take a plain line, and cannot
+   * interrupt a paragraph; an image line and the text beside it render as one visible paragraph),
+   * and neither is a footnote in a paragraph of its own.
    */
   hidingMarkupInserted: number;
   /**
@@ -835,6 +839,9 @@ const DEFINITION = /^ {0,3}\[\^?[^\]]*\]:/;
 // negated one that stops at its closing bracket, so neither can backtrack on a long line.
 const STANDALONE_IMAGE = /^[ \t]*!\[[^\]]*\]\([^)]*\)[ \t]*$/;
 const LINKED_IMAGE = /^[ \t]*\[!\[[^\]]*\]\([^)]*\)\]\([^)]*\)[ \t]*$/;
+
+/** The start of a link definition's title on a line of its own: blanks, then `"`, `'` or `(`. */
+const TITLE_START = /^[ \t]*["'(]/;
 
 /** The start of a GFM footnote definition: up to three spaces, `[^label]` and a colon. */
 const FOOTNOTE = /^ {0,3}\[\^[^\]]*\]:/;
@@ -963,12 +970,12 @@ function markupHides(text: string): boolean {
  * definition left open on one of its lines ({@link opensLinkDefinition}), or HTML that hides in the
  * run read as one text, its lines joined by a space ({@link markupHides}), so a tag split across
  * lines (`<div` then `hidden>`) is read as the one tag it is. Inline code is read like any text:
- * telling a code span from live HTML takes a whole CommonMark parse (an escaped backtick, a backtick
- * pair across a line break or inside an attribute leaves the markup live), so what looks like
- * markup is flagged even between backticks, the safe side. The cost: a `<` before a letter with no
- * `>` after it in a new run (`a<b`, in prose or in code) holds the pull request as unknown for a
- * person; `p < 0.05` and closed tags (`<label>`, `List<String>`) do not. One pass over the run,
- * whatever it holds.
+ * telling a code span from live HTML takes a whole CommonMark parse (an escaped backtick, a
+ * backtick pair across a line break or inside an attribute leaves the markup live), so what looks
+ * like markup is flagged even between backticks, the safe side. The cost: a `<` before a letter
+ * with no `>` after it in a new run (`a<b`, in prose or in code) holds the pull request as unknown
+ * for a person; `p < 0.05` and closed tags (`<label>`, `List<String>`) do not. One pass over the
+ * run, whatever it holds.
  */
 export function hidesText(run: readonly string[]): boolean {
   return run.some(opensLinkDefinition) || markupHides(run.join(" "));
@@ -1192,14 +1199,25 @@ export function proseFacts(input: {
   }
   const attached = (line: number): boolean => holdsOriginal[paragraphOf[line] as number] === true;
   const isNew = (line: number): boolean => notKept.has(line) && !takenByMinor.has(line);
-  // A run of lines not kept hides when its markup does, or when one of its new lines is a footnote
-  // definition inside an original paragraph; a minor edit hides on its own.
+  // A line a link definition right above it would take as its title: no blank line between, and
+  // an opening quote or parenthesis first. Read coarsely, the safe side: a title closed before the
+  // end of its line (`(Smith 2020) found`) is no title, and still counts.
+  const isTitle = (line: number): boolean => {
+    const at = head[line];
+    return at !== undefined && !at.paragraphStart && TITLE_START.test(at.text);
+  };
+  const isDefinition = (line: number): boolean =>
+    head[line] !== undefined && DEFINITION.test((head[line] as ProseLine).text);
+  // A run of lines not kept hides when its markup does, or, inside an original paragraph, when one
+  // of its new lines is a footnote definition or a link definition a title line follows, or when
+  // it starts with a title line under a kept link definition; a minor edit hides on its own.
   const hidingRuns = runsOf((line) => notKept.has(line)).filter(([first, last]) => {
     if (hidesText(head.slice(first, last + 1).map((line) => line.text))) return true;
+    if (attached(first) && isTitle(first) && isDefinition(first - 1)) return true;
     for (let line = first; line <= last; line++) {
-      if (isNew(line) && attached(line) && FOOTNOTE.test((head[line] as ProseLine).text)) {
-        return true;
-      }
+      if (!isNew(line) || !attached(line)) continue;
+      const text = (head[line] as ProseLine).text;
+      if (FOOTNOTE.test(text) || (isDefinition(line) && isTitle(line + 1))) return true;
     }
     return false;
   }).length;

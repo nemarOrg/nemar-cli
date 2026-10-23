@@ -1835,6 +1835,92 @@ describe("proseFacts: the tripwires", () => {
     expect(above("[1]: <https://example.org").hidingMarkupInserted).toBe(1);
   });
 
+  // Original paragraphs that open with a parenthesis, a double quote and a single quote: a link
+  // definition right above one takes that line, to its closing mark, as the definition's title,
+  // which renders as nothing. micromark with GFM renders each head below without the line.
+  const OPENED = [
+    "# Notes",
+    "",
+    "(Recorded at the university hospital between 2018 and 2019.)", // 2
+    "The montage followed the international 10-20 system.",
+    "",
+    '"The tasks were explained to each participant in their own language."', // 5
+    "",
+    "'The rare targets were shown on one trial in five.'", // 7
+  ].join("\n");
+  const DEFINED = "[x]: https://example.org/x";
+
+  test("a complete link definition right above an original line opening a title hides it", () => {
+    for (const at of [2, 5, 7]) {
+      const head = edited((lines) => lines.splice(at, 0, DEFINED), OPENED);
+      const facts = readme({ "README.md": OPENED }, { "README.md": head });
+      expect(facts.preserved, head).toBe(true);
+      expect(facts.joinedInsertedRuns, head).toBe(1);
+      expect(facts.hidingMarkupInserted, head).toBe(1);
+    }
+  });
+
+  test("the same definition after a blank line, or above a plain line, does not", () => {
+    const facts = (head: string) => readme({ "README.md": OPENED }, { "README.md": head });
+    // A blank line ends the definition: the line after it is a paragraph of its own.
+    expect(
+      facts(edited((lines) => lines.splice(2, 0, DEFINED, ""), OPENED)).hidingMarkupInserted,
+    ).toBe(0);
+    // A new plain line between: the definition takes nothing, and the two lines below render as
+    // one paragraph.
+    const between = edited((lines) => lines.splice(2, 0, DEFINED, "See the notes below."), OPENED);
+    expect(facts(between).hidingMarkupInserted).toBe(0);
+    // Right above the plain second line of the first paragraph: no title, and a definition cannot
+    // interrupt a paragraph, so it renders as text.
+    expect(facts(edited((lines) => lines.splice(3, 0, DEFINED), OPENED)).hidingMarkupInserted).toBe(
+      0,
+    );
+    // Right below the first paragraph, a blank line before the quoted one: the definition stays in
+    // the first paragraph as text and the quoted paragraph renders.
+    expect(facts(edited((lines) => lines.splice(4, 0, DEFINED), OPENED)).hidingMarkupInserted).toBe(
+      0,
+    );
+  });
+
+  test("a title closed before the end of its line is none, and still counts: the safe side", () => {
+    // micromark renders this line: the definition ends at its destination. The fact counts it.
+    const base = "# Notes\n\n(Smith 2020) found the same effect in older adults.\n";
+    const head = `# Notes\n\n${DEFINED}\n(Smith 2020) found the same effect in older adults.\n`;
+    expect(readme({ "README.md": base }, { "README.md": head }).hidingMarkupInserted).toBe(1);
+  });
+
+  test("a title line put under a kept link definition hides the original line it takes", () => {
+    const base =
+      "# Notes\n\n[1]: https://doi.org/10.1000/a\nThe montage followed the 10-20 system.\n";
+    // An inserted opening parenthesis and an inserted closing one: the original line between is
+    // the definition's title.
+    const wrapped = base
+      .replace("The montage", "(\nThe montage")
+      .replace("system.\n", "system.\n)\n");
+    const facts = readme({ "README.md": base }, { "README.md": wrapped });
+    // The opening line falls between the definition and the line, both kept: that alone alters.
+    expect(facts.insertedInsideParagraph).toBe(1);
+    expect(facts.hidingMarkupInserted).toBe(1);
+    // A minor edit that opens the original line with a parenthesis: nothing else moves, and no
+    // bracket is added, so only the run counts.
+    const opened = base.replace(
+      "The montage followed the 10-20 system.",
+      "(The montage followed the 10-20 system.)",
+    );
+    const edit = readme({ "README.md": base }, { "README.md": opened });
+    expect(edit.protectedAltered + edit.insertedInsideParagraph + edit.joinedInsertedRuns).toBe(0);
+    expect(edit.minorEdits).toBe(1);
+    expect(edit.hidingMarkupInserted).toBe(1);
+    // The same line opened with no definition above it is ordinary.
+    const plain = "# Notes\n\nThe montage followed the 10-20 system.\n";
+    const free = readme(
+      { "README.md": plain },
+      { "README.md": plain.replace("The", "(The").replace("system.", "system.)") },
+    );
+    expect(free.minorEdits).toBe(1);
+    expect(free.hidingMarkupInserted).toBe(0);
+  });
+
   test("a reference appended to an original reference block, or a badge under the title, is ordinary", () => {
     const references = "# Title\n\n## References\n\n[1]: https://doi.org/10.1000/a\n";
     const appended = `${references}[2]: https://doi.org/10.1000/b\n`;
