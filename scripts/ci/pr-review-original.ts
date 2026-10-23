@@ -160,6 +160,12 @@ export interface NormalizedText {
   breaks: LineBreaks;
   /** The text is not empty and its last character is a line break. */
   endsWithBreak: boolean;
+  /**
+   * The text has more lines than the `maxLines` it was read with: reading stopped at the first line
+   * past the bound, so `lines` holds `maxLines + 1` lines and `breaks` and `endsWithBreak` describe
+   * nothing. A caller that sees it refuses the text.
+   */
+  overLimit: boolean;
 }
 
 /** Whether a UTF-16 code unit is a space or a tab, the only characters stripped from a line's end. */
@@ -181,8 +187,15 @@ function isTrailingBlank(unit: number): boolean {
  *
  * Trailing blanks are stripped by a loop from the end, not by a regular expression: `/[ \t]+$/`
  * backtracks over every run of spaces that is not at the end, which is quadratic in a hostile line.
+ *
+ * With `maxLines`, reading stops at the first line past it (`overLimit`), so the lines a refused
+ * text costs are bounded by the cap and not by its length.
  */
-export function normalizeProse(text: string): NormalizedText {
+export function normalizeProse(
+  text: string,
+  maxLines: number = Number.POSITIVE_INFINITY,
+): NormalizedText {
+  const over: NormalizedText = { lines: [], breaks: "none", endsWithBreak: false, overLimit: true };
   const lines: { text: string; paragraphStart: boolean }[] = [];
   let paragraphStart = true;
   let lf = 0;
@@ -203,6 +216,7 @@ export function normalizeProse(text: string): NormalizedText {
     const unit = text.charCodeAt(i);
     if (unit !== 0x0a && unit !== 0x0d) continue;
     keep(start, i);
+    if (lines.length > maxLines) return { ...over, lines };
     if (unit === 0x0a) lf++;
     else if (text.charCodeAt(i + 1) === 0x0a) {
       crlf++;
@@ -211,11 +225,12 @@ export function normalizeProse(text: string): NormalizedText {
     start = i + 1;
   }
   keep(start, text.length);
+  if (lines.length > maxLines) return { ...over, lines };
   const kinds = (lf > 0 ? 1 : 0) + (crlf > 0 ? 1 : 0) + (cr > 0 ? 1 : 0);
   const breaks: LineBreaks =
     kinds === 0 ? "none" : kinds > 1 ? "mixed" : lf > 0 ? "lf" : crlf > 0 ? "crlf" : "cr";
   const last = text.charCodeAt(text.length - 1);
-  return { lines, breaks, endsWithBreak: last === 0x0a || last === 0x0d };
+  return { lines, breaks, endsWithBreak: last === 0x0a || last === 0x0d, overLimit: false };
 }
 
 /** One normalized line of a document, with the part it came from. */
@@ -305,14 +320,17 @@ export function assembleDocument(
   let notUtf8 = false;
   for (const { name, content } of kept) {
     const decoded = decodeProse(content);
-    const normalized = normalizeProse(decoded.text);
+    // The lines this side has left are the bound for the part, so no part is split into more lines
+    // than the side may hold: 4 MiB of short lines is refused at line 20,001, not after millions.
+    const normalized = normalizeProse(
+      decoded.text,
+      ORIGINAL_LIMITS.maxDocumentLines - lines.length,
+    );
+    if (normalized.overLimit) return { ok: false, refusal: "too_many_lines" };
     notUtf8 ||= decoded.notUtf8;
     breaks = joinBreaks(breaks, normalized.breaks);
     if (decoded.text.length > 0) finalBreak.set(name, normalized.endsWithBreak);
     for (const line of normalized.lines) lines.push({ ...line, part: name });
-    if (lines.length > ORIGINAL_LIMITS.maxDocumentLines) {
-      return { ok: false, refusal: "too_many_lines" };
-    }
   }
   return { ok: true, value: { lines, breaks, notUtf8, finalBreak } };
 }
@@ -677,6 +695,7 @@ export interface ProseFacts {
    * A protected line the platform showed at the base is kept, but in a part it no longer shows: a
    * new `README.md` beside the original `README` hides the original from every reader of the
    * shown README while the document, read whole, is preserved.
+   * Also true when the base had a README the platform shows and the head has none it can show.
    */
   shownPartReplaced: boolean;
   /**
@@ -845,8 +864,9 @@ function cutExample(text: string): string {
  * The part the platform shows is the first of `README_CANDIDATES` present, compared with exact
  * case as git stores names, while the document's own names are matched without regard to case: a
  * `readme.md` is in the document but is never the shown part. When no part of a side is a candidate,
- * every part of that side counts as shown: a head with no candidate hides nothing, and a candidate
- * added beside a base that had none hides every original part it does not hold.
+ * every part of that side counts as shown: a candidate added beside a base that had none hides every
+ * original part it does not hold. But a base that HAD a shown README and a head that has none (a
+ * `README.md` renamed `readme.md` or `README.MD`) has lost it, whatever the text: the fact is true.
  */
 export function proseFacts(input: {
   document: DocumentKind;
@@ -968,12 +988,16 @@ export function proseFacts(input: {
     const shownBase = firstReadme(input.base.map((part) => part.name));
     const shownHead = firstReadme(input.head.map((part) => part.name));
     const shown = (name: string | null, part: string): boolean => name === null || part === name;
-    shownPartReplaced = pairs.some(
-      ([b, h]) =>
-        isProtected[b] &&
-        shown(shownBase, (base[b] as ProseLine).part) &&
-        !shown(shownHead, (head[h] as ProseLine).part),
-    );
+    // A README the platform showed, and none it can show now (`README.md` renamed `readme.md`).
+    const shownLost = shownBase !== null && shownHead === null;
+    shownPartReplaced =
+      shownLost ||
+      pairs.some(
+        ([b, h]) =>
+          isProtected[b] &&
+          shown(shownBase, (base[b] as ProseLine).part) &&
+          !shown(shownHead, (head[h] as ProseLine).part),
+      );
   }
   let finalNewlineAdded = false;
   for (const [name, ends] of baseRead.value.finalBreak) {

@@ -295,6 +295,20 @@ describe("normalizeProse", () => {
     expect(normalizeProse("a\nb").lines).toEqual(normalizeProse("a\nb\n").lines);
   });
 
+  test("with a line bound, reading stops at the first line past it", () => {
+    expect(normalizeProse("a\nb\n", 2).overLimit).toBe(false);
+    expect(normalizeProse("a\nb\n").overLimit).toBe(false);
+    const over = normalizeProse("a\nb\nc\n", 2);
+    expect(over.overLimit).toBe(true);
+    expect(over.lines.map((line) => line.text)).toEqual(["a", "b", "c"]);
+    // Blank lines are not lines: they never bring a text over the bound.
+    expect(normalizeProse("a\n\n\n\nb\n", 2).overLimit).toBe(false);
+    // 4 MiB of two-byte lines holds two million lines; only the bound and one more are built.
+    const flood = normalizeProse("a\n".repeat(2 * 1024 * 1024), ORIGINAL_LIMITS.maxDocumentLines);
+    expect(flood.overLimit).toBe(true);
+    expect(flood.lines.length).toBe(ORIGINAL_LIMITS.maxDocumentLines + 1);
+  });
+
   test("a hostile megabyte of spaces before a letter is normalized in linear time", () => {
     const spaces = " ".repeat(1024 * 1024);
     const started = performance.now();
@@ -419,6 +433,22 @@ describe("assembleDocument", () => {
     expect(assembled(assembleDocument("changes", [atLimit], NO_SKIP)).lines.length).toBe(limit);
     const over = [part("CHANGES", "entry\n".repeat(limit)), part("CHANGELOG", "one more\n")];
     expect(assembleDocument("changes", over, NO_SKIP)).toEqual({
+      ok: false,
+      refusal: "too_many_lines",
+    });
+    // The bound is the side's, shared by its parts in order.
+    const split = (second: number) => [
+      part("CHANGELOG", "a\n".repeat(limit - 5_000)),
+      part("CHANGES", "b\n".repeat(second)),
+    ];
+    expect(assembleDocument("changes", split(5_000), NO_SKIP).ok).toBe(true);
+    expect(assembleDocument("changes", split(5_001), NO_SKIP)).toEqual({
+      ok: false,
+      refusal: "too_many_lines",
+    });
+    // 4 MiB of two-byte lines, within the byte bound, is refused by its lines.
+    const flood = part("CHANGES", "a\n".repeat(2 * 1024 * 1024));
+    expect(assembleDocument("changes", [flood], NO_SKIP)).toEqual({
       ok: false,
       refusal: "too_many_lines",
     });
@@ -1369,6 +1399,17 @@ describe("proseFacts: the tripwires", () => {
       { README: ORIGINAL, "README.md": "# A rewritten introduction\n" },
     );
     expect(facts.shownPartReplaced).toBe(true);
+  });
+
+  test("a shown README renamed to a name the platform does not show is a shown part lost", () => {
+    for (const name of ["readme.md", "README.MD", "Readme.md", "readme"]) {
+      const facts = readme({ "README.md": ORIGINAL }, { [name]: ORIGINAL });
+      expect(facts.preserved, name).toBe(true);
+      expect(facts.shownPartReplaced, name).toBe(true);
+    }
+    expect(readme({ README: ORIGINAL }, { "readme.txt": ORIGINAL }).shownPartReplaced).toBe(true);
+    // A README removed altogether has lost its shown part too.
+    expect(readme({ "README.md": ORIGINAL }, {}).shownPartReplaced).toBe(true);
   });
 
   test("a rename keeps the shown part, and a lowercase readme is never the shown part", () => {
