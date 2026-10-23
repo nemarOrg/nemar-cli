@@ -82,7 +82,8 @@ Part B, what a contributor may change of the original authors' content (question
 Its facts are computed by a pure module (design, "As built (Phase 7)") and acted on by the job (design, "As built (Phase 8)").
 A README line altered beyond a minor edit, moved or removed, a line put inside an original paragraph, a CHANGES line altered, moved or removed, an author-owned field altered or removed, or a changed participant value sets `no_degradation` to `fail` before the report is parsed, a lowering the script is allowed to make like every platform finding, and a model cannot raise it.
 A replaced recording, anything that could not be compared and an abandoned pass are `unknown`; the check then tells the author to use CHANGES, a new section or an administrator.
-The README is compared with the one at the dataset's first version tag when the job can list the tags and holds the tag's commit, and otherwise every line at the merge base is protected, so a failed lookup is never leniency.
+The README is compared with the one at the dataset's first version tag when the job can list the tags and holds the tag's commit.
+A dataset with no version tag has published nothing, so its README and CHANGES text is information only (the owner's decision of 2026-10-23), and when the lookup fails or no tag is an ancestor every line at the merge base is protected, so a failed lookup is never leniency.
 
 ### Release order
 
@@ -104,7 +105,7 @@ No new budget enters the job: ADR 0107's 45.4 minutes are unchanged.
 - An unrelocated or unkept removal in a file the summary summarized is a platform blocker, at 3 files or at 3,000, whether or not that file was also shown as a diff.
   A removal in a file the summary did not summarize is read from its diff by the model, as before the summary existed, and when that diff is not shown in full the pull request is incomplete, as before.
 - The prompt is a calibrated one, changed: the model calibration of ADR 0107 is required again before the check is required.
-- The longest review message, system prompt included, grows to 261,136 characters (it was 258,381 before Part B), under the 300,000 a test holds it to.
+- The longest review message, system prompt included, grows to 261,332 characters (it was 258,381 before Part B), under the 300,000 a test holds it to.
 - Two values that the fence makes equal (a `<facts>` and a `</facts>`) used to show as equal text with no note on where they differ, because the note was computed before the fence.
   No loss could hide this way, since a removal is an atom of its own with a finding; the calibration phase fixed it (`fencedForm` in the summary module, held equal to the prompt's fence by a test over generated text).
 - Measured on the real code, not the prototype (design section 12.4, 86 frozen pull requests, no network, no model): 5,482 of 9,208 changed files are accounted for, 15 pull requests are truncated (7 of them by the 400-name cut), and 18 carry a platform blocker.
@@ -118,8 +119,9 @@ No new budget enters the job: ADR 0107's 45.4 minutes are unchanged.
   The module refuses an alignment past an edit distance of 2,000 instead of counting every protected line as altered, so a very large README rewrite will be `unknown` and a person looks.
   The facts are tripwires and not a proof against hostile Markdown; the raw diff and the model stay in the loop.
 - Part B on set A (offline, so the merge-base anchor): 9 pull requests fail, 5 more are `unknown` only, 2 carry information and 70 are clear; every Part A number is unchanged.
+  On the 129 pull requests open on 2026-10-23, with the tag lookup on, 20 fail (17 on tagged datasets, 3 `Name` changes of the platform's own account), 5 are `unknown` only, 3 carry information and 101 are clear; datasets with no version tag are clear.
   A contributor's `Name` change fails whatever the naming rule says, and the platform's own account is exempted by the Worker, not by the job.
-- The review runs `git ls-remote` against the dataset's repository in the content pass, once, when a README changed; its failure costs the stricter anchor and nothing else.
+- The review runs `git ls-remote` against the dataset's repository in the content pass, once, when a README or CHANGES changed; its failure costs the stricter anchor and nothing else.
 - A diff git writes as binary (a NUL byte in a table) is no read at all: the file stays unread and a removed row in it keeps the content incomplete.
   So does a modified or removed binary file in a read area (a `README.pdf`), whose one-line `Binary files differ` diff used to count as read; the pull request cannot pass on it and a person looks.
 
