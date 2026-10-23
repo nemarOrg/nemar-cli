@@ -1822,3 +1822,162 @@ export function participantValuesAltered(
   }
   return altered;
 }
+
+// ---------------------------------------------------------------------------------------------
+// The facts of one pull request: everything above, for the content pass to hand the review
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * What the search for the README's anchor came to. A closed list, printed in a public log like
+ * every word of this module:
+ *
+ * - `not_needed`: no root README part changed, so no anchor was looked for;
+ * - `not_looked_up`: a README part changed and the version tags were not read (the caller was told
+ *   not to, as an offline calibration is), or the pass was abandoned;
+ * - `lookup_failed`: the repository's tags could not be listed (an error, a timeout, an answer past
+ *   its bound);
+ * - `tag_tree_unreadable`: a tag was chosen and its commit's root tree could not be listed;
+ * - `first_version_tag`: the README at the first version tag is the anchor;
+ * - `no_tag`, `no_ancestor`, `check_failed`, `too_many_tags`: the reasons of {@link AnchorChoice}.
+ *
+ * Every word but `first_version_tag` leaves the README with no anchor, so every merge-base line is
+ * protected (the stricter side). A tag whose README could not be read keeps `first_version_tag`
+ * here while the README's own facts say `merge_base`: this word is about the search, the facts'
+ * `anchor` about what protected the lines.
+ */
+export const ANCHOR_LOOKUPS = [
+  "not_needed",
+  "not_looked_up",
+  "lookup_failed",
+  "tag_tree_unreadable",
+  "first_version_tag",
+  "no_tag",
+  "no_ancestor",
+  "check_failed",
+  "too_many_tags",
+] as const;
+export type AnchorLookup = (typeof ANCHOR_LOOKUPS)[number];
+
+/**
+ * What became of one document: no part of it changed (`unchanged`, and nothing was compared), it
+ * was refused in one of the closed words of {@link PROSE_REFUSALS}, or it was compared.
+ */
+export type DocumentResult =
+  | { readonly status: "unchanged" }
+  | { readonly status: "refused"; readonly refusal: ProseRefusal }
+  | { readonly status: "compared"; readonly facts: ProseFacts };
+
+/**
+ * Everything Part B says about one pull request, for the review to act on. All or nothing: when
+ * `abandoned` is true the pass that reads the bytes ran out of time or could not read them, and
+ * nothing below it is a fact (it is {@link ORIGINAL_ABANDONED}, which the caller reports as not
+ * compared, never as clean).
+ */
+export interface OriginalContentFacts {
+  readonly abandoned: boolean;
+  readonly anchorLookup: AnchorLookup;
+  readonly readme: DocumentResult;
+  readonly changes: DocumentResult;
+  /** Null when `dataset_description.json` is not among the changed paths. */
+  readonly authorFields: AuthorFieldFacts | null;
+  /**
+   * The count of {@link participantValuesAltered}, asked only when a root participants file is
+   * modified or changed type, and 0 otherwise; null when it cannot be known.
+   */
+  readonly participantValues: number | null;
+  readonly recordings: Readonly<RecordingFacts & { unread: number }>;
+}
+
+/** A document no part of which changed: one object, shared and frozen. */
+const UNCHANGED: DocumentResult = Object.freeze({ status: "unchanged" });
+
+/**
+ * The facts of a pass that was abandoned: nothing compared, nothing counted, and the anchor never
+ * looked for. One object shared by every caller, frozen through every level it has, like the
+ * summary's `ABANDONED_SUMMARY`, so no reader can change it for the next one.
+ */
+export const ORIGINAL_ABANDONED: OriginalContentFacts = Object.freeze({
+  abandoned: true,
+  anchorLookup: "not_looked_up",
+  readme: UNCHANGED,
+  changes: UNCHANGED,
+  authorFields: null,
+  participantValues: 0,
+  recordings: Object.freeze({ replaced: 0, typeChanged: 0, moved: 0, unread: 0 }),
+});
+
+/**
+ * What {@link originalContentFacts} is given: the bytes and entries the caller read, and nothing it
+ * would have to decide here.
+ */
+export interface OriginalContentInput {
+  /**
+   * Every changed path with its status as `git diff --raw` names it, so a type change is
+   * `typechange` (the change list calls it modified, which would hide it).
+   */
+  changes: readonly { path: string; status: RecordingChange["status"] }[];
+  /**
+   * The parts of each document at the merge base and at the head, both sides of a document any part
+   * of which changed, the parts that did not change among them. A document with no changed part is
+   * not compared, so its parts are not needed.
+   */
+  documents: Readonly<
+    Record<DocumentKind, { base: readonly DocumentPart[]; head: readonly DocumentPart[] }>
+  >;
+  /** The README parts at the anchor the search found, or null when there is none. */
+  anchor: readonly DocumentPart[] | null;
+  anchorLookup: AnchorLookup;
+  /** `dataset_description.json` at the merge base and at the head. */
+  description: { before: DescriptionSide; after: DescriptionSide };
+  /** Every changed path, read as {@link recordingFacts} needs it: the same paths as `changes`. */
+  recordings: readonly RecordingChange[];
+  /** The change summary of the same pass. */
+  summary: ChangeSummary;
+  /** The paths the platform proved differ only in layout. */
+  cosmetic: ReadonlySet<string>;
+}
+
+/**
+ * The facts of one pull request from what its caller read (design B2 and B3, as built). Each
+ * document any part of which changed is compared once, with the anchor for the README alone
+ * (CHANGES protects every merge-base line whatever the anchor), and is `refused` in its closed word
+ * when it cannot be; a document no part of which changed is `unchanged`. The author fields are
+ * compared only when `dataset_description.json` changed. Participant values are counted only when
+ * a root participants file was modified or changed type: an abandoned summary has no count for any
+ * file (see {@link participantValuesAltered}), and asking it about a pull request that touched no
+ * participants file would make every such pass unknown for no change at all.
+ */
+export function originalContentFacts(input: OriginalContentInput): OriginalContentFacts {
+  const changed = (document: DocumentKind): boolean =>
+    input.changes.some((change) => isDocumentName(document, change.path));
+  const documentResult = (document: DocumentKind): DocumentResult => {
+    if (!changed(document)) return UNCHANGED;
+    const { base, head } = input.documents[document];
+    const anchor = document === "readme" ? input.anchor : null;
+    const result = proseFacts({ document, base, head, anchor });
+    return result.ok
+      ? { status: "compared", facts: result.facts }
+      : { status: "refused", refusal: result.refusal };
+  };
+  const participantsChanged = input.changes.some(
+    (change) =>
+      (PARTICIPANT_FILES as readonly string[]).includes(change.path) &&
+      (change.status === "modified" || change.status === "typechange"),
+  );
+  const descriptionChanged = input.changes.some(
+    (change) => change.path === "dataset_description.json",
+  );
+  return {
+    abandoned: false,
+    anchorLookup: input.anchorLookup,
+    readme: documentResult("readme"),
+    changes: documentResult("changes"),
+    authorFields: descriptionChanged
+      ? authorFieldFacts(input.description.before, input.description.after)
+      : null,
+    participantValues: participantsChanged
+      ? participantValuesAltered(input.summary, input.changes, input.cosmetic)
+      : 0,
+    recordings: recordingFacts(input.recordings),
+  };
+}

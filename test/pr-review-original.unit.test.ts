@@ -10,6 +10,7 @@ import { describe, expect, test } from "bun:test";
 import { classifyPath } from "../scripts/ci/pr-review-evidence";
 import {
   ALTERS_PARTICIPANT_VALUE,
+  ANCHOR_LOOKUPS,
   ARRAY_VALUED_KEYS,
   AUTHOR_OWNED_KEYS,
   type AlignOp,
@@ -18,14 +19,19 @@ import {
   type DescriptionSide,
   type DocumentKind,
   type DocumentPart,
+  type DocumentResult,
   MINOR_EDIT_KEYS,
+  ORIGINAL_ABANDONED,
   ORIGINAL_LIMITS,
+  type OriginalContentFacts,
+  type OriginalContentInput,
   PARTICIPANT_FILES,
   PROSE_REFUSALS,
   type PointerProbe,
   type ProseDocument,
   type ProseFacts,
   type ProseRead,
+  type ProseRefusal,
   REVIEW_LEFT_OUT_DIRS,
   type RecordingChange,
   type RecordingFacts,
@@ -45,6 +51,7 @@ import {
   minorBound,
   minorEditHides,
   normalizeProse,
+  originalContentFacts,
   parseVersionTags,
   participantValuesAltered,
   proseAltered,
@@ -3897,5 +3904,324 @@ describe("participantValuesAltered: which files and which summaries", () => {
     expect(summary.classes.length).toBeGreaterThan(0);
     expect(participantValuesAltered(summary, modifiedFiles([events]), NO_COSMETIC)).toBe(0);
     expect(participantValuesAltered(EMPTY_SUMMARY, [], NO_COSMETIC)).toBe(0);
+  });
+});
+
+/** The builder's input for a pull request that changed nothing, for each test to fill in. */
+function contentInput(over: Partial<OriginalContentInput> = {}): OriginalContentInput {
+  return {
+    changes: [],
+    documents: { readme: { base: [], head: [] }, changes: { base: [], head: [] } },
+    anchor: null,
+    anchorLookup: "not_needed",
+    description: { before: "absent", after: "absent" },
+    recordings: [],
+    summary: EMPTY_SUMMARY,
+    cosmetic: NO_COSMETIC,
+    ...over,
+  };
+}
+
+/** One changed path as the content pass lists it. */
+const modified = (path: string): { path: string; status: RecordingChange["status"] } => ({
+  path,
+  status: "modified",
+});
+
+/** The facts a compared document holds, or a failed expectation naming what it was instead. */
+function comparedFacts(result: DocumentResult): ProseFacts {
+  if (result.status !== "compared") throw new Error(`not compared: ${result.status}`);
+  return result.facts;
+}
+
+describe("originalContentFacts: the documents", () => {
+  const base = parts({ "README.md": ORIGINAL });
+  const removed = parts({ "README.md": edited((lines) => lines.splice(7, 2)) });
+
+  test("a document no part of which changed is unchanged and never read, whatever its parts hold", () => {
+    // Parts that could not be read, and would be refused if they were compared.
+    const unreadable: DocumentPart[] = [
+      { name: "README.md", mode: "100644", oid: "a".repeat(40), content: "unreadable" },
+    ];
+    const facts = originalContentFacts(
+      contentInput({
+        changes: [modified("sub-01/eeg/sub-01_task-rest_eeg.json"), modified("docs/README.md")],
+        documents: {
+          readme: { base: unreadable, head: unreadable },
+          changes: { base: unreadable.map((p) => ({ ...p, name: "CHANGES" })), head: [] },
+        },
+      }),
+    );
+    expect(facts.readme).toEqual({ status: "unchanged" });
+    expect(facts.changes).toEqual({ status: "unchanged" });
+    // The same parts, with the README changed: compared, so refused.
+    const changed = originalContentFacts(
+      contentInput({
+        changes: [modified("README.md")],
+        documents: {
+          readme: { base: unreadable, head: unreadable },
+          changes: { base: [], head: [] },
+        },
+      }),
+    );
+    expect(changed.readme).toEqual({ status: "refused", refusal: "unreadable" });
+    expect(changed.changes).toEqual({ status: "unchanged" });
+  });
+
+  test("a changed document is compared once, from the merge base to the head, as proseFacts compares it", () => {
+    const facts = originalContentFacts(
+      contentInput({
+        changes: [modified("README.md")],
+        documents: { readme: { base, head: removed }, changes: { base: [], head: [] } },
+      }),
+    );
+    const direct = proseFacts({ document: "readme", base, head: removed, anchor: null });
+    expect(direct.ok).toBe(true);
+    expect(facts.readme).toEqual({
+      status: "compared",
+      facts: direct.ok ? direct.facts : untouched(0),
+    });
+    expect(comparedFacts(facts.readme).protectedAltered).toBe(2);
+    expect(facts.abandoned).toBe(false);
+  });
+
+  test("a part added or removed beside an unchanged one changes the document", () => {
+    const head = [...base, part("README.txt", "A note added beside the README.\n")];
+    const facts = originalContentFacts(
+      contentInput({
+        changes: [{ path: "README.txt", status: "added" }],
+        documents: { readme: { base, head }, changes: { base: [], head: [] } },
+      }),
+    );
+    expect(comparedFacts(facts.readme)).toMatchObject({ partsBefore: 1, partsAfter: 2 });
+  });
+
+  test("a refused document says its closed word", () => {
+    const binary = parts({ "README.md": new Uint8Array([0x61, 0x00, 0x62]) });
+    const cases: [DocumentPart[], DocumentPart[], ProseRefusal][] = [
+      [base, binary, "binary"],
+      [base, [{ ...(base[0] as DocumentPart), mode: "120000" }], "not_regular"],
+      [[{ ...(base[0] as DocumentPart), content: "unreadable" }], removed, "unreadable"],
+    ];
+    for (const [before, after, refusal] of cases) {
+      const facts = originalContentFacts(
+        contentInput({
+          changes: [modified("README.md")],
+          documents: { readme: { base: before, head: after }, changes: { base: [], head: [] } },
+        }),
+      );
+      expect(facts.readme, refusal).toEqual({ status: "refused", refusal });
+    }
+  });
+
+  test("the anchor protects the README alone: CHANGES keeps every merge-base line", () => {
+    // Lines 7 and 8 were added after the anchor: removing them is later text, not original text.
+    const anchor = parts({ "README.md": edited((lines) => lines.splice(6, 3)) });
+    const changesBase = parts({ CHANGES: "1.1.0\n - Added sub-03\n1.0.0\n - Initial release\n" });
+    const changesHead = parts({ CHANGES: "1.1.0\n - Added sub-03\n1.0.0\n" });
+    const input = contentInput({
+      changes: [modified("README.md"), modified("CHANGES")],
+      documents: {
+        readme: { base, head: removed },
+        changes: { base: changesBase, head: changesHead },
+      },
+      anchor,
+      anchorLookup: "first_version_tag",
+    });
+    const facts = originalContentFacts(input);
+    expect(facts.anchorLookup).toBe("first_version_tag");
+    expect(comparedFacts(facts.readme)).toMatchObject({
+      anchor: "first_version_tag",
+      protectedAltered: 0,
+      laterAltered: 2,
+    });
+    expect(comparedFacts(facts.changes)).toMatchObject({
+      anchor: "merge_base",
+      protectedLines: 4,
+      protectedAltered: 1,
+    });
+    // With no anchor the same README removal is original text.
+    const strict = originalContentFacts({ ...input, anchor: null, anchorLookup: "no_tag" });
+    expect(strict.anchorLookup).toBe("no_tag");
+    expect(comparedFacts(strict.readme)).toMatchObject({
+      anchor: "merge_base",
+      protectedAltered: 2,
+      laterAltered: 0,
+    });
+    expect(strict.changes).toEqual(facts.changes);
+  });
+});
+
+describe("originalContentFacts: the description, the participants and the recordings", () => {
+  const before = description(DESCRIPTION);
+  const renamed = changed({ Name: "A new name" });
+
+  test("the author fields are compared only when dataset_description.json changed", () => {
+    const sides = { before, after: renamed };
+    expect(originalContentFacts(contentInput({ description: sides })).authorFields).toBeNull();
+    expect(
+      originalContentFacts(
+        contentInput({ changes: [modified("dataset_description.json")], description: sides }),
+      ).authorFields,
+    ).toEqual(noFieldChange({ altered: ["Name"] }));
+    // Added, with nothing before it: every key it holds is added.
+    expect(
+      originalContentFacts(
+        contentInput({
+          changes: [{ path: "dataset_description.json", status: "added" }],
+          description: { before: "absent", after: before },
+        }),
+      ).authorFields,
+    ).toEqual(authorFieldFacts("absent", before));
+    // A side that could not be read is unparsed, never clean.
+    expect(
+      originalContentFacts(
+        contentInput({
+          changes: [modified("dataset_description.json")],
+          description: { before: "unreadable", after: renamed },
+        }),
+      ).authorFields,
+    ).toEqual(noFieldChange({ unparsed: true }));
+  });
+
+  test("an abandoned summary with no participants file changed counts 0, not unknown", () => {
+    const facts = originalContentFacts(
+      contentInput({
+        changes: [modified("README.md"), { path: PARTICIPANTS_TSV, status: "added" }],
+        documents: {
+          readme: { base: parts({ "README.md": "a\n" }), head: parts({ "README.md": "a\nb\n" }) },
+          changes: { base: [], head: [] },
+        },
+        summary: ABANDONED_SUMMARY,
+      }),
+    );
+    expect(facts.participantValues).toBe(0);
+    // The module's own count would be unknown for the same summary: the guard is the builder's.
+    expect(participantValuesAltered(ABANDONED_SUMMARY, [], NO_COSMETIC)).toBeNull();
+  });
+
+  test("a root participants file modified or changed type is counted, and unknown when it cannot be", () => {
+    for (const path of PARTICIPANT_FILES) {
+      for (const status of ["modified", "typechange"] as const) {
+        const facts = originalContentFacts(
+          contentInput({ changes: [{ path, status }], summary: ABANDONED_SUMMARY }),
+        );
+        expect(facts.participantValues, `${status} ${path}`).toBeNull();
+      }
+      // Removed: Part A's loss fact, and no value is asked about.
+      expect(
+        originalContentFacts(
+          contentInput({ changes: [{ path, status: "removed" }], summary: ABANDONED_SUMMARY }),
+        ).participantValues,
+      ).toBe(0);
+    }
+    // A summary that read the file counts its changed values.
+    const edit: Edit = {
+      path: PARTICIPANTS_TSV,
+      before: sexTable("None", "M"),
+      after: sexTable("F", "M"),
+    };
+    expect(
+      originalContentFacts(
+        contentInput({ changes: [modified(PARTICIPANTS_TSV)], summary: summaryOf([edit]) }),
+      ).participantValues,
+    ).toBe(1);
+    // One the platform proved cosmetic has nothing to count, even unread.
+    expect(
+      originalContentFacts(
+        contentInput({
+          changes: [modified(PARTICIPANTS_TSV)],
+          cosmetic: new Set([PARTICIPANTS_TSV]),
+        }),
+      ).participantValues,
+    ).toBe(0);
+    // A nested participants file is no root file: not asked, so 0 even from an abandoned summary.
+    expect(
+      originalContentFacts(
+        contentInput({
+          changes: [modified(`sub-01/${PARTICIPANTS_TSV}`)],
+          summary: ABANDONED_SUMMARY,
+        }),
+      ).participantValues,
+    ).toBe(0);
+  });
+
+  test("the recordings are recordingFacts of every changed path", () => {
+    const recordings = [
+      recording("sub-01/eeg/sub-01_task-x_eeg.edf", locked(keyOf(1)), locked(keyOf(2)), true),
+      recording("derivatives/x/sub-02_eeg.edf", locked(keyOf(3)), null),
+      recording("sub-02/eeg/sub-02_task-x_eeg.edf", null, locked(keyOf(3)), true),
+      recording("sub-03/eeg/sub-03_task-x_eeg.edf", locked(keyOf(4)), plain("x", "unreadable")),
+    ];
+    const facts = originalContentFacts(
+      contentInput({
+        changes: recordings.map(({ path, status }) => ({ path, status })),
+        recordings,
+      }),
+    );
+    expect(facts.recordings).toEqual(noRecordingChange({ replaced: 1, moved: 1, unread: 1 }));
+    expect(facts.recordings).toEqual(recordingFacts(recordings));
+  });
+
+  test("a pull request that changed nothing Part B reads has nothing to say", () => {
+    expect(originalContentFacts(contentInput())).toEqual({
+      abandoned: false,
+      anchorLookup: "not_needed",
+      readme: { status: "unchanged" },
+      changes: { status: "unchanged" },
+      authorFields: null,
+      participantValues: 0,
+      recordings: noRecordingChange(),
+    });
+  });
+});
+
+describe("the facts of an abandoned pass", () => {
+  test("ORIGINAL_ABANDONED holds nothing and says the anchor was never looked for", () => {
+    expect(ORIGINAL_ABANDONED).toEqual({
+      abandoned: true,
+      anchorLookup: "not_looked_up",
+      readme: { status: "unchanged" },
+      changes: { status: "unchanged" },
+      authorFields: null,
+      participantValues: 0,
+      recordings: noRecordingChange(),
+    });
+  });
+
+  test("it is frozen at every level, so no reader can change it for the next", () => {
+    expect(Object.isFrozen(ORIGINAL_ABANDONED)).toBe(true);
+    expect(Object.isFrozen(ORIGINAL_ABANDONED.readme)).toBe(true);
+    expect(Object.isFrozen(ORIGINAL_ABANDONED.changes)).toBe(true);
+    expect(Object.isFrozen(ORIGINAL_ABANDONED.recordings)).toBe(true);
+    const writable = ORIGINAL_ABANDONED as { -readonly [K in keyof OriginalContentFacts]: unknown };
+    expect(() => {
+      writable.abandoned = false;
+    }).toThrow(TypeError);
+    expect(() => {
+      (ORIGINAL_ABANDONED.recordings as { unread: number }).unread = 1;
+    }).toThrow(TypeError);
+    expect(ORIGINAL_ABANDONED.abandoned).toBe(true);
+    expect(ORIGINAL_ABANDONED.recordings.unread).toBe(0);
+  });
+
+  test("the anchor words are a closed list that holds every reason chooseAnchor gives", () => {
+    expect(new Set(ANCHOR_LOOKUPS).size).toBe(ANCHOR_LOOKUPS.length);
+    const reasons = [
+      chooseAnchor([], () => true),
+      chooseAnchor([versionTag("1", "0", "0", sha(1))], () => false),
+      chooseAnchor([versionTag("1", "0", "0", sha(1))], () => null),
+      chooseAnchor(
+        Array.from({ length: ORIGINAL_LIMITS.maxTagsTried + 1 }, (_, i) =>
+          versionTag("1", "0", String(i), sha(i + 1)),
+        ),
+        () => false,
+      ),
+    ].map((choice) => (choice.anchor === "merge_base" ? choice.reason : choice.anchor));
+    expect(reasons).toEqual(["no_tag", "no_ancestor", "check_failed", "too_many_tags"]);
+    for (const reason of reasons) expect(ANCHOR_LOOKUPS as readonly string[]).toContain(reason);
+    expect(ANCHOR_LOOKUPS).toContain("first_version_tag");
+    // Words a log prints: lower case and underscores only.
+    for (const word of ANCHOR_LOOKUPS) expect(word).toMatch(/^[a-z_]+$/);
   });
 });
