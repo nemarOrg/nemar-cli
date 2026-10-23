@@ -14,7 +14,11 @@
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { Log, LogLevel, Miniflare } from "miniflare";
-import { INBOUND_REJECT_REASON, handleInboundEmail } from "../src/services/inbound-mail";
+import {
+  INBOUND_REJECT_REASON,
+  clampUtf8Bytes,
+  handleInboundEmail,
+} from "../src/services/inbound-mail";
 import { bundleWorker, wranglerCompatibility } from "./helpers/worker-bundle";
 
 const KEY_SHAPE = /^inbound\/raw\/\d{4}\/\d{2}\/\d{2}\/[0-9a-f-]{36}\.eml$/;
@@ -78,6 +82,18 @@ afterAll(async () => {
 async function keys(b: R2Bucket = bucket): Promise<string[]> {
   return (await b.list({ prefix: "inbound/raw/" })).objects.map((o) => o.key);
 }
+
+describe("clampUtf8Bytes", () => {
+  test("leaves a short value alone and cuts at a character boundary", () => {
+    expect(clampUtf8Bytes("abc", 400)).toBe("abc");
+    expect(clampUtf8Bytes("abcdef", 3)).toBe("abc");
+    expect(clampUtf8Bytes("aé", 2)).toBe("a"); // é is bytes 1-2: a cut at 2 would split it
+    expect(clampUtf8Bytes("a€b", 3)).toBe("a"); // € is bytes 1-3
+    expect(clampUtf8Bytes("a😀", 4)).toBe("a"); // a four-byte character
+    expect(clampUtf8Bytes("a😀", 5)).toBe("a😀");
+    expect(clampUtf8Bytes("é", 0)).toBe("");
+  });
+});
 
 describe("handleInboundEmail", () => {
   test("stores the raw bytes at a dated key with the envelope and message id as metadata", async () => {
@@ -147,6 +163,71 @@ describe("handleInboundEmail", () => {
     );
     expect(rejects).toEqual([INBOUND_REJECT_REASON]);
     expect(await keys()).toEqual(before);
+  });
+
+  test("metadata is clamped by UTF-8 bytes, without splitting a character, and stays under 2 KiB", async () => {
+    const before = new Set(await keys());
+    // 300 two-byte characters is 600 bytes but only 300 UTF-16 units, so a unit-based clamp
+    // would let it through; a three-byte character straddling the cut must be dropped whole.
+    const long = "é".repeat(300);
+    const raw = rawMessage("clamp");
+    const message = platformMessage(
+      raw,
+      `${long}@sender.test`,
+      `${"€".repeat(200)}@staging.nemar.test`,
+    );
+    message.headers.set("message-id", `<${long}${long}@sender.test>`);
+    await handleInboundEmail(message, { MAIL_INBOUND: bucket });
+
+    const key = (await keys()).find((k) => !before.has(k)) as string;
+    const stored = (await bucket.get(key)) as R2ObjectBody;
+    const meta = stored.customMetadata ?? {};
+    const enc = new TextEncoder();
+    for (const field of ["envelope_from", "envelope_to", "message_id"]) {
+      expect(enc.encode(meta[field]).byteLength).toBeLessThanOrEqual(400);
+      expect(meta[field]).not.toContain("\uFFFD");
+      expect(meta[field].length).toBeGreaterThan(0);
+    }
+    expect(meta.envelope_from).toBe("é".repeat(200));
+    expect(meta.envelope_to).toBe("€".repeat(133));
+    const total = Object.entries(meta).reduce(
+      (n, [k, v]) => n + enc.encode(k).byteLength + enc.encode(v).byteLength,
+      0,
+    );
+    expect(total).toBeLessThan(2048);
+    expect(new Uint8Array(await stored.arrayBuffer())).toEqual(raw);
+  });
+
+  test("a put that fails with metadata is retried without it and the message is kept", async () => {
+    const before = new Set(await keys());
+    // R2 refusing the metadata, simulated at the boundary: the real bucket takes every other put.
+    const refusingMetadata = {
+      put: (key: string, value: ArrayBuffer, options?: Parameters<R2Bucket["put"]>[2]) => {
+        if (options?.customMetadata) throw new Error("metadata refused");
+        return bucket.put(key, value, options);
+      },
+    } as unknown as R2Bucket;
+    const warnings: string[] = [];
+    const realWarn = console.warn;
+    console.warn = (...args: unknown[]) => {
+      warnings.push(args.map(String).join(" "));
+    };
+    const raw = rawMessage("retry");
+    try {
+      await handleInboundEmail(
+        platformMessage(raw, "ada@sender.test", "support@staging.nemar.test"),
+        { MAIL_INBOUND: refusingMetadata },
+      );
+    } finally {
+      console.warn = realWarn;
+    }
+    const added = (await keys()).filter((k) => !before.has(k));
+    expect(added.length).toBe(1);
+    const stored = (await bucket.get(added[0])) as R2ObjectBody;
+    expect(new Uint8Array(await stored.arrayBuffer())).toEqual(raw);
+    expect(stored.httpMetadata?.contentType).toBe("message/rfc822");
+    expect(stored.customMetadata ?? {}).toEqual({});
+    expect(warnings.join("\n")).toContain("retrying without it");
   });
 
   test("a failed write throws so the delivery is reported as failed, not lost", async () => {
