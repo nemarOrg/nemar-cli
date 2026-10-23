@@ -9339,6 +9339,8 @@ describe("the worst case fits", () => {
         same: Array.from({ length: 50 }, (_, k) => `${long(195)}${i}-${k}`),
       })),
       readIncomplete: true,
+      // The one file the reader could not show in full: the cut seventh diff.
+      unreadFiles: 1,
       cosmeticOnlyFiles: 0,
       groups: Array.from({ length: 12 }, (_, i) => ({
         status: "modified" as const,
