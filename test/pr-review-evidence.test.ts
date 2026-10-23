@@ -75,6 +75,11 @@ import {
   readBlobsSized,
 } from "../scripts/ci/pr-review-evidence";
 import {
+  ORIGINAL_ABANDONED,
+  type OriginalContentFacts,
+  type ProseFacts,
+} from "../scripts/ci/pr-review-original";
+import {
   MAX_BODY_CHARS,
   MAX_PLATFORM_FINDINGS,
   REVIEW_OUTPUT_SCHEMA,
@@ -4744,14 +4749,31 @@ describe("the change summary", () => {
         );
       }
     };
+    // What the cosmetic proofs and the summary's pool asked about (the first four cat-file
+    // processes), apart from what Part B read after them, which probes every changed side: the size
+    // of each, and the bytes of the ones short enough to be an annex pointer.
     const read = (r: Repo) => {
       const listing = gatherListing(r.dir, r.base, r.head);
       const log = callLog("cs-unconsulted");
-      const restore = installGitShim(root, [{ match: " cat-file ", stdinLog: log }]);
+      const partB = callLog("cs-unconsulted-part-b");
+      const partBBytes = callLog("cs-unconsulted-part-b-bytes");
+      const restore = installGitShim(root, [
+        { match: " cat-file ", stdinLog: log },
+        { match: " cat-file ", stdinLog: partB, fromCall: 5 },
+        { match: " cat-file --batch ", stdinLog: partBBytes, fromCall: 3 },
+      ]);
       try {
         const content = gatherContent(r.dir, listing);
         const evidence = buildEvidence({ ...listing, ...content }, NO_TEXT_PROBLEMS);
-        return { content, evidence, asked: new Set(loggedCalls(log)) };
+        const all = loggedCalls(log);
+        const later = loggedCalls(partB);
+        return {
+          content,
+          evidence,
+          asked: new Set(all.slice(0, all.length - later.length)),
+          partBAsked: new Set(later),
+          partBRead: new Set(loggedCalls(partBBytes)),
+        };
       } finally {
         restore();
       }
@@ -4773,6 +4795,12 @@ describe("the change summary", () => {
     expect(withOthers.asked).toContain(id(crowded, copy));
     for (const path of unconsulted) expect(withOthers.asked, path).not.toContain(id(crowded, path));
     expect([...withOthers.asked].sort()).toEqual([...without.asked].sort());
+    // Part B asked for the size of every one of them, and read none of the long documents.
+    for (const path of unconsulted)
+      expect(withOthers.partBAsked, path).toContain(id(crowded, path));
+    for (const path of unconsulted.filter((p) => p.endsWith(".json"))) {
+      expect(withOthers.partBRead, path).not.toContain(id(crowded, path));
+    }
   });
 
   test("a pool table whose earlier version cannot be read lends no copies", () => {
@@ -4884,7 +4912,8 @@ describe("the change summary keeps to its deadline, and leaves the raw path as i
     expect(late.catFile).toEqual(COSMETIC_READS);
     expectRaw(late.content, late.listing);
     // The same through the clock alone, with the real budget: the start is decided by the clock
-    // the summary is given, read once, and nothing of the summary is read once it says too late.
+    // the summary is given, read once by the summary and once by Part B, which starts by the same
+    // line; nothing of either is read once it says too late.
     let reads = 0;
     const clocked = read(null, {
       now: () => {
@@ -4892,7 +4921,8 @@ describe("the change summary keeps to its deadline, and leaves the raw path as i
         return Number.MAX_SAFE_INTEGER;
       },
     });
-    expect(reads).toBe(1);
+    expect(reads).toBe(2);
+    expect(clocked.content.original).toBe(ORIGINAL_ABANDONED);
     expect(clocked.content.summary).toBe(ABANDONED_SUMMARY);
     expect(clocked.catFile).toEqual(COSMETIC_READS);
     expectRaw(clocked.content, clocked.listing);
@@ -6591,48 +6621,49 @@ describe("the evidence observer", () => {
   });
 });
 
+/**
+ * A clone made as the review job makes one: a bare origin that allows blob-less fetches, a
+ * promisor remote, and one fetch of the base and the head with `--filter=blob:none`, no checkout.
+ */
+function blobLessClone(name: string, origin: Repo): string {
+  const bare = join(root, `${name}-origin.git`);
+  execFileSync("git", ["clone", "-q", "--bare", origin.dir, bare], { env: GIT_ENV });
+  git(bare, "config", "uploadpack.allowFilter", "true");
+  git(bare, "config", "uploadpack.allowAnySHA1InWant", "true");
+  const clone = join(root, name);
+  mkdirSync(clone, { recursive: true });
+  git(clone, "init", "-q", "-b", "main");
+  git(clone, "config", "extensions.partialClone", "origin");
+  git(clone, "remote", "add", "origin", `file://${bare}`);
+  git(
+    clone,
+    "fetch",
+    "-q",
+    "--no-tags",
+    "--filter=blob:none",
+    "origin",
+    "+refs/heads/main:refs/remotes/origin/main",
+    "+refs/heads/contrib:refs/remotes/pr/head",
+  );
+  return clone;
+}
+
+/** Whether the clone holds the object, asked so that asking cannot fetch it. */
+function holds(clone: string, oid: string): boolean {
+  try {
+    execFileSync("git", ["-C", clone, "cat-file", "-e", oid], {
+      env: { ...GIT_ENV, GIT_NO_LAZY_FETCH: "1" },
+      stdio: "ignore",
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const NO_LAZY_FETCH = { GIT_NO_LAZY_FETCH: "1" };
+
 describe("the content pass on the job's blob-less clone", () => {
-  /**
-   * A clone made as the review job makes one: a bare origin that allows blob-less fetches, a
-   * promisor remote, and one fetch of the base and the head with `--filter=blob:none`, no checkout.
-   */
-  function blobLessClone(name: string, origin: Repo): string {
-    const bare = join(root, `${name}-origin.git`);
-    execFileSync("git", ["clone", "-q", "--bare", origin.dir, bare], { env: GIT_ENV });
-    git(bare, "config", "uploadpack.allowFilter", "true");
-    git(bare, "config", "uploadpack.allowAnySHA1InWant", "true");
-    const clone = join(root, name);
-    mkdirSync(clone, { recursive: true });
-    git(clone, "init", "-q", "-b", "main");
-    git(clone, "config", "extensions.partialClone", "origin");
-    git(clone, "remote", "add", "origin", `file://${bare}`);
-    git(
-      clone,
-      "fetch",
-      "-q",
-      "--no-tags",
-      "--filter=blob:none",
-      "origin",
-      "+refs/heads/main:refs/remotes/origin/main",
-      "+refs/heads/contrib:refs/remotes/pr/head",
-    );
-    return clone;
-  }
-
-  /** Whether the clone holds the object, asked so that asking cannot fetch it. */
-  function holds(clone: string, oid: string): boolean {
-    try {
-      execFileSync("git", ["-C", clone, "cat-file", "-e", oid], {
-        env: { ...GIT_ENV, GIT_NO_LAZY_FETCH: "1" },
-        stdio: "ignore",
-      });
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
-  const NO_LAZY_FETCH = { GIT_NO_LAZY_FETCH: "1" };
   /** Twenty tables of the bulk relabel and one sidecar reindented, which is cosmetic. */
   const origin = () =>
     bulkRelabel(`clone-source-${Math.random().toString(36).slice(2)}`, {
@@ -6672,12 +6703,26 @@ describe("the content pass on the job's blob-less clone", () => {
     );
     expect(calls.filter((c) => c.startsWith("diff --numstat"))).toHaveLength(1);
     expect(calls.filter((c) => c.startsWith("diff --raw"))).toHaveLength(1);
-    // Two processes for the cosmetic proofs, two for the summary's pool: no more, no fewer.
+    // Two processes for the cosmetic proofs, two for the summary's pool, and two for Part B's one
+    // batch: no more, no fewer.
     expect(calls.filter((c) => c.startsWith("cat-file"))).toEqual([
       "cat-file --batch-check",
       "cat-file --batch",
       "cat-file --batch-check",
       "cat-file --batch",
+      "cat-file --batch-check",
+      "cat-file --batch",
+    ]);
+    // Part B compared the README and CHANGES from the prefetched blobs too, and listed the origin's
+    // tags once: it has none, so the README is protected from the merge base.
+    expect(content.original.abandoned).toBe(false);
+    expect([content.original.readme.status, content.original.changes.status]).toEqual([
+      "compared",
+      "compared",
+    ]);
+    expect(content.original.anchorLookup).toBe("no_tag");
+    expect(calls.filter((c) => c.startsWith("ls-remote"))).toEqual([
+      "ls-remote --tags origin refs/tags/v*",
     ]);
     expect(calls.filter((c) => /^show \S+\.(json|tsv)$/.test(c))).toEqual([]);
     // The README and CHANGES, which nothing else covers, and three illustrations.
@@ -6702,6 +6747,543 @@ describe("the content pass on the job's blob-less clone", () => {
     expect(content.summary.accounted.size).toBe(0);
     expect(content.summary).toBe(EMPTY_SUMMARY);
   }, 30_000);
+});
+
+// ---------------------------------------------------------------------------------------------
+// Part B: what a pull request changed of the content its original authors published
+// ---------------------------------------------------------------------------------------------
+
+describe("original content", () => {
+  /** The README the original authors published at v1.0.0: a title and one paragraph. */
+  const FIRST =
+    "# Resting EEG\n\nTwo volunteers rested with their eyes closed.\nEach recording lasted ten minutes.\n";
+  /** The README at v1.1.0: the platform's curation added a section after the first version. */
+  const CURATED = `${FIRST}\n## Curation\n\nCurated by the NEMAR team in 2026.\n`;
+  /** A pull request that removes a line the original authors published. */
+  const ORIGINAL_REMOVED = CURATED.replace("Each recording lasted ten minutes.\n", "");
+  /** A pull request that rewords only the curation added after v1.0.0. */
+  const CURATION_REWORDED = `${FIRST}\n## Curation\n\nMaintained by the archive since the first release.\n`;
+
+  /**
+   * A dataset whose `main` holds the README at v1.0.0 and then at v1.1.0, each version tagged with
+   * the annotated tags `tags` names for it (none, to test a repository without tags), and a pull
+   * request on `contrib` that applies `edit`.
+   */
+  function taggedDataset(
+    name: string,
+    edit: (dir: string) => void,
+    tags: { first?: string[]; curated?: string[] } = { first: ["v1.0.0"], curated: ["v1.1.0"] },
+  ): Repo {
+    const dir = join(root, name);
+    mkdirSync(dir, { recursive: true });
+    git(dir, "init", "-q", "-b", "main");
+    write(dir, "dataset_description.json", desc("1.0.0"));
+    write(dir, "CHANGES", "1.0.0 2026-01-01\n - Initial release\n");
+    write(dir, "README.md", FIRST);
+    git(dir, "add", "-A");
+    git(dir, "commit", "-q", "-m", "first version");
+    for (const tag of tags.first ?? []) git(dir, "tag", "-a", tag, "-m", tag);
+    write(dir, "README.md", CURATED);
+    git(dir, "commit", "-q", "-am", "curation");
+    for (const tag of tags.curated ?? []) git(dir, "tag", "-a", tag, "-m", tag);
+    return branch(dir, () => edit(dir));
+  }
+
+  const writeReadme = (text: string) => (dir: string) => write(dir, "README.md", text);
+
+  /**
+   * The Part B facts of a pull request, read from a blob-less clone of it as the review job reads
+   * one, with the shim's `rules` around the content pass.
+   */
+  function fromClone(name: string, r: Repo, options: ContentOptions = {}, rules: ShimRule[] = []) {
+    const clone = blobLessClone(name, r);
+    const listing = gatherListing(clone, r.base, r.head);
+    const restore = installGitShim(root, rules);
+    try {
+      return { clone, original: gatherContent(clone, listing, options).original };
+    } finally {
+      restore();
+    }
+  }
+
+  /** The Part B facts of a pull request read in place, its version tags not listed. */
+  function inPlace(r: Repo, options: ContentOptions = { versionTags: false }) {
+    return gatherContent(r.dir, gatherListing(r.dir, r.base, r.head), options).original;
+  }
+
+  /** The facts of a compared document, or a failed expectation naming what it was instead. */
+  function compared(result: OriginalContentFacts["readme"]): ProseFacts {
+    if (result.status !== "compared") throw new Error(`not compared: ${JSON.stringify(result)}`);
+    return result.facts;
+  }
+
+  describe("the anchor: the README at the first version tag", () => {
+    test("an original line held at v1.0.0 and removed is altered, under that tag's anchor", () => {
+      const r = taggedDataset("oc-removed-source", writeReadme(ORIGINAL_REMOVED));
+      const { original } = fromClone("oc-removed", r);
+      expect(original.abandoned).toBe(false);
+      expect(original.anchorLookup).toBe("first_version_tag");
+      expect(compared(original.readme)).toMatchObject({
+        anchor: "first_version_tag",
+        protectedAltered: 1,
+        laterAltered: 0,
+      });
+    });
+
+    test("rewording text added after v1.0.0 is later text, not the original authors'", () => {
+      const r = taggedDataset("oc-later-source", writeReadme(CURATION_REWORDED));
+      const { original } = fromClone("oc-later", r);
+      expect(original.anchorLookup).toBe("first_version_tag");
+      // The lowest tag anchors: under v1.1.0 the curation line would be protected too.
+      expect(compared(original.readme)).toMatchObject({
+        anchor: "first_version_tag",
+        protectedAltered: 0,
+        laterAltered: 1,
+      });
+    });
+
+    test("with no version tag every merge-base line is protected", () => {
+      const r = taggedDataset("oc-no-tag-source", writeReadme(CURATION_REWORDED), {});
+      const { original } = fromClone("oc-no-tag", r);
+      expect(original.anchorLookup).toBe("no_tag");
+      expect(compared(original.readme)).toMatchObject({
+        anchor: "merge_base",
+        protectedAltered: 1,
+        laterAltered: 0,
+      });
+    });
+
+    test("a lower tag whose commit is not an ancestor of the merge base is skipped, and the next one anchors", () => {
+      const r = taggedDataset("oc-not-ancestor-source", writeReadme(ORIGINAL_REMOVED));
+      // On the pull request's own commit, which the clone holds: below v1.0.0, and no ancestor.
+      git(r.dir, "tag", "-a", "v0.1.0", "-m", "v0.1.0", r.head);
+      const log = callLog("oc-not-ancestor");
+      const { original } = fromClone("oc-not-ancestor", r, {}, [{ match: " --is-ancestor ", log }]);
+      expect(original.anchorLookup).toBe("first_version_tag");
+      // Under v0.1.0, the pull request's own README, the removed line would be no original line.
+      expect(compared(original.readme)).toMatchObject({
+        anchor: "first_version_tag",
+        protectedAltered: 1,
+      });
+      expect(loggedCalls(log)).toHaveLength(2);
+    });
+
+    test("a tag commit the clone does not hold stops the search at the merge base, and nothing is fetched", () => {
+      const r = taggedDataset("oc-missing-source", writeReadme(CURATION_REWORDED));
+      // A commit on a branch the job never fetches, tagged below v1.0.0; the branch is then gone.
+      git(r.dir, "checkout", "-q", "-b", "side", "main~1");
+      write(r.dir, "side.txt", "never fetched\n");
+      git(r.dir, "add", "-A");
+      git(r.dir, "commit", "-q", "-m", "side");
+      git(r.dir, "tag", "-a", "v0.9.0", "-m", "v0.9.0");
+      git(r.dir, "checkout", "-q", "main");
+      git(r.dir, "branch", "-q", "-D", "side");
+      const side = git(r.dir, "rev-parse", "v0.9.0^{commit}");
+      const { clone, original } = fromClone("oc-missing", r);
+      expect(original.anchorLookup).toBe("check_failed");
+      expect(compared(original.readme)).toMatchObject({
+        anchor: "merge_base",
+        protectedAltered: 1,
+        laterAltered: 0,
+      });
+      // Asking about it did not fetch it: had it been fetched, it would be found no ancestor and
+      // v1.0.0 would anchor.
+      expect(holds(clone, side)).toBe(false);
+    });
+
+    test("a tag listing that fails leaves the merge base: lookup_failed", () => {
+      // Read in place: the repository has its tags but no origin to list them from.
+      const r = taggedDataset("oc-no-origin", writeReadme(CURATION_REWORDED));
+      const original = inPlace(r, {});
+      expect(original.anchorLookup).toBe("lookup_failed");
+      expect(compared(original.readme)).toMatchObject({
+        anchor: "merge_base",
+        protectedAltered: 1,
+        laterAltered: 0,
+      });
+    });
+
+    test("the anchor's README is read once, by its own call, and with lazy fetching off the merge base protects", () => {
+      const r = taggedDataset("oc-anchor-once-source", writeReadme(CURATION_REWORDED));
+      const anchorBlob = git(r.dir, "rev-parse", "v1.0.0:README.md");
+      const log = callLog("oc-anchor-once");
+      const { clone, original } = fromClone("oc-anchor-once", r, {}, [
+        { match: " cat-file --batch ", stdinLog: log },
+      ]);
+      expect(original.anchorLookup).toBe("first_version_tag");
+      expect(compared(original.readme)).toMatchObject({ protectedAltered: 0, laterAltered: 1 });
+      const read = loggedCalls(log);
+      expect(read.filter((id) => id === anchorBlob)).toHaveLength(1);
+      expect(new Set(read).size).toBe(read.length);
+      expect(holds(clone, anchorBlob)).toBe(true);
+      // The blob is in no side of the pull request's diff, so the clone holds it only by fetching
+      // it. Kept from fetching, the anchor cannot be read: the tag is still found, and the README
+      // is protected from the merge base.
+      const cut = fromClone("oc-anchor-cut", r, {}, [{ match: " cat-file ", env: NO_LAZY_FETCH }]);
+      expect(holds(cut.clone, anchorBlob)).toBe(false);
+      expect(cut.original.anchorLookup).toBe("first_version_tag");
+      expect(compared(cut.original.readme)).toMatchObject({
+        anchor: "merge_base",
+        protectedAltered: 1,
+        laterAltered: 0,
+      });
+      // A tag on the merge base itself: its README is the one already read, and not read again.
+      const onBase = taggedDataset("oc-anchor-base-source", writeReadme(ORIGINAL_REMOVED), {
+        curated: ["v1.0.0"],
+      });
+      const again = callLog("oc-anchor-base");
+      const same = fromClone("oc-anchor-base", onBase, {}, [
+        { match: " cat-file --batch ", stdinLog: again },
+      ]);
+      expect(same.original.anchorLookup).toBe("first_version_tag");
+      const baseBlob = git(onBase.dir, "rev-parse", "v1.0.0:README.md");
+      expect(loggedCalls(again).filter((id) => id === baseBlob)).toHaveLength(1);
+    });
+
+    test("offline, the version tags are never listed, and the merge base protects", () => {
+      const r = taggedDataset("oc-offline-source", writeReadme(CURATION_REWORDED));
+      const log = callLog("oc-offline");
+      const offline = fromClone("oc-offline", r, { versionTags: false }, [
+        { match: " ls-remote ", log },
+      ]);
+      expect(loggedCalls(log)).toEqual([]);
+      expect(offline.original.anchorLookup).toBe("not_looked_up");
+      expect(compared(offline.original.readme)).toMatchObject({
+        anchor: "merge_base",
+        protectedAltered: 1,
+      });
+      // The control: the same pull request online lists them once.
+      const online = callLog("oc-online");
+      fromClone("oc-online", r, {}, [{ match: " ls-remote ", log: online }]);
+      expect(loggedCalls(online)).toHaveLength(1);
+    });
+
+    test("a pull request that changes no README never lists the tags", () => {
+      const r = taggedDataset("oc-no-readme-source", (dir) =>
+        write(dir, "CHANGES", "Unreleased\n - Fixed units\n1.0.0 2026-01-01\n - Initial release\n"),
+      );
+      const log = callLog("oc-no-readme");
+      const { original } = fromClone("oc-no-readme", r, {}, [{ match: " ls-remote ", log }]);
+      expect(loggedCalls(log)).toEqual([]);
+      expect(original.anchorLookup).toBe("not_needed");
+      expect(original.readme).toEqual({ status: "unchanged" });
+      expect(compared(original.changes)).toMatchObject({ protectedAltered: 0, insertedLines: 2 });
+    });
+
+    test("an origin that answers with megabytes of tags is cut off at its bound, and many tags cost at most 32 checks", () => {
+      const r = taggedDataset("oc-hostile-source", writeReadme(CURATION_REWORDED));
+      const clone = blobLessClone("oc-hostile", r);
+      const bare = join(root, "oc-hostile-origin.git");
+      const packedRefs = join(bare, "packed-refs");
+      // The refs the bare origin already has, its header left out (so git sorts what follows).
+      const kept = existsSync(packedRefs)
+        ? readFileSync(packedRefs, "utf8")
+            .split("\n")
+            .filter((line) => line !== "" && !line.startsWith("#"))
+        : [];
+      const listing = gatherListing(clone, r.base, r.head);
+      const withRefs = (refs: string[]) => {
+        writeFileSync(packedRefs, `${[...kept, ...refs].join("\n")}\n`);
+        const checks = callLog("oc-hostile-checks");
+        const restore = installGitShim(root, [{ match: " --is-ancestor ", log: checks }]);
+        const started = Date.now();
+        try {
+          const { original } = gatherContent(clone, listing);
+          return { original, elapsed: Date.now() - started, checks: loggedCalls(checks).length };
+        } finally {
+          restore();
+        }
+      };
+      // Every tag below v1.0.0 names the pull request's own commit: in the clone, no ancestor.
+      const tags = (n: number) =>
+        Array.from({ length: n }, (_, i) => `${r.head} refs/tags/v0.0.${i}`);
+      const many = withRefs(tags(10_000));
+      expect(many.original.anchorLookup).toBe("too_many_tags");
+      expect(many.checks).toBe(32);
+      // 100,000 tags, and 10 MB of names that are no version, are past the 1 MiB the listing may
+      // write: the listing is stopped, and no tag is checked.
+      const flood = withRefs(tags(100_000));
+      const garbage = withRefs(
+        Array.from({ length: 2_500 }, (_, i) => `${r.head} refs/tags/v${"9".repeat(4_000)}x${i}`),
+      );
+      for (const run of [flood, garbage]) {
+        expect(run.original.anchorLookup).toBe("lookup_failed");
+        expect(run.checks).toBe(0);
+      }
+      for (const run of [many, flood, garbage]) {
+        expect(compared(run.original.readme)).toMatchObject({
+          anchor: "merge_base",
+          protectedAltered: 1,
+        });
+        // Generous: the bound is what is tested, not the machine.
+        expect(run.elapsed).toBeLessThan(60_000);
+      }
+    }, 240_000);
+  });
+
+  describe("the facts of the content", () => {
+    const OPEN = "# Resting EEG\n\nTwo volunteers rested.\nEach recording lasted ten minutes.";
+    const SECTION = "\n\n## Added\n\nA new section.\n";
+
+    test("a README turned from CRLF to LF with a section appended says its line endings changed, and nothing is altered", () => {
+      const crlf = `${OPEN.replaceAll("\n", "\r\n")}\r\n`;
+      const r = changed("oc-crlf", { "README.md": crlf }, (dir) =>
+        write(dir, "README.md", `${OPEN}${SECTION}`),
+      );
+      expect(compared(inPlace(r).readme)).toMatchObject({
+        lineEndingsChanged: true,
+        finalNewlineAdded: false,
+        protectedAltered: 0,
+        laterAltered: 0,
+        minorEdits: 0,
+        moved: false,
+        insertedInsideParagraph: 0,
+        insertedLines: 2,
+      });
+    });
+
+    test("a final newline added with a section appended alters nothing", () => {
+      const r = changed("oc-final-newline", { "README.md": OPEN }, (dir) =>
+        write(dir, "README.md", `${OPEN}${SECTION}`),
+      );
+      expect(compared(inPlace(r).readme)).toMatchObject({
+        finalNewlineAdded: true,
+        lineEndingsChanged: false,
+        protectedAltered: 0,
+        preserved: true,
+      });
+    });
+
+    test("a typo fixed in an original line is a minor edit, not an alteration", () => {
+      const r = changed("oc-minor", { "README.md": `${OPEN}\n` }, (dir) =>
+        write(dir, "README.md", `${OPEN.replace("volunteers", "volunters")}\n`),
+      );
+      expect(compared(inPlace(r).readme)).toMatchObject({
+        minorEdits: 1,
+        protectedAltered: 0,
+        preserved: false,
+      });
+    });
+
+    test("the dataset's Name changed is an altered author field; an author appended has grown", () => {
+      const named = changed("oc-name", { "dataset_description.json": desc("1.0.0") }, (dir) =>
+        write(dir, "dataset_description.json", desc("1.0.0", { Name: "Another dataset" })),
+      );
+      expect(inPlace(named).authorFields).toEqual({
+        altered: ["Name"],
+        removed: [],
+        minor: [],
+        grown: [],
+        added: [],
+        unparsed: false,
+      });
+      const authors = changed(
+        "oc-authors",
+        { "dataset_description.json": desc("1.0.0", { Authors: ["Ada Lovelace"] }) },
+        (dir) =>
+          write(
+            dir,
+            "dataset_description.json",
+            desc("1.1.0", { Authors: ["Ada Lovelace", "Alan Turing"] }),
+          ),
+      );
+      expect(inPlace(authors).authorFields).toMatchObject({ altered: [], grown: ["Authors"] });
+      // A pull request that leaves the description alone compares no field.
+      const untouched = changed("oc-no-description", { "README.md": `${OPEN}\n` }, (dir) =>
+        write(dir, "README.md", `${OPEN}${SECTION}`),
+      );
+      expect(inPlace(untouched).authorFields).toBeNull();
+    });
+
+    test("participant values: one changed is counted, one filled is not, and a file that cannot be read is unknown", () => {
+      const table = (...rows: string[]) => `participant_id\tsex\n${rows.join("\n")}\n`;
+      const base = { "participants.tsv": table("sub-01\tM", "sub-02\tn/a") };
+      const changedValue = changed("oc-participant-changed", base, (dir) =>
+        write(dir, "participants.tsv", table("sub-01\tF", "sub-02\tn/a")),
+      );
+      expect(inPlace(changedValue).participantValues).toBe(1);
+      const filled = changed("oc-participant-filled", base, (dir) =>
+        write(dir, "participants.tsv", table("sub-01\tM", "sub-02\tF")),
+      );
+      expect(inPlace(filled).participantValues).toBe(0);
+      const ragged = changed("oc-participant-ragged", base, (dir) =>
+        write(dir, "participants.tsv", table("sub-01\tM\textra", "sub-02\tn/a")),
+      );
+      expect(inPlace(ragged).participantValues).toBeNull();
+      // Turned into a link: a type change, which the summary never reads.
+      const linked = changed("oc-participant-link", base, (dir) => {
+        unlinkSync(join(dir, "participants.tsv"));
+        symlinkSync("elsewhere.tsv", join(dir, "participants.tsv"));
+      });
+      expect(inPlace(linked).participantValues).toBeNull();
+    });
+
+    test("recordings: an annex key replaced, an annexed file turned into a git file, and a pointer moved", () => {
+      const key = (n: number) => `SHA256E-s${100 + n}--${String(n).padStart(8, "0")}.edf`;
+      const recordingOf = (s: string) => `${s}/eeg/${s}_task-rest_eeg.edf`;
+      const link = (dir: string, s: string, n: number) => {
+        const path = join(dir, recordingOf(s));
+        mkdirSync(dirname(path), { recursive: true });
+        symlinkSync(`../../.git/annex/objects/Xj/9P/${key(n)}/${key(n)}`, path);
+      };
+      const dir = join(root, "oc-annex");
+      mkdirSync(dir, { recursive: true });
+      git(dir, "init", "-q", "-b", "main");
+      for (const [s, n] of [
+        ["sub-01", 1],
+        ["sub-02", 2],
+        ["sub-03", 3],
+      ] as const) {
+        link(dir, s, n);
+      }
+      git(dir, "add", "-A");
+      git(dir, "commit", "-q", "-m", "recordings");
+      const r = branch(dir, () => {
+        unlinkSync(join(dir, recordingOf("sub-01")));
+        link(dir, "sub-01", 11);
+        unlinkSync(join(dir, recordingOf("sub-02")));
+        write(dir, recordingOf("sub-02"), "the recording itself\n");
+        unlinkSync(join(dir, recordingOf("sub-03")));
+        link(dir, "sub-04", 3);
+      });
+      expect(inPlace(r).recordings).toEqual({ replaced: 1, typeChanged: 1, moved: 1, unread: 0 });
+    });
+  });
+
+  describe("an abandoned pass", () => {
+    test("a clock past the line abandons Part B before it reads anything, and the pass goes on", () => {
+      const r = changed("oc-clock", { "README.md": "# A\n\nB.\n" }, (dir) =>
+        write(dir, "README.md", "# A\n\nC.\n"),
+      );
+      const listing = gatherListing(r.dir, r.base, r.head);
+      const log = callLog("oc-clock");
+      const restore = installGitShim(root, [{ match: " cat-file ", log }]);
+      let content: ReturnType<typeof gatherContent>;
+      try {
+        content = gatherContent(r.dir, listing, { now: () => Number.MAX_SAFE_INTEGER });
+      } finally {
+        restore();
+      }
+      expect(content.original).toBe(ORIGINAL_ABANDONED);
+      expect(loggedCalls(log)).toEqual([]);
+      expect(content.patches.map((p) => p.path)).toEqual(["README.md"]);
+      // The control: with the real clock the same pass compares the README.
+      expect(compared(inPlace(r).readme).minorEdits).toBe(1);
+    });
+
+    test("a Part B batch that stalls past the line abandons Part B, and the pass completes in its budget", () => {
+      const r = changed(
+        "oc-stall",
+        { [tableOf("sub-01")]: "name\ttype\nCz\tEEG\nPz\tEEG\n", "README.md": "# A\n\nB.\n" },
+        (dir) => {
+          write(dir, tableOf("sub-01"), "name\ttype\nCz\tEEG\n");
+          write(dir, "README.md", "# A\n\nC.\n");
+        },
+      );
+      const listing = gatherListing(r.dir, r.base, r.head);
+      const log = callLog("oc-stall");
+      // The first two processes are the cosmetic proof's; the third is Part B's, and it stalls.
+      const restore = installGitShim(root, [
+        { match: " cat-file ", log },
+        { match: " cat-file ", sleepSeconds: 30, fromCall: 3 },
+      ]);
+      // 47 seconds: Part B's line is 7 seconds in, the pass's own deadline 40 seconds after it.
+      __setEvidenceBudgetForTests({ content: 47_000 });
+      let content: ReturnType<typeof gatherContent>;
+      let elapsed = 0;
+      try {
+        const started = Date.now();
+        content = gatherContent(r.dir, listing);
+        elapsed = Date.now() - started;
+      } finally {
+        __setEvidenceBudgetForTests(null);
+        restore();
+      }
+      expect(loggedCalls(log).map((c) => c.split("never ")[1]?.trim())).toEqual([
+        "cat-file --batch-check",
+        "cat-file --batch",
+        "cat-file --batch-check",
+      ]);
+      expect(content.original).toBe(ORIGINAL_ABANDONED);
+      expect(elapsed).toBeLessThan(30_000);
+      // The rest of the pass is as it was: the summary, the diffs and the change log.
+      expect(content.summary.accounted.has(tableOf("sub-01"))).toBe(true);
+      expect(content.patches.map((p) => p.path)).toContain("README.md");
+      expect(content.changelogEntry).toBe("unknown_version");
+    }, 90_000);
+
+    test("an abandoned summary with no participants file changed leaves the participant count at 0", () => {
+      const r = changed(
+        "oc-summary-abandoned",
+        { [tableOf("sub-01")]: "name\ttype\nCz\tEEG\nPz\tEEG\n", "README.md": "# A\n\nB.\n" },
+        (dir) => {
+          write(dir, tableOf("sub-01"), "name\ttype\nCz\tEEG\n");
+          write(dir, "README.md", "# A\n\nB.\n\nC.\n");
+        },
+      );
+      const listing = gatherListing(r.dir, r.base, r.head);
+      // The summary reads the clock first and finds it past; Part B reads the real time.
+      let reads = 0;
+      const content = gatherContent(r.dir, listing, {
+        versionTags: false,
+        now: () => (++reads === 1 ? Number.MAX_SAFE_INTEGER : Date.now()),
+      });
+      expect(content.summary).toBe(ABANDONED_SUMMARY);
+      expect(content.original.abandoned).toBe(false);
+      expect(content.original.participantValues).toBe(0);
+      expect(compared(content.original.readme).protectedAltered).toBe(0);
+    });
+  });
+
+  test("Part B reads no blob twice: what the cosmetic proofs and the summary's pool read is taken from them", () => {
+    const r = changed(
+      "oc-once",
+      {
+        "dataset_description.json": desc("1.0.0", { Authors: ["Ada Lovelace"] }),
+        "README.md": "# Resting EEG\n\nTwo volunteers rested.\n",
+        CHANGES: "1.0.0 2026-01-01\n - Initial release\n",
+        [sidecarOf("sub-01")]: '{"TaskName":"rest","PowerLineFrequency":60}',
+      },
+      (dir) => {
+        write(
+          dir,
+          "dataset_description.json",
+          desc("1.1.0", { Authors: ["Ada Lovelace", "Alan Turing"] }),
+        );
+        write(dir, "README.md", "# Resting EEG\n\nTwo volunteers rested.\n\n## Added\n\nMore.\n");
+        write(dir, "CHANGES", "1.1.0 2026-10-22\n - Added\n1.0.0 2026-01-01\n - Initial release\n");
+        write(dir, sidecarOf("sub-01"), '{"TaskName":"rest"}');
+        // Added, so the summary's pool reads it: the home of the key moved out of the sidecar.
+        write(dir, "sub-01/sub-01_task-rest_eeg.json", '{"PowerLineFrequency":60}');
+      },
+    );
+    const listing = gatherListing(r.dir, r.base, r.head);
+    const log = callLog("oc-once");
+    const restore = installGitShim(root, [{ match: " cat-file --batch ", stdinLog: log }]);
+    let content: ReturnType<typeof gatherContent>;
+    try {
+      content = gatherContent(r.dir, listing, { versionTags: false });
+    } finally {
+      restore();
+    }
+    expect(content.summary.loss.keysMoved).toBe(1);
+    expect(content.original.authorFields).toMatchObject({ altered: [], grown: ["Authors"] });
+    expect(compared(content.original.readme).protectedAltered).toBe(0);
+    expect(compared(content.original.changes).protectedAltered).toBe(0);
+    const read = loggedCalls(log);
+    expect(new Set(read).size).toBe(read.length);
+    // Each of these was read exactly once, by the step that needed it first.
+    const id = (rev: string, path: string) => git(r.dir, "rev-parse", `${rev}:${path}`);
+    for (const blob of [
+      id(r.base, "dataset_description.json"),
+      id(r.head, "dataset_description.json"),
+      id(r.head, "sub-01/sub-01_task-rest_eeg.json"),
+      id(r.base, "README.md"),
+      id(r.head, "README.md"),
+    ]) {
+      expect(read.filter((x) => x === blob)).toHaveLength(1);
+    }
+  });
 });
 
 describe("the worst case fits", () => {
@@ -6791,6 +7373,7 @@ describe("the worst case fits", () => {
       groupsOmittedFiles: 1,
       changelogEntry: "added" as const,
       summary: worstSummary,
+      original: ORIGINAL_ABANDONED,
     };
     const review = buildReviewMessages({
       facts,
