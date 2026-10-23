@@ -753,8 +753,10 @@ export function platformFindings(
  * Everything else the facts hold is for the model to read and the platform does nothing with:
  * minor edits, edits of text added after the anchor, new lines joined to an original paragraph,
  * line endings, a final newline, a part that is not UTF-8, the permitted edits of author fields,
- * and recordings moved with their key (which never cancel Part A's removal facts). Null facts, from
- * a caller that read no content, decide nothing.
+ * and recordings moved with their key (which never cancel Part A's removal facts). So is a README or
+ * CHANGES that is `unpublished`: the dataset has no version tag, so nothing of it has been published
+ * to protect, and only the author fields, the participant values and the recordings are decided.
+ * Null facts, from a caller that read no content, decide nothing.
  */
 export interface OriginalVerdict {
   text: {

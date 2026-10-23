@@ -6251,6 +6251,31 @@ describe("the verdict of the original content", () => {
     for (const o of information) expect(decided(o)).toEqual(NOTHING);
   });
 
+  test("a README or CHANGES of a dataset never published is information; its fields, values and recordings are not", () => {
+    const unpublished = {
+      anchorLookup: "no_tag" as const,
+      readme: { status: "unpublished" as const },
+      changes: { status: "unpublished" as const },
+    };
+    expect(decided(originalOf(unpublished))).toEqual(NOTHING);
+    expect(platformFindings(EMPTY_SUMMARY, originalOf(unpublished))).toEqual([]);
+    expect(
+      decided(
+        originalOf({
+          ...unpublished,
+          authorFields: fieldsOf({ altered: ["Name"] }),
+          participantValues: 2,
+          recordings: { replaced: 1, typeChanged: 0, moved: 0, unread: 0 },
+        }),
+      ),
+    ).toEqual({
+      ...NOTHING,
+      fields: { keys: ["Name"], participants: 2 },
+      recordings: 1,
+      lowersToFail: true,
+    });
+  });
+
   test("a finding points at the README the platform showed, the CHANGES part, or the file of the fields", () => {
     const paths = (o: OriginalContentFacts) => originalVerdict(o).paths;
     expect(paths(originalOf({ readme: compared({ protectedAltered: 1 }) })).text).toBe("README.md");
@@ -7951,6 +7976,8 @@ describe("the content pass on the job's blob-less clone", () => {
 
   test("one prefetch brings every blob: the cosmetic proof and the summary read them with no fetch of their own", () => {
     const r = origin();
+    // A published dataset: its first version is the merge base, whose README Part B already reads.
+    git(r.dir, "tag", "-a", "v1.0.0", "-m", "v1.0.0", r.base);
     const clone = blobLessClone("clone-lazy", r);
     const before = git(r.dir, "rev-parse", `${r.base}:${bulkTable(1)}`);
     const after = git(r.dir, "rev-parse", `${r.head}:${bulkTable(1)}`);
@@ -7991,13 +8018,13 @@ describe("the content pass on the job's blob-less clone", () => {
       "cat-file --batch",
     ]);
     // Part B compared the README and CHANGES from the prefetched blobs too, and listed the origin's
-    // tags once: it has none, so the README is protected from the merge base.
+    // tags once: v1.0.0 anchors the README, whose blob at the tag is the one already read.
     expect(content.original.abandoned).toBe(false);
     expect([content.original.readme.status, content.original.changes.status]).toEqual([
       "compared",
       "compared",
     ]);
-    expect(content.original.anchorLookup).toBe("no_tag");
+    expect(content.original.anchorLookup).toBe("first_version_tag");
     expect(calls.filter((c) => c.startsWith("ls-remote"))).toEqual([
       "ls-remote --tags origin refs/tags/v*",
     ]);
@@ -8050,6 +8077,7 @@ describe("original content", () => {
     name: string,
     edit: (dir: string) => void,
     tags: { first?: string[]; curated?: string[] } = { first: ["v1.0.0"], curated: ["v1.1.0"] },
+    setUp: (dir: string) => void = () => {},
   ): Repo {
     const dir = join(root, name);
     mkdirSync(dir, { recursive: true });
@@ -8057,6 +8085,7 @@ describe("original content", () => {
     write(dir, "dataset_description.json", desc("1.0.0"));
     write(dir, "CHANGES", "1.0.0 2026-01-01\n - Initial release\n");
     write(dir, "README.md", FIRST);
+    setUp(dir);
     git(dir, "add", "-A");
     git(dir, "commit", "-q", "-m", "first version");
     for (const tag of tags.first ?? []) git(dir, "tag", "-a", tag, "-m", tag);
@@ -8243,11 +8272,13 @@ describe("original content", () => {
       expect(holds(clone, tagTree)).toBe(false);
     });
 
-    test("with no version tag every merge-base line is protected", () => {
+    test("with no version tag at all the dataset was never published: the README is unpublished, not compared", () => {
       const r = taggedDataset("oc-no-tag-source", writeReadme(CURATION_REWORDED), {});
       const { original } = fromClone("oc-no-tag", r);
       expect(original.anchorLookup).toBe("no_tag");
-      expect(compared(original.readme)).toMatchObject({
+      expect(original.readme).toEqual({ status: "unpublished" });
+      // The same pull request read where the tags cannot be listed is protected from the merge base.
+      expect(compared(inPlace(r, {}).readme)).toMatchObject({
         anchor: "merge_base",
         protectedAltered: 1,
         laterAltered: 0,
@@ -8359,14 +8390,32 @@ describe("original content", () => {
       expect(loggedCalls(online)).toHaveLength(1);
     });
 
-    test("a pull request that changes no README never lists the tags", () => {
+    test("a pull request that changes neither README nor CHANGES never lists the tags", () => {
+      const r = taggedDataset("oc-no-documents-source", (dir) =>
+        write(dir, "task-rest_eeg.json", '{"TaskName":"rest"}'),
+      );
+      const log = callLog("oc-no-documents");
+      const { original } = fromClone("oc-no-documents", r, {}, [{ match: " ls-remote ", log }]);
+      expect(loggedCalls(log)).toEqual([]);
+      expect(original.anchorLookup).toBe("not_needed");
+      expect(original.readme).toEqual({ status: "unchanged" });
+      expect(original.changes).toEqual({ status: "unchanged" });
+    });
+
+    test("a pull request that changes CHANGES alone lists the tags once, to know the dataset was published, and reads no README at the tag", () => {
       const r = taggedDataset("oc-no-readme-source", (dir) =>
         write(dir, "CHANGES", "Unreleased\n - Fixed units\n1.0.0 2026-01-01\n - Initial release\n"),
       );
+      const tagCommit = git(r.dir, "rev-parse", "v1.0.0^{commit}");
       const log = callLog("oc-no-readme");
-      const { original } = fromClone("oc-no-readme", r, {}, [{ match: " ls-remote ", log }]);
-      expect(loggedCalls(log)).toEqual([]);
-      expect(original.anchorLookup).toBe("not_needed");
+      const trees = callLog("oc-no-readme-trees");
+      const { original } = fromClone("oc-no-readme", r, {}, [
+        { match: " ls-remote ", log },
+        { match: `ls-tree -z ${tagCommit}`, log: trees },
+      ]);
+      expect(loggedCalls(log)).toHaveLength(1);
+      expect(loggedCalls(trees)).toEqual([]);
+      expect(original.anchorLookup).toBe("first_version_tag");
       expect(original.readme).toEqual({ status: "unchanged" });
       expect(compared(original.changes)).toMatchObject({ protectedAltered: 0, insertedLines: 2 });
     });
@@ -9153,6 +9202,134 @@ describe("original content", () => {
       });
       expect(clean.findings).toEqual([]);
       expect(verdictOf(clean)).toBe("pass");
+    });
+
+    describe("no protection before publication: a dataset with no version tag", () => {
+      /** CHANGES with the 1.0.0 entry reworded under the new one: an edit of an existing line. */
+      const CHANGES_EDITED =
+        "1.1.0 2026-10-16\n - Fixed units\n1.0.0 2026-01-01\n - First release\n";
+      const editTexts = (dir: string) => {
+        release(dir);
+        write(dir, "README.md", ORIGINAL_REMOVED);
+        write(dir, "CHANGES", CHANGES_EDITED);
+      };
+      const key = (n: number) => `SHA256E-s${100 + n}--${String(n).padStart(8, "0")}.edf`;
+      const RECORDING = "sub-01/eeg/sub-01_task-rest_eeg.edf";
+      const link = (dir: string, n: number) => {
+        mkdirSync(join(dir, dirname(RECORDING)), { recursive: true });
+        symlinkSync(`../../.git/annex/objects/Xj/9P/${key(n)}/${key(n)}`, join(dir, RECORDING));
+      };
+      const table = (...rows: string[]) => `participant_id\tsex\n${rows.join("\n")}\n`;
+      /** A participants table and an annexed recording at the merge base. */
+      const withData = (dir: string) => {
+        write(dir, "participants.tsv", table("sub-01\tM", "sub-02\tF"));
+        link(dir, 1);
+      };
+
+      test("a reworded README paragraph and an edited CHANGES line are information: no finding, and a pass stays a pass", () => {
+        const r = taggedDataset("ou-texts-source", editTexts, {});
+        const clone = blobLessClone("ou-texts", r);
+        const listing = gatherListing(clone, r.base, r.head);
+        const { original } = gatherContent(clone, listing);
+        // The origin was asked and has no version tag: nothing has been published.
+        expect(original.anchorLookup).toBe("no_tag");
+        expect(original.readme).toEqual({ status: "unpublished" });
+        expect(original.changes).toEqual({ status: "unpublished" });
+        const report = reportOf(clone, r, {});
+        expect(report.findings).toEqual([]);
+        expect(report.criteria.no_degradation).toBe("pass");
+        expect(verdictOf(report)).toBe("pass");
+      });
+
+      test("on the same dataset a changed Name, a changed participant value and a replaced recording still fail and hold", () => {
+        const r = taggedDataset(
+          "ou-data-source",
+          (dir) => {
+            editTexts(dir);
+            write(dir, "dataset_description.json", desc("1.1.0", { Name: "Another dataset" }));
+            write(dir, "participants.tsv", table("sub-01\tF", "sub-02\tF"));
+            unlinkSync(join(dir, RECORDING));
+            link(dir, 2);
+          },
+          {},
+          withData,
+        );
+        const report = reportOf(blobLessClone("ou-data", r), r, {});
+        expect(report.findings.map((f) => [f.code, f.path])).toEqual([
+          ["original_field_altered", "dataset_description.json"],
+          ["recording_replaced", null],
+        ]);
+        expect(report.findings[0]?.note).toContain(
+          "1 field of the dataset description and 1 participant value changed.",
+        );
+        expect(report.criteria.no_degradation).toBe("fail");
+        expect(verdictOf(report)).toBe("fail");
+      });
+
+      test("a README the pull request did not change stays unchanged; CHANGES alone is listed once and no README is read", () => {
+        const r = taggedDataset(
+          "ou-changes-only-source",
+          (dir) => {
+            release(dir);
+            write(dir, "CHANGES", CHANGES_EDITED);
+          },
+          {},
+        );
+        const log = callLog("ou-changes-only");
+        const { original } = fromClone("ou-changes-only", r, {}, [{ match: " ls-remote ", log }]);
+        expect(loggedCalls(log)).toHaveLength(1);
+        expect(original.anchorLookup).toBe("no_tag");
+        expect(original.readme).toEqual({ status: "unchanged" });
+        expect(original.changes).toEqual({ status: "unpublished" });
+        expect(verdictOf(reportOf(blobLessClone("ou-changes-only-report", r), r, {}))).toBe("pass");
+      });
+
+      test("every lookup that could not answer keeps the merge base: the same edits fail with a tag, with no origin, with no ancestor tag and with an unreadable tag tree", () => {
+        const failsWith = (report: PrReviewReport) => {
+          expect(codes(report)).toEqual(["original_text_altered"]);
+          expect(verdictOf(report)).toBe("fail");
+        };
+        // A first version tag: the README line removed was published at v1.0.0.
+        const tagged = taggedDataset("ou-tagged-source", editTexts);
+        const clone = blobLessClone("ou-tagged", tagged);
+        const listing = gatherListing(clone, tagged.base, tagged.head);
+        expect(gatherContent(clone, listing).original.anchorLookup).toBe("first_version_tag");
+        failsWith(reportOf(clone, tagged, {}));
+        // No origin to list the tags from.
+        const local = taggedDataset("ou-no-origin", editTexts, {});
+        expect(
+          gatherContent(local.dir, gatherListing(local.dir, local.base, local.head)).original
+            .anchorLookup,
+        ).toBe("lookup_failed");
+        failsWith(reportOf(local.dir, local, {}));
+        // Only a tag on the pull request's own commit: listed, and no ancestor of the merge base.
+        const stray = taggedDataset("ou-no-ancestor-source", editTexts, {});
+        git(stray.dir, "tag", "-a", "v0.1.0", "-m", "v0.1.0", stray.head);
+        const strayClone = blobLessClone("ou-no-ancestor", stray);
+        const strayListing = gatherListing(strayClone, stray.base, stray.head);
+        expect(gatherContent(strayClone, strayListing).original.anchorLookup).toBe("no_ancestor");
+        failsWith(reportOf(strayClone, stray, {}));
+        // A tag whose tree git cannot list: its listing is pointed at an empty object store.
+        const unreadable = taggedDataset("ou-tag-tree-source", editTexts);
+        const tagCommit = git(unreadable.dir, "rev-parse", "v1.0.0^{commit}");
+        const empty = join(root, "ou-empty-objects");
+        mkdirSync(empty, { recursive: true });
+        const cut = blobLessClone("ou-tag-tree", unreadable);
+        const restore = installGitShim(root, [
+          { match: `ls-tree -z ${tagCommit}`, env: { GIT_OBJECT_DIRECTORY: empty } },
+        ]);
+        let cutReport: PrReviewReport;
+        let lookup: string;
+        try {
+          const cutListing = gatherListing(cut, unreadable.base, unreadable.head);
+          lookup = gatherContent(cut, cutListing).original.anchorLookup;
+          cutReport = reportOf(cut, unreadable, {});
+        } finally {
+          restore();
+        }
+        expect(lookup).toBe("tag_tree_unreadable");
+        failsWith(cutReport);
+      });
     });
   });
 });

@@ -4815,8 +4815,8 @@ describe("originalContentFacts: the documents", () => {
       protectedAltered: 1,
     });
     // With no anchor the same README removal is original text.
-    const strict = originalContentFacts({ ...input, anchor: null, anchorLookup: "no_tag" });
-    expect(strict.anchorLookup).toBe("no_tag");
+    const strict = originalContentFacts({ ...input, anchor: null, anchorLookup: "no_ancestor" });
+    expect(strict.anchorLookup).toBe("no_ancestor");
     expect(comparedFacts(strict.readme)).toMatchObject({
       anchor: "merge_base",
       protectedAltered: 2,
@@ -4858,6 +4858,93 @@ describe("originalContentFacts: the documents", () => {
       changes: null,
       participants: null,
     });
+  });
+});
+
+describe("originalContentFacts: no protection before publication", () => {
+  const base = parts({ "README.md": ORIGINAL });
+  const removed = parts({ "README.md": edited((lines) => lines.splice(7, 2)) });
+  const changesBase = parts({ CHANGES: "1.1.0\n - Added sub-03\n1.0.0\n - Initial release\n" });
+  const changesHead = parts({ CHANGES: "1.1.0\n - Added sub-03\n1.0.0\n - First release\n" });
+  const texts = contentInput({
+    changes: [modified("README.md"), modified("CHANGES")],
+    documents: {
+      readme: { base, head: removed },
+      changes: { base: changesBase, head: changesHead },
+    },
+  });
+
+  test("when the lookup found no version tag, a changed README or CHANGES is unpublished and not compared", () => {
+    const facts = originalContentFacts({ ...texts, anchorLookup: "no_tag" });
+    expect(facts.anchorLookup).toBe("no_tag");
+    expect(facts.readme).toEqual({ status: "unpublished" });
+    expect(facts.changes).toEqual({ status: "unpublished" });
+    expect(Object.isFrozen(facts.readme)).toBe(true);
+    // Not compared at all: parts that would be refused are not refused either.
+    const unreadable: DocumentPart[] = [
+      { name: "README.md", mode: "100644", oid: "a".repeat(40), content: "unreadable" },
+    ];
+    const refusedIfRead = originalContentFacts({
+      ...texts,
+      documents: {
+        readme: { base: unreadable, head: unreadable },
+        changes: texts.documents.changes,
+      },
+      anchorLookup: "no_tag",
+    });
+    expect(refusedIfRead.readme).toEqual({ status: "unpublished" });
+    // A document no part of which changed stays unchanged.
+    const readmeOnly = originalContentFacts({
+      ...texts,
+      changes: [modified("README.md")],
+      anchorLookup: "no_tag",
+    });
+    expect([readmeOnly.readme.status, readmeOnly.changes.status]).toEqual([
+      "unpublished",
+      "unchanged",
+    ]);
+  });
+
+  test("every other lookup word compares both documents: only an answer of no tag lifts the protection", () => {
+    for (const word of ANCHOR_LOOKUPS) {
+      if (word === "no_tag") continue;
+      const facts = originalContentFacts({ ...texts, anchorLookup: word });
+      expect([facts.readme.status, facts.changes.status], word).toEqual(["compared", "compared"]);
+      if (facts.readme.status === "compared") {
+        expect(facts.readme.facts.protectedAltered, word).toBe(2);
+      }
+    }
+  });
+
+  test("the author fields, the participant values and the recordings are decided whatever the lookup found", () => {
+    const edit: Edit = {
+      path: PARTICIPANTS_TSV,
+      before: sexTable("None", "M"),
+      after: sexTable("F", "M"),
+    };
+    const recordings = [
+      recording("sub-01/eeg/sub-01_task-x_eeg.edf", locked(keyOf(1)), locked(keyOf(2)), true),
+    ];
+    const everything = contentInput({
+      ...texts,
+      changes: [
+        ...texts.changes,
+        modified("dataset_description.json"),
+        modified(PARTICIPANTS_TSV),
+        ...recordings.map(({ path, status }) => ({ path, status })),
+      ],
+      description: { before: description(DESCRIPTION), after: changed({ Name: "A new name" }) },
+      summary: summaryOf([edit]),
+      recordings,
+    });
+    const strict = originalContentFacts({ ...everything, anchorLookup: "lookup_failed" });
+    const unpublished = originalContentFacts({ ...everything, anchorLookup: "no_tag" });
+    expect(unpublished.authorFields).toEqual(noFieldChange({ altered: ["Name"] }));
+    expect(unpublished.participantValues).toBe(1);
+    expect(unpublished.recordings).toEqual(noRecordingChange({ replaced: 1 }));
+    for (const key of ["authorFields", "participantValues", "recordings", "paths"] as const) {
+      expect(unpublished[key], key).toEqual(strict[key]);
+    }
   });
 });
 
