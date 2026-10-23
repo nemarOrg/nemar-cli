@@ -10,9 +10,9 @@ Send and receive every NEMAR email on Cloudflare: sending through the Workers `s
 ## Decided (2026-10-23)
 
 1. One mail system on Cloudflare; Resend is retired after a soak and kept before that only as a fallback for a transport failure (ADR 0110).
-2. The provider is chosen by `EMAIL_PROVIDER` inside `sendEmail`, behind the unchanged non-production delivery fence. Unset or anything but `cloudflare` is Resend, so production does not change until its own phase.
+2. The provider is chosen by `EMAIL_PROVIDER` inside `sendEmail`, behind the unchanged non-production delivery fence. Unset, empty or `resend` is Resend, so production does not change until its own phase; any other value is a configuration error, never Resend.
 3. Staging first, on `test.nemar.org`. The dev Worker's `send_email` binding is restricted to the staging sender addresses. Production does not receive mail in phase 1: it has no `MAIL_INBOUND` binding and no routing rule.
-4. Routing rules are created by the operator, not by Wrangler's `addresses` key (needs Wrangler 4.113 or later, the repository pins 4.85, and it would make every CI deploy depend on Email Routing permissions). Revisit at the cutover.
+4. Routing rules are created by the operator, not by Wrangler's `addresses` key (needs Wrangler 4.113 or later; the root `package.json` allows `^4.70.0` and `backend/package.json` `^4.85.0`, and the deploy workflow runs `npx wrangler` from `backend/`, so it uses the backend's locked 4.85.0; and it would make every CI deploy depend on Email Routing permissions). Revisit at the cutover.
 5. The ticket model is direction only for now: tags from recipient addresses and plus-tags, rules, restricted queues, replies from the support address.
 
 ## Phases
@@ -34,7 +34,7 @@ Send and receive every NEMAR email on Cloudflare: sending through the Workers `s
 - The dev Worker deploys only from `dev`, so staging sees this work only after the epic branch reaches `dev`.
 - `@cloudflare/workers-types` predates the structured `send_email` form, so `services/email.ts` declares a local minimal interface instead of bumping the package. Miniflare 4.20260424 accepts the structured form, which `backend/test/email-send-binding.test.ts` drives.
 - Several senders check `RESEND_API_KEY` before calling `sendEmail`, so the dev secret stays until phase 7.
-- The Cloudflare path sends an HTML part only.
+- The Cloudflare path sends the HTML and a plain-text part derived from it; the Resend request is unchanged.
 
 ## Open questions for the owner
 

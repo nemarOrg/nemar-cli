@@ -15,7 +15,7 @@ Email Routing is zone-level, and its catch-all rule exists only at the apex, so 
 
 Mail moves to the Cloudflare Email Service in phases, and Resend is retired after a soak.
 
-- **Sending** goes through the `send_email` binding. `EMAIL_PROVIDER` selects it: exactly `cloudflare` sends through the binding, anything else, including unset, is Resend, so production is unchanged until its own phase. `cloudflare` with no binding is a configuration error and never falls back to Resend.
+- **Sending** goes through the `send_email` binding. `EMAIL_PROVIDER` selects it: `cloudflare` sends through the binding, while unset, empty or `resend` is Resend, so production, which sets nothing, is unchanged until its own phase. Any other value, and `cloudflare` with no binding, is a configuration error that sends nothing and never falls back to Resend; a send refused for that reason counts as a certain non-delivery.
 - **One provider switch, one fence.** The provider is chosen inside `sendEmail`, after the non-production delivery fence (`isEmailDeliveryAllowed`, issue #957, unchanged) and the `[DEV]` wrap, so every wrapper and the broadcast path inherit both and neither is repeated. Cloudflare error codes that say nothing was delivered become `EmailRejectedError`; an internal error, an unknown code or no code stays a plain error, because the message may have been accepted.
 - **After the soak,** Resend is a fallback only for a transport failure of the Cloudflare call, never for a definite refusal, and is then removed.
 - **Receiving** goes through Email Routing into the Worker, which stores each raw message in a private R2 bucket under `inbound/raw/YYYY/MM/DD/<uuid>.eml` with the envelope as object metadata, and does nothing else in phase 1. A Worker with no `MAIL_INBOUND` binding rejects the message, so production, which has neither the binding nor a routing rule, cannot take mail in by accident.
@@ -26,7 +26,7 @@ Mail moves to the Cloudflare Email Service in phases, and Resend is retired afte
 
 One system sends and receives, and the staging Worker can no longer reach Resend with a key it still holds.
 The dev `RESEND_API_KEY` stays set until the final phase, because several senders check for the key before calling `sendEmail`; deleting it earlier would silence staging mail.
-The Cloudflare path sends an HTML part only and bounds a call with a timer rather than an abort signal, since the binding takes none; a timed-out send is reported as possibly accepted.
+The Cloudflare path sends a plain-text part derived from the HTML as well, and bounds a call with a timer rather than an abort signal, since the binding takes none; a timed-out send is reported as possibly accepted.
 Cloudflare returns no per-recipient batch, so a broadcast on this provider is one send per recipient; that is acceptable for staging and is replaced by a queue when announcements move.
 The catch-all exists only at the apex, so it is first exercised at the cutover, and staging cannot show what an unrouted address does there.
 
