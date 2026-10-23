@@ -76,6 +76,7 @@ import {
   assembleReport,
   buildReviewMessages,
   buildScreenMessages,
+  originalLowersToFail,
   platformFindings,
   readScreenAnswer,
 } from "./pr-review-prompt";
@@ -557,6 +558,12 @@ export interface PullRequestUnderReview {
   /** The pull request as the API returns it: its title and its description. */
   pr: { title?: unknown; body?: unknown };
   fromFork: boolean;
+  /**
+   * Whether the content pass may list the origin's version tags to find the README's anchor
+   * (`ContentOptions.versionTags`). The review leaves it unset, which allows it; a run that must
+   * not reach a remote sets it false.
+   */
+  versionTags?: boolean;
 }
 
 /**
@@ -613,12 +620,17 @@ export async function reviewPullRequest(
     });
   }
 
-  const { value: content, ms: contentMs } = timed(() => gatherContent(repoDir, listing));
+  const { value: content, ms: contentMs } = timed(() =>
+    gatherContent(repoDir, listing, { versionTags: input.versionTags }),
+  );
   const all = { ...listing, ...content };
   const evidence = buildEvidence(all, facts);
-  // The removals the change summary found and nothing in the pull request keeps: the platform's
-  // own findings, decided from git before the review is asked, which can only lower its answer.
-  const platform = platformFindings(all.summary);
+  // The removals the change summary found and nothing in the pull request keeps, and what the
+  // pull request changed of the original authors' content: the platform's own findings, decided
+  // from git before the review is asked, which can only lower its answer. An alteration of that
+  // content fails `no_degradation` whatever the review says.
+  const platform = platformFindings(all.summary, all.original);
+  const lowerToFail = originalLowersToFail(all.original);
   observeEvidence?.(evidenceStats(all, evidence, { listingMs, contentMs }));
   const reviewMessages = buildReviewMessages({
     facts: all,
@@ -640,6 +652,7 @@ export async function reviewPullRequest(
     evidence,
     { screen: screen.usage, review: review.usage },
     platform,
+    lowerToFail,
   );
 }
 

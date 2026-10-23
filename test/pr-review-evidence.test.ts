@@ -206,6 +206,15 @@ function newDataset(name: string): string {
   return dir;
 }
 
+/**
+ * A new section after the README, past a blank line: what a contributor may add without changing a
+ * line the original authors published.
+ */
+function appendSection(dir: string, title = "Edited"): void {
+  const readme = join(dir, "README.md");
+  writeFileSync(readme, `${readFileSync(readme, "utf8")}\n## ${title}\n\nA new section.\n`);
+}
+
 /** Branch from main, apply `edit`, commit, return the base (main tip) and head. */
 function branch(dir: string, edit: () => void, branchName = "contrib"): Repo {
   const base = git(dir, "rev-parse", "main");
@@ -1168,7 +1177,7 @@ describe("runReview: the job around the model call", () => {
     const dir = newDataset(name);
     const r = branch(dir, () => {
       release(dir);
-      write(dir, "README.md", "# Edited\n");
+      appendSection(dir);
     });
     return r;
   }
@@ -3964,7 +3973,7 @@ describe("the facts come before any model, and fail the verdict whatever it says
     },
   );
 
-  test("a changed dataset_description.json with a new, readable, fine name keeps the review as it was", async () => {
+  test("a changed dataset_description.json with a new, readable, fine name passes the naming rule, and the platform fails the changed Name", async () => {
     const report = await reviewWith("facts-name-fine", (dir) =>
       write(
         dir,
@@ -3972,8 +3981,19 @@ describe("the facts come before any model, and fail the verdict whatever it says
         desc("1.1.0", { Name: "Resting EEG of volunteers, with eyes closed" }),
       ),
     );
+    // The naming rule finds nothing, and the review goes on to both models as it did.
     expect(report.evidence.name_problem).toBeNull();
-    expect(verdictOf(report)).toBe("pass");
+    expect(report.stage).toBe("full");
+    expect(modelRequests).toHaveLength(2);
+    expect(factsOf(report).notes.map((n) => n.code)).toEqual([]);
+    // The name is the original authors' all the same: the platform fails the change itself, with a
+    // finding that names the field, whatever the review said.
+    expect(report.findings.map((f) => [f.code, f.path])).toEqual([
+      ["original_field_altered", "dataset_description.json"],
+    ]);
+    expect(report.findings[0]?.note).toContain("The dataset description's Name changed.");
+    expect(report.criteria.no_degradation).toBe("fail");
+    expect(verdictOf(report)).toBe("fail");
   });
 
   test("a dataset_description.json the pull request does not touch is not asked about, readable or not", async () => {
@@ -4055,7 +4075,11 @@ describe("the facts come before any model, and fail the verdict whatever it says
     git(dir, "commit", "-q", "-m", "an old name");
     const r = branch(dir, () => {
       write(dir, "dataset_description.json", desc("1.1.0", { Name: "Lee2019 Motor Imagery" }));
-      write(dir, "CHANGES", "1.1.0 2026-10-16\n - Fixed units\n1.0.0 2026-01-01\n - Initial\n");
+      write(
+        dir,
+        "CHANGES",
+        "1.1.0 2026-10-16\n - Fixed units\n1.0.0 2026-01-01\n - Initial release\n",
+      );
     });
     const res = await runReview({
       repoDir: r.dir,
@@ -6364,6 +6388,10 @@ describe("the platform's findings from the original content", () => {
             ? ["original_text_altered"]
             : order.slice(0, places);
         expect(ours, name).toEqual(expected);
+        // One place for both: the one finding counts the text and the fields together.
+        if (places === 1 && present.includes("T") && present.includes("F")) {
+          expect(platform.at(-1)?.note, name).toContain("of README or CHANGES and 1 field");
+        }
         expect(lowerToFail, name).toBe(present.includes("T") || present.includes("F"));
         if (lowerToFail) {
           expect(
@@ -7757,6 +7785,222 @@ describe("original content", () => {
     ]) {
       expect(read.filter((x) => x === blob)).toHaveLength(1);
     }
+  });
+
+  describe("from git to the verdict: what the platform does with the facts", () => {
+    /**
+     * The report of an all-pass review of the pull request read in `dir` (a clone, or the source
+     * itself), the way the job assembles it: the content pass, the platform's findings from both
+     * parts, and the fail the original content may hold.
+     */
+    function reportOf(dir: string, r: Repo, options: ContentOptions = { versionTags: false }) {
+      const listing = gatherListing(dir, r.base, r.head);
+      const all = { ...listing, ...gatherContent(dir, listing, options) };
+      return full(
+        allPass,
+        buildEvidence(all, NO_TEXT_PROBLEMS),
+        platformFindings(all.summary, all.original),
+        originalLowersToFail(all.original),
+      );
+    }
+    const codes = (report: PrReviewReport) => report.findings.map((f) => f.code);
+    /** A release that also applies `edit`: version and CHANGES entry as a contributor writes them. */
+    const releasing = (edit: (dir: string) => void) => (dir: string) => {
+      release(dir);
+      edit(dir);
+    };
+
+    test("an original README line removed fails no_degradation with the README note, and the check says what to do instead", () => {
+      const r = taggedDataset("ov-removed-source", releasing(writeReadme(ORIGINAL_REMOVED)));
+      const report = reportOf(blobLessClone("ov-removed", r), r, {});
+      expect(report.findings).toEqual([
+        {
+          criterion: "no_degradation",
+          severity: "blocker",
+          code: "original_text_altered",
+          path: "README.md",
+          note: "1 line the original authors published in README was removed, reworded or moved. Keep it; put your account in CHANGES or a new section, or ask a NEMAR administrator to correct one.",
+        },
+      ]);
+      expect(report.criteria.no_degradation).toBe("fail");
+      expect(verdictOf(report)).toBe("fail");
+      expect(findingLines(report)).toContain(ORIGINAL_CONTENT_PARAGRAPH);
+    });
+
+    test("rewording text added after v1.0.0 is information: an all-pass review passes", () => {
+      const r = taggedDataset("ov-later-source", releasing(writeReadme(CURATION_REWORDED)));
+      const report = reportOf(blobLessClone("ov-later", r), r, {});
+      expect(report.findings).toEqual([]);
+      expect(verdictOf(report)).toBe("pass");
+    });
+
+    test("a tag lookup that fails falls back to the merge base, and the stricter rule fails the same edit", () => {
+      // In place: the tags are there, but there is no origin to list them from.
+      const r = taggedDataset("ov-no-origin", releasing(writeReadme(CURATION_REWORDED)));
+      const report = reportOf(r.dir, r, {});
+      expect(codes(report)).toEqual(["original_text_altered"]);
+      expect(verdictOf(report)).toBe("fail");
+    });
+
+    test("a README turned from CRLF to LF with a section appended is clean and passes", () => {
+      const original = "# Resting EEG\r\n\r\nTwo volunteers rested.\r\n";
+      const r = releaseChanging("ov-crlf", { "README.md": original }, (dir) =>
+        write(dir, "README.md", "# Resting EEG\n\nTwo volunteers rested.\n\n## Added\n\nMore.\n"),
+      );
+      const report = reportOf(r.dir, r);
+      expect(report.findings).toEqual([]);
+      expect(verdictOf(report)).toBe("pass");
+    });
+
+    test("a changed Name fails as an original field; an author appended is information", () => {
+      const named = releaseChanging("ov-name", {}, (dir) =>
+        write(dir, "dataset_description.json", desc("1.1.0", { Name: "Another dataset" })),
+      );
+      const failed = reportOf(named.dir, named);
+      expect(failed.findings.map((f) => [f.code, f.path])).toEqual([
+        ["original_field_altered", "dataset_description.json"],
+      ]);
+      expect(verdictOf(failed)).toBe("fail");
+      const authors = releaseChanging(
+        "ov-authors",
+        { "dataset_description.json": desc("1.0.0", { Authors: ["Ada Lovelace"] }) },
+        (dir) =>
+          write(
+            dir,
+            "dataset_description.json",
+            desc("1.1.0", { Authors: ["Ada Lovelace", "Alan Turing"] }),
+          ),
+      );
+      const grown = reportOf(authors.dir, authors);
+      expect(grown.findings).toEqual([]);
+      expect(verdictOf(grown)).toBe("pass");
+    });
+
+    test("a participant value changed fails; a missing value filled is information", () => {
+      const table = (...rows: string[]) => `participant_id\tsex\n${rows.join("\n")}\n`;
+      const base = { "participants.tsv": table("sub-01\tM", "sub-02\tn/a") };
+      const changedValue = releaseChanging("ov-participant", base, (dir) =>
+        write(dir, "participants.tsv", table("sub-01\tF", "sub-02\tn/a")),
+      );
+      const failed = reportOf(changedValue.dir, changedValue);
+      expect(failed.findings.map((f) => [f.code, f.path, f.note])).toEqual([
+        [
+          "original_field_altered",
+          "participants.tsv",
+          "1 participant value changed. Keep the values the authors recorded: add new information, or ask a NEMAR administrator to correct a value.",
+        ],
+      ]);
+      expect(verdictOf(failed)).toBe("fail");
+      const filled = releaseChanging("ov-participant-filled", base, (dir) =>
+        write(dir, "participants.tsv", table("sub-01\tM", "sub-02\tF")),
+      );
+      expect(verdictOf(reportOf(filled.dir, filled))).toBe("pass");
+    });
+
+    test("a recording with a new annex key is unknown with recording_replaced, never a pass and never a fail", () => {
+      const key = (n: number) => `SHA256E-s${100 + n}--${String(n).padStart(8, "0")}.edf`;
+      const path = "sub-01/eeg/sub-01_task-rest_eeg.edf";
+      const link = (dir: string, n: number) => {
+        mkdirSync(join(dir, dirname(path)), { recursive: true });
+        symlinkSync(`../../.git/annex/objects/Xj/9P/${key(n)}/${key(n)}`, join(dir, path));
+      };
+      const dir = join(root, "ov-annex");
+      mkdirSync(dir, { recursive: true });
+      git(dir, "init", "-q", "-b", "main");
+      write(dir, "dataset_description.json", desc("1.0.0"));
+      write(dir, "CHANGES", "1.0.0 2026-01-01\n - Initial release\n");
+      link(dir, 1);
+      git(dir, "add", "-A");
+      git(dir, "commit", "-q", "-m", "a recording");
+      const r = branch(dir, () => {
+        release(dir);
+        unlinkSync(join(dir, path));
+        link(dir, 2);
+      });
+      const report = reportOf(r.dir, r);
+      expect(codes(report)).toEqual(["recording_replaced"]);
+      expect(report.criteria.no_degradation).toBe("unknown");
+      expect(verdictOf(report)).toBe("uncertain");
+      // Only the two codes for an alteration of what the authors wrote carry the paragraph.
+      expect(findingLines(report)).not.toContain(ORIGINAL_CONTENT_PARAGRAPH);
+    });
+
+    test("an abandoned Part B pass is unknown: not a pass, and not a fail even over an altered README", () => {
+      const r = taggedDataset("ov-abandoned", releasing(writeReadme(ORIGINAL_REMOVED)));
+      // The clock is past the line for the summary and for Part B; nothing of either is read.
+      const report = reportOf(r.dir, r, { versionTags: false, now: () => Number.MAX_SAFE_INTEGER });
+      expect(report.findings.map((f) => [f.code, f.note])).toEqual([
+        [
+          "evidence_incomplete",
+          "The platform could not finish comparing this pull request with what the authors published. A person looks.",
+        ],
+      ]);
+      expect(report.criteria.no_degradation).toBe("unknown");
+      expect(verdictOf(report)).toBe("uncertain");
+      // The control: the same pull request compared fails.
+      expect(verdictOf(reportOf(r.dir, r))).toBe("fail");
+    });
+
+    test("two Part A findings and an alteration: the alteration takes the third place, and the review fails", () => {
+      const r = releaseChanging(
+        "ov-three",
+        { ...TWO_SUBJECTS, "README.md": "# Resting EEG\n\nTwo volunteers.\n" },
+        (dir) => {
+          write(dir, tableOf("sub-01"), "name\ttype\nPz\tEEG\n");
+          write(dir, sidecarOf("sub-01"), '{"SamplingFrequency":500}');
+          write(dir, "README.md", "# Resting EEG\n\nThe recordings of two volunteers.\n");
+        },
+      );
+      const report = reportOf(r.dir, r);
+      expect(codes(report)).toEqual(["data_removed", "metadata_removed", "original_text_altered"]);
+      expect(verdictOf(report)).toBe("fail");
+      expect(verdictOf(parseStoredPrReviewReport(JSON.parse(JSON.stringify(report))))).toBe("fail");
+    });
+
+    test("reviewPullRequest fails an altered README though the review answers pass everywhere", async () => {
+      const dir = newDataset("ov-review");
+      const r = branch(dir, () => {
+        release(dir);
+        write(dir, "README.md", "# Resting EEG\n\nTwo volunteers, now documented.\n");
+      });
+      const report = await reviewPullRequest({
+        repoDir: r.dir,
+        base: r.base,
+        head: r.head,
+        pr: { title: "Document the volunteers", body: "Adds a line about the volunteers." },
+        fromFork: false,
+        versionTags: false,
+      });
+      // Both models were asked, and the review said pass to everything.
+      expect(modelRequests).toHaveLength(2);
+      expect(STAND_IN_OUTPUT.criteria).toEqual({
+        no_degradation: "pass",
+        advances_revision: "pass",
+        material_improvement: "pass",
+      });
+      expect(report.criteria.no_degradation).toBe("fail");
+      expect(codes(report)).toEqual(["original_text_altered"]);
+      expect(verdictOf(report)).toBe("fail");
+      // The same pull request with the README appended to, not changed: the review's pass stands.
+      const added = branch(
+        dir,
+        () => {
+          release(dir);
+          appendSection(dir);
+        },
+        "contrib-added",
+      );
+      const clean = await reviewPullRequest({
+        repoDir: added.dir,
+        base: added.base,
+        head: added.head,
+        pr: { title: "Document the volunteers", body: "Adds a section about the volunteers." },
+        fromFork: false,
+        versionTags: false,
+      });
+      expect(clean.findings).toEqual([]);
+      expect(verdictOf(clean)).toBe("pass");
+    });
   });
 });
 
