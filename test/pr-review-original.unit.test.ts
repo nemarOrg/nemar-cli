@@ -2034,6 +2034,41 @@ describe("authorFieldFacts", () => {
     expect(authorFieldsAltered(facts)).toBe(true);
   });
 
+  test("a scalar field never grows: an array that gained an element is altered", () => {
+    for (const key of ["Name", "License", "DatasetDOI", "Acknowledgements", "HowToAcknowledge"]) {
+      expect(
+        authorFieldFacts(changed({ [key]: ["CC0"] }), changed({ [key]: ["CC0", "CC-BY-NC-4.0"] })),
+        key,
+      ).toEqual(noFieldChange({ altered: [key as AuthorOwnedKey] }));
+    }
+    // An element minor-edited inside an array is no minor edit for a scalar field either.
+    const thanks = "We thank the participants and the staff of the clinical research unit.";
+    expect(
+      authorFieldFacts(
+        changed({ Acknowledgements: [thanks] }),
+        changed({ Acknowledgements: [thanks.replace("staff", "stuff")] }),
+      ),
+    ).toEqual(noFieldChange({ altered: ["Acknowledgements"] }));
+    // The string itself still takes a minor edit, and missing to a value is still added.
+    expect(
+      authorFieldFacts(
+        changed({ Acknowledgements: thanks }),
+        changed({ Acknowledgements: thanks.replace("staff", "stuff") }),
+      ),
+    ).toEqual(noFieldChange({ minor: ["Acknowledgements"] }));
+    expect(authorFieldFacts(changed({ License: [""] }), changed({ License: ["CC0"] }))).toEqual(
+      noFieldChange({ added: ["License"] }),
+    );
+    // An array-valued key still grows.
+    const [ada, alan, grace] = DESCRIPTION.Authors as [string, string, string];
+    expect(
+      authorFieldFacts(
+        description(DESCRIPTION),
+        changed({ Authors: [ada, alan, grace, "Mary Jackson"] }),
+      ),
+    ).toEqual(noFieldChange({ grown: ["Authors"] }));
+  });
+
   test("a number beside an array, or an object beside a string, is altered for any key", () => {
     expect(authorFieldFacts(changed({ Funding: 5 }), changed({ Funding: [5] }))).toEqual(
       noFieldChange({ altered: ["Funding"] }),
