@@ -2071,7 +2071,20 @@ describe("annexSide", () => {
     }
   });
 
-  test("an unlocked pointer is a small regular blob starting /annex/objects/, whose key is its first line's last component", () => {
+  // How git-annex itself reads a link target or a pointer, measured with git-annex 10.20261006: a
+  // scratch repository (`git annex init`, one file added), then blobs written with
+  // `git hash-object -w` and committed with `git update-index --cacheinfo`, and
+  // `git annex find --branch HEAD --include='*' --format='${file} ${key}\n'` to list what it calls
+  // annexed. Measured annexed: a pointer `/annex/objects/KEY` with or without a final LF, with CRLF
+  // (key without the CR), with a deeper path, with `x/` or a BOM before `/annex/objects/`, or with
+  // later lines that each hold `/annex/`; a link target with `x/` or `/` before `annex/objects/`, a
+  // final LF, or a final CR (key without it). Measured NOT annexed: a pointer with `onset\tduration`
+  // after it, with a blank line after it, or with a later line without `/annex/`; a pointer or a
+  // link target `annex/objects/KEY` (no slash before `annex`); a link target with anything after a
+  // line break. git-annex also accepted a NUL or a CR inside a key, which this module reads as no
+  // key (the side is then a plain file, which flags the change).
+
+  test("a pointer is the whole blob: its first line names the key and every later line holds /annex/", () => {
     const key = "SHA256E-s10--abc.edf";
     for (const mode of [REGULAR, "100755"]) {
       expect(annexSide(mode, encoder.encode(`/annex/objects/${key}\n`)), mode).toEqual({
@@ -2079,18 +2092,39 @@ describe("annexSide", () => {
         key,
       });
     }
-    // No final newline, a deeper path, and anything after the first line are all the same key.
     for (const text of [
       `/annex/objects/${key}`,
+      `/annex/objects/${key}\r\n`,
       `/annex/objects/Xj/9P/${key}/${key}\n`,
-      `/annex/objects/${key}\nanything else\n`,
+      `x/annex/objects/${key}\n`,
+      ` /annex/objects/${key}\n`,
+      `../.git/annex/objects/Xj/9P/${key}/${key}\n`,
+      `/annex/objects/${key}\n/annex/other\n`,
+      `/annex/objects/${key}\nsomething /annex/ here\n`,
+      `/annex/objects/${key}\r\n/annex/x\r\n`,
     ]) {
-      expect(annexSide(REGULAR, encoder.encode(text)), text).toEqual({ kind: "annexed", key });
+      expect(annexSide(REGULAR, encoder.encode(text)), JSON.stringify(text)).toEqual({
+        kind: "annexed",
+        key,
+      });
     }
-    // Not a pointer: another start, an empty key, a key that is not one, or a BOM before the slash.
+    expect(
+      annexSide(
+        REGULAR,
+        new Uint8Array([0xef, 0xbb, 0xbf, ...encoder.encode(`/annex/objects/${key}\n`)]),
+      ),
+    ).toEqual({ kind: "annexed", key });
+  });
+
+  test("a pointer with data appended, a blank line after it, or no slash before annex is git", () => {
+    const key = "SHA256E-s10--abc.edf";
     for (const text of [
+      // Content that replaced a recording by the pointer and new rows is not the recording.
+      `/annex/objects/${key}\nonset\tduration\n`,
+      `/annex/objects/${key}\n\n`,
+      `/annex/objects/${key}\n/annex/x\nplain\n`,
+      `/annex/objects/${key}\n\n/annex/x\n`,
       `annex/objects/${key}\n`,
-      " /annex/objects/SHA256E-s10--abc.edf\n",
       "/annex/objects/\n",
       "/annex/objects/readme.txt\n",
       "# not a pointer\n/annex/objects/SHA256E-s10--abc.edf\n",
@@ -2100,20 +2134,32 @@ describe("annexSide", () => {
         kind: "git",
       });
     }
-    expect(
-      annexSide(
-        REGULAR,
-        new Uint8Array([0xef, 0xbb, 0xbf, ...encoder.encode(`/annex/objects/${key}`)]),
-      ),
-    ).toEqual({ kind: "git" });
   });
 
-  test("a regular blob holding a link target is git, whatever the target says", () => {
+  test("a link target is one line: a final LF or CR is dropped, anything after a line break is no key", () => {
     const key = "SHA256E-s10--abc.edf";
-    expect(annexSide(REGULAR, encoder.encode(annexTarget(key)))).toEqual({ kind: "git" });
-    expect(annexSide(REGULAR, encoder.encode(`../.git/annex/objects/${key}`))).toEqual({
-      kind: "git",
-    });
+    for (const target of [
+      `../.git/annex/objects/Xj/9P/${key}/${key}\n`,
+      `../.git/annex/objects/Xj/9P/${key}/${key}\r`,
+      `x/annex/objects/${key}`,
+      `/annex/objects/${key}`,
+    ]) {
+      expect(annexSide(SYMLINK, encoder.encode(target)), JSON.stringify(target)).toEqual({
+        kind: "annexed",
+        key,
+      });
+    }
+    for (const target of [
+      // No slash before `annex`, and no `.git` above it: not an annex link.
+      `annex/objects/${key}`,
+      `../.git/annex/objects/Xj/9P/${key}/${key}\n/annex/more`,
+      `../.git/annex/objects/Xj/9P/${key}/${key}\r\nextra`,
+      `.git/annex/objects/Xj/9P/${key}/${key}\nextra`,
+    ]) {
+      expect(annexSide(SYMLINK, encoder.encode(target)), JSON.stringify(target)).toEqual({
+        kind: "link",
+      });
+    }
   });
 
   test("a submodule is other, an unknown mode is other, and a regular file is git", () => {
@@ -2145,13 +2191,11 @@ describe("annexSide", () => {
 
   test("bytes over the pointer bound are large, whatever they say", () => {
     const key = "SHA256E-s10--abc.edf";
-    const atBound = encoder.encode(
-      `/annex/objects/${key}\n${"x".repeat(1_023 - 1 - 15 - key.length)}`,
-    );
+    const head = `/annex/objects/${key}\n/annex/`;
+    const atBound = encoder.encode(`${head}${"x".repeat(1_023 - head.length)}`);
     expect(atBound.length).toBe(ORIGINAL_LIMITS.pointerMaxBytes);
     expect(annexSide(REGULAR, atBound)).toEqual({ kind: "annexed", key });
-    const over = new Uint8Array(ORIGINAL_LIMITS.pointerMaxBytes + 1);
-    over.set(atBound);
+    const over = encoder.encode(`${head}${"x".repeat(1_024 - head.length)}`);
     expect(annexSide(REGULAR, over)).toEqual({ kind: "git" });
     // A megabyte that ends in a valid annex link is still not read.
     const megabyte = encoder.encode(
@@ -2161,36 +2205,38 @@ describe("annexSide", () => {
     expect(annexSide(SYMLINK, megabyte)).toEqual({ kind: "link" });
   });
 
-  test("hostile key text: a NUL or malformed UTF-8 is no key, and a newline cannot end one early", () => {
+  test("hostile key text: a control character or malformed UTF-8 is no key", () => {
     const key = "SHA256E-s10--abc.edf";
-    // A NUL anywhere in the last component is outside the grammar.
-    expect(
-      annexSide(SYMLINK, encoder.encode(`.git/annex/objects/xx/yy/${key}\0/${key}\0`)),
-    ).toEqual({
-      kind: "link",
-    });
-    expect(annexSide(SYMLINK, encoder.encode(`.git/annex/objects/xx/yy/${key}/${key}\0x`))).toEqual(
-      {
+    // A NUL, a CR inside, or a second CR at the end: git-annex accepts these, this module does not.
+    for (const target of [
+      `.git/annex/objects/xx/yy/${key}\0/${key}\0`,
+      `.git/annex/objects/xx/yy/${key}/${key}\0x`,
+      `.git/annex/objects/xx/yy/${key}/${key}\rextra`,
+      `.git/annex/objects/xx/yy/${key}/${key}\r\r`,
+      `.git/annex/objects/xx/yy/${key}/${key}\u{7F}`,
+    ]) {
+      expect(annexSide(SYMLINK, encoder.encode(target)), JSON.stringify(target)).toEqual({
         kind: "link",
-      },
-    );
+      });
+    }
+    for (const text of [`/annex/objects/${key}\0`, `/annex/objects/${key}\ronset\n`]) {
+      expect(annexSide(REGULAR, encoder.encode(text)), JSON.stringify(text)).toEqual({
+        kind: "git",
+      });
+    }
     // A malformed byte is not replaced by U+FFFD: it would let two different keys read as one.
     const bad = new Uint8Array([
       ...encoder.encode(`.git/annex/objects/xx/yy/${key}/SHA256E-s1--a`),
       0xff,
     ]);
     expect(annexSide(SYMLINK, bad)).toEqual({ kind: "link" });
-    // A newline is a character of the last component, so the key is the whole of it and a forged
-    // second key after the newline cannot make the first one look equal to another path's.
+    // `KEY\nextra`: a forged second line never extends a key, in a link or in a pointer.
     const forged = `${key}\nSHA256E-s99--forged.edf`;
     expect(annexSide(SYMLINK, encoder.encode(`.git/annex/objects/xx/yy/${forged}`))).toEqual({
-      kind: "annexed",
-      key: forged,
+      kind: "link",
     });
-    // In a pointer the first line ends at the newline, and the text after it is not read.
     expect(annexSide(REGULAR, encoder.encode(`/annex/objects/${forged}`))).toEqual({
-      kind: "annexed",
-      key,
+      kind: "git",
     });
   });
 });
@@ -2358,17 +2404,33 @@ describe("recordingFacts: what is a replacement and what is not", () => {
     }
   });
 
-  test("a symlink that is not annexed, or a submodule, changing is not a recording fact", () => {
+  test("in the recordings area, a plain link, a submodule or a git file that changed is replaced", () => {
     const a = sideOf(SYMLINK, "../shared/a.edf");
     const b = sideOf(SYMLINK, "../shared/b.edf");
-    expect(recordingFacts([recording("link_eeg.edf", a, b, true)])).toEqual(noRecordingChange());
-    expect(recordingFacts([recording("link_eeg.edf", a, null, true)])).toEqual(noRecordingChange());
-    expect(recordingFacts([recording("link_eeg.edf", null, a, true)])).toEqual(noRecordingChange());
-    const old: Side = { mode: SUBMODULE, oid: "1".repeat(40), probe: "large" };
-    const moved: Side = { mode: SUBMODULE, oid: "2".repeat(40), probe: "large" };
-    expect(recordingFacts([recording("vendor/lib", old, moved, true)])).toEqual(
+    const file = plain("recorded bytes", "large");
+    const submodule: Side = { mode: SUBMODULE, oid: "1".repeat(40), probe: "large" };
+    const later: Side = { mode: SUBMODULE, oid: "2".repeat(40), probe: "large" };
+    for (const [label, was, now] of [
+      ["link to a link with another target", a, b],
+      ["git file to a plain link", file, a],
+      ["plain link to a git file", a, file],
+      ["git file to a submodule", file, submodule],
+      ["submodule at a new commit", submodule, later],
+    ] as [string, Side, Side][]) {
+      expect(recordingFacts([recording("sub-01/eeg/x_eeg.edf", was, now, true)]), label).toEqual(
+        noRecordingChange({ replaced: 1 }),
+      );
+      // Outside the recordings area the same change is no recording fact.
+      expect(recordingFacts([recording("sub-01/x_notes.txt", was, now)]), label).toEqual(
+        noRecordingChange(),
+      );
+    }
+    // The same link, and a link only added or removed, are nothing.
+    expect(recordingFacts([recording("x_eeg.edf", a, { ...a }, true)])).toEqual(
       noRecordingChange(),
     );
+    expect(recordingFacts([recording("x_eeg.edf", a, null, true)])).toEqual(noRecordingChange());
+    expect(recordingFacts([recording("x_eeg.edf", null, a, true)])).toEqual(noRecordingChange());
   });
 
   test("git to git is a replacement only in the recordings area, and only with new content", () => {

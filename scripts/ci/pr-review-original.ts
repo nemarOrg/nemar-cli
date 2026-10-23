@@ -1265,11 +1265,23 @@ export type AnnexSide =
   | { kind: "unreadable" };
 
 /**
- * The key grammar of a git-annex object: a backend name, optional `-s<size>`-style fields, `--`,
- * then the rest of the name. Applied to the LAST component of a link target or a pointer line, so
- * what a key is does not depend on how many directories sit above it.
+ * The shape of a git-annex key: a backend name, optional `-s<size>`-style fields, `--`, then the
+ * rest of the name. Applied to the LAST component of a link target or a pointer line, so what a key
+ * is does not depend on how many directories sit above it.
  */
-const ANNEX_KEY = /^[A-Z0-9]+(-[A-Za-z][0-9]+)*--[^/\0]+$/;
+const ANNEX_KEY = /^[A-Z0-9]+(-[A-Za-z][0-9]+)*--[^/]+$/;
+
+/** What git-annex looks for in a link target or in the first line of a pointer. */
+const OBJECTS_INFIX = "/annex/objects/";
+
+/** Whether a string holds a control character: U+0000 to U+001F, or U+007F. */
+function hasControlCharacter(text: string): boolean {
+  for (let i = 0; i < text.length; i++) {
+    const unit = text.charCodeAt(i);
+    if (unit < 0x20 || unit === 0x7f) return true;
+  }
+  return false;
+}
 
 /** The text of bytes when they are strict UTF-8, else null: a malformed byte is never replaced. */
 function strictUtf8(bytes: Uint8Array): string | null {
@@ -1281,35 +1293,49 @@ function strictUtf8(bytes: Uint8Array): string | null {
 }
 
 /**
- * The key of an annex symlink, or null when the target is not one. The target (the probe, decoded as
- * strict UTF-8) must hold the components `annex` and `objects` one after the other with something
- * after them, and its last component must be a key. Only the last component is the key: a link
- * that gained or lost a `../` is the same object, and a link into another directory is not.
+ * The key a link target's or a pointer's first line names, or null: the line (without its line
+ * break and one carriage return before it) must hold `/annex/objects/` anywhere, as git-annex
+ * requires, so `annex/objects/KEY` with no slash before it is no annex path, and its last
+ * component must have the shape of a key and hold no control character. git-annex itself accepts a
+ * NUL or a carriage return inside a key; no recording has one, and reading such a key as no key
+ * reports the side as a plain file, which flags the change, never hides it.
+ */
+function keyOfLine(raw: string): string | null {
+  const line = raw.endsWith("\r") ? raw.slice(0, -1) : raw;
+  if (!line.includes(OBJECTS_INFIX)) return null;
+  const name = line.slice(line.lastIndexOf("/") + 1);
+  return ANNEX_KEY.test(name) && !hasControlCharacter(name) ? name : null;
+}
+
+/**
+ * The key of an annex symlink, or null when the target (the probe, decoded as strict UTF-8) is not
+ * one, by git-annex's own reading: one line, a final line break allowed but nothing after it, read
+ * by {@link keyOfLine}. Only the last component is the key: a link that gained or lost a `../` is
+ * the same object.
  */
 function linkKey(bytes: Uint8Array): string | null {
   const target = strictUtf8(bytes);
   if (target === null) return null;
-  const components = target.split("/");
-  const last = components.length - 1;
-  let inObjects = false;
-  for (let i = 0; i + 1 < last; i++) {
-    if (components[i] === "annex" && components[i + 1] === "objects") inObjects = true;
-  }
-  const name = components[last] as string;
-  return inObjects && ANNEX_KEY.test(name) ? name : null;
+  const lf = target.indexOf("\n");
+  if (lf >= 0 && lf !== target.length - 1) return null;
+  return keyOfLine(lf >= 0 ? target.slice(0, lf) : target);
 }
 
 /**
- * The key of an unlocked annex pointer, or null when the bytes are not one: the first line (up to
- * the first LF, which is not part of it) must start with `/annex/objects/`, and its last component
- * must be a key. Whatever follows the first line is not read.
+ * The key of an unlocked annex pointer, or null when the bytes are not one, by git-annex's own
+ * reading: the WHOLE blob must be the pointer. Its first line is read by {@link keyOfLine}, and
+ * every line after it must hold `/annex/`. So a pointer with data appended (a table's rows after
+ * it) is plain content, never the recording it once pointed at.
  */
 function pointerKey(bytes: Uint8Array): string | null {
-  const lf = bytes.indexOf(0x0a);
-  const line = strictUtf8(lf === -1 ? bytes : bytes.subarray(0, lf));
-  if (line === null || !line.startsWith("/annex/objects/")) return null;
-  const name = line.slice(line.lastIndexOf("/") + 1);
-  return ANNEX_KEY.test(name) ? name : null;
+  const text = strictUtf8(bytes);
+  if (text === null) return null;
+  const lf = text.indexOf("\n");
+  if (lf < 0) return keyOfLine(text);
+  const rest = text.slice(lf + 1).split("\n");
+  if (rest[rest.length - 1] === "") rest.pop();
+  if (!rest.every((line) => line.includes("/annex/"))) return null;
+  return keyOfLine(text.slice(0, lf));
 }
 
 /**
@@ -1336,7 +1362,10 @@ export function annexSide(mode: string, probe: PointerProbe): AnnexSide {
 
 /** What a pull request did to recorded content, in counts (design B2.4). */
 export interface RecordingFacts {
-  /** Annexed content whose key changed, or a recordings-area file git holds with new content. */
+  /**
+   * Annexed content whose key changed, or a recordings-area path that is not annexed and changed
+   * its content, its link target or its kind.
+   */
   replaced: number;
   /** A path annexed on one side and not on the other: annexed to git, to a link, or the reverse. */
   typeChanged: number;
@@ -1356,8 +1385,10 @@ export interface RecordingFacts {
  *   pointer, or a link whose `../` depth changed): nothing;
  * - annexed on one side only: `typeChanged`, decided by what each side IS and not by the status
  *   `typechange`, so an unlocked pointer replaced by its content (status modified) counts;
- * - neither annexed: `replaced` only for `git` to `git` inside the recordings area with different
- *   blob ids; anywhere else, nothing.
+ * - neither annexed: inside the recordings area, `replaced` when the side changed kind (a git file
+ *   made a plain link or a submodule, or the reverse) or its blob id (new content, a link with a
+ *   new target, a submodule at a new commit); a mode alone changing is nothing; outside the
+ *   recordings area, nothing.
  *
  * Below `sourcedata/`, `derivatives/` or `code/` a path on both sides is no fact at all: the review
  * does not read those areas, and what changed there is not what the authors recorded.
@@ -1398,9 +1429,7 @@ export function recordingFacts(
       facts.typeChanged++;
     } else if (
       change.recordingArea &&
-      was.kind === "git" &&
-      now.kind === "git" &&
-      change.oidBefore !== change.oidAfter
+      (was.kind !== now.kind || change.oidBefore !== change.oidAfter)
     ) {
       facts.replaced++;
     }
