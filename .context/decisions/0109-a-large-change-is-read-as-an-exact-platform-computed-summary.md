@@ -110,9 +110,10 @@ No new budget enters the job: ADR 0107's 45.4 minutes are unchanged.
   Symbols and combining marks must match, a hyphen or dash inside a longer name is punctuation, and a bare number such as `-1` or `5%` is compared as written and pairs only with another bare number.
   The value must be unique among the parent's removed and among its added leaves (design 4.7).
   A change to either rule moves the baseline test (it runs where the frozen clones exist, not in CI), which then fails until the baseline is recorded again.
-- The Part B facts are measured on the same 86 pull requests with the strict merge-base anchor: 27 of the 29 READMEs that show deleted lines are only line-ending or final-newline artifacts and are not alterations, and the two real ones are flagged.
-  Two facts the design did not have, markup that hides original text and a README that shadows the shown one, are zero on set A.
-  The module refuses an alignment past an edit distance of 2,000 instead of counting every protected line as altered, so a very large README rewrite is `unknown` and a person looks.
+- The Part B facts are measured on the same 86 pull requests with the strict merge-base anchor: 27 of the 29 READMEs that show deleted lines are only line-ending, final-newline or trailing-whitespace artifacts and are not alterations, and the two real ones are flagged.
+  Three facts the design did not have, markup that hides original text, a README that shadows or loses the shown one, and new lines that join an original paragraph, are zero on set A except the last (one pull request, already altered).
+  The module refuses an alignment past an edit distance of 2,000 instead of counting every protected line as altered, so a very large README rewrite will be `unknown` and a person looks.
+  The facts are tripwires and not a proof against hostile Markdown; the raw diff and the model stay in the loop.
 - A diff git writes as binary (a NUL byte in a table) is no read at all: the file stays unread and a removed row in it keeps the content incomplete.
   So does a modified or removed binary file in a read area (a `README.pdf`), whose one-line `Binary files differ` diff used to count as read; the pull request cannot pass on it and a person looks.
 
