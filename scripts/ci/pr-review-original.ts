@@ -2034,24 +2034,19 @@ export function participantValuesAltered(
  * What the search for the README's anchor came to. A closed list, printed in a public log like
  * every word of this module:
  *
- * - `not_needed`: no root README or CHANGES part changed, so no tag was looked for;
- * - `not_looked_up`: a README or CHANGES part changed and the version tags were not read (the
- *   caller was told not to, as an offline calibration is), or the pass was abandoned;
+ * - `not_needed`: no root README part changed, so no anchor was looked for;
+ * - `not_looked_up`: a README part changed and the version tags were not read (the caller was told
+ *   not to, as an offline calibration is), or the pass was abandoned;
  * - `lookup_failed`: the repository's tags could not be listed (an error, a timeout, an answer past
  *   its bound);
  * - `tag_tree_unreadable`: a tag was chosen and its commit's root tree could not be listed;
  * - `first_version_tag`: the README at the first version tag is the anchor;
- * - `no_tag`: the tags were listed and the origin has no version tag at all. The dataset has never
- *   been published, so nothing of its README or CHANGES is protected yet: a changed one is
- *   `unpublished` (see {@link originalContentFacts});
- * - `no_ancestor`, `check_failed`, `too_many_tags`: the other reasons of {@link AnchorChoice}.
+ * - `no_tag`, `no_ancestor`, `check_failed`, `too_many_tags`: the reasons of {@link AnchorChoice}.
  *
- * Every word but `first_version_tag` and `no_tag` leaves the README with no anchor, so every
- * merge-base line is protected (the stricter side): only a lookup that succeeded and found no tag
- * lifts the protection, and a lookup that failed in any way keeps it. A tag whose README could not
- * be read, has no line or is too far from the merge base to align keeps `first_version_tag` here
- * while the README's own facts say `merge_base`: this word is about the search, the facts' `anchor`
- * about what protected the lines.
+ * Every word but `first_version_tag` leaves the README with no anchor, so every merge-base line is
+ * protected (the stricter side). A tag whose README could not be read, has no line or is too far
+ * from the merge base to align keeps `first_version_tag` here while the README's own facts say
+ * `merge_base`: this word is about the search, the facts' `anchor` about what protected the lines.
  */
 export const ANCHOR_LOOKUPS = [
   "not_needed",
@@ -2068,13 +2063,10 @@ export type AnchorLookup = (typeof ANCHOR_LOOKUPS)[number];
 
 /**
  * What became of one document: no part of it changed (`unchanged`, and nothing was compared), it
- * changed in a dataset that has never been published (`unpublished`: the tag lookup found no
- * version tag, so there is no original text to protect and nothing was compared), it was refused in
- * one of the closed words of {@link PROSE_REFUSALS}, or it was compared.
+ * was refused in one of the closed words of {@link PROSE_REFUSALS}, or it was compared.
  */
 export type DocumentResult =
   | { readonly status: "unchanged" }
-  | { readonly status: "unpublished" }
   | { readonly status: "refused"; readonly refusal: ProseRefusal }
   | { readonly status: "compared"; readonly facts: ProseFacts };
 
@@ -2127,9 +2119,6 @@ export interface OriginalPaths {
 /** A document no part of which changed: one object, shared and frozen. */
 const UNCHANGED: DocumentResult = Object.freeze({ status: "unchanged" });
 
-/** A document that changed in a dataset never published: one object, shared and frozen. */
-const UNPUBLISHED: DocumentResult = Object.freeze({ status: "unpublished" });
-
 /**
  * The facts of a pass that was abandoned: nothing compared, nothing counted, and the anchor never
  * looked for. One object shared by every caller, frozen through every level it has, like the
@@ -2181,18 +2170,7 @@ export interface OriginalContentInput {
  * The facts of one pull request from what its caller read (design B2 and B3, as built). Each
  * document any part of which changed is compared once, with the anchor for the README alone
  * (CHANGES protects every merge-base line whatever the anchor), and is `refused` in its closed word
- * when it cannot be; a document no part of which changed is `unchanged`.
- *
- * No protection before publication: when the tag lookup succeeded and the origin has no version
- * tag at all (`no_tag`), the dataset has never been published, so a README or CHANGES that changed
- * is `unpublished` and is not compared (no counts, no tripwires, no refusals): its edits are the
- * review's to judge like any other file's. Only that word does it. Every lookup that could not
- * answer (`lookup_failed`, `tag_tree_unreadable`, `check_failed`, `no_ancestor`, `too_many_tags`)
- * keeps every merge-base line protected, so a failure never lifts the protection; the cost of the
- * rule is that a published dataset whose tags were all deleted loses it too. The author fields,
- * the participant values and the recordings are compared whatever the lookup found.
- *
- * The author fields are
+ * when it cannot be; a document no part of which changed is `unchanged`. The author fields are
  * compared only when `dataset_description.json` changed. Participant values are counted only when
  * a root participants file was modified or changed type: an abandoned summary has no count for any
  * file (see {@link participantValuesAltered}), and asking it about a pull request that touched no
@@ -2203,7 +2181,6 @@ export function originalContentFacts(input: OriginalContentInput): OriginalConte
     input.changes.some((change) => isDocumentName(document, change.path));
   const documentResult = (document: DocumentKind): DocumentResult => {
     if (!changed(document)) return UNCHANGED;
-    if (input.anchorLookup === "no_tag") return UNPUBLISHED;
     const { base, head } = input.documents[document];
     const anchor = document === "readme" ? input.anchor : null;
     const result = proseFacts({ document, base, head, anchor });
