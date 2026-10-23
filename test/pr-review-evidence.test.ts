@@ -6283,12 +6283,12 @@ describe("the platform's findings from the original content", () => {
     expect(
       notesOf(originalOf({ recordings: { replaced: 1, typeChanged: 0, moved: 0, unread: 0 } })),
     ).toEqual([
-      "1 annexed file has new content or moved in or out of the annex. A NEMAR administrator confirms a change to recorded data; describe it in CHANGES.",
+      "1 data file has new content, or moved in or out of the annex. A NEMAR administrator confirms a change to recorded data; describe it in CHANGES.",
     ]);
     expect(
       notesOf(originalOf({ recordings: { replaced: 59, typeChanged: 41, moved: 0, unread: 0 } })),
     ).toEqual([
-      "100 annexed files, recordings among them, have new content or moved in or out of the annex. A NEMAR administrator confirms a change to recorded data; describe it in CHANGES.",
+      "100 data files have new content, or moved in or out of the annex. A NEMAR administrator confirms a change to recorded data; describe it in CHANGES.",
     ]);
     expect(notesOf(ORIGINAL_ABANDONED)).toEqual([
       "The platform could not finish comparing this pull request with what the authors published. A person looks.",
@@ -7322,7 +7322,7 @@ describe("the original content in the prompt", () => {
         p.startsWith("The original authors' content."),
       ) ?? "";
     expect(paragraph.length).toBeGreaterThan(600);
-    expect(paragraph.length).toBeLessThanOrEqual(1_300);
+    expect(paragraph.length).toBeLessThanOrEqual(1_400);
     for (const phrase of [
       "The original_content facts compare this pull request with what the original authors published:",
       "the README with the README at the dataset's first version tag when anchor is first_version_tag, otherwise every README line at the merge base;",
@@ -7332,7 +7332,8 @@ describe("the original content in the prompt", () => {
       "The platform has already acted on every alteration counted there and on every part marked not_decided, so do not repeat those as findings.",
       "Minor edits of original README lines, edits of README text added after the anchor and author fields edited slightly are yours to judge from the diffs:",
       "they are allowed when they are straightforward corrections that the CHANGES entry describes.",
-      "When readme is kept and readme_line_endings_changed or readme_final_newline_added is true, lines a README diff shows as removed are no alteration.",
+      "When readme is kept and readme_line_endings_changed or readme_final_newline_added is true, lines a README diff shows as removed are no alteration,",
+      "except lines the diff shows changed in other ways, such as minor edits or edits of later text, which are yours to judge.",
       "The participant values counted are the change summary's classes for participants.tsv and participants.json.",
       "When abandoned is true the comparison was not made.",
     ]) {

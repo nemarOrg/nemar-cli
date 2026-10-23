@@ -2000,12 +2000,18 @@ export interface OriginalContentFacts {
 export interface OriginalPaths {
   /**
    * When any README part changed: the part the platform showed at the merge base (the first of
-   * `README_CANDIDATES` present, with exact case), or null when it showed none.
+   * `README_CANDIDATES` present, with exact case), else the first README part of the merge base in
+   * code-unit order (a `readme.md`, which is a README part but no candidate), or null when the
+   * merge base had no README part at all.
    */
   readme: string | null;
   /** When any CHANGES part changed: the first part at the merge base, in code-unit order. */
   changes: string | null;
-  /** The first root participants file, in {@link PARTICIPANT_FILES} order, modified or retyped. */
+  /**
+   * The participants file whose values were counted: the file of the first class the count took,
+   * or, when none was counted, the first root participants file in {@link PARTICIPANT_FILES} order
+   * that was modified or retyped.
+   */
   participants: string | null;
 }
 
@@ -2096,6 +2102,20 @@ export function originalContentFacts(input: OriginalContentInput): OriginalConte
   const descriptionChanged = input.changes.some(
     (change) => change.path === "dataset_description.json",
   );
+  const participantValues =
+    participantsChanged.length > 0
+      ? participantValuesAltered(input.summary, input.changes, input.cosmetic)
+      : 0;
+  // The file the count came from: the shape of the first class it took (a root file's shape is its
+  // name), so a finding about participants.json values names it, not participants.tsv.
+  const countedFile =
+    participantValues !== null && participantValues > 0
+      ? (input.summary.classes.find(
+          (c) =>
+            (PARTICIPANT_FILES as readonly string[]).includes(c.shape) &&
+            ALTERS_PARTICIPANT_VALUE[c.kind],
+        )?.shape ?? null)
+      : null;
   return {
     abandoned: false,
     anchorLookup: input.anchorLookup,
@@ -2104,15 +2124,12 @@ export function originalContentFacts(input: OriginalContentInput): OriginalConte
     authorFields: descriptionChanged
       ? authorFieldFacts(input.description.before, input.description.after)
       : null,
-    participantValues:
-      participantsChanged.length > 0
-        ? participantValuesAltered(input.summary, input.changes, input.cosmetic)
-        : 0,
+    participantValues,
     recordings: recordingFacts(input.recordings),
     paths: {
-      readme: firstReadme(baseNames("readme")),
+      readme: firstReadme(baseNames("readme")) ?? baseNames("readme")[0] ?? null,
       changes: baseNames("changes")[0] ?? null,
-      participants: participantsChanged[0] ?? null,
+      participants: countedFile ?? participantsChanged[0] ?? null,
     },
   };
 }

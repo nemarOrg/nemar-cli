@@ -4289,8 +4289,16 @@ describe("originalContentFacts: the documents", () => {
     expect(
       pathsOf(["README", "README.md"], ["CHANGES.md", "CHANGELOG"], ["README", "CHANGES.md"]),
     ).toEqual({ readme: "README.md", changes: "CHANGELOG", participants: null });
-    // A README the platform does not show (a lower-case name) is none to point at.
-    expect(pathsOf(["readme.md"], [], ["readme.md"]).readme).toBeNull();
+    // A README the platform does not show (a lower-case name) is still the README: its first part
+    // is named, never CHANGES.
+    expect(pathsOf(["readme.md"], ["CHANGES"], ["readme.md"])).toEqual({
+      readme: "readme.md",
+      changes: null,
+      participants: null,
+    });
+    expect(pathsOf(["readme.txt", "readme.md"], [], ["readme.txt"]).readme).toBe("readme.md");
+    // No README part at the merge base at all: nothing to point at.
+    expect(pathsOf([], [], ["README.md"]).readme).toBeNull();
     // A document that did not change names nothing, even when it has parts.
     expect(pathsOf(["README.md"], ["CHANGES"], ["sub-01/eeg/x.json"])).toEqual({
       readme: null,
@@ -4408,6 +4416,28 @@ describe("originalContentFacts: the description, the participants and the record
         }),
       ).participantValues,
     ).toBe(0);
+  });
+
+  test("a finding names the participants file whose values were counted, not the first modified", () => {
+    // participants.tsv only gains a row (nothing counted); participants.json has a value changed.
+    const tsvRowAdded: Edit = {
+      path: PARTICIPANTS_TSV,
+      before: sexTable("M"),
+      after: sexTable("M", "F"),
+    };
+    const jsonValue: Edit = {
+      path: PARTICIPANTS_JSON,
+      before: json({ sex: { Description: "sex" } }),
+      after: json({ sex: { Description: "biological sex" } }),
+    };
+    const facts = originalContentFacts(
+      contentInput({
+        changes: [modified(PARTICIPANTS_TSV), modified(PARTICIPANTS_JSON)],
+        summary: summaryOf([tsvRowAdded, jsonValue]),
+      }),
+    );
+    expect(facts.participantValues).toBe(1);
+    expect(facts.paths.participants).toBe(PARTICIPANTS_JSON);
   });
 
   test("the recordings are recordingFacts of every changed path", () => {
