@@ -959,62 +959,19 @@ function markupHides(text: string): boolean {
 }
 
 /**
- * A line with its inline code spans blanked out: a run of backticks opens a span that the next run
- * of exactly as many backticks closes (CommonMark), and everything from the opener to the closer
- * becomes spaces; a run with no closer is left as it is. Inline code renders as literal text, so
- * `a<b` inside it is no tag. Linear: the runs are listed once, and for each length a pointer into
- * that length's runs only moves forward. A code block's lines are not spans and are not blanked
- * (a fenced `if a<b` still reads as an open tag), which flags more, never less.
- */
-export function blankCodeSpans(line: string): string {
-  if (!line.includes("`")) return line;
-  const runs: [number, number][] = []; // start and length of each backtick run
-  for (let i = 0; i < line.length; ) {
-    if (line.charCodeAt(i) !== 0x60) {
-      i++;
-      continue;
-    }
-    let end = i;
-    while (end < line.length && line.charCodeAt(end) === 0x60) end++;
-    runs.push([i, end - i]);
-    i = end;
-  }
-  const byLength = new Map<number, number[]>(); // run indexes of each length, in order
-  runs.forEach(([, length], k) => {
-    const list = byLength.get(length);
-    if (list === undefined) byLength.set(length, [k]);
-    else list.push(k);
-  });
-  const next = new Map<number, number>(); // how far each length's list has been passed
-  let out = "";
-  let copied = 0;
-  for (let k = 0; k < runs.length; k++) {
-    const [start, length] = runs[k] as [number, number];
-    if (start < copied) continue;
-    const list = byLength.get(length) as number[];
-    let at = next.get(length) ?? 0;
-    while (at < list.length && (list[at] as number) <= k) at++;
-    next.set(length, at);
-    if (at >= list.length) continue;
-    const closer = list[at] as number;
-    const [closeStart] = runs[closer] as [number, number];
-    out += line.slice(copied, start) + " ".repeat(closeStart + length - start);
-    copied = closeStart + length;
-    k = closer;
-  }
-  return out + line.slice(copied);
-}
-
-/**
  * Whether a run of consecutive new lines holds markup that can hide text: a link reference
  * definition left open on one of its lines ({@link opensLinkDefinition}), or HTML that hides in the
- * run read as one text, its lines joined by a space and their inline code blanked
- * ({@link blankCodeSpans}, {@link markupHides}), so a tag split across lines (`<div` then
- * `hidden>`) is read as the one tag it is, and `a<b` in a code span is no tag. The cost is one pass
- * over the run, whatever it holds.
+ * run read as one text, its lines joined by a space ({@link markupHides}), so a tag split across
+ * lines (`<div` then `hidden>`) is read as the one tag it is. Inline code is read like any text:
+ * telling a code span from live HTML takes a whole CommonMark parse (an escaped backtick, a backtick
+ * pair across a line break or inside an attribute leaves the markup live), so what looks like
+ * markup is flagged even between backticks, the safe side. The cost: a `<` before a letter with no
+ * `>` after it in a new run (`a<b`, in prose or in code) holds the pull request as unknown for a
+ * person; `p < 0.05` and closed tags (`<label>`, `List<String>`) do not. One pass over the run,
+ * whatever it holds.
  */
 export function hidesText(run: readonly string[]): boolean {
-  return run.some(opensLinkDefinition) || markupHides(run.map(blankCodeSpans).join(" "));
+  return run.some(opensLinkDefinition) || markupHides(run.join(" "));
 }
 
 /** At most `maxValueChars + 1` code points of a line, never half a surrogate pair. */

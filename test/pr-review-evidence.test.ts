@@ -8850,6 +8850,28 @@ describe("original content", () => {
       expect(verdictOf(report)).toBe("pass");
     });
 
+    test("a comment opened between escaped backticks around an original paragraph is not a pass", async () => {
+      // CommonMark reads `\`` as a literal backtick, so the comment is live and hides the paragraph.
+      const original =
+        "# Resting EEG\n\nTwo volunteers rested.\nEach recording lasted ten minutes.\n";
+      const wrapped =
+        "# Resting EEG\n\n\\` <!-- \\`\nTwo volunteers rested.\nEach recording lasted ten minutes.\n\\` --> \\`\n";
+      const r = releaseChanging("ov-backticks", { "README.md": original }, (dir) =>
+        write(dir, "README.md", wrapped),
+      );
+      const report = await reviewPullRequest({
+        repoDir: r.dir,
+        base: r.base,
+        head: r.head,
+        pr: { title: "Annotate the README", body: "Adds two notes to the README." },
+        fromFork: false,
+        versionTags: false,
+      });
+      expect(report.findings.map((f) => f.code)).toEqual(["evidence_incomplete"]);
+      expect(report.criteria.no_degradation).toBe("unknown");
+      expect(verdictOf(report)).toBe("uncertain");
+    });
+
     test("an original paragraph wrapped in details or a comment is unknown: not a fail and not a pass", () => {
       const original = "# Resting EEG\n\nTwo volunteers rested.\n";
       for (const [name, wrapped] of [

@@ -41,7 +41,6 @@ import {
   assembleDocument,
   authorFieldFacts,
   authorFieldsAltered,
-  blankCodeSpans,
   chooseAnchor,
   decodeProse,
   hidesText,
@@ -1849,19 +1848,48 @@ describe("proseFacts: the tripwires", () => {
     expect(proseAltered(badge)).toBe(false);
   });
 
-  test("a less-than sign in inline code is no tag; in a code block line it still reads as one", () => {
-    for (const line of [
-      "Use `a<b` to compare.",
-      "A test: ``x<y and `z` ``.",
-      "p < 0.05 in all sessions.",
-    ]) {
-      const head = edited((lines) => lines.splice(9, 0, line));
-      const facts = readme({ "README.md": ORIGINAL }, { "README.md": head });
-      expect(facts.hidingMarkupInserted, line).toBe(0);
-    }
-    // Lines are read one at a time, so a fenced block's line is no code span: it flags.
+  test("a less-than sign before a letter reads as an open tag, in code too; p < 0.05 and closed tags do not", () => {
+    const hidingOf = (line: string) =>
+      readme(
+        { "README.md": ORIGINAL },
+        { "README.md": edited((lines) => lines.splice(9, 0, line)) },
+      ).hidingMarkupInserted;
+    // Flagged, the safe side: a person looks.
+    expect(hidingOf("Use `a<b` to compare.")).toBe(1);
+    expect(hidingOf("Use a<b to compare.")).toBe(1);
     const fenced = `${ORIGINAL}\n\`\`\`\nif a<b\n\`\`\`\n`;
     expect(readme({ "README.md": ORIGINAL }, { "README.md": fenced }).hidingMarkupInserted).toBe(1);
+    // Not a tag at all, or a tag that closes and hides nothing.
+    for (const line of [
+      "p < 0.05 in all sessions.",
+      "Pick a <label>name</label> for it.",
+      "A List<String> of names.",
+    ]) {
+      expect(hidingOf(line), line).toBe(0);
+    }
+  });
+
+  test("the four code-span attacks around an original paragraph are hiding", () => {
+    // (a) an escaped backtick, then a comment opened above the paragraph and closed below it.
+    const a = edited((lines) => {
+      lines.splice(9, 0, "\\` --> \\`");
+      lines.splice(7, 0, "\\` <!-- \\`");
+    });
+    // (b) details between escaped backticks, as a paragraph of its own above the original text.
+    const b = edited((lines) => lines.splice(7, 0, "\\` <details> \\`", ""));
+    // (c) a backtick paired across a line break, leaving details live.
+    const c = edited((lines) => lines.splice(7, 0, "Note: `", "x` <details> `"));
+    // (d) a backtick inside an attribute value.
+    const d = edited((lines) => lines.splice(7, 0, '<span title="`"><details>`">'));
+    for (const [label, head] of [
+      ["a", a],
+      ["b", b],
+      ["c", c],
+      ["d", d],
+    ] as const) {
+      const facts = readme({ "README.md": ORIGINAL }, { "README.md": head });
+      expect(facts.hidingMarkupInserted, label).toBeGreaterThanOrEqual(1);
+    }
   });
 
   test("a joined run counts once however many protected lines it touches, and a blank line unjoins it", () => {
@@ -2003,23 +2031,21 @@ describe("proseFacts: the tripwires", () => {
 });
 
 describe("hidesText", () => {
-  test("code spans are blanked from opener to closer, a run with no closer is left as it is", () => {
-    expect(blankCodeSpans("Use `a<b` here")).toBe("Use       here");
-    expect(blankCodeSpans("``a`b<c`` then")).toBe("          then");
-    expect(blankCodeSpans("an `open <b span")).toBe("an `open <b span");
-    expect(blankCodeSpans("``a<b` mismatched")).toBe("``a<b` mismatched");
-    expect(blankCodeSpans("`a` <b `c`")).toBe("    <b    ");
-    expect(blankCodeSpans("no code")).toBe("no code");
-    expect(hidesText(["Use `a<b` here"])).toBe(false);
-    expect(hidesText(["Use `a` <b here"])).toBe(true);
+  test("markup between backticks is read like any text: four ways CommonMark leaves it live", () => {
+    // micromark with GFM renders each of these with the comment or the details element live
+    // (an escaped backtick is a literal one; a backtick pairs across a line break; one inside an
+    // attribute value is no code span), so none may be blanked as inline code.
+    expect(hidesText(["\\` <!-- \\`"])).toBe(true);
+    expect(hidesText(["\\` <details> \\`"])).toBe(true);
+    expect(hidesText(["Note: `", "x` <details> `"])).toBe(true);
+    expect(hidesText(['<span title="`"><details>`">'])).toBe(true);
   });
 
-  test("blanking code spans stays one pass on 4 MiB of backticks", () => {
+  test("hostile 4 MiB runs of backticks and markup are read in one pass", () => {
     const size = 4 * 1024 * 1024;
     const fill = (unit: string): string => unit.repeat(Math.ceil(size / unit.length));
     for (const text of [fill("` `` ``` "), fill("`a<b` "), fill("``x` "), fill("`"), fill("x`")]) {
       const started = performance.now();
-      blankCodeSpans(text);
       hidesText([text]);
       expect(performance.now() - started, text.slice(0, 8)).toBeLessThan(5_000);
     }
