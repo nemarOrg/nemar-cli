@@ -672,8 +672,12 @@ export interface ProseFacts {
   /** How many protected lines did so. */
   movedLines: number;
   /**
-   * Runs of new lines placed between two protected lines of one original paragraph, the earlier
-   * kept (verbatim or by a minor edit) and the later one not the start of a paragraph.
+   * Runs of new lines placed inside an original paragraph: between two protected lines that were
+   * adjacent in one paragraph at the base (the earlier kept, verbatim or by a minor edit), and in
+   * the head joined to both, with no blank line before the run's first line or after its last. A
+   * run set off by a blank line on either side is not inside: joined on one side it is a joined
+   * run (`joinedInsertedRuns`), on neither a new paragraph. So a section added between two lines a
+   * README never separated (a heading right after its text) is an addition, not an alteration.
    */
   insertedInsideParagraph: number;
   /**
@@ -925,7 +929,9 @@ function cutExample(text: string): string {
  * taken once, by the protected lines in base order, after the minor edits took theirs), and
  * `protectedAltered` when it is not. A run of extra inserted lines (past the last pair of a hunk)
  * is `insertedInsideParagraph` when the base lines on either side of it are protected, the later
- * one does not start a paragraph, and the earlier one is kept verbatim or by a minor edit.
+ * one does not start a paragraph at the base, the earlier one is kept verbatim or by a minor edit,
+ * and in the head neither the run's first line nor the line after the run starts a paragraph: the
+ * run is read inside the paragraph only when no blank line sets it off on either side.
  *
  * The part the platform shows is the first of `README_CANDIDATES` present, compared with exact case
  * as git stores names, while the document's own names are matched without regard to case: a
@@ -1024,13 +1030,17 @@ export function proseFacts(input: {
       const earlier =
         removedHere.length > 0 ? (removedHere[removedHere.length - 1] as number) : before;
       const after = i;
+      // The run's first line in the head, and the head line after the run: the kept line `after`.
+      const firstExtra = insertedHere[removedHere.length] as number;
       if (
         earlier >= 0 &&
         after < base.length &&
         isProtected[earlier] &&
         isProtected[after] &&
         !(base[after] as ProseLine).paragraphStart &&
-        kept[earlier]
+        kept[earlier] &&
+        !(head[firstExtra] as ProseLine).paragraphStart &&
+        !(head[j] as ProseLine).paragraphStart
       ) {
         insertedInsideParagraph++;
       }

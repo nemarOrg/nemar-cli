@@ -8521,6 +8521,33 @@ describe("original content", () => {
       expect(verdictOf(report)).toBe("pass");
     });
 
+    test("a section set off by blank lines before a heading the README never separated passes the review", async () => {
+      // A README with no blank lines around its headings: at the base its last two sections read
+      // as one paragraph. A new section between them, set off by blank lines, adds and alters nothing.
+      const r = releaseChanging(
+        "ov-headings",
+        { "README.md": "## Methods\nEEG at 500 Hz.\n## License\nCC0\n" },
+        (dir) =>
+          write(
+            dir,
+            "README.md",
+            "## Methods\nEEG at 500 Hz.\n\n## Acknowledgments\n\nThanks to the lab.\n\n## License\nCC0\n",
+          ),
+      );
+      expect(reportOf(r.dir, r).findings).toEqual([]);
+      const report = await reviewPullRequest({
+        repoDir: r.dir,
+        base: r.base,
+        head: r.head,
+        pr: { title: "Acknowledge the lab", body: "Adds an acknowledgments section." },
+        fromFork: false,
+        versionTags: false,
+      });
+      expect(report.findings).toEqual([]);
+      expect(report.criteria.no_degradation).toBe("pass");
+      expect(verdictOf(report)).toBe("pass");
+    });
+
     test("a changed Name fails as an original field; an author appended is information", () => {
       const named = releaseChanging("ov-name", {}, (dir) =>
         write(dir, "dataset_description.json", desc("1.1.0", { Name: "Another dataset" })),

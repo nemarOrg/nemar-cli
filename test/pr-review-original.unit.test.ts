@@ -1280,6 +1280,93 @@ describe("proseFacts: the cases of design B7", () => {
   });
 });
 
+describe("proseFacts: a run is inside a paragraph only when no blank line sets it off", () => {
+  /** The facts of a README pull request, and whether they are an alteration. */
+  const judged = (base: string, head: string) => {
+    const facts = readme({ "README.md": base }, { "README.md": head });
+    return { facts, altered: proseAltered(facts) };
+  };
+
+  test("a section set off by blank lines before a heading the README never separated is an addition", () => {
+    const base = "## Methods\nEEG at 500 Hz.\n## License\nCC0\n";
+    const head =
+      "## Methods\nEEG at 500 Hz.\n\n## Acknowledgments\n\nThanks to the lab.\n\n## License\nCC0\n";
+    const { facts, altered } = judged(base, head);
+    expect(facts.insertedInsideParagraph).toBe(0);
+    expect(facts.joinedInsertedRuns).toBe(0);
+    expect(facts.preserved).toBe(true);
+    expect(altered).toBe(false);
+  });
+
+  test("a list item appended, then a blank line before the heading that followed the list, is an addition", () => {
+    const base = "## Sessions\n- rest\n- task\n## License\nCC0\n";
+    const head = "## Sessions\n- rest\n- task\n- recovery\n\n## License\nCC0\n";
+    const { facts, altered } = judged(base, head);
+    expect(facts.insertedInsideParagraph).toBe(0);
+    // Joined to the list above it: information.
+    expect(facts.joinedInsertedRuns).toBe(1);
+    expect(altered).toBe(false);
+  });
+
+  test("a new section before a heading with no blank line above it is an addition", () => {
+    const base = "# Title\n\nIntro text.\n## License\nCC0\n";
+    const head = "# Title\n\nIntro text.\n\n## Funding\n\nFunded by a grant.\n## License\nCC0\n";
+    const { facts, altered } = judged(base, head);
+    expect(facts.insertedInsideParagraph).toBe(0);
+    expect(facts.joinedInsertedRuns).toBe(1);
+    expect(altered).toBe(false);
+  });
+
+  test("a paragraph put between two sentences of a one-sentence-per-line README, set off by blank lines, is an addition", () => {
+    const base = "Sentence one.\nSentence two.\nSentence three.\nSentence four.\n";
+    const head =
+      "Sentence one.\nSentence two.\n\nA new paragraph.\n\nSentence three.\nSentence four.\n";
+    const { facts, altered } = judged(base, head);
+    expect(facts).toEqual(untouched(4, { insertedLines: 1 }));
+    expect(altered).toBe(false);
+  });
+
+  test("a sentence put between two lines of a paragraph with no blank line is still inside, and altered", () => {
+    const base = "Sentence one.\nSentence two.\nSentence three.\n";
+    const head = "Sentence one.\nA new sentence.\nSentence two.\nSentence three.\n";
+    const { facts, altered } = judged(base, head);
+    expect(facts.insertedInsideParagraph).toBe(1);
+    expect(altered).toBe(true);
+    // A blank line on one side only: joined to the other side, information.
+    const oneSide = judged(
+      base,
+      "Sentence one.\nA new sentence.\n\nSentence two.\nSentence three.\n",
+    );
+    expect(oneSide.facts.insertedInsideParagraph).toBe(0);
+    expect(oneSide.facts.joinedInsertedRuns).toBe(1);
+    expect(oneSide.altered).toBe(false);
+  });
+
+  test("a run after a minor edit, joined on both sides, is inside", () => {
+    const base = "First original sentence of the paragraph.\nSecond original sentence of it.\n";
+    const head =
+      "First original sentence of the paragrapH.\nAn added sentence.\nSecond original sentence of it.\n";
+    const { facts, altered } = judged(base, head);
+    expect(facts.minorEdits).toBe(1);
+    expect(facts.insertedInsideParagraph).toBe(1);
+    expect(altered).toBe(true);
+  });
+
+  test("a run that starts a new part in the head is never inside the paragraph it came between", () => {
+    // B moved into a new part after the new line: at the base A and B were one paragraph, but in
+    // the head the new line opens README.md, so a paragraph break sets it off.
+    const facts = readme(
+      { README: "Line A of the paragraph.\nLine B of the paragraph.\n" },
+      {
+        README: "Line A of the paragraph.\n",
+        "README.md": "A new line.\nLine B of the paragraph.\n",
+      },
+    );
+    expect(facts.protectedAltered + facts.movedLines).toBe(0);
+    expect(facts.insertedInsideParagraph).toBe(0);
+  });
+});
+
 describe("proseFacts: the adversarial cases of design B6", () => {
   test("trailing whitespace and line endings cleaned up everywhere is preserved", () => {
     const messy = ORIGINAL_LINES.map((line, i) => (i % 2 === 0 ? `${line} \t` : line)).join("\r\n");
