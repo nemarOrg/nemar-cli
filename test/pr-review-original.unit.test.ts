@@ -9,9 +9,11 @@
 import { describe, expect, test } from "bun:test";
 import {
   ALTERS_PARTICIPANT_VALUE,
+  ARRAY_VALUED_KEYS,
   AUTHOR_OWNED_KEYS,
   type AlignOp,
   type AuthorFieldFacts,
+  type AuthorOwnedKey,
   type DescriptionSide,
   type DocumentKind,
   type DocumentPart,
@@ -1860,7 +1862,13 @@ describe("authorFieldFacts", () => {
     expect(facts).toEqual(noFieldChange({ minor: ["Funding"], grown: ["Funding"] }));
   });
 
-  test("a lone string is a one-element array beside an array, and nothing else is", () => {
+  test("for an array-valued key a lone string is an array of one, both ways", () => {
+    expect(ARRAY_VALUED_KEYS).toEqual([
+      "Authors",
+      "Funding",
+      "EthicsApprovals",
+      "ReferencesAndLinks",
+    ]);
     expect(
       authorFieldFacts(
         changed({ Authors: "Ada Lovelace" }),
@@ -1873,6 +1881,45 @@ describe("authorFieldFacts", () => {
         changed({ Authors: ["Ada Lovelace", "Alan Turing"] }),
       ),
     ).toEqual(noFieldChange({ grown: ["Authors"] }));
+    // An array of one that became its string is no change either.
+    expect(
+      authorFieldFacts(changed({ Funding: ["Grant 1"] }), changed({ Funding: "Grant 1" })),
+    ).toEqual(noFieldChange());
+    expect(
+      authorFieldFacts(
+        changed({ EthicsApprovals: "IRB 1" }),
+        changed({ EthicsApprovals: ["IRB 1", "IRB 2"] }),
+      ),
+    ).toEqual(noFieldChange({ grown: ["EthicsApprovals"] }));
+  });
+
+  test("for any other key a change of JSON type is altered, a string grown into a list included", () => {
+    for (const key of ["Name", "License", "DatasetDOI", "Acknowledgements", "HowToAcknowledge"]) {
+      expect(
+        authorFieldFacts(changed({ [key]: "CC0" }), changed({ [key]: ["CC0", "CC-BY-NC-4.0"] })),
+        key,
+      ).toEqual(noFieldChange({ altered: [key as AuthorOwnedKey] }));
+      expect(authorFieldFacts(changed({ [key]: ["CC0"] }), changed({ [key]: "CC0" })), key).toEqual(
+        noFieldChange({ altered: [key as AuthorOwnedKey] }),
+      );
+    }
+    const facts = authorFieldFacts(
+      changed({ License: "CC0" }),
+      changed({ License: ["CC0", "CC-BY-NC-4.0"] }),
+    );
+    expect(authorFieldsAltered(facts)).toBe(true);
+  });
+
+  test("a number beside an array, or an object beside a string, is altered for any key", () => {
+    expect(authorFieldFacts(changed({ Funding: 5 }), changed({ Funding: [5] }))).toEqual(
+      noFieldChange({ altered: ["Funding"] }),
+    );
+    expect(authorFieldFacts(changed({ Funding: [5] }), changed({ Funding: 5 }))).toEqual(
+      noFieldChange({ altered: ["Funding"] }),
+    );
+    expect(
+      authorFieldFacts(changed({ Funding: { grant: "Grant 1" } }), changed({ Funding: "Grant 1" })),
+    ).toEqual(noFieldChange({ altered: ["Funding"] }));
     expect(
       authorFieldFacts(changed({ Funding: "Grant 1" }), changed({ Funding: { grant: "Grant 1" } })),
     ).toEqual(noFieldChange({ altered: ["Funding"] }));

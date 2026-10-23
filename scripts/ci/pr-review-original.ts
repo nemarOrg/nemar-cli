@@ -1093,6 +1093,20 @@ export const MINOR_EDIT_KEYS: readonly AuthorOwnedKey[] = [
   "ReferencesAndLinks",
 ];
 
+/**
+ * The author-owned keys whose value BIDS writes as an array. Only for these is a lone string read
+ * as the array of that one string, so `"Ada"` that became `["Ada", "Alan"]` has grown. For the
+ * others (`Name`, `License`, `DatasetDOI`, `Acknowledgements`, `HowToAcknowledge`) a value that
+ * changes its JSON type is altered: `"CC0"` that became `["CC0", "CC-BY-NC-4.0"]` is another
+ * license, not more of the same one.
+ */
+export const ARRAY_VALUED_KEYS: readonly AuthorOwnedKey[] = [
+  "Authors",
+  "Funding",
+  "EthicsApprovals",
+  "ReferencesAndLinks",
+];
+
 /** What a pull request did to the author-owned keys, each list in {@link AUTHOR_OWNED_KEYS} order. */
 export interface AuthorFieldFacts {
   /** Keys changed beyond what design B1 permits. */
@@ -1146,9 +1160,10 @@ function fieldChange(
   if (was.t === "str" && now.t === "str") {
     return compare(was, now) === "minor" ? ["minor"] : ["altered"];
   }
+  if (was.t !== now.t && !ARRAY_VALUED_KEYS.includes(key)) return ["altered"];
   if (was.t !== "arr" && now.t !== "arr") return ["altered"];
-  // A lone string beside an array is read as the array of that one string, so a string that became
-  // a list starting with it has grown. Missing elements are dropped on both sides first, so a
+  // For an array-valued key a lone string beside an array is read as the array of that one string,
+  // so a string that became a list starting with it has grown. Missing elements are dropped on both sides first, so a
   // placeholder `""` removed or added is no change.
   const elements = (v: JsonValue): JsonValue[] | null =>
     v.t === "arr" ? v.v.filter((item) => !isMissingJson(item)) : v.t === "str" ? [v] : null;
@@ -1180,7 +1195,9 @@ function fieldChange(
  * dropped, must start with every old element in order (equal, or a minor edit for a minor-edit
  * key): then the key is `grown` when new elements follow, and `minor` when an element took a
  * minor edit; anything else is `altered`, so an author list reordered, or an author inserted
- * before an old one, is altered, and one appended is grown. Every other change is `altered`.
+ * before an old one, is altered, and one appended is grown. A string beside an array is read as an
+ * array of one only for {@link ARRAY_VALUED_KEYS}; for every other key a change of JSON type is
+ * `altered`. Every other change is `altered`.
  */
 export function authorFieldFacts(
   before: DescriptionSide,
