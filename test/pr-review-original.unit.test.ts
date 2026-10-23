@@ -7,6 +7,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import { classifyPath } from "../scripts/ci/pr-review-evidence";
 import {
   ALTERS_PARTICIPANT_VALUE,
   ARRAY_VALUED_KEYS,
@@ -310,6 +311,26 @@ describe("normalizeProse", () => {
     expect(normalizeProse("a\r").endsWithBreak).toBe(true);
     expect(normalizeProse("").endsWithBreak).toBe(false);
     expect(normalizeProse("a\nb").lines).toEqual(normalizeProse("a\nb\n").lines);
+  });
+
+  test("a last line with no line break is counted against the bound too", () => {
+    expect(normalizeProse("a\nb\nc", 2).overLimit).toBe(true);
+    expect(normalizeProse("a\nb", 2).overLimit).toBe(false);
+    const limit = ORIGINAL_LIMITS.maxDocumentLines;
+    expect(normalizeProse(`${"a\n".repeat(limit)}z`, limit).overLimit).toBe(true);
+    expect(normalizeProse(`${"a\n".repeat(limit - 1)}z`, limit).overLimit).toBe(false);
+  });
+
+  test("reading stops at the bound: two million short lines are read only up to line 20,001", () => {
+    const limit = ORIGINAL_LIMITS.maxDocumentLines;
+    const text = "a\n".repeat(2 * 1024 * 1024);
+    const meter = { units: 0 };
+    expect(normalizeProse(text, limit, meter).overLimit).toBe(true);
+    // Line 20,001 ends at code unit 40,001: nothing after it is read.
+    expect(meter.units).toBe(2 * (limit + 1));
+    const whole = { units: 0 };
+    normalizeProse("a\nb\n", limit, whole);
+    expect(whole.units).toBe(4);
   });
 
   test("a single break is named too: one LF is lf, one CRLF is crlf", () => {
@@ -1532,6 +1553,13 @@ describe("proseFacts: the tripwires", () => {
     expect(readme({ "README.md": ORIGINAL }, { "README.md": appended }).joinedInsertedRuns).toBe(1);
   });
 
+  test("hiding markup on the very first head line is read, alone or split across two lines", () => {
+    const first = readme({ "README.md": ORIGINAL }, { "README.md": `<div hidden>\n${ORIGINAL}` });
+    expect(first.hidingMarkupInserted).toBe(1);
+    const split = readme({ "README.md": ORIGINAL }, { "README.md": `<div\nhidden>\n${ORIGINAL}` });
+    expect(split.hidingMarkupInserted).toBe(1);
+  });
+
   test("a run beyond a later line joined to an original paragraph is joined too", () => {
     // The tag has the title, L1 and L2, and a second paragraph. A later line X was added directly
     // above L1. A footnote definition put directly above X makes X, L1 and L2 its text: the run
@@ -1744,6 +1772,18 @@ describe("hidesText", () => {
     }
   });
 
+  test("an open quote swallows the closing bracket, and names and labels are read whole", () => {
+    expect(hidesText(['<a title="x>'])).toBe(true);
+    expect(hidesText(["<a title='x>"])).toBe(true);
+    for (const line of ["<details9>", "<detailsZ>", "<details-x>", "<x-details>", "<my-map>"]) {
+      expect(hidesText([line]), line).toBe(false);
+    }
+    // A tab after the colon is a blank like a space; an empty label is read as a definition too.
+    expect(hidesText(['[x]:\t<> "'])).toBe(true);
+    expect(hidesText(['[]: <> "'])).toBe(true);
+    expect(hidesText(["[]: /url"])).toBe(false);
+  });
+
   test("hostile runs of 4 MiB are each read in one pass", () => {
     const size = 4 * 1024 * 1024;
     // Whole units only, so a closed tag is never cut in half at the end.
@@ -1872,6 +1912,7 @@ describe("proseFacts: properties over seeded random READMEs", () => {
       expect(facts.preserved, label).toBe(true);
       expect(facts.insertedLines, label).toBe(added);
       expect(facts.laterAltered + facts.insertedInsideParagraph, label).toBe(0);
+      expect(facts.joinedInsertedRuns, label).toBe(0);
     }
   });
 
@@ -2196,6 +2237,15 @@ describe("authorFieldFacts", () => {
   });
 
   test("a number beside an array, or an object beside a string, is altered for any key", () => {
+    for (const key of ["Name", "License"] as const) {
+      expect(authorFieldFacts(changed({ [key]: 5 }), changed({ [key]: [5] })), key).toEqual(
+        noFieldChange({ altered: [key] }),
+      );
+      expect(
+        authorFieldFacts(changed({ [key]: { id: "x" } }), changed({ [key]: "x" })),
+        key,
+      ).toEqual(noFieldChange({ altered: [key] }));
+    }
     expect(authorFieldFacts(changed({ Funding: 5 }), changed({ Funding: [5] }))).toEqual(
       noFieldChange({ altered: ["Funding"] }),
     );
@@ -2408,13 +2458,14 @@ describe("annexSide", () => {
   // `git hash-object -w` and committed with `git update-index --cacheinfo`, and
   // `git annex find --branch HEAD --include='*' --format='${file} ${key}\n'` to list what it calls
   // annexed. Measured annexed: a pointer `/annex/objects/KEY` with or without a final LF, with CRLF
-  // (key without the CR), with a deeper path, with `x/` or a BOM before `/annex/objects/`, or with
-  // later lines that each hold `/annex/`; a link target with `x/` or `/` before `annex/objects/`, a
-  // final LF, or a final CR (key without it). Measured NOT annexed: a pointer with `onset\tduration`
-  // after it, with a blank line after it, or with a later line without `/annex/`; a pointer or a
-  // link target `annex/objects/KEY` (no slash before `annex`); a link target with anything after a
-  // line break. git-annex also accepted a NUL or a CR inside a key, which this module reads as no
-  // key (the side is then a plain file, which flags the change).
+  // (key without the CR), with a deeper path, with `x/`, a leading space or a BOM before
+  // `/annex/objects/`, or with later lines that each hold `/annex/`; a key holding a space; a link
+  // target with `x/` or `/` before `annex/objects/`, a final LF, or a final CR (key without it).
+  // Measured NOT annexed: a pointer with `onset\tduration` after it, with a blank line after it,
+  // with a blank line BEFORE it, or with a later line without `/annex/`; bytes that are not UTF-8;
+  // a pointer or a link target `annex/objects/KEY` (no slash before `annex`); a link target with
+  // anything after a line break. git-annex also accepted a NUL or a CR inside a key, which this
+  // module reads as no key (the side is then a plain file, which flags the change).
 
   test("a pointer is the whole blob: its first line names the key and every later line holds /annex/", () => {
     const key = "SHA256E-s10--abc.edf";
@@ -2446,6 +2497,19 @@ describe("annexSide", () => {
         new Uint8Array([0xef, 0xbb, 0xbf, ...encoder.encode(`/annex/objects/${key}\n`)]),
       ),
     ).toEqual({ kind: "annexed", key });
+  });
+
+  test("a blank line before a pointer, or bytes that are not UTF-8, make a git file", () => {
+    const key = "SHA256E-s10--abc.edf";
+    expect(annexSide(REGULAR, encoder.encode(`\n/annex/objects/${key}`))).toEqual({ kind: "git" });
+    expect(annexSide(REGULAR, new Uint8Array([0xff, 0xfe, 0x41, 0x0a]))).toEqual({ kind: "git" });
+    expect(annexSide("100755", new Uint8Array([0xff, 0xfe, 0x41, 0x0a]))).toEqual({ kind: "git" });
+    // A space inside a key is part of it, as git-annex reads it.
+    const spaced = "SHA256E-s14--a b.edf";
+    expect(annexSide(REGULAR, encoder.encode(`/annex/objects/${spaced}\n`))).toEqual({
+      kind: "annexed",
+      key: spaced,
+    });
   });
 
   test("a pointer with data appended, a blank line after it, or no slash before annex is git", () => {
@@ -2624,6 +2688,31 @@ describe("recordingFacts: the shapes of set A", () => {
 });
 
 describe("recordingFacts: the reviewed scope", () => {
+  test("the scope agrees with the evidence module's own areas for every kind of path", () => {
+    for (const path of [
+      "sub-01/eeg/sub-01_task-x_eeg.edf",
+      "sub-01/eeg/sub-01_task-x_events.tsv",
+      "README",
+      "CHANGES",
+      "dataset_description.json",
+      "participants.tsv",
+      "sourcedata/raw/sub-01.bdf",
+      "derivatives/eeglab/sub-01.set",
+      "code/run.py",
+      "sub-01/derivatives/x.edf",
+      "sourcedata.tsv",
+      "codebook.json",
+      "derivatives",
+      "code",
+      "Derivatives/x.edf",
+    ]) {
+      const area = classifyPath(path);
+      expect(inReviewedScope(path), path).toBe(
+        area !== "sourcedata" && area !== "derivatives" && area !== "code",
+      );
+    }
+  });
+
   test("the scope leaves out exactly sourcedata/, derivatives/ and code/ at the top", () => {
     expect([...REVIEW_LEFT_OUT_DIRS]).toEqual(["sourcedata", "derivatives", "code"]);
     for (const path of ["sourcedata/raw/x.bdf", "derivatives/a/b.edf", "code/run.py"]) {
@@ -2751,6 +2840,28 @@ describe("recordingFacts: what is a replacement and what is not", () => {
         noRecordingChange({ typeChanged: 1 }),
       );
     }
+  });
+
+  test("a path out of scope listed first does not stop the count of the paths after it", () => {
+    expect(
+      recordingFacts([
+        recording("code/run.py", plain("print(1)"), plain("print(2)")),
+        recording("sub-01/eeg/x_eeg.edf", locked(keyOf(40)), locked(keyOf(41)), true),
+      ]),
+    ).toEqual(noRecordingChange({ replaced: 1 }));
+  });
+
+  test("the same blob turned from a file into a link is a change of kind, so replaced", () => {
+    // A regular file holding `../shared/a.edf` and a symlink to `../shared/a.edf` are one blob id.
+    const file = sideOf(REGULAR, "../shared/a.edf");
+    const link = sideOf(SYMLINK, "../shared/a.edf");
+    expect(file.oid).toBe(link.oid);
+    expect(recordingFacts([recording("sub-01/eeg/x_eeg.edf", file, link, true)])).toEqual(
+      noRecordingChange({ replaced: 1 }),
+    );
+    expect(recordingFacts([recording("sub-01/eeg/x_eeg.edf", link, file, true)])).toEqual(
+      noRecordingChange({ replaced: 1 }),
+    );
   });
 
   test("in the recordings area, a plain link, a submodule or a git file that changed is replaced", () => {

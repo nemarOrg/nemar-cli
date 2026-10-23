@@ -11,17 +11,17 @@
  *
  * **This module is pure.** No git, no file system and no clock: it reads the bytes its caller has
  * already fetched and returns counts, booleans and closed words, so every rule here is tested on
- * bytes alone and none of it can reach a repository. Which blobs are read, at which commit, and what
- * a fact does to the review are the caller's.
+ * bytes alone and none of it can reach a repository. Which blobs are read, at which commit, and
+ * what a fact does to the review are the caller's.
  *
  * Two rules run through it, as through the summary it extends:
  *
  * 1. **What cannot be decided is said, never guessed.** A document the module will not read is one
  *    of the closed words in {@link PROSE_REFUSALS}, which the caller turns into "unknown" (a person
- *    looks), never into "clean". The words are printed in a public log, so none is built from a path
- *    or a contributor's text.
- * 2. **Where a reading is doubtful, the reading that flags is the one taken.** Protection falls back
- *    to the stricter side, every copy of an original line is protected, and a choice the rules
+ *    looks), never into "clean". The words are printed in a public log, so none is built from a
+ *    path or a contributor's text.
+ * 2. **Where a reading is doubtful, the reading that flags is the one taken.** Protection falls
+ *    back to the stricter side, every copy of an original line is protected, and a choice the rules
  *    leave open goes the way that reports more, never the way that could call an alteration clean.
  */
 
@@ -168,7 +168,14 @@ export interface NormalizedText {
   overLimit: boolean;
 }
 
-/** Whether a UTF-16 code unit is a space or a tab, the only characters stripped from a line's end. */
+/** The code units {@link normalizeProse} read, for a test to bound. Added to, never reset. */
+export interface NormalizeMeter {
+  units: number;
+}
+
+/**
+ * Whether a UTF-16 code unit is a space or a tab, the only characters stripped from a line's end.
+ */
 function isTrailingBlank(unit: number): boolean {
   return unit === 0x20 || unit === 0x09;
 }
@@ -189,11 +196,13 @@ function isTrailingBlank(unit: number): boolean {
  * backtracks over every run of spaces that is not at the end, which is quadratic in a hostile line.
  *
  * With `maxLines`, reading stops at the first line past it (`overLimit`), so the lines a refused
- * text costs are bounded by the cap and not by its length.
+ * text costs are bounded by the cap and not by its length; `meter`, when given, counts the code
+ * units read, so a test can see where reading stopped.
  */
 export function normalizeProse(
   text: string,
   maxLines: number = Number.POSITIVE_INFINITY,
+  meter?: NormalizeMeter,
 ): NormalizedText {
   const over: NormalizedText = { lines: [], breaks: "none", endsWithBreak: false, overLimit: true };
   const lines: { text: string; paragraphStart: boolean }[] = [];
@@ -216,7 +225,10 @@ export function normalizeProse(
     const unit = text.charCodeAt(i);
     if (unit !== 0x0a && unit !== 0x0d) continue;
     keep(start, i);
-    if (lines.length > maxLines) return { ...over, lines };
+    if (lines.length > maxLines) {
+      if (meter) meter.units += i + 1;
+      return { ...over, lines };
+    }
     if (unit === 0x0a) lf++;
     else if (text.charCodeAt(i + 1) === 0x0a) {
       crlf++;
@@ -225,6 +237,7 @@ export function normalizeProse(
     start = i + 1;
   }
   keep(start, text.length);
+  if (meter) meter.units += text.length;
   if (lines.length > maxLines) return { ...over, lines };
   const kinds = (lf > 0 ? 1 : 0) + (crlf > 0 ? 1 : 0) + (cr > 0 ? 1 : 0);
   const breaks: LineBreaks =
@@ -515,7 +528,9 @@ function myersMiddle(
   }
 }
 
-/** The script of the path {@link myersMiddle} found, from the slices it stored, in forward order. */
+/**
+ * The script of the path {@link myersMiddle} found, from the slices it stored, in forward order.
+ */
 function backtrack(trace: readonly Int32Array[], n: number, m: number): AlignOp[] {
   const ops: AlignOp[] = [];
   let x = n;
@@ -899,25 +914,26 @@ function cutExample(text: string): string {
  * the anchor (the first version tag; null when there is none). Either side may have no part at all:
  * a README added is all insertion, one removed all removal.
  *
- * Both sides are assembled (a part unchanged between them may be binary, see
- * {@link assembleDocument}) and aligned; a refusal of either side, or an alignment over the cap, is
- * the refusal, never a partial result. The anchor matters only for the README, and an anchor
- * document that cannot be read, has no part, or has no line protects every merge-base line instead.
+ * Both sides are assembled (a part unchanged between them may be binary, see {@link
+ * assembleDocument}) and aligned; a refusal of either side, or an alignment over the cap, is the
+ * refusal, never a partial result. The anchor matters only for the README, and an anchor document
+ * that cannot be read, has no part, or has no line protects every merge-base line instead.
  *
  * Inside each hunk the j-th removed line is paired with the j-th inserted line. A removed protected
- * line is a minor edit when its partner is within {@link isMinorEdit} (README only); otherwise it is
- * `moved` when its exact text is among the inserted lines of the document not yet taken (each taken
- * once, by the protected lines in base order, after the minor edits took theirs), and
- * `protectedAltered` when it is not. A run of extra inserted lines (past the last pair of a hunk) is
- * `insertedInsideParagraph` when the base lines on either side of it are protected, the later one
- * does not start a paragraph, and the earlier one is kept verbatim or by a minor edit.
+ * line is a minor edit when its partner is within {@link isMinorEdit} (README only); otherwise it
+ * is `moved` when its exact text is among the inserted lines of the document not yet taken (each
+ * taken once, by the protected lines in base order, after the minor edits took theirs), and
+ * `protectedAltered` when it is not. A run of extra inserted lines (past the last pair of a hunk)
+ * is `insertedInsideParagraph` when the base lines on either side of it are protected, the later
+ * one does not start a paragraph, and the earlier one is kept verbatim or by a minor edit.
  *
- * The part the platform shows is the first of `README_CANDIDATES` present, compared with exact
- * case as git stores names, while the document's own names are matched without regard to case: a
- * `readme.md` is in the document but is never the shown part. When no part of a side is a candidate,
- * every part of that side counts as shown: a candidate added beside a base that had none hides every
- * original part it does not hold. But a base that HAD a shown README and a head that has none (a
- * `README.md` renamed `readme.md` or `README.MD`) has lost it, whatever the text: the fact is true.
+ * The part the platform shows is the first of `README_CANDIDATES` present, compared with exact case
+ * as git stores names, while the document's own names are matched without regard to case: a
+ * `readme.md` is in the document but is never the shown part. When no part of a side is a
+ * candidate, every part of that side counts as shown: a candidate added beside a base that had none
+ * hides every original part it does not hold. But a base that HAD a shown README and a head that
+ * has none (a `README.md` renamed `readme.md` or `README.MD`) has lost it, whatever the text: the
+ * fact is true.
  */
 export function proseFacts(input: {
   document: DocumentKind;
@@ -1197,12 +1213,12 @@ export const MINOR_EDIT_KEYS: readonly AuthorOwnedKey[] = [
 ];
 
 /**
- * The author-owned keys whose value BIDS writes as an array. Only these can grow, and only for these
- * is a lone string read as the array of that one string, so `"Ada"` that became `["Ada", "Alan"]`
- * has grown. The others (`Name`, `License`, `DatasetDOI`, `Acknowledgements`, `HowToAcknowledge`)
- * hold one value: any change between two values that are not missing is altered (an array that
- * gained an element, a changed type, `"CC0"` that became `["CC0", "CC-BY-NC-4.0"]`), except a minor
- * edit of a string for the two of them that take one.
+ * The author-owned keys whose value BIDS writes as an array. Only these can grow, and only for
+ * these is a lone string read as the array of that one string, so `"Ada"` that became `["Ada",
+ * "Alan"]` has grown. The others (`Name`, `License`, `DatasetDOI`, `Acknowledgements`,
+ * `HowToAcknowledge`) hold one value: any change between two values that are not missing is altered
+ * (an array that gained an element, a changed type, `"CC0"` that became `["CC0", "CC-BY-NC-4.0"]`),
+ * except a minor edit of a string for the two of them that take one.
  */
 export const ARRAY_VALUED_KEYS: readonly AuthorOwnedKey[] = [
   "Authors",
@@ -1211,7 +1227,9 @@ export const ARRAY_VALUED_KEYS: readonly AuthorOwnedKey[] = [
   "ReferencesAndLinks",
 ];
 
-/** What a pull request did to the author-owned keys, each list in {@link AUTHOR_OWNED_KEYS} order. */
+/**
+ * What a pull request did to the author-owned keys, each list in {@link AUTHOR_OWNED_KEYS} order.
+ */
 export interface AuthorFieldFacts {
   /** Keys changed beyond what design B1 permits. */
   altered: AuthorOwnedKey[];
@@ -1219,7 +1237,10 @@ export interface AuthorFieldFacts {
   removed: AuthorOwnedKey[];
   /** Keys with a string, or an array element, changed by a minor edit (permitted). */
   minor: AuthorOwnedKey[];
-  /** Arrays whose old elements are all kept, in order, at the start, with new ones after (permitted). */
+  /**
+   * Arrays whose old elements are all kept, in order, at the start, with new ones after
+   * (permitted).
+   */
   grown: AuthorOwnedKey[];
   /** Keys that held no value and hold one now (permitted). */
   added: AuthorOwnedKey[];
@@ -1227,7 +1248,9 @@ export interface AuthorFieldFacts {
   unparsed: boolean;
 }
 
-/** One side of the dataset description: its bytes, no file at all, or bytes that could not be read. */
+/**
+ * One side of the dataset description: its bytes, no file at all, or bytes that could not be read.
+ */
 export type DescriptionSide = Uint8Array | "absent" | "unreadable";
 
 /** The top-level members of a side, empty when there is no file, null when they cannot be known. */
@@ -1239,12 +1262,16 @@ function descriptionKeys(side: DescriptionSide): ReadonlyMap<string, JsonValue> 
   return parsed.value.value.v;
 }
 
-/** A key that is not there, or holds a missing value (`isMissingJson`: null, `""`, `[]`, `[""]`...). */
+/**
+ * A key that is not there, or holds a missing value (`isMissingJson`: null, `""`, `[]`, `[""]`...).
+ */
 function holdsNothing(value: JsonValue | undefined): boolean {
   return value === undefined || isMissingJson(value);
 }
 
-/** What changed in one author-owned key: nothing, or the lists of {@link AuthorFieldFacts} it joins. */
+/**
+ * What changed in one author-owned key: nothing, or the lists of {@link AuthorFieldFacts} it joins.
+ */
 function fieldChange(
   key: AuthorOwnedKey,
   before: JsonValue | undefined,
@@ -1266,10 +1293,9 @@ function fieldChange(
   }
   // Only an array-valued key can grow; any other change of a scalar field is altered.
   if (!ARRAY_VALUED_KEYS.includes(key)) return ["altered"];
-  if (was.t !== "arr" && now.t !== "arr") return ["altered"];
   // For an array-valued key a lone string beside an array is read as the array of that one string,
-  // so a string that became a list starting with it has grown. Missing elements are dropped on both sides first, so a
-  // placeholder `""` removed or added is no change.
+  // so a string that became a list starting with it has grown. Missing elements are dropped on both
+  // sides first, so a placeholder `""` removed or added is no change.
   const elements = (v: JsonValue): JsonValue[] | null =>
     v.t === "arr" ? v.v.filter((item) => !isMissingJson(item)) : v.t === "str" ? [v] : null;
   const old = elements(was);
@@ -1289,17 +1315,17 @@ function fieldChange(
 
 /**
  * The facts of the author-owned keys of `dataset_description.json` (design B2.2) between the merge
- * base and the head. Both sides go through Part A's strict parser; a side that cannot be read,
- * does not parse, or is not an object gives `unparsed` with every list empty, which the caller
- * treats as unknown and never as clean.
+ * base and the head. Both sides go through Part A's strict parser; a side that cannot be read, does
+ * not parse, or is not an object gives `unparsed` with every list empty, which the caller treats as
+ * unknown and never as clean.
  *
  * Per key, "missing" is a key that is absent or holds a missing value: missing to missing is no
  * change (`[""]` to `[]`); missing to a value is `added`; a value to missing is `removed`; an equal
  * value is no change. Two strings are `minor` when the key is one of {@link MINOR_EDIT_KEYS} and
- * the edit is within {@link isMinorEdit}, and `altered` otherwise. Two arrays, with missing elements
- * dropped, must start with every old element in order (equal, or a minor edit for a minor-edit
- * key): then the key is `grown` when new elements follow, and `minor` when an element took a
- * minor edit; anything else is `altered`, so an author list reordered, or an author inserted
+ * the edit is within {@link isMinorEdit}, and `altered` otherwise. Two arrays, with missing
+ * elements dropped, must start with every old element in order (equal, or a minor edit for a
+ * minor-edit key): then the key is `grown` when new elements follow, and `minor` when an element
+ * took a minor edit; anything else is `altered`, so an author list reordered, or an author inserted
  * before an old one, is altered, and one appended is grown. Arrays, growth and a string read as an
  * array of one are for {@link ARRAY_VALUED_KEYS} only: for every other key any change but a minor
  * edit of a string (where the key takes one) is `altered`. Every other change is `altered`.
@@ -1373,15 +1399,18 @@ export interface RecordingChange {
   modeAfter: string;
   oidBefore: string;
   oidAfter: string;
-  /** The path is in the recordings area. Entered by the caller so this module never imports the policy. */
+  /**
+   * The path is in the recordings area. Entered by the caller so this module never imports the
+   * policy.
+   */
   recordingArea: boolean;
   /**
-   * The path is in the reviewed scope, {@link inReviewedScope} of the path: not below one of
-   * {@link REVIEW_LEFT_OUT_DIRS}. A replacement or a type change counts only here; a key moved and a
-   * side that could not be read count wherever the path is. Entered by the caller, which passes
-   * every changed path, so a key that left `derivatives/` for the raw tree is still seen to move.
-   * This is NOT the evidence module's `READABLE_AREAS`, the narrower set of areas whose files the
-   * review reads in full: a recording is in the reviewed scope and is never read in full.
+   * The path is in the reviewed scope, {@link inReviewedScope} of the path: not below one of {@link
+   * REVIEW_LEFT_OUT_DIRS}. A replacement or a type change counts only here; a key moved and a side
+   * that could not be read count wherever the path is. Entered by the caller, which passes every
+   * changed path, so a key that left `derivatives/` for the raw tree is still seen to move. This is
+   * NOT the evidence module's `READABLE_AREAS`, the narrower set of areas whose files the review
+   * reads in full: a recording is in the reviewed scope and is never read in full.
    */
   inReviewedScope: boolean;
   before: PointerProbe | null;
@@ -1479,10 +1508,10 @@ function pointerKey(bytes: Uint8Array): string | null {
  * (160000) has no blob to read and is `other` whatever the probe says. A probe of `unreadable` is
  * `unreadable`, for every other mode. A symlink (120000) is `annexed` when its target is an annex
  * link ({@link linkKey}), else `link`; a regular file (100644, 100755) is `annexed` when it is an
- * unlocked pointer ({@link pointerKey}), else `git`; every other mode is `other`. A probe of `large`
- * (or bytes over `pointerMaxBytes`, which a caller should have sent as `large`) is not an annex
- * link and not a pointer, and nothing is decoded: a symlink is then a `link` and a regular file
- * `git`. The bytes are never trusted past the key grammar, so NUL, a newline or a megabyte of
+ * unlocked pointer ({@link pointerKey}), else `git`; every other mode is `other`. A probe of
+ * `large` (or bytes over `pointerMaxBytes`, which a caller should have sent as `large`) is not an
+ * annex link and not a pointer, and nothing is decoded: a symlink is then a `link` and a regular
+ * file `git`. The bytes are never trusted past the key grammar, so NUL, a newline or a megabyte of
  * text in a target gives a `link` or `git` side and never a key.
  */
 export function annexSide(mode: string, probe: PointerProbe): AnnexSide {
@@ -1512,13 +1541,13 @@ export interface RecordingFacts {
 /**
  * The facts of the recordings a pull request touched (design B2.4; whether a side is annexed is
  * decided by what the side is, never by the area of its path or by the status `typechange`). Each
- * changed path is read as two sides ({@link annexSide}; a null probe is a side that does not exist).
- * Every fact is a count, and moves are matched over a multiset of keys, so the order the caller
- * lists the paths in changes nothing. The caller passes every changed path. For a path that exists on both sides and is in the
- * reviewed scope (`inReviewedScope`):
+ * changed path is read as two sides ({@link annexSide}; a null probe is a side that does not
+ * exist). Every fact is a count, and moves are matched over a multiset of keys, so the order the
+ * caller lists the paths in changes nothing. The caller passes every changed path. For a path that
+ * exists on both sides and is in the reviewed scope (`inReviewedScope`):
  *
- * - both annexed, with different keys: `replaced`; with the same key (a locked link made an unlocked
- *   pointer, or a link whose `../` depth changed): nothing;
+ * - both annexed, with different keys: `replaced`; with the same key (a locked link made an
+ *   unlocked pointer, or a link whose `../` depth changed): nothing;
  * - annexed on one side only: `typeChanged`, decided by what each side IS and not by the status
  *   `typechange`, so an unlocked pointer replaced by its content (status modified) counts;
  * - neither annexed: inside the recordings area, `replaced` when the side changed kind (a git file
@@ -1533,8 +1562,8 @@ export interface RecordingFacts {
  * multiset, one added path consumed per match), is `moved`, and a matched path is counted as
  * nothing else. The match runs over every path given, whatever its area: a pointer moved with its
  * key is the same recording wherever it went, so a set of links moved from `derivatives/` into the
- * raw tree is `moved`, and not an unexplained addition. An unmatched removal or addition is Part A's
- * loss fact, not a recording fact.
+ * raw tree is `moved`, and not an unexplained addition. An unmatched removal or addition is Part
+ * A's loss fact, not a recording fact.
  *
  * A path with an `unreadable` side, in any area, adds 1 to `unread` (once, whether one side or
  * both) and nothing else: it is unknown, never clean, and the caller says what unknown does.
@@ -1710,19 +1739,21 @@ export function chooseAnchor(
  * The two root files that hold what the authors recorded about their participants. A class of the
  * change summary is about one of them when its `shape` (the path with every BIDS entity value
  * written `*`) is exactly one of these names: a root path has no entity to fold, and a nested
- * `sub-01/participants.tsv` has a shape that begins `sub-*` and then a slash, which is no root file.
+ * `sub-01/participants.tsv` has a shape that begins `sub-*` and then a slash, which is no root
+ * file.
  */
 export const PARTICIPANT_FILES = ["participants.tsv", "participants.json"] as const;
 
 /**
- * Whether a change of each kind, in a participants file, alters a value the authors recorded (design
- * B2.3, with a change of a JSON value's type counted as a changed value): a cell or a JSON value replaced, rewritten by a rule or emptied, a row relabeled
- * (the participant's own id), or a value's type changed. The other kinds are not: a removal is
- * Part A's loss fact, a row or a key that was found elsewhere verbatim is kept, an addition or a
- * fill takes nothing away, a rename of a JSON key (case and punctuation only) and a reorder or a
- * layout change leave every value as it was. A `Record` over {@link ClassKind}, as `ROLE_OF` is of
- * its roles: a kind added to the summary without an entry here does not compile, because a kind
- * that defaulted to `false` would let a new way of changing a value pass unseen.
+ * Whether a change of each kind, in a participants file, alters a value the authors recorded
+ * (design B2.3, with a change of a JSON value's type counted as a changed value): a cell or a JSON
+ * value replaced, rewritten by a rule or emptied, a row relabeled (the participant's own id), or a
+ * value's type changed. The other kinds are not: a removal is Part A's loss fact, a row or a key
+ * that was found elsewhere verbatim is kept, an addition or a fill takes nothing away, a rename of
+ * a JSON key (case and punctuation only) and a reorder or a layout change leave every value as it
+ * was. A `Record` over {@link ClassKind}, as `ROLE_OF` is of its roles: a kind added to the summary
+ * without an entry here does not compile, because a kind that defaulted to `false` would let a new
+ * way of changing a value pass unseen.
  */
 export const ALTERS_PARTICIPANT_VALUE: Readonly<Record<ClassKind, boolean>> = {
   column_removed: false,
