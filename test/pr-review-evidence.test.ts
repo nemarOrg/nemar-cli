@@ -48,6 +48,7 @@ import {
   runReview,
   textFactsOf,
 } from "../scripts/ci/pr-review";
+import { partBWord, renderEvidenceTable } from "../scripts/ci/pr-review-calibrate";
 import {
   type ContentOptions,
   EVIDENCE_BUDGET_MS,
@@ -7031,6 +7032,7 @@ const BLOCK_WORDS: ReadonlySet<string> = new Set([
   "first_version_tag",
   "merge_base",
   "unchanged",
+  "unpublished",
   "kept",
   "altered",
   "not_decided",
@@ -7434,6 +7436,48 @@ describe("the original content in the prompt", () => {
     expect(originalPrompt(r).opens).toBe(4);
   });
 
+  test("a README or CHANGES of a dataset never published is unpublished, with every count of it 0", () => {
+    const block = originalContentBlock(
+      originalOf({
+        anchorLookup: "no_tag",
+        readme: { status: "unpublished" },
+        changes: { status: "unpublished" },
+        authorFields: fieldsOf({ altered: ["Name"], grown: ["Authors"] }),
+        participantValues: 2,
+        recordings: { replaced: 1, typeChanged: 0, moved: 3, unread: 0 },
+      }),
+    );
+    expect(block).toEqual({
+      abandoned: false,
+      anchor: "merge_base",
+      readme: "unpublished",
+      readme_original_lines_altered: 0,
+      readme_lines_put_inside_original_paragraphs: 0,
+      readme_minor_edits: 0,
+      readme_later_text_altered: 0,
+      readme_new_lines: 0,
+      readme_line_endings_changed: false,
+      readme_final_newline_added: false,
+      changes: "unpublished",
+      changes_lines_altered: 0,
+      // What is not text is compared and counted as on any dataset.
+      author_fields: "compared",
+      author_fields_altered: ["Name"],
+      author_fields_edited_slightly: [],
+      author_fields_added_or_grown: ["Authors"],
+      participant_values_altered: 2,
+      recordings_replaced: 1,
+      recordings_moved: 3,
+      recordings_not_read: 0,
+    });
+    // An unchanged document of the same dataset keeps its own word.
+    expect(
+      originalContentBlock(
+        originalOf({ anchorLookup: "no_tag", changes: { status: "unpublished" } }),
+      ).readme,
+    ).toBe("unchanged");
+  });
+
   test("the system prompt has one paragraph about it, after the change summary and before the output rule", () => {
     const at = (text: string) => {
       const i = REVIEW_SYSTEM_PROMPT.indexOf(text);
@@ -7452,13 +7496,14 @@ describe("the original content in the prompt", () => {
         p.startsWith("The original authors' content."),
       ) ?? "";
     expect(paragraph.length).toBeGreaterThan(600);
-    expect(paragraph.length).toBeLessThanOrEqual(1_400);
+    expect(paragraph.length).toBeLessThanOrEqual(1_600);
     for (const phrase of [
       "The original_content facts compare this pull request with what the original authors published:",
       "the README with the README at the dataset's first version tag when anchor is first_version_tag, otherwise every README line at the merge base;",
       "and, with the merge base, CHANGES, the author fields of dataset_description.json (",
       "the participant values and the data files.",
       "A contributor may add to this content but not alter it.",
+      "When readme or changes is unpublished, the dataset has no first version tag, so nothing has been published to protect and the README or CHANGES changes are yours to judge from the diffs as usual.",
       "The platform has already acted on every alteration counted there and on every part marked not_decided, so do not repeat those as findings.",
       "Minor edits of original README lines, edits of README text added after the anchor and author fields edited slightly are yours to judge from the diffs:",
       "they are allowed when they are straightforward corrections that the CHANGES entry describes.",
@@ -9239,6 +9284,45 @@ describe("original content", () => {
         expect(report.findings).toEqual([]);
         expect(report.criteria.no_degradation).toBe("pass");
         expect(verdictOf(report)).toBe("pass");
+        // The model is told the documents are unpublished, with no count of them.
+        const all = { ...listing, ...gatherContent(clone, listing) };
+        const sent = reviewPrompt(all).facts.original_content as OriginalContentBlock;
+        expect([sent.readme, sent.changes, sent.anchor]).toEqual([
+          "unpublished",
+          "unpublished",
+          "merge_base",
+        ]);
+        expect(sent.readme_original_lines_altered + sent.changes_lines_altered).toBe(0);
+        // The calibration's numbers come from the same facts: nothing for Part B to count.
+        const {
+          listingMs: _l,
+          contentMs: _c,
+          ...counts
+        } = evidenceStats(all, buildEvidence(all, NO_TEXT_PROBLEMS), {
+          listingMs: 0,
+          contentMs: 0,
+        });
+        expect(counts).toMatchObject({
+          readmeAlteredLines: 0,
+          changesAlteredLines: 0,
+          readmeNotDecided: false,
+          changesNotDecided: false,
+          originalFindings: 0,
+          originalFails: 0,
+        });
+        expect(partBWord(counts)).toBe("-");
+        const row = {
+          pr: "ou-texts#1",
+          error: null,
+          evidence: counts,
+          refusedBy: null,
+          classes: null,
+          refusedDeleted: null,
+          timings: { listingMs: 0, contentMs: 0 },
+        };
+        expect(renderEvidenceTable([row]).join("\n")).toContain(
+          "Part B: 0 fail (text 0, fields 0, participants 0), 0 unknown only",
+        );
       });
 
       test("on the same dataset a changed Name, a changed participant value and a replaced recording still fail and hold", () => {
@@ -9262,6 +9346,19 @@ describe("original content", () => {
         expect(report.findings[0]?.note).toContain(
           "1 field of the dataset description and 1 participant value changed.",
         );
+        const clone = blobLessClone("ou-data-stats", r);
+        const listing = gatherListing(clone, r.base, r.head);
+        const all = { ...listing, ...gatherContent(clone, listing) };
+        const {
+          listingMs: _l,
+          contentMs: _c,
+          ...counts
+        } = evidenceStats(all, buildEvidence(all, NO_TEXT_PROBLEMS), {
+          listingMs: 0,
+          contentMs: 0,
+        });
+        expect(partBWord(counts)).toBe("fail");
+        expect([counts.readmeAlteredLines, counts.changesAlteredLines]).toEqual([0, 0]);
         expect(report.criteria.no_degradation).toBe("fail");
         expect(verdictOf(report)).toBe("fail");
       });
