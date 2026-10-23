@@ -411,6 +411,11 @@ interface GitCallOptions {
   deadline?: number;
   /** The most output the call may produce; {@link MAX_GIT_OUTPUT} unless given. */
   maxBuffer?: number;
+  /**
+   * Variables set for this one call, over {@link childEnv}: `GIT_NO_LAZY_FETCH=1` keeps a call in a
+   * partial clone from fetching an object the clone does not hold.
+   */
+  env?: Readonly<Record<string, string>>;
 }
 
 /**
@@ -452,7 +457,7 @@ function runGit(
   const options: ExecFileSyncOptions = {
     encoding,
     maxBuffer: call.maxBuffer ?? MAX_GIT_OUTPUT,
-    env: childEnv(),
+    env: call.env === undefined ? childEnv() : { ...childEnv(), ...call.env },
     stdio: [call.input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
     ...(call.input === undefined ? {} : { input: call.input }),
     ...(Number.isFinite(timeout) ? { timeout } : {}),
@@ -690,6 +695,34 @@ export function readBlobs(
   caps: { maxBytes: number; maxTotalBytes: number },
   deadline?: number,
 ): Map<string, Buffer> | null {
+  return readBlobsSized(dir, oids, caps, deadline)?.blobs ?? null;
+}
+
+/** What {@link readBlobsSized} read: the blobs, and the size of every blob it was asked about. */
+export interface SizedBlobs {
+  blobs: Map<string, Buffer>;
+  /**
+   * The size git gave for each id it holds as a blob, read or left out by a cap. An id with no size
+   * here is one git said is missing, or names a tree, a commit or a tag, or was never asked about
+   * (not a full id, or the zero id). A size is a fact about the blob, so a caller can tell a blob too
+   * large to read from one that could not be read at all.
+   */
+  sizes: Map<string, number>;
+}
+
+/**
+ * {@link readBlobs}, with the size of every blob asked about kept beside the blobs read, and with
+ * `maxBytes` either one bound for every id or a bound per id (so one call can read a document whole
+ * and only the first kilobyte's worth of a pointer). Every rule of {@link readBlobs} holds: the
+ * ids, the prefix rule of `maxTotalBytes`, what is left out, and when the answer is null. A blob
+ * past the total keeps its size.
+ */
+export function readBlobsSized(
+  dir: string,
+  oids: readonly string[],
+  caps: { maxBytes: number | ((oid: string) => number); maxTotalBytes: number },
+  deadline?: number,
+): SizedBlobs | null {
   const ids: string[] = [];
   const seen = new Set<string>();
   for (const oid of oids) {
@@ -698,7 +731,10 @@ export function readBlobs(
     ids.push(oid);
   }
   const blobs = new Map<string, Buffer>();
-  if (ids.length === 0) return blobs;
+  const sizes = new Map<string, number>();
+  if (ids.length === 0) return { blobs, sizes };
+  const maxBytes = caps.maxBytes;
+  const capOf = typeof maxBytes === "number" ? () => maxBytes : maxBytes;
   const bound = deadline === undefined ? {} : { deadline };
   try {
     const answer = runGit(dir, ["cat-file", "--batch-check"], "utf8", {
@@ -720,9 +756,10 @@ export function readBlobs(
       if (line === `${id} missing`) continue;
       const m = /^([0-9a-f]{40}) (blob|tree|commit|tag) (0|[1-9][0-9]*)$/.exec(line);
       if (m === null || m[1] !== id) return null;
-      if (m[2] !== "blob" || exhausted) continue;
+      if (m[2] !== "blob") continue;
       const size = Number(m[3]);
-      if (size > caps.maxBytes) continue;
+      sizes.set(id, size);
+      if (exhausted || size > capOf(id)) continue;
       if (total + size > caps.maxTotalBytes) {
         exhausted = true;
         continue;
@@ -730,7 +767,7 @@ export function readBlobs(
       total += size;
       selected.push({ id, size });
     }
-    if (selected.length === 0) return blobs;
+    if (selected.length === 0) return { blobs, sizes };
     const out = runGit(dir, ["cat-file", "--batch"], "buffer", {
       ...bound,
       input: Buffer.from(`${selected.map((s) => s.id).join("\n")}\n`),
@@ -745,7 +782,7 @@ export function readBlobs(
       blobs.set(id, out.subarray(nl + 1, end));
       at = end + 1;
     }
-    return at === out.length ? blobs : null;
+    return at === out.length ? { blobs, sizes } : null;
   } catch (e) {
     // Swallowing this too would give the same result for the pass: its budget is spent, so the next
     // git call throws `timed_out` again at once. It is rethrown so the code says what happens.

@@ -72,6 +72,7 @@ import {
   parseRawEntries,
   pathPattern,
   readBlobs,
+  readBlobsSized,
 } from "../scripts/ci/pr-review-evidence";
 import {
   MAX_BODY_CHARS,
@@ -692,6 +693,54 @@ describe("readBlobs and rawEntries", () => {
     const a = id("a.txt");
     const blobs = readBlobs(dir, [a, a, a, id("b.txt"), a], { maxBytes: 100, maxTotalBytes: 10 });
     expect(texts(blobs)).toEqual({ [a]: "aaaaa", [id("b.txt")]: "bbbbb" });
+  });
+
+  test("readBlobsSized keeps the size of every blob asked about: read, over its cap, or past the total", () => {
+    const { id, dir } = blobRepo("blobs-sized", {
+      "a.txt": "aaaa",
+      "big.txt": "0123456789A",
+      "b.txt": "bbbb",
+      "c.txt": "cc",
+      "d/e.txt": "e",
+    });
+    const tree = git(dir, "rev-parse", "HEAD:d");
+    const nobody = "1234567890abcdef1234567890abcdef12345678";
+    const order = [id("a.txt"), id("big.txt"), id("b.txt"), id("c.txt"), tree, nobody, ZERO];
+    const sized = readBlobsSized(dir, order, { maxBytes: 10, maxTotalBytes: 9 });
+    // Read: a and b; big is over its cap; c would pass the total. Each has its size.
+    expect(texts(sized?.blobs ?? null)).toEqual({ [id("a.txt")]: "aaaa", [id("b.txt")]: "bbbb" });
+    expect(Object.fromEntries(sized?.sizes ?? [])).toEqual({
+      [id("a.txt")]: 4,
+      [id("big.txt")]: 11,
+      [id("b.txt")]: 4,
+      [id("c.txt")]: 2,
+    });
+    // The blobs are exactly what readBlobs reads with the same caps.
+    expect(texts(readBlobs(dir, order, { maxBytes: 10, maxTotalBytes: 9 }))).toEqual(
+      texts(sized?.blobs ?? null),
+    );
+  });
+
+  test("readBlobsSized takes a bound per id: each blob is read to its own", () => {
+    const { id, dir } = blobRepo("blobs-sized-per-id", {
+      "doc.md": "a document of some length\n",
+      pointer: "/annex/objects/KEY\n",
+      "big.bin": "x".repeat(64),
+    });
+    const bounds = new Map([
+      [id("doc.md"), 1024],
+      [id("pointer"), 20],
+      [id("big.bin"), 20],
+    ]);
+    const sized = readBlobsSized(dir, [...bounds.keys()], {
+      maxBytes: (oid) => bounds.get(oid) ?? 0,
+      maxTotalBytes: 1024,
+    });
+    expect(texts(sized?.blobs ?? null)).toEqual({
+      [id("doc.md")]: "a document of some length\n",
+      [id("pointer")]: "/annex/objects/KEY\n",
+    });
+    expect(sized?.sizes.get(id("big.bin"))).toBe(64);
   });
 
   test("the zero id, a short or upper-case id, HEAD and a rev:path are never asked: no cat-file starts", () => {
