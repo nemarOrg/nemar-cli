@@ -21,6 +21,12 @@ import {
   weeklyAttention,
 } from "../../shared/contract/weekly-attention";
 import {
+  UPSTREAM_STATES,
+  type UpstreamFleetSummary,
+  type UpstreamState,
+  countUpstreamStates,
+} from "../../shared/upstream-staleness";
+import {
   WEEKLY_MAX_LISTED_IDS,
   type WeeklySummaryFacts,
   buildWeeklyRolloverComment,
@@ -62,6 +68,39 @@ function neurobagelWeek(over: Partial<NeurobagelWeekly> = {}): NeurobagelWeekly 
   };
 }
 
+/** The upstream pass over a small fleet, counted through the real counter; nothing unchecked. */
+function upstreamPass(over: Partial<UpstreamFleetSummary> = {}): UpstreamFleetSummary {
+  const row = (state: UpstreamState, n: number) =>
+    Array.from({ length: n }, (_, i) => ({
+      dataset_id: `on${state}${i}`,
+      ds: null,
+      visibility: null,
+      state,
+      anomaly: null,
+      reason: "",
+      recorded: null,
+      upstream: null,
+      import_status: null,
+      probably_stale: null,
+    }));
+  const rows = [
+    ...row("current", 7),
+    ...row("stale_ready", 2),
+    ...row("mirror_lag", 1),
+    ...row("unknown", 1),
+  ];
+  return {
+    population: rows.length,
+    examined: rows.length,
+    withdrawn: 2,
+    excluded_unmanaged: 1,
+    counts: countUpstreamStates(rows),
+    truncated: false,
+    errors: [],
+    ...over,
+  };
+}
+
 /** A healthy week with everything known. Overridden per test. */
 function facts(over: Partial<WeeklySummaryFacts> = {}): WeeklySummaryFacts {
   return {
@@ -85,6 +124,7 @@ function facts(over: Partial<WeeklySummaryFacts> = {}): WeeklySummaryFacts {
     issuesRelabelled: 1,
     neurobagel: neurobagelWeek(),
     neurobagelFindings: 0,
+    upstream: upstreamPass(),
     errors: [],
     ...over,
   };
@@ -835,5 +875,147 @@ describe("the Neurobagel section", () => {
       const f = facts(w);
       expect(weeklyHeadline(f).attention).toBe(weeklyAttention(f).attention);
     }
+  });
+});
+
+describe("the upstream freshness section (epic #1046 phase 4b)", () => {
+  const section = (f: WeeklySummaryFacts) => {
+    const body = buildWeeklySummaryBody(f, "x");
+    return body.slice(body.indexOf("## Upstream freshness"), body.indexOf("## Dispatch liveness"));
+  };
+
+  test("renders every state, zeros as 0, after Coverage", () => {
+    const body = buildWeeklySummaryBody(facts(), "x");
+    const heading = body.search(/^## Upstream freshness$/m);
+    expect(heading).toBeGreaterThan(-1);
+    expect(body.indexOf("## Coverage")).toBeLessThan(heading);
+    expect(heading).toBeLessThan(body.indexOf("## Dispatch liveness"));
+    const text = section(facts());
+    const rows = [...text.matchAll(/^\| (?!state|---)[^|]+ \| (\d+) \|$/gm)].map((m) =>
+      Number(m[1]),
+    );
+    expect(rows).toHaveLength(UPSTREAM_STATES.length);
+    expect(rows).toEqual([7, 2, 1, 0, 0, 1, 0, 0, 0, 0, 0]);
+    expect(text).toContain("| Could not be compared (OpenNeuro unavailable) | 0 |");
+    expect(text).toContain("Stale in total: 3.");
+    expect(text).toContain("Tag unknown and probably stale by date: 0");
+    expect(text).toContain("Names and reasons: `nemar admin upstream-status`.");
+    expect(text).toContain(
+      "Mirrors with an unknown tag, never examined, with no version yet, with an import running or parked, and those whose source id does not match were not compared.",
+    );
+  });
+
+  test("says Examined, and how many of them were actually compared with upstream", () => {
+    // current 7 + stale 3 + unknown 1: ten were compared, the unknown one was not.
+    const text = section(facts());
+    expect(text).toContain("Examined 11 of 11 managed OpenNeuro mirrors");
+    expect(text).toContain("10 of them were compared with upstream.");
+    expect(text).not.toContain("Compared 11");
+  });
+
+  test("a fleet nobody examined for a tag is not called compared", () => {
+    // 1,000 mirrors never examined: every one is examined, none is compared.
+    const rows = Array.from({ length: 1000 }, (_, i) => ({
+      dataset_id: `on${String(100000 + i)}`,
+      ds: null,
+      visibility: null,
+      state: "not_examined" as const,
+      anomaly: null,
+      reason: "",
+      recorded: null,
+      upstream: null,
+      import_status: null,
+      probably_stale: null,
+    }));
+    const text = section(
+      facts({
+        upstream: upstreamPass({
+          population: 1000,
+          examined: 1000,
+          counts: countUpstreamStates(rows),
+        }),
+      }),
+    );
+    expect(text).toContain("Examined 1000 of 1000 managed OpenNeuro mirrors");
+    expect(text).toContain("0 of them were compared with upstream.");
+    expect(text).toContain("| Tag never examined | 1000 |");
+  });
+
+  test("an anomaly counts as compared except a source id mismatch", () => {
+    const base = {
+      dataset_id: "on000001",
+      ds: null,
+      visibility: null,
+      state: "anomaly" as const,
+      reason: "",
+      recorded: null,
+      upstream: null,
+      import_status: null,
+      probably_stale: null,
+    };
+    const rows = [
+      { ...base, anomaly: "upstream_deleted" as const },
+      { ...base, anomaly: "source_id_mismatch" as const },
+    ];
+    const text = section(
+      facts({
+        upstream: upstreamPass({ population: 2, examined: 2, counts: countUpstreamStates(rows) }),
+      }),
+    );
+    expect(text).toContain("1 of them were compared with upstream.");
+  });
+
+  test("the split of the stale rows is said not to be a fleet proportion, and nothing rots", () => {
+    const text = section(facts());
+    expect(text).toContain("not a fleet-wide proportion");
+    expect(text).toContain("25 GitHub checks");
+    expect(text).not.toContain("not built yet");
+  });
+
+  test("null renders as unknown, never zero, and makes the headline ask for attention", () => {
+    const f = facts({ upstream: null });
+    expect(section(f)).toContain("**unknown**, not zero");
+    expect(section(f)).not.toMatch(/\| \d+ \|/);
+    const head = weeklyHeadline(f);
+    expect(head.attention).toBe(true);
+    expect(head.line).toContain("upstream freshness could not be determined");
+  });
+
+  test("an absent upstream asks for attention too", () => {
+    const f = facts();
+    const absent = { ...f } as Partial<WeeklySummaryFacts>;
+    absent.upstream = undefined;
+    expect(weeklyAttention(absent as WeeklySummaryFacts).problems).toContain(
+      "upstream freshness could not be determined",
+    );
+  });
+
+  test("stale mirrors alone do not ask for attention, so a change to that is deliberate", () => {
+    const f = facts();
+    expect(f.upstream?.counts.stale).toBeGreaterThan(0);
+    expect(weeklyHeadline(f).attention).toBe(false);
+    expect(weeklyAttention(f).problems).toEqual([]);
+  });
+
+  test("a truncated pass says so in the section", () => {
+    expect(section(facts({ upstream: upstreamPass({ truncated: true }) }))).toContain(
+      "did not reach every mirror",
+    );
+  });
+
+  test("the section names no dataset and none of the words the public report must avoid", () => {
+    const text = section(facts());
+    expect(text).not.toMatch(/\b(nm|on|ds)\d{6}\b/);
+    expect(text).not.toMatch(/anonym|deposit|\bclass\b/i);
+    expect(weeklyHeadline(facts({ upstream: null })).line).not.toMatch(/anonym|deposit|\bclass\b/i);
+  });
+
+  test("the log line carries upstream_stale and upstream_unchecked, unknown when null", () => {
+    const line = weeklySummaryLogLine(facts(), 12);
+    expect(line).toContain("upstream_stale=3");
+    expect(line).toContain("upstream_unchecked=0");
+    const unknown = weeklySummaryLogLine(facts({ upstream: null }), 12);
+    expect(unknown).toContain("upstream_stale=unknown");
+    expect(unknown).toContain("upstream_unchecked=unknown");
   });
 });

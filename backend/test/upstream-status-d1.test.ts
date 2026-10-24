@@ -10,7 +10,8 @@
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { Miniflare } from "miniflare";
-import { runUpstreamStatusPage } from "../src/services/upstream-status";
+import { PUBLIC_DATASET_VERSIONS_SQL } from "../src/services/data-router";
+import { runUpstreamFleetSummary, runUpstreamStatusPage } from "../src/services/upstream-status";
 import type { Bindings } from "../src/types/bindings";
 import { applyMigrations, migrationFiles } from "./helpers/miniflare-d1";
 import { startOpenNeuroStandin } from "./helpers/openneuro-standin";
@@ -98,5 +99,26 @@ describe("upstream status on Miniflare D1", () => {
     expect(one.rows).toHaveLength(1);
     const withdrawn = await runUpstreamStatusPage(env(), { dataset: "on000004" });
     expect(withdrawn.rows).toEqual([]);
+  });
+
+  test("the whole fleet in counts, the way the weekly report reads it", async () => {
+    const summary = await runUpstreamFleetSummary(env());
+    expect(summary.population).toBe(3);
+    expect(summary.examined).toBe(3);
+    expect(summary.truncated).toBe(false);
+    expect(summary.counts.states).toMatchObject({ current: 1, not_examined: 1, in_progress: 1 });
+  });
+
+  test("the version rows the landing reads carry the two snapshot columns", async () => {
+    const row = await d1.prepare(PUBLIC_DATASET_VERSIONS_SQL).bind("on002893").first<{
+      version: string;
+      source_version: string | null;
+      source_version_basis: string | null;
+    }>();
+    expect(row).toMatchObject({
+      version: "1.0.0",
+      source_version: "2.0.0",
+      source_version_basis: "doi",
+    });
   });
 });

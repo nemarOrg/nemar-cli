@@ -34,6 +34,11 @@ import {
   WEEKLY_NEUROBAGEL_CHECKS,
   weeklyAttention,
 } from "../../../shared/contract/weekly-attention.js";
+import {
+  UPSTREAM_STATES,
+  type UpstreamFleetSummary,
+  type UpstreamState,
+} from "../../../shared/upstream-staleness.js";
 
 export type { NeurobagelWeekly };
 
@@ -224,6 +229,13 @@ export interface WeeklySummaryFacts {
    */
   neurobagelFindings: number | null;
 
+  /**
+   * The upstream freshness pass (epic #1046 phase 4b): counts by state over the managed mirrors,
+   * no dataset named. `null` when the pass did not run or failed: unknown, not zero. Stale is
+   * reported, not attention (ADR 0053); blindness is (see `gatherUpstream`).
+   */
+  upstream: UpstreamFleetSummary | null;
+
   /** Anything that went wrong producing this report. Listed, never swallowed. */
   errors: { stage: string; error: string }[];
 }
@@ -304,6 +316,10 @@ export function buildWeeklySummaryBody(f: WeeklySummaryFacts, nowIso: string): s
     "",
     `Datasets outstanding (nothing is working on them): ${count(f.outstanding)}`,
     "",
+    "## Upstream freshness",
+    "",
+    ...upstreamSection(f.upstream),
+    "",
     "## Dispatch liveness",
     "",
     "| | |",
@@ -370,6 +386,56 @@ export function buildWeeklySummaryBody(f: WeeklySummaryFacts, nowIso: string): s
     "",
     "Posted weekly by the import summary job whether or not anything is wrong (nemarOrg/nemar-cli#1312), because a report that only appears when something breaks cannot tell a healthy week from a broken reporter. Last week's summary is closed automatically when this one is filed; its content stays readable.",
   ].join("\n");
+}
+
+/** The plain label of each upstream state, in the order the section lists them. */
+const UPSTREAM_LABELS: Record<UpstreamState, string> = {
+  current: "At upstream's latest snapshot",
+  stale_ready: "Behind upstream, new tag on the GitHub mirror",
+  mirror_lag: "Behind upstream, new tag not on the GitHub mirror yet",
+  stale_unverified: "Behind upstream, GitHub mirror not checked",
+  anomaly: "Upstream and NEMAR disagree",
+  unknown: "Tag unknown (not compared)",
+  not_examined: "Tag never examined",
+  unpublished: "No NEMAR version yet",
+  in_progress: "Import running",
+  parked: "Parked",
+  unchecked: "Could not be compared (OpenNeuro unavailable)",
+};
+
+/**
+ * The upstream freshness section: counts only, rendered through {@link count}, no dataset named
+ * (the report is filed on a public-facing repository). `null` is unknown, never zero, and an
+ * unknown-tag mirror is said to be NOT compared, so it is never read as verified clean.
+ */
+function upstreamSection(u: UpstreamFleetSummary | null): string[] {
+  if (u === null) {
+    return [
+      "The upstream freshness pass did not run or failed, so none of its numbers are available. This is **unknown**, not zero.",
+    ];
+  }
+  // Compared with upstream: a verdict from OpenNeuro's snapshot list. An anomaly counts unless it
+  // is a source id mismatch, which is settled from NEMAR's own row before OpenNeuro is asked.
+  const compared =
+    u.counts.states.current +
+    u.counts.stale +
+    u.counts.states.anomaly -
+    u.counts.anomalies.source_id_mismatch;
+  return [
+    `Examined ${count(u.examined)} of ${count(u.population)} managed OpenNeuro mirrors (${count(u.withdrawn)} withdrawn and ${count(u.excluded_unmanaged)} other rows left out); ${count(compared)} of them were compared with upstream.${u.truncated ? " **The pass did not reach every mirror.**" : ""}`,
+    "",
+    "| state | mirrors |",
+    "|---|---|",
+    ...UPSTREAM_STATES.map((s) => `| ${UPSTREAM_LABELS[s]} | ${count(u.counts.states[s])} |`),
+    "",
+    `Stale in total: ${count(u.counts.stale)}. Tag unknown and probably stale by date: ${count(u.counts.probably_stale)} (display only, not counted as stale).`,
+    "",
+    "A stale mirror is reported, not an alarm: being behind upstream is an expected state, not a fault. Mirrors with an unknown tag, never examined, with no version yet, with an import running or parked, and those whose source id does not match were not compared.",
+    "",
+    'How the three "Behind upstream" rows divide depends on the 25 GitHub checks one weekly pass makes; it is not a fleet-wide proportion.',
+    "",
+    "Names and reasons: `nemar admin upstream-status`.",
+  ];
 }
 
 /**
@@ -441,6 +507,8 @@ export function weeklySummaryLogLine(f: WeeklySummaryFacts, issue: number | null
     `closed=${count(f.issuesClosed)} relabelled=${count(f.issuesRelabelled)} ` +
     `neurobagel=${f.neurobagel === null ? "unknown" : f.neurobagel.latest.overall} ` +
     `neurobagel_findings=${count(f.neurobagelFindings)} ` +
+    `upstream_stale=${f.upstream === null ? "unknown" : count(f.upstream.counts.stale)} ` +
+    `upstream_unchecked=${f.upstream === null ? "unknown" : count(f.upstream.counts.states.unchecked)} ` +
     `issue=${issue === null ? "none" : `#${issue}`} errors=${f.errors.length}`
   );
 }

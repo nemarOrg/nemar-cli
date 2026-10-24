@@ -484,6 +484,12 @@ export interface VersionInfo {
    * Null with a null `source_version` means the version was never examined.
    */
   source_version_basis?: "doi" | "lineage" | "unknown" | null;
+  /**
+   * Is this version a mirror of an OpenNeuro snapshot (ADR 0111, decision 5)? `true`: an N.0.0 of an
+   * OpenNeuro mirror whose upstream tag is known. `false`: not a mirror. `null`: an N.0.0 of a
+   * mirror whose tag is unknown or never examined; unknown is not "no". Absent: an older backend.
+   */
+  mirror?: boolean | null;
 }
 
 export interface VersionHistoryResponse {

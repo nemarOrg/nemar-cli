@@ -232,9 +232,42 @@ export function mirroredTagOf(rows: readonly SourceVersionRow[]): MirroredTag {
   }
   if (top === null) return { state: "none", tag: null, version: null };
   const basis = top.source_version_basis;
-  if (top.source_version !== null && (basis === "doi" || basis === "lineage")) {
+  // One definition of a known tag, shared with `mirrorFlagOf`: only a tag the parser could have
+  // recorded. A stored value it could not (an empty string, a hex snapshot id) is not known.
+  if (isSourceTag(top.source_version) && (basis === "doi" || basis === "lineage")) {
     return { state: "known", tag: top.source_version, version: top.version, basis };
   }
-  if (basis === "unknown") return { state: "unknown", tag: null, version: top.version };
+  // Examined, and no tag the parser could record: unknown, which includes a stored basis whose tag
+  // is not a recordable one.
+  if (basis === "unknown" || basis === "doi" || basis === "lineage") {
+    return { state: "unknown", tag: null, version: top.version };
+  }
   return { state: "unexamined", tag: null, version: top.version };
+}
+
+/** A NEMAR version of the form N.0.0, with the `v` some stored rows and tags carry. */
+const MIRROR_VERSION_RE = /^v?\d+\.0\.0$/;
+
+/**
+ * Is this version a mirror (ADR 0111, decision 5)? `true`: a version N.0.0 of an `on######`
+ * mirror whose upstream tag is known (basis `doi` or `lineage`). `false`: any other dataset, or a
+ * version that is not N.0.0 (NEMAR's own corrections are N.x.y). `null`: an N.0.0 version of a
+ * mirror whose tag is unknown, or was never examined; unknown is never "no" (ADR 0054), and the
+ * website must not show a mirror chip for it. Derived at read time and never stored. Per row: it
+ * reads the row's own tag, not the dataset's highest version. An absent column counts as NULL.
+ */
+export function mirrorFlagOf(
+  datasetId: string,
+  row: {
+    version: string;
+    source_version?: string | null;
+    source_version_basis?: string | null;
+  },
+): boolean | null {
+  if (openNeuroSourceId(datasetId) === null) return false;
+  if (!MIRROR_VERSION_RE.test(row.version)) return false;
+  const basis = row.source_version_basis ?? null;
+  const tag = row.source_version ?? null;
+  // The read side agrees with the write side: only a tag the parser could have recorded is known.
+  return isSourceTag(tag) && (basis === "doi" || basis === "lineage") ? true : null;
 }

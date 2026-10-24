@@ -159,6 +159,25 @@ export interface UpstreamStatusPage {
   error?: string;
 }
 
+/**
+ * The whole fleet in counts, for the weekly report: no row and no dataset id, because the report
+ * is filed on a public-facing repository. `counts` is recounted from the deduped rows of every
+ * page, never added from the pages' own `counts`.
+ */
+export interface UpstreamFleetSummary {
+  /** Managed mirrors in the population (withdrawn ones are not in it). */
+  population: number;
+  /** Distinct mirrors the pass reached. */
+  examined: number;
+  withdrawn: number;
+  excluded_unmanaged: number;
+  counts: UpstreamStateCounts;
+  /** The pass did not reach every mirror: it stopped early, or the population changed under it. */
+  truncated: boolean;
+  /** Batch-level problems, without dataset ids, at most ten. */
+  errors: string[];
+}
+
 const IN_PROGRESS = new Set(["preparing", "copying", "finalizing"]);
 const PARKED_STATUS = new Set(["quarantined", "rolled_back"]);
 

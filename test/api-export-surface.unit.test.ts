@@ -189,6 +189,7 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "updateEmailPreferences",
     "uploadTierOf",
     "upstreamBackfill",
+    "upstreamStatus",
     "validateCi",
     "verifyImport",
     "verifyUserById",
@@ -263,6 +264,7 @@ const POST_SPLIT_ADDITIONS = [
   "uploadTierOf", // #1251, ADR 0040: upload / browse / unknown from a listed row
   "zarrFidelitySweep", // #1068, epic #1181 phase 8: POST /admin/datasets/zarr-fidelity-sweep
   "upstreamBackfill", // #1908, epic #1046 phase 2, ADR 0111: POST /admin/datasets/upstream-backfill
+  "upstreamStatus", // #1910, epic #1046 phase 4, ADR 0111: GET /admin/upstream-status
   "anonymitySweep", // #1409, epic #1406: POST /admin/datasets/anonymity-sweep
   "anonymitySweepReset", // the same route with ?reset=1
   "getNeurobagelStatus", // epic #1586 phase 4, ADR 0084: GET /admin/neurobagel/status

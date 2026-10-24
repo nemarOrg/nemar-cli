@@ -71,6 +71,7 @@ import {
 } from "./import-weekly-summary.js";
 import { readLedger } from "./neurobagel-plan.js";
 import { VERIFY_ACTIONS, parseHeartbeat } from "./neurobagel-verify.js";
+import { runUpstreamFleetSummary } from "./upstream-status.js";
 
 /** The audit action this job writes, and reads to gate itself. */
 export const WEEKLY_SUMMARY_AUDIT_ACTION = "import_weekly_summary";
@@ -333,6 +334,7 @@ export async function runWeeklyImportSummary(
     issuesRelabelled: null,
     neurobagel: null,
     neurobagelFindings: null,
+    upstream: null,
     errors: [],
   };
 
@@ -378,6 +380,7 @@ export async function runWeeklyImportSummary(
   await gatherParked(env, facts, now);
   await gatherSweepActivity(env, facts, now);
   await gatherNeurobagel(env, facts, now);
+  await gatherUpstream(env, facts);
 
   // Rendered before posting, and returned whether or not the post happens: a dry
   // run's whole value is seeing this.
@@ -399,6 +402,52 @@ export async function runWeeklyImportSummary(
   }
 
   return result;
+}
+
+/**
+ * Upstream freshness (epic #1046 phase 4b; ADR 0111): the staleness report over the whole fleet,
+ * read-only, as counts. Stale mirrors are REPORTED and never make the week ask for attention
+ * (they are the expected backlog until the scheduled re-pull exists, and an alarm that never
+ * clears gets muted: ADR 0053). Not seeing is: a mirror OpenNeuro could not be asked about
+ * (`unchecked`), a problem OpenNeuro reported, a pass that did not reach every mirror, and a pass
+ * that threw each push an `errors` entry, which the headline counts. The first two are an
+ * if/else-if: a pass with unchecked mirrors adds ONE entry for them (naming the first problem),
+ * and the "problems reported" entry is added only when nothing is unchecked.
+ * A truncated pass adds its own entry as well.
+ *
+ * A thrown error leaves `upstream` null (unknown, not zero) and every other section intact. There
+ * is no dependency seam: the real pass runs in every weekly test, against stand-ins.
+ */
+async function gatherUpstream(env: Bindings, facts: WeeklySummaryFacts): Promise<void> {
+  try {
+    const upstream = await runUpstreamFleetSummary(env);
+    facts.upstream = upstream;
+    const unchecked = upstream.counts.states.unchecked;
+    if (unchecked > 0) {
+      facts.errors.push({
+        stage: "upstream",
+        error: `${unchecked} mirror(s) could not be compared with OpenNeuro${
+          upstream.errors[0] ? `: ${upstream.errors[0]}` : ""
+        }`,
+      });
+    } else if (upstream.errors.length > 0) {
+      // A per-mirror failure on an unknown-tag row leaves `unchecked` at 0; a batch-level one is
+      // here either way, and an unknown-tag mirror is by definition not compared.
+      facts.errors.push({
+        stage: "upstream",
+        error: `OpenNeuro reported ${upstream.errors.length} problem(s): ${upstream.errors[0]}`,
+      });
+    }
+    if (upstream.truncated) {
+      facts.errors.push({
+        stage: "upstream",
+        error: `the pass did not reach every mirror: ${upstream.examined} of ${upstream.population} were examined`,
+      });
+    }
+  } catch (err) {
+    facts.upstream = null;
+    facts.errors.push({ stage: "upstream", error: errText(err) });
+  }
 }
 
 function errText(err: unknown): string {

@@ -47,6 +47,10 @@ import type {
 } from "../../../shared/contract/pr-review-admin.js";
 import type { BackfillNameOutcome } from "../../../shared/contract/publication.js";
 import type { NeurobagelWeekly } from "../../../shared/contract/weekly-attention.js";
+import type {
+  UpstreamFleetSummary,
+  UpstreamStatusPage,
+} from "../../../shared/upstream-staleness.js";
 import { request } from "./client.js";
 import { ApiError } from "./errors.js";
 
@@ -1938,6 +1942,45 @@ export async function upstreamBackfill(options?: {
 }
 
 // ============================================================================
+// Upstream staleness report (epic #1046 phase 4, #1910; ADR 0111)
+// ============================================================================
+
+export type { UpstreamStatusPage };
+
+/**
+ * Examine one page (server default and maximum 100) of the managed OpenNeuro mirrors.
+ *
+ * A 502 carries a page body with `ok: false` (rows needed an OpenNeuro verdict and every one ended
+ * `unchecked`); this returns it, with `ok` forced false, instead of throwing. Any other failure
+ * throws. A 200 is NOT proof that every mirror was compared: read `errors` and the `unchecked`
+ * count too.
+ */
+export async function upstreamStatus(options?: {
+  limit?: number;
+  after?: string;
+  dataset?: string;
+}): Promise<UpstreamStatusPage> {
+  const params = new URLSearchParams();
+  if (options?.limit != null) params.set("limit", String(options.limit));
+  if (options?.after) params.set("after", options.after);
+  if (options?.dataset) params.set("dataset", options.dataset);
+  const query = params.toString() ? `?${params.toString()}` : "";
+  try {
+    return await request<UpstreamStatusPage>(
+      `/admin/upstream-status${query}`,
+      { method: "GET" },
+      true,
+    );
+  } catch (err) {
+    const body = err instanceof ApiError && err.statusCode === 502 ? err.rawBody : undefined;
+    if (body && typeof body === "object" && "rows" in body && "counts" in body) {
+      return { ...(body as UpstreamStatusPage), ok: false };
+    }
+    throw err;
+  }
+}
+
+// ============================================================================
 // Import-failure issue triage (#1310, epic #1306)
 // ============================================================================
 
@@ -2162,6 +2205,9 @@ export interface WeeklySummaryResponse {
     neurobagel: NeurobagelWeekly | null;
     /** Findings that need a person, as a count with no kind; null when it could not be counted. */
     neurobagelFindings: number | null;
+    /** The upstream freshness pass as counts; null when it did not run or failed, and absent
+     *  from an older backend, which is also unknown. Never rendered as zero. */
+    upstream?: UpstreamFleetSummary | null;
     errors: { stage: string; error: string }[];
   } | null;
   issue: { number: number | null; action: "created" | "would-create" | "already-filed" } | null;
