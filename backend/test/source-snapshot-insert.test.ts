@@ -811,18 +811,27 @@ describe("every INSERT into dataset_versions is the one statement", () => {
     ]);
   });
 
-  test("each of the five sites binds the shared statement", () => {
-    const sites = [
-      "routes/callbacks/manifest.ts",
-      "routes/admin/datasets-lifecycle.ts",
-      "services/publication-orchestrator.ts",
-      "routes/callbacks/version-doi.ts",
-    ];
-    for (const site of sites) {
-      expect(readFileSync(join(SRC, site), "utf8")).toContain("INSERT_DATASET_VERSION_SQL");
+  test("exactly five prepare() calls bind the shared statement, in the files that hold the sites", () => {
+    // A source count, not a behavior test: A and B and the legacy handler (D) are driven above,
+    // the orchestrator (C) and the Zenodo handler (E) are not reachable in a test, so this pins
+    // where their statements are. A sixth site, or one fewer, fails here.
+    const perFile: Record<string, number> = {
+      "routes/callbacks/manifest.ts": 1,
+      "routes/admin/datasets-lifecycle.ts": 1,
+      "services/publication-orchestrator.ts": 1,
+      "routes/callbacks/version-doi.ts": 2,
+    };
+    const tree = createTree();
+    const found: Record<string, number> = {};
+    for (const file of tree.walk(SRC)) {
+      const n = (
+        readFileSync(file, "utf8").match(/\.prepare\(\s*INSERT_DATASET_VERSION_SQL\s*\)/g) ?? []
+      ).length;
+      if (n > 0) found[rel(file)] = n;
     }
-    // version-doi.ts holds two sites, the legacy EZID handler and the Zenodo handler.
-    const versionDoi = readFileSync(join(SRC, "routes/callbacks/version-doi.ts"), "utf8");
-    expect(versionDoi.match(/\.prepare\(INSERT_DATASET_VERSION_SQL\)/g)).toHaveLength(2);
+    const expected = Object.fromEntries(
+      Object.entries(perFile).map(([f, n]) => [rel(join(SRC, f)), n]),
+    );
+    expect(found).toEqual(expected);
   });
 });

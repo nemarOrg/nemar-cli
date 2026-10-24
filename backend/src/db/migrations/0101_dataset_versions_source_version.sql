@@ -10,9 +10,16 @@
 --     A value here always means a KNOWN tag. It is the string upstream wrote, never normalized.
 --   * `source_version_basis`: how the tag is known.
 --       NULL (with source_version NULL)     never examined. Every row that exists today is this.
---       'unknown' (with source_version NULL) examined, and no single tag could be established
---                                            (no matching entry, or the entry disagrees with
---                                            itself). Not a fetch error: an error writes nothing.
+--       'unknown' (with source_version NULL) examined, and no single tag could be established:
+--                                            a description that names no matching entry or whose
+--                                            entry disagrees with itself; a description that is
+--                                            not valid JSON (recorded by the sites that read the
+--                                            raw file, not by the inline paths, which leave
+--                                            NULL/NULL); or a 404 for the tagged file older than
+--                                            an hour that a control read of the same repository
+--                                            (same credential) shows is about the tag. Not a
+--                                            fetch error: an error writes nothing. Final: nothing
+--                                            examines the row again.
 --       'doi'                                the tag is DECLARED by the version's own tagged
 --                                            dataset_description.json, in the entry of
 --                                            `SourceDatasets` that names this dataset's upstream
@@ -27,11 +34,14 @@
 -- examined" is not "examined and unknown", and neither is a tag. Hence the CHECK, which makes
 -- the two NULL-tag states and the known-tag state the only three rows the table can hold.
 --
--- Every term of the CHECK is written so that it is FALSE, never NULL, when basis is NULL: a CHECK
--- passes on NULL, and `NULL IN ('doi', 'lineage')` is NULL, which would let a tag with no basis in.
+-- Each term of the CHECK is TRUE or FALSE, never NULL: a CHECK passes on NULL, and
+-- `NULL IN ('doi', 'lineage')` is NULL, which would let a tag with no basis in. When basis is NULL
+-- only the first term can be TRUE, and only if source_version is NULL too.
 --
--- Column CHECK in ADD COLUMN has precedent in 0056_hed_columns.sql. Existing rows hold
--- NULL/NULL, which the CHECK accepts, so adding it re-validates every row and rejects none.
+-- This is a cross-column CHECK inside ADD COLUMN. It is exercised on SQLite by
+-- backend/test/source-version-migration.test.ts; it is UNVERIFIED on D1 until the dev deploy.
+-- Existing rows hold NULL/NULL, which the CHECK accepts, so adding it re-validates every row
+-- and rejects none.
 
 ALTER TABLE dataset_versions ADD COLUMN source_version TEXT;
 ALTER TABLE dataset_versions ADD COLUMN source_version_basis TEXT

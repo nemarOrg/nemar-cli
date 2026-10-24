@@ -238,7 +238,8 @@ ADR 0086 exempts `xx` from the identifier screen, so an `xx` re-pull never has a
 
 Epic #1046, Phase 2.
 Decision 4 is built: migration 0101 adds `dataset_versions.source_version` and `source_version_basis`, `shared/source-snapshot.ts` holds the one parser, the version insert records the snapshot, and `nemar admin upstream-backfill` records it for the mirrors that predate the columns.
-This section corrects one item under "Not yet verified" and states four readings that the decision text left open.
+This section makes one correction and states three readings that the decision text left open.
+The correction is to a sentence in decision 4, "from the tagged `dataset_description.json` the version-DOI callback already reads", and it answers the "Not yet verified" item "Where `source_version` is inserted under the central manifest flow."
 The decision text above is unchanged.
 
 ### Where `source_version` is inserted under the central manifest flow (verified)
@@ -284,14 +285,20 @@ Only `lineage`, which a Phase 5 plan alone writes, says the tree was compared.
 
 ### An absent file at insert time is not examined, and an error is never a verdict
 
-At insert time an absent file, a failed fetch, a timeout, a token that cannot be minted and a dataset that is not `on######` all leave NULL/NULL.
+At insert time an absent file, a failed fetch, a timeout, a body over 1 MiB, a token that cannot be minted and a dataset that is not `on######` all leave NULL/NULL.
 A 404 shortly after a tag is pushed can be the raw CDN not having caught up, so an insert never turns "absent" into `unknown`.
 `unknown` is written at insert only for a description that was read and names no single tag, which is a property of the content: a tagged blob is immutable.
+Only the sites that read the raw file themselves (A and B) can see that the file is not JSON, so only they record `unknown` for it; the inline sites C and D go through `readRepoMetadata`, which turns unparseable JSON into a fallback and a warning, and that is NULL/NULL there.
+The insert is `ON CONFLICT (dataset_id, version) DO NOTHING`, not `INSERT OR IGNORE`, so a snapshot pair the table's CHECK refuses raises (the callback answers 500 and the job stays retryable) and does not drop the row silently; a replayed insert for an existing version is still a no-op.
 
-The backfill is the only writer that records `unknown` for an absent file, and only for a row older than one hour, so a CDN-cached 404 on a fresh tag is never made final.
-A fetch error in the backfill writes nothing; the row stays NULL/NULL and the next pass tries it again.
-A batch of two or more rows that all read absent is refused as a suspect credential and writes nothing, because GitHub answers 404 for a credential that cannot see the repository.
-Its write is `WHERE source_version_basis IS NULL`, so it never overwrites a recorded value, and its paging is a keyset on `(dataset_id, version)`, so a row that always errors cannot starve the rows behind it.
+The backfill is the only writer that records `unknown` for an absent file, and `unknown` is final: nothing examines the row again.
+So a 404 is recorded only when it is proved to be about the tag and not about the credential, which GitHub also answers with 404.
+The proof is a control read: the same repository's `dataset_description.json` at `main`, with the same credential, must succeed.
+If the control read is absent or fails, the row is counted `not_examined`, nothing is written, and the next pass tries it again; this holds for a batch of any size, a single row included.
+The row must also be older than one hour, so a CDN-cached 404 on a fresh tag is never made final.
+A fetch error in the backfill writes nothing, and a batch in which no read proved the credential while at least one 404 is unconfirmed is refused as `suspect_credential` (502), whatever else errored beside it.
+Only a version of the form N.N.N is a candidate, and a ref is always the canonical `vX.Y.Z` tag, so a stored `v1.0.0` can never read `vv1.0.0`.
+The write is `WHERE source_version_basis IS NULL`, so it never overwrites a recorded value; its paging is a keyset on `(dataset_id, version)`, so a row that always errors cannot starve the rows behind it.
 A dry run, which is the default, writes nothing.
 
 ### Left open
