@@ -220,9 +220,14 @@ export type Download = { ok: true; bytes: number } | { ok: false; failure: ReadF
 /**
  * Where an upstream object is read from: the S3 object the server-side copy copies (by path), or,
  * for a whereis URL that is not an S3 endpoint, that URL itself, which is what the copy phase's
- * curl fallback fetches (`copyOne` in `s3-server-copy.ts`).
+ * curl fallback fetches (`copyOne` in `s3-server-copy.ts`), or one version of an S3 object, which
+ * is what an upstream re-pull copies (ADR 0111, decision 8: the copy pins the `versionId` upstream's
+ * `.log.rmet` records, so the scrub reads the same bytes the copy will copy).
  */
-export type UpstreamSource = { kind: "s3"; ref: S3Ref } | { kind: "url"; url: string };
+export type UpstreamSource =
+  | { kind: "s3"; ref: S3Ref }
+  | { kind: "url"; url: string }
+  | { kind: "pinned"; bucket: string; object: string; versionId: string; region?: string };
 
 /**
  * How the scrub reads the upstream objects the copy phase would copy. {@link httpUpstreamReader} is
@@ -248,8 +253,26 @@ export function upstreamObjectUrl(ref: S3Ref, baseUrl?: string): string {
   return `${host.replace(/\/+$/, "")}/${encodeURIComponent(ref.bucket)}/${path}`;
 }
 
+/**
+ * One version of an object, anonymously: {@link upstreamObjectUrl}'s path-style URL with every
+ * segment encoded, then `?versionId=`. The version is never dropped, so what is read is the pinned
+ * object and not whatever is current at the path.
+ */
+export function pinnedObjectUrl(
+  source: Extract<UpstreamSource, { kind: "pinned" }>,
+  baseUrl?: string,
+): string {
+  const path = upstreamObjectUrl(
+    { bucket: source.bucket, key: source.object, region: source.region },
+    baseUrl,
+  );
+  return `${path}?versionId=${encodeURIComponent(source.versionId)}`;
+}
+
 function urlOf(source: UpstreamSource, baseUrl?: string): string {
-  return source.kind === "s3" ? upstreamObjectUrl(source.ref, baseUrl) : source.url;
+  if (source.kind === "s3") return upstreamObjectUrl(source.ref, baseUrl);
+  if (source.kind === "pinned") return pinnedObjectUrl(source, baseUrl);
+  return source.url;
 }
 
 /** Local errors that a retry cannot fix and that are not the network's. */
@@ -301,7 +324,8 @@ async function readAtMost(res: Response, limit: number): Promise<Uint8Array> {
 
 /**
  * Anonymous HTTPS reads of upstream objects: an S3 source by path, which is what the server-side
- * copy copies (it drops the whereis URL's version), and any other source at its own URL. Retried on
+ * copy copies (it drops the whereis URL's version), a pinned source at its version
+ * ({@link pinnedObjectUrl}), and any other source at its own URL. Retried on
  * a timeout, a network error, a short read, a 5xx, a 408 and a 429; a failure is a fixed word
  * (`http-403`, `timeout`, `network`, `short-read`, `local-io`).
  *
@@ -312,7 +336,7 @@ async function readAtMost(res: Response, limit: number): Promise<Uint8Array> {
  */
 export function httpUpstreamReader(
   options: {
-    /** Only a test sets this; production reads `s3.amazonaws.com`. Applies to S3 sources only. */
+    /** Only a test sets this; production reads `s3.amazonaws.com`. Applies to S3 and pinned sources. */
     baseUrl?: string;
     attempts?: number;
     headerTimeoutMs?: number;

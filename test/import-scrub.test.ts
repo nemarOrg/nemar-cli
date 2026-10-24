@@ -53,6 +53,7 @@ import {
   MAX_SCANS_TABLE_BYTES,
   assertCopiedRecordingsRead,
   httpUpstreamReader,
+  pinnedObjectUrl,
   prepareImportedTreeForCopy,
   restrictManifestToTree,
   scrubImportedTree,
@@ -60,6 +61,7 @@ import {
 } from "../src/lib/import-scrub";
 import type { ImportManifestItem } from "../src/lib/s3-server-copy";
 import { scanLocalDataset } from "../src/lib/upload/identifier-preflight";
+import { type S3Standin, startS3Standin } from "./scrub/helpers/s3-standin";
 
 const NEMAR_ID = "on999999";
 const UPSTREAM_ID = "ds999999";
@@ -1772,4 +1774,75 @@ describe("assertCopiedRecordingsRead", () => {
       ),
     ).not.toThrow();
   });
+});
+
+describe("a pinned source is read at its version, never at the path's current object", () => {
+  // The S3 stand-in serves versions the way S3 does: a GET without `versionId` answers the path's
+  // current object, one with it answers that version.
+  let s3: S3Standin;
+  beforeAll(() => {
+    s3 = startS3Standin();
+  });
+  afterAll(() => s3.stop());
+
+  test("the URL encodes every segment and keeps the version", () => {
+    expect(
+      pinnedObjectUrl({
+        kind: "pinned",
+        bucket: "openneuro.org",
+        object: "ds004362/sub-096/eeg/sub-096_task-motion_run-3_eeg.set",
+        versionId: "6HN1nZuZnD7w.cd7JNcryB74XQAMV9Wn",
+      }),
+    ).toBe(
+      "https://s3.amazonaws.com/openneuro.org/ds004362/sub-096/eeg/sub-096_task-motion_run-3_eeg.set?versionId=6HN1nZuZnD7w.cd7JNcryB74XQAMV9Wn",
+    );
+    expect(
+      pinnedObjectUrl({
+        kind: "pinned",
+        bucket: "openneuro.org",
+        object: "ds000001/sub 01/a+b#c.edf",
+        versionId: "a+b/c=",
+        region: "us-west-2",
+      }),
+    ).toBe(
+      "https://s3.us-west-2.amazonaws.com/openneuro.org/ds000001/sub%2001/a%2Bb%23c.edf?versionId=a%2Bb%2Fc%3D",
+    );
+  });
+
+  test("the header read and the download both name the version, while a newer object is current", async () => {
+    const files = deltaFixtures();
+    const upstream = await buildUpstream(files);
+    const { clone, store } = await cloneForImport(upstream);
+    const flaggedKey = await keyAt(clone, FLAGGED_ANNEXED);
+    const object = `${UPSTREAM_ID}/${FLAGGED_ANNEXED}`;
+    const original = fixtureBytes(files, FLAGGED_ANNEXED);
+    const pinned = s3.putObject("openneuro.org", object, original);
+    // A later upstream snapshot rewrote the path with another recording of another size.
+    s3.putObject("openneuro.org", object, edfBytes(FLAGGED_PATIENT, 5000, 99));
+
+    const result = await scrubDelta(clone, {
+      scope: new Set([FLAGGED_ANNEXED]),
+      reader: httpUpstreamReader({ baseUrl: s3.url, retryDelayMs: 1 }),
+      sourceOf: (key) =>
+        key === flaggedKey
+          ? { kind: "pinned", bucket: "openneuro.org", object, versionId: pinned }
+          : null,
+    });
+
+    expect(result.counts).toMatchObject({
+      headers_read: 1,
+      headers_scrubbed: 1,
+      bytes_downloaded: original.length,
+    });
+    const stored = storedBytes(store, await keyAt(clone, FLAGGED_ANNEXED));
+    expect(Buffer.from(stored.subarray(EDF_HEADER_BYTES))).toEqual(
+      Buffer.from(original.subarray(EDF_HEADER_BYTES)),
+    );
+    const gets = s3.calls("GetObject").filter((c) => c.key === object);
+    // One ranged header read and one whole download, each at the pinned version.
+    expect(gets.map((g) => [g.status, g.versionId])).toEqual([
+      [206, pinned],
+      [200, pinned],
+    ]);
+  }, 120_000);
 });
