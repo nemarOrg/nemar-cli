@@ -303,7 +303,19 @@ export const REPULL_COUNT_KEYS = [
   "bytes",
   "headers_not_read_nemar_held",
   "headers_not_read_no_source",
+  "merged_outside_tool",
+  "merged_unscreened_head",
 ] as const;
+
+/**
+ * Count keys only the Worker writes, from what it read on GitHub itself: a pull request merged
+ * without a NEMAR tool's claim, and one merged at a head other than the screened one. A request
+ * that names one is refused, so no caller can set or clear the record of either.
+ */
+export const WORKER_COUNT_KEYS = [
+  "merged_outside_tool",
+  "merged_unscreened_head",
+] as const satisfies readonly (typeof REPULL_COUNT_KEYS)[number][];
 
 /** A re-pull records two pull requests: `n0` is N.0.0's, `n1` is N.0.1's (the corrections). */
 export const REPULL_PULL_REQUESTS = ["n0", "n1"] as const;

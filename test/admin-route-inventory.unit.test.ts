@@ -182,11 +182,14 @@ const EXPECTED_ENTRIES: Record<string, number> = {
   "GET /repulls": 1,
   "GET /repulls/:id": 1,
   "POST /repulls/:id/transition": 2,
-  // The re-pull's identifier screen (epic #1046 phase 6, #1912; ADR 0111): every write
+  // The re-pull's screen and its verified facts (epic #1046 phase 6, #1912; ADR 0111): every write
   // carries a zod validator beside the handler; the screens read is the handler alone.
   "GET /repulls/:id/screens": 1,
   "POST /repulls/:id/screen": 2,
   "POST /repulls/:id/screen/acknowledge": 2,
+  "POST /repulls/:id/merge-claim/release": 2,
+  "POST /repulls/:id/merged": 2,
+  "POST /repulls/:id/released": 2,
 
   // Import coverage sweep (issue #1311, epic #1306 phase 3)
   "POST /imports/coverage-sweep": 1,
@@ -249,7 +252,7 @@ describe("admin route inventory", () => {
   });
 
   test("entry total is pinned", () => {
-    expect(adminRoutes.routes.length).toBe(167);
+    expect(adminRoutes.routes.length).toBe(173);
   });
 
   // The count pin above can't see a SWAP of the router-level middleware

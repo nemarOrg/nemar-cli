@@ -69,6 +69,7 @@ import {
   SHA_RE,
   TERMINAL_STATUSES,
   VERIFIED_ONLY_STATUSES,
+  WORKER_COUNT_KEYS,
   canTransition,
   fieldProblem,
   fieldsFor,
@@ -199,10 +200,23 @@ export const AUDIT_CREATED_SQL = `INSERT INTO audit_log (user_id, action, resour
 const countsSchema = z
   .record(z.string(), z.unknown())
   .superRefine((value, ctx) => {
-    const problem = fieldProblem("counts", value, { to_version: "", patch_version: null });
+    const problem =
+      fieldProblem("counts", value, { to_version: "", patch_version: null }) ??
+      workerCountProblem(value);
     if (problem) ctx.addIssue({ code: "custom", message: problem });
   })
   .transform((value) => value as Record<string, number>);
+
+/** A count only the Worker writes, named in a request; null when there is none. */
+function workerCountProblem(counts: unknown): string | null {
+  if (typeof counts !== "object" || counts === null) return null;
+  const named = Object.keys(counts).find((k) =>
+    (WORKER_COUNT_KEYS as readonly string[]).includes(k),
+  );
+  return named
+    ? `counts.${named} is written only by the Worker, from what it read on GitHub`
+    : null;
+}
 
 export const createRepullSchema = z
   .object({
@@ -255,7 +269,7 @@ export type TransitionBody = z.infer<typeof transitionSchema>;
 // ----------------------------------------------------------------------------
 
 export type RepullRefusal = {
-  status: 400 | 403 | 404 | 409 | 429;
+  status: 400 | 403 | 404 | 409 | 429 | 502;
   code: string;
   message: string;
   /** The row a conflict is about, when naming it helps the caller (never a secret). */
@@ -707,6 +721,17 @@ const CLAIM_EDGES: Readonly<Partial<Record<RepullStatus, RepullPullRequest>>> = 
   patch_gates_clear: "n1",
 };
 
+/** Not for a request: what an internal caller of {@link prepareTransition} may do. */
+export interface TransitionOptions {
+  /**
+   * The caller read GitHub or the version row itself (`upstream-repull-verified.ts`), so it may
+   * write the states and counts a request cannot state. Never set from a request body.
+   */
+  verified?: boolean;
+  /** What the audit row records beside the edge: what the caller read, never a path or a key. */
+  auditDetails?: Record<string, unknown>;
+}
+
 /** A transition checked and built, not yet run. */
 export interface PreparedTransition {
   row: RepullRow;
@@ -781,13 +806,14 @@ export async function transitionRepull(
 
 /**
  * The checks of {@link transitionRepull} and the statements it runs, without running them, so a
- * caller that must write more in the same batch shares every check.
+ * caller that must write more in the same batch (`upstream-repull-verified.ts`) shares every check.
  */
 export async function prepareTransition(
   env: Bindings,
   admin: { id: number },
   row: RepullRow,
   t: { from: RepullStatus; to: RepullStatus; fields?: Record<string, unknown>; error?: string },
+  opts: TransitionOptions = {},
 ): Promise<PreparedTransition | RepullRefusal> {
   const db = env.DB;
   const id = row.id;
@@ -812,7 +838,7 @@ export async function prepareTransition(
     };
   }
   const repeats = t.from === t.to;
-  if (!repeats && (VERIFIED_ONLY_STATUSES as readonly string[]).includes(t.to)) {
+  if (!repeats && !opts.verified && (VERIFIED_ONLY_STATUSES as readonly string[]).includes(t.to)) {
     return {
       status: 409,
       code: "use-verified-route",
@@ -850,6 +876,10 @@ export async function prepareTransition(
         message: `${key} cannot be set by an edge into ${t.to}.`,
       };
     }
+  }
+  if (!opts.verified) {
+    const named = workerCountProblem(fields.counts);
+    if (named) return { status: 400, code: "field-not-allowed", message: named };
   }
   for (const key of spec.must) {
     if (fields[key] === undefined || fields[key] === null) {
@@ -968,6 +998,7 @@ export async function prepareTransition(
         from: t.from,
         to: t.to,
         fields: Object.keys(fields),
+        ...opts.auditDetails,
       }),
     }),
   );

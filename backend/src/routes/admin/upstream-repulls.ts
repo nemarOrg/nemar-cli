@@ -11,6 +11,9 @@
  *   GET  /admin/repulls/:id/screens      its identifier screens, newest first
  *   POST /admin/repulls/:id/screen       dispatch the screen of a pull request's recorded head
  *   POST /admin/repulls/:id/screen/acknowledge   record a reason on a screen that asks for one
+ *   POST /admin/repulls/:id/merge-claim/release  clear a claim that was not sent or was refused
+ *   POST /admin/repulls/:id/merged       record a merge, after reading it on GitHub
+ *   POST /admin/repulls/:id/released     record a release, after reading the version row and tag
  *
  * These routes record, verify and refuse. They copy nothing, push nothing, open, merge or close
  * no pull request and send no mail: execution and the merge run on an administrator's machine
@@ -44,6 +47,14 @@ import {
   transitionRepull,
   transitionSchema,
 } from "../../services/upstream-repull";
+import {
+  mergedSchema,
+  recordRepullMerged,
+  recordRepullReleased,
+  releaseClaimSchema,
+  releaseMergeClaim,
+  releasedSchema,
+} from "../../services/upstream-repull-verified";
 import type { AdminRouter } from "./shared";
 
 /** A refusal as the API speaks it: the code, the message, and what it is about when that helps. */
@@ -251,6 +262,64 @@ export function registerUpstreamRepullRoutes(admin: AdminRouter): void {
         return c.json({ screen: result.screen });
       } catch (err) {
         return c.json({ error: failure("acknowledge the screen", err) }, 500);
+      }
+    },
+  );
+
+  admin.post(
+    "/repulls/:id/merge-claim/release",
+    zValidator("json", releaseClaimSchema, invalidBody),
+    async (c) => {
+      const id = parseId(c.req.param("id"));
+      if (id === null)
+        return c.json({ error: "the id must be a re-pull id", code: "invalid-id" }, 400);
+      const user = c.get("user");
+      try {
+        const result = await releaseMergeClaim(c.env, { id: user.id }, id, c.req.valid("json"));
+        if (isRefusal(result)) return c.json(refusalBody(result), result.status);
+        return c.json({ repull: result.row });
+      } catch (err) {
+        return c.json({ error: failure("release the claim", err) }, 500);
+      }
+    },
+  );
+
+  admin.post("/repulls/:id/merged", zValidator("json", mergedSchema, invalidBody), async (c) => {
+    const id = parseId(c.req.param("id"));
+    if (id === null)
+      return c.json({ error: "the id must be a re-pull id", code: "invalid-id" }, 400);
+    const user = c.get("user");
+    try {
+      const result = await recordRepullMerged(c.env, { id: user.id }, id, c.req.valid("json"));
+      if (isRefusal(result)) return c.json(refusalBody(result), result.status);
+      return c.json({
+        repull: result.row,
+        merged_outside_tool: result.merged_outside_tool,
+        merged_unscreened_head: result.merged_unscreened_head,
+      });
+    } catch (err) {
+      return c.json({ error: failure("record the merge", err) }, 500);
+    }
+  });
+
+  admin.post(
+    "/repulls/:id/released",
+    zValidator("json", releasedSchema, invalidBody),
+    async (c) => {
+      const id = parseId(c.req.param("id"));
+      if (id === null)
+        return c.json({ error: "the id must be a re-pull id", code: "invalid-id" }, 400);
+      const user = c.get("user");
+      try {
+        const result = await recordRepullReleased(c.env, { id: user.id }, id, c.req.valid("json"));
+        if (isRefusal(result)) return c.json(refusalBody(result), result.status);
+        return c.json({
+          repull: result.row,
+          lineage_rows: result.lineage_rows,
+          stamps_rearmed: result.stamps_rearmed,
+        });
+      } catch (err) {
+        return c.json({ error: failure("record the release", err) }, 500);
       }
     },
   );

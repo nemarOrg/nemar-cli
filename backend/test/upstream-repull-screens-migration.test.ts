@@ -16,8 +16,16 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Miniflare } from "miniflare";
-import { DATASET_STATUSES, screenGate } from "../../shared/identifier-screen-report";
+import {
+  DATASET_STATUSES,
+  parseScreenReport,
+  screenGate,
+} from "../../shared/identifier-screen-report";
+import { REPULL_PULL_REQUESTS } from "../../shared/repull-state";
 import { deleteDatasetCascade } from "../src/services/deletion";
+import { isRefusal, transitionRepull } from "../src/services/upstream-repull";
+import { repullScreenGate, startRepullScreen } from "../src/services/upstream-repull-screen";
+import { LINEAGE_AT_RELEASE_SQL, STAMPS_REARM_SQL } from "../src/services/upstream-repull-verified";
 import type { Bindings } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
 import { MIGRATIONS_DIR, applyMigrations, migrationFiles } from "./helpers/miniflare-d1";
@@ -169,7 +177,7 @@ describe("the file says the shared words", () => {
 
   test("the two pull requests are the re-pull's two", () => {
     const check = /pr TEXT NOT NULL CHECK \(pr IN \(([^)]*)\)\)/.exec(SQL);
-    expect(words(check?.[1] ?? "").sort()).toEqual(["n0", "n1"]);
+    expect(words(check?.[1] ?? "").sort()).toEqual([...REPULL_PULL_REQUESTS].sort());
   });
 });
 
@@ -338,5 +346,148 @@ describe("the dataset cascade", () => {
       { repull_id: theirs },
     ]);
     expect(db.query("SELECT id FROM upstream_repulls").all()).toEqual([{ id: theirs }]);
+  });
+});
+
+describe("the service's own statements on D1", () => {
+  const HEAD = "0123456789abcdef0123456789abcdef01234567";
+
+  test("the dispatch claim, the gate, the cap and the release batch run on D1 as on SQLite", async () => {
+    const d1 = await mf.getD1Database("DB");
+    await d1.prepare("DELETE FROM upstream_repull_screens").run();
+    await d1.prepare("DELETE FROM upstream_repulls").run();
+    await d1
+      .prepare(
+        "INSERT OR IGNORE INTO users (username, email, password_hash, status, role, email_verified) VALUES ('rpsminiflare', 'rpsminiflare@example.org', 'x', 'approved', 'admin', 1)",
+      )
+      .run();
+    const user = await d1
+      .prepare("SELECT id FROM users WHERE username = 'rpsminiflare'")
+      .first<{ id: number }>();
+    const admin = { id: user?.id ?? 0 };
+    for (const ds of ["on099990", "on099991"]) {
+      await d1.prepare("DELETE FROM datasets WHERE dataset_id = ?").bind(ds).run();
+      await d1
+        .prepare(
+          `INSERT INTO datasets (dataset_id, name, owner_user_id, source, source_id, sweep_stamps)
+           VALUES (?, ?, ?, 'openneuro', 'ds099999', '{"hed_checked_at":"x","data_checked_at":"y","zarr_checked_at":"z"}')`,
+        )
+        .bind(ds, ds, admin.id)
+        .run();
+    }
+    const insert = async (row: Row) => {
+      const cols = Object.keys(row);
+      return (
+        await d1
+          .prepare(
+            `INSERT INTO upstream_repulls (${cols.join(", ")}) VALUES (${cols.map(() => "?").join(", ")}) RETURNING id`,
+          )
+          .bind(...cols.map((c) => row[c]))
+          .first<{ id: number }>()
+      )?.id as number;
+    };
+    const base = { upstream_ds: "ds099999", actor_user_id: admin.id, head_sha: HEAD };
+    const open = await insert(rowAt("pr_open", { ...base, dataset_id: "on099990" }));
+    const env = { DB: d1, ENVIRONMENT: "production" } as unknown as Bindings;
+
+    // The dispatch claim (INSERT ... SELECT ... WHERE EXISTS), then its failure: no secret.
+    const first = await startRepullScreen(env, { id: open, dataset_id: "on099990" }, "n0", HEAD, 1);
+    expect(first).toMatchObject({ kind: "failed", error: "dispatch-unconfigured" });
+    // The re-dispatch of an error (the rerun condition), and its failure again.
+    const again = await startRepullScreen(env, { id: open, dataset_id: "on099990" }, "n0", HEAD, 1);
+    expect(again.kind).toBe("failed");
+    const rows = (await d1.prepare("SELECT status, nonce FROM upstream_repull_screens").all())
+      .results;
+    expect(rows).toEqual([{ status: "error", nonce: null }]);
+
+    // A clear verdict for each of two gates_clear rows, then the cap of 1 on D1's clock.
+    await d1.prepare("DELETE FROM upstream_repulls").run();
+    const report = JSON.stringify(
+      parseScreenReport({
+        version: 1,
+        scanner: "identifier-scan@abcdef1",
+        head: HEAD,
+        scan: {
+          id: "on099990",
+          version: null,
+          scanned_at: "2026-10-24T12:00:00.000Z",
+          status: "clean",
+          incomplete: false,
+          incomplete_reasons: [],
+          files: { total: 1, edf_bdf: 1, header_read: 1, header_read_failed: 0 },
+        },
+      }),
+    );
+    const ids: number[] = [];
+    for (const ds of ["on099990", "on099991"]) {
+      const id = await insert(rowAt("gates_clear", { ...base, dataset_id: ds, gates_sha: HEAD }));
+      await d1
+        .prepare(
+          "INSERT INTO upstream_repull_screens (repull_id, pr, sha, status, report, reported_at) VALUES (?, 'n0', ?, 'clean', ?, datetime('now'))",
+        )
+        .bind(id, HEAD, report)
+        .run();
+      ids.push(id);
+    }
+    const gate = await repullScreenGate(d1, {
+      datasetId: "on099990",
+      repullId: ids[0] as number,
+      pr: "n0",
+      sha: HEAD,
+      actorId: admin.id,
+    });
+    expect(gate).toMatchObject({ ok: true, exempt: false });
+    const capped = { ...env, REPULL_DAILY_MERGE_CAP: "1" } as Bindings;
+    const claim = (id: number) =>
+      transitionRepull(capped, admin, id, {
+        from: "gates_clear",
+        to: "gates_clear",
+        fields: { merge_claim_sha: HEAD },
+      });
+    const won = await claim(ids[0] as number);
+    if (isRefusal(won)) throw new Error(`refused: ${won.code}`);
+    expect(won.row.merge_claimed_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+    expect(await claim(ids[1] as number)).toMatchObject({ code: "merge-cap", status: 429 });
+
+    // The release batch's two guarded statements: they apply to the row as read, and not after it moved.
+    const r = await d1
+      .prepare("SELECT id, status, revision FROM upstream_repulls WHERE id = ?")
+      .bind(ids[1])
+      .first<{ id: number; status: string; revision: number }>();
+    await d1
+      .prepare(
+        "INSERT INTO dataset_versions (dataset_id, version, doi, source_version, source_version_basis) VALUES ('on099991', '2.0.0', '10.5072/x', '1.0.1', 'doi')",
+      )
+      .run();
+    const asRead = [r?.id, r?.status, r?.revision];
+    const moved = [r?.id, r?.status, (r?.revision ?? 0) + 1];
+    const lineage = (binds: unknown[]) =>
+      d1
+        .prepare(LINEAGE_AT_RELEASE_SQL)
+        .bind("1.0.1", "on099991", "2.0.0", ...binds)
+        .run();
+    const stamps = (binds: unknown[]) =>
+      d1
+        .prepare(STAMPS_REARM_SQL)
+        .bind("on099991", ...binds)
+        .run();
+    expect((await lineage(moved)).meta.changes).toBe(0);
+    expect((await stamps(moved)).meta.changes).toBe(0);
+    expect((await lineage(asRead)).meta.changes).toBe(1);
+    expect((await stamps(asRead)).meta.changes).toBe(1);
+    const after = await d1
+      .prepare("SELECT sweep_stamps FROM datasets WHERE dataset_id = ?")
+      .bind("on099991")
+      .first<{ sweep_stamps: string }>();
+    expect(JSON.parse(after?.sweep_stamps ?? "{}")).toEqual({ zarr_checked_at: "z" });
+    const other = await d1
+      .prepare("SELECT sweep_stamps FROM datasets WHERE dataset_id = ?")
+      .bind("on099990")
+      .first<{ sweep_stamps: string }>();
+    expect(JSON.parse(other?.sweep_stamps ?? "{}")).toMatchObject({ hed_checked_at: "x" });
+    const basis = await d1
+      .prepare("SELECT source_version_basis FROM dataset_versions WHERE dataset_id = 'on099991'")
+      .first();
+    expect(basis).toEqual({ source_version_basis: "lineage" });
   });
 });

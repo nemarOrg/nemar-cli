@@ -20,6 +20,7 @@ const ROOTS = [
   // The screen bound to the re-pull row and its callback (ADR 0111, decision 7): the publication
   // screen they share a workflow with mails its result, so their closure is pinned by name too.
   `${SRC}/services/upstream-repull-screen.ts`,
+  `${SRC}/services/upstream-repull-verified.ts`,
   `${SRC}/routes/callbacks/identifier-screen-repull.ts`,
 ];
 
@@ -53,6 +54,7 @@ describe("the re-pull code sends no mail", () => {
       "routes/admin/upstream-repulls.ts",
       "services/import-error.ts",
       "services/upstream-repull-screen.ts",
+      "services/upstream-repull-verified.ts",
       "routes/callbacks/identifier-screen-repull.ts",
       "services/identifier-screen-stored.ts",
       "services/github/dispatch.ts",
