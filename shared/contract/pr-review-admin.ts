@@ -256,6 +256,11 @@ export interface StartReviewResponse {
   review_id: number | null;
   /** The pull request's author, when GitHub gave a login of the shape a login has; else null. */
   author_login: string | null;
+  /**
+   * `true` when the start asked for a redo and this Worker honored the flag. Absent otherwise, so a
+   * CLI that sent `redo` and does not see it knows an older Worker ignored it.
+   */
+  redo?: true;
 }
 
 /**

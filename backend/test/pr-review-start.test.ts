@@ -229,9 +229,9 @@ function restPull(o: {
   };
 }
 
-async function start(ds: string, n: number, key = ADMIN_KEY) {
+async function start(ds: string, n: number, key = ADMIN_KEY, query = "") {
   const res = await app.request(
-    `/admin/pr-reviews/${ds}/${n}/start`,
+    `/admin/pr-reviews/${ds}/${n}/start${query}`,
     { method: "POST", headers: { Authorization: `Bearer ${key}` } },
     env(),
   );
@@ -1872,5 +1872,231 @@ describe("the override: nemar admin pr-reviews allow <dataset> <pr> --admin", ()
     const r = await allow(DATASET, 7);
     expect(r.body).toMatchObject({ waived: false, reason: "pr_review_disabled" });
     expect(calls).toHaveLength(0);
+  });
+});
+
+describe("redo: an administrator starts a finished review again", () => {
+  const redo = (n = 7) => start(DATASET, n, ADMIN_KEY, "?redo=1");
+
+  test("a finished pass is restarted on the same row: a fresh token, no old result, one more run", async () => {
+    seedReview(db, { ds: DATASET, n: 7, sha: SHA_A, state: "reported", verdict: "pass" });
+    db.run("UPDATE pr_reviews SET claimed_at = '2026-10-01 00:00:00', edit_restarts = 3");
+    const before = rows()[0];
+    pulls[`${DATASET}#7`] = restPull({});
+
+    const r = await redo();
+
+    expect(r.status).toBe(200);
+    expect(r.body).toMatchObject({
+      dispatched: true,
+      reason: "redispatched",
+      review_id: before.id,
+      redo: true,
+    });
+    expect(rows()).toHaveLength(1);
+    const row = rows()[0];
+    expect(row).toMatchObject({
+      id: before.id,
+      state: "dispatched",
+      detail: null,
+      verdict: null,
+      report: null,
+      claimed_at: null,
+      edit_restarts: 0,
+      attempts: 2,
+    });
+    expect(row.nonce).not.toBeNull();
+    expect(row.nonce).not.toBe(before.nonce);
+    expect(dispatches()).toHaveLength(1);
+    // The check goes back to running: the old result must not stand while the new run is going.
+    expect(
+      calls.some((c) => /\/check-runs/.test(c.path) && ["POST", "PATCH"].includes(c.method)),
+    ).toBe(true);
+  });
+
+  test("the same start without redo is the unchanged rule: duplicate, nothing dispatched", async () => {
+    seedReview(db, { ds: DATASET, n: 7, sha: SHA_A, state: "reported", verdict: "pass" });
+    pulls[`${DATASET}#7`] = restPull({});
+
+    const r = await start(DATASET, 7);
+
+    expect(r.body).toMatchObject({ dispatched: false, reason: "duplicate" });
+    expect(r.body).not.toHaveProperty("redo");
+    expect(rows()[0]).toMatchObject({ state: "reported", verdict: "pass", attempts: 1 });
+    expect(dispatches()).toHaveLength(0);
+  });
+
+  test.each([
+    ["fail", "fail"],
+    ["uncertain", "uncertain"],
+  ] as const)("a finished %s is restarted too", async (_label, verdict) => {
+    seedReview(db, { ds: DATASET, n: 7, sha: SHA_A, state: "reported", verdict });
+    pulls[`${DATASET}#7`] = restPull({});
+
+    const r = await redo();
+
+    expect(r.body).toMatchObject({ dispatched: true, reason: "redispatched", redo: true });
+    expect(rows()[0]).toMatchObject({ state: "dispatched", verdict: null, attempts: 2 });
+  });
+
+  test("a report that ended at the facts stage made no model call, so the redo adds no run", async () => {
+    seedReview(db, {
+      ds: DATASET,
+      n: 7,
+      sha: SHA_A,
+      state: "reported",
+      verdict: "fail",
+      report: { stage: "facts" },
+    });
+    pulls[`${DATASET}#7`] = restPull({});
+
+    const r = await redo();
+
+    expect(r.body).toMatchObject({ dispatched: true, reason: "redispatched" });
+    expect(rows()[0]).toMatchObject({ state: "dispatched", attempts: 1 });
+  });
+
+  test.each([
+    ["not yet claimed", false],
+    ["claimed and running", true],
+  ])(
+    "a review that is running (%s) is never superseded: review_running, nothing changes",
+    async (_label, claimed) => {
+      seedReview(db, { ds: DATASET, n: 7, sha: SHA_A, state: "dispatched" });
+      db.run("UPDATE pr_reviews SET nonce = 'live-nonce'");
+      if (claimed) db.run("UPDATE pr_reviews SET claimed_at = datetime('now')");
+      pulls[`${DATASET}#7`] = restPull({});
+
+      const r = await redo();
+
+      expect(r.body).toMatchObject({ dispatched: false, reason: "review_running", redo: true });
+      expect(rows()[0]).toMatchObject({ state: "dispatched", nonce: "live-nonce", attempts: 1 });
+      expect(dispatches()).toHaveLength(0);
+    },
+  );
+
+  test("a review that is overdue is restarted, as without redo", async () => {
+    seedReview(db, {
+      ds: DATASET,
+      n: 7,
+      sha: SHA_A,
+      state: "dispatched",
+      createdAt: "2026-10-01 00:00:00",
+    });
+    pulls[`${DATASET}#7`] = restPull({});
+
+    const r = await redo();
+
+    expect(r.body).toMatchObject({ dispatched: true, reason: "redispatched", redo: true });
+    expect(dispatches()).toHaveLength(1);
+  });
+
+  test("a contributor an administrator has blocked is declined, and no run is spent", async () => {
+    db.run(
+      "INSERT INTO pr_review_overrides (author_id, author_login, mode) VALUES (900, 'n', 'block')",
+    );
+    seedReview(db, {
+      ds: DATASET,
+      n: 7,
+      sha: SHA_A,
+      authorId: 900,
+      login: "n",
+      state: "reported",
+      verdict: "pass",
+    });
+    pulls[`${DATASET}#7`] = restPull({ userId: 900, login: "n" });
+
+    const r = await redo();
+
+    expect(r.body).toMatchObject({ dispatched: false, reason: "contributor_paused", redo: true });
+    expect(rows()[0]).toMatchObject({ state: "declined", detail: "contributor_paused" });
+    expect(dispatches()).toHaveLength(0);
+  });
+
+  test("a commit refused at the edit cap is restarted and its count begins again", async () => {
+    seedReview(db, {
+      ds: DATASET,
+      n: 7,
+      sha: SHA_A,
+      state: "errored",
+      detail: "edit_limit",
+    });
+    db.run("UPDATE pr_reviews SET edit_restarts = 5");
+    pulls[`${DATASET}#7`] = restPull({});
+
+    const r = await redo();
+
+    expect(r.body).toMatchObject({ dispatched: true, reason: "redispatched" });
+    expect(rows()[0]).toMatchObject({ state: "dispatched", detail: null, edit_restarts: 0 });
+  });
+
+  test("a commit with no row is an ordinary first start under redo", async () => {
+    pulls[`${DATASET}#7`] = restPull({});
+
+    const r = await redo();
+
+    expect(r.body).toMatchObject({ dispatched: true, reason: "dispatched", redo: true });
+    expect(rows()[0]).toMatchObject({ state: "dispatched", attempts: 1 });
+  });
+
+  test("the answer echoes redo only when it was asked for, early returns included", async () => {
+    envOverrides = { PR_REVIEW_ENABLED: "0" };
+    const asked = await redo();
+    expect(asked.body).toMatchObject({ reason: "pr_review_disabled", redo: true });
+    const plain = await start(DATASET, 7);
+    expect(plain.body).toMatchObject({ reason: "pr_review_disabled" });
+    expect(plain.body).not.toHaveProperty("redo");
+    envOverrides = {};
+
+    const unknown = await start("nm000999", 7, ADMIN_KEY, "?redo=1");
+    expect(unknown.body).toMatchObject({ reason: "unknown_dataset", redo: true });
+  });
+
+  test.each([
+    ["?redo=1", true],
+    ["?redo=true", true],
+    ["?redo=0", false],
+    ["?redo=yes", false],
+    ["?redo=", false],
+    ["", false],
+  ])("the query %p is honored as redo=%p", async (query, honored) => {
+    seedReview(db, { ds: DATASET, n: 7, sha: SHA_A, state: "reported", verdict: "pass" });
+    pulls[`${DATASET}#7`] = restPull({});
+
+    const r = await start(DATASET, 7, ADMIN_KEY, query);
+
+    expect(r.body.reason).toBe(honored ? "redispatched" : "duplicate");
+    expect(dispatches()).toHaveLength(honored ? 1 : 0);
+  });
+
+  test("a member is refused, redo or not", async () => {
+    seedReview(db, { ds: DATASET, n: 7, sha: SHA_A, state: "reported", verdict: "pass" });
+    pulls[`${DATASET}#7`] = restPull({});
+
+    const r = await start(DATASET, 7, MEMBER_KEY, "?redo=1");
+
+    expect(r.status).toBe(403);
+    expect(rows()[0]).toMatchObject({ state: "reported" });
+    expect(dispatches()).toHaveLength(0);
+  });
+
+  test("the audit row says it was a redo, and only when it was", async () => {
+    seedReview(db, { ds: DATASET, n: 7, sha: SHA_A, state: "reported", verdict: "pass" });
+    pulls[`${DATASET}#7`] = restPull({});
+    await redo();
+    const audit = db
+      .query("SELECT details FROM audit_log WHERE action = 'pr_review_started' ORDER BY id")
+      .all() as Array<{ details: string }>;
+    expect(audit).toHaveLength(1);
+    expect(JSON.parse(audit[0].details)).toMatchObject({ redo: true, reason: "redispatched" });
+
+    seedReview(db, { ds: DATASET, n: 8, sha: SHA_A, state: "errored", detail: "workflow_failed" });
+    pulls[`${DATASET}#8`] = restPull({ number: 8 });
+    await start(DATASET, 8);
+    const second = db
+      .query("SELECT details FROM audit_log WHERE action = 'pr_review_started' ORDER BY id")
+      .all() as Array<{ details: string }>;
+    expect(second).toHaveLength(2);
+    expect(JSON.parse(second[1].details)).not.toHaveProperty("redo");
   });
 });

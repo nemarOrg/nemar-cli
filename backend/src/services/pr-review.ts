@@ -844,6 +844,13 @@ export interface PrReviewOptions {
    * not run. It names no sender, so whether the pull request is exempt is judged on its author alone.
    */
   adminStart?: boolean;
+  /**
+   * The administrator also asked for a commit whose review has a result (`reported`) to be run
+   * again (`start --redo`). Meaningful only with `adminStart`: nothing else asks for it. It reaches
+   * no further than that: a review that is running is not superseded, and the gate, the block and
+   * the exemption apply as to any start.
+   */
+  redo?: boolean;
 }
 
 /**
@@ -1154,7 +1161,7 @@ async function decideInserted(
  * current commit, which is what force-pushing back to an earlier reviewed commit means), its
  * stored result is re-stated on the pull request, and a review whose dispatch failed is tried
  * again. Nothing else is reviewed twice, except that an administrator's start also restarts a
- * commit whose review ended without a verdict, and an edit of the title, the body or the base, a
+ * commit whose review ended without a verdict (and, for a `redo`, one that has a result), and an edit of the title, the body or the base, a
  * reopening and a marking as ready restart the review of the commit they are on, whatever state
  * that is in (see `isRestartable`).
  */
@@ -1207,6 +1214,11 @@ async function handleRepeat(
 
   const outcome = outcomeOfRow(current);
   if (outcome) await publishOutcome(env, current, outcome, { commentOnly: true });
+  // A redo that found the review still running says so: "already has a review" would be true and
+  // would read as if the redo had been refused for having a result.
+  if (options.adminStart === true && options.redo === true && current.state === "dispatched") {
+    return no("review_running", existing.id);
+  }
   return no("duplicate", existing.id);
 }
 
@@ -1273,8 +1285,11 @@ function changesTheText(pr: PrIntake): boolean {
  * A commit that was declined, ended in an error or never reported is restarted otherwise only when
  * an administrator asks by name: a new delivery of the same commit must not buy a second model
  * call. So is one handed to GitHub that is past the watchdog's deadline: the production watchdog
- * would have closed it as `unreported`, and the dev Worker never runs it. A review that is running,
- * or has a result, is not restarted by anything else.
+ * would have closed it as `unreported`, and the dev Worker never runs it. A review that has a result
+ * (`reported`) is restarted by an administrator only when the start says `redo`, which is the
+ * administrator choosing to pay for a second run of a finished review (the owner re-judges after
+ * the rules changed). A review that is running is not restarted by anything else, a redo included:
+ * superseding it would waste its calls and could cut off a job about to report.
  */
 async function isRestartable(
   db: Db,
@@ -1288,6 +1303,7 @@ async function isRestartable(
   if (row.state === "declined" || row.state === "errored" || row.state === "unreported") {
     return true;
   }
+  if (row.state === "reported") return options.redo === true;
   if (row.state !== "dispatched") return false;
   const overdue = await db
     .prepare(
