@@ -298,6 +298,11 @@ export function mailReleaseStatements(
       binds: [userId],
     },
     {
+      sql: `UPDATE mail_queues SET escalation_user_id = NULL, updated_at = datetime('now')
+             WHERE escalation_user_id = ?${queueScope}`,
+      binds: [userId],
+    },
+    {
       sql: `UPDATE mail_queues
                SET rr_members = (SELECT json_group_array(value) FROM json_each(mail_queues.rr_members)
                                   WHERE value <> ?),
