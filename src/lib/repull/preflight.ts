@@ -11,7 +11,7 @@ import {
   normalizeUpstreamTag,
   sameUpstreamTag,
 } from "../../../shared/openneuro-tag.js";
-import { isSourceTag } from "../../../shared/source-snapshot.js";
+import { compareSourceTags, isSourceTag } from "../../../shared/source-snapshot.js";
 import type { LatestTagLookup } from "../openneuro.js";
 import { bumpVersion, parseVersion } from "../semver.js";
 import { bareVersion } from "./from-tag.js";
@@ -137,6 +137,22 @@ export function toTagCheck(args: {
     return refused("nothing-to-pull", `${tag} is the mirrored tag`, tag);
   }
   if (latest !== null && sameUpstreamTag(tag, latest)) {
+    // OpenNeuro's latest that is not numerically after from_tag may be real creation order
+    // (`00006` before `1.0.0`), or a step backwards (a withdrawn snapshot, or a mirror recorded
+    // ahead of upstream's latest). The tags cannot tell which, so it is unverified, never refused
+    // and never ok.
+    const order = args.fromTag === null ? 1 : compareSourceTags(tag, args.fromTag);
+    if (order === null || order <= 0) {
+      return {
+        tag,
+        check: {
+          name: "to-tag",
+          status: "unchecked",
+          code: "order-unverified",
+          detail: `${tag} is OpenNeuro's latest but not numerically after ${args.fromTag}; whether that is creation order or a step backwards is not proved`,
+        },
+      };
+    }
     return { tag, check: { name: "to-tag", status: "ok", detail: `${tag} (OpenNeuro's latest)` } };
   }
   return {
@@ -190,7 +206,8 @@ export interface VersionFacts {
  * The highest `dataset_versions` row, the highest `v*` tag and `Version` on `main` must agree, and
  * N.0.0 is the next major after them (ADR 0111, decision 2). The API's `current_version` is not
  * read: it defaults to 1.0.0 when the description cannot be read, which would hide a disagreement.
- * Rows that cannot be read (a dev worker's 404) leave the check `unchecked`.
+ * Rows that cannot be read (the versions route answered 404, as a backend without it does) leave
+ * the check `unchecked`.
  */
 export function versionCheck(args: {
   rows: Array<{ version: string }> | null;
