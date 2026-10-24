@@ -219,7 +219,7 @@ describe("a released mirror whose upstream moved refuses, before anything moves"
     }, 60_000);
   }
 
-  test("the refusal names the re-pull to the new tag, the command that takes it on", async () => {
+  test("the refusal names the re-pull, to OpenNeuro's latest by default or to this tag", async () => {
     const { bare } = await originRecordedAt(RECORDED.entry);
     const dir = await reimportClone(bare, "1.0.1");
     const err = await baseOnOriginMain(dir, {
@@ -230,9 +230,10 @@ describe("a released mirror whose upstream moved refuses, before anything moves"
     }).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(ImportRefused);
     const message = (err as ImportRefused).message;
-    // Quoted, so the tag is never read with the sentence's full stop.
+    // Quoted, so a tag is never read with the sentence's punctuation. The imported tag may not be
+    // the newer one, so the command's default, OpenNeuro's latest, comes first.
     expect(message).toContain(
-      `To pull the new snapshot as the next major: \`nemar admin repull plan ${NEMAR_ID} --to-tag 1.0.1\`.`,
+      `To pull a newer snapshot as the next major, plan an upstream re-pull: \`nemar admin repull plan ${NEMAR_ID}\` (OpenNeuro's latest snapshot by default; \`--to-tag 1.0.1\` names this one).`,
     );
     // The repair at the recorded tag is still the last thing said.
     expect(message.endsWith(`nemar admin import-openneuro ${UPSTREAM_ID} --tag 1.0.0`)).toBe(true);

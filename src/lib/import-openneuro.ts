@@ -362,8 +362,8 @@ export interface ReimportBase {
  *   - the dataset has released a version: refuse with `[openneuro-upstream-moved]` before any
  *     reset, S3 setup or push. Moving a released mirror to a newer snapshot is a re-pull's job
  *     (ADR 0111), never a re-import's, and a re-import would keep the old tree while copying the
- *     new tag's data (#993). The refusal names both ways on: the re-pull to the new tag
- *     (`nemar admin repull plan`) and the repair at the recorded one.
+ *     new tag's data (#993). The refusal names both ways on: a re-pull, to OpenNeuro's latest
+ *     snapshot by default (`nemar admin repull plan`), and the repair at the recorded tag.
  *   - it has not: the same import, prepared again at the tag it now imports. `git reset --soft
  *     origin/main` moves HEAD onto origin's tip and keeps the new tag's tree in the index, so the
  *     commits that follow are a fast-forward of origin carrying that tree. Steps 5b and 6 re-apply
@@ -454,7 +454,7 @@ export async function baseOnOriginMain(
   if (released) {
     throw new ImportRefused(
       OPENNEURO_UPSTREAM_MOVED_MARKER,
-      `${args.sourceId}: ${args.nemarId} has released a version and its main records upstream tag ${recordedTag}; this import is at ${args.importTag}. Moving a released mirror to a new snapshot is an upstream re-pull (ADR 0111), not a re-import. Nothing was reset, copied or pushed. To pull the new snapshot as the next major: \`nemar admin repull plan ${args.nemarId} --to-tag ${args.importTag}\`. To repair the released version's data at the tag it mirrors: nemar admin import-openneuro ${args.sourceId} --tag ${recordedTag}`,
+      `${args.sourceId}: ${args.nemarId} has released a version and its main records upstream tag ${recordedTag}; this import is at ${args.importTag}. Moving a released mirror to a new snapshot is an upstream re-pull (ADR 0111), not a re-import. Nothing was reset, copied or pushed. To pull a newer snapshot as the next major, plan an upstream re-pull: \`nemar admin repull plan ${args.nemarId}\` (OpenNeuro's latest snapshot by default; \`--to-tag ${args.importTag}\` names this one). To repair the released version's data at the tag it mirrors: nemar admin import-openneuro ${args.sourceId} --tag ${recordedTag}`,
     );
   }
   // A retarget takes the new tag's tree whole, so origin's `.nemar/` goes with the old one, and
