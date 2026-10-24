@@ -11,6 +11,7 @@ import { handleInboundEmail } from "../src/services/inbound-mail";
 import {
   type InboundTicketInput,
   TEXT_BODY_MAX_BYTES,
+  aligned,
   extractMessageIds,
   ingestInboundMessage,
   isSpam,
@@ -109,8 +110,23 @@ describe("pure helpers", () => {
       parseAuthResults(hdr("spf=pass smtp.mailfrom=sender.example"), "ada@sender.example")
         .alignedPass,
     ).toBe(true);
-    // No domain given: counted, best effort.
-    expect(parseAuthResults(hdr("dkim=pass"), "ada@sender.example").alignedPass).toBe(true);
+    // No domain given, or only a helo name / header.i: cannot be shown to align, so unaligned.
+    expect(parseAuthResults(hdr("dkim=pass"), "ada@sender.example").alignedPass).toBe(false);
+    expect(
+      parseAuthResults(hdr("dkim=pass header.i=@sender.example"), "ada@sender.example").alignedPass,
+    ).toBe(false);
+    expect(
+      parseAuthResults(hdr("spf=pass smtp.helo=sender.example"), "ada@sender.example").alignedPass,
+    ).toBe(false);
+    // Siblings fail closed; a shared parent of one label or a hosting suffix never aligns.
+    expect(aligned("a.sender.example", "b.sender.example")).toBe(false);
+    expect(aligned("a.io", "b.io")).toBe(false);
+    expect(aligned("io", "x.io")).toBe(false);
+    expect(aligned("github.io", "alice.github.io")).toBe(false);
+    expect(aligned("app.pages.dev", "pages.dev")).toBe(false);
+    expect(aligned("mail.sender.example", "sender.example")).toBe(true);
+    expect(aligned("sender.example", "sender.example")).toBe(true);
+    expect(aligned("github.io", "github.io")).toBe(true);
     // A pass for one signature wins over a failing other one.
     const two = parseAuthResults(
       hdr("dkim=fail header.d=sender.example; dkim=pass header.d=sender.example"),
@@ -343,7 +359,7 @@ describe("account link", () => {
 
     // spf and dkim pass but dmarc does not: not linked.
     const noDmarc = await ingest({
-      auth: "mx.cloudflare.net; spf=pass; dkim=pass",
+      auth: "mx.cloudflare.net; spf=pass smtp.mailfrom=sender.example; dkim=pass header.d=sender.example",
       from: "ada@sender.example",
     });
     expect(ticket(noDmarc.ticketId).requester_user_id).toBeNull();
@@ -723,5 +739,101 @@ describe("robustness", () => {
       )
       .get(r.ticketId);
     expect(msg?.text_body).toBe("Visible");
+  });
+});
+
+describe("final review hardening", () => {
+  test("an spf pass on smtp.helo with no dmarc and a spoofed From is spam and cannot thread", async () => {
+    const first = await ingest({ messageId: "<h@sender.example>" });
+    const spoof = await ingest({
+      from: "ada@sender.example",
+      auth: "mx.cloudflare.net; spf=pass smtp.helo=attacker.example; dkim=none; dmarc=none",
+      inReplyTo: "<h@sender.example>",
+    });
+    expect(spoof).toMatchObject({ outcome: "created", status: "spam" });
+    expect(spoof.ticketId).not.toBe(first.ticketId);
+  });
+
+  test("a restricted ticket in an unrestricted queue reopens only to an owner or the pool", async () => {
+    const admin = seedUser(db, { role: "admin" });
+    const owner = seedUser(db, { role: "owner" });
+    db.run("UPDATE mail_queues SET assignee_user_id = ? WHERE tag = '*'", [admin]);
+    const first = await ingest({ messageId: "<rq@sender.example>" });
+    db.run(
+      "UPDATE mail_tickets SET restricted = 1, status = 'closed', assignee_user_id = NULL WHERE id = ?",
+      [first.ticketId],
+    );
+    const pool = await ingest({ inReplyTo: "<rq@sender.example>" });
+    expect(pool.assigneeUserId).toBeNull(); // the queue's admin is not an owner
+    db.run("UPDATE mail_tickets SET status = 'closed' WHERE id = ?", [first.ticketId]);
+    db.run("UPDATE mail_queues SET assignee_user_id = ? WHERE tag = '*'", [owner]);
+    const owned = await ingest({ inReplyTo: "<rq@sender.example>" });
+    expect(owned.assigneeUserId).toBe(owner);
+  });
+
+  test("an outgoing To recipient may thread but an inbound to_addr does not make a participant", async () => {
+    const first = await ingest({ messageId: "<o@sender.example>" });
+    // The inbound message's to_addr is our own address: sending From it is not enough.
+    const ours = await ingest({
+      from: "support@staging.nemar.test",
+      auth: strangerAuth.replace("stranger.example", "staging.nemar.test"),
+      inReplyTo: "<o@sender.example>",
+    });
+    expect(ours.ticketId).not.toBe(first.ticketId);
+    db.run(
+      "INSERT INTO mail_messages (ticket_id, direction, from_addr, to_addr) VALUES (?, 'note', 'a@x.example', 'noted@sender.example')",
+      [first.ticketId],
+    );
+    const noted = await ingest({ from: "noted@sender.example", inReplyTo: "<o@sender.example>" });
+    expect(noted.ticketId).not.toBe(first.ticketId);
+  });
+
+  test("a spam message is stored without its Message-ID", async () => {
+    const bad = await ingest({ auth: null, messageId: "<forged@sender.example>" });
+    const stored = db
+      .query<{ message_id: string | null }, [number]>(
+        "SELECT message_id FROM mail_messages WHERE ticket_id = ?",
+      )
+      .get(bad.ticketId);
+    expect(stored?.message_id).toBeNull();
+    const reply = await ingest({ inReplyTo: "<forged@sender.example>" });
+    expect(reply.outcome).toBe("created");
+    expect(createdDetail(reply.ticketId).matched_ticket_id).toBeUndefined();
+  });
+
+  test("two concurrent replies to a closed ticket write one reopened event", async () => {
+    const first = await ingest({ messageId: "<cc@sender.example>" });
+    db.run("UPDATE mail_tickets SET status = 'closed' WHERE id = ?", [first.ticketId]);
+    await Promise.all([
+      ingest({ inReplyTo: "<cc@sender.example>" }),
+      ingest({ inReplyTo: "<cc@sender.example>" }),
+    ]);
+    expect(
+      count("SELECT COUNT(*) AS n FROM mail_messages WHERE ticket_id = ?", first.ticketId),
+    ).toBe(3);
+    expect(
+      count(
+        "SELECT COUNT(*) AS n FROM mail_ticket_events WHERE ticket_id = ? AND kind = 'reopened'",
+        first.ticketId,
+      ),
+    ).toBe(1);
+  });
+
+  test("the stored to_addr is a single line", async () => {
+    const r = await ingest({}, "support@staging.nemar.test");
+    const raw = eml({ to: "support@staging.nemar.test" });
+    const input: InboundTicketInput = {
+      rawKey: "inbound/raw/2026/10/24/line.eml",
+      raw,
+      envelopeFrom: "a@sender.example",
+      envelopeTo: "support@staging.nemar.test\r\nBcc: x@y.example",
+      receivedAt: new Date(),
+    };
+    const out = await ingestInboundMessage(d1, input);
+    const row = db
+      .query<{ to_addr: string }, [number]>("SELECT to_addr FROM mail_messages WHERE ticket_id = ?")
+      .get(out.ticketId);
+    expect(row?.to_addr).not.toMatch(/[\r\n]/);
+    expect(r.outcome).toBe("created");
   });
 });

@@ -47,6 +47,11 @@ const MAX_REFERENCE_IDS = 20;
  * The authserv-id Cloudflare Email Routing stamps on the `Authentication-Results` header it adds
  * (observed on real staging mail). Only a header naming this id is read: a sender can put any
  * header, including its own `Authentication-Results`, above or below ours.
+ *
+ * "The first header with this id" is safe because Cloudflare PREPENDS its trace block: on real
+ * staging mail inspected 2026-10-24, its Received, ARC-Authentication-Results, Received-SPF and
+ * Authentication-Results all sit above the sender's own Received headers, so nothing the sender
+ * wrote can precede ours.
  */
 export const CLOUDFLARE_AUTHSERV_ID = "mx.cloudflare.net";
 
@@ -94,10 +99,30 @@ export function ticketPlusTag(ref: string): string {
 
 const domainOf = (address: string): string => address.split("@")[1]?.toLowerCase() ?? "";
 
-/** Relaxed alignment: equal, or one is a subdomain of the other. */
-function aligned(a: string, b: string): boolean {
+/** Hosting suffixes under which unrelated tenants share a parent domain. */
+const SHARED_SUFFIXES: ReadonlySet<string> = new Set([
+  "github.io",
+  "pages.dev",
+  "workers.dev",
+  "herokuapp.com",
+  "vercel.app",
+  "netlify.app",
+]);
+
+/**
+ * Relaxed alignment by parent/child host matching: equal, or one is a subdomain of the other.
+ * There is no public suffix list here, so siblings (`a.example.com` and `b.example.com`) fail
+ * closed rather than guess an organisational domain. To keep a shared parent from aligning
+ * unrelated parties, the parent must have at least two labels (never `io` or `com`) and must not
+ * be a known shared hosting suffix (`github.io`, `pages.dev`, ...); that list is deliberately
+ * tiny and best effort. DMARC remains the primary signal.
+ */
+export function aligned(a: string, b: string): boolean {
   if (a === "" || b === "") return false;
-  return a === b || a.endsWith(`.${b}`) || b.endsWith(`.${a}`);
+  if (a === b) return true;
+  const [child, parent] = a.length > b.length ? [a, b] : [b, a];
+  if (!child.endsWith(`.${parent}`)) return false;
+  return parent.includes(".") && !SHARED_SUFFIXES.has(parent);
 }
 
 /**
@@ -105,7 +130,8 @@ function aligned(a: string, b: string): boolean {
  * {@link CLOUDFLARE_AUTHSERV_ID}; every other such header is ignored, whatever its position. With
  * none, every result is `none`. An SPF or DKIM pass only sets `alignedPass` when the header gives
  * its domain (`smtp.mailfrom` or `header.d`) and that domain aligns with the From domain; a pass
- * that names no domain is counted (best effort). DMARC is the primary signal.
+ * that names no such domain never counts, and `smtp.helo` is never used. DMARC is the primary
+ * signal.
  */
 export function parseAuthResults(
   headers: { key: string; value: string }[],
@@ -133,7 +159,9 @@ export function parseAuthResults(
     if (verdict !== "pass") continue;
     const prop = name === "spf" ? /smtp\.mailfrom\s*=\s*([^\s;]+)/i : /header\.d\s*=\s*([^\s;]+)/i;
     const named = prop.exec(segment)?.[1]?.replace(/^.*@/, "").toLowerCase();
-    if (named === undefined || aligned(named, fromDomain)) results.alignedPass = true;
+    // A pass that names no domain (SPF on `smtp.helo` only, DKIM with only `header.i`) cannot be
+    // shown to align with From, so it does not count.
+    if (named !== undefined && aligned(named, fromDomain)) results.alignedPass = true;
   }
   return results;
 }
@@ -226,7 +254,12 @@ async function findByMessageIds(db: D1Database, ids: string[]): Promise<TicketHe
     .first<TicketHead>();
 }
 
-/** Whether `address` is the ticket's requester or already on one of its messages. */
+/**
+ * Whether `address` is the ticket's requester, wrote one of its messages, or is the To recipient
+ * of an outgoing one. An outgoing message's `to_addr` must hold only the staff-chosen To
+ * recipient (phase 3b stores exactly the requester there), never Cc or Bcc, and an inbound
+ * message's `to_addr` (our own address) is not a participant.
+ */
 async function isTicketParticipant(
   db: D1Database,
   ticket: TicketHead,
@@ -237,7 +270,8 @@ async function isTicketParticipant(
   const row = await db
     .prepare(
       `SELECT 1 AS ok FROM mail_messages
-        WHERE ticket_id = ?1 AND (lower(from_addr) = ?2 OR lower(to_addr) = ?2) LIMIT 1`,
+        WHERE ticket_id = ?1
+          AND (lower(from_addr) = ?2 OR (direction = 'out' AND lower(to_addr) = ?2)) LIMIT 1`,
     )
     .bind(ticket.id, address)
     .first<{ ok: number }>();
@@ -320,11 +354,12 @@ async function ingestNew(db: D1Database, input: InboundTicketInput): Promise<Ing
   // repeats it (a forged or accidental duplicate) is stored with no id, so it can never become
   // the target of a later `In-Reply-To`; the original is still in the raw object.
   const messageId =
-    rawMessageId !== null &&
-    (await db
-      .prepare("SELECT 1 AS ok FROM mail_messages WHERE message_id = ? LIMIT 1")
-      .bind(rawMessageId)
-      .first<{ ok: number }>())
+    spam ||
+    (rawMessageId !== null &&
+      (await db
+        .prepare("SELECT 1 AS ok FROM mail_messages WHERE message_id = ? LIMIT 1")
+        .bind(rawMessageId)
+        .first<{ ok: number }>()))
       ? null
       : rawMessageId;
   const inReplyTo = parsed.inReplyTo ? clampUtf8Bytes(parsed.inReplyTo, HEADER_ID_MAX_BYTES) : null;
@@ -367,7 +402,7 @@ async function ingestNew(db: D1Database, input: InboundTicketInput): Promise<Ing
         inReplyTo,
         references,
         fromAddr,
-        clampUtf8Bytes(envelopeTo, ADDRESS_MAX_BYTES),
+        singleLine(clampUtf8Bytes(envelopeTo, ADDRESS_MAX_BYTES)),
         subject,
         textBody,
         input.rawKey,
@@ -425,7 +460,7 @@ async function ingestNew(db: D1Database, input: InboundTicketInput): Promise<Ing
         const next = await resolveAssignee(
           db,
           target.queue_tag,
-          { excludedUserId: target.excluded_user_id },
+          { excludedUserId: target.excluded_user_id, restricted: target.restricted === 1 },
           input.receivedAt,
         );
         reassigned = next !== assignee;
@@ -439,7 +474,9 @@ async function ingestNew(db: D1Database, input: InboundTicketInput): Promise<Ing
           .bind(assignee, created, target.id),
         db
           .prepare(
-            "INSERT INTO mail_ticket_events (ticket_id, kind, actor_user_id, detail, created_at) VALUES (?, 'reopened', NULL, ?, ?)",
+            // `changes()` is the guarded UPDATE's row count: a concurrent reply that reopened the
+            // ticket first leaves this one with no rows, so no duplicate event.
+            "INSERT INTO mail_ticket_events (ticket_id, kind, actor_user_id, detail, created_at) SELECT ?, 'reopened', NULL, ?, ? WHERE changes() > 0",
           )
           .bind(target.id, JSON.stringify({ from: status, to: "open", reason: "reply" }), created),
       );
@@ -447,8 +484,9 @@ async function ingestNew(db: D1Database, input: InboundTicketInput): Promise<Ing
         statements.push(
           db
             .prepare(
+              // Chained on the `reopened` insert above: one row only if that one was written.
               `INSERT INTO mail_ticket_events (ticket_id, kind, actor_user_id, detail, created_at)
-               VALUES (?, ?, NULL, ?, ?)`,
+               SELECT ?, ?, NULL, ?, ? WHERE changes() > 0`,
             )
             .bind(
               target.id,
@@ -472,7 +510,9 @@ async function ingestNew(db: D1Database, input: InboundTicketInput): Promise<Ing
 
   const requesterUserId =
     !spam && auth.dmarc === "pass" ? await accountForAddress(db, fromAddr) : null;
-  const assignee = spam ? null : await resolveAssignee(db, queueTag, {}, input.receivedAt);
+  const assignee = spam
+    ? null
+    : await resolveAssignee(db, queueTag, { restricted: queueRestricted }, input.receivedAt);
   const status = spam ? "spam" : "open";
   const ref = newTicketRef();
 
