@@ -307,3 +307,22 @@ There is no migration: the restart is the SQL that already exists.
 The cost is the administrator's to decide (a review is up to two model calls, and a bulk redo of about a hundred reviews is a hundred runs); nothing automatic redoes a review.
 The first run's tokens leave the volume's token and cost sums when the report is cleared, as for any restart ([ADR 0107](0107-dataset-pull-requests-are-screened-on-content-owners-and-administrators-are-exempt-and-the-review-check-is-required.md) names this), while the run count keeps both.
 A bulk redo cannot be resumed (running it again redoes the reviews that finished in between), and a `--limit` to stage it is not built.
+
+## Amendment 2026-10-24 (second): `start --all --concurrency`
+
+A bulk start began every review at once, and each review reserves its whole output budget (128,000 tokens) against the workspace's output-tokens-per-minute limit when its request begins ([ADR 0107](0107-dataset-pull-requests-are-screened-on-content-owners-and-administrators-are-exempt-and-the-review-check-is-required.md), Consequences), so about a hundred starts asked for a hundred budgets together and queued a hundred jobs in one repository.
+`start --all [--redo] --concurrency <n>` paces it: at most `n` of the reviews that run started are in progress at any time, and the next one starts as each leaves `in_progress`.
+It is a sliding window, not fixed batches, because a batch waits for its slowest review (one that truncates runs for half an hour) while the other slots sit idle.
+
+The pacing is in the CLI alone.
+While it waits it reads the admin list (`verdict=in_progress`) every 30 seconds, one request that answers for every pull request, and a started review counts as running while it is in that list.
+A review the Worker calls overdue leaves the list after its 60 minutes, so no wait is without end.
+A list that is incomplete (GitHub returned fewer pull requests than exist, or some could not be read) or a request that fails cannot tell what finished, so it is never taken as "finished": the window stays full, and three such reads in a row stop the run, because it cannot keep its limit blind.
+An answer that is not a start (a blocked contributor, an exempt author, `review_running`) takes no slot.
+Only the reviews this run started are counted: reviews that contributors' pushes started are running too, but counting them would let a busy hour stall the run for something it did not cause.
+
+Ctrl-C stops the run after the start in flight and lists the pull requests never started, as commands to continue by name for a redo (a rerun of `--all --redo` would redo the finished ones again), and exits 130.
+The same list is printed when three reads fail (exit 1).
+Reviews already started keep running on the Worker either way.
+Without the flag nothing changes, except that above ten starts at once the list ends with a line naming the limit and the flag.
+The administrator chooses `n` from the workspace's limit (`n` x 128,000 output tokens must fit it); the CLI does not read or guess that limit.
