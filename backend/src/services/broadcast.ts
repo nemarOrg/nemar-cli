@@ -56,8 +56,30 @@ export type SingleUserLookupResult =
   | { ok: true; email: string; user_id: number; username: string }
   | { ok: false; error: SingleUserLookupError; user_id?: number; username?: string };
 
+/** Env for a broadcast: the delivery fence's fields plus the optional announcement outbox. */
+export interface BroadcastEnv extends EmailDeliveryEnv {
+  /** Queue the announcement consumer drains (epic #1893 phase 2). Unbound: sends run inline. */
+  EMAIL_OUTBOX?: Queue;
+}
+
+/**
+ * One queued announcement message. The body is NOT in it: the consumer renders it from the
+ * `broadcast_emails` row's `subject` and `body_markdown`, so a message stays small and the
+ * announcement text lives in one place.
+ */
+export interface BroadcastOutboxMessage {
+  kind: "broadcast";
+  broadcast_id: number;
+  to: string;
+}
+
+export type BroadcastStatus = "sent" | "queued" | "done";
+
 export interface BroadcastResult {
   broadcast_id: number;
+  /** `sent`: finished inline. `queued`: handed to the outbox, outcomes arrive per message
+   *  (`GET /admin/notify/:id`). `recipient_count` is then the number queued. */
+  status: BroadcastStatus;
   recipient_count: number;
   failure_count: number;
   failed_recipients: string[];
@@ -274,6 +296,113 @@ interface ResendBatchResponseItem {
 }
 
 /**
+ * The queued path: record the audit row as `queued` with the allowed count, then enqueue one
+ * {@link BroadcastOutboxMessage} per allowed recipient (the consumer, services/email-outbox.ts,
+ * sends each and writes the outcome back to the row). The row is written FIRST so a message can
+ * never reach the consumer before its row exists.
+ *
+ * If `sendBatch` throws midway, the messages already enqueued still run. The unqueued remainder
+ * is counted in `failure_count` (no addresses stored: the caller still holds the list) and the
+ * result carries `error: "queue_enqueue_failed"`, with `recipient_count` the number that WERE
+ * queued. The row turns `done` as soon as its outcomes add up to `queued_count`, which here is
+ * immediately when nothing was queued and otherwise when the consumer finishes the rest.
+ */
+async function enqueueBroadcast(
+  db: D1Database,
+  queue: Queue,
+  params: { sentById: number; group: RecipientGroupOrUser; subject: string; bodyMarkdown: string },
+  allowedRecipients: string[],
+  suppressedCount: number,
+): Promise<BroadcastResult> {
+  const audit = await db
+    .prepare(
+      `INSERT INTO broadcast_emails
+         (sent_by, recipient_group, subject, body_markdown, recipient_count, failure_count,
+          failed_recipients, status, queued_count)
+       VALUES (?, ?, ?, ?, ?, 0, '[]', 'queued', ?)
+       RETURNING id`,
+    )
+    .bind(
+      params.sentById,
+      params.group,
+      params.subject,
+      params.bodyMarkdown,
+      allowedRecipients.length,
+      allowedRecipients.length,
+    )
+    .first<{ id: number }>();
+  if (!audit?.id) {
+    // Nothing was enqueued, so nothing can be reported against a row.
+    console.error("[broadcast] Audit record not created; nothing was queued", {
+      group: params.group,
+      subject: params.subject,
+    });
+    return {
+      broadcast_id: 0,
+      status: "sent",
+      recipient_count: 0,
+      failure_count: 0,
+      failed_recipients: [],
+      suppressed_count: suppressedCount,
+      error: "queue_enqueue_failed",
+    };
+  }
+  const broadcastId = audit.id;
+
+  let queued = 0;
+  try {
+    for (let i = 0; i < allowedRecipients.length; i += BATCH_SIZE) {
+      const chunk = allowedRecipients.slice(i, i + BATCH_SIZE);
+      await queue.sendBatch(
+        chunk.map((to) => ({
+          body: {
+            kind: "broadcast",
+            broadcast_id: broadcastId,
+            to,
+          } satisfies BroadcastOutboxMessage,
+        })),
+      );
+      queued += chunk.length;
+    }
+  } catch (error) {
+    const remainder = allowedRecipients.length - queued;
+    console.error(
+      `[broadcast] enqueue failed for broadcast ${broadcastId} after ${queued} of ${allowedRecipients.length}:`,
+      error instanceof Error ? error.message : String(error),
+    );
+    await db
+      .prepare(
+        `UPDATE broadcast_emails
+            SET failure_count = failure_count + ?,
+                recipient_count = ?,
+                status = CASE WHEN delivered_count + failure_count + ? + unknown_count >= queued_count
+                              THEN 'done' ELSE status END
+          WHERE id = ?`,
+      )
+      .bind(remainder, queued, remainder, broadcastId)
+      .run();
+    return {
+      broadcast_id: broadcastId,
+      status: queued === 0 ? "done" : "queued",
+      recipient_count: queued,
+      failure_count: remainder,
+      failed_recipients: [],
+      suppressed_count: suppressedCount,
+      error: "queue_enqueue_failed",
+    };
+  }
+
+  return {
+    broadcast_id: broadcastId,
+    status: "queued",
+    recipient_count: queued,
+    failure_count: 0,
+    failed_recipients: [],
+    suppressed_count: suppressedCount,
+  };
+}
+
+/**
  * Send broadcast emails via Resend batch API in chunks of 100, or, when
  * EMAIL_PROVIDER=cloudflare (staging), one message per allowed recipient through the
  * same single-send path as every other mail (sequential: the allow-listed set is
@@ -304,7 +433,7 @@ export async function sendBroadcast(
   },
   replyTo?: string,
   isDev?: boolean,
-  env?: EmailDeliveryEnv,
+  env?: BroadcastEnv,
   sendTimeoutMs: number = BROADCAST_SEND_TIMEOUT_MS,
 ): Promise<BroadcastResult> {
   // Guard: the provider must be configured before iterating recipients. A missing or blank
@@ -318,6 +447,7 @@ export async function sendBroadcast(
     });
     return {
       broadcast_id: -1,
+      status: "sent",
       recipient_count: 0,
       failure_count: 0,
       failed_recipients: [],
@@ -343,6 +473,17 @@ export async function sendBroadcast(
         `recipient(s) for group "${params.group}" (subject: "${params.subject}"): ` +
         `ENVIRONMENT=${env?.ENVIRONMENT ?? "unset"} is not production and they are not on ` +
         `DEV_EMAIL_ALLOWLIST. Sample: ${suppressedRecipients.slice(0, 3).map(redactRecipient).join(", ")}`,
+    );
+  }
+
+  // With nothing allowed there is nothing to queue; the inline path records the empty send.
+  if (resolved.provider === "cloudflare" && env?.EMAIL_OUTBOX && allowedRecipients.length > 0) {
+    return enqueueBroadcast(
+      db,
+      env.EMAIL_OUTBOX,
+      params,
+      allowedRecipients,
+      suppressedRecipients.length,
     );
   }
 
@@ -458,6 +599,7 @@ export async function sendBroadcast(
 
   return {
     broadcast_id: auditResult?.id ?? 0,
+    status: "sent",
     recipient_count: totalSent,
     failure_count: failedRecipients.length,
     failed_recipients: failedRecipients,
