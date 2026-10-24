@@ -278,3 +278,14 @@ anything.
 The observation does not say what the state is for the held verdicts (`uncertain`, `declined`,
 `errored`, which are `action_required`), and it does not settle whether `unstable` should be accepted
 when both required checks pass: that stays the maintainer's decision, tracked in issue #1743.
+
+## Amendment 2026-10-23 (#1046): narrowed by ADR 0111 for re-pull pull requests
+
+Designed in [ADR 0111](0111-an-upstream-re-pull-is-a-reviewed-delta-on-a-release-branch.md) (decision 7) and not yet built: nothing in this command or in the Worker behaves differently today.
+ADR 0107 already partially supersedes this record, and ADR 0111 narrows one more aspect of it, the merge, for one class of pull request: an upstream re-pull on `release/vN.0.0` that the automatic path opened and `upstream_repulls` records.
+The approval sentences stand as written, "its approval is made by the administrator, from their machine, with their own GitHub login" and "No Worker code path approves", because the Worker will submit no review.
+What will change for that class is that a merge no longer always follows an administrator's approval and `--merge` or `y`.
+While `AUTO_REPULL_MERGE_ENABLED` is on, the Worker will merge one that is machine clean: zero unexplained paths, an identifier screen that says `clear`, BIDS validation and `version-check` green, an ADR 0107 review stored for that head whose verdict is `pass` (any other verdict, or none, is not machine clean), a head equal to the screened SHA, the daily merge cap claimed, and GitHub reporting `clean`.
+Every other pull request, and a re-pull pull request that is not machine clean or that an administrator opened, will be approved and merged as this record says.
+For a re-pull pull request this command will add two checks once built: an identifier screen of that head that is `clear` or carries the administrator's recorded acknowledgment (ADR 0086), which `approve --merge` does not require today, and a claim on the re-pull daily merge cap from the backend before the merge is sent.
+AGENTS.md's summary of this record ("nothing merges without `--merge` or a `y`") is updated by the phase that builds the merge.

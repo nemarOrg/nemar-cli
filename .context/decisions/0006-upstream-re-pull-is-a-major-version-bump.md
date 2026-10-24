@@ -40,3 +40,12 @@ Pulling new upstream content bumps the **major** version: `1.0.0` -> `2.0.0`. Mi
 ## Amendment 2026-10-04 (#1610): privacy corrections
 
 A privacy correction under [ADR 0085](0085-a-privacy-correction-scrubs-every-version-in-place.md) changes bytes under an existing version and issues no new version at all, so it is the one exception to "minor and patch are NEMAR's own corrections". The ledger and the dataset's change log, not the version number, are its record.
+
+## Amendment 2026-10-23 (#1046): the re-pull mechanism
+
+Designed in [ADR 0111](0111-an-upstream-re-pull-is-a-reviewed-delta-on-a-release-branch.md) and not yet built; this policy stands: pulling new upstream content is a major bump.
+ADR 0111 refines what the numbers will mean on a mirror once it is built.
+N.0.0 will be a pure mirror of one upstream snapshot, upstream's tree at the pulled tag with NEMAR's standard edits applied, and upstream will win every conflict.
+NEMAR's corrections that upstream did not touch will replay as the next patch, N.0.1, in a pull request to `main` merged only after N.0.0 has merged and been tagged.
+A version with `source_version` set and the form `N.0.0` will be a mirror, and a manual major bump will be refused on `on` datasets, so a major on a mirror will always mean an upstream pull.
+The mapping the Consequences above ask to be recorded will be `dataset_versions.source_version`, with its basis, and the dataset's tag will be derived from its highest version row.
