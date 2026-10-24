@@ -417,6 +417,22 @@ describe("a plan from tag A to tag B over an imported mirror", () => {
     }
   });
 
+  test("OpenNeuro's latest that is not numerically after from_tag is unverified, not ok", async () => {
+    // 00001 is on the mirror and numerically equal to the mirrored 1.0.0 without being that tag.
+    openNeuro.latest = "00001";
+    try {
+      const f = await plan(fx);
+      expect((f.body.upstream as Body).to_tag).toBe("00001");
+      expect(f.preflight.find((c) => c.name === "to-tag")).toMatchObject({
+        status: "unchecked",
+        code: "order-unverified",
+      });
+      expect(f.executable).toBe(false);
+    } finally {
+      openNeuro.latest = TAG_B;
+    }
+  });
+
   test("a tag the version rows could not record is refused (Phase 4a's isSourceTag)", async () => {
     const out = await planRepull(options(fx, { toTag: "1.1.0-rc1" }));
     expect(out.planned ? null : out.reason).toBe("to-tag-unrecordable");
@@ -660,12 +676,14 @@ describe("the privacy ledger (ADR 0085)", () => {
       const ledger = (body.refusals as Array<{ code: string; detail: string }>).find(
         (r) => r.code === "ledger-unreadable",
       );
-      expect(ledger?.detail).toMatch(/SyntaxError|JSON/);
+      // The parser's class, and nothing it quoted from the file.
+      expect(ledger?.detail).toContain("SyntaxError");
+      expect(JSON.stringify(body)).not.toContain("Jane");
       // A badge naming another DOI than the concept DOI is not NEMAR's edit.
       expect(row(body, "README.md").explained_by_base).toBeNull();
       // A NEMAR-owned file that does not parse is said, with the parser's words, not left null.
       expect(body.nemar_owned_edits).toEqual([
-        expect.objectContaining({ status: "unparseable", from: null, error: expect.any(String) }),
+        expect.objectContaining({ status: "unparseable", from: null, error: "SyntaxError" }),
       ]);
       expect(f.executable).toBe(false);
     } finally {

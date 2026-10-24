@@ -69,7 +69,7 @@ export const UPSTREAM_ID = "ds099999";
 export const CONCEPT_DOI = "10.82901/nemar.on099999";
 export const TAG_A = "1.0.0";
 export const TAG_B = "1.1.0";
-/** A legacy-shaped tag that compares equal to 1.0.0, for the not-newer refusal. */
+/** A legacy-shaped tag that compares equal to 1.0.0 and is not OpenNeuro's latest (order-unverified). */
 export const TAG_LEGACY = "00001";
 const BUCKET_PATH = `openneuro.org/${UPSTREAM_ID}`;
 const PUBLIC_UUID = "9e1479f6-49e0-413b-8222-a7f8000f55a6";
@@ -621,10 +621,11 @@ async function build(
     }[opts.changes];
     write(clone, PATHS.changes, `${readFileSync(join(clone, PATHS.changes), "utf8")}${appended}`);
   }
-  if (opts.brokenNemarMetadata) write(clone, ".nemar/metadata.json", "{ not json\n");
+  // Value-looking tokens: a parser's message would quote them, and nothing may echo them.
+  if (opts.brokenNemarMetadata) write(clone, ".nemar/metadata.json", "{ Jane Doe\n");
   if (opts.corruptLedger) {
     const ledger = join(clone, ".nemar/corrections.jsonl");
-    write(clone, ".nemar/corrections.jsonl", `${readFileSync(ledger, "utf8")}not a ledger line\n`);
+    write(clone, ".nemar/corrections.jsonl", `${readFileSync(ledger, "utf8")}Jane Doe\n`);
   }
   if (!opts.noContributorEdits || opts.sidecarEditOnly) {
     write(
