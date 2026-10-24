@@ -187,7 +187,7 @@ original authors' content is protected by facts the platform computes: a README 
 altered beyond a minor edit, an author-owned field or a participant value changed fails, a replaced
 recording or an undecidable comparison holds the pull request, and the README is compared with the
 one at the first version tag, else with the merge base; the facts carry only class words and counts),
-0111 (designed, not yet built: an upstream re-pull is one synthesized delta commit on `release/vN.0.0`
+0111 (the read-only plan, `nemar admin repull plan`, is built in Phase 5; execution is not yet built: an upstream re-pull is one synthesized delta commit on `release/vN.0.0`
 through a pull request, never a bypass or a git merge of upstream history; N.0.0 is a pure mirror where
 upstream wins every conflict, and corrections replay as N.0.1 to `main` once N.0.0 is merged and
 tagged; the scrub runs on delta paths before the copy and the commit, and a privacy-ledger change is
