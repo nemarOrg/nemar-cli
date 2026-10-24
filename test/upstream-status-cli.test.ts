@@ -670,8 +670,18 @@ describe("nemar admin upstream-status --measure", () => {
         files_deleted: 76,
         bytes_to_copy: 3431782003,
         bytes_to_copy_known: 3431782003,
+        not_comparable: {
+          unknown: 0,
+          probably_stale: 0,
+          not_examined: 0,
+          unchecked: 0,
+          anomaly: 0,
+        },
         catch_up_days: 1,
       });
+      expect(out.measurement.scope).toBe("fleet");
+      expect(out.measurement.complete).toBe(true);
+      expect(out.measurement_skipped).toBeNull();
       expect(out.measurement.doi_volume.catch_up).toBe(2);
       expect(out.measurement.deltas.map((d: { dataset_id: string }) => d.dataset_id)).toEqual([
         "on002893",
@@ -688,6 +698,8 @@ describe("nemar admin upstream-status --measure", () => {
       expect(human.stdout).toContain("Measured 2: metadata-only 1, data-changing 1");
       expect(human.stdout).toContain("Files added 29, changed 326, deleted 76");
       expect(human.stdout).toContain("Bytes to copy: 3431782003 (3.2 GiB)");
+      expect(human.stdout).toContain("Scope: the whole fleet; only stale mirrors are measured");
+      expect(human.stdout).toContain("Not covered by these totals (never measured, not zero)");
       expect(human.stdout).toContain("REPULL_DAILY_OPEN_CAP=2 the catch-up takes 1 day(s)");
       expect(human.stdout).toContain("upstream's between the two tags, not NEMAR's tree");
       expect(human.stdout).toContain("a declaration, not a tree comparison");
@@ -755,6 +767,299 @@ describe("nemar admin upstream-status --measure", () => {
       expect(t.bytes_to_copy).toBeNull();
       expect(t.bytes_to_copy_known).toBe(3431782003);
       expect(files.requests.length).toBe(1);
+    } finally {
+      server.stop();
+      files.stop();
+    }
+  }, 30_000);
+
+  test("mirror_lag and stale_unverified rows are stale and are measured too", async () => {
+    seedAuthenticatedConfig();
+    const lag = { ...staleRow("on002893", "1.0.0", "2.0.0"), state: "mirror_lag" as const };
+    const unverified = {
+      ...staleRow("on003082", "1.0.0", "1.0.1"),
+      state: "stale_unverified" as const,
+    };
+    const server = startServer([{ body: page([lag, unverified]) }]);
+    const files = startOpenNeuroFilesStandin();
+    try {
+      const env = { NEMAR_OPENNEURO_GRAPHQL_URL: files.url };
+      const result = await runCli(
+        ["admin", "upstream-status", "--measure", "--json"],
+        server.url,
+        env,
+      );
+      expect(result.exitCode).toBe(0);
+      const t = JSON.parse(result.stdout).measurement.totals;
+      expect([t.stale, t.measured, t.data_changing, t.metadata_only]).toEqual([2, 2, 1, 1]);
+      expect(files.requests.length).toBe(2);
+    } finally {
+      server.stop();
+      files.stop();
+    }
+  }, 30_000);
+
+  test("rows that cannot be measured are counted beside the totals and say what the scope was", async () => {
+    seedAuthenticatedConfig();
+    const rows = [
+      DATA,
+      row("on000010", "unknown", { recorded: null, probably_stale: true }),
+      row("on000011", "unknown", { recorded: null, probably_stale: false }),
+      row("on000012", "not_examined", { recorded: null }),
+      row("on000013", "anomaly", { anomaly: "upstream_deleted" }),
+      row("on000014", "in_progress"),
+    ];
+    const server = startServer([{ body: page(rows) }]);
+    const files = startOpenNeuroFilesStandin();
+    try {
+      const env = { NEMAR_OPENNEURO_GRAPHQL_URL: files.url };
+      const json = await runCli(
+        ["admin", "upstream-status", "--measure", "--dataset", "on002893", "--json"],
+        server.url,
+        env,
+      );
+      // The dataset scope expects exactly one row, so this pass is not complete and is not measured.
+      expect(JSON.parse(json.stdout).measurement).toBeNull();
+
+      const result = await runCli(
+        ["admin", "upstream-status", "--measure", "--json"],
+        server.url,
+        env,
+      );
+      expect(result.exitCode).toBe(0);
+      const out = JSON.parse(result.stdout).measurement;
+      expect(out.totals.not_comparable).toEqual({
+        unknown: 2,
+        probably_stale: 1,
+        not_examined: 1,
+        unchecked: 0,
+        anomaly: 1,
+      });
+      expect(out.doi_volume.excluded).toMatchObject({ unknown: 2, not_examined: 1, anomaly: 1 });
+      const human = await runCli(["admin", "upstream-status", "--measure"], server.url, env);
+      expect(human.stdout).toContain(
+        "2 unknown tag (1 of them probably stale by date), 1 never examined, 0 unchecked, 1 anomaly",
+      );
+      expect(human.stdout).toContain("DOI estimate left out:");
+      expect(human.stdout).toContain("2 unknown");
+      expect(human.stdout).toContain("1 not_examined");
+    } finally {
+      server.stop();
+      files.stop();
+    }
+  }, 30_000);
+
+  test("a scoped pass names its scope in the measurement", async () => {
+    seedAuthenticatedConfig();
+    const server = startServer([{ body: page([DATA]) }]);
+    const files = startOpenNeuroFilesStandin();
+    try {
+      const env = { NEMAR_OPENNEURO_GRAPHQL_URL: files.url };
+      const byDataset = await runCli(
+        ["admin", "upstream-status", "--measure", "--dataset", "on002893", "--json"],
+        server.url,
+        env,
+      );
+      expect(JSON.parse(byDataset.stdout).measurement.scope).toBe("dataset");
+      const byCursor = await runCli(
+        ["admin", "upstream-status", "--measure", "--after", "on000001", "--json"],
+        server.url,
+        env,
+      );
+      expect(JSON.parse(byCursor.stdout).measurement.scope).toBe("after");
+    } finally {
+      server.stop();
+      files.stop();
+    }
+  }, 30_000);
+
+  test("a refused (502) page is not measured: null, the reason, exit 2, OpenNeuro not asked", async () => {
+    seedAuthenticatedConfig();
+    const refused = page([DATA], {
+      ok: false,
+      error: "OpenNeuro could not be read for any mirror that needed a verdict",
+      next_cursor: "on002893",
+      population_total: 5,
+    });
+    const server = startServer([{ status: 502, body: refused }]);
+    const files = startOpenNeuroFilesStandin();
+    try {
+      const env = { NEMAR_OPENNEURO_GRAPHQL_URL: files.url };
+      const json = await runCli(
+        ["admin", "upstream-status", "--measure", "--json"],
+        server.url,
+        env,
+      );
+      expect(json.exitCode).toBe(2);
+      const out = JSON.parse(json.stdout);
+      expect(out.measurement).toBeNull();
+      expect(out.measurement_skipped).toContain("did not finish cleanly");
+      const human = await runCli(["admin", "upstream-status", "--measure"], server.url, env);
+      expect(human.exitCode).toBe(2);
+      expect(human.stdout).toContain("Not measured: the pass did not finish cleanly");
+      expect(files.requests.length).toBe(0);
+    } finally {
+      server.stop();
+      files.stop();
+    }
+  }, 30_000);
+
+  test("--max-pages reached is not measured either", async () => {
+    seedAuthenticatedConfig();
+    const server = startServer([
+      { body: page([DATA], { next_cursor: "on002893", population_total: 2 }) },
+      { body: page([META], { population_total: 2 }) },
+    ]);
+    const files = startOpenNeuroFilesStandin();
+    try {
+      const env = { NEMAR_OPENNEURO_GRAPHQL_URL: files.url };
+      const result = await runCli(
+        ["admin", "upstream-status", "--measure", "--max-pages", "1", "--json"],
+        server.url,
+        env,
+      );
+      expect(result.exitCode).toBe(2);
+      expect(JSON.parse(result.stdout).measurement).toBeNull();
+      expect(files.requests.length).toBe(0);
+    } finally {
+      server.stop();
+      files.stop();
+    }
+  }, 30_000);
+
+  test("an unchecked row means the stale set may be partial: not measured", async () => {
+    seedAuthenticatedConfig();
+    const server = startServer([{ body: page([DATA, row("on000020", "unchecked")]) }]);
+    const files = startOpenNeuroFilesStandin();
+    try {
+      const env = { NEMAR_OPENNEURO_GRAPHQL_URL: files.url };
+      const result = await runCli(
+        ["admin", "upstream-status", "--measure", "--json"],
+        server.url,
+        env,
+      );
+      expect(result.exitCode).toBe(2);
+      expect(JSON.parse(result.stdout).measurement).toBeNull();
+      expect(files.requests.length).toBe(0);
+    } finally {
+      server.stop();
+      files.stop();
+    }
+  }, 30_000);
+
+  test("a population that changed during the pass is not measured", async () => {
+    seedAuthenticatedConfig();
+    const server = startServer([
+      { body: page([DATA], { next_cursor: "on002893", population_total: 2 }) },
+      { body: page([META], { population_total: 3 }) },
+    ]);
+    const files = startOpenNeuroFilesStandin();
+    try {
+      const env = { NEMAR_OPENNEURO_GRAPHQL_URL: files.url };
+      const result = await runCli(
+        ["admin", "upstream-status", "--measure", "--json"],
+        server.url,
+        env,
+      );
+      expect(result.exitCode).toBe(2);
+      expect(JSON.parse(result.stdout).measurement).toBeNull();
+      expect(files.requests.length).toBe(0);
+    } finally {
+      server.stop();
+      files.stop();
+    }
+  }, 30_000);
+
+  test("five reads in a row failing stops the measurement; the rest are unknown with the reason", async () => {
+    seedAuthenticatedConfig();
+    // Seven stale rows that all name a recorded dataset; the stand-in refuses every request.
+    const rows = Array.from({ length: 7 }, (_, i) => ({
+      ...staleRow("on003082", "1.0.0", "1.0.1"),
+      dataset_id: `on00010${i}`,
+    }));
+    const server = startServer([{ body: page(rows) }]);
+    const files = startOpenNeuroFilesStandin();
+    files.setStatus(503);
+    try {
+      const env = { NEMAR_OPENNEURO_GRAPHQL_URL: files.url };
+      const result = await runCli(
+        ["admin", "upstream-status", "--measure", "--json"],
+        server.url,
+        env,
+      );
+      expect(result.exitCode).toBe(2);
+      const m = JSON.parse(result.stdout).measurement;
+      expect(files.requests.length).toBe(5);
+      expect(m.totals.delta_unknown).toBe(7);
+      expect(m.totals.bytes_to_copy).toBeNull();
+      expect(m.complete).toBe(false);
+      expect(m.deltas[4].reason).toContain("HTTP 503");
+      expect(m.deltas[5].reason).toContain("5 reads in a row failed");
+      expect(m.deltas[6].reason).toContain("5 reads in a row failed");
+    } finally {
+      server.stop();
+      files.stop();
+    }
+  }, 30_000);
+
+  test("a progress line goes to stderr every ten mirrors, never into the JSON", async () => {
+    seedAuthenticatedConfig();
+    // Eleven stale rows on distinct ids (on000200 to on000210), all naming a recorded dataset.
+    const rows = Array.from({ length: 11 }, (_, i) => ({
+      ...staleRow("on003082", "1.0.0", "1.0.1"),
+      dataset_id: `on0002${String(i).padStart(2, "0")}`,
+    }));
+    const server = startServer([{ body: page(rows) }]);
+    const files = startOpenNeuroFilesStandin();
+    try {
+      const env = { NEMAR_OPENNEURO_GRAPHQL_URL: files.url };
+      const result = await runCli(
+        ["admin", "upstream-status", "--measure", "--json"],
+        server.url,
+        env,
+      );
+      expect(result.exitCode).toBe(0);
+      expect(result.stderr).toContain("measured 10 of 11 stale mirror(s)");
+      expect(result.stderr.match(/measured \d+ of/g)?.length).toBe(1);
+      expect(() => JSON.parse(result.stdout)).not.toThrow();
+    } finally {
+      server.stop();
+      files.stop();
+    }
+  }, 60_000);
+
+  test("the DOI volume is read at the CLI's clock: snapshots relative to now are counted", async () => {
+    seedAuthenticatedConfig();
+    // Built relative to now (a recorded list ages out of any fixed window): an import 400 days
+    // ago, then re-pulls 100, 90 and 5 days ago, and one the CLI's `now` must call the future.
+    const ago = (days: number) => new Date(Date.now() - days * 86_400_000).toISOString();
+    const aged = {
+      ...staleRow("on002893", "1.0.0", "2.0.0"),
+      upstream: {
+        latest_tag: "2.0.0",
+        latest_created: ago(5),
+        snapshots: [
+          { tag: "1.0.0", created: ago(400) },
+          { tag: "1.1.0", created: ago(100) },
+          { tag: "1.2.0", created: ago(90) },
+          { tag: "2.0.0", created: ago(5) },
+        ],
+      },
+    };
+    const server = startServer([{ body: page([aged]) }]);
+    const files = startOpenNeuroFilesStandin();
+    try {
+      const env = { NEMAR_OPENNEURO_GRAPHQL_URL: files.url };
+      const result = await runCli(
+        ["admin", "upstream-status", "--measure", "--json"],
+        server.url,
+        env,
+      );
+      const v = JSON.parse(result.stdout).measurement.doi_volume;
+      expect(v.per_snapshot).toBe(3);
+      expect(v.at_most_every_30_days).toBe(2);
+      expect(v.busiest_day).toBe(1);
+      expect(v.snapshots_dated_in_the_future).toBe(0);
     } finally {
       server.stop();
       files.stop();

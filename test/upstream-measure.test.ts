@@ -120,6 +120,30 @@ describe("measureStaleMirrors", () => {
     expect(recent.totals.bytes_to_copy).toBeNull();
   });
 
+  test("rows that cannot be measured are counted by kind, unchecked included", async () => {
+    const other = (id: string, state: UpstreamStatusRow["state"], probably?: boolean) => ({
+      ...staleRow(id, "ds003082", null, null),
+      state,
+      probably_stale: probably ?? null,
+    });
+    const rows = [
+      OK("on000001"),
+      other("on000002", "unchecked"),
+      other("on000003", "unknown", true),
+      other("on000004", "not_examined"),
+      other("on000005", "anomaly"),
+    ];
+    const m = await measureStaleMirrors(rows, options);
+    expect(m.totals.not_comparable).toEqual({
+      unknown: 1,
+      probably_stale: 1,
+      not_examined: 1,
+      unchecked: 1,
+      anomaly: 1,
+    });
+    expect(m.scope).toBe("fleet");
+  });
+
   test("progress is reported every ten mirrors", async () => {
     const rows = Array.from({ length: 21 }, (_, i) => OK(`on0003${String(i).padStart(2, "0")}`));
     const lines: string[] = [];
