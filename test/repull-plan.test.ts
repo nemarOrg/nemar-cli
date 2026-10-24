@@ -392,6 +392,15 @@ describe("a plan from tag A to tag B over an imported mirror", () => {
     // Phase 3's tag rule: `v1.1.0` names the snapshot `1.1.0`, for both flags.
     const v = await plan(fx, { toTag: `v${TAG_B}`, fromTag: `v${TAG_A}` });
     expect(v.body.upstream).toMatchObject({ from_tag: TAG_A, to_tag: TAG_B });
+    // Where no tag is recorded, the flag itself is the tag planned from, without its v.
+    const unrecorded = await plan(fx, {
+      fromTag: `v${TAG_A}`,
+      catalog: {
+        dataset: DATASET_ROW,
+        versions: [{ version: "v1.0.0", source_version: null, source_version_basis: "unknown" }],
+      },
+    });
+    expect(unrecorded.body.upstream).toMatchObject({ from_tag: TAG_A, from_tag_source: "flag" });
   });
 
   test("without version rows, from_tag comes from the tagged description and the version check is unchecked", async () => {
