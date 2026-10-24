@@ -87,8 +87,7 @@ A later summary replaces an earlier one, and the event records who wrote it, nev
 
 *The purge.* Each ticket is purged in one batch: its messages and reply keys are deleted, every event keeps its kind, actor and time but loses its detail, tags other than the queue tag are deleted, and the requester address and subject are cleared.
 `requester_email` and `subject` are NOT NULL in the original table, so they hold the empty string, not NULL; the table is not rebuilt for that.
-The requester, exclusion and assignee references are nulled, the status becomes `closed`, `purged_at` is set, the summary is kept, and a `purged` event is added.
-Clearing the exclusion means an owner it once excluded can now read the kept summary of that ticket; the summary holds no names by rule, and the exclusion exists to keep a person out of the live conversation.
+The requester and assignee references are nulled; the exclusion is kept and keeps applying to the detail, the list and the summary route, so an owner a conduct report excludes never reads its kept summary; open, pending and escalated tickets become `closed` while spam and closed keep their status; `purged_at` is set, the summary is kept, and a `purged` event is added.
 An open ticket past the cutoff is purged too, since its raw record has expired, and is counted separately in the log.
 A purged ticket is read-only (409 `ticket_purged`) and a later message to its address opens a new ticket.
 The raw keys of purged messages are kept in `mail_purged_raw_keys` (a random id and a date, nothing about the sender) so reprocessing a raw object that outlived its ticket cannot rebuild the conversation.

@@ -8,8 +8,9 @@
  *   - clears every event's `detail` (kind, actor and time stay), and adds a `purged` event;
  *   - deletes the tags other than the queue tag (a tag is written by whoever composed the address);
  *   - clears `requester_email` and `subject` to the empty string (both are NOT NULL in 0102), and
- *     nulls the requester, the exclusion and the assignee; the status becomes `closed`; `summary`
- *     and its author and time are kept.
+ *     nulls the requester and the assignee; `excluded_user_id` is KEPT, so the exclusion still
+ *     applies to the summary; open, pending and escalated become `closed` (spam and closed stay as
+ *     they are); `summary` and its author and time are kept.
  *
  * It never touches R2 (the bucket's lifecycle rule owns raw deletion) and never sends mail. It
  * reads and writes only this environment's own mail tables, which is why it may run on the
@@ -75,7 +76,8 @@ function purgeStatements(db: D1Database, id: number, now: string): D1PreparedSta
     db
       .prepare(
         `UPDATE mail_tickets SET requester_email = '', subject = '', requester_user_id = NULL,
-            excluded_user_id = NULL, assignee_user_id = NULL, status = 'closed',
+            assignee_user_id = NULL,
+            status = CASE WHEN status IN ('open', 'pending', 'escalated') THEN 'closed' ELSE status END,
             purged_at = ?, updated_at = ?
           WHERE id = ? AND purged_at IS NULL`,
       )

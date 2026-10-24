@@ -324,7 +324,7 @@ describe("purgeExpiredTickets", () => {
     expect(after.requester_email).toBe("");
     expect(after.subject).toBe("");
     expect(after.requester_user_id).toBeNull();
-    expect(after.excluded_user_id).toBeNull();
+    expect(after.excluded_user_id).toBe(ids.owner2);
     expect(after.assignee_user_id).toBeNull();
     expect(after.status).toBe("closed");
     expect(after.purged_at).toBe("2026-10-24 12:00:00");
@@ -368,7 +368,8 @@ describe("purgeExpiredTickets", () => {
     const d = ticket({ status: "spam", lastAt: "2023-01-01 00:00:00" });
     const r = await purgeExpiredTickets(env(), NOW);
     expect(r).toMatchObject({ status: "ok", purged: 4, purgedOpen: 2 });
-    for (const id of [a, b, c, d]) expect(row(id).status).toBe("closed");
+    for (const id of [a, b, c]) expect(row(id).status).toBe("closed");
+    expect(row(d).status).toBe("spam");
   });
 
   test("a restricted ticket stays restricted after the purge", async () => {
@@ -377,6 +378,26 @@ describe("purgeExpiredTickets", () => {
     expect(row(t).restricted).toBe(1);
     expect((await call("admin", "GET", `/tickets/${t}`)).status).toBe(404);
     expect((await call("owner", "GET", `/tickets/${t}`)).status).toBe(200);
+  });
+
+  test("the exclusion survives the purge: the excluded owner is refused, another owner reads the summary", async () => {
+    const t = ticket({
+      queue: "conduct",
+      restricted: true,
+      excluded: ids.owner2,
+      lastAt: "2023-01-01 00:00:00",
+    });
+    await call("owner", "PUT", `/tickets/${t}/summary`, { summary: "A report was handled." });
+    await purgeExpiredTickets(env(), NOW);
+    expect(row(t).excluded_user_id).toBe(ids.owner2);
+    expect((await call("owner2", "GET", `/tickets/${t}`)).status).toBe(404);
+    expect((await call("owner2", "PUT", `/tickets/${t}/summary`, { summary: "x" })).status).toBe(
+      404,
+    );
+    expect((await call("owner2", "GET", "/tickets?status=closed")).body.tickets).toEqual([]);
+    const ok = await call("owner", "GET", `/tickets/${t}`);
+    expect(ok.status).toBe(200);
+    expect(ok.body.summary).toBe("A report was handled.");
   });
 
   test("a re-run finds nothing and writes nothing", async () => {
