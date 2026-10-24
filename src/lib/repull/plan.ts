@@ -41,6 +41,7 @@ import { fetchOpenNeuroLatestTag } from "../openneuro.js";
 import { bumpVersion } from "../semver.js";
 import { DESCRIPTION_PATH } from "./description.js";
 import {
+  PLANNER_VERSION,
   PLAN_FILE_VERSION,
   PLAN_SCHEMA,
   type PlanBody,
@@ -633,7 +634,7 @@ export async function planRepull(opts: PlanOptions): Promise<PlanOutcome> {
     const n1 = corrections.length > 0 ? bumpVersion(versions.next, "patch") : null;
 
     const body: PlanBody = {
-      planner: 1,
+      planner: PLANNER_VERSION,
       dataset: id,
       upstream: {
         ds,

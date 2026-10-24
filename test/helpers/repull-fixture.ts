@@ -38,6 +38,7 @@ import {
   withBidsignoreEntry,
 } from "../../shared/standard-edits/bidsignore";
 import { applyConceptDoiToDescription } from "../../shared/standard-edits/description";
+import { ensureParticipantsTsv } from "../../shared/standard-edits/participants";
 import {
   buildDoiBadge,
   planReadmeBadgeCommit,
@@ -227,6 +228,12 @@ export interface FixtureOptions {
    * `.set` and moves the scrubbed recording, so N.0.0 would name two dead keys.
    */
   deadKeys?: boolean;
+  /**
+   * Upstream ships no `participants.tsv` at either tag, and NEMAR's holds the enrichment's
+   * placeholder for its own tree (`ensureParticipantsTsv`), or with `"edited"` that placeholder
+   * with one value filled in afterwards. Tag B adds sub-03, so its placeholder differs.
+   */
+  generatedParticipants?: true | "edited";
 }
 
 /** The ADR 0085 sentence a correction appends to `CHANGES` (`changeLogEntry`). */
@@ -459,7 +466,9 @@ async function build(
       ? {}
       : { [opts.readme === "md" ? "README.md" : "README"]: README_A }),
     [PATHS.changes]: `${TAG_A} 2026-01-01\n  - Initial snapshot.\n`,
-    [PATHS.participants]: "participant_id\tage\nsub-01\t30\nsub-02\t31\n",
+    ...(opts.generatedParticipants
+      ? {}
+      : { [PATHS.participants]: "participant_id\tage\nsub-01\t30\nsub-02\t31\n" }),
     [PATHS.flaggedEdf]: flagged,
     [PATHS.cleanEdf]: edfBytes("X X X X", 4000, 2, false),
     [PATHS.sidecar]: `{\n  "TaskName": "rest",\n  "SamplingFrequency": 256\n}\n`,
@@ -634,8 +643,24 @@ async function build(
       `{\n  "TaskName": "rest",\n  "SamplingFrequency": 256,\n  "PowerLineFrequency": 60\n}\n`,
     );
   }
+  if (opts.generatedParticipants) {
+    // The enrichment's commit, from the tree as it stands (GitHub's listing names files and their
+    // directories; the subjects are the same either way).
+    const listed = (await run(["git", "ls-files"], clone)).split("\n").filter(Boolean);
+    const placeholder = ensureParticipantsTsv(listed.map((path) => ({ path }))).contentToCommit;
+    if (placeholder === null) throw new Error("the fixture's tree has no subjects");
+    write(
+      clone,
+      PATHS.participants,
+      opts.generatedParticipants === "edited"
+        ? placeholder.replace("sub-01\tn/a\tn/a", "sub-01\t30\tn/a")
+        : placeholder,
+    );
+  }
   if (!opts.noContributorEdits && !opts.sidecarEditOnly) {
-    write(clone, PATHS.participants, "participant_id\tage\nsub-01\t29\nsub-02\t31\n");
+    if (!opts.generatedParticipants) {
+      write(clone, PATHS.participants, "participant_id\tage\nsub-01\t29\nsub-02\t31\n");
+    }
     const described = JSON.parse(readFileSync(join(clone, PATHS.description), "utf8"));
     described.HowToAcknowledge = "Cite the NEMAR mirror.";
     write(clone, PATHS.description, JSON.stringify(described, null, 2));
@@ -732,7 +757,11 @@ async function build(
       2,
     )}\n`,
     [PATHS.changes]: `${TAG_A} 2026-01-01\n  - Initial snapshot.\n${TAG_B} 2026-06-01\n  - Added sub-03.\n`,
-    [PATHS.participants]: "participant_id\tage\nsub-01\t30\nsub-02\t31\nsub-03\t32\n",
+    ...(opts.generatedParticipants
+      ? {}
+      : {
+          [PATHS.participants]: "participant_id\tage\nsub-01\t30\nsub-02\t31\nsub-03\t32\n",
+        }),
   };
   if (opts.deadKeys) changes[PATHS.copiedSet] = files[PATHS.set] as Uint8Array;
   if (opts.subtypes) {

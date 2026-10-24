@@ -30,6 +30,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { sourceSnapshotOf } from "../shared/source-snapshot";
 import { buildDoiBadge } from "../shared/standard-edits/readme";
+import { PLANNER_VERSION } from "../src/lib/repull/digest";
 import { gitBlobOid } from "../src/lib/repull/edits";
 import { type PlanOptions, RepullCannotPlan, planRepull } from "../src/lib/repull/plan";
 import { listBucketObjects } from "../src/lib/repull/sources";
@@ -688,6 +689,86 @@ describe("the privacy ledger (ADR 0085)", () => {
         expect.objectContaining({ status: "unparseable", from: null, error: "SyntaxError" }),
       ]);
       expect(f.executable).toBe(false);
+    } finally {
+      fx.cleanup();
+    }
+  });
+});
+
+describe("the enrichment's generated participants.tsv is a standard edit", () => {
+  const placeholder = (...subjects: string[]) =>
+    `participant_id\tage\tsex\n${subjects.map((s) => `${s}\tn/a\tn/a\n`).join("")}`;
+
+  test("explained from upstream's tree, re-made from tag B's subjects, and no correction for the ledger rule", async () => {
+    // A recorded correction makes any unexplained path refuse the plan, so this also shows the
+    // generated file is not counted as one.
+    const fx = await buildRepullFixture({
+      generatedParticipants: true,
+      noContributorEdits: true,
+      recordedCorrection: true,
+    });
+    try {
+      const f = await plan(fx);
+      const body = f.body as Body;
+      expect(body.planner).toBe(PLANNER_VERSION);
+      expect(PLANNER_VERSION).toBe(2);
+      const p = row(body, PATHS.participants);
+      expect(p).toMatchObject({
+        class: "take-theirs",
+        explained_by_base: "participants-generated",
+        explained_by_theirs: null,
+        decision: "theirs",
+        delta: true,
+      });
+      expect(p.target).toEqual({
+        kind: "git",
+        mode: "100644",
+        oid: gitBlobOid(Buffer.from(placeholder("sub-01", "sub-02", "sub-03"))),
+        computed: "participants-generated",
+      });
+      expect(counts(body).unexplained).toBe(0);
+      expect(body.refusals).toEqual([]);
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  test("with the same subjects at both tags, NEMAR's file is kept as it is", async () => {
+    const fx = await buildRepullFixture({
+      generatedParticipants: true,
+      noContributorEdits: true,
+      metadataOnlyB: true,
+    });
+    try {
+      const p = row((await plan(fx)).body as Body, PATHS.participants);
+      expect(p).toMatchObject({
+        class: "keep-ours",
+        explained_by_base: "participants-generated",
+        explained_by_theirs: "participants-generated",
+        decision: "ours",
+        delta: false,
+        deleted: false,
+      });
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  test("a placeholder edited afterwards is NEMAR's own addition, a correction", async () => {
+    const fx = await buildRepullFixture({
+      generatedParticipants: "edited",
+      noContributorEdits: true,
+    });
+    try {
+      const p = row((await plan(fx)).body as Body, PATHS.participants);
+      expect(p).toMatchObject({
+        class: "correction",
+        subtype: "nemar-added",
+        explained_by_base: null,
+        explained_by_theirs: null,
+        deleted: true,
+      });
+      expect(p.target).toEqual({ kind: "absent" });
     } finally {
       fx.cleanup();
     }
