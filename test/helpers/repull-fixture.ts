@@ -91,6 +91,10 @@ export const PATHS = {
   participants: "participants.tsv",
   description: "dataset_description.json",
   changes: "CHANGES",
+  /** With `deadKeys`: a copy of tag A's `.set`, whose key NEMAR marked dead. */
+  copiedSet: "sub-02/eeg/sub-02_task-rest_eeg.set",
+  /** With `deadKeys`: where tag B moves the recording the import scrubbed. */
+  movedEdf: "sub-04/eeg/sub-04_task-rest_eeg.edf",
 } as const;
 
 const UPSTREAM_GITATTRIBUTES = `* annex.backend=SHA256E
@@ -165,6 +169,11 @@ export interface FixtureOptions {
    * must fetch it to see that NEMAR's annexed copy hashes to it.
    */
   bigMotion?: boolean;
+  /**
+   * NEMAR's git-annex branch marks tag A's `.set` key dead, and tag B both adds a copy of that
+   * `.set` and moves the scrubbed recording, so N.0.0 would name two dead keys.
+   */
+  deadKeys?: boolean;
 }
 
 /** The ADR 0085 sentence a correction appends to `CHANGES` (`changeLogEntry`). */
@@ -465,6 +474,27 @@ async function build(
       `{\n  "TaskName": "rest",\n  "SamplingFrequency": 256,\n  "PowerLineFrequency": 60\n}\n`,
     );
     write(clone, PATHS.participants, "participant_id\tage\nsub-01\t29\nsub-02\t31\n");
+    const described = JSON.parse(readFileSync(join(clone, PATHS.description), "utf8"));
+    described.HowToAcknowledge = "Cite the NEMAR mirror.";
+    write(clone, PATHS.description, JSON.stringify(described, null, 2));
+  }
+  if (opts.deadKeys) {
+    // Retired the way the scrub and ADR 0085's annex-registry retire a key: every holder
+    // retracted, then the key marked dead.
+    const setA = upKeysA.get(PATHS.set) as string;
+    // `whereis` exits 1 for a key with no copy, so its JSON is read, never its exit code.
+    const listed = await runCommand(["git", "annex", "whereis", "--key", setA, "--json"], {
+      cwd: clone,
+    });
+    const where = JSON.parse(listed.stdout.split("\n")[0] as string) as {
+      whereis?: Array<{ uuid: string }>;
+      untrusted?: Array<{ uuid: string }>;
+    };
+    const holders = [...(where.whereis ?? []), ...(where.untrusted ?? [])].map((w) => w.uuid);
+    await run(["git", "annex", "setpresentkey", "--batch"], clone, {
+      stdin: holders.map((u: string) => `${setA} ${u} 0\n`).join(""),
+    });
+    await run(["git", "annex", "dead", "--key", setA], clone);
   }
   await run(["git", "-c", "annex.largefiles=nothing", "add", "-A"], clone);
   await run(["git", "commit", "-qm", "Publish edits"], clone);
@@ -516,7 +546,12 @@ async function build(
     [PATHS.changes]: `${TAG_A} 2026-01-01\n  - Initial snapshot.\n${TAG_B} 2026-06-01\n  - Added sub-03.\n`,
     [PATHS.participants]: "participant_id\tage\nsub-01\t30\nsub-02\t31\nsub-03\t32\n",
   };
+  if (opts.deadKeys) changes[PATHS.copiedSet] = files[PATHS.set] as Uint8Array;
   for (const [p, b] of Object.entries(changes)) write(up, p, b);
+  if (opts.deadKeys) {
+    mkdirSync(join(up, dirname(PATHS.movedEdf)), { recursive: true });
+    await run(["git", "mv", PATHS.flaggedEdf, PATHS.movedEdf], up);
+  }
   await run(["git", "rm", "-q", PATHS.deletedSidecar], up);
   await run(["git", "mv", PATHS.events, PATHS.eventsRenamed], up);
   await run(["git", "annex", "add", "--quiet", "."], up);

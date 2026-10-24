@@ -455,7 +455,20 @@ export async function overlay(input: OverlayInput): Promise<OverlayResult> {
   });
   {
     const changed = description.upstreamChanged;
-    const cls = classify(changed, description.explained);
+    // Corrections and conflicts are per key, so the file's class is its worst key's: a conflict
+    // on any key, else a correction on any key, else upstream's change taken. A file that could not
+    // be merged at all is unexplained as a whole.
+    const keyClasses = new Set(description.keys.map((k) => k.class));
+    const merged = description.status === "merged";
+    const cls: PathClass = !merged
+      ? classify(changed, false)
+      : keyClasses.has("conflict")
+        ? "conflict"
+        : keyClasses.has("correction")
+          ? "correction"
+          : changed
+            ? "take-theirs"
+            : "keep-ours";
     decisions.push({
       path: DESCRIPTION_PATH,
       group: "description",
@@ -469,16 +482,17 @@ export async function overlay(input: OverlayInput): Promise<OverlayResult> {
       },
       class: cls,
       subtype:
-        cls === "conflict"
-          ? conflictSubtype(descSides.base, descSides.theirs, descSides.ours)
-          : cls === "correction"
-            ? correctionSubtype(descSides.base, descSides.ours)
-            : null,
+        cls !== "conflict" && cls !== "correction"
+          ? null
+          : merged
+            ? "per-key"
+            : cls === "conflict"
+              ? conflictSubtype(descSides.base, descSides.theirs, descSides.ours)
+              : correctionSubtype(descSides.base, descSides.ours),
       decision: "theirs",
-      target:
-        description.status === "merged"
-          ? { kind: "description" }
-          : { kind: "unknown", reason: `description-${description.status}` },
+      target: merged
+        ? { kind: "description" }
+        : { kind: "unknown", reason: `description-${description.status}` },
       delta: true,
       deleted: false,
     });

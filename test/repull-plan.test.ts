@@ -18,9 +18,8 @@ import { join } from "node:path";
 import { sourceSnapshotOf } from "../shared/source-snapshot";
 import { buildDoiBadge } from "../shared/standard-edits/readme";
 import { gitBlobOid } from "../src/lib/repull/edits";
-import { listBucketObjects } from "../src/lib/repull/sources";
 import { type PlanOptions, planRepull } from "../src/lib/repull/plan";
-import { startRenameS3Standin } from "./helpers/s3-rename-standin";
+import { listBucketObjects } from "../src/lib/repull/sources";
 import {
   CHANGES_SENTENCE,
   CONCEPT_DOI,
@@ -34,6 +33,7 @@ import {
   buildRepullFixture,
   refsOf,
 } from "./helpers/repull-fixture";
+import { startRenameS3Standin } from "./helpers/s3-rename-standin";
 
 setDefaultTimeout(240_000);
 
@@ -169,6 +169,7 @@ describe("a plan from tag A to tag B over an imported mirror", () => {
     const sidecar = row(body, PATHS.sidecar);
     expect(sidecar).toMatchObject({ class: "correction", subtype: "nemar-modified", delta: true });
     expect(body.corrections).toEqual([
+      { path: PATHS.description, group: "description", subtype: "per-key" },
       { path: PATHS.sidecar, group: null, subtype: "nemar-modified" },
     ]);
     expect(body.versions).toEqual({ current: "1.0.0", n0: "2.0.0", n1: "2.0.1" });
@@ -217,7 +218,17 @@ describe("a plan from tag A to tag B over an imported mirror", () => {
       source_version: TAG_B,
       source_version_basis: "doi",
     });
-    expect(d.keys).toEqual([expect.objectContaining({ key: "GeneratedBy", class: "take-theirs" })]);
+    // A key upstream added is taken; a key NEMAR added is a correction for N.0.1, so N.0.0 lacks it.
+    expect(d.keys).toEqual([
+      expect.objectContaining({ key: "GeneratedBy", class: "take-theirs", take: "theirs" }),
+      expect.objectContaining({
+        key: "HowToAcknowledge",
+        class: "correction",
+        subtype: "nemar-added",
+      }),
+    ]);
+    expect(merged.HowToAcknowledge).toBeUndefined();
+    expect(counts(body).description_corrections).toBe(1);
     expect(row(body, PATHS.description).target).toEqual({ kind: "description" });
   });
 
@@ -238,7 +249,7 @@ describe("a plan from tag A to tag B over an imported mirror", () => {
 
   test("a ledger with only the import's own line does not refuse a plan with unexplained paths", () => {
     expect(body.ledger).toEqual({ status: "ok", lines: 1, recorded_corrections: 0 });
-    expect(counts(body).unexplained).toBe(2);
+    expect(counts(body).unexplained).toBe(3);
     expect(body.refusals).toEqual([]);
   });
 
@@ -372,6 +383,35 @@ describe("the privacy ledger (ADR 0085)", () => {
       });
       expect(counts(body).unexplained).toBe(0);
       expect(body.versions).toEqual({ current: "1.0.0", n0: "2.0.0", n1: null });
+    } finally {
+      fx.cleanup();
+    }
+  });
+});
+
+describe("dead keys", () => {
+  test("N.0.0 never copies a dead key: a recording is left for the scrub to re-key, anything else refuses", async () => {
+    const fx = await buildRepullFixture({ deadKeys: true, noContributorEdits: true });
+    try {
+      const f = await plan(fx);
+      const body = f.body as Body;
+      const copy = body.copy as { items: Array<{ key: string }>; dead_recordings: string[] };
+      expect(row(body, PATHS.movedEdf).target).toEqual({
+        kind: "annex",
+        key: fx.keys.flaggedUpstream,
+      });
+      expect(copy.dead_recordings).toEqual([fx.keys.flaggedUpstream]);
+      expect(row(body, PATHS.copiedSet).target).toEqual({ kind: "annex", key: fx.keys.setA });
+      expect(copy.items.map((i) => i.key)).not.toContain(fx.keys.setA);
+      expect(copy.items.map((i) => i.key)).not.toContain(fx.keys.flaggedUpstream);
+      expect(body.refusals).toEqual([expect.objectContaining({ code: "target-names-dead-key" })]);
+      // The scrubbed recording's old path: upstream moved it, and NEMAR's re-keyed copy goes.
+      expect(row(body, PATHS.flaggedEdf)).toMatchObject({
+        explained_by_base: "scrubbed-key",
+        class: "take-theirs",
+        deleted: true,
+      });
+      expect(f.executable).toBe(false);
     } finally {
       fx.cleanup();
     }
