@@ -49,8 +49,13 @@ function ticket(over: Record<string, unknown> = {}) {
   };
 }
 
-const USERS: Record<string, number> = { admin1: 1, alice: 7, bob: 8 };
-const NAMES: Record<number, string> = { 1: "admin1", 7: "alice", 8: "bob" };
+const USERS: Record<string, number> = { admin1: 1, alice: 7, bob: 8, "12345": 77 };
+const NAMES: Record<number, string> = {
+  1: "admin1",
+  7: "alice",
+  8: "bob",
+  9: "eve\u001b[31m\u202e",
+};
 
 /** The server: user routes are built in; a test supplies the mail routes it cares about. */
 function startServer(routes: Record<string, Handler> = {}) {
@@ -69,6 +74,8 @@ function startServer(routes: Record<string, Handler> = {}) {
       };
       if (url.pathname === "/notices") return Response.json({ notices: [] });
       calls.push(call);
+      const override = routes[`${req.method} ${url.pathname}`];
+      if (override) return override(call);
       if (url.pathname === "/users/me") {
         return Response.json({
           user: {
@@ -109,6 +116,10 @@ function startServer(routes: Record<string, Handler> = {}) {
     stop: () => server.stop(true),
   };
 }
+
+/** Whether text still holds an ESC, BEL, RLO or RLM character. */
+const hasRaw = (text: string) =>
+  ["\u001b", "\u0007", "\u202e", "\u200f"].some((c) => text.includes(c));
 
 const err = (status: number, code: string, error = `${code} sentence`) =>
   Response.json({ error, code }, { status });
@@ -243,7 +254,7 @@ describe("mail list", () => {
 
 describe("mail show", () => {
   const hostile = {
-    ticket: ticket({ subject: "Pay now\u001b[2J ‮gnp.exe" }),
+    ticket: ticket({ subject: "Pay now\u001b[2J \u202egnp.exe" }),
     tags: ["billing\u001b[1m"],
     messages: [
       {
@@ -267,7 +278,7 @@ describe("mail show", () => {
         from_addr: "person@example.org",
         to_addr: "support@example.org",
         subject: "Pay now\u001b[2J",
-        text_body: "first message\u001b]0;owned\u0007\nline two ‮evil\ttabbed",
+        text_body: "first message\u001b]0;owned\u0007\nline two \u202eevil\ttabbed",
         spf: "pass",
         dkim: "fail",
         dmarc: "none",
@@ -292,7 +303,7 @@ describe("mail show", () => {
       const r = await runCli(["show", "42"], server.url);
       expect(r.exitCode).toBe(0);
       expect(r.stdout).not.toContain("\u001b");
-      expect(r.stdout).not.toContain("‮");
+      expect(r.stdout).not.toContain("\u202e");
       expect(r.stdout).not.toContain("\u0007");
       expect(r.stdout).toContain("\\x1b[2J");
       expect(r.stdout).toContain("\\u202e");
@@ -315,7 +326,7 @@ describe("mail show", () => {
       const r = await runCli(["show", "42", "--json"], server.url);
       expect(r.exitCode).toBe(0);
       const body = JSON.parse(r.stdout);
-      expect(body.ticket.subject).toBe("Pay now\u001b[2J ‮gnp.exe");
+      expect(body.ticket.subject).toBe("Pay now\u001b[2J \u202egnp.exe");
       expect(body.messages[1].text_body).toContain("\u001b]0;owned\u0007");
     } finally {
       server.stop();
@@ -591,14 +602,14 @@ describe("exit code 3", () => {
     }
   });
 
-  test("forbidden", async () => {
+  test("forbidden is exit 4, not found stays 3", async () => {
     const server = startServer({
       "POST /admin/mail/reprocess": () => err(403, "forbidden", "Only an owner can do that."),
     });
     try {
       const raw = "inbound/raw/2026/10/20/123e4567-e89b-12d3-a456-426614174000.eml";
       const r = await runCli(["reprocess", raw], server.url);
-      expect(r.exitCode).toBe(3);
+      expect(r.exitCode).toBe(4);
       expect(r.stderr).toContain("Only an owner can do that.");
     } finally {
       server.stop();
@@ -680,7 +691,7 @@ describe("queues and away", () => {
     try {
       const r = await runCli(["queues", "set", "support", "--strategy", "pool"], server.url);
       expect(r.stderr).toContain("Only an owner can do that.");
-      expect(r.exitCode).toBe(3);
+      expect(r.exitCode).toBe(4);
     } finally {
       server.stop();
     }
@@ -719,9 +730,9 @@ describe("queues and away", () => {
           "away",
           "set",
           "--from",
-          "2026-11-01",
+          "2026-11-01T00:00:00Z",
           "--until",
-          "2026-11-10",
+          "2026-11-10T00:00:00Z",
           "--backup",
           "bob",
           "--note",
@@ -760,14 +771,19 @@ describe("queues and away", () => {
     });
     try {
       const r = await runCli(
-        ["away", "set", "--until", "2026-12-01", "--user", "alice"],
+        ["away", "set", "--until", "2026-12-01T00:00:00+00:00", "--user", "alice"],
         server.url,
       );
       expect(r.exitCode).toBe(0);
       const bad = await runCli(["away", "set", "--until", "someday"], server.url);
       expect(bad.exitCode).toBe(2);
+      for (const loose of ["2026-12-01", "2026-12-01T10:00:00", "2026-12-01 10:00:00Z"]) {
+        const r = await runCli(["away", "set", "--until", loose], server.url);
+        expect(r.exitCode, loose).toBe(2);
+      }
+      expect(server.mail()).toHaveLength(1);
       const order = await runCli(
-        ["away", "set", "--from", "2026-12-02", "--until", "2026-12-01"],
+        ["away", "set", "--from", "2026-12-02T00:00:00Z", "--until", "2026-12-01T00:00:00Z"],
         server.url,
       );
       expect(order.exitCode).toBe(2);
@@ -804,6 +820,240 @@ describe("reprocess and help", () => {
       expect(all.stdout).toContain("Exit codes:");
       expect(all.stdout).toMatch(/3\s+not found or not visible/);
       expect(all.stdout).toMatch(/2\s+usage/);
+    } finally {
+      server.stop();
+    }
+  });
+});
+
+describe("reply retry advice for unknown outcomes", () => {
+  const retry = async (respond: () => Response, extra: string[] = []) => {
+    const server = startServer({ "POST /admin/mail/tickets/42/reply": respond });
+    try {
+      const r = await runCli(
+        ["reply", "42", "--text", "hi", "--yes", "--idempotency-key", "k-9", ...extra],
+        server.url,
+      );
+      return r;
+    } finally {
+      server.stop();
+    }
+  };
+
+  test("an HTML 504 from a gateway says to retry with the key", async () => {
+    const r = await retry(() => new Response("<html>", { status: 504 }));
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toContain("--idempotency-key k-9");
+  });
+
+  test("a 500 internal and a maintenance 503 do too, and --json carries the key", async () => {
+    const a = await retry(() => err(500, "internal", "Boom."), ["--json"]);
+    expect(a.exitCode).toBe(1);
+    expect(JSON.parse(a.stderr.trim().split("\n").at(-1) ?? "")).toMatchObject({
+      code: "internal",
+      idempotency_key: "k-9",
+    });
+    const b = await retry(() =>
+      Response.json({ mode: "full", message: "Down for maintenance." }, { status: 503 }),
+    );
+    expect(b.stderr).toContain("--idempotency-key k-9");
+  });
+
+  test("a definite 4xx refusal does not suggest a retry", async () => {
+    const r = await retry(() => err(409, "ticket_closed", "It is closed."), ["--json"]);
+    expect(r.exitCode).toBe(1);
+    const last = JSON.parse(r.stderr.trim().split("\n").at(-1) ?? "");
+    expect(last.idempotency_key).toBeUndefined();
+    const human = await retry(() => err(409, "ticket_closed", "It is closed."));
+    expect(human.stderr).not.toContain("Retry with");
+  });
+});
+
+describe("exit codes 3 and 4", () => {
+  test("404 is 3 and 403 is 4 on the same route", async () => {
+    let status = 404;
+    const server = startServer({
+      "GET /admin/mail/tickets/42": () =>
+        status === 404 ? err(404, "not_found", "No such ticket.") : err(403, "forbidden", "No."),
+    });
+    try {
+      expect((await runCli(["show", "42"], server.url)).exitCode).toBe(3);
+      status = 403;
+      expect((await runCli(["show", "42"], server.url)).exitCode).toBe(4);
+      const j = await runCli(["show", "42", "--json"], server.url);
+      expect(JSON.parse(j.stderr.trim())).toMatchObject({ code: "forbidden" });
+    } finally {
+      server.stop();
+    }
+  });
+});
+
+describe("Commander usage errors exit 2", () => {
+  test("a missing argument, with and without --json", async () => {
+    const server = startServer();
+    try {
+      const plain = await runCli(["show"], server.url);
+      expect(plain.exitCode).toBe(2);
+      expect(plain.stderr).toContain("missing required argument");
+      const json = await runCli(["show", "--json"], server.url);
+      expect(json.exitCode).toBe(2);
+      expect(json.stdout).toBe("");
+      const body = JSON.parse(json.stderr.trim());
+      expect(body.code).toBe("usage");
+      expect(body.error).toContain("missing required argument");
+      expect(server.mail()).toHaveLength(0);
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("a missing required option and an unknown option", async () => {
+    const server = startServer();
+    try {
+      const plain = await runCli(["away", "set"], server.url);
+      expect(plain.exitCode).toBe(2);
+      expect(plain.stderr).toContain("--until");
+      const json = await runCli(["away", "set", "--json"], server.url);
+      expect(json.exitCode).toBe(2);
+      expect(JSON.parse(json.stderr.trim())).toMatchObject({ code: "usage" });
+      const unknown = await runCli(["list", "--bogus", "--json"], server.url);
+      expect(unknown.exitCode).toBe(2);
+      expect(JSON.parse(unknown.stderr.trim())).toMatchObject({ code: "usage" });
+      const cmd = await runCli(["nonsense"], server.url);
+      expect(cmd.exitCode).toBe(2);
+    } finally {
+      server.stop();
+    }
+  });
+});
+
+describe("names", () => {
+  const hostileShow = {
+    ticket: ticket({ assignee_user_id: 9 }),
+    tags: [],
+    messages: [],
+    events: [
+      { id: 1, kind: "assigned", actor_user_id: 9, detail: null, created_at: NOW },
+      { id: 2, kind: "note", actor_user_id: 9, detail: null, created_at: NOW },
+    ],
+  };
+
+  test("a hostile username is escaped every time it is shown, not only the first", async () => {
+    const server = startServer({ "GET /admin/mail/tickets/42": () => Response.json(hostileShow) });
+    try {
+      const r = await runCli(["show", "42"], server.url);
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).not.toContain("\u001b");
+      expect(r.stdout).not.toContain("\u202e");
+      expect(r.stdout.split("eve\\x1b[31m\\u202e").length - 1).toBe(3);
+      // One lookup serves all three.
+      expect(server.calls.filter((c) => c.path === "/admin/users/by-id/9")).toHaveLength(1);
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("a 404 on the name lookup degrades to #id", async () => {
+    const server = startServer({
+      "GET /admin/mail/tickets/42": () =>
+        Response.json({ ...hostileShow, ticket: ticket({ assignee_user_id: 55 }), events: [] }),
+    });
+    try {
+      const r = await runCli(["show", "42"], server.url);
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toContain("#55");
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("any other lookup failure fails the command", async () => {
+    for (const status of [401, 429, 500]) {
+      const server = startServer({
+        "GET /admin/mail/tickets/42": () => Response.json(hostileShow),
+        "GET /admin/users/by-id/9": () => err(status, "x", "Lookup refused."),
+      });
+      try {
+        const r = await runCli(["show", "42"], server.url);
+        expect(r.exitCode, String(status)).not.toBe(0);
+        expect(r.stderr).toContain("Lookup refused.");
+      } finally {
+        server.stop();
+      }
+    }
+  });
+
+  test("bare digits are a user id and @name is always a username", async () => {
+    const server = startServer({
+      "POST /admin/mail/tickets/42/assign": (call) =>
+        Response.json({
+          ticket: ticket({ assignee_user_id: (call.body as { user_id: number }).user_id }),
+        }),
+    });
+    try {
+      await runCli(["assign", "42", "12345"], server.url);
+      await runCli(["assign", "42", "@12345"], server.url);
+      await runCli(["assign", "42", "@bob"], server.url);
+      expect(server.mail().map((c) => c.body)).toEqual([
+        { user_id: 12345 },
+        { user_id: 77 },
+        { user_id: 8 },
+      ]);
+    } finally {
+      server.stop();
+    }
+  });
+});
+
+describe("failures part way through", () => {
+  test("a repeated cursor under --all is an error and prints nothing", async () => {
+    const server = startServer({
+      "GET /admin/mail/tickets": () => Response.json({ tickets: [ticket()], next_cursor: "same" }),
+    });
+    try {
+      const json = await runCli(["list", "--all", "--json"], server.url);
+      expect(json.exitCode).toBe(1);
+      expect(json.stdout).toBe("");
+      expect(JSON.parse(json.stderr.trim())).toHaveProperty("error");
+      const human = await runCli(["list", "--all"], server.url);
+      expect(human.exitCode).toBe(1);
+      expect(human.stdout).toBe("");
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("a page that fails under --all leaves standard output empty", async () => {
+    const server = startServer({
+      "GET /admin/mail/tickets": (call) =>
+        call.query.cursor
+          ? err(500, "internal", "Second page failed.")
+          : Response.json({ tickets: [ticket()], next_cursor: "c1" }),
+    });
+    try {
+      const r = await runCli(["list", "--all", "--json"], server.url);
+      expect(r.exitCode).toBe(1);
+      expect(r.stdout).toBe("");
+    } finally {
+      server.stop();
+    }
+  });
+});
+
+describe("server-generated fields are escaped too", () => {
+  test("ref, status, queue and dates in list and show", async () => {
+    const bad = ticket({ ref: "R\u001b[1m", status: "open\u202e", queue_tag: "q\u0007" });
+    const server = startServer({
+      "GET /admin/mail/tickets": () => Response.json({ tickets: [bad], next_cursor: null }),
+      "GET /admin/mail/tickets/42": () =>
+        Response.json({ ticket: bad, tags: [], messages: [], events: [] }),
+    });
+    try {
+      for (const args of [["list"], ["show", "42"]]) {
+        const r = await runCli(args, server.url);
+        expect(hasRaw(r.stdout), args[0]).toBe(false);
+        expect(r.stdout).toContain("R\\x1b[1m");
+      }
     } finally {
       server.stop();
     }

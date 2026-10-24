@@ -56,8 +56,32 @@ import { getCurrentUser } from "../lib/api/auth.js";
 import { ApiError, errorDetail } from "../lib/api/errors.js";
 import { isAuthenticated } from "../lib/config.js";
 import { confirm } from "../lib/confirm.js";
-import { markReportedExit, unmarkReportedExit } from "../lib/debug-log.js";
+import { markReportedExit, markUsageExit, unmarkReportedExit } from "../lib/debug-log.js";
 import { terminalSafeText } from "../lib/display-name.js";
+
+/**
+ * Every command of the group is one of these, so that what Commander itself rejects (a missing
+ * argument, an unknown option, a missing required option) is a usage error like every other: exit 2,
+ * and `{"error", "code": "usage"}` on standard error under `--json`. `index.ts` replaces each
+ * command's `exitOverride`, so the exit code cannot be set there; `error` is what Commander calls
+ * for all of these, and it is overridden for this tree alone.
+ */
+class MailCommand extends Command {
+  override createCommand(name?: string): Command {
+    return new MailCommand(name);
+  }
+
+  override error(message: string): never {
+    const clean = message.replace(/^error: /, "").trim();
+    if (process.argv.includes("--json")) {
+      console.error(JSON.stringify({ error: clean, code: "usage" }));
+    } else {
+      console.error(`Error: ${oneLine(clean)}`);
+    }
+    markUsageExit();
+    process.exit(EXIT_USAGE);
+  }
+}
 
 // ---------------------------------------------------------------------------------------------
 // Errors, exit codes and guidance
@@ -67,6 +91,7 @@ import { terminalSafeText } from "../lib/display-name.js";
 const EXIT_ERROR = 1;
 const EXIT_USAGE = 2;
 const EXIT_NOT_FOUND = 3;
+const EXIT_NOT_PERMITTED = 4;
 
 /** A mistyped or refused invocation: nothing was sent. */
 class UsageError extends Error {}
@@ -78,7 +103,8 @@ class UsageError extends Error {}
 export const MAIL_ERROR_GUIDANCE: Record<MailErrorCode, string> = {
   bad_request: "The server rejected the request as malformed; check the arguments and try again.",
   not_found: "There is no such ticket, or it is not visible to you.",
-  forbidden: "That action is for an owner.",
+  forbidden:
+    "Your account is not permitted to do that (an owner-only action, or an account that is not active).",
   ineligible_assignee:
     "That person cannot take it: on a restricted queue everyone named must be an owner, on any other an admin or an owner.",
   ticket_is_spam:
@@ -121,18 +147,26 @@ function guidanceFor(word: string | undefined): string | undefined {
     : undefined;
 }
 
-/** What a failure of a reply says about retrying: the one case where the key matters. */
-function retryAdvice(error: ApiError, key: string): string | undefined {
+/**
+ * Whether the outcome of a reply is unknown or retryable under its key: the connection failed, the
+ * server answered 5xx (including an HTML gateway error and maintenance mode), or the route said so.
+ * A definite 4xx refusal is not retried with the key: the same request would be refused again.
+ */
+function retryableWithKey(error: ApiError): boolean {
   const word = mailErrorCode(error);
-  if (
+  return (
     word === "reply_in_progress" ||
     word === "reply_delivery_unknown" ||
     word === "reply_not_sent" ||
-    error.statusCode === 0
-  ) {
-    return `Retry with: --idempotency-key ${key}  (the same key never sends the reply twice)`;
-  }
-  return undefined;
+    error.statusCode === 0 ||
+    error.statusCode >= 500
+  );
+}
+
+function retryAdvice(error: ApiError, key: string): string | undefined {
+  return retryableWithKey(error)
+    ? `Retry with: --idempotency-key ${key}  (the same key never sends the reply twice)`
+    : undefined;
 }
 
 interface Failure {
@@ -140,6 +174,8 @@ interface Failure {
   code: string;
   exit: number;
   hint?: string;
+  /** The reply may be retried under its key. */
+  retryWithKey?: boolean;
   /** Whether exit is the command's answer and not a crash (suppresses the bug-report nudge). */
   answered: boolean;
 }
@@ -150,19 +186,17 @@ function failureOf(error: unknown, replyKey?: string): Failure {
   }
   if (error instanceof ApiError) {
     const word = mailErrorCode(error);
-    const notFound =
-      word === "not_found" ||
-      word === "forbidden" ||
-      error.statusCode === 404 ||
-      error.statusCode === 403;
+    const notFound = word === "not_found" || error.statusCode === 404;
+    const notPermitted = word === "forbidden" || error.statusCode === 403;
     const guidance = guidanceFor(word);
     const retry = replyKey ? retryAdvice(error, replyKey) : undefined;
     const hint = [guidance, retry].filter(Boolean).join(" ") || undefined;
     return {
       message: error.message,
       code: word ?? (error.statusCode === 0 ? "network_error" : `http_${error.statusCode}`),
-      exit: notFound ? EXIT_NOT_FOUND : EXIT_ERROR,
+      exit: notFound ? EXIT_NOT_FOUND : notPermitted ? EXIT_NOT_PERMITTED : EXIT_ERROR,
       hint,
+      retryWithKey: replyKey !== undefined && retryableWithKey(error),
       answered: error.statusCode >= 400 && error.statusCode < 500,
     };
   }
@@ -171,7 +205,7 @@ function failureOf(error: unknown, replyKey?: string): Failure {
 
 /**
  * Run a command body and turn whatever it throws into one failure: a sentence on standard error
- * (`{"error", "code"}` under `--json`) and an exit code of 1, 2 or 3. `replyKey` is read when the
+ * (`{"error", "code"}` under `--json`) and an exit code of 1 to 4. `replyKey` is read when the
  * failure is made, so a reply that has not generated its key yet still reports correctly.
  */
 async function run(json: boolean, body: () => Promise<void>, replyKey?: () => string | undefined) {
@@ -194,7 +228,7 @@ async function run(json: boolean, body: () => Promise<void>, replyKey?: () => st
 function fail(json: boolean, f: Failure, replyKey?: string): void {
   if (json) {
     const payload: Record<string, string> = { error: f.message, code: f.code };
-    if (replyKey && f.hint?.includes("--idempotency-key")) payload.idempotency_key = replyKey;
+    if (replyKey && f.retryWithKey) payload.idempotency_key = replyKey;
     console.error(JSON.stringify(payload));
   } else {
     console.error(`Error: ${oneLine(f.message)}`);
@@ -238,33 +272,38 @@ function pad(value: string, width: number): string {
 
 const USERNAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
 
-/** Users resolved or named in one run: each is looked up once. */
+/** Users resolved or named in one run: each is looked up once, concurrent callers sharing the lookup. */
 class People {
-  private readonly names = new Map<number, string>();
+  private readonly names = new Map<number, Promise<string>>();
   private readonly ids = new Map<string, number>();
   private me: number | undefined;
 
-  /** `me`, `none` (when `allowNone`), a numeric id or a username, as the id the API takes. */
+  /**
+   * `me`, `none` (when `allowNone`), a numeric id, a username, or `@username` (a username even
+   * when it is all digits), as the id the API takes.
+   */
   async resolve(arg: string, label: string, allowNone = false): Promise<number | null> {
     if (arg === "none") {
       if (allowNone) return null;
       throw new UsageError(`${label} cannot be 'none' here.`);
     }
     if (arg === "me") return this.whoAmI();
-    if (/^\d{1,12}$/.test(arg)) return Number(arg);
-    if (!USERNAME_RE.test(arg)) {
+    const explicit = arg.startsWith("@");
+    if (!explicit && /^\d{1,12}$/.test(arg)) return Number(arg);
+    const username = explicit ? arg.slice(1) : arg;
+    if (!USERNAME_RE.test(username)) {
       throw new UsageError(
-        `${label}: '${oneLine(arg)}' is not me${allowNone ? ", none" : ""}, a user id or a username.`,
+        `${label}: '${oneLine(arg)}' is not me${allowNone ? ", none" : ""}, a user id, a username or @username.`,
       );
     }
-    const cached = this.ids.get(arg);
+    const cached = this.ids.get(username);
     if (cached !== undefined) return cached;
-    const { user } = await getAdminUserByUsername(arg);
+    const { user } = await getAdminUserByUsername(username);
     if (typeof user.id !== "number") {
       throw new ApiError(500, `The user lookup for '${oneLine(arg)}' did not return an id.`);
     }
-    this.ids.set(arg, user.id);
-    if (user.username) this.names.set(user.id, user.username);
+    this.ids.set(username, user.id);
+    if (user.username) this.names.set(user.id, Promise.resolve(user.username));
     return user.id;
   }
 
@@ -272,25 +311,31 @@ class People {
     if (this.me === undefined) {
       const user = await getCurrentUser();
       this.me = user.id;
-      if (user.username) this.names.set(user.id, user.username);
+      if (user.username) this.names.set(user.id, Promise.resolve(user.username));
     }
     return this.me;
   }
 
-  /** A person as a human reads it: the username, else `#id`; never fails the command. */
+  /**
+   * A person as a human reads it: the username, else `#id` (an account with no username, or one
+   * the lookup answers 404 for). Any other failure of the lookup is the command's failure: a name
+   * is not worth hiding a 401, an outage or a rate limit behind ids that look like an answer.
+   * The text is escaped on every return, the cache holds it raw.
+   */
   async name(id: number | null | undefined): Promise<string> {
     if (id === null || id === undefined) return "-";
-    const known = this.names.get(id);
-    if (known) return known;
-    let shown = `#${id}`;
-    try {
-      const username = await getUsernameById(id);
-      if (username) shown = username;
-    } catch {
-      // A name is a convenience; the id is still the answer.
+    let lookup = this.names.get(id);
+    if (!lookup) {
+      lookup = getUsernameById(id).then(
+        (username) => username || `#${id}`,
+        (error: unknown) => {
+          if (error instanceof ApiError && error.statusCode === 404) return `#${id}`;
+          throw error;
+        },
+      );
+      this.names.set(id, lookup);
     }
-    this.names.set(id, shown);
-    return oneLine(shown);
+    return oneLine(await lookup);
   }
 
   async list(ids: readonly number[]): Promise<string> {
@@ -304,7 +349,7 @@ class People {
 // ---------------------------------------------------------------------------------------------
 
 function ticketLine(t: TicketSummary, assignee: string): string {
-  return `#${t.id}  ${t.ref}  ${t.status}  ${t.queue_tag}${t.restricted ? " (restricted)" : ""}  assignee ${assignee}  ${oneLine(t.subject)}`;
+  return `#${t.id}  ${oneLine(t.ref)}  ${oneLine(t.status)}  ${oneLine(t.queue_tag)}${t.restricted ? " (restricted)" : ""}  assignee ${assignee}  ${oneLine(t.subject)}`;
 }
 
 async function printTicketAction(verb: string, t: TicketSummary, people: People): Promise<void> {
@@ -320,11 +365,11 @@ async function renderList(tickets: TicketSummary[], people: People): Promise<voi
   for (const t of tickets) {
     rows.push([
       `#${t.id}`,
-      t.ref,
-      t.status,
-      `${t.queue_tag}${t.restricted ? "*" : ""}`,
+      oneLine(t.ref),
+      oneLine(t.status),
+      `${oneLine(t.queue_tag)}${t.restricted ? "*" : ""}`,
       await people.name(t.assignee_user_id),
-      t.last_message_at,
+      oneLine(t.last_message_at),
       oneLine(t.requester_email),
       oneLine(t.subject),
     ]);
@@ -343,10 +388,10 @@ async function renderList(tickets: TicketSummary[], people: People): Promise<voi
 
 async function renderTicket(detail: TicketDetail, people: People): Promise<void> {
   const t = detail.ticket;
-  console.log(`Ticket #${t.id}  ${t.ref}`);
+  console.log(`Ticket #${t.id}  ${oneLine(t.ref)}`);
   console.log(`Subject:    ${oneLine(t.subject)}`);
-  console.log(`Status:     ${t.status}`);
-  console.log(`Queue:      ${t.queue_tag}${t.restricted ? " (restricted)" : ""}`);
+  console.log(`Status:     ${oneLine(t.status)}`);
+  console.log(`Queue:      ${oneLine(t.queue_tag)}${t.restricted ? " (restricted)" : ""}`);
   console.log(`Assignee:   ${await people.name(t.assignee_user_id)}`);
   const requester =
     t.requester_user_id === null
@@ -354,8 +399,8 @@ async function renderTicket(detail: TicketDetail, people: People): Promise<void>
       : `${oneLine(t.requester_email)} (account ${await people.name(t.requester_user_id)})`;
   console.log(`Requester:  ${requester}`);
   console.log(`Tags:       ${detail.tags.length > 0 ? detail.tags.map(oneLine).join(", ") : "-"}`);
-  console.log(`Created:    ${t.created_at}`);
-  console.log(`Updated:    ${t.updated_at}`);
+  console.log(`Created:    ${oneLine(t.created_at)}`);
+  console.log(`Updated:    ${oneLine(t.updated_at)}`);
 
   console.log("\nThread (oldest first)");
   const messages = [...detail.messages].sort(
@@ -368,7 +413,7 @@ async function renderTicket(detail: TicketDetail, people: People): Promise<void>
       m.direction === "note"
         ? `by ${await people.name(m.author_user_id)}`
         : `${oneLine(m.from_addr)} -> ${oneLine(m.to_addr)}`;
-    console.log(`\n[${m.created_at}] ${kind} #${m.id}  ${who}`);
+    console.log(`\n[${oneLine(m.created_at)}] ${kind} #${m.id}  ${who}`);
     if (m.direction === "in") {
       console.log(
         `  auth: spf=${oneLine(m.spf)} dkim=${oneLine(m.dkim)} dmarc=${oneLine(m.dmarc)}`,
@@ -387,19 +432,19 @@ async function renderTicket(detail: TicketDetail, people: People): Promise<void>
     const detailText =
       e.detail === null || e.detail === undefined ? "" : `  ${oneLine(JSON.stringify(e.detail))}`;
     console.log(
-      `  [${e.created_at}] ${oneLine(e.kind)} by ${await people.name(e.actor_user_id)}${detailText}`,
+      `  [${oneLine(e.created_at)}] ${oneLine(e.kind)} by ${await people.name(e.actor_user_id)}${detailText}`,
     );
   }
 }
 
 async function renderQueue(q: MailQueue, people: People): Promise<void> {
   console.log(`${oneLine(q.tag)}${q.restricted ? " (restricted)" : ""}`);
-  console.log(`  strategy:    ${q.strategy}`);
+  console.log(`  strategy:    ${oneLine(q.strategy)}`);
   console.log(`  assignee:    ${await people.name(q.assignee_user_id)}`);
   console.log(`  backup:      ${await people.name(q.backup_user_id)}`);
   console.log(`  members:     ${await people.list(q.rr_members)}`);
   console.log(`  escalation:  ${await people.name(q.escalation_user_id)}`);
-  console.log(`  open:        ${q.open_tickets}`);
+  console.log(`  open:        ${oneLine(q.open_tickets)}`);
 }
 
 async function renderAvailability(a: Availability, people: People): Promise<void> {
@@ -408,7 +453,9 @@ async function renderAvailability(a: Availability, people: People): Promise<void
     console.log("Away:    no window set");
     return;
   }
-  console.log(`Away:    ${a.away_from ?? "now"} until ${a.away_until ?? "further notice"}`);
+  console.log(
+    `Away:    ${a.away_from ? oneLine(a.away_from) : "now"} until ${a.away_until ? oneLine(a.away_until) : "further notice"}`,
+  );
   console.log(`Backup:  ${await people.name(a.backup_user_id)}`);
   console.log(`Note:    ${a.note ? oneLine(a.note) : "-"}`);
 }
@@ -457,6 +504,20 @@ async function bodyText(
   return text;
 }
 
+/** What a person is shown before a reply is sent: recipient, subject and text, all made safe. */
+export function replyPreview(
+  ticket: Pick<TicketSummary, "requester_email" | "subject">,
+  text: string,
+): string {
+  return [
+    `To:       ${oneLine(ticket.requester_email)}`,
+    `Subject:  Re: ${oneLine(ticket.subject)}`,
+    "",
+    terminalSafeText(text),
+    "",
+  ].join("\n");
+}
+
 /** The Worker's own bound on a reply or note (TEXT_MAX in backend/src/routes/admin/mail.ts). */
 const MAX_TEXT = 20_000;
 
@@ -476,10 +537,16 @@ function enumOf<T extends string>(raw: string, allowed: readonly T[], label: str
   throw new UsageError(`${label} must be one of ${allowed.join(", ")}, not '${oneLine(raw)}'.`);
 }
 
+/** An ISO 8601 instant with an explicit zone: a date alone or a local time would depend on where this runs. */
+const INSTANT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/;
+
 function instantOf(raw: string, label: string): string {
   const ms = Date.parse(raw);
-  if (Number.isNaN(ms))
-    throw new UsageError(`${label}: '${oneLine(raw)}' is not an ISO 8601 date.`);
+  if (!INSTANT_RE.test(raw) || Number.isNaN(ms)) {
+    throw new UsageError(
+      `${label}: '${oneLine(raw)}' is not an ISO 8601 instant with a zone, like 2026-10-24T09:00:00Z.`,
+    );
+  }
   return new Date(ms).toISOString();
 }
 
@@ -501,12 +568,15 @@ Exit codes:
   0  done
   1  the API or the network failed (a refusal such as a closed ticket, a server error, no connection)
   2  usage: a bad or missing argument, an empty body, or a reply not confirmed (nothing was sent)
-  3  not found or not visible to you (a missing ticket, or one you may not see, or an owner-only action)
+  3  not found or not visible to you (the API answers a ticket you may not see with not found)
+  4  not permitted (403: an owner-only action, or an account that is not active)
 
-With --json the API's answer is printed verbatim as one JSON document on standard output, and a
-failure is {"error", "code"} on standard error. Text in tickets comes from outside: human output
+With --json the API's answer is printed verbatim as one JSON document on standard output, and
+standard error is JSON Lines, one JSON document per line: {"error", "code"} for a failure (code
+"usage" for a mistyped command) and, for a reply, {"idempotency_key"} before it is sent. Text in tickets comes from outside: human output
 escapes control and bidirectional characters, --json does not, so a consumer must treat it as data.
-A <user> is 'me', a numeric id or a username; 'none' where the command says so.
+A <user> is 'me', a numeric id, a username, or @username (a username even when it is all digits);
+'none' where the command says so.
 `;
 
 const jsonOption = [
@@ -514,7 +584,7 @@ const jsonOption = [
   "Print the API's answer as JSON (errors as JSON on standard error)",
 ] as const;
 
-const listCommand = new Command("list")
+const listCommand = new MailCommand("list")
   .description("List support tickets you may see, newest activity first")
   .option("--status <status>", `One of ${TICKET_STATUSES.join(", ")} (default: not closed or spam)`)
   .option("--queue <tag>", "Only this queue")
@@ -564,7 +634,12 @@ const listCommand = new Command("list")
       let next = page.next_cursor;
       if (o.all) {
         const seen = new Set<string>();
-        while (next && !seen.has(next)) {
+        while (next) {
+          if (seen.has(next)) {
+            throw new Error(
+              "The server repeated a page cursor, so the listing is incomplete; nothing was printed.",
+            );
+          }
           seen.add(next);
           page = await listMailTickets({ ...query, cursor: next });
           tickets = tickets.concat(page.tickets);
@@ -580,7 +655,7 @@ const listCommand = new Command("list")
     });
   });
 
-const showCommand = new Command("show")
+const showCommand = new MailCommand("show")
   .description("Show a ticket: header, tags, the thread oldest first, and its events")
   .argument("<id>", "Ticket id")
   .option(...jsonOption)
@@ -593,7 +668,7 @@ const showCommand = new Command("show")
     });
   });
 
-const replyCommand = new Command("reply")
+const replyCommand = new MailCommand("reply")
   .description("Send a reply to the requester from support@, with an Idempotency-Key")
   .argument("<id>", "Ticket id")
   .argument("[source]", "'-' reads the reply from standard input")
@@ -612,7 +687,10 @@ A reply reaches a person, so it is sent with an Idempotency-Key: a repeat of the
 sends twice. The key is printed to standard error before anything is sent. If the answer is lost
 (a network failure, reply_delivery_unknown, reply_in_progress) retry with --idempotency-key <that key>.
 With a terminal the recipient, subject and text are shown and you confirm; without one, --yes is
-required and the command refuses (exit 2, nothing sent) otherwise.`,
+required and the command refuses (exit 2, nothing sent) otherwise.
+Reusing a key replays the earlier result and sends no new text: a changed --text under a key that
+was already used is not sent. A reply that failed with an unknown outcome (a network error, a 5xx,
+reply_delivery_unknown) is retried with the same key, never with a new one.`,
   )
   .action(async (rawId: string, source: string | undefined, _o, command: Command) => {
     const o = optsOf<
@@ -634,9 +712,7 @@ required and the command refuses (exit 2, nothing sent) otherwise.`,
         }
         if (!o.yes) {
           const ticket = (await getMailTicket(id)).ticket;
-          console.error(`To:       ${oneLine(ticket.requester_email)}`);
-          console.error(`Subject:  Re: ${oneLine(ticket.subject)}`);
-          console.error(`\n${terminalSafeText(text)}\n`);
+          console.error(replyPreview(ticket, text));
           const answer = await confirm("Send this reply?", {});
           if (answer !== "confirmed")
             throw new UsageError("Not sent: the reply was not confirmed.");
@@ -646,13 +722,15 @@ required and the command refuses (exit 2, nothing sent) otherwise.`,
         else console.error(`Idempotency-Key: ${key}`);
         const sent = await replyToMailTicket(id, text, key);
         if (o.json) return printJson(sent);
-        console.log(`Reply sent (message ${sent.message_id}); the ticket is now ${sent.status}.`);
+        console.log(
+          `Reply sent (message ${oneLine(sent.message_id)}); the ticket is now ${oneLine(sent.status)}.`,
+        );
       },
       () => key,
     );
   });
 
-const noteCommand = new Command("note")
+const noteCommand = new MailCommand("note")
   .description("Add an internal note to a ticket (never sent to the requester)")
   .argument("<id>", "Ticket id")
   .argument("[source]", "'-' reads the note from standard input")
@@ -665,14 +743,14 @@ const noteCommand = new Command("note")
       const id = ticketIdOf(rawId);
       const added = await addMailNote(id, await bodyText(o, source));
       if (o.json) return printJson(added);
-      console.log(`Note added to ticket #${id} (message ${added.message_id}).`);
+      console.log(`Note added to ticket #${id} (message ${oneLine(added.message_id)}).`);
     });
   });
 
-const assignCommand = new Command("assign")
+const assignCommand = new MailCommand("assign")
   .description("Assign a ticket to a person, or unassign it")
   .argument("<id>", "Ticket id")
-  .argument("<user>", "me, none, a user id or a username")
+  .argument("<user>", "me, none, a user id, a username or @username")
   .option(...jsonOption)
   .action(async (rawId: string, who: string, _o, command: Command) => {
     const o = optsOf<Common>(command);
@@ -696,7 +774,7 @@ async function changeStatus(rawId: string, rawStatus: string, json: boolean): Pr
   });
 }
 
-const statusCommand = new Command("status")
+const statusCommand = new MailCommand("status")
   .description(`Set a ticket's status: ${SETTABLE_STATUSES.join(", ")}`)
   .argument("<id>", "Ticket id")
   .argument("<status>", SETTABLE_STATUSES.join(" | "))
@@ -705,7 +783,7 @@ const statusCommand = new Command("status")
     await changeStatus(rawId, status, !!optsOf<Common>(command).json);
   });
 
-const closeCommand = new Command("close")
+const closeCommand = new MailCommand("close")
   .description("Close a ticket (same as: status <id> closed)")
   .argument("<id>", "Ticket id")
   .option(...jsonOption)
@@ -713,7 +791,7 @@ const closeCommand = new Command("close")
     await changeStatus(rawId, "closed", !!optsOf<Common>(command).json);
   });
 
-const escalateCommand = new Command("escalate")
+const escalateCommand = new MailCommand("escalate")
   .description("Hand a ticket to its queue's escalation owner")
   .argument("<id>", "Ticket id")
   .option("--reason <text>", "Why (up to 500 characters; the owner is told)")
@@ -731,7 +809,7 @@ const escalateCommand = new Command("escalate")
     });
   });
 
-const queuesSetCommand = new Command("set")
+const queuesSetCommand = new MailCommand("set")
   .description("Create or change a queue (owner); only the options you give change")
   .argument("<tag>", "Queue tag")
   .option("--strategy <strategy>", QUEUE_STRATEGIES.join(" | "))
@@ -791,7 +869,7 @@ const queuesSetCommand = new Command("set")
     });
   });
 
-const queuesCommand = new Command("queues")
+const queuesCommand = new MailCommand("queues")
   .description("List the queues you may see; 'queues set <tag>' changes one (owner)")
   .option(...jsonOption)
   .action(async (_o, command: Command) => {
@@ -809,7 +887,7 @@ const queuesCommand = new Command("queues")
   })
   .addCommand(queuesSetCommand);
 
-const awayShowCommand = new Command("show")
+const awayShowCommand = new MailCommand("show")
   .description("Show your away window (--user: anyone's, owner)")
   .option("--user <user>", "Another person (owner only)")
   .option(...jsonOption)
@@ -828,10 +906,10 @@ async function showAway(o: Common & { user?: string }): Promise<void> {
   });
 }
 
-const awaySetCommand = new Command("set")
+const awaySetCommand = new MailCommand("set")
   .description("Set an away window: tickets assigned to you go to your backup meanwhile")
-  .option("--from <date>", "Start (ISO 8601; default: now)")
-  .requiredOption("--until <date>", "End (ISO 8601)")
+  .option("--from <date>", "Start (ISO 8601 with Z or an offset; default: now)")
+  .requiredOption("--until <date>", "End (ISO 8601 with Z or an offset, like 2026-10-24T09:00:00Z)")
   .option("--backup <user>", "Who covers; 'none' for nobody")
   .option("--note <text>", "A note (up to 500 characters)")
   .option("--user <user>", "Set another person's window (owner only)")
@@ -861,7 +939,7 @@ const awaySetCommand = new Command("set")
     });
   });
 
-const awayClearCommand = new Command("clear")
+const awayClearCommand = new MailCommand("clear")
   .description("Clear an away window")
   .option("--user <user>", "Clear another person's window (owner only)")
   .option(...jsonOption)
@@ -880,7 +958,7 @@ const awayClearCommand = new Command("clear")
     });
   });
 
-const awayCommand = new Command("away")
+const awayCommand = new MailCommand("away")
   .description("Show, set or clear your away window (set and clear: --user for an owner)")
   .option("--user <user>", "Another person (owner only)")
   .option(...jsonOption)
@@ -891,7 +969,7 @@ const awayCommand = new Command("away")
   .addCommand(awaySetCommand)
   .addCommand(awayClearCommand);
 
-const reprocessCommand = new Command("reprocess")
+const reprocessCommand = new MailCommand("reprocess")
   .description("Rebuild a ticket from a stored raw message (owner)")
   .argument("<raw_key>", "inbound/raw/YYYY/MM/DD/<uuid>.eml")
   .option(...jsonOption)
@@ -903,11 +981,11 @@ const reprocessCommand = new Command("reprocess")
       }
       const res = await reprocessMail(rawKey);
       if (o.json) return printJson(res);
-      console.log(`${res.outcome}: ticket #${res.ticket_id} (${res.status}).`);
+      console.log(`${oneLine(res.outcome)}: ticket #${res.ticket_id} (${oneLine(res.status)}).`);
     });
   });
 
-export const mailCommand = new Command("mail")
+export const mailCommand = new MailCommand("mail")
   .description("Support tickets (exit: 0 ok, 1 error, 2 usage, 3 not found)")
   .addHelpText(
     "after",

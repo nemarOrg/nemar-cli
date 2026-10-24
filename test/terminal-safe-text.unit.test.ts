@@ -23,7 +23,9 @@ describe("terminalSafeText", () => {
   });
 
   test("escapes bidirectional overrides, embeddings and isolates, and the line separators", () => {
-    expect(terminalSafeText("a‮b‪c⁦d⁩e f g")).toBe("a\\u202eb\\u202ac\\u2066d\\u2069e\\u2028f\\u2029g");
+    expect(terminalSafeText("a\u202eb\u202ac\u2066d\u2069e\u2028f\u2029g")).toBe(
+      "a\\u202eb\\u202ac\\u2066d\\u2069e\\u2028f\\u2029g",
+    );
   });
 
   test("escapes direction marks and invisible characters, in both functions", () => {
@@ -34,7 +36,7 @@ describe("terminalSafeText", () => {
   });
 
   test("writes every escape the way displayName does", () => {
-    const hostile = "\u001b\r\u0000\u007f\u009b‮⁦ ";
+    const hostile = "\u001b\r\u0000\u007f\u009b\u202e\u2066\u2028";
     expect(terminalSafeText(hostile)).toBe(displayName(hostile));
   });
 
