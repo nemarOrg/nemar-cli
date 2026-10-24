@@ -1,0 +1,932 @@
+/**
+ * `nemar admin mail`: work the support tickets that arrive at support@ (epic #1893, phase 4).
+ *
+ *   nemar admin mail list [filters]              the tickets you may see, newest activity first
+ *   nemar admin mail show <id>                   one ticket: header, tags, thread, events
+ *   nemar admin mail reply <id> --text|--file|-  answer the requester (always with an Idempotency-Key)
+ *   nemar admin mail note <id> --text|--file|-   an internal note
+ *   nemar admin mail assign <id> <user|me|none>
+ *   nemar admin mail status <id> <open|pending|closed|spam>     (`close <id>` is `closed`)
+ *   nemar admin mail escalate <id> [--reason r]
+ *   nemar admin mail queues [set <tag> ...]      queues and how they assign (set: owner)
+ *   nemar admin mail away [set|clear]            your away window (--user: owner)
+ *   nemar admin mail reprocess <raw_key>         owner
+ *
+ * The routes and their shapes are in shared/contract/mail-admin.ts. Humans and agents use the same
+ * commands: nothing here reads an account's kind or username, only what the API answers.
+ */
+
+import { readFileSync } from "node:fs";
+import { Command } from "commander";
+import {
+  QUEUE_STRATEGIES,
+  SETTABLE_STATUSES,
+  TICKET_STATUSES,
+} from "../../shared/contract/mail-admin.js";
+import type {
+  Availability,
+  ListTicketsQuery,
+  MailErrorCode,
+  MailQueue,
+  PutAvailabilityRequest,
+  PutQueueRequest,
+  QueueStrategy,
+  SettableStatus,
+  TicketDetail,
+  TicketStatus,
+  TicketSummary,
+} from "../../shared/contract/mail-admin.js";
+import {
+  addMailNote,
+  assignMailTicket,
+  escalateMailTicket,
+  getAdminUserByUsername,
+  getMailAvailability,
+  getMailTicket,
+  getUsernameById,
+  listMailQueues,
+  listMailTickets,
+  putMailAvailability,
+  putMailQueue,
+  replyToMailTicket,
+  reprocessMail,
+  setMailTicketStatus,
+} from "../lib/api/admin.js";
+import { getCurrentUser } from "../lib/api/auth.js";
+import { ApiError, errorDetail } from "../lib/api/errors.js";
+import { isAuthenticated } from "../lib/config.js";
+import { confirm } from "../lib/confirm.js";
+import { markReportedExit, unmarkReportedExit } from "../lib/debug-log.js";
+import { terminalSafeText } from "../lib/display-name.js";
+
+// ---------------------------------------------------------------------------------------------
+// Errors, exit codes and guidance
+// ---------------------------------------------------------------------------------------------
+
+/** Exit codes, documented in `--help`. */
+const EXIT_ERROR = 1;
+const EXIT_USAGE = 2;
+const EXIT_NOT_FOUND = 3;
+
+/** A mistyped or refused invocation: nothing was sent. */
+class UsageError extends Error {}
+
+/**
+ * One sentence of guidance for each closed word the mail routes answer with. A server that grows
+ * a word this table lacks still prints its own sentence; the table only adds what to do next.
+ */
+export const MAIL_ERROR_GUIDANCE: Record<MailErrorCode, string> = {
+  bad_request: "The server rejected the request as malformed; check the arguments and try again.",
+  not_found: "There is no such ticket, or it is not visible to you.",
+  forbidden: "That action is for an owner.",
+  ineligible_assignee:
+    "That person cannot take it: on a restricted queue everyone named must be an owner, on any other an admin or an owner.",
+  ticket_is_spam:
+    "The ticket is marked spam; reopen it with 'status <id> open' before changing it.",
+  ticket_closed: "The ticket is closed; reopen it with 'status <id> open' before changing it.",
+  already_escalated: "The ticket is already escalated; nothing more to do.",
+  no_escalation_owner:
+    "The queue has no escalation owner; an owner sets one with 'queues set <tag> --escalation <user>'.",
+  escalation_owner_ineligible:
+    "The queue's escalation owner cannot take this ticket; an owner should name another with 'queues set <tag> --escalation <user>'.",
+  restricted_locked: "The ticket is in a restricted queue, which locks this change; ask an owner.",
+  restricted_flag_busy:
+    "The queue still has open tickets, so its restricted flag cannot change: close or move them first.",
+  restriction_mismatch:
+    "The ticket's restricted flag no longer matches its queue, so it cannot be reopened; ask an owner.",
+  reply_in_progress:
+    "A reply with this key is still being sent; wait a moment and retry with the same key.",
+  fallback_not_restrictable: "The '*' fallback queue is never restricted.",
+  reply_not_sent:
+    "Nothing was sent and the key is released; retry with the same key if you still want to reply.",
+  reply_delivery_unknown:
+    "The mail provider's answer was lost, so the reply may or may not have gone; read the thread before retrying, and retry only with the same key, which never sends twice.",
+  inbound_not_configured:
+    "This deployment has no inbound mail bucket, so there is nothing to reprocess.",
+  internal: "The mail routes failed unexpectedly; try again, and report it if it keeps happening.",
+};
+
+/** The closed word in a mail error body (`ApiError.code` is the sentence, the word is `rawBody.code`). */
+function mailErrorCode(error: ApiError): string | undefined {
+  const raw = error.rawBody;
+  if (raw && typeof raw === "object" && "code" in raw && typeof raw.code === "string") {
+    return raw.code;
+  }
+  return undefined;
+}
+
+function guidanceFor(word: string | undefined): string | undefined {
+  return word !== undefined && Object.hasOwn(MAIL_ERROR_GUIDANCE, word)
+    ? MAIL_ERROR_GUIDANCE[word as MailErrorCode]
+    : undefined;
+}
+
+/** What a failure of a reply says about retrying: the one case where the key matters. */
+function retryAdvice(error: ApiError, key: string): string | undefined {
+  const word = mailErrorCode(error);
+  if (
+    word === "reply_in_progress" ||
+    word === "reply_delivery_unknown" ||
+    word === "reply_not_sent" ||
+    error.statusCode === 0
+  ) {
+    return `Retry with: --idempotency-key ${key}  (the same key never sends the reply twice)`;
+  }
+  return undefined;
+}
+
+interface Failure {
+  message: string;
+  code: string;
+  exit: number;
+  hint?: string;
+  /** Whether exit is the command's answer and not a crash (suppresses the bug-report nudge). */
+  answered: boolean;
+}
+
+function failureOf(error: unknown, replyKey?: string): Failure {
+  if (error instanceof UsageError) {
+    return { message: error.message, code: "usage", exit: EXIT_USAGE, answered: true };
+  }
+  if (error instanceof ApiError) {
+    const word = mailErrorCode(error);
+    const notFound =
+      word === "not_found" ||
+      word === "forbidden" ||
+      error.statusCode === 404 ||
+      error.statusCode === 403;
+    const guidance = guidanceFor(word);
+    const retry = replyKey ? retryAdvice(error, replyKey) : undefined;
+    const hint = [guidance, retry].filter(Boolean).join(" ") || undefined;
+    return {
+      message: error.message,
+      code: word ?? (error.statusCode === 0 ? "network_error" : `http_${error.statusCode}`),
+      exit: notFound ? EXIT_NOT_FOUND : EXIT_ERROR,
+      hint,
+      answered: error.statusCode >= 400 && error.statusCode < 500,
+    };
+  }
+  return { message: errorDetail(error), code: "error", exit: EXIT_ERROR, answered: false };
+}
+
+/**
+ * Run a command body and turn whatever it throws into one failure: a sentence on standard error
+ * (`{"error", "code"}` under `--json`) and an exit code of 1, 2 or 3. `replyKey` is read when the
+ * failure is made, so a reply that has not generated its key yet still reports correctly.
+ */
+async function run(json: boolean, body: () => Promise<void>, replyKey?: () => string | undefined) {
+  if (!isAuthenticated()) {
+    fail(json, {
+      message: "Not authenticated. Run 'nemar auth login' first.",
+      code: "not_authenticated",
+      exit: EXIT_ERROR,
+      answered: true,
+    });
+    return;
+  }
+  try {
+    await body();
+  } catch (error) {
+    fail(json, failureOf(error, replyKey?.()), replyKey?.());
+  }
+}
+
+function fail(json: boolean, f: Failure, replyKey?: string): void {
+  if (json) {
+    const payload: Record<string, string> = { error: f.message, code: f.code };
+    if (replyKey && f.hint?.includes("--idempotency-key")) payload.idempotency_key = replyKey;
+    console.error(JSON.stringify(payload));
+  } else {
+    console.error(`Error: ${oneLine(f.message)}`);
+    if (f.hint) console.error(`  ${f.hint}`);
+  }
+  process.exitCode = f.exit;
+  if (f.answered) markReportedExit();
+  else unmarkReportedExit();
+}
+
+// ---------------------------------------------------------------------------------------------
+// Output helpers
+// ---------------------------------------------------------------------------------------------
+
+/** {@link terminalSafeText} for a value that sits on one line: a kept newline or tab is written out. */
+function oneLine(value: unknown): string {
+  return terminalSafeText(String(value ?? ""))
+    .replace(/\n/g, "\\n")
+    .replace(/\t/g, "\\t");
+}
+
+function printJson(body: unknown): void {
+  console.log(JSON.stringify(body, null, 2));
+}
+
+/** Indent every line of a block of text. */
+function indent(text: string, by = "    "): string {
+  return text
+    .split("\n")
+    .map((line) => (line === "" ? line : `${by}${line}`))
+    .join("\n");
+}
+
+function pad(value: string, width: number): string {
+  return value.length >= width ? value : value + " ".repeat(width - value.length);
+}
+
+// ---------------------------------------------------------------------------------------------
+// People: me, none, a numeric id or a username
+// ---------------------------------------------------------------------------------------------
+
+const USERNAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
+
+/** Users resolved or named in one run: each is looked up once. */
+class People {
+  private readonly names = new Map<number, string>();
+  private readonly ids = new Map<string, number>();
+  private me: number | undefined;
+
+  /** `me`, `none` (when `allowNone`), a numeric id or a username, as the id the API takes. */
+  async resolve(arg: string, label: string, allowNone = false): Promise<number | null> {
+    if (arg === "none") {
+      if (allowNone) return null;
+      throw new UsageError(`${label} cannot be 'none' here.`);
+    }
+    if (arg === "me") return this.whoAmI();
+    if (/^\d{1,12}$/.test(arg)) return Number(arg);
+    if (!USERNAME_RE.test(arg)) {
+      throw new UsageError(
+        `${label}: '${oneLine(arg)}' is not me${allowNone ? ", none" : ""}, a user id or a username.`,
+      );
+    }
+    const cached = this.ids.get(arg);
+    if (cached !== undefined) return cached;
+    const { user } = await getAdminUserByUsername(arg);
+    if (typeof user.id !== "number") {
+      throw new ApiError(500, `The user lookup for '${oneLine(arg)}' did not return an id.`);
+    }
+    this.ids.set(arg, user.id);
+    if (user.username) this.names.set(user.id, user.username);
+    return user.id;
+  }
+
+  private async whoAmI(): Promise<number> {
+    if (this.me === undefined) {
+      const user = await getCurrentUser();
+      this.me = user.id;
+      if (user.username) this.names.set(user.id, user.username);
+    }
+    return this.me;
+  }
+
+  /** A person as a human reads it: the username, else `#id`; never fails the command. */
+  async name(id: number | null | undefined): Promise<string> {
+    if (id === null || id === undefined) return "-";
+    const known = this.names.get(id);
+    if (known) return known;
+    let shown = `#${id}`;
+    try {
+      const username = await getUsernameById(id);
+      if (username) shown = username;
+    } catch {
+      // A name is a convenience; the id is still the answer.
+    }
+    this.names.set(id, shown);
+    return oneLine(shown);
+  }
+
+  async list(ids: readonly number[]): Promise<string> {
+    const named = await Promise.all(ids.map((id) => this.name(id)));
+    return named.length > 0 ? named.join(", ") : "-";
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Rendering
+// ---------------------------------------------------------------------------------------------
+
+function ticketLine(t: TicketSummary, assignee: string): string {
+  return `#${t.id}  ${t.ref}  ${t.status}  ${t.queue_tag}${t.restricted ? " (restricted)" : ""}  assignee ${assignee}  ${oneLine(t.subject)}`;
+}
+
+async function printTicketAction(verb: string, t: TicketSummary, people: People): Promise<void> {
+  console.log(`${verb}: ${ticketLine(t, await people.name(t.assignee_user_id))}`);
+}
+
+async function renderList(tickets: TicketSummary[], people: People): Promise<void> {
+  if (tickets.length === 0) {
+    console.log("No tickets.");
+    return;
+  }
+  const rows: string[][] = [];
+  for (const t of tickets) {
+    rows.push([
+      `#${t.id}`,
+      t.ref,
+      t.status,
+      `${t.queue_tag}${t.restricted ? "*" : ""}`,
+      await people.name(t.assignee_user_id),
+      t.last_message_at,
+      oneLine(t.requester_email),
+      oneLine(t.subject),
+    ]);
+  }
+  const head = ["ID", "REF", "STATUS", "QUEUE", "ASSIGNEE", "LAST MESSAGE", "FROM", "SUBJECT"];
+  const widths = head.map((h, i) => Math.max(h.length, ...rows.map((r) => r[i].length)));
+  const line = (cells: string[]) =>
+    cells
+      .map((c, i) => (i === cells.length - 1 ? c : pad(c, widths[i])))
+      .join("  ")
+      .trimEnd();
+  console.log(line(head));
+  for (const r of rows) console.log(line(r));
+  console.log("\n* restricted queue");
+}
+
+async function renderTicket(detail: TicketDetail, people: People): Promise<void> {
+  const t = detail.ticket;
+  console.log(`Ticket #${t.id}  ${t.ref}`);
+  console.log(`Subject:    ${oneLine(t.subject)}`);
+  console.log(`Status:     ${t.status}`);
+  console.log(`Queue:      ${t.queue_tag}${t.restricted ? " (restricted)" : ""}`);
+  console.log(`Assignee:   ${await people.name(t.assignee_user_id)}`);
+  const requester =
+    t.requester_user_id === null
+      ? oneLine(t.requester_email)
+      : `${oneLine(t.requester_email)} (account ${await people.name(t.requester_user_id)})`;
+  console.log(`Requester:  ${requester}`);
+  console.log(`Tags:       ${detail.tags.length > 0 ? detail.tags.map(oneLine).join(", ") : "-"}`);
+  console.log(`Created:    ${t.created_at}`);
+  console.log(`Updated:    ${t.updated_at}`);
+
+  console.log("\nThread (oldest first)");
+  const messages = [...detail.messages].sort(
+    (a, b) => a.created_at.localeCompare(b.created_at) || a.id - b.id,
+  );
+  if (messages.length === 0) console.log("  (no messages)");
+  for (const m of messages) {
+    const kind = m.direction === "in" ? "IN" : m.direction === "out" ? "OUT" : "NOTE";
+    const who =
+      m.direction === "note"
+        ? `by ${await people.name(m.author_user_id)}`
+        : `${oneLine(m.from_addr)} -> ${oneLine(m.to_addr)}`;
+    console.log(`\n[${m.created_at}] ${kind} #${m.id}  ${who}`);
+    if (m.direction === "in") {
+      console.log(
+        `  auth: spf=${oneLine(m.spf)} dkim=${oneLine(m.dkim)} dmarc=${oneLine(m.dmarc)}`,
+      );
+    }
+    console.log(`  subject: ${oneLine(m.subject)}`);
+    console.log(indent(terminalSafeText(m.text_body)));
+  }
+
+  console.log("\nEvents");
+  const events = [...detail.events].sort(
+    (a, b) => a.created_at.localeCompare(b.created_at) || a.id - b.id,
+  );
+  if (events.length === 0) console.log("  (none)");
+  for (const e of events) {
+    const detailText =
+      e.detail === null || e.detail === undefined ? "" : `  ${oneLine(JSON.stringify(e.detail))}`;
+    console.log(
+      `  [${e.created_at}] ${oneLine(e.kind)} by ${await people.name(e.actor_user_id)}${detailText}`,
+    );
+  }
+}
+
+async function renderQueue(q: MailQueue, people: People): Promise<void> {
+  console.log(`${oneLine(q.tag)}${q.restricted ? " (restricted)" : ""}`);
+  console.log(`  strategy:    ${q.strategy}`);
+  console.log(`  assignee:    ${await people.name(q.assignee_user_id)}`);
+  console.log(`  backup:      ${await people.name(q.backup_user_id)}`);
+  console.log(`  members:     ${await people.list(q.rr_members)}`);
+  console.log(`  escalation:  ${await people.name(q.escalation_user_id)}`);
+  console.log(`  open:        ${q.open_tickets}`);
+}
+
+async function renderAvailability(a: Availability, people: People): Promise<void> {
+  console.log(`User:    ${await people.name(a.user_id)}`);
+  if (!a.away_until && !a.away_from) {
+    console.log("Away:    no window set");
+    return;
+  }
+  console.log(`Away:    ${a.away_from ?? "now"} until ${a.away_until ?? "further notice"}`);
+  console.log(`Backup:  ${await people.name(a.backup_user_id)}`);
+  console.log(`Note:    ${a.note ? oneLine(a.note) : "-"}`);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Argument parsing
+// ---------------------------------------------------------------------------------------------
+
+function ticketIdOf(raw: string): number {
+  if (!/^\d{1,12}$/.test(raw) || Number(raw) <= 0) {
+    throw new UsageError(`'${oneLine(raw)}' is not a ticket id (a number like 42).`);
+  }
+  return Number(raw);
+}
+
+/** The body of a reply or note: exactly one of --text, --file and `-`; never empty. */
+async function bodyText(
+  opts: { text?: string; file?: string },
+  source: string | undefined,
+): Promise<string> {
+  if (source !== undefined && source !== "-") {
+    throw new UsageError(
+      `Unexpected argument '${oneLine(source)}'; use '-' to read standard input.`,
+    );
+  }
+  const given = [opts.text !== undefined, opts.file !== undefined, source === "-"].filter(
+    Boolean,
+  ).length;
+  if (given !== 1) {
+    throw new UsageError("Give the text with exactly one of --text, --file <path> or '-' (stdin).");
+  }
+  let text: string;
+  if (opts.text !== undefined) text = opts.text;
+  else if (opts.file !== undefined && opts.file !== "-") {
+    try {
+      text = readFileSync(opts.file, "utf8");
+    } catch (error) {
+      throw new UsageError(`Cannot read ${oneLine(opts.file)}: ${errorDetail(error)}`);
+    }
+  } else text = await Bun.stdin.text();
+  text = text.trim();
+  if (text === "") throw new UsageError("The text is empty; nothing was sent.");
+  if (text.length > MAX_TEXT) {
+    throw new UsageError(`The text is ${text.length} characters; the limit is ${MAX_TEXT}.`);
+  }
+  return text;
+}
+
+/** The Worker's own bound on a reply or note (TEXT_MAX in backend/src/routes/admin/mail.ts). */
+const MAX_TEXT = 20_000;
+
+const KEY_RE = /^[A-Za-z0-9._:-]{1,64}$/;
+
+function statusOf(raw: string): SettableStatus {
+  if ((SETTABLE_STATUSES as readonly string[]).includes(raw)) return raw as SettableStatus;
+  throw new UsageError(
+    raw === "escalated"
+      ? "'escalated' is set with 'nemar admin mail escalate <id>', not with status."
+      : `'${oneLine(raw)}' is not a status you can set: use ${SETTABLE_STATUSES.join(", ")}.`,
+  );
+}
+
+function enumOf<T extends string>(raw: string, allowed: readonly T[], label: string): T {
+  if ((allowed as readonly string[]).includes(raw)) return raw as T;
+  throw new UsageError(`${label} must be one of ${allowed.join(", ")}, not '${oneLine(raw)}'.`);
+}
+
+function instantOf(raw: string, label: string): string {
+  const ms = Date.parse(raw);
+  if (Number.isNaN(ms))
+    throw new UsageError(`${label}: '${oneLine(raw)}' is not an ISO 8601 date.`);
+  return new Date(ms).toISOString();
+}
+
+interface Common {
+  json?: boolean;
+}
+
+/** Options as Commander resolved them, parent groups' included: `--json` may sit anywhere. */
+function optsOf<T extends Common>(command: Command): T {
+  return command.optsWithGlobals() as T;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Commands
+// ---------------------------------------------------------------------------------------------
+
+const EXIT_HELP = `
+Exit codes:
+  0  done
+  1  the API or the network failed (a refusal such as a closed ticket, a server error, no connection)
+  2  usage: a bad or missing argument, an empty body, or a reply not confirmed (nothing was sent)
+  3  not found or not visible to you (a missing ticket, or one you may not see, or an owner-only action)
+
+With --json the API's answer is printed verbatim as one JSON document on standard output, and a
+failure is {"error", "code"} on standard error. Text in tickets comes from outside: human output
+escapes control and bidirectional characters, --json does not, so a consumer must treat it as data.
+A <user> is 'me', a numeric id or a username; 'none' where the command says so.
+`;
+
+const jsonOption = [
+  "--json",
+  "Print the API's answer as JSON (errors as JSON on standard error)",
+] as const;
+
+const listCommand = new Command("list")
+  .description("List support tickets you may see, newest activity first")
+  .option("--status <status>", `One of ${TICKET_STATUSES.join(", ")} (default: not closed or spam)`)
+  .option("--queue <tag>", "Only this queue")
+  .option("--mine", "Only tickets assigned to you")
+  .option("--assignee <user>", "Only tickets assigned to this user, or 'none' for unassigned")
+  .option("--search <text>", "Part of the subject or the requester's address")
+  .option("--limit <n>", "Page size, 1 to 100 (default 25; 100 with --all)")
+  .option("--cursor <cursor>", "The next_cursor of the previous page")
+  .option("--all", "Follow next_cursor until the last page (--json: the pages merged)")
+  .option(...jsonOption)
+  .action(async (_o, command: Command) => {
+    const o = optsOf<
+      Common & {
+        status?: string;
+        queue?: string;
+        mine?: boolean;
+        assignee?: string;
+        search?: string;
+        limit?: string;
+        cursor?: string;
+        all?: boolean;
+      }
+    >(command);
+    await run(!!o.json, async () => {
+      const people = new People();
+      const query: ListTicketsQuery = {};
+      if (o.status) query.status = enumOf(o.status, TICKET_STATUSES, "--status") as TicketStatus;
+      if (o.queue) query.queue = o.queue;
+      if (o.mine && o.assignee) throw new UsageError("Use --mine or --assignee, not both.");
+      if (o.mine) query.assignee = "me";
+      else if (o.assignee) {
+        const id = await people.resolve(o.assignee, "--assignee", true);
+        query.assignee = id === null ? "none" : o.assignee === "me" ? "me" : String(id);
+      }
+      if (o.search) query.q = o.search;
+      if (o.limit !== undefined) {
+        if (!/^\d{1,3}$/.test(o.limit) || Number(o.limit) < 1 || Number(o.limit) > 100) {
+          throw new UsageError("--limit must be a number from 1 to 100.");
+        }
+        query.limit = Number(o.limit);
+      } else if (o.all) query.limit = 100;
+      if (o.cursor) query.cursor = o.cursor;
+      if (o.all && o.cursor) throw new UsageError("--all starts at the first page; drop --cursor.");
+
+      let page = await listMailTickets(query);
+      let tickets = page.tickets;
+      let next = page.next_cursor;
+      if (o.all) {
+        const seen = new Set<string>();
+        while (next && !seen.has(next)) {
+          seen.add(next);
+          page = await listMailTickets({ ...query, cursor: next });
+          tickets = tickets.concat(page.tickets);
+          next = page.next_cursor;
+        }
+      }
+      if (o.json) {
+        printJson(o.all ? { tickets, next_cursor: null } : page);
+        return;
+      }
+      await renderList(tickets, people);
+      if (!o.all && next) console.log(`More: --cursor ${oneLine(next)}  (or --all)`);
+    });
+  });
+
+const showCommand = new Command("show")
+  .description("Show a ticket: header, tags, the thread oldest first, and its events")
+  .argument("<id>", "Ticket id")
+  .option(...jsonOption)
+  .action(async (rawId: string, _o, command: Command) => {
+    const o = optsOf<Common>(command);
+    await run(!!o.json, async () => {
+      const detail = await getMailTicket(ticketIdOf(rawId));
+      if (o.json) return printJson(detail);
+      await renderTicket(detail, new People());
+    });
+  });
+
+const replyCommand = new Command("reply")
+  .description("Send a reply to the requester from support@, with an Idempotency-Key")
+  .argument("<id>", "Ticket id")
+  .argument("[source]", "'-' reads the reply from standard input")
+  .option("--text <text>", "The reply")
+  .option("--file <path>", "Read the reply from a file")
+  .option(
+    "--idempotency-key <key>",
+    "Your own key (1 to 64 of letters, digits . _ : -); default: generated",
+  )
+  .option("-y, --yes", "Send without asking (required when there is no terminal)")
+  .option(...jsonOption)
+  .addHelpText(
+    "after",
+    `
+A reply reaches a person, so it is sent with an Idempotency-Key: a repeat of the same key never
+sends twice. The key is printed to standard error before anything is sent. If the answer is lost
+(a network failure, reply_delivery_unknown, reply_in_progress) retry with --idempotency-key <that key>.
+With a terminal the recipient, subject and text are shown and you confirm; without one, --yes is
+required and the command refuses (exit 2, nothing sent) otherwise.`,
+  )
+  .action(async (rawId: string, source: string | undefined, _o, command: Command) => {
+    const o = optsOf<
+      Common & { text?: string; file?: string; idempotencyKey?: string; yes?: boolean }
+    >(command);
+    let key: string | undefined;
+    await run(
+      !!o.json,
+      async () => {
+        const id = ticketIdOf(rawId);
+        if (o.idempotencyKey !== undefined && !KEY_RE.test(o.idempotencyKey)) {
+          throw new UsageError("--idempotency-key must be 1 to 64 letters, digits or . _ : -");
+        }
+        const text = await bodyText(o, source);
+        if (!o.yes && !process.stdin.isTTY) {
+          throw new UsageError(
+            "Not sending: there is no terminal to confirm on. Add --yes to send without asking.",
+          );
+        }
+        if (!o.yes) {
+          const ticket = (await getMailTicket(id)).ticket;
+          console.error(`To:       ${oneLine(ticket.requester_email)}`);
+          console.error(`Subject:  Re: ${oneLine(ticket.subject)}`);
+          console.error(`\n${terminalSafeText(text)}\n`);
+          const answer = await confirm("Send this reply?", {});
+          if (answer !== "confirmed")
+            throw new UsageError("Not sent: the reply was not confirmed.");
+        }
+        key = o.idempotencyKey ?? `nemar-cli-${crypto.randomUUID()}`;
+        if (o.json) console.error(JSON.stringify({ idempotency_key: key }));
+        else console.error(`Idempotency-Key: ${key}`);
+        const sent = await replyToMailTicket(id, text, key);
+        if (o.json) return printJson(sent);
+        console.log(`Reply sent (message ${sent.message_id}); the ticket is now ${sent.status}.`);
+      },
+      () => key,
+    );
+  });
+
+const noteCommand = new Command("note")
+  .description("Add an internal note to a ticket (never sent to the requester)")
+  .argument("<id>", "Ticket id")
+  .argument("[source]", "'-' reads the note from standard input")
+  .option("--text <text>", "The note")
+  .option("--file <path>", "Read the note from a file")
+  .option(...jsonOption)
+  .action(async (rawId: string, source: string | undefined, _o, command: Command) => {
+    const o = optsOf<Common & { text?: string; file?: string }>(command);
+    await run(!!o.json, async () => {
+      const id = ticketIdOf(rawId);
+      const added = await addMailNote(id, await bodyText(o, source));
+      if (o.json) return printJson(added);
+      console.log(`Note added to ticket #${id} (message ${added.message_id}).`);
+    });
+  });
+
+const assignCommand = new Command("assign")
+  .description("Assign a ticket to a person, or unassign it")
+  .argument("<id>", "Ticket id")
+  .argument("<user>", "me, none, a user id or a username")
+  .option(...jsonOption)
+  .action(async (rawId: string, who: string, _o, command: Command) => {
+    const o = optsOf<Common>(command);
+    await run(!!o.json, async () => {
+      const id = ticketIdOf(rawId);
+      const people = new People();
+      const userId = await people.resolve(who, "<user>", true);
+      const res = await assignMailTicket(id, userId);
+      if (o.json) return printJson(res);
+      await printTicketAction("Assigned", res.ticket, people);
+    });
+  });
+
+async function changeStatus(rawId: string, rawStatus: string, json: boolean): Promise<void> {
+  await run(json, async () => {
+    const id = ticketIdOf(rawId);
+    const status = statusOf(rawStatus);
+    const res = await setMailTicketStatus(id, status);
+    if (json) return printJson(res);
+    await printTicketAction("Status set", res.ticket, new People());
+  });
+}
+
+const statusCommand = new Command("status")
+  .description(`Set a ticket's status: ${SETTABLE_STATUSES.join(", ")}`)
+  .argument("<id>", "Ticket id")
+  .argument("<status>", SETTABLE_STATUSES.join(" | "))
+  .option(...jsonOption)
+  .action(async (rawId: string, status: string, _o, command: Command) => {
+    await changeStatus(rawId, status, !!optsOf<Common>(command).json);
+  });
+
+const closeCommand = new Command("close")
+  .description("Close a ticket (same as: status <id> closed)")
+  .argument("<id>", "Ticket id")
+  .option(...jsonOption)
+  .action(async (rawId: string, _o, command: Command) => {
+    await changeStatus(rawId, "closed", !!optsOf<Common>(command).json);
+  });
+
+const escalateCommand = new Command("escalate")
+  .description("Hand a ticket to its queue's escalation owner")
+  .argument("<id>", "Ticket id")
+  .option("--reason <text>", "Why (up to 500 characters; the owner is told)")
+  .option(...jsonOption)
+  .action(async (rawId: string, _o, command: Command) => {
+    const o = optsOf<Common & { reason?: string }>(command);
+    await run(!!o.json, async () => {
+      const id = ticketIdOf(rawId);
+      if (o.reason && o.reason.trim().length > 500) {
+        throw new UsageError("--reason is limited to 500 characters.");
+      }
+      const res = await escalateMailTicket(id, o.reason?.trim());
+      if (o.json) return printJson(res);
+      await printTicketAction("Escalated", res.ticket, new People());
+    });
+  });
+
+const queuesSetCommand = new Command("set")
+  .description("Create or change a queue (owner); only the options you give change")
+  .argument("<tag>", "Queue tag")
+  .option("--strategy <strategy>", QUEUE_STRATEGIES.join(" | "))
+  .option("--assignee <user>", "Who a 'fixed' queue assigns to: a user, or 'none'")
+  .option("--backup <user>", "Who takes tickets while the assignee is away: a user, or 'none'")
+  .option("--members <users>", "Comma-separated users of the rotation (restarts it); '' empties it")
+  .option("--escalation <user>", "The escalation owner: a user, or 'none'")
+  .option("--restricted <bool>", "true or false: only owners see a restricted queue")
+  .option(...jsonOption)
+  .action(async (tag: string, _o, command: Command) => {
+    const o = optsOf<
+      Common & {
+        strategy?: string;
+        assignee?: string;
+        backup?: string;
+        members?: string;
+        escalation?: string;
+        restricted?: string;
+      }
+    >(command);
+    await run(!!o.json, async () => {
+      const people = new People();
+      const body: PutQueueRequest = {};
+      if (o.strategy !== undefined) {
+        body.strategy = enumOf(o.strategy, QUEUE_STRATEGIES, "--strategy") as QueueStrategy;
+      }
+      if (o.restricted !== undefined) {
+        body.restricted =
+          enumOf(o.restricted, ["true", "false"] as const, "--restricted") === "true";
+      }
+      if (o.assignee !== undefined) {
+        body.assignee_user_id = await people.resolve(o.assignee, "--assignee", true);
+      }
+      if (o.backup !== undefined) {
+        body.backup_user_id = await people.resolve(o.backup, "--backup", true);
+      }
+      if (o.escalation !== undefined) {
+        body.escalation_user_id = await people.resolve(o.escalation, "--escalation", true);
+      }
+      if (o.members !== undefined) {
+        const members: number[] = [];
+        for (const m of o.members
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean)) {
+          members.push((await people.resolve(m, "--members")) as number);
+        }
+        body.rr_members = members;
+      }
+      if (Object.keys(body).length === 0) {
+        throw new UsageError("Nothing to change: give at least one option (see --help).");
+      }
+      const res = await putMailQueue(tag, body);
+      if (o.json) return printJson(res);
+      console.log("Queue saved.");
+      await renderQueue(res.queue, people);
+    });
+  });
+
+const queuesCommand = new Command("queues")
+  .description("List the queues you may see; 'queues set <tag>' changes one (owner)")
+  .option(...jsonOption)
+  .action(async (_o, command: Command) => {
+    const o = optsOf<Common>(command);
+    await run(!!o.json, async () => {
+      const res = await listMailQueues();
+      if (o.json) return printJson(res);
+      if (res.queues.length === 0) return console.log("No queues.");
+      const people = new People();
+      for (const q of res.queues) {
+        await renderQueue(q, people);
+        console.log("");
+      }
+    });
+  })
+  .addCommand(queuesSetCommand);
+
+const awayShowCommand = new Command("show")
+  .description("Show your away window (--user: anyone's, owner)")
+  .option("--user <user>", "Another person (owner only)")
+  .option(...jsonOption)
+  .action(async (_o, command: Command) => {
+    const o = optsOf<Common & { user?: string }>(command);
+    await showAway(o);
+  });
+
+async function showAway(o: Common & { user?: string }): Promise<void> {
+  await run(!!o.json, async () => {
+    const people = new People();
+    const userId = o.user ? ((await people.resolve(o.user, "--user")) as number) : undefined;
+    const res = await getMailAvailability(userId);
+    if (o.json) return printJson(res);
+    await renderAvailability(res.availability, people);
+  });
+}
+
+const awaySetCommand = new Command("set")
+  .description("Set an away window: tickets assigned to you go to your backup meanwhile")
+  .option("--from <date>", "Start (ISO 8601; default: now)")
+  .requiredOption("--until <date>", "End (ISO 8601)")
+  .option("--backup <user>", "Who covers; 'none' for nobody")
+  .option("--note <text>", "A note (up to 500 characters)")
+  .option("--user <user>", "Set another person's window (owner only)")
+  .option(...jsonOption)
+  .action(async (_o, command: Command) => {
+    const o = optsOf<
+      Common & { from?: string; until: string; backup?: string; note?: string; user?: string }
+    >(command);
+    await run(!!o.json, async () => {
+      const people = new People();
+      const body: PutAvailabilityRequest = { away_until: instantOf(o.until, "--until") };
+      if (o.from !== undefined) body.away_from = instantOf(o.from, "--from");
+      if (body.away_from && body.away_from >= (body.away_until as string)) {
+        throw new UsageError("--from must be before --until.");
+      }
+      if (o.backup !== undefined)
+        body.backup_user_id = await people.resolve(o.backup, "--backup", true);
+      if (o.note !== undefined) {
+        if (o.note.length > 500) throw new UsageError("--note is limited to 500 characters.");
+        body.note = o.note;
+      }
+      const userId = o.user ? ((await people.resolve(o.user, "--user")) as number) : undefined;
+      const res = await putMailAvailability(body, userId);
+      if (o.json) return printJson(res);
+      console.log("Away window set.");
+      await renderAvailability(res.availability, people);
+    });
+  });
+
+const awayClearCommand = new Command("clear")
+  .description("Clear an away window")
+  .option("--user <user>", "Clear another person's window (owner only)")
+  .option(...jsonOption)
+  .action(async (_o, command: Command) => {
+    const o = optsOf<Common & { user?: string }>(command);
+    await run(!!o.json, async () => {
+      const people = new People();
+      const userId = o.user ? ((await people.resolve(o.user, "--user")) as number) : undefined;
+      const res = await putMailAvailability(
+        { away_from: null, away_until: null, backup_user_id: null, note: null },
+        userId,
+      );
+      if (o.json) return printJson(res);
+      console.log("Away window cleared.");
+      await renderAvailability(res.availability, people);
+    });
+  });
+
+const awayCommand = new Command("away")
+  .description("Show, set or clear your away window (set and clear: --user for an owner)")
+  .option("--user <user>", "Another person (owner only)")
+  .option(...jsonOption)
+  .action(async (_o, command: Command) => {
+    await showAway(optsOf<Common & { user?: string }>(command));
+  })
+  .addCommand(awayShowCommand)
+  .addCommand(awaySetCommand)
+  .addCommand(awayClearCommand);
+
+const reprocessCommand = new Command("reprocess")
+  .description("Rebuild a ticket from a stored raw message (owner)")
+  .argument("<raw_key>", "inbound/raw/YYYY/MM/DD/<uuid>.eml")
+  .option(...jsonOption)
+  .action(async (rawKey: string, _o, command: Command) => {
+    const o = optsOf<Common>(command);
+    await run(!!o.json, async () => {
+      if (!/^inbound\/raw\/\d{4}\/\d{2}\/\d{2}\/[0-9a-f-]{36}\.eml$/.test(rawKey)) {
+        throw new UsageError("That is not a raw key (inbound/raw/YYYY/MM/DD/<uuid>.eml).");
+      }
+      const res = await reprocessMail(rawKey);
+      if (o.json) return printJson(res);
+      console.log(`${res.outcome}: ticket #${res.ticket_id} (${res.status}).`);
+    });
+  });
+
+export const mailCommand = new Command("mail")
+  .description("Support tickets (exit: 0 ok, 1 error, 2 usage, 3 not found)")
+  .addHelpText(
+    "after",
+    `${EXIT_HELP}
+Examples:
+  nemar admin mail list --mine
+  nemar admin mail show 42
+  nemar admin mail reply 42 --text "Thanks, this is fixed." --yes
+  nemar admin mail assign 42 me
+  nemar admin mail close 42`,
+  )
+  .addCommand(listCommand)
+  .addCommand(showCommand)
+  .addCommand(replyCommand)
+  .addCommand(noteCommand)
+  .addCommand(assignCommand)
+  .addCommand(statusCommand)
+  .addCommand(closeCommand)
+  .addCommand(escalateCommand)
+  .addCommand(queuesCommand)
+  .addCommand(awayCommand)
+  .addCommand(reprocessCommand);
