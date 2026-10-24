@@ -34,6 +34,10 @@ function pool(
     declined?: number[];
     failing?: number[];
     pollAnswers?: Array<"unknown" | "throw" | "ok">;
+    /** Pull requests whose start throws but whose review the Worker did begin. */
+    failingButRunning?: number[];
+    /** Whether a review that left the list is confirmed finished (default: when it is really done). */
+    confirm?: (e: PaceEntry) => Promise<boolean>;
   } = {},
 ) {
   let now = 0;
@@ -43,11 +47,16 @@ function pool(
     sleeps: 0,
     polls: 0,
     waits: [] as Array<{ running: number; remaining: number }>,
+    unknowns: [] as Array<{ count: number; max: number }>,
   };
   const running = () => new Set([...finishAt].filter(([, end]) => end > now).map(([key]) => key));
   const pollAnswers = [...(over.pollAnswers ?? [])];
   const deps: PaceDeps<PaceEntry, Answer> = {
     async start(e) {
+      if (over.failingButRunning?.includes(e.pr_number)) {
+        finishAt.set(paceKey(e), now + (durations[e.pr_number] ?? 10));
+        throw new Error("connection lost after the request was sent");
+      }
       if (over.failing?.includes(e.pr_number)) throw new Error("start failed");
       if (over.declined?.includes(e.pr_number)) {
         log.starts.push({ pr: e.pr_number, at: now, runningAfter: running().size });
@@ -71,6 +80,10 @@ function pool(
     },
     onResult() {},
     onWait: (info) => log.waits.push(info),
+    now: () => now,
+    ...(over.confirm ? { confirmFinished: over.confirm } : {}),
+    ...(over.failingButRunning ? { maybeRunning: () => true } : {}),
+    onUnknown: (info) => log.unknowns.push(info),
   };
   return { deps, log, now: () => now };
 }
@@ -79,6 +92,7 @@ const options = (concurrency: number, signal = new AbortController().signal) => 
   concurrency,
   pollMs: 10,
   maxUnknownPolls: 3,
+  maxHoldMs: 100 * 60_000,
   signal,
 });
 
@@ -221,6 +235,158 @@ describe("runPaced", () => {
     await runPaced([entry(1), entry(2), entry(3)], deps, options(2));
 
     expect(log.waits[0]).toEqual({ running: 2, remaining: 1 });
+  });
+});
+
+describe("runPaced: leaving the list is not proof of finishing", () => {
+  test("a review that left the list but is not confirmed finished keeps its slot", async () => {
+    // The queue stops showing it (a closed pull request, a lagging search) while the job still runs.
+    let clock = () => 0;
+    let confirms = 0;
+    const p = pool(
+      { 1: 10, 2: 5 },
+      {
+        confirm: async () => {
+          confirms++;
+          return clock() >= 80;
+        },
+      },
+    );
+    clock = p.now;
+
+    await runPaced([entry(1), entry(2)], p.deps, options(1));
+
+    expect(confirms).toBeGreaterThan(1);
+    expect(p.log.starts.find((s) => s.pr === 2)?.at).toBeGreaterThanOrEqual(80);
+  });
+
+  test("a confirmation that throws keeps the slot as well", async () => {
+    let clock = () => 0;
+    const p = pool(
+      { 1: 10, 2: 5 },
+      {
+        confirm: async () => {
+          if (clock() < 50) throw new Error("detail unreadable");
+          return true;
+        },
+      },
+    );
+    clock = p.now;
+
+    await runPaced([entry(1), entry(2)], p.deps, options(1));
+
+    expect(p.log.starts.find((s) => s.pr === 2)?.at).toBeGreaterThanOrEqual(50);
+  });
+
+  test("a review still in the list is not asked about", async () => {
+    let clock = () => 0;
+    const askedAt: number[] = [];
+    const p = pool(
+      { 1: 100, 2: 5 },
+      {
+        confirm: async () => {
+          askedAt.push(clock());
+          return true;
+        },
+      },
+    );
+    clock = p.now;
+
+    await runPaced([entry(1), entry(2)], p.deps, options(1));
+
+    expect(askedAt.length).toBeGreaterThan(0);
+    for (const at of askedAt) expect(at).toBeGreaterThanOrEqual(100);
+  });
+
+  test("a slot is freed after the hold limit even when it is never confirmed", async () => {
+    const p = pool({ 1: 10, 2: 5 }, { confirm: async () => false });
+
+    await runPaced([entry(1), entry(2)], p.deps, { ...options(1), maxHoldMs: 50 });
+
+    const at = p.log.starts.find((s) => s.pr === 2)?.at ?? -1;
+    expect(at).toBeGreaterThanOrEqual(50);
+    expect(at).toBeLessThan(100);
+  });
+});
+
+describe("runPaced: a start that throws", () => {
+  test("after the request may have reached the Worker it takes a slot until the queue shows it done", async () => {
+    const p = pool({ 1: 30, 2: 5 }, { failingButRunning: [1] });
+
+    const out = await runPaced([entry(1), entry(2)], p.deps, options(1));
+
+    expect(out.results.map((r) => ("error" in r ? "error" : "answer"))).toEqual([
+      "error",
+      "answer",
+    ]);
+    expect(p.log.starts[0]?.pr).toBe(2);
+    expect(p.log.starts[0]?.at).toBeGreaterThanOrEqual(30);
+  });
+
+  test("when it surely did not, the next one starts at once", async () => {
+    const p = pool({ 2: 5 }, { failing: [1] });
+
+    await runPaced([entry(1), entry(2)], p.deps, options(1));
+
+    expect(p.log.starts[0]).toMatchObject({ pr: 2, at: 0 });
+  });
+});
+
+describe("runPaced: Ctrl-C and unreadable reads", () => {
+  test("Ctrl-C during a read that never answers ends the run at once", async () => {
+    const abort = new AbortController();
+    const p = pool({ 1: 10_000 });
+    p.deps.inProgress = () => new Promise(() => {});
+    setTimeout(() => abort.abort(), 20);
+    const t0 = performance.now();
+
+    const out = await runPaced([entry(1), entry(2), entry(3)], p.deps, options(1, abort.signal));
+
+    expect(performance.now() - t0).toBeLessThan(3_000);
+    expect(out.stoppedBy).toBe("interrupted");
+    expect(out.notStarted.map((e) => e.pr_number)).toEqual([2, 3]);
+  });
+
+  test("Ctrl-C during a confirmation that never answers ends the run at once", async () => {
+    const abort = new AbortController();
+    const p = pool({ 1: 10 }, { confirm: () => new Promise(() => {}) });
+    setTimeout(() => abort.abort(), 20);
+
+    const out = await runPaced([entry(1), entry(2)], p.deps, options(1, abort.signal));
+
+    expect(out.stoppedBy).toBe("interrupted");
+    expect(out.notStarted.map((e) => e.pr_number)).toEqual([2]);
+  });
+
+  test("Ctrl-C during the read that would have been the last unreadable one ends as interrupted", async () => {
+    const abort = new AbortController();
+    const p = pool({ 1: 10_000 }, { pollAnswers: ["unknown", "unknown"] });
+    const inner = p.deps.inProgress;
+    let reads = 0;
+    p.deps.inProgress = async () => {
+      reads++;
+      if (reads === 3) {
+        abort.abort();
+        return null;
+      }
+      return await inner();
+    };
+
+    const out = await runPaced([entry(1), entry(2)], p.deps, options(1, abort.signal));
+
+    expect(out.stoppedBy).toBe("interrupted");
+  });
+
+  test("each unreadable read is reported with its count and the maximum", async () => {
+    const p = pool({ 1: 10_000 }, { pollAnswers: ["unknown", "throw", "unknown"] });
+
+    await runPaced([entry(1), entry(2)], p.deps, options(1));
+
+    expect(p.log.unknowns).toEqual([
+      { count: 1, max: 3 },
+      { count: 2, max: 3 },
+      { count: 3, max: 3 },
+    ]);
   });
 });
 
