@@ -1621,8 +1621,58 @@ async function whereisHolders(repo: string, keys: string[]): Promise<Map<string,
   return out;
 }
 
-function presentIn(log: string): Set<string> {
+/** The uuids whose newest line in a location log's text says present (`1`). */
+export function presentIn(log: string): Set<string> {
   return new Set([...newestStatuses(log)].filter(([, status]) => status === "1").map(([u]) => u));
+}
+
+/**
+ * git-annex's `keyFile`: the name a key's logs are stored under on the git-annex branch. A key
+ * holding `&`, `%`, `:` or `/` (a URL key, for one) is escaped so the tree stays flat and the
+ * mapping one to one; any other key is its own name. The hash directory is still computed from
+ * the key itself ({@link hashDirLower}).
+ */
+function annexKeyFile(key: string): string {
+  if (!/[&%:/]/.test(key)) return key;
+  const escapes: Record<string, string> = { "&": "&a", "%": "&s", ":": "&c", "/": "%" };
+  return key.replace(/[&%:/]/g, (c) => escapes[c] as string);
+}
+
+/**
+ * Location-log text for each key as the git-annex branch records it at `ref`; "" when there is
+ * none. Plain git only (one `rev-parse` and one `cat-file --batch`): unlike {@link locationLogs},
+ * which asks `git annex examinekey` for each path, it computes the path itself, so it works in a
+ * bare clone with no git-annex installed. Like `locationLogs` it reads what was COMMITTED, never a
+ * journal, and unlike `whereis` it merges no remote git-annex branch: name the ref to read.
+ *
+ * `ref` is resolved to one commit first and every log is read from that commit, so a branch that
+ * moves during the read cannot mix two states. A ref that does not resolve refuses
+ * (`annex-ref-missing`) rather than answering "no log" for every key, which would read as nothing
+ * dead and nothing present. Exported for the upstream re-pull's planner (ADR 0111), which reads
+ * dead marks and `nemar-s3` presence from a bare clone.
+ */
+export async function readLocationLogsAt(
+  repo: string,
+  ref: string,
+  keys: string[],
+): Promise<string[]> {
+  if (!/^[^\s:^~?*[\\-][^\s:^~?*[\\]*$/.test(ref)) {
+    throw new ContractError("annex ref is not a ref name");
+  }
+  if (!keys.every((k) => k.length > 0 && !/[\r\n]/.test(k))) {
+    throw new ContractError("location log read holds a bad key");
+  }
+  const resolved = await gitRaw(repo, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]);
+  const commit = resolved.stdout.toString("utf8").trim();
+  if (resolved.exitCode !== 0 || !/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(commit)) {
+    throw new GitScrubError("refused: annex-ref-missing", "git rev-parse", resolved.stderr);
+  }
+  if (keys.length === 0) return [];
+  const contents = await readObjects(
+    repo,
+    keys.map((k) => `${commit}:${hashDirLower(k)}${annexKeyFile(k)}.log`),
+  );
+  return contents.map((c) => (c ? c.toString("utf8") : ""));
 }
 
 /** Dead: some repository's newest line is `X` and none is present. */
