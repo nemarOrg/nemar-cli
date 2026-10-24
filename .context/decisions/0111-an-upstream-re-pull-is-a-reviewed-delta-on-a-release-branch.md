@@ -75,6 +75,7 @@ Measured staleness is real: `on004362` missed upstream's 1.0.1 metadata fix (#18
 
 - One row per `(dataset_id, to_tag)`, `UNIQUE`, plus a partial unique index allowing one non-terminal row per dataset.
 - The one row records both pull requests: `branch`, `pr_number` and `head_sha` for N.0.0, and `patch_branch`, `patch_pr_number` and `patch_head_sha` for N.0.1, which stay NULL when there are no corrections.
+  `origin` records who opened them: `automatic` for the scheduled path, `administrator` for `nemar admin repull <id> --execute`.
   A second row keyed by version was rejected because the N.0.1 row would be open beside the N.0.0 row, which the one-non-terminal-row index forbids.
 - Its states are planned, prepared, copied, registered, pr_open, gates_clear, merged and released, then, when there is an N.0.1, patch_synthesized, patch_gates_clear, patch_merged and patch_released, and finally complete.
   Abandoned, failed and superseded are terminal, and superseded means a newer tag arrived before N.0.0 merged, so the pull requests are closed and the plan made again from the same `from_tag`.
@@ -114,10 +115,11 @@ Measured staleness is real: `on004362` missed upstream's 1.0.1 metadata fix (#18
 
 A re-pull pull request is machine clean when all of these hold:
 
-- `AUTO_REPULL_MERGE_ENABLED` is on, and the pull request is the one `upstream_repulls` recorded for this re-pull (its branch, number and head SHA);
+- `AUTO_REPULL_MERGE_ENABLED` is on, and the pull request is the one `upstream_repulls` recorded for this re-pull (its branch, number and head SHA) on a row whose `origin` is `automatic`: a pull request an administrator opened, including through `--execute`, is never merged by the Worker;
 - the plan had zero unexplained paths, so there is no conflict and no correction to replay: the Worker never merges an N.0.1 pull request, because N.0.1 exists only when a correction does, and an administrator merges it;
 - the identifier screen, dispatched with `ref=<head sha>` and a callback bound to the re-pull row, says `clear`: never `unchecked`, never `rerun`, and never `acknowledge`, which needs a person (ADR 0086);
 - BIDS validation and `version-check` are green;
+- the ADR 0107 review stored for that head is not `declined`, which blocks even where the review's ruleset is only a shadow check;
 - the pull request's head equals the screened SHA;
 - the daily merge cap is not exhausted, and its claim is made before the merge is sent.
 
@@ -130,7 +132,7 @@ ADR 0093's sentence "No Worker code path approves" stays literally true, because
 The amendment of 2026-10-10 ("it still does not approve or merge") is about `start` and is unchanged.
 For every other pull request the Worker neither approves nor merges, and ADR 0093 stands.
 
-A re-pull pull request that is not machine clean is merged by an administrator, through `nemar admin repull <id> --merge` or `nemar admin pr-reviews`, under ADR 0093, with a screen that is `clear` or carries the administrator's recorded acknowledgment (ADR 0086).
+A re-pull pull request that is not machine clean, or that an administrator opened, is merged by an administrator, through `nemar admin repull <id> --merge` or `nemar admin pr-reviews`, under ADR 0093, with a screen that is `clear` or carries the administrator's recorded acknowledgment (ADR 0086).
 The Worker's merge call is not built until the ruleset check below is done.
 
 ### 8. A copy pins the object version, and nothing of the prior version is deleted
@@ -195,7 +197,9 @@ The Worker's merge call is not built until the ruleset check below is done.
 - Where `source_version` is inserted under the central manifest flow.
 - Whether "explained" edits are detected on early rewritten imports (`on003645`, `on004362`); local dry-run plans count the unexplained paths.
 - Whether a plan can tell which paths a ledger-recorded correction changed, since the ledger lists no files; until it can, decision 1's refusal applies to every unexplained path of a dataset whose ledger records a correction.
-- How ADR 0107's review treats a re-pull pull request the App opens: the App is not exempt, and where the review's ruleset is in force its verdict decides whether GitHub ever reports `clean`.
+- What ADR 0107's review does to a re-pull pull request the App opens.
+  The App is not exempt, so the review runs; where its ruleset is in force GitHub reports `clean` only once the check passes, and whether a re-pull diff can pass at all is unknown, because ADR 0109 fails a changed `CHANGES` line and holds a replaced recording, both normal in a re-pull.
+  Whether `fail`, `uncertain` or `could_not_decide` should also stop the Worker where the ruleset is only a shadow check is not decided; only `declined` does.
 - Whether enrichment commits on the release branch move its head after the screen read it.
 - Not decided: what ends a row whose N.0.1 pull request an administrator closes unmerged; until that is decided, such a row stays non-terminal and blocks the dataset's next re-pull.
 - Whether OpenNeuro writes S3 before it pushes to GitHub, and whether the object at a path lags the pinned `versionId`.
