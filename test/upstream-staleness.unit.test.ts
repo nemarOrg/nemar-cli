@@ -234,6 +234,48 @@ describe("anomalies a real response cannot produce (built from the recorded shap
     );
   });
 
+  test("an unreadable latest date never lets a row read current beside a later snapshot", () => {
+    // Reproduced defect: `??` falls back only on null, so a garbage string skipped the check.
+    const garbage: UpstreamRead = {
+      kind: "snapshot",
+      latest: { tag: "2.1.0", created: "garbage" },
+      snapshots: [
+        { tag: "2.1.0", created: "also garbage" },
+        { tag: "2.2.0", created: "2026-01-01T00:00:00.000Z" },
+      ],
+    };
+    const unreadable = classifyMirror(facts({ tag: "2.1.0" }), garbage);
+    expect([unreadable.state, unreadable.anomaly]).toEqual([
+      "anomaly",
+      "upstream_dates_unreadable",
+    ]);
+    // Neither date present at all is the same anomaly, not a fall-through to current.
+    const none: UpstreamRead = {
+      kind: "snapshot",
+      latest: { tag: "2.1.0", created: null },
+      snapshots: [{ tag: "2.1.0", created: null }],
+    };
+    expect(classifyMirror(facts({ tag: "2.1.0" }), none).anomaly).toBe("upstream_dates_unreadable");
+    // The entry's readable date stands in for a garbage one, and then the list is checked.
+    const viaEntry: UpstreamRead = {
+      kind: "snapshot",
+      latest: { tag: "2.1.0", created: "garbage" },
+      snapshots: [
+        { tag: "2.1.0", created: "2024-01-01T00:00:00.000Z" },
+        { tag: "2.2.0", created: "2026-01-01T00:00:00.000Z" },
+      ],
+    };
+    expect(classifyMirror(facts({ tag: "2.1.0" }), viaEntry).anomaly).toBe(
+      "upstream_latest_inconsistent",
+    );
+    const viaEntryClean: UpstreamRead = {
+      kind: "snapshot",
+      latest: { tag: "2.1.0", created: "garbage" },
+      snapshots: [{ tag: "2.1.0", created: "2024-01-01T00:00:00.000Z" }],
+    };
+    expect(classifyMirror(facts({ tag: "2.1.0" }), viaEntryClean).state).toBe("current");
+  });
+
   test("the latest's date falls back to its entry in the list", () => {
     const up: UpstreamRead = {
       kind: "snapshot",

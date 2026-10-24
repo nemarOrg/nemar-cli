@@ -345,18 +345,31 @@ export function classifyMirror(
   if (latest === null) {
     return settle(row, "anomaly", `upstream ${row.ds} has no snapshot`, "upstream_no_snapshot");
   }
-  // 9b. The latest disagrees with the list: a snapshot in the list was created after it.
-  const latestMs = parseMs(latest.created ?? snapshotOf(up.snapshots, latest.tag)?.created);
-  if (!Number.isNaN(latestMs)) {
-    const later = up.snapshots.find((s) => parseMs(s.created) > latestMs);
-    if (later) {
-      return settle(
-        row,
-        "anomaly",
-        `upstream says its latest is ${latest.tag}, but ${later.tag} in its own list was created later`,
-        "upstream_latest_inconsistent",
-      );
-    }
+  // 9b. The latest's creation date: its own, or when that is unreadable its entry in the list. If
+  //     neither reads, nothing below can be trusted (a row would read `current` beside a later
+  //     snapshot), so that is an anomaly rather than a fall-through.
+  const entryCreated = snapshotOf(up.snapshots, latest.tag)?.created ?? null;
+  const latestCreated = [latest.created, entryCreated].find(
+    (c): c is string => c !== null && !Number.isNaN(parseMs(c)),
+  );
+  if (latestCreated === undefined) {
+    return settle(
+      row,
+      "anomaly",
+      `the creation date of upstream's latest ${latest.tag} is unreadable, so the order cannot be established`,
+      "upstream_dates_unreadable",
+    );
+  }
+  //     And the latest must not disagree with the list: a snapshot created after it.
+  const latestMs = parseMs(latestCreated);
+  const later = up.snapshots.find((s) => parseMs(s.created) > latestMs);
+  if (later) {
+    return settle(
+      row,
+      "anomaly",
+      `upstream says its latest is ${latest.tag}, but ${later.tag} in its own list was created later`,
+      "upstream_latest_inconsistent",
+    );
   }
   // 10. The same tag: current.
   if (latest.tag === recorded) {
@@ -382,14 +395,14 @@ export function classifyMirror(
     );
   }
   // 13. Compare creation times, never the numbers (see the module comment).
-  const theirs = latest.created ?? snapshotOf(up.snapshots, latest.tag)?.created ?? null;
+  const theirs = latestCreated;
   const mineMs = parseMs(mine.created);
-  const theirsMs = parseMs(theirs);
-  if (Number.isNaN(mineMs) || Number.isNaN(theirsMs)) {
+  const theirsMs = latestMs;
+  if (Number.isNaN(mineMs)) {
     return settle(
       row,
       "anomaly",
-      `the creation date of ${Number.isNaN(mineMs) ? recorded : latest.tag} is unreadable, so the order cannot be established`,
+      `the creation date of ${recorded} is unreadable, so the order cannot be established`,
       "upstream_dates_unreadable",
     );
   }
@@ -402,7 +415,7 @@ export function classifyMirror(
     );
   }
   // 14. Upstream is newer. Has the tag reached the GitHub mirror?
-  const newer = `upstream ${latest.tag} (${(theirs ?? "").slice(0, 10)}) is newer than the recorded ${recorded}`;
+  const newer = `upstream ${latest.tag} (${theirs.slice(0, 10)}) is newer than the recorded ${recorded}`;
   if (!probe) {
     row.needs_probe = true;
     return settle(row, "stale_unverified", `${newer}; the GitHub mirror was not checked`);

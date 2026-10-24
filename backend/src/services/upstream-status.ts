@@ -142,6 +142,16 @@ function groupFacts(rows: readonly PageRow[]): MirrorFacts[] {
   return out;
 }
 
+/** A 200 only proves the tag exists if the body is the JSON object a description is. */
+function isDescriptionBody(body: string): boolean {
+  try {
+    const parsed: unknown = JSON.parse(body);
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed);
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Has `tag` reached OpenNeuro's GitHub mirror of `ds`? The same kind of proof as the backfill's
  * for a 404 (ADR 0111, Phase 2 amendment), with the control read at `HEAD` because OpenNeuro's
@@ -153,16 +163,6 @@ function groupFacts(rows: readonly PageRow[]): MirrorFacts[] {
  * that arrived minutes ago can read `mirror_lag`, and a re-check inside that window will not
  * change it.
  */
-/** A 200 only proves the tag exists if the body is the JSON object a description is. */
-function isDescriptionBody(body: string): boolean {
-  try {
-    const parsed: unknown = JSON.parse(body);
-    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed);
-  } catch {
-    return false;
-  }
-}
-
 export async function probeGitHubMirror(
   env: Pick<Bindings, "GITHUB_RAW_BASE">,
   ds: string,

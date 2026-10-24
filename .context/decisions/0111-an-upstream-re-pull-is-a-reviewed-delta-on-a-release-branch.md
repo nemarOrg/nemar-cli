@@ -393,7 +393,8 @@ The first matching step wins:
 10. The latest tag equals the recorded one: `current`.
 11. The latest tag is not a numeric tag: `anomaly` (`upstream_tag_unparsable`).
 12. The recorded tag is not among upstream's snapshots: `anomaly` (`recorded_tag_not_upstream`).
-13. The latest snapshot was not created after the recorded one, or either date is unreadable: `anomaly` (`upstream_older`, `upstream_dates_unreadable`).
+13. The latest snapshot was created at the same time as the recorded one (`upstream_older`; an earlier latest is already `upstream_latest_inconsistent`, because the recorded tag is in the list), or either date is unreadable: `anomaly` (`upstream_older`, `upstream_dates_unreadable`).
+    The latest's own date is tried first and its entry in the list second; if neither reads, the row is `upstream_dates_unreadable` before the tags are compared, so an undated latest never reads `current`.
 14. Otherwise upstream is newer, and the GitHub mirror decides between `stale_ready`, `mirror_lag` and `stale_unverified`.
 
 A row that cannot be compared (steps 1 to 5) is never sent to OpenNeuro.
@@ -441,5 +442,6 @@ When `upstream_repulls` exists, a non-terminal row there must join step 1, and c
 A report with stale mirrors is a successful report.
 The route answers 502 only when at least one row on the page needed an OpenNeuro verdict (a known tag) and every such row ended `unchecked`.
 A page of only unknown-tag rows with OpenNeuro down is 200 with those rows `unknown`, their reasons naming the failure, and a partial failure is 200 with some rows `unchecked` and the problem in `errors[]`.
+A per-alias OpenNeuro read failure on an UNKNOWN-tag row leaves the row `unknown`, with `unchecked` at 0 and `errors[]` empty (`errors[]` carries batch-level failures only), so the command must not read unknown rows as verified clean: they are by definition not compared, and the reason text names the failure.
 So a 200 does not prove every mirror was compared: the command of the next part must treat a 200 whose rows include `unchecked`, or whose `errors[]` is not empty, as "could not see" and exit 2, not only a 502.
 
