@@ -47,6 +47,7 @@ import type {
 } from "../../../shared/contract/pr-review-admin.js";
 import type { BackfillNameOutcome } from "../../../shared/contract/publication.js";
 import type { NeurobagelWeekly } from "../../../shared/contract/weekly-attention.js";
+import type { UpstreamStatusPage } from "../../../shared/upstream-staleness.js";
 import { request } from "./client.js";
 import { ApiError } from "./errors.js";
 
@@ -1932,6 +1933,44 @@ export async function upstreamBackfill(options?: {
     const body = err instanceof ApiError && err.statusCode === 502 ? err.rawBody : undefined;
     if (body && typeof body === "object" && "execute" in body && "counts" in body) {
       return { ...(body as UpstreamBackfillResponse), ok: false };
+    }
+    throw err;
+  }
+}
+
+// ============================================================================
+// Upstream staleness report (epic #1046 phase 4, #1910; ADR 0111)
+// ============================================================================
+
+/**
+ * One page of `GET /admin/upstream-status`. A 502 carries this same body with `ok: false` (rows
+ * needed an OpenNeuro verdict and every one ended `unchecked`); {@link upstreamStatus} returns it
+ * instead of throwing. A 200 is NOT proof that every mirror was compared: read `errors` and the
+ * `unchecked` count too.
+ */
+export type { UpstreamStatusPage };
+
+/** Examine one page (server default and maximum 100) of the managed OpenNeuro mirrors. */
+export async function upstreamStatus(options?: {
+  limit?: number;
+  after?: string;
+  dataset?: string;
+}): Promise<UpstreamStatusPage> {
+  const params = new URLSearchParams();
+  if (options?.limit != null) params.set("limit", String(options.limit));
+  if (options?.after) params.set("after", options.after);
+  if (options?.dataset) params.set("dataset", options.dataset);
+  const query = params.toString() ? `?${params.toString()}` : "";
+  try {
+    return await request<UpstreamStatusPage>(
+      `/admin/upstream-status${query}`,
+      { method: "GET" },
+      true,
+    );
+  } catch (err) {
+    const body = err instanceof ApiError && err.statusCode === 502 ? err.rawBody : undefined;
+    if (body && typeof body === "object" && "rows" in body && "counts" in body) {
+      return { ...(body as UpstreamStatusPage), ok: false };
     }
     throw err;
   }

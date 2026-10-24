@@ -242,6 +242,7 @@ import {
 } from "../lib/withdrawn-datasets.js";
 import { prReviewsCommand } from "./admin-pr-reviews.js";
 import { publishCommand } from "./admin-publish.js";
+import { upstreamStatusCommand } from "./admin-upstream-status.js";
 
 /**
  * Fetch a file from a GitHub repo via the gh CLI, returning its decoded content.
@@ -7938,6 +7939,7 @@ upstreamBackfillCommand
   );
 
 adminCommand.addCommand(upstreamBackfillCommand);
+adminCommand.addCommand(upstreamStatusCommand);
 
 // ============================================================================
 // Anonymity verification sweep (issue #1409, epic #1406)
