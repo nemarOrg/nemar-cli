@@ -156,7 +156,13 @@ export function registerMailRoutes(admin: AdminRouter): void {
       // Validate access before the body, so a hidden ticket is a 404 whatever is sent.
       await requireVisibleTicket(c.env.DB, c.get("user"), n);
       const { text } = await parseBody(c, replySchema);
-      const sent = await replyToTicket(c.env, c.get("user"), n, text);
+      const sent = await replyToTicket(
+        c.env,
+        c.get("user"),
+        n,
+        text,
+        c.req.header("Idempotency-Key") ?? undefined,
+      );
       return c.json({
         message_id: sent.message_id,
         header_message_id: sent.header_message_id,

@@ -534,6 +534,7 @@ function cloudflareSendFailure(error: unknown, message: string): Error {
 export function isCertainNonDelivery(error: unknown): boolean {
   return (
     error instanceof EmailRejectedError ||
+    error instanceof MailHeaderError ||
     error instanceof DevEmailFenceError ||
     error instanceof EmailProviderConfigError
   );
@@ -644,6 +645,14 @@ export async function sendEmail(
   );
 }
 
+/** A caller's extra mail headers were refused before any provider was called: nothing was sent. */
+export class MailHeaderError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "MailHeaderError";
+  }
+}
+
 /** The only extra headers a caller may set: the threading trio. Names compare case-insensitively. */
 export const ALLOWED_MAIL_HEADERS: readonly string[] = ["Message-ID", "In-Reply-To", "References"];
 
@@ -663,13 +672,15 @@ export function validateMailHeaders(
   const out: Record<string, string> = {};
   for (const [name, value] of Object.entries(headers)) {
     const canonical = ALLOWED_MAIL_HEADERS.find((h) => h.toLowerCase() === name.toLowerCase());
-    if (!canonical) throw new Error(`mail header "${name.slice(0, 40)}" is not allowed`);
+    if (!canonical) throw new MailHeaderError(`mail header "${name.slice(0, 40)}" is not allowed`);
     // biome-ignore lint/suspicious/noControlCharactersInRegex: rejecting control characters is the point
     if (typeof value !== "string" || /[\u0000-\u001f\u007f]/.test(value)) {
-      throw new Error(`mail header ${canonical} has a control character in its value`);
+      throw new MailHeaderError(`mail header ${canonical} has a control character in its value`);
     }
     if (value.length === 0 || value.length > MAIL_HEADER_VALUE_MAX) {
-      throw new Error(`mail header ${canonical} must be 1 to ${MAIL_HEADER_VALUE_MAX} characters`);
+      throw new MailHeaderError(
+        `mail header ${canonical} must be 1 to ${MAIL_HEADER_VALUE_MAX} characters`,
+      );
     }
     out[canonical] = value;
   }

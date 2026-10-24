@@ -11,10 +11,11 @@ import { Hono } from "hono";
 import { Miniflare } from "miniflare";
 import { adminRoutes } from "../src/routes/admin";
 import { handleInboundEmail } from "../src/services/inbound-mail";
+import { buildReferences } from "../src/services/mail-admin";
 import { hashApiKey } from "../src/services/token";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { bindingError, recordingBinding } from "./helpers/cloudflare-email";
-import { freshDb, realD1 } from "./helpers/d1";
+import { freshDb, realD1, yieldingD1 } from "./helpers/d1";
 import { withFakeResend } from "./helpers/resend";
 import { eml } from "./helpers/tickets";
 
@@ -426,6 +427,160 @@ describe("reply", () => {
       (await call("admin", "POST", `/tickets/${t}/reply`, { text: "x", to: "a@b.c" })).status,
     ).toBe(400);
     expect(binding.sent.length).toBe(0);
+  });
+});
+
+describe("long threads", () => {
+  test("References is trimmed from the oldest end, keeps In-Reply-To and the newest ids, and fits", async () => {
+    const t = ticket();
+    for (let i = 0; i < 30; i++) {
+      inbound(t, `<m${String(i).padStart(2, "0")}-${"x".repeat(60)}@sender.example>`);
+    }
+    const r = await call("admin", "POST", `/tickets/${t}/reply`, { text: "hi" });
+    expect(r.status).toBe(200);
+    const h = binding.sent[0].headers ?? {};
+    expect((h.References ?? "").length).toBeLessThanOrEqual(998);
+    const refs = (h.References ?? "").split(" ");
+    expect(refs.at(-1)).toBe(h["In-Reply-To"]);
+    expect(refs.some((x) => x.startsWith("<m29-"))).toBe(true);
+    expect(refs.some((x) => x.startsWith("<m00-"))).toBe(false);
+    // Contiguous newest run: nothing newer is dropped in favour of something older.
+    const nums = refs.map((x) => Number(x.slice(2, 4)));
+    expect(nums).toEqual([...nums].sort((a, b) => a - b));
+    expect(nums.at(-1)).toBe(29);
+  });
+
+  test("buildReferences pins the id replied to even when it is not the newest", () => {
+    const ids = ["<a@x>", "<b@x>", "<c@x>", "<d@x>"];
+    expect(buildReferences(ids, "<b@x>", 11)).toBe("<b@x> <d@x>");
+    expect(buildReferences(ids, undefined, 11)).toBe("<c@x> <d@x>");
+    expect(buildReferences([], undefined)).toBeUndefined();
+  });
+
+  test("a header that cannot be sent is a certain non-delivery and nothing is recorded as maybe sent", async () => {
+    const t = ticket();
+    inbound(t, `<${"y".repeat(997)}>`);
+    const r = await call("admin", "POST", `/tickets/${t}/reply`, { text: "hi" });
+    expect(r.status).toBe(502);
+    expect(r.body.code).toBe("reply_not_sent");
+    expect(binding.sent.length).toBe(0);
+    expect(events(t)).toEqual([]);
+    expect(
+      db.query("SELECT COUNT(*) AS n FROM mail_messages WHERE direction = 'out'").get(),
+    ).toEqual({ n: 0 });
+  });
+});
+
+describe("reply idempotency and recording faults", () => {
+  const send = (who: Who, t: number, key?: string, text = "hi") =>
+    app
+      .request(
+        `/admin/mail/tickets/${t}/reply`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${KEYS[who]}`,
+            "Content-Type": "application/json",
+            ...(key ? { "Idempotency-Key": key } : {}),
+          },
+          body: JSON.stringify({ text }),
+        },
+        env(),
+      )
+      .then(async (res) => ({
+        status: res.status,
+        body: (await res.json()) as Record<string, any>,
+      }));
+
+  test("a repeat with the same key returns the stored outcome and sends once", async () => {
+    const t = ticket();
+    const first = await send("agent", t, "k-1");
+    const again = await send("agent", t, "k-1", "different text is ignored");
+    expect(first.status).toBe(200);
+    expect(again).toEqual(first);
+    expect(binding.sent.length).toBe(1);
+    expect(
+      db.query("SELECT COUNT(*) AS n FROM mail_messages WHERE direction = 'out'").get(),
+    ).toEqual({ n: 1 });
+    // The same key on another ticket is its own reply; no key means no idempotency.
+    const other = ticket();
+    expect((await send("agent", other, "k-1")).status).toBe(200);
+    await send("agent", t);
+    await send("agent", t);
+    expect(binding.sent.length).toBe(4);
+    expect((await send("agent", t, "bad key!")).status).toBe(400);
+  });
+
+  test("a duplicate while the first is in flight is 409 reply_in_progress, and a stale one is unknown", async () => {
+    const t = ticket();
+    db.run(
+      "INSERT INTO mail_reply_keys (ticket_id, idem_key, state) VALUES (?, 'k-2', 'pending')",
+      [t],
+    );
+    const busy = await send("agent", t, "k-2");
+    expect([busy.status, busy.body.code]).toEqual([409, "reply_in_progress"]);
+    db.run(
+      "UPDATE mail_reply_keys SET created_at = datetime('now', '-10 minutes') WHERE idem_key = 'k-2'",
+    );
+    const stale = await send("agent", t, "k-2");
+    expect([stale.status, stale.body.code]).toEqual([502, "reply_delivery_unknown"]);
+    expect(binding.sent.length).toBe(0);
+  });
+
+  test("two simultaneous requests with one key send once", async () => {
+    envOverrides = { DB: yieldingD1(realD1(db)) };
+    const t = ticket();
+    const [a, b] = await Promise.all([send("agent", t, "k-3"), send("agent", t, "k-3")]);
+    expect([a.status, b.status].sort()).toEqual([200, 409]);
+    expect(binding.sent.length).toBe(1);
+  });
+
+  test("an unknown outcome is never re-sent on a retry; a refusal frees the key", async () => {
+    binding = recordingBinding(() => bindingError("E_INTERNAL_SERVER_ERROR", "boom"));
+    const t = ticket();
+    expect((await send("agent", t, "k-4")).body.code).toBe("reply_delivery_unknown");
+    const retry = await send("agent", t, "k-4");
+    expect([retry.status, retry.body.code]).toEqual([502, "reply_delivery_unknown"]);
+    expect(binding.sent.length).toBe(1);
+
+    let refuse = true;
+    binding = recordingBinding(() => (refuse ? bindingError("E_RECIPIENT_SUPPRESSED") : undefined));
+    const u = ticket();
+    expect((await send("agent", u, "k-5")).body.code).toBe("reply_not_sent");
+    refuse = false;
+    expect((await send("agent", u, "k-5")).status).toBe(200);
+    expect(binding.sent.length).toBe(2);
+  });
+
+  test("if the event write fails too, the 502 and its clear text still come back", async () => {
+    binding = recordingBinding(() => bindingError("E_INTERNAL_SERVER_ERROR", "boom"));
+    db.run(
+      "CREATE TRIGGER no_failed_events BEFORE INSERT ON mail_ticket_events WHEN NEW.kind = 'reply_failed' BEGIN SELECT RAISE(ABORT, 'disk'); END",
+    );
+    const t = ticket();
+    const r = await send("agent", t, "k-6");
+    expect([r.status, r.body.code]).toEqual([502, "reply_delivery_unknown"]);
+    expect(r.body.error).toContain("may or may not have gone out");
+    expect(events(t)).toEqual([]);
+  });
+
+  test("sent but not recorded writes an event naming the Message-ID and refuses a repeat", async () => {
+    db.run(
+      "CREATE TRIGGER no_out BEFORE INSERT ON mail_messages WHEN NEW.direction = 'out' BEGIN SELECT RAISE(ABORT, 'disk'); END",
+    );
+    const t = ticket();
+    const r = await send("agent", t, "k-7");
+    expect([r.status, r.body.code]).toEqual([502, "reply_delivery_unknown"]);
+    expect(r.body.error).toContain("Do not send it again");
+    expect(binding.sent.length).toBe(1);
+    const [event] = events(t);
+    expect(event.kind).toBe("reply_failed");
+    expect(JSON.parse(event.detail ?? "{}")).toEqual({
+      delivery: "sent_unrecorded",
+      header_message_id: binding.sent[0].headers?.["Message-ID"],
+    });
+    expect((await send("agent", t, "k-7")).status).toBe(502);
+    expect(binding.sent.length).toBe(1);
   });
 });
 

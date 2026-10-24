@@ -6,7 +6,9 @@
  *   POST /admin/mail/tickets/:id/reply          send a reply to the requester from support@
  *   POST /admin/mail/tickets/:id/note           an internal note
  *   POST /admin/mail/tickets/:id/assign         assign or unassign
- *   POST /admin/mail/tickets/:id/status         open, pending, closed or spam
+ *   POST /admin/mail/tickets/:id/status         open, pending, closed or spam (reopening a ticket whose
+ *                                               restricted flag no longer matches its queue is 409
+ *                                               `restriction_mismatch`)
  *   POST /admin/mail/tickets/:id/escalate       hand to the escalation owner
  *   GET  /admin/mail/queues                     queues the caller may see
  *   PUT  /admin/mail/queues/:tag                (owner) create or change a queue
@@ -122,7 +124,17 @@ export interface TicketDetail {
   events: TicketEvent[];
 }
 
-/** Plain text. It is sent as an escaped HTML body with the line breaks kept. */
+/**
+ * Plain text, sent as an escaped HTML body with the line breaks kept.
+ *
+ * The request MAY carry an `Idempotency-Key` header (1 to 64 letters, digits or `. _ : -`), and an
+ * agent that can retry after a lost response SHOULD. The key is unique per ticket and stored
+ * before anything is sent: a repeat of a reply that was sent returns the same response without
+ * sending; a repeat while the first is still being sent is 409 `reply_in_progress`; a repeat of a
+ * reply whose outcome was unknown is 502 `reply_delivery_unknown` again and is never re-sent; a
+ * reply that certainly sent nothing (`reply_not_sent`) releases its key so the retry can go. Without
+ * a key every request sends.
+ */
 export interface ReplyRequest {
   text: string;
 }
@@ -158,7 +170,7 @@ export interface MailQueue {
   backup_user_id: number | null;
   rr_members: number[];
   escalation_user_id: number | null;
-  /** Tickets in this queue that are not closed. */
+  /** Tickets in this queue that are not closed and that the caller may see. */
   open_tickets: number;
 }
 

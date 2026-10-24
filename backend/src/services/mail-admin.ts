@@ -19,6 +19,7 @@ import { escapeHtml } from "../lib/escape";
 import type { Bindings } from "../types/bindings";
 import {
   DevEmailFenceError,
+  MailHeaderError,
   isCertainNonDelivery,
   parseMailbox,
   redactAddressIn,
@@ -276,19 +277,155 @@ export function textToHtml(text: string): string {
   return `<!DOCTYPE html><html><body style="font-family: sans-serif; line-height: 1.5;">${paragraphs.join("")}</body></html>`;
 }
 
-const MAX_REFERENCES = 20;
+const MAX_REFERENCES = 60;
+/** A header value stays within this many characters (the same bound validateMailHeaders enforces). */
+const REFERENCES_MAX_CHARS = 998;
+/** A reply whose key has been pending this long is treated as having an unknown outcome. */
+const PENDING_KEY_STALE_SECONDS = 120;
+const IDEMPOTENCY_KEY = /^[A-Za-z0-9._:-]{1,64}$/;
+const MESSAGE_ID = /^<[^<>\s]+>$/;
 
+/**
+ * The `References` value for a reply: the ticket's Message-IDs oldest to newest, trimmed from the
+ * OLDEST end until it fits `maxChars`. The id being replied to (`inReplyTo`) is always kept, then
+ * the newest others.
+ */
+export function buildReferences(
+  ids: string[],
+  inReplyTo: string | undefined,
+  maxChars = REFERENCES_MAX_CHARS,
+): string | undefined {
+  const keep = new Set<number>();
+  let length = 0;
+  const add = (index: number): boolean => {
+    const cost = ids[index].length + (keep.size > 0 ? 1 : 0);
+    if (length + cost > maxChars) return false;
+    keep.add(index);
+    length += cost;
+    return true;
+  };
+  const pinned = inReplyTo === undefined ? -1 : ids.lastIndexOf(inReplyTo);
+  if (pinned >= 0) add(pinned);
+  for (let i = ids.length - 1; i >= 0; i--) {
+    if (i === pinned) continue;
+    if (!add(i)) break;
+  }
+  const kept = [...keep].sort((x, y) => x - y).map((i) => ids[i]);
+  return kept.length > 0 ? kept.join(" ") : undefined;
+}
+
+export interface ReplyOutcome {
+  message_id: number;
+  header_message_id: string;
+  status: TicketStatus;
+}
+
+const UNKNOWN_MESSAGE =
+  "The mail provider did not confirm the send, so the reply may or may not have gone out. Check with the requester before sending it again.";
+
+/** Best effort: used where the primary failure must still reach the caller with its clear text. */
+async function tryRun(label: string, work: () => Promise<unknown>): Promise<void> {
+  try {
+    await work();
+  } catch (error) {
+    console.error(
+      `[mail-admin] ${label} failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
+
+/**
+ * Send a reply and record it. With an `idempotencyKey` a retry is safe: the key is stored unique
+ * per ticket BEFORE anything is sent, a repeat of a sent reply returns its stored outcome without
+ * sending, a repeat while the first is still in flight is 409 `reply_in_progress`, and a repeat of
+ * a reply whose outcome was unknown is the same 502 again (never a second send). A reply that
+ * certainly sent nothing releases its key so the retry can go.
+ */
 export async function replyToTicket(
   env: Bindings,
   viewer: Viewer,
   ticketId: number,
   text: string,
-): Promise<{ message_id: number; header_message_id: string; status: TicketStatus }> {
+  idempotencyKey?: string,
+): Promise<ReplyOutcome> {
   const db = env.DB;
   const ticket = await requireVisibleTicket(db, viewer, ticketId);
   if (ticket.status === "spam") {
     throw new MailAdminError(409, "ticket_is_spam", "A spam ticket cannot be replied to.");
   }
+  if (idempotencyKey !== undefined && !IDEMPOTENCY_KEY.test(idempotencyKey)) {
+    throw new MailAdminError(
+      400,
+      "bad_request",
+      "Idempotency-Key is 1 to 64 letters, digits or . _ : -.",
+    );
+  }
+
+  if (idempotencyKey !== undefined) {
+    const claimed = await db
+      .prepare(
+        "INSERT OR IGNORE INTO mail_reply_keys (ticket_id, idem_key, state) VALUES (?, ?, 'pending')",
+      )
+      .bind(ticket.id, idempotencyKey)
+      .run();
+    if ((claimed.meta?.changes ?? 0) === 0) {
+      const prior = await db
+        .prepare(
+          `SELECT state, outcome,
+                  created_at < datetime('now', '-${PENDING_KEY_STALE_SECONDS} seconds') AS stale
+             FROM mail_reply_keys WHERE ticket_id = ? AND idem_key = ?`,
+        )
+        .bind(ticket.id, idempotencyKey)
+        .first<{ state: string; outcome: string | null; stale: number }>();
+      if (prior?.state === "sent" && prior.outcome)
+        return JSON.parse(prior.outcome) as ReplyOutcome;
+      if (prior && (prior.state === "unknown" || prior.stale === 1)) {
+        throw new MailAdminError(502, "reply_delivery_unknown", UNKNOWN_MESSAGE);
+      }
+      throw new MailAdminError(
+        409,
+        "reply_in_progress",
+        "A reply with this Idempotency-Key is still being sent. Do not send it again.",
+      );
+    }
+  }
+  const setKey = (state: "unknown", headerId: string) =>
+    idempotencyKey === undefined
+      ? Promise.resolve()
+      : db
+          .prepare(
+            "UPDATE mail_reply_keys SET state = ?, header_message_id = ? WHERE ticket_id = ? AND idem_key = ?",
+          )
+          .bind(state, headerId, ticket.id, idempotencyKey)
+          .run();
+  const releaseKey = () =>
+    idempotencyKey === undefined
+      ? Promise.resolve()
+      : db
+          .prepare("DELETE FROM mail_reply_keys WHERE ticket_id = ? AND idem_key = ?")
+          .bind(ticket.id, idempotencyKey)
+          .run();
+
+  try {
+    return await sendAndRecord(env, viewer, ticket, text, idempotencyKey, setKey);
+  } catch (error) {
+    // Everything but an unknown outcome means nothing went out: free the key for the retry.
+    if (!(error instanceof MailAdminError && error.code === "reply_delivery_unknown")) {
+      await tryRun("releasing the reply key", releaseKey);
+    }
+    throw error;
+  }
+}
+
+async function sendAndRecord(
+  env: Bindings,
+  viewer: Viewer,
+  ticket: TicketRow,
+  text: string,
+  idempotencyKey: string | undefined,
+  setKey: (state: "unknown", headerId: string) => Promise<unknown>,
+): Promise<ReplyOutcome> {
+  const db = env.DB;
   const domain = supportDomain(env);
   const supportAddress = `support@${domain}`;
   const headerId = `<${crypto.randomUUID()}@${domain}>`;
@@ -308,15 +445,16 @@ export async function replyToTicket(
     )
     .bind(ticket.id, MAX_REFERENCES)
     .all<{ message_id: string }>();
-  const references = (chain.results ?? [])
+  const ids = (chain.results ?? [])
     .map((r) => r.message_id)
-    .filter((id) => /^<[^<>\s]+>$/.test(id))
+    .filter((id) => MESSAGE_ID.test(id))
     .reverse();
   const headers: Record<string, string> = { "Message-ID": headerId };
-  if (latestIn && /^<[^<>\s]+>$/.test(latestIn.message_id)) {
+  if (latestIn && MESSAGE_ID.test(latestIn.message_id)) {
     headers["In-Reply-To"] = latestIn.message_id;
   }
-  if (references.length > 0) headers.References = references.join(" ");
+  const references = buildReferences(ids, headers["In-Reply-To"]);
+  if (references) headers.References = references;
 
   const subject = replySubject(ticket.subject);
   const { isDev } = resolveEmailConfig(env);
@@ -343,34 +481,32 @@ export async function replyToTicket(
     );
     if (isCertainNonDelivery(error)) {
       console.warn(`[mail-admin] reply on ticket ${ticket.id} not sent: ${reason}`);
-      const fenced = error instanceof DevEmailFenceError;
       throw new MailAdminError(
         502,
         "reply_not_sent",
-        fenced
+        error instanceof DevEmailFenceError
           ? "Nothing was sent: this environment does not deliver to that recipient."
-          : "Nothing was sent: the mail provider refused the message.",
+          : error instanceof MailHeaderError
+            ? "Nothing was sent: the message headers were refused."
+            : "Nothing was sent: the mail provider refused the message.",
       );
     }
     // The provider may have accepted it and only the answer was lost. Storing nothing would
     // invite a second send; storing it as sent would claim a delivery nobody saw. So the
     // attempt is recorded as an event naming the Message-ID, the admin is told it is unknown,
-    // and the requester's own reply (which carries that id) will thread if it did arrive.
+    // and the requester's own reply (which carries that id) will thread if it did arrive. The
+    // writes are best effort: a failing database must not hide the 502 and its clear text.
     console.error(`[mail-admin] reply on ticket ${ticket.id} outcome unknown: ${reason}`);
-    await db.batch([
+    await tryRun("recording the unknown reply", () =>
       eventStatement(db, ticket.id, "reply_failed", viewer.id, {
         delivery: "unknown",
         header_message_id: headerId,
-      }),
-    ]);
-    throw new MailAdminError(
-      502,
-      "reply_delivery_unknown",
-      "The mail provider did not confirm the send, so the reply may or may not have gone out. Check with the requester before sending it again.",
+      }).run(),
     );
+    await tryRun("marking the reply key unknown", () => setKey("unknown", headerId));
+    throw new MailAdminError(502, "reply_delivery_unknown", UNKNOWN_MESSAGE);
   }
 
-  const body = text.slice(0, 64 * 1024);
   const nextStatus: TicketStatus = ticket.status === "open" ? "pending" : ticket.status;
   const statements = [
     db
@@ -387,7 +523,7 @@ export async function replyToTicket(
         supportAddress,
         ticket.requester_email,
         subject,
-        body,
+        text.slice(0, 64 * 1024),
         viewer.id,
       ),
     db
@@ -406,12 +542,34 @@ export async function replyToTicket(
       }),
     );
   }
+  if (idempotencyKey !== undefined) {
+    statements.push(
+      db
+        .prepare(
+          `UPDATE mail_reply_keys SET state = 'sent', header_message_id = ?1,
+              outcome = json_object('message_id',
+                (SELECT id FROM mail_messages WHERE ticket_id = ?2 AND message_id = ?1),
+                'header_message_id', ?1, 'status', ?3)
+            WHERE ticket_id = ?2 AND idem_key = ?4`,
+        )
+        .bind(headerId, ticket.id, nextStatus, idempotencyKey),
+    );
+  }
   try {
     await db.batch(statements);
   } catch (error) {
     console.error(
       `[mail-admin] reply on ticket ${ticket.id} was sent but not recorded: ${error instanceof Error ? error.message : String(error)}`,
     );
+    // The mail went out, so leave a trace that names it (best effort, like the unknown case),
+    // and make a repeat of the same key answer 502 and not send again.
+    await tryRun("recording the unrecorded reply", () =>
+      eventStatement(db, ticket.id, "reply_failed", viewer.id, {
+        delivery: "sent_unrecorded",
+        header_message_id: headerId,
+      }).run(),
+    );
+    await tryRun("marking the reply key unknown", () => setKey("unknown", headerId));
     throw new MailAdminError(
       502,
       "reply_delivery_unknown",
