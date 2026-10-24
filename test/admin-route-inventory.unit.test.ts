@@ -200,6 +200,9 @@ const EXPECTED_ENTRIES: Record<string, number> = {
   // transition carry a zod validator beside the handler; the two reads are the handler alone.
   "POST /repulls": 2,
   "GET /repulls": 1,
+  // The automatic re-pull's switches (epic #1046 phase 7, #1913): a handler alone, registered
+  // BEFORE `GET /repulls/:id`, which would otherwise answer 400 for "switches".
+  "GET /repulls/switches": 1,
   "GET /repulls/:id": 1,
   "POST /repulls/:id/transition": 2,
   // The re-pull's screen and its verified facts (epic #1046 phase 6, #1912; ADR 0111): every write
@@ -271,8 +274,19 @@ describe("admin route inventory", () => {
     expect(dup).toBeLessThan(byUsername);
   });
 
+  // `GET /repulls/switches` is reachable only registered before `GET /repulls/:id`, for the reason
+  // the duplicate report above gives: `:id` would match "switches" first and answer 400.
+  test("GET /repulls/switches is registered before GET /repulls/:id", () => {
+    const paths = adminRoutes.routes.map((r) => `${r.method} ${r.path}`);
+    const switches = paths.indexOf("GET /repulls/switches");
+    const byId = paths.indexOf("GET /repulls/:id");
+    expect(switches).toBeGreaterThanOrEqual(0);
+    expect(byId).toBeGreaterThanOrEqual(0);
+    expect(switches).toBeLessThan(byId);
+  });
+
   test("entry total is pinned", () => {
-    expect(adminRoutes.routes.length).toBe(189);
+    expect(adminRoutes.routes.length).toBe(190);
   });
 
   // The count pin above can't see a SWAP of the router-level middleware
