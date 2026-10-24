@@ -204,6 +204,9 @@ export interface Bindings {
   /** Raw content host for the git-file broker. Unset in production, where
    *  `GITHUB_RAW_ORIGIN` applies; tests point it at a local server. */
   GITHUB_RAW_BASE?: string;
+  /** OpenNeuro GraphQL endpoint for the upstream staleness report. Unset in
+   *  production; tests point it at a local server. */
+  OPENNEURO_GRAPHQL_URL?: string;
   /** Size below which a brokered git file is buffered so the runtime can
    *  declare its length. Unset everywhere but tests, which lower it to reach
    *  the streaming branch without a multi-megabyte fixture. */

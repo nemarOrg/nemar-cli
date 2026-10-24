@@ -16,7 +16,7 @@
 
 import { SYSTEM_USER_ID } from "../lib/constants";
 
-const OPENNEURO_GRAPHQL_URL = "https://openneuro.org/crn/graphql";
+export const OPENNEURO_GRAPHQL_URL = "https://openneuro.org/crn/graphql";
 
 /**
  * NEMAR's in-scope BIDS modalities (matched against OpenNeuro's `summary.modalities`,
