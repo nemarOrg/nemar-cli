@@ -1639,7 +1639,7 @@ function annexKeyFile(key: string): string {
 }
 
 /** How many paths one `ls-tree` names: far under any argv limit, few processes for a large dataset. */
-const LS_TREE_BATCH = 1000;
+const LS_TREE_BATCH = 500;
 
 /** Each `<mode> <type> <oid>\t<path>` entry of an `ls-tree -z` listing, by path. */
 async function treeEntries(
