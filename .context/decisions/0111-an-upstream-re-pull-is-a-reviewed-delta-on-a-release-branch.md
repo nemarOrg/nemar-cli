@@ -53,14 +53,16 @@ Measured staleness is real: `on004362` missed upstream's 1.0.1 metadata fix (#18
   and both added a path with different content (N.0.0 has upstream's).
   A path NEMAR added or deleted that upstream did not change is a correction: N.0.0 follows upstream, and N.0.1 replays NEMAR's addition or deletion.
 - A conflict stays out of N.0.1 until an administrator resolves it.
-- Corrections replay as N.0.1, the next patch, in a second pull request stacked on the first, opened with it and merged right after it.
+- Corrections replay as N.0.1, the next patch, in a second pull request that targets `main` and is opened with N.0.0's.
+  It is merged only after N.0.0 has merged and been tagged.
+  Both are squash-merged, as `y` in ADR 0093's `next` merges, so N.0.1 cannot be stacked by branch ancestry: once N.0.0 is tagged, N.0.1 is synthesized again on the new `main` (the corrections replayed onto N.0.0's tree), and its gates are read on that commit, never on the one it was opened with.
   A re-pull with no corrections opens no N.0.1.
 
 ### 2. The delta is replayed as one commit, through a pull request
 
 - The plan compares base, theirs and ours per path (decision 1), on a clone of `nemarDatasets/<id>` at `main` (so `enableremote nemar-s3` reuses the bucket's UUID, avoiding #1320) and metadata-only clones of upstream at the two tags.
 - The result is one commit on `release/vN.0.0`, carrying the trailers `Upstream-Snapshot: <ds>@<to_tag>` and `Repull-Plan: <digest>`.
-  N is the next major after the highest of the `dataset_versions` rows, the `v*` tags and `Version` on `main`; the plan refuses when the three disagree or another release pull request is open.
+  N is the next major after the highest of the `dataset_versions` rows, the `v*` tags and `Version` on `main`; the plan refuses when the three disagree or another release pull request is open, not counting this re-pull's own N.0.1.
 - It lands through a pull request, never a bypass and never a direct push, and it is never a git merge of upstream's history: upstream's commits are not pushed to NEMAR.
 - The scrub, the annex policy and the date normalization run on the delta paths only (decision 1), and they run before the commit, so unscrubbed bytes never enter NEMAR's history.
   A recording the commit does not touch keeps its bytes and its key.
@@ -71,8 +73,12 @@ Measured staleness is real: `on004362` missed upstream's 1.0.1 metadata fix (#18
 ### 3. Re-pull state lives in `upstream_repulls`, never in `import_jobs`
 
 - One row per `(dataset_id, to_tag)`, `UNIQUE`, plus a partial unique index allowing one non-terminal row per dataset.
-- Its states are planned, prepared, copied, registered, pr_open, gates_clear, merged, released and complete; abandoned, failed and superseded are terminal, and superseded means a newer tag arrived before the merge, so the pull request is closed and the plan made again from the same `from_tag`.
-- Every step checks its own end state before it acts, so `--resume` continues from the recorded status, and `--abandon` closes the pull request, deletes the branch and reports the orphaned bytes.
+- The one row records both pull requests: `branch`, `pr_number` and `head_sha` for N.0.0, and `patch_branch`, `patch_pr_number` and `patch_head_sha` for N.0.1, which stay NULL when there are no corrections.
+  A second row keyed by version was rejected because the N.0.1 row would be open beside the N.0.0 row, which the one-non-terminal-row index forbids.
+- Its states are planned, prepared, copied, registered, pr_open, gates_clear, merged and released, then, when there is an N.0.1, patch_synthesized, patch_gates_clear, patch_merged and patch_released, and finally complete.
+  Abandoned, failed and superseded are terminal, and superseded means a newer tag arrived before N.0.0 merged, so the pull requests are closed and the plan made again from the same `from_tag`.
+- Every step checks its own end state before it acts, so `--resume` continues from the recorded status.
+  `--abandon` closes the pull requests, deletes the branches and reports the orphaned bytes, and is refused once N.0.0 has merged, because its tag and DOI exist.
 - `last_error` is written through `import-error.ts`, so ADR 0051's rule applies.
 - A re-pull never writes `import_jobs`: its sticky row per dataset, its `preparing` reset, its six-hour sweep and the retry engine, which reads only `import_jobs`, would each treat a re-pull as a broken import.
 
@@ -156,7 +162,7 @@ The Worker's merge call is not built until the ruleset check below is done.
 - **Two DOIs when N.0.1 has content.**
   N.0.0 cites upstream's snapshot without NEMAR's corrections, which is what its number says, and N.0.1 is the version a reader most likely wants.
 - **A window between N.0.0 and N.0.1.**
-  Between the two merges the public latest lacks NEMAR's corrections; merging N.0.1 right after N.0.0 keeps the window short, and a conflict keeps its correction out until an administrator resolves it.
+  Between the two merges the public latest lacks NEMAR's corrections; the window lasts at least until N.0.0 is tagged and N.0.1 is synthesized again and its gates pass, and a conflict keeps its correction out until an administrator resolves it.
   A change the privacy ledger records, and a change a deterministic rule re-applies (the scrub, the date normalization), are standard edits, so N.0.0 carries them and the window never lacks them.
   Every other correction is in the window, including a privacy-minded one the ledger does not record.
 - **Orphan locked objects.**
@@ -190,6 +196,7 @@ The Worker's merge call is not built until the ruleset check below is done.
 - Whether a plan can tell which paths a ledger-recorded correction changed, since the ledger lists no files; until it can, decision 1's refusal applies to every unexplained path of a dataset whose ledger records a correction.
 - How ADR 0107's review treats a re-pull pull request the App opens: the App is not exempt, and where the review's ruleset is in force its verdict decides whether GitHub ever reports `clean`.
 - Whether enrichment commits on the release branch move its head after the screen read it.
+- Not decided: what ends a row whose N.0.1 pull request an administrator closes unmerged; until that is decided, such a row stays non-terminal and blocks the dataset's next re-pull.
 - Whether OpenNeuro writes S3 before it pushes to GitHub, and whether the object at a path lags the pinned `versionId`.
 
 ## Receipts

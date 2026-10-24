@@ -46,6 +46,6 @@ A privacy correction under [ADR 0085](0085-a-privacy-correction-scrubs-every-ver
 [ADR 0111](0111-an-upstream-re-pull-is-a-reviewed-delta-on-a-release-branch.md) builds the re-pull and leaves this policy standing: pulling new upstream content is a major bump.
 It refines what the numbers mean on a mirror.
 N.0.0 is a pure mirror of one upstream snapshot, upstream's tree at the pulled tag with NEMAR's standard edits applied, and upstream wins every conflict.
-NEMAR's corrections that upstream did not touch replay as the next patch, N.0.1, in a pull request merged right after N.0.0's.
+NEMAR's corrections that upstream did not touch replay as the next patch, N.0.1, in a pull request to `main` merged only after N.0.0 has merged and been tagged.
 A version with `source_version` set and the form `N.0.0` is a mirror, and a manual major bump is refused on `on` datasets, so a major on a mirror always means an upstream pull.
 The mapping the Consequences above ask to be recorded is `dataset_versions.source_version`, with its basis, and the dataset's tag is derived from its highest version row.
