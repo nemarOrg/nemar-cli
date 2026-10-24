@@ -291,6 +291,97 @@ describe("nemar admin upstream-backfill: the loop", () => {
   });
 });
 
+describe("nemar admin upstream-backfill: what the operator is told", () => {
+  test("it says that unknown is final, in a dry run and with --execute", async () => {
+    seedAuthenticatedConfig();
+    const server = startServer([{ body: batch() }]);
+    try {
+      for (const args of [
+        ["admin", "upstream-backfill"],
+        ["admin", "upstream-backfill", "--execute"],
+      ]) {
+        const result = await runCli(args, server.url);
+        expect(result.stdout).toContain("'unknown' is final");
+      }
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("a finished pass with rows not examined says to rerun without --after", async () => {
+    seedAuthenticatedConfig();
+    const server = startServer([
+      {
+        body: batch({
+          not_examined: 2,
+          errors: [
+            {
+              dataset_id: "on000001",
+              version: "1.0.0",
+              error: "absent at the tag and at main; not recorded",
+            },
+            { dataset_id: "on000002", version: "1.0.0", error: "HTTP 500" },
+          ],
+        }),
+      },
+    ]);
+    try {
+      const result = await runCli(["admin", "upstream-backfill", "--execute"], server.url);
+      expect(result.exitCode).toBe(1);
+      expect(result.stdout).toContain("2 row(s) were not examined");
+      expect(result.stdout).toContain("rerun without --after");
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("an unfinished pass prints the resume cursor, not the rerun line", async () => {
+    seedAuthenticatedConfig();
+    const server = startServer([
+      {
+        body: batch({
+          next_cursor: "on000002@1.0.0",
+          remaining: 5,
+          not_examined: 1,
+          errors: [{ dataset_id: "on000001", version: "1.0.0", error: "HTTP 500" }],
+        }),
+      },
+    ]);
+    try {
+      const result = await runCli(
+        ["admin", "upstream-backfill", "--execute", "--max-batches", "1"],
+        server.url,
+      );
+      expect(result.stdout).toContain("Resume with: --after on000002@1.0.0");
+      expect(result.stdout).not.toContain("rerun without --after");
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("a clean finished pass does not print the rerun line", async () => {
+    seedAuthenticatedConfig();
+    const server = startServer([{ body: batch() }]);
+    try {
+      const result = await runCli(["admin", "upstream-backfill", "--execute"], server.url);
+      expect(result.stdout).not.toContain("rerun without --after");
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("--json prints no prose line", async () => {
+    seedAuthenticatedConfig();
+    const server = startServer([{ body: batch() }]);
+    try {
+      const result = await runCli(["admin", "upstream-backfill", "--json"], server.url);
+      expect(() => JSON.parse(result.stdout)).not.toThrow();
+    } finally {
+      server.stop();
+    }
+  });
+});
+
 describe("nemar admin upstream-backfill: --json", () => {
   test("prints one summary object with the totals and the final counts", async () => {
     seedAuthenticatedConfig();

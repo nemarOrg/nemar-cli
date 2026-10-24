@@ -7758,6 +7758,11 @@ upstreamBackfillCommand
         if (!options.json) console.log(line);
       };
       if (!execute) say(chalk.yellow("Dry run: nothing is written. Pass --execute to record."));
+      say(
+        chalk.dim(
+          "A recorded 'unknown' is final: it is never examined again. A read that fails or whose 404 a control read does not confirm is not recorded.",
+        ),
+      );
 
       const total = {
         batches: 0,
@@ -7842,6 +7847,13 @@ upstreamBackfillCommand
           );
         }
         if (resumeCursor) console.log(`Resume with: --after ${resumeCursor}`);
+        if (done && total.not_examined > 0) {
+          console.log(
+            chalk.yellow(
+              `${total.not_examined} row(s) were not examined and are still retryable: rerun without --after to try them again.`,
+            ),
+          );
+        }
         if (last) {
           console.log(
             chalk.cyan(
