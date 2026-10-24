@@ -21,6 +21,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import ts from "typescript";
 import {
   buildDoiBadge as badgeViaDoiService,
   planReadmeBadgeCommit as planViaDoiService,
@@ -223,23 +224,93 @@ describe("selectPublishReadmes, the publish step's rule over a tree", () => {
 
 describe("the publish step calls the shared rule", () => {
   // The orchestrator's update_readme step reads GitHub, so no test drives it end to end. This
-  // pins that it takes its README selection from the shared rule and keeps no list of its own,
-  // so the planner cannot model a rule the step no longer follows.
-  const source = readFileSync(
-    join(import.meta.dir, "../backend/src/services/publication-orchestrator.ts"),
-    "utf8",
+  // pins, on the parsed syntax tree (so no comment can satisfy or trip it), that the step takes
+  // its README selection from the shared rule, reads and badges the content source the rule
+  // chose, deletes exactly what the rule says to delete, and keeps no README list of its own, so
+  // the re-pull planner cannot model a rule the step no longer follows.
+  const ORCHESTRATOR = "publication-orchestrator.ts";
+  const file = ts.createSourceFile(
+    ORCHESTRATOR,
+    readFileSync(join(import.meta.dir, "../backend/src/services", ORCHESTRATOR), "utf8"),
+    ts.ScriptTarget.Latest,
+    true,
   );
 
-  test("imports selectPublishReadmes and reads contentSource and remove from it", () => {
-    expect(source).toContain(
-      'import { selectPublishReadmes } from "../../../shared/standard-edits/readme.js";',
-    );
-    expect(source).toContain("const readmes = selectPublishReadmes(tree);");
-    expect(source).toContain("const contentSource = readmes.contentSource;");
-    expect(source).toContain("for (const readme of readmes.remove) {");
+  const nodes = (root: ts.Node): ts.Node[] => {
+    const out: ts.Node[] = [];
+    const visit = (n: ts.Node) => {
+      out.push(n);
+      ts.forEachChild(n, visit);
+    };
+    visit(root);
+    return out;
+  };
+  const printer = ts.createPrinter({ removeComments: true });
+  /** Code text with every comment and run of whitespace dropped. */
+  const code = (n: ts.Node) =>
+    printer.printNode(ts.EmitHint.Unspecified, n, file).replace(/\s+/g, "");
+  const step = nodes(file).find(
+    (n): n is ts.FunctionDeclaration =>
+      ts.isFunctionDeclaration(n) && n.name?.text === "stepUpdateReadme",
+  );
+  const inStep = step ? nodes(step) : [];
+  const initializerOf = (name: string) =>
+    inStep
+      .filter(ts.isVariableDeclaration)
+      .filter((d) => ts.isIdentifier(d.name) && d.name.text === name)
+      .map((d) => (d.initializer ? code(d.initializer) : ""));
+
+  test("imports selectPublishReadmes from the shared module", () => {
+    const imported = file.statements
+      .filter(ts.isImportDeclaration)
+      .filter(
+        (d) =>
+          ts.isStringLiteral(d.moduleSpecifier) &&
+          d.moduleSpecifier.text === "../../../shared/standard-edits/readme.js",
+      )
+      .flatMap((d) => {
+        const bindings = d.importClause?.namedBindings;
+        return bindings && ts.isNamedImports(bindings)
+          ? bindings.elements.map((e) => e.name.text)
+          : [];
+      });
+    expect(imported).toContain("selectPublishReadmes");
   });
 
-  test("names no README spelling of its own", () => {
-    expect(source).not.toMatch(/"README\.(rst|txt)"/);
+  test("selects from main's tree, reads the chosen source, and badges it under its own path", () => {
+    expect(step).toBeDefined();
+    expect(initializerOf("tree")).toEqual(['awaitgetTreeAtRef(repoName,"main",pat)']);
+    expect(initializerOf("readmes")).toEqual(["selectPublishReadmes(tree)"]);
+    expect(initializerOf("contentSource")).toEqual(["readmes.contentSource"]);
+    const reads = inStep
+      .filter(ts.isCallExpression)
+      .filter((c) => code(c.expression) === "getBlobContent")
+      .map(code);
+    expect(reads).toEqual(["getBlobContent(repoName,contentSource.sha,pat)"]);
+    const sourcePath = inStep
+      .filter(ts.isPropertyAssignment)
+      .filter((p) => ts.isIdentifier(p.name) && p.name.text === "contentSourcePath")
+      .map((p) => code(p.initializer));
+    expect(sourcePath).toEqual(["contentSource?.path"]);
+  });
+
+  test("deletes exactly the files the rule lists, and nothing else", () => {
+    const loops = inStep.filter(ts.isForOfStatement);
+    expect(loops.map((l) => code(l.expression))).toEqual(["readmes.remove"]);
+    const deletes = inStep
+      .filter(ts.isCallExpression)
+      .filter((c) => code(c.expression) === "deleteRepoFile");
+    expect(deletes).toHaveLength(1);
+    expect(nodes(loops[0] as ts.Node)).toContain(deletes[0] as ts.Node);
+  });
+
+  test("spells no README name but the README.md it writes, anywhere in the file", () => {
+    // A re-inlined candidate list, in any case, is a literal naming a README spelling.
+    const spellings = nodes(file)
+      .filter((n) => ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n))
+      .map((n) => (n as ts.StringLiteral).text)
+      .filter((t) => /^readme(\.[a-z0-9]+)?$/i.test(t));
+    expect(spellings.length).toBeGreaterThan(0);
+    expect([...new Set(spellings)]).toEqual(["README.md"]);
   });
 });
