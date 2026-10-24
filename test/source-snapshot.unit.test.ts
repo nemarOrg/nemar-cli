@@ -307,6 +307,23 @@ describe("mirroredTagOf: the highest NEMAR version speaks", () => {
     expect(mirroredTagOf([row("1.0.0", "2.0.2", null)]).state).toBe("unexamined");
     expect(mirroredTagOf([row("1.0.0", "2.0.2", "guess")]).state).toBe("unexamined");
   });
+
+  test("a stored tag the parser could not have recorded is unknown, as mirrorFlagOf reads it", () => {
+    // The staleness pass and the mirror flag share one definition of a known tag.
+    for (const tag of ["", "57fecb0ccce88d000ac17538", "v2.0.2."]) {
+      const rows = [{ version: "1.0.0", source_version: tag, source_version_basis: "doi" }];
+      expect(mirroredTagOf(rows)).toEqual({ state: "unknown", tag: null, version: "1.0.0" });
+      expect(
+        mirrorFlagOf("on000001", {
+          version: "1.0.0",
+          source_version: tag,
+          source_version_basis: "doi",
+        }),
+      ).toBeNull();
+    }
+    const legacy = [{ version: "1.0.0", source_version: "00006", source_version_basis: "doi" }];
+    expect(mirroredTagOf(legacy)).toMatchObject({ state: "known", tag: "00006" });
+  });
 });
 
 describe("mirrorFlagOf: a version of an OpenNeuro mirror is a mirror only when its tag is known", () => {

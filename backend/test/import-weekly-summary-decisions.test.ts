@@ -901,7 +901,7 @@ describe("the upstream freshness section (epic #1046 phase 4b)", () => {
     expect(text).toContain("Tag unknown and probably stale by date: 0");
     expect(text).toContain("Names and reasons: `nemar admin upstream-status`.");
     expect(text).toContain(
-      "A mirror with an unknown tag, one never examined, one with no version yet and one whose import is running were not compared.",
+      "Mirrors with an unknown tag, never examined, with no version yet, with an import running or parked, and those whose source id does not match were not compared.",
     );
   });
 

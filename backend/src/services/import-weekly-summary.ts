@@ -430,7 +430,7 @@ function upstreamSection(u: UpstreamFleetSummary | null): string[] {
     "",
     `Stale in total: ${count(u.counts.stale)}. Tag unknown and probably stale by date: ${count(u.counts.probably_stale)} (display only, not counted as stale).`,
     "",
-    "A stale mirror is reported, not an alarm: being behind upstream is an expected state, not a fault. A mirror with an unknown tag, one never examined, one with no version yet and one whose import is running were not compared.",
+    "A stale mirror is reported, not an alarm: being behind upstream is an expected state, not a fault. Mirrors with an unknown tag, never examined, with no version yet, with an import running or parked, and those whose source id does not match were not compared.",
     "",
     'How the three "Behind upstream" rows divide depends on the 25 GitHub checks one weekly pass makes; it is not a fleet-wide proportion.',
     "",

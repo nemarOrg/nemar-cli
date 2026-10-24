@@ -232,10 +232,16 @@ export function mirroredTagOf(rows: readonly SourceVersionRow[]): MirroredTag {
   }
   if (top === null) return { state: "none", tag: null, version: null };
   const basis = top.source_version_basis;
-  if (top.source_version !== null && (basis === "doi" || basis === "lineage")) {
+  // One definition of a known tag, shared with `mirrorFlagOf`: only a tag the parser could have
+  // recorded. A stored value it could not (an empty string, a hex snapshot id) is not known.
+  if (isSourceTag(top.source_version) && (basis === "doi" || basis === "lineage")) {
     return { state: "known", tag: top.source_version, version: top.version, basis };
   }
-  if (basis === "unknown") return { state: "unknown", tag: null, version: top.version };
+  // Examined, and no tag the parser could record: unknown, which includes a stored basis whose tag
+  // is not a recordable one.
+  if (basis === "unknown" || basis === "doi" || basis === "lineage") {
+    return { state: "unknown", tag: null, version: top.version };
+  }
   return { state: "unexamined", tag: null, version: top.version };
 }
 

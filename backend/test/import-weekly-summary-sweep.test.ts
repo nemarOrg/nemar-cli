@@ -635,7 +635,7 @@ describe("the upstream freshness section", () => {
     expect(r.facts?.errors?.filter((e) => e.stage === "upstream")).toEqual([]);
     expect(r.renderedBody).toContain("| Tag unknown (not compared) | 1 |");
     expect(r.renderedBody).toContain(
-      "A mirror with an unknown tag, one never examined, one with no version yet and one whose import is running were not compared.",
+      "Mirrors with an unknown tag, never examined, with no version yet, with an import running or parked, and those whose source id does not match were not compared.",
     );
   });
 

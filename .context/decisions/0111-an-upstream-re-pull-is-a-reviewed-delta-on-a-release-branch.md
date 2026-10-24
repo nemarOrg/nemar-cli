@@ -456,7 +456,7 @@ The decision text above and the Phase 4a amendment are unchanged.
 
 `nemar admin upstream-status` walks `GET /admin/upstream-status` page by page and adds the pages up itself.
 It recounts the states from the deduplicated rows with the shared counter and never adds the pages' own `counts`, so a row seen on two pages is counted once.
-It exits 0 when no row was `unchecked` and no page failed, whatever the stale count: stale is a finding, not a failure.
+It exits 0 when no row was `unchecked`, no page failed or carried `errors[]`, `--max-pages` did not stop the walk early and the population did not change during the pass, whatever the stale count: stale is a finding, not a failure.
 Exit 0 does not mean a clean fleet: unknown-tag and never-examined mirrors were not compared and still exit 0, which is why the report prints them with their own counts.
 It exits 2 when the pass could not see: any `unchecked` row, any page the API refused (502, after which the walk stops, because a down OpenNeuro would cost its timeout on every remaining page), any page whose `errors[]` is not empty even on a 200, `--max-pages` reached before the end, or a population that changed during the pass.
 It exits 1 when a request fails; after a failed first read it prints the failure and no table, because a table of zeros would claim a fleet that was never read.

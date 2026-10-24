@@ -965,7 +965,14 @@ describe("runUpstreamFleetSummary: the whole fleet in counts, for the weekly rep
 
   test("the GitHub token is asked for once per pass, and a failed mint is remembered, not retried per page", async () => {
     openneuro.synthetic(true);
-    for (const id of ids(500000, 105)) seed(id, at("0.9.0"));
+    // 105 mirrors: 10 stale on page 1, 5 stale on page 2 (budget is left for them), the rest have
+    // no version and are never probed. Page 2 therefore needs the credential again.
+    for (const [i, id] of ids(500000, 105).entries()) {
+      if (i < 10 || i >= 100) {
+        seed(id, at("0.9.0"));
+        raw.serve(`ds${id.slice(2)}`, "HEAD");
+      } else seed(id);
+    }
     const readsOf = async (extra: Partial<Bindings>, rows: number) => {
       let reads = 0;
       const counting = env(extra);
@@ -975,19 +982,23 @@ describe("runUpstreamFleetSummary: the whole fleet in counts, for the weekly rep
           return extra.GITHUB_ADMIN_PAT;
         },
       });
-      // `rows` mirrors per pass: 5 is one page, 105 is two.
+      // `rows` mirrors in the pass: 100 is one page, 105 is two.
       db.run("UPDATE datasets SET withdrawn_at = NULL");
       db.run(
         `UPDATE datasets SET withdrawn_at = datetime('now') WHERE dataset_id > 'on${500000 + rows - 1}'`,
       );
-      await runUpstreamFleetSummary(counting);
-      return reads;
+      raw.log.length = 0;
+      const summary = await runUpstreamFleetSummary(counting);
+      return { reads, probed: raw.log.length, summary };
     };
     for (const pat of [undefined, "ups-test-pat"]) {
-      const onePage = await readsOf({ GITHUB_ADMIN_PAT: pat }, 5);
+      const onePage = await readsOf({ GITHUB_ADMIN_PAT: pat }, 100);
       const twoPages = await readsOf({ GITHUB_ADMIN_PAT: pat }, 105);
-      expect(onePage).toBeGreaterThan(0);
-      expect(twoPages).toBe(onePage);
+      expect(onePage.reads).toBeGreaterThan(0);
+      expect(twoPages.reads).toBe(onePage.reads);
+      // With a credential, page 2 really did probe (5 more stale mirrors, 2 reads each).
+      if (pat) expect(twoPages.probed).toBe(onePage.probed + 10);
+      else expect(twoPages.probed).toBe(0);
     }
   });
 
