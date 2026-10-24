@@ -303,7 +303,8 @@ function targetFamily(
         : { kind: "git", mode: "100644", oid: gitBlobOid((f as { bytes: Buffer }).bytes) },
     );
   }
-  if (!conceptDoi) {
+  const doi = bareDoi(conceptDoi);
+  if (!doi) {
     out.set("README.md", { kind: "unknown", reason: "no-concept-doi" });
     return out;
   }
@@ -311,11 +312,6 @@ function targetFamily(
   const content = source ? contentBytes(source) : Buffer.alloc(0);
   if (content === null) {
     out.set("README.md", { kind: "unknown", reason: "readme-unread" });
-    return out;
-  }
-  const doi = bareDoi(conceptDoi);
-  if (!doi) {
-    out.set("README.md", { kind: "unknown", reason: "no-concept-doi" });
     return out;
   }
   const plan = planReadmeBadgeCommit({
