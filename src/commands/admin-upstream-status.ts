@@ -9,8 +9,9 @@
  * READ-ONLY: it calls `GET /admin/upstream-status`, which writes nothing. The pages are walked
  * here and added up by `lib/upstream-status-report.ts` from the rows, not from the pages' counts.
  *
- * EXIT CODES. 0: everything the pass reached was compared, whatever the stale count (stale is a
- * finding, not a failure). 1: a request failed. 2: the pass could not see: any `unchecked` row,
+ * EXIT CODES. 0: no row was unchecked and no page failed, whatever the stale count (stale is a
+ * finding, not a failure). 0 is NOT "the fleet is clean": unknown-tag and never-examined rows were
+ * not compared and still exit 0. 1: a request failed. 2: the pass could not see: any `unchecked` row,
  * any refused (502) page, any page with `errors[]`, `--max-pages` reached, or the population
  * changed while it ran. A 200 does not prove every mirror was compared, so a 200 that carries
  * `errors[]` or `unchecked` rows is a 2 as well.
@@ -41,7 +42,7 @@ function positiveInt(text: string | undefined, fallback: number): number | null 
 
 export const upstreamStatusCommand = new Command("upstream-status")
   .description("Report which OpenNeuro mirrors are behind upstream (read-only)")
-  .option("--limit <n>", "Mirrors per page (the server allows 1 to 100)", "100")
+  .option("--limit <n>", "Mirrors per page (values above 100 are capped to 100)", "100")
   .option("--after <id>", "Resume after this dataset id, e.g. on000123")
   .option("--dataset <id>", "Examine only this mirror, e.g. on003645")
   .option("--max-pages <n>", "Stop after this many pages", "50")
@@ -126,7 +127,11 @@ export const upstreamStatusCommand = new Command("upstream-status")
           ),
         );
       } else {
-        for (const line of renderReport(summary, list as number)) console.log(line);
+        // After a failed first read there is nothing to report: a table of zeros would be a
+        // definite-looking claim about a fleet that was never read.
+        if (pages.length > 0) {
+          for (const line of renderReport(summary, list as number)) console.log(line);
+        }
         if (failure) console.error(chalk.red(`Stopped: ${failure}`));
         if (summary.could_not_see.length > 0) {
           console.log("");

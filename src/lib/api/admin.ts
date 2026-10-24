@@ -1945,15 +1945,16 @@ export async function upstreamBackfill(options?: {
 // Upstream staleness report (epic #1046 phase 4, #1910; ADR 0111)
 // ============================================================================
 
-/**
- * One page of `GET /admin/upstream-status`. A 502 carries this same body with `ok: false` (rows
- * needed an OpenNeuro verdict and every one ended `unchecked`); {@link upstreamStatus} returns it
- * instead of throwing. A 200 is NOT proof that every mirror was compared: read `errors` and the
- * `unchecked` count too.
- */
 export type { UpstreamStatusPage };
 
-/** Examine one page (server default and maximum 100) of the managed OpenNeuro mirrors. */
+/**
+ * Examine one page (server default and maximum 100) of the managed OpenNeuro mirrors.
+ *
+ * A 502 carries a page body with `ok: false` (rows needed an OpenNeuro verdict and every one ended
+ * `unchecked`); this returns it, with `ok` forced false, instead of throwing. Any other failure
+ * throws. A 200 is NOT proof that every mirror was compared: read `errors` and the `unchecked`
+ * count too.
+ */
 export async function upstreamStatus(options?: {
   limit?: number;
   after?: string;

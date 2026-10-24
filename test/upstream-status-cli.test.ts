@@ -361,6 +361,8 @@ describe("nemar admin upstream-status: exit codes", () => {
       const result = await runCli(["admin", "upstream-status"], server.url);
       expect(result.exitCode).toBe(2);
       expect(result.stdout).toContain("1 mirror(s) could not be compared");
+      // The row is named, so an administrator can find it.
+      expect(result.stdout).toContain("on000001  ds000001");
     } finally {
       server.stop();
     }
@@ -483,6 +485,38 @@ describe("nemar admin upstream-status: exit codes", () => {
     }
   });
 
+  test("--dataset answered with no row exits 2: the mirror was not examined", async () => {
+    seedAuthenticatedConfig();
+    // A withdrawn or unmanaged mirror: a 200 with no rows (the route answers 404, but a CLI must
+    // not call an empty answer a clean one).
+    const server = startServer([{ body: page([], { population_total: 900 }) }]);
+    try {
+      const result = await runCli(
+        ["admin", "upstream-status", "--dataset", "on000008"],
+        server.url,
+      );
+      expect(result.exitCode).toBe(2);
+      expect(result.stdout).toContain("exactly one row");
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("a failed first request prints the failure and no table of zeros", async () => {
+    seedAuthenticatedConfig();
+    const server = startServer([{ status: 500, body: { error: "boom" } }]);
+    try {
+      const result = await runCli(["admin", "upstream-status"], server.url);
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain("Stopped:");
+      expect(result.stdout).not.toContain("Examined");
+      expect(result.stdout).not.toMatch(/^\s+current\s+0\s/m);
+      expect(result.stdout).not.toContain("Stale in total");
+    } finally {
+      server.stop();
+    }
+  });
+
   test("a failed request exits 1 and names the failure", async () => {
     seedAuthenticatedConfig();
     const server = startServer([
@@ -517,6 +551,42 @@ describe("nemar admin upstream-status --json", () => {
       expect(json.rows).toHaveLength(2);
       expect(json.errors).toEqual([]);
       expect(result.exitCode).toBe(0);
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("a request that fails after the first page is complete:false with a reason, and exits 1", async () => {
+    seedAuthenticatedConfig();
+    const server = startServer([
+      {
+        body: page([row("on000001", "current")], { next_cursor: "on000001", population_total: 3 }),
+      },
+      { status: 500, body: { error: "boom" } },
+    ]);
+    try {
+      const result = await runCli(["admin", "upstream-status", "--json"], server.url);
+      const json = JSON.parse(result.stdout);
+      expect(json.complete).toBe(false);
+      expect(json.could_not_see.length).toBeGreaterThan(0);
+      expect(json.failure).toBeTruthy();
+      expect(json.examined).toBe(1);
+      expect(result.exitCode).toBe(1);
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("a failed first request in --json has no rows, complete:false and a failure", async () => {
+    seedAuthenticatedConfig();
+    const server = startServer([{ status: 500, body: { error: "boom" } }]);
+    try {
+      const result = await runCli(["admin", "upstream-status", "--json"], server.url);
+      const json = JSON.parse(result.stdout);
+      expect(json.complete).toBe(false);
+      expect(json.rows).toEqual([]);
+      expect(json.failure).toBeTruthy();
+      expect(result.exitCode).toBe(1);
     } finally {
       server.stop();
     }
