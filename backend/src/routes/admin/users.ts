@@ -1954,7 +1954,6 @@ export function registerUsersRoutes(admin: AdminRouter): void {
       if (result.error === "email_service_unconfigured") {
         return c.json({ error: "email_service_unconfigured" }, 500);
       }
-      if (result.error === "queue_enqueue_failed") return c.json(result, 502);
       return c.json(result);
     }
 
@@ -1995,7 +1994,6 @@ export function registerUsersRoutes(admin: AdminRouter): void {
     if (result.error === "email_service_unconfigured") {
       return c.json({ error: "email_service_unconfigured" }, 500);
     }
-    if (result.error === "queue_enqueue_failed") return c.json(result, 502);
     return c.json(result);
   });
 

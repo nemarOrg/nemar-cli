@@ -126,7 +126,7 @@ describe("announcements through the outbox", () => {
     expect(JSON.stringify(after)).not.toContain("notifymember@");
   });
 
-  test("an enqueue failure answers 502 with the counted remainder", async () => {
+  test("an enqueue failure answers 200 with the error and the counted remainder", async () => {
     const q = recordingQueue({ failBatchAt: 0 });
     const { e } = env(q.queue);
     const post = await app.request(
@@ -138,7 +138,7 @@ describe("announcements through the outbox", () => {
       },
       e,
     );
-    expect(post.status).toBe(502);
+    expect(post.status).toBe(200);
     expect(await post.json()).toMatchObject({ error: "queue_enqueue_failed", failure_count: 2 });
   });
 });

@@ -8,6 +8,7 @@
 
 import { z } from "zod";
 import { escapeHtml } from "../lib/escape";
+import { recordBroadcastOutcome } from "./broadcast-outcomes";
 import {
   BROADCAST_SEND_TIMEOUT_MS,
   type EmailDeliveryEnv,
@@ -302,10 +303,10 @@ interface ResendBatchResponseItem {
  * never reach the consumer before its row exists.
  *
  * If `sendBatch` throws midway, the messages already enqueued still run. The unqueued remainder
- * is counted in `failure_count` (no addresses stored: the caller still holds the list) and the
- * result carries `error: "queue_enqueue_failed"`, with `recipient_count` the number that WERE
- * queued. The row turns `done` as soon as its outcomes add up to `queued_count`, which here is
- * immediately when nothing was queued and otherwise when the consumer finishes the rest.
+ * is recorded as `unqueued` outcomes and counted in `failure_count` (no addresses stored), and
+ * the result carries `error: "queue_enqueue_failed"` with `recipient_count` the number that WERE
+ * queued. The route answers 200 with that body so the CLI can show the ID and counts. The row
+ * turns `done` as soon as its outcomes add up to `queued_count`.
  */
 async function enqueueBroadcast(
   db: D1Database,
@@ -365,27 +366,35 @@ async function enqueueBroadcast(
       queued += chunk.length;
     }
   } catch (error) {
-    const remainder = allowedRecipients.length - queued;
+    const unqueued = allowedRecipients.slice(queued);
     console.error(
       `[broadcast] enqueue failed for broadcast ${broadcastId} after ${queued} of ${allowedRecipients.length}:`,
       error instanceof Error ? error.message : String(error),
     );
-    await db
-      .prepare(
-        `UPDATE broadcast_emails
-            SET failure_count = failure_count + ?,
-                recipient_count = ?,
-                status = CASE WHEN delivered_count + failure_count + ? + unknown_count >= queued_count
-                              THEN 'done' ELSE status END
-          WHERE id = ?`,
-      )
-      .bind(remainder, queued, remainder, broadcastId)
-      .run();
+    // recipient_count on a queued row is the number actually enqueued; queued_count stays the
+    // number the row expects outcomes for. Each unqueued recipient gets an 'unqueued' outcome,
+    // so if the failed sendBatch had in fact enqueued some of them, a later delivery of one is
+    // ignored by the outcome table and counts once.
+    let counted = 0;
+    try {
+      await db
+        .prepare("UPDATE broadcast_emails SET recipient_count = ? WHERE id = ?")
+        .bind(queued, broadcastId)
+        .run();
+      for (const to of unqueued) {
+        if (await recordBroadcastOutcome(db, broadcastId, to, "unqueued")) counted++;
+      }
+    } catch (recordError) {
+      console.error(
+        `[broadcast] could not record the unqueued remainder for broadcast ${broadcastId}:`,
+        recordError instanceof Error ? recordError.message : String(recordError),
+      );
+    }
     return {
       broadcast_id: broadcastId,
-      status: queued === 0 ? "done" : "queued",
+      status: queued === 0 && counted === unqueued.length ? "done" : "queued",
       recipient_count: queued,
-      failure_count: remainder,
+      failure_count: counted,
       failed_recipients: [],
       suppressed_count: suppressedCount,
       error: "queue_enqueue_failed",
