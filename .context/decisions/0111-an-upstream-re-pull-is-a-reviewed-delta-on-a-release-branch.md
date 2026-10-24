@@ -335,7 +335,7 @@ each git subprocess, the git-annex branch reads included, may run only `clone`, 
 `clone` and `ls-remote` take only a `https://github.com/<org>/<repo>` or `file:///` URL and `fetch` only the remote `origin`;
 the one `aws` call, when asked for, is `s3api list-objects-v2` with `--bucket`, `--prefix`, `--region` and `--output json`;
 and the plan's own HTTP requests (the open pull requests, the bucket's anonymous `annex-uuid` marker) are GET or HEAD.
-Outside the guard, and read-only by what they are: the NEMAR API's two GETs (the dataset row and its version rows), which the command makes through the API client before it plans; `gh auth token`, which reads the administrator's stored GitHub token; reads of the test bases' local directories; and the scratch directory and the plan file.
+Outside the guard, and read-only by what they are: OpenNeuro's latest-snapshot query (a GraphQL POST that only asks); the NEMAR API's two GETs (the dataset row and its version rows), which the command makes through the API client before it plans; `gh auth token`, which reads the administrator's stored GitHub token; reads of the test bases' local directories; and the scratch directory and the plan file.
 `GIT_NO_LAZY_FETCH=1` is set on every git call; the planner does not depend on it, because it reads only blobs the clone holds and lists the missing ones with `rev-list --missing=print`, which never fetches.
 
 The digest is the sha256 of the plan body's canonical JSON.
@@ -367,6 +367,14 @@ Decision 4 says a mirror whose tag is unknown is never re-pulled.
 `plan` refuses one with `from-tag-unknown`, and `--from-tag` on one makes the plan with the check refused as `from-tag-not-recorded`: it is shown, it is never executable, and its lineage is marked not recordable, so Phase 6 never records `lineage` from it.
 `--from-tag` that disagrees with a recorded tag refuses as `from-tag-disagrees`, and a tag that is not an OpenNeuro snapshot tag at all (by `isOpenNeuroTag`, the shape decision 10's import also uses: `1..2`, `a/b`) as `from-tag-malformed` or `to-tag-malformed`; `v1.1.0` names the same snapshot as `1.1.0` (`sameUpstreamTag`).
 A highest version row that was never examined (both columns NULL), or rows that cannot be read at all (a versions route that answers 404), is not unknown: the plan reads that version's tagged `dataset_description.json` from its own clone with `sourceSnapshotOf`, the file and the parser the backfill would use, and says so in `from_tag_source` (`tagged-description`).
+
+### `to_tag` is OpenNeuro's latest snapshot, and its order is OpenNeuro's
+
+Decision 10 says `to_tag` is a tag, never a branch head, and the Phase 4a amendment (dated 2026-10-24, below) rules that upstream's creation order decides, not the number.
+So `plan` takes its default `to_tag` from OpenNeuro's own `latestSnapshot.tag`, the query decision 10's import pins its tag with (`fetchOpenNeuroLatestTag`), and never from the highest number among the mirror's tags.
+The tag must have an OpenNeuro tag's shape (`isOpenNeuroTag`), be one the version rows can record (`isSourceTag`, `to-tag-unrecordable` otherwise, because a re-pull to it could never be proved), and be on the GitHub mirror (`mirror-lag` otherwise); equal to `from_tag` is `nothing-to-pull`, and with no answer from OpenNeuro and no `--to-tag` nothing is planned (`latest-unknown`).
+A `--to-tag` that OpenNeuro does not name as its latest, or any `--to-tag` while OpenNeuro does not answer, is planned with the check `unchecked` (`order-unverified`), because the planner cannot prove from the tags that it is newer than `from_tag`; such a plan is never executable.
+The query is a GraphQL POST that only asks, and it runs outside the HTTP guard for that reason.
 
 ### Which `ds` a mirror names (closes the Phase 2 amendment's open item)
 
