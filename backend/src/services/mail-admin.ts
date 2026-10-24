@@ -275,12 +275,16 @@ function liveEventStatement(
   kind: string,
   actor: number | null,
   detail: unknown,
+  /** Write only if the statement just before it changed a row (an idempotent winner's chain). */
+  afterChange = false,
 ): D1PreparedStatement {
   return db
     .prepare(
       `INSERT INTO mail_ticket_events (ticket_id, kind, actor_user_id, detail)
        SELECT ?1, ?2, ?3, ?4
-        WHERE EXISTS (SELECT 1 FROM mail_tickets WHERE id = ?1 AND purged_at IS NULL)`,
+        WHERE EXISTS (SELECT 1 FROM mail_tickets WHERE id = ?1 AND purged_at IS NULL)${
+          afterChange ? " AND changes() > 0" : ""
+        }`,
     )
     .bind(ticketId, kind, actor, JSON.stringify(detail));
 }
@@ -661,30 +665,98 @@ async function sendAndRecord(
 // Note, assign, status, escalate
 // ---------------------------------------------------------------------------------------------
 
+/**
+ * Add an internal note. With an `idempotencyKey` a retry after a lost response is safe: the note and
+ * its key are written in ONE batch (notes send no mail, so there is no in-flight or unknown state)
+ * and a repeat of the key returns the stored message id and writes nothing. Keys are unique per
+ * ticket in `mail_note_keys`, a namespace separate from a reply's `mail_reply_keys`.
+ */
 export async function addNote(
   db: D1Database,
   viewer: Viewer,
   ticketId: number,
   text: string,
+  idempotencyKey?: string,
 ): Promise<number> {
   const ticket = await requireVisibleTicket(db, viewer, ticketId);
   assertNotPurged(ticket);
-  const results = await db.batch([
+  if (idempotencyKey !== undefined && !IDEMPOTENCY_KEY.test(idempotencyKey)) {
+    throw new MailAdminError(
+      400,
+      "bad_request",
+      "Idempotency-Key is 1 to 64 letters, digits or . _ : -.",
+    );
+  }
+  const storedFor = async (key: string): Promise<number | null> => {
+    const row = await db
+      .prepare("SELECT message_id FROM mail_note_keys WHERE ticket_id = ? AND idem_key = ?")
+      .bind(ticket.id, key)
+      .first<{ message_id: number }>();
+    return row?.message_id ?? null;
+  };
+  if (idempotencyKey !== undefined) {
+    const replay = await storedFor(idempotencyKey);
+    if (replay !== null) return replay;
+  }
+  const insert =
+    idempotencyKey === undefined
+      ? db
+          .prepare(
+            `INSERT INTO mail_messages (ticket_id, direction, text_body, author_user_id)
+             SELECT ?1, 'note', ?2, ?3
+              WHERE EXISTS (SELECT 1 FROM mail_tickets WHERE id = ?1 AND purged_at IS NULL)`,
+          )
+          .bind(ticket.id, text.slice(0, 64 * 1024), viewer.id)
+      : db
+          .prepare(
+            `INSERT INTO mail_messages (ticket_id, direction, text_body, author_user_id)
+             SELECT ?1, 'note', ?2, ?3
+              WHERE EXISTS (SELECT 1 FROM mail_tickets WHERE id = ?1 AND purged_at IS NULL)
+                AND NOT EXISTS (SELECT 1 FROM mail_note_keys WHERE ticket_id = ?1 AND idem_key = ?4)`,
+          )
+          .bind(ticket.id, text.slice(0, 64 * 1024), viewer.id, idempotencyKey);
+  const statements = [insert];
+  if (idempotencyKey !== undefined) {
+    // Directly after the note insert, so last_insert_rowid() and changes() still describe it.
+    statements.push(
+      db
+        .prepare(
+          `INSERT OR IGNORE INTO mail_note_keys (ticket_id, idem_key, message_id)
+           SELECT ?1, ?2, last_insert_rowid() WHERE changes() > 0`,
+        )
+        .bind(ticket.id, idempotencyKey),
+    );
+  }
+  // Keyed: the bump and the event run only if the statement before them changed a row, so a race
+  // loser (whose note and key inserts wrote nothing) neither moves the retention clock nor logs.
+  const gate = idempotencyKey !== undefined;
+  statements.push(
     db
       .prepare(
-        `INSERT INTO mail_messages (ticket_id, direction, text_body, author_user_id)
-         SELECT ?1, 'note', ?2, ?3
-          WHERE EXISTS (SELECT 1 FROM mail_tickets WHERE id = ?1 AND purged_at IS NULL)`,
-      )
-      .bind(ticket.id, text.slice(0, 64 * 1024), viewer.id),
-    db
-      .prepare(
-        "UPDATE mail_tickets SET updated_at = datetime('now'), last_activity_at = datetime('now') WHERE id = ? AND purged_at IS NULL",
+        `UPDATE mail_tickets SET updated_at = datetime('now'), last_activity_at = datetime('now') WHERE id = ? AND purged_at IS NULL${
+          gate ? " AND changes() > 0" : ""
+        }`,
       )
       .bind(ticket.id),
-    liveEventStatement(db, ticket.id, "note", viewer.id, null),
-  ]);
-  if ((results[0]?.meta?.changes ?? 0) === 0) throwPurged();
+    liveEventStatement(db, ticket.id, "note", viewer.id, null, gate),
+  );
+  const results = await db.batch(statements);
+  if ((results[0]?.meta?.changes ?? 0) === 0) {
+    // Nothing was written: a concurrent request with the same key won, or the ticket was purged.
+    if (idempotencyKey !== undefined) {
+      const replay = await storedFor(idempotencyKey);
+      if (replay !== null) return replay;
+    }
+    throwPurged();
+  }
+  if (idempotencyKey !== undefined) {
+    const stored = await storedFor(idempotencyKey);
+    if (stored === null) {
+      // An invariant broke; the route answers an unexpected error as 500 `internal`.
+      throw new Error("A keyed note was stored but its key is missing.");
+    }
+    return stored;
+  }
   const row = await db
     .prepare("SELECT MAX(id) AS id FROM mail_messages WHERE ticket_id = ? AND direction = 'note'")
     .bind(ticket.id)

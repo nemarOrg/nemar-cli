@@ -15,7 +15,7 @@ import { buildReferences } from "../src/services/mail-admin";
 import { hashApiKey } from "../src/services/token";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { bindingError, recordingBinding } from "./helpers/cloudflare-email";
-import { freshDb, realD1, yieldingD1 } from "./helpers/d1";
+import { freshDb, realD1, wrapD1, yieldingD1 } from "./helpers/d1";
 import { withFakeResend } from "./helpers/resend";
 import { eml } from "./helpers/tickets";
 
@@ -583,6 +583,164 @@ describe("reply idempotency and recording faults", () => {
     });
     expect((await send("agent", t, "k-7")).status).toBe(502);
     expect(binding.sent.length).toBe(1);
+  });
+});
+
+describe("note idempotency", () => {
+  const post = (who: Who, t: number, kind: "note" | "reply", key?: string, text = "n") =>
+    app
+      .request(
+        `/admin/mail/tickets/${t}/${kind}`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${KEYS[who]}`,
+            "Content-Type": "application/json",
+            ...(key ? { "Idempotency-Key": key } : {}),
+          },
+          body: JSON.stringify({ text }),
+        },
+        env(),
+      )
+      .then(async (res) => ({
+        status: res.status,
+        body: (await res.json()) as Record<string, any>,
+      }));
+  const notes = (t: number) =>
+    (
+      db
+        .query("SELECT COUNT(*) AS n FROM mail_messages WHERE ticket_id = ? AND direction = 'note'")
+        .get(t) as { n: number }
+    ).n;
+
+  test("a repeat with the same key returns the same message id and stores one note", async () => {
+    const t = ticket();
+    const first = await post("agent", t, "note", "n-1", "once");
+    const again = await post("agent", t, "note", "n-1", "different text is ignored");
+    expect(first.status).toBe(200);
+    expect(first.body.message_id).toBeGreaterThan(0);
+    expect(again).toEqual(first);
+    expect(notes(t)).toBe(1);
+    const events = db
+      .query("SELECT COUNT(*) AS n FROM mail_ticket_events WHERE ticket_id = ? AND kind = 'note'")
+      .get(t) as { n: number };
+    expect(events.n).toBe(1);
+    // The same key on another ticket is its own note.
+    const other = ticket();
+    expect((await post("agent", other, "note", "n-1")).status).toBe(200);
+    expect(notes(other)).toBe(1);
+    expect(binding.sent.length).toBe(0);
+  });
+
+  test("different keys, and no key, store separate notes", async () => {
+    const t = ticket();
+    const a = await post("agent", t, "note", "n-a");
+    const b = await post("agent", t, "note", "n-b");
+    const c = await post("agent", t, "note");
+    const d = await post("agent", t, "note");
+    expect(new Set([a, b, c, d].map((r) => r.body.message_id)).size).toBe(4);
+    expect(notes(t)).toBe(4);
+  });
+
+  test("a malformed key is refused and stores nothing", async () => {
+    const t = ticket();
+    expect((await post("agent", t, "note", "bad key!")).status).toBe(400);
+    expect((await post("agent", t, "note", "x".repeat(65))).status).toBe(400);
+    expect(notes(t)).toBe(0);
+  });
+
+  test("note keys and reply keys are separate namespaces", async () => {
+    const t = ticket();
+    const note = await post("agent", t, "note", "shared");
+    const reply = await post("agent", t, "reply", "shared", "a reply");
+    expect(reply.status).toBe(200);
+    expect(reply.body.message_id).not.toBe(note.body.message_id);
+    expect(binding.sent.length).toBe(1);
+    // And the other way round: a reply key does not satisfy a note.
+    await post("agent", t, "reply", "r-only");
+    const n2 = await post("agent", t, "note", "r-only", "fresh note");
+    expect(n2.status).toBe(200);
+    expect(notes(t)).toBe(2);
+    expect(binding.sent.length).toBe(2);
+  });
+
+  /** A D1 that runs `between` after the route's reads and just before its batch. */
+  const withGap = (between: () => void) => {
+    const inner = wrapD1(realD1(db), () => {});
+    return {
+      ...inner,
+      prepare: inner.prepare.bind(inner),
+      batch: async (stmts: unknown[]) => {
+        between();
+        return (inner as unknown as { batch(s: unknown[]): Promise<unknown> }).batch(stmts);
+      },
+    } as unknown as D1Database;
+  };
+
+  test("a race loser replays the winner's id and neither logs nor moves the retention clock", async () => {
+    const t = ticket();
+    db.run("UPDATE mail_tickets SET last_activity_at = '2026-01-01 00:00:00' WHERE id = ?", [t]);
+    let winnerId = 0;
+    envOverrides = {
+      DB: withGap(() => {
+        const r = db.run(
+          "INSERT INTO mail_messages (ticket_id, direction, text_body, author_user_id) VALUES (?, 'note', 'winner', ?)",
+          [t, ids.agent],
+        );
+        winnerId = Number(r.lastInsertRowid);
+        db.run(
+          "INSERT INTO mail_note_keys (ticket_id, idem_key, message_id) VALUES (?, 'race', ?)",
+          [t, winnerId],
+        );
+        db.run(
+          "INSERT INTO mail_ticket_events (ticket_id, kind, actor_user_id) VALUES (?, 'note', ?)",
+          [t, ids.agent],
+        );
+      }),
+    };
+    const loser = await post("agent", t, "note", "race", "loser");
+    expect(loser.status).toBe(200);
+    expect(loser.body.message_id).toBe(winnerId);
+    expect(notes(t)).toBe(1);
+    expect(
+      (
+        db
+          .query(
+            "SELECT COUNT(*) AS n FROM mail_ticket_events WHERE ticket_id = ? AND kind = 'note'",
+          )
+          .get(t) as { n: number }
+      ).n,
+    ).toBe(1);
+    expect(row(t).last_activity_at).toBe("2026-01-01 00:00:00");
+  });
+
+  test("a purge landing between the pre-check and the batch gives 409 with no note and no key", async () => {
+    const t = ticket();
+    envOverrides = {
+      DB: withGap(() => {
+        db.run("UPDATE mail_tickets SET purged_at = datetime('now') WHERE id = ?", [t]);
+      }),
+    };
+    const r = await post("agent", t, "note", "n-late", "x");
+    expect(r.status).toBe(409);
+    expect(notes(t)).toBe(0);
+    expect(db.query("SELECT COUNT(*) AS n FROM mail_note_keys").get()).toEqual({ n: 0 });
+  });
+
+  test("deleting a ticket row cascades its note keys", async () => {
+    const t = ticket();
+    await post("agent", t, "note", "n-c");
+    expect(db.query("SELECT COUNT(*) AS n FROM mail_note_keys").get()).toEqual({ n: 1 });
+    db.run("PRAGMA foreign_keys = ON");
+    db.run("DELETE FROM mail_tickets WHERE id = ?", [t]);
+    expect(db.query("SELECT COUNT(*) AS n FROM mail_note_keys").get()).toEqual({ n: 0 });
+  });
+
+  test("a purged ticket refuses a keyed note and stores no key", async () => {
+    const t = ticket();
+    db.run("UPDATE mail_tickets SET purged_at = datetime('now') WHERE id = ?", [t]);
+    expect((await post("agent", t, "note", "n-p")).status).toBe(409);
+    expect(db.query("SELECT COUNT(*) AS n FROM mail_note_keys").get()).toEqual({ n: 0 });
   });
 });
 

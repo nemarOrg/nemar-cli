@@ -71,6 +71,9 @@ A header the sender refuses (an over-long or malformed value) is a certain non-d
 A reply may carry an idempotency key, stored unique per ticket before the send, because the default assignee may be an agent that retries after a lost response: a repeat of a sent reply returns its stored outcome without sending, a repeat while one is in flight is refused as in progress, and a repeat after an unknown outcome is refused and never re-sent.
 A key still pending after 120 seconds is treated as unknown, so a key left pending by a crash becomes permanently unknown: a retry needs a new key, and nothing is re-sent under the old one.
 Key rows are kept until their ticket is deleted.
+A note may carry an idempotency key too (#1941), with the same format and per-ticket uniqueness, but notes send no mail, so there is no pending or unknown state: the note and its key (`mail_note_keys`) are written in one batch, and a repeat of a key returns the stored message id with 200 and writes nothing.
+A key identifies the intent, not the text: reusing a key with different text replays the first note and stores nothing new, as for replies.
+Note keys are a separate namespace from reply keys, so one string used for a reply and for a note answers neither the other's outcome; the retention purge deletes a ticket's note keys with its messages, and the summary it keeps is unchanged.
 `References` keeps the thread's first Message-ID, the one being replied to and the newest ids that fit.
 
 **Retention.**

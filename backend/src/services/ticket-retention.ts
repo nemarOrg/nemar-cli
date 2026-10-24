@@ -98,6 +98,7 @@ export function purgeStatements(
       .bind(id, stamp),
     db.prepare(`DELETE FROM mail_messages WHERE ticket_id = ?1 AND ${claimed}`).bind(id, stamp),
     db.prepare(`DELETE FROM mail_reply_keys WHERE ticket_id = ?1 AND ${claimed}`).bind(id, stamp),
+    db.prepare(`DELETE FROM mail_note_keys WHERE ticket_id = ?1 AND ${claimed}`).bind(id, stamp),
     db
       .prepare(`UPDATE mail_ticket_events SET detail = NULL WHERE ticket_id = ?1 AND ${claimed}`)
       .bind(id, stamp),
