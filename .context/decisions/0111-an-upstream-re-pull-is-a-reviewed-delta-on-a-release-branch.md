@@ -606,3 +606,58 @@ Decision 5 says the website shows a mirror tag on that version.
 What the website receives is the flag, so it shows a chip from `mirror`; the public wire carries the flag and never the tag itself.
 `metadata.json` is not changed.
 An `xx` fixture is `false` even after a rehearsal re-pull; how an `xx` names its upstream stays open (Left open, above).
+
+## Amendment 2026-10-24 (#1912): Phase 6 builds manual execution
+
+Epic #1046, Phase 6, delivered in slices; each pull request adds the slice for what it builds, and the decision text above is unchanged.
+This slice is the record (decision 3) and the fences that guard it (decision 6).
+Nothing here copies, pushes or opens a pull request: the record is written by routes that only record and refuse, and no route sends mail.
+
+### The table keys a row by attempt
+
+Decision 3 reads "one row per `(dataset_id, to_tag)`, `UNIQUE`".
+Taken literally, a tag whose re-pull was abandoned or failed could never be tried again.
+Migration 0105 therefore keys the row by `(dataset_id, to_tag, attempt)`, and the partial unique index still allows one non-terminal row per dataset.
+A new attempt for a tag is allowed only when every earlier attempt ended `abandoned`, `failed` or `superseded`, and a merge sha or a held merge claim on an earlier attempt blocks the tag whatever its status says: a merge commit may be on `main`, or may have been sent with its answer lost, and a second major for the same tag would be a second DOI.
+A row with the same tag and the same plan digest is returned as it is (200), before the version rows are consulted, so a rerun resumes it even after N.0.0 is tagged and is no longer the dataset's highest version; any other open row is `repull-in-flight` and names itself.
+
+### The fences, as built
+
+- **Environment.**
+  Every `/admin/repulls` write refuses a dataset that is not `xx` unless `ENVIRONMENT` is exactly `production`.
+  The test is "is production", not "is not a known non-production value": the organization is shared, so an unset or misspelled binding must leave the fence on, which is the reverse of the repository's usual fail-closed helper.
+  The same fence applies to a transition, so a record of an `on` dataset cannot be moved outside production either.
+- **Anonymous datasets** are refused (`anonymous-dataset`) with no override.
+  A re-pull takes upstream's authors and README, which would undo ADR 0065's blind.
+- **A withdrawn dataset**, **an import that is preparing, copying or finalizing**, and **a dataset not recorded as a mirror of that `ds`** are refused, each by its own code.
+- **The dataset's own version rows must agree with the plan.**
+  The highest version (both `1.0.0` and `v1.0.0` spellings, ordered by number) must be the plan's `from_version`, and every row at it must name `from_tag` by `doi` or `lineage`.
+  A row recorded `unknown` is never re-pulled (decision 4).
+  A row never examined is accepted only when the plan itself establishes the lineage, because the Worker has no other evidence of the tag.
+
+### The states as built
+
+The 17 states, and the only edges between them, are `shared/repull-state.ts`; the database holds the stage invariants as CHECKs, so a half-written row is refused even by a writer that skips the service.
+A transition is one compare-and-set on the recorded status.
+It takes only an allowed edge, writes only the columns its target names, and keeps the pull request's branch and number once set.
+A branch must be the release branch of the version the row carries.
+`counts` is merged key by key and holds only declared keys with non-negative integers, never a path or a key.
+`last_error` goes through the ADR 0051 rule, and an edge into `failed` must say why.
+Closing a record (`abandoned`, `superseded`, `patch_declined`) is refused while a merge claim is held, because the pull request may have merged.
+
+Two kinds of state are not written by this route, so a caller cannot state them.
+`merged`, `released`, `patch_merged` and `patch_released` are facts about GitHub and the version row, and are written only by routes that read them.
+`gates_clear` and `patch_gates_clear` are written only when the identifier screen is bound to the row.
+Both groups are refused here (`use-verified-route`, `screen-not-built`), so the record cannot be used to skip the screen or to claim a merge that did not happen.
+
+### Lineage at create
+
+When the live plan says the from-version's tree was compared with upstream's outside the paths NEMAR owns, create upgrades that version's row to the basis `lineage`, in the same batch as the record.
+It writes only a row never examined, or one that already names the same tag by `doi` or `lineage`; a row recorded `unknown`, or naming another tag, is never overwritten.
+One statement writes the word `lineage`, and a source scan keeps it the only one.
+
+### The staleness report reads the record
+
+The staleness report's Amendment (#1910) says "in-progress" can mean only `import_jobs` until `upstream_repulls` exists, and that a non-terminal row there must then join the first step.
+It does now: a mirror with one open re-pull, in any non-terminal status, is `in_progress` ("a re-pull to <tag> is <status>"), is never sent to OpenNeuro, and is never offered as a candidate for another re-pull.
+The partial unique index allows at most one open row per dataset, so the join adds no rows.
