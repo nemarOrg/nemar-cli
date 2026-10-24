@@ -1046,9 +1046,14 @@ export function sourceDatasetEntry(
  * (the scrub in Step 5b may have blanked values in it since prepare first read it). NEMAR owns one
  * entry per mirrored `ds` (ADR 0111 decision 1), so:
  *   - `already-recorded`: an entry already records a tag for this dataset; the file is left alone.
+ *   - `disagree`: entries already record different tags for this dataset; the file is left alone
+ *     and a warning says so, because a third tag would only deepen the disagreement.
  *   - `completed`: an entry names this dataset and nothing else but records no tag (a concept DOI,
  *     a dataset page); it gains `Version` and whichever of `DOI` and `URL` it lacks, in place, so
- *     the description still has one entry for the dataset and the guard can read its tag.
+ *     the description still has one entry for the dataset and the guard can read its tag. An
+ *     entry that already carries a `Version` (one that is not a tag) or a `DOI` or `URL` that is
+ *     not a string is someone else's statement: it is left alone, with a warning, and the record
+ *     is appended beside it.
  *   - `appended`: otherwise, a new entry. An entry that also names another dataset is left alone.
  * Kept in git, never the annex, and written as publication writes the file, two-space JSON.
  * Entries of any shape, `null` included, are kept as they are.
@@ -1057,10 +1062,19 @@ export async function appendSourceDatasetEntry(
   datasetPath: string,
   openneuroId: string,
   tag: string,
-): Promise<"already-recorded" | "completed" | "appended"> {
+): Promise<"already-recorded" | "disagree" | "completed" | "appended"> {
   const descPath = join(datasetPath, "dataset_description.json");
   const desc = readBidsDescription(datasetPath);
-  if (recordedUpstreamTag(desc, openneuroId) !== null) return "already-recorded";
+  const recorded = readRecordedUpstreamTag(desc, openneuroId);
+  if (recorded.state === "recorded") return "already-recorded";
+  if (recorded.state === "disagree") {
+    console.log(
+      chalk.yellow(
+        `  Warning: dataset_description.json already records disagreeing upstream tags for ${openneuroId} (${recorded.tags.join(", ")}); not recording ${tag} beside them, so the upstream-moved guard stays inert for this dataset until a person settles them`,
+      ),
+    );
+    return "disagree";
+  }
   // A `SourceDatasets` that is not an array is kept as the first entry, as publication keeps it.
   const existing = desc.SourceDatasets;
   const sources: unknown[] = Array.isArray(existing)
@@ -1071,13 +1085,26 @@ export async function appendSourceDatasetEntry(
   const entry = sourceDatasetEntry(openneuroId, tag);
   const index = untaggedEntryIndexFor({ SourceDatasets: sources }, openneuroId);
   let outcome: "completed" | "appended";
-  if (index >= 0) {
-    const current = sources[index] as Record<string, unknown>;
-    const has = (key: string) => typeof current[key] === "string" && current[key] !== "";
+  const current = index >= 0 ? (sources[index] as Record<string, unknown>) : null;
+  const present = (key: string) =>
+    current !== null && current[key] !== undefined && current[key] !== null && current[key] !== "";
+  const completable =
+    current !== null &&
+    !present("Version") &&
+    (!present("DOI") || typeof current.DOI === "string") &&
+    (!present("URL") || typeof current.URL === "string");
+  if (current !== null && !completable) {
+    console.log(
+      chalk.yellow(
+        `  Warning: left the existing SourceDatasets entry for ${openneuroId} as it is (it carries a Version that is not a tag, or a DOI or URL that is not text); recording ${tag} beside it`,
+      ),
+    );
+  }
+  if (current !== null && completable) {
     sources[index] = {
       ...current,
-      ...(has("DOI") ? {} : { DOI: entry.DOI }),
-      ...(has("URL") ? {} : { URL: entry.URL }),
+      ...(present("DOI") ? {} : { DOI: entry.DOI }),
+      ...(present("URL") ? {} : { URL: entry.URL }),
       Version: entry.Version,
     };
     outcome = "completed";

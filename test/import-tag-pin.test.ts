@@ -406,13 +406,18 @@ describe("the import records the snapshot it is, in SourceDatasets", () => {
   async function recordOver(sources: unknown[]): Promise<{
     outcome: string;
     staged: Record<string, unknown> & { SourceDatasets: unknown[] };
+    onDisk: Record<string, unknown> & { SourceDatasets: unknown[] };
   }> {
     const dir = await pinnedAt("1.0.1");
     const descPath = join(dir, "dataset_description.json");
     const upstreamDesc = JSON.parse(readFileSync(descPath, "utf8"));
     writeFileSync(descPath, JSON.stringify({ ...upstreamDesc, SourceDatasets: sources }));
     const outcome = await appendSourceDatasetEntry(dir, UPSTREAM_ID, "1.0.1");
-    return { outcome, staged: JSON.parse(await git(dir, "show", ":dataset_description.json")) };
+    return {
+      outcome,
+      staged: JSON.parse(await git(dir, "show", ":dataset_description.json")),
+      onDisk: JSON.parse(readFileSync(descPath, "utf8")),
+    };
   }
 
   test("an untagged entry for this dataset alone is completed in place, never joined by a second", async () => {
@@ -456,6 +461,31 @@ describe("the import records the snapshot it is, in SourceDatasets", () => {
       sourceDatasetEntry(UPSTREAM_ID, "1.0.1"),
     ]);
     expect(recordedUpstreamTag(staged, UPSTREAM_ID)).toBe("1.0.1");
+  }, 60_000);
+
+  test("entries that already disagree are left alone: no third tag beside them", async () => {
+    const disagreeing = [
+      { DOI: `doi:10.18112/openneuro.${UPSTREAM_ID}.v1.0.0` },
+      { URL: `https://openneuro.org/datasets/${UPSTREAM_ID}/versions/0.9.0` },
+    ];
+    const { outcome, onDisk } = await recordOver(disagreeing);
+    expect(outcome).toBe("disagree");
+    // Nothing was written: the file is still what the test wrote.
+    expect(onDisk.SourceDatasets).toEqual(disagreeing);
+  }, 60_000);
+
+  test("an untagged entry carrying someone else's Version or a non-text DOI is not overwritten", async () => {
+    const page = `https://openneuro.org/datasets/${UPSTREAM_ID}`;
+    for (const theirs of [
+      // Not a tag (a slash), so the entry records none, and it is not this import's to overwrite.
+      { URL: page, Version: "n/a" },
+      { URL: page, DOI: ["doi:10.18112/openneuro.ds000001", "doi:10.5281/zenodo.1"] },
+    ]) {
+      const { outcome, staged } = await recordOver([theirs]);
+      expect(outcome).toBe("appended");
+      expect(staged.SourceDatasets).toEqual([theirs, sourceDatasetEntry(UPSTREAM_ID, "1.0.1")]);
+      expect(recordedUpstreamTag(staged, UPSTREAM_ID)).toBe("1.0.1");
+    }
   }, 60_000);
 
   test("a leading v on the tag does not reach the DOI", () => {
