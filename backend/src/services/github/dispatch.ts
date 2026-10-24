@@ -7,6 +7,7 @@
  * intentional changes are import paths.
  */
 
+import { isOpenNeuroTag } from "../../../../shared/openneuro-tag";
 import { GITHUB_API, VALIDATOR_VERSION } from "./shared";
 
 /**
@@ -290,18 +291,46 @@ export async function triggerEnrichmentRun(
 }
 
 /**
+ * The `client_payload` of an `onboard-openneuro` dispatch. `openneuro_tag` is
+ * present only when a well-formed tag is given: a workflow older than the tag
+ * pin ignores an unknown key, and the CLI resolves OpenNeuro's latest tag
+ * itself when none arrives (ADR 0111 decision 10), so omitting it is always
+ * safe and sending a malformed one never is. Pure, for the test.
+ */
+export function buildOpenNeuroOnboardPayload(
+  openneuroIds: string,
+  tag: string | null | undefined,
+): { event_type: "onboard-openneuro"; client_payload: Record<string, string> } {
+  const client_payload: Record<string, string> = { openneuro_ids: openneuroIds };
+  if (tag !== null && tag !== undefined) {
+    if (isOpenNeuroTag(tag)) {
+      client_payload.openneuro_tag = tag;
+    } else {
+      console.warn(
+        `[onboard-openneuro] not sending malformed tag ${JSON.stringify(tag).slice(0, 80)} for ${openneuroIds}; the import resolves the latest tag itself`,
+      );
+    }
+  }
+  return { event_type: "onboard-openneuro", client_payload };
+}
+
+/**
  * Dispatch the `onboard-openneuro` workflow on `nemarDatasets/.github` to import
  * one or more OpenNeuro datasets (epic #775). Same repository_dispatch shape as
  * `triggerEnrichmentRun`; the workflow's parse-ids reads
- * `client_payload.openneuro_ids`. `pat` must carry dispatch write on
- * `nemarDatasets/.github` -- use `getDatasetsToken()`. `fetchImpl` defaults to
- * the global fetch (injectable for tests).
+ * `client_payload.openneuro_ids`, and `client_payload.openneuro_tag` when
+ * `tag` is given (see {@link buildOpenNeuroOnboardPayload}). The auto-import
+ * passes the tag discovery found; the retry engine passes none, so a retry is
+ * prepared at the tag OpenNeuro names when it runs. `pat` must carry dispatch
+ * write on `nemarDatasets/.github` -- use `getDatasetsToken()`. `fetchImpl`
+ * defaults to the global fetch (injectable for tests).
  */
 export async function triggerOpenNeuroOnboard(
   openneuroIds: string,
   pat: string,
-  fetchImpl: typeof fetch = fetch,
+  options: { tag?: string | null; fetchImpl?: typeof fetch } = {},
 ): Promise<void> {
+  const fetchImpl = options.fetchImpl ?? fetch;
   const response = await fetchImpl(`${GITHUB_API()}/repos/${CENTRAL_WORKFLOW_REPO}/dispatches`, {
     method: "POST",
     headers: {
@@ -310,10 +339,7 @@ export async function triggerOpenNeuroOnboard(
       "User-Agent": "NEMAR-API",
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({
-      event_type: "onboard-openneuro",
-      client_payload: { openneuro_ids: openneuroIds },
-    }),
+    body: JSON.stringify(buildOpenNeuroOnboardPayload(openneuroIds, options.tag)),
   });
 
   if (!response.ok) {

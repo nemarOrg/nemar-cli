@@ -342,3 +342,46 @@ describe("the retry engine parks a lag past its window and files its one issue",
     expect(candidateIds(db)).toEqual(["on004366"]);
   });
 });
+
+describe("a retry is dispatched with no tag", () => {
+  test("so the import resolves OpenNeuro's latest when it runs, never a tag that has since moved", async () => {
+    const dispatched: Record<string, unknown>[] = [];
+    const server = Bun.serve({
+      port: 0,
+      fetch: async (req) => {
+        if (req.method === "POST" && new URL(req.url).pathname.endsWith("/dispatches")) {
+          dispatched.push((await req.json()) as Record<string, unknown>);
+          return new Response(null, { status: 204 });
+        }
+        return new Response("not found", { status: 404 });
+      },
+    });
+    (globalThis as { NEMAR_GITHUB_API_URL?: string }).NEMAR_GITHUB_API_URL =
+      `http://127.0.0.1:${server.port}`;
+    try {
+      const db = freshDb();
+      seedFailedRow(db, "on004366", MIRROR_LAG);
+      const now = Date.parse("2026-11-10T00:00:00Z");
+      const env = { ...prodEnv(db), GITHUB_ADMIN_PAT: "test-pat" } as unknown as Bindings;
+      // The real dispatch: no transport injected.
+      const result = await applyRetryPlan(
+        env,
+        [
+          {
+            datasetId: "on004366",
+            sourceId: "ds004366",
+            decision: { action: "dispatch", nextRecoveryAttempt: 1, nextRetryAt: now + 1 },
+          },
+        ],
+        now,
+      );
+      expect(result.dispatched).toBe(1);
+      expect(dispatched).toEqual([
+        { event_type: "onboard-openneuro", client_payload: { openneuro_ids: "ds004366" } },
+      ]);
+    } finally {
+      (globalThis as { NEMAR_GITHUB_API_URL?: string }).NEMAR_GITHUB_API_URL = undefined;
+      server.stop(true);
+    }
+  });
+});
