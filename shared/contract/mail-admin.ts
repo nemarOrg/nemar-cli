@@ -162,7 +162,11 @@ export interface ReplyRequest {
   text: string;
 }
 export interface ReplyResponse {
-  /** The id of the stored outgoing message (a `TicketMessage.id`). */
+  /**
+   * The id of the stored outgoing message (a `TicketMessage.id`). 0 means the reply WAS sent but
+   * not recorded: the retention purge claimed the ticket between the send and the write, so the
+   * ticket holds no trace of it. Replaying that key then answers 409 `ticket_purged`.
+   */
   message_id: number;
   /** The Message-ID the reply went out under. */
   header_message_id: string;

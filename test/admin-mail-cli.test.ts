@@ -350,6 +350,21 @@ describe("mail show", () => {
 describe("mail reply", () => {
   const sent = { message_id: "9", header_message_id: "<h9@example.org>", status: "pending" };
 
+  test("message_id 0 says the reply was sent but not recorded because the ticket was purged", async () => {
+    const server = startServer({
+      "POST /admin/mail/tickets/42/reply": () => Response.json({ ...sent, message_id: 0 }),
+    });
+    try {
+      const r = await runCli(["reply", "42", "--text", "Hello there", "--yes"], server.url);
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toContain("sent, but not recorded");
+      expect(r.stdout).toContain("purged");
+      expect(r.stdout).not.toContain("message 0");
+    } finally {
+      server.stop();
+    }
+  });
+
   test("sends a generated Idempotency-Key and prints it to stderr first", async () => {
     const server = startServer({ "POST /admin/mail/tickets/42/reply": () => Response.json(sent) });
     try {

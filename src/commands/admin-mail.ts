@@ -761,6 +761,12 @@ a new key sends again, and it may deliver a second copy.`,
         else console.error(`Idempotency-Key: ${key}`);
         const sent = await replyToMailTicket(id, text, key);
         if (o.json) return printJson(sent);
+        if (sent.message_id === 0) {
+          console.log(
+            "Reply sent, but not recorded: the ticket was purged under the retention policy while it was being sent. Do not send it again.",
+          );
+          return;
+        }
         console.log(
           `Reply sent (message ${oneLine(sent.message_id)}); the ticket is now ${oneLine(sent.status)}.`,
         );
