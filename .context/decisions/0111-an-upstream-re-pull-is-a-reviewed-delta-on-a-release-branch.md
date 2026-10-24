@@ -9,7 +9,7 @@ Amends [ADR 0006](0006-upstream-re-pull-is-a-major-version-bump.md): its policy 
 Narrows [ADR 0093](0093-pull-requests-awaiting-approval-are-managed-from-one-admin-command-and-an-approval-is-the-administrators-own.md) in one aspect, the merge, for one class of pull request, the re-pull pull request the automatic path opened (decision 7); ADR 0107 already partially supersedes ADR 0093, and for every other pull request what remains of it stands.
 Builds on ADR 0001 (published datasets are PR-only), ADR 0023 (`--clean` reconciles), ADR 0034 (the column budget), ADR 0060, ADR 0085, ADR 0086, ADR 0089 and ADR 0091 (what an imported tree goes through), and ADR 0053 and ADR 0054 (unknown is never zero).
 The analysis is `.context/design-upstream-repull.md`; where it and this record disagree, this record wins.
-Nothing here is built yet; the later phases of #1046 build it.
+Nothing in the Decision section is built yet: each rule there is designed here and built by the later phases of #1046, and its present tense states the rule, not today's behavior.
 
 ## Context
 
@@ -22,6 +22,8 @@ Early imports rewrote every commit, so on `on003645` NEMAR's history shares no a
 Measured staleness is real: `on004362` missed upstream's 1.0.1 metadata fix (#1810).
 
 ## Decision
+
+Everything in this section is designed and not yet built.
 
 **An upstream re-pull replays the delta between two pinned upstream tags onto NEMAR's `main` as one synthesized commit on `release/vN.0.0`, landed through a pull request; N.0.0 is a pure mirror of the upstream snapshot, and NEMAR's corrections follow as N.0.1.**
 

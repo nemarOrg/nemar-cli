@@ -217,7 +217,8 @@ A key the git-annex branch records as dead is dropped from the copy, not refused
 
 ## Amendment 2026-10-23 (#1046): a re-pull re-applies the policy as a function on its delta paths
 
-An upstream re-pull ([ADR 0111](0111-an-upstream-re-pull-is-a-reviewed-delta-on-a-release-branch.md)) works on a clone of NEMAR's `main`, which is already governed, and brings only what it changes onto this record's policy.
-`applyNemarAnnexPolicy` runs again as a function after the delta is applied, never merged as text, so an `annex.largefiles` line a new upstream snapshot brings back is stripped again and NEMAR's expression is read back before the copy and before the commit.
-Data upstream left in git on a path the commit adds or changes is moved into the annex and uploaded as in prepare, and a path the commit does not touch is not normalized again.
-A file NEMAR moved into the annex counts as an explained edit when its key hashes the upstream blob at the base tag, so a re-pull does not mistake it for a NEMAR correction.
+Designed in [ADR 0111](0111-an-upstream-re-pull-is-a-reviewed-delta-on-a-release-branch.md) and not yet built.
+An upstream re-pull will work on a clone of NEMAR's `main`, which is already governed, and will bring only what it changes onto this record's policy.
+`applyNemarAnnexPolicy` will run again as a function after the delta is applied, never merged as text, so an `annex.largefiles` line a new upstream snapshot brings back is stripped again and NEMAR's expression is read back before the copy and before the commit.
+Data upstream left in git on a path the commit adds or changes will be moved into the annex and uploaded as in prepare, and a path the commit does not touch will not be normalized again.
+A file NEMAR moved into the annex will count as an explained edit when its key hashes the upstream blob at the base tag, so a re-pull does not mistake it for a NEMAR correction.

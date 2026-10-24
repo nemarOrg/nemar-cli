@@ -156,8 +156,9 @@ Setting both day and month also removes the month, which the maintainer's readin
 - Upload: `src/lib/upload/date-normalization.ts`, `src/lib/upload/identifier-preflight.ts`, `src/commands/dataset.ts`, `test/upload-date-normalization.test.ts`, `test/upload-identifier-preflight-cli.test.ts`.
 - Provenance sentences: `shared/privacy-correction-text.ts`.
 
-## Amendment 2026-10-23 (#1046): a re-pull normalizes new and changed recordings only
+## Amendment 2026-10-23 (#1046): a re-pull is a third place, on its delta paths only
 
-An upstream re-pull ([ADR 0111](0111-an-upstream-re-pull-is-a-reviewed-delta-on-a-release-branch.md)) applies the rules a first import applies, on the paths its commit adds or changes and on nothing else.
-A recording the re-pull does not touch keeps its dates, its bytes and its key, so "nothing already published is changed" holds across a re-pull.
-"Nothing else" above lists a re-import among the paths that do not run the rule; a re-pull is not a re-import, and it is the one addition.
+Designed in [ADR 0111](0111-an-upstream-re-pull-is-a-reviewed-delta-on-a-release-branch.md) and not yet built.
+ADR 0091 limits the rule to a first import and an upload.
+A re-pull is neither, and this adds it as a third place, on its delta paths only: it will apply the rules a first import applies to the paths its commit adds or changes, and to nothing else.
+A recording the re-pull does not touch will keep its dates, its bytes and its key, so "nothing already published is changed" holds across a re-pull.
