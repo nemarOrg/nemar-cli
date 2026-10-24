@@ -35,7 +35,8 @@ Everything in this section is designed and not yet built.
   `CHANGES` is upstream-owned, and NEMAR never writes it.
 - The standard edits are re-applied as functions, never merged as text: the README rename and DOI badge, the `.nemar/` line in `.bidsignore`, ADR 0060's annex policy, moving git-resident data into the annex, ADR 0089's scrub with its provenance sentence, and ADR 0091's date normalization.
 - A change recorded in the dataset's privacy ledger (`.nemar/corrections.jsonl`, ADR 0085) is a standard edit: N.0.0 carries it, and a plan that would revert one refuses.
-  The ledger holds counts and no per-file list (ADR 0036), so when it records a correction and the plan cannot tell whether an unexplained path belongs to it, the plan refuses rather than revert it.
+  A ledger line whose `action` is other than `import-scrubbed` (the importer's own line, which the delta scrub re-applies as a function) is a recorded correction.
+  The ledger holds counts and no per-file list (ADR 0036), so a plan cannot tell which unexplained paths a recorded correction made, and it refuses rather than revert one: the refusal applies to a dataset whose ledger holds at least one recorded correction, to any plan for it with an unexplained path, and it has no override.
   This keeps ADR 0085's promise that a re-pull is scrubbed again and does not reintroduce what was corrected.
 - Base is upstream at `from_tag`, theirs is upstream at `to_tag`, and ours is NEMAR `main`.
   An upstream-changed path is one that differs between base and theirs.
@@ -216,7 +217,6 @@ ADR 0086 exempts `xx` from the identifier screen, so an `xx` re-pull never has a
 - Whether the rulesets let the GitHub App merge without a human review, and without using its bypass; the merge call is not built until this is checked.
 - Where `source_version` is inserted under the central manifest flow.
 - Whether "explained" edits are detected on early rewritten imports (`on003645`, `on004362`); local dry-run plans count the unexplained paths.
-- Whether a plan can tell which paths a ledger-recorded correction changed, since the ledger lists no files; until it can, decision 1's refusal applies to every unexplained path of a dataset whose ledger records a correction.
 - Whether ADR 0107's review can ever pass a re-pull diff.
   The App is not exempt, so the review runs, and ADR 0109 fails a changed `CHANGES` line and holds a replaced recording, both normal in a re-pull; until a re-pull's review passes, none is machine clean.
 - Whether enrichment commits on the release branch move its head after the screen read it.
