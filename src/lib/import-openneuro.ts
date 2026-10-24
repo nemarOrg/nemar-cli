@@ -294,15 +294,18 @@ export function decidePublicationRequestAction(
  * hard-fails with "diverging commits and auto-rebase failed".
  *
  *   - `none`: origin has no resolvable `main` (a genuine first import: nothing to base on), or
- *     the clone is not on a plain `main`. Detached HEAD ("HEAD") and git-annex adjusted branches
- *     ("adjusted/main(unlocked)") are excluded on purpose: pushToGitHub special-cases both
- *     (HEAD:main push, no-rebase adjusted push) and neither is safe to reset the same way.
- *   - `hard-reset`: origin's `main` records no upstream tag, or records the tag being imported.
- *     The same import again, so the tree becomes origin's, as before the tag pin. An unrecorded
- *     tag lands here by design: it never trips the guard (ADR 0111 decision 10).
- *   - `moved`: origin's `main` records a DIFFERENT upstream tag. What happens next depends on
- *     whether the dataset has released a version, which costs a request, so it is asked only now
- *     (see {@link baseOnOriginMain}).
+ *     the tag is not moved and the clone is not on a plain `main`. Detached HEAD ("HEAD") and
+ *     git-annex adjusted branches ("adjusted/main(unlocked)") are not reset: pushToGitHub
+ *     special-cases both (HEAD:main push, no-rebase adjusted push) and neither is safe to reset
+ *     the same way.
+ *   - `hard-reset`: origin's `main` records no upstream tag, or records the tag being imported,
+ *     and the clone is on `main`. The same import again, so the tree becomes origin's, as before
+ *     the tag pin. An unrecorded tag lands here by design: it never trips the guard (ADR 0111
+ *     decision 10).
+ *   - `moved`: origin's `main` records a DIFFERENT upstream tag, whatever branch the clone is on:
+ *     the guard reads the tag first, so an odd branch can never skip it. What happens next depends
+ *     on whether the dataset has released a version, which costs a request, so it is asked only
+ *     now (see {@link baseOnOriginMain}).
  */
 export function decideReimportBase(args: {
   originMainSha: string | null;
@@ -310,13 +313,11 @@ export function decideReimportBase(args: {
   recordedTag: string | null;
   importTag: string;
 }): "none" | "hard-reset" | "moved" {
-  if (args.originMainSha === null || args.originMainSha === "" || args.currentBranch !== "main") {
-    return "none";
+  if (args.originMainSha === null || args.originMainSha === "") return "none";
+  if (args.recordedTag !== null && !sameUpstreamTag(args.recordedTag, args.importTag)) {
+    return "moved";
   }
-  if (args.recordedTag === null || sameUpstreamTag(args.recordedTag, args.importTag)) {
-    return "hard-reset";
-  }
-  return "moved";
+  return args.currentBranch === "main" ? "hard-reset" : "none";
 }
 
 /** What Step 4c did to the clone's `main`, and the tag origin's `main` recorded. */
@@ -350,8 +351,9 @@ export interface ReimportBase {
  * `released` is called only in that case, and an error from it is a plain failure: not knowing
  * whether a dataset is released must never read as "unreleased".
  *
- * Best-effort where it always was: an origin with no `main` (or one this clone cannot fetch) is a
- * first import, and a failed hard reset warns and falls back to the normal push path, as before.
+ * An origin with no `main` (git's "couldn't find remote ref main") is a first import. Any other
+ * failure to fetch it throws: an origin that could not be asked is not one with nothing to guard.
+ * A failed hard reset still warns and falls back to the normal push path, as before.
  */
 export async function baseOnOriginMain(
   datasetPath: string,
@@ -360,7 +362,14 @@ export async function baseOnOriginMain(
   const originMainFetch = await runCommand(["git", "fetch", "origin", "main"], {
     cwd: datasetPath,
   });
-  if (originMainFetch.exitCode !== 0) return { kind: "none", recordedTag: null };
+  if (originMainFetch.exitCode !== 0) {
+    if (/couldn't find remote ref/i.test(originMainFetch.stderr)) {
+      return { kind: "none", recordedTag: null };
+    }
+    throw new Error(
+      `Could not fetch ${args.nemarId}'s main from origin (${originMainFetch.stderr.trim()}). Without it the upstream-moved guard cannot run; nothing was reset or pushed.`,
+    );
+  }
 
   const originMainRev = await runCommand(
     ["git", "rev-parse", "--verify", "--quiet", "origin/main"],
@@ -405,6 +414,11 @@ export async function baseOnOriginMain(
     throw new ImportRefused(
       OPENNEURO_UPSTREAM_MOVED_MARKER,
       `${args.sourceId}: ${args.nemarId} has released a version and its main records upstream tag ${recordedTag}; this import is at ${args.importTag}. Moving a released mirror to a new snapshot is an upstream re-pull (ADR 0111), not a re-import. Nothing was reset, copied or pushed.`,
+    );
+  }
+  if (currentBranch.stdout.trim() !== "main") {
+    throw new Error(
+      `${args.nemarId}'s unreleased import moved from upstream tag ${recordedTag} to ${args.importTag}, but the clone is on ${currentBranch.stdout.trim()}, not main, which cannot be retargeted safely. Nothing was reset or pushed.`,
     );
   }
   const soft = await runCommand(["git", "reset", "--soft", "origin/main"], { cwd: datasetPath });

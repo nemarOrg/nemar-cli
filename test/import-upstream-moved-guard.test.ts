@@ -206,6 +206,53 @@ describe("a released mirror whose upstream moved refuses, before anything moves"
   }, 60_000);
 });
 
+describe("the guard cannot be skipped by a branch or a failed fetch", () => {
+  test("a detached HEAD on a moved, released mirror is still refused", async () => {
+    const { bare, tip } = await originRecordedAt(RECORDED.doiOnly);
+    const dir = await reimportClone(bare, "1.0.1");
+    await git(dir, "checkout", "-q", "--detach");
+    const p = baseOnOriginMain(dir, {
+      sourceId: UPSTREAM_ID,
+      importTag: "1.0.1",
+      nemarId: NEMAR_ID,
+      released: async () => true,
+    });
+    await expect(p).rejects.toBeInstanceOf(ImportRefused);
+    expect(await git(bare, "rev-parse", "main")).toBe(tip);
+  }, 60_000);
+
+  test("an origin that cannot be fetched fails closed, never reads as a first import", async () => {
+    const { bare } = await originRecordedAt(RECORDED.doiOnly);
+    const dir = await reimportClone(bare, "1.0.1");
+    await git(dir, "remote", "set-url", "origin", join(scratch.root, "no-such-origin"));
+    const state = releaseState(true);
+    const p = baseOnOriginMain(dir, {
+      sourceId: UPSTREAM_ID,
+      importTag: "1.0.1",
+      nemarId: NEMAR_ID,
+      released: state.released,
+    });
+    await expect(p).rejects.toThrow(/Could not fetch on000001's main from origin/);
+    await p.catch((e) => expect(e).not.toBeInstanceOf(ImportRefused));
+    expect(await git(dir, "rev-parse", "HEAD")).toBe(upstream.commits["1.0.1"]);
+  }, 60_000);
+
+  test("an unreleased import off main is not retargeted", async () => {
+    const { bare, tip } = await originRecordedAt(RECORDED.doiOnly);
+    const dir = await reimportClone(bare, "1.0.1");
+    await git(dir, "checkout", "-q", "--detach");
+    const p = baseOnOriginMain(dir, {
+      sourceId: UPSTREAM_ID,
+      importTag: "1.0.1",
+      nemarId: NEMAR_ID,
+      released: async () => false,
+    });
+    await expect(p).rejects.toThrow(/cannot be retargeted safely/);
+    expect(await git(dir, "rev-parse", "HEAD")).toBe(upstream.commits["1.0.1"]);
+    expect(await git(bare, "rev-parse", "main")).toBe(tip);
+  }, 60_000);
+});
+
 describe("an unreleased import whose upstream moved is retargeted to the new tag", () => {
   test("HEAD becomes origin's tip, the tree stays the new tag's, and the push fast-forwards", async () => {
     const { bare, tip } = await originRecordedAt(RECORDED.doiOnly);

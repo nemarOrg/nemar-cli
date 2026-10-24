@@ -686,12 +686,21 @@ describe("decideReimportBase (#990, #993: Step 4c)", () => {
     );
   });
 
-  test("no base on a git-annex adjusted branch or in detached HEAD, even with an origin main tip", () => {
+  test("no reset on a git-annex adjusted branch or in detached HEAD, even with an origin main tip", () => {
     // DataLad adjusted branches ("adjusted/main(unlocked)") are rebased
     // never; pushToGitHub special-cases them, and a reset here would
     // fight that.
     for (const currentBranch of ["adjusted/main(unlocked)", "HEAD"]) {
-      expect(decideReimportBase({ ...reimport, currentBranch, recordedTag: "1.0.0" })).toBe("none");
+      expect(decideReimportBase({ ...reimport, currentBranch, recordedTag: "1.0.1" })).toBe("none");
+      expect(decideReimportBase({ ...reimport, currentBranch, recordedTag: null })).toBe("none");
+    }
+  });
+
+  test("a moved tag is moved on any branch: an odd branch never skips the guard", () => {
+    for (const currentBranch of ["main", "adjusted/main(unlocked)", "HEAD"]) {
+      expect(decideReimportBase({ ...reimport, currentBranch, recordedTag: "1.0.0" })).toBe(
+        "moved",
+      );
     }
   });
 });
