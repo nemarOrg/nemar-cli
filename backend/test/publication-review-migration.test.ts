@@ -146,8 +146,13 @@ describe("0098 adds one table and two indexes, and no column anywhere else", () 
       );
     const before = objects(dbBefore0098());
     // `freshDb` applies every migration, so objects a LATER migration adds are not 0098's:
-    // 0100 adds broadcast_outcomes.
-    const laterMigrations = new Set(["table:broadcast_outcomes"]);
+    // 0100 adds broadcast_outcomes; 0101 adds email_delivery_events and its two indexes.
+    const laterMigrations = new Set([
+      "table:broadcast_outcomes",
+      "table:email_delivery_events",
+      "index:idx_email_delivery_events_recipient",
+      "index:idx_email_delivery_events_occurred_at",
+    ]);
     const added = [...objects(freshDb())]
       .filter((o) => !before.has(o) && !laterMigrations.has(o))
       .sort();

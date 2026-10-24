@@ -261,7 +261,18 @@ describe("retry bounds and pacing", () => {
       require("node:path").join(import.meta.dir, "../wrangler-sccn.toml"),
       "utf-8",
     ) as string;
-    const retries = [...toml.matchAll(/max_retries = (\d+)/g)].map((m) => Number(m[1]));
+    // Only the outbox consumers: the delivery-events consumers have their own retry budget.
+    type Consumer = { queue: string; max_retries?: number };
+    const config = Bun.TOML.parse(toml) as {
+      queues?: { consumers?: Consumer[] };
+      env?: { dev?: { queues?: { consumers?: Consumer[] } } };
+    };
+    const retries = [
+      ...(config.queues?.consumers ?? []),
+      ...(config.env?.dev?.queues?.consumers ?? []),
+    ]
+      .filter((c) => c.queue.startsWith("nemar-email-outbox"))
+      .map((c) => c.max_retries);
     expect(retries).toEqual([OUTBOX_MAX_RETRIES, OUTBOX_MAX_RETRIES]);
   });
 
