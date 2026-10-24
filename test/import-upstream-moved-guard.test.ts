@@ -503,7 +503,7 @@ describe("an unrecorded or unchanged tag never trips the guard", () => {
         unrecorded:
           form === "nothing"
             ? `records no upstream tag for ${UPSTREAM_ID}`
-            : `records disagreeing upstream tags for ${UPSTREAM_ID} (0.9.0, 1.0.0)`,
+            : `names ${UPSTREAM_ID} in SourceDatasets but records no single upstream tag for it (no entry carries one, they disagree, or one names another dataset too)`,
       });
       expect(state.calls.n).toBe(0);
       expect(await git(dir, "rev-parse", "HEAD")).toBe(tip);

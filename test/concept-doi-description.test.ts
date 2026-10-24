@@ -10,8 +10,8 @@
 
 import { describe, expect, test } from "bun:test";
 import { applyConceptDoiToDescription } from "../backend/src/services/doi";
+import { sourceSnapshotOf } from "../shared/source-snapshot";
 import { sourceDatasetEntry } from "../src/lib/import-openneuro";
-import { recordedUpstreamTag } from "../src/lib/import-upstream-tag";
 
 const CONCEPT = "10.82901/nemar.on002720";
 const UPSTREAM = "10.18112/openneuro.ds002720.v1.0.1";
@@ -112,7 +112,7 @@ describe("applyConceptDoiToDescription", () => {
       CONCEPT,
     );
     expect(result.description.SourceDatasets).toEqual([entry]);
-    expect(recordedUpstreamTag(result.description, "ds002720")).toBe("1.0.1");
+    expect(sourceSnapshotOf(result.description, "ds002720").source_version).toBe("1.0.1");
   });
 
   test("any DOI already a source is recognized in another spelling", () => {
@@ -151,7 +151,7 @@ describe("applyConceptDoiToDescription", () => {
       CONCEPT,
     );
     expect(result.description.SourceDatasets).toEqual([entry]);
-    expect(recordedUpstreamTag(result.description, "ds002720")).toBe("1.0.0");
+    expect(sourceSnapshotOf(result.description, "ds002720").source_version).toBe("1.0.0");
   });
 
   test("the live on004362 shape: a DOI-only entry, before publication and after it", () => {
@@ -168,7 +168,7 @@ describe("applyConceptDoiToDescription", () => {
       "10.82901/nemar.on004362",
     );
     expect(after.changed).toBe(false);
-    expect(recordedUpstreamTag(after.description, "ds004362")).toBe("1.0.0");
+    expect(sourceSnapshotOf(after.description, "ds004362").source_version).toBe("1.0.0");
   });
 
   test("an entry naming the dataset by its page only also stands for it", () => {

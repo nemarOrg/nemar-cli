@@ -20,13 +20,14 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { sourceSnapshotOf } from "../shared/source-snapshot";
 import { pushToGitHub } from "../src/lib/git-annex/clone-push";
 import {
   cloneOpenNeuroAtTag,
+  hasSourceEntryFor,
   shouldRecordSourceEntry,
   sourceDatasetEntry,
 } from "../src/lib/import-openneuro";
-import { hasSourceEntryFor, recordedUpstreamTag } from "../src/lib/import-upstream-tag";
 import { makeScratch, run } from "./helpers/annex-repo";
 import { buildTaggedUpstream } from "./helpers/tagged-upstream";
 
@@ -221,7 +222,7 @@ describe("prepareImport at a tag against a dataset that already exists", () => {
     expect(newTip).not.toBe(tip);
     expect((await run(["git", "merge-base", "--is-ancestor", tip, newTip], bare)).exitCode).toBe(0);
     const desc = JSON.parse(await git(bare, "show", "main:dataset_description.json"));
-    expect(recordedUpstreamTag(desc, DS)).toBe("1.0.1");
+    expect(sourceSnapshotOf(desc, DS).source_version).toBe("1.0.1");
     // README renamed to README.md by Step 6, content untouched.
     expect(await git(bare, "show", "main:README.md")).toBe("README at 1.0.1");
     // The tag imported is not OpenNeuro's latest, and the run says so.
@@ -234,7 +235,7 @@ describe("prepareImport at a tag against a dataset that already exists", () => {
     const r = await prepare(root, "1.0.0");
     expect({ code: r.code, lastFailure: r.lastFailure }).toEqual({ code: 0, lastFailure: "" });
     const desc = JSON.parse(await git(bare, "show", "main:dataset_description.json"));
-    expect(recordedUpstreamTag(desc, DS)).toBe("1.0.0");
+    expect(sourceSnapshotOf(desc, DS).source_version).toBe("1.0.0");
   }, 120_000);
 
   test("origin records no tag: the hard reset records none either, and says the guard is inert", async () => {

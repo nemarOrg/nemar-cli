@@ -6,6 +6,10 @@
  * `repository_dispatch` payload, the onboard workflow's `parse-ids`, and the CLI's `--tag`. The
  * workflow repeats the pattern in bash; it will be pinned to this one by the workflow pull request's
  * test/onboard-workflow.test.ts, which runs `parse-ids` over the same accepted and refused tags.
+ *
+ * Which tag a `dataset_description.json` RECORDS is not read here: that is `sourceSnapshotOf` in
+ * shared/source-snapshot.ts, whose tag is narrower (numeric and dotted). A tag this module admits
+ * and that parser does not read is pinned and cloned, but the import does not record it.
  */
 
 /**

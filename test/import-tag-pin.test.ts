@@ -16,6 +16,7 @@ import { join } from "node:path";
 import { which } from "bun";
 import { classifyImportFailure } from "../backend/src/services/import-failure-cause";
 import { decideRetryAction } from "../backend/src/services/import-retry";
+import { sourceSnapshotOf } from "../shared/source-snapshot";
 import { ImportRefused, OPENNEURO_MIRROR_LAG_MARKER } from "../src/lib/import-markers";
 import {
   EXPLICIT_TAG_LOOKUP_MS,
@@ -23,7 +24,6 @@ import {
   cloneOpenNeuroAtTag,
   sourceDatasetEntry,
 } from "../src/lib/import-openneuro";
-import { recordedUpstreamTag } from "../src/lib/import-upstream-tag";
 import { fetchOpenNeuroLatestTag } from "../src/lib/openneuro";
 import { makeScratch, run } from "./helpers/annex-repo";
 import {
@@ -383,7 +383,7 @@ describe("the import records the snapshot it is, in SourceDatasets", () => {
       SourceDatasets: undefined,
     });
     // What the upstream-moved guard reads back is the tag that was imported.
-    expect(recordedUpstreamTag(staged, UPSTREAM_ID)).toBe("1.0.1");
+    expect(sourceSnapshotOf(staged, UPSTREAM_ID).source_version).toBe("1.0.1");
     // A regular blob in git (mode 100644), never an annex pointer.
     expect((await git(dir, "ls-files", "-s", "dataset_description.json")).split(" ")[0]).toBe(
       "100644",
@@ -402,8 +402,11 @@ describe("the import records the snapshot it is, in SourceDatasets", () => {
     expect(readFileSync(join(dir, "dataset_description.json"), "utf8")).toBe(once);
   }, 60_000);
 
-  /** Rewrite the clone's description with `sources`, then record 1.0.1 and return what is staged. */
-  async function recordOver(sources: unknown[]): Promise<{
+  /** Rewrite the clone's description with `sources`, then record `tag` and return what is staged. */
+  async function recordOver(
+    sources: unknown[],
+    tag = "1.0.1",
+  ): Promise<{
     outcome: string;
     staged: Record<string, unknown> & { SourceDatasets: unknown[] };
     onDisk: Record<string, unknown> & { SourceDatasets: unknown[] };
@@ -412,7 +415,7 @@ describe("the import records the snapshot it is, in SourceDatasets", () => {
     const descPath = join(dir, "dataset_description.json");
     const upstreamDesc = JSON.parse(readFileSync(descPath, "utf8"));
     writeFileSync(descPath, JSON.stringify({ ...upstreamDesc, SourceDatasets: sources }));
-    const outcome = await appendSourceDatasetEntry(dir, UPSTREAM_ID, "1.0.1");
+    const outcome = await appendSourceDatasetEntry(dir, UPSTREAM_ID, tag);
     return {
       outcome,
       staged: JSON.parse(await git(dir, "show", ":dataset_description.json")),
@@ -432,14 +435,14 @@ describe("the import records the snapshot it is, in SourceDatasets", () => {
     expect(doiOnly.staged.SourceDatasets).toEqual([
       { DOI: conceptDoi, URL: entry.URL, Version: "1.0.1" },
     ]);
-    expect(recordedUpstreamTag(doiOnly.staged, UPSTREAM_ID)).toBe("1.0.1");
+    expect(sourceSnapshotOf(doiOnly.staged, UPSTREAM_ID).source_version).toBe("1.0.1");
 
     const urlOnly = await recordOver([{ URL: page, Name: "upstream's own label" }]);
     expect(urlOnly.outcome).toBe("completed");
     expect(urlOnly.staged.SourceDatasets).toEqual([
       { URL: page, Name: "upstream's own label", DOI: entry.DOI, Version: "1.0.1" },
     ]);
-    expect(recordedUpstreamTag(urlOnly.staged, UPSTREAM_ID)).toBe("1.0.1");
+    expect(sourceSnapshotOf(urlOnly.staged, UPSTREAM_ID).source_version).toBe("1.0.1");
   }, 60_000);
 
   test("an entry that already records a tag, in the live on004362 shape, is left alone", async () => {
@@ -448,19 +451,35 @@ describe("the import records the snapshot it is, in SourceDatasets", () => {
     expect(outcome).toBe("already-recorded");
   }, 60_000);
 
-  test("an entry naming two datasets is not edited; the record is appended beside it", async () => {
+  test("an entry naming two datasets leaves the tag unreadable, so nothing is recorded beside it", async () => {
+    // The shared parser reads no tag while an entry for this dataset names another one too (it
+    // cannot say whose tag it is), so a record appended beside it would still read as unknown.
     const twoDatasets = {
       DOI: `doi:10.18112/openneuro.${UPSTREAM_ID}`,
       URL: "https://openneuro.org/datasets/ds000002",
     };
-    const { outcome, staged } = await recordOver([twoDatasets, null]);
+    const { outcome, onDisk } = await recordOver([twoDatasets, null]);
+    expect(outcome).toBe("unreadable");
+    expect(onDisk.SourceDatasets).toEqual([twoDatasets, null]);
+  }, 60_000);
+
+  test("an entry that also holds another registrant's DOI is not completed; the record goes beside it", async () => {
+    const theirs = {
+      DOI: "doi:10.5281/zenodo.1234",
+      URL: `https://openneuro.org/datasets/${UPSTREAM_ID}`,
+    };
+    const { outcome, staged } = await recordOver([theirs]);
     expect(outcome).toBe("appended");
-    expect(staged.SourceDatasets).toEqual([
-      twoDatasets,
-      null,
-      sourceDatasetEntry(UPSTREAM_ID, "1.0.1"),
-    ]);
-    expect(recordedUpstreamTag(staged, UPSTREAM_ID)).toBe("1.0.1");
+    expect(staged.SourceDatasets).toEqual([theirs, sourceDatasetEntry(UPSTREAM_ID, "1.0.1")]);
+    expect(sourceSnapshotOf(staged, UPSTREAM_ID).source_version).toBe("1.0.1");
+  }, 60_000);
+
+  test("a tag the shared parser does not read is not recorded", async () => {
+    // OpenNeuro's tag shape admits `2.1.0-rc1`; the parser reads numeric dotted tags only, so the
+    // record would read as unknown to every reader of the tag, the guard included.
+    const { outcome, onDisk } = await recordOver([], "2.1.0-rc1");
+    expect(outcome).toBe("unreadable");
+    expect(onDisk.SourceDatasets).toEqual([]);
   }, 60_000);
 
   test("entries that already disagree are left alone: no third tag beside them", async () => {
@@ -469,7 +488,7 @@ describe("the import records the snapshot it is, in SourceDatasets", () => {
       { URL: `https://openneuro.org/datasets/${UPSTREAM_ID}/versions/0.9.0` },
     ];
     const { outcome, onDisk } = await recordOver(disagreeing);
-    expect(outcome).toBe("disagree");
+    expect(outcome).toBe("unreadable");
     // Nothing was written: the file is still what the test wrote.
     expect(onDisk.SourceDatasets).toEqual(disagreeing);
   }, 60_000);
@@ -484,7 +503,7 @@ describe("the import records the snapshot it is, in SourceDatasets", () => {
       const { outcome, staged } = await recordOver([theirs]);
       expect(outcome).toBe("appended");
       expect(staged.SourceDatasets).toEqual([theirs, sourceDatasetEntry(UPSTREAM_ID, "1.0.1")]);
-      expect(recordedUpstreamTag(staged, UPSTREAM_ID)).toBe("1.0.1");
+      expect(sourceSnapshotOf(staged, UPSTREAM_ID).source_version).toBe("1.0.1");
     }
   }, 60_000);
 

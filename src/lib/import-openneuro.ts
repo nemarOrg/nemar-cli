@@ -29,6 +29,7 @@ import {
   normalizeUpstreamTag,
   sameUpstreamTag,
 } from "../../shared/openneuro-tag.js";
+import { isOwnSourceEntry, sourceSnapshotOf } from "../../shared/source-snapshot.js";
 import { decideReadme, readmeProvenanceStub } from "../../shared/standard-edits/readme.js";
 import { addCi, importDataset, reindexDataset } from "./api/admin.js";
 import { getDataset, getUserCiStatus, hasReleasedVersion } from "./api/datasets.js";
@@ -71,11 +72,6 @@ import {
   screenWaitBudget,
 } from "./import-publication.js";
 import { httpUpstreamReader, prepareImportedTreeForCopy } from "./import-scrub.js";
-import {
-  readRecordedUpstreamTag,
-  recordedUpstreamTag,
-  untaggedEntryIndexFor,
-} from "./import-upstream-tag.js";
 import { fetchOpenNeuroLatestTag } from "./openneuro.js";
 import {
   type ImportManifest,
@@ -362,8 +358,11 @@ export interface ReimportBase {
  * metadata commit, when origin already has a `main` (#990), and refuse when doing so would move a
  * released mirror to a new upstream tag (#993; ADR 0111 decision 10).
  *
- * The tag origin's `main` records is read from its `dataset_description.json`
- * ({@link recordedUpstreamTag}). When it differs from `importTag`:
+ * The tag origin's `main` records is read from its `dataset_description.json` with Phase 2's
+ * parser, `sourceSnapshotOf` (shared/source-snapshot.ts), the one every reader of the tag uses.
+ * When it differs from `importTag` (exactly, after a leading `v`: `sameUpstreamTag`, never the
+ * parser's numeric `compareSourceTags`, which calls `1.0` and `1.0.0` equal and would take the
+ * hard reset that keeps the old tree, #993):
  *   - the dataset has released a version: refuse with `[openneuro-upstream-moved]` before any
  *     reset, S3 setup or push. Moving a released mirror to a newer snapshot is a re-pull's job
  *     (ADR 0111), never a re-import's, and a re-import would keep the old tree while copying the
@@ -544,9 +543,21 @@ async function originLedgerLinesARetargetDrops(
 }
 
 /**
- * The upstream tag `origin/main`'s `dataset_description.json` records, or why it records none:
- * no such file, a file git could not read, one that is not JSON (an annex pointer, say), no entry
- * with a tag, or entries that disagree. Unknown never trips the guard; the caller says so.
+ * Whether any `SourceDatasets` entry of `desc` is the dataset's own (`isOwnSourceEntry`: its DOI
+ * or URL names `sourceId`), tagged or not. `SourceDatasets` is read as the shared parser reads
+ * it: an array, or a single object standing for a one-entry array.
+ */
+export function hasSourceEntryFor(desc: unknown, sourceId: string): boolean {
+  if (!desc || typeof desc !== "object" || Array.isArray(desc)) return false;
+  const sd = (desc as Record<string, unknown>).SourceDatasets;
+  return (Array.isArray(sd) ? sd : [sd]).some((entry) => isOwnSourceEntry(entry, sourceId));
+}
+
+/**
+ * The upstream tag `origin/main`'s `dataset_description.json` records (`sourceSnapshotOf`), or
+ * why it records none: no such file, a file git could not read, one that is not JSON (an annex
+ * pointer, say), no entry for the dataset, or entries for it that give no single tag. Unknown
+ * never trips the guard; the caller says so.
  */
 async function originRecordedTag(
   datasetPath: string,
@@ -572,15 +583,14 @@ async function originRecordedTag(
   } catch {
     return { tag: null, why: "has a dataset_description.json that is not JSON" };
   }
-  const read = readRecordedUpstreamTag(desc, sourceId);
-  if (read.state === "recorded") return { tag: read.tag };
-  if (read.state === "disagree") {
-    return {
-      tag: null,
-      why: `records disagreeing upstream tags for ${sourceId} (${read.tags.join(", ")})`,
-    };
-  }
-  return { tag: null, why: `records no upstream tag for ${sourceId}` };
+  const snapshot = sourceSnapshotOf(desc, sourceId);
+  if (snapshot.source_version !== null) return { tag: snapshot.source_version };
+  return {
+    tag: null,
+    why: hasSourceEntryFor(desc, sourceId)
+      ? `names ${sourceId} in SourceDatasets but records no single upstream tag for it (no entry carries one, they disagree, or one names another dataset too)`
+      : `records no upstream tag for ${sourceId}`,
+  };
 }
 
 /**
@@ -1042,19 +1052,41 @@ export function sourceDatasetEntry(
 }
 
 /**
+ * Whether `entry` is the dataset's own and names nothing else: every DOI or URL it holds as text
+ * names `sourceId` by itself, as the shared parser reads it. A `null`, a non-object and an entry
+ * with a field naming another dataset (or nothing the parser knows, a Zenodo DOI say) are not.
+ */
+function namesOnlyThisDataset(entry: unknown, sourceId: string): entry is Record<string, unknown> {
+  if (!isOwnSourceEntry(entry, sourceId)) return false;
+  const e = entry as Record<string, unknown>;
+  return (["DOI", "URL"] as const).every((key) => {
+    const value = e[key];
+    return (
+      typeof value !== "string" ||
+      value.trim() === "" ||
+      isOwnSourceEntry({ [key]: value }, sourceId)
+    );
+  });
+}
+
+/**
  * Record {@link sourceDatasetEntry} in the clone's `dataset_description.json`, read from disk now
- * (the scrub in Step 5b may have blanked values in it since prepare first read it). NEMAR owns one
- * entry per mirrored `ds` (ADR 0111 decision 1), so:
- *   - `already-recorded`: an entry already records a tag for this dataset; the file is left alone.
- *   - `disagree`: entries already record different tags for this dataset; the file is left alone
- *     and a warning says so, because a third tag would only deepen the disagreement.
+ * (the scrub in Step 5b may have blanked values in it since prepare first read it). What the file
+ * records is read with Phase 2's parser, `sourceSnapshotOf`, and the import writes only a record
+ * that parser then reads as `tag`. NEMAR owns one entry per mirrored `ds` (ADR 0111 decision 1),
+ * so:
+ *   - `already-recorded`: the description already gives a tag for this dataset; left alone.
  *   - `completed`: an entry names this dataset and nothing else but records no tag (a concept DOI,
  *     a dataset page); it gains `Version` and whichever of `DOI` and `URL` it lacks, in place, so
  *     the description still has one entry for the dataset and the guard can read its tag. An
  *     entry that already carries a `Version` (one that is not a tag) or a `DOI` or `URL` that is
  *     not a string is someone else's statement: it is left alone, with a warning, and the record
  *     is appended beside it.
- *   - `appended`: otherwise, a new entry. An entry that also names another dataset is left alone.
+ *   - `appended`: otherwise, a new entry.
+ *   - `unreadable`: the record would still not read as `tag`, because an entry for this dataset
+ *     carries another tag or names another dataset too, or because `tag` is not one the parser
+ *     reads (it reads numeric dotted tags such as `1.0.0` and `00001`); the file is left alone
+ *     and a warning says so, because writing would only add to what a person has to settle.
  * Kept in git, never the annex, and written as publication writes the file, two-space JSON.
  * Entries of any shape, `null` included, are kept as they are.
  */
@@ -1062,19 +1094,10 @@ export async function appendSourceDatasetEntry(
   datasetPath: string,
   openneuroId: string,
   tag: string,
-): Promise<"already-recorded" | "disagree" | "completed" | "appended"> {
+): Promise<"already-recorded" | "unreadable" | "completed" | "appended"> {
   const descPath = join(datasetPath, "dataset_description.json");
   const desc = readBidsDescription(datasetPath);
-  const recorded = readRecordedUpstreamTag(desc, openneuroId);
-  if (recorded.state === "recorded") return "already-recorded";
-  if (recorded.state === "disagree") {
-    console.log(
-      chalk.yellow(
-        `  Warning: dataset_description.json already records disagreeing upstream tags for ${openneuroId} (${recorded.tags.join(", ")}); not recording ${tag} beside them, so the upstream-moved guard stays inert for this dataset until a person settles them`,
-      ),
-    );
-    return "disagree";
-  }
+  if (sourceSnapshotOf(desc, openneuroId).source_version !== null) return "already-recorded";
   // A `SourceDatasets` that is not an array is kept as the first entry, as publication keeps it.
   const existing = desc.SourceDatasets;
   const sources: unknown[] = Array.isArray(existing)
@@ -1083,7 +1106,7 @@ export async function appendSourceDatasetEntry(
       ? []
       : [existing];
   const entry = sourceDatasetEntry(openneuroId, tag);
-  const index = untaggedEntryIndexFor({ SourceDatasets: sources }, openneuroId);
+  const index = sources.findIndex((s) => namesOnlyThisDataset(s, openneuroId));
   let outcome: "completed" | "appended";
   const current = index >= 0 ? (sources[index] as Record<string, unknown>) : null;
   const present = (key: string) =>
@@ -1093,13 +1116,6 @@ export async function appendSourceDatasetEntry(
     !present("Version") &&
     (!present("DOI") || typeof current.DOI === "string") &&
     (!present("URL") || typeof current.URL === "string");
-  if (current !== null && !completable) {
-    console.log(
-      chalk.yellow(
-        `  Warning: left the existing SourceDatasets entry for ${openneuroId} as it is (it carries a Version that is not a tag, or a DOI or URL that is not text); recording ${tag} beside it`,
-      ),
-    );
-  }
   if (current !== null && completable) {
     sources[index] = {
       ...current,
@@ -1112,7 +1128,23 @@ export async function appendSourceDatasetEntry(
     sources.push(entry);
     outcome = "appended";
   }
-  writeFileSync(descPath, `${JSON.stringify({ ...desc, SourceDatasets: sources }, null, 2)}\n`);
+  const next = { ...desc, SourceDatasets: sources };
+  if (sourceSnapshotOf(next, openneuroId).source_version !== entry.Version) {
+    console.log(
+      chalk.yellow(
+        `  Warning: recording upstream ${openneuroId} ${tag} would not make dataset_description.json read as that tag (an entry for ${openneuroId} carries another tag or names another dataset too, or ${tag} is not a tag the shared parser reads); left it as it is, so the upstream-moved guard stays inert for this dataset until a person settles it`,
+      ),
+    );
+    return "unreadable";
+  }
+  if (current !== null && !completable) {
+    console.log(
+      chalk.yellow(
+        `  Warning: left the existing SourceDatasets entry for ${openneuroId} as it is (it carries a Version that is not a tag, or a DOI or URL that is not text); recording ${tag} beside it`,
+      ),
+    );
+  }
+  writeFileSync(descPath, `${JSON.stringify(next, null, 2)}\n`);
   const add = await runCommand(
     ["git", "-c", "annex.largefiles=nothing", "add", "dataset_description.json"],
     { cwd: datasetPath },
