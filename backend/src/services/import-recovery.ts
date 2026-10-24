@@ -119,6 +119,13 @@ export function decideImportRecovery(s: ImportGuardState): ImportRecoveryDecisio
  * refuses a lagging tag BEFORE it creates the dataset, so the leftover-state
  * rule would answer `not_found_dataset`, which no engine retries -- and a
  * transient refusal would be parked on its first occurrence.
+ *
+ * The override also bypasses `has_doi`, `made_public` and `has_version` for a
+ * dataset that already exists, on purpose: the refusal came before this run
+ * reset, copied or pushed anything, so whatever state those reasons protect
+ * was left by earlier runs and is untouched, and only a quarantine that stays
+ * retryable lets the lag clear. The retry that follows meets the same guards
+ * any import does (a released mirror whose upstream moved refuses and parks).
  */
 export function classifyRecovery(
   lastError: string | null,

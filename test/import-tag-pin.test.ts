@@ -10,7 +10,7 @@
  * against the real API and a real mirror, is in import-tag-pin.integration.test.ts.
  */
 
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { which } from "bun";
@@ -53,6 +53,12 @@ beforeAll(async () => {
     },
   });
 }, 60_000);
+
+// Every test starts from the failing endpoint and a zero count, whatever the last one set.
+beforeEach(() => {
+  graphqlAnswer = () => new Response("unavailable", { status: 503 });
+  graphqlRequests = 0;
+});
 
 afterAll(() => {
   graphql.stop(true);
@@ -278,6 +284,11 @@ describe("a refusal clears the staging an earlier attempt left", () => {
   // copied and finalized -- published, even -- under a prepare that just refused. Real `aws` CLI,
   // against the S3 stand-in, isolated from the developer's own AWS setup.
   const awsInstalled = which("aws") !== null;
+
+  // CI has the aws CLI; a skip there would hide this coverage, so it is a failure instead.
+  test.if(process.env.CI === "true")("the aws CLI is present in CI", () => {
+    expect(awsInstalled).toBe(true);
+  });
 
   test.skipIf(!awsInstalled)(
     "refuseImport removes <id>/staging/ and nothing else, then exits 1",

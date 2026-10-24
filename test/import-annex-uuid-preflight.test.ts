@@ -120,6 +120,11 @@ async function bareOriginOf(repo: string): Promise<string> {
 
 const OTHER_UUID = "0e6c1f3a-9b1d-4c2e-8f00-000000000001";
 
+// CI has the aws CLI; a skip there would hide the preflight's coverage, so it is a failure instead.
+test.if(process.env.CI === "true")("the aws CLI is present in CI", () => {
+  expect(awsInstalled).toBe(true);
+});
+
 describe.skipIf(!awsInstalled)("the bucket's annex-uuid against the git-annex branch", () => {
   test("no marker in the bucket: clear, whatever the branch says", async () => {
     const { repo } = await repoWithRemote();

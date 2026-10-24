@@ -86,7 +86,7 @@ export type RetryDecision =
   | { action: "dispatch"; nextRecoveryAttempt: number; nextRetryAt: number };
 
 /**
- * Core per-candidate decision (retry engine step 1-3 in the phase plan):
+ * Core per-candidate decision, first match wins:
  *   1. Verified complete now (upstream came back, a prior dispatch landed
  *      after the row was queried) -> recover, no dispatch.
  *   2. No source_id at all -> nothing can ever be dispatched -> blocklist
@@ -95,19 +95,20 @@ export type RetryDecision =
  *      (migration 0044) and every write path validates it non-empty; kept so
  *      the function still has a sane, terminal answer if that constraint
  *      ever weakens instead of dispatching with an empty source_id.
- *   3. Still incomplete, inside the window, or not an upstream-inaccessible
- *      failure -> dispatch (bump recovery_attempts, backoff).
- *   4. Still incomplete, past the window, AND upstream-inaccessible -> park
- *      on the blocklist (`upstream_403_after_window`) instead of dispatching
- *      forever against a dataset OpenNeuro itself can't serve.
- *   Before 3: a refusal no retry can clear -- a deterministic scrub refusal,
- *      an upstream move of a released mirror, an annex-uuid conflict -- is
- *      parked at once.
+ *   3. A refusal no retry can clear -> blocklist at once, whatever the
+ *      window: a deterministic scrub refusal (`identifier_scrub_refused`), an
+ *      upstream move of a released mirror (`upstream_moved`), an annex-uuid
+ *      conflict (`annex_uuid_conflict`).
+ *   4. Past the window AND upstream-inaccessible -> park on the blocklist
+ *      (`upstream_403_after_window`) instead of dispatching forever against a
+ *      dataset OpenNeuro itself can't serve.
  *   5. Past the window AND still refused for a mirror lag (ADR 0111 decision
  *      10) -> park as `mirror_lag`. A lag is transient and retried, but a tag
  *      that has not reached OpenNeuro's GitHub mirror in 14 days is not going
  *      to by itself; the sweep files one admin issue when it parks one (lead
- *      ruling, 2026-10-23).
+ *      ruling, 2026-10-23). The window starts at the engine's first retry of
+ *      the row (see retryCandidateInput).
+ *   6. Anything else -> dispatch (bump recovery_attempts, backoff).
  *
  * Pure -- `firstIncompleteAtMs` and `now` are both resolved by the caller
  * (COALESCE(first_incomplete_at, now) parsed to epoch ms) so the window
@@ -136,8 +137,11 @@ export function decideRetryAction(args: {
   //   - a bucket annex-uuid the dataset's git-annex branch does not record as nemar-s3 (#1320, lead
   //     ruling 2026-10-23): every attempt fails the same way and burns retry budget a transient
   //     failure needs.
-  // Recovery quarantines both first, as a non-retryable reason, so this is the backstop for a row
-  // that reaches the sweep anyway (`failed` or `incomplete` carrying the message).
+  // classifyRecovery has no rule for either marker: a failure callback usually quarantines the row
+  // first by the dataset's state (has_doi for a released mirror, not_found_dataset or an orphan for
+  // a first import), and a quarantined row is no candidate unless it carries the upstream or the
+  // mirror-lag marker. This park is the backstop for a `failed` or `incomplete` row that still
+  // carries one of these messages and so reaches the sweep.
   const cause = classifyImportFailure({ stage: "prepare", lastError: args.lastError }).cause;
   if (cause === "upstream_moved") return { action: "blocklist", reason: "upstream_moved" };
   if (cause === "annex_uuid_conflict") {
