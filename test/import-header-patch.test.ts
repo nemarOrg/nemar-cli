@@ -6,12 +6,14 @@
  * `prepareImportedTreeForCopy` and passes unedited. This file pins the result itself, which the
  * upstream re-pull's planner (ADR 0111) uses to compute what the import would leave in a header.
  *
- * Two branches have no input that reaches them, and that is by construction, not an oversight:
- * `scrub-unverified` needs a scrub that leaves a removable finding, and the scrub rewrites a whole
- * field to a placeholder the scanner reads as clean whenever the field has one; `datesUnproven`
- * needs the date rule to fault or fail its own proof, and its seeded fuzz in
- * `test/identifier-dates.test.ts` finds no layout that does. Both are defenses kept for a scanner
- * that grows a rule the scrub does not yet follow. All names and dates are invented.
+ * `scrub-unverified` IS reachable: a seeded fuzz in review of #1925 found a recording field whose
+ * leading `Startdate 99-ZZZ-9999` keeps the `dd-MMM-yyyy` shape the scrub's placeholder preserves,
+ * which the scanner then reads as free text, so the scrub's own proof fails. That header is pinned
+ * below, and `test/import-scrub-header-outcomes.test.ts` drives it through the importer to its
+ * refusal. `datesUnproven` has no input found that reaches it: it needs the date rule to fault or
+ * fail its own proof, and neither the seeded fuzz in `test/identifier-dates.test.ts` nor that
+ * review's 400,000 patches found one. It stays a defense for a scanner that grows a rule the date
+ * rule does not yet follow. All names and dates are invented.
  */
 
 import { describe, expect, test } from "bun:test";
@@ -67,6 +69,22 @@ describe("importHeaderPatch", () => {
       ok: false,
       reason: "not-edf",
     });
+  });
+
+  test("a scrub its own proof rejects is scrub-unverified, with dates on or off", () => {
+    // The scrub keeps `Startdate 99-ZZZ-9999` as the placeholder's date and the scanner reads it
+    // as free text, so `verifyScrub` finds identifying content left.
+    const before = buildHeader({
+      patient: "",
+      recording: "Startdate 99-ZZZ-9999 00-JAN-0000 14-MAR-2023 M P_01",
+      startdate: "14.03.23",
+    });
+    for (const dates of [true, false]) {
+      expect(importHeaderPatch(before, dates), String(dates)).toEqual({
+        ok: false,
+        reason: "scrub-unverified",
+      });
+    }
   });
 
   test("a clean header with dates off comes back byte for byte, its dates reported as left", () => {

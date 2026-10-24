@@ -2,7 +2,7 @@
  * The path rules the importer's scrub reads by (`RECORDING_PATH`, `JSON_PATH`, `SCANS_TABLE_PATH`
  * in `src/lib/import-scrub.ts`), exported so the upstream re-pull's planner (ADR 0111) forecasts
  * the scrub over exactly the paths it will run on. The scrub itself uses these same constants;
- * `test/import-scrub.test.ts` and `test/import-scrub-not-edf.test.ts` drive it through them.
+ * `test/import-scrub.test.ts` and `test/import-scrub-header-outcomes.test.ts` drive it through them.
  */
 
 import { describe, expect, test } from "bun:test";
