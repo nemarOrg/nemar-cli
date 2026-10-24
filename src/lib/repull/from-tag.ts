@@ -11,12 +11,17 @@
  * tag, refuses. `--from-tag` on such a mirror gives a dry run only (`from-tag-not-recorded`): the
  * plan is made and shown, is never executable, and its lineage is never recordable (ADR 0111's
  * Phase 5 amendment). `--from-tag` that disagrees with a recorded tag refuses, and one that is not
- * an upstream tag at all refuses as `from-tag-malformed`.
+ * an OpenNeuro snapshot tag at all (`isOpenNeuroTag`, shared with Phase 3's import) refuses as
+ * `from-tag-malformed`; `v1.0.0` names the same snapshot as `1.0.0` (`sameUpstreamTag`).
  */
 
 import {
+  isOpenNeuroTag,
+  normalizeUpstreamTag,
+  sameUpstreamTag,
+} from "../../../shared/openneuro-tag.js";
+import {
   type SourceVersionRow,
-  compareSourceTags,
   mirroredTagOf,
   sourceSnapshotOf,
 } from "../../../shared/source-snapshot.js";
@@ -49,8 +54,8 @@ export async function resolveFromTag(args: {
   ds: string;
   readTagged: (version: string) => Promise<unknown | undefined>;
 }): Promise<FromTagResolution> {
-  const flag = args.flag?.trim() || undefined;
-  if (flag !== undefined && compareSourceTags(flag, flag) === null) {
+  const raw = args.flag?.trim() || undefined;
+  if (raw !== undefined && !isOpenNeuroTag(raw)) {
     return {
       tag: null,
       source: null,
@@ -58,10 +63,11 @@ export async function resolveFromTag(args: {
         name: "from-tag",
         status: "refused",
         code: "from-tag-malformed",
-        detail: `${flag} is not an upstream tag (digits and dots, like 1.0.0)`,
+        detail: `${raw} is not an OpenNeuro snapshot tag`,
       },
     };
   }
+  const flag = raw === undefined ? undefined : normalizeUpstreamTag(raw);
   let recorded: { tag: string; source: FromTagSource } | null = null;
   let unknownWhy: string | null = null;
 
@@ -115,7 +121,7 @@ export async function resolveFromTag(args: {
   }
 
   if (recorded) {
-    if (flag !== undefined && flag !== recorded.tag) {
+    if (flag !== undefined && !sameUpstreamTag(flag, recorded.tag)) {
       return {
         tag: null,
         source: null,

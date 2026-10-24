@@ -384,11 +384,14 @@ describe("a plan from tag A to tag B over an imported mirror", () => {
     expect(out.reason).toBe("nothing-to-pull");
   });
 
-  test("a tag that is not an upstream tag is malformed, not mirror lag", async () => {
-    const to = await planRepull(options(fx, { toTag: "v2.0.0" }));
+  test("a tag that is not an OpenNeuro snapshot tag is malformed, not mirror lag; a v prefix is the same tag", async () => {
+    const to = await planRepull(options(fx, { toTag: "1..2" }));
     expect(to.planned ? null : to.reason).toBe("to-tag-malformed");
-    const from = await planRepull(options(fx, { fromTag: "1.0.x" }));
+    const from = await planRepull(options(fx, { fromTag: "a/b" }));
     expect(from.planned ? null : from.reason).toBe("from-tag-malformed");
+    // Phase 3's tag rule: `v1.1.0` names the snapshot `1.1.0`, for both flags.
+    const v = await plan(fx, { toTag: `v${TAG_B}`, fromTag: `v${TAG_A}` });
+    expect(v.body.upstream).toMatchObject({ from_tag: TAG_A, to_tag: TAG_B });
   });
 
   test("without version rows, from_tag comes from the tagged description and the version check is unchecked", async () => {

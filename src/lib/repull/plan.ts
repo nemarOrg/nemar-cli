@@ -35,6 +35,7 @@ import { type SourceVersionRow, openNeuroSourceId } from "../../../shared/source
 import { parseRemoteLog } from "../content-recovery.js";
 import { UPSTREAM_BUCKET } from "../fleet-content-recovery.js";
 import { shouldAnnex } from "../git-annex/policy.js";
+import { uuidsNamedInRemoteLog } from "../git-annex/s3-remote.js";
 import { JSON_PATH, RECORDING_PATH, SCANS_TABLE_PATH } from "../import-scrub.js";
 import { bumpVersion } from "../semver.js";
 import { DESCRIPTION_PATH } from "./description.js";
@@ -358,11 +359,11 @@ export async function planRepull(opts: PlanOptions): Promise<PlanOutcome> {
 
     // NEMAR's special remotes, from its git-annex branch.
     const remoteLog = await readRemoteLog(nemar.path);
-    const nemarRemotes = [...parseRemoteLog(remoteLog).values()].filter(
-      (r) => r.name === S3_REMOTE_NAME,
-    );
-    const nemarUuid = nemarRemotes.length === 1 ? (nemarRemotes[0]?.uuid ?? null) : null;
-    const nemarRecord = nemarRemotes.length === 1 ? nemarRemotes[0] : undefined;
+    // Which uuids are nemar-s3 is Phase 3's reading (`uuidsNamedInRemoteLog`, the #1320 import
+    // preflight's): each uuid's latest line decides, so a remote renamed away no longer counts.
+    const nemarUuids = uuidsNamedInRemoteLog(remoteLog, S3_REMOTE_NAME);
+    const nemarUuid = nemarUuids.length === 1 ? (nemarUuids[0] ?? null) : null;
+    const nemarRecord = nemarUuid ? parseRemoteLog(remoteLog).get(nemarUuid) : undefined;
     const region = nemarRecord
       ? (datacenterOf(remoteLog, nemarRecord.uuid) ?? "us-east-2")
       : "us-east-2";
@@ -531,7 +532,7 @@ export async function planRepull(opts: PlanOptions): Promise<PlanOutcome> {
         token: opts.github.token,
         apiBase: opts.github.apiBase,
       }),
-      annexUuidCheck({ remoteUuids: nemarRemotes.map((r) => r.uuid), marker }),
+      annexUuidCheck({ remoteUuids: nemarUuids, marker }),
     ];
 
     const renames = pairRenames(result.decisions);

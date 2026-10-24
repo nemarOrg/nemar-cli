@@ -6,6 +6,11 @@
  * not executable. The checks read; none writes.
  */
 
+import {
+  isOpenNeuroTag,
+  normalizeUpstreamTag,
+  sameUpstreamTag,
+} from "../../../shared/openneuro-tag.js";
 import { compareSourceTags } from "../../../shared/source-snapshot.js";
 import { bumpVersion, parseVersion } from "../semver.js";
 import { bareVersion } from "./from-tag.js";
@@ -101,18 +106,21 @@ export function toTagCheck(args: {
   mirrorTags: string[];
   fromTag: string | null;
 }): { tag: string | null; check: Check } {
-  const flag = args.flag?.trim() || undefined;
-  if (flag !== undefined && compareSourceTags(flag, flag) === null) {
+  // The tag's shape is Phase 3's (shared/openneuro-tag.ts): one definition for every place a tag
+  // crosses a boundary, and `v1.1.0` names the same snapshot as `1.1.0`.
+  const raw = args.flag?.trim() || undefined;
+  if (raw !== undefined && !isOpenNeuroTag(raw)) {
     return {
       tag: null,
       check: {
         name: "to-tag",
         status: "refused",
         code: "to-tag-malformed",
-        detail: `${flag} is not an upstream tag (digits and dots, like 1.1.0)`,
+        detail: `${raw} is not an OpenNeuro snapshot tag`,
       },
     };
   }
+  const flag = raw === undefined ? undefined : normalizeUpstreamTag(raw);
   const tag = flag ?? highestUpstreamTag(args.mirrorTags);
   if (tag === null) {
     return {
@@ -137,7 +145,7 @@ export function toTagCheck(args: {
     };
   }
   if (args.fromTag !== null) {
-    if (tag === args.fromTag) {
+    if (sameUpstreamTag(tag, args.fromTag)) {
       return {
         tag,
         check: {
@@ -156,7 +164,10 @@ export function toTagCheck(args: {
           name: "to-tag",
           status: "refused",
           code: "not-newer",
-          detail: `${tag} is not newer than ${args.fromTag}`,
+          detail:
+            order === null
+              ? `${tag} cannot be ordered against ${args.fromTag}`
+              : `${tag} is not newer than ${args.fromTag}`,
         },
       };
     }
