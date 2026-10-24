@@ -247,6 +247,7 @@ export interface QueueResponse {
  * posted as failed), `naming_unchecked` (exempt, and the dataset name could not be read, whatever
  * the title says, so the check needs a person), `exempt_naming_waived` (exempt, and an administrator waived the naming rule
  * for this commit), `draft`, `not_open`, `not_main`, `bot_author`, `dataset_not_reviewable`,
+ * `review_running` (a redo found the review still running and left it alone),
  * `pr_review_disabled`, ...). `review_id` is null when no review row exists for it.
  */
 export interface StartReviewResponse {

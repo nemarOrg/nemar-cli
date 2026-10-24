@@ -1877,6 +1877,8 @@ describe("the override: nemar admin pr-reviews allow <dataset> <pr> --admin", ()
 
 describe("redo: an administrator starts a finished review again", () => {
   const redo = (n = 7) => start(DATASET, n, ADMIN_KEY, "?redo=1");
+  /** The check-run writes GitHub recorded, in order. */
+  const checkWrites = () => calls.filter((c) => /\/check-runs(\/\d+)?$/.test(c.path));
 
   test("a finished pass is restarted on the same row: a fresh token, no old result, one more run", async () => {
     seedReview(db, { ds: DATASET, n: 7, sha: SHA_A, state: "reported", verdict: "pass" });
@@ -1902,16 +1904,19 @@ describe("redo: an administrator starts a finished review again", () => {
       verdict: null,
       report: null,
       claimed_at: null,
-      edit_restarts: 0,
+      // A redo is no edit, so the contributor's count of edit restarts is left as it was.
+      edit_restarts: 3,
       attempts: 2,
     });
     expect(row.nonce).not.toBeNull();
     expect(row.nonce).not.toBe(before.nonce);
     expect(dispatches()).toHaveLength(1);
     // The check goes back to running: the old result must not stand while the new run is going.
-    expect(
-      calls.some((c) => /\/check-runs/.test(c.path) && ["POST", "PATCH"].includes(c.method)),
-    ).toBe(true);
+    const writes = checkWrites();
+    expect(writes.length).toBeGreaterThan(0);
+    expect(writes[writes.length - 1].body).toMatchObject({ status: "in_progress" });
+    expect(writes[writes.length - 1].body).not.toHaveProperty("conclusion");
+    expect(JSON.stringify(writes.map((c) => c.body))).not.toContain("success");
   });
 
   test("the same start without redo is the unchanged rule: duplicate, nothing dispatched", async () => {
@@ -1972,6 +1977,8 @@ describe("redo: an administrator starts a finished review again", () => {
       expect(r.body).toMatchObject({ dispatched: false, reason: "review_running", redo: true });
       expect(rows()[0]).toMatchObject({ state: "dispatched", nonce: "live-nonce", attempts: 1 });
       expect(dispatches()).toHaveLength(0);
+      // The running review's check is not touched either.
+      expect(checkWrites()).toEqual([]);
     },
   );
 
@@ -1991,7 +1998,7 @@ describe("redo: an administrator starts a finished review again", () => {
     expect(dispatches()).toHaveLength(1);
   });
 
-  test("a contributor an administrator has blocked is declined, and no run is spent", async () => {
+  test("a contributor an administrator has blocked: the answer is the block, and the finished review stands untouched", async () => {
     db.run(
       "INSERT INTO pr_review_overrides (author_id, author_login, mode) VALUES (900, 'n', 'block')",
     );
@@ -2004,23 +2011,42 @@ describe("redo: an administrator starts a finished review again", () => {
       state: "reported",
       verdict: "pass",
     });
+    const before = rows()[0];
     pulls[`${DATASET}#7`] = restPull({ userId: 900, login: "n" });
 
     const r = await redo();
 
     expect(r.body).toMatchObject({ dispatched: false, reason: "contributor_paused", redo: true });
-    expect(rows()[0]).toMatchObject({ state: "declined", detail: "contributor_paused" });
+    // A redo does not change the text the review judged: nothing is written, no result is lost,
+    // no run is spent, and no check or comment is posted.
+    expect(rows()[0]).toMatchObject({
+      state: "reported",
+      verdict: "pass",
+      attempts: 1,
+      nonce: before.nonce,
+      report: before.report,
+    });
     expect(dispatches()).toHaveLength(0);
+    expect(checkWrites()).toEqual([]);
+    expect(db.query("SELECT * FROM audit_log WHERE action = 'pr_review_started'").all()).toEqual(
+      [],
+    );
   });
 
-  test("a commit refused at the edit cap is restarted and its count begins again", async () => {
-    seedReview(db, {
-      ds: DATASET,
-      n: 7,
-      sha: SHA_A,
-      state: "errored",
-      detail: "edit_limit",
-    });
+  test("a finished review of a commit at the edit cap is redone without lifting the cap", async () => {
+    seedReview(db, { ds: DATASET, n: 7, sha: SHA_A, state: "reported", verdict: "fail" });
+    db.run("UPDATE pr_reviews SET edit_restarts = 5");
+    pulls[`${DATASET}#7`] = restPull({});
+
+    const r = await redo();
+
+    expect(r.body).toMatchObject({ dispatched: true, reason: "redispatched" });
+    // A redo is no edit and a bulk redo must not give a contributor five more: the count stays.
+    expect(rows()[0]).toMatchObject({ state: "dispatched", detail: null, edit_restarts: 5 });
+  });
+
+  test("a review refused at the edit cap is lifted by a start, redo or not, as before", async () => {
+    seedReview(db, { ds: DATASET, n: 7, sha: SHA_A, state: "errored", detail: "edit_limit" });
     db.run("UPDATE pr_reviews SET edit_restarts = 5");
     pulls[`${DATASET}#7`] = restPull({});
 
@@ -2028,6 +2054,139 @@ describe("redo: an administrator starts a finished review again", () => {
 
     expect(r.body).toMatchObject({ dispatched: true, reason: "redispatched" });
     expect(rows()[0]).toMatchObject({ state: "dispatched", detail: null, edit_restarts: 0 });
+  });
+
+  test("an owner's or administrator's pull request with no review on record is still not reviewed", async () => {
+    pulls[`${DATASET}#7`] = restPull({ number: 7, userId: 4001, login: "startadmin-gh" });
+
+    const r = await redo();
+
+    expect(r.body).toMatchObject({ dispatched: false, reason: "exempt_author", redo: true });
+    expect(rows()).toHaveLength(0);
+    expect(dispatches()).toHaveLength(0);
+  });
+
+  test("an exempt author's commit that a review has touched is restarted like anyone's, never written over by skipped", async () => {
+    // A stranger's push to the administrator's branch put the commit through review (ADR 0107).
+    seedReview(db, {
+      ds: DATASET,
+      n: 7,
+      sha: SHA_A,
+      authorId: 4001,
+      login: "startadmin-gh",
+      state: "reported",
+      verdict: "fail",
+    });
+    db.run("UPDATE pr_reviews SET check_run_id = 4242 WHERE pr_number = 7");
+    pulls[`${DATASET}#7`] = restPull({ number: 7, userId: 4001, login: "startadmin-gh" });
+
+    const r = await redo();
+
+    expect(r.body).toMatchObject({ dispatched: true, reason: "redispatched", redo: true });
+    expect(rows()[0]).toMatchObject({ state: "dispatched", verdict: null });
+    expect(dispatches()).toHaveLength(1);
+    expect(JSON.stringify(checkWrites().map((c) => c.body))).not.toContain("skipped");
+  });
+
+  test.each([
+    ["a draft", { draft: true }, "draft"],
+    ["a closed pull request", { state: "closed" }, "not_open"],
+    ["a pull request not aimed at main", { base: "develop" }, "not_main"],
+    ["a bot's pull request", { login: "dependabot[bot]", type: "Bot" }, "bot_author"],
+  ])(
+    "%s is not redone: the gate answers first and the finished review stands",
+    async (_label, over, word) => {
+      seedReview(db, { ds: DATASET, n: 7, sha: SHA_A, state: "reported", verdict: "pass" });
+      pulls[`${DATASET}#7`] = restPull(over);
+
+      const r = await redo();
+
+      expect(r.body).toMatchObject({ dispatched: false, reason: word, redo: true });
+      expect(rows()[0]).toMatchObject({ state: "reported", verdict: "pass", attempts: 1 });
+      expect(dispatches()).toHaveLength(0);
+    },
+  );
+
+  describe("a job that is still inside its limit is never superseded", () => {
+    const minutesAgo = (m: number) =>
+      new Date(Date.now() - m * 60_000).toISOString().slice(0, 19).replace("T", " ");
+
+    test.each([
+      ["handed over 61 minutes ago, claimed 20 minutes ago", "dispatched", 61, 20],
+      ["closed by the watchdog as unreported, claimed 20 minutes ago", "unreported", 61, 20],
+    ] as const)(
+      "%s: a redo says review_running and a plain start says duplicate, and nothing changes",
+      async (_label, state, created, claimed) => {
+        seedReview(db, {
+          ds: DATASET,
+          n: 7,
+          sha: SHA_A,
+          state: state === "dispatched" ? "dispatched" : ("unreported" as never),
+          createdAt: minutesAgo(created),
+        });
+        db.run("UPDATE pr_reviews SET nonce = 'live-nonce', claimed_at = ?", [minutesAgo(claimed)]);
+        pulls[`${DATASET}#7`] = restPull({});
+
+        const redone = await redo();
+        expect(redone.body).toMatchObject({ dispatched: false, reason: "review_running" });
+        const plain = await start(DATASET, 7);
+        expect(plain.body).toMatchObject({ dispatched: false, reason: "duplicate" });
+        expect(rows()[0]).toMatchObject({ state, nonce: "live-nonce", attempts: 1 });
+        expect(dispatches()).toHaveLength(0);
+      },
+    );
+
+    test.each([
+      ["handed over 61 minutes ago, claimed 51 minutes ago", "dispatched"],
+      ["closed by the watchdog as unreported, claimed 51 minutes ago", "unreported"],
+    ] as const)("%s: the job has had its limit, so a start restarts it", async (_label, state) => {
+      seedReview(db, {
+        ds: DATASET,
+        n: 7,
+        sha: SHA_A,
+        state: state === "dispatched" ? "dispatched" : ("unreported" as never),
+        createdAt: minutesAgo(61),
+      });
+      db.run("UPDATE pr_reviews SET claimed_at = ?", [minutesAgo(51)]);
+      pulls[`${DATASET}#7`] = restPull({});
+
+      const r = await start(DATASET, 7);
+
+      expect(r.body).toMatchObject({ dispatched: true, reason: "redispatched" });
+      expect(rows()[0]).toMatchObject({ state: "dispatched", claimed_at: null, attempts: 2 });
+    });
+  });
+
+  test("a redo that loses the race to a stored result is tried again against the row as it is now", async () => {
+    // The watchdog closed the review a while ago, so a start may restart it. Between the read and
+    // the write a report is stored: the conditional write finds nothing to change, and the redo is
+    // tried once more against the finished review instead of answering "already has a review".
+    seedReview(db, { ds: DATASET, n: 7, sha: SHA_A, state: "unreported" as never });
+    pulls[`${DATASET}#7`] = restPull({});
+    let injected = false;
+    const racing = wrapD1(realD1(db), (sql) => {
+      if (!injected && sql.includes("SET state = ?, detail = ?, nonce = ?")) {
+        injected = true;
+        db.run(
+          "UPDATE pr_reviews SET state = 'reported', verdict = 'pass', report = '{\"stage\":\"full\"}', nonce = NULL, claimed_at = datetime('now')",
+        );
+      }
+    });
+
+    const r = await handlePullRequestEvent(
+      { ...env(), DB: racing } as Bindings,
+      {
+        action: "synchronize",
+        pull_request: restPull({}),
+        repository: (restPull({}).base as { repo: unknown }).repo,
+      },
+      { adminStart: true, redo: true },
+    );
+
+    expect(injected).toBe(true);
+    expect(r).toMatchObject({ dispatched: true, reason: "redispatched" });
+    expect(rows()[0]).toMatchObject({ state: "dispatched", verdict: null, attempts: 2 });
+    expect(dispatches()).toHaveLength(1);
   });
 
   test("a commit with no row is an ordinary first start under redo", async () => {
