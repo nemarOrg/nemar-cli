@@ -144,6 +144,11 @@ interface ImportOptions {
    * mirror's default HEAD.
    */
   tag?: string;
+  /**
+   * Moves the OpenNeuro GraphQL endpoint prepare asks for the latest tag, and bounds its retries.
+   * For tests; a run leaves it unset and asks openneuro.org.
+   */
+  openNeuroLookup?: Parameters<typeof fetchOpenNeuroLatestTag>[1];
 }
 
 /**
@@ -324,6 +329,15 @@ export function decideReimportBase(args: {
     return "moved";
   }
   return args.currentBranch === "main" ? "hard-reset" : "none";
+}
+
+/**
+ * Whether Step 6 records the pinned tag as a `SourceDatasets` entry (ADR 0111 decision 10): when
+ * the tree is the pinned tag's, a first import or a retarget. After a hard reset the tree is
+ * origin's, and recording a tag there would be a guess. Pure, for the test.
+ */
+export function shouldRecordSourceEntry(base: Pick<ReimportBase, "kind">): boolean {
+  return base.kind !== "hard-reset";
 }
 
 /** What Step 4c did to the clone's `main`, and the tag origin's `main` recorded. */
@@ -1368,7 +1382,10 @@ async function prepareImportSteps(
   const cloneSpinner = ora("Cloning OpenNeuro dataset...").start();
   let pinned: PinnedClone;
   try {
-    pinned = await cloneOpenNeuroAtTag(openneuroId, datasetPath, { tag: options.tag });
+    pinned = await cloneOpenNeuroAtTag(openneuroId, datasetPath, {
+      tag: options.tag,
+      lookup: options.openNeuroLookup,
+    });
   } catch (err) {
     cloneSpinner.stop();
     if (err instanceof ImportRefused) throw err;
@@ -1873,7 +1890,7 @@ async function prepareImportSteps(
     // The upstream snapshot this tree is, recorded where the guard and the version-DOI mint read
     // it (ADR 0111 decision 10). Only when the tree IS the pinned tag's: a first import or a
     // retarget. After a hard reset the tree is origin's, and recording a tag there would be a guess.
-    if (base.kind !== "hard-reset") {
+    if (shouldRecordSourceEntry(base)) {
       recordedEntry = await appendSourceDatasetEntry(datasetPath, openneuroId, pinned.tag);
     }
   } catch (err) {

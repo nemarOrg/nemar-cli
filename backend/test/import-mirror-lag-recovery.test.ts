@@ -27,10 +27,13 @@ import {
 import { IMPORT_FAILURE_ISSUE_LABEL } from "../src/services/import-issue-identity";
 import { classifyRecovery, runImportRecovery } from "../src/services/import-recovery";
 import {
+  type CandidateRow,
   IMPORT_RETRY_CANDIDATES_QUERY,
   RETRY_WINDOW_MS,
   applyRetryPlan,
   planRetryTick,
+  retryCandidateInput,
+  runRetryTick,
 } from "../src/services/import-retry";
 import type { Bindings } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
@@ -383,5 +386,71 @@ describe("a retry is dispatched with no tag", () => {
       (globalThis as { NEMAR_GITHUB_API_URL?: string }).NEMAR_GITHUB_API_URL = undefined;
       server.stop(true);
     }
+  });
+});
+
+describe("the 14-day window, read from the row as D1 stores it", () => {
+  test("first_incomplete_at as a SQLite datetime string: just past 14 days parks, just inside dispatches", async () => {
+    // The path the sweep takes after its S3 reads: the candidate query's rows, read through
+    // parseSqliteUtc, planned and acted on. A window misread as local time, or not read at all
+    // (`?? now`), would dispatch the 15-day row instead of parking it.
+    const db = freshDb();
+    const now = Date.parse("2026-11-20T12:00:00Z");
+    const sqlite = (ms: number) =>
+      new Date(ms)
+        .toISOString()
+        .replace("T", " ")
+        .replace(/\.\d+Z$/, "");
+    const day = 24 * 60 * 60 * 1000;
+    // Hours either side of the boundary, so a datetime read as local time instead of UTC moves
+    // one across it wherever the process runs off UTC (the stored form has no zone).
+    const hour = 60 * 60 * 1000;
+    for (const [id, age] of [
+      ["on004362", 14 * day + 3 * hour],
+      ["on004366", 14 * day - 3 * hour],
+    ] as const) {
+      db.query(
+        `INSERT INTO import_jobs (dataset_id, source, source_id, stage, status, last_error,
+                                  first_incomplete_at)
+         VALUES (?, 'openneuro', ?, 'prepare', 'quarantined', ?, ?)`,
+      ).run(id, `ds${id.slice(2)}`, MIRROR_LAG, sqlite(now - age));
+    }
+    const rows = db.query(IMPORT_RETRY_CANDIDATES_QUERY).all(sqlite(now), 100) as CandidateRow[];
+    expect(rows.map((r) => r.dataset_id).sort()).toEqual(["on004362", "on004366"]);
+    const dispatched: string[] = [];
+    const result = await runRetryTick(
+      prodEnv(db),
+      rows.map((row) => retryCandidateInput(row, { complete: false }, now)),
+      now,
+      {
+        token: async () => "test-token",
+        dispatch: async (sourceId) => {
+          dispatched.push(sourceId);
+        },
+        issueDeps: recordingDeps([]),
+      },
+    );
+    expect(result).toMatchObject({ blocklisted: 1, dispatched: 1 });
+    const parked = db
+      .query("SELECT blocklist_reason FROM import_jobs WHERE dataset_id = 'on004362'")
+      .get() as { blocklist_reason: string };
+    expect(parked.blocklist_reason).toBe("mirror_lag");
+    expect(dispatched).toEqual(["ds004366"]);
+  });
+
+  test("a row the engine has not retried yet starts its window now", () => {
+    const now = Date.parse("2026-11-20T12:00:00Z");
+    const input = retryCandidateInput(
+      {
+        dataset_id: "on004362",
+        source_id: "ds004362",
+        recovery_attempts: 0,
+        first_incomplete_at: null,
+        last_error: MIRROR_LAG,
+      },
+      { complete: false },
+      now,
+    );
+    expect(input.firstIncompleteAtMs).toBe(now);
   });
 });

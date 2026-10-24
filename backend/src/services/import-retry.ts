@@ -302,12 +302,52 @@ export const RECLASSIFY_CANDIDATES_QUERY = `
    ORDER BY updated_at ASC
    LIMIT ?`;
 
-interface CandidateRow {
+/** A row of {@link IMPORT_RETRY_CANDIDATES_QUERY} or {@link BLOCKLIST_RECHECK_QUERY}. */
+export interface CandidateRow {
   dataset_id: string;
   source_id: string | null;
   recovery_attempts: number;
   first_incomplete_at: string | null;
   last_error: string | null;
+}
+
+/**
+ * A candidate row and its fresh S3 verdict as the decision reads them. `first_incomplete_at` is a
+ * SQLite `datetime('now')` string, read as UTC; a row the engine has not yet retried has none and
+ * its window starts now. That is where the 14-day mirror-lag window is anchored (lead ruling,
+ * 2026-10-23): at the engine's first retry of the row, not at the lag's first occurrence. A row
+ * whose window was opened by an earlier, unrelated retry and never closed (a row that failed,
+ * was retried, then completed without its window being cleared, say) therefore parks at its
+ * first mirror lag, with its one admin issue.
+ */
+export function retryCandidateInput(
+  row: CandidateRow,
+  verified: { complete: boolean },
+  now: number,
+): RetryCandidateInput {
+  return {
+    datasetId: row.dataset_id,
+    sourceId: row.source_id,
+    verified,
+    firstIncompleteAtMs: parseSqliteUtc(row.first_incomplete_at) ?? now,
+    lastError: row.last_error,
+    recoveryAttempts: row.recovery_attempts,
+  };
+}
+
+/**
+ * Plan a tick over its verified candidates and act on the plan: the part of the sweep after its
+ * S3 reads. Split out so a test can run it on real SQLite; the sweep itself runs only in
+ * production, where the S3 reads it starts with cannot be pointed at a stand-in.
+ */
+export async function runRetryTick(
+  env: Bindings,
+  inputs: RetryCandidateInput[],
+  now: number,
+  deps: RetryPlanDeps = {},
+): Promise<Awaited<ReturnType<typeof applyRetryPlan>>> {
+  const plan = planRetryTick(inputs, { now, maxDispatches: MAX_RECOVERY_DISPATCHES_PER_TICK });
+  return applyRetryPlan(env, plan, now, deps);
 }
 
 function nowSqlite(ms: number): string {
@@ -676,21 +716,12 @@ export async function sweepImportRetries(env: Bindings): Promise<void> {
       );
       continue;
     }
-    inputs.push({
-      datasetId: row.dataset_id,
-      sourceId: row.source_id,
-      verified,
-      firstIncompleteAtMs: parseSqliteUtc(row.first_incomplete_at) ?? now,
-      lastError: row.last_error,
-      recoveryAttempts: row.recovery_attempts,
-    });
+    inputs.push(retryCandidateInput(row, verified, now));
   }
 
-  const plan = planRetryTick(inputs, { now, maxDispatches: MAX_RECOVERY_DISPATCHES_PER_TICK });
-
-  const { recovered, blocklisted, dispatched, newlyBlocklisted } = await applyRetryPlan(
+  const { recovered, blocklisted, dispatched, newlyBlocklisted } = await runRetryTick(
     env,
-    plan,
+    inputs,
     now,
   );
 

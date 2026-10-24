@@ -24,13 +24,16 @@ export interface TaggedUpstream {
 }
 
 /** What `dataset_description.json` holds at each snapshot: OpenNeuro's own DOI form. */
-export function upstreamDescription(tag: "1.0.0" | "1.0.1" | "draft"): Record<string, unknown> {
+export function upstreamDescription(
+  tag: "1.0.0" | "1.0.1" | "draft",
+  id: string = UPSTREAM_ID,
+): Record<string, unknown> {
   return {
     Name: "A tagged upstream",
     BIDSVersion: "1.8.0",
     License: "CC0",
     Authors: ["Ada Lovelace"],
-    ...(tag === "draft" ? {} : { DatasetDOI: `doi:10.18112/openneuro.${UPSTREAM_ID}.v${tag}` }),
+    ...(tag === "draft" ? {} : { DatasetDOI: `doi:10.18112/openneuro.${id}.v${tag}` }),
   };
 }
 
@@ -40,8 +43,12 @@ async function must(cmd: string[], cwd: string): Promise<string> {
   return r.stdout.trim();
 }
 
-async function snapshot(dir: string, label: "1.0.0" | "1.0.1" | "draft"): Promise<string> {
-  writeFile(dir, "dataset_description.json", `${JSON.stringify(upstreamDescription(label))}\n`);
+async function snapshot(
+  dir: string,
+  label: "1.0.0" | "1.0.1" | "draft",
+  id: string,
+): Promise<string> {
+  writeFile(dir, "dataset_description.json", `${JSON.stringify(upstreamDescription(label, id))}\n`);
   writeFile(dir, "README", `README at ${label}\n`);
   writeFile(dir, "participants.tsv", `participant_id\tlabel\nsub-01\t${label}\n`);
   await must(["git", "add", "dataset_description.json", "README", "participants.tsv"], dir);
@@ -54,9 +61,17 @@ async function snapshot(dir: string, label: "1.0.0" | "1.0.1" | "draft"): Promis
   return must(["git", "rev-parse", "HEAD"], dir);
 }
 
-/** Build the upstream under `root`: tags 1.0.0 and 1.0.1, then an untagged HEAD. */
-export async function buildTaggedUpstream(root: string): Promise<TaggedUpstream> {
-  const dir = join(root, `upstream-${UPSTREAM_ID}`);
+/**
+ * Build the upstream under `root`: tags 1.0.0 and 1.0.1, then an untagged HEAD. `id` names the
+ * OpenNeuro dataset the descriptions belong to, and `dir` where the repository goes (a test that
+ * reaches it through a `url.<base>.insteadOf` rewrite names it as the mirror's URL ends).
+ */
+export async function buildTaggedUpstream(
+  root: string,
+  options: { id?: string; dir?: string } = {},
+): Promise<TaggedUpstream> {
+  const id = options.id ?? UPSTREAM_ID;
+  const dir = options.dir ?? join(root, `upstream-${id}`);
   mkdirSync(dir, { recursive: true });
   await must(["git", "init", "-q", "-b", "main"], dir);
   await must(["git", "config", "user.email", "test@test.com"], dir);
@@ -65,12 +80,12 @@ export async function buildTaggedUpstream(root: string): Promise<TaggedUpstream>
   // OpenNeuro's rule: recordings annexed, metadata in git.
   writeFile(dir, ".gitattributes", "*.edf annex.largefiles=anything\n* annex.backend=SHA256E\n");
   await must(["git", "add", ".gitattributes"], dir);
-  const first = await snapshot(dir, "1.0.0");
+  const first = await snapshot(dir, "1.0.0", id);
   await must(["git", "tag", "1.0.0"], dir);
-  const second = await snapshot(dir, "1.0.1");
+  const second = await snapshot(dir, "1.0.1", id);
   // An annotated tag, as some mirrors carry: `^{commit}` must peel it.
   await must(["git", "tag", "-a", "-m", "snapshot 1.0.1", "1.0.1"], dir);
-  const head = await snapshot(dir, "draft");
+  const head = await snapshot(dir, "draft", id);
   return { dir, commits: { "1.0.0": first, "1.0.1": second, head } };
 }
 
