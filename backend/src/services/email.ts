@@ -566,7 +566,10 @@ export async function sendEmail(
   isDev?: boolean,
   deliveryEnv?: EmailDeliveryEnv,
   timeoutMs?: number,
+  headers?: Record<string, string>,
 ): Promise<void> {
+  // Validated first, before the fence or any provider: a rejected header is a caller bug.
+  const extraHeaders = validateMailHeaders(headers);
   if (!isEmailDeliveryAllowed(to, deliveryEnv)) {
     console.warn(
       `[email] suppressed send to ${redactRecipient(to)} (subject: "${subject}"): ENVIRONMENT=${deliveryEnv?.ENVIRONMENT ?? "unset"} is not production and the recipient is not on DEV_EMAIL_ALLOWLIST`,
@@ -588,6 +591,7 @@ export async function sendEmail(
         fromEmail,
         replyTo,
         timeoutMs,
+        extraHeaders,
       );
       return;
     } catch (error) {
@@ -609,6 +613,7 @@ export async function sendEmail(
           fromEmail,
           replyTo,
           timeoutMs,
+          extraHeaders,
         );
       } catch (resendError) {
         console.error(
@@ -627,7 +632,40 @@ export async function sendEmail(
     fromEmail,
     replyTo,
     timeoutMs,
+    extraHeaders,
   );
+}
+
+/** The only extra headers a caller may set: the threading trio. Names compare case-insensitively. */
+export const ALLOWED_MAIL_HEADERS: readonly string[] = ["Message-ID", "In-Reply-To", "References"];
+
+/** The most characters one header value may carry (RFC 5322 line limit, less the name). */
+const MAIL_HEADER_VALUE_MAX = 998;
+
+/**
+ * Check the extra headers of a send against {@link ALLOWED_MAIL_HEADERS} and return them under
+ * their canonical names, or undefined when none. A name outside the list, a value with a control
+ * character (CR or LF would inject a header) or an over-long value throws a plain Error before any
+ * provider is called.
+ */
+export function validateMailHeaders(
+  headers: Record<string, string> | undefined,
+): Record<string, string> | undefined {
+  if (!headers) return undefined;
+  const out: Record<string, string> = {};
+  for (const [name, value] of Object.entries(headers)) {
+    const canonical = ALLOWED_MAIL_HEADERS.find((h) => h.toLowerCase() === name.toLowerCase());
+    if (!canonical) throw new Error(`mail header "${name.slice(0, 40)}" is not allowed`);
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: rejecting control characters is the point
+    if (typeof value !== "string" || /[\u0000-\u001f\u007f]/.test(value)) {
+      throw new Error(`mail header ${canonical} has a control character in its value`);
+    }
+    if (value.length === 0 || value.length > MAIL_HEADER_VALUE_MAX) {
+      throw new Error(`mail header ${canonical} must be 1 to ${MAIL_HEADER_VALUE_MAX} characters`);
+    }
+    out[canonical] = value;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 async function sendViaResend(
@@ -638,6 +676,7 @@ async function sendViaResend(
   fromEmail: string,
   replyTo?: string,
   timeoutMs?: number,
+  headers?: Record<string, string>,
 ): Promise<void> {
   const body: Record<string, unknown> = {
     from: fromEmail,
@@ -646,6 +685,7 @@ async function sendViaResend(
     html,
   };
   if (replyTo) body.reply_to = replyTo;
+  if (headers) body.headers = headers;
   const response = await fetch(RESEND_API_URL, {
     method: "POST",
     headers: {
@@ -674,6 +714,7 @@ async function sendViaCloudflare(
   fromEmail: string,
   replyTo?: string,
   timeoutMs?: number,
+  headers?: Record<string, string>,
 ): Promise<void> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -686,6 +727,7 @@ async function sendViaCloudflare(
       // spam filters that prefer one.
       text: htmlToText(html),
       ...(replyTo ? { replyTo: parseMailbox(replyTo) } : {}),
+      ...(headers ? { headers } : {}),
     });
     if (!timeoutMs) {
       await sent;
