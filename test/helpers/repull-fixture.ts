@@ -810,12 +810,10 @@ async function build(
       2,
     )}\n`,
     [PATHS.changes]: `${TAG_A} 2026-01-01\n  - Initial snapshot.\n${TAG_B} 2026-06-01\n  - Added sub-03.\n`,
-    ...(opts.generatedParticipants
-      ? {}
-      : {
-          [PATHS.participants]: "participant_id\tage\nsub-01\t30\nsub-02\t31\nsub-03\t32\n",
-        }),
   };
+  if (!opts.generatedParticipants) {
+    changes[PATHS.participants] = "participant_id\tage\nsub-01\t30\nsub-02\t31\nsub-03\t32\n";
+  }
   if (opts.deadKeys) changes[PATHS.copiedSet] = files[PATHS.set] as Uint8Array;
   if (opts.subtypes) {
     changes[PATHS.bothAdded] = `{\n  "TaskName": "rest",\n  "SamplingFrequency": 128\n}\n`;
