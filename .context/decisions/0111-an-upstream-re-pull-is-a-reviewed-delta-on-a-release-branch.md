@@ -315,6 +315,8 @@ Whether an `xx` fixture maps through `import_jobs.source_id` is a Phase 4 and 5 
 
 ## Amendment 2026-10-23 (#1911): Phase 5 builds the plan, and its readings are settled
 
+Extended 2026-10-24, after the Phase 3 and Phase 4a amendments below: the section on `to_tag` (OpenNeuro's latest snapshot, and an order the tags cannot prove is unverified) and the reuse of Phase 3's tag shape and Phase 4a's `isSourceTag` were settled that day.
+
 Epic #1046, Phase 5.
 `nemar admin repull plan <id>` is built: a read-only plan, written to a file under its digest, that Phase 6's `nemar admin repull execute` will take.
 Execution is not built.
@@ -374,6 +376,7 @@ Decision 10 says `to_tag` is a tag, never a branch head, and the Phase 4a amendm
 So `plan` takes its default `to_tag` from OpenNeuro's own `latestSnapshot.tag`, the query decision 10's import pins its tag with (`fetchOpenNeuroLatestTag`), and never from the highest number among the mirror's tags.
 The tag must have an OpenNeuro tag's shape (`isOpenNeuroTag`), be one the version rows can record (`isSourceTag`, `to-tag-unrecordable` otherwise, because a re-pull to it could never be proved), and be on the GitHub mirror (`mirror-lag` otherwise); equal to `from_tag` is `nothing-to-pull`, and with no answer from OpenNeuro and no `--to-tag` nothing is planned (`latest-unknown`).
 A `--to-tag` that OpenNeuro does not name as its latest, or any `--to-tag` while OpenNeuro does not answer, is planned with the check `unchecked` (`order-unverified`), because the planner cannot prove from the tags that it is newer than `from_tag`; such a plan is never executable.
+OpenNeuro's latest that is not numerically after `from_tag` is `order-unverified` too, never refused and never `ok`: it can be real creation order (`00006` before `1.0.0`) or a step backwards (a withdrawn snapshot, or a mirror recorded ahead of upstream's latest), and the tags cannot tell which.
 The query is a GraphQL POST that only asks, and it runs outside the HTTP guard for that reason.
 
 ### Which `ds` a mirror names (closes the Phase 2 amendment's open item)
