@@ -91,3 +91,53 @@ describe("prepareImport refuses a tag the mirror lacks, before it creates anythi
     ).toBe(true);
   }, 120_000);
 });
+
+describe("the CLI's --tag reaches prepare", () => {
+  test("`admin import-openneuro --phase prepare --tag` refuses a tag the mirror lacks", async () => {
+    // The real entry point with an isolated config holding a key it never gets to use: the refusal
+    // comes before the first API call. The configured API is a closed local port, so the start-up
+    // notice fetch fails at once instead of reaching a real backend.
+    const configDir = join(scratch.root, "cli-config");
+    await Bun.write(
+      join(configDir, "config.json"),
+      JSON.stringify({
+        activeAccount: "tagpin",
+        accounts: { tagpin: { apiKey: "unused-key", apiUrl: "http://127.0.0.1:1" } },
+      }),
+    );
+    const child = Bun.spawn(
+      [
+        "bun",
+        join(import.meta.dir, "..", "src", "index.ts"),
+        "admin",
+        "import-openneuro",
+        DATASET,
+        "--phase",
+        "prepare",
+        "--tag",
+        "0.0.0-nemar-absent",
+        "--dir",
+        join(scratch.root, "cli-prepare"),
+      ],
+      {
+        env: {
+          PATH: process.env.PATH ?? "",
+          HOME: configDir,
+          NEMAR_CONFIG_DIR: configDir,
+          NEMAR_NO_UPDATE_CHECK: "1",
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+    const [out, err] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ]);
+    expect(await child.exited).toBe(1);
+    const failures = (out + err).split("\n").filter((l) => l.includes("✖"));
+    expect(failures.at(-1)).toContain(
+      `[openneuro-mirror-lag] ${DATASET}: upstream tag 0.0.0-nemar-absent`,
+    );
+  }, 120_000);
+});

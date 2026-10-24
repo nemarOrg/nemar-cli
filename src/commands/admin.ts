@@ -50,6 +50,7 @@ import {
   neurobagelVerificationState,
 } from "../../shared/contract/neurobagel-admin.js";
 import { weeklyAttention } from "../../shared/contract/weekly-attention.js";
+import { isOpenNeuroTag } from "../../shared/openneuro-tag.js";
 import {
   checkedAfterDatasetId,
   checkedDatasetId,
@@ -4035,6 +4036,38 @@ export function chunkDatasetIds(
 }
 
 /**
+ * The `--field` arguments of one `gh workflow run onboard-openneuro.yml`. `openneuro_tag` only when
+ * a tag is given: a workflow older than the tag pin has no such input and GitHub answers 422 for an
+ * unknown one, so a dispatch without `--tag` keeps its old shape. Exported for the test.
+ */
+export function openNeuroDispatchFields(chunk: string[], tag?: string): string[] {
+  return [
+    "--field",
+    `openneuro_ids=${chunk.join(",")}`,
+    ...(tag !== undefined ? ["--field", `openneuro_tag=${tag}`] : []),
+  ];
+}
+
+/**
+ * Why `--tag` cannot be used with these arguments, or null when it can. A tag names one dataset's
+ * snapshot, so it cannot apply to a batch, and only prepare clones: copy and finalize read what
+ * prepare staged. Exported for the test.
+ */
+export function importTagOptionError(
+  tag: string | undefined,
+  ids: string[],
+  phase: string | undefined,
+): string | null {
+  if (tag === undefined) return null;
+  if (!isOpenNeuroTag(tag)) {
+    return `Invalid --tag "${tag}". Expected an OpenNeuro snapshot tag such as 1.0.1.`;
+  }
+  if (ids.length !== 1) return "--tag applies to a single dataset ID";
+  if (phase !== undefined && phase !== "prepare") return "--tag is only valid with --phase prepare";
+  return null;
+}
+
+/**
  * Dispatch the onboard-openneuro.yml workflow (nemarDatasets/.github) for a
  * batch of OpenNeuro `ds######` ids -- the prepare/copy/finalize matrix
  * hardened in epic #967 Phases 1-3. Shared by `import-openneuro`'s default
@@ -4049,6 +4082,7 @@ export function chunkDatasetIds(
  */
 async function dispatchOpenNeuroImportWorkflow(
   dsIds: string[],
+  tag?: string,
 ): Promise<{ ok: true } | { ok: false; error: string }> {
   const { runCommand } = await import("../lib/git-annex/run-command.js");
   const chunks = chunkDatasetIds(dsIds);
@@ -4068,8 +4102,7 @@ async function dispatchOpenNeuroImportWorkflow(
       "onboard-openneuro.yml",
       "--repo",
       "nemarDatasets/.github",
-      "--field",
-      `openneuro_ids=${chunk.join(",")}`,
+      ...openNeuroDispatchFields(chunk, tag),
     ]);
     if (result.exitCode !== 0) {
       return {
@@ -4282,6 +4315,10 @@ adminCommand
     "--screen-wait-minutes <n>",
     "How long finalize waits for the identifier screen's verdict before leaving the publication for an admin (default: what the finalize job's 90-minute timeout leaves, at most 45; ADR 0089).",
   )
+  .option(
+    "--tag <tag>",
+    "Import this upstream snapshot tag (e.g. 1.0.1) instead of OpenNeuro's latest. One dataset only; with --phase, prepare only. Without it, prepare asks OpenNeuro for the latest tag; it never imports the mirror's default HEAD (ADR 0111). A tag not yet on the GitHub mirror is refused as a mirror lag.",
+  )
   .action(
     async (
       openneuroIds: string,
@@ -4294,6 +4331,7 @@ adminCommand
         shard?: string;
         normalizeMaxGb?: string;
         screenWaitMinutes?: string;
+        tag?: string;
       },
     ) => {
       if (!requireAuth()) return;
@@ -4302,6 +4340,12 @@ adminCommand
         .split(",")
         .map((id) => id.trim())
         .filter(Boolean);
+
+      const tagError = importTagOptionError(options.tag, ids, options.phase);
+      if (tagError !== null) {
+        console.error(chalk.red(tagError));
+        process.exit(1);
+      }
 
       // Validate all IDs
       for (const id of ids) {
@@ -4379,6 +4423,7 @@ adminCommand
           persistStaging: true,
           normalizeMaxBytes,
           screenWaitMs,
+          tag: options.tag,
         };
         try {
           if (options.phase === "prepare") {
@@ -4410,6 +4455,7 @@ adminCommand
             trustUpstream: options.trustUpstream,
             normalizeMaxBytes,
             screenWaitMs,
+            tag: options.tag,
           });
         } catch (error) {
           const msg = error instanceof Error ? error.message : String(error);
@@ -4421,9 +4467,13 @@ adminCommand
 
       // Default: dispatch GitHub Actions workflow on nemarDatasets/.github
       const idsStr = ids.join(",");
-      console.log(chalk.cyan(`\nDispatching OpenNeuro import workflow for: ${idsStr}\n`));
+      console.log(
+        chalk.cyan(
+          `\nDispatching OpenNeuro import workflow for: ${idsStr}${options.tag !== undefined ? ` at upstream tag ${options.tag}` : ""}\n`,
+        ),
+      );
 
-      const dispatch = await dispatchOpenNeuroImportWorkflow(ids);
+      const dispatch = await dispatchOpenNeuroImportWorkflow(ids, options.tag);
       if (!dispatch.ok) {
         console.error(chalk.red(`Failed to dispatch workflow: ${dispatch.error}`));
         console.error(
