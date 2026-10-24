@@ -11,11 +11,15 @@
  * nothing, so the sender gets a bounce.
  */
 
-import { redactRecipient } from "./email";
+import { clampUtf8Bytes } from "../lib/utf8";
+import { redactAddressIn, redactRecipient } from "./email";
+import { ingestInboundMessage } from "./tickets";
 
 /** What the handler needs of the Worker's env; structural, like EmailDeliveryEnv. */
 export interface InboundMailEnv {
   MAIL_INBOUND?: R2Bucket;
+  /** When bound, a stored message is also turned into a ticket (phase 3). */
+  DB?: D1Database;
 }
 
 /** The SMTP reason a sender sees when this Worker holds no inbound bucket. */
@@ -32,16 +36,6 @@ const METADATA_VALUE_MAX_BYTES = 400;
 export function inboundRawKey(receivedAt: Date, id: string = crypto.randomUUID()): string {
   const iso = receivedAt.toISOString();
   return `inbound/raw/${iso.slice(0, 4)}/${iso.slice(5, 7)}/${iso.slice(8, 10)}/${id}.eml`;
-}
-
-/** `value` cut to at most `maxBytes` UTF-8 bytes, never inside a multibyte character. */
-export function clampUtf8Bytes(value: string, maxBytes: number): string {
-  const bytes = new TextEncoder().encode(value);
-  if (bytes.byteLength <= maxBytes) return value;
-  let end = maxBytes;
-  // A continuation byte (10xxxxxx) means the cut landed inside a character: back up to its start.
-  while (end > 0 && (bytes[end] & 0xc0) === 0x80) end--;
-  return new TextDecoder().decode(bytes.subarray(0, end));
 }
 
 const clamp = (value: string): string => clampUtf8Bytes(value, METADATA_VALUE_MAX_BYTES);
@@ -93,4 +87,26 @@ export async function handleInboundEmail(
   console.log(
     `[inbound-mail] stored ${key} (${raw.byteLength} bytes) from ${redactRecipient(message.from)} to ${redactRecipient(message.to)}`,
   );
+
+  // Everything below is a working copy of the stored message. The raw object is the record, so a
+  // failure here is logged and swallowed: the message is not lost and `reprocessRawKey` rebuilds
+  // the ticket. Throwing would only make Email Routing redeliver a message that is already kept.
+  if (!env.DB) return;
+  try {
+    const result = await ingestInboundMessage(env.DB, {
+      rawKey: key,
+      raw,
+      envelopeFrom: message.from,
+      envelopeTo: message.to,
+      receivedAt,
+    });
+    console.log(
+      `[inbound-mail] ${key} ${result.outcome} ticket ${result.ticketId} (${result.status})`,
+    );
+  } catch (error) {
+    const text = error instanceof Error ? error.message : String(error);
+    console.error(
+      `[inbound-mail] ticketing failed for ${key}, raw message kept: ${redactAddressIn(redactAddressIn(text, message.from), message.to)}`,
+    );
+  }
 }
