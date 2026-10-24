@@ -410,7 +410,10 @@ export async function runWeeklyImportSummary(
  * (they are the expected backlog until the scheduled re-pull exists, and an alarm that never
  * clears gets muted: ADR 0053). Not seeing is: a mirror OpenNeuro could not be asked about
  * (`unchecked`), a problem OpenNeuro reported, a pass that did not reach every mirror, and a pass
- * that threw each push one `errors` entry, which the headline counts.
+ * that threw each push an `errors` entry, which the headline counts. The first two are an
+ * if/else-if: a pass with unchecked mirrors adds ONE entry for them (naming the first problem),
+ * and the "problems reported" entry is added only when nothing is unchecked.
+ * A truncated pass adds its own entry as well.
  *
  * A thrown error leaves `upstream` null (unknown, not zero) and every other section intact. There
  * is no dependency seam: the real pass runs in every weekly test, against stand-ins.

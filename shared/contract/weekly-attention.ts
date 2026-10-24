@@ -79,7 +79,7 @@ export interface WeeklyAttentionFacts {
    * permanent alarm gets muted: ADR 0053); only not seeing is. A mirror that could not be
    * compared, or a pass that stopped early, reaches the headline through `errors`.
    */
-  upstream?: { counts: unknown; truncated: boolean } | null;
+  upstream?: { counts: unknown } | null;
   errors: { stage: string; error: string }[];
 }
 

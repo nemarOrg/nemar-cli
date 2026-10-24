@@ -414,8 +414,15 @@ function upstreamSection(u: UpstreamFleetSummary | null): string[] {
       "The upstream freshness pass did not run or failed, so none of its numbers are available. This is **unknown**, not zero.",
     ];
   }
+  // Compared with upstream: a verdict from OpenNeuro's snapshot list. An anomaly counts unless it
+  // is a source id mismatch, which is settled from NEMAR's own row before OpenNeuro is asked.
+  const compared =
+    u.counts.states.current +
+    u.counts.stale +
+    u.counts.states.anomaly -
+    u.counts.anomalies.source_id_mismatch;
   return [
-    `Compared ${count(u.examined)} of ${count(u.population)} managed OpenNeuro mirrors (${count(u.withdrawn)} withdrawn and ${count(u.excluded_unmanaged)} other rows not compared).${u.truncated ? " **The pass did not reach every mirror.**" : ""}`,
+    `Examined ${count(u.examined)} of ${count(u.population)} managed OpenNeuro mirrors (${count(u.withdrawn)} withdrawn and ${count(u.excluded_unmanaged)} other rows left out); ${count(compared)} of them were compared with upstream.${u.truncated ? " **The pass did not reach every mirror.**" : ""}`,
     "",
     "| state | mirrors |",
     "|---|---|",
@@ -423,7 +430,9 @@ function upstreamSection(u: UpstreamFleetSummary | null): string[] {
     "",
     `Stale in total: ${count(u.counts.stale)}. Tag unknown and probably stale by date: ${count(u.counts.probably_stale)} (display only, not counted as stale).`,
     "",
-    "A stale mirror is reported, not an alarm: the scheduled re-pull that acts on it is not built yet. A mirror with an unknown tag was not compared.",
+    "A stale mirror is reported, not an alarm: being behind upstream is an expected state, not a fault. A mirror with an unknown tag, one never examined, one with no version yet and one whose import is running were not compared.",
+    "",
+    'How the three "Behind upstream" rows divide depends on the 25 GitHub checks one weekly pass makes; it is not a fleet-wide proportion.',
     "",
     "Names and reasons: `nemar admin upstream-status`.",
   ];

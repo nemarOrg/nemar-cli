@@ -634,7 +634,9 @@ describe("the upstream freshness section", () => {
     expect(r.facts?.upstream?.counts.states.unchecked).toBe(0);
     expect(r.facts?.errors?.filter((e) => e.stage === "upstream")).toEqual([]);
     expect(r.renderedBody).toContain("| Tag unknown (not compared) | 1 |");
-    expect(r.renderedBody).toContain("A mirror with an unknown tag was not compared.");
+    expect(r.renderedBody).toContain(
+      "A mirror with an unknown tag, one never examined, one with no version yet and one whose import is running were not compared.",
+    );
   });
 
   test("a batch failure with only unknown-tag mirrors is listed even though nothing is unchecked", async () => {

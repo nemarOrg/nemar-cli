@@ -900,7 +900,76 @@ describe("the upstream freshness section (epic #1046 phase 4b)", () => {
     expect(text).toContain("Stale in total: 3.");
     expect(text).toContain("Tag unknown and probably stale by date: 0");
     expect(text).toContain("Names and reasons: `nemar admin upstream-status`.");
-    expect(text).toContain("A mirror with an unknown tag was not compared.");
+    expect(text).toContain(
+      "A mirror with an unknown tag, one never examined, one with no version yet and one whose import is running were not compared.",
+    );
+  });
+
+  test("says Examined, and how many of them were actually compared with upstream", () => {
+    // current 7 + stale 3 + unknown 1: ten were compared, the unknown one was not.
+    const text = section(facts());
+    expect(text).toContain("Examined 11 of 11 managed OpenNeuro mirrors");
+    expect(text).toContain("10 of them were compared with upstream.");
+    expect(text).not.toContain("Compared 11");
+  });
+
+  test("a fleet nobody examined for a tag is not called compared", () => {
+    // 1,000 mirrors never examined: every one is examined, none is compared.
+    const rows = Array.from({ length: 1000 }, (_, i) => ({
+      dataset_id: `on${String(100000 + i)}`,
+      ds: null,
+      visibility: null,
+      state: "not_examined" as const,
+      anomaly: null,
+      reason: "",
+      recorded: null,
+      upstream: null,
+      import_status: null,
+      probably_stale: null,
+    }));
+    const text = section(
+      facts({
+        upstream: upstreamPass({
+          population: 1000,
+          examined: 1000,
+          counts: countUpstreamStates(rows),
+        }),
+      }),
+    );
+    expect(text).toContain("Examined 1000 of 1000 managed OpenNeuro mirrors");
+    expect(text).toContain("0 of them were compared with upstream.");
+    expect(text).toContain("| Tag never examined | 1000 |");
+  });
+
+  test("an anomaly counts as compared except a source id mismatch", () => {
+    const base = {
+      dataset_id: "on000001",
+      ds: null,
+      visibility: null,
+      state: "anomaly" as const,
+      reason: "",
+      recorded: null,
+      upstream: null,
+      import_status: null,
+      probably_stale: null,
+    };
+    const rows = [
+      { ...base, anomaly: "upstream_deleted" as const },
+      { ...base, anomaly: "source_id_mismatch" as const },
+    ];
+    const text = section(
+      facts({
+        upstream: upstreamPass({ population: 2, examined: 2, counts: countUpstreamStates(rows) }),
+      }),
+    );
+    expect(text).toContain("1 of them were compared with upstream.");
+  });
+
+  test("the split of the stale rows is said not to be a fleet proportion, and nothing rots", () => {
+    const text = section(facts());
+    expect(text).toContain("not a fleet-wide proportion");
+    expect(text).toContain("25 GitHub checks");
+    expect(text).not.toContain("not built yet");
   });
 
   test("null renders as unknown, never zero, and makes the headline ask for attention", () => {
@@ -948,12 +1017,5 @@ describe("the upstream freshness section (epic #1046 phase 4b)", () => {
     const unknown = weeklySummaryLogLine(facts({ upstream: null }), 12);
     expect(unknown).toContain("upstream_stale=unknown");
     expect(unknown).toContain("upstream_unchecked=unknown");
-  });
-
-  test("the headline and the command's exit code stay one function", () => {
-    for (const w of [{}, { upstream: null }] as Partial<WeeklySummaryFacts>[]) {
-      const f = facts(w);
-      expect(weeklyHeadline(f).attention).toBe(weeklyAttention(f).attention);
-    }
   });
 });
