@@ -412,6 +412,40 @@ export async function catBatch(
   }
 }
 
+/**
+ * {@link readObjects} through a {@link GitRunner}: one `git cat-file --batch`, its answer held
+ * whole and sliced by the byte counts its headers give. Small objects only (location logs).
+ */
+async function readObjectsVia(
+  run: GitRunner,
+  repo: string,
+  specs: string[],
+): Promise<(Buffer | null)[]> {
+  if (specs.length === 0) return [];
+  const r = await run(repo, ["cat-file", "--batch"], `${specs.join("\n")}\n`);
+  if (r.exitCode !== 0) throw new GitScrubError("git-command-failed", "git cat-file", r.stderr);
+  const out: (Buffer | null)[] = [];
+  let cursor = 0;
+  for (const _spec of specs) {
+    const newline = r.stdout.indexOf(0x0a, cursor);
+    if (newline < 0) throw new GitScrubError("git-command-failed", "git cat-file");
+    const tokens = r.stdout.subarray(cursor, newline).toString("utf8").split(" ");
+    const last = tokens[tokens.length - 1];
+    if (last === "missing" || last === "ambiguous") {
+      out.push(null);
+      cursor = newline + 1;
+      continue;
+    }
+    const size = Number(tokens[2]);
+    if (!Number.isFinite(size) || size < 0)
+      throw new GitScrubError("git-command-failed", "git cat-file");
+    const start = newline + 1;
+    out.push(Buffer.from(r.stdout.subarray(start, start + size)));
+    cursor = start + size + 1;
+  }
+  return out;
+}
+
 /** The whole content of each spec, or null for a missing one. Small objects only. */
 async function readObjects(repo: string, specs: string[]): Promise<(Buffer | null)[]> {
   const parts: Buffer[][] = specs.map(() => []);
@@ -1632,7 +1666,7 @@ export function presentIn(log: string): Set<string> {
  * mapping one to one; any other key is its own name. The hash directory is still computed from
  * the key itself ({@link hashDirLower}).
  */
-function annexKeyFile(key: string): string {
+export function annexKeyFile(key: string): string {
   if (!/[&%:/]/.test(key)) return key;
   const escapes: Record<string, string> = { "&": "&a", "%": "&s", ":": "&c", "/": "%" };
   return key.replace(/[&%:/]/g, (c) => escapes[c] as string);
@@ -1641,17 +1675,28 @@ function annexKeyFile(key: string): string {
 /** How many paths one `ls-tree` names: far under any argv limit, few processes for a large dataset. */
 const LS_TREE_BATCH = 500;
 
+/**
+ * How {@link readLocationLogsAt} runs git: `git -C repo args`, binary-safe, never throwing on a
+ * non-zero exit. {@link gitRaw} by default; the re-pull planner passes its read-only guard.
+ */
+export type GitRunner = (
+  repo: string,
+  args: string[],
+  stdin?: string | Uint8Array,
+) => Promise<GitResult>;
+
 /** Each `<mode> <type> <oid>\t<path>` entry of an `ls-tree -z` listing, by path. */
 async function treeEntries(
   repo: string,
   commit: string,
   paths: string[],
+  run: GitRunner = gitRaw,
 ): Promise<Map<string, { type: string; oid: string }>> {
   const out = new Map<string, { type: string; oid: string }>();
   for (let i = 0; i < paths.length; i += LS_TREE_BATCH) {
     // ls-tree matches its paths literally (it turns wildcards off), and a log path starts with
     // its hash directory, never `:`, so no pathspec magic applies to a key's file name.
-    const r = await gitRaw(repo, [
+    const r = await run(repo, [
       "ls-tree",
       "-z",
       "--full-tree",
@@ -1689,12 +1734,13 @@ async function treeEntries(
  *   a log path that is not a file: `refused: annex-log-unreadable` (`git cat-file`).
  *
  * Exported for the upstream re-pull's planner (ADR 0111), which reads dead marks and `nemar-s3`
- * presence from a bare clone.
+ * presence from a bare clone and passes `run`, its read-only guard, so these reads go through it.
  */
 export async function readLocationLogsAt(
   repo: string,
   ref: string,
   keys: string[],
+  run: GitRunner = gitRaw,
 ): Promise<string[]> {
   if (!/^[^\s:^~?*[\\-][^\s:^~?*[\\]*$/.test(ref)) {
     throw new ContractError("annex ref is not a ref name");
@@ -1702,23 +1748,24 @@ export async function readLocationLogsAt(
   if (!keys.every((k) => k.length > 0 && !/[\r\n]/.test(k))) {
     throw new ContractError("location log read holds a bad key");
   }
-  const resolved = await gitRaw(repo, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]);
+  const resolved = await run(repo, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]);
   const commit = resolved.stdout.toString("utf8").trim();
   if (resolved.exitCode !== 0 || !/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(commit)) {
     throw new GitScrubError("refused: annex-ref-missing", "git rev-parse", resolved.stderr);
   }
-  if ((await treeEntries(repo, commit, ["uuid.log"])).get("uuid.log")?.type !== "blob") {
+  if ((await treeEntries(repo, commit, ["uuid.log"], run)).get("uuid.log")?.type !== "blob") {
     throw new GitScrubError("refused: annex-ref-not-git-annex", "git ls-tree");
   }
   if (keys.length === 0) return [];
   const paths = keys.map((k) => `${hashDirLower(k)}${annexKeyFile(k)}.log`);
   const unique = [...new Set(paths)];
-  const entries = await treeEntries(repo, commit, unique);
+  const entries = await treeEntries(repo, commit, unique, run);
   const named = unique.filter((p) => entries.has(p));
   if (named.some((p) => entries.get(p)?.type !== "blob")) {
     throw new GitScrubError("refused: annex-log-unreadable", "git cat-file");
   }
-  const contents = await readObjects(
+  const contents = await readObjectsVia(
+    run,
     repo,
     named.map((p) => entries.get(p)?.oid as string),
   );

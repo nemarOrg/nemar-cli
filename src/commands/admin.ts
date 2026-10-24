@@ -242,6 +242,7 @@ import {
 } from "../lib/withdrawn-datasets.js";
 import { prReviewsCommand } from "./admin-pr-reviews.js";
 import { publishCommand } from "./admin-publish.js";
+import { repullCommand } from "./admin-repull.js";
 import { upstreamStatusCommand } from "./admin-upstream-status.js";
 
 /**
@@ -10359,3 +10360,4 @@ neurobagelCommand
 
 adminCommand.addCommand(neurobagelCommand);
 adminCommand.addCommand(prReviewsCommand);
+adminCommand.addCommand(repullCommand);

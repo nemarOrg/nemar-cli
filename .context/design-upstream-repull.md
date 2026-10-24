@@ -96,6 +96,7 @@ New behavior to build (no callback does this today): one ADR 0023 reconcile (`--
 - Manual path: the administrator's machine pushes the branch and opens the PR under their own login (ADR 0107 review `skipped`); the Worker never merges a PR an administrator opened.
 - `xx` re-pulls take the manual path only: ADR 0086 exempts `xx` from the screen, so they are never machine clean.
 - Gates before merge: BIDS validation and `version-check` (required), and the identifier screen dispatched with `ref=<head sha>` and a callback bound to the re-pull row; it must be clear or carry a recorded administrator acknowledgment (ADR 0086).
+- Command shape: ADR 0111's Phase 5 amendment builds `nemar admin repull plan <id>`, and execution is `nemar admin repull execute`; the `nemar admin repull <id>` spellings in this record predate it.
 - Merge (squash, as ADR 0093's `y`): manual through `nemar admin repull <id> --merge` (claims the daily DOI budget, requires `clean`) or `nemar admin pr-reviews` (which must then require the screen and claim the cap); automatic merge by the Worker only of a PR the automatic path opened, under the machine definition below.
 - After merge the existing release path runs: run-pr-merge tags, the tag webhook, run-version-doi, EZID; the DOI carries IsDerivedFrom `openneuro.<ds>.v<tag>` because the mint reads `SourceDatasets` at the tag.
 
@@ -142,7 +143,7 @@ Open check before building the merge call: whether the rulesets let the GitHub A
 
 - `AUTO_REPULL_ENABLED` (opens PRs; off when absent; production-only through the scheduled allowlist) and `AUTO_REPULL_MERGE_ENABLED` (Worker merge), both default off.
 - `REPULL_DAILY_OPEN_CAP` default 2; `REPULL_DAILY_MERGE_CAP` default 5, claimed by the backend before any merge, manual ones included, because every merge mints an irreversible DOI.
-- `nemar admin repull <id>` is a dry run by default; `--execute` requires `--plan <file>`.
+- `nemar admin repull <id>` is a dry run by default; `--execute` requires `--plan <file>`. Built as `nemar admin repull plan <id>`, then `nemar admin repull execute`, per ADR 0111's Phase 5 amendment.
 - Outside production the routes refuse any dataset that is not `xx` (the GitHub org is shared); mail goes through the admin-only fence.
 - `diffNewDatasets` stays id-only so the live auto-import never sees stale mirrors.
 
