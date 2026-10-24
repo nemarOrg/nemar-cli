@@ -101,7 +101,16 @@ export async function fetchOpenNeuroLatestTag(
 /** Two snapshots' file listings, or why they could not be read. */
 export type SnapshotFilePairLookup =
   | { ok: true; from: SnapshotFile[]; to: SnapshotFile[] }
-  | { ok: false; error: string };
+  | {
+      ok: false;
+      error: string;
+      /**
+       * True when OpenNeuro was not reached or did not answer (network error, timeout, HTTP error,
+       * a body that is not JSON): the only failures that suggest an outage. False when it
+       * answered and the answer is unusable for this dataset.
+       */
+      transport: boolean;
+    };
 
 const SNAPSHOT_FILE_PAIR_QUERY = `query SnapshotFilePair($ds: ID!, $from: String!, $to: String!) {
   a: snapshot(datasetId: $ds, tag: $from) { files(recursive: true) { id filename size annexed directory } }
@@ -178,11 +187,13 @@ export async function fetchSnapshotFilePair(
       }),
       signal: AbortSignal.timeout(options.timeoutMs ?? 120_000),
     });
-    if (!res.ok) return { ok: false, error: `OpenNeuro GraphQL answered HTTP ${res.status}` };
+    if (!res.ok) {
+      return { ok: false, error: `OpenNeuro GraphQL answered HTTP ${res.status}`, transport: true };
+    }
     json = await res.json();
   } catch (err) {
     const why = err instanceof Error ? err.message : String(err);
-    return { ok: false, error: `OpenNeuro GraphQL unreadable (${why})` };
+    return { ok: false, error: `OpenNeuro GraphQL unreadable (${why})`, transport: true };
   }
   const root = isRecord(json) ? json : {};
   const data = isRecord(root.data) ? root.data : {};
@@ -194,13 +205,17 @@ export async function fetchSnapshotFilePair(
     .slice(0, 200);
   // Data beside errors is a partial answer: nothing in it can be trusted as the whole listing.
   if (errors.length > 0) {
-    return { ok: false, error: `OpenNeuro reported an error${message ? `: ${message}` : ""}` };
+    return {
+      ok: false,
+      error: `OpenNeuro reported an error${message ? `: ${message}` : ""}`,
+      transport: false,
+    };
   }
   const from = readFileList(data.a, fromTag);
   const to = readFileList(data.b, toTag);
   if (typeof from !== "string" && typeof to !== "string") return { ok: true, from, to };
   const why = typeof from === "string" ? from : (to as string);
-  return { ok: false, error: why };
+  return { ok: false, error: why, transport: false };
 }
 
 function delay(ms: number): Promise<void> {

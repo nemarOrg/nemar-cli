@@ -69,6 +69,12 @@ export interface NotComparable {
   not_examined: number;
   unchecked: number;
   anomaly: number;
+  /** An import or a re-pull is running: not compared with upstream, and can be stale. */
+  in_progress: number;
+  /** Parked (blocklisted, quarantined, rolled back): not compared, and can be stale. */
+  parked: number;
+  /** No NEMAR version yet: nothing to compare. */
+  unpublished: number;
 }
 
 export interface MeasurementTotals {
@@ -101,7 +107,10 @@ export interface Measurement {
   endpoint: string;
   /** Which part of the fleet the pass covered. */
   scope: PassScope;
-  /** False while any delta is unknown or not measured: the totals are then "at least". */
+  /**
+   * False while any delta is unknown or not measured, or a new key's size is unknown: the totals
+   * are then "at least". True implies `totals.bytes_to_copy` is not null.
+   */
   complete: boolean;
   deltas: DeltaMeasurement[];
   totals: MeasurementTotals;
@@ -141,6 +150,9 @@ export function totalsOf(
     not_examined: 0,
     unchecked: 0,
     anomaly: 0,
+    in_progress: 0,
+    parked: 0,
+    unpublished: 0,
   },
 ): MeasurementTotals {
   let metadataOnly = 0;
@@ -200,7 +212,8 @@ export async function measureStaleMirrors(
   let consecutiveFailures = 0;
   let gaveUp: string | null = null;
   for (const [i, row] of chosen.entries()) {
-    if (i > 0 && i % MEASURE_PROGRESS_EVERY === 0) {
+    // No progress line once reading has stopped: nothing is being measured then.
+    if (gaveUp === null && i > 0 && i % MEASURE_PROGRESS_EVERY === 0) {
       options.onProgress?.(`measured ${i} of ${chosen.length} stale mirror(s)`);
     }
     const from = row.recorded?.tag ?? null;
@@ -223,10 +236,13 @@ export async function measureStaleMirrors(
       consecutiveFailures = 0;
       deltas.push({ ...base, delta: summarizeSnapshotDelta(pair.from, pair.to), reason: null });
     } else {
-      consecutiveFailures++;
       deltas.push({ ...base, delta: null, reason: pair.error });
+      // Only a transport failure (network, timeout, HTTP error) suggests an outage. A listing
+      // OpenNeuro answered but that is unusable (a deleted snapshot, no root description,
+      // errors beside data) is about this mirror alone, and proves OpenNeuro is reachable.
+      consecutiveFailures = pair.transport ? consecutiveFailures + 1 : 0;
       if (consecutiveFailures >= maxFailures) {
-        gaveUp = `not read: ${maxFailures} reads in a row failed, so the rest were skipped (last: ${pair.error})`;
+        gaveUp = `not read: ${maxFailures} reads in a row failed to reach OpenNeuro, so the rest were skipped (last: ${pair.error})`;
       }
     }
   }
@@ -238,12 +254,16 @@ export async function measureStaleMirrors(
     not_examined: counts.states.not_examined,
     unchecked: counts.states.unchecked,
     anomaly: counts.states.anomaly,
+    in_progress: counts.states.in_progress,
+    parked: counts.states.parked,
+    unpublished: counts.states.unpublished,
   });
   return {
     measured_at: new Date(startedAt).toISOString(),
     endpoint: options.graphqlUrl ?? OPENNEURO_GRAPHQL_URL,
     scope: options.scope ?? "fleet",
-    complete: totals.delta_unknown === 0 && totals.not_measured === 0,
+    // Every delta read AND every new key sized: exactly when the byte total is known.
+    complete: totals.bytes_to_copy !== null,
     deltas,
     totals,
     doi_volume: doiVolume,
@@ -283,6 +303,9 @@ function coverageLines(m: Measurement): string[] {
     `${c.not_examined} never examined`,
     `${c.unchecked} unchecked`,
     `${c.anomaly} anomaly`,
+    `${c.in_progress} in progress`,
+    `${c.parked} parked`,
+    `${c.unpublished} unpublished`,
   ];
   return [
     `  Scope: ${SCOPE_LABEL[m.scope]}; only stale mirrors are measured.`,

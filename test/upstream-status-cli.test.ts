@@ -676,6 +676,9 @@ describe("nemar admin upstream-status --measure", () => {
           not_examined: 0,
           unchecked: 0,
           anomaly: 0,
+          in_progress: 0,
+          parked: 0,
+          unpublished: 0,
         },
         catch_up_days: 1,
       });
@@ -834,11 +837,19 @@ describe("nemar admin upstream-status --measure", () => {
         not_examined: 1,
         unchecked: 0,
         anomaly: 1,
+        in_progress: 1,
+        parked: 0,
+        unpublished: 0,
       });
-      expect(out.doi_volume.excluded).toMatchObject({ unknown: 2, not_examined: 1, anomaly: 1 });
+      expect(out.doi_volume.excluded).toMatchObject({
+        unknown: 2,
+        not_examined: 1,
+        anomaly: 1,
+        in_progress: 1,
+      });
       const human = await runCli(["admin", "upstream-status", "--measure"], server.url, env);
       expect(human.stdout).toContain(
-        "2 unknown tag (1 of them probably stale by date), 1 never examined, 0 unchecked, 1 anomaly",
+        "2 unknown tag (1 of them probably stale by date), 1 never examined, 0 unchecked, 1 anomaly, 1 in progress, 0 parked, 0 unpublished",
       );
       expect(human.stdout).toContain("DOI estimate left out:");
       expect(human.stdout).toContain("2 unknown");
@@ -1043,6 +1054,7 @@ describe("nemar admin upstream-status --measure", () => {
           { tag: "1.1.0", created: ago(100) },
           { tag: "1.2.0", created: ago(90) },
           { tag: "2.0.0", created: ago(5) },
+          { tag: "2.1.0", created: ago(-3) },
         ],
       },
     };
@@ -1059,7 +1071,7 @@ describe("nemar admin upstream-status --measure", () => {
       expect(v.per_snapshot).toBe(3);
       expect(v.at_most_every_30_days).toBe(2);
       expect(v.busiest_day).toBe(1);
-      expect(v.snapshots_dated_in_the_future).toBe(0);
+      expect(v.snapshots_dated_in_the_future).toBe(1);
     } finally {
       server.stop();
       files.stop();

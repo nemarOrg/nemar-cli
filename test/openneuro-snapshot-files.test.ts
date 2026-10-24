@@ -39,7 +39,11 @@ describe("fetchSnapshotFilePair", () => {
     const res = await fetchSnapshotFilePair("ds003082", "1.0.0", "1.0.1", {
       graphqlUrl: standin.url,
     });
-    expect(res).toEqual({ ok: false, error: "OpenNeuro GraphQL answered HTTP 503" });
+    expect(res).toEqual({
+      ok: false,
+      error: "OpenNeuro GraphQL answered HTTP 503",
+      transport: true,
+    });
   });
 
   test("a body that is not JSON is a failure", async () => {
@@ -48,6 +52,7 @@ describe("fetchSnapshotFilePair", () => {
       graphqlUrl: standin.url,
     });
     expect(res.ok).toBe(false);
+    expect(res).toMatchObject({ transport: true });
   });
 
   test("a hang past the timeout is a failure", async () => {
@@ -57,6 +62,7 @@ describe("fetchSnapshotFilePair", () => {
       timeoutMs: 200,
     });
     expect(res.ok).toBe(false);
+    expect(res).toMatchObject({ transport: true });
   });
 
   test("an unreachable endpoint is a failure, not a throw", async () => {
@@ -65,6 +71,7 @@ describe("fetchSnapshotFilePair", () => {
       timeoutMs: 2000,
     });
     expect(res.ok).toBe(false);
+    expect(res).toMatchObject({ transport: true });
   });
 
   test("a snapshot OpenNeuro could not serve is a failure that carries its message", async () => {
@@ -76,6 +83,8 @@ describe("fetchSnapshotFilePair", () => {
     if (res.ok) return;
     expect(res.error).toContain("1.0.1");
     expect(res.error).toContain("not found");
+    // OpenNeuro answered; the answer is unusable for this dataset. That is not an outage.
+    expect(res.transport).toBe(false);
   });
 
   test("a files value that is not a list is a failure, never []", async () => {
@@ -84,7 +93,7 @@ describe("fetchSnapshotFilePair", () => {
     const res = await fetchSnapshotFilePair("ds003082", "1.0.0", "1.0.1", {
       graphqlUrl: standin.url,
     });
-    expect(res.ok).toBe(false);
+    expect(res).toMatchObject({ ok: false, transport: false });
   });
 
   // Built from the recorded entry shape: OpenNeuro does not send these today, and each is a
@@ -173,6 +182,7 @@ describe("fetchSnapshotFilePair", () => {
       if (res.ok) continue;
       expect(res.error).toContain("malformed file entry");
       expect(res.error).toContain("entry 1");
+      expect(res.transport).toBe(false);
     }
   });
 });

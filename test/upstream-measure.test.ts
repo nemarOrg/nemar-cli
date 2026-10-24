@@ -63,12 +63,29 @@ describe("measureStaleMirrors", () => {
     expect(m.deltas.every((d) => d.reason === null || !d.reason.includes("in a row"))).toBe(true);
   });
 
+  test("failures that are about one mirror, not about reaching OpenNeuro, never stop the reading", async () => {
+    // OpenNeuro answers (HTTP 200) with GraphQL errors for this dataset, as for a snapshot deleted upstream.
+    standin.failDatasetContent("ds000999");
+    const rows = [
+      BAD("on000001"),
+      BAD("on000002"),
+      BAD("on000003"),
+      BAD("on000004"),
+      OK("on000005"),
+    ];
+    const m = await measureStaleMirrors(rows, { ...options, maxConsecutiveFailures: 2 });
+    expect(standin.requests.length).toBe(5);
+    expect(m.totals.delta_unknown).toBe(4);
+    expect(m.totals.measured).toBe(1);
+    expect(m.deltas.every((d) => d.reason === null || !d.reason.includes("in a row"))).toBe(true);
+  });
+
   test("consecutive failures stop the reading and record why for the rest", async () => {
     const rows = [BAD("on000001"), BAD("on000002"), OK("on000003"), OK("on000004")];
     const m = await measureStaleMirrors(rows, { ...options, maxConsecutiveFailures: 2 });
     expect(standin.requests.length).toBe(2);
     expect(m.deltas[2]?.delta).toBeNull();
-    expect(m.deltas[2]?.reason).toContain("2 reads in a row failed");
+    expect(m.deltas[2]?.reason).toContain("2 reads in a row failed to reach OpenNeuro");
     expect(m.totals.delta_unknown).toBe(4);
     expect(m.complete).toBe(false);
   });
@@ -132,6 +149,9 @@ describe("measureStaleMirrors", () => {
       other("on000003", "unknown", true),
       other("on000004", "not_examined"),
       other("on000005", "anomaly"),
+      other("on000006", "in_progress"),
+      other("on000007", "parked"),
+      other("on000008", "unpublished"),
     ];
     const m = await measureStaleMirrors(rows, options);
     expect(m.totals.not_comparable).toEqual({
@@ -140,8 +160,57 @@ describe("measureStaleMirrors", () => {
       not_examined: 1,
       unchecked: 1,
       anomaly: 1,
+      in_progress: 1,
+      parked: 1,
+      unpublished: 1,
     });
     expect(m.scope).toBe("fleet");
+  });
+
+  test("a new key with no known size makes the measurement incomplete, though every delta was read", async () => {
+    // Built: a listing whose new annexed key declares no size and the listing gives none.
+    const desc = (id: string) => ({
+      id,
+      filename: "dataset_description.json",
+      size: 755,
+      annexed: false,
+      directory: false,
+    });
+    const sizeless = {
+      id: "WORM-m17--x.bin",
+      filename: "x.bin",
+      size: null,
+      annexed: true,
+      directory: false,
+    };
+    standin.setText(
+      JSON.stringify({
+        data: { a: { files: [desc("a")] }, b: { files: [desc("a"), sizeless] } },
+      }),
+    );
+    const m = await measureStaleMirrors([OK("on000001")], options);
+    expect(m.totals.delta_unknown).toBe(0);
+    expect(m.totals.not_measured).toBe(0);
+    expect(m.totals.bytes_to_copy).toBeNull();
+    expect(m.complete).toBe(false);
+    // And a fully sized one is complete: complete implies a known byte total.
+    standin.setRecorded();
+    const ok = await measureStaleMirrors([OK("on000001")], options);
+    expect(ok.totals.bytes_to_copy).not.toBeNull();
+    expect(ok.complete).toBe(true);
+  });
+
+  test("no progress line is emitted once reading has stopped", async () => {
+    standin.setStatus(503);
+    const rows = Array.from({ length: 25 }, (_, i) => OK(`on0004${String(i).padStart(2, "0")}`));
+    const lines: string[] = [];
+    await measureStaleMirrors(rows, {
+      ...options,
+      maxConsecutiveFailures: 3,
+      onProgress: (l) => lines.push(l),
+    });
+    expect(standin.requests.length).toBe(3);
+    expect(lines).toEqual([]);
   });
 
   test("progress is reported every ten mirrors", async () => {

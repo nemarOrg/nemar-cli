@@ -35,7 +35,8 @@ type Mode =
   | { kind: "hang" }
   | { kind: "text"; body: string }
   | { kind: "partial" }
-  | { kind: "ds-fails"; ds: string; status: number };
+  | { kind: "ds-fails"; ds: string; status: number }
+  | { kind: "ds-content-fails"; ds: string };
 
 export function startOpenNeuroFilesStandin() {
   const requests: FilesRequest[] = [];
@@ -54,6 +55,13 @@ export function startOpenNeuroFilesStandin() {
       if (mode.kind === "text") return new Response(mode.body);
       if (mode.kind === "ds-fails" && mode.ds === ds) {
         return new Response("down", { status: mode.status });
+      }
+      if (mode.kind === "ds-content-fails" && mode.ds === ds) {
+        // OpenNeuro answered (HTTP 200) but cannot serve this dataset: GraphQL errors, null data.
+        return Response.json({
+          data: { a: null, b: null },
+          errors: [{ message: `Dataset ${ds} has been deleted.`, path: ["a"] }],
+        });
       }
       const file = RECORDINGS[`${ds} ${from} ${to}`];
       if (!file) return new Response(`not recorded: ${ds} ${from} ${to}`, { status: 500 });
@@ -87,6 +95,10 @@ export function startOpenNeuroFilesStandin() {
     /** Answer HTTP `status` for one dataset only; every other dataset is served from the recording. */
     failDataset(ds: string, status = 503) {
       mode = { kind: "ds-fails", ds, status };
+    },
+    /** Answer HTTP 200 with GraphQL errors for one dataset: reachable, but unusable for it. */
+    failDatasetContent(ds: string) {
+      mode = { kind: "ds-content-fails", ds };
     },
     setRecorded() {
       mode = { kind: "recorded" };
