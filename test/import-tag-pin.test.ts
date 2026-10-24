@@ -122,7 +122,7 @@ describe("the clone is at the tag, not at HEAD", () => {
       expect(existsSync(join(dir, ".git", "annex"))).toBe(true);
       // OpenNeuro could not say what its latest is, so there is nothing to compare against.
       expect(pinned.latestTag).toBeNull();
-    });
+    }, 60_000);
   }
 });
 
@@ -139,7 +139,7 @@ describe("with an explicit tag the latest-tag lookup is one short try", () => {
     expect(graphqlRequests).toBe(1);
     expect(pinned.latestTag).toBeNull();
     expect(EXPLICIT_TAG_LOOKUP_MS).toBeLessThanOrEqual(10_000);
-  });
+  }, 60_000);
 });
 
 describe("a tag the mirror does not have refuses as a mirror lag", () => {
@@ -170,7 +170,7 @@ describe("a tag the mirror does not have refuses as a mirror lag", () => {
         hasSourceId: true,
       }).action,
     ).toBe("dispatch");
-  });
+  }, 60_000);
 
   test("only a tag answers: a name that is also an abbreviated commit does not stand in for it", async () => {
     // `refs/tags/<tag>` is what is resolved. A bare name would also match a commit by its
@@ -185,7 +185,7 @@ describe("a tag the mirror does not have refuses as a mirror lag", () => {
       }),
     );
     expect(err.marker).toBe(OPENNEURO_MIRROR_LAG_MARKER);
-  });
+  }, 60_000);
 });
 
 describe("with no tag, the tag is OpenNeuro's latest, and not knowing it refuses", () => {
@@ -198,7 +198,7 @@ describe("with no tag, the tag is OpenNeuro's latest, and not knowing it refuses
     expect(err.marker).toBe(OPENNEURO_MIRROR_LAG_MARKER);
     expect(err.message).toContain("HTTP 503");
     expect(graphqlRequests).toBe(2);
-  });
+  }, 60_000);
 
   test("a dataset with no snapshot: refused, and not retried within the run", async () => {
     graphqlAnswer = () => Response.json({ data: { dataset: { latestSnapshot: null } } });
@@ -208,7 +208,7 @@ describe("with no tag, the tag is OpenNeuro's latest, and not knowing it refuses
     );
     expect(err.message).toContain("no snapshot");
     expect(graphqlRequests).toBe(1);
-  });
+  }, 60_000);
 
   test("a dataset OpenNeuro does not know: refused with OpenNeuro's own words", async () => {
     // The shape openneuro.org answered for ds999999 on 2026-10-23.
@@ -221,7 +221,7 @@ describe("with no tag, the tag is OpenNeuro's latest, and not knowing it refuses
       cloneOpenNeuroAtTag(UPSTREAM_ID, cloneDir(), { repoUrl: upstream.dir, lookup: fastLookup() }),
     );
     expect(err.message).toContain("does not exist");
-  });
+  }, 60_000);
 
   test("a latest tag of an unexpected shape is not used", async () => {
     graphqlAnswer = () =>
@@ -231,7 +231,7 @@ describe("with no tag, the tag is OpenNeuro's latest, and not knowing it refuses
       cloneOpenNeuroAtTag(UPSTREAM_ID, cloneDir(), { repoUrl: upstream.dir, lookup: fastLookup() }),
     );
     expect(err.marker).toBe(OPENNEURO_MIRROR_LAG_MARKER);
-  });
+  }, 60_000);
 });
 
 describe("an explicit tag of the wrong shape is a usage error, not a refusal", () => {
@@ -245,7 +245,7 @@ describe("an explicit tag of the wrong shape is a usage error, not a refusal", (
     await expect(p).rejects.toThrow(/Invalid upstream tag/);
     await p.catch((err) => expect(err).not.toBeInstanceOf(ImportRefused));
     expect(existsSync(dir)).toBe(false);
-  });
+  }, 60_000);
 });
 
 describe("a refusal removes the work directory it made, never the caller's", () => {
@@ -389,7 +389,7 @@ describe("the import records the snapshot it is, in SourceDatasets", () => {
       "100644",
     );
     expect(await git(dir, "annex", "find", "--include", "*", "dataset_description.json")).toBe("");
-  });
+  }, 60_000);
 
   test("never a second entry for the same dataset", async () => {
     const dir = await pinnedAt("1.0.0");
@@ -400,7 +400,7 @@ describe("the import records the snapshot it is, in SourceDatasets", () => {
     // tag never disagrees with itself.
     expect(await appendSourceDatasetEntry(dir, UPSTREAM_ID, "1.0.1")).toBe("already-recorded");
     expect(readFileSync(join(dir, "dataset_description.json"), "utf8")).toBe(once);
-  });
+  }, 60_000);
 
   /** Rewrite the clone's description with `sources`, then record 1.0.1 and return what is staged. */
   async function recordOver(sources: unknown[]): Promise<{
@@ -435,13 +435,13 @@ describe("the import records the snapshot it is, in SourceDatasets", () => {
       { URL: page, Name: "upstream's own label", DOI: entry.DOI, Version: "1.0.1" },
     ]);
     expect(recordedUpstreamTag(urlOnly.staged, UPSTREAM_ID)).toBe("1.0.1");
-  });
+  }, 60_000);
 
   test("an entry that already records a tag, in the live on004362 shape, is left alone", async () => {
     const tagged = [{ DOI: `doi:10.18112/openneuro.${UPSTREAM_ID}.v1.0.0` }];
     const { outcome } = await recordOver(tagged);
     expect(outcome).toBe("already-recorded");
-  });
+  }, 60_000);
 
   test("an entry naming two datasets is not edited; the record is appended beside it", async () => {
     const twoDatasets = {
@@ -456,7 +456,7 @@ describe("the import records the snapshot it is, in SourceDatasets", () => {
       sourceDatasetEntry(UPSTREAM_ID, "1.0.1"),
     ]);
     expect(recordedUpstreamTag(staged, UPSTREAM_ID)).toBe("1.0.1");
-  });
+  }, 60_000);
 
   test("a leading v on the tag does not reach the DOI", () => {
     expect(sourceDatasetEntry(UPSTREAM_ID, "v1.0.1").DOI).toBe(

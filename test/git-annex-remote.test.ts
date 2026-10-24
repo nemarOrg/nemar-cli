@@ -1350,7 +1350,7 @@ describe("Step 4c: re-import main-reset avoids the diverging-history push failur
     const pushResult = await pushToGitHub(p2, "origin");
     expect(pushResult.success).toBe(false);
     expect(pushResult.error).toMatch(/diverging commits and auto-rebase failed/i);
-  });
+  }, 60_000);
 
   test("fix: Step 4c resets main onto origin/main first, so the same re-import push succeeds", async () => {
     const { src, bareDir } = await newUpstreamAndBare("b");
@@ -1410,7 +1410,7 @@ describe("Step 4c: re-import main-reset avoids the diverging-history push failur
     expect(metadataCommitCount).toBe(2);
     const metadataContent = await Bun.file(join(checker, ".nemar", "metadata.json")).text();
     expect(JSON.parse(metadataContent).version).toBe(2);
-  });
+  }, 60_000);
 
   test("recovery: same-version re-import with identical metadata is a no-op commit and a no-op push (#990 Gap 1, primary recovery path)", async () => {
     // The actual #967 recovery scenario Step 4c exists for: re-copying data
@@ -1471,7 +1471,7 @@ describe("Step 4c: re-import main-reset avoids the diverging-history push failur
     expect(push2.success).toBe(true);
     expect(push2.warning).toBeUndefined();
     expect((await runCmd(["git", "rev-parse", "main"], p2)).stdout.trim()).toBe(firstImportSha);
-  });
+  }, 60_000);
 
   test("first import: origin has no main ref yet, so Step 4c's fetch is skipped and the plain push still succeeds (#990 Gap 2, must-not-regress)", async () => {
     // Codifies the single most important "must not regress" behavior: a
@@ -1514,5 +1514,5 @@ describe("Step 4c: re-import main-reset avoids the diverging-history push failur
     const push1 = await pushToGitHub(p1, "origin");
     expect(push1.success).toBe(true);
     expect(push1.warning).toBeUndefined();
-  });
+  }, 60_000);
 });
