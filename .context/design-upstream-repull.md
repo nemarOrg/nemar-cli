@@ -119,7 +119,7 @@ Open check before building the merge call: whether the rulesets let the GitHub A
 - `UNIQUE(dataset_id, to_tag)` plus a partial unique index allowing one non-terminal row per dataset.
 - States: planned, prepared, copied, registered, pr_open, gates_clear, merged, released, then (with a 2.0.1) patch_synthesized, patch_gates_clear, patch_merged, patch_released, and complete; terminal: abandoned, failed, superseded (a newer tag arrived before 2.0.0 merged: close its PR and plan again from the same `from_tag`), patch_declined.
 - Every step checks its own end state first: `dataset_versions` already has `source_version = to_tag`; the branch exists with trailers `Upstream-Snapshot: ds003645@2.1.0` and `Repull-Plan: <digest>`; copy skips present objects; registration and the annex push are idempotent; the PR is found by head branch; the tag exists; the DOI row exists.
-- `--execute` needs the digest of the reviewed plan; if main moved since the plan, plan again unless the new commits touch only `.nemar/**`.
+- `--execute` needs the digest of the reviewed plan; if main moved since the plan, plan again and stop for review of the new digest, unless the new commits touch only `.nemar/**`.
 - `--resume` continues from the recorded status; `--abandon` before 2.0.0 merges closes its PR, deletes its branch, reports orphan bytes and ends the row abandoned.
 - After 2.0.0 has merged, `--abandon` closes only 2.0.1's PR and branch and ends the row patch_declined; 2.0.0 stays released, its corrections remain corrections in the next plan, and a PR found closed unmerged ends the row the same way (abandoned before the 2.0.0 merge, patch_declined after it).
 - The retry engine reads only `import_jobs`, which a re-pull never writes.
