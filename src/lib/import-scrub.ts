@@ -138,6 +138,13 @@ export const IMPORT_SCRUB_REFUSALS = [
   "scrub-unverified",
   /** The scrubbed recordings could not be annexed or uploaded from the host. */
   "upload-failed",
+  /**
+   * A scoped scrub (an upstream re-pull's) would change a header while a provenance file lies
+   * outside its scope, so the file would be committed without the sentence that says so.
+   */
+  "provenance-out-of-scope",
+  /** A scoped scrub's tree has changes outside the scope it was given, which it would not read. */
+  "scope-incomplete",
   /** Anything else went wrong inside the scrub; the detail is the error's class, never its text. */
   "scrub-failed",
 ] as const;
@@ -476,11 +483,10 @@ export interface ImportScrubCounts {
   provenance_annotated: number;
   /** 1 when the provenance README got the note, else 0. */
   provenance_readme_annotated: number;
-  /**
-   * Provenance files tracked but not annotated: not a regular file, not a JSON object, or outside
-   * the scrub's scope.
-   */
+  /** Provenance files tracked but not annotated because they are not a regular file. */
   provenance_not_annotated: number;
+  /** Provenance files not annotated because their text is not a JSON object. */
+  provenance_malformed: number;
 }
 
 function zeroCounts(): ImportScrubCounts {
@@ -515,6 +521,7 @@ function zeroCounts(): ImportScrubCounts {
     provenance_annotated: 0,
     provenance_readme_annotated: 0,
     provenance_not_annotated: 0,
+    provenance_malformed: 0,
   };
 }
 
@@ -565,13 +572,16 @@ export interface ImportScrubInput {
    * The paths the scrub may read and change; every tracked path when absent (the importer). An
    * upstream re-pull scrubs its delta paths only (ADR 0111, decisions 1 and 2), so a recording, a
    * JSON file or a scans table outside the scope is neither read nor changed, and the counts see
-   * only the scope. A provenance file outside it is not annotated and is counted as not annotated.
+   * only the scope. The scope must hold every path changed since HEAD (`scope-incomplete`
+   * otherwise), and the provenance files whenever a header will change
+   * (`provenance-out-of-scope` otherwise), so nothing unscrubbed or unannotated is committed.
    */
   scope?: ReadonlySet<string>;
   /**
    * Where an annexed recording's header is read from, by key, in place of {@link keyUrlMap}: a
-   * source, `"held"` for a key NEMAR already holds (it keeps its bytes, ADR 0091, and is counted
-   * `headers_not_read_nemar_held`), or null for a key nothing can supply (counted
+   * source, `"held"` for a key NEMAR already holds, whose bytes are already in NEMAR's bucket where
+   * the identifier screen reads them (ADR 0086, ADR 0088), so it is not read again and keeps its
+   * key (counted `headers_not_read_nemar_held`), or null for a key nothing can supply (counted
    * `headers_not_read_no_source`). Absent for the importer, whose sources are its whereis URLs.
    */
   sourceOf?: (key: string) => UpstreamSource | "held" | null;
@@ -778,6 +788,18 @@ function isRegularFile(abs: string): boolean {
   }
 }
 
+/**
+ * Tracked paths whose index or working-tree content differs from HEAD (staged or not, deletions
+ * included), from git's NUL-separated listing so no path is quoted or split.
+ */
+async function changedSinceHead(datasetPath: string): Promise<string[]> {
+  const r = await runCommand(["git", "diff", "--name-only", "-z", "--no-renames", "HEAD", "--"], {
+    cwd: datasetPath,
+  });
+  if (r.exitCode !== 0) throw new Error("git could not list the paths changed since HEAD");
+  return r.stdout.split("\0").filter((p) => p !== "");
+}
+
 async function stageAsGit(datasetPath: string, paths: string[]): Promise<void> {
   // `annex.largefiles=nothing`: these are git content (JSON, text, the ledger), and a plain `git add`
   // in an annexed repository can turn a file into an annex pointer whose content nothing uploads.
@@ -840,6 +862,17 @@ async function scrubTree(input: ImportScrubInput): Promise<ImportScrubResult> {
   const allTracked = [...(await listTrackedPaths(datasetPath))].sort();
   const scope = input.scope;
   const tracked = scope ? allTracked.filter((p) => scope.has(p)) : allTracked;
+  // A caller that names a scope must name every path it changed: the scrub reads only the scope,
+  // so a changed path outside it would reach the commit unread (ADR 0111, decision 2).
+  if (scope) {
+    const outside = (await changedSinceHead(datasetPath)).filter((p) => !scope.has(p)).length;
+    if (outside > 0) {
+      throw new ImportScrubRefused(
+        "scope-incomplete",
+        `${outside} path(s) changed since HEAD are outside the scrub's scope`,
+      );
+    }
+  }
   const annexedKeys = await listAnnexedKeys(datasetPath);
   const recordings = tracked.filter((p) => RECORDING_PATH.test(p));
   counts.recordings = recordings.length;
@@ -1023,6 +1056,20 @@ async function scrubTree(input: ImportScrubInput): Promise<ImportScrubResult> {
   const datesKept = new Set(datesFit ? datesReplaceable : []);
   const toFetch = flaggedUpstream.filter((f) => f.change.scrub || datesKept.has(f));
   const toPatch: typeof toFetch = [];
+  // A header is about to change, and with it the sentence each provenance file must carry. A
+  // scoped scrub can write only what is in its scope, so a provenance file outside it refuses
+  // here, before a byte moves, rather than being committed without the sentence (ADR 0085).
+  if (scope && (toFetch.length > 0 || flaggedGitHeld.length > 0)) {
+    const left = [PROVENANCE_PATH, PROVENANCE_README_PATH].filter(
+      (p) => !scope.has(p) && allTracked.includes(p),
+    ).length;
+    if (left > 0) {
+      throw new ImportScrubRefused(
+        "provenance-out-of-scope",
+        `${left} provenance file(s) are outside the scope of a scrub that changes headers`,
+      );
+    }
+  }
 
   // 3. Download, check, patch. Each download replaces the annex pointer at its path. A recording
   // the identifier scrub needs refuses on any failure; one whose only change is its date is left
@@ -1254,11 +1301,6 @@ async function scrubTree(input: ImportScrubInput): Promise<ImportScrubResult> {
         ? "dates-set"
         : null;
   if (headerChange !== null) {
-    // A provenance file outside the scope is not this run's to change; it is counted, so the
-    // result says a sentence it would have carried is missing.
-    for (const p of [PROVENANCE_PATH, PROVENANCE_README_PATH]) {
-      if (scope && !scope.has(p) && allTracked.includes(p)) counts.provenance_not_annotated++;
-    }
     const provenance = join(datasetPath, PROVENANCE_PATH);
     if (tracked.includes(PROVENANCE_PATH) && isRegularFile(provenance)) {
       const text = readFileSync(provenance, "utf8");
@@ -1273,7 +1315,7 @@ async function scrubTree(input: ImportScrubInput): Promise<ImportScrubResult> {
         toStage.push(PROVENANCE_PATH);
         counts.provenance_annotated = 1;
       } else {
-        counts.provenance_not_annotated++;
+        counts.provenance_malformed++;
       }
     } else if (tracked.includes(PROVENANCE_PATH)) {
       counts.provenance_not_annotated++;

@@ -1610,7 +1610,16 @@ const OUT_EDF = "sub-04/eeg/sub-04_task-rest_eeg.edf";
 const OUT_JSON = "sub-04/eeg/sub-04_task-rest_eeg.json";
 const IN_SCANS = "sub-01/sub-01_scans.tsv";
 const OUT_SCANS = "sub-04/sub-04_scans.tsv";
-const OUT_PROVENANCE = "sourcedata/sourcedata_provenance.json";
+const PROVENANCE = "sourcedata/sourcedata_provenance.json";
+const PROVENANCE_README = "sourcedata/README_sourcedata_provenance.md";
+
+/** The provenance pair, as an upstream that ships one has it. */
+function provenanceFixtures(json = `{\n  "files": []\n}\n`): Fixture[] {
+  return [
+    { path: PROVENANCE, bytes: text(json) },
+    { path: PROVENANCE_README, bytes: text("# Provenance\n") },
+  ];
+}
 
 /** A tree in which every rule the scrub runs has work both inside and outside a re-pull's scope. */
 function deltaFixtures(): Fixture[] {
@@ -1629,7 +1638,6 @@ function deltaFixtures(): Fixture[] {
     { path: OUT_JSON, bytes: sidecar },
     { path: IN_SCANS, bytes: text(SCANS_TEXT) },
     { path: OUT_SCANS, bytes: text(SCANS_TEXT) },
-    { path: OUT_PROVENANCE, bytes: text(`{\n  "files": []\n}\n`) },
   ];
 }
 
@@ -1694,7 +1702,8 @@ describe("an upstream re-pull scrubs its delta paths only (ADR 0111)", () => {
       SCANS_TEXT.replace("2023-03-14T", "2023-01-01T"),
     );
     expect(readFileSync(join(clone, OUT_SCANS), "utf8")).toBe(SCANS_TEXT);
-    expect(readFileSync(join(clone, OUT_PROVENANCE), "utf8")).toBe(original(OUT_PROVENANCE));
+    // Read means the header was judged by this run: the flagged key, and nothing held or outside.
+    expect(result.headerReadKeys).toEqual(new Set([flaggedKey]));
 
     expect(result.counts).toMatchObject({
       recordings: 2,
@@ -1706,9 +1715,6 @@ describe("an upstream re-pull scrubs its delta paths only (ADR 0111)", () => {
       json_files_blanked: 1,
       scans_tables_read: 1,
       scans_tables_normalized: 1,
-      // The provenance file is outside the scope: not annotated, and said.
-      provenance_annotated: 0,
-      provenance_not_annotated: 1,
     });
 
     // The scrub's commit carries the scope's changes and nothing else.
@@ -1735,7 +1741,133 @@ describe("an upstream re-pull scrubs its delta paths only (ADR 0111)", () => {
       headers_not_read_no_source: 2,
       headers_not_read_nemar_held: 0,
     });
+    expect(result.headerReadKeys).toEqual(new Set());
     expect(result.committed).toBe(false);
+  }, 120_000);
+
+  test("a held key the scrub did not read cannot be copied: the closing check refuses it", async () => {
+    const upstream = await buildUpstream(deltaFixtures());
+    const { clone } = await cloneForImport(upstream);
+    const heldKey = await keyAt(clone, CLEAN_ANNEXED);
+    const result = await scrubDelta(clone, {
+      scope: new Set([CLEAN_ANNEXED]),
+      sourceOf: () => "held",
+    });
+    expect(result.headerReadKeys.has(heldKey)).toBe(false);
+    const item: ImportManifestItem = {
+      key: heldKey,
+      sourceUrl: null,
+      source: null,
+      destUri: `s3://nemar/${NEMAR_ID}/objects/${heldKey}`,
+    };
+    const err = await refusal(
+      Promise.resolve().then(() =>
+        assertCopiedRecordingsRead(
+          [item],
+          new Map([[CLEAN_ANNEXED, heldKey]]),
+          result.headerReadKeys,
+        ),
+      ),
+    );
+    expect(err.code).toBe("header-unreadable");
+  }, 120_000);
+
+  test("a changed path the scope does not name refuses before anything is read", async () => {
+    // The scrub reads only its scope, so a path the caller changed and left out would reach the
+    // commit unread. Staged or not, either refuses.
+    for (const stage of [false, true]) {
+      const upstream = await buildUpstream(deltaFixtures());
+      const { clone } = await cloneForImport(upstream);
+      writeFileSync(join(clone, OUT_JSON), `{"TaskName": "changed by the caller"}\n`);
+      if (stage) {
+        await run(["git", "-c", "annex.largefiles=nothing", "add", OUT_JSON], clone);
+      }
+      const head = (await run(["git", "rev-parse", "HEAD"], clone)).trim();
+      const err = await refusal(
+        scrubDelta(clone, {
+          scope: new Set([FLAGGED_ANNEXED, SIDECAR]),
+          sourceOf: () => null,
+        }),
+      );
+      expect(err.code, `staged: ${stage}`).toBe("scope-incomplete");
+      expect(err.message).toContain("1 path(s) changed since HEAD");
+      expectNoSecret(err.message);
+      expect((await run(["git", "rev-parse", "HEAD"], clone)).trim()).toBe(head);
+      // The same change inside the scope is the caller's delta, and the scrub reads it.
+      const ok = await scrubDelta(clone, {
+        scope: new Set([FLAGGED_ANNEXED, SIDECAR, OUT_JSON]),
+        sourceOf: () => null,
+      });
+      expect(ok.counts.json_files_read).toBe(2);
+    }
+  }, 180_000);
+});
+
+describe("a re-pull's header scrub never leaves a provenance file without its sentence", () => {
+  const flaggedSource = async (clone: string) => {
+    const flaggedKey = await keyAt(clone, FLAGGED_ANNEXED);
+    return (key: string) => (key === flaggedKey ? upstreamS3(FLAGGED_ANNEXED) : null);
+  };
+
+  test("a provenance file outside the scope refuses before a byte is downloaded", async () => {
+    const upstream = await buildUpstream([...deltaFixtures(), ...provenanceFixtures()]);
+    const { clone } = await cloneForImport(upstream);
+    const head = (await run(["git", "rev-parse", "HEAD"], clone)).trim();
+    const err = await refusal(
+      scrubDelta(clone, {
+        // The JSON is in scope and its README is not: one file left out is enough.
+        scope: new Set([FLAGGED_ANNEXED, PROVENANCE]),
+        sourceOf: await flaggedSource(clone),
+      }),
+    );
+    expect(err.code).toBe("provenance-out-of-scope");
+    expect(err.message).toContain("1 provenance file(s)");
+    // The header was read to decide; nothing was downloaded, written or committed.
+    expect(requests.every((r) => r.range !== null)).toBe(true);
+    expect((await run(["git", "rev-parse", "HEAD"], clone)).trim()).toBe(head);
+    expect(readFileSync(join(clone, PROVENANCE), "utf8")).toBe(`{\n  "files": []\n}\n`);
+  }, 120_000);
+
+  test("with no header to change, a provenance file outside the scope is not the scrub's", async () => {
+    const upstream = await buildUpstream([...deltaFixtures(), ...provenanceFixtures()]);
+    const { clone } = await cloneForImport(upstream);
+    const result = await scrubDelta(clone, { scope: new Set([SIDECAR]), sourceOf: () => null });
+    expect(result.counts).toMatchObject({ json_values_blanked: 1, headers_scrubbed: 0 });
+    expect(result.counts.provenance_annotated).toBe(0);
+  }, 120_000);
+
+  test("in the scope, both files get the sentence", async () => {
+    const upstream = await buildUpstream([...deltaFixtures(), ...provenanceFixtures()]);
+    const { clone } = await cloneForImport(upstream);
+    const result = await scrubDelta(clone, {
+      scope: new Set([FLAGGED_ANNEXED, PROVENANCE, PROVENANCE_README]),
+      sourceOf: await flaggedSource(clone),
+    });
+    expect(result.counts).toMatchObject({
+      headers_scrubbed: 1,
+      provenance_annotated: 1,
+      provenance_readme_annotated: 1,
+      provenance_not_annotated: 0,
+      provenance_malformed: 0,
+    });
+    const doc = JSON.parse(readFileSync(join(clone, PROVENANCE), "utf8"));
+    expect(doc[PROVENANCE_NOTE_KEY]).toBe(provenanceNote("2026-10-06", "scrubbed-and-dates-set"));
+  }, 120_000);
+
+  test("a provenance file that is not a JSON object is counted as malformed, not as out of scope", async () => {
+    const upstream = await buildUpstream([...deltaFixtures(), ...provenanceFixtures("[1, 2]\n")]);
+    const { clone } = await cloneForImport(upstream);
+    const result = await scrubDelta(clone, {
+      scope: new Set([FLAGGED_ANNEXED, PROVENANCE, PROVENANCE_README]),
+      sourceOf: await flaggedSource(clone),
+    });
+    expect(result.counts).toMatchObject({
+      headers_scrubbed: 1,
+      provenance_annotated: 0,
+      provenance_malformed: 1,
+      provenance_not_annotated: 0,
+    });
+    expect(readFileSync(join(clone, PROVENANCE), "utf8")).toBe("[1, 2]\n");
   }, 120_000);
 });
 
@@ -1844,6 +1976,36 @@ describe("a pinned source is read at its version, never at the path's current ob
       [206, pinned],
       [200, pinned],
     ]);
+  }, 120_000);
+
+  test("a pinned version that is gone refuses as http-404, never falling back to the current object", async () => {
+    const files = deltaFixtures();
+    const upstream = await buildUpstream(files);
+    const { clone } = await cloneForImport(upstream);
+    const flaggedKey = await keyAt(clone, FLAGGED_ANNEXED);
+    const object = `${UPSTREAM_ID}/gone/${FLAGGED_ANNEXED}`;
+    const original = fixtureBytes(files, FLAGGED_ANNEXED);
+    const pinned = s3.putObject("openneuro.org", object, original);
+    // The current object at the path is the very bytes the key names, so a read that dropped the
+    // version would succeed; only the pinned version is gone.
+    s3.putObject("openneuro.org", object, original);
+    s3.dropVersion("openneuro.org", object, pinned);
+
+    const err = await refusal(
+      scrubDelta(clone, {
+        scope: new Set([FLAGGED_ANNEXED]),
+        reader: httpUpstreamReader({ baseUrl: s3.url, retryDelayMs: 1 }),
+        sourceOf: (key) =>
+          key === flaggedKey
+            ? { kind: "pinned", bucket: "openneuro.org", object, versionId: pinned }
+            : null,
+      }),
+    );
+    expect(err.code).toBe("header-unreadable");
+    expect(err.message).toContain("http-404 x1");
+    const gets = s3.calls("GetObject").filter((c) => c.key === object);
+    expect(gets.length).toBeGreaterThan(0);
+    expect(gets.every((g) => g.status === 404)).toBe(true);
   }, 120_000);
 });
 

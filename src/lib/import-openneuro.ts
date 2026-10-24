@@ -1907,10 +1907,11 @@ async function prepareImportSteps(
     if (scrub.committed) {
       console.log(chalk.dim("  Committed the privacy correction and its ledger line"));
     }
-    if (c.provenance_not_annotated > 0) {
+    const notAnnotated = c.provenance_not_annotated + c.provenance_malformed;
+    if (notAnnotated > 0) {
       console.log(
         chalk.yellow(
-          `  Warning: ${c.provenance_not_annotated} provenance file(s) could not be annotated; their checksums still describe the upstream files without saying so`,
+          `  Warning: ${notAnnotated} provenance file(s) could not be annotated; their checksums still describe the upstream files without saying so`,
         ),
       );
     }
