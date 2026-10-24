@@ -46,6 +46,7 @@ import { runAnonymitySweepCron } from "./services/anonymity-sweep";
 import { archiveRetrySweep } from "./services/archive-retry";
 import { AUTO_IMPORT_CRON, autoImportTick } from "./services/auto-import";
 import { runAvailabilityReportSweepCron } from "./services/availability-report";
+import type { BroadcastOutboxMessage } from "./services/broadcast";
 import { fetchAndSyncCitationCounts } from "./services/citation-counts-sync";
 import { isNemarWebOrigin, isOscOrigin } from "./services/cors-origins";
 import { sweepLogLines } from "./services/cron-sweep-log";
@@ -61,6 +62,7 @@ import {
   sendStalenessAdminReviewEmail,
   sendStalenessWarningEmail,
 } from "./services/email";
+import { handleOutboxBatch, isBroadcastOutboxMessage } from "./services/email-outbox";
 import { isNonProductionEnv } from "./services/environment";
 import { resolveHostRoute } from "./services/host-routing";
 import { sweepIdentifierScreens } from "./services/identifier-screen";
@@ -899,8 +901,30 @@ async function scheduledCleanup(env: Bindings): Promise<void> {
   );
 }
 
+/**
+ * Queue consumer entry (epic #1893). One Worker consumes several queues, and a batch holds
+ * messages of one queue, so dispatch is per message on its body. A branch is added here for
+ * each kind of message; anything unrecognised is acked and logged, never retried, because a
+ * retry of a message nobody handles only delays its dead-lettering.
+ */
+export async function dispatchQueueBatch(batch: MessageBatch<unknown>, env: Bindings) {
+  const broadcasts: Message<BroadcastOutboxMessage>[] = [];
+  for (const message of batch.messages) {
+    if (isBroadcastOutboxMessage(message.body)) {
+      broadcasts.push(message as Message<BroadcastOutboxMessage>);
+    } else {
+      console.warn(`[queue] unrecognised message on ${batch.queue}; acking`);
+      message.ack();
+    }
+  }
+  if (broadcasts.length > 0) await handleOutboxBatch(broadcasts, env);
+}
+
 export default {
   fetch: app.fetch,
+  async queue(batch: MessageBatch<unknown>, env: Bindings, _ctx: ExecutionContext) {
+    await dispatchQueueBatch(batch, env);
+  },
   // Email Routing delivers inbound mail here (epic #1893, ADR 0110). With no MAIL_INBOUND
   // binding, which is every Worker but staging, the message is rejected.
   async email(message: ForwardableEmailMessage, env: Bindings) {
