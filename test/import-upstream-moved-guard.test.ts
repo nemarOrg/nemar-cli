@@ -305,12 +305,53 @@ describe("an unrecorded or unchanged tag never trips the guard", () => {
         nemarId: NEMAR_ID,
         released: state.released,
       });
-      expect(base).toEqual({ kind: "hard-reset", recordedTag: null });
+      // Inert, and said: the reason travels with the result and is printed by baseOnOriginMain.
+      expect(base).toEqual({
+        kind: "hard-reset",
+        recordedTag: null,
+        unrecorded:
+          form === "nothing"
+            ? `records no upstream tag for ${UPSTREAM_ID}`
+            : `records disagreeing upstream tags for ${UPSTREAM_ID} (0.9.0, 1.0.0)`,
+      });
       expect(state.calls.n).toBe(0);
       expect(await git(dir, "rev-parse", "HEAD")).toBe(tip);
       expect(await git(dir, "status", "--porcelain")).toBe("");
     }, 60_000);
   }
+
+  test("a description that is missing or not JSON is said, never swallowed", async () => {
+    for (const [content, reason] of [
+      [null, "has no dataset_description.json"],
+      ["../../.git/annex/objects/xx/yy/SHA256E-s10--abc.json", "is not JSON"],
+    ] as const) {
+      const { bare } = await originRecordedAt(RECORDED.doiOnly);
+      // Change origin's description the way a legacy import left it.
+      const editor = fresh("editor");
+      await run(["git", "clone", "-q", bare, editor]);
+      await git(editor, "config", "user.email", "test@test.com");
+      await git(editor, "config", "user.name", "Test");
+      if (content === null) await git(editor, "rm", "-q", "dataset_description.json");
+      else {
+        writeFileSync(join(editor, "dataset_description.json"), content);
+        await git(editor, "add", "dataset_description.json");
+      }
+      await git(editor, "commit", "-q", "-m", "legacy description");
+      await git(editor, "push", "-q", "origin", "main");
+
+      const dir = await reimportClone(bare, "1.0.1");
+      const state = releaseState(true);
+      const base = await baseOnOriginMain(dir, {
+        sourceId: UPSTREAM_ID,
+        importTag: "1.0.1",
+        nemarId: NEMAR_ID,
+        released: state.released,
+      });
+      expect(base.kind).toBe("hard-reset");
+      expect(base.unrecorded).toContain(reason);
+      expect(state.calls.n).toBe(0);
+    }
+  }, 120_000);
 
   test("recorded at the tag being imported: the hard reset, release state never asked", async () => {
     const { bare, tip } = await originRecordedAt(RECORDED.entry);

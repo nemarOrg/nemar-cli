@@ -69,7 +69,11 @@ import {
   screenWaitBudget,
 } from "./import-publication.js";
 import { httpUpstreamReader, prepareImportedTreeForCopy } from "./import-scrub.js";
-import { recordedUpstreamTag, untaggedEntryIndexFor } from "./import-upstream-tag.js";
+import {
+  readRecordedUpstreamTag,
+  recordedUpstreamTag,
+  untaggedEntryIndexFor,
+} from "./import-upstream-tag.js";
 import { fetchOpenNeuroLatestTag } from "./openneuro.js";
 import {
   type ImportManifest,
@@ -329,6 +333,12 @@ export interface ReimportBase {
    */
   kind: "none" | "hard-reset" | "retarget";
   recordedTag: string | null;
+  /**
+   * Set when origin has a `main` whose recorded tag could not be read, and why: the guard is
+   * inert then (ADR 0111: an unrecorded tag never trips it), which is said out loud, never left
+   * silent.
+   */
+  unrecorded?: string;
 }
 
 /**
@@ -378,7 +388,19 @@ export async function baseOnOriginMain(
   const currentBranch = await runCommand(["git", "rev-parse", "--abbrev-ref", "HEAD"], {
     cwd: datasetPath,
   });
-  const recordedTag = await originRecordedTag(datasetPath, args.sourceId);
+  const recorded = await originRecordedTag(datasetPath, args.sourceId);
+  const recordedTag = recorded.tag;
+  const unrecorded =
+    recorded.tag === null && (originMainRev.stdout.trim() || null) !== null
+      ? recorded.why
+      : undefined;
+  if (unrecorded !== undefined) {
+    console.log(
+      chalk.yellow(
+        `  Warning: ${args.nemarId}'s main ${unrecorded}, so the upstream-moved guard cannot check this import at ${args.importTag}. If ${args.nemarId} has released a version and its upstream has moved since, this re-import keeps the old tree while copying the new tag's data (#993).`,
+      ),
+    );
+  }
   const decision = decideReimportBase({
     originMainSha: originMainRev.stdout.trim() || null,
     currentBranch: currentBranch.stdout.trim(),
@@ -386,7 +408,8 @@ export async function baseOnOriginMain(
     importTag: args.importTag,
   });
 
-  if (decision === "none") return { kind: "none", recordedTag };
+  const extra = unrecorded !== undefined ? { unrecorded } : {};
+  if (decision === "none") return { kind: "none", recordedTag, ...extra };
 
   if (decision === "hard-reset") {
     const reset = await runCommand(["git", "reset", "--hard", "origin/main"], { cwd: datasetPath });
@@ -396,9 +419,9 @@ export async function baseOnOriginMain(
           `  Warning: found origin/main for ${args.nemarId} (re-import) but could not reset onto it (${reset.stderr.trim()}). Falling back to the normal push path.`,
         ),
       );
-      return { kind: "none", recordedTag };
+      return { kind: "none", recordedTag, ...extra };
     }
-    return { kind: "hard-reset", recordedTag };
+    return { kind: "hard-reset", recordedTag, ...extra };
   }
 
   // decision === "moved", so recordedTag is set.
@@ -430,18 +453,41 @@ export async function baseOnOriginMain(
   return { kind: "retarget", recordedTag };
 }
 
-/** The upstream tag `origin/main`'s `dataset_description.json` records, or null for none or unreadable. */
-async function originRecordedTag(datasetPath: string, sourceId: string): Promise<string | null> {
+/**
+ * The upstream tag `origin/main`'s `dataset_description.json` records, or why it records none:
+ * no such file, a file git could not read, one that is not JSON (an annex pointer, say), no entry
+ * with a tag, or entries that disagree. Unknown never trips the guard; the caller says so.
+ */
+async function originRecordedTag(
+  datasetPath: string,
+  sourceId: string,
+): Promise<{ tag: string; why?: undefined } | { tag: null; why: string }> {
   const shown = await runCommand(["git", "show", "origin/main:dataset_description.json"], {
     cwd: datasetPath,
   });
-  if (shown.exitCode !== 0) return null;
-  try {
-    return recordedUpstreamTag(JSON.parse(shown.stdout), sourceId);
-  } catch {
-    // An annex pointer or a broken file records nothing: unknown, which never trips the guard.
-    return null;
+  if (shown.exitCode !== 0) {
+    return /does not exist in|exists on disk, but not in/.test(shown.stderr)
+      ? { tag: null, why: "has no dataset_description.json" }
+      : {
+          tag: null,
+          why: `has a dataset_description.json git could not read (${shown.stderr.trim()})`,
+        };
   }
+  let desc: unknown;
+  try {
+    desc = JSON.parse(shown.stdout);
+  } catch {
+    return { tag: null, why: "has a dataset_description.json that is not JSON" };
+  }
+  const read = readRecordedUpstreamTag(desc, sourceId);
+  if (read.state === "recorded") return { tag: read.tag };
+  if (read.state === "disagree") {
+    return {
+      tag: null,
+      why: `records disagreeing upstream tags for ${sourceId} (${read.tags.join(", ")})`,
+    };
+  }
+  return { tag: null, why: `records no upstream tag for ${sourceId}` };
 }
 
 /**
