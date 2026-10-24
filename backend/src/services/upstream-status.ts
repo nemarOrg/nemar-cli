@@ -2,7 +2,7 @@
  * The upstream staleness report (epic #1046 phase 4a, #1910; ADR 0111, decision 6 and the
  * Phase 4 amendment): which OpenNeuro mirrors are behind upstream.
  *
- * READ-ONLY. It reads D1 (the mirrors, their import state, their version rows), asks OpenNeuro
+ * READ-ONLY. It reads D1 (the mirrors, their import state, their open re-pull, their version rows), asks OpenNeuro
  * for the snapshot lists, and asks the GitHub mirror whether a newer tag has arrived. The report
  * itself writes nothing to D1, GitHub or S3, sends no mail and files no issue (ADR 0052, ADR 0053,
  * ADR 0055); authentication, which wraps the route, still stamps `tokens.last_used_at`.
@@ -25,6 +25,7 @@
  * The statements authentication runs are not counted.
  */
 
+import { TERMINAL_STATUSES } from "../../../shared/repull-state.js";
 import {
   type ClassifiedMirror,
   type MirrorFacts,
@@ -64,8 +65,16 @@ export const MIRROR_POPULATION = `${MIRROR_BASE} AND d.withdrawn_at IS NULL`;
 const PAGE_COLUMNS = `p.dataset_id, p.source_id, p.visibility,
        ij.status AS import_status, ij.blocklisted AS import_blocklisted,
        ij.blocklist_reason AS import_blocklist_reason,
+       ur.status AS repull_status, ur.to_tag AS repull_to_tag,
        dv.version, dv.source_version, dv.source_version_basis, dv.created_at AS version_created_at`;
+/**
+ * The one open re-pull of a mirror, if any (`upstream_repulls`, migration 0105). The partial
+ * unique index allows at most one non-terminal row per dataset, so this join adds no rows.
+ */
+const OPEN_REPULL = `ur.dataset_id = p.dataset_id
+   AND ur.status NOT IN (${TERMINAL_STATUSES.map((s) => `'${s}'`).join(", ")})`;
 const PAGE_JOINS = `  LEFT JOIN import_jobs ij ON ij.dataset_id = p.dataset_id
+  LEFT JOIN upstream_repulls ur ON ${OPEN_REPULL}
   LEFT JOIN dataset_versions dv ON dv.dataset_id = p.dataset_id
  ORDER BY p.dataset_id`;
 
@@ -107,6 +116,8 @@ interface PageRow {
   import_status: string | null;
   import_blocklisted: number | null;
   import_blocklist_reason: string | null;
+  repull_status: string | null;
+  repull_to_tag: string | null;
   version: string | null;
   source_version: string | null;
   source_version_basis: string | null;
@@ -127,6 +138,8 @@ function groupFacts(rows: readonly PageRow[]): MirrorFacts[] {
         importStatus: row.import_status,
         blocklisted: row.import_blocklisted === 1,
         blocklistReason: row.import_blocklist_reason,
+        repullStatus: row.repull_status,
+        repullToTag: row.repull_to_tag,
         versions: [],
       };
       byId.set(row.dataset_id, facts);

@@ -21,6 +21,7 @@ import type { Database } from "bun:sqlite";
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import type { Server } from "bun";
 import { Hono } from "hono";
+import type { RepullStatus } from "../../shared/repull-state";
 import type { UpstreamStatusPage } from "../../shared/upstream-staleness";
 import { adminMiddleware, authMiddleware } from "../src/middleware/auth";
 import { adminRoutes } from "../src/routes/admin";
@@ -40,6 +41,7 @@ import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, realD1, wrapD1 } from "./helpers/d1";
 import { startOpenNeuroStandin } from "./helpers/openneuro-standin";
 import { startRawHost } from "./helpers/raw-mirror-standin";
+import { type Row, rowAt } from "./helpers/repull-rows";
 
 const ADMIN_KEY = "ups-admin-key-0123456789abcdef0123456789abcdef01";
 const MEMBER_KEY = "ups-member-key-0123456789abcdef0123456789abcdef0";
@@ -179,6 +181,20 @@ function seed(id: string, o: SeedOptions = {}): void {
        VALUES (?, 'openneuro', ?, ?, ?, ?)`,
     ).run(id, sourceId ?? "", o.job.status, o.job.blocklisted ? 1 : 0, o.job.reason ?? null);
   }
+}
+
+/** An `upstream_repulls` row for a seeded mirror, at a status that satisfies the table's CHECKs. */
+function seedRepull(id: string, status: RepullStatus, over: Row = {}): void {
+  const row = rowAt(status, {
+    dataset_id: id,
+    upstream_ds: `ds${id.slice(2)}`,
+    actor_user_id: ownerId,
+    ...over,
+  });
+  const cols = Object.keys(row);
+  db.query(
+    `INSERT INTO upstream_repulls (${cols.join(", ")}) VALUES (${cols.map(() => "?").join(", ")})`,
+  ).run(...(cols.map((c) => row[c]) as never[]));
 }
 
 const at = (tag: string): SeedOptions => ({ versions: [{ version: "1.0.0", tag }] });
@@ -570,6 +586,60 @@ describe("upstream-status: in-progress and unknown-tag rows", () => {
     }
     expect(rows.on000024?.state).not.toBe("in_progress");
     expect(openneuro.log.flatMap((r) => r.ids)).toEqual(["ds000024"]);
+  });
+
+  test("an open re-pull is in_progress, whatever its status, and is never sent to OpenNeuro", async () => {
+    const open = ["planned", "prepared", "copied", "registered", "pr_open", "released"] as const;
+    open.forEach((status, i) => {
+      const id = `on0000${31 + i}`;
+      seed(id, at("1.0.0"));
+      seedRepull(id, status);
+    });
+    seed("on000040", at("1.0.0"));
+    const page = await body(await call(""));
+    const rows = byId(page);
+    open.forEach((status, i) => {
+      const row = rows[`on0000${31 + i}`];
+      expect([row?.state, row?.reason]).toEqual([
+        "in_progress",
+        `a re-pull to 1.0.1 is ${status}; not compared`,
+      ]);
+    });
+    expect(rows.on000040?.state).not.toBe("in_progress");
+    expect(openneuro.log.flatMap((r) => r.ids)).toEqual(["ds000040"]);
+    expect(page.counts.states.in_progress).toBe(open.length);
+  });
+
+  test("a finished re-pull does not hide a mirror, and one open row never doubles a row", async () => {
+    seed("on000041", {
+      versions: [
+        { version: "1.0.0", tag: "1.0.0" },
+        { version: "2.0.0", tag: "1.0.1" },
+      ],
+    });
+    for (const [i, status] of (
+      ["abandoned", "failed", "superseded", "complete", "patch_declined"] as const
+    ).entries()) {
+      seedRepull("on000041", status, { attempt: i + 1, to_tag: `1.0.${i + 1}` });
+    }
+    let page = await body(await call(""));
+    expect(page.rows.map((r) => r.dataset_id)).toEqual(["on000041"]);
+    expect(page.rows[0]?.state).not.toBe("in_progress");
+    seedRepull("on000041", "pr_open", { attempt: 6, to_tag: "1.0.9" });
+    page = await body(await call(""));
+    expect(page.rows.map((r) => [r.dataset_id, r.state, r.reason])).toEqual([
+      ["on000041", "in_progress", "a re-pull to 1.0.9 is pr_open; not compared"],
+    ]);
+  });
+
+  test("a re-pull outranks an import that is not running, but not the other way round", async () => {
+    seed("on000042", { ...at("1.0.0"), job: { status: "complete" } });
+    seedRepull("on000042", "copied");
+    seed("on000043", { ...at("1.0.0"), job: { status: "copying" } });
+    seedRepull("on000043", "copied");
+    const rows = byId(await body(await call("")));
+    expect(rows.on000042?.reason).toBe("a re-pull to 1.0.1 is copied; not compared");
+    expect(rows.on000043?.reason).toBe("an import is copying; not compared");
   });
 
   test("an unknown tag older than upstream's latest is probably stale, and still unknown", async () => {
