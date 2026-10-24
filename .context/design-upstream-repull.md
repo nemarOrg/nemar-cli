@@ -150,7 +150,9 @@ Gates before the automatic path:
 - G2: the staleness report is live and the measurement is done (stale counts per state; files added, changed, deleted; bytes to copy; metadata-only versus data-changing; conflict and unexplained counts from batch dry runs; DOI volume from GraphQL `snapshots{tag created}` over twelve months under one re-pull per snapshot and under at most one per 30 days, counting 2.0.1 patches).
 - G3: the owner has reviewed dry-run plans for on003645 and on004362.
 - G4: on003645 executed, then on004362; the 2.0.0 DOI resolves with IsDerivedFrom and 1.0.0 still serves. These production runs are deferred until everything is built and ds003645 2.1.0 is on the GitHub mirror (owner, 2026-10-23); if it is still missing, run on004362 first.
-- G5: the owner sets the caps from the measured estimate and turns the flags on.
+- G5: the owner sets the caps from the measured estimate and turns the flags on; the first Worker merges run with `REPULL_DAILY_MERGE_CAP=1`.
+
+The Worker's merge has no staging rehearsal: outside production only `xx` datasets are re-pulled and they are never machine clean, so its first run is in production behind the flag and the cap of 1.
 
 The automatic path takes only plans with zero unexplained paths (conflicts are among them).
 

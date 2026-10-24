@@ -183,7 +183,7 @@ ADR 0086 exempts `xx` from the identifier screen, so an `xx` re-pull never has a
 
 - **DOI volume grows with upstream churn.**
   Every merged re-pull mints a version DOI that cannot be withdrawn, and a re-pull with corrections mints two.
-  The volume is measured before anything runs on its own (gate G2 of the design record), and the owner sets the caps from that estimate and turns the switches on (G5).
+  The volume is measured before anything runs on its own (gate G2 of the design record), and the owner sets the caps from that estimate and turns the switches on (G5); the first Worker merges run with `REPULL_DAILY_MERGE_CAP` set to 1.
 - **Two DOIs when N.0.1 has content.**
   N.0.0 cites upstream's snapshot without NEMAR's corrections, which is what its number says, and N.0.1 is the version a reader most likely wants.
 - **A window between N.0.0 and N.0.1.**
@@ -202,7 +202,7 @@ ADR 0086 exempts `xx` from the identifier screen, so an `xx` re-pull never has a
 - **The Worker gains a path that merges into `main` of a public dataset.**
   It is bounded by the machine definition, the switch and the cap, and a defect in it would mint a DOI; that is why the merge call waits for the ruleset check and for gates G1 to G5.
 - **The Worker's merge has no staging rehearsal.**
-  Outside production only `xx` datasets are re-pulled, and they never reach machine clean, so the Worker's merge first runs in production, behind its switch.
+  Outside production only `xx` datasets are re-pulled, and they never reach machine clean, so the Worker's merge first runs in production, behind its switch and with `REPULL_DAILY_MERGE_CAP` set to 1 for its first merges (G5).
 - **A NEMAR change that would deserve a major has no major on a mirror;** it takes a minor.
 - The importer changes as well: it clones a tag, and it refuses a re-import whose tag moved.
 
