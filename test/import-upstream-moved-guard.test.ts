@@ -219,6 +219,25 @@ describe("a released mirror whose upstream moved refuses, before anything moves"
     }, 60_000);
   }
 
+  test("the refusal names the re-pull to the new tag, the command that takes it on", async () => {
+    const { bare } = await originRecordedAt(RECORDED.entry);
+    const dir = await reimportClone(bare, "1.0.1");
+    const err = await baseOnOriginMain(dir, {
+      sourceId: UPSTREAM_ID,
+      importTag: "1.0.1",
+      nemarId: NEMAR_ID,
+      released: async () => true,
+    }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ImportRefused);
+    const message = (err as ImportRefused).message;
+    // Quoted, so the tag is never read with the sentence's full stop.
+    expect(message).toContain(
+      `To pull the new snapshot as the next major: \`nemar admin repull plan ${NEMAR_ID} --to-tag 1.0.1\`.`,
+    );
+    // The repair at the recorded tag is still the last thing said.
+    expect(message.endsWith(`nemar admin import-openneuro ${UPSTREAM_ID} --tag 1.0.0`)).toBe(true);
+  }, 60_000);
+
   test("not knowing whether it is released is a plain failure, never a retarget", async () => {
     const { bare, tip } = await originRecordedAt(RECORDED.doiOnly);
     const dir = await reimportClone(bare, "1.0.1");
