@@ -268,24 +268,60 @@ SUITE("verify --fresh-clone: the pushed repository (I1, I11)", () => {
     git(repo, "push", "-q", "--force", "origin", "main");
   }, 240_000);
 
-  test("an upstream re-pull's own commit (a repull-scrubbed line beside its delta) is tolerated", async () => {
+  test("an upstream re-pull's own commit (a repull-scrubbed line, its delta, its trailers) is tolerated", async () => {
     // ADR 0111: the re-pull's delta scrub writes its line before the one commit that carries the
-    // delta, so the commit touches the ledger and other files, as the importer's does.
+    // delta, and that commit says what it is in two trailers.
     const repullLine = LEDGER_LINE.replace("history-rewritten", "repull-scrubbed");
-    const repo = fresh();
-    const file = join(repo, ".nemar", "corrections.jsonl");
-    const before = existsSync(file) ? readFileSync(file, "utf8") : "";
-    write(repo, ".nemar/corrections.jsonl", `${before}${repullLine}`);
-    write(repo, "repulled-alongside.txt", "the re-pull's delta");
-    git(repo, "add", ".");
-    git(repo, "commit", "-q", "-m", "Re-pull of the next upstream snapshot");
-    git(repo, "push", "-q", "origin", "main");
-    const ok = await verifyFresh(fresh());
+    const trailers = [
+      "",
+      "Upstream-Snapshot: ds000001@1.0.1",
+      `Repull-Plan: sha256:${"a".repeat(64)}`,
+    ].join("\n");
+    const ledgerOf = (repo: string) => {
+      const file = join(repo, ".nemar", "corrections.jsonl");
+      return existsSync(file) ? readFileSync(file, "utf8") : "";
+    };
+    /** Commit `ledger` beside another file with `message`, push it, verify, and undo the push. */
+    const verdict = async (ledger: (before: string) => string, message: string) => {
+      const repo = fresh();
+      write(repo, ".nemar/corrections.jsonl", ledger(ledgerOf(repo)));
+      write(repo, "repulled-alongside.txt", "the re-pull's delta");
+      git(repo, "add", ".");
+      git(repo, "commit", "-q", "-m", message);
+      git(repo, "push", "-q", "origin", "main");
+      try {
+        return await verifyFresh(fresh());
+      } finally {
+        git(repo, "reset", "-q", "--hard", "HEAD~1");
+        git(repo, "push", "-q", "--force", "origin", "main");
+      }
+    };
+
+    const ok = await verdict((before) => `${before}${repullLine}`, `Re-pull ds000001\n${trailers}`);
     expect(ok.code, ok.out).toBe(0);
-    // Undo, so later tests see the tolerated state.
-    git(repo, "reset", "-q", "--hard", "HEAD~1");
-    git(repo, "push", "-q", "--force", "origin", "main");
-  }, 240_000);
+
+    // The twins: without both trailers, with another action, or editing a line before it, the
+    // same commit is a ledger commit that touches something else. The edit needs a line to edit.
+    expect(ledgerOf(fresh())).toContain("v1.0.1");
+    for (const [label, ledger, message] of [
+      ["no trailers", (b: string) => `${b}${repullLine}`, "Re-pull ds000001"],
+      [
+        "one trailer",
+        (b: string) => `${b}${repullLine}`,
+        "Re-pull ds000001\n\nUpstream-Snapshot: ds000001@1.0.1",
+      ],
+      ["another action", (b: string) => `${b}${LEDGER_LINE}`, `Re-pull ds000001\n${trailers}`],
+      [
+        "an edited earlier line",
+        (b: string) => `${b.replace("v1.0.1", "v1.0.9")}${repullLine}`,
+        `Re-pull ds000001\n${trailers}`,
+      ],
+    ] as const) {
+      const bad = await verdict(ledger, message);
+      expect(bad.code, `${label}: ${bad.out}`).toBe(4);
+      expect(bad.out, label).toContain("reason=ledger-commit-not-alone");
+    }
+  }, 300_000);
 
   test("a ledger that is not a valid ledger of this dataset fails", async () => {
     const repo = fresh();

@@ -51,6 +51,17 @@ const ACTIONS: ReadonlySet<LedgerEntry["action"]> = new Set([
 ]);
 
 /**
+ * The actions a tool writes itself, in the same commit as the files it scrubbed: the importer's
+ * (ADR 0089) and an upstream re-pull's delta scrub (ADR 0111). An operator cannot type them
+ * (`ledger-cli.ts` refuses both), a re-pull plan does not count them as recorded corrections,
+ * and ADR 0085's fresh-clone proof tolerates their commits under its own rule (`git-lib.ts`).
+ */
+export const SCRUB_ACTIONS: ReadonlySet<LedgerEntry["action"]> = new Set([
+  "import-scrubbed",
+  "repull-scrubbed",
+]);
+
+/**
  * What a verification may say, from a closed list. A free-text field is the one place a stray
  * value could slip in, so there is none: the strongest claim is the longest phrase.
  */

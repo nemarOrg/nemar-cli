@@ -1375,19 +1375,28 @@ export async function verifyRewrite(opts: VerifyOptions): Promise<VerifyResult> 
   return { ok: failures.length === 0, failures, counts };
 }
 
+/** A re-pull commit's two trailers (ADR 0111, decision 2): the snapshot it pulled and the plan. */
+const UPSTREAM_SNAPSHOT_TRAILER = /^Upstream-Snapshot: ds\d{6}@[0-9A-Za-z][0-9A-Za-z._-]*$/m;
+const REPULL_PLAN_TRAILER = /^Repull-Plan: sha256:[0-9a-f]{64}$/m;
+
 /**
- * Whether the lines a commit appended to the ledger are all a scrub's own line: the importer's
- * `import-scrubbed`, or an upstream re-pull's `repull-scrubbed`. Each is committed in the SAME
- * commit as the files it scrubbed (ADR 0089; ADR 0111's one re-pull commit), so a dataset imported
- * or re-pulled that way would otherwise fail `ledger-commit-not-alone` for good. Anything else
- * (a line that is not an append, one of another action, one that does not parse) is not that.
+ * Whether a commit that touches the ledger and other files is a scrub's own commit: every line it
+ * adds to the ledger is a scrub's (`import-scrubbed` from the importer, ADR 0089, or
+ * `repull-scrubbed` from an upstream re-pull's delta scrub, ADR 0111), it edits nothing before
+ * them, and a commit that adds a `repull-scrubbed` line carries the re-pull commit's
+ * `Upstream-Snapshot:` and `Repull-Plan:` trailers. Each scrub commits its line in the SAME
+ * commit as the files it scrubbed, so a dataset imported or re-pulled that way would otherwise
+ * fail `ledger-commit-not-alone` for good. Anything else (a line that is not an append, one of
+ * another action, one that does not parse, a re-pull line without both trailers) is not that.
  *
  * What this does NOT prove: that the other files in the commit are the scrub's. Nothing in the
- * repository tells the scrub's commit from one made by hand with the same line, so the bound is
- * on what the commit may do to the LEDGER (append scrub lines, edit nothing before them); the
- * lines themselves are validated for this dataset at every head tip (`ledger-invalid`).
+ * repository tells the scrub's commit from one made by hand with the same line and trailers, so
+ * the bound is on what the commit may do to the LEDGER (append scrub lines, edit nothing before
+ * them) and on what it must say of itself; the words cannot be typed at the ledger's command
+ * line (`ledger-cli.ts`), and the lines themselves are validated for this dataset at every head
+ * tip (`ledger-invalid`).
  */
-async function addsOnlyImportLines(repo: string, sha: string): Promise<boolean> {
+async function isScrubLedgerCommit(repo: string, sha: string): Promise<boolean> {
   const lines = async (rev: string): Promise<string[] | undefined> => {
     const r = await gitRaw(repo, ["cat-file", "blob", `${rev}:${LEDGER_PATH}`]);
     if (r.exitCode !== 0) return undefined;
@@ -1400,19 +1409,23 @@ async function addsOnlyImportLines(repo: string, sha: string): Promise<boolean> 
   // A first commit, or a parent with no ledger, appends everything.
   const before = (await lines(`${sha}^`)) ?? [];
   if (!now || now.length <= before.length || before.some((l, i) => l !== now[i])) return false;
+  let actions: unknown[];
   try {
-    return now.slice(before.length).every((l) => {
-      const entry = JSON.parse(l) as { action?: unknown };
-      return entry.action === "import-scrubbed" || entry.action === "repull-scrubbed";
-    });
+    actions = now.slice(before.length).map((l) => (JSON.parse(l) as { action?: unknown }).action);
   } catch {
     return false;
   }
+  if (!actions.every((a) => a === "import-scrubbed" || a === "repull-scrubbed")) return false;
+  if (!actions.includes("repull-scrubbed")) return true;
+  const trailers = await gitRaw(repo, ["show", "-s", "--format=%(trailers:only,unfold)", sha]);
+  if (trailers.exitCode !== 0) return false;
+  const text = trailers.stdout.toString("utf8");
+  return UPSTREAM_SNAPSHOT_TRAILER.test(text) && REPULL_PLAN_TRAILER.test(text);
 }
 
 /**
  * The commits that touch {@link LEDGER_PATH}: how many there are, how many touch anything else
- * too (the importer's own commit excepted, see {@link addsOnlyImportLines}), and at how many head
+ * too (a scrub's own commit excepted, see {@link isScrubLedgerCommit}), and at how many head
  * tips the ledger is not a valid ledger of `dataset`.
  */
 async function ledgerChecks(
@@ -1435,7 +1448,7 @@ async function ledgerChecks(
     const paths = rest.filter((p) => p !== "");
     if (!paths.includes(LEDGER_PATH)) continue;
     commits++;
-    if (paths.some((p) => p !== LEDGER_PATH) && !(await addsOnlyImportLines(repo, sha))) {
+    if (paths.some((p) => p !== LEDGER_PATH) && !(await isScrubLedgerCommit(repo, sha))) {
       notAlone++;
     }
   }

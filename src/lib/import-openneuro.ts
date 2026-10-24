@@ -460,9 +460,11 @@ export async function baseOnOriginMain(
   // A retarget takes the new tag's tree whole, so origin's `.nemar/` goes with the old one, and
   // with it whatever the ledger records. Step 5b's scrub writes the new tree's own line from
   // scratch; it does not carry the old ones. So a ledger line the retarget would lose refuses it:
-  // a recorded correction (ADR 0085), or an `import-scrubbed` line whose scrub changed git (a JSON
-  // value blanked, a git-held recording scrubbed), because origin's history still holds those
-  // originals and only a hard reset keeps the hold that says so (ADR 0089, earlierHistoryHold).
+  // a recorded correction (ADR 0085), an upstream re-pull's `repull-scrubbed` line (ADR 0111; a
+  // re-pull needs a released mirror, refused above, so dropping its record is not a retarget's to
+  // decide), or an `import-scrubbed` line whose scrub changed git (a JSON value blanked, a git-held
+  // recording scrubbed), because origin's history still holds those originals and only a hard
+  // reset keeps the hold that says so (ADR 0089, earlierHistoryHold).
   const kept = await originLedgerLinesARetargetDrops(datasetPath);
   if (kept !== 0) {
     throw new Error(
@@ -500,7 +502,8 @@ async function originMainHasPath(
 
 /**
  * How many lines of `origin/main`'s privacy ledger a retarget would drop with consequence: any line
- * but the importer's own `import-scrubbed` one, an `import-scrubbed` line whose scrub blanked a
+ * but the importer's own `import-scrubbed` one (a re-pull's `repull-scrubbed` line included),
+ * an `import-scrubbed` line whose scrub blanked a
  * JSON value or scrubbed a git-held recording (origin's history holds those originals, ADR 0089),
  * and a line that is not a JSON object, because a ledger that cannot be read cannot be shown to
  * hold none. No ledger is 0; a ledger git cannot read is `unreadable`.

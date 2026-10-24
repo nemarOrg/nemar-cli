@@ -28,7 +28,7 @@ import {
   presentIn,
   readLocationLogsAt,
 } from "../../../scripts/scrub/git/git-lib.js";
-import { LEDGER_REPO_PATH, parseLedgerText } from "../../../scripts/scrub/ledger.js";
+import { LEDGER_REPO_PATH, SCRUB_ACTIONS, parseLedgerText } from "../../../scripts/scrub/ledger.js";
 import { isKeyPresentAtDeclaredSize } from "../../../shared/annex-key.js";
 import type { CanonicalJsonValue } from "../../../shared/neurobagel/canonical-json.js";
 import { type SourceVersionRow, openNeuroSourceId } from "../../../shared/source-snapshot.js";
@@ -763,13 +763,6 @@ function errorWords(err: unknown): string {
   return err instanceof Error && /^[A-Za-z]{1,40}$/.test(err.name) ? err.name : "unparseable";
 }
 
-/**
- * The ledger lines a scrub writes itself and a re-pull re-applies as a function: the importer's
- * own (`import-scrubbed`) and a re-pull's delta scrub (`repull-scrubbed`). Every other line is a
- * recorded correction (ADR 0111, decision 1, as the Phase 6b amendment reads it).
- */
-const SCRUB_ACTIONS: ReadonlySet<string> = new Set(["import-scrubbed", "repull-scrubbed"]);
-
 async function readLedger(
   tree: Map<string, { oid: string }>,
   store: BlobStore,
@@ -796,6 +789,8 @@ async function readLedger(
     return {
       status: "ok",
       lines: lines.length,
+      // A scrub's own line is re-applied as a function; every other line is a recorded correction
+      // (ADR 0111, decision 1, as the Phase 6b amendment corrects it).
       recordedCorrections: lines.filter((l) => !SCRUB_ACTIONS.has(l.action)).length,
       error: null,
     };
