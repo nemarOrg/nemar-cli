@@ -191,4 +191,18 @@ describe("sendBroadcast with an outbox bound", () => {
       failure_count: 50,
     });
   });
+
+  test("case-variant duplicates are queued once and the row reaches done", async () => {
+    const q = recordingQueue();
+    const { env: e } = env(q.queue);
+    const db = freshDb();
+    const result = await run(db, ["a@nemar.test", "A@Nemar.test ", "b@nemar.test"], e);
+    expect(result.recipient_count).toBe(2);
+    expect(q.bodies.map((b) => (b as { to: string }).to)).toEqual(["a@nemar.test", "b@nemar.test"]);
+    expect(readRow(db)).toMatchObject({ queued_count: 2 });
+
+    const { batch } = recordingBatch(q.bodies);
+    await handleOutboxBatch(batch.messages as never, { ...e, DB: realD1(db) } as OutboxEnv);
+    expect(readRow(db)).toMatchObject({ status: "done", queued_count: 2, delivered_count: 2 });
+  });
 });

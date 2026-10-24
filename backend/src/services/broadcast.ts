@@ -312,9 +312,19 @@ async function enqueueBroadcast(
   db: D1Database,
   queue: Queue,
   params: { sentById: number; group: RecipientGroupOrUser; subject: string; bodyMarkdown: string },
-  allowedRecipients: string[],
+  allRecipients: string[],
   suppressedCount: number,
 ): Promise<BroadcastResult> {
+  // Outcomes are keyed by the hash of the trimmed, lowercased address, so two spellings of one
+  // recipient would share an outcome row and leave the row waiting for a count that never
+  // comes. Keep the first spelling of each.
+  const seen = new Set<string>();
+  const allowedRecipients = allRecipients.filter((to) => {
+    const key = to.trim().toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
   const audit = await db
     .prepare(
       `INSERT INTO broadcast_emails
