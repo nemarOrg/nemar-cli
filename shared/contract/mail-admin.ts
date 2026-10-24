@@ -1,0 +1,206 @@
+/**
+ * The wire shapes of the support-ticket admin routes (epic #1893 phase 3b, ADR 0111):
+ *
+ *   GET  /admin/mail/tickets                    list, filtered, keyset-paged
+ *   GET  /admin/mail/tickets/:id                one ticket: messages, tags, events
+ *   POST /admin/mail/tickets/:id/reply          send a reply to the requester from support@
+ *   POST /admin/mail/tickets/:id/note           an internal note
+ *   POST /admin/mail/tickets/:id/assign         assign or unassign
+ *   POST /admin/mail/tickets/:id/status         open, pending, closed or spam
+ *   POST /admin/mail/tickets/:id/escalate       hand to the escalation owner
+ *   GET  /admin/mail/queues                     queues the caller may see
+ *   PUT  /admin/mail/queues/:tag                (owner) create or change a queue
+ *   GET  /admin/mail/availability               the caller's own away window
+ *   PUT  /admin/mail/availability               set it
+ *   GET  /admin/mail/availability/:userId       (owner) anyone's
+ *   PUT  /admin/mail/availability/:userId       (owner) set anyone's
+ *   POST /admin/mail/reprocess                  (owner) rebuild a ticket from a stored raw key
+ *
+ * Access follows the account's role and the ticket's exclusion, never the account kind or the
+ * username: an owner sees every ticket, an admin sees the unrestricted ones, and nobody sees a
+ * ticket that excludes them. A ticket the caller may not see answers 404 `not_found`, on every
+ * route, so its existence does not leak. The raw message is never returned.
+ */
+
+export const TICKET_STATUSES = ["open", "pending", "escalated", "closed", "spam"] as const;
+export type TicketStatus = (typeof TICKET_STATUSES)[number];
+
+/** The statuses the status route sets. `escalated` has its own route, which also reassigns. */
+export const SETTABLE_STATUSES = ["open", "pending", "closed", "spam"] as const;
+export type SettableStatus = (typeof SETTABLE_STATUSES)[number];
+
+export const QUEUE_STRATEGIES = ["fixed", "round_robin", "pool"] as const;
+export type QueueStrategy = (typeof QUEUE_STRATEGIES)[number];
+
+export type MailErrorCode =
+  | "bad_request"
+  | "not_found"
+  | "forbidden"
+  | "ineligible_assignee"
+  | "ticket_is_spam"
+  | "ticket_closed"
+  | "already_escalated"
+  | "no_escalation_owner"
+  | "escalation_owner_ineligible"
+  | "restricted_locked"
+  | "restricted_flag_busy"
+  | "fallback_not_restrictable"
+  | "reply_not_sent"
+  | "reply_delivery_unknown"
+  | "inbound_not_configured"
+  | "internal";
+
+export interface MailErrorBody {
+  error: string;
+  code: MailErrorCode;
+}
+
+export interface TicketSummary {
+  id: number;
+  ref: string;
+  queue_tag: string;
+  restricted: boolean;
+  status: TicketStatus;
+  assignee_user_id: number | null;
+  requester_email: string;
+  requester_user_id: number | null;
+  subject: string;
+  created_at: string;
+  updated_at: string;
+  last_message_at: string;
+}
+
+/** Query of the list route. `status` absent hides spam and closed tickets. */
+export interface ListTicketsQuery {
+  status?: TicketStatus;
+  queue?: string;
+  /** `me`, a user id, or `none` for unassigned. */
+  assignee?: string;
+  /** Substring of the subject or the requester address. */
+  q?: string;
+  /** The `next_cursor` of the previous page. */
+  cursor?: string;
+  /** 1 to 100, default 25. */
+  limit?: number;
+}
+
+export interface ListTicketsResponse {
+  tickets: TicketSummary[];
+  /** Pass as `cursor` for the next page; null on the last. Order is last_message_at then id, newest first. */
+  next_cursor: string | null;
+}
+
+export interface TicketMessage {
+  id: number;
+  direction: "in" | "out" | "note";
+  message_id: string | null;
+  from_addr: string;
+  to_addr: string;
+  subject: string;
+  text_body: string;
+  spf: string;
+  dkim: string;
+  dmarc: string;
+  author_user_id: number | null;
+  created_at: string;
+}
+
+export interface TicketEvent {
+  id: number;
+  kind: string;
+  actor_user_id: number | null;
+  detail: unknown;
+  created_at: string;
+}
+
+export interface TicketDetail {
+  ticket: TicketSummary;
+  tags: string[];
+  messages: TicketMessage[];
+  events: TicketEvent[];
+}
+
+/** Plain text. It is sent as an escaped HTML body with the line breaks kept. */
+export interface ReplyRequest {
+  text: string;
+}
+export interface ReplyResponse {
+  message_id: string;
+  /** The Message-ID the reply went out under. */
+  header_message_id: string;
+  status: TicketStatus;
+}
+
+export interface NoteRequest {
+  text: string;
+}
+export interface AssignRequest {
+  user_id: number | null;
+}
+export interface StatusRequest {
+  status: SettableStatus;
+}
+export interface EscalateRequest {
+  reason?: string;
+}
+
+export interface TicketActionResponse {
+  ticket: TicketSummary;
+}
+
+export interface MailQueue {
+  tag: string;
+  restricted: boolean;
+  strategy: QueueStrategy;
+  assignee_user_id: number | null;
+  backup_user_id: number | null;
+  rr_members: number[];
+  escalation_user_id: number | null;
+  /** Tickets in this queue that are not closed. */
+  open_tickets: number;
+}
+
+export interface ListQueuesResponse {
+  queues: MailQueue[];
+}
+
+/**
+ * Every field is optional and merges into the stored queue; a tag with no queue is created.
+ * Rules: `security` and `conduct` stay restricted; `*` is never restricted; the restricted flag
+ * of a queue with tickets that are not closed cannot change (`restricted_flag_busy`, close or
+ * move them first); every person named on a restricted queue must be an owner, and on any other
+ * an admin or owner (`ineligible_assignee`). Changing `rr_members` restarts the rotation.
+ */
+export interface PutQueueRequest {
+  restricted?: boolean;
+  strategy?: QueueStrategy;
+  assignee_user_id?: number | null;
+  backup_user_id?: number | null;
+  rr_members?: number[];
+  escalation_user_id?: number | null;
+}
+
+export interface Availability {
+  user_id: number;
+  away_from: string | null;
+  away_until: string | null;
+  backup_user_id: number | null;
+  note: string | null;
+}
+
+/** All fields null (and no backup) clears the window. Dates are ISO 8601 instants. */
+export interface PutAvailabilityRequest {
+  away_from?: string | null;
+  away_until?: string | null;
+  backup_user_id?: number | null;
+  note?: string | null;
+}
+
+export interface ReprocessRequest {
+  raw_key: string;
+}
+export interface ReprocessResponse {
+  outcome: "created" | "threaded" | "duplicate";
+  ticket_id: number;
+  status: TicketStatus;
+}
