@@ -10,7 +10,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { which } from "bun";
 import {
@@ -304,6 +304,11 @@ describe.skipIf(!awsInstalled)("finalizeImport stops at the gate", () => {
     origin = join(origins, `${FINAL_ID}.git`);
     await ok(["git", "init", "-q", "--bare", "-b", "main", origin], root.root);
     await ok(["git", "push", "-q", origin, "main", "git-annex"], work);
+    // Annex-initialise the origin up front. A clone's `git annex init` probes a local origin, and
+    // older git-annex (10.20240129, the CI runner's) initialises one that has no annex.uuid by
+    // committing to ITS git-annex branch. GitHub is never such an origin, so that commit is the
+    // fixture's artefact; doing it here keeps it out of the before/after comparison below.
+    await ok(["git", "annex", "init", "-q", "origin"], origin);
 
     // The copy landed one key; the other never reached the bucket.
     stand.putObject("nemar", `${S3_PREFIX}${backed}`, new Uint8Array(150));
@@ -350,8 +355,8 @@ describe.skipIf(!awsInstalled)("finalizeImport stops at the gate", () => {
         "",
       ].join("\n"),
     );
-    const workDir = join(root.root, "finalize-work");
-    mkdirSync(workDir, { recursive: true });
+    // A fresh directory per attempt: a retry must not meet the clone a failed attempt left behind.
+    const workDir = mkdtempSync(join(root.root, "finalize-work-"));
     const child = Bun.spawn(["bun", "run", script], {
       env: {
         ...process.env,
