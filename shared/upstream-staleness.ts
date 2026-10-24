@@ -617,3 +617,108 @@ export function summarizeSnapshotDelta(
     bytes_to_copy: bytes,
   };
 }
+
+const DAY_MS = 86_400_000;
+
+/** How many re-pulls (and so DOIs) the fleet would mint, under three readings of upstream churn. */
+export interface DoiVolume {
+  window_days: number;
+  /** Mirrors in `current` or a `stale_*` state: a known tag and a snapshot list were read. */
+  mirrors_counted: number;
+  /** Mirrors left out, by state, zero-filled; the counted states are 0 here by construction. */
+  excluded: Record<UpstreamState, number>;
+  /** One re-pull straight to the latest tag for each stale mirror. */
+  catch_up: number;
+  /** Upstream snapshots created in the window, every dataset's first excluded: one re-pull each. */
+  per_snapshot: number;
+  /** The same snapshots, at most one counted per dataset per `minGapDays`. */
+  at_most_every_30_days: number;
+  /** The most of those snapshots created on one UTC date. */
+  busiest_day: number;
+  /** Each figure doubled: a re-pull with corrections also mints an N.0.1 DOI. */
+  upper_bound_with_patches: {
+    catch_up: number;
+    per_snapshot: number;
+    at_most_every_30_days: number;
+  };
+  /** Snapshots whose `created` did not parse: left out of the figures above, never read as old. */
+  snapshots_with_unreadable_dates: number;
+}
+
+/** A snapshot's creation time in ms, NaN when absent or unparsable. */
+function createdMs(created: string | null): number {
+  return created === null ? Number.NaN : Date.parse(created);
+}
+
+const COUNTED_STATES: readonly UpstreamState[] = ["current", ...STALE_STATES];
+
+/**
+ * Estimate the DOI volume of re-pulling (ADR 0111). Whether a re-pull carries corrections, and so
+ * a second DOI, is known only from a plan (`nemar admin repull plan`), so the figure is a range:
+ * the base and its doubling. The first snapshot of a dataset was the import, not a re-pull, so it
+ * is not counted (and when the first listed snapshot has no readable date, nothing is excluded:
+ * the estimate errs high rather than guess which one was the import).
+ */
+export function estimateRepullDoiVolume(
+  rows: readonly UpstreamStatusRow[],
+  nowMs: number,
+  opts: { windowDays?: number; minGapDays?: number } = {},
+): DoiVolume {
+  const windowDays = opts.windowDays ?? 365;
+  const minGapMs = (opts.minGapDays ?? 30) * DAY_MS;
+  const since = nowMs - windowDays * DAY_MS;
+
+  const excluded = Object.fromEntries(UPSTREAM_STATES.map((s) => [s, 0])) as Record<
+    UpstreamState,
+    number
+  >;
+  let counted = 0;
+  let catchUp = 0;
+  let perSnapshot = 0;
+  let spaced = 0;
+  let unreadable = 0;
+  const perDay = new Map<string, number>();
+
+  for (const row of rows) {
+    if (!COUNTED_STATES.includes(row.state) || row.upstream === null) {
+      excluded[row.state]++;
+      continue;
+    }
+    counted++;
+    if ((STALE_STATES as readonly string[]).includes(row.state)) catchUp++;
+
+    const times = row.upstream.snapshots.map((s) => createdMs(s.created));
+    unreadable += times.filter((t) => Number.isNaN(t)).length;
+    const stamped = times.filter((t) => !Number.isNaN(t)).sort((a, b) => a - b);
+    const firstReadable = times.length > 0 && !Number.isNaN(times[0] as number);
+    // Drop the import (the earliest snapshot); keep everything when it cannot be identified.
+    const candidates = firstReadable ? stamped.slice(1) : stamped;
+    let lastCounted = Number.NEGATIVE_INFINITY;
+    for (const t of candidates) {
+      if (t <= since || t > nowMs) continue;
+      perSnapshot++;
+      const day = new Date(t).toISOString().slice(0, 10);
+      perDay.set(day, (perDay.get(day) ?? 0) + 1);
+      if (t - lastCounted >= minGapMs) {
+        spaced++;
+        lastCounted = t;
+      }
+    }
+  }
+
+  return {
+    window_days: windowDays,
+    mirrors_counted: counted,
+    excluded,
+    catch_up: catchUp,
+    per_snapshot: perSnapshot,
+    at_most_every_30_days: spaced,
+    busiest_day: Math.max(0, ...perDay.values()),
+    upper_bound_with_patches: {
+      catch_up: catchUp * 2,
+      per_snapshot: perSnapshot * 2,
+      at_most_every_30_days: spaced * 2,
+    },
+    snapshots_with_unreadable_dates: unreadable,
+  };
+}

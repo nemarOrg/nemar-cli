@@ -13,7 +13,19 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { type SnapshotFile, summarizeSnapshotDelta } from "../shared/upstream-staleness";
+import {
+  type MirrorFacts,
+  type MirrorProbe,
+  type SnapshotFile,
+  UPSTREAM_STATES,
+  type UpstreamRead,
+  type UpstreamSnapshot,
+  type UpstreamStatusRow,
+  diffStaleMirrors,
+  estimateRepullDoiVolume,
+  summarizeSnapshotDelta,
+  toWireRow,
+} from "../shared/upstream-staleness";
 
 const FILES = join(import.meta.dir, "fixtures/openneuro-snapshot-files");
 
@@ -165,5 +177,199 @@ describe("summarizeSnapshotDelta on built listings", () => {
     );
     expect(d.new_keys).toBe(2);
     expect(d.bytes_to_copy).toBeNull();
+  });
+});
+
+// ----------------------------------------------------------------------------
+// DOI volume
+// ----------------------------------------------------------------------------
+
+describe("estimateRepullDoiVolume", () => {
+  const FIXTURES = join(import.meta.dir, "../backend/test/fixtures/openneuro-graphql");
+  const request = JSON.parse(
+    readFileSync(join(FIXTURES, "graphql-upstream-snapshots.request.json"), "utf-8"),
+  ) as { variables: Record<string, string> };
+  const response = JSON.parse(
+    readFileSync(join(FIXTURES, "graphql-upstream-snapshots.response.json"), "utf-8"),
+  ) as {
+    data: Record<
+      string,
+      null | { id: string; latestSnapshot: UpstreamSnapshot | null; snapshots: UpstreamSnapshot[] }
+    >;
+  };
+
+  /** The rows the classifier produces from the recorded lists, each mirror recorded at `tags[ds]`. */
+  function recordedRows(tags: Record<string, string>): UpstreamStatusRow[] {
+    const upstream = new Map<string, UpstreamRead>();
+    const mirrors: MirrorFacts[] = [];
+    for (const [alias, ds] of Object.entries(request.variables)) {
+      const node = response.data[alias];
+      if (!node) continue;
+      upstream.set(ds, {
+        kind: "snapshot",
+        latest: node.latestSnapshot,
+        snapshots: node.snapshots,
+      });
+      mirrors.push({
+        datasetId: `on${ds.slice(2)}`,
+        sourceId: ds,
+        visibility: "public",
+        importStatus: "complete",
+        blocklisted: false,
+        blocklistReason: null,
+        versions: [
+          {
+            version: "1.0.0",
+            source_version: tags[ds] ?? null,
+            source_version_basis: "doi",
+            created_at: "2025-01-01 00:00:00",
+          },
+        ],
+      });
+    }
+    const ready = new Map<string, MirrorProbe>(
+      [...upstream.keys()].map((ds) => [ds, { kind: "ready" }]),
+    );
+    return diffStaleMirrors(mirrors, upstream, ready).map(toWireRow);
+  }
+
+  const RECORDED_AT: Record<string, string> = {
+    ds003645: "2.0.2",
+    ds004362: "1.0.0",
+    ds000001: "00006",
+    ds002893: "2.0.0",
+    ds003082: "1.0.1",
+  };
+
+  test("the trailing year at the recording: ds003645 2.1.0 and ds004362 1.0.1", () => {
+    const rows = recordedRows(RECORDED_AT);
+    const v = estimateRepullDoiVolume(rows, Date.parse("2026-10-24T12:00:00Z"));
+    expect(v.mirrors_counted).toBe(5);
+    expect(v.catch_up).toBe(3);
+    expect(v.per_snapshot).toBe(2);
+    expect(v.at_most_every_30_days).toBe(2);
+    expect(v.busiest_day).toBe(1);
+    expect(v.upper_bound_with_patches).toEqual({
+      catch_up: 6,
+      per_snapshot: 4,
+      at_most_every_30_days: 4,
+    });
+    expect(v.snapshots_with_unreadable_dates).toBe(0);
+  });
+
+  test("two snapshots on one day count twice per snapshot and once under the gap (real data)", () => {
+    // ds003645's 2.0.1 and 2.0.2 were both created on 2023-04-14.
+    const rows = recordedRows(RECORDED_AT);
+    const v = estimateRepullDoiVolume(rows, Date.parse("2024-01-01T00:00:00Z"));
+    expect(v.per_snapshot).toBe(2);
+    expect(v.at_most_every_30_days).toBe(1);
+    expect(v.busiest_day).toBe(2);
+    const noGap = estimateRepullDoiVolume(rows, Date.parse("2024-01-01T00:00:00Z"), {
+      minGapDays: 0,
+    });
+    expect(noGap.at_most_every_30_days).toBe(2);
+  });
+
+  test("the window is half open: a snapshot at the edge is out, at now is in", () => {
+    const now = Date.parse("2026-10-24T04:10:36.000Z");
+    // ds003645 2.1.0 was created at exactly `now`: in. Its 2.0.2 is long before the window.
+    expect(estimateRepullDoiVolume(recordedRows(RECORDED_AT), now).per_snapshot).toBe(2);
+    expect(estimateRepullDoiVolume(recordedRows(RECORDED_AT), now - 1).per_snapshot).toBe(1);
+    // ds004362 1.0.1 as the window's lower edge: created exactly windowDays before now is out.
+    const created = Date.parse(response.data.a1?.snapshots[1]?.created as string);
+    const only = recordedRows({ ds004362: "1.0.0" }).filter((r) => r.ds === "ds004362");
+    expect(
+      estimateRepullDoiVolume(only, created + 30 * 86_400_000, { windowDays: 30 }),
+    ).toMatchObject({
+      per_snapshot: 0,
+    });
+    expect(
+      estimateRepullDoiVolume(only, created + 30 * 86_400_000 - 1, { windowDays: 30 }),
+    ).toMatchObject({ per_snapshot: 1 });
+  });
+
+  test("a dataset's first snapshot is the import, not a re-pull", () => {
+    // ds003082's first snapshot (2020) is inside a 10-year window; only its 1.0.1 counts.
+    const rows = recordedRows({ ds003082: "1.0.1" }).filter((r) => r.ds === "ds003082");
+    const v = estimateRepullDoiVolume(rows, Date.parse("2026-10-24T12:00:00Z"), {
+      windowDays: 3650,
+    });
+    expect(v.per_snapshot).toBe(1);
+  });
+
+  test("rows without a known tag are excluded and counted by state, never dropped", () => {
+    const rows = recordedRows({ ds003645: "2.0.2" });
+    const v = estimateRepullDoiVolume(rows, Date.parse("2026-10-24T12:00:00Z"));
+    expect(v.mirrors_counted).toBe(1);
+    const total = Object.values(v.excluded).reduce((a, b) => a + b, 0);
+    expect(total).toBe(rows.length - 1);
+    expect(Object.keys(v.excluded).sort()).toEqual([...UPSTREAM_STATES].sort());
+  });
+
+  test("an unparsable date is counted, not read as old and not dropped silently", () => {
+    // Built: OpenNeuro does not send an unparsable `created` today.
+    const row = (created: string | null): UpstreamStatusRow => ({
+      dataset_id: "on000009",
+      ds: "ds000009",
+      visibility: "public",
+      state: "current",
+      anomaly: null,
+      reason: "x",
+      recorded: { version: "1.0.0", tag: "1.0.1", basis: "doi" },
+      upstream: {
+        latest_tag: "1.0.1",
+        latest_created: null,
+        snapshots: [
+          { tag: "1.0.0", created: "2025-01-01T00:00:00Z" },
+          { tag: "1.0.1", created },
+        ],
+      },
+      import_status: "complete",
+      probably_stale: null,
+    });
+    const now = Date.parse("2026-01-01T00:00:00Z");
+    const bad = estimateRepullDoiVolume([row("not a date")], now);
+    expect(bad.snapshots_with_unreadable_dates).toBe(1);
+    expect(bad.per_snapshot).toBe(0);
+    expect(estimateRepullDoiVolume([row(null)], now).snapshots_with_unreadable_dates).toBe(1);
+    expect(estimateRepullDoiVolume([row("2025-06-01T00:00:00Z")], now).per_snapshot).toBe(1);
+  });
+
+  test("snapshots exactly the gap apart are both counted; one day less is one", () => {
+    // Built: the boundary of the gap rule (real data has no pair exactly 30 days apart).
+    const row = (second: string): UpstreamStatusRow => ({
+      dataset_id: "on000009",
+      ds: "ds000009",
+      visibility: "public",
+      state: "current",
+      anomaly: null,
+      reason: "x",
+      recorded: { version: "1.0.0", tag: "1.0.2", basis: "doi" },
+      upstream: {
+        latest_tag: "1.0.2",
+        latest_created: second,
+        snapshots: [
+          { tag: "1.0.0", created: "2025-01-01T00:00:00Z" },
+          { tag: "1.0.1", created: "2025-03-01T00:00:00Z" },
+          { tag: "1.0.2", created: second },
+        ],
+      },
+      import_status: "complete",
+      probably_stale: null,
+    });
+    const now = Date.parse("2026-01-01T00:00:00Z");
+    expect(estimateRepullDoiVolume([row("2025-03-31T00:00:00Z")], now).at_most_every_30_days).toBe(
+      2,
+    );
+    expect(estimateRepullDoiVolume([row("2025-03-30T00:00:00Z")], now).at_most_every_30_days).toBe(
+      1,
+    );
+  });
+
+  test("an empty fleet is zeros with every excluded key present", () => {
+    const v = estimateRepullDoiVolume([], Date.now());
+    expect(v.mirrors_counted).toBe(0);
+    expect(v.busiest_day).toBe(0);
+    expect(Object.keys(v.excluded).length).toBe(UPSTREAM_STATES.length);
   });
 });
