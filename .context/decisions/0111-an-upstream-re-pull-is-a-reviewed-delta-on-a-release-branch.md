@@ -1,0 +1,179 @@
+# ADR 0111: An upstream re-pull is a reviewed delta on a release branch
+
+**Status:** accepted
+**Date:** 2026-10-23
+**Owner:** Seyed Yahya Shirazi
+
+Epic #1046, Phase 1 (#1907).
+Amends [ADR 0006](0006-upstream-re-pull-is-a-major-version-bump.md): its policy stands (a re-pull is a major bump), and this record adds the mechanism and says what major and patch mean on a mirror.
+Narrows [ADR 0093](0093-pull-requests-awaiting-approval-are-managed-from-one-admin-command-and-an-approval-is-the-administrators-own.md) for one class of pull request, the re-pull pull request (decision 7); for every other pull request ADR 0093 stands.
+Builds on ADR 0001 (published datasets are PR-only), ADR 0016 (tags are CI's), ADR 0023 (`--clean` reconciles), ADR 0034 (the column budget), ADR 0060, ADR 0085, ADR 0086, ADR 0089 and ADR 0091 (what an imported tree goes through), and ADR 0053 and ADR 0054 (unknown is never zero).
+The analysis is `.context/design-upstream-repull.md`; where it and this record disagree, this record wins.
+Nothing here is built yet; the later phases of #1046 build it.
+
+## Context
+
+ADR 0006 fixed the policy for an upstream re-pull and left the machinery to epic #1046.
+An imported mirror never re-enters candidacy: discovery fetches `latestSnapshot.tag` and discards it, and `diffNewDatasets` compares ids only.
+Running the importer again is not a re-pull: `POST /datasets/import` answers 409 for an existing dataset, prepare's step 4c resets onto `origin/main` under a same-version assumption (#993), so the copy manifest follows the new upstream while the tree stays NEMAR's old one, and finalize skips publication for a public dataset (#985).
+Nothing records which upstream snapshot a version mirrors: the importer clones the default HEAD, no importer step sets `Version`, and neither `datasets` nor `dataset_versions` has a `source_version`.
+Early imports rewrote every commit, so on `on003645` NEMAR's history shares no ancestry with upstream's although the trees match upstream 2.0.2 plus `.github/`.
+`AUTO_IMPORT_ENABLED` is `"true"` in production (`backend/wrangler-sccn.toml`), so nothing a re-pull needs may reach the auto-import's candidate set.
+Measured staleness is real: `on004362` missed upstream's 1.0.1 metadata fix (#1810).
+
+## Decision
+
+**An upstream re-pull replays the delta between two pinned upstream tags onto NEMAR's `main` as one synthesized commit on `release/vN.0.0`, landed through a pull request; N.0.0 is a pure mirror of the upstream snapshot, and NEMAR's corrections follow as N.0.1.**
+
+### 1. N.0.0 is a pure mirror, and upstream wins every conflict
+
+- The N.0.0 tree is upstream's tree at `to_tag` with NEMAR's standard edits applied, and nothing else outside the paths NEMAR owns.
+- NEMAR owns `.nemar/**`, `.github/**`, and in `dataset_description.json` the keys `DatasetDOI` (the concept DOI) and `Version`, and the `SourceDatasets` entry naming this dataset's own `ds`, which becomes `{DOI, URL, Version: to_tag}`.
+  Other `SourceDatasets` entries are kept from both sides, and every other key and path is upstream-owned.
+  `CHANGES` is upstream-owned, and NEMAR never writes it.
+- The standard edits are re-applied as functions, never merged as text: the README rename and DOI badge, the `.nemar/` line in `.bidsignore`, ADR 0060's annex policy, moving git-resident data into the annex, ADR 0089's scrub with its provenance sentence, and ADR 0091's date normalization.
+- A NEMAR change to an upstream-owned path is explained when ours equals a standard edit applied to base, checked mechanically: a scrubbed key is explained when NEMAR's git-annex branch marks the upstream key dead, and a file moved into the annex is explained when its key hashes the base blob.
+- An unexplained NEMAR change is a correction when upstream did not change that path between `from_tag` and `to_tag`, and a conflict when it did.
+- A conflict takes upstream's side in N.0.0, so a re-pull never blocks on one; the plan lists it for an administrator, and it stays out of N.0.1 until an administrator resolves it.
+- Corrections replay as N.0.1, the next patch, in a second pull request stacked on the first, opened with it and merged right after it.
+  A re-pull with no corrections opens no N.0.1.
+
+### 2. The delta is replayed as one commit, through a pull request
+
+- The plan compares, per path, base (upstream at `from_tag`), theirs (upstream at `to_tag`) and ours (NEMAR `main`), on a clone of `nemarDatasets/<id>` at `main` (so `enableremote nemar-s3` reuses the bucket's UUID, avoiding #1320) and metadata-only clones of upstream at the two tags.
+- The result is one commit on `release/vN.0.0`, carrying the trailers `Upstream-Snapshot: <ds>@<to_tag>` and `Repull-Plan: <digest>`.
+  N is the next major after the highest of the `dataset_versions` rows, the `v*` tags and `Version` on `main`; the plan refuses when the three disagree or another release pull request is open.
+- It lands through a pull request, never a bypass and never a direct push, and it is never a git merge of upstream's history: upstream's commits are not pushed to NEMAR.
+- The scrub, the annex policy and the date normalization run on the delta paths only, which are the paths the commit adds or changes relative to `main`, and they run before the commit, so unscrubbed bytes never enter NEMAR's history.
+  A recording the commit does not touch keeps its bytes and its key.
+- `nemar admin repull <id>` is a dry run by default, and `--execute` requires `--plan <file>` with the digest of the reviewed plan; when `main` moved since the plan, it plans again unless the new commits touch only `.nemar/**`.
+- The merge changes nothing downstream: the existing workflows tag the merge, the tag mints the version DOI through EZID (ADR 0007), and the DOI carries `IsDerivedFrom` `openneuro.<ds>.v<to_tag>` because the mint reads `SourceDatasets` at the tag.
+  The release callback also queues one ADR 0023 reconcile (`--clean`, never `--wipe`), so the Zarr stores of deleted recordings go, and re-arms the hed, channel-montage, data, availability and identifier stamps.
+
+### 3. Re-pull state lives in `upstream_repulls`, never in `import_jobs`
+
+- One row per `(dataset_id, to_tag)`, `UNIQUE`, plus a partial unique index allowing one non-terminal row per dataset.
+- Its states are planned, prepared, copied, registered, pr_open, gates_clear, merged, released and complete; abandoned, failed and superseded are terminal, and superseded means a newer tag arrived before the merge, so the pull request is closed and the plan made again from the same `from_tag`.
+- Every step checks its own end state before it acts, so `--resume` continues from the recorded status, and `--abandon` closes the pull request, deletes the branch and reports the orphaned bytes.
+- `last_error` is written through `import-error.ts`, so ADR 0051's rule applies.
+- A re-pull never writes `import_jobs`: its sticky row per dataset, its `preparing` reset, its six-hour sweep and the retry engine, which reads only `import_jobs`, would each treat a re-pull as a broken import.
+
+### 4. The upstream tag is recorded per version, and the dataset's tag is derived
+
+- `dataset_versions` gains `source_version` (the upstream tag) and `source_version_basis` (`doi`, `lineage` or `unknown`); NULL means the row was never examined.
+- The dataset's mirrored tag is the `source_version` of its highest-semver version row, derived at read time, so `datasets` gains no column and stays under ADR 0034's budget (84 columns pinned, cap 97, on 2026-10-23).
+- The value is written when the version row is inserted, from the tagged `dataset_description.json` the version-DOI callback already reads, by one parser, `sourceSnapshotOf(desc, sourceId)`.
+  It reads `Version`, then a DOI matching `10.18112/openneuro.<ds>.v<tag>`, then the URL, accepts only an entry naming the dataset's own `ds`, and answers `unknown` when they disagree.
+- The backfill of existing mirrors reads `v<version>/dataset_description.json` through the authenticated raw CDN, and no match is `unknown`.
+- Unknown is never guessed and never rendered as zero: a mirror whose tag is unknown is never re-pulled, the staleness report counts it as unknown and never as current, and an import date compared with a snapshot date is shown only as "probably stale", never recorded as a tag.
+  The `lineage` basis (tree equality outside NEMAR's paths) is established only inside a plan.
+
+### 5. N.0.0 on a mirror always means an upstream pull
+
+- A version row with `source_version` set and a version of the form `N.0.0` is a mirror.
+  The API exposes that as a derived flag, computed at read time and never stored, and the website shows a mirror tag on that version.
+- A manual major bump is refused on `on` datasets: `nemar dataset release --type major`, and `nemar dataset update --bump major`, which reaches the same number.
+  NEMAR's own changes to a mirror take minor and patch.
+
+### 6. Discovery stays id-only, and the re-pull has its own switches and caps
+
+- `diffNewDatasets` stays id-only, so the live auto-import never sees a stale mirror; staleness is computed by its own report.
+- `AUTO_REPULL_ENABLED` lets the scheduled path open re-pull pull requests, and `AUTO_REPULL_MERGE_ENABLED` lets the Worker merge them (decision 7).
+  Both are off when absent, and the scheduled path is production-only through the dev cron's allowlist.
+- `REPULL_DAILY_OPEN_CAP` (default 2) bounds the re-pull pull requests the automatic path opens in a day.
+- `REPULL_DAILY_MERGE_CAP` (default 5) bounds merges: every merge a NEMAR tool makes of a re-pull pull request, the Worker's and the manual ones (`nemar admin repull <id> --merge`, `nemar admin pr-reviews`) alike, first claims one from the backend, and a refused claim merges nothing, because every merge mints an irreversible DOI.
+- The automatic path takes only a plan with zero conflicts and zero unexplained paths.
+- Outside production, the re-pull routes refuse every dataset that is not `xx`, because the GitHub organization is shared, and re-pull mail goes through the admin-only fence.
+
+### 7. The Worker may merge a re-pull pull request, and nothing else, when it is machine clean
+
+A re-pull pull request is machine clean when all of these hold:
+
+- `AUTO_REPULL_MERGE_ENABLED` is on, and the pull request is the one `upstream_repulls` recorded for this re-pull (its branch, number and head SHA);
+- the plan had zero unexplained paths against the pure-mirror rule, and, for the N.0.1 pull request, zero conflicts;
+- the identifier screen, dispatched with `ref=<head sha>` and a callback bound to the re-pull row, says `clear`: never `unchecked`, never `rerun`, and never `acknowledge`, which needs a person (ADR 0086);
+- BIDS validation and `version-check` are green;
+- the pull request's head equals the screened SHA;
+- the daily merge cap is not exhausted, and its claim is made before the merge is sent.
+
+The merge is sent with the screened SHA, so GitHub refuses a branch that moved, and only when GitHub reports the pull request `clean`: the NEMAR App is a bypass actor (ADR 0001, ADR 0107), and `clean` is what keeps "never a bypass" true for a merge the App makes.
+The Worker submits no approving review on this class either, since ADR 0001 requires none; the record is the merge, the `upstream_repulls` row and the plan digest.
+
+**What this narrows in ADR 0093, for re-pull pull requests only:** its rule that accepting a change into a dataset's `main` is the administrator's own act, which its Decision states as "its approval is made by the administrator, from their machine, with their own GitHub login".
+A machine-clean re-pull pull request is accepted by the Worker, which merges it.
+ADR 0093's sentence "No Worker code path approves" stays literally true, because the Worker submits no review, and from now on reads as: no Worker code path approves, and the only Worker code path that merges is this record's merge of a machine-clean re-pull pull request.
+The amendment of 2026-10-10 ("it still does not approve or merge") is about `start` and is unchanged.
+For every other pull request the Worker neither approves nor merges, and ADR 0093 stands.
+
+A re-pull pull request that is not machine clean is merged by an administrator, through `nemar admin repull <id> --merge` or `nemar admin pr-reviews`, under ADR 0093, with a screen that is `clear` or carries the administrator's recorded acknowledgment (ADR 0086).
+The Worker's merge call is not built until the ruleset check below is done.
+
+### 8. A copy pins the object version, and nothing of the prior version is deleted
+
+- The copy manifest is the keys the new tree names that are not present and not dead, written to `<id>/staging/repull-<tag>.json`.
+- Each copy item carries the S3 `versionId` upstream's `.log.rmet` records for its key, and the copy pins it; an item without a `versionId` is refused, never copied by path.
+  Today `parseS3Url` drops the query string, so the import copy takes whatever object is current at the path.
+- Prior-version objects stay under their governance lock, and the old version's manifest, DOI and data-plane routes are unchanged.
+- An abandoned re-pull leaves locked orphan objects; the plan states their size, and `--abandon` reports them.
+
+### 9. A re-pull is a new version of a published dataset, not a publication
+
+- It makes no publication request; the identifier screen gates its merge (decision 7) instead.
+- ADR 0089's forward-fix hold does not apply.
+  That hold exists because an import pushes upstream's history, which still holds what the scrub replaced; a re-pull pushes none and scrubs its delta paths before its one commit, so nothing it adds to NEMAR's history holds an original.
+- ADR 0091's date normalization applies to new and changed recordings only, so nothing already published is changed.
+
+### 10. The upstream tag is pinned, never HEAD
+
+- A first import clones the discovered tag (`--tag`), never the default HEAD, and writes the `SourceDatasets` entry with `Version`.
+- A tag not yet on the GitHub mirror refuses with `[openneuro-mirror-lag]`, which is transient and retried, not parked.
+- A re-pull's `from_tag` is the recorded `source_version`, and its `to_tag` is a tag.
+- The import path gets #993's guard: step 4c refuses with `[openneuro-upstream-moved]` when the tag being imported differs from the tag `origin/main` mirrors, the classifier calls that `upstream_moved`, and the retry engine parks it like `identifier_scrub_refused`, because moving a mirror to a new tag is a re-pull's job.
+
+## Consequences
+
+- **DOI volume grows with upstream churn.**
+  Every merged re-pull mints a version DOI that cannot be withdrawn, and a re-pull with corrections mints two.
+  The volume is measured before anything runs on its own (gate G2 of the design record), and the owner sets the caps from that estimate and turns the switches on (G5).
+- **Two DOIs when N.0.1 has content.**
+  N.0.0 cites upstream's snapshot without NEMAR's corrections, which is what its number says, and N.0.1 is the version a reader most likely wants.
+- **A window between N.0.0 and N.0.1.**
+  Between the two merges the public latest lacks NEMAR's corrections; merging N.0.1 right after N.0.0 keeps the window short, and a conflict keeps its correction out until an administrator resolves it.
+  The identifier scrub is a standard edit, so N.0.0 carries it and the window never lacks it.
+- **Orphan locked objects.**
+  An abandoned re-pull leaves copied objects under the governance lock; they cost storage and are reported, not deleted.
+- **One synthesized commit instead of upstream's history.**
+  NEMAR's log shows one commit per re-pull, named by its trailers, and not upstream's commits; upstream's repository and `CHANGES` remain the record of how the snapshot was made.
+- **Few re-pulls will be merged by the Worker at first.**
+  Most mirrors are in formats the scanner does not parse, so their screen asks for an acknowledgment (ADR 0089, Consequences), and only an administrator can give one.
+- **The merge cap binds NEMAR's tools only.**
+  An organization administrator merging in the GitHub UI is not stopped by it.
+- **The Worker gains a path that merges into `main` of a public dataset.**
+  It is bounded by the machine definition, the switch and the cap, and a defect in it would mint a DOI; that is why the merge call waits for the ruleset check and for gates G1 to G5.
+- **A NEMAR change that would deserve a major has no major on a mirror;** it takes a minor.
+- The importer changes as well: it clones a tag, and it refuses a re-import whose tag moved.
+
+## Alternatives considered
+
+- **A git merge of upstream.** There is no shared ancestry on early rewritten imports, and pushing upstream's history would carry its unscrubbed bytes into NEMAR's (ADR 0089).
+- **Replacing the whole tree.** Discards NEMAR's edits and re-scrubs and re-normalizes unchanged recordings under new keys, which breaks ADR 0091's rule that nothing already published is changed.
+- **Carrying NEMAR's corrections inside N.0.0.** A re-pull would block on every conflict, and N.0.0 would no longer say "this is upstream's snapshot", which is the question ADR 0006's version rule answers.
+- **The Worker never merges.** Keeps ADR 0093 whole, and leaves every re-pull of about 900 mirrors waiting for an administrator; the machine definition, the cap and a switch that is off by default bound the risk instead, and the switch off is exactly this alternative.
+- **`source_version` on `datasets`.** Spends a column of ADR 0034's budget on a value the highest version row already gives, and loses which tag each version mirrored.
+- **Reusing `import_jobs`.** Its sticky row, `preparing` reset, six-hour sweep and retry engine would each read a re-pull as a failed import.
+- **A minor bump for upstream.** Rejected by ADR 0006 already; here it would also stop the version number from saying which versions are mirrors.
+
+## Not yet verified
+
+- Whether the rulesets let the GitHub App merge without a human review, and without using its bypass; the merge call is not built until this is checked.
+- Where `source_version` is inserted under the central manifest flow.
+- Whether "explained" edits are detected on early rewritten imports (`on003645`, `on004362`); local dry-run plans count the unexplained paths.
+- How ADR 0107's review treats a re-pull pull request the App opens: the App is not exempt, and where the review's ruleset is in force its verdict decides whether GitHub ever reports `clean`.
+- Whether enrichment commits on the release branch move its head after the screen read it.
+- Whether OpenNeuro writes S3 before it pushes to GitHub, and whether the object at a path lags the pinned `versionId`.
+
+## Receipts
+
+- Epic #1046 and its Phase 1, #1907; the design record `.context/design-upstream-repull.md`.
+- #993 (step 4c's same-version assumption), #1320 (the bucket's annex UUID belongs to another special remote), #985 (finalize skips publication for a published dataset), #1810 (`on004362` missed upstream's 1.0.1).
+- `src/lib/import-openneuro.ts` (`prepareImport`, step 4c, `finalizeImport`), `backend/src/services/openneuro-discovery.ts` (`diffNewDatasets`, `latestSnapshot.tag`), `backend/src/services/auto-import.ts`, `backend/src/routes/callbacks/version-doi.ts`, `src/commands/dataset.ts` (`release --type`, `update --bump`), `backend/test/datasets-column-budget.test.ts`.
