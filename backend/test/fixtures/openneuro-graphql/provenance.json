@@ -1,0 +1,11 @@
+{
+  "recorded_at": "2026-10-24",
+  "endpoint": "https://openneuro.org/crn/graphql",
+  "openneuro_server_version": "5.10.1",
+  "user_agent": "NEMAR-plan-probe",
+  "note": "Real recorded OpenNeuro responses (public, unauthenticated). Never edit the two JSON files; a test that needs a shape OpenNeuro does not produce builds it in the test and says so.",
+  "files": {
+    "graphql-upstream-snapshots.request.json": "the exact batched request shape the staleness reader sends (aliases a0..aN, ID! variables)",
+    "graphql-upstream-snapshots.response.json": "its real response: ds003645 (latest 2.1.0), ds004362 (latest 1.0.1), ds000001 (legacy tags 00006 then 1.0.0), ds006903 (DELETED_DATASET), ds999999 (does not exist, INTERNAL_SERVER_ERROR), ds002893 and ds003082 (two snapshots each)"
+  }
+}
