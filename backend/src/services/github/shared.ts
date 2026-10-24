@@ -45,9 +45,10 @@ export const GITHUB_RAW_ORIGIN = "https://raw.githubusercontent.com";
 
 /**
  * `<base>/<org>/<repo>/<ref>/<encoded path>` -- the one raw-content URL
- * builder. `ref` is a tag, branch or commit SHA; `repo` is the dataset id,
- * since nemarDatasets names each dataset's repo after its own id. `org` defaults to
- * nemarDatasets; the upstream staleness report reads {@link OPENNEURO_GITHUB_ORG}.
+ * builder. `ref` is a tag, branch or commit SHA (or `HEAD`, the default ref).
+ * `org` defaults to nemarDatasets, where each dataset's repo is named after
+ * its own id, so `repo` is the dataset id; the upstream staleness report passes
+ * {@link OPENNEURO_GITHUB_ORG} and an OpenNeuro `ds######` instead.
  *
  * Per-segment `encodeURIComponent` rather than `encodeURI`: a BIDS path
  * segment can contain characters that are legal in a filename and meaningful
