@@ -1,5 +1,5 @@
 /**
- * Migration 0100_dataset_versions_source_version.sql (epic #1046 phase 2, #1908; ADR 0111,
+ * Migration 0101_dataset_versions_source_version.sql (epic #1046 phase 2, #1908; ADR 0111,
  * decision 4), on a real SQLite database.
  *
  * What is pinned: the two columns exist and are nullable, a row that predates the migration
@@ -18,9 +18,9 @@ import { join } from "node:path";
 import { freshDb } from "./helpers/d1";
 
 const MIGRATIONS_DIR = join(import.meta.dir, "../src/db/migrations");
-const TARGET = "0100_dataset_versions_source_version.sql";
+const TARGET = "0101_dataset_versions_source_version.sql";
 
-/** Every migration before the target, so a row can be seeded at the pre-0100 schema. */
+/** Every migration before the target, so a row can be seeded at the pre-0101 schema. */
 function dbBeforeTarget(): Database {
   const db = new Database(":memory:");
   for (const file of readdirSync(MIGRATIONS_DIR)
@@ -62,7 +62,7 @@ function rowOf(db: Database, id: string, version: string) {
     .get(id, version);
 }
 
-describe("migration 0100: the columns", () => {
+describe("migration 0101: the columns", () => {
   test("both columns exist on dataset_versions, and datasets is untouched", () => {
     const db = freshDb();
     const cols = (t: string) =>
@@ -102,7 +102,7 @@ describe("migration 0100: the columns", () => {
   });
 });
 
-describe("migration 0100: the CHECK keeps three states apart", () => {
+describe("migration 0101: the CHECK keeps three states apart", () => {
   test("a known tag with basis doi or lineage is accepted, a legacy tag keeps its zeros", () => {
     const db = freshDb();
     seedDataset(db, "on000003");

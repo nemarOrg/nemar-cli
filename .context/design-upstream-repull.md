@@ -173,4 +173,4 @@ The automatic path takes only plans with zero unexplained paths (conflicts are a
 
 See the epic body of #1046.
 Dependencies: 2, 3 and 5 are independent after 1 (5 needs 2's parser); 4 follows 2; 6 follows 5; 7 follows 4 and 6; 8 follows 4 and 6.
-Next free ADR is 0111; next migration was 0100 on 2026-10-23 (recheck `origin/dev`).
+Next free ADR is 0111; next migration was 0100 on 2026-10-23 (recheck `origin/dev`). Phase 2 took 0101, because the email epic (#1893) holds 0100 on its branch.

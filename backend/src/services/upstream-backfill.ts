@@ -2,7 +2,7 @@
  * The backfill of `dataset_versions.source_version` for the mirrors that existed before the
  * column did (epic #1046 phase 2, #1908; ADR 0111, decision 4).
  *
- * Every row that predates migration 0100 is NULL/NULL, "never examined". For each `on######`
+ * Every row that predates migration 0101 is NULL/NULL, "never examined". For each `on######`
  * version this reads `v<version>/dataset_description.json` through the authenticated raw CDN
  * and records what it says through the same parser the insert path uses
  * (`shared/source-snapshot.ts`): a tag with basis `doi`, or `unknown`.

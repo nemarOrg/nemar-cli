@@ -25,7 +25,7 @@
  * DECLARED by the description, not that the tree was compared with upstream's.
  */
 
-/** The three words `dataset_versions.source_version_basis` can hold (migration 0100). */
+/** The three words `dataset_versions.source_version_basis` can hold (migration 0101). */
 export const SOURCE_VERSION_BASES = ["doi", "lineage", "unknown"] as const;
 export type SourceVersionBasis = (typeof SOURCE_VERSION_BASES)[number];
 
