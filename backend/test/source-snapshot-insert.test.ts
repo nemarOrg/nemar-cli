@@ -29,7 +29,9 @@ import { Hono } from "hono";
 import worker from "../src/index";
 import { adminMiddleware, authMiddleware } from "../src/middleware/auth";
 import { registerDatasetLifecycleRoutes } from "../src/routes/admin/datasets-lifecycle";
+import { __resetInstallationTokenCacheForTests } from "../src/services/github-auth";
 import { signManifestCallbackToken } from "../src/services/github/callback-tokens";
+import { __resetRateLimitStateForTests } from "../src/services/github/transport";
 import {
   INSERT_DATASET_VERSION_SQL,
   SNAPSHOT_LOOKUP_DEADLINE_MS,
@@ -183,6 +185,10 @@ afterAll(() => {
 beforeEach(() => {
   db = freshDb();
   standin.reset();
+  // Process-wide state other test files in the same Bun process leave behind: a drained
+  // GitHub rate-limit bucket makes the reads fail fast, and a stalled token mint stays cached.
+  __resetRateLimitStateForTests();
+  __resetInstallationTokenCacheForTests();
   // S3 lives on an amazonaws.com host the code builds itself; send it to the stand-in.
   globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(input instanceof Request ? input.url : String(input));
