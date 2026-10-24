@@ -456,22 +456,30 @@ The decision text above and the Phase 4a amendment are unchanged.
 
 `nemar admin upstream-status` walks `GET /admin/upstream-status` page by page and adds the pages up itself.
 It recounts the states from the deduplicated rows with the shared counter and never adds the pages' own `counts`, so a row seen on two pages is counted once.
-It exits 0 when everything it reached was compared, whatever the stale count: stale is a finding, not a failure.
+It exits 0 when no row was `unchecked` and no page failed, whatever the stale count: stale is a finding, not a failure.
+Exit 0 does not mean a clean fleet: unknown-tag and never-examined mirrors were not compared and still exit 0, which is why the report prints them with their own counts.
 It exits 2 when the pass could not see: any `unchecked` row, any page the API refused (502, after which the walk stops, because a down OpenNeuro would cost its timeout on every remaining page), any page whose `errors[]` is not empty even on a 200, `--max-pages` reached before the end, or a population that changed during the pass.
-It exits 1 when a request fails.
+It exits 1 when a request fails; after a failed first read it prints the failure and no table, because a table of zeros would claim a fleet that was never read.
 An `unknown` row is by definition not compared, and the command says so; a per-alias OpenNeuro failure on one leaves it `unknown`, so it is never read as verified clean.
 `--dataset` and `--after` examine part of the fleet and do not demand all of it.
 
 ### The weekly section
 
-The Monday report gains `## Upstream freshness`, after Coverage: counts by state, rendered only through the one renderer that prints unknown as unknown, "Stale in total", the count of unknown-tag mirrors that look stale by date (display only), and a pointer to the command.
+The Monday report gains `## Upstream freshness`, after Coverage: "Examined N of M" and how many of those were actually compared with upstream (a mirror never examined for its tag is examined and not compared), counts by state rendered only through the one renderer that prints unknown as unknown, "Stale in total", the count of unknown-tag mirrors that look stale by date (display only), and a pointer to the command.
+The split of the stale rows between "tag on the GitHub mirror", "not there yet" and "not checked" depends on the 25 probes one pass makes and is not a fleet-wide proportion; the report says so.
 No dataset is named in it, and none in the errors it adds, because the report is filed on a public-facing repository.
 Stale is reported and is not a reason for the week to ask for attention: it is the expected backlog until the scheduled re-pull exists, and an alarm that never clears gets muted (ADR 0053).
 Blindness is a reason, and arrives three ways.
 A pass that did not run or threw leaves `upstream` null, which the shared attention rule treats as unknown, and so does a backend that predates the field.
 A mirror that could not be compared (`unchecked`), a problem OpenNeuro reported, and a pass that did not reach every mirror each add one entry to the report's list of failed parts, which the headline counts.
-The pass is bounded for the Monday tick, which shares one subrequest allowance with its other jobs: at most 20 pages (about 20 GraphQL requests), and 25 GitHub probes for the whole pass, not per page; a stale row the budget left out reads `stale_unverified`, which is still stale.
-`nemar admin import-weekly` prints the same counts, `unknown` when the pass is null or absent, and exits 1 for that week.
+The pass is bounded for the Monday tick, which shares ONE subrequest allowance with its other jobs.
+A page of 100 mirrors is at most 2 GraphQL requests and 3 D1 statements, so 20 pages are at most 40 GraphQL requests and 60 statements, plus at most 25 tag reads and 25 control reads (the probe budget is for the whole pass, not per page), plus one token mint: about 151 in the worst case, and about 101 for a fleet of 1,000 mirrors.
+The token is minted once for the pass, and a failed mint is remembered rather than retried on every page.
+A stale row the budget left out reads `stale_unverified`, which is still stale.
+The 20-page cap is a ceiling of 2,000 managed mirrors.
+Past it `truncated` is always true and every Monday would add a "did not reach every mirror" entry, a permanent alarm that gets muted (ADR 0053), so when the fleet nears 2,000 the cap must be raised; each added page costs up to 5 subrequests.
+`nemar admin import-weekly` prints the same counts, and `unknown` when the pass is null or absent.
+It exits 2 when the pass threw (the backend then also lists an `upstream` entry among the failed parts, which that command already reads as "could not determine"), and 1 when the backend predates the field (the key is absent and there is no such entry).
 The log line gains `upstream_stale=` and `upstream_unchecked=`, `unknown` when null.
 
 ### The mirror flag
@@ -483,5 +491,7 @@ The flag is three-valued, because a literal boolean would have to say "not a mir
 `null`: an N.0.0 of an `on######` dataset whose tag is unknown or was never examined; a consumer must not show it as a mirror.
 It is read from each row's own tag, not from the dataset's highest version, derived at read time and never stored, so `datasets` gains no column.
 It rides on every version of `GET /datasets/:id/versions` (beside the tag and its basis, which that owner-or-admin route already carried) and of the public landing, `data.nemar.org/<id>/` as JSON and the page bundle's landing, which exposes the flag only and neither the tag nor its basis.
+Decision 5 says the website shows a mirror tag on that version.
+What the website receives is the flag, so it shows a chip from `mirror`; the public wire carries the flag and never the tag itself.
 `metadata.json` is not changed.
 An `xx` fixture is `false` even after a rehearsal re-pull; how an `xx` names its upstream stays open (Left open, above).
