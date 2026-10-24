@@ -402,40 +402,50 @@ describe("the 14-day window, read from the row as D1 stores it", () => {
         .replace("T", " ")
         .replace(/\.\d+Z$/, "");
     const day = 24 * 60 * 60 * 1000;
-    // Hours either side of the boundary, so a datetime read as local time instead of UTC moves
-    // one across it wherever the process runs off UTC (the stored form has no zone).
-    const hour = 60 * 60 * 1000;
-    for (const [id, age] of [
-      ["on004362", 14 * day + 3 * hour],
-      ["on004366", 14 * day - 3 * hour],
-    ] as const) {
-      db.query(
-        `INSERT INTO import_jobs (dataset_id, source, source_id, stage, status, last_error,
+    // Hours either side of the boundary, and the process put in a zone 7 to 8 hours off UTC, so a
+    // datetime read as local time instead of UTC (the stored form has no zone) moves one row
+    // across it on any runner, a UTC one included. Bun applies a TZ change at once; the old
+    // value is restored with Reflect.deleteProperty, because assigning undefined stores the
+    // string "undefined" and leaves the zone set.
+    const savedTz = process.env.TZ;
+    process.env.TZ = "America/Los_Angeles";
+    try {
+      const hour = 60 * 60 * 1000;
+      for (const [id, age] of [
+        ["on004362", 14 * day + 3 * hour],
+        ["on004366", 14 * day - 3 * hour],
+      ] as const) {
+        db.query(
+          `INSERT INTO import_jobs (dataset_id, source, source_id, stage, status, last_error,
                                   first_incomplete_at)
          VALUES (?, 'openneuro', ?, 'prepare', 'quarantined', ?, ?)`,
-      ).run(id, `ds${id.slice(2)}`, MIRROR_LAG, sqlite(now - age));
-    }
-    const rows = db.query(IMPORT_RETRY_CANDIDATES_QUERY).all(sqlite(now), 100) as CandidateRow[];
-    expect(rows.map((r) => r.dataset_id).sort()).toEqual(["on004362", "on004366"]);
-    const dispatched: string[] = [];
-    const result = await runRetryTick(
-      prodEnv(db),
-      rows.map((row) => retryCandidateInput(row, { complete: false }, now)),
-      now,
-      {
-        token: async () => "test-token",
-        dispatch: async (sourceId) => {
-          dispatched.push(sourceId);
+        ).run(id, `ds${id.slice(2)}`, MIRROR_LAG, sqlite(now - age));
+      }
+      const rows = db.query(IMPORT_RETRY_CANDIDATES_QUERY).all(sqlite(now), 100) as CandidateRow[];
+      expect(rows.map((r) => r.dataset_id).sort()).toEqual(["on004362", "on004366"]);
+      const dispatched: string[] = [];
+      const result = await runRetryTick(
+        prodEnv(db),
+        rows.map((row) => retryCandidateInput(row, { complete: false }, now)),
+        now,
+        {
+          token: async () => "test-token",
+          dispatch: async (sourceId) => {
+            dispatched.push(sourceId);
+          },
+          issueDeps: recordingDeps([]),
         },
-        issueDeps: recordingDeps([]),
-      },
-    );
-    expect(result).toMatchObject({ blocklisted: 1, dispatched: 1 });
-    const parked = db
-      .query("SELECT blocklist_reason FROM import_jobs WHERE dataset_id = 'on004362'")
-      .get() as { blocklist_reason: string };
-    expect(parked.blocklist_reason).toBe("mirror_lag");
-    expect(dispatched).toEqual(["ds004366"]);
+      );
+      expect(result).toMatchObject({ blocklisted: 1, dispatched: 1 });
+      const parked = db
+        .query("SELECT blocklist_reason FROM import_jobs WHERE dataset_id = 'on004362'")
+        .get() as { blocklist_reason: string };
+      expect(parked.blocklist_reason).toBe("mirror_lag");
+      expect(dispatched).toEqual(["ds004366"]);
+    } finally {
+      if (savedTz === undefined) Reflect.deleteProperty(process.env, "TZ");
+      else process.env.TZ = savedTz;
+    }
   });
 
   test("a row the engine has not retried yet starts its window now", () => {
