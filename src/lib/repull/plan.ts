@@ -47,7 +47,7 @@ import {
   type PlanFile,
   planDigest,
 } from "./digest.js";
-import { type Side, type Target, keyDigest, stripBom } from "./edits.js";
+import { type Side, type Target, bareDoi, keyDigest, stripBom } from "./edits.js";
 import { type FromTagSource, bareVersion, resolveFromTag } from "./from-tag.js";
 import { type PathDecision, overlay } from "./overlay.js";
 import {
@@ -129,15 +129,6 @@ export interface PlanOptions {
 export type PlanOutcome =
   | { planned: false; preflight: Check[]; reason: string; workdir: string | null }
   | { planned: true; file: PlanFile; workdir: string | null };
-
-/** The DOI as a badge or a description names it, without `doi:` or a resolver. */
-function bareDoi(doi: string | null | undefined): string | null {
-  if (typeof doi !== "string" || doi.trim() === "") return null;
-  return doi
-    .trim()
-    .replace(/^doi:/i, "")
-    .replace(/^https?:\/\/(?:dx\.)?doi\.org\//i, "");
-}
 
 /**
  * Remove the scratch directory on SIGINT and SIGTERM as on a normal return. The handler is

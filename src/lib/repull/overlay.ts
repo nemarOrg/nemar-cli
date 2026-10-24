@@ -40,6 +40,7 @@ import {
   type Side,
   type Target,
   annexKeyOfEntry,
+  bareDoi,
   baseName,
   explainEdit,
   gitBlobOid,
@@ -203,11 +204,6 @@ function importFamily(x: Map<string, Side>, stub: string): Family {
   return out;
 }
 
-/** The DOI as a badge names it: no `doi:` prefix and no resolver. */
-function bareDoi(doi: string): string {
-  return doi.replace(/^doi:/i, "").replace(/^https?:\/\/(?:dx\.)?doi\.org\//i, "");
-}
-
 /**
  * The README text with zero, one, two, ... leading DOI badges for `conceptDoi` removed. A badge is
  * rebuilt in each spelling NEMAR has written and compared byte for byte: the shields.io form
@@ -216,8 +212,8 @@ function bareDoi(doi: string): string {
  */
 export function badgeStrips(text: string, conceptDoi: string | null): string[] {
   const out = [text];
-  if (!conceptDoi) return out;
   const doi = bareDoi(conceptDoi);
+  if (!doi) return out;
   const spellings = [
     buildDoiBadge(doi),
     `[![DOI](https://zenodo.org/badge/DOI/${doi}.svg)](https://doi.org/${doi})`,
@@ -318,6 +314,10 @@ function targetFamily(
     return out;
   }
   const doi = bareDoi(conceptDoi);
+  if (!doi) {
+    out.set("README.md", { kind: "unknown", reason: "no-concept-doi" });
+    return out;
+  }
   const plan = planReadmeBadgeCommit({
     readmeContent: content.toString("utf8"),
     doiBadge: buildDoiBadge(doi),

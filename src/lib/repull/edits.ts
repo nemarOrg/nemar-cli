@@ -257,6 +257,18 @@ export interface ExplainContext {
   isDeadAtNemar(key: string): boolean;
 }
 
+/**
+ * A DOI as a badge or a description names it, without `doi:` or a resolver, trimmed; null for a
+ * value that is not a non-empty string, so a comparison with a missing DOI never matches.
+ */
+export function bareDoi(doi: string | null | undefined): string | null {
+  if (typeof doi !== "string" || doi.trim() === "") return null;
+  return doi
+    .trim()
+    .replace(/^doi:/i, "")
+    .replace(/^https?:\/\/(?:dx\.)?doi\.org\//i, "");
+}
+
 /** Text without a leading byte-order mark, which `JSON.parse` refuses. */
 export function stripBom(text: string): string {
   return text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
