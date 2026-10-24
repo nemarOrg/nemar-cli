@@ -228,20 +228,39 @@ describe("nemar admin import-weekly: the report reads correctly", () => {
     }
   });
 
-  test("upstream null or absent prints unknown, never zero, and asks for attention (exit 1)", async () => {
+  test("a pass that threw prints unknown and exits 2, as the backend's errors entry says", async () => {
     seedAuthenticatedConfig();
-    const absent: Record<string, unknown> = { ...HEALTHY.facts };
-    absent.upstream = undefined;
-    for (const facts of [{ ...HEALTHY.facts, upstream: null }, absent]) {
-      const server = startCaptureServer({ ...HEALTHY, facts });
-      try {
-        const result = await runCli(["admin", "import-weekly"], server.url);
-        expect(result.stdout).toContain("upstream=unknown");
-        expect(result.stdout).not.toContain("upstream: stale=");
-        expect(result.exitCode).toBe(1);
-      } finally {
-        server.stop();
-      }
+    // What the backend sends when the pass threw: upstream null AND an errors entry for the stage.
+    const server = startCaptureServer({
+      ...HEALTHY,
+      facts: {
+        ...HEALTHY.facts,
+        upstream: null,
+        errors: [{ stage: "upstream", error: "D1_ERROR: upstream page failed" }],
+      },
+    });
+    try {
+      const result = await runCli(["admin", "import-weekly"], server.url);
+      expect(result.stdout).toContain("upstream=unknown");
+      expect(result.stdout).not.toContain("upstream: stale=");
+      expect(result.exitCode).toBe(2);
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("a backend that predates the field prints unknown and exits 1 (absent is unknown)", async () => {
+    seedAuthenticatedConfig();
+    // No `upstream` key and no errors entry: nothing failed, the field is simply not there.
+    const { upstream: _omitted, ...withoutKey } = HEALTHY.facts;
+    const server = startCaptureServer({ ...HEALTHY, facts: withoutKey });
+    try {
+      const result = await runCli(["admin", "import-weekly"], server.url);
+      expect(result.stdout).toContain("upstream=unknown");
+      expect(result.stdout).not.toContain("upstream: stale=");
+      expect(result.exitCode).toBe(1);
+    } finally {
+      server.stop();
     }
   });
 
