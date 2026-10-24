@@ -19,6 +19,7 @@ import {
   isEligibleAssignee,
   isRestrictedQueue,
   parseRrMembers,
+  ticketVisibleTo,
 } from "./ticket-assignment";
 
 const QUEUE_TAG = /^[a-z0-9._-]{1,64}$/;
@@ -42,13 +43,20 @@ function toQueue(row: QueueRowWithEscalation, open: number): MailQueue {
 }
 
 /** Queues the viewer may know exist: every one for an owner, the unrestricted ones for an admin. */
-export async function listQueues(db: D1Database, role: string): Promise<MailQueue[]> {
+export async function listQueues(
+  db: D1Database,
+  viewer: { id: number; role: string },
+): Promise<MailQueue[]> {
+  // The count is of tickets the viewer may see, so it never hints at restricted or excluded ones.
+  const vis = ticketVisibleTo(viewer, "t");
+  const role = viewer.role;
   const rows = await db
     .prepare(
       `SELECT q.*, (SELECT COUNT(*) FROM mail_tickets t
-                     WHERE t.queue_tag = q.tag AND t.status <> 'closed') AS open_tickets
+                     WHERE t.queue_tag = q.tag AND t.status <> 'closed' AND ${vis.sql}) AS open_tickets
          FROM mail_queues q ORDER BY q.tag`,
     )
+    .bind(...vis.binds)
     .all<QueueRowWithEscalation & { open_tickets: number }>();
   // A queue's restricted state is its flag or its tag (3a's isRestrictedQueue), so the filter
   // for a non-owner is applied here and not in SQL.
@@ -76,6 +84,7 @@ async function requireEligible(
 
 export async function putQueue(
   db: D1Database,
+  viewer: { id: number; role: string },
   tag: string,
   req: PutQueueRequest,
 ): Promise<MailQueue> {
@@ -176,7 +185,7 @@ export async function putQueue(
       membersChanged ? 1 : 0,
     )
     .run();
-  const [queue] = (await listQueues(db, "owner")).filter((q) => q.tag === tag);
+  const [queue] = (await listQueues(db, viewer)).filter((q) => q.tag === tag);
   return queue;
 }
 

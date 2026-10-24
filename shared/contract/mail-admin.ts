@@ -44,6 +44,8 @@ export type MailErrorCode =
   | "escalation_owner_ineligible"
   | "restricted_locked"
   | "restricted_flag_busy"
+  | "restriction_mismatch"
+  | "reply_in_progress"
   | "fallback_not_restrictable"
   | "reply_not_sent"
   | "reply_delivery_unknown"

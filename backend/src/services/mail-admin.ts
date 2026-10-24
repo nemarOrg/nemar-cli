@@ -25,7 +25,7 @@ import {
   resolveEmailConfig,
   sendEmail,
 } from "./email";
-import { isEligibleAssignee, ticketVisibleTo } from "./ticket-assignment";
+import { isEligibleAssignee, isRestrictedQueue, ticketVisibleTo } from "./ticket-assignment";
 import { plainLine } from "./ticket-notify";
 import { ticketPlusTag } from "./tickets";
 
@@ -501,6 +501,22 @@ export async function setTicketStatus(
 ): Promise<TicketSummary> {
   const ticket = await requireVisibleTicket(db, viewer, ticketId);
   if (ticket.status === status) return toSummary(ticket);
+  if (ticket.status === "closed" || ticket.status === "spam") {
+    // Reopening puts the ticket back in a queue's hands. Its restricted flag was copied at
+    // creation, so if the queue's rule has changed since, refuse rather than quietly keep a
+    // ticket under a rule its queue no longer applies (or the reverse).
+    const queue = await db
+      .prepare("SELECT restricted FROM mail_queues WHERE tag = ?")
+      .bind(ticket.queue_tag)
+      .first<{ restricted: number }>();
+    if (isRestrictedQueue(ticket.queue_tag, queue) !== (ticket.restricted === 1)) {
+      throw new MailAdminError(
+        409,
+        "restriction_mismatch",
+        "This ticket's restriction no longer matches its queue's, so it cannot be reopened here.",
+      );
+    }
+  }
   await db.batch([
     db
       .prepare("UPDATE mail_tickets SET status = ?, updated_at = datetime('now') WHERE id = ?")

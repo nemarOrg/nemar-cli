@@ -21,6 +21,7 @@ import {
   assignTicket,
   escalateTicket,
   listTickets,
+  loadVisibleTicket,
   replyToTicket,
   requireVisibleTicket,
   setTicketStatus,
@@ -110,16 +111,16 @@ function safeJson(text: string): unknown {
 }
 
 function ticketId(c: Context): number {
-  const n = Number(c.req.param("id"));
-  if (!Number.isSafeInteger(n) || n <= 0)
-    throw new MailAdminError(404, "not_found", "No such ticket.");
+  const raw = c.req.param("id") ?? "";
+  const n = /^\d{1,12}$/.test(raw) ? Number(raw) : 0;
+  if (n <= 0) throw new MailAdminError(404, "not_found", "No such ticket.");
   return n;
 }
 
 function userIdParam(c: Context): number {
-  const n = Number(c.req.param("userId"));
-  if (!Number.isSafeInteger(n) || n <= 0)
-    throw new MailAdminError(400, "bad_request", "Not a user id.");
+  const raw = c.req.param("userId") ?? "";
+  const n = /^\d{1,12}$/.test(raw) ? Number(raw) : 0;
+  if (n <= 0) throw new MailAdminError(400, "bad_request", "Not a user id.");
   return n;
 }
 
@@ -217,7 +218,7 @@ export function registerMailRoutes(admin: AdminRouter): void {
 
   admin.get("/mail/queues", async (c) => {
     try {
-      return c.json({ queues: await listQueues(c.env.DB, c.get("user").role) });
+      return c.json({ queues: await listQueues(c.env.DB, c.get("user")) });
     } catch (error) {
       return fail(c, error);
     }
@@ -227,7 +228,9 @@ export function registerMailRoutes(admin: AdminRouter): void {
     try {
       requireOwner(c);
       const req = await parseBody(c, queueSchema);
-      return c.json({ queue: await putQueue(c.env.DB, c.req.param("tag") ?? "", req) });
+      return c.json({
+        queue: await putQueue(c.env.DB, c.get("user"), c.req.param("tag") ?? "", req),
+      });
     } catch (error) {
       return fail(c, error);
     }
@@ -283,6 +286,11 @@ export function registerMailRoutes(admin: AdminRouter): void {
       }
       const result = await reprocessRawKey(c.env.DB, bucket, raw_key);
       if (result.outcome === "missing") {
+        throw new MailAdminError(404, "not_found", "That raw message is not in the bucket.");
+      }
+      // The answer names a ticket, so it is subject to the same visibility as every other route:
+      // an owner a ticket excludes learns nothing about it by replaying its raw key.
+      if (!(await loadVisibleTicket(c.env.DB, c.get("user"), result.ticketId))) {
         throw new MailAdminError(404, "not_found", "That raw message is not in the bucket.");
       }
       if (result.outcome === "created" && !result.spam) {

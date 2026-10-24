@@ -693,6 +693,83 @@ describe("availability", () => {
   });
 });
 
+describe("review round 1: reprocess, counts, reopen, ids", () => {
+  test("replaying a key of a ticket that excludes the caller is a 404 with no ticket fields", async () => {
+    const key = "inbound/raw/2026/10/24/1c9d8f3e-1111-4222-8333-444455556666.eml";
+    await bucket.put(key, eml({ subject: "Concealed" }), {
+      customMetadata: {
+        envelope_from: "ada@sender.example",
+        envelope_to: "support@nemar.org",
+        received_at: "2026-10-24T10:00:00.000Z",
+      },
+    });
+    const made = await call("owner", "POST", "/reprocess", { raw_key: key });
+    expect(made.status).toBe(200);
+    db.run("UPDATE mail_tickets SET excluded_user_id = ? WHERE id = ?", [
+      ids.owner2,
+      made.body.ticket_id,
+    ]);
+    const replay = await call("owner2", "POST", "/reprocess", { raw_key: key });
+    expect(replay.status).toBe(404);
+    expect(replay.body.code).toBe("not_found");
+    expect(JSON.stringify(replay.body)).not.toContain(String(made.body.ticket_id));
+    expect((await call("owner", "POST", "/reprocess", { raw_key: key })).body.outcome).toBe(
+      "duplicate",
+    );
+  });
+
+  test("open_tickets counts only tickets the viewer may see", async () => {
+    ticket({ queue: "support" });
+    ticket({ queue: "support", excluded: ids.admin });
+    ticket({ queue: "support", status: "closed" });
+    const count = async (who: Who) =>
+      (
+        (await call(who, "GET", "/queues")).body.queues as { tag: string; open_tickets: number }[]
+      ).find((q) => q.tag === "*");
+    ticket({ queue: "*" });
+    ticket({ queue: "*", excluded: ids.admin });
+    expect((await count("admin"))?.open_tickets).toBe(1);
+    expect((await count("owner"))?.open_tickets).toBe(2);
+    ticket({ queue: "security", restricted: true });
+    const sec = async (who: Who) =>
+      (
+        (await call(who, "GET", "/queues")).body.queues as { tag: string; open_tickets: number }[]
+      ).find((q) => q.tag === "security");
+    expect(await sec("admin")).toBeUndefined();
+    expect((await sec("owner"))?.open_tickets).toBe(1);
+  });
+
+  test("reopening a ticket whose restriction no longer matches its queue is refused", async () => {
+    const stale = ticket({ queue: "legal", restricted: true, status: "closed" });
+    const r = await call("owner", "POST", `/tickets/${stale}/status`, { status: "open" });
+    expect(r.status).toBe(409);
+    expect(r.body.code).toBe("restriction_mismatch");
+    expect(row(stale).status).toBe("closed");
+    const open = ticket({ queue: "security", restricted: false, status: "spam" });
+    expect(
+      (await call("owner", "POST", `/tickets/${open}/status`, { status: "open" })).body.code,
+    ).toBe("restriction_mismatch");
+    const fine = ticket({ queue: "security", restricted: true, status: "closed" });
+    expect(
+      (await call("owner", "POST", `/tickets/${fine}/status`, { status: "open" })).status,
+    ).toBe(200);
+    // Closing never needs the check.
+    const live = ticket({ queue: "legal", restricted: true });
+    expect(
+      (await call("owner", "POST", `/tickets/${live}/status`, { status: "closed" })).status,
+    ).toBe(200);
+  });
+
+  test("ids in a path are plain digits", async () => {
+    const t = ticket();
+    expect((await call("admin", "GET", `/tickets/${t}.0`)).status).toBe(404);
+    expect((await call("admin", "GET", "/tickets/1e0")).status).toBe(404);
+    expect((await call("admin", "GET", "/tickets/%2B1")).status).toBe(404);
+    expect((await call("owner", "GET", "/availability/1e0")).status).toBe(400);
+    expect((await call("owner", "GET", "/availability/0x1")).status).toBe(400);
+  });
+});
+
 describe("reprocess", () => {
   const KEY = "inbound/raw/2026/10/24/0b9d8f3e-1111-4222-8333-444455556666.eml";
 
