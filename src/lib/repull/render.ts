@@ -32,11 +32,22 @@ function subtypes(value: unknown): string {
 
 /**
  * A byte count that may be partly unknown, never rendered as complete when it is not (ADR 0053,
- * ADR 0054): `N bytes`, or `at least N bytes, plus M of unknown size`.
+ * ADR 0054): `N bytes`, or `N bytes known, plus M of unknown size`.
  */
 export function bytesPhrase(bytes: unknown, unknown: unknown): string {
   const n = Number(unknown ?? 0);
-  return n > 0 ? `at least ${bytes} bytes, plus ${n} of unknown size` : `${bytes} bytes`;
+  return n > 0 ? `${bytes} bytes known, plus ${n} of unknown size` : `${bytes} bytes`;
+}
+
+/**
+ * The orphan bound: `at most N bytes` when every size is known, and otherwise the known part with
+ * the count of unknown sizes and the plain statement that there is then no upper bound.
+ */
+export function orphanPhrase(bytes: unknown, unknown: unknown): string {
+  const n = Number(unknown ?? 0);
+  return n > 0
+    ? `${bytes} bytes known, plus ${n} of unknown size, no upper bound`
+    : `at most ${bytes} bytes`;
 }
 
 type OwnedEdit = { path: string; status: string; error: string | null };
@@ -77,7 +88,7 @@ export function summaryLines(file: PlanFile, path: string | null): string[] {
     "Data:",
     `  copy ${c.copy_items} key(s), ${bytesPhrase(c.copy_bytes, c.copy_bytes_unknown)}, unpinned ${c.copy_unpinned}, already held ${c.copy_already_held}; un-annexed from upstream ${c.unannex_items}`,
     `  local uploads ${c.local_uploads}, ${bytesPhrase(c.local_bytes, c.local_bytes_unknown)}`,
-    `  orphan bytes if abandoned: up to ${bytesPhrase(c.orphan_bytes_max, c.orphan_bytes_unknown)}; ${c.data_changing ? "data-changing" : "metadata-only"}; DOIs ${c.doi_count}`,
+    `  orphan bytes if abandoned: ${orphanPhrase(c.orphan_bytes_max, c.orphan_bytes_unknown)}; ${c.data_changing ? "data-changing" : "metadata-only"}; DOIs ${c.doi_count}`,
     `  fetched ${c.fetched_bytes} bytes of large blobs; ${c.fetch_refused} needed and not fetched`,
     "",
     "Preflight:",
@@ -128,7 +139,7 @@ export function countsMarkdown(file: PlanFile): string {
       "local uploads / bytes",
       `${c.local_uploads} / ${bytesPhrase(c.local_bytes, c.local_bytes_unknown)}`,
     ),
-    row("orphan bytes (upper bound)", bytesPhrase(c.orphan_bytes_max, c.orphan_bytes_unknown)),
+    row("orphan bytes if abandoned", orphanPhrase(c.orphan_bytes_max, c.orphan_bytes_unknown)),
     row("data-changing", c.data_changing ? "yes" : "no"),
     row("DOIs", c.doi_count),
     "",
