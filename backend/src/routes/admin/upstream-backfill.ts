@@ -9,9 +9,10 @@
  * safe: the write never overwrites a recorded value, so rows already examined drop out of the
  * candidate set, and `after` exists only to step past a row that keeps erroring.
  *
- * 502 means the call must not be read as progress: every read failed, or every description
- * read as absent in a batch of two or more (a credential GitHub cannot see the repositories
- * with answers 404 to all of them), and in both cases nothing was written. 500 is a database
+ * 502 means the call must not be read as progress: every read failed, or every 404 was left
+ * unconfirmed because no read in the batch proved the credential can see the repositories (a
+ * credential GitHub cannot see them with answers 404 to all of them), and in both cases nothing
+ * was written. 500 is a database
  * failure while choosing candidates. The service holds the rules; this file is the HTTP shell.
  */
 
@@ -24,7 +25,13 @@ export function registerUpstreamBackfillRoutes(admin: AdminRouter): void {
     if (after !== undefined && !CURSOR_RE.test(after)) {
       return c.json({ error: "`after` must look like on000001@1.0.0" }, 400);
     }
-    const execute = ["1", "true"].includes(c.req.query("execute") ?? "");
+    // A flag that writes data is parsed strictly: a misspelling must not silently be a dry run
+    // (the operator thinks it ran) or, worse, a run.
+    const executeRaw = c.req.query("execute");
+    if (executeRaw !== undefined && !["1", "true", "0", "false"].includes(executeRaw)) {
+      return c.json({ error: "`execute` must be 1, true, 0 or false" }, 400);
+    }
+    const execute = executeRaw === "1" || executeRaw === "true";
     const limitRaw = Number.parseInt(c.req.query("limit") || "", 10);
     const limit = Number.isFinite(limitRaw) ? limitRaw : undefined;
 

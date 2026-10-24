@@ -8,30 +8,47 @@
  * (`shared/source-snapshot.ts`): a tag with basis `doi`, or `unknown`.
  *
  * THE RULES THAT MAKE IT SAFE TO RUN AGAINST PRODUCTION
- *   - A fetch ERROR writes nothing. A 5xx, a 429, a network failure or a timeout says nothing
- *     about the content, and recording `unknown` for it would be the forbidden error-as-unknown
- *     (ADR 0053, ADR 0054); the row stays NULL/NULL and the next pass tries it again.
- *   - A 404 is `unknown` ("no description at that tag"), but only for a row older than an
- *     hour: the raw CDN caches a 404 for a few minutes, so a freshly pushed tag can read as
- *     absent when it is not. A younger row is not a candidate.
- *   - GitHub answers 404 for a credential that cannot see the repository. So a batch of two or
- *     more rows that ALL read absent is refused as `suspect_credential` and writes nothing.
+ *   - A fetch ERROR writes nothing. A 5xx, a 429, a network failure, a timeout or a body over
+ *     the size cap says nothing about the content, and recording `unknown` for it would be the
+ *     forbidden error-as-unknown (ADR 0053, ADR 0054); the row stays NULL/NULL and the next
+ *     pass tries it again.
+ *   - `unknown` is FINAL: the write never overwrites it and nothing re-examines the row. So a
+ *     404 becomes `unknown` only when it is proved to be about the tag and not about the
+ *     credential. GitHub answers 404 for a credential that cannot see a repository, so a 404 is
+ *     recorded only after a CONTROL READ succeeds: the same repository's `dataset_description.json`
+ *     at `main`, with the same credential. If the control read is absent or fails, the row is
+ *     counted `not_examined`, nothing is written, and the next pass retries it. This holds for a
+ *     batch of any size, including one row.
+ *   - A batch in which no row proved the credential (nothing returned content, no 404 was
+ *     confirmed by a control read) but at least one 404 was left unconfirmed is refused as
+ *     `suspect_credential`, whatever else errored in the same batch.
+ *   - A row younger than an hour is not a candidate: the raw CDN caches a 404 for a few
+ *     minutes, so a freshly pushed tag can read as absent when it is not.
+ *   - Only a version of the form N.N.N is a candidate, so a stored `v1.0.0` or a non-semver
+ *     value can neither build a bad tag URL nor produce a cursor the route would refuse.
  *   - The write is `... WHERE source_version_basis IS NULL`: it never overwrites a recorded
- *     value, so a rerun writes 0 and a live insert that lands first always wins.
+ *     value, so a rerun writes 0 and a live insert that lands first always wins. A write result
+ *     that carries no change count is an error, never a zero.
  *   - Paging is a KEYSET on `(dataset_id, version)`. Without it a row that always errors would
- *     sit at the head of an offset-free queue forever and starve every row behind it (the
- *     fairness bug the Zarr fidelity sweep had).
+ *     sit at the head of the queue on every pass and starve every row behind it.
  *   - The default is a dry run, and a dry run writes nothing.
  *
- * COST. At most {@link UPSTREAM_BACKFILL_MAX} raw GETs (no REST quota: the CDN returns no
- * `x-ratelimit-*` and spends none of the installation's hourly budget) and one D1 batch per call.
+ * COST. Per call at most {@link UPSTREAM_BACKFILL_MAX} raw GETs for the tags, at most one control
+ * GET per distinct repository whose tag read was absent, one candidate query, one D1 batch and
+ * the count queries. The raw CDN returns no `x-ratelimit-*` and spends none of the installation's
+ * hourly REST budget. `counts.not_examined` counts every `on` version row with no basis,
+ * including rows whose version is not N.N.N and which no pass will ever examine.
  */
 
 import { openNeuroSourceId } from "../../../shared/source-snapshot.js";
 import type { Bindings } from "../types/bindings.js";
 import { getDatasetsToken } from "./github-auth.js";
 import { errorMessage } from "./repo-metadata.js";
-import { fetchDescriptionAtTag, snapshotFromDescriptionText } from "./source-snapshot.js";
+import {
+  fetchDescriptionAtRef,
+  fetchDescriptionAtTag,
+  snapshotFromDescriptionText,
+} from "./source-snapshot.js";
 
 export const UPSTREAM_BACKFILL_DEFAULT = 25;
 export const UPSTREAM_BACKFILL_MAX = 50;
@@ -43,6 +60,9 @@ const ELIGIBLE = `dv.source_version_basis IS NULL
   AND dv.dataset_id GLOB 'on[0-9][0-9][0-9][0-9][0-9][0-9]'
   AND d.withdrawn_at IS NULL
   AND d.github_repo IS NOT NULL
+  AND dv.version NOT GLOB '*[^0-9.]*'
+  AND dv.version GLOB '[0-9]*.[0-9]*.[0-9]*'
+  AND dv.version NOT GLOB '*.*.*.*'
   AND dv.created_at < datetime('now', '${UPSTREAM_BACKFILL_MIN_AGE}')`;
 
 /** The rows to examine, in key order, after the cursor. */
@@ -129,7 +149,9 @@ type Examined =
       unparseable: boolean;
       absent: boolean;
     }
-  | { kind: "error"; candidate: Candidate; error: string };
+  | { kind: "error"; candidate: Candidate; error: string }
+  /** The tag read was absent and the control read did not show the credential sees the repo. */
+  | { kind: "unconfirmed"; candidate: Candidate; error: string };
 
 /** Run `work` over `items`, at most `width` at a time, keeping the order of the results. */
 async function mapBounded<T, R>(
@@ -228,6 +250,17 @@ export async function runUpstreamBackfill(
       return finish(env.DB, result, candidates[candidates.length - 1]);
     }
 
+    // One control read per repository, shared by every row of it that reads absent.
+    const controls = new Map<string, Promise<Awaited<ReturnType<typeof fetchDescriptionAtRef>>>>();
+    const controlOf = (repo: string) => {
+      let read = controls.get(repo);
+      if (!read) {
+        read = fetchDescriptionAtRef(env, repo, "main", pat);
+        controls.set(repo, read);
+      }
+      return read;
+    };
+
     const examined = await mapBounded(candidates, CONCURRENCY, async (c): Promise<Examined> => {
       const sourceId = openNeuroSourceId(c.dataset_id);
       if (!sourceId) return { kind: "error", candidate: c, error: "not an on###### dataset id" };
@@ -235,12 +268,24 @@ export async function runUpstreamBackfill(
       const fetched = await fetchDescriptionAtTag(env, repo, c.version, pat);
       if (fetched.kind === "error") return { kind: "error", candidate: c, error: fetched.reason };
       if (fetched.kind === "absent") {
+        const control = await controlOf(repo);
+        if (control.kind !== "content") {
+          return {
+            kind: "unconfirmed",
+            candidate: c,
+            error:
+              control.kind === "absent"
+                ? "dataset_description.json is absent at the tag and at main, so the 404 may be the credential's; not recorded"
+                : `dataset_description.json is absent at the tag and the control read of main failed (${control.reason}); not recorded`,
+          };
+        }
         return {
           kind: "record",
           candidate: c,
           tag: null,
           basis: "unknown",
-          reason: "dataset_description.json does not exist at the tag",
+          reason:
+            "dataset_description.json does not exist at the tag (the control read of main succeeded)",
           unparseable: false,
           absent: true,
         };
@@ -262,27 +307,24 @@ export async function runUpstreamBackfill(
     const records = examined.filter((e): e is Extract<Examined, { kind: "record" }> => {
       return e.kind === "record";
     });
+    let unconfirmed = 0;
     for (const e of examined) {
-      if (e.kind === "error") {
-        result.not_examined++;
-        result.errors.push({
-          dataset_id: e.candidate.dataset_id,
-          version: e.candidate.version,
-          error: e.error,
-        });
-      }
+      if (e.kind === "record") continue;
+      if (e.kind === "unconfirmed") unconfirmed++;
+      result.not_examined++;
+      result.errors.push({
+        dataset_id: e.candidate.dataset_id,
+        version: e.candidate.version,
+        error: e.error,
+      });
     }
 
-    // A credential GitHub cannot see the repositories with answers 404 to every one of them.
-    if (
-      candidates.length >= 2 &&
-      records.length === candidates.length &&
-      records.every((r) => r.absent)
-    ) {
+    // No row proved that the credential can see these repositories, and at least one 404 is
+    // unconfirmed: the likeliest cause is the credential, whatever else errored beside it.
+    if (records.length === 0 && unconfirmed > 0) {
       result.ok = false;
       result.suspect_credential = true;
-      result.absent = records.length;
-      result.error = `All ${records.length} descriptions read as absent; the GitHub credential may not see these repositories. Nothing was written.`;
+      result.error = `${unconfirmed} description(s) read as absent and no read in this batch proved the GitHub credential can see these repositories. Nothing was written.`;
       return finish(env.DB, result, candidates[candidates.length - 1]);
     }
     if (records.length === 0) {
@@ -291,13 +333,17 @@ export async function runUpstreamBackfill(
       return finish(env.DB, result, candidates[candidates.length - 1]);
     }
 
-    for (const r of records) {
+    const noteRecorded = (r: Extract<Examined, { kind: "record" }>) => {
       if (r.absent) result.absent++;
       if (r.unparseable) result.unparseable++;
       if (r.basis === "doi") result.recorded.doi++;
-      else {
-        result.recorded.unknown++;
-        if (!execute && result.unknown_samples.length < 10) {
+      else result.recorded.unknown++;
+    };
+
+    if (!execute) {
+      for (const r of records) {
+        noteRecorded(r);
+        if (r.basis !== "doi" && result.unknown_samples.length < 10) {
           result.unknown_samples.push({
             dataset_id: r.candidate.dataset_id,
             version: r.candidate.version,
@@ -305,9 +351,7 @@ export async function runUpstreamBackfill(
           });
         }
       }
-    }
-
-    if (execute) {
+    } else {
       const statements = records.map((r) =>
         env.DB.prepare(UPSTREAM_BACKFILL_WRITE_SQL).bind(
           r.tag,
@@ -317,12 +361,19 @@ export async function runUpstreamBackfill(
         ),
       );
       const written = await env.DB.batch(statements);
-      written.forEach((w, i) => {
-        if ((w.meta?.changes ?? 0) === 0) {
-          const r = records[i] as Extract<Examined, { kind: "record" }>;
+      records.forEach((r, i) => {
+        const changes = written[i]?.meta?.changes;
+        if (typeof changes !== "number") {
+          // The write may or may not have happened; a missing count is never read as zero.
+          result.errors.push({
+            dataset_id: r.candidate.dataset_id,
+            version: r.candidate.version,
+            error: "the write result carried no change count; whether it landed is unknown",
+          });
+        } else if (changes === 0) {
           result.skipped_existing++;
-          if (r.basis === "doi") result.recorded.doi--;
-          else result.recorded.unknown--;
+        } else {
+          noteRecorded(r);
         }
       });
     }

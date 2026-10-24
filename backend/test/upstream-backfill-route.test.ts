@@ -65,6 +65,13 @@ function startRawHost() {
         body: typeof body === "string" ? body : JSON.stringify(body),
       });
     },
+    /** Serve `body` as the description at an arbitrary ref (the control read reads `main`). */
+    serveRef(repo: string, ref: string, body: unknown, status = 200) {
+      files.set(`/nemarDatasets/${repo}/${ref}/dataset_description.json`, {
+        status,
+        body: typeof body === "string" ? body : JSON.stringify(body),
+      });
+    },
     reset() {
       files.clear();
       log.length = 0;
@@ -210,6 +217,18 @@ describe("upstream-backfill: who may call it", () => {
     expect(snapshotOf("on000001")).toEqual(NOT_EXAMINED);
   });
 
+  test("an `execute` that is not 1, true, 0 or false is 400 and does nothing", async () => {
+    seed("on000001");
+    raw.serve("on000001", "1.0.0", describing("on000001", "1.0.0"));
+    for (const bad of ["yes", "", "2", "TRUE", "on"]) {
+      expect((await call(`?execute=${bad}`)).status).toBe(400);
+    }
+    expect(raw.log).toHaveLength(0);
+    for (const ok of ["1", "true", "0", "false"]) {
+      expect((await call(`?execute=${ok}`)).status).toBe(200);
+    }
+  });
+
   test("a malformed `after` is 400", async () => {
     for (const bad of ["on000001", "nm000001@1.0.0", "on000001@1.0", "garbage"]) {
       expect((await call(`?after=${bad}`)).status).toBe(400);
@@ -328,16 +347,54 @@ describe("upstream-backfill: errors are not verdicts", () => {
     expect(snapshotOf("on000002")?.source_version_basis).toBe("doi");
   });
 
-  test("a 404 on one row is unknown, beside a row that has its file", async () => {
+  test("a 404 is unknown once the control read of main shows the credential sees the repository", async () => {
     seed("on000001");
     seed("on000002");
     raw.serve("on000002", "1.0.0", describing("on000002", "1.0.0"));
+    raw.serveRef("on000001", "main", { Name: "the repository is visible" });
     const body = await json(await call("?execute=1"));
     expect(body.absent).toBe(1);
     expect(snapshotOf("on000001")).toEqual({
       source_version: null,
       source_version_basis: "unknown",
     });
+  });
+
+  test("a 404 whose control read is also absent is NOT recorded: it may be the credential's", async () => {
+    seed("on000001");
+    seed("on000002");
+    raw.serve("on000002", "1.0.0", describing("on000002", "1.0.0"));
+    const res = await call("?execute=1");
+    expect(res.status).toBe(200);
+    const body = await json(res);
+    expect(body.not_examined).toBe(1);
+    expect(body.recorded).toEqual({ doi: 1, unknown: 0 });
+    expect(body.errors).toEqual([
+      expect.objectContaining({
+        dataset_id: "on000001",
+        error: expect.stringContaining("not recorded"),
+      }),
+    ]);
+    expect(snapshotOf("on000001")).toEqual(NOT_EXAMINED);
+  });
+
+  test("a 404 whose control read fails is NOT recorded, and says why", async () => {
+    seed("on000001");
+    seed("on000002");
+    raw.serve("on000002", "1.0.0", describing("on000002", "1.0.0"));
+    raw.serveRef("on000001", "main", "boom", 503);
+    const body = await json(await call("?execute=1"));
+    expect(body.not_examined).toBe(1);
+    expect(body.errors[0]?.error).toContain("control read of main failed");
+    expect(snapshotOf("on000001")).toEqual(NOT_EXAMINED);
+  });
+
+  test("several absent versions of one repository share one control read", async () => {
+    seed("on000001", ["1.0.0", "1.0.1", "1.0.2"]);
+    raw.serveRef("on000001", "main", { Name: "visible" });
+    const body = await json(await call("?execute=1"));
+    expect(body.recorded.unknown).toBe(3);
+    expect(raw.log.filter((r) => r.path.includes("/main/"))).toHaveLength(1);
   });
 
   test("every read failing is a 502 that writes nothing", async () => {
@@ -363,27 +420,84 @@ describe("upstream-backfill: errors are not verdicts", () => {
     expect(snapshotOf("on000002")).toEqual(NOT_EXAMINED);
   });
 
-  test("a batch where every description is absent is a suspect credential and writes nothing", async () => {
+  test("a batch where every description is absent and nothing proves the credential is suspect and writes nothing", async () => {
     seed("on000001");
     seed("on000002");
     seed("on000003");
     const res = await call("?execute=1");
     expect(res.status).toBe(502);
     const body = await json(res);
-    expect(body).toMatchObject({ ok: false, suspect_credential: true, absent: 3 });
+    expect(body).toMatchObject({ ok: false, suspect_credential: true, not_examined: 3 });
     for (const id of ["on000001", "on000002", "on000003"]) {
       expect(snapshotOf(id)).toEqual(NOT_EXAMINED);
     }
   });
 
-  test("a batch of one absent description is recorded: there is no majority to doubt", async () => {
+  test("a lone absent description is held back, not recorded: unknown is final", async () => {
     seed("on000001");
+    const res = await call("?execute=1");
+    expect(res.status).toBe(502);
+    expect(await json(res)).toMatchObject({ suspect_credential: true });
+    expect(snapshotOf("on000001")).toEqual(NOT_EXAMINED);
+  });
+
+  test("a lone absent description IS recorded when the control read succeeds", async () => {
+    seed("on000001");
+    raw.serveRef("on000001", "main", { Name: "visible" });
     const res = await call("?execute=1");
     expect(res.status).toBe(200);
     expect(snapshotOf("on000001")).toEqual({
       source_version: null,
       source_version_basis: "unknown",
     });
+  });
+
+  test("a mixed batch (one 500 and several absent) records no unknown while the credential is unproved", async () => {
+    seed("on000001");
+    seed("on000002");
+    seed("on000003");
+    seed("on000004");
+    raw.serve("on000001", "1.0.0", "boom", 500);
+    const res = await call("?execute=1");
+    expect(res.status).toBe(502);
+    const body = await json(res);
+    expect(body).toMatchObject({ ok: false, suspect_credential: true, not_examined: 4 });
+    for (const id of ["on000001", "on000002", "on000003", "on000004"]) {
+      expect(snapshotOf(id)).toEqual(NOT_EXAMINED);
+    }
+  });
+
+  test("a mixed batch whose controls succeed records the absent rows and leaves the 500 row", async () => {
+    seed("on000001");
+    seed("on000002");
+    seed("on000003");
+    raw.serve("on000001", "1.0.0", "boom", 500);
+    raw.serveRef("on000002", "main", { Name: "visible" });
+    raw.serveRef("on000003", "main", { Name: "visible" });
+    const res = await call("?execute=1");
+    expect(res.status).toBe(200);
+    const body = await json(res);
+    expect(body.recorded.unknown).toBe(2);
+    expect(body.not_examined).toBe(1);
+    expect(snapshotOf("on000001")).toEqual(NOT_EXAMINED);
+    expect(snapshotOf("on000002")?.source_version_basis).toBe("unknown");
+  });
+
+  test("a write result without a change count is an error, never a zero", async () => {
+    seed("on000001");
+    raw.serve("on000001", "1.0.0", describing("on000001", "1.0.0"));
+    const d1 = realD1(db);
+    const batch = d1.batch.bind(d1);
+    d1.batch = (async (statements: D1PreparedStatement[]) => {
+      const results = (await batch(statements)) as { meta?: unknown }[];
+      return results.map((r) => ({ ...r, meta: undefined }));
+    }) as typeof d1.batch;
+    const body = await json(await call("?execute=1", ADMIN_KEY, env({}, d1)));
+    expect(body.skipped_existing).toBe(0);
+    expect(body.recorded).toEqual({ doi: 0, unknown: 0 });
+    expect(body.errors).toEqual([
+      expect.objectContaining({ error: expect.stringContaining("no change count") }),
+    ]);
   });
 
   test("no GitHub credential is a 502 that reads and writes nothing", async () => {
@@ -516,6 +630,53 @@ describe("upstream-backfill: paging", () => {
     expect(second.scanned).toBe(2);
     expect(second.next_cursor).toBeNull();
     expect(second.counts).toMatchObject({ doi: 4, not_examined: 0 });
+  });
+
+  test("the keyset tie-breaks on version inside one dataset: every row exactly once", async () => {
+    seed("on000001", ["1.0.0", "1.0.1", "1.0.10"]);
+    for (const v of ["1.0.0", "1.0.1", "1.0.10"]) {
+      raw.serve("on000001", v, describing("on000001", v));
+    }
+    for (const limit of [1, 2]) {
+      raw.log.length = 0;
+      let cursor: string | null = null;
+      let calls = 0;
+      do {
+        const body: Body = await json(
+          await call(`?limit=${limit}${cursor ? `&after=${cursor}` : ""}`),
+        );
+        cursor = body.next_cursor;
+        calls++;
+      } while (cursor && calls < 10);
+      expect(cursor).toBeNull();
+      expect(raw.log.map((r) => r.path.split("/")[3]).sort()).toEqual([
+        "v1.0.0",
+        "v1.0.1",
+        "v1.0.10",
+      ]);
+    }
+  });
+
+  test("a v-prefixed or non-semver stored version is never a candidate and never wedges the cursor", async () => {
+    seed("on000001", ["v1.0.0", "1.0", "1.0.0.1", "latest", "1.0.0-rc1", "1.x.0", "1.0.1"]);
+    raw.serve("on000001", "1.0.1", describing("on000001", "1.0.1"));
+    let cursor: string | null = null;
+    let calls = 0;
+    do {
+      const res: Response = await call(`?execute=1&limit=1${cursor ? `&after=${cursor}` : ""}`);
+      expect(res.status).toBe(200);
+      const body: Body = await json(res);
+      cursor = body.next_cursor;
+      calls++;
+    } while (cursor && calls < 10);
+    expect(cursor).toBeNull();
+    expect(snapshotOf("on000001", "1.0.1")?.source_version_basis).toBe("doi");
+    for (const v of ["v1.0.0", "1.0", "1.0.0.1", "latest", "1.0.0-rc1", "1.x.0"]) {
+      expect(snapshotOf("on000001", v)).toEqual(NOT_EXAMINED);
+    }
+    expect(raw.log.map((r) => r.path)).toEqual([
+      "/nemarDatasets/on000001/v1.0.1/dataset_description.json",
+    ]);
   });
 
   test("limit defaults to 25, is clamped to 50, and a nonsense limit is the default", async () => {
