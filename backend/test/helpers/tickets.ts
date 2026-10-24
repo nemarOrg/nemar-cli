@@ -52,7 +52,7 @@ export interface EmlOptions {
 }
 
 export const PASS =
-  "mx.example.net; spf=pass smtp.mailfrom=sender.example; dkim=pass header.d=sender.example; dmarc=pass header.from=sender.example";
+  "mx.cloudflare.net; spf=pass smtp.mailfrom=sender.example; dkim=pass header.d=sender.example; dmarc=pass header.from=sender.example";
 
 /** A message as text, CRLF line ends, parsed by the real parser in the tests. */
 export function eml(o: EmlOptions = {}): Uint8Array {

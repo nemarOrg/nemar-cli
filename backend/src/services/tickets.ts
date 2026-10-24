@@ -3,19 +3,36 @@
  *
  * The raw message in R2 is the record; everything here is a working copy built from it, so a
  * failure at any step leaves the record intact and {@link reprocessRawKey} rebuilds the copy.
- * Processing one raw key twice stores it once: the key is unique on `mail_messages`, and a key
- * already stored short-circuits to `duplicate`.
+ * Processing one raw key twice stores it once: the key is unique on `mail_messages`, a key
+ * already stored short-circuits to `duplicate`, and a concurrent second insert that loses the
+ * unique constraint is re-checked and reported as `duplicate` too.
  *
- * Threading, in order: the `+t<ref>` plus tag of the recipient, then `In-Reply-To` and
- * `References` matched against stored Message-IDs, else a new ticket. A message judged spam is
- * never threaded: an unauthenticated sender must not be able to append to a ticket by guessing
- * or forging a header.
+ * Threading finds a candidate ticket by the `+t<ref>` plus tag of the recipient, then by
+ * `In-Reply-To` and `References` matched against stored Message-IDs (the oldest holder of an id
+ * wins). Finding a candidate is not permission to append to it. The message is appended only when
+ * ALL of these hold; otherwise it opens a new ticket whose `created` event records the
+ * candidate and the reason:
+ *   - the message is not spam (DMARC pass, or no DMARC failure plus an aligned SPF or DKIM pass,
+ *     from the one Authentication-Results header Cloudflare stamps);
+ *   - the candidate is not itself a spam ticket;
+ *   - the recipient's queue and the candidate agree on restriction (a security or conduct
+ *     address never appends to an unrestricted ticket);
+ *   - the From address is the ticket's requester or an address already on the ticket.
+ *
+ * Tags are descriptive labels taken from the recipient address, which anyone can choose, so they
+ * must NEVER feed an access decision: restriction is the queue's (or RESTRICTED_TAGS) and the
+ * ticket's `restricted` and `excluded_user_id`, nothing else.
  */
 
 import PostalMime from "postal-mime";
 import { htmlToText } from "../lib/html-to-text";
 import { clampUtf8Bytes } from "../lib/utf8";
-import { FALLBACK_QUEUE_TAG, resolveAssignee } from "./ticket-assignment";
+import {
+  FALLBACK_QUEUE_TAG,
+  isEligibleAssignee,
+  isRestrictedQueue,
+  resolveAssignee,
+} from "./ticket-assignment";
 
 /** The stored body is clamped to this many UTF-8 bytes. */
 export const TEXT_BODY_MAX_BYTES = 64 * 1024;
@@ -26,12 +43,19 @@ const TAG_MAX_LENGTH = 64;
 /** The most Message-IDs from `References` looked up for one message. */
 const MAX_REFERENCE_IDS = 20;
 
-export type AuthVerdict = "pass" | "fail" | "none" | string;
+/**
+ * The authserv-id Cloudflare Email Routing stamps on the `Authentication-Results` header it adds
+ * (observed on real staging mail). Only a header naming this id is read: a sender can put any
+ * header, including its own `Authentication-Results`, above or below ours.
+ */
+export const CLOUDFLARE_AUTHSERV_ID = "mx.cloudflare.net";
 
 export interface AuthResults {
   spf: string;
   dkim: string;
   dmarc: string;
+  /** An SPF or DKIM pass whose domain aligns with the From domain (or names none to check). */
+  alignedPass: boolean;
 }
 
 export interface InboundTicketInput {
@@ -68,31 +92,60 @@ export function ticketPlusTag(ref: string): string {
   return `t${ref}`;
 }
 
+const domainOf = (address: string): string => address.split("@")[1]?.toLowerCase() ?? "";
+
+/** Relaxed alignment: equal, or one is a subdomain of the other. */
+function aligned(a: string, b: string): boolean {
+  if (a === "" || b === "") return false;
+  return a === b || a.endsWith(`.${b}`) || b.endsWith(`.${a}`);
+}
+
 /**
- * spf, dkim and dmarc results from the TOPMOST `Authentication-Results` header. Cloudflare adds
- * its own on receipt, above anything the sender supplied, so a header lower down (which the
- * sender could have forged) is never read. A mechanism the header does not mention is `none`.
+ * spf, dkim and dmarc results from the FIRST `Authentication-Results` header whose authserv-id is
+ * {@link CLOUDFLARE_AUTHSERV_ID}; every other such header is ignored, whatever its position. With
+ * none, every result is `none`. An SPF or DKIM pass only sets `alignedPass` when the header gives
+ * its domain (`smtp.mailfrom` or `header.d`) and that domain aligns with the From domain; a pass
+ * that names no domain is counted (best effort). DMARC is the primary signal.
  */
-export function parseAuthResults(headers: { key: string; value: string }[]): AuthResults {
-  const header = headers.find((h) => h.key.toLowerCase() === "authentication-results");
-  const results: AuthResults = { spf: "none", dkim: "none", dmarc: "none" };
+export function parseAuthResults(
+  headers: { key: string; value: string }[],
+  fromAddress = "",
+): AuthResults {
+  const results: AuthResults = { spf: "none", dkim: "none", dmarc: "none", alignedPass: false };
+  const header = headers.find(
+    (h) =>
+      h.key.toLowerCase() === "authentication-results" &&
+      (h.value.split(";")[0] ?? "").trim().toLowerCase() === CLOUDFLARE_AUTHSERV_ID,
+  );
   if (!header) return results;
-  for (const name of ["spf", "dkim", "dmarc"] as const) {
-    // The first occurrence is the one the receiver evaluated; later dkim=... entries are
-    // additional signatures. A `pass` anywhere for dkim counts, so prefer it.
-    const matches = [
-      ...header.value.matchAll(new RegExp(`(?:^|[\\s;])${name}\\s*=\\s*([a-z]+)`, "gi")),
-    ].map((m) => m[1].toLowerCase());
-    if (matches.length === 0) continue;
-    results[name] = matches.includes("pass") ? "pass" : matches[0];
+  const fromDomain = domainOf(fromAddress);
+  for (const segment of header.value.split(";").slice(1)) {
+    const m = /^\s*(spf|dkim|dmarc)\s*=\s*([a-z]+)/i.exec(segment);
+    if (!m) continue;
+    const name = m[1].toLowerCase() as "spf" | "dkim" | "dmarc";
+    const verdict = m[2].toLowerCase();
+    if (name === "dmarc") {
+      results.dmarc = verdict;
+      continue;
+    }
+    // A pass anywhere for the mechanism wins over a failure of another signature.
+    if (verdict === "pass" || results[name] === "none") results[name] = verdict;
+    if (verdict !== "pass") continue;
+    const prop = name === "spf" ? /smtp\.mailfrom\s*=\s*([^\s;]+)/i : /header\.d\s*=\s*([^\s;]+)/i;
+    const named = prop.exec(segment)?.[1]?.replace(/^.*@/, "").toLowerCase();
+    if (named === undefined || aligned(named, fromDomain)) results.alignedPass = true;
   }
   return results;
 }
 
-/** Spam: a DMARC failure, or no authentication mechanism passed at all. */
+/**
+ * Spam unless DMARC passes, or DMARC did not fail and an SPF or DKIM pass aligns with the From
+ * domain.
+ */
 export function isSpam(auth: AuthResults): boolean {
+  if (auth.dmarc === "pass") return false;
   if (auth.dmarc === "fail") return true;
-  return auth.spf !== "pass" && auth.dkim !== "pass" && auth.dmarc !== "pass";
+  return !auth.alignedPass;
 }
 
 /** `local part` split into its queue tag and the plus tag, both lowercased; "" when absent. */
@@ -120,6 +173,17 @@ export function extractMessageIds(...values: (string | undefined)[]): string[] {
   return ids;
 }
 
+/** One line of display text: control characters (CR, LF, NUL, ...) become spaces, runs collapse. */
+export function singleLine(value: string): string {
+  let out = "";
+  for (const ch of value) {
+    const c = ch.codePointAt(0) ?? 0;
+    const control = c < 0x20 || (c >= 0x7f && c <= 0x9f) || c === 0x2028 || c === 0x2029;
+    out += control ? " " : ch;
+  }
+  return out.replace(/\s+/g, " ").trim();
+}
+
 /** `YYYY-MM-DD HH:MM:SS`, the form SQLite's `datetime('now')` writes. */
 function sqlDate(d: Date): string {
   return d.toISOString().slice(0, 19).replace("T", " ");
@@ -129,30 +193,55 @@ interface TicketHead {
   id: number;
   status: string;
   restricted: number;
+  queue_tag: string;
+  excluded_user_id: number | null;
   assignee_user_id: number | null;
+  requester_email: string;
 }
+
+const HEAD_COLUMNS =
+  "t.id, t.status, t.restricted, t.queue_tag, t.excluded_user_id, t.assignee_user_id, t.requester_email";
 
 async function findByRef(db: D1Database, plus: string): Promise<TicketHead | null> {
   const m = REF_TAG.exec(plus);
   if (!m) return null;
   return db
-    .prepare("SELECT id, status, restricted, assignee_user_id FROM mail_tickets WHERE ref = ?")
+    .prepare(`SELECT ${HEAD_COLUMNS} FROM mail_tickets t WHERE t.ref = ?`)
     .bind(m[1])
     .first<TicketHead>();
 }
 
+/** The ticket holding the OLDEST stored message with any of `ids`: a later copy cannot steal it. */
 async function findByMessageIds(db: D1Database, ids: string[]): Promise<TicketHead | null> {
   const wanted = ids.slice(0, MAX_REFERENCE_IDS);
   if (wanted.length === 0) return null;
   const marks = wanted.map(() => "?").join(", ");
   return db
     .prepare(
-      `SELECT t.id, t.status, t.restricted, t.assignee_user_id
+      `SELECT ${HEAD_COLUMNS}
          FROM mail_messages m JOIN mail_tickets t ON t.id = m.ticket_id
-        WHERE m.message_id IN (${marks}) ORDER BY m.id DESC LIMIT 1`,
+        WHERE m.message_id IN (${marks}) ORDER BY m.id ASC LIMIT 1`,
     )
     .bind(...wanted)
     .first<TicketHead>();
+}
+
+/** Whether `address` is the ticket's requester or already on one of its messages. */
+async function isTicketParticipant(
+  db: D1Database,
+  ticket: TicketHead,
+  address: string,
+): Promise<boolean> {
+  if (address === "") return false;
+  if (ticket.requester_email.toLowerCase() === address) return true;
+  const row = await db
+    .prepare(
+      `SELECT 1 AS ok FROM mail_messages
+        WHERE ticket_id = ?1 AND (lower(from_addr) = ?2 OR lower(to_addr) = ?2) LIMIT 1`,
+    )
+    .bind(ticket.id, address)
+    .first<{ ok: number }>();
+  return row !== null;
 }
 
 /** A verified or approved, live account whose address is `email`, else null. */
@@ -169,6 +258,24 @@ async function accountForAddress(db: D1Database, email: string): Promise<number 
   return row?.id ?? null;
 }
 
+async function existingByRawKey(db: D1Database, rawKey: string): Promise<IngestResult | null> {
+  const existing = await db
+    .prepare(
+      `SELECT t.id, t.status, t.assignee_user_id FROM mail_messages m
+         JOIN mail_tickets t ON t.id = m.ticket_id WHERE m.raw_key = ?`,
+    )
+    .bind(rawKey)
+    .first<{ id: number; status: string; assignee_user_id: number | null }>();
+  if (!existing) return null;
+  return {
+    outcome: "duplicate",
+    ticketId: existing.id,
+    status: existing.status,
+    assigneeUserId: existing.assignee_user_id,
+    spam: existing.status === "spam",
+  };
+}
+
 /**
  * Turn one stored raw message into a ticket, or into a message on an existing ticket. Throws on a
  * parse or database failure; the Worker's `email()` path catches it and keeps the raw object.
@@ -177,39 +284,49 @@ export async function ingestInboundMessage(
   db: D1Database,
   input: InboundTicketInput,
 ): Promise<IngestResult> {
-  const existing = await db
-    .prepare(
-      `SELECT t.id, t.status, t.assignee_user_id FROM mail_messages m
-         JOIN mail_tickets t ON t.id = m.ticket_id WHERE m.raw_key = ?`,
-    )
-    .bind(input.rawKey)
-    .first<{ id: number; status: string; assignee_user_id: number | null }>();
-  if (existing) {
-    return {
-      outcome: "duplicate",
-      ticketId: existing.id,
-      status: existing.status,
-      assigneeUserId: existing.assignee_user_id,
-      spam: existing.status === "spam",
-    };
+  const already = await existingByRawKey(db, input.rawKey);
+  if (already) return already;
+  try {
+    return await ingestNew(db, input);
+  } catch (error) {
+    // A concurrent ingest of the same key won the unique raw_key constraint and this batch
+    // rolled back whole; that is a duplicate, not a failure.
+    const winner = await existingByRawKey(db, input.rawKey).catch(() => null);
+    if (winner) return winner;
+    throw error;
   }
+}
 
+async function ingestNew(db: D1Database, input: InboundTicketInput): Promise<IngestResult> {
   const parsed = await PostalMime.parse(input.raw);
-  const auth = parseAuthResults(parsed.headers);
+  const fromAddr = singleLine(
+    clampUtf8Bytes(
+      (parsed.from?.address || input.envelopeFrom || "").toLowerCase(),
+      ADDRESS_MAX_BYTES,
+    ),
+  );
+  const auth = parseAuthResults(parsed.headers, fromAddr);
   const spam = isSpam(auth);
 
   const envelopeTo = input.envelopeTo || parsed.to?.[0]?.address || "";
   const { base, plus } = splitRecipient(envelopeTo);
-  const fromAddr = clampUtf8Bytes(
-    (parsed.from?.address || input.envelopeFrom || "").toLowerCase(),
-    ADDRESS_MAX_BYTES,
-  );
-  const subject = clampUtf8Bytes((parsed.subject ?? "").trim(), SUBJECT_MAX_BYTES);
+  const subject = singleLine(clampUtf8Bytes(parsed.subject ?? "", SUBJECT_MAX_BYTES));
   const bodySource = (parsed.text ?? (parsed.html ? htmlToText(parsed.html) : "")).trimEnd();
   const textBody = clampUtf8Bytes(bodySource, TEXT_BODY_MAX_BYTES);
-  const messageId = parsed.messageId
+  const rawMessageId = parsed.messageId
     ? clampUtf8Bytes(parsed.messageId.trim(), HEADER_ID_MAX_BYTES)
     : null;
+  // The first stored message to carry an id keeps it as the lookup key. A later message that
+  // repeats it (a forged or accidental duplicate) is stored with no id, so it can never become
+  // the target of a later `In-Reply-To`; the original is still in the raw object.
+  const messageId =
+    rawMessageId !== null &&
+    (await db
+      .prepare("SELECT 1 AS ok FROM mail_messages WHERE message_id = ? LIMIT 1")
+      .bind(rawMessageId)
+      .first<{ ok: number }>())
+      ? null
+      : rawMessageId;
   const inReplyTo = parsed.inReplyTo ? clampUtf8Bytes(parsed.inReplyTo, HEADER_ID_MAX_BYTES) : null;
   const references = parsed.references ? clampUtf8Bytes(parsed.references, 2048) : null;
   const created = sqlDate(input.receivedAt);
@@ -220,6 +337,22 @@ export async function ingestInboundMessage(
   if (baseTag) tags.add(baseTag);
   const plusTag = REF_TAG.test(plus) ? null : cleanTag(plus);
   if (plusTag) tags.add(plusTag);
+
+  // The recipient's queue comes first: it decides restriction before any threading. A reserved
+  // tag keeps its own tag and stays restricted even when its row is missing.
+  const queueFor = async (tag: string) =>
+    db
+      .prepare("SELECT tag, restricted FROM mail_queues WHERE tag = ?")
+      .bind(tag)
+      .first<{ tag: string; restricted: number }>();
+  const own = baseTag ? await queueFor(baseTag) : null;
+  const fallback = own ? null : await queueFor(FALLBACK_QUEUE_TAG);
+  const queueTag = own
+    ? own.tag
+    : baseTag && isRestrictedQueue(baseTag)
+      ? baseTag
+      : (fallback?.tag ?? FALLBACK_QUEUE_TAG);
+  const queueRestricted = isRestrictedQueue(queueTag, own ?? fallback);
 
   const messageInsert = (ticketIdSql: string, ticketBinds: unknown[]): D1PreparedStatement =>
     db
@@ -244,10 +377,24 @@ export async function ingestInboundMessage(
         created,
       );
 
-  const target = spam
-    ? null
-    : ((await findByRef(db, plus)) ??
-      (await findByMessageIds(db, extractMessageIds(parsed.inReplyTo, parsed.references))));
+  // A candidate is a match by ref or Message-ID; it becomes the target only if it passes every
+  // check, and otherwise the reason is recorded on the new ticket.
+  let target: TicketHead | null = null;
+  let declined: { matched_ticket_id: number; reason: string } | null = null;
+  if (!spam) {
+    const candidate =
+      (await findByRef(db, plus)) ??
+      (await findByMessageIds(db, extractMessageIds(parsed.inReplyTo, parsed.references)));
+    if (candidate) {
+      let reason: string | null = null;
+      if (candidate.status === "spam") reason = "candidate_is_spam";
+      else if (queueRestricted && candidate.restricted !== 1) reason = "restriction_mismatch";
+      else if (!(await isTicketParticipant(db, candidate, fromAddr)))
+        reason = "sender_not_on_ticket";
+      if (reason === null) target = candidate;
+      else declined = { matched_ticket_id: candidate.id, reason };
+    }
+  }
 
   if (target) {
     const statements: D1PreparedStatement[] = [
@@ -264,21 +411,53 @@ export async function ingestInboundMessage(
       );
     }
     let status = target.status;
+    let assignee = target.assignee_user_id;
     // A reply to a closed ticket reopens it, and one to a pending ticket (waiting on the
-    // requester) puts it back with the team. Escalated and spam tickets keep their status.
+    // requester) puts it back with the team. Escalated tickets keep their status. The holder
+    // is kept only if still eligible for THIS ticket (restricted, excluded, role, status);
+    // otherwise the queue's strategy picks again, else the pool.
     if (status === "closed" || status === "pending") {
+      const keep =
+        assignee !== null &&
+        (await isEligibleAssignee(db, assignee, target.restricted === 1, target.excluded_user_id));
+      let reassigned = false;
+      if (!keep) {
+        const next = await resolveAssignee(
+          db,
+          target.queue_tag,
+          { excludedUserId: target.excluded_user_id },
+          input.receivedAt,
+        );
+        reassigned = next !== assignee;
+        assignee = next;
+      }
       statements.push(
         db
           .prepare(
-            "UPDATE mail_tickets SET status = 'open', updated_at = ? WHERE id = ? AND status IN ('closed', 'pending')",
+            "UPDATE mail_tickets SET status = 'open', assignee_user_id = ?, updated_at = ? WHERE id = ? AND status IN ('closed', 'pending')",
           )
-          .bind(created, target.id),
+          .bind(assignee, created, target.id),
         db
           .prepare(
-            "INSERT INTO mail_ticket_events (ticket_id, kind, actor_user_id, detail, created_at) VALUES (?, 'status', NULL, ?, ?)",
+            "INSERT INTO mail_ticket_events (ticket_id, kind, actor_user_id, detail, created_at) VALUES (?, 'reopened', NULL, ?, ?)",
           )
           .bind(target.id, JSON.stringify({ from: status, to: "open", reason: "reply" }), created),
       );
+      if (reassigned) {
+        statements.push(
+          db
+            .prepare(
+              `INSERT INTO mail_ticket_events (ticket_id, kind, actor_user_id, detail, created_at)
+               VALUES (?, ?, NULL, ?, ?)`,
+            )
+            .bind(
+              target.id,
+              assignee === null ? "unassigned" : "assigned",
+              JSON.stringify({ to: assignee, reason: "reopen" }),
+              created,
+            ),
+        );
+      }
       status = "open";
     }
     await db.batch(statements);
@@ -286,25 +465,14 @@ export async function ingestInboundMessage(
       outcome: "threaded",
       ticketId: target.id,
       status,
-      assigneeUserId: target.assignee_user_id,
+      assigneeUserId: assignee,
       spam: false,
     };
   }
 
-  // A new ticket. Queue: the recipient's own if it has one, else the fallback.
-  const queue = await db
-    .prepare("SELECT tag, restricted FROM mail_queues WHERE tag = ?")
-    .bind(baseTag ?? FALLBACK_QUEUE_TAG)
-    .first<{ tag: string; restricted: number }>();
-  const queueRow = queue ??
-    (await db
-      .prepare("SELECT tag, restricted FROM mail_queues WHERE tag = ?")
-      .bind(FALLBACK_QUEUE_TAG)
-      .first<{ tag: string; restricted: number }>()) ?? { tag: FALLBACK_QUEUE_TAG, restricted: 0 };
-
   const requesterUserId =
     !spam && auth.dmarc === "pass" ? await accountForAddress(db, fromAddr) : null;
-  const assignee = spam ? null : await resolveAssignee(db, queueRow.tag, {}, input.receivedAt);
+  const assignee = spam ? null : await resolveAssignee(db, queueTag, {}, input.receivedAt);
   const status = spam ? "spam" : "open";
   const ref = newTicketRef();
 
@@ -317,8 +485,8 @@ export async function ingestInboundMessage(
       )
       .bind(
         ref,
-        queueRow.tag,
-        queueRow.restricted,
+        queueTag,
+        queueRestricted ? 1 : 0,
         status,
         assignee,
         fromAddr,
@@ -334,7 +502,7 @@ export async function ingestInboundMessage(
         `INSERT INTO mail_ticket_events (ticket_id, kind, actor_user_id, detail, created_at)
          VALUES ((SELECT id FROM mail_tickets WHERE ref = ?), 'created', NULL, ?, ?)`,
       )
-      .bind(ref, JSON.stringify({ queue: queueRow.tag, spam }), created),
+      .bind(ref, JSON.stringify({ queue: queueTag, spam, ...(declined ?? {}) }), created),
   ];
   if (assignee !== null) {
     statements.push(

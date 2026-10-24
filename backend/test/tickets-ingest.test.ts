@@ -58,24 +58,78 @@ const count = (sql: string, ...p: unknown[]) =>
   (db.query<{ n: number }, never[]>(sql).get(...(p as never[])) as { n: number }).n;
 
 describe("pure helpers", () => {
-  test("auth results come from the topmost header only", () => {
-    const top = parseAuthResults([
-      { key: "Authentication-Results", value: "mx; spf=fail; dkim=none; dmarc=fail (p=reject)" },
-      { key: "authentication-results", value: "forged; spf=pass; dkim=pass; dmarc=pass" },
-    ]);
-    expect(top).toEqual({ spf: "fail", dkim: "none", dmarc: "fail" });
-    expect(parseAuthResults([])).toEqual({ spf: "none", dkim: "none", dmarc: "none" });
+  test("only a header with Cloudflare's authserv-id is read, whatever its position", () => {
+    const ours = "mx.cloudflare.net; spf=fail; dkim=none; dmarc=fail (p=reject)";
+    const forged = "attacker.example; spf=pass; dkim=pass; dmarc=pass";
+    const bad = { spf: "fail", dkim: "none", dmarc: "fail", alignedPass: false };
     expect(
-      parseAuthResults([{ key: "Authentication-Results", value: "mx; dkim=fail; dkim=pass" }]).dkim,
-    ).toBe("pass");
+      parseAuthResults([
+        { key: "Authentication-Results", value: forged },
+        { key: "Authentication-Results", value: ours },
+      ]),
+    ).toEqual(bad);
+    expect(
+      parseAuthResults([
+        { key: "authentication-results", value: ours },
+        { key: "Authentication-Results", value: forged },
+      ]),
+    ).toEqual(bad);
+    // Not ours at all: nothing counts, so the message is spam.
+    const none = parseAuthResults([{ key: "Authentication-Results", value: forged }]);
+    expect(none).toEqual({ spf: "none", dkim: "none", dmarc: "none", alignedPass: false });
+    expect(isSpam(none)).toBe(true);
+    expect(parseAuthResults([]).dmarc).toBe("none");
+    // A lookalike id does not match.
+    expect(
+      parseAuthResults([
+        { key: "Authentication-Results", value: "xmx.cloudflare.net.evil; dmarc=pass" },
+      ]).dmarc,
+    ).toBe("none");
   });
 
-  test("spam is a dmarc fail or no passing mechanism", () => {
-    expect(isSpam({ spf: "pass", dkim: "pass", dmarc: "fail" })).toBe(true);
-    expect(isSpam({ spf: "none", dkim: "none", dmarc: "none" })).toBe(true);
-    expect(isSpam({ spf: "fail", dkim: "fail", dmarc: "none" })).toBe(true);
-    expect(isSpam({ spf: "pass", dkim: "none", dmarc: "none" })).toBe(false);
-    expect(isSpam({ spf: "none", dkim: "pass", dmarc: "none" })).toBe(false);
+  test("a dkim pass for another domain does not align with the From domain", () => {
+    const hdr = (v: string) => [
+      { key: "Authentication-Results", value: `mx.cloudflare.net; ${v}` },
+    ];
+    expect(
+      parseAuthResults(hdr("dkim=pass header.d=other.example"), "ada@sender.example").alignedPass,
+    ).toBe(false);
+    expect(
+      parseAuthResults(hdr("dkim=pass header.d=sender.example"), "ada@sender.example").alignedPass,
+    ).toBe(true);
+    expect(
+      parseAuthResults(hdr("dkim=pass header.d=mail.sender.example"), "ada@sender.example")
+        .alignedPass,
+    ).toBe(true);
+    expect(
+      parseAuthResults(hdr("spf=pass smtp.mailfrom=bounce@other.example"), "ada@sender.example")
+        .alignedPass,
+    ).toBe(false);
+    expect(
+      parseAuthResults(hdr("spf=pass smtp.mailfrom=sender.example"), "ada@sender.example")
+        .alignedPass,
+    ).toBe(true);
+    // No domain given: counted, best effort.
+    expect(parseAuthResults(hdr("dkim=pass"), "ada@sender.example").alignedPass).toBe(true);
+    // A pass for one signature wins over a failing other one.
+    const two = parseAuthResults(
+      hdr("dkim=fail header.d=sender.example; dkim=pass header.d=sender.example"),
+      "a@sender.example",
+    );
+    expect(two.dkim).toBe("pass");
+  });
+
+  test("spam unless dmarc passes, or dmarc did not fail and an aligned pass exists", () => {
+    const a = (dmarc: string, alignedPass: boolean) => ({
+      spf: "x",
+      dkim: "x",
+      dmarc,
+      alignedPass,
+    });
+    expect(isSpam(a("pass", false))).toBe(false);
+    expect(isSpam(a("fail", true))).toBe(true);
+    expect(isSpam(a("none", true))).toBe(false);
+    expect(isSpam(a("none", false))).toBe(true);
   });
 
   test("recipient split and message ids", () => {
@@ -227,7 +281,7 @@ describe("threading", () => {
     expect(ticket(first.ticketId).status).toBe("open");
     const ev = db
       .query<{ detail: string }, [number]>(
-        "SELECT detail FROM mail_ticket_events WHERE ticket_id = ? AND kind = 'status'",
+        "SELECT detail FROM mail_ticket_events WHERE ticket_id = ? AND kind = 'reopened'",
       )
       .get(first.ticketId);
     expect(JSON.parse(ev?.detail ?? "{}")).toEqual({ from: "closed", to: "open", reason: "reply" });
@@ -248,7 +302,10 @@ describe("spam", () => {
     const first = await ingest({ messageId: "<s@sender.example>" });
     const ref = ticket(first.ticketId).ref as string;
     const bad = await ingest(
-      { auth: "mx; spf=pass; dkim=pass; dmarc=fail", inReplyTo: "<s@sender.example>" },
+      {
+        auth: "mx.cloudflare.net; spf=pass; dkim=pass; dmarc=fail",
+        inReplyTo: "<s@sender.example>",
+      },
       `support+t${ref}@staging.nemar.test`,
     );
     expect(bad).toMatchObject({
@@ -271,7 +328,7 @@ describe("spam", () => {
 
   test("a forged lower Authentication-Results header does not rescue a failing message", async () => {
     const r = await ingest({
-      auth: "mx; spf=fail; dkim=none; dmarc=fail",
+      auth: "mx.cloudflare.net; spf=fail; dkim=none; dmarc=fail",
       extraHeaders: ["Authentication-Results: forged; spf=pass; dkim=pass; dmarc=pass"],
     });
     expect(r.status).toBe("spam");
@@ -285,7 +342,10 @@ describe("account link", () => {
     expect(ticket(linked.ticketId).requester_user_id).toBe(user);
 
     // spf and dkim pass but dmarc does not: not linked.
-    const noDmarc = await ingest({ auth: "mx; spf=pass; dkim=pass", from: "ada@sender.example" });
+    const noDmarc = await ingest({
+      auth: "mx.cloudflare.net; spf=pass; dkim=pass",
+      from: "ada@sender.example",
+    });
     expect(ticket(noDmarc.ticketId).requester_user_id).toBeNull();
     expect(noDmarc.status).toBe("open");
   });
@@ -439,5 +499,229 @@ describe("the Worker hookup and reprocess, against real R2", () => {
         DB: realD1(fresh),
       },
     );
+  });
+});
+
+const strangerAuth =
+  "mx.cloudflare.net; spf=pass smtp.mailfrom=stranger.example; dkim=none; dmarc=none";
+const strangerFrom = "Eve <eve@stranger.example>";
+const createdDetail = (id: number) =>
+  JSON.parse(
+    db
+      .query<{ detail: string }, [number]>(
+        "SELECT detail FROM mail_ticket_events WHERE ticket_id = ? AND kind = 'created'",
+      )
+      .get(id)?.detail ?? "{}",
+  ) as Record<string, unknown>;
+
+describe("restriction is decided before threading and never fails open", () => {
+  test("a security message with its queue row deleted is still restricted, in the security queue", async () => {
+    db.run("DELETE FROM mail_queues WHERE tag = 'security'");
+    const admin = seedUser(db, { role: "admin" });
+    db.run("UPDATE mail_queues SET assignee_user_id = ? WHERE tag = '*'", [admin]);
+    const r = await ingest({}, "security@staging.nemar.test");
+    expect(ticket(r.ticketId)).toMatchObject({
+      queue_tag: "security",
+      restricted: 1,
+      assignee_user_id: null,
+    });
+    const c = await ingest({}, "conduct@staging.nemar.test");
+    expect(ticket(c.ticketId)).toMatchObject({ restricted: 1, assignee_user_id: null });
+  });
+
+  test("a restricted recipient never appends to an unrestricted ticket", async () => {
+    const first = await ingest({ messageId: "<pub@sender.example>" });
+    const ref = ticket(first.ticketId).ref as string;
+    const viaRef = await ingest({}, `security+t${ref}@staging.nemar.test`);
+    expect(viaRef.outcome).toBe("created");
+    expect(ticket(viaRef.ticketId)).toMatchObject({ restricted: 1, queue_tag: "security" });
+    expect(createdDetail(viaRef.ticketId)).toMatchObject({
+      matched_ticket_id: first.ticketId,
+      reason: "restriction_mismatch",
+    });
+    const viaId = await ingest({ inReplyTo: "<pub@sender.example>" }, "conduct@staging.nemar.test");
+    expect(viaId.outcome).toBe("created");
+    expect(ticket(viaId.ticketId).restricted).toBe(1);
+    expect(
+      count("SELECT COUNT(*) AS n FROM mail_messages WHERE ticket_id = ?", first.ticketId),
+    ).toBe(1);
+  });
+
+  test("an unrestricted recipient may append to a restricted ticket for its own requester", async () => {
+    const first = await ingest({}, "security@staging.nemar.test");
+    const ref = ticket(first.ticketId).ref as string;
+    const reply = await ingest({}, `support+t${ref}@staging.nemar.test`);
+    expect(reply).toMatchObject({ outcome: "threaded", ticketId: first.ticketId });
+    const stranger = await ingest(
+      { from: strangerFrom, auth: strangerAuth },
+      `support+t${ref}@staging.nemar.test`,
+    );
+    expect(stranger.ticketId).not.toBe(first.ticketId);
+  });
+});
+
+describe("threading needs the sender to be on the ticket", () => {
+  test("a stranger with an SPF pass and no DMARC cannot thread by ref or by Message-ID", async () => {
+    const first = await ingest({ messageId: "<own@sender.example>" });
+    const ref = ticket(first.ticketId).ref as string;
+    const byRef = await ingest(
+      { from: strangerFrom, auth: strangerAuth },
+      `support+t${ref}@staging.nemar.test`,
+    );
+    expect(byRef.outcome).toBe("created");
+    expect(createdDetail(byRef.ticketId)).toMatchObject({
+      matched_ticket_id: first.ticketId,
+      reason: "sender_not_on_ticket",
+    });
+    const byId = await ingest({
+      from: strangerFrom,
+      auth: strangerAuth,
+      references: "<own@sender.example>",
+    });
+    expect(byId.outcome).toBe("created");
+    expect(createdDetail(byId.ticketId).reason).toBe("sender_not_on_ticket");
+    expect(
+      count("SELECT COUNT(*) AS n FROM mail_messages WHERE ticket_id = ?", first.ticketId),
+    ).toBe(1);
+  });
+
+  test("the requester, in any letter case, and an address already on the ticket can thread", async () => {
+    const first = await ingest({ messageId: "<p@sender.example>" });
+    const upper = await ingest({ from: "ADA@Sender.Example", inReplyTo: "<p@sender.example>" });
+    expect(upper).toMatchObject({ outcome: "threaded", ticketId: first.ticketId });
+    // A colleague added by an outgoing message (as phase 3b records a reply and its Cc).
+    db.run(
+      "INSERT INTO mail_messages (ticket_id, direction, from_addr, to_addr) VALUES (?, 'out', 'support@staging.nemar.test', 'colleague@sender.example')",
+      [first.ticketId],
+    );
+    const colleague = await ingest({
+      from: "colleague@sender.example",
+      inReplyTo: "<p@sender.example>",
+    });
+    expect(colleague).toMatchObject({ outcome: "threaded", ticketId: first.ticketId });
+  });
+
+  test("the oldest holder of a Message-ID wins, and a repeat is stored without the id", async () => {
+    const first = await ingest({ messageId: "<dup@sender.example>" });
+    const copy = await ingest({
+      from: strangerFrom,
+      auth: strangerAuth,
+      messageId: "<dup@sender.example>",
+    });
+    expect(copy.ticketId).not.toBe(first.ticketId);
+    const stored = db
+      .query<{ message_id: string | null }, [number]>(
+        "SELECT message_id FROM mail_messages WHERE ticket_id = ?",
+      )
+      .get(copy.ticketId);
+    expect(stored?.message_id).toBeNull();
+    const reply = await ingest({ inReplyTo: "<dup@sender.example>" });
+    expect(reply).toMatchObject({ outcome: "threaded", ticketId: first.ticketId });
+  });
+
+  test("a spam ticket is never threaded into", async () => {
+    const spamTicket = await ingest({ auth: null, messageId: "<sp@sender.example>" });
+    expect(spamTicket.status).toBe("spam");
+    const ref = ticket(spamTicket.ticketId).ref as string;
+    const reply = await ingest(
+      { inReplyTo: "<sp@sender.example>" },
+      `support+t${ref}@staging.nemar.test`,
+    );
+    expect(reply.outcome).toBe("created");
+    expect(reply.status).toBe("open");
+    expect(createdDetail(reply.ticketId)).toMatchObject({
+      matched_ticket_id: spamTicket.ticketId,
+      reason: "candidate_is_spam",
+    });
+  });
+});
+
+describe("reopening", () => {
+  test("a still-eligible assignee is kept", async () => {
+    const admin = seedUser(db, { role: "admin" });
+    db.run("UPDATE mail_queues SET assignee_user_id = ? WHERE tag = '*'", [admin]);
+    const first = await ingest({ messageId: "<k@sender.example>" });
+    db.run("UPDATE mail_tickets SET status = 'closed' WHERE id = ?", [first.ticketId]);
+    const reply = await ingest({ inReplyTo: "<k@sender.example>" });
+    expect(reply).toMatchObject({ status: "open", assigneeUserId: admin });
+  });
+
+  test("a released or demoted assignee is replaced through the queue, else the pool", async () => {
+    const old = seedUser(db, { role: "admin" });
+    const next = seedUser(db, { role: "admin" });
+    db.run("UPDATE mail_queues SET assignee_user_id = ? WHERE tag = '*'", [old]);
+    const first = await ingest({ messageId: "<d@sender.example>" });
+    db.run("UPDATE mail_tickets SET status = 'closed' WHERE id = ?", [first.ticketId]);
+    db.run("UPDATE users SET role = 'member' WHERE id = ?", [old]);
+    db.run("UPDATE mail_queues SET assignee_user_id = ? WHERE tag = '*'", [next]);
+    const reply = await ingest({ inReplyTo: "<d@sender.example>" });
+    expect(reply).toMatchObject({ status: "open", assigneeUserId: next });
+    expect(ticket(first.ticketId).assignee_user_id).toBe(next);
+    const kinds = db
+      .query<{ kind: string }, [number]>(
+        "SELECT kind FROM mail_ticket_events WHERE ticket_id = ? ORDER BY id",
+      )
+      .all(first.ticketId)
+      .map((e) => e.kind);
+    expect(kinds).toEqual(["created", "assigned", "reopened", "assigned"]);
+
+    // Closed again, the new holder is revoked and the queue has nobody: the pool.
+    db.run("UPDATE mail_tickets SET status = 'closed' WHERE id = ?", [first.ticketId]);
+    db.run("UPDATE users SET status = 'revoked' WHERE id = ?", [next]);
+    const again = await ingest({ inReplyTo: "<d@sender.example>" });
+    expect(again).toMatchObject({ status: "open", assigneeUserId: null });
+  });
+
+  test("a restricted ticket whose holder is the excluded owner is not handed back to them", async () => {
+    const excluded = seedUser(db, { role: "owner" });
+    const other = seedUser(db, { role: "owner" });
+    db.run(
+      "UPDATE mail_queues SET strategy = 'fixed', assignee_user_id = ? WHERE tag = 'conduct'",
+      [other],
+    );
+    const first = await ingest({ messageId: "<x@sender.example>" }, "conduct@staging.nemar.test");
+    db.run(
+      "UPDATE mail_tickets SET status = 'closed', assignee_user_id = ?, excluded_user_id = ? WHERE id = ?",
+      [excluded, excluded, first.ticketId],
+    );
+    const reply = await ingest({ inReplyTo: "<x@sender.example>" }, "conduct@staging.nemar.test");
+    expect(reply.assigneeUserId).toBe(other);
+  });
+});
+
+describe("robustness", () => {
+  test("two concurrent ingests of one raw key store it once and both report success", async () => {
+    const input: InboundTicketInput = {
+      rawKey: "inbound/raw/2026/10/24/race.eml",
+      raw: eml(),
+      envelopeFrom: "a@sender.example",
+      envelopeTo: "support@staging.nemar.test",
+      receivedAt: new Date(),
+    };
+    const [a, b] = await Promise.all([
+      ingestInboundMessage(d1, input),
+      ingestInboundMessage(d1, input),
+    ]);
+    expect([a.outcome, b.outcome].sort()).toEqual(["created", "duplicate"]);
+    expect(a.ticketId).toBe(b.ticketId);
+    expect(count("SELECT COUNT(*) AS n FROM mail_tickets")).toBe(1);
+    expect(count("SELECT COUNT(*) AS n FROM mail_messages")).toBe(1);
+  });
+
+  test("control characters in the subject are replaced before storing", async () => {
+    const r = await ingest({ subject: "=?UTF-8?Q?a=0D=0Ab=00c=E2=80=A8d?=" });
+    expect(ticket(r.ticketId).subject).toBe("a b c d");
+  });
+
+  test("script and style content never reaches the stored body", async () => {
+    const r = await ingest({
+      html: "<style>p{color:red}</style><script>steal()</script><p>Visible</p>",
+    });
+    const msg = db
+      .query<{ text_body: string }, [number]>(
+        "SELECT text_body FROM mail_messages WHERE ticket_id = ?",
+      )
+      .get(r.ticketId);
+    expect(msg?.text_body).toBe("Visible");
   });
 });
