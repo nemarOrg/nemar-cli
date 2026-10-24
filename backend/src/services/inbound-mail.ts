@@ -5,8 +5,9 @@
  * lands it: the raw message goes to R2 untouched, and one log line says it arrived. No parsing, no
  * D1, no replies; ticketing comes in a later phase.
  *
- * Two fences keep production out of this path. The `MAIL_INBOUND` bucket is bound only in
- * `[env.dev]`, and the routing rules that deliver here exist only for the staging subdomain; a
+ * Two fences keep production out of this path until the cutover. The production `MAIL_INBOUND` bucket
+ * is bound but no production routing rule delivers here (phase 6), and the staging routing rules
+ * exist only for the staging subdomain; a
  * message that reaches a Worker with no bucket is rejected rather than dropped or accepted into
  * nothing, so the sender gets a bounce.
  */
