@@ -157,16 +157,17 @@ export function toTagCheck(args: {
     return refused("nothing-to-pull", `${tag} is the mirrored tag`, tag);
   }
   const read = args.upstream;
+  const mirrored = args.fromTag ?? "the mirrored tag (unknown)";
   if (named.tag === null || latest === null || read.kind !== "snapshot" || read.latest === null) {
     return unverified(
       tag,
-      `OpenNeuro could not say which snapshot is latest (${named.tag === null ? named.reason : "no answer"}), so that ${tag} is newer than ${args.fromTag} is not proved`,
+      `OpenNeuro could not say which snapshot is latest (${named.tag === null ? named.reason : "no answer"}), so that ${tag} is newer than ${mirrored} is not proved`,
     );
   }
   if (!sameUpstreamTag(tag, latest)) {
     return unverified(
       tag,
-      `${tag} is not OpenNeuro's latest snapshot (${latest}), so that it is newer than ${args.fromTag} is not proved`,
+      `${tag} is not OpenNeuro's latest snapshot (${latest}), so that it is newer than ${mirrored} is not proved`,
     );
   }
   if (args.fromTag === null) {
@@ -199,6 +200,8 @@ function orderGap(
       return `the mirrored ${fromTag} is not among OpenNeuro's snapshots`;
     case "recorded_undated":
       return `the creation date of the mirrored ${fromTag} is unreadable`;
+    case "list_undated":
+      return `the creation date of ${order.undated} in OpenNeuro's list is unreadable, and it could be newer`;
     case "not_after":
       return `OpenNeuro's latest ${tag} was not created after the mirrored ${fromTag}`;
   }

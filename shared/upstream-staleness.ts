@@ -317,6 +317,11 @@ export type SnapshotOrder =
   | { kind: "recorded_absent" }
   /** The recorded tag's creation date is unreadable. */
   | { kind: "recorded_undated" }
+  /**
+   * Another snapshot in upstream's list has an unreadable creation date: it could be newer than
+   * the latest, so no order between the two tags is definite.
+   */
+  | { kind: "list_undated"; undated: string }
   /** The latest was created at or before the recorded tag. */
   | { kind: "not_after" };
 
@@ -339,6 +344,8 @@ export function upstreamSnapshotOrder(
   if (!mine) return { kind: "recorded_absent" };
   const mineMs = parseMs(mine.created);
   if (Number.isNaN(mineMs)) return { kind: "recorded_undated" };
+  const undated = snapshots.find((s) => s.tag !== latest.tag && Number.isNaN(parseMs(s.created)));
+  if (undated) return { kind: "list_undated", undated: undated.tag };
   if (latestMs <= mineMs) return { kind: "not_after" };
   return { kind: "newer", latestCreated };
 }
@@ -473,6 +480,16 @@ export function classifyMirror(
       row,
       "anomaly",
       `the creation date of ${recorded} is unreadable, so the order cannot be established`,
+      "upstream_dates_unreadable",
+    );
+  }
+  //     Any other snapshot without a readable date could be newer than the latest, so neither
+  //     `stale` nor `upstream_older` is a definite claim.
+  if (order.kind === "list_undated") {
+    return settle(
+      row,
+      "anomaly",
+      `the creation date of ${order.undated} in upstream's list is unreadable, so the order cannot be established`,
       "upstream_dates_unreadable",
     );
   }

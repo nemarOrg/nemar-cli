@@ -59,6 +59,14 @@ describe("upstreamSnapshotOrder", () => {
     expect(
       upstreamSnapshotOrder(latest, [snap("00006", "2020-05-01T00:00:00Z"), latest], "00006").kind,
     ).toBe("not_after");
+    // Another snapshot without a date could be the newest of all.
+    expect(
+      upstreamSnapshotOrder(
+        latest,
+        [list[0] as UpstreamSnapshot, latest, snap("1.2.0", null)],
+        "00006",
+      ),
+    ).toEqual({ kind: "list_undated", undated: "1.2.0" });
   });
 });
 
@@ -70,6 +78,16 @@ describe("the to-tag check orders by OpenNeuro's creation order", () => {
       status: "ok",
       detail: "1.0.0 (OpenNeuro's latest)",
     });
+  });
+
+  test("an undated snapshot anywhere in the list keeps the check unverified", () => {
+    const latest = snap("1.1.0", "2021-01-01T00:00:00Z");
+    const c = check(
+      read(latest, [snap("1.0.0", "2020-01-01T00:00:00Z"), latest, snap("1.2.0", null)]),
+      "1.0.0",
+    );
+    expect(c).toMatchObject({ status: "unchecked", code: "order-unverified" });
+    expect(c.detail).toContain("the creation date of 1.2.0 in OpenNeuro's list is unreadable");
   });
 
   test("a larger number OpenNeuro did not create later is never ok", () => {
@@ -107,11 +125,22 @@ describe("the to-tag check orders by OpenNeuro's creation order", () => {
       status: "unchecked",
       code: "order-unverified",
     });
-    // With nothing to order against, it is not ok either.
-    expect(check(read(latest, [latest]), null)).toMatchObject({
+    // With nothing to order against, it is not ok either, and the words say why.
+    expect(check(read(latest, [latest]), null)).toEqual({
+      name: "to-tag",
       status: "unchecked",
       code: "order-unverified",
+      detail: "there is no from_tag to order 1.1.0 against",
     });
+    // An unknown from_tag is named as unknown, never printed as null.
+    for (const answer of [
+      { kind: "error", reason: "HTTP 503" } as UpstreamRead,
+      read(latest, [latest]),
+    ]) {
+      const c = check(answer, null, "1.0.1");
+      expect(c.detail).toContain("newer than the mirrored tag (unknown)");
+      expect(c.detail).not.toContain("null");
+    }
   });
 
   test("with no --to-tag, no answer, a deleted dataset or no snapshot plans nothing", () => {
