@@ -274,6 +274,11 @@ export function redactAddressIn(message: string, address: string): string {
   return message.replace(new RegExp(literal, "gi"), () => redacted);
 }
 
+/** `text` with every email address in it redacted, for a message whose addresses are not all known. */
+function redactAnyAddress(text: string): string {
+  return text.replace(/[^\s<>"',;]+@[^\s<>"',;]+/g, (match) => redactRecipient(match));
+}
+
 /** A failed send as text for a log line or a stored failure: its message, the recipient redacted. */
 function sendFailureText(error: unknown, address: string): string {
   return redactAddressIn(error instanceof Error ? error.message : String(error), address);
@@ -476,8 +481,9 @@ export const CLOUDFLARE_NON_DELIVERY_CODES: ReadonlySet<string> = new Set([
 /**
  * The refusals a Cloudflare send may be retried through Resend for, when EMAIL_FALLBACK=resend:
  * the quota and account-level ones, where Cloudflare certainly delivered nothing and the message
- * itself is fine (a subset of the non-delivery codes above, which the tests assert). Every other code (a suppressed or rejected recipient, a validation error, a
- * failed delivery) would be refused by Resend too, or would deliver twice.
+ * itself is fine (a subset of the non-delivery codes above, which the tests assert). Every
+ * other code (a suppressed or rejected recipient, a validation error, a failed delivery) would
+ * be refused by Resend too, or would deliver twice.
  */
 export const RESEND_FALLBACK_CODES: ReadonlySet<string> = new Set([
   "E_RATE_LIMIT_EXCEEDED",
@@ -485,6 +491,7 @@ export const RESEND_FALLBACK_CODES: ReadonlySet<string> = new Set([
   "E_ACCOUNT_SUSPENDED",
   "E_SENDER_DOMAIN_NOT_AVAILABLE",
 ]);
+
 /** The two Cloudflare codes that mean "slow down", mapped to a 429 like a Resend limit. */
 const CLOUDFLARE_LIMIT_CODES: ReadonlySet<string> = new Set([
   "E_RATE_LIMIT_EXCEEDED",
@@ -530,7 +537,8 @@ export function isCertainNonDelivery(error: unknown): boolean {
  *
  * Fallback: a Cloudflare send refused with a code in {@link RESEND_FALLBACK_CODES} is sent once
  * through Resend when EMAIL_FALLBACK=resend and `resendApiKey` is non-blank; if that send fails
- * its error propagates, with no further retry. Every other failure rethrows unchanged, and
+ * its error propagates, with no further retry. Each attempt is bounded separately by `timeoutMs`,
+ * so a fallback can take up to twice that in wall time. Every other failure rethrows unchanged, and
  * {@link EmailProviderConfigError} never falls back.
  *
  * `deliveryEnv` (issue #957) is the delivery-level fence: when set and not
@@ -583,14 +591,32 @@ export async function sendEmail(
       );
       return;
     } catch (error) {
-      const code = error instanceof EmailRejectedError ? error.code : undefined;
       const fallbackOn = (deliveryEnv?.EMAIL_FALLBACK ?? "").trim().toLowerCase() === "resend";
-      if (!code || !RESEND_FALLBACK_CODES.has(code) || !fallbackOn || !resendApiKey.trim()) {
+      const code = error instanceof EmailRejectedError ? error.code : undefined;
+      if (!fallbackOn || !resendApiKey.trim() || !code || !RESEND_FALLBACK_CODES.has(code)) {
         throw error;
       }
+      const reason = redactAnyAddress(redactAddressIn((error as Error).message, to));
       console.warn(
-        `[email] Cloudflare refused a send to ${redactRecipient(to)} with ${code}; fell back to Resend`,
+        `[email][cloudflare-fallback] ${code} for ${redactRecipient(to)}, falling back to Resend: ${reason}`,
       );
+      try {
+        await sendViaResend(
+          to,
+          wrapped.subject,
+          wrapped.html,
+          resendApiKey,
+          fromEmail,
+          replyTo,
+          timeoutMs,
+        );
+      } catch (resendError) {
+        console.error(
+          `[email][cloudflare-fallback] Resend also failed for ${redactRecipient(to)} after Cloudflare ${code}`,
+        );
+        throw resendError;
+      }
+      return;
     }
   }
   await sendViaResend(
@@ -1733,7 +1759,7 @@ export async function sendIdentifierScreenBlockedEmail(
     );
   } catch (error) {
     // The caller logs this message; the depositor's address is not for a log.
-    if (error instanceof Error) error.message = redactAddressIn(error.message, to);
+    if (error instanceof Error) error.message = redactAddressIn((error as Error).message, to);
     throw error;
   }
 }

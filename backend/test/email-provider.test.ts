@@ -368,7 +368,7 @@ describe("the gated Resend fallback", () => {
         console.warn = realWarn;
       }
       expect(sent.length).toBe(1); // Cloudflare was tried first, once
-      const line = warnings.find((w) => w.includes("fell back to Resend")) ?? "";
+      const line = warnings.find((w) => w.startsWith("[email][cloudflare-fallback]")) ?? "";
       expect(line).toContain(code);
       expect(line.toLowerCase()).not.toContain(ALLOWED);
     });
