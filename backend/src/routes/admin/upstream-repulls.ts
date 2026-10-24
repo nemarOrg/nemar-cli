@@ -6,7 +6,8 @@
  *   GET  /admin/repulls                  list (`dataset`, `open`, `after`, `limit` up to 50)
  *   GET  /admin/repulls/:id              one record
  *   POST /admin/repulls/:id/transition   move it along one allowed edge (the claim to merge is the
- *                                        gates-clear self-edge: screened head, dataset fences)
+ *                                        gates-clear self-edge: screened head, dataset fences, a
+ *                                        unit of REPULL_DAILY_MERGE_CAP)
  *   GET  /admin/repulls/:id/screens      its identifier screens, newest first
  *   POST /admin/repulls/:id/screen       dispatch the screen of a pull request's recorded head
  *   POST /admin/repulls/:id/screen/acknowledge   record a reason on a screen that asks for one
@@ -52,6 +53,7 @@ function refusalBody(r: RepullRefusal) {
     code: r.code,
     repull: r.row,
     ...(r.screen ? { screen: r.screen } : {}),
+    ...(r.merge_cap ? { merge_cap: r.merge_cap } : {}),
   };
 }
 

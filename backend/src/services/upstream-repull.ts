@@ -26,11 +26,12 @@
  * mirror, anonymity, withdrawn and import fences on every step toward a merge: dispatching the
  * screen, the edges into the gates-clear states and the claim to merge.
  *
- * THE SCREEN (ADR 0111, decision 7). The edges into `gates_clear` and `patch_gates_clear` are
- * taken only while the identifier screen bound to the row (`upstream-repull-screen.ts`) passes
- * for the recorded head, and the claim to merge only while it passes for the claimed head. Each
- * re-asserts what it read in the statement that writes, so a verdict that changed in between is
- * not relied on.
+ * THE SCREEN AND THE CAP (ADR 0111, decisions 6 and 7). The edges into `gates_clear` and
+ * `patch_gates_clear` are taken only while the identifier screen bound to the row
+ * (`upstream-repull-screen.ts`) passes for the recorded head, and the claim to merge only while
+ * it passes for the claimed head and the day's merge cap (`REPULL_DAILY_MERGE_CAP`) has a unit
+ * left. Each re-asserts what it read in the statement that writes, so a verdict or a unit that
+ * changed in between is not relied on. A refusal writes nothing (ADR 0099).
  *
  * `lineage_recordable` is an administrator's assertion: the Worker has no evidence of it (it holds
  * neither tree), so it is recorded in the audit row and nothing here verifies it.
@@ -254,13 +255,15 @@ export type TransitionBody = z.infer<typeof transitionSchema>;
 // ----------------------------------------------------------------------------
 
 export type RepullRefusal = {
-  status: 400 | 403 | 404 | 409;
+  status: 400 | 403 | 404 | 409 | 429;
   code: string;
   message: string;
   /** The row a conflict is about, when naming it helps the caller (never a secret). */
   row?: RepullRow;
   /** The screen a refusal is about, as the API shows it. */
   screen?: RepullScreenView;
+  /** The merge cap in force and today's claims, on a refusal by the cap. */
+  merge_cap?: MergeCapState;
 };
 
 export function isRefusal(value: unknown): value is RepullRefusal {
@@ -379,6 +382,90 @@ export async function datasetFenceRefusal(
   const facts = await db.prepare(CREATE_FACTS_SQL).bind(row.dataset_id).first<DatasetFacts>();
   if (!facts) return { status: 404, code: "not-found", message: `No dataset ${row.dataset_id}.` };
   return datasetFactsRefusal(facts, row.dataset_id, row.upstream_ds);
+}
+
+// ----------------------------------------------------------------------------
+// The daily merge cap (ADR 0111, decision 6)
+// ----------------------------------------------------------------------------
+
+/** `REPULL_DAILY_MERGE_CAP` when the binding is absent. */
+export const REPULL_MERGE_CAP_DEFAULT = 5;
+/** The largest cap a binding may set; a larger value is unreadable, not clamped. */
+export const REPULL_CAP_MAX = 20;
+
+export interface CapReading {
+  value: number;
+  /** `default` when absent, `set` when read, `unreadable` when set to anything else. */
+  source: "default" | "set" | "unreadable";
+}
+
+export interface MergeCapState extends CapReading {
+  /** Claims made today (UTC), N.0.0's and N.0.1's together. */
+  used: number;
+}
+
+/**
+ * A cap from its binding. Absent: the default. One or two digits and at most
+ * {@link REPULL_CAP_MAX}: that number (`0` stops every merge). Anything else (a sign, a decimal,
+ * a space, an empty string, a larger number) is unreadable and reads 0, so a typo stops merging
+ * rather than falling back to the default, and the refusal says why.
+ */
+export function readRepullCap(raw: string | undefined, fallback: number): CapReading {
+  if (raw === undefined) return { value: fallback, source: "default" };
+  if (/^\d{1,2}$/.test(raw)) {
+    const value = Number(raw);
+    if (value <= REPULL_CAP_MAX) return { value, source: "set" };
+  }
+  return { value: 0, source: "unreadable" };
+}
+
+export function repullMergeCap(env: Pick<Bindings, "REPULL_DAILY_MERGE_CAP">): CapReading {
+  return readRepullCap(env.REPULL_DAILY_MERGE_CAP, REPULL_MERGE_CAP_DEFAULT);
+}
+
+/**
+ * Today's claims to merge, both pull requests together, in a fixed UTC day on D1's own clock
+ * (ADR 0099: a fixed window). The claim times are `datetime('now')`, so a day's claims are the
+ * ones at or after `date('now')` and before the next day; the partial indexes on both columns
+ * serve the two ranges. A released claim no longer counts: it was never sent.
+ */
+const MERGE_CLAIMS_TODAY_EXPR = `(SELECT COUNT(*) FROM upstream_repulls
+    WHERE merge_claimed_at >= date('now') AND merge_claimed_at < date('now', '+1 day'))
+  + (SELECT COUNT(*) FROM upstream_repulls
+    WHERE patch_merge_claimed_at >= date('now') AND patch_merge_claimed_at < date('now', '+1 day'))`;
+
+export const MERGE_CLAIMS_TODAY_SQL = `SELECT ${MERGE_CLAIMS_TODAY_EXPR} AS used`;
+
+/** The condition the claim's own UPDATE carries, `?` the cap: so the count and the claim are one statement. */
+export const MERGE_CAP_GUARD_SQL = `(${MERGE_CLAIMS_TODAY_EXPR}) < ?`;
+
+export async function mergeClaimsToday(db: D1Database): Promise<number> {
+  return (await db.prepare(MERGE_CLAIMS_TODAY_SQL).first<{ used: number }>())?.used ?? 0;
+}
+
+function mergeCapRefusal(cap: CapReading, used: number): RepullRefusal {
+  const merge_cap: MergeCapState = { ...cap, used };
+  if (cap.source === "unreadable") {
+    // Attention, not a quiet zero: the owner set the binding and it does not read.
+    console.error(
+      "[upstream-repull] REPULL_DAILY_MERGE_CAP is set but unreadable; it reads 0 and no re-pull merges",
+    );
+    return {
+      status: 429,
+      code: "merge-cap-unreadable",
+      message: `REPULL_DAILY_MERGE_CAP is set but is not a whole number from 0 to ${REPULL_CAP_MAX}, so it reads 0 and no re-pull is merged until it is corrected.`,
+      merge_cap,
+    };
+  }
+  return {
+    status: 429,
+    code: "merge-cap",
+    message:
+      cap.value === 0
+        ? "REPULL_DAILY_MERGE_CAP is 0: no re-pull is merged."
+        : `Today's re-pull merges are used (${used} of ${cap.value}, UTC day); a merge mints a DOI that cannot be withdrawn, so this one waits for tomorrow.`,
+    merge_cap,
+  };
 }
 
 interface VersionFactRow {
@@ -627,7 +714,7 @@ export interface PreparedTransition {
   audit: D1PreparedStatement;
   /**
    * Why the update matched nothing when the row itself had not moved: one of the conditions it
-   * carries beyond the compare-and-set (the screen's verdict) failed.
+   * carries beyond the compare-and-set (the screen's verdict, the day's merge cap) failed.
    */
   guardRefusal?: () => Promise<RepullRefusal>;
 }
@@ -669,8 +756,9 @@ function screenChanged(row: RepullRow): RepullRefusal {
  *  - into `gates_clear` or `patch_gates_clear`: the gates sha must be the recorded head, the
  *    dataset fences must hold, and the identifier screen bound to the row must pass for that head
  *    (ADR 0111, decision 7); the statement re-checks the screen's verdict;
- *  - the claim to merge (the self-edge on either): the dataset fences and the screen for the
- *    claimed head.
+ *  - the claim to merge (the self-edge on either): the dataset fences, the screen for the claimed
+ *    head, and a unit of the day's merge cap, counted in the statement that claims it, so two
+ *    claims racing for the last unit cannot both win (ADR 0111, decision 6; ADR 0099).
  *
  * `last_error` goes through {@link resolveImportError} (ADR 0051): a specific message is never
  * overwritten by a generic one, and a blank one is refused. An edge into a different, non-terminal
@@ -801,7 +889,7 @@ export async function prepareTransition(
     }
   }
 
-  // The edges that read the screen and re-assert it when they write.
+  // The edges that read the screen (and, for a claim, the cap) and re-assert it when they write.
   const guards: SqlGuard[] = [];
   let guardRefusal: PreparedTransition["guardRefusal"];
   const gatedPr = repeats ? null : pullRequestOfGatesStatus(t.to);
@@ -828,6 +916,15 @@ export async function prepareTransition(
     if (!gate.ok) return screenRefusal(gate, row);
     if (!gate.exempt) guards.push(gate.guard);
     guardRefusal = async () => screenChanged(row);
+  }
+  if (claim) {
+    const cap = repullMergeCap(env);
+    if (cap.value === 0) return { ...mergeCapRefusal(cap, await mergeClaimsToday(db)), row };
+    guards.push({ sql: MERGE_CAP_GUARD_SQL, binds: [cap.value] });
+    guardRefusal = async () => {
+      const used = await mergeClaimsToday(db);
+      return used >= cap.value ? { ...mergeCapRefusal(cap, used), row } : screenChanged(row);
+    };
   }
 
   // Column names below come from the edge's field list, checked against `may` above: never a request.
