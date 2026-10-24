@@ -94,6 +94,8 @@ export async function githubRead(
 
 export interface PullRequestFacts {
   state: string;
+  /** A draft is not ready to merge; an absent field reads as not a draft. */
+  draft: boolean;
   merged: boolean;
   mergeCommitSha: string | null;
   headSha: string;
@@ -116,6 +118,7 @@ export function pullRequestFacts(body: unknown): PullRequestFacts | null {
   if (typeof headRef !== "string" || typeof baseRef !== "string") return null;
   return {
     state,
+    draft: body.draft === true,
     merged,
     mergeCommitSha:
       typeof mergeCommitSha === "string" && SHA_RE.test(mergeCommitSha) ? mergeCommitSha : null,
@@ -164,9 +167,11 @@ export async function readRecordedPullRequest(
 
 /**
  * The live pull request, before its gates are recorded and before a claim to merge: GitHub, not
- * the caller, says the head. It must be open, not merged, aimed at `main` from the recorded
- * release branch, with its head at `sha`. An unread GitHub refuses (502); every other mismatch is
- * `head-moved` (409). Nothing is recorded either way.
+ * the caller, says the head. It must be open, not a draft, not merged, aimed at `main` from the
+ * recorded release branch, with its head at `sha`. An unread GitHub refuses (502); a draft is
+ * `pr-draft` (409), so it takes no unit of the cap; every other mismatch is `head-moved` (409).
+ * Nothing is recorded either way. The read is followed by the UPDATE and then the caller's merge,
+ * so it holds only if that merge passes the same `sha` to GitHub, which refuses a moved head.
  */
 export async function liveHeadRefusal(
   env: Bindings,
@@ -186,6 +191,14 @@ export async function liveHeadRefusal(
       status: 409,
       code: "head-moved",
       message: `Pull request #${number} is ${facts.merged ? "merged" : facts.state}, not open; read it again before going on.`,
+      row,
+    };
+  }
+  if (facts.draft) {
+    return {
+      status: 409,
+      code: "pr-draft",
+      message: `Pull request #${number} is a draft; mark it ready for review before its gates or its merge.`,
       row,
     };
   }

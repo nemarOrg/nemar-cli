@@ -258,6 +258,11 @@ function claimAt(id: number, when: string, column = "merge_claimed_at") {
 const rowOf = (id: number) =>
   db.query("SELECT * FROM upstream_repulls WHERE id = ?").get(id) as Row;
 
+/** The id of a dataset's one re-pull row. */
+const rowsOf = (datasetId: string) =>
+  (db.query("SELECT id FROM upstream_repulls WHERE dataset_id = ?").get(datasetId) as Row)
+    .id as number;
+
 const auditCount = () =>
   (db.query("SELECT COUNT(*) AS n FROM audit_log WHERE action LIKE 'repull_%'").get() as Row).n;
 
@@ -487,6 +492,7 @@ describe("the gates and the claim read the live pull request", () => {
       ["another base", { base: { ref: "dev" } }],
       ["missing", { status: 404 }],
     ];
+    const draft: PullAnswer = { draft: true };
     for (const [what, answer] of cases) {
       db.run("DELETE FROM upstream_repull_screens");
       db.run("DELETE FROM upstream_repulls");
@@ -508,6 +514,23 @@ describe("the gates and the claim read the live pull request", () => {
       expect(rowOf(claiming).merge_claimed_at).toBeNull();
       expect(rowOf(opening).status).toBe("pr_open");
     }
+    // A draft is refused by its own word, and takes no unit of the cap.
+    gh.pulls = { "on099999#7": draft, "on099998#7": draft };
+    const c = await claim(rowsOf("on099999"));
+    const g = await gates(rowsOf("on099998"));
+    expect([c.status, c.body.code, g.status, g.body.code]).toEqual([
+      409,
+      "pr-draft",
+      409,
+      "pr-draft",
+    ]);
+    expect(
+      (
+        db
+          .query("SELECT COUNT(*) AS n FROM upstream_repulls WHERE merge_claimed_at IS NOT NULL")
+          .get() as Row
+      ).n,
+    ).toBe(0);
   });
 
   test("a GitHub that cannot be read refuses with 502, and the transport's retry time is passed on", async () => {
@@ -774,6 +797,27 @@ describe("recording the merge", () => {
     expect([create.status, create.body.code]).toEqual([400, "invalid-body"]);
   });
 
+  test("an N.0.1 replay reports N.0.1's own facts, not N.0.0's counts", async () => {
+    seedMirror("on099999");
+    // N.0.0 merged with no claim held, at an unscreened head: the row counts both.
+    const id = seedRepull("patch_gates_clear", {
+      patch_head_sha: HEAD,
+      patch_gates_sha: HEAD,
+      counts: '{"merged_outside_tool":1,"merged_unscreened_head":1}',
+    });
+    markScreen(id, "clean", { pr: "n1" });
+    expect((await patchClaim(id)).status).toBe(200);
+    gh.pulls["on099999#8"] = { merged: true, head: { sha: HEAD, ref: "release/v2.0.1" } };
+    const first = await merged(id, "n1");
+    expect(first.body).toMatchObject({ merged_outside_tool: false, replayed: false });
+    const again = await merged(id, "n1");
+    expect(again.body).toMatchObject({
+      replayed: true,
+      merged_outside_tool: false,
+      merged_unscreened_head: false,
+    });
+  });
+
   test("N.0.1's merge is recorded the same way", async () => {
     const id = ready("on099999", "patch_gates_clear");
     expect((await patchClaim(id)).status).toBe(200);
@@ -915,7 +959,8 @@ describe("recording the release", () => {
     gh.requests = [];
     const again = await released(id);
     expect(again.status).toBe(200);
-    expect(again.body).toMatchObject({ replayed: true, stamps_rearmed: 0, lineage_rows: 0 });
+    // Unknown is not zero: the replay wrote nothing and says so.
+    expect(again.body).toMatchObject({ replayed: true, stamps_rearmed: null, lineage_rows: null });
     expect(rowOf(id)).toEqual(stored);
     const other = await released(id, { tag_sha: OTHER });
     expect([other.status, other.body.code]).toEqual([409, "already-released"]);

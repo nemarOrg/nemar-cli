@@ -22,6 +22,7 @@ import type { Server } from "bun";
 export interface PullAnswer {
   status?: number;
   state?: string;
+  draft?: boolean;
   merged?: unknown;
   merge_commit_sha?: string | null;
   head?: { sha: string; ref: string };
@@ -111,6 +112,7 @@ export function startRepullGitHub(o: { defaultHead?: string | null } = {}): Repu
         const body: Record<string, unknown> = {
           number: n,
           state: a.state ?? (a.merged === true ? "closed" : "open"),
+          draft: a.draft ?? false,
           merged: a.merged ?? false,
           merge_commit_sha:
             a.merge_commit_sha === undefined ? STANDIN_MERGE_SHA : a.merge_commit_sha,

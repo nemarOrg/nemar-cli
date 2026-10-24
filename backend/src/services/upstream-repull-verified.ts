@@ -273,11 +273,13 @@ export async function recordRepullMerged(
   const { facts } = read;
   if (recorded !== null) {
     // A retry after a lost answer: the stored merge stands when GitHub names the same commit.
+    // The flags are this pull request's own facts (its claim, its screened head), never the
+    // row's counts, which N.0.0's and N.0.1's merges share.
     if (facts.merged && facts.mergeCommitSha === recorded) {
       return {
         row,
-        merged_outside_tool: (row.counts.merged_outside_tool ?? 0) > 0,
-        merged_unscreened_head: (row.counts.merged_unscreened_head ?? 0) > 0,
+        merged_outside_tool: row[cols.claimSha] === null,
+        merged_unscreened_head: facts.headSha !== row[cols.gates],
         replayed: true,
       };
     }
@@ -349,14 +351,18 @@ export async function recordRepullMerged(
 
 export interface ReleasedResult {
   row: RepullRow;
-  /** Version rows the lineage write upgraded: 0 unless N.0.0's tagged tree was verified. */
-  lineage_rows: number;
+  /**
+   * Version rows the lineage write upgraded: 0 unless N.0.0's tagged tree was verified. Null on a
+   * replay: this request wrote nothing, and the first request's answer and audit row say what it
+   * wrote (unknown is not zero).
+   */
+  lineage_rows: number | null;
   /**
    * 1 when the statement that re-arms the dataset's four sweep stamps ran on its row (it reports a
    * change even when none of the four was there to remove); 0 only when the dataset has no stamps
-   * object at all.
+   * object at all. Null on a replay, as `lineage_rows`.
    */
-  stamps_rearmed: number;
+  stamps_rearmed: number | null;
   /** The release was already recorded with this tag commit; nothing was written. */
   replayed: boolean;
 }
@@ -383,7 +389,7 @@ export async function recordRepullReleased(
   if (recorded !== null) {
     // A retry after a lost answer: the stored release stands for the same tag commit.
     if (recorded === body.tag_sha) {
-      return { row, lineage_rows: 0, stamps_rearmed: 0, replayed: true };
+      return { row, lineage_rows: null, stamps_rearmed: null, replayed: true };
     }
     return {
       status: 409,
