@@ -60,6 +60,8 @@ export interface PullState {
   mergeableStateAfterReview?: string;
   /** The head every read AFTER THE FIRST sees: a push that lands between two readers' reads. */
   headAfterFirstRead?: string;
+  /** The head branch's name; "add-subjects" unless a test says otherwise. */
+  headRef?: string;
   /**
    * What every read made with the administrator's own token AFTER ITS FIRST answers instead: a
    * status (a GitHub that stops answering), a head (a push), a mergeable state (a check that turns
@@ -107,6 +109,8 @@ export interface GitHubStandin {
   commentStatus: number | null;
   /** When set, closing a pull request answers this status instead of closing it. */
   closeStatus: number | null;
+  /** When set, listing a repository's pull requests answers this status instead of the list. */
+  pullsListStatus: number | null;
   /** The comments recorded, in order: `{ dataset, number, body, token }`. */
   comments: Array<{ dataset: string; number: number; body: string; token: string | null }>;
   /**
@@ -138,6 +142,7 @@ export function startGitHubStandin(): GitHubStandin {
     dispatchStatus: 204,
     users: {} as GitHubStandin["users"],
     reviewStatus: null as number | null,
+    pullsListStatus: null as number | null,
     reviewState: null as string | null,
     reviewCommit: null as string | null,
     userStatus: null as number | null,
@@ -238,6 +243,28 @@ export function startGitHubStandin(): GitHubStandin {
         return Response.json({ id: state.comments.length, body: text }, { status: 201 });
       }
 
+      // The list the re-pull plan reads (ADR 0111): the open pull requests of one repository.
+      const list = url.pathname.match(/^\/repos\/nemarDatasets\/([^/]+)\/pulls$/);
+      if (req.method === "GET" && list) {
+        if (state.pullsListStatus !== null) {
+          return Response.json({ message: "Server Error" }, { status: state.pullsListStatus });
+        }
+        const wanted = url.searchParams.get("state") ?? "open";
+        return Response.json(
+          Object.entries(state.pulls)
+            .filter(
+              ([k, p]) =>
+                k.startsWith(`${list[1]}#`) && (wanted === "all" || (p.state ?? "open") === wanted),
+            )
+            .map(([k, p]) => ({
+              number: Number(k.split("#")[1]),
+              state: p.state ?? "open",
+              head: { ref: p.headRef ?? "add-subjects", sha: p.sha },
+              base: { ref: p.base ?? "main" },
+            })),
+        );
+      }
+
       const pull = url.pathname.match(/^\/repos\/nemarDatasets\/([^/]+)\/pulls\/(\d+)(\/[a-z]+)?$/);
       if (pull) {
         const key = `${pull[1]}#${pull[2]}`;
@@ -280,7 +307,7 @@ export function startGitHubStandin(): GitHubStandin {
               sha:
                 later?.sha ??
                 (p.headAfterFirstRead && reads[key] > 1 ? p.headAfterFirstRead : p.sha),
-              ref: "add-subjects",
+              ref: p.headRef ?? "add-subjects",
               repo: { full_name: `nemarDatasets/${pull[1]}`, owner: { login: "nemarDatasets" } },
             },
           });
@@ -414,6 +441,12 @@ export function startGitHubStandin(): GitHubStandin {
     get comments() {
       return state.comments;
     },
+    get pullsListStatus() {
+      return state.pullsListStatus;
+    },
+    set pullsListStatus(v) {
+      state.pullsListStatus = v;
+    },
     get unreadableAnswers() {
       return state.unreadableAnswers;
     },
@@ -434,6 +467,7 @@ export function startGitHubStandin(): GitHubStandin {
       state.unreadableAnswers = false;
       state.commentStatus = null;
       state.closeStatus = null;
+      state.pullsListStatus = null;
       state.comments.length = 0;
       for (const k of Object.keys(state.pulls)) delete state.pulls[k];
       for (const k of Object.keys(state.naming)) delete state.naming[k];
