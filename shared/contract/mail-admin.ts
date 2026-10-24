@@ -1,5 +1,5 @@
 /**
- * The wire shapes of the support-ticket admin routes (epic #1893 phase 3b, ADR 0111):
+ * The wire shapes of the support-ticket admin routes (epic #1893 phase 3b, ADR 0112):
  *
  *   GET  /admin/mail/tickets                    list, filtered, keyset-paged
  *   GET  /admin/mail/tickets/:id                one ticket: messages, tags, events
@@ -24,7 +24,7 @@
  * ticket that excludes them. A ticket the caller may not see answers 404 `not_found`, on every
  * route, so its existence does not leak. The raw message is never returned.
  *
- * Retention (ADR 0111): after the retention period a ticket is purged, which keeps its summary and
+ * Retention (ADR 0112): after the retention period a ticket is purged, which keeps its summary and
  * its metadata and removes everything else. A purged ticket is read-only: every route that changes
  * it answers 409 `ticket_purged`.
  */

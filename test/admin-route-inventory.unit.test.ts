@@ -25,7 +25,7 @@ const EXPECTED_ENTRIES: Record<string, number> = {
   // Router-level middleware (authMiddleware + adminMiddleware + cookieOriginGuard, #1603/#1584).
   "ALL /*": 3,
 
-  // Epic #1893 phase 3b (ADR 0111): support tickets. Each is one handler; the owner-only ones
+  // Epic #1893 phase 3b (ADR 0112): support tickets. Each is one handler; the owner-only ones
   // check the role inside it, not in extra middleware.
   "GET /mail/tickets": 1,
   "GET /mail/tickets/:id": 1,

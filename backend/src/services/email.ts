@@ -309,7 +309,7 @@ export interface EmailPreferences {
   identifier_sweep: boolean;
   /**
    * A support ticket was assigned to the admin, or arrived unassigned in a queue they can work, or
-   * was escalated to them (epic #1893 phase 3, ADR 0111). Its own category so an admin can leave
+   * was escalated to them (epic #1893 phase 3, ADR 0112). Its own category so an admin can leave
    * the ticket stream without losing approval or publication mail. Opted in by default.
    */
   support_tickets: boolean;

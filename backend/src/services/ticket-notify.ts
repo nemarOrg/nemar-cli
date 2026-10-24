@@ -1,5 +1,5 @@
 /**
- * Mail to the admins about support tickets (epic #1893 phase 3b, ADR 0111).
+ * Mail to the admins about support tickets (epic #1893 phase 3b, ADR 0112).
  *
  * Category `support_tickets`, each admin's own preference, and the same production-only fence as
  * every admin notification ({@link isAdminNotificationAllowed}): a non-production Worker shares the

@@ -104,7 +104,7 @@ export interface Bindings {
    *  (caught and logged per-site). */
   FROM_EMAIL?: string;
   /** Days a support ticket's raw record is kept before the retention purge (epic #1893 phase 6a,
-   *  ADR 0111): 730 in production, 30 on staging. A whole number from 1 to 36500; unset, empty or
+   *  ADR 0112): 730 in production, 30 on staging. A whole number from 1 to 36500; unset, empty or
    *  anything else means the purge deletes nothing (services/ticket-retention.ts). */
   MAIL_RETENTION_DAYS?: string;
   /** Which provider sends mail (epic #1893, ADR 0110): "cloudflare"

@@ -632,7 +632,7 @@ describe("fetchAndSyncDataPapers is wired into the daily cron (outside the sweep
 });
 
 /**
- * `purgeExpiredTickets` (epic #1893 phase 6a, ADR 0111) deletes support tickets past
+ * `purgeExpiredTickets` (epic #1893 phase 6a, ADR 0112) deletes support tickets past
  * `MAIL_RETENTION_DAYS`, keeping each one's summary. It is not sweep-shaped, so it gets targeted
  * assertions like `fetchAndSyncDataPapers`. It is allowed on the dev cron because it reads and
  * writes only the calling env's own mail tables: no mail, no GitHub, no DOI, no R2.

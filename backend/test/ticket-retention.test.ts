@@ -1,5 +1,5 @@
 /**
- * Support-ticket retention (epic #1893 phase 6a, ADR 0111): the summary route and the purge, through
+ * Support-ticket retention (epic #1893 phase 6a, ADR 0112): the summary route and the purge, through
  * the REAL admin router and its auth middleware against a real migrated database (bun:sqlite behind
  * realD1), with real R2 (Miniflare) for the reprocess check. Tokens are real API keys. No mocks.
  */

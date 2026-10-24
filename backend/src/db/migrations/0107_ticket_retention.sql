@@ -1,4 +1,4 @@
--- Epic #1893 phase 6a (#1943, ADR 0111): support-ticket retention. After the retention period only
+-- Epic #1893 phase 6a (#1943, ADR 0112): support-ticket retention. After the retention period only
 -- a short written summary of a ticket is kept; the raw messages and everything personal are purged
 -- by services/ticket-retention.ts.
 --   summary: written through the admin API by whoever may see the ticket (never by the Worker, which

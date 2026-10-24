@@ -1606,7 +1606,7 @@ export default {
           ),
         ),
     );
-    // Epic #1893 phase 6a (ADR 0111): purge support tickets past MAIL_RETENTION_DAYS, keeping
+    // Epic #1893 phase 6a (ADR 0112): purge support tickets past MAIL_RETENTION_DAYS, keeping
     // each one's summary. ALLOWED ON THE NON-PROD CRON (see DEV_CRON_ALLOWLIST): it reads and
     // writes only this env's own mail tables, sends no mail, dispatches nothing and never touches
     // R2, so it cannot reach a real user, a repository or a production object; staging's shorter

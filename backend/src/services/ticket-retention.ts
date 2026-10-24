@@ -1,5 +1,5 @@
 /**
- * Support-ticket retention (epic #1893 phase 6a, ADR 0111): after `MAIL_RETENTION_DAYS` days without
+ * Support-ticket retention (epic #1893 phase 6a, ADR 0112): after `MAIL_RETENTION_DAYS` days without
  * activity (`last_activity_at`: an inbound message, reply, note, status change, assign or escalate;
  * not a summary), a ticket keeps its summary and its metadata and loses everything else.
  *

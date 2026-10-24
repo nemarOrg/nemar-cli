@@ -1,5 +1,5 @@
 /**
- * The support-ticket admin routes (epic #1893 phase 3b, ADR 0111), through the REAL admin router
+ * The support-ticket admin routes (epic #1893 phase 3b, ADR 0112), through the REAL admin router
  * and its auth middleware, against a real migrated database (bun:sqlite behind realD1), real R2
  * (Miniflare) for reprocessing, and the recording `send_email` binding at the send boundary. Tokens
  * are real API keys. No mocks of business logic.

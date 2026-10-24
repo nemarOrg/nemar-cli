@@ -1,5 +1,5 @@
 /**
- * The operations behind the support-ticket admin routes (epic #1893 phase 3b, ADR 0111).
+ * The operations behind the support-ticket admin routes (epic #1893 phase 3b, ADR 0112).
  *
  * Every function that touches a ticket takes the viewer and goes through {@link loadVisibleTicket},
  * which puts 3a's `ticketVisibleTo` predicate in the query. A ticket the viewer may not see is

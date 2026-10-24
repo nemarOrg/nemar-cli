@@ -1,4 +1,4 @@
-# ADR 0111: Inbound mail becomes support tickets
+# ADR 0112: Inbound mail becomes support tickets
 
 **Status:** proposed
 **Date:** 2026-10-24

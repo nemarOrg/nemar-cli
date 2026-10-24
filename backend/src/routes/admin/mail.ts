@@ -1,5 +1,5 @@
 /**
- * Support-ticket admin routes (epic #1893 phase 3b, ADR 0111). The wire shapes are in
+ * Support-ticket admin routes (epic #1893 phase 3b, ADR 0112). The wire shapes are in
  * shared/contract/mail-admin.ts, which lists the routes and what each refuses.
  *
  * Admin-only through the router's middleware; the owner-only routes check the role here and say

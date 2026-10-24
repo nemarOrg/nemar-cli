@@ -1,6 +1,6 @@
 /**
  * Queue configuration and away windows for the support-ticket admin routes (epic #1893 phase 3b,
- * ADR 0111). Eligibility is 3a's {@link isEligibleAssignee}: an approved, live admin or owner, and
+ * ADR 0112). Eligibility is 3a's {@link isEligibleAssignee}: an approved, live admin or owner, and
  * an owner only on a restricted queue.
  */
 

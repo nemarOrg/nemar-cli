@@ -1,5 +1,5 @@
 /**
- * Where `MAIL_RETENTION_DAYS` is set (epic #1893 phase 6a, ADR 0111): 730 days in production and 30
+ * Where `MAIL_RETENTION_DAYS` is set (epic #1893 phase 6a, ADR 0112): 730 days in production and 30
  * on staging, in the Worker's configuration file (a dashboard-only value would be dropped by the
  * next deploy). Parsed with Bun's TOML parser, so a misplaced or commented-out line fails here.
  */
