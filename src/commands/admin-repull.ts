@@ -21,12 +21,12 @@ import chalk from "chalk";
 import { Command, InvalidArgumentError } from "commander";
 import { failMessage, requireSignedIn, say } from "../lib/admin-command.js";
 import { getApiUrl } from "../lib/api/client.js";
-import { getDataset, getVersionHistory } from "../lib/api/datasets.js";
 import { ApiError, errorDetail } from "../lib/api/errors.js";
 import { getConfigDir } from "../lib/config.js";
 import { markReportedExit } from "../lib/debug-log.js";
 import { adminGitHubToken, githubApiBase } from "../lib/pr-review-approve.js";
 import { defaultPlanPath, planFileJson, writePlanFile } from "../lib/repull/digest.js";
+import { readCatalogFacts } from "../lib/repull/execute/catalog.js";
 import { type CatalogFacts, RepullCannotPlan, planRepull } from "../lib/repull/plan.js";
 import { countsMarkdown, preflightLines, summaryLines } from "../lib/repull/render.js";
 import { openNeuroGraphqlUrl as openNeuroUrlFromEnv } from "../lib/repull/sources.js";
@@ -134,30 +134,9 @@ repullCommand
       }
 
       // The two NEMAR API reads, outside the planner's guard (they are GETs through the API client).
-      // A 404 on the versions route (a backend without it) leaves the rows unknown; it is never
-      // read as "no rows".
       let catalog: CatalogFacts;
       try {
-        let dataset: CatalogFacts["dataset"] = null;
-        try {
-          dataset = await getDataset(datasetId);
-        } catch (err) {
-          if (!(err instanceof ApiError && err.statusCode === 404)) throw err;
-        }
-        let versions: CatalogFacts["versions"] = null;
-        if (dataset) {
-          try {
-            const history = await getVersionHistory(datasetId);
-            versions = history.versions.map((v) => ({
-              version: v.version,
-              source_version: v.source_version ?? null,
-              source_version_basis: v.source_version_basis ?? null,
-            }));
-          } catch (err) {
-            if (!(err instanceof ApiError && err.statusCode === 404)) throw err;
-          }
-        }
-        catalog = { dataset, versions };
+        catalog = await readCatalogFacts(datasetId);
       } catch (err) {
         failMessage(`Could not read ${datasetId} from the NEMAR API: ${errorDetail(err)}`, {
           json,
