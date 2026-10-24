@@ -304,10 +304,10 @@ describe.skipIf(!awsInstalled)("finalizeImport stops at the gate", () => {
     origin = join(origins, `${FINAL_ID}.git`);
     await ok(["git", "init", "-q", "--bare", "-b", "main", origin], root.root);
     await ok(["git", "push", "-q", origin, "main", "git-annex"], work);
-    // Annex-initialise the origin up front. A clone's `git annex init` probes a local origin, and
-    // older git-annex (10.20240129, the CI runner's) initialises one that has no annex.uuid by
+    // Annex-initialize the origin up front. A clone's `git annex init` probes a local origin, and
+    // older git-annex (10.20240129, the CI runner's) initializes one that has no annex.uuid by
     // committing to ITS git-annex branch. GitHub is never such an origin, so that commit is the
-    // fixture's artefact; doing it here keeps it out of the before/after comparison below.
+    // fixture's artifact; doing it here keeps it out of the before/after comparison below.
     await ok(["git", "annex", "init", "-q", "origin"], origin);
 
     // The copy landed one key; the other never reached the bucket.
