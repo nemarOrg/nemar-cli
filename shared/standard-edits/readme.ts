@@ -13,7 +13,8 @@
  * They live in `shared/` because the upstream re-pull's planner (ADR 0111) runs in the CLI and has
  * to tell these edits apart from a contributor's change by making them itself; a copy there would
  * drift from what import and publish do. `ensureReadmeMd` and the orchestrator call these
- * functions, and `backend/src/services/doi.ts` re-exports the badge pair for its existing callers.
+ * functions, and `backend/src/services/doi.ts` re-exports the badge pair for its existing callers,
+ * as it re-exports `applyConceptDoiToDescription` from `shared/standard-edits/description.ts`.
  *
  * Pure: no I/O, and no import from Node or the Worker runtime, so the Worker bundle and the CLI
  * both load it.

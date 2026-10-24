@@ -1317,7 +1317,8 @@ async function stepUpdateMetadata(c: ApproveStepContext): Promise<RespondOutcome
       if (isRespond(descResult)) return descResult;
       const datasetDesc = descResult;
 
-      // The rule lives in doi.ts so the #1386 repair applies the same edit.
+      // The rule lives in shared/standard-edits/description.ts (re-exported by doi.ts), so the
+      // #1386 repair and the upstream re-pull's planner apply the same edit. Never copy it here.
       const applied = applyConceptDoiToDescription(datasetDesc, conceptDoi);
       if (applied.preservedSourceDoi) {
         console.log(
