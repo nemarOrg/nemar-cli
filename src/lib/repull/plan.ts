@@ -16,8 +16,13 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { isDead, presentIn, readLocationLogsAt } from "../../../scripts/scrub/git/git-lib.js";
-import { parseLedgerText } from "../../../scripts/scrub/ledger.js";
+import {
+  S3_REMOTE_NAME,
+  isDead,
+  presentIn,
+  readLocationLogsAt,
+} from "../../../scripts/scrub/git/git-lib.js";
+import { LEDGER_REPO_PATH, parseLedgerText } from "../../../scripts/scrub/ledger.js";
 import { isKeyPresentAtDeclaredSize } from "../../../shared/annex-key.js";
 import type { CanonicalJsonValue } from "../../../shared/neurobagel/canonical-json.js";
 import { type SourceVersionRow, openNeuroSourceId } from "../../../shared/source-snapshot.js";
@@ -67,8 +72,6 @@ import {
   upstreamUrl,
 } from "./sources.js";
 
-export const NEMAR_REMOTE = "nemar-s3";
-export const LEDGER_PATH = ".nemar/corrections.jsonl";
 export const NEMAR_METADATA_PATH = ".nemar/metadata.json";
 export const DEFAULT_MAX_FETCH_BYTES = 5 * 1024 ** 3;
 const DATASET_ID_RE = /^[a-z]{2}\d{6}$/;
@@ -301,7 +304,7 @@ export async function planRepull(opts: PlanOptions): Promise<PlanOutcome> {
     const remoteLog =
       (await readBlobs(nemar.path, [remoteLogSpec])).get(remoteLogSpec)?.toString("utf8") ?? "";
     const nemarRemotes = [...parseRemoteLog(remoteLog).values()].filter(
-      (r) => r.name === NEMAR_REMOTE,
+      (r) => r.name === S3_REMOTE_NAME,
     );
     const nemarUuid = nemarRemotes.length === 1 ? (nemarRemotes[0]?.uuid ?? null) : null;
     const refusals: Array<{ code: string; detail: string }> = [];
@@ -394,7 +397,7 @@ export async function planRepull(opts: PlanOptions): Promise<PlanOutcome> {
         pin: pin ? { bucket: pin.bucket, object: pin.object, version: pin.version } : null,
       });
     }
-    const prefix = await destinationPrefix(nemar.path, id, NEMAR_REMOTE, "git-annex");
+    const prefix = await destinationPrefix(nemar.path, id, S3_REMOTE_NAME, "git-annex");
 
     // Local uploads: git blobs NEMAR's policy annexes, moved from the executing host.
     const localUploads = result.decisions
@@ -414,7 +417,7 @@ export async function planRepull(opts: PlanOptions): Promise<PlanOutcome> {
     if (ledger.status === "unreadable") {
       refusals.push({
         code: "ledger-unreadable",
-        detail: `${LEDGER_PATH} does not parse as a ledger`,
+        detail: `${LEDGER_REPO_PATH} does not parse as a ledger`,
       });
     } else if (ledger.recordedCorrections > 0 && unexplained > 0) {
       refusals.push({
@@ -652,7 +655,7 @@ async function readLedger(
   tree: Map<string, { oid: string }>,
   store: BlobStore,
 ): Promise<{ status: "absent" | "ok" | "unreadable"; lines: number; recordedCorrections: number }> {
-  const entry = tree.get(LEDGER_PATH);
+  const entry = tree.get(LEDGER_REPO_PATH);
   if (!entry) return { status: "absent", lines: 0, recordedCorrections: 0 };
   await store.load([entry.oid]);
   const bytes = store.get(entry.oid);
