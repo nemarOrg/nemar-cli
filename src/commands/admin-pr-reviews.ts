@@ -1396,22 +1396,52 @@ function pollMs(): number {
   return n;
 }
 
+/**
+ * How long one read of the admin list or of a stored review may take while a paced run waits
+ * (the Worker's own search is bounded at 90 seconds, so the default is generous; tests shorten it).
+ */
+function readTimeoutMs(): number {
+  const raw = process.env.NEMAR_PR_REVIEWS_READ_TIMEOUT_MS;
+  return raw !== undefined && /^[1-9][0-9]{2,6}$/.test(raw) ? Number(raw) : 120_000;
+}
+
+/** `p`, or `fallback` when it takes longer than the read timeout (the request itself is left to end). */
+async function within<T>(p: Promise<T>, fallback: T): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<T>((resolve) => {
+    timer = setTimeout(() => resolve(fallback), readTimeoutMs());
+  });
+  try {
+    return await Promise.race([p, timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** The pull requests in progress right now, or null when the list is incomplete or unreadable. */
 async function inProgressNow(): Promise<ReadonlySet<string> | null> {
-  const q = await listPrReviews({ verdicts: ["in_progress"] });
-  if (q.truncated || q.skipped.unreadable > 0) return null;
+  const q = await within(listPrReviews({ verdicts: ["in_progress"] }), null);
+  if (q === null || q.truncated || q.skipped.unreadable > 0) return null;
   return new Set(q.entries.map((e) => paceKey(e)));
 }
 
 /**
  * Whether a started review that left the in-progress list is really finished: the stored review of
- * the pull request's current commit is not in progress. A pull request that was closed or merged, or
- * that GitHub's search leaves out for a moment, also drops out of the list while its job may still
- * run. A pull request GitHub no longer has is finished; any other failure to read is not an answer.
+ * the commit this run started it for is not in progress. A pull request that was closed or merged,
+ * or that GitHub's search leaves out for a moment, also drops out of the list while its job may
+ * still run. The commit is named, because without it the Worker judges the pull request's current
+ * head, and reads `not_reviewed` whenever GitHub cannot be asked or the head has moved even though
+ * the stored review of the started commit is still running. A pull request GitHub no longer has
+ * and that has no stored review is finished; any other failure to read is not an answer.
  */
-async function confirmFinished(e: { dataset_id: string; pr_number: number }): Promise<boolean> {
+async function confirmFinished(e: {
+  dataset_id: string;
+  pr_number: number;
+  head_sha: string;
+}): Promise<boolean> {
   try {
-    const d = await getPrReview(e.dataset_id, e.pr_number);
+    const d = await within(getPrReview(e.dataset_id, e.pr_number, e.head_sha), null);
+    if (d === null) return false;
     return d.verdict !== "in_progress";
   } catch (err) {
     return err instanceof ApiError && errorWord(err) === "no_such_pull_request";
@@ -1419,11 +1449,13 @@ async function confirmFinished(e: { dataset_id: string; pr_number: number }): Pr
 }
 
 /**
- * Whether a start that threw may still have begun the review: a connection that failed or a 5xx
- * can come after the Worker dispatched it, while a refusal with a 4xx cannot.
+ * Whether a start that threw may still have begun the review. A refusal with a 4xx cannot have: the
+ * Worker answered before it dispatched anything. A connection that failed or a body that could not
+ * be read (the client reports both as status 0) and a 5xx can all come after the Worker dispatched
+ * it, so they may have.
  */
 function startMayHaveBegun(err: unknown): boolean {
-  return !(err instanceof ApiError && err.statusCode < 500);
+  return !(err instanceof ApiError && err.statusCode >= 400 && err.statusCode < 500);
 }
 
 /** Reads of the admin list in a row that may fail to tell before a paced run stops. */
@@ -1640,6 +1672,8 @@ async function startAll(options: {
   const abort = new AbortController();
   let interrupts = 0;
   let lastInterrupt = 0;
+  // The start in flight, so a second Ctrl-C can say which one may or may not have begun.
+  let inFlight: string | null = null;
   const onSigint = () => {
     // One keypress can reach the process twice (a signal delivered to a whole process tree, or by
     // the runtime waking an idle loop), so a second signal within half a second of the first is
@@ -1650,7 +1684,16 @@ async function startAll(options: {
     interrupts++;
     // A request in flight cannot be taken back, so the first Ctrl-C asks the run to stop after it
     // and the second leaves at once (the reviews already started keep running either way).
-    if (interrupts > 1) process.exit(130);
+    if (interrupts > 1) {
+      if (!json && inFlight !== null) {
+        console.log(
+          chalk.dim(
+            `\nThe start of ${inFlight} was in flight; check it with: nemar admin pr-reviews show ${inFlight.replace(" #", " ")}`,
+          ),
+        );
+      }
+      process.exit(130);
+    }
     abort.abort();
     if (!json) {
       console.log(
@@ -1665,7 +1708,14 @@ async function startAll(options: {
     outcome = await runPaced<(typeof todo)[number], StartReviewResponse>(
       todo,
       {
-        start: (e) => startPrReview(e.dataset_id, e.pr_number, { redo }),
+        start: async (e) => {
+          inFlight = `${e.dataset_id} #${e.pr_number}`;
+          try {
+            return await startPrReview(e.dataset_id, e.pr_number, { redo });
+          } finally {
+            inFlight = null;
+          }
+        },
         isRunning: (r) => r.dispatched,
         maybeRunning: startMayHaveBegun,
         inProgress: inProgressNow,

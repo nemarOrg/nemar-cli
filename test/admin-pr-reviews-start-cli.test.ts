@@ -31,7 +31,13 @@ import { hashApiKey } from "../backend/src/services/token";
 import type { Bindings } from "../backend/src/types/bindings";
 import { freshDb, realD1 } from "../backend/test/helpers/d1";
 import { makePrQueueApp } from "../backend/test/helpers/pr-queue-app";
-import { type PrSpec, SHA_A, prNode, seedReview } from "../backend/test/helpers/pr-queue-fixtures";
+import {
+  type PrSpec,
+  SHA_A,
+  SHA_B,
+  prNode,
+  seedReview,
+} from "../backend/test/helpers/pr-queue-fixtures";
 import { REVIEW_MAX_TOKENS } from "../scripts/ci/pr-review";
 import { type GitHubStandin, WORKER_TOKEN, startGitHubStandin } from "./helpers/github-standin";
 
@@ -155,6 +161,7 @@ function launch(
     stdout: "pipe",
     stderr: "pipe",
   });
+  launched.push(proc);
   const result = (async () => {
     const stdout = await new Response(proc.stdout).text();
     const stderr = await new Response(proc.stderr).text();
@@ -162,6 +169,18 @@ function launch(
   })();
   return { proc, result };
 }
+
+/** Every CLI a test started: one that outlives its test (a failed assertion) is killed. */
+const launched: Array<{ kill(signal?: number | string): void }> = [];
+afterEach(() => {
+  for (const proc of launched.splice(0)) {
+    try {
+      proc.kill("SIGKILL");
+    } catch {
+      // Already gone.
+    }
+  }
+});
 
 async function cli(
   args: string[],
@@ -1317,30 +1336,61 @@ describe("nemar admin pr-reviews start --all --concurrency", () => {
     expect(r.stdout).not.toContain("Run the same command again");
   });
 
-  test("a review that left the list because its pull request was closed keeps its slot until it reports", async () => {
-    waiting(2);
-    const run = launch([...START, "--all", "--yes", "--concurrency", "1"], undefined, POLL);
-    await untilDispatched(1);
-    // The first pull request is closed: it drops out of the open pull requests the list is built
-    // from, while its review is still running.
-    const first = rows()[0]?.dataset_id;
-    gh.searchPages = [
-      (gh.searchPages[0] ?? []).filter((n) => (n.repository as { name: string }).name !== first),
-    ];
-    await Bun.sleep(500);
-    // Several polls have passed, and the second review has not started.
-    expect(rows()).toHaveLength(1);
-    finishOne();
+  test.each([
+    ["its pull request was closed", () => {}],
+    [
+      "GitHub cannot be asked about its pull request",
+      (key: string) => {
+        delete gh.pulls[key];
+      },
+    ],
+    [
+      "its pull request moved on to a commit whose own review already finished",
+      (key: string) => {
+        const pull = gh.pulls[key];
+        if (pull) pull.sha = SHA_B;
+        // The new commit was seen more recently and has a finished review, so the newest review
+        // on record is not the one this run started.
+        seedReview(db, {
+          ds: key.split("#")[0] as string,
+          n: 1,
+          sha: SHA_B,
+          state: "reported",
+          verdict: "pass",
+          seenAt: "2999-01-01 00:00:00.000",
+        });
+      },
+    ],
+  ])(
+    "a review that left the list because %s keeps its slot until it reports",
+    async (_label, change) => {
+      waiting(2);
+      const run = launch([...START, "--all", "--yes", "--concurrency", "1"], undefined, POLL);
+      await untilDispatched(1);
+      // The first pull request drops out of the open pull requests the list is built from, while
+      // its review is still running.
+      const first = rows()[0]?.dataset_id as string;
+      gh.searchPages = [
+        (gh.searchPages[0] ?? []).filter((n) => (n.repository as { name: string }).name !== first),
+      ];
+      change(`${first}#1`);
+      await Bun.sleep(600);
+      // Several polls have passed, and the second pull request's review has not been started.
+      expect(dispatches()).toHaveLength(1);
+      finishOne();
 
-    const r = await run.result;
+      const r = await run.result;
 
-    expect(r.exitCode).toBe(0);
-    expect(rows()).toHaveLength(2);
-  });
+      expect(r.exitCode).toBe(0);
+      expect(dispatches()).toHaveLength(2);
+    },
+  );
 
   describe("with a front that can hang or alter the admin list and a start", () => {
     let front: ReturnType<typeof Bun.serve>;
-    let mode: "pass" | "hang_list" | "hang_start_2" | "unreadable_list" = "pass";
+    let mode: "pass" | "hang_list" | "hang_start_2" | "unreadable_list" | "drop_start_1" = "pass";
+    /** What the front has been asked, so a test waits for the request instead of a guess at time. */
+    const hits = { list: 0, start2: 0 };
     beforeAll(() => {
       front = Bun.serve({
         port: 0,
@@ -1352,6 +1402,7 @@ describe("nemar admin pr-reviews start --all --concurrency", () => {
             req.method === "GET" &&
             url.pathname === "/admin/pr-reviews" &&
             url.searchParams.get("verdict") === "in_progress";
+          if (isInProgressList) hits.list++;
           if (isInProgressList && mode === "hang_list")
             return await new Promise<Response>(() => {});
           if (
@@ -1359,9 +1410,25 @@ describe("nemar admin pr-reviews start --all --concurrency", () => {
             mode === "hang_start_2" &&
             url.pathname.includes("/nm000202/")
           ) {
+            hits.start2++;
             return await new Promise<Response>(() => {});
           }
           const res = await handle(req, env());
+          if (
+            req.method === "POST" &&
+            mode === "drop_start_1" &&
+            url.pathname.includes("/nm000201/")
+          ) {
+            // The Worker has started the review; the response never reaches the client whole.
+            return new Response(
+              new ReadableStream({
+                start(controller) {
+                  controller.error(new Error("connection cut"));
+                },
+              }),
+              { status: 200, headers: { "content-type": "application/json" } },
+            );
+          }
           if (isInProgressList && mode === "unreadable_list") {
             const body = (await res.json()) as { skipped: { unreadable: number } };
             body.skipped.unreadable = 1;
@@ -1374,15 +1441,22 @@ describe("nemar admin pr-reviews start --all --concurrency", () => {
     afterAll(() => front.stop(true));
     beforeEach(() => {
       mode = "pass";
+      hits.list = 0;
+      hits.start2 = 0;
     });
     const url = () => `http://127.0.0.1:${front.port}`;
+    const until = async (condition: () => boolean) => {
+      const t0 = Date.now();
+      while (!condition() && Date.now() - t0 < 20_000) await Bun.sleep(10);
+    };
 
     test("a list read that never answers does not hold Ctrl-C", async () => {
       mode = "hang_list";
       waiting(3);
       const run = launch([...START, "--all", "--yes", "--concurrency", "1"], url(), POLL);
       await untilDispatched(1);
-      await Bun.sleep(300);
+      // The run is now inside the read that never answers.
+      await until(() => hits.list > 0);
       const t0 = Date.now();
       run.proc.kill("SIGINT");
 
@@ -1403,7 +1477,8 @@ describe("nemar admin pr-reviews start --all --concurrency", () => {
         waiting(3);
         const run = launch([...START, "--all", "--yes", ...extra], url(), POLL);
         await untilDispatched(1);
-        await Bun.sleep(300);
+        // The run is now inside the start that never answers.
+        await until(() => hits.start2 > 0);
         run.proc.kill("SIGINT");
         await Bun.sleep(900);
         // The second request is still in flight, so the run is still there after the first Ctrl-C.
@@ -1416,8 +1491,42 @@ describe("nemar admin pr-reviews start --all --concurrency", () => {
         expect(r.exitCode).toBe(130);
         expect(Date.now() - t0).toBeLessThan(5_000);
         expect(r.stdout).toContain("Stopping after the request in flight; press Ctrl-C again");
+        expect(r.stdout).toContain("The start of nm000202 #1 was in flight");
       },
     );
+
+    test("a list read that never answers is given up after the read timeout, and ten of them stop the run", async () => {
+      mode = "hang_list";
+      waiting(3);
+
+      const r = await cli([...START, "--all", "--yes", "--concurrency", "1"], url(), {
+        ...POLL,
+        NEMAR_PR_REVIEWS_READ_TIMEOUT_MS: "150",
+      });
+
+      expect(r.exitCode).toBe(1);
+      expect(r.stdout).toContain("could not be read completely 10 times in a row");
+      expect(hits.list).toBeGreaterThanOrEqual(10);
+      expect(rows()).toHaveLength(1);
+    });
+
+    test("a start whose response is cut after the Worker began it still holds its slot", async () => {
+      mode = "drop_start_1";
+      waiting(2);
+      const run = launch([...START, "--all", "--yes", "--concurrency", "1"], url(), POLL);
+      // The first review was begun by the Worker although the CLI never saw the answer.
+      await untilDispatched(1);
+      await Bun.sleep(600);
+      // Several polls later the second has not started: the first still holds the only slot.
+      expect(rows()).toHaveLength(1);
+      finishOne();
+
+      const r = await run.result;
+
+      expect(rows()).toHaveLength(2);
+      expect(r.exitCode).toBe(1);
+      expect(r.stdout).toContain("failed:");
+    });
 
     test("an unreadable pull request in the list cannot tell what finished, so ten such reads stop the run", async () => {
       mode = "unreadable_list";
