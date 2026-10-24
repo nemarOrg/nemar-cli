@@ -43,6 +43,7 @@ Everything in this section is designed and not yet built.
 - Base is upstream at `from_tag`, theirs is upstream at `to_tag`, and ours is NEMAR `main`.
   An upstream-changed path is one that differs between base and theirs.
   A delta path is one the re-pull's commit adds or changes relative to ours.
+  Delta paths are fixed from the pre-scrub plan, so the scrub that runs on them never changes which paths they are.
   A path present on one side only differs from that side.
 - An unexplained path is an upstream-owned path where ours differs from base, ours is not a standard edit applied to base, and ours is not already theirs with the standard edits applied.
   "Explained" is checked mechanically: a scrubbed key is explained when NEMAR's git-annex branch marks the upstream key dead, and a file moved into the annex is explained when its key hashes the base blob.

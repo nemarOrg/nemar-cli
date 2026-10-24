@@ -43,7 +43,7 @@ Working copy: clone `nemarDatasets/<id>` at `main` (so `enableremote nemar-s3` r
 Starting point: an upstream-owned path on `main` that differs from upstream at `from_tag` and that no standard edit explains is an unexplained path, classified below, and never by itself a refusal (ADR 0111 decision 1).
 The plan refuses when it would revert a privacy-ledger change, and a mirror whose tag is unknown is never planned.
 
-Three-way decision per path (base = upstream at `from_tag`, theirs = upstream at `to_tag`, ours = NEMAR `main`; upstream-changed = base differs from theirs; delta path = a path the commit adds or changes relative to ours):
+Three-way decision per path (base = upstream at `from_tag`, theirs = upstream at `to_tag`, ours = NEMAR `main`; upstream-changed = base differs from theirs; delta path = a path the commit adds or changes relative to ours, fixed from the pre-scrub plan):
 
 - not upstream-changed and not unexplained: keep ours (no standard edit runs on it again).
 - upstream-changed and not unexplained (ours equals base or a standard edit applied to base): take theirs with the standard edits applied.
