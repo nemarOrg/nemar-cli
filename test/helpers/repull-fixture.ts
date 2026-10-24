@@ -27,7 +27,7 @@
  * Every name, date and code in a header below is invented.
  */
 
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { hashDirLower } from "../../scripts/scrub/git/git-lib";
@@ -73,6 +73,7 @@ export const TAG_B = "1.1.0";
 export const TAG_LEGACY = "00001";
 const BUCKET_PATH = `openneuro.org/${UPSTREAM_ID}`;
 const PUBLIC_UUID = "9e1479f6-49e0-413b-8222-a7f8000f55a6";
+const OTHER_UUID = "5d2c6f0e-1a4b-4c3d-9e8f-7a6b5c4d3e2f";
 const FIXED_NOW = new Date("2026-10-06T12:00:00.000Z");
 
 export const PATHS = {
@@ -95,6 +96,20 @@ export const PATHS = {
   copiedSet: "sub-02/eeg/sub-02_task-rest_eeg.set",
   /** With `deadKeys`: where tag B moves the recording the import scrubbed. */
   movedEdf: "sub-04/eeg/sub-04_task-rest_eeg.edf",
+  /** With `privacyEdits`: a small recording git holds, whose header the import scrubs in place. */
+  gitHeldEdf: "sub-01/eeg/sub-01_task-short_eeg.edf",
+  /** With `privacyEdits`: a sidecar with an identifier-keyed value the import blanks. */
+  blankedJson: "sub-01/eeg/sub-01_task-rest_acq.json",
+  /** With `privacyEdits`: a scans table whose dated `acq_time` the import sets to 1 January. */
+  scans: "sub-01/sub-01_scans.tsv",
+  provenance: "sourcedata/sourcedata_provenance.json",
+  provenanceReadme: "sourcedata/README_sourcedata_provenance.md",
+  /** With `subtypes`: a path both sides add with different content. */
+  bothAdded: "sub-03/eeg/sub-03_task-rest_eeg.json",
+  /** With `subtypes`: a path only NEMAR adds. */
+  nemarAdded: "code/nemar-notes.txt",
+  /** With `gitlink`: a submodule tag B adds. */
+  gitlink: "vendor/tool",
 } as const;
 
 const UPSTREAM_GITATTRIBUTES = `* annex.backend=SHA256E
@@ -105,6 +120,8 @@ const UPSTREAM_GITATTRIBUTES = `* annex.backend=SHA256E
 README annex.largefiles=nothing
 CHANGES annex.largefiles=nothing
 *.sh annex.largefiles=nothing
+*.txt annex.largefiles=nothing
+.bidsignore annex.largefiles=nothing
 *.set annex.backend=MD5E
 *.set annex.largefiles=largerthan=2kb
 *.edf annex.largefiles=largerthan=2kb
@@ -162,8 +179,44 @@ export interface FixtureOptions {
   noContributorEdits?: boolean;
   /** What the bucket's `annex-uuid` marker says; the `nemar-s3` UUID by default, null for none. */
   marker?: string | null;
-  /** Append ADR 0085's privacy sentence to NEMAR's `CHANGES`, as a correction's rewrite does. */
-  changesSentence?: boolean;
+  /**
+   * NEMAR's `CHANGES` beyond upstream's text: ADR 0085's sentence as a correction's rewrite appends
+   * it (`sentence`), a near spelling of it (`forged`), or the sentence followed by more text
+   * (`not-at-end`).
+   */
+  changes?: "sentence" | "forged" | "not-at-end";
+  /** NEMAR edits the sidecar only (one correction, no conflict), instead of every contributor edit. */
+  sidecarEditOnly?: boolean;
+  /** A line that does not parse is appended to NEMAR's ledger. */
+  corruptLedger?: boolean;
+  /** NEMAR's `.nemar/metadata.json` does not parse. */
+  brokenNemarMetadata?: boolean;
+  /** Tag B adds a submodule (a gitlink). */
+  gitlink?: boolean;
+  /** NEMAR's README badge names another DOI than the concept DOI (a stale badge). */
+  staleBadge?: boolean;
+  /** The publish step wrote the Zenodo badge it wrote before #1182. */
+  legacyBadge?: boolean;
+  /** Upstream's root README: a bare `README` (the default), `README.md`, or none at all. */
+  readme?: "bare" | "md" | "none";
+  /** NEMAR edits README.md's text (a conflict once upstream changes its README). */
+  readmeEdit?: boolean;
+  /**
+   * Tag A carries what the import changes in place: a git-held recording whose header it scrubs, a
+   * sidecar it blanks, a scans table whose date it sets, the provenance file and its README it
+   * annotates, and an upstream `.bidsignore` the publish step appends to.
+   */
+  privacyEdits?: boolean;
+  /** NEMAR replaces the scrubbed recording with content of another size; upstream's key stays dead. */
+  wrongSizeScrubbedKey?: boolean;
+  /** NEMAR's location log already records tag B's `.set` key at nemar-s3. */
+  heldSetB?: boolean;
+  /** Upstream annexes `README` and `CHANGES`; the import un-annexes root metadata (#768). */
+  annexedRootMetadata?: boolean;
+  /** NEMAR's edits that make one path of every conflict and correction subtype. */
+  subtypes?: boolean;
+  /** Tag B changes metadata only. */
+  metadataOnlyB?: boolean;
   /**
    * Make the git-held `_motion.tsv` 1.1 MiB, over the clones' 1 MiB blob filter, so the planner
    * must fetch it to see that NEMAR's annexed copy hashes to it.
@@ -179,11 +232,20 @@ export interface FixtureOptions {
 /** The ADR 0085 sentence a correction appends to `CHANGES` (`changeLogEntry`). */
 export const CHANGES_SENTENCE = `\n${changeLogEntry("2026-10-07", ["v1.0.0"])}\n`;
 
+/** A near spelling of the ADR 0085 sentence, which no correction writes. */
+export const CHANGES_FORGED =
+  "\n2026-10-07: privacy correction. Identification fields in recording file headers were changed in v1.0.0. See .nemar/corrections.jsonl.\n";
+
+/** Upstream's README at tag A. */
+export const README_A = "A fixture dataset for the re-pull planner.\n";
+
 /** Upstream's README at tag B. */
 export const README_B = "A fixture dataset for the re-pull planner.\nVersion 1.1.0 adds sub-03.\n";
 
 export interface RepullFixture {
   root: string;
+  /** The directory holding the bare NEMAR origin (`<originBase>/<id>`). */
+  originBase: string;
   /** The planner's test bases. */
   env: Record<string, string>;
   originRepo: string;
@@ -199,8 +261,15 @@ export interface RepullFixture {
     addedEdf: string;
     setA: string;
     setB: string;
+    /** With `annexedRootMetadata`: upstream's key for `CHANGES` at tag B. */
+    changesB: string | null;
   };
   cleanup(): void;
+}
+
+/** Run git in a repository and return stdout; throws on failure. For tests that move a ref. */
+export async function gitIn(repo: string, args: string[]): Promise<string> {
+  return run(["git", ...args], repo);
 }
 
 async function run(
@@ -340,7 +409,9 @@ async function build(
       null,
       2,
     )}\n`,
-    README: "A fixture dataset for the re-pull planner.\n",
+    ...(opts.readme === "none"
+      ? {}
+      : { [opts.readme === "md" ? "README.md" : "README"]: README_A }),
     [PATHS.changes]: `${TAG_A} 2026-01-01\n  - Initial snapshot.\n`,
     [PATHS.participants]: "participant_id\tage\nsub-01\t30\nsub-02\t31\n",
     [PATHS.flaggedEdf]: flagged,
@@ -354,7 +425,24 @@ async function build(
       ? motionTable(1.1 * 1024 * 1024, 1)
       : "0.1\t0.2\t0.3\n0.4\t0.5\t0.6\n",
     [PATHS.script]: "#!/bin/sh\necho fixture\n",
+    ...(opts.privacyEdits
+      ? {
+          [PATHS.gitHeldEdf]: edfBytes("Qwfixturelast F 02-FEB-1990 Zxfixturename", 400, 9, true),
+          [PATHS.blankedJson]: `{\n  "TaskName": "rest",\n  "Acq": {\n    "PatientName": "Zxfixturename Qwfixturelast"\n  }\n}\n`,
+          [PATHS.scans]: "filename\tacq_time\neeg/sub-01_task-rest_eeg.edf\t2023-03-14T10:11:12\n",
+          [PATHS.provenance]: `{\n  "files": [\n    { "file": "eeg/sub-01_task-rest_eeg.edf", "sha256": "00" }\n  ]\n}\n`,
+          [PATHS.provenanceReadme]: "Provenance of the sourcedata files.\n",
+          ".bidsignore": "code/\n",
+        }
+      : {}),
   };
+  const attributes = opts.annexedRootMetadata
+    ? UPSTREAM_GITATTRIBUTES.replace(
+        "README annex.largefiles=nothing",
+        "README annex.largefiles=anything",
+      ).replace("CHANGES annex.largefiles=nothing", "CHANGES annex.largefiles=anything")
+    : UPSTREAM_GITATTRIBUTES;
+  files[".gitattributes"] = attributes;
   for (const [p, b] of Object.entries(files)) {
     write(up, p, b);
     served.set(`${BUCKET_PATH}/${p}`, typeof b === "string" ? text(b) : b);
@@ -392,6 +480,17 @@ async function build(
     clone,
   );
   const nemarUuid = (await run(["git", "config", "remote.nemar-s3.annex-uuid"], clone)).trim();
+  if (opts.annexedRootMetadata) {
+    // `ensureRootMetadataUnannexed` (#768) as prepare's step 1 runs it: the annexed root metadata
+    // is replaced by its bytes and staged as git content. The function itself fetches from
+    // OpenNeuro's public S3 URL, which a test cannot point elsewhere, so its two writes are made
+    // here with the bytes upstream committed.
+    for (const name of ["README", PATHS.changes]) {
+      rmSync(join(clone, name), { force: true });
+      writeFileSync(join(clone, name), files[name] as string);
+    }
+    await run(["git", "-c", "annex.largefiles=nothing", "add", "README", PATHS.changes], clone);
+  }
   const unannexedData = await findUnannexedData(clone);
   const { urlMap } = await getAnnexWhereisAll(clone);
   const prepared = await prepareImportedTreeForCopy({
@@ -413,10 +512,7 @@ async function build(
   const openNeuroDoi = String(desc.DatasetDOI).replace(/^doi:/, "");
   ensureReadmeMd(clone, UPSTREAM_ID, openNeuroDoi);
   seedMetadata(clone, NEMAR_ID, UPSTREAM_ID, desc, openNeuroDoi);
-  await run(
-    ["git", "-c", "annex.largefiles=nothing", "add", "-A", "--", "README", "README.md", ".nemar"],
-    clone,
-  );
+  await run(["git", "-c", "annex.largefiles=nothing", "add", "-A"], clone);
   await run(["git", "commit", "-qm", "Seed NEMAR metadata"], clone);
   // The copy and finalize phases, as far as the git-annex branch sees them: every upstream key
   // the manifest names is recorded present at nemar-s3.
@@ -437,15 +533,26 @@ async function build(
   const source = readmes.contentSource
     ? readFileSync(join(clone, readmes.contentSource.path), "utf8")
     : "";
+  const badgeDoi = opts.staleBadge ? "10.82901/nemar.stale" : CONCEPT_DOI;
   const badge = planReadmeBadgeCommit({
     readmeContent: source,
-    doiBadge: buildDoiBadge(CONCEPT_DOI),
-    conceptDoi: CONCEPT_DOI,
+    doiBadge: opts.legacyBadge
+      ? `[![DOI](https://zenodo.org/badge/DOI/${badgeDoi}.svg)](https://doi.org/${badgeDoi})`
+      : buildDoiBadge(badgeDoi),
+    conceptDoi: badgeDoi,
     contentSourcePath: readmes.contentSource?.path,
   });
   if (badge.commit) write(clone, "README.md", badge.content);
   for (const r of readmes.remove) rmSync(join(clone, r.path));
-  write(clone, ".bidsignore", withBidsignoreEntry("", NEMAR_BIDSIGNORE_ENTRY).content);
+  const ignore = join(clone, ".bidsignore");
+  write(
+    clone,
+    ".bidsignore",
+    withBidsignoreEntry(
+      existsSync(ignore) ? readFileSync(ignore, "utf8") : "",
+      NEMAR_BIDSIGNORE_ENTRY,
+    ).content,
+  );
   write(clone, ".github/workflows/validate.yml", "name: validate\non: push\njobs: {}\n");
   if (opts.recordedCorrection) {
     appendLedger(join(clone, ".nemar/corrections.jsonl"), {
@@ -460,23 +567,48 @@ async function build(
       actor: "fixture-actor",
     });
   }
-  if (opts.changesSentence) {
-    write(
-      clone,
-      PATHS.changes,
-      `${readFileSync(join(clone, PATHS.changes), "utf8")}${CHANGES_SENTENCE}`,
-    );
+  if (opts.changes) {
+    const appended = {
+      sentence: CHANGES_SENTENCE,
+      forged: CHANGES_FORGED,
+      "not-at-end": `${CHANGES_SENTENCE}Trailing text after the sentence.\n`,
+    }[opts.changes];
+    write(clone, PATHS.changes, `${readFileSync(join(clone, PATHS.changes), "utf8")}${appended}`);
   }
-  if (!opts.noContributorEdits) {
+  if (opts.brokenNemarMetadata) write(clone, ".nemar/metadata.json", "{ not json\n");
+  if (opts.corruptLedger) {
+    const ledger = join(clone, ".nemar/corrections.jsonl");
+    write(clone, ".nemar/corrections.jsonl", `${readFileSync(ledger, "utf8")}not a ledger line\n`);
+  }
+  if (!opts.noContributorEdits || opts.sidecarEditOnly) {
     write(
       clone,
       PATHS.sidecar,
       `{\n  "TaskName": "rest",\n  "SamplingFrequency": 256,\n  "PowerLineFrequency": 60\n}\n`,
     );
+  }
+  if (!opts.noContributorEdits && !opts.sidecarEditOnly) {
     write(clone, PATHS.participants, "participant_id\tage\nsub-01\t29\nsub-02\t31\n");
     const described = JSON.parse(readFileSync(join(clone, PATHS.description), "utf8"));
     described.HowToAcknowledge = "Cite the NEMAR mirror.";
     write(clone, PATHS.description, JSON.stringify(described, null, 2));
+  }
+  if (opts.readmeEdit) {
+    write(clone, "README.md", `${readFileSync(join(clone, "README.md"), "utf8")}A NEMAR note.\n`);
+  }
+  if (opts.subtypes) {
+    // upstream-deleted/nemar-changed, nemar-deleted/upstream-changed, both-added (tag B adds the
+    // same path), nemar-added, nemar-deleted.
+    write(clone, PATHS.deletedSidecar, `{\n  "TaskName": "rest",\n  "SamplingFrequency": 500\n}\n`);
+    rmSync(join(clone, PATHS.channels));
+    write(clone, PATHS.bothAdded, `{\n  "TaskName": "rest",\n  "Source": "nemar"\n}\n`);
+    write(clone, PATHS.nemarAdded, "Notes NEMAR added.\n");
+    rmSync(join(clone, PATHS.sidecar));
+  }
+  if (opts.wrongSizeScrubbedKey) {
+    // Another recording of another size where the scrubbed one was; upstream's key stays dead.
+    write(clone, PATHS.flaggedEdf, edfBytes("X X X X", 4744, 5, false));
+    await run(["git", "annex", "add", "--quiet", PATHS.flaggedEdf], clone);
   }
   if (opts.deadKeys) {
     // Retired the way the scrub and ADR 0085's annex-registry retire a key: every holder
@@ -522,15 +654,24 @@ async function build(
 
   // ---- Tag B, upstream ----
   const added = edfBytes("X X X X", 4000, 3, false);
+  const dataB = opts.metadataOnlyB
+    ? {}
+    : {
+        [PATHS.addedEdf]: added,
+        [PATHS.set]: noise(new Uint8Array(3000), 0, 8),
+        [PATHS.motion]: opts.bigMotion
+          ? motionTable(1.1 * 1024 * 1024, 2)
+          : "0.1\t0.2\t0.3\n0.4\t0.5\t0.7\n",
+        [PATHS.motionAdded]: "1.1\t1.2\t1.3\n",
+      };
+  const readmeB =
+    opts.readme === "none" || opts.annexedRootMetadata
+      ? {}
+      : { [opts.readme === "md" ? "README.md" : "README"]: README_B };
   const changes: Record<string, Uint8Array | string> = {
-    [PATHS.addedEdf]: added,
+    ...dataB,
+    ...readmeB,
     [PATHS.channels]: "name\ttype\tunits\nFz\tEEG\tuV\nCz\tEEG\tuV\n",
-    [PATHS.set]: noise(new Uint8Array(3000), 0, 8),
-    [PATHS.motion]: opts.bigMotion
-      ? motionTable(1.1 * 1024 * 1024, 2)
-      : "0.1\t0.2\t0.3\n0.4\t0.5\t0.7\n",
-    README: README_B,
-    [PATHS.motionAdded]: "1.1\t1.2\t1.3\n",
     [PATHS.description]: `${JSON.stringify(
       {
         Name: "Repull fixture",
@@ -547,6 +688,9 @@ async function build(
     [PATHS.participants]: "participant_id\tage\nsub-01\t30\nsub-02\t31\nsub-03\t32\n",
   };
   if (opts.deadKeys) changes[PATHS.copiedSet] = files[PATHS.set] as Uint8Array;
+  if (opts.subtypes) {
+    changes[PATHS.bothAdded] = `{\n  "TaskName": "rest",\n  "SamplingFrequency": 128\n}\n`;
+  }
   for (const [p, b] of Object.entries(changes)) write(up, p, b);
   if (opts.deadKeys) {
     mkdirSync(join(up, dirname(PATHS.movedEdf)), { recursive: true });
@@ -555,28 +699,40 @@ async function build(
   await run(["git", "rm", "-q", PATHS.deletedSidecar], up);
   await run(["git", "mv", PATHS.events, PATHS.eventsRenamed], up);
   await run(["git", "annex", "add", "--quiet", "."], up);
-  await run(["git", "update-index", "--chmod=+x", PATHS.script], up);
+  if (!opts.metadataOnlyB) await run(["git", "update-index", "--chmod=+x", PATHS.script], up);
+  if (opts.gitlink) {
+    const commit = (await run(["git", "rev-parse", "HEAD"], up)).trim();
+    await run(
+      ["git", "update-index", "--add", "--cacheinfo", `160000,${commit},${PATHS.gitlink}`],
+      up,
+    );
+  }
   await run(["git", "commit", "-qm", "upstream 1.1.0"], up);
   await run(["git", "tag", TAG_B], up);
   const upKeysB = await listAnnexedKeys(up);
 
   // OpenNeuro's versioned bucket, as the git-annex branch records it: the remote and one pin per
   // key it exported, `<versionId>#<object path>`.
+  // A second versioned remote on another bucket, whose pins the planner must not take.
   await writeAnnexBranchFile(
     up,
     "remote.log",
-    `${PUBLIC_UUID} bucket=openneuro.org name=s3-PUBLIC type=S3 versioning=yes timestamp=1700000000s\n`,
+    `${PUBLIC_UUID} bucket=openneuro.org name=s3-PUBLIC type=S3 versioning=yes timestamp=1700000000s\n${OTHER_UUID} bucket=elsewhere.example name=s3-OTHER type=S3 versioning=yes timestamp=1700000000s\n`,
   );
-  const pin = async (path: string, key: string, version: string) =>
+  const pin = async (path: string, key: string, version: string, uuid = PUBLIC_UUID) =>
     writeAnnexBranchFile(
       up,
       `${hashDirLower(key)}${key}.log.rmet`,
-      `1700000001s ${PUBLIC_UUID}:V +${version}#${UPSTREAM_ID}/${path}\n`,
+      `1700000001s ${uuid}:V +${version}#${UPSTREAM_ID}/${path}\n`,
     );
   const addedKey = upKeysB.get(PATHS.addedEdf) as string;
   const setB = upKeysB.get(PATHS.set) as string;
-  await pin(PATHS.addedEdf, addedKey, "VERSIONADDED");
-  if (!opts.unpinnedSet) await pin(PATHS.set, setB, "VERSIONSETB");
+  const changesB = opts.annexedRootMetadata ? (upKeysB.get(PATHS.changes) as string) : null;
+  if (!opts.metadataOnlyB) {
+    await pin(PATHS.addedEdf, addedKey, "VERSIONADDED");
+    await pin(PATHS.set, setB, "VERSIONSETB", opts.unpinnedSet ? OTHER_UUID : PUBLIC_UUID);
+  }
+  if (changesB) await pin(PATHS.changes, changesB, "VERSIONCHANGESB");
 
   const upstreamBase = join(root, "upstreams");
   const upstreamRepo = join(upstreamBase, UPSTREAM_ID);
@@ -597,6 +753,15 @@ async function build(
     upstreamRepo,
   );
 
+  if (opts.heldSetB) {
+    // As if an earlier, abandoned re-pull had already copied tag B's .set into the bucket.
+    await writeAnnexBranchFile(
+      originRepo,
+      `${hashDirLower(setB)}${setB}.log`,
+      `1790000001s 1 ${nemarUuid}\n`,
+    );
+  }
+
   const bucketBase = join(root, "bucket");
   if (opts.marker !== null) {
     write(bucketBase, `${NEMAR_ID}/objects/annex-uuid`, opts.marker ?? nemarUuid);
@@ -609,6 +774,7 @@ async function build(
   rmSync(work, { recursive: true, force: true });
   const fixture: RepullFixture = {
     root,
+    originBase,
     env: {
       NEMAR_REPULL_ORIGIN_BASE: originBase,
       NEMAR_REPULL_UPSTREAM_BASE: upstreamBase,
@@ -626,6 +792,7 @@ async function build(
       addedEdf: addedKey,
       setA: upKeysA.get(PATHS.set) as string,
       setB,
+      changesB,
     },
     cleanup() {
       Bun.spawnSync(["chmod", "-R", "u+w", root]);

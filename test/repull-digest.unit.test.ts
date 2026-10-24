@@ -18,7 +18,13 @@ import {
   planFileJson,
   readPlanFile,
 } from "../src/lib/repull/digest";
-import { ReadOnlyViolation, assertReadOnlyGit, readOnlyFetch } from "../src/lib/repull/read-only";
+import {
+  ReadOnlyViolation,
+  assertReadOnlyAws,
+  assertReadOnlyGit,
+  readOnlyFetch,
+} from "../src/lib/repull/read-only";
+import { remoteEnv } from "../src/lib/repull/sources";
 
 const BODY: PlanBody = {
   planner: 1,
@@ -43,6 +49,7 @@ function fileOf(body: PlanBody, over: Partial<PlanFile> = {}): PlanFile {
     digest: planDigest(body),
     created_at: "2026-10-24T00:00:00.000Z",
     environment: "https://api.nemar.org",
+    sources: "remotes",
     preflight: [{ name: "release-pr", status: "unchecked", code: "no-token" }],
     executable: false,
     body,
@@ -100,6 +107,7 @@ describe("the plan digest", () => {
         fileOf(BODY, {
           created_at: "2031-01-01T00:00:00.000Z",
           environment: "http://127.0.0.1:1",
+          sources: "test-bases",
           preflight: [{ name: "release-pr", status: "ok" }],
           executable: true,
         }),
@@ -119,45 +127,142 @@ describe("the plan digest", () => {
 });
 
 describe("the read-only guard", () => {
-  test("allows the planner's reads", () => {
+  test("allows exactly the planner's own calls", () => {
     for (const args of [
-      ["clone", "--bare", "--filter=blob:limit=1m", "u", "d"],
-      ["fetch", "--quiet", "origin"],
-      ["-c", "fetch.negotiationAlgorithm=noop", "fetch", "--stdin"],
-      ["ls-remote", "--refs", "u"],
+      [
+        "clone",
+        "--bare",
+        "--quiet",
+        "--filter=blob:limit=1m",
+        "--depth=1",
+        "--no-tags",
+        "--branch",
+        "1.1.0",
+        "https://github.com/OpenNeuroDatasets/ds004362.git",
+        "/tmp/x/upstream.git",
+      ],
+      ["clone", "--bare", "--branch", "main", "file:///tmp/origins/on099999", "/tmp/x/n.git"],
+      ["fetch", "--quiet", "--depth=1", "--no-tags", "origin", "+refs/tags/1.0.0:refs/tags/1.0.0"],
+      [
+        "-c",
+        "fetch.negotiationAlgorithm=noop",
+        "fetch",
+        "--quiet",
+        "origin",
+        "--no-tags",
+        "--no-write-fetch-head",
+        "--recurse-submodules=no",
+        "--filter=blob:none",
+        "--stdin",
+      ],
+      ["ls-remote", "--refs", "https://github.com/nemarDatasets/on004362.git", "refs/tags/v*"],
       ["cat-file", "--batch"],
-      ["ls-tree", "-r", "-z", "HEAD"],
-      ["rev-parse", "--verify", "HEAD"],
-      ["rev-list", "--objects", "--missing=print", "HEAD"],
-      ["for-each-ref"],
+      ["ls-tree", "-r", "-z", "--full-tree", "abc123"],
+      ["ls-tree", "-z", "--full-tree", "abc123", "--", "a/b/KEY.log", "-odd-name.log"],
+      ["rev-parse", "--verify", "--quiet", "refs/heads/main^{commit}"],
+      ["rev-parse", "--show-object-format"],
+      ["rev-list", "--objects", "--missing=print", "--no-object-names", "abc123"],
     ]) {
       expect(() => assertReadOnlyGit(args)).not.toThrow();
     }
   });
 
-  test("refuses anything that could write or run a program", () => {
+  test("refuses anything else, in separated and attached forms", () => {
     for (const args of [
       ["push", "origin", "main"],
       ["annex", "copy", "--to", "nemar-s3"],
       ["config", "user.name", "x"],
       ["update-ref", "refs/heads/main", "0"],
-      ["-c", "core.sshCommand=evil", "fetch"],
-      ["clone", "--upload-pack=evil", "u", "d"],
-      ["fetch", "-u", "evil", "origin"],
-      ["clone", "--template=/tmp/hooks", "u", "d"],
-      ["clone", "--config", "core.hooksPath=/tmp", "u", "d"],
-      ["clone", "-c", "core.hooksPath=/tmp", "u", "d"],
+      ["for-each-ref"],
+      ["show", "git-annex:remote.log"],
+      ["cat-file", "--batch-check"],
+      ["-c", "core.sshCommand=evil", "fetch", "origin"],
+      ["-ccore.hooksPath=/tmp", "fetch", "origin"],
+      ["-c", "fetch.negotiationAlgorithm=skipping", "fetch", "origin"],
+      ["-C", "/tmp", "fetch", "origin"],
+      ["clone", "--upload-pack=evil", "https://github.com/a/b", "d"],
+      ["clone", "-u", "evil", "https://github.com/a/b", "d"],
+      ["clone", "-uevil", "https://github.com/a/b", "d"],
+      ["clone", "-c", "core.hooksPath=/tmp", "https://github.com/a/b", "d"],
+      ["clone", "-ccore.hooksPath=/tmp", "https://github.com/a/b", "d"],
+      ["clone", "--template=/tmp/hooks", "https://github.com/a/b", "d"],
+      ["clone", "--config", "core.hooksPath=/tmp", "https://github.com/a/b", "d"],
+      ["clone", "--branch", "https://github.com/a/b", "d"],
+      ["clone", "--branch", "--upload-pack=evil", "https://github.com/a/b", "d"],
+      ["clone", "ext::sh -c touch% /tmp/pwned", "d"],
+      ["clone", "https://evil.example/a/b", "d"],
+      ["ls-remote", "--refs", "ssh://git@github.com/a/b"],
+      ["fetch", "--upload-pack=evil", "origin"],
+      ["fetch", "evil-remote", "refs/heads/main"],
+      ["fetch", "--depth=1", "https://github.com/a/b"],
+      ["ls-tree", "-r", "--name-only", "abc123"],
+      ["rev-parse", "--git-path", "hooks"],
+      ["cat-file", "--batch", "--", "x"],
       [],
     ]) {
       expect(() => assertReadOnlyGit(args)).toThrow(ReadOnlyViolation);
     }
   });
 
-  test("HTTP is GET and HEAD only", async () => {
+  test("aws is list-objects-v2 with its four options and JSON output only", () => {
+    expect(() =>
+      assertReadOnlyAws([
+        "s3api",
+        "list-objects-v2",
+        "--bucket",
+        "nemar",
+        "--prefix",
+        "on099999/objects/",
+        "--region",
+        "us-east-2",
+        "--output",
+        "json",
+      ]),
+    ).not.toThrow();
+    for (const args of [
+      ["s3", "cp", "a", "s3://nemar/x"],
+      ["s3api", "put-object", "--bucket", "nemar", "--key", "x"],
+      ["s3api", "list-objects-v2", "--bucket", "nemar", "--endpoint-url", "http://evil"],
+      ["s3api", "list-objects-v2", "--bucket", "nemar", "--output", "text"],
+      ["s3api", "list-objects-v2", "--bucket"],
+      ["s3api", "list-objects-v2", "--bucket", "--prefix"],
+    ]) {
+      expect(() => assertReadOnlyAws(args)).toThrow(ReadOnlyViolation);
+    }
+  });
+
+  test("HTTP is GET and HEAD only, and a GET goes out", async () => {
     for (const method of ["POST", "PUT", "PATCH", "DELETE"]) {
       await expect(readOnlyFetch("http://127.0.0.1:9/x", { method })).rejects.toThrow(
         ReadOnlyViolation,
       );
     }
+    const seen: string[] = [];
+    const server = Bun.serve({
+      port: 0,
+      fetch(req) {
+        seen.push(req.method);
+        return new Response("ok");
+      },
+    });
+    try {
+      const get = await readOnlyFetch(`http://127.0.0.1:${server.port}/x`);
+      expect(await get.text()).toBe("ok");
+      await readOnlyFetch(`http://127.0.0.1:${server.port}/x`, { method: "head" });
+      expect(seen).toEqual(["GET", "HEAD"]);
+    } finally {
+      server.stop(true);
+    }
+  });
+});
+
+describe("the credential environment of a remote", () => {
+  test("a GitHub URL gets the helper reset and the token's helper; anything else gets nothing", () => {
+    const gh = remoteEnv("https://github.com/nemarDatasets/on004362.git", "tok") ?? {};
+    expect(gh.GIT_CONFIG_KEY_0).toBe("credential.helper");
+    expect(gh.GIT_CONFIG_VALUE_0).toBe("");
+    expect(gh.GIT_CONFIG_KEY_1).toBe("credential.https://github.com.helper");
+    // A token is never offered to a host that is not GitHub, a local test base included.
+    expect(remoteEnv("file:///tmp/origins/on099999", "tok")).toBeUndefined();
   });
 });
