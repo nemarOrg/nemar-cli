@@ -2189,6 +2189,50 @@ describe("redo: an administrator starts a finished review again", () => {
     expect(dispatches()).toHaveLength(1);
   });
 
+  test.each([
+    ["a redo", true, "review_running"],
+    ["a plain start", false, "duplicate"],
+  ])(
+    "%s that meets a job claiming the review just before the write leaves that job alone",
+    async (_label, asRedo, word) => {
+      // Handed over two hours ago and never claimed: an administrator may start it. In the gap
+      // between the read and the write a late job claims it, and the conditional write must not
+      // replace its nonce.
+      seedReview(db, {
+        ds: DATASET,
+        n: 7,
+        sha: SHA_A,
+        state: "dispatched",
+        createdAt: "2026-10-01 00:00:00",
+      });
+      db.run("UPDATE pr_reviews SET nonce = 'live-nonce'");
+      pulls[`${DATASET}#7`] = restPull({});
+      let injected = false;
+      const racing = wrapD1(realD1(db), (sql) => {
+        if (!injected && sql.includes("SET state = ?, detail = ?, nonce = ?")) {
+          injected = true;
+          db.run("UPDATE pr_reviews SET claimed_at = datetime('now')");
+        }
+      });
+
+      const r = await handlePullRequestEvent(
+        { ...env(), DB: racing } as Bindings,
+        {
+          action: "synchronize",
+          pull_request: restPull({}),
+          repository: (restPull({}).base as { repo: unknown }).repo,
+        },
+        { adminStart: true, redo: asRedo },
+      );
+
+      expect(injected).toBe(true);
+      expect(r).toMatchObject({ dispatched: false, reason: word });
+      expect(rows()[0]).toMatchObject({ state: "dispatched", nonce: "live-nonce", attempts: 1 });
+      expect(rows()[0].claimed_at).not.toBeNull();
+      expect(dispatches()).toHaveLength(0);
+    },
+  );
+
   test("a commit with no row is an ordinary first start under redo", async () => {
     pulls[`${DATASET}#7`] = restPull({});
 

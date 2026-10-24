@@ -1451,7 +1451,7 @@ async function restartReview(
               published_at = ${paused ? KEEP_RECENT_DECLINE_STAMP : "NULL"},
               publish_attempts = 0, edit_restarts = ${count}, decided_at = ${paused ? "datetime('now')" : "NULL"},
               created_at = datetime('now'), verdict = NULL, report = NULL
-        WHERE id = ? AND state = ? AND detail IS ? AND edit_restarts = ?`,
+        WHERE id = ? AND state = ? AND detail IS ? AND edit_restarts = ? AND claimed_at IS ?`,
     )
     .bind(
       paused ? "declined" : "dispatched",
@@ -1461,6 +1461,7 @@ async function restartReview(
       existing.state,
       existing.detail,
       existing.editRestarts,
+      existing.claimedAt,
     )
     .run();
   if ((reset.meta.changes ?? 0) !== 1) return null;
