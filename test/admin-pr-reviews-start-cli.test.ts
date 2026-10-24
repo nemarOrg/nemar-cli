@@ -127,10 +127,12 @@ afterEach(() => {
   rmSync(configDir, { recursive: true, force: true });
 });
 
-async function cli(
+/** Start the CLI and return the process with a promise for its output; `cli` waits for it. */
+function launch(
   args: string[],
   apiUrl = `http://127.0.0.1:${apiServer.port}`,
-): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  extraEnv: Record<string, string> = {},
+) {
   const childEnv: Record<string, string | undefined> = {
     ...process.env,
     NEMAR_CONFIG_DIR: configDir,
@@ -140,6 +142,7 @@ async function cli(
     NO_COLOR: "1",
     FORCE_COLOR: undefined,
     CLICOLOR_FORCE: undefined,
+    ...extraEnv,
   };
   const clean: Record<string, string> = {};
   for (const [k, v] of Object.entries(childEnv)) if (v !== undefined) clean[k] = v;
@@ -151,9 +154,20 @@ async function cli(
     stdout: "pipe",
     stderr: "pipe",
   });
-  const stdout = await new Response(proc.stdout).text();
-  const stderr = await new Response(proc.stderr).text();
-  return { stdout, stderr, exitCode: await proc.exited };
+  const result = (async () => {
+    const stdout = await new Response(proc.stdout).text();
+    const stderr = await new Response(proc.stderr).text();
+    return { stdout, stderr, exitCode: await proc.exited };
+  })();
+  return { proc, result };
+}
+
+async function cli(
+  args: string[],
+  apiUrl = `http://127.0.0.1:${apiServer.port}`,
+  extraEnv: Record<string, string> = {},
+): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  return await launch(args, apiUrl, extraEnv).result;
 }
 
 const START = ["admin", "pr-reviews", "start"];
@@ -1163,5 +1177,300 @@ describe("nemar admin pr-reviews start --redo", () => {
       expect(out.redo_ignored).toBe(true);
       expect(out.results).toHaveLength(1);
     });
+  });
+});
+
+describe("nemar admin pr-reviews start --all --concurrency", () => {
+  const POLL = { NEMAR_PR_REVIEWS_POLL_MS: "40" };
+  const dispatchedCount = () =>
+    (
+      db.query("SELECT count(*) AS n FROM pr_reviews WHERE state = 'dispatched'").get() as {
+        n: number;
+      }
+    ).n;
+  /** A job reports: the oldest review in progress gets its result. */
+  const finishOne = () =>
+    db.run(
+      `UPDATE pr_reviews SET state = 'reported', verdict = 'pass', report = '{"stage":"full"}', nonce = NULL
+        WHERE id = (SELECT id FROM pr_reviews WHERE state = 'dispatched' ORDER BY id LIMIT 1)`,
+    );
+  /** Sample how many reviews are in progress while a test plays the jobs finishing. */
+  function playJobs(everyMs = 120) {
+    const seen = { max: 0 };
+    const sampler = setInterval(() => {
+      seen.max = Math.max(seen.max, dispatchedCount());
+    }, 8);
+    const finisher = setInterval(finishOne, everyMs);
+    return {
+      seen,
+      stop: () => {
+        clearInterval(sampler);
+        clearInterval(finisher);
+      },
+    };
+  }
+  const datasets = ["nm000201", "nm000202", "nm000203", "nm000204", "nm000205"];
+  function waiting(n: number) {
+    for (const ds of datasets.slice(0, n))
+      openPr({ ds, n: 1, author: `u-${ds}`, authorId: 100 + Number(ds.slice(-2)) });
+  }
+  function finished(n: number) {
+    for (const [i, ds] of datasets.slice(0, n).entries()) {
+      openPr({ ds, n: 1, author: `u-${ds}`, authorId: 100 + i });
+      seedReview(db, {
+        ds,
+        n: 1,
+        sha: SHA_A,
+        authorId: 100 + i,
+        state: "reported",
+        verdict: "pass",
+      });
+    }
+  }
+
+  test("never more than the limit in progress at once, and every pull request is started", async () => {
+    waiting(5);
+    const jobs = playJobs();
+
+    const r = await cli([...START, "--all", "--yes", "--concurrency", "2"], undefined, POLL);
+    jobs.stop();
+
+    expect(r.exitCode).toBe(0);
+    expect(jobs.seen.max).toBeLessThanOrEqual(2);
+    expect(jobs.seen.max).toBe(2);
+    expect(rows()).toHaveLength(5);
+    expect(dispatches()).toHaveLength(5);
+    expect(r.stdout).toMatch(/5 started/);
+    expect(r.stdout).toContain("running (limit 2)");
+    expect(r.stdout).toContain("waiting for one to report");
+  });
+
+  test("a redo is paced the same way, and each finished review is run again once", async () => {
+    finished(4);
+    const jobs = playJobs();
+
+    const r = await cli(
+      [...START, "--all", "--redo", "--yes", "--concurrency", "2"],
+      undefined,
+      POLL,
+    );
+    jobs.stop();
+
+    expect(r.exitCode).toBe(0);
+    expect(jobs.seen.max).toBeLessThanOrEqual(2);
+    expect(rows()).toHaveLength(4);
+    for (const row of rows()) expect(row.attempts).toBe(2);
+    expect(r.stdout).toMatch(/4 started/);
+  });
+
+  test("a limit above the list never waits", async () => {
+    waiting(3);
+    const r = await cli([...START, "--all", "--yes", "--concurrency", "10"], undefined, POLL);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toMatch(/3 started/);
+    expect(r.stdout).not.toContain("waiting for one to report");
+  });
+
+  test("Ctrl-C stops after the start in flight and lists what was never started", async () => {
+    waiting(3);
+    const run = launch([...START, "--all", "--yes", "--concurrency", "1"], undefined, POLL);
+    // The first review is started; the run is now waiting for it to report.
+    const t0 = Date.now();
+    while (dispatchedCount() < 1 && Date.now() - t0 < 20_000) await Bun.sleep(10);
+    expect(dispatchedCount()).toBe(1);
+    run.proc.kill("SIGINT");
+
+    const r = await run.result;
+
+    expect(r.exitCode).toBe(130);
+    expect(r.stdout).toContain("Interrupted: 2 pull requests not started");
+    expect(r.stdout).toContain("Run the same command again");
+    expect(r.stdout + r.stderr).not.toContain("--debug");
+    expect(rows()).toHaveLength(1);
+  });
+
+  test("an interrupted redo lists the rest as commands to continue by name", async () => {
+    finished(3);
+    const run = launch(
+      [...START, "--all", "--redo", "--yes", "--concurrency", "1"],
+      undefined,
+      POLL,
+    );
+    const t0 = Date.now();
+    while (
+      (
+        db.query("SELECT count(*) AS n FROM pr_reviews WHERE state = 'dispatched'").get() as {
+          n: number;
+        }
+      ).n < 1 &&
+      Date.now() - t0 < 20_000
+    ) {
+      await Bun.sleep(10);
+    }
+    run.proc.kill("SIGINT");
+
+    const r = await run.result;
+
+    expect(r.exitCode).toBe(130);
+    expect(r.stdout).toContain("Interrupted: 2 pull requests not started");
+    expect(r.stdout).toMatch(/nemar admin pr-reviews start nm00020[2-5] 1 --redo/);
+    expect(r.stdout).not.toContain("Run the same command again");
+  });
+
+  describe("when the admin list cannot be read", () => {
+    let front: ReturnType<typeof Bun.serve>;
+    beforeAll(() => {
+      front = Bun.serve({
+        port: 0,
+        fetch(req) {
+          const url = new URL(req.url);
+          if (url.pathname === "/notices") return Response.json({ notices: [] });
+          if (url.pathname === "/datasets/facets") return Response.json({});
+          if (
+            req.method === "GET" &&
+            url.pathname === "/admin/pr-reviews" &&
+            url.searchParams.get("verdict") === "in_progress"
+          ) {
+            return Response.json({ error: "unavailable" }, { status: 400 });
+          }
+          return handle(req, env());
+        },
+      });
+    });
+    afterAll(() => front.stop(true));
+
+    test("three reads in a row that fail stop the run, with the rest listed", async () => {
+      waiting(3);
+      const r = await cli(
+        [...START, "--all", "--yes", "--concurrency", "1"],
+        `http://127.0.0.1:${front.port}`,
+        POLL,
+      );
+
+      expect(r.exitCode).toBe(1);
+      expect(r.stdout).toContain("could not be read 3 times in a row");
+      expect(r.stdout).toContain("limit of 1 running at once cannot be kept");
+      expect(r.stdout).toContain("2 pull requests not started");
+      expect(rows()).toHaveLength(1);
+    });
+
+    test("--json carries stopped_by and not_started", async () => {
+      waiting(3);
+      const r = await cli(
+        [...START, "--all", "--yes", "--json", "--concurrency", "1"],
+        `http://127.0.0.1:${front.port}`,
+        POLL,
+      );
+
+      expect(r.exitCode).toBe(1);
+      const out = JSON.parse(r.stdout) as {
+        concurrency: number;
+        stopped_by: string;
+        not_started: Array<{ dataset_id: string }>;
+        results: unknown[];
+      };
+      expect(out.concurrency).toBe(1);
+      expect(out.stopped_by).toBe("unknown_polls");
+      expect(out.not_started).toHaveLength(2);
+      expect(out.results).toHaveLength(1);
+    });
+  });
+
+  test("a list GitHub cut short cannot tell what finished, so it is not taken as finished", async () => {
+    waiting(3);
+    // GitHub's search says it has more than it returned, for the reads while waiting too.
+    gh.searchPages = [gh.searchPages[0] ?? [], []];
+    gh.searchTotal = 1500;
+    const run = launch([...START, "--all", "--yes", "--concurrency", "1"], undefined, POLL);
+    // A run that keeps waiting is killed instead of left behind; the assertions then fail.
+    const guard = setTimeout(() => run.proc.kill(), 12_000);
+
+    const r = await run.result;
+    clearTimeout(guard);
+
+    expect(r.exitCode).toBe(1);
+    expect(r.stdout).toContain("could not be read 3 times in a row");
+    expect(rows()).toHaveLength(1);
+  });
+
+  test.each([["0"], ["abc"], ["1.5"], ["-2"], [""]])(
+    "--concurrency %p is refused before the API is asked",
+    async (value) => {
+      waiting(2);
+      const r = await cli([...START, "--all", "--yes", "--concurrency", value]);
+      expect(r.exitCode).toBe(1);
+      expect(r.stdout + r.stderr).toContain("--concurrency takes a whole number of at least 1");
+      expect(gh.seen).toHaveLength(0);
+      expect(rows()).toHaveLength(0);
+    },
+  );
+
+  test("--concurrency without --all is refused", async () => {
+    const r = await cli([...START, "nm000201", "1", "--concurrency", "2"]);
+    expect(r.exitCode).toBe(1);
+    expect(r.stdout + r.stderr).toContain("--concurrency goes with --all");
+    expect(gh.seen).toHaveLength(0);
+  });
+
+  test("--dry-run shows the plan and starts nothing, in the text and in the JSON", async () => {
+    waiting(3);
+
+    const text = await cli([...START, "--all", "--dry-run", "--concurrency", "2"]);
+    expect(text.exitCode).toBe(0);
+    expect(text.stdout).toContain("Would start 3 pull requests, at most 2 running at once.");
+    expect(dispatches()).toHaveLength(0);
+
+    const json = await cli([...START, "--all", "--dry-run", "--json", "--concurrency", "2"]);
+    expect(JSON.parse(json.stdout)).toMatchObject({ dry_run: true, concurrency: 2 });
+    expect(dispatches()).toHaveLength(0);
+  });
+
+  test("--json of a run that did not need to wait carries concurrency and an empty not_started", async () => {
+    waiting(2);
+    const r = await cli(
+      [...START, "--all", "--yes", "--json", "--concurrency", "5"],
+      undefined,
+      POLL,
+    );
+    expect(r.exitCode).toBe(0);
+    expect(JSON.parse(r.stdout)).toMatchObject({ concurrency: 5, not_started: [] });
+  });
+
+  test("the hint about --concurrency appears above ten starts at once, and not at ten or with the flag", async () => {
+    for (const ds of ["nm000206", "nm000207", "nm000208", "nm000209", "nm000210", "nm000211"]) {
+      seedDataset(ds);
+    }
+    const all = [
+      ...datasets,
+      "nm000206",
+      "nm000207",
+      "nm000208",
+      "nm000209",
+      "nm000210",
+      "nm000211",
+    ];
+    for (const [i, ds] of all.slice(0, 10).entries()) {
+      openPr({ ds, n: 1, author: `h${i}`, authorId: 300 + i });
+    }
+    const ten = await cli([...START, "--all", "--dry-run"]);
+    expect(ten.stdout).toContain("10 pull requests waiting");
+    expect(ten.stdout).not.toContain("--concurrency <n> paces them");
+
+    openPr({ ds: all[10] as string, n: 1, author: "h10", authorId: 310 });
+    const eleven = await cli([...START, "--all", "--dry-run"]);
+    expect(eleven.stdout).toContain("11 pull requests waiting");
+    expect(eleven.stdout).toContain("--concurrency <n> paces them");
+
+    const paced = await cli([...START, "--all", "--dry-run", "--concurrency", "3"]);
+    expect(paced.stdout).not.toContain("--concurrency <n> paces them");
+  });
+
+  test("the help explains the pacing and what n should fit", async () => {
+    const r = await cli([...START, "--help-all"]);
+    expect(r.exitCode).toBe(0);
+    const help = r.stdout.replace(/\s+/g, " ");
+    expect(help).toContain("--concurrency <n>");
+    expect(help).toContain("n x 128,000 fits the limit");
+    expect(help).toContain("Ctrl-C stops it after the start in flight");
   });
 });
