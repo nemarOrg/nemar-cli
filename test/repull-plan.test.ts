@@ -868,6 +868,8 @@ describe("large blobs are fetched under the bound", () => {
       fetched_bytes: 0,
       conflicts: 0,
       unchecked: 1,
+      // An unchecked path could hide a reverted correction as well as a conflict could.
+      unexplained: 1,
       local_bytes_unknown: 1,
       orphan_bytes_unknown: 1,
     });
