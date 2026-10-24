@@ -145,7 +145,12 @@ describe("0098 adds one table and two indexes, and no column anywhere else", () 
           .map((o) => `${o.type}:${o.name}`),
       );
     const before = objects(dbBefore0098());
-    const added = [...objects(freshDb())].filter((o) => !before.has(o)).sort();
+    // `freshDb` applies every migration, so objects a LATER migration adds are not 0098's:
+    // 0100 adds broadcast_outcomes.
+    const laterMigrations = new Set(["table:broadcast_outcomes"]);
+    const added = [...objects(freshDb())]
+      .filter((o) => !before.has(o) && !laterMigrations.has(o))
+      .sort();
     expect(added).toEqual([
       "index:idx_publication_reviews_depositor",
       "index:idx_publication_reviews_state",
