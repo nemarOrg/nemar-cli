@@ -155,3 +155,9 @@ Setting both day and month also removes the month, which the maintainer's readin
 - Importer: `src/lib/import-scrub.ts`, `test/import-scrub.test.ts` ("a first import sets acquisition dates to 1 January", "a re-import changes no date").
 - Upload: `src/lib/upload/date-normalization.ts`, `src/lib/upload/identifier-preflight.ts`, `src/commands/dataset.ts`, `test/upload-date-normalization.test.ts`, `test/upload-identifier-preflight-cli.test.ts`.
 - Provenance sentences: `shared/privacy-correction-text.ts`.
+
+## Amendment 2026-10-23 (#1046): a re-pull normalizes new and changed recordings only
+
+An upstream re-pull ([ADR 0111](0111-an-upstream-re-pull-is-a-reviewed-delta-on-a-release-branch.md)) applies the rules a first import applies, on the paths its commit adds or changes and on nothing else.
+A recording the re-pull does not touch keeps its dates, its bytes and its key, so "nothing already published is changed" holds across a re-pull.
+"Nothing else" above lists a re-import among the paths that do not run the rule; a re-pull is not a re-import, and it is the one addition.

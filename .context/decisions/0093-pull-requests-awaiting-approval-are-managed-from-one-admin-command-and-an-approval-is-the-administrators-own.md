@@ -278,3 +278,11 @@ anything.
 The observation does not say what the state is for the held verdicts (`uncertain`, `declined`,
 `errored`, which are `action_required`), and it does not settle whether `unstable` should be accepted
 when both required checks pass: that stays the maintainer's decision, tracked in issue #1743.
+
+## Amendment 2026-10-23 (#1046): narrowed by ADR 0111 for re-pull pull requests
+
+[ADR 0111](0111-an-upstream-re-pull-is-a-reviewed-delta-on-a-release-branch.md) (decision 7) narrows this record for one class of pull request: an upstream re-pull on `release/vN.0.0`, or its stacked N.0.1, recorded in `upstream_repulls`.
+While `AUTO_REPULL_MERGE_ENABLED` is on, the Worker may merge such a pull request with no administrator's approval when it is machine clean: zero unexplained paths, an identifier screen that says `clear`, BIDS validation and `version-check` green, a head equal to the screened SHA, the daily merge cap claimed, and GitHub reporting `clean`.
+The Worker still submits no review, so "No Worker code path approves" stays true, and the merge of a machine-clean re-pull pull request is the only Worker code path that merges.
+Every other pull request, and a re-pull pull request that is not machine clean, is approved and merged as this record says.
+A merge of a re-pull pull request through this command claims the re-pull daily merge cap from the backend first.

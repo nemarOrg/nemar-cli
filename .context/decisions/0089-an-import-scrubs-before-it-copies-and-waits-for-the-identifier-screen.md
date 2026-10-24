@@ -177,3 +177,11 @@ outcome per dataset, and the mirrored data is public upstream. Suppressing it is
 A recording is downloaded and given a new key when either rule changes its header, so a recording whose only change is its date gets one too.
 The patch then covers the start-date bytes 168 to 176 and the EDF+ `Startdate` token as well as bytes 8 to 168, each step proven (`verifyScrub`, `verifyDateNormalization`).
 A re-import is unchanged.
+
+## Amendment 2026-10-23 (#1046): a re-pull scrubs its delta paths before its commit
+
+An upstream re-pull ([ADR 0111](0111-an-upstream-re-pull-is-a-reviewed-delta-on-a-release-branch.md)) is not an import: it writes no `import_jobs` row and makes no publication request.
+It runs this record's scrub on its delta paths only, the paths its one synthesized commit adds or changes relative to `main`, and runs it before that commit, so unscrubbed bytes never enter NEMAR's history.
+A recording the commit does not touch keeps its key and is not read again.
+It pushes none of upstream's history, so the forward-fix hold does not apply to it; the identifier screen gates its merge instead of a publication.
+The copy manifest rule stands (the new tree's keys, minus those present and those dead), and each re-pull copy item also pins its S3 `versionId`.
