@@ -16,7 +16,8 @@
  *   pass-through re-export and the deprecated createDataladDataset/
  *   isDataladDataset aliases), plus the declared addition of
  *   batchSetKeysAbsent in #1396, the counterpart that withdraws a presence
- *   claim the bucket cannot back.
+ *   claim the bucket cannot back, and of preflightBucketAnnexUuid in #1909,
+ *   the #1320 check prepare runs before configuring nemar-s3.
  *
  * INTERNAL_WIRING lists symbols exported ONLY so sibling git-annex/* modules
  * can import them (declared in #908): not part of the CLI-facing surface.
@@ -91,8 +92,10 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "getAnnexS3Remotes",
     "initOrEnableSpecialRemote",
     "markInheritedOpenNeuroRemotesIgnored",
+    "preflightBucketAnnexUuid",
     "selectAnnexS3Remote",
     "toS3Credentials",
+    "uuidsNamedInRemoteLog",
   ],
   github: [
     "acceptGitHubInvitation",
@@ -207,6 +210,8 @@ const INTERNAL_WIRING = [
   // Moved from import-normalize.ts so the upload can share it without importing the
   // import pipeline; consumed by sibling modules only.
   "unstageTrackedPaths",
+  // The #1320 preflight's remote.log reader, exported for its unit test (#1909).
+  "uuidsNamedInRemoteLog",
   // Non-identifying annex repository descriptions (#1399).
   "ANNEX_CLONE_DESCRIPTION",
   "ANNEX_DEPOSIT_DESCRIPTION",
@@ -329,6 +334,7 @@ const MONOLITH_EXPORTS = [
   "isWorkingTreeDirty",
   "listDatasetVersions",
   "markInheritedOpenNeuroRemotesIgnored",
+  "preflightBucketAnnexUuid",
   "pushBranch",
   "pushToGitHub",
   "readLocalDatasetVersion",

@@ -37,8 +37,10 @@ import { ensureLocalMainBranch } from "./git-annex/repo-state.js";
 import { runCommand } from "./git-annex/run-command.js";
 import {
   type S3Credentials,
+  awsCredentialEnv,
   configureS3Remote,
   markInheritedOpenNeuroRemotesIgnored,
+  preflightBucketAnnexUuid,
 } from "./git-annex/s3-remote.js";
 import {
   batchSetKeysPresent,
@@ -48,6 +50,7 @@ import {
 } from "./git-annex/transfer.js";
 import {
   ImportRefused,
+  NEMAR_ANNEX_UUID_CONFLICT_MARKER,
   OPENNEURO_MIRROR_LAG_MARKER,
   OPENNEURO_UPSTREAM_MARKER,
   OPENNEURO_UPSTREAM_MOVED_MARKER,
@@ -1424,6 +1427,26 @@ async function prepareImportSteps(
   if (!options.skipData && (keyUrlMap.size > 0 || unannexedData.length > 0)) {
     const s3Spinner = ora("Setting up NEMAR S3 remote...").start();
     s3Creds = resolveS3Credentials();
+    // #1320: an annex-uuid at the prefix that the git-annex branch (merged in Step 4b) does not
+    // record as nemar-s3 makes initremote/enableremote fail on this attempt and on every retry.
+    // Refused here, before the remote is touched, naming both uuids and the recovery that fits.
+    const preflight = await preflightBucketAnnexUuid(datasetPath, {
+      bucket: S3_BUCKET,
+      prefix: `${nemarId}/objects`,
+      region: S3_REGION,
+      env: awsCredentialEnv(s3Creds),
+    });
+    if (preflight.kind === "conflict") {
+      s3Spinner.stop();
+      throw new ImportRefused(NEMAR_ANNEX_UUID_CONFLICT_MARKER, preflight.detail);
+    }
+    if (preflight.kind === "unchecked") {
+      console.log(
+        chalk.yellow(
+          `  Warning: could not compare the bucket's annex-uuid with the git-annex branch (${preflight.reason}); configuring the remote as before`,
+        ),
+      );
+    }
     const s3Result = await configureS3Remote(
       datasetPath,
       { name: "nemar-s3", bucket: S3_BUCKET, prefix: `${nemarId}/objects`, region: S3_REGION },

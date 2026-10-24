@@ -540,3 +540,147 @@ export async function selectAnnexS3Remote(
 
   return remotes[0];
 }
+
+// ---------------------------------------------------------------------------
+// The bucket's annex-uuid against the git-annex branch (#1320)
+// ---------------------------------------------------------------------------
+
+/**
+ * The uuids the git-annex branch's `remote.log` currently names `name`. A uuid appears once per
+ * change to its configuration, and the line with the latest timestamp is its current one, so a
+ * remote renamed away from `name` no longer counts. Pure, for the test.
+ */
+export function uuidsNamedInRemoteLog(remoteLog: string, name: string): string[] {
+  const latest = new Map<string, { at: number; order: number; fields: Map<string, string> }>();
+  let order = 0;
+  for (const line of remoteLog.split("\n")) {
+    const tokens = line.trim().split(/\s+/).filter(Boolean);
+    if (tokens.length < 2) continue;
+    const uuid = tokens[0] as string;
+    const fields = new Map<string, string>();
+    for (const token of tokens.slice(1)) {
+      const eq = token.indexOf("=");
+      if (eq > 0) fields.set(token.slice(0, eq), token.slice(eq + 1));
+    }
+    const at = Number.parseFloat((fields.get("timestamp") ?? "").replace(/s$/, ""));
+    const stamp = Number.isFinite(at) ? at : Number.NEGATIVE_INFINITY;
+    order += 1;
+    const prior = latest.get(uuid);
+    if (!prior || stamp > prior.at || (stamp === prior.at && order > prior.order)) {
+      latest.set(uuid, { at: stamp, order, fields });
+    }
+  }
+  return [...latest.entries()]
+    .filter(([, entry]) => entry.fields.get("name") === name)
+    .map(([uuid]) => uuid)
+    .sort();
+}
+
+/** What the #1320 preflight found. */
+export type AnnexUuidPreflight =
+  | { kind: "clear"; bucketUuid: string | null }
+  /** The bucket could not be asked; the caller proceeds as before the preflight existed. */
+  | { kind: "unchecked"; reason: string }
+  | { kind: "conflict"; bucketUuid: string; branchUuids: string[]; detail: string };
+
+/**
+ * Pure decision of the #1320 preflight: proceed only when the bucket's prefix holds no annex-uuid,
+ * or exactly one uuid the git-annex branch names `nemar-s3` matches it. Anything else would make
+ * `initremote` (no branch uuid) or `enableremote` (a different one) fail with git-annex's "used by
+ * a different special remote", on this attempt and every retry.
+ *
+ * The refusal names both sides and the recovery that fits:
+ *   - the branch records none: the marker was left by an attempt whose git-annex branch never
+ *     reached the dataset, so it names a remote nothing can use. Removing it is safe because the
+ *     objects are addressed by key, and the next prepare writes a new marker for its own remote.
+ *   - the branch records another uuid (or several): two histories disagree about which remote
+ *     the bucket is. Nothing may be deleted until a person has reconciled them (#1320).
+ */
+function decideAnnexUuidPreflight(args: {
+  bucketUuid: string | null;
+  branchUuids: string[];
+  uuidObject: string;
+}): AnnexUuidPreflight {
+  const { bucketUuid, branchUuids, uuidObject } = args;
+  if (bucketUuid === null) return { kind: "clear", bucketUuid: null };
+  if (branchUuids.length === 1 && branchUuids[0] === bucketUuid) {
+    return { kind: "clear", bucketUuid };
+  }
+  const branch = branchUuids.length === 0 ? "none" : branchUuids.join(",");
+  const recovery =
+    branchUuids.length === 0
+      ? `The git-annex branch records no ${NEMAR_S3_REMOTE_NAME} remote, so the marker was left by an attempt that never pushed one. Recovery: aws s3 rm ${uuidObject} (the objects are key-addressed and stay), then re-run prepare.`
+      : `The bucket and the git-annex branch name different ${NEMAR_S3_REMOTE_NAME} remotes. Delete nothing; reconcile per nemarOrg/nemar-cli#1320.`;
+  return {
+    kind: "conflict",
+    bucketUuid,
+    branchUuids,
+    detail: `bucket ${bucketUuid}; branch ${branch}. ${recovery} Nothing was configured, copied or pushed.`,
+  };
+}
+
+/**
+ * The #1320 preflight, run before `configureS3Remote`: compare the annex-uuid git-annex keeps at
+ * the S3 prefix with the `nemar-s3` uuids the dataset's git-annex branch records (so after Step
+ * 4b has merged origin's branch). Listed first and read second, so an absent marker is told apart
+ * from one this run cannot read; when either step fails, the answer is `unchecked`, never clear or
+ * conflict, and prepare proceeds as it did before the preflight existed.
+ *
+ * `env` is added to the aws CLI's environment: the credentials, and for a test the stand-in's
+ * endpoint.
+ */
+export async function preflightBucketAnnexUuid(
+  datasetPath: string,
+  args: { bucket: string; prefix: string; region: string; env?: Record<string, string> },
+): Promise<AnnexUuidPreflight> {
+  const key = `${args.prefix.replace(/\/$/, "")}/annex-uuid`;
+  const uuidObject = `s3://${args.bucket}/${key}`;
+  const listed = await runCommand(
+    [
+      "aws",
+      "s3api",
+      "list-objects-v2",
+      "--bucket",
+      args.bucket,
+      "--prefix",
+      key,
+      "--region",
+      args.region,
+      "--output",
+      "json",
+    ],
+    { env: args.env },
+  );
+  if (listed.exitCode !== 0) {
+    return { kind: "unchecked", reason: `listing ${uuidObject} failed: ${listed.stderr.trim()}` };
+  }
+  let present = false;
+  try {
+    const parsed = listed.stdout.trim()
+      ? (JSON.parse(listed.stdout) as { Contents?: Array<{ Key?: string }> })
+      : {};
+    present = (parsed.Contents ?? []).some((o) => o.Key === key);
+  } catch (err) {
+    return {
+      kind: "unchecked",
+      reason: `listing ${uuidObject} was unreadable: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+
+  let bucketUuid: string | null = null;
+  if (present) {
+    const got = await runCommand(["aws", "s3", "cp", uuidObject, "-", "--region", args.region], {
+      env: args.env,
+    });
+    bucketUuid = got.stdout.trim();
+    if (got.exitCode !== 0 || bucketUuid === "") {
+      return { kind: "unchecked", reason: `reading ${uuidObject} failed: ${got.stderr.trim()}` };
+    }
+  }
+
+  const log = await runCommand(["git", "show", "git-annex:remote.log"], { cwd: datasetPath });
+  // No remote.log (or no git-annex branch) records no remote at all.
+  const branchUuids =
+    log.exitCode === 0 ? uuidsNamedInRemoteLog(log.stdout, NEMAR_S3_REMOTE_NAME) : [];
+  return decideAnnexUuidPreflight({ bucketUuid, branchUuids, uuidObject });
+}
