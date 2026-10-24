@@ -9,7 +9,7 @@ Amends [ADR 0006](0006-upstream-re-pull-is-a-major-version-bump.md): its policy 
 Narrows [ADR 0093](0093-pull-requests-awaiting-approval-are-managed-from-one-admin-command-and-an-approval-is-the-administrators-own.md) in one aspect, the merge, for one class of pull request, the re-pull pull request the automatic path opened (decision 7); ADR 0107 already partially supersedes ADR 0093, and for every other pull request what remains of it stands.
 Builds on ADR 0001 (published datasets are PR-only), ADR 0023 (`--clean` reconciles), ADR 0034 (the column budget), ADR 0060, ADR 0085, ADR 0086, ADR 0089 and ADR 0091 (what an imported tree goes through), and ADR 0053 and ADR 0054 (unknown is never zero).
 The analysis is `.context/design-upstream-repull.md`; where it and this record disagree, this record wins.
-Decisions 4 and 10 are built, as their dated amendments below record; every other rule in the Decision section is designed here and built by the later phases of #1046, and its present tense states the rule, not today's behavior.
+Decisions 4 and 10 are built, as their dated amendments below record, and so are the record of decision 3 (the table, its routes and its fences) and the fences of decision 6 (Amendment 2026-10-24 (#1912), Phase 6a); every other rule in the Decision section is designed here and built by the later phases of #1046, and its present tense states the rule, not today's behavior.
 
 ## Context
 
@@ -25,7 +25,7 @@ Measured staleness is real: `on004362` missed upstream's 1.0.1 metadata fix (#18
 ## Decision
 
 Everything in this section is designed and not yet built.
-*Annotated 2026-10-24: decisions 4 and 10 are built, as their dated amendments below record; every other rule is still designed and not built.*
+*Annotated 2026-10-24: decisions 4 and 10 are built, as their dated amendments below record; the record of decision 3 and the fences of decision 6 are built by Phase 6a (#1912); every other rule is still designed and not built.*
 
 **An upstream re-pull replays the delta between two pinned upstream tags onto NEMAR's `main` as one synthesized commit on `release/vN.0.0`, landed through a pull request; N.0.0 is a pure mirror of the upstream snapshot, and NEMAR's corrections follow as N.0.1.**
 
@@ -611,15 +611,22 @@ An `xx` fixture is `false` even after a rehearsal re-pull; how an `xx` names its
 
 Epic #1046, Phase 6, delivered in slices; each pull request adds the slice for what it builds, and the decision text above is unchanged.
 This slice is the record (decision 3) and the fences that guard it (decision 6).
-Nothing here copies, pushes or opens a pull request: the record is written by routes that only record and refuse, and no route sends mail.
+Nothing here copies, pushes or opens a pull request: the record is written by routes that only record and refuse, and no route sends mail (a source scan pins that the code imports no mail service).
 
 ### The table keys a row by attempt
 
 Decision 3 reads "one row per `(dataset_id, to_tag)`, `UNIQUE`".
-Taken literally, a tag whose re-pull was abandoned or failed could never be tried again.
-Migration 0105 therefore keys the row by `(dataset_id, to_tag, attempt)`, and the partial unique index still allows one non-terminal row per dataset.
-A new attempt for a tag is allowed only when every earlier attempt ended `abandoned`, `failed` or `superseded`, and a merge sha or a held merge claim on an earlier attempt blocks the tag whatever its status says: a merge commit may be on `main`, or may have been sent with its answer lost, and a second major for the same tag would be a second DOI.
+Taken literally, a tag whose re-pull was abandoned or failed could never be tried again, so this record reads it per attempt: migration 0105 keys the row by `(dataset_id, to_tag, attempt)`, and the partial unique index still allows one non-terminal row per dataset.
+A new attempt for a tag is allowed only when every earlier attempt ended `abandoned`, `failed` or `superseded`.
+A tag is merged as a major once: a second partial unique index on `(dataset_id, to_tag)` where `merge_sha` is set backs that in the database.
 A row with the same tag and the same plan digest is returned as it is (200), before the version rows are consulted, so a rerun resumes it even after N.0.0 is tagged and is no longer the dataset's highest version; any other open row is `repull-in-flight` and names itself.
+
+### A merge that nothing has reconciled blocks the dataset
+
+Create refuses (`merge-unreconciled`) when any record of the dataset holds a merge claim or a merge sha, for either pull request, and is not finished, whatever its status: `failed`, `released`, `merged` and `gates_clear` all count.
+`complete` is finished, and so is `patch_declined`, which is reachable only from a released N.0.0 and is refused while the patch claim is held.
+`failed` stays writable on purpose, so a lost merge answer can be reported; it does not free the dataset, because a merge may be on `main` with no row saying so, and a second major would be a second DOI.
+Clearing a claim after GitHub confirms the pull request was not merged, and expiring a stuck open row, are written by Phase 6f (resume and reconcile); Phase 6a has no writer for either, and open rows never expire here.
 
 ### The fences, as built
 
@@ -630,6 +637,7 @@ A row with the same tag and the same plan digest is returned as it is (200), bef
 - **Anonymous datasets** are refused (`anonymous-dataset`) with no override.
   A re-pull takes upstream's authors and README, which would undo ADR 0065's blind.
 - **A withdrawn dataset**, **an import that is preparing, copying or finalizing**, and **a dataset not recorded as a mirror of that `ds`** are refused, each by its own code.
+  These run at create only: the execution phases must re-check the anonymity, withdrawn and import fences when they move a record, which a transition does not do today.
 - **The dataset's own version rows must agree with the plan.**
   The highest version (both `1.0.0` and `v1.0.0` spellings, ordered by number) must be the plan's `from_version`, and every row at it must name `from_tag` by `doi` or `lineage`.
   A row recorded `unknown` is never re-pulled (decision 4).
@@ -638,22 +646,33 @@ A row with the same tag and the same plan digest is returned as it is (200), bef
 ### The states as built
 
 The 17 states, and the only edges between them, are `shared/repull-state.ts`; the database holds the stage invariants as CHECKs, so a half-written row is refused even by a writer that skips the service.
-A transition is one compare-and-set on the recorded status.
+A transition is one compare-and-set on the recorded status and on the row's `revision`, which every write increments, so of two writers that read the same row only one applies, even when both repeat a status.
 It takes only an allowed edge, writes only the columns its target names, and keeps the pull request's branch and number once set.
 A branch must be the release branch of the version the row carries.
 `counts` is merged key by key and holds only declared keys with non-negative integers, never a path or a key.
-`last_error` goes through the ADR 0051 rule, and an edge into `failed` must say why.
-Closing a record (`abandoned`, `superseded`, `patch_declined`) is refused while a merge claim is held, because the pull request may have merged.
+`last_error` goes through the ADR 0051 rule and is never blank; an edge into `failed`, or the `planned` edge that records why a step could not finish, must say why, and an edge into a different, non-terminal status clears the stored error.
+
+Four edges repeat a status to write one thing: `planned` (the error), `released` (the count of locked objects) and `gates_clear` and `patch_gates_clear` (the claim to merge).
+The claim is recorded before the merge is sent, needs the screened head, names exactly that head, and cannot be recorded twice.
+While it is held, closing the pull request (`abandoned`, `superseded`, `patch_declined`) and moving its head (`pr_open`, `patch_synthesized`) are refused, because the pull request may have merged; `failed` is not.
 
 Two kinds of state are not written by this route, so a caller cannot state them.
 `merged`, `released`, `patch_merged` and `patch_released` are facts about GitHub and the version row, and are written only by routes that read them.
 `gates_clear` and `patch_gates_clear` are written only when the identifier screen is bound to the row.
-Both groups are refused here (`use-verified-route`, `screen-not-built`), so the record cannot be used to skip the screen or to claim a merge that did not happen.
+Both groups are refused here (`use-verified-route`, `screen-not-built`) except for the repeating edges above, so the record cannot be used to skip the screen or to claim a merge that did not happen.
+
+### The record is deleted with its dataset
+
+Unlike `import_jobs`, whose state row deliberately outlives the dataset so a rolled-back orphan stays auditable, `deleteDatasetCascade` deletes these rows.
+A fixture dataset is deleted and re-created under one id, and a stale open row would block the re-created dataset for good; the DOI record of a merged re-pull lives in its own tables, not here.
 
 ### Lineage at create
 
-When the live plan says the from-version's tree was compared with upstream's outside the paths NEMAR owns, create upgrades that version's row to the basis `lineage`, in the same batch as the record.
-It writes only a row never examined, or one that already names the same tag by `doi` or `lineage`; a row recorded `unknown`, or naming another tag, is never overwritten.
+`lineage_recordable` is an administrator's assertion that the plan compared the from-version's tree with upstream's outside the paths NEMAR owns.
+The Worker holds neither tree and has no evidence of it; the assertion is recorded in the audit row.
+When it is made, create upgrades that version's row to the basis `lineage`, in the same batch as the record, and says how many rows it upgraded (`lineage_rows`).
+It writes only a row never examined, or one that already names the same tag by `doi` or `lineage`, in either spelling of the tag; a row recorded `unknown`, or naming another tag, is never overwritten.
+The upgrade is one way: `doi` becomes `lineage` and nothing writes it back, so the audit row records the basis the row held before.
 One statement writes the word `lineage`, and a source scan keeps it the only one.
 
 ### The staleness report reads the record

@@ -2,10 +2,11 @@
  * The upstream staleness report (epic #1046 phase 4a, #1910; ADR 0111, decision 6 and the
  * Phase 4 amendment): which OpenNeuro mirrors are behind upstream.
  *
- * READ-ONLY. It reads D1 (the mirrors, their import state, their open re-pull, their version rows), asks OpenNeuro
- * for the snapshot lists, and asks the GitHub mirror whether a newer tag has arrived. The report
- * itself writes nothing to D1, GitHub or S3, sends no mail and files no issue (ADR 0052, ADR 0053,
- * ADR 0055); authentication, which wraps the route, still stamps `tokens.last_used_at`.
+ * READ-ONLY. It reads D1 (the mirrors, their import state, their open re-pull, their version
+ * rows), asks OpenNeuro for the snapshot lists, and asks the GitHub mirror whether a newer tag has
+ * arrived. The report itself writes nothing to D1, GitHub or S3, sends no mail and files no issue
+ * (ADR 0052, ADR 0053, ADR 0055); authentication, which wraps the route, still stamps
+ * `tokens.last_used_at`.
  * The verdicts are `shared/upstream-staleness.ts`; this file gathers the facts and pages them.
  *
  * POPULATION. Managed `on######` mirrors (`source = 'openneuro'`, not owned by the system user),
