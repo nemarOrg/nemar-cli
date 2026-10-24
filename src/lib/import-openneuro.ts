@@ -34,6 +34,7 @@ import { getDataset, getUserCiStatus, hasReleasedVersion } from "./api/datasets.
 import { ApiError } from "./api/errors.js";
 import { requestPublication } from "./api/publish.js";
 
+import { LEDGER_REPO_PATH } from "../../scripts/scrub/ledger.js";
 import { cloneDataset, pushToGitHub } from "./git-annex/clone-push.js";
 import { configureGitHubRemote } from "./git-annex/github.js";
 import { isNeverAnnexedMetadata, shouldAnnex } from "./git-annex/policy.js";
@@ -439,6 +440,15 @@ export async function baseOnOriginMain(
       `${args.sourceId}: ${args.nemarId} has released a version and its main records upstream tag ${recordedTag}; this import is at ${args.importTag}. Moving a released mirror to a new snapshot is an upstream re-pull (ADR 0111), not a re-import. Nothing was reset, copied or pushed.`,
     );
   }
+  // A retarget takes the new tag's tree whole, so origin's `.nemar/` goes with the old one. The
+  // importer's own `import-scrubbed` line is re-applied by Step 5b's scrub; any other ledger line
+  // is a recorded correction (ADR 0085) that the retarget would drop, so it is refused instead.
+  const corrections = await originRecordedCorrections(datasetPath);
+  if (corrections !== 0) {
+    throw new Error(
+      `${args.nemarId}'s main ${corrections === "unreadable" ? `has a ${LEDGER_REPO_PATH} git could not read` : `records ${corrections} privacy correction(s) in ${LEDGER_REPO_PATH}`} (ADR 0085), which retargeting it from upstream tag ${recordedTag} to ${args.importTag} would drop. Nothing was reset or pushed; a person decides how this dataset moves.`,
+    );
+  }
   if (currentBranch.stdout.trim() !== "main") {
     throw new Error(
       `${args.nemarId}'s unreleased import moved from upstream tag ${recordedTag} to ${args.importTag}, but the clone is on ${currentBranch.stdout.trim()}, not main, which cannot be retargeted safely. Nothing was reset or pushed.`,
@@ -451,6 +461,36 @@ export async function baseOnOriginMain(
     );
   }
   return { kind: "retarget", recordedTag };
+}
+
+/**
+ * How many lines of `origin/main`'s privacy ledger are recorded corrections: any line but the
+ * importer's own `import-scrubbed` one, and a line that is not a JSON object counts too, because a
+ * ledger that cannot be read cannot be shown to hold none. No ledger is 0; a ledger git cannot
+ * read is `unreadable`.
+ */
+async function originRecordedCorrections(datasetPath: string): Promise<number | "unreadable"> {
+  const shown = await runCommand(["git", "show", `origin/main:${LEDGER_REPO_PATH}`], {
+    cwd: datasetPath,
+  });
+  if (shown.exitCode !== 0) {
+    return /does not exist in|exists on disk, but not in/.test(shown.stderr) ? 0 : "unreadable";
+  }
+  let count = 0;
+  for (const line of shown.stdout.split("\n")) {
+    if (line.trim() === "") continue;
+    let entry: unknown;
+    try {
+      entry = JSON.parse(line);
+    } catch {
+      count += 1;
+      continue;
+    }
+    const action =
+      typeof entry === "object" && entry !== null ? (entry as { action?: unknown }).action : null;
+    if (action !== "import-scrubbed") count += 1;
+  }
+  return count;
 }
 
 /**

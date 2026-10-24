@@ -293,6 +293,59 @@ describe("an unreleased import whose upstream moved is retargeted to the new tag
   }, 60_000);
 });
 
+describe("a retarget never drops a recorded privacy correction (ADR 0085)", () => {
+  /** Put `lines` in origin/main's ledger, as an earlier attempt or a correction would have. */
+  async function withLedger(bare: string, lines: string[]): Promise<string> {
+    const editor = fresh("ledger");
+    await run(["git", "clone", "-q", bare, editor]);
+    await git(editor, "config", "user.email", "test@test.com");
+    await git(editor, "config", "user.name", "Test");
+    mkdirSync(join(editor, ".nemar"), { recursive: true });
+    writeFileSync(join(editor, ".nemar", "corrections.jsonl"), `${lines.join("\n")}\n`);
+    await git(editor, "add", ".nemar/corrections.jsonl");
+    await git(editor, "commit", "-q", "-m", "ledger");
+    await git(editor, "push", "-q", "origin", "main");
+    return git(bare, "rev-parse", "main");
+  }
+  const scrubbed = JSON.stringify({ version: 1, action: "import-scrubbed", counts: {} });
+
+  test("the importer's own import-scrubbed line does not stop a retarget", async () => {
+    const { bare } = await originRecordedAt(RECORDED.doiOnly);
+    const tip = await withLedger(bare, [scrubbed]);
+    const dir = await reimportClone(bare, "1.0.1");
+    const base = await baseOnOriginMain(dir, {
+      sourceId: UPSTREAM_ID,
+      importTag: "1.0.1",
+      nemarId: NEMAR_ID,
+      released: async () => false,
+    });
+    expect(base.kind).toBe("retarget");
+    expect(await git(dir, "rev-parse", "HEAD")).toBe(tip);
+  }, 60_000);
+
+  test("any other line, or one that is not JSON, refuses before any reset", async () => {
+    for (const extra of [
+      JSON.stringify({ version: 1, action: "headers-scrubbed", counts: { headers: 2 } }),
+      "{not json",
+    ]) {
+      const { bare } = await originRecordedAt(RECORDED.doiOnly);
+      const tip = await withLedger(bare, [scrubbed, extra]);
+      const dir = await reimportClone(bare, "1.0.1");
+      const p = baseOnOriginMain(dir, {
+        sourceId: UPSTREAM_ID,
+        importTag: "1.0.1",
+        nemarId: NEMAR_ID,
+        released: async () => false,
+      });
+      await expect(p).rejects.toThrow(
+        /records 1 privacy correction\(s\) in \.nemar\/corrections\.jsonl/,
+      );
+      expect(await git(dir, "rev-parse", "HEAD")).toBe(upstream.commits["1.0.1"]);
+      expect(await git(bare, "rev-parse", "main")).toBe(tip);
+    }
+  }, 120_000);
+});
+
 describe("an unrecorded or unchanged tag never trips the guard", () => {
   for (const form of ["nothing", "disagreeing"] as const) {
     test(`recorded ${form}: the same-version hard reset, and release state is never asked`, async () => {
