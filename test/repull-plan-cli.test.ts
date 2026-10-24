@@ -58,6 +58,7 @@ import {
 } from "./helpers/github-standin";
 import {
   CONCEPT_DOI,
+  type LatestSnapshotStandin,
   NEMAR_ID,
   type RepullFixture,
   TAG_A,
@@ -66,6 +67,7 @@ import {
   UPSTREAM_ID,
   buildRepullFixture,
   refsOf,
+  startLatestSnapshotStandin,
 } from "./helpers/repull-fixture";
 
 setDefaultTimeout(240_000);
@@ -80,6 +82,7 @@ let db: Database;
 let configDir: string;
 let scratch: string;
 let fx: RepullFixture;
+let openNeuro: LatestSnapshotStandin;
 const handle = makeRepullApp();
 /** Answer the versions route 404, as a backend without it does. */
 let versions404 = false;
@@ -95,6 +98,7 @@ function env(): Bindings {
 
 beforeAll(async () => {
   gh = startGitHubStandin();
+  openNeuro = startLatestSnapshotStandin(TAG_B);
   // The versions route reads the description through GitHub; the stand-in answers it 404.
   (globalThis as { NEMAR_GITHUB_API_URL?: string }).NEMAR_GITHUB_API_URL = gh.url;
   apiServer = Bun.serve({
@@ -116,6 +120,7 @@ afterAll(() => {
   (globalThis as { NEMAR_GITHUB_API_URL?: string }).NEMAR_GITHUB_API_URL = undefined;
   apiServer.stop(true);
   gh.stop();
+  openNeuro.stop();
   fx?.cleanup();
 });
 
@@ -204,6 +209,7 @@ function childEnvOf(opts: CliOptions): Record<string, string | undefined> {
     NEMAR_CONFIG_DIR: configDir,
     TEST_API_URL: `http://127.0.0.1:${apiServer.port}`,
     NEMAR_GITHUB_API_URL: gh.url,
+    NEMAR_REPULL_OPENNEURO_URL: openNeuro.url,
     GH_TOKEN: ADMIN_TOKEN,
     TMPDIR: scratch,
     NEMAR_NO_UPDATE_CHECK: "1",
@@ -369,10 +375,20 @@ describe("preflight refusals", () => {
     await refused(["--to-tag", "9.9.9"], "mirror-lag", 1);
   });
 
-  test("the mirrored tag itself is nothing to pull, and an older one is not newer", async () => {
+  test("the mirrored tag itself is nothing to pull, and a tag OpenNeuro does not name latest is unverified", async () => {
     seed();
     await refused(["--to-tag", TAG_A], "nothing-to-pull", 1);
-    await refused(["--to-tag", TAG_LEGACY], "not-newer", 1);
+    await refused(["--to-tag", TAG_LEGACY], "order-unverified", 3);
+  });
+
+  test("OpenNeuro not answering leaves no default to_tag", async () => {
+    seed();
+    openNeuro.status = 500;
+    try {
+      await refused([], "latest-unknown", 1);
+    } finally {
+      openNeuro.status = null;
+    }
   });
 
   test("version rows that disagree with the tags and main refuse (exit 3)", async () => {

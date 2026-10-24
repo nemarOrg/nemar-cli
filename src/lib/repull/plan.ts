@@ -10,9 +10,9 @@
  * It writes nothing to the mirror, to S3, to D1 or to the NEMAR API. What it writes is its own
  * scratch directory (deleted on exit, on SIGINT and on SIGTERM, unless `--keep-workdir`) and the
  * plan file the command saves. Every git subprocess, including the git-annex branch reads, the
- * one `aws` call and its own HTTP requests go through `read-only.ts`; the NEMAR API reads and
- * `gh auth token` are made by the command before it calls this, and are named in that module's
- * header.
+ * one `aws` call and its own GET and HEAD requests go through `read-only.ts`. Outside it, and
+ * read-only: OpenNeuro's latest-snapshot GraphQL query (a POST), and the NEMAR API reads and
+ * `gh auth token`, which the command makes before it calls this; `read-only.ts` names them all.
  *
  * It binds the PRE-scrub manifest. The scrubbed new tree cannot be known before the scrub runs, so
  * Phase 6's execution must check that what it copies is a subset of this plan's copy keys plus its
@@ -37,6 +37,7 @@ import { UPSTREAM_BUCKET } from "../fleet-content-recovery.js";
 import { shouldAnnex } from "../git-annex/policy.js";
 import { uuidsNamedInRemoteLog } from "../git-annex/s3-remote.js";
 import { JSON_PATH, RECORDING_PATH, SCANS_TABLE_PATH } from "../import-scrub.js";
+import { fetchOpenNeuroLatestTag } from "../openneuro.js";
 import { bumpVersion } from "../semver.js";
 import { DESCRIPTION_PATH } from "./description.js";
 import {
@@ -57,7 +58,7 @@ import {
   toTagCheck,
   versionCheck,
 } from "./preflight.js";
-import { guardedGitRunner, readOnlyGit } from "./read-only.js";
+import { guardedGitRunner, killLiveGit, readOnlyGit } from "./read-only.js";
 import {
   BlobStore,
   type Env,
@@ -121,6 +122,8 @@ export interface PlanOptions {
    * of the bucket with the ambient AWS credentials (ADR 0111's Phase 5 amendment).
    */
   presence?: "location-log" | "bucket-listing";
+  /** OpenNeuro's GraphQL endpoint; the real one by default (a test points it at a stand-in). */
+  openNeuroGraphqlUrl?: string;
 }
 
 export type PlanOutcome =
@@ -148,6 +151,8 @@ function scratchGuard(workdir: string, keep: boolean): () => void {
     if (!keep) rmSync(workdir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   };
   const onSignal = (signal: NodeJS.Signals) => {
+    // A clone still writing would recreate parts of the directory after it is removed.
+    killLiveGit();
     remove();
     process.exit(signal === "SIGINT" ? 130 : 143);
   };
@@ -186,6 +191,14 @@ export async function planRepull(opts: PlanOptions): Promise<PlanOutcome> {
   // must not fail only at the listing.
   const upEnv = remoteEnv(upUrl, null);
   const nemarEnv = remoteEnv(nemarUrl, opts.github.token);
+  // Which snapshot is upstream's latest is OpenNeuro's answer (its creation order), the one an
+  // import pins to (Phase 3); a read-only GraphQL query, made outside the HTTP guard because it is a
+  // POST. Never throws: not knowing is an answer the to-tag check reads.
+  const latest = await fetchOpenNeuroLatestTag(ds, {
+    graphqlUrl: opts.openNeuroGraphqlUrl,
+    attempts: 2,
+    retryDelayMs: 1_000,
+  });
 
   let upRefs: Map<string, string>;
   let nemarRefs: Map<string, string>;
@@ -247,7 +260,7 @@ export async function planRepull(opts: PlanOptions): Promise<PlanOutcome> {
         }
       },
     });
-    const to = toTagCheck({ flag: opts.toTag, mirrorTags, fromTag: from.tag });
+    const to = toTagCheck({ flag: opts.toTag, mirrorTags, fromTag: from.tag, latest });
     const blocking = [from.check, to.check].filter(
       (c) => c.status === "refused" && c.code !== "from-tag-not-recorded",
     );

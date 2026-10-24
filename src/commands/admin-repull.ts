@@ -5,7 +5,8 @@
  *                                  replay, what would be copied from which pinned upstream object
  *
  * What the plan reads: NEMAR's API (the dataset row and its version rows, two GETs made here
- * through the API client), the administrator's GitHub token (`GH_TOKEN`, else `gh auth token`),
+ * through the API client), OpenNeuro's latest snapshot tag (one GraphQL query, the import's own),
+ * the administrator's GitHub token (`GH_TOKEN`, else `gh auth token`),
  * the GitHub REST API once (the open pull requests), git over HTTPS (which spends no REST quota),
  * the bucket's `annex-uuid` marker (one anonymous GET) and, with `--bucket-listing`, a listing of
  * `nemar-s3`'s prefix with the ambient AWS credentials. Everything after the two API reads and the
@@ -28,13 +29,16 @@ import { adminGitHubToken, githubApiBase } from "../lib/pr-review-approve.js";
 import { defaultPlanPath, planFileJson, writePlanFile } from "../lib/repull/digest.js";
 import { type CatalogFacts, RepullCannotPlan, planRepull } from "../lib/repull/plan.js";
 import { countsMarkdown, preflightLines, summaryLines } from "../lib/repull/render.js";
+import { openNeuroGraphqlUrl as openNeuroUrlFromEnv } from "../lib/repull/sources.js";
 
 /** Exit codes: 0 executable, 3 planned but not executable, 1 nothing planned. */
 export const EXIT_NOT_EXECUTABLE = 3;
 
 const PLAN_HELP = `
 A dry run, always. It compares upstream at the tag NEMAR's latest version mirrors (from_tag)
-with upstream at --to-tag (default: the mirror's highest tag) and NEMAR's main, path by path.
+with upstream at --to-tag (default: OpenNeuro's latest snapshot) and NEMAR's main, path by path.
+A --to-tag that is not OpenNeuro's latest is planned, and is not executable: that it is newer
+than from_tag cannot be proved (upstream's creation order decides, not the tag number).
 
 It writes nothing to the mirror, S3, D1 or the NEMAR API. Its output is the plan file, written
 with mode 0600 to --out or to $NEMAR_CONFIG_DIR/repull/<id>/<to>.<digest8>.json, where
@@ -57,13 +61,13 @@ Exit codes:
   0  the plan is executable.
   3  the plan was made and is not executable: a release-pr or annex-uuid check that is not ok,
      a version check that is refused or unchecked, from-tag-not-recorded (--from-tag on an
-     unrecorded tag), an unpinned key, or a plan refusal (the privacy ledger, a gitlink, a target
+     unrecorded tag), a to-tag whose order is unverified, an unpinned key, or a plan refusal (the privacy ledger, a gitlink, a target
      that cannot be computed, a dead key, the fetch bound, a concept DOI that disagrees).
      Conflicts and corrections alone do not stop a plan: N.0.0 takes upstream's side and N.0.1
      replays NEMAR's corrections.
   1  nothing was planned: a usage error, a dataset that is not an OpenNeuro mirror, a from-tag or
-     to-tag refusal (unknown, disagrees, malformed, mirror-lag, nothing-to-pull, not-newer), a
-     dataset never released, or a remote that could not be read.`;
+     to-tag refusal (unknown, disagrees, malformed, latest-unknown, to-tag-unrecordable,
+     mirror-lag, nothing-to-pull), a dataset never released, or a remote that could not be read.`;
 
 /** `--max-fetch-gb`: a non-negative number of GB. */
 function parseGb(value: string): number {
@@ -81,7 +85,7 @@ export const repullCommand = new Command("repull").description(
 repullCommand
   .command("plan <datasetId>")
   .description("Plan a re-pull of a newer upstream snapshot as the next major version (read-only)")
-  .option("--to-tag <tag>", "The upstream tag to pull (default: the mirror's highest)")
+  .option("--to-tag <tag>", "The upstream tag to pull (default: OpenNeuro's latest snapshot)")
   .option(
     "--from-tag <tag>",
     "The upstream tag NEMAR mirrors, when it is not recorded (dry run only)",
@@ -162,8 +166,10 @@ repullCommand
       }
 
       let apiBase: string;
+      let openNeuroGraphqlUrl: string | undefined;
       try {
         apiBase = githubApiBase();
+        openNeuroGraphqlUrl = openNeuroUrlFromEnv(process.env);
       } catch (err) {
         failMessage(errorDetail(err), { json, answered: true });
         return;
@@ -184,6 +190,7 @@ repullCommand
           github: { token: token.ok ? token.token : null, apiBase },
           environment: getApiUrl(),
           presence: options.bucketListing ? "bucket-listing" : "location-log",
+          openNeuroGraphqlUrl,
         });
       } catch (err) {
         failMessage(

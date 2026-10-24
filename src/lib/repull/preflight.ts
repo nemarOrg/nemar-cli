@@ -11,7 +11,8 @@ import {
   normalizeUpstreamTag,
   sameUpstreamTag,
 } from "../../../shared/openneuro-tag.js";
-import { compareSourceTags } from "../../../shared/source-snapshot.js";
+import { isSourceTag } from "../../../shared/source-snapshot.js";
+import type { LatestTagLookup } from "../openneuro.js";
 import { bumpVersion, parseVersion } from "../semver.js";
 import { bareVersion } from "./from-tag.js";
 import { readOnlyFetch } from "./read-only.js";
@@ -90,89 +91,66 @@ export function sourceCheck(args: {
 // to-tag
 // ---------------------------------------------------------------------------------------
 
-/** The highest of upstream's mirror tags, by numeric comparison; unparsable tags are skipped. */
-export function highestUpstreamTag(tags: string[]): string | null {
-  let best: string | null = null;
-  for (const tag of tags) {
-    if (compareSourceTags(tag, tag) === null) continue;
-    if (best === null || (compareSourceTags(tag, best) ?? 0) > 0) best = tag;
-  }
-  return best;
-}
-
-/** `to_tag` must be on the mirror and newer than `from_tag` (ADR 0111, decision 10). */
+/**
+ * `to_tag` (ADR 0111, decision 10, and the Phase 4a amendment: upstream's creation order decides,
+ * not the number). The default is OpenNeuro's own latest snapshot (`latestSnapshot.tag`, Phase 3's
+ * `fetchOpenNeuroLatestTag`, the tag an import pins to). It must have an OpenNeuro tag's shape, be a
+ * tag the Phase 2 parser can record (`isSourceTag`, so the re-pull can be proved afterwards), and be
+ * on the GitHub mirror; equal to `from_tag` is nothing to pull. A tag that is not OpenNeuro's latest,
+ * or a plan made while OpenNeuro could not say, has an order the planner cannot prove, so the check
+ * is `unchecked` and the plan is not executable.
+ */
 export function toTagCheck(args: {
   flag: string | undefined;
   mirrorTags: string[];
   fromTag: string | null;
+  latest: LatestTagLookup;
 }): { tag: string | null; check: Check } {
   // The tag's shape is Phase 3's (shared/openneuro-tag.ts): one definition for every place a tag
   // crosses a boundary, and `v1.1.0` names the same snapshot as `1.1.0`.
   const raw = args.flag?.trim() || undefined;
+  const refused = (code: string, detail: string, tag: string | null = null) => ({
+    tag,
+    check: { name: "to-tag" as const, status: "refused" as const, code, detail },
+  });
   if (raw !== undefined && !isOpenNeuroTag(raw)) {
-    return {
-      tag: null,
-      check: {
-        name: "to-tag",
-        status: "refused",
-        code: "to-tag-malformed",
-        detail: `${raw} is not an OpenNeuro snapshot tag`,
-      },
-    };
+    return refused("to-tag-malformed", `${raw} is not an OpenNeuro snapshot tag`);
   }
-  const flag = raw === undefined ? undefined : normalizeUpstreamTag(raw);
-  const tag = flag ?? highestUpstreamTag(args.mirrorTags);
+  const latest = args.latest.tag === null ? null : normalizeUpstreamTag(args.latest.tag);
+  const tag = raw !== undefined ? normalizeUpstreamTag(raw) : latest;
   if (tag === null) {
-    return {
-      tag: null,
-      check: {
-        name: "to-tag",
-        status: "refused",
-        code: "mirror-lag",
-        detail: "the mirror has no tag",
-      },
-    };
+    return refused(
+      "latest-unknown",
+      `${args.latest.tag === null ? args.latest.reason : "no tag"}; name one with --to-tag`,
+    );
+  }
+  if (!isSourceTag(tag)) {
+    return refused(
+      "to-tag-unrecordable",
+      `${tag} is not a tag the version rows can record, so a re-pull to it could never be proved`,
+    );
   }
   if (!args.mirrorTags.includes(tag)) {
-    return {
-      tag: null,
-      check: {
-        name: "to-tag",
-        status: "refused",
-        code: "mirror-lag",
-        detail: `${tag} is not on the GitHub mirror yet`,
-      },
-    };
+    return refused("mirror-lag", `${tag} is not on the GitHub mirror yet`);
   }
-  if (args.fromTag !== null) {
-    if (sameUpstreamTag(tag, args.fromTag)) {
-      return {
-        tag,
-        check: {
-          name: "to-tag",
-          status: "refused",
-          code: "nothing-to-pull",
-          detail: `${tag} is the mirrored tag`,
-        },
-      };
-    }
-    const order = compareSourceTags(tag, args.fromTag);
-    if (order === null || order <= 0) {
-      return {
-        tag,
-        check: {
-          name: "to-tag",
-          status: "refused",
-          code: "not-newer",
-          detail:
-            order === null
-              ? `${tag} cannot be ordered against ${args.fromTag}`
-              : `${tag} is not newer than ${args.fromTag}`,
-        },
-      };
-    }
+  if (args.fromTag !== null && sameUpstreamTag(tag, args.fromTag)) {
+    return refused("nothing-to-pull", `${tag} is the mirrored tag`, tag);
   }
-  return { tag, check: { name: "to-tag", status: "ok", detail: tag } };
+  if (latest !== null && sameUpstreamTag(tag, latest)) {
+    return { tag, check: { name: "to-tag", status: "ok", detail: `${tag} (OpenNeuro's latest)` } };
+  }
+  return {
+    tag,
+    check: {
+      name: "to-tag",
+      status: "unchecked",
+      code: "order-unverified",
+      detail:
+        latest === null
+          ? `OpenNeuro could not say which snapshot is latest (${args.latest.tag === null ? args.latest.reason : ""}), so that ${tag} is newer than ${args.fromTag} is not proved`
+          : `${tag} is not OpenNeuro's latest snapshot (${latest}), so that it is newer than ${args.fromTag} is not proved`,
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------------------

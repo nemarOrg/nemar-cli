@@ -37,6 +37,7 @@ import { ADMIN_TOKEN, startGitHubStandin } from "./helpers/github-standin";
 import {
   CHANGES_SENTENCE,
   CONCEPT_DOI,
+  type LatestSnapshotStandin,
   NEMAR_ID,
   PATHS,
   README_B,
@@ -47,6 +48,7 @@ import {
   buildRepullFixture,
   gitIn,
   refsOf,
+  startLatestSnapshotStandin,
   writeAnnexBranchFile,
 } from "./helpers/repull-fixture";
 import { startRenameS3Standin } from "./helpers/s3-rename-standin";
@@ -71,8 +73,16 @@ const ROWS_A = [{ version: "v1.0.0", source_version: TAG_A, source_version_basis
 const DATASET_ROW = { source: "openneuro", source_id: UPSTREAM_ID, concept_doi: CONCEPT_DOI };
 const CHANGES_B = `${TAG_A} 2026-01-01\n  - Initial snapshot.\n${TAG_B} 2026-06-01\n  - Added sub-03.\n`;
 
+/** OpenNeuro's latest-snapshot answer for every plan in this file: tag B unless a test says otherwise. */
+let openNeuro: LatestSnapshotStandin;
+beforeAll(() => {
+  openNeuro = startLatestSnapshotStandin(TAG_B);
+});
+afterAll(() => openNeuro?.stop());
+
 function options(fx: RepullFixture, over: Partial<PlanOptions> = {}): PlanOptions {
   return {
+    openNeuroGraphqlUrl: openNeuro.url,
     datasetId: NEMAR_ID,
     catalog: { dataset: DATASET_ROW, versions: ROWS_A },
     github: { token: null, apiBase: "http://127.0.0.1:9" },
@@ -375,6 +385,41 @@ describe("a plan from tag A to tag B over an imported mirror", () => {
     } finally {
       renameSync(aside, marker);
     }
+  });
+
+  test("to_tag defaults to OpenNeuro's latest snapshot, and a tag it does not name latest is not proved newer", async () => {
+    expect(file.preflight.find((c) => c.name === "to-tag")).toMatchObject({
+      status: "ok",
+      detail: `${TAG_B} (OpenNeuro's latest)`,
+    });
+    // The legacy 00001 is on the mirror, and its creation order against 1.0.0 is not OpenNeuro's
+    // answer, so the plan is made and is not executable (Phase 4a: order is creation, not number).
+    const legacy = await plan(fx, { toTag: "00001" });
+    expect(legacy.preflight.find((c) => c.name === "to-tag")).toMatchObject({
+      status: "unchecked",
+      code: "order-unverified",
+    });
+    expect(legacy.executable).toBe(false);
+  });
+
+  test("with OpenNeuro not answering, nothing is planned without --to-tag, and a flag is unverified", async () => {
+    openNeuro.status = 503;
+    try {
+      const none = await planRepull(options(fx));
+      expect(none.planned ? null : none.reason).toBe("latest-unknown");
+      const flagged = await plan(fx, { toTag: TAG_B });
+      expect(flagged.preflight.find((c) => c.name === "to-tag")).toMatchObject({
+        status: "unchecked",
+        code: "order-unverified",
+      });
+    } finally {
+      openNeuro.status = null;
+    }
+  });
+
+  test("a tag the version rows could not record is refused (Phase 4a's isSourceTag)", async () => {
+    const out = await planRepull(options(fx, { toTag: "1.1.0-rc1" }));
+    expect(out.planned ? null : out.reason).toBe("to-tag-unrecordable");
   });
 
   test("from_tag equal to to_tag is nothing to pull", async () => {

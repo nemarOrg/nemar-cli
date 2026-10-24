@@ -267,6 +267,52 @@ export interface RepullFixture {
   cleanup(): void;
 }
 
+/**
+ * OpenNeuro's GraphQL endpoint as the latest-snapshot query (`fetchOpenNeuroLatestTag`) reads it,
+ * the way Phase 3's import tests stand in for it: `latest` is the tag it names, `null` answers that
+ * the dataset has no snapshot, and `status` answers every request with that HTTP status instead.
+ */
+export interface LatestSnapshotStandin {
+  url: string;
+  latest: string | null;
+  status: number | null;
+  requests: number;
+  stop(): void;
+}
+
+export function startLatestSnapshotStandin(latest: string | null = TAG_B): LatestSnapshotStandin {
+  const state = { latest, status: null as number | null, requests: 0 };
+  const server = Bun.serve({
+    port: 0,
+    fetch(req) {
+      state.requests++;
+      if (state.status !== null) return new Response("unavailable", { status: state.status });
+      if (req.method !== "POST") return new Response("method", { status: 405 });
+      const snapshot = state.latest === null ? null : { tag: state.latest };
+      return Response.json({ data: { dataset: { latestSnapshot: snapshot } } });
+    },
+  });
+  return {
+    url: `http://127.0.0.1:${server.port}/crn/graphql`,
+    get latest() {
+      return state.latest;
+    },
+    set latest(v) {
+      state.latest = v;
+    },
+    get status() {
+      return state.status;
+    },
+    set status(v) {
+      state.status = v;
+    },
+    get requests() {
+      return state.requests;
+    },
+    stop: () => server.stop(true),
+  };
+}
+
 /** Run git in a repository and return stdout; throws on failure. For tests that move a ref. */
 export async function gitIn(repo: string, args: string[]): Promise<string> {
   return run(["git", ...args], repo);

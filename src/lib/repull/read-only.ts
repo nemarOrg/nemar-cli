@@ -16,11 +16,12 @@
  * - the HTTP requests the planner makes itself (the open pull requests, the bucket's anonymous
  *   `annex-uuid` marker) go through {@link readOnlyFetch}, GET and HEAD only.
  *
- * Outside this guard, and read-only by what they are: the NEMAR API's two GETs (the dataset row and
- * its version rows), which the command makes through the API client before planning; `gh auth
- * token`, which reads the administrator's stored GitHub token; reads of the test bases' local
- * directories; and the planner's own scratch directory and plan file. `clone` and `fetch` write
- * only into the scratch directory.
+ * Outside this guard, and read-only by what they are: OpenNeuro's latest-snapshot query
+ * (`fetchOpenNeuroLatestTag`, a GraphQL POST that asks, the same call an import pins its tag with);
+ * the NEMAR API's two GETs (the dataset row and its version rows), which the command makes through
+ * the API client before planning; `gh auth token`, which reads the administrator's stored GitHub
+ * token; reads of the test bases' local directories; and the planner's own scratch directory and
+ * plan file. `clone` and `fetch` write only into the scratch directory.
  *
  * `GIT_NO_LAZY_FETCH=1` is set on every git call, so a partial clone never fetches a missing blob
  * on its own (git 2.44 and later honor it; an older git ignores it, and nothing here depends on it,
@@ -139,6 +140,25 @@ export function assertReadOnlyGit(args: readonly string[]): void {
   }
 }
 
+/** The git processes the planner has running, so a signal handler can stop them first. */
+const liveGit = new Set<{ kill(signal?: number | NodeJS.Signals): void }>();
+
+/**
+ * Stop every git process the planner started that is still running. The scratch directory's
+ * signal handler calls this before it removes the directory: a clone still writing would
+ * otherwise recreate parts of it after the removal.
+ */
+export function killLiveGit(): void {
+  for (const proc of liveGit) {
+    try {
+      proc.kill("SIGKILL");
+    } catch {
+      // already gone
+    }
+  }
+  liveGit.clear();
+}
+
 /** Run one read-only git command. Never throws on a non-zero exit; the caller reads `exitCode`. */
 export async function readOnlyGit(args: string[], opts: ReadOnlyGitOptions = {}): Promise<GitRun> {
   assertReadOnlyGit(args);
@@ -156,12 +176,17 @@ export async function readOnlyGit(args: string[], opts: ReadOnlyGitOptions = {})
     stderr: "pipe",
     env,
   });
-  const [out, err, exitCode] = await Promise.all([
-    new Response(proc.stdout).arrayBuffer(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ]);
-  return { stdout: Buffer.from(out), stderr: err, exitCode };
+  liveGit.add(proc);
+  try {
+    const [out, err, exitCode] = await Promise.all([
+      new Response(proc.stdout).arrayBuffer(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    return { stdout: Buffer.from(out), stderr: err, exitCode };
+  } finally {
+    liveGit.delete(proc);
+  }
 }
 
 /**

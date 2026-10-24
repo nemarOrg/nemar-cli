@@ -60,10 +60,33 @@ export function localBase(env: Env, which: keyof typeof BASE_ENV): string | null
   return value.replace(/\/+$/, "");
 }
 
+/**
+ * OpenNeuro's GraphQL endpoint for the latest-snapshot query: the real one, or a test's stand-in
+ * through `NEMAR_REPULL_OPENNEURO_URL`, honored only for a loopback http address (the
+ * `NEMAR_GITHUB_API_URL` rule); a set value that is not one refuses.
+ */
+export function openNeuroGraphqlUrl(env: Env): string | undefined {
+  const value = env.NEMAR_REPULL_OPENNEURO_URL?.trim();
+  if (!value) return undefined;
+  try {
+    const u = new URL(value);
+    if (u.protocol === "http:" && ["127.0.0.1", "localhost", "[::1]"].includes(u.hostname)) {
+      return value;
+    }
+  } catch {
+    // refused below
+  }
+  throw new Error(
+    "NEMAR_REPULL_OPENNEURO_URL is set but is not an http://127.0.0.1, http://localhost or http://[::1] address. It is only for tests, so it is refused rather than ignored.",
+  );
+}
+
 /** True when any test base redirects a remote; the plan file records it. */
 export function usesTestBases(env: Env): boolean {
-  return (Object.keys(BASE_ENV) as Array<keyof typeof BASE_ENV>).some(
-    (k) => localBase(env, k) !== null,
+  return (
+    (Object.keys(BASE_ENV) as Array<keyof typeof BASE_ENV>).some(
+      (k) => localBase(env, k) !== null,
+    ) || openNeuroGraphqlUrl(env) !== undefined
   );
 }
 
