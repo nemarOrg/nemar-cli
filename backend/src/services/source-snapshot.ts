@@ -17,19 +17,27 @@
  * did not produce a description: the file is absent, the fetch failed, the token could not be
  * minted, the dataset is not an `on######` mirror. A 404 right after a tag is pushed can be a
  * CDN that has not caught up, so an insert never turns "absent" into `unknown`; only the
- * backfill, an hour later, may (`services/upstream-backfill.ts`). `unknown` is recorded only
- * when a description WAS read and does not name a single tag, which is a property of the
- * content: a tagged blob is immutable.
+ * backfill, an hour later and after a control read, may (`services/upstream-backfill.ts`).
+ * `unknown` is recorded only when a description WAS read and does not name a single tag, which
+ * is a property of the content (a tagged blob is immutable). Only the sites that read the raw
+ * file themselves (A, the manifest-ready callback; B, admin regeneration) and the backfill can
+ * see that the file is not JSON, so only they record `unknown` for it. The inline sites C and D
+ * go through `readRepoMetadata`, which turns unparseable JSON into its `{ Name }` fallback and
+ * a warning, and that is NULL/NULL there ({@link columnsFromDescription}).
  *
  * NOTHING HERE MAY FAIL AN INSERT. The version row is the contract the publication flow waits
  * on, so every function that runs before it answers NULL/NULL instead of throwing, and the whole
- * lookup is bounded by a deadline.
+ * lookup is bounded by {@link SNAPSHOT_LOOKUP_DEADLINE_MS}. That is the worst-case latency this
+ * adds to the manifest-ready callback: 5 seconds, well inside the 30 second `--max-time` the
+ * live `generate-manifest.yml` gives the callback's curl (connect timeout 10 seconds). When the
+ * deadline wins, the lookup it abandoned keeps running unawaited; it is NOT handed to
+ * `waitUntil`, because its answer would be discarded and keeping the isolate alive for it buys
+ * nothing, and its own fetch is bounded by {@link RAW_FETCH_TIMEOUT_MS} anyway.
  */
 
+import { toVersionTag } from "../../../shared/contract/version.js";
 import {
   type SourceSnapshot,
-  type SourceVersionRow,
-  mirroredTagOf,
   openNeuroSourceId,
   sourceSnapshotOf,
 } from "../../../shared/source-snapshot.js";
@@ -62,6 +70,8 @@ export const NOT_EXAMINED: SnapshotColumns = { source_version: null, source_vers
 export const SNAPSHOT_LOOKUP_DEADLINE_MS = 5000;
 /** How long the raw fetch alone may take. */
 const RAW_FETCH_TIMEOUT_MS = 4000;
+/** The most of a `dataset_description.json` that is read. A real one is a few KiB. */
+export const DESCRIPTION_MAX_BYTES = 1024 * 1024;
 
 /** The outcome of reading `dataset_description.json` at a tag: three states, never two. */
 export type DescriptionFetch =
@@ -70,20 +80,21 @@ export type DescriptionFetch =
   | { kind: "error"; reason: string };
 
 /**
- * `dataset_description.json` at `v<version>` through the authenticated raw CDN. Only a 404 is
- * `absent`; any other status, a network failure and a timeout are `error`, which a caller never
- * folds into a verdict.
+ * `dataset_description.json` at a ref (a tag, or a branch for the control read of the backfill)
+ * through the authenticated raw CDN. Only a 404 is `absent`; any other status, a network
+ * failure, a timeout and a body over {@link DESCRIPTION_MAX_BYTES} are `error`, which a caller
+ * never folds into a verdict.
  */
-export async function fetchDescriptionAtTag(
+export async function fetchDescriptionAtRef(
   env: Pick<Bindings, "GITHUB_RAW_BASE">,
   repo: string,
-  version: string,
+  ref: string,
   pat: string,
 ): Promise<DescriptionFetch> {
   const url = rawContentUrl(
     env.GITHUB_RAW_BASE ?? GITHUB_RAW_ORIGIN,
     repo,
-    `v${version}`,
+    ref,
     "dataset_description.json",
   );
   let response: Response;
@@ -104,10 +115,58 @@ export async function fetchDescriptionAtTag(
     return { kind: "error", reason: `HTTP ${response.status} for ${url}` };
   }
   try {
-    return { kind: "content", body: await response.text() };
+    const body = await readCapped(response, DESCRIPTION_MAX_BYTES);
+    if (body === null) {
+      return { kind: "error", reason: `body over ${DESCRIPTION_MAX_BYTES} bytes for ${url}` };
+    }
+    return { kind: "content", body };
   } catch (err) {
     return { kind: "error", reason: `body read failed for ${url}: ${errorMessage(err)}` };
   }
+}
+
+/** The text of a response, or null when it is longer than `max` bytes (the rest is not read). */
+async function readCapped(response: Response, max: number): Promise<string | null> {
+  const declared = Number(response.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > max) {
+    await response.body?.cancel().catch(() => {});
+    return null;
+  }
+  if (!response.body) return "";
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > max) {
+      await reader.cancel().catch(() => {});
+      return null;
+    }
+    chunks.push(value);
+  }
+  const bytes = new Uint8Array(total);
+  let at = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, at);
+    at += chunk.byteLength;
+  }
+  return new TextDecoder().decode(bytes);
+}
+
+/**
+ * `dataset_description.json` at the tag of a NEMAR version. The ref is the canonical `vX.Y.Z`
+ * tag whether the stored version carries the `v` or not, so a `v1.0.0` row never reads
+ * `vv1.0.0`.
+ */
+export function fetchDescriptionAtTag(
+  env: Pick<Bindings, "GITHUB_RAW_BASE">,
+  repo: string,
+  version: string,
+  pat: string,
+): Promise<DescriptionFetch> {
+  return fetchDescriptionAtRef(env, repo, toVersionTag(version), pat);
 }
 
 /**
@@ -121,7 +180,9 @@ export function snapshotFromDescriptionText(
 ): { columns: SourceSnapshot; unparseable: boolean } {
   let desc: unknown;
   try {
-    desc = JSON.parse(text);
+    // A byte order mark is not part of the JSON; a description saved with one is still a
+    // description, and calling it unparseable would record a wrong `unknown`.
+    desc = JSON.parse(text.startsWith("\uFEFF") ? text.slice(1) : text);
   } catch {
     return {
       columns: { source_version: null, source_version_basis: "unknown" },
@@ -166,7 +227,12 @@ export async function snapshotColumnsForInsert(
         console.warn(`[source-snapshot] ${datasetId}@${version} not examined: ${fetched.reason}`);
         return NOT_EXAMINED;
       }
-      if (fetched.kind === "absent") return NOT_EXAMINED;
+      if (fetched.kind === "absent") {
+        console.warn(
+          `[source-snapshot] ${datasetId}@${version} not examined: dataset_description.json is absent at the tag`,
+        );
+        return NOT_EXAMINED;
+      }
       return snapshotFromDescriptionText(sourceId, fetched.body).columns;
     } catch (err) {
       console.warn(`[source-snapshot] ${datasetId}@${version} not examined: ${errorMessage(err)}`);
@@ -199,23 +265,4 @@ export function columnsFromDescription(
   if (warnings.some((w) => w.startsWith(BIDS_METADATA_UNAVAILABLE))) return NOT_EXAMINED;
   if (Object.keys(description).every((key) => key === "Name")) return NOT_EXAMINED;
   return sourceSnapshotOf(description, sourceId);
-}
-
-/** The version rows of a dataset as far as the snapshot is concerned. */
-export async function readSourceVersionRows(
-  db: D1Database,
-  datasetId: string,
-): Promise<SourceVersionRow[]> {
-  const rows = await db
-    .prepare(
-      "SELECT version, source_version, source_version_basis FROM dataset_versions WHERE dataset_id = ?",
-    )
-    .bind(datasetId)
-    .all<SourceVersionRow>();
-  return rows.results;
-}
-
-/** The tag a dataset mirrors, derived from its highest version row (ADR 0111, decision 4). */
-export async function readMirroredTag(db: D1Database, datasetId: string) {
-  return mirroredTagOf(await readSourceVersionRows(db, datasetId));
 }

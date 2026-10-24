@@ -21,6 +21,7 @@
 
 import type { Database } from "bun:sqlite";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import { generateKeyPairSync } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Server } from "bun";
@@ -31,13 +32,18 @@ import { registerDatasetLifecycleRoutes } from "../src/routes/admin/datasets-lif
 import { signManifestCallbackToken } from "../src/services/github/callback-tokens";
 import {
   INSERT_DATASET_VERSION_SQL,
+  SNAPSHOT_LOOKUP_DEADLINE_MS,
   columnsFromDescription,
   snapshotColumnsForInsert,
+  snapshotFromDescriptionText,
 } from "../src/services/source-snapshot";
 import { hashApiKey } from "../src/services/token";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
 import { SRC, createTree, foldedStrings, parse, rel } from "./helpers/ts-scan";
+
+/** The cap on a description, written out so a changed constant cannot move the test with it. */
+const ONE_MIB = 1024 * 1024;
 
 const CALLBACK_SECRET = "manifest-callback-secret-0123456789abcdef";
 const ADMIN_KEY = "snap-admin-key-0123456789abcdef0123456789abcdef01";
@@ -62,7 +68,9 @@ interface Logged {
  * answer 200, the GitHub commit and tree endpoints answer an empty repository.
  */
 function startStandin() {
-  const descriptions = new Map<string, { status: number; body: string }>();
+  const descriptions = new Map<string, { status: number; body: string; chunked: boolean }>();
+  /** `<repo>@<ref>` to the `dataset_description.json` text a git tree read of it finds. */
+  const gitDescriptions = new Map<string, string>();
   const log: Logged[] = [];
   let hang = false;
   const server: Server = Bun.serve({
@@ -76,18 +84,57 @@ function startStandin() {
         authorization: req.headers.get("authorization"),
         userAgent: req.headers.get("user-agent"),
       });
+      // The GitHub App installation-token endpoint, rerouted here: it never answers.
+      if (path.startsWith("/__token-stall")) return new Promise<Response>(() => {});
       if (path.endsWith("/dataset_description.json")) {
         if (hang) return new Promise<Response>(() => {});
         const entry = descriptions.get(path);
         if (!entry) return new Response("404: Not Found", { status: 404 });
+        if (entry.chunked) {
+          // No Content-Length: the reader has to count the bytes itself.
+          const bytes = new TextEncoder().encode(entry.body);
+          return new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                controller.enqueue(bytes);
+                controller.close();
+              },
+            }),
+            { status: entry.status },
+          );
+        }
         return new Response(entry.body, { status: entry.status });
       }
-      if (/^\/repos\/nemarDatasets\/[^/]+\/commits\//.test(path)) {
-        return Response.json({ sha: "c".repeat(40), commit: { tree: { sha: "t".repeat(40) } } });
+      const commit = /^\/repos\/nemarDatasets\/([^/]+)\/commits\/(.+)$/.exec(path);
+      if (commit) {
+        return Response.json({
+          sha: "c".repeat(40),
+          commit: { tree: { sha: `tree.${commit[2]}` } },
+        });
       }
-      if (/^\/repos\/nemarDatasets\/[^/]+\/git\/trees\//.test(path)) {
-        return Response.json({ sha: "t".repeat(40), tree: [], truncated: false });
+      const tree = /^\/repos\/nemarDatasets\/([^/]+)\/git\/trees\/tree\.(.+)$/.exec(path);
+      if (tree) {
+        const text = gitDescriptions.get(`${tree[1]}@${tree[2]}`);
+        const entries =
+          text === undefined
+            ? []
+            : [
+                {
+                  path: "dataset_description.json",
+                  type: "blob",
+                  sha: `blob.${tree[2]}`,
+                  size: text.length,
+                },
+              ];
+        return Response.json({ sha: "t".repeat(40), tree: entries, truncated: false });
       }
+      const blob = /^\/repos\/nemarDatasets\/([^/]+)\/git\/blobs\/blob\.(.+)$/.exec(path);
+      if (blob) {
+        const text = gitDescriptions.get(`${blob[1]}@${blob[2]}`) ?? "";
+        return Response.json({ content: btoa(text), encoding: "base64" });
+      }
+      // The registrar (EZID), as the legacy handler's mint reaches it: success for every verb.
+      if (path.startsWith("/id/")) return new Response(`success: ${path.slice(4)}`);
       if (req.method === "HEAD" || req.method === "PUT") return new Response(null, { status: 200 });
       return new Response("not found", { status: 404 });
     },
@@ -100,13 +147,19 @@ function startStandin() {
       hang = on;
     },
     /** Serve a description for `repo` at `v<version>`. */
-    describe(repo: string, version: string, body: unknown, status = 200) {
+    describe(repo: string, version: string, body: unknown, status = 200, chunked = false) {
       descriptions.set(`/nemarDatasets/${repo}/v${version}/dataset_description.json`, {
         status,
+        chunked,
         body: typeof body === "string" ? body : JSON.stringify(body),
       });
     },
+    /** Serve `body` as the description a git tree read of `repo` at `ref` finds. */
+    gitDescribe(repo: string, ref: string, body: unknown) {
+      gitDescriptions.set(`${repo}@${ref}`, typeof body === "string" ? body : JSON.stringify(body));
+    },
     reset() {
+      gitDescriptions.clear();
       descriptions.clear();
       log.length = 0;
       hang = false;
@@ -133,6 +186,10 @@ beforeEach(() => {
   // S3 lives on an amazonaws.com host the code builds itself; send it to the stand-in.
   globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(input instanceof Request ? input.url : String(input));
+    if (url.hostname === "api.github.com" && url.pathname.includes("/access_tokens")) {
+      // The App token mint (its host is not overridable): stall it on the stand-in.
+      return realFetch(`${standin.base}/__token-stall`, { method: "POST" });
+    }
     if (url.hostname.endsWith(".amazonaws.com")) {
       const headers = input instanceof Request ? input.headers : new Headers(init?.headers);
       return realFetch(`${standin.base}${url.pathname}`, {
@@ -422,6 +479,196 @@ describe("admin manifest regeneration records the snapshot when it repairs a str
       path: "/nemarDatasets/on000042/v1.0.0/dataset_description.json",
       authorization: "Bearer snap-test-pat",
     });
+  });
+});
+
+// ----------------------------------------------------------------------------
+// The read itself: ref shape, byte order mark, size cap, warnings, deadline
+// ----------------------------------------------------------------------------
+
+describe("the tagged read", () => {
+  const tagged = (id: string, tag: string) => ({
+    SourceDatasets: [{ DOI: `10.18112/openneuro.ds${id.slice(2)}.v${tag}` }],
+  });
+
+  test("a stored version that already carries the v reads v1.0.0, never vv1.0.0", async () => {
+    standin.describe("on000070", "1.0.0", tagged("on000070", "4.0.0"));
+    const columns = await snapshotColumnsForInsert(env(), "on000070", "v1.0.0");
+    expect(columns).toEqual({ source_version: "4.0.0", source_version_basis: "doi" });
+    expect(standin.rawRequests().map((r) => r.path)).toEqual([
+      "/nemarDatasets/on000070/v1.0.0/dataset_description.json",
+    ]);
+  });
+
+  test("a description with a byte order mark is read, not called unparseable", () => {
+    const text = `\uFEFF${JSON.stringify(tagged("on000071", "2.1.0"))}`;
+    expect(snapshotFromDescriptionText("ds000071", text)).toEqual({
+      columns: { source_version: "2.1.0", source_version_basis: "doi" },
+      unparseable: false,
+    });
+  });
+
+  /** A valid description of exactly `bytes` bytes. */
+  const descriptionOfSize = (id: string, bytes: number) => {
+    const base = JSON.stringify({ ...tagged(id, "2.1.0"), P: "" });
+    return JSON.stringify({ ...tagged(id, "2.1.0"), P: "x".repeat(bytes - base.length) });
+  };
+
+  for (const chunked of [false, true]) {
+    const how = chunked ? "streamed without a length" : "with a declared length";
+
+    test(`a body one byte over the cap, ${how}, is a read error, not a verdict: NULL/NULL`, async () => {
+      const id = chunked ? "on000077" : "on000072";
+      const body = descriptionOfSize(id, ONE_MIB + 1);
+      expect(new TextEncoder().encode(body).length).toBe(ONE_MIB + 1);
+      standin.describe(id, "1.0.0", body, 200, chunked);
+      const warnings: string[] = [];
+      console.warn = (...args: unknown[]) => {
+        warnings.push(args.join(" "));
+      };
+      const { res, snapshot } = await publish(id);
+      expect(res.status).toBe(200);
+      expect(snapshot).toEqual(NOT_EXAMINED);
+      expect(warnings.some((w) => w.includes(`${id}@1.0.0`) && w.includes("over"))).toBe(true);
+    });
+
+    test(`a body of exactly the cap, ${how}, is read`, async () => {
+      const id = chunked ? "on000078" : "on000073";
+      const body = descriptionOfSize(id, ONE_MIB);
+      expect(new TextEncoder().encode(body).length).toBe(ONE_MIB);
+      standin.describe(id, "1.0.0", body, 200, chunked);
+      const { snapshot } = await publish(id);
+      expect(snapshot).toEqual({ source_version: "2.1.0", source_version_basis: "doi" });
+    });
+  }
+
+  test("an absent file and a failed read each leave a warning naming the dataset and version", async () => {
+    const warnings: string[] = [];
+    console.warn = (...args: unknown[]) => {
+      warnings.push(args.join(" "));
+    };
+    await publish("on000074"); // 404
+    standin.describe("on000075", "1.0.0", "boom", 500);
+    await publish("on000075");
+    expect(warnings.some((w) => w.includes("on000074@1.0.0") && w.includes("absent"))).toBe(true);
+    expect(warnings.some((w) => w.includes("on000075@1.0.0") && w.includes("500"))).toBe(true);
+    // No secret is logged.
+    expect(warnings.join("\n")).not.toContain("snap-test-pat");
+  });
+
+  test("a token mint that stalls is cut off at the deadline: NULL/NULL, a 200, in about five seconds", async () => {
+    const { privateKey } = generateKeyPairSync("rsa", {
+      modulusLength: 2048,
+      privateKeyEncoding: { type: "pkcs8", format: "pem" },
+      publicKeyEncoding: { type: "spki", format: "pem" },
+    });
+    standin.describe("on000076", "1.0.0", tagged("on000076", "2.1.0"));
+    const bindings = env({
+      GITHUB_ADMIN_PAT: undefined,
+      GITHUB_APP_ID: "123",
+      GITHUB_APP_PRIVATE_KEY: privateKey,
+      // Its own installation id: the token cache is per process, and a stalled mint stays cached.
+      GITHUB_APP_INSTALLATION_ID_NEMAR_DATASETS: "7600076",
+    });
+    seedDataset("on000076");
+    const token = await seedManifestJob("on000076", "1.0.0", "nonce-76");
+    const started = Date.now();
+    // Not settled: the metadata refresh the callback starts in the background uses the same
+    // stalled mint, and is not what is being timed.
+    const res = await manifestReady(token, "on000076", "1.0.0", bindings).response;
+    const elapsed = Date.now() - started;
+    const snapshot = snapshotOf("on000076", "1.0.0");
+    expect(res.status).toBe(200);
+    expect(snapshot).toEqual(NOT_EXAMINED);
+    expect(elapsed).toBeGreaterThanOrEqual(SNAPSHOT_LOOKUP_DEADLINE_MS - 200);
+    expect(elapsed).toBeLessThan(SNAPSHOT_LOOKUP_DEADLINE_MS + 500);
+    expect(standin.rawRequests()).toHaveLength(0);
+  }, 15_000);
+});
+
+// ----------------------------------------------------------------------------
+// Site D: the legacy EZID handler, through its route
+// ----------------------------------------------------------------------------
+
+describe("the legacy version-DOI handler records the snapshot of the description it read", () => {
+  const WEBHOOK = "snap-legacy-webhook-token-0123456789abcdef";
+
+  function legacyEnv(): Bindings {
+    return env({
+      NEMAR_WEBHOOK_TOKEN: WEBHOOK,
+      EZID_USERNAME: "apitest",
+      EZID_PASSWORD: "apitest",
+      EZID_SANDBOX_USERNAME: "apitest",
+      EZID_SANDBOX_PASSWORD: "apitest",
+    });
+  }
+
+  async function publishVersionDoi(id: string) {
+    seedDataset(id);
+    const work: Promise<unknown>[] = [];
+    const res = await worker.fetch(
+      new Request(`${API}/webhooks/publish-version-doi`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Webhook-Token": WEBHOOK },
+        body: JSON.stringify({
+          dataset_id: id,
+          version: "1.0.0",
+          release_url: `https://github.com/nemarDatasets/${id}/releases/tag/v1.0.0`,
+        }),
+      }),
+      legacyEnv(),
+      {
+        waitUntil: (p: Promise<unknown>) => {
+          work.push(p);
+        },
+        passThroughOnException: () => {},
+      } as unknown as ExecutionContext,
+    );
+    await Promise.all(work);
+    return { res, snapshot: snapshotOf(id, "1.0.0") };
+  }
+
+  beforeAll(() => {
+    // The registrar: the stand-in answers every EZID verb with success.
+    (globalThis as { NEMAR_EZID_API_URL?: string }).NEMAR_EZID_API_URL = standin.base;
+  });
+  afterAll(() => {
+    (globalThis as { NEMAR_EZID_API_URL?: string }).NEMAR_EZID_API_URL = undefined;
+  });
+  beforeEach(() => {
+    console.error = () => {};
+  });
+
+  test("a description with a DOI gives its tag", async () => {
+    standin.gitDescribe("on000090", "v1.0.0", {
+      Name: "x",
+      BIDSVersion: "1.9.0",
+      SourceDatasets: [{ DOI: "10.18112/openneuro.ds000090.v5.0.1" }],
+    });
+    const { res, snapshot } = await publishVersionDoi("on000090");
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ message: "Version DOI published successfully" });
+    expect(snapshot).toEqual({ source_version: "5.0.1", source_version_basis: "doi" });
+  });
+
+  test("a description that names no upstream is unknown", async () => {
+    standin.gitDescribe("on000091", "v1.0.0", { Name: "x", BIDSVersion: "1.9.0" });
+    const { res, snapshot } = await publishVersionDoi("on000091");
+    expect(res.status).toBe(200);
+    expect(snapshot).toEqual({ source_version: null, source_version_basis: "unknown" });
+  });
+
+  test("a tree with no description file leaves NULL/NULL: the { Name } fallback is not a description", async () => {
+    const { res, snapshot } = await publishVersionDoi("on000092");
+    expect(res.status).toBe(200);
+    expect(snapshot).toEqual(NOT_EXAMINED);
+  });
+
+  test("a description that is not JSON leaves NULL/NULL here: only the raw-reading sites call it unknown", async () => {
+    standin.gitDescribe("on000093", "v1.0.0", "<<not json>>");
+    const { res, snapshot } = await publishVersionDoi("on000093");
+    expect(res.status).toBe(200);
+    expect(snapshot).toEqual(NOT_EXAMINED);
   });
 });
 
