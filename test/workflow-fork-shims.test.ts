@@ -17,15 +17,35 @@ import { join } from "node:path";
 import { parse } from "yaml";
 import { getWorkflowTemplates } from "../backend/src/services/github";
 
-type Step = { name?: string; uses?: string; run?: string; env?: Record<string, string> };
+type Step = {
+  name?: string;
+  uses?: string;
+  run?: string;
+  env?: Record<string, string>;
+  with?: Record<string, unknown>;
+};
 type Workflow = {
   on: Record<string, unknown>;
-  jobs: Record<string, { steps: Step[] }>;
+  permissions?: unknown;
+  jobs: Record<string, { permissions?: unknown; steps: Step[] }>;
 };
 
 const SHIMS = {
   "bids-validation.yml": "run-bids-validation",
   "version-check.yml": "run-version-check",
+} as const;
+
+// The exact client_payload each shim sends today. A new key (title, body, labels, ...) would
+// put pull-request-author text into a dispatch, so it must fail here and be decided on purpose.
+const PAYLOAD_KEYS = {
+  "bids-validation.yml": ["dataset_id", "head_sha", "pr_number", "ref", "validator_version"],
+  "version-check.yml": ["dataset_id", "head_sha", "pr_number", "ref"],
+} as const;
+
+// The triggers each shim declares besides pull_request_target.
+const OTHER_TRIGGERS = {
+  "bids-validation.yml": ["push", "workflow_dispatch"],
+  "version-check.yml": ["workflow_dispatch"],
 } as const;
 
 function shim(file: keyof typeof SHIMS): { wf: Workflow; dispatch: Step } {
@@ -145,5 +165,36 @@ for (const file of Object.keys(SHIMS) as (keyof typeof SHIMS)[]) {
         expect(r.args).toEqual([]);
       });
     }
+
+    test("the job holds no permissions of its own", () => {
+      const { wf } = shim(file);
+      expect(wf.permissions).toBeUndefined();
+      for (const job of Object.values(wf.jobs)) expect(job.permissions).toEqual({});
+    });
+
+    test("the App token is minted for the .github repository only", () => {
+      const { wf } = shim(file);
+      const mints = Object.values(wf.jobs)
+        .flatMap((j) => j.steps)
+        .filter((s) => s.uses?.startsWith("actions/create-github-app-token"));
+      expect(mints).toHaveLength(1);
+      expect(mints[0]?.with?.repositories).toBe(".github");
+      expect(mints[0]?.with?.owner).toBe("nemarDatasets");
+    });
+
+    test("the dispatch payload carries exactly the pinned keys", () => {
+      const { dispatch } = shim(file);
+      const keys = [...(dispatch.run ?? "").matchAll(/client_payload\[(\w+)\]=/g)]
+        .map((m) => m[1])
+        .sort();
+      expect(keys).toEqual([...PAYLOAD_KEYS[file]]);
+    });
+
+    test("the other triggers are still declared", () => {
+      const { wf } = shim(file);
+      expect(Object.keys(wf.on).sort()).toEqual(
+        [...OTHER_TRIGGERS[file], "pull_request_target"].sort(),
+      );
+    });
   });
 }
