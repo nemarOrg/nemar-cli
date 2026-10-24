@@ -10,6 +10,14 @@ import { Hono } from "hono";
 import { Miniflare } from "miniflare";
 import { adminRoutes } from "../src/routes/admin";
 import {
+  MailAdminError,
+  addNote,
+  assignTicket,
+  escalateTicket,
+  replyToTicket,
+  setTicketStatus,
+} from "../src/services/mail-admin";
+import {
   purgeExpiredTickets,
   purgeOneTicket,
   retentionDays,
@@ -664,21 +672,100 @@ describe("review round 1: failure isolation, activity, races", () => {
     expect(row(t).summary).toBeNull();
   });
 
-  test("a reply whose ticket is purged while the mail is being sent returns success and records nothing", async () => {
-    const t = ticket({ status: "open" });
-    binding = recordingBinding(() => {
-      // The purge wins the race after the provider accepted the message.
-      db.run("DELETE FROM mail_messages WHERE ticket_id = ?", [t]);
-      db.run("UPDATE mail_tickets SET purged_at = '2026-10-24 12:00:00' WHERE id = ?", [t]);
-      return undefined;
+  /** The real database handle, except that the first batch is preceded by `before` (a purge that wins the race). */
+  function racing(before: () => Promise<unknown>): D1Database {
+    const inner = realD1(db);
+    let fired = false;
+    return new Proxy(inner, {
+      get(target, prop) {
+        if (prop === "batch") {
+          return async (statements: D1PreparedStatement[]) => {
+            if (!fired) {
+              fired = true;
+              await before();
+            }
+            return target.batch(statements);
+          };
+        }
+        const value = Reflect.get(target, prop);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
     });
-    const r = await call("admin", "POST", `/tickets/${t}/reply`, { text: "hello" });
-    expect(r.status).toBe(200);
+  }
+  const purgeNow = (t: number) => () =>
+    purgeOneTicket(realD1(db), t, "2026-10-24 12:00:00", CUTOFF);
+
+  test("a reply whose ticket is purged (by the real purge) after the send returns success and records nothing", async () => {
+    const t = ticket({ status: "open", lastAt: OLD });
+    const out = await replyToTicket(
+      { ...env(), DB: racing(purgeNow(t)) } as Bindings,
+      { id: ids.admin, role: "admin" },
+      t,
+      "hello",
+    );
+    expect(out.message_id).toBe(0);
     expect(binding.sent.length).toBe(1);
     expect(count("mail_messages", t)).toBe(0);
     expect(events(t).some((e) => e.kind === "reply" || e.kind === "status")).toBe(false);
-    expect(row(t).status).toBe("open");
+    expect(row(t).status).toBe("closed");
     expect(row(t).purged_at).toBe("2026-10-24 12:00:00");
+    expect(row(t).last_activity_at).toBe(OLD);
+  });
+
+  test("an inbound message racing a purge ends in a new ticket; the purged one gets nothing", async () => {
+    const t = fullTicket(OLD);
+    db.run("UPDATE mail_tickets SET status = 'closed' WHERE id = ?", [t]);
+    const ref = row(t).ref as string;
+    const result = await ingestInboundMessage(racing(purgeNow(t)), {
+      rawKey: "inbound/raw/2026/10/24/5c9d8f3e-1111-4222-8333-444455556666.eml",
+      raw: eml({ from: "ada@sender.example", to: `support+t${ref}@nemar.org`, subject: "Again" }),
+      envelopeFrom: "ada@sender.example",
+      envelopeTo: `support+t${ref}@nemar.org`,
+      receivedAt: new Date("2026-10-24T12:00:00Z"),
+    });
+    expect(result.outcome).toBe("created");
+    expect(result.ticketId).not.toBe(t);
+    // The purged ticket holds nothing new and was not reopened.
+    expect(count("mail_messages", t)).toBe(0);
+    expect(row(t).status).toBe("closed");
+    expect(row(t).requester_email).toBe("");
+    expect(row(t).last_activity_at).toBe(OLD);
+    expect(events(t).some((e) => e.kind === "reopened")).toBe(false);
+    expect(count("mail_ticket_tags", t)).toBe(1);
+    // The message is on the new ticket, which records why it did not thread.
+    expect(count("mail_messages", result.ticketId)).toBe(1);
+    expect(JSON.parse(events(result.ticketId)[0].detail ?? "{}")).toMatchObject({
+      matched_ticket_id: t,
+      reason: "candidate_purged",
+    });
+  });
+
+  test("a note, assign, status change or escalate racing a purge is refused with ticket_purged", async () => {
+    db.run("UPDATE mail_queues SET escalation_user_id = ? WHERE tag = '*'", [ids.owner]);
+    const viewer = { id: ids.owner, role: "owner" };
+    const attempts: [string, (d: D1Database, t: number) => Promise<unknown>][] = [
+      ["note", (d, t) => addNote(d, viewer, t, "late note")],
+      ["assign", (d, t) => assignTicket(d, viewer, t, ids.admin)],
+      ["status", (d, t) => setTicketStatus(d, viewer, t, "pending")],
+      ["escalate", (d, t) => escalateTicket(d, viewer, t, null)],
+    ];
+    for (const [name, attempt] of attempts) {
+      const t = ticket({ status: "open", lastAt: OLD });
+      const snapshot = JSON.stringify(events(t));
+      let code: string | undefined;
+      try {
+        await attempt(racing(purgeNow(t)), t);
+      } catch (error) {
+        code = error instanceof MailAdminError ? error.code : String(error);
+      }
+      expect([name, code]).toEqual([name, "ticket_purged"]);
+      expect(count("mail_messages", t)).toBe(0);
+      // Only the purge's own event was written, and the ticket is as the purge left it.
+      expect(events(t).map((e) => e.kind)).toEqual(["purged"]);
+      expect(snapshot).toBe("[]");
+      expect(row(t).status).toBe("closed");
+      expect(row(t).assignee_user_id).toBeNull();
+    }
   });
 
   test("a reply on a purged ticket sends nothing", async () => {

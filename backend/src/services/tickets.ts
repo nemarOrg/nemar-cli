@@ -390,12 +390,19 @@ async function ingestNew(db: D1Database, input: InboundTicketInput): Promise<Ing
       : (fallback?.tag ?? FALLBACK_QUEUE_TAG);
   const queueRestricted = isRestrictedQueue(queueTag, own ?? fallback);
 
-  const messageInsert = (ticketIdSql: string, ticketBinds: unknown[]): D1PreparedStatement =>
+  // `liveTicketId` gates the insert on that ticket not being purged: a purge can claim a ticket
+  // between loading it as a target and this batch, and the message must not land on it then.
+  const messageInsert = (
+    ticketIdSql: string,
+    ticketBinds: unknown[],
+    liveTicketId?: number,
+  ): D1PreparedStatement =>
     db
       .prepare(
         `INSERT INTO mail_messages (ticket_id, direction, message_id, in_reply_to, references_ids,
             from_addr, to_addr, subject, text_body, raw_key, spf, dkim, dmarc, created_at)
-         VALUES (${ticketIdSql}, 'in', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         SELECT ${ticketIdSql}, 'in', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+          ${liveTicketId === undefined ? "" : "WHERE EXISTS (SELECT 1 FROM mail_tickets WHERE id = ? AND purged_at IS NULL)"}`,
       )
       .bind(
         ...ticketBinds,
@@ -411,6 +418,7 @@ async function ingestNew(db: D1Database, input: InboundTicketInput): Promise<Ing
         auth.dkim,
         auth.dmarc,
         created,
+        ...(liveTicketId === undefined ? [] : [liveTicketId]),
       );
 
   // A candidate is a match by ref or Message-ID; it becomes the target only if it passes every
@@ -435,17 +443,20 @@ async function ingestNew(db: D1Database, input: InboundTicketInput): Promise<Ing
 
   if (target) {
     const statements: D1PreparedStatement[] = [
-      messageInsert("?", [target.id]),
+      messageInsert("?", [target.id], target.id),
       db
         .prepare(
-          "UPDATE mail_tickets SET last_message_at = ?, last_activity_at = MAX(last_activity_at, ?), updated_at = ? WHERE id = ?",
+          "UPDATE mail_tickets SET last_message_at = ?, last_activity_at = MAX(last_activity_at, ?), updated_at = ? WHERE id = ? AND purged_at IS NULL",
         )
         .bind(created, created, created, target.id),
     ];
     for (const tag of tags) {
       statements.push(
         db
-          .prepare("INSERT OR IGNORE INTO mail_ticket_tags (ticket_id, tag) VALUES (?, ?)")
+          .prepare(
+            `INSERT OR IGNORE INTO mail_ticket_tags (ticket_id, tag)
+             SELECT ?1, ?2 WHERE EXISTS (SELECT 1 FROM mail_tickets WHERE id = ?1 AND purged_at IS NULL)`,
+          )
           .bind(target.id, tag),
       );
     }
@@ -473,7 +484,7 @@ async function ingestNew(db: D1Database, input: InboundTicketInput): Promise<Ing
       statements.push(
         db
           .prepare(
-            "UPDATE mail_tickets SET status = 'open', assignee_user_id = ?, updated_at = ? WHERE id = ? AND status IN ('closed', 'pending')",
+            "UPDATE mail_tickets SET status = 'open', assignee_user_id = ?, updated_at = ? WHERE id = ? AND status IN ('closed', 'pending') AND purged_at IS NULL",
           )
           .bind(assignee, created, target.id),
         db
@@ -502,14 +513,19 @@ async function ingestNew(db: D1Database, input: InboundTicketInput): Promise<Ing
       }
       status = "open";
     }
-    await db.batch(statements);
-    return {
-      outcome: "threaded",
-      ticketId: target.id,
-      status,
-      assigneeUserId: assignee,
-      spam: false,
-    };
+    const results = await db.batch(statements);
+    if ((results[0]?.meta?.changes ?? 0) > 0) {
+      return {
+        outcome: "threaded",
+        ticketId: target.id,
+        status,
+        assigneeUserId: assignee,
+        spam: false,
+      };
+    }
+    // The purge claimed the ticket after it was loaded: every gated statement wrote nothing, so
+    // the message opens a new ticket exactly as one sent to an already purged ticket does.
+    declined = { matched_ticket_id: target.id, reason: "candidate_purged" };
   }
 
   const requesterUserId =

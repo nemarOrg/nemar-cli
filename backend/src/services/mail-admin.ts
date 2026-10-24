@@ -88,13 +88,16 @@ export function toSummary(row: TicketRow): TicketSummary {
 
 /** A purged ticket is read-only: its raw record is gone, so nothing may be added to it. */
 function assertNotPurged(ticket: TicketRow): void {
-  if (ticket.purged_at !== null) {
-    throw new MailAdminError(
-      409,
-      "ticket_purged",
-      "This ticket was purged under the retention policy and can no longer be changed.",
-    );
-  }
+  if (ticket.purged_at !== null) throwPurged();
+}
+
+/** A write was refused by its `purged_at IS NULL` gate: the purge claimed the ticket first. */
+function throwPurged(): never {
+  throw new MailAdminError(
+    409,
+    "ticket_purged",
+    "This ticket was purged under the retention policy and can no longer be changed.",
+  );
 }
 
 /** The ticket, if `viewer` may see it; else null, which every caller turns into `not_found`. */
@@ -666,20 +669,22 @@ export async function addNote(
 ): Promise<number> {
   const ticket = await requireVisibleTicket(db, viewer, ticketId);
   assertNotPurged(ticket);
-  await db.batch([
+  const results = await db.batch([
     db
       .prepare(
         `INSERT INTO mail_messages (ticket_id, direction, text_body, author_user_id)
-         VALUES (?, 'note', ?, ?)`,
+         SELECT ?1, 'note', ?2, ?3
+          WHERE EXISTS (SELECT 1 FROM mail_tickets WHERE id = ?1 AND purged_at IS NULL)`,
       )
       .bind(ticket.id, text.slice(0, 64 * 1024), viewer.id),
     db
       .prepare(
-        "UPDATE mail_tickets SET updated_at = datetime('now'), last_activity_at = datetime('now') WHERE id = ?",
+        "UPDATE mail_tickets SET updated_at = datetime('now'), last_activity_at = datetime('now') WHERE id = ? AND purged_at IS NULL",
       )
       .bind(ticket.id),
-    eventStatement(db, ticket.id, "note", viewer.id, null),
+    liveEventStatement(db, ticket.id, "note", viewer.id, null),
   ]);
+  if ((results[0]?.meta?.changes ?? 0) === 0) throwPurged();
   const row = await db
     .prepare("SELECT MAX(id) AS id FROM mail_messages WHERE ticket_id = ? AND direction = 'note'")
     .bind(ticket.id)
@@ -713,18 +718,19 @@ export async function assignTicket(
     }
   }
   if (userId === ticket.assignee_user_id) return toSummary(ticket);
-  await db.batch([
+  const results = await db.batch([
     db
       .prepare(
-        "UPDATE mail_tickets SET assignee_user_id = ?, updated_at = datetime('now'), last_activity_at = datetime('now') WHERE id = ?",
+        "UPDATE mail_tickets SET assignee_user_id = ?, updated_at = datetime('now'), last_activity_at = datetime('now') WHERE id = ? AND purged_at IS NULL",
       )
       .bind(userId, ticket.id),
-    eventStatement(db, ticket.id, userId === null ? "unassigned" : "assigned", viewer.id, {
+    liveEventStatement(db, ticket.id, userId === null ? "unassigned" : "assigned", viewer.id, {
       from: ticket.assignee_user_id,
       to: userId,
       reason: "manual",
     }),
   ]);
+  if ((results[0]?.meta?.changes ?? 0) === 0) throwPurged();
   return reload(db, ticket.id);
 }
 
@@ -756,14 +762,15 @@ export async function setTicketStatus(
       );
     }
   }
-  await db.batch([
+  const results = await db.batch([
     db
       .prepare(
-        "UPDATE mail_tickets SET status = ?, updated_at = datetime('now'), last_activity_at = datetime('now') WHERE id = ?",
+        "UPDATE mail_tickets SET status = ?, updated_at = datetime('now'), last_activity_at = datetime('now') WHERE id = ? AND purged_at IS NULL",
       )
       .bind(status, ticket.id),
-    eventStatement(db, ticket.id, "status", viewer.id, { from: ticket.status, to: status }),
+    liveEventStatement(db, ticket.id, "status", viewer.id, { from: ticket.status, to: status }),
   ]);
+  if ((results[0]?.meta?.changes ?? 0) === 0) throwPurged();
   return reload(db, ticket.id);
 }
 
@@ -811,19 +818,20 @@ export async function escalateTicket(
       "The escalation owner cannot hold this ticket. An owner should change the setting.",
     );
   }
-  await db.batch([
+  const results = await db.batch([
     db
       .prepare(
-        "UPDATE mail_tickets SET status = 'escalated', assignee_user_id = ?, updated_at = datetime('now'), last_activity_at = datetime('now') WHERE id = ?",
+        "UPDATE mail_tickets SET status = 'escalated', assignee_user_id = ?, updated_at = datetime('now'), last_activity_at = datetime('now') WHERE id = ? AND purged_at IS NULL",
       )
       .bind(ownerId, ticket.id),
-    eventStatement(db, ticket.id, "escalated", viewer.id, { to: ownerId, reason }),
-    eventStatement(db, ticket.id, "assigned", viewer.id, {
+    liveEventStatement(db, ticket.id, "escalated", viewer.id, { to: ownerId, reason }),
+    liveEventStatement(db, ticket.id, "assigned", viewer.id, {
       from: ticket.assignee_user_id,
       to: ownerId,
       reason: "escalation",
     }),
   ]);
+  if ((results[0]?.meta?.changes ?? 0) === 0) throwPurged();
   return { ticket: await reload(db, ticket.id), ownerId };
 }
 
