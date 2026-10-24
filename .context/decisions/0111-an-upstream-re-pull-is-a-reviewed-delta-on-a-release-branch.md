@@ -86,7 +86,8 @@ Measured staleness is real: `on004362` missed upstream's 1.0.1 metadata fix (#18
 
 ### 4. The upstream tag is recorded per version, and the dataset's tag is derived
 
-- `dataset_versions` gains `source_version` (the upstream tag) and `source_version_basis` (`doi`, `lineage` or `unknown`); NULL means the row was never examined.
+- `dataset_versions` gains `source_version` (the upstream tag) and `source_version_basis` (`doi`, `lineage` or `unknown`).
+  An unknown tag is stored as `source_version` NULL with basis `unknown`, and both NULL means the row was never examined, so "`source_version` set" always means a known tag.
 - The dataset's mirrored tag is the `source_version` of its highest-semver version row, derived at read time, so `datasets` gains no column and stays under ADR 0034's budget (84 columns pinned, cap 97, on 2026-10-23).
 - The value is written when the version row is inserted, from the tagged `dataset_description.json` the version-DOI callback already reads, by one parser, `sourceSnapshotOf(desc, sourceId)`.
   It reads `Version`, then a DOI matching `10.18112/openneuro.<ds>.v<tag>`, then the URL, accepts only an entry naming the dataset's own `ds`, and answers `unknown` when they disagree.
@@ -96,7 +97,7 @@ Measured staleness is real: `on004362` missed upstream's 1.0.1 metadata fix (#18
 
 ### 5. N.0.0 on a mirror always means an upstream pull
 
-- A version row with `source_version` set and a version of the form `N.0.0` is a mirror.
+- A version row with `source_version` set (not NULL, so never an unknown tag) and a version of the form `N.0.0` is a mirror.
   The API exposes that as a derived flag, computed at read time and never stored, and the website shows a mirror tag on that version.
 - A manual major bump is refused on `on` datasets: `nemar dataset release --type major`, and `nemar dataset update --bump major`, which reaches the same number.
   NEMAR's own changes to a mirror take minor and patch.
@@ -157,7 +158,11 @@ The Worker's merge call is not built until the ruleset check below is done.
 - A first import clones the discovered tag (`--tag`), never the default HEAD, and writes the `SourceDatasets` entry with `Version`.
 - A tag not yet on the GitHub mirror refuses with `[openneuro-mirror-lag]`, which is transient and retried, not parked.
 - A re-pull's `from_tag` is the recorded `source_version`, and its `to_tag` is a tag.
-- The import path gets #993's guard: step 4c refuses with `[openneuro-upstream-moved]` when the tag being imported differs from the tag `origin/main` mirrors, the classifier calls that `upstream_moved`, and the retry engine parks it like `identifier_scrub_refused`, because moving a mirror to a new tag is a re-pull's job.
+- The import path gets #993's guard, and only for a released mirror.
+  Step 4c refuses with `[openneuro-upstream-moved]` when `origin/main` records a tag (its `SourceDatasets` entry), the dataset has released a version (a `dataset_versions` row exists), and the tag being imported differs from the recorded one.
+  The classifier calls that `upstream_moved`, and the retry engine parks it like `identifier_scrub_refused`, because moving a released mirror to a new tag is a re-pull's job.
+  An import that never released a version and is retried is prepared again at the tag the retry discovers: it is the same import, not a re-pull.
+  An unrecorded tag, `origin/main` naming none or the released version's `source_version` being NULL, never trips the guard.
 
 ## Consequences
 
