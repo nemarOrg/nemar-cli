@@ -300,6 +300,30 @@ SUITE("verify --fresh-clone: the pushed repository (I1, I11)", () => {
     const ok = await verdict((before) => `${before}${repullLine}`, `Re-pull ds000001\n${trailers}`);
     expect(ok.code, ok.out).toBe(0);
 
+    // GitHub's squash merge lists each commit of the pull request as a bullet, so the re-pull
+    // commit's trailers end up mid-message and the last paragraph is an enrichment bullet: git
+    // reads no trailers there, and the merge is refused as a ledger commit beside other files.
+    const bullets = [
+      "Re-pull ds000001 1.0.0 to 1.0.1 as v2.0.0 (#7)",
+      "",
+      "* Re-pull ds000001 1.0.0 to 1.0.1 as v2.0.0",
+      trailers,
+      "",
+      "* Update .nemar/metadata.json",
+    ].join("\n");
+    const squash = await verdict((before) => `${before}${repullLine}`, bullets);
+    expect(squash.code, squash.out).toBe(4);
+    expect(squash.out).toContain("reason=ledger-commit-not-alone count=1");
+    // The same squash with both trailers moved to its end, as the merge must write it, passes.
+    const kept = await verdict(
+      (before) => `${before}${repullLine}`,
+      `${bullets
+        .split("\n")
+        .filter((l) => !/^(Upstream-Snapshot|Repull-Plan):/.test(l))
+        .join("\n")}\n${trailers}`,
+    );
+    expect(kept.code, kept.out).toBe(0);
+
     // The twins: without both trailers, with another action, or editing a line before it, the
     // same commit is a ledger commit that touches something else. The edit needs a line to edit.
     expect(ledgerOf(fresh())).toContain("v1.0.1");
