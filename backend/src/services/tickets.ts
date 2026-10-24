@@ -14,7 +14,7 @@
 
 import PostalMime from "postal-mime";
 import { htmlToText } from "../lib/html-to-text";
-import { clampUtf8Bytes } from "./inbound-mail";
+import { clampUtf8Bytes } from "../lib/utf8";
 import { FALLBACK_QUEUE_TAG, resolveAssignee } from "./ticket-assignment";
 
 /** The stored body is clamped to this many UTF-8 bytes. */

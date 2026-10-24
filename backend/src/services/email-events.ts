@@ -11,8 +11,8 @@
  * way again, so it is acked and logged without an address.
  */
 
+import { clampUtf8Bytes } from "../lib/utf8";
 import { redactRecipient } from "./email";
-import { clampUtf8Bytes } from "./inbound-mail";
 
 /** Message bodies whose `type` starts with this are Email Sending events. */
 export const EMAIL_EVENT_TYPE_PREFIX = "cf.email.sending.";

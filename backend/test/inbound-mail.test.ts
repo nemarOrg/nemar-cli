@@ -14,11 +14,8 @@
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { Log, LogLevel, Miniflare } from "miniflare";
-import {
-  INBOUND_REJECT_REASON,
-  clampUtf8Bytes,
-  handleInboundEmail,
-} from "../src/services/inbound-mail";
+import { clampUtf8Bytes } from "../src/lib/utf8";
+import { INBOUND_REJECT_REASON, handleInboundEmail } from "../src/services/inbound-mail";
 import { bundleWorker, wranglerCompatibility } from "./helpers/worker-bundle";
 
 const KEY_SHAPE = /^inbound\/raw\/\d{4}\/\d{2}\/\d{2}\/[0-9a-f-]{36}\.eml$/;

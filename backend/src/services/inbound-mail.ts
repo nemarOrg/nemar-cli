@@ -11,6 +11,7 @@
  * nothing, so the sender gets a bounce.
  */
 
+import { clampUtf8Bytes } from "../lib/utf8";
 import { redactAddressIn, redactRecipient } from "./email";
 import { ingestInboundMessage } from "./tickets";
 
@@ -35,16 +36,6 @@ const METADATA_VALUE_MAX_BYTES = 400;
 export function inboundRawKey(receivedAt: Date, id: string = crypto.randomUUID()): string {
   const iso = receivedAt.toISOString();
   return `inbound/raw/${iso.slice(0, 4)}/${iso.slice(5, 7)}/${iso.slice(8, 10)}/${id}.eml`;
-}
-
-/** `value` cut to at most `maxBytes` UTF-8 bytes, never inside a multibyte character. */
-export function clampUtf8Bytes(value: string, maxBytes: number): string {
-  const bytes = new TextEncoder().encode(value);
-  if (bytes.byteLength <= maxBytes) return value;
-  let end = maxBytes;
-  // A continuation byte (10xxxxxx) means the cut landed inside a character: back up to its start.
-  while (end > 0 && (bytes[end] & 0xc0) === 0x80) end--;
-  return new TextDecoder().decode(bytes.subarray(0, end));
 }
 
 const clamp = (value: string): string => clampUtf8Bytes(value, METADATA_VALUE_MAX_BYTES);
