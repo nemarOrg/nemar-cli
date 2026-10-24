@@ -30,6 +30,25 @@ function subtypes(value: unknown): string {
   return entries.length === 0 ? "" : ` (${entries.map(([k, v]) => `${k} ${v}`).join(", ")})`;
 }
 
+/**
+ * A byte count that may be partly unknown, never rendered as complete when it is not (ADR 0053,
+ * ADR 0054): `N bytes`, or `at least N bytes, plus M of unknown size`.
+ */
+export function bytesPhrase(bytes: unknown, unknown: unknown): string {
+  const n = Number(unknown ?? 0);
+  return n > 0 ? `at least ${bytes} bytes, plus ${n} of unknown size` : `${bytes} bytes`;
+}
+
+type OwnedEdit = { path: string; status: string; error: string | null };
+
+/** One line per NEMAR-owned edit the plan could not read, so `from: null` is never silent. */
+function ownedEditLines(file: PlanFile): string[] {
+  const edits = (file.body.nemar_owned_edits ?? []) as unknown as OwnedEdit[];
+  return edits
+    .filter((e) => e.status !== "ok")
+    .map((e) => `  ${e.path}: ${e.status}${e.error ? ` (${e.error})` : ""}`);
+}
+
 /** One line per preflight check. */
 export function preflightLines(checks: Check[]): string[] {
   return checks.map(
@@ -53,16 +72,19 @@ export function summaryLines(file: PlanFile, path: string | null): string[] {
     `  upstream-changed ${c.upstream_changed}, unexplained ${c.unexplained}`,
     `  conflicts ${c.conflicts}${subtypes(c.conflicts_by_subtype)}`,
     `  corrections ${c.corrections}${subtypes(c.corrections_by_subtype)}`,
+    `  unchecked ${c.unchecked} (bytes a check needed could not be read)`,
     `  description keys: ${c.description_conflicts} conflict(s), ${c.description_corrections} correction(s)`,
     "Data:",
-    `  copy ${c.copy_items} key(s), ${c.copy_bytes} bytes${c.copy_bytes_unknown ? ` (+${c.copy_bytes_unknown} of unknown size)` : ""}, unpinned ${c.copy_unpinned}, already held ${c.copy_already_held}`,
-    `  local uploads ${c.local_uploads}, ${c.local_bytes} bytes${c.local_bytes_unknown ? ` (+${c.local_bytes_unknown} of unknown size)` : ""}`,
-    `  orphan bytes at most ${c.orphan_bytes_max} if abandoned; ${c.data_changing ? "data-changing" : "metadata-only"}; DOIs ${c.doi_count}`,
-    `  fetched ${c.fetched_bytes} bytes of large blobs; ${c.fetch_refused} refused by the bound`,
+    `  copy ${c.copy_items} key(s), ${bytesPhrase(c.copy_bytes, c.copy_bytes_unknown)}, unpinned ${c.copy_unpinned}, already held ${c.copy_already_held}; un-annexed from upstream ${c.unannex_items}`,
+    `  local uploads ${c.local_uploads}, ${bytesPhrase(c.local_bytes, c.local_bytes_unknown)}`,
+    `  orphan bytes if abandoned: up to ${bytesPhrase(c.orphan_bytes_max, c.orphan_bytes_unknown)}; ${c.data_changing ? "data-changing" : "metadata-only"}; DOIs ${c.doi_count}`,
+    `  fetched ${c.fetched_bytes} bytes of large blobs; ${c.fetch_refused} needed and not fetched`,
     "",
     "Preflight:",
     ...preflightLines(file.preflight),
   ];
+  const owned = ownedEditLines(file);
+  if (owned.length > 0) lines.push("", "NEMAR-owned edits that could not be read:", ...owned);
   if (refusals.length > 0) {
     lines.push("", "Refusals:", ...refusals.map((r) => `  ${r.code}: ${r.detail}`));
   }
@@ -96,10 +118,17 @@ export function countsMarkdown(file: PlanFile): string {
     row("unexplained", c.unexplained),
     row("conflicts", `${c.conflicts}${subtypes(c.conflicts_by_subtype)}`),
     row("corrections", `${c.corrections}${subtypes(c.corrections_by_subtype)}`),
-    row("copy keys / bytes", `${c.copy_items} / ${c.copy_bytes}`),
+    row("unchecked", c.unchecked),
+    row(
+      "copy keys / bytes",
+      `${c.copy_items} / ${bytesPhrase(c.copy_bytes, c.copy_bytes_unknown)}`,
+    ),
     row("copy keys unpinned", c.copy_unpinned),
-    row("local uploads / bytes", `${c.local_uploads} / ${c.local_bytes}`),
-    row("orphan bytes (upper bound)", c.orphan_bytes_max),
+    row(
+      "local uploads / bytes",
+      `${c.local_uploads} / ${bytesPhrase(c.local_bytes, c.local_bytes_unknown)}`,
+    ),
+    row("orphan bytes (upper bound)", bytesPhrase(c.orphan_bytes_max, c.orphan_bytes_unknown)),
     row("data-changing", c.data_changing ? "yes" : "no"),
     row("DOIs", c.doi_count),
     "",

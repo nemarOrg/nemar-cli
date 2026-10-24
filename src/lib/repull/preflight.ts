@@ -102,6 +102,17 @@ export function toTagCheck(args: {
   fromTag: string | null;
 }): { tag: string | null; check: Check } {
   const flag = args.flag?.trim() || undefined;
+  if (flag !== undefined && compareSourceTags(flag, flag) === null) {
+    return {
+      tag: null,
+      check: {
+        name: "to-tag",
+        status: "refused",
+        code: "to-tag-malformed",
+        detail: `${flag} is not an upstream tag (digits and dots, like 1.1.0)`,
+      },
+    };
+  }
   const tag = flag ?? highestUpstreamTag(args.mirrorTags);
   if (tag === null) {
     return {

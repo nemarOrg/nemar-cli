@@ -9,8 +9,8 @@
  *   `{DOI, URL, Version: to_tag}`, the entry the version DOI's mint reads `IsDerivedFrom` from.
  *
  * Every other key is merged three-way by canonical JSON value, so a correction or a conflict is per
- * key, never the whole file. The other `SourceDatasets` entries merge three-way as a set (the
- * lead's ruling of 2026-10-23): an entry either side added is kept, and one upstream removed is not
+ * key, never the whole file. The other `SourceDatasets` entries merge three-way as a set (ADR
+ * 0111's Phase 5 amendment): an entry either side added is kept, and one upstream removed is not
  * brought back. An entry may be anything, `null` included: `applyConceptDoiToDescription` throws on
  * a `null` entry, so nothing here calls it on these values.
  *

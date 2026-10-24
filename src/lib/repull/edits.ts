@@ -4,9 +4,10 @@
  *
  * A standard edit is a function NEMAR applies to upstream's bytes, never a text merge. The planner
  * calls each one itself, on the bytes it reads, and compares: a path whose NEMAR side is exactly
- * what one of these functions makes of upstream's side is "explained". Every function here is the
- * one the importer or the publish step runs (imported, never copied), so what is recognized here
- * cannot drift from what was done:
+ * what one of these functions makes of upstream's side is "explained". The functions are the ones
+ * the importer and the publish step run, imported from where they live. The two edits a text
+ * pattern finds (the `CHANGES` sentence here, the README badge in `overlay.ts`) are rebuilt with
+ * the function that writes them and compared byte for byte, so a near spelling is not explained:
  *
  * - moving a git-held file NEMAR's policy calls data into the annex (`shouldAnnex`, ADR 0060), and
  *   un-annexing root metadata upstream annexed (`isNeverAnnexedMetadata`);
@@ -16,8 +17,8 @@
  * - the JSON blank and the scans-table dates (`blankIdentifierJsonKeys`,
  *   `normalizeScansTableDates`), and the provenance file's sentence and README note;
  * - the `.gitattributes` strip (`stripLargefilesAttributes`) and the `.bidsignore` line;
- * - the ADR 0085 privacy sentence appended to `CHANGES`, re-applied as a ledger edit (the lead's
- *   ruling of 2026-10-23: `CHANGES` is upstream-owned except that sentence).
+ * - the ADR 0085 privacy sentence appended to `CHANGES`, re-applied as a ledger edit (ADR 0111's
+ *   Phase 5 amendment: `CHANGES` is upstream-owned except that sentence).
  *
  * The README family and `dataset_description.json` are compared as units elsewhere
  * (`overlay.ts`, `description.ts`).
@@ -170,7 +171,7 @@ const CHANGES_SENTENCE =
 
 /**
  * Split NEMAR's `CHANGES` into upstream's text and the privacy sentences appended to it, newest
- * last. Returns null for `prefix` when no sentence was appended.
+ * last. With no sentence appended, `prefix` is the whole text and `sentences` is empty.
  */
 export function splitChangesSentences(text: string): { prefix: string; sentences: string[] } {
   const sentences: string[] = [];
@@ -364,7 +365,8 @@ export function explainEdit(
     // NEMAR's git-annex branch, and a header patch never changes a file's size.
     const before = keyDigest(x.key)?.size ?? null;
     const after = keyDigest(ours.key)?.size ?? null;
-    const sameSize = before === null || after === null || before === after;
+    // An unknown size is not the same size: a key that declares none proves nothing about it.
+    const sameSize = before !== null && after !== null && before === after;
     return ctx.isDeadAtNemar(x.key) && sameSize ? "scrubbed-key" : null;
   }
 
@@ -479,7 +481,12 @@ export type Target =
   /** A git blob NEMAR's policy annexes: its key is computed when the plan is executed. */
   | { kind: "annex-from-git"; oid: string; size: number | null }
   /** Root metadata upstream annexed, which the import keeps in git: un-annexed at execution. */
-  | { kind: "unannex"; key: string }
+  | {
+      kind: "unannex";
+      key: string;
+      /** ADR 0085 sentences appended to the un-annexed text (`CHANGES` only). */
+      append?: string[];
+    }
   | { kind: "git"; mode: string; oid: string; computed?: string }
   | { kind: "description" }
   /** The planner could not compute the target (bytes it could not read); never executable. */
@@ -512,7 +519,12 @@ export function targetOf(
     return { kind: "absent" };
   }
   if (x.kind === "annex") {
-    if (root && isNeverAnnexedMetadata(name)) return { kind: "unannex", key: x.key };
+    if (root && isNeverAnnexedMetadata(name)) {
+      // CHANGES keeps its ADR 0085 sentences whether upstream holds it in git or in the annex.
+      return name === "CHANGES" && opts.sentences.length > 0
+        ? { kind: "unannex", key: x.key, append: [...opts.sentences] }
+        : { kind: "unannex", key: x.key };
+    }
     return { kind: "annex", key: x.key };
   }
   const size = x.bytes?.length ?? x.size;

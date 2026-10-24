@@ -5,12 +5,18 @@
  * The plan compares upstream at `from_tag` (base), upstream at `to_tag` (theirs) and NEMAR's
  * `main` (ours) path by path (`overlay.ts`), and says what N.0.0 would hold, what N.0.1 would
  * replay, which keys a copy would bring into NEMAR's bucket from which pinned upstream version, and
- * what the scrub would read. It writes nothing anywhere but its own scratch directory and the plan
- * file: every subprocess and request goes through `read-only.ts`.
+ * what the scrub would read.
+ *
+ * It writes nothing to the mirror, to S3, to D1 or to the NEMAR API. What it writes is its own
+ * scratch directory (deleted on exit, on SIGINT and on SIGTERM, unless `--keep-workdir`) and the
+ * plan file the command saves. Every git subprocess, including the git-annex branch reads, the
+ * one `aws` call and its own HTTP requests go through `read-only.ts`; the NEMAR API reads and
+ * `gh auth token` are made by the command before it calls this, and are named in that module's
+ * header.
  *
  * It binds the PRE-scrub manifest. The scrubbed new tree cannot be known before the scrub runs, so
  * Phase 6's execution must check that what it copies is a subset of this plan's copy keys plus its
- * own local uploads (an ambiguity of ADR 0111 decision 8, recorded in the phase report).
+ * own local uploads (ADR 0111's Phase 5 amendment, on decision 8).
  */
 
 import { mkdtempSync, rmSync } from "node:fs";
@@ -26,12 +32,8 @@ import { LEDGER_REPO_PATH, parseLedgerText } from "../../../scripts/scrub/ledger
 import { isKeyPresentAtDeclaredSize } from "../../../shared/annex-key.js";
 import type { CanonicalJsonValue } from "../../../shared/neurobagel/canonical-json.js";
 import { type SourceVersionRow, openNeuroSourceId } from "../../../shared/source-snapshot.js";
-import { type PinnedSource, parseRemoteLog } from "../content-recovery.js";
-import {
-  UPSTREAM_BUCKET,
-  destinationPrefix,
-  readPinnedSources,
-} from "../fleet-content-recovery.js";
+import { parseRemoteLog } from "../content-recovery.js";
+import { UPSTREAM_BUCKET } from "../fleet-content-recovery.js";
 import { shouldAnnex } from "../git-annex/policy.js";
 import { JSON_PATH, RECORDING_PATH, SCANS_TABLE_PATH } from "../import-scrub.js";
 import { bumpVersion } from "../semver.js";
@@ -54,7 +56,7 @@ import {
   toTagCheck,
   versionCheck,
 } from "./preflight.js";
-import { readOnlyGit } from "./read-only.js";
+import { guardedGitRunner, readOnlyGit } from "./read-only.js";
 import {
   BlobStore,
   type Env,
@@ -69,7 +71,11 @@ import {
   originUrl,
   readAnnexUuidMarker,
   readBlobs,
+  readPinsAt,
+  readRemoteLog,
+  remoteEnv,
   upstreamUrl,
+  usesTestBases,
 } from "./sources.js";
 
 export const NEMAR_METADATA_PATH = ".nemar/metadata.json";
@@ -91,7 +97,7 @@ export interface CatalogFacts {
     source_id?: string | null;
     concept_doi?: string | null;
   } | null;
-  /** `GET /datasets/:id/versions` rows; null when they cannot be read (a dev worker's 404). */
+  /** `GET /datasets/:id/versions` rows; null when they cannot be read (a route that answers 404). */
   versions: SourceVersionRow[] | null;
 }
 
@@ -111,7 +117,7 @@ export interface PlanOptions {
   now?: Date;
   /**
    * Where "NEMAR already holds this key" comes from: the location log (the default), or a listing
-   * of the bucket with the ambient AWS credentials (the lead's ruling of 2026-10-23).
+   * of the bucket with the ambient AWS credentials (ADR 0111's Phase 5 amendment).
    */
   presence?: "location-log" | "bucket-listing";
 }
@@ -119,6 +125,39 @@ export interface PlanOptions {
 export type PlanOutcome =
   | { planned: false; preflight: Check[]; reason: string; workdir: string | null }
   | { planned: true; file: PlanFile; workdir: string | null };
+
+/** The DOI as a badge or a description names it, without `doi:` or a resolver. */
+function bareDoi(doi: string | null | undefined): string | null {
+  if (typeof doi !== "string" || doi.trim() === "") return null;
+  return doi
+    .trim()
+    .replace(/^doi:/i, "")
+    .replace(/^https?:\/\/(?:dx\.)?doi\.org\//i, "");
+}
+
+/**
+ * Remove the scratch directory on SIGINT and SIGTERM as on a normal return. The handler is
+ * idempotent (Bun can deliver one SIGINT twice) and is removed when the run ends.
+ */
+function scratchGuard(workdir: string, keep: boolean): () => void {
+  let done = false;
+  const remove = () => {
+    if (done) return;
+    done = true;
+    if (!keep) rmSync(workdir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+  };
+  const onSignal = (signal: NodeJS.Signals) => {
+    remove();
+    process.exit(signal === "SIGINT" ? 130 : 143);
+  };
+  process.on("SIGINT", onSignal);
+  process.on("SIGTERM", onSignal);
+  return () => {
+    process.off("SIGINT", onSignal);
+    process.off("SIGTERM", onSignal);
+    remove();
+  };
+}
 
 /** Build the plan. Throws {@link RepullCannotPlan} when the remotes cannot be read. */
 export async function planRepull(opts: PlanOptions): Promise<PlanOutcome> {
@@ -142,15 +181,19 @@ export async function planRepull(opts: PlanOptions): Promise<PlanOutcome> {
   const ds = source.ds;
   const upUrl = upstreamUrl(ds, env);
   const nemarUrl = originUrl(id, env);
+  // ls-remote carries the same credentials as the clone of the same remote: a private mirror
+  // must not fail only at the listing.
+  const upEnv = remoteEnv(upUrl, null);
+  const nemarEnv = remoteEnv(nemarUrl, opts.github.token);
 
   let upRefs: Map<string, string>;
   let nemarRefs: Map<string, string>;
   try {
-    upRefs = await lsRemote(upUrl, ["refs/tags/*", "refs/heads/git-annex"], undefined);
+    upRefs = await lsRemote(upUrl, ["refs/tags/*", "refs/heads/git-annex"], upEnv);
     nemarRefs = await lsRemote(
       nemarUrl,
       ["refs/heads/main", "refs/heads/git-annex", "refs/heads/release/*", "refs/tags/v*"],
-      undefined,
+      nemarEnv,
     );
   } catch (err) {
     throw new RepullCannotPlan(
@@ -170,6 +213,7 @@ export async function planRepull(opts: PlanOptions): Promise<PlanOutcome> {
 
   const workdir = mkdtempSync(join(opts.workRoot ?? tmpdir(), `nemar-repull-${id}-`));
   const keep = opts.keepWorkdir === true;
+  const release = scratchGuard(workdir, keep);
   try {
     const nemar = await cloneAt({
       url: nemarUrl,
@@ -179,10 +223,9 @@ export async function planRepull(opts: PlanOptions): Promise<PlanOutcome> {
       token: opts.github.token,
     });
 
-    const highestTag = highestVTag(vTags);
     const from = await resolveFromTag({
       rows: opts.catalog.versions,
-      highestTag,
+      highestTag: highestVTag(vTags),
       flag: opts.fromTag,
       ds,
       readTagged: async (version) => {
@@ -190,15 +233,11 @@ export async function planRepull(opts: PlanOptions): Promise<PlanOutcome> {
         if (!nemarRefs.has(ref)) return undefined;
         const f = await readOnlyGit(
           ["fetch", "--quiet", "--depth=1", "--no-tags", "origin", `+${ref}:${ref}`],
-          {
-            cwd: nemar.path,
-            env: nemar.env,
-          },
+          { cwd: nemar.path, env: nemar.env },
         );
         if (f.exitCode !== 0) throw new RepullCannotPlan(`could not fetch ${ref}`);
-        const blob = (await readBlobs(nemar.path, [`${ref}:${DESCRIPTION_PATH}`])).get(
-          `${ref}:${DESCRIPTION_PATH}`,
-        );
+        const spec = `${ref}:${DESCRIPTION_PATH}`;
+        const blob = (await readBlobs(nemar.path, [spec])).get(spec);
         if (!blob) return undefined;
         try {
           return JSON.parse(stripBom(blob.toString("utf8")));
@@ -237,8 +276,9 @@ export async function planRepull(opts: PlanOptions): Promise<PlanOutcome> {
       ],
     });
     for (const repo of [upstream.path, nemar.path]) {
-      if ((await objectFormat(repo)) !== "sha1")
+      if ((await objectFormat(repo)) !== "sha1") {
         throw new RepullCannotPlan("only SHA-1 repositories are planned");
+      }
     }
 
     const baseRef = await commitAndTree(upstream.path, `refs/tags/${fromTag}`);
@@ -258,20 +298,20 @@ export async function planRepull(opts: PlanOptions): Promise<PlanOutcome> {
     const upStore = new BlobStore(
       upstream,
       await missingBlobs(upstream.path, [baseRef.commit, theirsRef.commit]),
-      new Map(),
       budget,
     );
     const nemarStore = new BlobStore(
       nemar,
       await missingBlobs(nemar.path, [oursRef.commit]),
-      new Map(),
       budget,
     );
 
     // Version facts first: the description's merge needs N.0.0.
     const descEntry = oursTree.get(DESCRIPTION_PATH);
     if (descEntry) await nemarStore.load([descEntry.oid]);
-    const mainVersion = descEntry ? versionOf(nemarStore.get(descEntry.oid)) : null;
+    const oursDesc = descEntry ? parseObjectOrNull(nemarStore.get(descEntry.oid)) : null;
+    const mainVersion =
+      typeof oursDesc?.Version === "string" ? bareVersion(oursDesc.Version) : null;
     const versions = versionCheck({ rows: opts.catalog.versions, tags: vTags, mainVersion });
     if (versions.next === null) {
       return {
@@ -282,7 +322,26 @@ export async function planRepull(opts: PlanOptions): Promise<PlanOutcome> {
       };
     }
 
+    // The concept DOI is the catalog's. NEMAR's description must carry the same one (DatasetDOI
+    // is NEMAR's), or N.0.0's description and its README badge would name two DOIs.
+    const refusals: Array<{ code: string; detail: string }> = [];
+    const conceptDoi = bareDoi(opts.catalog.dataset?.concept_doi);
+    const descDoi = bareDoi(typeof oursDesc?.DatasetDOI === "string" ? oursDesc.DatasetDOI : null);
+    if (conceptDoi !== null && descDoi !== null && conceptDoi !== descDoi) {
+      refusals.push({
+        code: "concept-doi-disagrees",
+        detail: `the catalog's concept DOI is ${conceptDoi} and main's DatasetDOI is ${descDoi}`,
+      });
+    }
+
+    const git = guardedGitRunner(nemar.env);
     const logs = new Map<string, string>();
+    const readLogs = async (keys: string[]) => {
+      const fresh = keys.filter((k) => !logs.has(k));
+      if (fresh.length === 0) return;
+      const texts = await readLocationLogsAt(nemar.path, "refs/heads/git-annex", fresh, git);
+      fresh.forEach((k, i) => logs.set(k, texts[i] ?? ""));
+    };
     const result = await overlay({
       base: baseTree,
       theirs: theirsTree,
@@ -292,45 +351,43 @@ export async function planRepull(opts: PlanOptions): Promise<PlanOutcome> {
       ds,
       toTag,
       nextVersion: versions.next,
-      prepareDeadKeys: async (keys) => {
-        const texts = await readLocationLogsAt(nemar.path, "git-annex", keys);
-        keys.forEach((k, i) => logs.set(k, texts[i] ?? ""));
-      },
+      conceptDoi,
+      prepareDeadKeys: readLogs,
       deadAtNemar: (key) => isDead(logs.get(key) ?? ""),
     });
 
-    // NEMAR's special remotes.
-    const remoteLogSpec = "refs/heads/git-annex:remote.log";
-    const remoteLog =
-      (await readBlobs(nemar.path, [remoteLogSpec])).get(remoteLogSpec)?.toString("utf8") ?? "";
+    // NEMAR's special remotes, from its git-annex branch.
+    const remoteLog = await readRemoteLog(nemar.path);
     const nemarRemotes = [...parseRemoteLog(remoteLog).values()].filter(
       (r) => r.name === S3_REMOTE_NAME,
     );
     const nemarUuid = nemarRemotes.length === 1 ? (nemarRemotes[0]?.uuid ?? null) : null;
-    const refusals: Array<{ code: string; detail: string }> = [];
-
-    // The copy manifest: the delta paths' target keys NEMAR does not hold and are not dead.
-    const keyPaths = new Map<string, string[]>();
-    for (const d of result.decisions) {
-      if (!d.delta || d.target.kind !== "annex") continue;
-      const list = keyPaths.get(d.target.key) ?? [];
-      list.push(d.path);
-      keyPaths.set(d.target.key, list);
-    }
-    const missingLogs = [...keyPaths.keys()].filter((k) => !logs.has(k));
-    if (missingLogs.length > 0) {
-      const texts = await readLocationLogsAt(nemar.path, "git-annex", missingLogs);
-      missingLogs.forEach((k, i) => logs.set(k, texts[i] ?? ""));
-    }
-    // Presence: the location log by default; a listing of the bucket when the administrator asks
-    // for one (the log can claim content the bucket never received, #1396). A dead key is judged
-    // first: its object can outlive the mark under the governance lock, and is still never copied
-    // nor named.
     const nemarRecord = nemarRemotes.length === 1 ? nemarRemotes[0] : undefined;
     const region = nemarRecord
       ? (datacenterOf(remoteLog, nemarRecord.uuid) ?? "us-east-2")
       : "us-east-2";
+    // Where nemar-s3's objects live: its own fileprefix, else the convention.
     const bucketPrefix = nemarRecord?.fileprefix ?? `${id}/objects/`;
+
+    // The keys N.0.0's delta paths name: copied into the bucket (`annex`), or read from upstream's
+    // pinned object and kept in git (`unannex`, root metadata upstream annexed). Both need a pin.
+    const keyPaths = new Map<string, { paths: string[]; purpose: "copy" | "unannex" }>();
+    for (const d of result.decisions) {
+      if (!d.delta || (d.target.kind !== "annex" && d.target.kind !== "unannex")) continue;
+      const entry = keyPaths.get(d.target.key) ?? {
+        paths: [],
+        purpose: d.target.kind === "annex" ? "copy" : "unannex",
+      };
+      if (d.target.kind === "annex") entry.purpose = "copy";
+      entry.paths.push(d.path);
+      keyPaths.set(d.target.key, entry);
+    }
+    await readLogs([...keyPaths.keys()]);
+
+    // Presence: the location log by default; a listing of the bucket when the administrator asks
+    // for one (the log can claim content the bucket never received, #1396). A dead key is judged
+    // first: its object can outlive the mark under the governance lock, and is still never held,
+    // copied or named.
     let listing: Map<string, number> | null = null;
     if (opts.presence === "bucket-listing") {
       if (!nemarRecord?.bucket) {
@@ -353,10 +410,10 @@ export async function planRepull(opts: PlanOptions): Promise<PlanOutcome> {
       listing
         ? isKeyPresentAtDeclaredSize(key, listing)
         : (nemarUuid !== null && presentIn(log).has(nemarUuid)) || result.oursKeys.has(key);
-    const copyKeys: string[] = [];
+    const wanted: Array<{ key: string; purpose: "copy" | "unannex" }> = [];
     const deadRecordings: string[] = [];
     let held = 0;
-    for (const [key, paths] of [...keyPaths].sort(([a], [b]) => (a < b ? -1 : 1))) {
+    for (const [key, { paths, purpose }] of [...keyPaths].sort(([a], [b]) => (a < b ? -1 : 1))) {
       const log = logs.get(key) ?? "";
       if (isDead(log)) {
         if (paths.every((p) => RECORDING_PATH.test(p))) {
@@ -369,35 +426,44 @@ export async function planRepull(opts: PlanOptions): Promise<PlanOutcome> {
         }
         continue;
       }
-      if (isHeld(key, log)) {
+      if (purpose === "copy" && isHeld(key, log)) {
         held++;
         continue;
       }
-      copyKeys.push(key);
+      wanted.push({ key, purpose });
     }
-    const pins: Map<string, PinnedSource[]> =
-      upstreamHasAnnex && copyKeys.length > 0
-        ? await readPinnedSources(upstream.path, copyKeys, "git-annex")
-        : new Map();
+    const pins = upstreamHasAnnex
+      ? await readPinsAt(
+          upstream.path,
+          wanted.map((w) => w.key),
+        )
+      : new Map();
     const copyItems: CanonicalJsonValue[] = [];
     const unpinned: string[] = [];
     let copyBytes = 0;
     let copyBytesUnknown = 0;
-    for (const key of copyKeys) {
+    let copyCount = 0;
+    let unannexCount = 0;
+    for (const { key, purpose } of wanted) {
       const pin =
         [...(pins.get(key) ?? [])].filter((p) => p.bucket === UPSTREAM_BUCKET).pop() ?? null;
       const size = keyDigest(key)?.size ?? null;
-      if (size === null) copyBytesUnknown++;
-      else copyBytes += size;
+      if (purpose === "copy") {
+        copyCount++;
+        if (size === null) copyBytesUnknown++;
+        else copyBytes += size;
+      } else {
+        unannexCount++;
+      }
       if (!pin) unpinned.push(key);
       copyItems.push({
         key,
-        paths: (keyPaths.get(key) ?? []).sort(),
+        purpose,
+        paths: [...(keyPaths.get(key)?.paths ?? [])].sort(),
         size,
         pin: pin ? { bucket: pin.bucket, object: pin.object, version: pin.version } : null,
       });
     }
-    const prefix = await destinationPrefix(nemar.path, id, S3_REMOTE_NAME, "git-annex");
 
     // Local uploads: git blobs NEMAR's policy annexes, moved from the executing host.
     const localUploads = result.decisions
@@ -409,15 +475,17 @@ export async function planRepull(opts: PlanOptions): Promise<PlanOutcome> {
     const localBytes = localUploads.reduce((n, u) => n + (u.size ?? 0), 0);
     const localBytesUnknown = localUploads.filter((u) => u.size === null).length;
 
-    // The privacy ledger (ADR 0085).
+    // The privacy ledger (ADR 0085). An unchecked path could hide a reverted correction as well
+    // as a conflict could, so it counts as unexplained here.
     const ledger = await readLedger(oursTree, nemarStore);
     const conflicts = result.decisions.filter((d) => d.class === "conflict");
     const corrections = result.decisions.filter((d) => d.class === "correction");
-    const unexplained = conflicts.length + corrections.length;
+    const unchecked = result.decisions.filter((d) => d.class === "unchecked");
+    const unexplained = conflicts.length + corrections.length + unchecked.length;
     if (ledger.status === "unreadable") {
       refusals.push({
         code: "ledger-unreadable",
-        detail: `${LEDGER_REPO_PATH} does not parse as a ledger`,
+        detail: `${LEDGER_REPO_PATH} does not parse as a ledger: ${ledger.error}`,
       });
     } else if (ledger.recordedCorrections > 0 && unexplained > 0) {
       refusals.push({
@@ -435,10 +503,21 @@ export async function planRepull(opts: PlanOptions): Promise<PlanOutcome> {
         detail: `${unknownTargets.length} path(s) whose N.0.0 content could not be computed`,
       });
     }
+    if (result.fetchRefused > 0) {
+      refusals.push({
+        code: "fetch-bound",
+        detail: `${result.fetchRefused} blob(s) a check needed were not fetched (over --max-fetch-gb, or not delivered); ${unchecked.length} path(s) are unchecked`,
+      });
+    }
 
     // Preflight checks that read the remotes once more.
     const marker = nemarRecord?.bucket
-      ? await readAnnexUuidMarker({ bucket: nemarRecord.bucket, region, prefix: bucketPrefix, env })
+      ? await readAnnexUuidMarker({
+          bucket: nemarRecord.bucket,
+          region,
+          prefix: bucketPrefix,
+          env,
+        })
       : null;
     const preflight: Check[] = [
       source.check,
@@ -464,14 +543,21 @@ export async function planRepull(opts: PlanOptions): Promise<PlanOutcome> {
       result.sides.get(d.path)?.ours ?? { kind: "absent" };
     const isAdd = (d: PathDecision) => d.delta && oursSide(d).kind === "absent";
     const recordingsToRead = deltas.filter((d) => RECORDING_PATH.test(d.path));
-    const recordingBytes = recordingsToRead.reduce((n, d) => {
+    let recordingBytes = 0;
+    let recordingBytesUnknown = 0;
+    for (const d of recordingsToRead) {
       const t = d.target;
-      if (t.kind === "annex") return n + (keyDigest(t.key)?.size ?? 0);
-      if (t.kind === "annex-from-git") return n + (t.size ?? 0);
-      return n;
-    }, 0);
+      const size =
+        t.kind === "annex"
+          ? (keyDigest(t.key)?.size ?? null)
+          : t.kind === "annex-from-git"
+            ? t.size
+            : 0;
+      if (size === null) recordingBytesUnknown++;
+      else recordingBytes += size;
+    }
     const dataChanging =
-      copyKeys.length > 0 ||
+      copyCount > 0 ||
       localUploads.length > 0 ||
       [...deltas, ...deletions].some((d) => {
         const o = oursSide(d);
@@ -502,17 +588,20 @@ export async function planRepull(opts: PlanOptions): Promise<PlanOutcome> {
       corrections_by_subtype: bySubtype(corrections),
       conflicts: conflicts.length,
       conflicts_by_subtype: bySubtype(conflicts),
+      unchecked: unchecked.length,
       description_corrections: descKeys.filter((k) => k.class === "correction").length,
       description_conflicts: descKeys.filter((k) => k.class === "conflict").length,
-      copy_items: copyKeys.length,
+      copy_items: copyCount,
       copy_bytes: copyBytes,
       copy_bytes_unknown: copyBytesUnknown,
       copy_unpinned: unpinned.length,
       copy_already_held: held,
+      unannex_items: unannexCount,
       local_uploads: localUploads.length,
       local_bytes: localBytes,
       local_bytes_unknown: localBytesUnknown,
       orphan_bytes_max: copyBytes + localBytes + recordingBytes,
+      orphan_bytes_unknown: copyBytesUnknown + localBytesUnknown + recordingBytesUnknown,
       data_changing: dataChanging,
       metadata_only: !dataChanging,
       doi_count: corrections.length > 0 ? 2 : 1,
@@ -556,7 +645,7 @@ export async function planRepull(opts: PlanOptions): Promise<PlanOutcome> {
         main_commit: oursRef.commit,
         main_tree: oursRef.tree,
         annex_commit: nemarAnnex.commit,
-        concept_doi: result.description.conceptDoi,
+        concept_doi: conceptDoi,
       },
       versions: { current: versions.current, n0: versions.next, n1 },
       lineage: { holds: lineageHolds, recordable: lineageHolds && from.source !== "flag" },
@@ -574,9 +663,10 @@ export async function planRepull(opts: PlanOptions): Promise<PlanOutcome> {
       },
       corrections: corrections.map((d) => ({ path: d.path, group: d.group, subtype: d.subtype })),
       conflicts: conflicts.map((d) => ({ path: d.path, group: d.group, subtype: d.subtype })),
+      unchecked: unchecked.map((d) => ({ path: d.path, group: d.group, subtype: d.subtype })),
       copy: {
         presence_basis: listing ? "bucket-listing" : "location-log",
-        destination_prefix: prefix,
+        destination_prefix: bucketPrefix,
         items: copyItems,
         unpinned,
         dead_recordings: deadRecordings,
@@ -600,13 +690,14 @@ export async function planRepull(opts: PlanOptions): Promise<PlanOutcome> {
       digest: planDigest(body),
       created_at: (opts.now ?? new Date()).toISOString(),
       environment: opts.environment,
+      sources: usesTestBases(env) ? "test-bases" : "remotes",
       preflight,
       executable,
       body,
     };
     return { planned: true, file, workdir: keep ? workdir : null };
   } finally {
-    if (!keep) rmSync(workdir, { recursive: true, force: true });
+    release();
   }
 }
 
@@ -629,11 +720,11 @@ function compareParts(a: number[], b: number[]): number {
   return 0;
 }
 
-function versionOf(bytes: Buffer | null): string | null {
+function parseObjectOrNull(bytes: Buffer | null): Record<string, unknown> | null {
   if (!bytes) return null;
   try {
     const v = JSON.parse(stripBom(bytes.toString("utf8")));
-    return typeof v?.Version === "string" ? bareVersion(v.Version) : null;
+    return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
   } catch {
     return null;
   }
@@ -651,28 +742,51 @@ function datacenterOf(remoteLog: string, uuid: string): string | null {
   return found;
 }
 
+/** A parse error's own words, short; a ledger line holds counts, never a value (ADR 0085). */
+function errorWords(err: unknown): string {
+  const text = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+  return text.slice(0, 200);
+}
+
 async function readLedger(
   tree: Map<string, { oid: string }>,
   store: BlobStore,
-): Promise<{ status: "absent" | "ok" | "unreadable"; lines: number; recordedCorrections: number }> {
+): Promise<{
+  status: "absent" | "ok" | "unreadable";
+  lines: number;
+  recordedCorrections: number;
+  error: string | null;
+}> {
   const entry = tree.get(LEDGER_REPO_PATH);
-  if (!entry) return { status: "absent", lines: 0, recordedCorrections: 0 };
+  if (!entry) return { status: "absent", lines: 0, recordedCorrections: 0, error: null };
   await store.load([entry.oid]);
   const bytes = store.get(entry.oid);
-  if (!bytes) return { status: "unreadable", lines: 0, recordedCorrections: 0 };
+  if (!bytes) {
+    return {
+      status: "unreadable",
+      lines: 0,
+      recordedCorrections: 0,
+      error: "its blob is not in the clone (1 MiB or larger)",
+    };
+  }
   try {
     const lines = parseLedgerText(bytes.toString("utf8"));
     return {
       status: "ok",
       lines: lines.length,
       recordedCorrections: lines.filter((l) => l.action !== "import-scrubbed").length,
+      error: null,
     };
-  } catch {
-    return { status: "unreadable", lines: 0, recordedCorrections: 0 };
+  } catch (err) {
+    return { status: "unreadable", lines: 0, recordedCorrections: 0, error: errorWords(err) };
   }
 }
 
-/** The one NEMAR-owned file a re-pull rewrites besides the description: `IsIdenticalTo`. */
+/**
+ * The one NEMAR-owned file a re-pull rewrites besides the description: `.nemar/metadata.json`'s
+ * `IsIdenticalTo` identifier. A file that is absent, does not parse, or names no such identifier is
+ * said in `status` (with the parse error), never left as a silent `from: null`.
+ */
 async function nemarOwnedEdits(
   tree: Map<string, { oid: string }>,
   store: BlobStore,
@@ -681,19 +795,25 @@ async function nemarOwnedEdits(
 ): Promise<CanonicalJsonValue[]> {
   const entry = tree.get(NEMAR_METADATA_PATH);
   const to = `10.18112/openneuro.${ds}.v${toTag}`;
-  let current: string | null = null;
-  if (entry) {
-    await store.load([entry.oid]);
-    try {
-      const meta = JSON.parse(store.get(entry.oid)?.toString("utf8") ?? "");
-      const rel = Array.isArray(meta?.related_identifiers) ? meta.related_identifiers : [];
-      const hit = rel.find((r: { relation_type?: string }) => r?.relation_type === "IsIdenticalTo");
-      current = typeof hit?.identifier === "string" ? hit.identifier : null;
-    } catch {
-      current = null;
-    }
+  const edit = (status: string, from: string | null, error: string | null = null) => [
+    { path: NEMAR_METADATA_PATH, edit: "is-identical-to", status, from, to, error },
+  ];
+  if (!entry) return edit("absent", null);
+  await store.load([entry.oid]);
+  const bytes = store.get(entry.oid);
+  if (!bytes) return edit("unreadable", null, "its blob is not in the clone (1 MiB or larger)");
+  let meta: unknown;
+  try {
+    meta = JSON.parse(stripBom(bytes.toString("utf8")));
+  } catch (err) {
+    return edit("unparseable", null, errorWords(err));
   }
-  return [{ path: NEMAR_METADATA_PATH, edit: "is-identical-to", from: current, to }];
+  const rel = (meta as { related_identifiers?: unknown })?.related_identifiers;
+  const hit = Array.isArray(rel)
+    ? rel.find((r: { relation_type?: string }) => r?.relation_type === "IsIdenticalTo")
+    : undefined;
+  if (typeof hit?.identifier !== "string") return edit("no-is-identical-to", null);
+  return edit("ok", hit.identifier);
 }
 
 /** Deleted and added paths with the same content are reported as one rename, never decided. */

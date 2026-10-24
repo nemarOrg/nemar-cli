@@ -59,7 +59,12 @@ export function isNemarOwnedPath(path: string): boolean {
   return path.startsWith(".nemar/") || path.startsWith(".github/");
 }
 
-export type PathClass = "keep-ours" | "take-theirs" | "conflict" | "correction";
+/**
+ * The four classes of ADR 0111's table, and `unchecked`: a path a check needed bytes for that the
+ * plan could not read (refused by the fetch bound, or not delivered). An unchecked path is never
+ * guessed to be a conflict or a correction, and its plan refuses (`fetch-bound`).
+ */
+export type PathClass = "keep-ours" | "take-theirs" | "conflict" | "correction" | "unchecked";
 
 export interface PathDecision {
   path: string;
@@ -94,6 +99,11 @@ export interface OverlayInput {
   ds: string;
   toTag: string;
   nextVersion: string;
+  /**
+   * The dataset's concept DOI from its catalog row. The README badge NEMAR writes names it, so only
+   * a badge naming it is an explained edit, and N.0.0's badge is built from it.
+   */
+  conceptDoi: string | null;
 }
 
 export interface OverlayResult {
@@ -104,7 +114,7 @@ export interface OverlayResult {
   oursKeys: Set<string>;
   /** Sides as read, by path, for the copy manifest and the forecast. */
   sides: Map<string, { base: Side; theirs: Side; ours: Side }>;
-  /** Blobs a check needed and the fetch bound refused. */
+  /** Blobs a check needed and could not have (over the bound, or not delivered). */
   fetchRefused: number;
   /** ADR 0085 sentences NEMAR's `CHANGES` carries on top of upstream's. */
   changesSentences: string[];
@@ -125,7 +135,7 @@ function sideOf(e: TreeEntry | undefined, store: BlobStore): Side {
     const key = annexKeyOfEntry(e.mode, bytes);
     if (key) return { kind: "annex", key, mode: e.mode, oid: e.oid };
   }
-  return { kind: "git", mode: e.mode, oid: e.oid, size: bytes?.length ?? store.size(e.oid), bytes };
+  return { kind: "git", mode: e.mode, oid: e.oid, size: bytes?.length ?? null, bytes };
 }
 
 function conflictSubtype(base: Side, theirs: Side, ours: Side): string {
@@ -193,28 +203,30 @@ function importFamily(x: Map<string, Side>, stub: string): Family {
   return out;
 }
 
-const BADGE_LINE =
-  /^\[!\[DOI\]\((?:https:\/\/zenodo\.org\/badge\/DOI\/(\S+?)\.svg|https:\/\/img\.shields\.io\/badge\/DOI-(\S+?)-blue)\)\]\(https:\/\/doi\.org\/(\S+?)\)\n\n/;
+/** The DOI as a badge names it: no `doi:` prefix and no resolver. */
+function bareDoi(doi: string): string {
+  return doi.replace(/^doi:/i, "").replace(/^https?:\/\/(?:dx\.)?doi\.org\//i, "");
+}
 
 /**
- * The README text with zero, one, two, ... leading DOI badges removed. The two spellings are the
- * ones NEMAR has written (the shields.io form `buildDoiBadge` makes today, and the Zenodo form it
- * made before #1182); a badge counts only when its image and its link name the same DOI.
+ * The README text with zero, one, two, ... leading DOI badges for `conceptDoi` removed. A badge is
+ * rebuilt in each spelling NEMAR has written and compared byte for byte: the shields.io form
+ * `buildDoiBadge` makes today, and the Zenodo form it made before #1182. A badge naming any other
+ * DOI (a stale or a forged one) is not NEMAR's edit and is not removed; with no concept DOI, none is.
  */
-export function badgeStrips(text: string): string[] {
+export function badgeStrips(text: string, conceptDoi: string | null): string[] {
   const out = [text];
+  if (!conceptDoi) return out;
+  const doi = bareDoi(conceptDoi);
+  const spellings = [
+    buildDoiBadge(doi),
+    `[![DOI](https://zenodo.org/badge/DOI/${doi}.svg)](https://doi.org/${doi})`,
+  ].map((badge) => `${badge}\n\n`);
   let rest = text;
   for (;;) {
-    const m = BADGE_LINE.exec(rest);
-    if (!m) break;
-    let imageDoi: string;
-    try {
-      imageDoi = m[1] ?? decodeURIComponent(m[2] as string);
-    } catch {
-      break;
-    }
-    if (imageDoi !== m[3]) break;
-    rest = rest.slice(m[0].length);
+    const badge = spellings.find((b) => rest.startsWith(b));
+    if (!badge) break;
+    rest = rest.slice(badge.length);
     out.push(rest);
   }
   return out;
@@ -230,7 +242,12 @@ function sameFamily(a: Family, ours: Map<string, Side>): boolean {
 }
 
 /** Which README edit explains NEMAR's family from upstream's `x`, or null. */
-function explainFamily(x: Map<string, Side>, ours: Map<string, Side>, stub: string): string | null {
+function explainFamily(
+  x: Map<string, Side>,
+  ours: Map<string, Side>,
+  stub: string,
+  conceptDoi: string | null,
+): string | null {
   const plain: Family = new Map([...x].map(([p, side]) => [p, { side }]));
   if (sameFamily(plain, ours)) return "identical";
   const imported = importFamily(x, stub);
@@ -250,7 +267,7 @@ function explainFamily(x: Map<string, Side>, ours: Map<string, Side>, stub: stri
     if (!o || !sameContent(f, o)) return null;
   }
   const text = new TextDecoder().decode(oursReadme.bytes);
-  for (const stripped of badgeStrips(text).slice(1)) {
+  for (const stripped of badgeStrips(text, conceptDoi).slice(1)) {
     const bytes = Buffer.from(stripped);
     if (!source) {
       if (bytes.length === 0) return "readme-badge";
@@ -300,7 +317,7 @@ function targetFamily(
     out.set("README.md", { kind: "unknown", reason: "readme-unread" });
     return out;
   }
-  const doi = conceptDoi.replace(/^doi:/i, "").replace(/^https?:\/\/(?:dx\.)?doi\.org\//i, "");
+  const doi = bareDoi(conceptDoi);
   const plan = planReadmeBadgeCommit({
     readmeContent: content.toString("utf8"),
     doiBadge: buildDoiBadge(doi),
@@ -419,7 +436,9 @@ export async function overlay(input: OverlayInput): Promise<OverlayResult> {
       }
     }
   }
-  const refused = (await upstream.fetch(upWants)).size + (await nemar.fetch(ourWants)).size;
+  await upstream.fetch(upWants);
+  await nemar.fetch(ourWants);
+  const refusedOids = new Set([...upstream.refused, ...nemar.refused]);
   if (upWants.length + ourWants.length > 0) {
     for (const p of examined) {
       sides.set(p, {
@@ -526,8 +545,8 @@ export async function overlay(input: OverlayInput): Promise<OverlayResult> {
       input.ds,
       openNeuroDoiOf(descBytes(descSides.theirs).bytes),
     );
-    const eBase = explainFamily(fb, fo, stubBase);
-    const eTheirs = explainFamily(ft, fo, stubTheirs);
+    const eBase = explainFamily(fb, fo, stubBase, input.conceptDoi);
+    const eTheirs = explainFamily(ft, fo, stubTheirs, input.conceptDoi);
     const famId = (m: Map<string, Side>) =>
       [...m]
         .map(([p, s]) => `${p}=${identity(s)}`)
@@ -537,7 +556,7 @@ export async function overlay(input: OverlayInput): Promise<OverlayResult> {
     const explained = eBase !== null || eTheirs !== null;
     const cls = classify(changed, explained);
     const keep = cls === "keep-ours" || (cls === "take-theirs" && eTheirs !== null);
-    const targets = keep ? null : targetFamily(ft, stubTheirs, description.conceptDoi);
+    const targets = keep ? null : targetFamily(ft, stubTheirs, input.conceptDoi);
     const keepOurs = keep || (targets !== null && familyEquals(targets, fo));
     const first = (m: Map<string, Side>): Side =>
       m.size > 0 ? ([...m.values()][0] as Side) : ABSENT;
@@ -588,7 +607,12 @@ export async function overlay(input: OverlayInput): Promise<OverlayResult> {
     const eBase: EditName | null = explainEdit(p, s.base, s.ours, ctx);
     const eTheirs: EditName | null = explainEdit(p, s.theirs, s.ours, ctx);
     const changed = identity(s.base) !== identity(s.theirs);
-    const cls = classify(changed, eBase !== null || eTheirs !== null);
+    const explained = eBase !== null || eTheirs !== null;
+    // A side whose bytes a check needed and could not have: not evidence of anything.
+    const unread = [s.base, s.theirs, s.ours].some(
+      (x) => x.kind === "git" && refusedOids.has(x.oid),
+    );
+    const cls: PathClass = !explained && unread ? "unchecked" : classify(changed, explained);
     const keep = cls === "keep-ours" || (cls === "take-theirs" && eTheirs !== null);
     const target: Target | { kind: "ours" } = keep
       ? { kind: "ours" }
@@ -610,7 +634,9 @@ export async function overlay(input: OverlayInput): Promise<OverlayResult> {
           ? conflictSubtype(s.base, s.theirs, s.ours)
           : cls === "correction"
             ? correctionSubtype(s.base, s.ours)
-            : null,
+            : cls === "unchecked"
+              ? "fetch-bound"
+              : null,
       decision: keep || sameAsOurs ? "ours" : "theirs",
       target: sameAsOurs ? { kind: "ours" } : target,
       delta,
@@ -625,7 +651,7 @@ export async function overlay(input: OverlayInput): Promise<OverlayResult> {
     gitlinks,
     oursKeys,
     sides,
-    fetchRefused: refused,
+    fetchRefused: refusedOids.size,
     changesSentences,
   };
 }

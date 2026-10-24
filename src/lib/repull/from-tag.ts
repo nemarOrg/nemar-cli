@@ -9,12 +9,14 @@
  *
  * Unknown is never guessed: a row recorded `unknown`, or a tagged description that names no single
  * tag, refuses. `--from-tag` on such a mirror gives a dry run only (`from-tag-not-recorded`): the
- * plan is made and shown, is never executable, and its lineage is never recordable (the lead's
- * ruling of 2026-10-23). `--from-tag` that disagrees with a recorded tag refuses.
+ * plan is made and shown, is never executable, and its lineage is never recordable (ADR 0111's
+ * Phase 5 amendment). `--from-tag` that disagrees with a recorded tag refuses, and one that is not
+ * an upstream tag at all refuses as `from-tag-malformed`.
  */
 
 import {
   type SourceVersionRow,
+  compareSourceTags,
   mirroredTagOf,
   sourceSnapshotOf,
 } from "../../../shared/source-snapshot.js";
@@ -48,6 +50,18 @@ export async function resolveFromTag(args: {
   readTagged: (version: string) => Promise<unknown | undefined>;
 }): Promise<FromTagResolution> {
   const flag = args.flag?.trim() || undefined;
+  if (flag !== undefined && compareSourceTags(flag, flag) === null) {
+    return {
+      tag: null,
+      source: null,
+      check: {
+        name: "from-tag",
+        status: "refused",
+        code: "from-tag-malformed",
+        detail: `${flag} is not an upstream tag (digits and dots, like 1.0.0)`,
+      },
+    };
+  }
   let recorded: { tag: string; source: FromTagSource } | null = null;
   let unknownWhy: string | null = null;
 

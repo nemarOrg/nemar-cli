@@ -2,21 +2,30 @@
  * Where the re-pull planner reads from, and how (ADR 0111, epic #1046 phase 5).
  *
  * Three remotes: NEMAR's dataset repository (`nemarDatasets/<id>`), upstream's GitHub mirror
- * (`OpenNeuroDatasets/<ds>`), and NEMAR's bucket, from which only the `annex-uuid` marker is ever
- * read. Each clone is bare, depth 1 and blob-filtered at 1 MiB (`--filter=blob:limit=1m`): the
- * planner compares trees by object id, reads small blobs (sidecars, annex pointers, the git-annex
- * branch's logs) whole, and fetches a larger blob only when a check needs its bytes, under the
+ * (`OpenNeuroDatasets/<ds>`), and NEMAR's bucket. From the bucket the planner reads the
+ * `annex-uuid` marker anonymously (one GET through `readOnlyFetch`) and, only when the
+ * administrator asks for it, a listing of `nemar-s3`'s prefix with the ambient AWS credentials
+ * (`aws s3api list-objects-v2` through `readOnlyAws`).
+ *
+ * Each clone is bare, depth 1 and blob-filtered at 1 MiB (`--filter=blob:limit=1m`): the planner
+ * compares trees by object id, reads small blobs (sidecars, annex pointers, the git-annex branch's
+ * logs) whole, and fetches a larger blob only when a check needs its bytes, under the
  * `--max-fetch-gb` bound ({@link BlobStore}). Nothing is checked out, so a README name that differs
- * only in case or Unicode normalization is never folded by a filesystem.
+ * only in case or Unicode normalization is never folded by a filesystem. `ls-remote`, the clones
+ * and their fetches all carry the same credential environment ({@link remoteEnv}), never a token
+ * in the argv or the URL.
  *
  * A test points the three remotes at local paths through `NEMAR_REPULL_ORIGIN_BASE`,
  * `NEMAR_REPULL_UPSTREAM_BASE` and `NEMAR_REPULL_BUCKET_BASE`. Each is honored only as an absolute
  * local path, the same rule as the loopback-only `NEMAR_GITHUB_API_URL`: a value that is set and is
- * not one refuses, because a typo must not turn a rehearsal into a read of the real dataset.
+ * not one refuses, because a typo must not turn a rehearsal into a read of the real dataset. A plan
+ * made with any of them active says so in its file (`sources: "test-bases"`).
  */
 
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
+import { annexKeyFile, hashDirLower } from "../../../scripts/scrub/git/git-lib.js";
+import { type PinnedSource, parseRemoteLog, parseRmet } from "../content-recovery.js";
 import { fleetCloneEnv } from "../fleet-key-registration.js";
 import {
   type GitRun,
@@ -51,6 +60,13 @@ export function localBase(env: Env, which: keyof typeof BASE_ENV): string | null
   return value.replace(/\/+$/, "");
 }
 
+/** True when any test base redirects a remote; the plan file records it. */
+export function usesTestBases(env: Env): boolean {
+  return (Object.keys(BASE_ENV) as Array<keyof typeof BASE_ENV>).some(
+    (k) => localBase(env, k) !== null,
+  );
+}
+
 /** The clone URL of NEMAR's dataset repository. */
 export function originUrl(datasetId: string, env: Env): string {
   const base = localBase(env, "origin");
@@ -66,6 +82,15 @@ export function upstreamUrl(ds: string, env: Env): string {
 // ---------------------------------------------------------------------------------------
 // ls-remote
 // ---------------------------------------------------------------------------------------
+
+/**
+ * The credential environment for one remote: for a GitHub URL the empty helper reset and, with a
+ * token, the token's helper ({@link fleetCloneEnv}); for anything else, nothing, so a token is never
+ * offered to a host that is not GitHub. `ls-remote` and the clone of one remote use the same one.
+ */
+export function remoteEnv(url: string, token: string | null): Env | undefined {
+  return fleetCloneEnv(url, token);
+}
 
 /** `refname -> oid`, from `git ls-remote`, peeled lines (`^{}`) dropped. */
 export async function lsRemote(
@@ -107,7 +132,7 @@ export async function cloneAt(args: {
   extra: string[];
   token?: string | null;
 }): Promise<Clone> {
-  const env = fleetCloneEnv(args.url, args.token ?? null);
+  const env = remoteEnv(args.url, args.token ?? null);
   const clone = await readOnlyGit(
     [
       "clone",
@@ -208,22 +233,6 @@ export async function missingBlobs(repo: string, commits: string[]): Promise<Set
   return missing;
 }
 
-/** Sizes of present objects (`cat-file --batch-check`), by id. Missing ids are absent. */
-export async function objectSizes(repo: string, oids: string[]): Promise<Map<string, number>> {
-  const sizes = new Map<string, number>();
-  if (oids.length === 0) return sizes;
-  const r = await readOnlyGit(["cat-file", "--batch-check"], {
-    cwd: repo,
-    stdin: `${oids.join("\n")}\n`,
-  });
-  if (r.exitCode !== 0) throw new Error(`git cat-file --batch-check failed: ${firstLine(r)}`);
-  for (const line of r.stdout.toString("utf8").split("\n")) {
-    const [oid, type, size] = line.split(" ");
-    if (oid && type === "blob" && size !== undefined) sizes.set(oid, Number(size));
-  }
-  return sizes;
-}
-
 /** Whole contents of present blobs (`cat-file --batch`), by id. A missing id is absent. */
 export async function readBlobs(repo: string, oids: string[]): Promise<Map<string, Buffer>> {
   const found = new Map<string, Buffer>();
@@ -258,23 +267,20 @@ export async function readBlobs(repo: string, oids: string[]): Promise<Map<strin
  *
  * A blob under 1 MiB is in the clone already. A larger one is fetched only when a check names it
  * WITH the size it expects (the size an annex key declares for the same content), and only while
- * the bytes fetched so far plus that size stay within the bound; past it the blob is refused and
- * the path it belongs to counts as unexplained. A blob whose size is not known in advance is never
- * fetched. The bound is shared by every clone of one plan.
+ * the bytes fetched so far plus that size stay within the bound. A blob the bound refuses, or that
+ * a fetch which exited 0 did not deliver, is refused: its path is classed `unchecked` and the plan
+ * refuses (`fetch-bound`), so it is never executable on a guess. A blob whose size is not known in
+ * advance is never fetched. The bound is shared by every clone of one plan.
  */
 export class BlobStore {
   private readonly bytes = new Map<string, Buffer>();
+  /** Blob ids a check needed and could not have: over the bound, or not delivered. */
+  readonly refused = new Set<string>();
   constructor(
     readonly clone: Clone,
     readonly missing: Set<string>,
-    readonly sizes: Map<string, number>,
     private readonly budget: FetchBudget,
   ) {}
-
-  /** The blob's size when it is in the clone, else null (it is 1 MiB or larger). */
-  size(oid: string): number | null {
-    return this.sizes.get(oid) ?? null;
-  }
 
   isMissing(oid: string): boolean {
     return this.missing.has(oid);
@@ -303,6 +309,7 @@ export class BlobStore {
       if (!this.missing.has(w.oid) || claimed.has(w.oid) || refused.has(w.oid)) continue;
       if (!this.budget.claim(w.expected)) {
         refused.add(w.oid);
+        this.refused.add(w.oid);
         continue;
       }
       claimed.set(w.oid, w.expected);
@@ -326,10 +333,18 @@ export class BlobStore {
     );
     if (r.exitCode !== 0)
       throw new Error(`git fetch of ${take.length} blob(s) failed: ${firstLine(r)}`);
-    for (const [oid, body] of await readBlobs(this.clone.path, take)) {
+    const arrived = await readBlobs(this.clone.path, take);
+    for (const oid of take) {
+      const body = arrived.get(oid);
+      if (!body) {
+        // The fetch exited 0 and did not deliver it: as unread as a refused one.
+        refused.add(oid);
+        this.refused.add(oid);
+        this.budget.used -= claimed.get(oid) ?? 0;
+        continue;
+      }
       this.bytes.set(oid, body);
       this.missing.delete(oid);
-      this.sizes.set(oid, body.length);
       // The bound counts what arrived; a blob that is not the size it was expected to be (it is
       // then not the key's content, which the check will find) is counted at its own size.
       this.budget.used += body.length - (claimed.get(oid) ?? 0);
@@ -378,10 +393,11 @@ export async function readAnnexUuidMarker(args: {
       const text = readFileSync(join(base, `${args.prefix}annex-uuid`), "utf8");
       return { status: "ok", uuid: text.trim() };
     } catch (err) {
+      // A local store answers like S3 does: no object is absent, a refused read is forbidden.
       const code = (err as NodeJS.ErrnoException).code;
-      return code === "ENOENT"
-        ? { status: "absent", detail: "no annex-uuid object" }
-        : { status: "error", detail: code ?? "read failed" };
+      if (code === "ENOENT") return { status: "absent", detail: "no annex-uuid object" };
+      if (code === "EACCES" || code === "EPERM") return { status: "forbidden", detail: code };
+      return { status: "error", detail: code ?? "read failed" };
     }
   }
   const path = `${args.prefix}annex-uuid`.split("/").map(encodeURIComponent).join("/");
@@ -407,8 +423,11 @@ export async function readAnnexUuidMarker(args: {
 /**
  * The objects under `nemar-s3`'s prefix, name -> size, with the ambient AWS credentials: the
  * presence basis an administrator may ask for instead of the location log, which can say NEMAR
- * holds content the bucket never received (#1396). Throws rather than answer a partial listing,
- * because a short listing reads as "NEMAR lacks these keys" and inflates the copy.
+ * holds content the bucket never received (#1396).
+ *
+ * An empty or short listing would read as "NEMAR holds nothing" and inflate the copy, so the
+ * listing must contain the prefix's own `annex-uuid` object, which every `nemar-s3` prefix has, as
+ * its control; without it this throws. The AWS CLI v2 follows every page itself.
  */
 export async function listBucketObjects(args: {
   bucket: string;
@@ -430,7 +449,7 @@ export async function listBucketObjects(args: {
       const st = statSync(join(dir, name));
       if (st.isFile()) out.set(name, st.size);
     }
-    return out;
+    return withControl(out, args.prefix);
   }
   const r = await readOnlyAws(
     [
@@ -451,19 +470,58 @@ export async function listBucketObjects(args: {
     throw new Error(`aws s3api list-objects-v2 failed: ${firstLine(r)}`);
   }
   const text = r.stdout.toString("utf8").trim();
-  if (!text) return out;
-  const parsed = JSON.parse(text) as {
+  const parsed = (text ? JSON.parse(text) : {}) as {
     Contents?: Array<{ Key?: string; Size?: number }>;
-    IsTruncated?: boolean;
-    NextContinuationToken?: string;
   };
-  if (parsed.IsTruncated === true || parsed.NextContinuationToken) {
-    throw new Error("the bucket listing came back truncated; refusing a partial view");
-  }
   for (const obj of parsed.Contents ?? []) {
     if (typeof obj.Key !== "string" || !obj.Key.startsWith(args.prefix)) continue;
     const name = obj.Key.slice(args.prefix.length);
     if (name) out.set(name, typeof obj.Size === "number" ? obj.Size : -1);
   }
-  return out;
+  return withControl(out, args.prefix);
+}
+
+/** The listing, once it is shown to hold the prefix's `annex-uuid` marker. */
+function withControl(listing: Map<string, number>, prefix: string): Map<string, number> {
+  if (!listing.has("annex-uuid")) {
+    throw new Error(
+      `the listing of ${prefix} holds no annex-uuid object, so it cannot be told from an empty or partial one`,
+    );
+  }
+  return listing;
+}
+
+// ---------------------------------------------------------------------------------------
+// The git-annex branch: remote.log and version pins
+// ---------------------------------------------------------------------------------------
+
+/** `remote.log` of a clone's git-annex branch; "" when the branch has none. */
+export async function readRemoteLog(repo: string): Promise<string> {
+  const spec = "refs/heads/git-annex:remote.log";
+  return (await readBlobs(repo, [spec])).get(spec)?.toString("utf8") ?? "";
+}
+
+/**
+ * The S3 version pins upstream's git-annex branch records for each key (`<key>.log.rmet`), parsed
+ * by `parseRmet` against its `remote.log`, as `readPinnedSources` parses them; read by computed
+ * path through the guard, so a key whose log name git-annex escapes is found too. A key whose
+ * record is absent, or whose blob the clone lacks, has no pin, which refuses the plan as unpinned.
+ */
+export async function readPinsAt(
+  repo: string,
+  keys: string[],
+): Promise<Map<string, PinnedSource[]>> {
+  const pins = new Map<string, PinnedSource[]>();
+  if (keys.length === 0) return pins;
+  const remotes = parseRemoteLog(await readRemoteLog(repo));
+  const specOf = (k: string) =>
+    `refs/heads/git-annex:${hashDirLower(k)}${annexKeyFile(k)}.log.rmet`;
+  const bodies = await readBlobs(repo, keys.map(specOf));
+  for (const key of keys) {
+    const body = bodies.get(specOf(key));
+    if (!body) continue;
+    const parsed = parseRmet(body.toString("utf8"), remotes);
+    if (parsed.length > 0) pins.set(key, parsed);
+  }
+  return pins;
 }

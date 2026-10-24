@@ -3,10 +3,16 @@
  * with the digest of the reviewed plan).
  *
  * The digest is the sha256 of the plan body's canonical JSON (`canonicalJson`: sorted keys, two
- * spaces, one trailing newline). What can differ between two runs over the same remotes is kept
- * out of the body, so the same inputs always give the same digest: `created_at`, `environment`,
- * the preflight answers (which depend on the token the operator holds, not on the dataset) and
- * whether the plan is executable (which follows from them).
+ * spaces, one trailing newline). What can differ between two runs over the same remotes with the
+ * same options is kept out of the body, so they give the same digest: `created_at`,
+ * `environment`, `sources` (whether test bases redirected the remotes), the preflight answers
+ * (which depend on the token the operator holds, not on the dataset) and whether the plan is
+ * executable (which follows from them). Because those are outside the digest, Phase 6 recomputes
+ * the preflight and executability itself and never trusts either from a file.
+ *
+ * The plan file is the plan's output, written to the administrator's config directory with mode
+ * 0600, because a path can itself be an identifier; nothing is written to the mirror, S3, D1 or the
+ * NEMAR API.
  */
 
 import { createHash } from "node:crypto";
@@ -28,6 +34,7 @@ export const VOLATILE_FIELDS = [
   "digest",
   "created_at",
   "environment",
+  "sources",
   "preflight",
   "executable",
 ] as const;
@@ -40,6 +47,8 @@ export interface PlanFile {
   digest: string;
   created_at: string;
   environment: string;
+  /** `test-bases` when any `NEMAR_REPULL_*_BASE` redirected a remote, else `remotes`. */
+  sources: "test-bases" | "remotes";
   preflight: Check[];
   executable: boolean;
   body: PlanBody;
