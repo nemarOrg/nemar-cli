@@ -23,6 +23,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import chalk from "chalk";
 import ora from "ora";
+import { decideReadme, readmeProvenanceStub } from "../../shared/standard-edits/readme.js";
 import { addCi, importDataset, reindexDataset } from "./api/admin.js";
 import { getDataset, getUserCiStatus } from "./api/datasets.js";
 import { ApiError } from "./api/errors.js";
@@ -746,13 +747,6 @@ export type ReadmeOutcome =
   | { kind: "kept"; path: string }
   | { kind: "created"; path: "README.md" };
 
-/** Detect any README file regardless of case (`README`, `Readme.md`, `readme`).
- *  Case-insensitive on purpose: on case-insensitive filesystems (macOS APFS,
- *  Windows NTFS) `writeFileSync('README.md', ...)` would silently overwrite
- *  an upstream `Readme.md` if we missed it during the scan. The `/i` keeps
- *  the fallback branch from ever clobbering real content. */
-const README_FILENAME_REGEX = /^README(\.[A-Za-z0-9]+)?$/i;
-
 /**
  * Decide what to do with the imported repo's README file.
  *
@@ -775,46 +769,35 @@ const README_FILENAME_REGEX = /^README(\.[A-Za-z0-9]+)?$/i;
  * is always safe; renaming the bare `README` over it could destroy
  * authored content.
  *
- * Pure on filesystem state — no git operations, no network. The caller is
- * responsible for staging the returned paths.
+ * The rule itself is `decideReadme` in `shared/standard-edits/readme.ts`, so the
+ * upstream re-pull's planner (ADR 0111) makes the same decision over a git tree;
+ * this applies it to the directory. Pure on filesystem state — no git
+ * operations, no network. The caller is responsible for staging the returned
+ * paths.
  */
 export function ensureReadmeMd(
   datasetPath: string,
   openneuroId: string,
   openNeuroDoi: string | null,
 ): ReadmeOutcome {
-  const entries = readdirSync(datasetPath, { withFileTypes: true });
-  const readmeEntries = entries.filter((e) => e.isFile() && README_FILENAME_REGEX.test(e.name));
+  // Regular files only, in listing order: a symlink is not a README here.
+  const rootFiles = readdirSync(datasetPath, { withFileTypes: true })
+    .filter((e) => e.isFile())
+    .map((e) => e.name);
+  const decision = decideReadme(rootFiles);
 
-  // Prefer any README with an extension over bare `README`. Two reasons:
-  // (1) a `*.md` / `*.rst` is already renderable and renaming over it would
-  //     destroy content; (2) `entries.filter` returns OS-listing order which
-  //     is non-deterministic on some filesystems — picking a stable
-  //     preference rule removes the order dependence.
-  const suffixed = readmeEntries.find((e) => e.name.includes("."));
-  if (suffixed) {
-    return { kind: "kept", path: suffixed.name };
-  }
+  if (decision.kind === "kept") return { kind: "kept", path: decision.path };
 
-  const bare = readmeEntries.find((e) => !e.name.includes("."));
-  if (bare) {
+  if (decision.kind === "renamed") {
     // Bare README (any case) — rename to canonical `README.md` so GitHub
-    // renders it. The collision case was handled by the `suffixed` branch
-    // above; if we get here, no `.md`/`.rst`/etc. exists, so rename is safe.
-    renameSync(join(datasetPath, bare.name), join(datasetPath, "README.md"));
+    // renders it. A README with an extension would have been kept instead,
+    // so nothing is renamed over authored content.
+    renameSync(join(datasetPath, decision.from), join(datasetPath, "README.md"));
     return { kind: "renamed", from: "README", to: "README.md" };
   }
 
-  // No README upstream — write a deterministic provenance-only stub. Provenance
-  // is independently encoded in `.nemar/metadata.json` (IsDescribedBy /
-  // IsIdenticalTo + source/source_id columns), so the browser can render
-  // upstream attribution even without this file. The stub exists so a casual
-  // visitor browsing the GitHub repo still sees where the data came from.
-  const marker = "<!-- nemar:provenance -->";
-  const openneuroUrl = `https://openneuro.org/datasets/${openneuroId}`;
-  const doiLine = openNeuroDoi ? `\n- DOI: [${openNeuroDoi}](https://doi.org/${openNeuroDoi})` : "";
-  const block = `${marker}\n## Provenance\n\nThis dataset is mirrored on NEMAR from OpenNeuro.\n\n- Source: [${openneuroId}](${openneuroUrl})${doiLine}\n`;
-  writeFileSync(join(datasetPath, "README.md"), block);
+  // No README upstream — write the deterministic provenance-only stub.
+  writeFileSync(join(datasetPath, "README.md"), readmeProvenanceStub(openneuroId, openNeuroDoi));
   return { kind: "created", path: "README.md" };
 }
 
