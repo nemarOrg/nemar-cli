@@ -7,9 +7,10 @@
 import type { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
 import { type BroadcastEnv, sendBroadcast } from "../src/services/broadcast";
+import { type OutboxEnv, handleOutboxBatch } from "../src/services/email-outbox";
 import { recordingBinding } from "./helpers/cloudflare-email";
 import { freshDb, realD1 } from "./helpers/d1";
-import { recordingQueue } from "./helpers/queue-binding";
+import { recordingBatch, recordingQueue } from "./helpers/queue-binding";
 
 const FROM = "NEMAR Staging <noreply@staging.nemar.test>";
 
@@ -147,5 +148,47 @@ describe("sendBroadcast with an outbox bound", () => {
     expect(result.status).toBe("sent");
     expect(sent.length).toBe(1);
     expect(readRow(db)).toMatchObject({ status: "sent", queued_count: 0 });
+  });
+
+  test("after a partial enqueue every message counts once, even one that was in fact enqueued", async () => {
+    const q = recordingQueue({ failBatchAt: 1 });
+    const { env: e, sent } = env(q.queue);
+    const db = freshDb();
+    const recipients = Array.from({ length: 150 }, (_, i) => `u${i}@nemar.test`);
+    const result = await run(db, recipients, e);
+    expect(result).toMatchObject({
+      recipient_count: 100,
+      failure_count: 50,
+      error: "queue_enqueue_failed",
+    });
+    const outcomes = db
+      .query<{ outcome: string; n: number }, []>(
+        "SELECT outcome, COUNT(*) AS n FROM broadcast_outcomes GROUP BY outcome",
+      )
+      .all();
+    expect(outcomes).toEqual([{ outcome: "unqueued", n: 50 }]);
+
+    // The 100 that were enqueued, plus one from the unqueued remainder that the failed sendBatch
+    // had in fact enqueued after all: it must not be sent or counted again.
+    const delivered = [
+      ...q.bodies,
+      { kind: "broadcast", broadcast_id: result.broadcast_id, to: "u120@nemar.test" },
+    ];
+    const { batch, recorded } = recordingBatch(delivered);
+    const quiet = console.warn;
+    console.warn = () => {};
+    try {
+      await handleOutboxBatch(batch.messages as never, { ...e, DB: realD1(db) } as OutboxEnv);
+    } finally {
+      console.warn = quiet;
+    }
+    expect(sent.length).toBe(100);
+    expect(recorded.every((r) => r.acked)).toBe(true);
+    expect(readRow(db)).toMatchObject({
+      status: "done",
+      queued_count: 150,
+      delivered_count: 100,
+      failure_count: 50,
+    });
   });
 });

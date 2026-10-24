@@ -7,7 +7,13 @@
 import type { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
 import { dispatchQueueBatch } from "../src/index";
-import { type OutboxEnv, handleOutboxBatch } from "../src/services/email-outbox";
+import {
+  OUTBOX_FINAL_ATTEMPT,
+  OUTBOX_MAX_RETRIES,
+  type OutboxEnv,
+  handleOutboxBatch,
+  limitRetryDelaySeconds,
+} from "../src/services/email-outbox";
 import type { Bindings } from "../src/types/bindings";
 import { type BindingMessage, bindingError, recordingBinding } from "./helpers/cloudflare-email";
 import { freshDb, realD1 } from "./helpers/d1";
@@ -221,5 +227,156 @@ describe("dispatchQueueBatch", () => {
       [true, null],
     ]);
     expect(row(db)?.status).toBe("done");
+  });
+});
+
+/**
+ * The D1 boundary failing: `prepare` throws for SQL matching `prepare`, and `batch` (the
+ * outcome write) rejects when `batch` is set. Everything else is the real database.
+ */
+function failingDb(real: D1Database, fail: { prepare?: RegExp; batch?: boolean }): D1Database {
+  return new Proxy(real, {
+    get(target, prop) {
+      if (prop === "prepare") {
+        return (sql: string) => {
+          if (fail.prepare?.test(sql)) throw new Error("d1 unavailable");
+          return target.prepare(sql);
+        };
+      }
+      if (prop === "batch" && fail.batch) {
+        return async () => {
+          throw new Error("d1 unavailable");
+        };
+      }
+      const value = Reflect.get(target, prop);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+}
+
+describe("retry bounds and pacing", () => {
+  test("the final attempt tracks max_retries", () => {
+    expect(OUTBOX_FINAL_ATTEMPT).toBe(OUTBOX_MAX_RETRIES + 1);
+    const toml = require("node:fs").readFileSync(
+      require("node:path").join(import.meta.dir, "../wrangler-sccn.toml"),
+      "utf-8",
+    ) as string;
+    const retries = [...toml.matchAll(/max_retries = (\d+)/g)].map((m) => Number(m[1]));
+    expect(retries).toEqual([OUTBOX_MAX_RETRIES, OUTBOX_MAX_RETRIES]);
+  });
+
+  test("a limit refusal retries with a growing, capped delay and changes no counter", async () => {
+    expect(limitRetryDelaySeconds(1)).toBe(300);
+    expect(limitRetryDelaySeconds(3)).toBe(900);
+    expect(limitRetryDelaySeconds(10)).toBe(3000);
+    expect(limitRetryDelaySeconds(20)).toBe(3600);
+    for (const attempts of [1, 3, 10]) {
+      const { db, env } = setup(() => bindingError("E_RATE_LIMIT_EXCEEDED"));
+      seedBroadcast(db, 1);
+      const { batch, recorded } = recordingBatch([msg("a@nemar.test")], attempts);
+      await quiet(() => handleOutboxBatch(batch.messages as never, env));
+      expect(recorded[0]).toMatchObject({
+        acked: false,
+        retried: { delaySeconds: limitRetryDelaySeconds(attempts) },
+      });
+      expect(row(db)).toMatchObject({ status: "queued", failure_count: 0, delivered_count: 0 });
+    }
+  });
+
+  test("a limit refusal on the final attempt is recorded as a failure and acked", async () => {
+    const { db, env } = setup(() => bindingError("E_DAILY_LIMIT_EXCEEDED"));
+    seedBroadcast(db, 1);
+    const { batch, recorded } = recordingBatch([msg("a@nemar.test")], OUTBOX_FINAL_ATTEMPT);
+    await quiet(() => handleOutboxBatch(batch.messages as never, env));
+    expect(recorded[0]).toMatchObject({ acked: true, retried: null });
+    const r = row(db);
+    expect(r).toMatchObject({ status: "done", failure_count: 1 });
+    expect(JSON.parse(r?.failed_recipients ?? "[]")).toEqual(["a***@nemar.test (limit, gave up)"]);
+  });
+
+  test("after a limit refusal the rest of the batch is retried unsent", async () => {
+    const { db, env, sent } = setup(() => bindingError("E_RATE_LIMIT_EXCEEDED"));
+    seedBroadcast(db, 3);
+    const { batch, recorded } = recordingBatch([
+      msg("a@nemar.test"),
+      msg("b@nemar.test"),
+      msg("c@nemar.test"),
+    ]);
+    await quiet(() => handleOutboxBatch(batch.messages as never, env));
+    expect(sent.length).toBe(1); // only the first was tried
+    for (const r of recorded)
+      expect(r).toMatchObject({ acked: false, retried: { delaySeconds: 300 } });
+    expect(row(db)).toMatchObject({ status: "queued", delivered_count: 0, failure_count: 0 });
+  });
+
+  test("deferred messages on their final attempt give up rather than reach the DLQ", async () => {
+    const { db, env } = setup(() => bindingError("E_RATE_LIMIT_EXCEEDED"));
+    seedBroadcast(db, 2);
+    const { batch, recorded } = recordingBatch(
+      [msg("a@nemar.test"), msg("b@nemar.test")],
+      OUTBOX_FINAL_ATTEMPT,
+    );
+    await quiet(() => handleOutboxBatch(batch.messages as never, env));
+    expect(recorded.every((r) => r.acked && r.retried === null)).toBe(true);
+    expect(row(db)).toMatchObject({ status: "done", failure_count: 2 });
+  });
+
+  test("an unreadable row retries, then gives up on the final attempt", async () => {
+    const { db, env, sent } = setup();
+    seedBroadcast(db, 1);
+    const broken = { ...env, DB: failingDb(env.DB, { prepare: /SELECT subject/ }) };
+
+    const first = recordingBatch([msg("a@nemar.test")], 1);
+    await quiet(() => handleOutboxBatch(first.batch.messages as never, broken));
+    expect(first.recorded[0]).toMatchObject({ acked: false, retried: { delaySeconds: 60 } });
+    expect(row(db)?.failure_count).toBe(0);
+
+    const last = recordingBatch([msg("a@nemar.test")], OUTBOX_FINAL_ATTEMPT);
+    await quiet(() => handleOutboxBatch(last.batch.messages as never, broken));
+    expect(last.recorded[0]).toMatchObject({ acked: true, retried: null });
+    expect(row(db)).toMatchObject({ status: "done", failure_count: 1 });
+    expect(JSON.parse(row(db)?.failed_recipients ?? "[]")).toEqual([
+      "a***@nemar.test (row unreadable, gave up)",
+    ]);
+    expect(sent).toEqual([]);
+  });
+});
+
+describe("idempotent outcomes", () => {
+  test("a duplicate delivery is acked, not re-sent, and counts once", async () => {
+    const { db, env, sent } = setup();
+    seedBroadcast(db, 2);
+    const first = recordingBatch([msg("a@nemar.test")]);
+    await handleOutboxBatch(first.batch.messages as never, env);
+    const again = recordingBatch([msg("A@nemar.test ")]); // same recipient, differently written
+    await quiet(() => handleOutboxBatch(again.batch.messages as never, env));
+
+    expect(sent.length).toBe(1);
+    expect(again.recorded[0]).toMatchObject({ acked: true, retried: null });
+    expect(row(db)).toMatchObject({ status: "queued", delivered_count: 1 });
+    const stored = db.query("SELECT recipient_hash FROM broadcast_outcomes").all();
+    expect(stored.length).toBe(1);
+    expect(JSON.stringify(stored)).not.toContain("nemar.test");
+  });
+
+  test("a failed outcome write is acked and logged, never retried", async () => {
+    const { db, env, sent } = setup();
+    seedBroadcast(db, 1);
+    const broken = { ...env, DB: failingDb(env.DB, { batch: true }) };
+    const lines: string[] = [];
+    const real = console.error;
+    console.error = (...a: unknown[]) => {
+      lines.push(a.map(String).join(" "));
+    };
+    const { batch, recorded } = recordingBatch([msg("a@nemar.test")]);
+    try {
+      await handleOutboxBatch(batch.messages as never, broken);
+    } finally {
+      console.error = real;
+    }
+    expect(sent.length).toBe(1);
+    expect(recorded[0]).toMatchObject({ acked: true, retried: null });
+    expect(lines.some((l) => l.includes("could not record delivered"))).toBe(true);
+    expect(lines.join("\n")).not.toContain("a@nemar.test");
   });
 });

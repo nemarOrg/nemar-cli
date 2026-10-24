@@ -40,12 +40,13 @@ export interface RecordedMessage {
 }
 
 /** A consumer batch of `bodies`, with each message's ack and retry recorded. */
-export function recordingBatch(bodies: unknown[]) {
+/** `attempts` is each message's delivery attempt number (the first delivery is 1). */
+export function recordingBatch(bodies: unknown[], attempts = 1) {
   const recorded: RecordedMessage[] = bodies.map((body) => ({ body, acked: false, retried: null }));
   const messages = recorded.map((r, i) => ({
     id: `m${i}`,
     timestamp: new Date(0),
-    attempts: 1,
+    attempts,
     body: r.body,
     ack() {
       r.acked = true;

@@ -913,7 +913,8 @@ export async function dispatchQueueBatch(batch: MessageBatch<unknown>, env: Bind
     if (isBroadcastOutboxMessage(message.body)) {
       broadcasts.push(message as Message<BroadcastOutboxMessage>);
     } else {
-      console.warn(`[queue] unrecognised message on ${batch.queue}; acking`);
+      // Stable tag: alert on "[queue] unrecognised message".
+      console.warn(`[queue] unrecognised message queue=${batch.queue}; acking`);
       message.ack();
     }
   }

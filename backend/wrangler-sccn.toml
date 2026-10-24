@@ -393,7 +393,10 @@ OPENNEURO_MAINTAINER_EMAIL_ENABLED = "false"
 # Announcement outbox (epic #1893 phase 2, ADR 0110). `nemar admin notify` enqueues one
 # message per recipient when the Cloudflare provider is active; this same Worker consumes
 # them one send at a time (max_concurrency = 1 paces the sends under the rate limit).
-# Both queues must exist before the deploy that carries these blocks, or the deploy fails.
+# These queues must exist before the deploy that carries these blocks, or the deploy fails:
+# `nemar-email-outbox` and its dead-letter queue `nemar-email-outbox-dlq` (production), and
+# `nemar-email-outbox-dev` and `nemar-email-outbox-dev-dlq` (dev). max_retries is mirrored by
+# OUTBOX_MAX_RETRIES in services/email-outbox.ts; change both together.
 [[queues.producers]]
 binding = "EMAIL_OUTBOX"
 queue = "nemar-email-outbox"
@@ -402,7 +405,7 @@ queue = "nemar-email-outbox"
 queue = "nemar-email-outbox"
 max_batch_size = 10
 max_concurrency = 1
-max_retries = 5
+max_retries = 10
 dead_letter_queue = "nemar-email-outbox-dlq"
 
 # Development environment (SCCN account)
@@ -506,7 +509,7 @@ binding = "MAIL_INBOUND"
 bucket_name = "nemar-mail-dev"
 
 # Announcement outbox for dev (not inherited from top-level). Same shape as the production
-# blocks above, on the dev queues, which must exist before the next dev deploy.
+# blocks above, on the dev queues (names listed there), which must exist before the next dev deploy.
 [[env.dev.queues.producers]]
 binding = "EMAIL_OUTBOX"
 queue = "nemar-email-outbox-dev"
@@ -515,7 +518,7 @@ queue = "nemar-email-outbox-dev"
 queue = "nemar-email-outbox-dev"
 max_batch_size = 10
 max_concurrency = 1
-max_retries = 5
+max_retries = 10
 dead_letter_queue = "nemar-email-outbox-dev-dlq"
 
 # Observability for dev (not inherited from top-level)
