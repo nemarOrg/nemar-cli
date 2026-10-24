@@ -20,15 +20,30 @@ const UNSAFE_NAME_CHARACTERS = /[\p{Cc}\u2028\u2029\u202a-\u202e\u2066-\u2069]/g
  * everything else as it is.
  */
 export function displayName(name: string): string {
-  return name.replace(UNSAFE_NAME_CHARACTERS, (c) => {
-    if (c === "\n") return "\\n";
-    if (c === "\r") return "\\r";
-    if (c === "\t") return "\\t";
-    const code = c.codePointAt(0) ?? 0;
-    return code <= 0xff
-      ? `\\x${code.toString(16).padStart(2, "0")}`
-      : `\\u${code.toString(16).padStart(4, "0")}`;
-  });
+  return name.replace(UNSAFE_NAME_CHARACTERS, escapeCharacter);
+}
+
+function escapeCharacter(c: string): string {
+  if (c === "\n") return "\\n";
+  if (c === "\r") return "\\r";
+  if (c === "\t") return "\\t";
+  const code = c.codePointAt(0) ?? 0;
+  return code <= 0xff
+    ? `\\x${code.toString(16).padStart(2, "0")}`
+    : `\\u${code.toString(16).padStart(4, "0")}`;
+}
+
+/**
+ * Multi-line text from outside (a ticket's subject, addresses and body) as it is shown to a
+ * person. Newlines and tabs are kept; every other control character (the carriage return, an
+ * ESCAPE that starts a terminal sequence, DEL, the C1 controls), the line and paragraph
+ * separators and the bidirectional overrides and isolates are written out as escapes, exactly as
+ * {@link displayName} writes them.
+ */
+export function terminalSafeText(text: string): string {
+  return text.replace(UNSAFE_NAME_CHARACTERS, (c) =>
+    c === "\n" || c === "\t" ? c : escapeCharacter(c),
+  );
 }
 
 /** Names as shown, joined for one line of a message. */
