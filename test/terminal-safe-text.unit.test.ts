@@ -26,6 +26,13 @@ describe("terminalSafeText", () => {
     expect(terminalSafeText("a‮b‪c⁦d⁩e f g")).toBe("a\\u202eb\\u202ac\\u2066d\\u2069e\\u2028f\\u2029g");
   });
 
+  test("escapes direction marks and invisible characters, in both functions", () => {
+    const text = "a\u200eb\u200fc\u061cd\u200be\u200cf\u200dg\u2060h\ufeffi";
+    const expected = "a\\u200eb\\u200fc\\u061cd\\u200be\\u200cf\\u200dg\\u2060h\\ufeffi";
+    expect(terminalSafeText(text)).toBe(expected);
+    expect(displayName(text)).toBe(expected);
+  });
+
   test("writes every escape the way displayName does", () => {
     const hostile = "\u001b\r\u0000\u007f\u009b‮⁦ ";
     expect(terminalSafeText(hostile)).toBe(displayName(hostile));

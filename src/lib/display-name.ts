@@ -10,9 +10,13 @@
  * Characters that must not reach a terminal or break a one-name-per-line list: C0 and C1
  * controls (a newline, an ESCAPE that starts a terminal sequence), the Unicode line and
  * paragraph separators (U+2028, U+2029), and the bidirectional embeddings, overrides and
- * isolates (U+202A to U+202E, U+2066 to U+2069) that reorder what is displayed.
+ * isolates (U+202A to U+202E, U+2066 to U+2069) that reorder what is displayed, the implicit
+ * direction marks (LRM U+200E, RLM U+200F, ALM U+061C), and the invisible characters that make
+ * two different strings look alike (zero-width U+200B to U+200D, word joiner U+2060, byte order
+ * mark U+FEFF).
  */
-const UNSAFE_NAME_CHARACTERS = /[\p{Cc}\u2028\u2029\u202a-\u202e\u2066-\u2069]/gu;
+const UNSAFE_NAME_CHARACTERS =
+  /[\p{Cc}\u2028\u2029\u202a-\u202e\u2066-\u2069\u200b-\u200f\u061c\u2060\ufeff]/gu;
 
 /**
  * A file name as it is shown to a person: each character above written out as an escape
