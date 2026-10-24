@@ -61,7 +61,7 @@ NEMAR owns always: `.nemar/**` and `.github/**` (the OpenNeuro related identifie
 
 `dataset_description.json` merges field by field:
 
-- NEMAR owns `DatasetDOI` (concept DOI) and `Version` (the next major, or the patch for the 2.0.1 stack).
+- NEMAR owns `DatasetDOI` (concept DOI) and `Version` (the next major, or the next patch for 2.0.1).
 - The `SourceDatasets` entry for this ds is replaced by `{DOI, URL, Version: to_tag}`; other entries are kept from both sides.
 - Every other key is upstream-owned and merged three-way.
 
