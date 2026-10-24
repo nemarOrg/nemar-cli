@@ -496,6 +496,8 @@ describe("a plan from tag A to tag B over an imported mirror", () => {
     expect(md.explained_by_base).toBeNull();
     expect(md.target).toEqual({ kind: "unknown", reason: "no-concept-doi" });
     expect(refusalCodes(f.body as Body)).toContain("target-unknown");
+    // A missing DOI is not a disagreeing one.
+    expect(refusalCodes(f.body as Body)).not.toContain("concept-doi-disagrees");
   });
 
   test("a catalog concept DOI that main's DatasetDOI does not carry refuses", async () => {

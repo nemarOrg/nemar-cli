@@ -19,7 +19,7 @@
 import { describe, expect, test } from "bun:test";
 import { buildDoiBadge } from "../shared/standard-edits/readme";
 import { mergeDescription } from "../src/lib/repull/description";
-import { type Side, explainEdit } from "../src/lib/repull/edits";
+import { type Side, bareDoi, explainEdit } from "../src/lib/repull/edits";
 import { badgeStrips } from "../src/lib/repull/overlay";
 import { toTagCheck } from "../src/lib/repull/preflight";
 import { bytesPhrase, orphanPhrase } from "../src/lib/repull/render";
@@ -194,5 +194,17 @@ describe("planSources", () => {
     expect(planSources({}, undefined)).toBe("remotes");
     expect(planSources({}, "http://127.0.0.1:9/crn/graphql")).toBe("test-bases");
     expect(planSources({ NEMAR_REPULL_ORIGIN_BASE: "/tmp/o" }, undefined)).toBe("test-bases");
+  });
+});
+
+describe("bareDoi", () => {
+  test("drops doi: and a resolver, and a missing DOI is null so it never matches another", () => {
+    expect(bareDoi(" doi:10.82901/nemar.nm000001 ")).toBe("10.82901/nemar.nm000001");
+    expect(bareDoi("DOI:10.82901/nemar.nm000001")).toBe("10.82901/nemar.nm000001");
+    expect(bareDoi("https://doi.org/10.82901/nemar.nm000001")).toBe("10.82901/nemar.nm000001");
+    expect(bareDoi("https://dx.doi.org/10.82901/nemar.nm000001")).toBe("10.82901/nemar.nm000001");
+    expect(bareDoi(null)).toBeNull();
+    expect(bareDoi(undefined)).toBeNull();
+    expect(bareDoi("   ")).toBeNull();
   });
 });
