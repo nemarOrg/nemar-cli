@@ -136,6 +136,9 @@ AGENTS.md's summary of ADR 0093 ("nothing merges without `--merge` or a `y`") is
 
 A re-pull pull request that is not machine clean, or that an administrator opened, is merged by an administrator, through `nemar admin repull <id> --merge` or `nemar admin pr-reviews`, under ADR 0093, with a screen that is `clear` or carries the administrator's recorded acknowledgment (ADR 0086).
 `nemar admin pr-reviews` will require that screen for a re-pull pull request, which its `approve --merge` does not check today, and will claim the merge cap before the merge is sent.
+
+An `xx` re-pull takes the administrator path only.
+ADR 0086 exempts `xx` from the identifier screen, so an `xx` re-pull never has a `clear` verdict and is never machine clean, and an administrator merges it under that exemption, with no screen.
 The Worker's merge call is not built until the ruleset check below is done.
 
 ### 8. A copy pins the object version, and nothing of the prior version is deleted
@@ -185,6 +188,8 @@ The Worker's merge call is not built until the ruleset check below is done.
   An organization administrator merging in the GitHub UI is not stopped by it.
 - **The Worker gains a path that merges into `main` of a public dataset.**
   It is bounded by the machine definition, the switch and the cap, and a defect in it would mint a DOI; that is why the merge call waits for the ruleset check and for gates G1 to G5.
+- **The Worker's merge has no staging rehearsal.**
+  Outside production only `xx` datasets are re-pulled, and they never reach machine clean, so the Worker's merge first runs in production, behind its switch.
 - **A NEMAR change that would deserve a major has no major on a mirror;** it takes a minor.
 - The importer changes as well: it clones a tag, and it refuses a re-import whose tag moved.
 
