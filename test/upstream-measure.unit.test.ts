@@ -504,6 +504,24 @@ describe("totalsOf and renderMeasurement", () => {
     expect([t.files_added, t.files_changed, t.files_deleted]).toEqual([1, 2, 3]);
   });
 
+  test("a size just under a unit boundary is promoted, not printed as 1024.0 KiB", () => {
+    const deltas = [measured("on000001", delta({ data_changing: true, bytes_to_copy: 1048575 }))];
+    const lines = renderMeasurement(
+      {
+        measured_at: "2026-10-24T12:00:00.000Z",
+        endpoint: "x",
+        scope: "fleet",
+        complete: true,
+        deltas,
+        totals: totalsOf(deltas, 1, 1),
+        doi_volume: estimateRepullDoiVolume([], Date.now()),
+      },
+      10,
+    ).join("\n");
+    expect(lines).toContain("Bytes to copy: 1048575 (1.0 MiB)");
+    expect(lines).not.toContain("1024.0 KiB");
+  });
+
   test("the human block never prints an unknown as a number", () => {
     const deltas = [
       measured("on000001", delta({ bytes_to_copy: null })),
@@ -514,6 +532,8 @@ describe("totalsOf and renderMeasurement", () => {
       {
         measured_at: "2026-10-24T12:00:00.000Z",
         endpoint: "x",
+        scope: "fleet",
+        complete: false,
         deltas,
         totals: totalsOf(deltas, 2, 2),
         doi_volume: volume,
