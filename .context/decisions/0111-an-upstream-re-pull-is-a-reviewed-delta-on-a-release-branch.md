@@ -684,3 +684,57 @@ One statement writes the word `lineage`, and a source scan keeps it the only one
 The staleness report's Amendment (#1910) says "in-progress" can mean only `import_jobs` until `upstream_repulls` exists, and that a non-terminal row there must then join the first step.
 It does now: a mirror with one open re-pull, in any non-terminal status, is `in_progress` ("a re-pull to <tag> is <status>"), is never sent to OpenNeuro, and is never offered as a candidate for another re-pull.
 The partial unique index allows at most one open row per dataset, so the join adds no rows.
+
+## Amendment 2026-10-24 (#1910): Phase 4c builds the measurement
+
+Epic #1046, Phase 4, third part.
+Gate G2 of the design record asks for a measurement before anything runs on its own, and decision 6 lists what it holds.
+This part builds the half of it that upstream alone can answer: `nemar admin upstream-status --measure`.
+The decision text above and the earlier amendments are unchanged.
+
+### What it measures
+
+For each stale mirror (`stale_ready`, `mirror_lag` or `stale_unverified`) the command reads OpenNeuro's recursive file listing at the recorded tag and at upstream's latest tag, in one request, and summarizes the difference.
+Files match by name, and a file is changed when its identifier differs, whatever its size.
+An annexed file's identifier is its annex key, so a changed key is changed content.
+A file counts as annexed when the snapshot that holds it says so: the new side for an addition, the old side for a deletion, either side for a change, so a file that moves between git and the annex is annexed.
+A delta is data-changing when any annexed file was added, changed or deleted, and metadata-only otherwise.
+The bytes to copy are the sizes of the distinct annex keys the latest snapshot has and the recorded one does not, read from the size each key declares in its fields (the strict field, so a free-text name that looks like a size is not read as one) and otherwise from the listing.
+A listing is refused rather than summarized when it cannot be a snapshot: no file at all, no root `dataset_description.json`, a size that is not a non-negative integer, a repeated filename, or an answer that carries `errors[]` beside its data.
+An empty tree would otherwise make every file of the other snapshot look added or deleted.
+The mirror report prints the files added, changed and deleted, the bytes to copy, and how many deltas are metadata-only and how many are data-changing.
+The listings are a few megabytes for a dataset of thousands of files, so the command reads them from the administrator's machine and the Worker never does.
+
+### DOI volume
+
+The estimate reads the snapshot lists the staleness pass already holds, for every mirror whose tag is known.
+The catch-up is one re-pull, straight to the latest tag, for each stale mirror.
+The trailing year of upstream churn is counted two ways: one re-pull for every snapshot created in the window, and at most one per 30 days for a dataset.
+A dataset's first snapshot (the earliest by date, whatever the list order) was its import and is not counted; when any snapshot of a dataset has an unreadable date the earliest cannot be named, so none is left out for that dataset and the estimate errs high.
+A snapshot whose creation date does not parse is counted separately and never read as old, and a snapshot dated in the future is counted separately and left out of the figures.
+The human report also lists the mirrors the estimate left out, by state.
+Whether a re-pull also carries NEMAR's corrections, and so a second DOI, is known only from a plan, so every figure is also given doubled as an upper bound.
+At the default `REPULL_DAILY_OPEN_CAP` of 2 the catch-up takes the number of re-pulls divided by two, rounded up, in days.
+
+### Two limits, and what belongs to Phase 5
+
+The delta is upstream's between the two tags.
+It is not NEMAR's tree: NEMAR's own corrections, the scrub, the annex policy and date normalization are not in it, so it says how much upstream changed and not how much a re-pull would write.
+A tag recorded with basis `doi` is a declaration, not a tree comparison (see "What `doi` means"), and early imports cloned the default branch, so a delta measured from a wrong declaration is wrong.
+The command prints both limits with the numbers.
+The conflict and unexplained-path counts of gate G2 need a plan, which compares NEMAR's tree with upstream's; they come from Phase 5's `nemar admin repull plan`, and G2 is complete only with them.
+
+### Unknown is never zero
+
+A listing that could not be read leaves that delta null with its reason and counts it as unknown.
+A stale mirror left out by `--measure-limit` is counted as not measured.
+While either count is above zero, or a new key in a measured delta has no known size, the total bytes to copy is null, and the sum over the deltas with a known size is printed beside it as "at least".
+A total also says what it does not cover.
+Only stale mirrors are measured, so the measurement carries the scope of the pass (the whole fleet, one mirror, or the mirrors after a cursor) and a count of the mirrors it cannot measure: unknown tag (and how many of those look stale by date), never examined, unchecked, anomaly, in progress, parked and unpublished.
+The measurement is marked incomplete while any delta is unknown or not measured or a new key has no known size, so a complete measurement always has a known byte total; a deliberate `--measure-limit` leaves the exit code at 0.
+A delta that could not be read exits 2, as an `unchecked` row does: the pass could not see.
+Reading is sequential, with a progress line every ten mirrors, and stops after five consecutive failed reads to reach OpenNeuro (a network error, a timeout or an HTTP error): the rest are recorded as unknown with that reason, because OpenNeuro being down would otherwise cost the timeout on every remaining mirror.
+A listing that OpenNeuro answered but that is unusable for one dataset (a snapshot deleted upstream, no root `dataset_description.json`, errors beside the data) marks only that mirror unknown and does not count toward the stop.
+Only a complete pass is measured: one that threw, was refused, stopped at `--max-pages`, saw the population change, had an `unchecked` row or carried `errors[]` may hold a partial set of stale mirrors, and totaling a part of the fleet would read as the whole.
+Such a pass reports `measurement` as null with the reason and keeps its own exit code.
+The measurement is read-only: it writes nothing to NEMAR or to OpenNeuro, and the only requests it sends OpenNeuro are read queries.

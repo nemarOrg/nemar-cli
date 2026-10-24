@@ -19,6 +19,7 @@
  * their own state; none is "current" and none is "not stale".
  */
 
+import { annexKeyFieldSize } from "./annex-key.js";
 import {
   type SourceVersionRow,
   isSourceTag,
@@ -509,4 +510,232 @@ export function countUpstreamStates(rows: readonly UpstreamStatusRow[]): Upstrea
   }
   const stale = STALE_STATES.reduce((sum, s) => sum + states[s], 0);
   return { states, anomalies, stale, probably_stale: probablyStale };
+}
+
+// ----------------------------------------------------------------------------
+// The measurement (Phase 4c): what a re-pull would carry
+// ----------------------------------------------------------------------------
+
+/** One entry of an OpenNeuro snapshot's recursive file listing (`DatasetFile`). */
+export interface SnapshotFile {
+  filename: string;
+  /** The git-annex key for an annexed file, the blob SHA for a git file. */
+  id: string;
+  size: number | null;
+  annexed: boolean;
+  directory?: boolean;
+}
+
+/**
+ * What changed between two snapshots of one dataset, as OpenNeuro lists them. It is UPSTREAM'S
+ * delta between the two tags, not NEMAR's tree: NEMAR's corrections, its scrubs and its annex
+ * policy are not in it (ADR 0111, Phase 4c amendment).
+ */
+export interface SnapshotDelta {
+  added: number;
+  changed: number;
+  deleted: number;
+  annexed_added: number;
+  annexed_changed: number;
+  annexed_deleted: number;
+  /** Any annexed file was added, changed or deleted. */
+  data_changing: boolean;
+  /** Distinct annex keys the target snapshot has and the source snapshot does not. */
+  new_keys: number;
+  /**
+   * Bytes of the new keys, from the size each key declares in its fields, falling back to the
+   * listing's size. Null when any new key has neither: an unknown size is never a zero.
+   */
+  bytes_to_copy: number | null;
+}
+
+/**
+ * Summarize the change from the `from` listing to the `to` listing.
+ *
+ * Directory entries are skipped. Files match by `filename`; `changed` means a different `id`
+ * (a content change, whatever the size). An annexed count follows the side that holds the file:
+ * the `to` entry for an addition, the `from` entry for a deletion, and EITHER side for a change,
+ * so a file moving between git and the annex counts as annexed.
+ */
+export function summarizeSnapshotDelta(
+  from: readonly SnapshotFile[],
+  to: readonly SnapshotFile[],
+): SnapshotDelta {
+  const before = new Map<string, SnapshotFile>();
+  for (const f of from) if (!f.directory) before.set(f.filename, f);
+  const after = new Map<string, SnapshotFile>();
+  for (const f of to) if (!f.directory) after.set(f.filename, f);
+
+  let added = 0;
+  let changed = 0;
+  let deleted = 0;
+  let annexedAdded = 0;
+  let annexedChanged = 0;
+  let annexedDeleted = 0;
+  for (const [name, f] of after) {
+    const old = before.get(name);
+    if (old === undefined) {
+      added++;
+      if (f.annexed) annexedAdded++;
+    } else if (old.id !== f.id) {
+      changed++;
+      if (f.annexed || old.annexed) annexedChanged++;
+    }
+  }
+  for (const [name, f] of before) {
+    if (!after.has(name)) {
+      deleted++;
+      if (f.annexed) annexedDeleted++;
+    }
+  }
+
+  const known = new Set<string>();
+  for (const f of before.values()) known.add(f.id);
+  const newKeys = new Map<string, SnapshotFile>();
+  for (const f of after.values()) {
+    if (f.annexed && !known.has(f.id) && !newKeys.has(f.id)) newKeys.set(f.id, f);
+  }
+  let bytes: number | null = 0;
+  for (const [key, f] of newKeys) {
+    // The strict field parser: a free-text name such as `WORM-s5-m17--a-s9--b` must not be read as
+    // 9 bytes (the looser `annexKeyDeclaredSize` does). Without a size field, the listing's size.
+    const size = annexKeyFieldSize(key) ?? f.size;
+    if (size === null) {
+      bytes = null;
+      break;
+    }
+    bytes += size;
+  }
+
+  return {
+    added,
+    changed,
+    deleted,
+    annexed_added: annexedAdded,
+    annexed_changed: annexedChanged,
+    annexed_deleted: annexedDeleted,
+    data_changing: annexedAdded + annexedChanged + annexedDeleted > 0,
+    new_keys: newKeys.size,
+    bytes_to_copy: bytes,
+  };
+}
+
+const DAY_MS = 86_400_000;
+
+/** How many re-pulls (and so DOIs) the fleet would mint, under three readings of upstream churn. */
+export interface DoiVolume {
+  window_days: number;
+  /** Mirrors in `current` or a `stale_*` state: a known tag and a snapshot list were read. */
+  mirrors_counted: number;
+  /**
+   * Mirrors left out, by state, zero-filled. A mirror in a state with no snapshot comparison
+   * (unknown, not_examined, unchecked, anomaly, and so on) is left out under its own state. A
+   * `current` or stale row that somehow carries no upstream data would also land here under its
+   * state; the classifier always sets it, so those two stay 0 in practice.
+   */
+  excluded: Record<UpstreamState, number>;
+  /** One re-pull straight to the latest tag for each stale mirror. */
+  catch_up: number;
+  /** Upstream snapshots created in the window, every dataset's first excluded: one re-pull each. */
+  per_snapshot: number;
+  /** The same snapshots, at most one counted per dataset per `minGapDays`. */
+  at_most_every_30_days: number;
+  /** The most of those snapshots created on one UTC date. */
+  busiest_day: number;
+  /** Each figure doubled: a re-pull with corrections also mints an N.0.1 DOI. */
+  upper_bound_with_patches: {
+    catch_up: number;
+    per_snapshot: number;
+    at_most_every_30_days: number;
+  };
+  /** Snapshots whose `created` did not parse: left out of the figures above, never read as old. */
+  snapshots_with_unreadable_dates: number;
+  /** Snapshots dated after `now`: left out of the figures above, counted so they cannot vanish. */
+  snapshots_dated_in_the_future: number;
+}
+
+/** A snapshot's creation time in ms, NaN when absent or unparsable. */
+function createdMs(created: string | null): number {
+  return created === null ? Number.NaN : Date.parse(created);
+}
+
+const COUNTED_STATES: readonly UpstreamState[] = ["current", ...STALE_STATES];
+
+/**
+ * Estimate the DOI volume of re-pulling (ADR 0111). Whether a re-pull carries corrections, and so
+ * a second DOI, is known only from a plan (`nemar admin repull plan`), so the figure is a range:
+ * the base and its doubling. The first snapshot of a dataset (the earliest by creation date) was
+ * the import, not a re-pull, so it is not counted. When any snapshot of a dataset has an
+ * unreadable date the earliest cannot be identified, so none is excluded for that dataset and its
+ * figures can be high by one: the estimate errs high rather than guess which one was the import.
+ */
+export function estimateRepullDoiVolume(
+  rows: readonly UpstreamStatusRow[],
+  nowMs: number,
+  opts: { windowDays?: number; minGapDays?: number } = {},
+): DoiVolume {
+  const windowDays = opts.windowDays ?? 365;
+  const minGapMs = (opts.minGapDays ?? 30) * DAY_MS;
+  const since = nowMs - windowDays * DAY_MS;
+
+  const excluded = Object.fromEntries(UPSTREAM_STATES.map((s) => [s, 0])) as Record<
+    UpstreamState,
+    number
+  >;
+  let counted = 0;
+  let catchUp = 0;
+  let perSnapshot = 0;
+  let spaced = 0;
+  let unreadable = 0;
+  let future = 0;
+  const perDay = new Map<string, number>();
+
+  for (const row of rows) {
+    if (!COUNTED_STATES.includes(row.state) || row.upstream === null) {
+      excluded[row.state]++;
+      continue;
+    }
+    counted++;
+    if ((STALE_STATES as readonly string[]).includes(row.state)) catchUp++;
+
+    const times = row.upstream.snapshots.map((s) => createdMs(s.created));
+    const stamped = times.filter((t) => !Number.isNaN(t)).sort((a, b) => a - b);
+    const unreadableHere = times.length - stamped.length;
+    unreadable += unreadableHere;
+    // Drop the import (the earliest by date); keep everything when a date is unreadable, because
+    // the unreadable one could be the earliest.
+    const candidates = unreadableHere === 0 ? stamped.slice(1) : stamped;
+    let lastCounted = Number.NEGATIVE_INFINITY;
+    for (const t of candidates) {
+      if (t > nowMs) {
+        future++;
+        continue;
+      }
+      if (t <= since) continue;
+      perSnapshot++;
+      const day = new Date(t).toISOString().slice(0, 10);
+      perDay.set(day, (perDay.get(day) ?? 0) + 1);
+      if (t - lastCounted >= minGapMs) {
+        spaced++;
+        lastCounted = t;
+      }
+    }
+  }
+
+  return {
+    window_days: windowDays,
+    mirrors_counted: counted,
+    excluded,
+    catch_up: catchUp,
+    per_snapshot: perSnapshot,
+    at_most_every_30_days: spaced,
+    busiest_day: Math.max(0, ...perDay.values()),
+    upper_bound_with_patches: {
+      catch_up: catchUp * 2,
+      per_snapshot: perSnapshot * 2,
+      at_most_every_30_days: spaced * 2,
+    },
+    snapshots_with_unreadable_dates: unreadable,
+    snapshots_dated_in_the_future: future,
+  };
 }

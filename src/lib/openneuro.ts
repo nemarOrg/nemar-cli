@@ -7,6 +7,7 @@
 
 import { spawn } from "bun";
 import { isOpenNeuroTag } from "../../shared/openneuro-tag.js";
+import type { SnapshotFile } from "../../shared/upstream-staleness.js";
 import { isAwsCliAvailable } from "./aws-cli.js";
 import { type RemoteFile, downloadFiles } from "./file-download.js";
 
@@ -95,6 +96,126 @@ export async function fetchOpenNeuroLatestTag(
     return { tag: null, reason: "OpenNeuro names no snapshot for this dataset yet" };
   }
   return { tag: null, reason };
+}
+
+/** Two snapshots' file listings, or why they could not be read. */
+export type SnapshotFilePairLookup =
+  | { ok: true; from: SnapshotFile[]; to: SnapshotFile[] }
+  | {
+      ok: false;
+      error: string;
+      /**
+       * True when OpenNeuro was not reached or did not answer (network error, timeout, HTTP error,
+       * a body that is not JSON): the only failures that suggest an outage. False when it
+       * answered and the answer is unusable for this dataset.
+       */
+      transport: boolean;
+    };
+
+const SNAPSHOT_FILE_PAIR_QUERY = `query SnapshotFilePair($ds: ID!, $from: String!, $to: String!) {
+  a: snapshot(datasetId: $ds, tag: $from) { files(recursive: true) { id filename size annexed directory } }
+  b: snapshot(datasetId: $ds, tag: $to) { files(recursive: true) { id filename size annexed directory } }
+}`;
+
+/**
+ * A listing as OpenNeuro sends it, or the reason it is not one. A listing that cannot be a BIDS
+ * snapshot is a failure, never a delta: no non-directory entry (an empty tree would make every
+ * file of the other snapshot look added or deleted), no root `dataset_description.json`, a size
+ * that is not a non-negative integer, or two entries with one filename.
+ */
+function readFileList(node: unknown, which: string): SnapshotFile[] | string {
+  const files = isRecord(node) ? node.files : undefined;
+  if (!Array.isArray(files)) return `OpenNeuro sent no file list for the ${which} snapshot`;
+  const out: SnapshotFile[] = [];
+  const seen = new Set<string>();
+  for (const [i, f] of files.entries()) {
+    const ok =
+      isRecord(f) &&
+      typeof f.filename === "string" &&
+      typeof f.id === "string" &&
+      typeof f.annexed === "boolean" &&
+      (f.size === null || (Number.isSafeInteger(f.size) && (f.size as number) >= 0)) &&
+      (f.directory === undefined || f.directory === null || typeof f.directory === "boolean");
+    if (!ok) return `OpenNeuro sent a malformed file entry (${which} snapshot, entry ${i})`;
+    const entry = f as Record<string, unknown>;
+    if (seen.has(entry.filename as string)) {
+      return `OpenNeuro listed ${entry.filename} twice (${which} snapshot, entry ${i})`;
+    }
+    seen.add(entry.filename as string);
+    out.push({
+      filename: entry.filename as string,
+      id: entry.id as string,
+      size: entry.size as number | null,
+      annexed: entry.annexed as boolean,
+      directory: entry.directory === true,
+    });
+  }
+  if (!out.some((f) => !f.directory)) {
+    return `OpenNeuro sent an empty file list for the ${which} snapshot`;
+  }
+  if (!out.some((f) => !f.directory && f.filename === "dataset_description.json")) {
+    return `OpenNeuro sent a file list with no root dataset_description.json for the ${which} snapshot`;
+  }
+  return out;
+}
+
+/**
+ * Read the recursive file listings of two snapshots of one dataset in ONE request (`nemar admin
+ * upstream-status --measure`, ADR 0111 Phase 4c). Listings are large (a few MB for a dataset of
+ * thousands of files), so this runs on the administrator's machine and never in the Worker.
+ *
+ * Never throws, and NEVER turns a failure into an empty list: an empty list would claim that a
+ * snapshot has no files, and the delta computed from it would be a confident wrong number. A
+ * non-2xx, a network error, a timeout, a body that is not JSON, a snapshot OpenNeuro could not
+ * serve, a `files` that is not a list, or a malformed entry each come back as `{ ok: false }`.
+ * The dataset and tags travel only as variables.
+ */
+export async function fetchSnapshotFilePair(
+  ds: string,
+  fromTag: string,
+  toTag: string,
+  options: { graphqlUrl?: string; timeoutMs?: number } = {},
+): Promise<SnapshotFilePairLookup> {
+  let json: unknown;
+  try {
+    const res = await fetch(options.graphqlUrl ?? OPENNEURO_GRAPHQL_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "User-Agent": "nemar-cli" },
+      body: JSON.stringify({
+        query: SNAPSHOT_FILE_PAIR_QUERY,
+        variables: { ds, from: fromTag, to: toTag },
+      }),
+      signal: AbortSignal.timeout(options.timeoutMs ?? 120_000),
+    });
+    if (!res.ok) {
+      return { ok: false, error: `OpenNeuro GraphQL answered HTTP ${res.status}`, transport: true };
+    }
+    json = await res.json();
+  } catch (err) {
+    const why = err instanceof Error ? err.message : String(err);
+    return { ok: false, error: `OpenNeuro GraphQL unreadable (${why})`, transport: true };
+  }
+  const root = isRecord(json) ? json : {};
+  const data = isRecord(root.data) ? root.data : {};
+  const errors = Array.isArray(root.errors) ? root.errors : [];
+  const message = errors
+    .map((e) => (isRecord(e) && typeof e.message === "string" ? e.message : null))
+    .filter((m): m is string => m !== null)
+    .join("; ")
+    .slice(0, 200);
+  // Data beside errors is a partial answer: nothing in it can be trusted as the whole listing.
+  if (errors.length > 0) {
+    return {
+      ok: false,
+      error: `OpenNeuro reported an error${message ? `: ${message}` : ""}`,
+      transport: false,
+    };
+  }
+  const from = readFileList(data.a, fromTag);
+  const to = readFileList(data.b, toTag);
+  if (typeof from !== "string" && typeof to !== "string") return { ok: true, from, to };
+  const why = typeof from === "string" ? from : (to as string);
+  return { ok: false, error: why, transport: false };
 }
 
 function delay(ms: number): Promise<void> {
