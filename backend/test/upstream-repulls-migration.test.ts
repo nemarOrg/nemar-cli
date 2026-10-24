@@ -21,65 +21,20 @@ import {
   TERMINAL_STATUSES,
   TRANSITION_FIELDS,
 } from "../../shared/repull-state";
+import {
+  createRepull,
+  createRepullSchema,
+  isRefusal,
+  listRepulls,
+  transitionRepull,
+} from "../src/services/upstream-repull";
+import type { Bindings } from "../src/types/bindings";
 import { freshDb } from "./helpers/d1";
 import { MIGRATIONS_DIR, applyMigrations, migrationFiles } from "./helpers/miniflare-d1";
+import { DIGEST, type Row, SHA, rowAt } from "./helpers/repull-rows";
 
 const FILE = "0105_upstream_repulls.sql";
 const SQL = readFileSync(join(MIGRATIONS_DIR, FILE), "utf-8");
-
-type Row = Record<string, string | number | null>;
-
-const SHA = "a".repeat(40);
-const TREE = "b".repeat(40);
-const DIGEST = `sha256:${"0".repeat(64)}`;
-
-const TERMINAL = new Set<string>(TERMINAL_STATUSES);
-
-/** A row that satisfies every CHECK for `status`, with `over` laid on top. */
-function rowAt(status: RepullStatus, over: Row = {}): Row {
-  const row: Row = {
-    dataset_id: "xx090123",
-    upstream_ds: "ds004362",
-    from_tag: "1.0.0",
-    to_tag: "1.0.1",
-    attempt: 1,
-    from_version: "1.0.0",
-    to_version: "2.0.0",
-    plan_digest: DIGEST,
-    planner: 1,
-    origin: "administrator",
-    actor_user_id: 1,
-    status,
-    base_sha: SHA,
-    terminal_at: TERMINAL.has(status) ? "2026-10-24 00:00:00" : null,
-  };
-  const after = (s: RepullStatus) => REPULL_STATUSES.indexOf(status) >= REPULL_STATUSES.indexOf(s);
-  const early = ["planned", "abandoned", "failed", "superseded"];
-  if (!early.includes(status)) {
-    row.synth_tree = TREE;
-    row.synth_sha = SHA;
-    row.manifest_digest = DIGEST;
-  }
-  const hasPr = after("pr_open") && !early.includes(status);
-  if (hasPr) Object.assign(row, { branch: "release/v2.0.0", pr_number: 7, head_sha: SHA });
-  if (status === "gates_clear") row.gates_sha = SHA;
-  if (hasPr && after("merged")) row.merge_sha = SHA;
-  if (hasPr && after("released")) row.tag_sha = SHA;
-  const patch = ["patch_synthesized", "patch_gates_clear", "patch_merged", "patch_released"];
-  if (patch.includes(status)) {
-    Object.assign(row, {
-      patch_version: "2.0.1",
-      patch_branch: "release/v2.0.1",
-      patch_pr_number: 8,
-      patch_head_sha: SHA,
-      patch_base_sha: SHA,
-    });
-  }
-  if (status === "patch_gates_clear") row.patch_gates_sha = SHA;
-  if (status === "patch_merged" || status === "patch_released") row.patch_merge_sha = SHA;
-  if (status === "patch_released") row.patch_tag_sha = SHA;
-  return { ...row, ...over };
-}
 
 /** An engine reduced to what the tests ask of it: write a row, read rows, report the refusal. */
 interface Engine {
@@ -381,5 +336,102 @@ describe("what D1 must support for the service", () => {
     ]) {
       expect(names).toContain(n);
     }
+  });
+});
+
+describe("the service on D1", () => {
+  const PLAN = {
+    dataset_id: "xx090123",
+    upstream_ds: "ds099999",
+    from_tag: "1.0.0",
+    to_tag: "1.0.1",
+    from_version: "1.0.0",
+    to_version: "2.0.0",
+    plan_digest: DIGEST,
+    planner: 2,
+    base_sha: SHA,
+    lineage_recordable: true,
+    counts: { delta_paths: 4 },
+  };
+
+  test("create, lineage, audit, transition and the open-slot index behave as on SQLite", async () => {
+    const d1 = await mf.getD1Database("DB");
+    // D1 enforces foreign keys: the dataset's owner and the audit row's actor are a real user.
+    await d1
+      .prepare(
+        "INSERT OR IGNORE INTO users (username, email, password_hash, status, role, email_verified) VALUES ('rplminiflare', 'rplminiflare@example.org', 'x', 'approved', 'admin', 1)",
+      )
+      .run();
+    const user = await d1
+      .prepare("SELECT id FROM users WHERE username = 'rplminiflare'")
+      .first<{ id: number }>();
+    const ADMIN = { id: user?.id ?? 0 };
+    await d1.prepare("DELETE FROM upstream_repulls").run();
+    await d1.prepare("DELETE FROM dataset_versions WHERE dataset_id = 'xx090123'").run();
+    await d1.prepare("DELETE FROM datasets WHERE dataset_id = 'xx090123'").run();
+    await d1.prepare("DELETE FROM audit_log WHERE action LIKE 'repull_%'").run();
+    await d1
+      .prepare(
+        "INSERT INTO datasets (dataset_id, name, owner_user_id, source, source_id) VALUES ('xx090123', 'x', ?, 'openneuro', 'ds099999')",
+      )
+      .bind(ADMIN.id)
+      .run();
+    await d1
+      .prepare(
+        "INSERT INTO dataset_versions (dataset_id, version, doi, source_version, source_version_basis) VALUES ('xx090123', 'v1.0.0', '10.5072/x', '1.0.0', 'doi')",
+      )
+      .run();
+    const env = { DB: d1, ENVIRONMENT: "test" } as unknown as Bindings;
+
+    const made = await createRepull(env, ADMIN, createRepullSchema.parse(PLAN));
+    if (isRefusal(made)) throw new Error(`refused: ${made.code}`);
+    expect(made).toMatchObject({
+      created: true,
+      row: { status: "planned", attempt: 1, counts: { delta_paths: 4 } },
+    });
+
+    const lineage = await d1
+      .prepare(
+        "SELECT source_version, source_version_basis FROM dataset_versions WHERE dataset_id = 'xx090123'",
+      )
+      .first();
+    expect(lineage).toEqual({ source_version: "1.0.0", source_version_basis: "lineage" });
+    const audit = await d1
+      .prepare("SELECT resource_id, details FROM audit_log WHERE action = 'repull_created'")
+      .first<{ resource_id: string; details: string }>();
+    expect(audit?.resource_id).toBe(String(made.row.id));
+    expect(JSON.parse(audit?.details ?? "{}")).toMatchObject({ lineage_rows: 1 });
+
+    const again = await createRepull(env, ADMIN, createRepullSchema.parse(PLAN));
+    expect(again).toMatchObject({ created: false, row: { id: made.row.id } });
+
+    const moved = await transitionRepull(env, ADMIN, made.row.id, {
+      from: "planned",
+      to: "prepared",
+      fields: { synth_tree: SHA, synth_sha: SHA, manifest_digest: DIGEST, counts: { written: 2 } },
+    });
+    if (isRefusal(moved)) throw new Error(`refused: ${moved.code}`);
+    expect(moved.row).toMatchObject({ status: "prepared", counts: { delta_paths: 4, written: 2 } });
+    const stale = await transitionRepull(env, ADMIN, made.row.id, {
+      from: "planned",
+      to: "prepared",
+      fields: {},
+    });
+    expect(stale).toMatchObject({ code: "stale-status", status: 409 });
+    const transitions = await d1
+      .prepare("SELECT COUNT(*) AS n FROM audit_log WHERE action = 'repull_transition'")
+      .first<{ n: number }>();
+    expect(transitions?.n).toBe(1);
+
+    const closed = await transitionRepull(env, ADMIN, made.row.id, {
+      from: "prepared",
+      to: "abandoned",
+    });
+    if (isRefusal(closed)) throw new Error(`refused: ${closed.code}`);
+    expect(closed.row.terminal_at).not.toBeNull();
+    const second = await createRepull(env, ADMIN, createRepullSchema.parse(PLAN));
+    expect(second).toMatchObject({ created: true, row: { attempt: 2 } });
+    const list = await listRepulls(d1, { dataset: "xx090123", open: true });
+    expect(list.map((r) => r.attempt)).toEqual([2]);
   });
 });

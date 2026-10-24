@@ -176,6 +176,13 @@ const EXPECTED_ENTRIES: Record<string, number> = {
   // Upstream staleness report (epic #1046 phase 4a, #1910; ADR 0111): read-only.
   "GET /upstream-status": 1,
 
+  // The record of an upstream re-pull (epic #1046 phase 6, #1912; ADR 0111): create and
+  // transition carry a zod validator beside the handler; the two reads are the handler alone.
+  "POST /repulls": 2,
+  "GET /repulls": 1,
+  "GET /repulls/:id": 1,
+  "POST /repulls/:id/transition": 2,
+
   // Import coverage sweep (issue #1311, epic #1306 phase 3)
   "POST /imports/coverage-sweep": 1,
 
@@ -237,7 +244,7 @@ describe("admin route inventory", () => {
   });
 
   test("entry total is pinned", () => {
-    expect(adminRoutes.routes.length).toBe(156);
+    expect(adminRoutes.routes.length).toBe(162);
   });
 
   // The count pin above can't see a SWAP of the router-level middleware
