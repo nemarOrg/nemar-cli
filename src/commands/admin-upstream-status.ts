@@ -76,6 +76,10 @@ export const upstreamStatusCommand = new Command("upstream-status")
     "With --measure, measure at most this many stale mirrors (the rest are not measured, so the byte total is unknown, shown as at least)",
   )
   .option("--json", "Output one JSON document instead of the report")
+  .addHelpText(
+    "after",
+    "\nEnvironment:\n  NEMAR_OPENNEURO_GRAPHQL_URL  Read --measure file listings from this OpenNeuro GraphQL endpoint (for tests; default https://openneuro.org/crn/graphql)",
+  )
   .action(
     async (options: {
       limit?: string;
