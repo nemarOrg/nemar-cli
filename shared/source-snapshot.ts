@@ -45,6 +45,15 @@ const DS_ID_RE = /^ds\d{6}$/;
  */
 const TAG_RE = /^\d{1,9}(?:\.\d{1,9}){0,3}$/;
 
+/**
+ * True when `tag` is an upstream tag the parser can record (see {@link TAG_RE}). A tag that
+ * fails this (a legacy hex snapshot id, `v2.0.2.`) could never be written to
+ * `dataset_versions.source_version`, so a re-pull to it could never be proved afterwards.
+ */
+export function isSourceTag(tag: unknown): tag is string {
+  return typeof tag === "string" && TAG_RE.test(tag);
+}
+
 /** The `ds` an NEMAR `on######` id mirrors, or null for any other id. */
 export function openNeuroSourceId(datasetId: string): string | null {
   const m = /^on(\d{6})$/.exec(datasetId);

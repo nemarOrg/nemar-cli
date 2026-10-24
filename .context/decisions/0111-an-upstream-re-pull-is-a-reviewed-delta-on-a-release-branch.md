@@ -230,6 +230,7 @@ ADR 0086 exempts `xx` from the identifier screen, so an `xx` re-pull never has a
 - Whether OpenNeuro writes S3 before it pushes to GitHub, and whether the object at a path lags the pinned `versionId`.
 - That upstream's `.log.rmet` records a `versionId` per key, which the design record states and nothing here has checked.
 - That the dataset workflows tag the squash merge of a re-pull pull request as they tag other merges to `main`.
+- Whether the NEMAR installation token is accepted for another organization's public raw files (`OpenNeuroDatasets`), which the staleness report's mirror probe uses; if it is not, every probe reads `stale_unverified` with the reason and the first production run shows it.
 
 ## Receipts
 
@@ -345,3 +346,102 @@ The lead's rulings of 2026-10-23 settle three questions decision 10 left open, a
   The retry engine's park, in both wordings of the annex conflict, is the backstop for a `failed` or `incomplete` row that carries one and reaches the sweep, because each retry fails the same way; an operator restarts the import by hand after fixing the bucket marker.
   The #1320 preflight compares the bucket's `annex-uuid` with the `nemar-s3` uuids the git-annex branch records and refuses a disagreement with `[nemar-annex-uuid-conflict]`, naming both and the recovery.
   It answers unchecked, and prepare goes on as before with a warning, whenever the comparison is incomplete: Step 4b's fetch or merge failed, git cannot read the branch, the bucket cannot be asked, or origin has a git-annex branch that records no `nemar-s3`.
+
+## Amendment 2026-10-24 (#1910): Phase 4a builds the staleness report
+
+Epic #1046, Phase 4, first part.
+Decision 6 says staleness is "computed by its own report" and designs no more than that.
+This section says what the report is, in the words the code uses, and states the readings the decision text left open.
+The decision text above is unchanged.
+The command (`nemar admin upstream-status`), the weekly section and the mirror flag are not built by this part; the next part builds them and records them in its own amendment, and where this section mentions them it says "will".
+
+### What it is
+
+`GET /admin/upstream-status[?limit=N][&after=onNNNNNN][&dataset=onNNNNNN]` is read-only and admin-only.
+It reads D1, asks OpenNeuro for the snapshot lists of the mirrors that need it (a batched GraphQL query, fifty datasets to a request, sequential, ids only as variables), and asks OpenNeuro's GitHub mirror whether a newer tag has arrived.
+The report itself writes nothing to D1, GitHub or S3, sends no mail and files no issue (ADR 0052, ADR 0053, ADR 0055); authentication, which wraps the route, still stamps `tokens.last_used_at`.
+The verdicts are one pure function in `shared/upstream-staleness.ts`, so that the route now, and the command, the weekly report and the later scheduler (all still to be built) will read the same answer.
+A call examines at most 100 mirrors.
+`dataset` together with `after`, a `limit` that is not a positive integer, and a malformed `after` or `dataset` are 400.
+`counts` in a response is for that page; aggregating pages is the caller's job, and the command of the next part will do it over the rows.
+
+### The population
+
+The report covers managed `on######` mirrors: `source = 'openneuro'`, not owned by the system user.
+A withdrawn mirror is excluded from the pass and counted on its own, so the report says how many it left out.
+Any other `on######` row (another `source`, or owned by the system user) is also left out and counted, as `excluded_unmanaged`, so what was left out is said (ADR 0054).
+`xx` fixtures are not covered, and the "Left open" item above stays open for the re-pull phases.
+Every other managed mirror is classified, public or not; the row carries its visibility.
+Design §4 said "public"; the decision text does not, and a private mirror that is behind is still behind.
+
+### The states, and which wins
+
+A row is exactly one of `current`, `stale_ready`, `mirror_lag`, `stale_unverified`, `anomaly`, `unknown`, `not_examined`, `unpublished`, `in_progress`, `parked` or `unchecked`.
+"Stale" is the sum of the three `stale_*` states.
+The first matching step wins:
+
+1. An import is preparing, copying or finalizing and the row is not blocklisted: `in_progress`.
+2. The row is blocklisted, or its import is quarantined or rolled back: `parked`.
+3. `source_id` names another dataset than the id implies: `anomaly` (`source_id_mismatch`).
+4. No NEMAR version exists: `unpublished`.
+5. The highest version was never examined for its tag: `not_examined`.
+6. The highest version's tag is unknown: `unknown`, never current and never stale.
+7. The tag is known and OpenNeuro was not asked or could not answer: `unchecked`.
+8. Upstream is deleted or absent: `anomaly` (`upstream_deleted`, `upstream_absent`).
+9. Upstream has no snapshot: `anomaly` (`upstream_no_snapshot`).
+   A snapshot in upstream's own list was created after the one it calls latest: `anomaly` (`upstream_latest_inconsistent`), before the tags are compared.
+10. The latest tag equals the recorded one: `current`.
+11. The latest tag is not a numeric tag: `anomaly` (`upstream_tag_unparsable`).
+12. The recorded tag is not among upstream's snapshots: `anomaly` (`recorded_tag_not_upstream`).
+13. The latest snapshot was created at the same time as the recorded one (`upstream_older`; an earlier latest is already `upstream_latest_inconsistent`, because the recorded tag is in the list), or either date is unreadable: `anomaly` (`upstream_older`, `upstream_dates_unreadable`).
+    The latest's own date is tried first and its entry in the list second; if neither reads, the row is `upstream_dates_unreadable` before the tags are compared, so an undated latest never reads `current`.
+14. Otherwise upstream is newer, and the GitHub mirror decides between `stale_ready`, `mirror_lag` and `stale_unverified`.
+
+A row that cannot be compared (steps 1 to 5) is never sent to OpenNeuro.
+`unchecked` is the state of a mirror whose answer could not be had, and it is never rendered as current or as not stale (ADR 0053, ADR 0054).
+A partial GraphQL response (a node and an error for the same alias), a null latest beside a non-empty list, and an error message that is not "Dataset <that id> does not exist." are each an `unchecked` read, never a verdict.
+
+### Upstream's creation order decides, not the number
+
+Design §4 said tags compare numerically, and the decision text does not fix an order.
+Real histories contradict the numeric reading: `ds000001` has snapshots `00006` (2018) and `1.0.0` (2020), and `1.0.0` is numerically smaller.
+Ordering by number would call a mirror recorded at `00006` an anomaly while it is stale.
+So the recorded tag must appear in upstream's snapshot list, and upstream's latest is newer when its creation time is later.
+`compareSourceTags` is not used for the verdict.
+A latest tag that the Phase 2 parser could never record (`57fecb0c...` is a legacy snapshot id; `v2.0.2.` is a negative example of the parser's tag pattern) is an anomaly, because a re-pull to it could never be proved afterwards by a recorded `source_version`.
+Known limit: a tag re-created upstream under the SAME tag (OpenNeuro's `ds003645` 2.1.0 carries a creation time later than its first sighting) cannot be detected from the tag, so the mirror reads `current` or `stale` by tag alone.
+The dry-run plan of the re-pull phase compares trees and sees it.
+
+### Mirror lag is proved, not inferred
+
+The report reads `dataset_description.json` of `OpenNeuroDatasets/<ds>` at the newer tag through the authenticated raw CDN.
+A hit is `stale_ready`.
+A 404 is `mirror_lag` only if a control read of the same repository at `HEAD`, with the same credential, succeeds: the same kind of proof as the backfill's for a 404 (Phase 2 amendment), read at `HEAD` because OpenNeuro's default branch name varies, where the backfill reads `main`.
+A 200 counts only when its body is a JSON object, so an HTML page served with a 200 is `stale_unverified`, for the tag read and for the control read alike.
+An error, a 404 on the control too, or a call whose probe budget ran out is `stale_unverified` with the reason, and is still counted stale.
+Two known limits: a tag whose root holds no `dataset_description.json` would read as lag, which is not seen in practice; and the raw CDN caches a 404 for about five minutes, so a tag that arrived minutes ago can read `mirror_lag`, and a re-check inside that window will not change it.
+
+### Probably stale, for display only
+
+An `unknown` row is compared with upstream by date only to say "probably stale": upstream's latest snapshot was created after the mirror's highest NEMAR version row.
+It is a separate count, never added to stale and never recorded as a tag (decision 4).
+
+### No cron, and nothing is filed
+
+Nothing acts on staleness before the scheduled re-pull, and ADR 0053 says an alarm needs outstanding work.
+The report runs on demand.
+The Monday report will carry a counts-only section (the next part builds it), which will be the unconditional heartbeat ADR 0054 asks for.
+The argument against a daily job holds once that section lands: until then nothing sends the number anywhere, and the on-demand route is the only reader.
+A daily job would spend subrequests on the busiest tick and produce a number nobody receives.
+The scheduler of the later phase will call the same service.
+
+### Two points the decision text should have made
+
+"In-progress" can mean only `import_jobs` today.
+When `upstream_repulls` exists, a non-terminal row there must join step 1, and candidates for a re-pull come from `stale_ready` alone.
+A report with stale mirrors is a successful report.
+The route answers 502 only when at least one row on the page needed an OpenNeuro verdict (a known tag) and every such row ended `unchecked`.
+A page of only unknown-tag rows with OpenNeuro down is 200 with those rows `unknown`, their reasons naming the failure, and a partial failure is 200 with some rows `unchecked` and the problem in `errors[]`.
+A per-alias OpenNeuro read failure on an UNKNOWN-tag row leaves the row `unknown`, with `unchecked` at 0 and `errors[]` empty (`errors[]` carries batch-level failures only), so the command must not read unknown rows as verified clean: they are by definition not compared, and the reason text names the failure.
+So a 200 does not prove every mirror was compared: the command of the next part must treat a 200 whose rows include `unchecked`, or whose `errors[]` is not empty, as "could not see" and exit 2, not only a 502.
+
