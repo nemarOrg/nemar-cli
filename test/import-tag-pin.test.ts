@@ -26,6 +26,7 @@ import {
 } from "../src/lib/import-openneuro";
 import { fetchOpenNeuroLatestTag } from "../src/lib/openneuro";
 import { makeScratch, run } from "./helpers/annex-repo";
+import { useTestGitIdentity } from "./helpers/git-identity";
 import {
   RECORDING,
   type TaggedUpstream,
@@ -42,8 +43,10 @@ let clones = 0;
 let graphql: ReturnType<typeof Bun.serve>;
 let graphqlAnswer: () => Response = () => new Response("unavailable", { status: 503 });
 let graphqlRequests = 0;
+let restoreGitIdentity: () => void;
 
 beforeAll(async () => {
+  restoreGitIdentity = useTestGitIdentity();
   upstream = await buildTaggedUpstream(scratch.root);
   graphql = Bun.serve({
     port: 0,
@@ -63,6 +66,7 @@ beforeEach(() => {
 afterAll(() => {
   graphql.stop(true);
   scratch.cleanup();
+  restoreGitIdentity();
 });
 
 function cloneDir(): string {

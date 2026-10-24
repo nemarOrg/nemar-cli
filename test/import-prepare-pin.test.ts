@@ -29,6 +29,7 @@ import {
   sourceDatasetEntry,
 } from "../src/lib/import-openneuro";
 import { makeScratch, run } from "./helpers/annex-repo";
+import { useTestGitIdentity } from "./helpers/git-identity";
 import { buildTaggedUpstream } from "./helpers/tagged-upstream";
 
 const DS = "ds999990";
@@ -39,8 +40,10 @@ let backend: ReturnType<typeof Bun.serve>;
 let graphql: ReturnType<typeof Bun.serve>;
 /** What the version list answers for the dataset: released when it holds a version. */
 let versions: unknown[] = [];
+let restoreGitIdentity: () => void;
 
 beforeAll(() => {
+  restoreGitIdentity = useTestGitIdentity();
   backend = Bun.serve({
     port: 0,
     fetch: async (req) => {
@@ -64,6 +67,7 @@ afterAll(() => {
   backend.stop(true);
   graphql.stop(true);
   scratch.cleanup();
+  restoreGitIdentity();
 });
 
 async function git(dir: string, ...args: string[]): Promise<string> {

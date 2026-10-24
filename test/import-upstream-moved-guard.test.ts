@@ -24,6 +24,7 @@ import {
   sourceDatasetEntry,
 } from "../src/lib/import-openneuro";
 import { makeScratch, run } from "./helpers/annex-repo";
+import { useTestGitIdentity } from "./helpers/git-identity";
 import {
   type TaggedUpstream,
   UPSTREAM_ID,
@@ -36,8 +37,10 @@ const scratch = makeScratch("import-upstream-moved");
 let upstream: TaggedUpstream;
 let graphql: ReturnType<typeof startUnavailableGraphql>;
 let n = 0;
+let restoreGitIdentity: () => void;
 
 beforeAll(async () => {
+  restoreGitIdentity = useTestGitIdentity();
   upstream = await buildTaggedUpstream(scratch.root);
   graphql = startUnavailableGraphql();
 }, 60_000);
@@ -45,6 +48,7 @@ beforeAll(async () => {
 afterAll(() => {
   graphql.stop();
   scratch.cleanup();
+  restoreGitIdentity();
 });
 
 async function git(dir: string, ...args: string[]): Promise<string> {

@@ -9,17 +9,36 @@
  * `git rev-parse` could take for an abbreviated commit).
  */
 
-import { afterAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { isOpenNeuroTag } from "../shared/openneuro-tag";
 import { cloneOpenNeuroAtTag, openNeuroMirrorUrl } from "../src/lib/import-openneuro";
 import { fetchOpenNeuroLatestTag } from "../src/lib/openneuro";
 import { makeScratch, run } from "./helpers/annex-repo";
+import { useTestGitIdentity } from "./helpers/git-identity";
 
 const DATASET = "ds000001";
 const scratch = makeScratch("import-tag-pin-live");
+let restoreGitIdentity: () => void;
 
-afterAll(() => scratch.cleanup());
+// The clone runs `git annex init`, which commits; the integration runner has no git identity.
+beforeAll(() => {
+  restoreGitIdentity = useTestGitIdentity();
+});
+
+afterAll(() => {
+  scratch.cleanup();
+  restoreGitIdentity();
+});
+
+/**
+ * A clone destination of its own for each attempt: the integration tier reruns a failed test
+ * (`--retry`), and a rerun into the directory a failed attempt left would fail on that instead.
+ */
+function freshCloneDir(name: string): string {
+  return join(mkdtempSync(join(scratch.root, `${name}-`)), DATASET);
+}
 
 /** The commit a tag names on the mirror, peeled, as git ls-remote reports it. */
 async function mirrorTagCommit(tag: string): Promise<string | null> {
@@ -39,7 +58,7 @@ describe("the latest tag comes from OpenNeuro, and the clone is at it", () => {
   }, 60_000);
 
   test("with no tag, cloneOpenNeuroAtTag clones the mirror at OpenNeuro's latest", async () => {
-    const dir = join(scratch.root, "latest");
+    const dir = freshCloneDir("latest");
     const pinned = await cloneOpenNeuroAtTag(DATASET, dir);
     expect(pinned.tag).toBe(pinned.latestTag as string);
     const expected = await mirrorTagCommit(pinned.tag);
@@ -48,7 +67,7 @@ describe("the latest tag comes from OpenNeuro, and the clone is at it", () => {
   }, 120_000);
 
   test("a legacy hex tag is resolved as a tag", async () => {
-    const dir = join(scratch.root, "legacy");
+    const dir = freshCloneDir("legacy");
     const tag = "57fecb0ccce88d000ac17538";
     const pinned = await cloneOpenNeuroAtTag(DATASET, dir, { tag });
     expect(pinned.commit).toBe((await mirrorTagCommit(tag)) as string);
