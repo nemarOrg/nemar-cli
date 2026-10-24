@@ -220,3 +220,26 @@ describe("selectPublishReadmes, the publish step's rule over a tree", () => {
     expect(selectPublishReadmes([bare]).remove[0]).toBe(bare);
   });
 });
+
+describe("the publish step calls the shared rule", () => {
+  // The orchestrator's update_readme step reads GitHub, so no test drives it end to end. This
+  // pins that it takes its README selection from the shared rule and keeps no list of its own,
+  // so the planner cannot model a rule the step no longer follows.
+  const source = readFileSync(
+    join(import.meta.dir, "../backend/src/services/publication-orchestrator.ts"),
+    "utf8",
+  );
+
+  test("imports selectPublishReadmes and reads contentSource and remove from it", () => {
+    expect(source).toContain(
+      'import { selectPublishReadmes } from "../../../shared/standard-edits/readme.js";',
+    );
+    expect(source).toContain("const readmes = selectPublishReadmes(tree);");
+    expect(source).toContain("const contentSource = readmes.contentSource;");
+    expect(source).toContain("for (const readme of readmes.remove) {");
+  });
+
+  test("names no README spelling of its own", () => {
+    expect(source).not.toMatch(/"README\.(rst|txt)"/);
+  });
+});
