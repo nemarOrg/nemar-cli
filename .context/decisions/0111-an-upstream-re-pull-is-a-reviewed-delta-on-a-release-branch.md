@@ -510,6 +510,7 @@ The first matching step wins:
 12. The recorded tag is not among upstream's snapshots: `anomaly` (`recorded_tag_not_upstream`).
 13. The latest snapshot was created at the same time as the recorded one (`upstream_older`; an earlier latest is already `upstream_latest_inconsistent`, because the recorded tag is in the list), or either date is unreadable: `anomaly` (`upstream_older`, `upstream_dates_unreadable`).
     The latest's own date is tried first and its entry in the list second; if neither reads, the row is `upstream_dates_unreadable` before the tags are compared, so an undated latest never reads `current`.
+    *Annotated 2026-10-24 (Phase 6b): any other snapshot in the list whose date is unreadable (`list_undated`) is `upstream_dates_unreadable` too, before the times decide, because it could be the newest; see the Phase 6b amendment.*
 14. Otherwise upstream is newer, and the GitHub mirror decides between `stale_ready`, `mirror_lag` and `stale_unverified`.
 
 A row that cannot be compared (steps 1 to 5) is never sent to OpenNeuro.
@@ -824,8 +825,10 @@ It makes two corrections, to decision 1's ledger rule and to the Phase 5 amendme
 
 Decision 2 says the scrub runs on the delta paths only.
 `scrubImportedTree` takes the paths it may read and change (`scope`), and a recording, a JSON file or a scans table outside them is neither read nor changed; its counts see only the scope.
-The scope must name every path changed since `HEAD`, staged or not, or the scrub refuses (`scope-incomplete`) before it reads anything, because a changed path it does not read would reach the commit unscrubbed.
-A re-pull never commits a header change whose provenance file lacks ADR 0085's sentence: when a header in the scope will change and a provenance file (`sourcedata/sourcedata_provenance.json` or its README) lies outside the scope, the scrub refuses (`provenance-out-of-scope`) before a byte is downloaded, and the caller puts both files in the scope (the lead's ruling of 2026-10-24, which settles the owner question this slice first left open).
+The scope must name every path changed since `HEAD`, staged or not, and every untracked path `.gitignore` does not exclude, or the scrub refuses (`scope-incomplete`) before it reads anything, because a changed path it does not read would reach the commit unscrubbed.
+So a re-pull's scope holds every delta path it wrote, every one it deleted, and every `.gitattributes` the annex policy edited (ADR 0060).
+A re-pull never commits a header change whose provenance file lacks its sentence (ADR 0085's for a scrub, ADR 0091's for a date): when a header in the scope will change and a provenance file (`sourcedata/sourcedata_provenance.json` or its README) lies outside the scope, the scrub refuses (`provenance-out-of-scope`) after the ranged header reads that decide it and before any recording is downloaded, and the caller puts both files in the scope (the lead's ruling of 2026-10-24, which settles the owner question this slice first left open).
+The rule counts a planned change, a date-only one included; a date-only recording whose download would later have failed, leaving its header as it was, is refused all the same, the safe side.
 A provenance file that is not a JSON object is counted on its own (`provenance_malformed`), apart from one that is not a regular file (`provenance_not_annotated`); the importer warns on either, as it did.
 The caller names each annexed recording's source (`sourceOf`) in place of the importer's whereis map: a source, a key NEMAR already holds, whose bytes are already in NEMAR's bucket where the identifier screen reads them (ADR 0086, ADR 0088), so it is counted and not read again, or none, which is counted.
 A source can be one version of an S3 object, read at its path-style URL with every segment encoded and `?versionId=` kept, for the header and for the download, so the scrub reads the bytes decision 8's pinned copy will copy; the rules that the object is the key's size and hashes to it are unchanged.
@@ -841,7 +844,9 @@ The delta scrub writes its own word, `repull-scrubbed`, before the one commit, s
 The rule, corrected: a recorded correction is a line whose `action` is neither `import-scrubbed` nor `repull-scrubbed`.
 A `repull-scrubbed` line holds nothing: a re-import's history hold (ADR 0089) still reads `import-scrubbed` lines only.
 ADR 0085's fresh-clone proof tolerates a commit that appends `repull-scrubbed` lines beside other files, as it tolerates the importer's, because the re-pull's commit is one commit; without that, every re-pulled dataset would fail `ledger-commit-not-alone` for good.
-It does so only when that commit carries decision 2's `Upstream-Snapshot:` and `Repull-Plan:` trailers and edits no earlier line, so the merge that lands N.0.0 on `main` must keep both trailers in its commit message.
+It does so only when that commit carries decision 2's `Upstream-Snapshot:` and `Repull-Plan:` trailers, as git reads trailers (the message's last paragraph), and edits no earlier line, so the merge that lands N.0.0 on `main` must end its commit message with both.
+GitHub's default squash message lists each commit of the pull request as a bullet, so the re-pull commit's trailers end up mid-message; the proof reads no trailers in such a merge and fails the dataset with `ledger-commit-not-alone`.
+Phase 6f writes the squash message itself so that it ends with both trailers.
 Neither scrub word can be typed: `ledger-cli.ts append` refuses `import-scrubbed` and `repull-scrubbed`, which only the scrub that wrote them, in the commit that carries what it scrubbed, may write.
 Decision 10's retarget of an unreleased import still refuses any line but the importer's own, `repull-scrubbed` included.
 A re-pull needs a released mirror, which the guard refuses before that rule runs, so the line should never meet it; if it does, dropping a record of a scrub is not the retarget's to decide, which is the safe direction.

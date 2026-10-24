@@ -430,7 +430,8 @@ export function classifyMirror(
   }
   // 9b to 13 read upstream's creation order through the one helper, in this order: an unreadable
   //     latest date and a latest the list contradicts come before the tags are compared, so an
-  //     undated latest never reads `current`.
+  //     undated latest never reads `current`; after them an undated recorded tag, then any other
+  //     undated snapshot (`list_undated`), then the times.
   const order = upstreamSnapshotOrder(latest, up.snapshots, recorded);
   // 9b. Neither the latest's own date nor its entry in the list reads: nothing below can be
   //     trusted (a row would read `current` beside a later snapshot), so that is an anomaly
@@ -474,7 +475,9 @@ export function classifyMirror(
       "recorded_tag_not_upstream",
     );
   }
-  // 13. Compare creation times, never the numbers (see the module comment).
+  // 13. Compare creation times, never the numbers (see the module comment). An unreadable date of
+  //     the recorded tag, or of any other snapshot in the list (`list_undated`, which could be the
+  //     newest), is `upstream_dates_unreadable` before the times decide.
   if (order.kind === "recorded_undated") {
     return settle(
       row,
