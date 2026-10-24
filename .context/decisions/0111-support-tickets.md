@@ -69,6 +69,9 @@ A reply whose outcome is unknown (a timeout, an internal error) records an event
 A reply that was sent but could not be recorded writes the same kind of event, best effort, and the failure to write any such event never hides the error.
 A header the sender refuses (an over-long or malformed value) is a certain non-delivery, and `References` is trimmed from its oldest end so a long thread still fits.
 A reply may carry an idempotency key, stored unique per ticket before the send, because the default assignee may be an agent that retries after a lost response: a repeat of a sent reply returns its stored outcome without sending, a repeat while one is in flight is refused as in progress, and a repeat after an unknown outcome is refused and never re-sent.
+A key still pending after 120 seconds is treated as unknown, so a key left pending by a crash becomes permanently unknown: a retry needs a new key, and nothing is re-sent under the old one.
+Key rows are kept until their ticket is deleted.
+`References` keeps the thread's first Message-ID, the one being replied to and the newest ids that fit.
 
 **Retention.**
 Raw messages live in R2 for two years in production and 30 days on staging, by bucket lifecycle rule.
