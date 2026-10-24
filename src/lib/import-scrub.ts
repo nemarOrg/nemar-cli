@@ -190,10 +190,16 @@ export const MAX_JSON_BYTES = 1024 * 1024;
 /** Inline scans tables over this are not edited, and keep their dates. */
 export const MAX_SCANS_TABLE_BYTES = 8 * 1024 * 1024;
 
-const RECORDING = /\.(edf|bdf)$/i;
-const JSON_FILE = /\.json$/i;
+// The paths the scrub reads, by name alone. Exported so the upstream re-pull's planner (ADR 0111)
+// forecasts the scrub over the same paths it will run on. None has a `g` or `y` flag, so `test`
+// keeps no state between calls.
+
+/** A recording whose header the scrub reads and may patch: EDF or BDF, any case. */
+export const RECORDING_PATH = /\.(edf|bdf)$/i;
+/** An inline JSON document whose identifier-keyed values the scrub blanks. */
+export const JSON_PATH = /\.json$/i;
 /** The tables the screen reads `acq_time` from (`identifier-fleet-lib.ts`), spelled the same way. */
-const SCANS_TABLE = /_scans\.tsv$/;
+export const SCANS_TABLE_PATH = /_scans\.tsv$/;
 
 // ---------------------------------------------------------------------------------------
 // Reading upstream
@@ -782,7 +788,7 @@ async function scrubTree(input: ImportScrubInput): Promise<ImportScrubResult> {
   const counts = zeroCounts();
   const tracked = [...(await listTrackedPaths(datasetPath))].sort();
   const annexedKeys = await listAnnexedKeys(datasetPath);
-  const recordings = tracked.filter((p) => RECORDING.test(p));
+  const recordings = tracked.filter((p) => RECORDING_PATH.test(p));
   counts.recordings = recordings.length;
 
   // A re-import's tree is the dataset NEMAR already holds, which may be public: no date is changed.
@@ -1094,7 +1100,7 @@ async function scrubTree(input: ImportScrubInput): Promise<ImportScrubResult> {
 
   // 6. Blank identifier-keyed values in inline JSON.
   for (const path of tracked) {
-    if (!JSON_FILE.test(path)) continue;
+    if (!JSON_PATH.test(path)) continue;
     if (annexedKeys.has(path)) {
       counts.json_files_annexed++;
       continue;
@@ -1130,7 +1136,7 @@ async function scrubTree(input: ImportScrubInput): Promise<ImportScrubResult> {
   // (ADR 0091), at the head of the tree, as the JSON above is blanked there.
   if (normalizeDates) {
     for (const path of tracked) {
-      if (!SCANS_TABLE.test(path)) continue;
+      if (!SCANS_TABLE_PATH.test(path)) continue;
       if (annexedKeys.has(path)) {
         counts.scans_tables_annexed++;
         continue;
@@ -1423,7 +1429,9 @@ export async function prepareImportedTreeForCopy(args: {
   } catch (err) {
     throw new ImportScrubRefused("scrub-failed", describeError(err));
   }
-  const recordingKeys = new Set([...tree].filter(([p]) => RECORDING.test(p)).map(([, k]) => k));
+  const recordingKeys = new Set(
+    [...tree].filter(([p]) => RECORDING_PATH.test(p)).map(([, k]) => k),
+  );
   const unread = manifest.items.filter(
     (it) =>
       !isLocallyUploaded(it) && recordingKeys.has(it.key) && !scrub.headerReadKeys.has(it.key),
