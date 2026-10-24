@@ -13,10 +13,11 @@
 
 import { clampUtf8Bytes } from "../lib/utf8";
 import { redactAddressIn, redactRecipient } from "./email";
+import { type TicketNotifyEnv, notifyTicketCreated } from "./ticket-notify";
 import { ingestInboundMessage } from "./tickets";
 
 /** What the handler needs of the Worker's env; structural, like EmailDeliveryEnv. */
-export interface InboundMailEnv {
+export interface InboundMailEnv extends TicketNotifyEnv {
   MAIL_INBOUND?: R2Bucket;
   /** When bound, a stored message is also turned into a ticket (phase 3). */
   DB?: D1Database;
@@ -103,6 +104,10 @@ export async function handleInboundEmail(
     console.log(
       `[inbound-mail] ${key} ${result.outcome} ticket ${result.ticketId} (${result.status})`,
     );
+    // Best effort, and it never throws: a notification failure must not look like an ingest one.
+    if (result.outcome === "created" && !result.spam) {
+      await notifyTicketCreated(env, env.DB, result.ticketId);
+    }
   } catch (error) {
     const text = error instanceof Error ? error.message : String(error);
     console.error(
