@@ -215,7 +215,7 @@ The owner set the models, the budgets and the prompt on 2026-10-16, after a comp
   `attempts` goes up by one when the earlier run could have cost a model call, as for any restart, and the answer's reason word is `redispatched_after_edit`.
   A review that was handed to GitHub and never claimed could not have cost one, so several quick edits before the job starts are still one run.
   A contributor an administrator has blocked is declined again, as for any restart.
-  An administrator's `start --redo` uses this same restart for a finished review (ADR 0093, amendment of 2026-10-24); it never supersedes a running one and begins the count again, as every administrator's start does.
+  An administrator's `start --redo` uses this same restart for a finished review (ADR 0093, amendment of 2026-10-24); it never supersedes a running one and leaves the count of a finished review as it is.
   The restart is tried against the row as it is now.
   If a result or the watchdog's verdict lands between the Worker's read of the row and its write, the write finds nothing to change, and the edit is tried again on a fresh read, up to three times in all, so it is not dropped for having lost that race.
   A reopening and a marking as ready are retried the same way.
