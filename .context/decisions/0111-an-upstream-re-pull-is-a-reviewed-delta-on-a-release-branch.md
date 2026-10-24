@@ -82,9 +82,12 @@ Everything in this section is designed and not yet built.
   `origin` records who opened them: `automatic` for the scheduled path, `administrator` for `nemar admin repull <id> --execute`.
   A second row keyed by version was rejected: created at plan time it would be open beside the N.0.0 row, which the one-non-terminal-row index forbids, and created at `patch_synthesized` it would leave a gap after N.0.0's release in which another re-pull could start before the corrections land.
 - Its states are planned, prepared, copied, registered, pr_open, gates_clear, merged and released, then, when there is an N.0.1, patch_synthesized, patch_gates_clear, patch_merged and patch_released, and finally complete.
-  Abandoned, failed and superseded are terminal, and superseded means a newer tag arrived before N.0.0 merged, so the pull requests are closed and the plan made again from the same `from_tag`.
+  Abandoned, failed, superseded and patch_declined are terminal, and superseded means a newer tag arrived before N.0.0 merged, so its pull request is closed and the plan made again from the same `from_tag`.
 - Every step checks its own end state before it acts, so `--resume` continues from the recorded status.
-  `--abandon` closes the pull requests, deletes the branches and reports the orphaned bytes, and is refused once N.0.0 has merged, because its tag and DOI exist.
+- `--abandon` before N.0.0 merges closes its pull request, deletes its branch, reports the orphaned bytes and ends the row `abandoned`.
+  After N.0.0 has merged, it closes only N.0.1's pull request and branch, when they exist, and ends the row `patch_declined` (terminal).
+  N.0.0 stays released, because its tag and DOI exist, and its corrections remain corrections in the next plan.
+  A step that finds a recorded pull request closed unmerged ends the row the same way: `abandoned` before the N.0.0 merge, `patch_declined` after it.
 - `last_error` is written through `import-error.ts`, so ADR 0051's rule applies.
 - A re-pull never writes `import_jobs`: its sticky row per dataset, its `preparing` reset, its six-hour sweep and the retry engine, which reads only `import_jobs`, would each treat a re-pull as a broken import.
 
@@ -217,7 +220,6 @@ ADR 0086 exempts `xx` from the identifier screen, so an `xx` re-pull never has a
   The App is not exempt, so the review runs; where its ruleset is in force GitHub reports `clean` only once the check passes, and whether a re-pull diff can pass at all is unknown, because ADR 0109 fails a changed `CHANGES` line and holds a replaced recording, both normal in a re-pull.
   Whether `fail`, `uncertain` or `could_not_decide` should also stop the Worker where the ruleset is only a shadow check is not decided; only `declined` does.
 - Whether enrichment commits on the release branch move its head after the screen read it.
-- Not decided: what ends a row whose N.0.1 pull request an administrator closes unmerged; until that is decided, such a row stays non-terminal and blocks the dataset's next re-pull.
 - Whether OpenNeuro writes S3 before it pushes to GitHub, and whether the object at a path lags the pinned `versionId`.
 - That upstream's `.log.rmet` records a `versionId` per key, which the design record states and nothing here has checked.
 - That the dataset workflows tag the squash merge of a re-pull pull request as they tag other merges to `main`.
