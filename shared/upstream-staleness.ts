@@ -298,6 +298,59 @@ function snapshotOf(list: readonly UpstreamSnapshot[], tag: string): UpstreamSna
 }
 
 /**
+ * Where upstream's latest snapshot stands against a recorded tag, by OpenNeuro's creation order
+ * and never by the number (see the module comment). Only `newer` says upstream moved on; every
+ * other answer is a reason the order is not established. This is the one reading of the order:
+ * the staleness verdict ({@link classifyMirror}) and the re-pull plan's `to-tag` check take it from
+ * here. Tags compare exactly, as upstream wrote them.
+ */
+export type SnapshotOrder =
+  /** The latest was created after the recorded tag; `latestCreated` is the date that decided. */
+  | { kind: "newer"; latestCreated: string }
+  /** The latest is the recorded tag. */
+  | { kind: "same" }
+  /** The latest's creation date is unreadable, from itself and from its entry in the list. */
+  | { kind: "latest_undated" }
+  /** A snapshot in upstream's own list was created after the one it calls latest. */
+  | { kind: "latest_inconsistent"; later: string }
+  /** The recorded tag is not among upstream's snapshots, so its place in the history is unknown. */
+  | { kind: "recorded_absent" }
+  /** The recorded tag's creation date is unreadable. */
+  | { kind: "recorded_undated" }
+  /**
+   * Another snapshot in upstream's list has an unreadable creation date: it could be newer than
+   * the latest, so no order between the two tags is definite.
+   */
+  | { kind: "list_undated"; undated: string }
+  /** The latest was created at or before the recorded tag. */
+  | { kind: "not_after" };
+
+export function upstreamSnapshotOrder(
+  latest: UpstreamSnapshot,
+  snapshots: readonly UpstreamSnapshot[],
+  recorded: string,
+): SnapshotOrder {
+  // The latest's creation date: its own, or when that is unreadable its entry in the list.
+  const entryCreated = snapshotOf(snapshots, latest.tag)?.created ?? null;
+  const latestCreated = [latest.created, entryCreated].find(
+    (c): c is string => c !== null && !Number.isNaN(parseMs(c)),
+  );
+  if (latestCreated === undefined) return { kind: "latest_undated" };
+  const latestMs = parseMs(latestCreated);
+  const later = snapshots.find((s) => parseMs(s.created) > latestMs);
+  if (later) return { kind: "latest_inconsistent", later: later.tag };
+  if (latest.tag === recorded) return { kind: "same" };
+  const mine = snapshotOf(snapshots, recorded);
+  if (!mine) return { kind: "recorded_absent" };
+  const mineMs = parseMs(mine.created);
+  if (Number.isNaN(mineMs)) return { kind: "recorded_undated" };
+  const undated = snapshots.find((s) => s.tag !== latest.tag && Number.isNaN(parseMs(s.created)));
+  if (undated) return { kind: "list_undated", undated: undated.tag };
+  if (latestMs <= mineMs) return { kind: "not_after" };
+  return { kind: "newer", latestCreated };
+}
+
+/**
  * One mirror's verdict. The first matching step wins; each is commented where it happens.
  * `up` is what OpenNeuro said and `probe` whether the newer tag has reached the GitHub mirror;
  * both may be absent, which is never read as a verdict.
@@ -375,14 +428,15 @@ export function classifyMirror(
   if (latest === null) {
     return settle(row, "anomaly", `upstream ${row.ds} has no snapshot`, "upstream_no_snapshot");
   }
-  // 9b. The latest's creation date: its own, or when that is unreadable its entry in the list. If
-  //     neither reads, nothing below can be trusted (a row would read `current` beside a later
-  //     snapshot), so that is an anomaly rather than a fall-through.
-  const entryCreated = snapshotOf(up.snapshots, latest.tag)?.created ?? null;
-  const latestCreated = [latest.created, entryCreated].find(
-    (c): c is string => c !== null && !Number.isNaN(parseMs(c)),
-  );
-  if (latestCreated === undefined) {
+  // 9b to 13 read upstream's creation order through the one helper, in this order: an unreadable
+  //     latest date and a latest the list contradicts come before the tags are compared, so an
+  //     undated latest never reads `current`; after them an undated recorded tag, then any other
+  //     undated snapshot (`list_undated`), then the times.
+  const order = upstreamSnapshotOrder(latest, up.snapshots, recorded);
+  // 9b. Neither the latest's own date nor its entry in the list reads: nothing below can be
+  //     trusted (a row would read `current` beside a later snapshot), so that is an anomaly
+  //     rather than a fall-through.
+  if (order.kind === "latest_undated") {
     return settle(
       row,
       "anomaly",
@@ -391,18 +445,16 @@ export function classifyMirror(
     );
   }
   //     And the latest must not disagree with the list: a snapshot created after it.
-  const latestMs = parseMs(latestCreated);
-  const later = up.snapshots.find((s) => parseMs(s.created) > latestMs);
-  if (later) {
+  if (order.kind === "latest_inconsistent") {
     return settle(
       row,
       "anomaly",
-      `upstream says its latest is ${latest.tag}, but ${later.tag} in its own list was created later`,
+      `upstream says its latest is ${latest.tag}, but ${order.later} in its own list was created later`,
       "upstream_latest_inconsistent",
     );
   }
   // 10. The same tag: current.
-  if (latest.tag === recorded) {
+  if (order.kind === "same") {
     return settle(row, "current", `at upstream's latest snapshot, ${recorded}`);
   }
   // 11. A latest tag the parser could never record cannot be the target of a provable re-pull.
@@ -415,8 +467,7 @@ export function classifyMirror(
     );
   }
   // 12. The recorded tag is not one of upstream's snapshots, so its place in the history is unknown.
-  const mine = snapshotOf(up.snapshots, recorded);
-  if (!mine) {
+  if (order.kind === "recorded_absent") {
     return settle(
       row,
       "anomaly",
@@ -424,11 +475,10 @@ export function classifyMirror(
       "recorded_tag_not_upstream",
     );
   }
-  // 13. Compare creation times, never the numbers (see the module comment).
-  const theirs = latestCreated;
-  const mineMs = parseMs(mine.created);
-  const theirsMs = latestMs;
-  if (Number.isNaN(mineMs)) {
+  // 13. Compare creation times, never the numbers (see the module comment). An unreadable date of
+  //     the recorded tag, or of any other snapshot in the list (`list_undated`, which could be the
+  //     newest), is `upstream_dates_unreadable` before the times decide.
+  if (order.kind === "recorded_undated") {
     return settle(
       row,
       "anomaly",
@@ -436,7 +486,17 @@ export function classifyMirror(
       "upstream_dates_unreadable",
     );
   }
-  if (theirsMs <= mineMs) {
+  //     Any other snapshot without a readable date could be newer than the latest, so neither
+  //     `stale` nor `upstream_older` is a definite claim.
+  if (order.kind === "list_undated") {
+    return settle(
+      row,
+      "anomaly",
+      `the creation date of ${order.undated} in upstream's list is unreadable, so the order cannot be established`,
+      "upstream_dates_unreadable",
+    );
+  }
+  if (order.kind === "not_after") {
     return settle(
       row,
       "anomaly",
@@ -444,6 +504,7 @@ export function classifyMirror(
       "upstream_older",
     );
   }
+  const theirs = order.latestCreated;
   // 14. Upstream is newer. Has the tag reached the GitHub mirror?
   const newer = `upstream ${latest.tag} (${theirs.slice(0, 10)}) is newer than the recorded ${recorded}`;
   if (!probe) {

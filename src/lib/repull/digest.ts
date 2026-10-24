@@ -27,6 +27,16 @@ import type { Check } from "./preflight.js";
 export const PLAN_SCHEMA = "nemar.repull-plan";
 export const PLAN_FILE_VERSION = 1;
 
+/**
+ * Which planner made a plan, in its body (`planner`), so in its digest. Execution will refuse (a
+ * later slice builds it) a plan an older planner made rather than read it under rules it was not
+ * made with.
+ *
+ * 1: Phase 5's planner. 2: the enrichment's generated `participants.tsv` is a standard edit, and
+ * a `repull-scrubbed` ledger line is not a recorded correction.
+ */
+export const PLANNER_VERSION = 2;
+
 /** The fields of a plan file that are NOT part of the digested body. */
 export const VOLATILE_FIELDS = [
   "schema",

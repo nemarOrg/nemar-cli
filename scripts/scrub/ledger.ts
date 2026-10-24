@@ -45,6 +45,20 @@ const ACTIONS: ReadonlySet<LedgerEntry["action"]> = new Set([
   // Written by the importer, not by an operator: the tree was scrubbed before its first push, so no
   // version existed yet and `versions` is empty (ADR 0089).
   "import-scrubbed",
+  // Written by an upstream re-pull's delta scrub before the commit, so no history holds the
+  // original (ADR 0111, decision 9): it holds nothing, and it is not a recorded correction.
+  "repull-scrubbed",
+]);
+
+/**
+ * The actions a tool writes itself, in the same commit as the files it scrubbed: the importer's
+ * (ADR 0089) and an upstream re-pull's delta scrub (ADR 0111). An operator cannot type them
+ * (`ledger-cli.ts` refuses both), a re-pull plan does not count them as recorded corrections,
+ * and ADR 0085's fresh-clone proof tolerates their commits under its own rule (`git-lib.ts`).
+ */
+export const SCRUB_ACTIONS: ReadonlySet<LedgerEntry["action"]> = new Set([
+  "import-scrubbed",
+  "repull-scrubbed",
 ]);
 
 /**

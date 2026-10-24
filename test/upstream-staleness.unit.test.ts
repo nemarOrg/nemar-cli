@@ -194,6 +194,23 @@ describe("anomalies a real response cannot produce (built from the recorded shap
     );
   });
 
+  test("upstream_dates_unreadable: another snapshot's date does not parse, so stale is not claimed", () => {
+    // 1.2.0 has no date and could be newer than the stated latest 1.1.0.
+    const up = snapshotRead(
+      [
+        ["1.0.0", "2020-01-01T00:00:00.000Z"],
+        ["1.1.0", "2021-01-01T00:00:00.000Z"],
+        ["1.2.0", null],
+      ],
+      "1.1.0",
+    );
+    const row = classifyMirror(facts({ tag: "1.0.0" }), up);
+    expect([row.state, row.anomaly]).toEqual(["anomaly", "upstream_dates_unreadable"]);
+    expect(row.reason).toContain("1.2.0");
+    // At the stated latest, the mirror is current: no order between two tags is claimed.
+    expect(classifyMirror(facts({ tag: "1.1.0" }), up).state).toBe("current");
+  });
+
   test("upstream_latest_inconsistent: a snapshot in the list was created after the stated latest", () => {
     // A stale-looking or current-looking verdict from `latestSnapshot` alone would be wrong here.
     const up = snapshotRead(

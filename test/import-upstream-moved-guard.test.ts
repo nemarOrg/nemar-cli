@@ -219,6 +219,26 @@ describe("a released mirror whose upstream moved refuses, before anything moves"
     }, 60_000);
   }
 
+  test("the refusal names the re-pull, to OpenNeuro's latest by default or to this tag", async () => {
+    const { bare } = await originRecordedAt(RECORDED.entry);
+    const dir = await reimportClone(bare, "1.0.1");
+    const err = await baseOnOriginMain(dir, {
+      sourceId: UPSTREAM_ID,
+      importTag: "1.0.1",
+      nemarId: NEMAR_ID,
+      released: async () => true,
+    }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ImportRefused);
+    const message = (err as ImportRefused).message;
+    // Quoted, so a tag is never read with the sentence's punctuation. The imported tag may not be
+    // the newer one, so the command's default, OpenNeuro's latest, comes first.
+    expect(message).toContain(
+      `To pull a newer snapshot as the next major, plan an upstream re-pull: \`nemar admin repull plan ${NEMAR_ID}\` (OpenNeuro's latest snapshot by default; \`--to-tag 1.0.1\` names this one).`,
+    );
+    // The repair at the recorded tag is still the last thing said.
+    expect(message.endsWith(`nemar admin import-openneuro ${UPSTREAM_ID} --tag 1.0.0`)).toBe(true);
+  }, 60_000);
+
   test("not knowing whether it is released is a plain failure, never a retarget", async () => {
     const { bare, tip } = await originRecordedAt(RECORDED.doiOnly);
     const dir = await reimportClone(bare, "1.0.1");
@@ -427,6 +447,26 @@ describe("a retarget never drops a recorded privacy correction (ADR 0085)", () =
       expect(await git(bare, "rev-parse", "main")).toBe(tip);
     }
   }, 120_000);
+
+  test("a re-pull's repull-scrubbed line refuses too: only the importer's own line is dropped", async () => {
+    // A re-pull runs only on a released mirror, which the guard refuses before this rule, so an
+    // unreleased import never meets the line. If one does, dropping a record of a scrub is not the
+    // retarget's to decide, which is the safe direction.
+    const { bare } = await originRecordedAt(RECORDED.doiOnly);
+    const tip = await withLedger(bare, [
+      scrubbed,
+      JSON.stringify({ version: 1, action: "repull-scrubbed", counts: {} }),
+    ]);
+    const dir = await reimportClone(bare, "1.0.1");
+    const p = baseOnOriginMain(dir, {
+      sourceId: UPSTREAM_ID,
+      importTag: "1.0.1",
+      nemarId: NEMAR_ID,
+      released: async () => false,
+    });
+    await expect(p).rejects.toThrow(/records 1 line\(s\) in \.nemar\/corrections\.jsonl/);
+    expect(await git(bare, "rev-parse", "main")).toBe(tip);
+  }, 60_000);
 });
 
 describe("a retarget never loses the hold an import scrub put on origin's history (ADR 0089)", () => {

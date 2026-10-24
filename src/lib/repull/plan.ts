@@ -11,7 +11,7 @@
  * scratch directory (deleted on exit, on SIGINT and on SIGTERM, unless `--keep-workdir`) and the
  * plan file the command saves. Every git subprocess, including the git-annex branch reads, the
  * one `aws` call and its own GET and HEAD requests go through `read-only.ts`. Outside it, and
- * read-only: OpenNeuro's latest-snapshot GraphQL query (a POST), and the NEMAR API reads and
+ * read-only: OpenNeuro's snapshot GraphQL query (a POST), and the NEMAR API reads and
  * `gh auth token`, which the command makes before it calls this; `read-only.ts` names them all.
  *
  * It binds the PRE-scrub manifest. The scrubbed new tree cannot be known before the scrub runs, so
@@ -28,7 +28,7 @@ import {
   presentIn,
   readLocationLogsAt,
 } from "../../../scripts/scrub/git/git-lib.js";
-import { LEDGER_REPO_PATH, parseLedgerText } from "../../../scripts/scrub/ledger.js";
+import { LEDGER_REPO_PATH, SCRUB_ACTIONS, parseLedgerText } from "../../../scripts/scrub/ledger.js";
 import { isKeyPresentAtDeclaredSize } from "../../../shared/annex-key.js";
 import type { CanonicalJsonValue } from "../../../shared/neurobagel/canonical-json.js";
 import { type SourceVersionRow, openNeuroSourceId } from "../../../shared/source-snapshot.js";
@@ -37,10 +37,11 @@ import { UPSTREAM_BUCKET } from "../fleet-content-recovery.js";
 import { shouldAnnex } from "../git-annex/policy.js";
 import { uuidsNamedInRemoteLog } from "../git-annex/s3-remote.js";
 import { JSON_PATH, RECORDING_PATH, SCANS_TABLE_PATH } from "../import-scrub.js";
-import { fetchOpenNeuroLatestTag } from "../openneuro.js";
+import { fetchOpenNeuroSnapshots } from "../openneuro.js";
 import { bumpVersion } from "../semver.js";
 import { DESCRIPTION_PATH } from "./description.js";
 import {
+  PLANNER_VERSION,
   PLAN_FILE_VERSION,
   PLAN_SCHEMA,
   type PlanBody,
@@ -182,10 +183,11 @@ export async function planRepull(opts: PlanOptions): Promise<PlanOutcome> {
   // must not fail only at the listing.
   const upEnv = remoteEnv(upUrl, null);
   const nemarEnv = remoteEnv(nemarUrl, opts.github.token);
-  // Which snapshot is upstream's latest is OpenNeuro's answer (its creation order), the one an
-  // import pins to (Phase 3); a read-only GraphQL query, made outside the HTTP guard because it is a
-  // POST. Never throws: not knowing is an answer the to-tag check reads.
-  const latest = await fetchOpenNeuroLatestTag(ds, {
+  // Which snapshot is upstream's latest, and the creation order of all of them, is OpenNeuro's
+  // answer: the latest is the tag an import pins to (Phase 3), and the order is the one the
+  // staleness report reads (Phase 4a). A read-only GraphQL query, made outside the HTTP guard
+  // because it is a POST. Never throws: not knowing is an answer the to-tag check reads.
+  const upstreamSnapshots = await fetchOpenNeuroSnapshots(ds, {
     graphqlUrl: opts.openNeuroGraphqlUrl,
     attempts: 2,
     retryDelayMs: 1_000,
@@ -251,7 +253,12 @@ export async function planRepull(opts: PlanOptions): Promise<PlanOutcome> {
         }
       },
     });
-    const to = toTagCheck({ flag: opts.toTag, mirrorTags, fromTag: from.tag, latest });
+    const to = toTagCheck({
+      flag: opts.toTag,
+      mirrorTags,
+      fromTag: from.tag,
+      upstream: upstreamSnapshots,
+    });
     const blocking = [from.check, to.check].filter(
       (c) => c.status === "refused" && c.code !== "from-tag-not-recorded",
     );
@@ -633,7 +640,7 @@ export async function planRepull(opts: PlanOptions): Promise<PlanOutcome> {
     const n1 = corrections.length > 0 ? bumpVersion(versions.next, "patch") : null;
 
     const body: PlanBody = {
-      planner: 1,
+      planner: PLANNER_VERSION,
       dataset: id,
       upstream: {
         ds,
@@ -782,7 +789,9 @@ async function readLedger(
     return {
       status: "ok",
       lines: lines.length,
-      recordedCorrections: lines.filter((l) => l.action !== "import-scrubbed").length,
+      // A scrub's own line is re-applied as a function; every other line is a recorded correction
+      // (ADR 0111, decision 1, as the Phase 6b amendment corrects it).
+      recordedCorrections: lines.filter((l) => !SCRUB_ACTIONS.has(l.action)).length,
       error: null,
     };
   } catch (err) {

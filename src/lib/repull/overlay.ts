@@ -43,6 +43,7 @@ import {
   bareDoi,
   baseName,
   explainEdit,
+  generatedParticipants,
   gitBlobOid,
   identity,
   isRootPath,
@@ -454,6 +455,14 @@ export async function overlay(input: OverlayInput): Promise<OverlayResult> {
   }
   await input.prepareDeadKeys([...keys].sort());
   const ctx: ExplainContext = { isDeadAtNemar: input.deadAtNemar };
+  // The enrichment's placeholder participants.tsv is a function of a tree's subjects, so each
+  // upstream side explains it with the placeholder of its own tree.
+  const participants = {
+    base: generatedParticipants(base.keys()),
+    theirs: generatedParticipants(theirs.keys()),
+  };
+  const ctxBase: ExplainContext = { ...ctx, generatedParticipants: participants.base };
+  const ctxTheirs: ExplainContext = { ...ctx, generatedParticipants: participants.theirs };
 
   const decisions: PathDecision[] = [];
   const descSides = sides.get(DESCRIPTION_PATH) as { base: Side; theirs: Side; ours: Side };
@@ -600,9 +609,15 @@ export async function overlay(input: OverlayInput): Promise<OverlayResult> {
   for (const p of examined) {
     if (p === DESCRIPTION_PATH || readmePaths.has(p)) continue;
     const s = sides.get(p) as { base: Side; theirs: Side; ours: Side };
-    const eBase: EditName | null = explainEdit(p, s.base, s.ours, ctx);
-    const eTheirs: EditName | null = explainEdit(p, s.theirs, s.ours, ctx);
-    const changed = identity(s.base) !== identity(s.theirs);
+    const eBase: EditName | null = explainEdit(p, s.base, s.ours, ctxBase);
+    const eTheirs: EditName | null = explainEdit(p, s.theirs, s.ours, ctxTheirs);
+    const generated = eBase === "participants-generated" || eTheirs === "participants-generated";
+    // Where upstream ships no participants.tsv at either tag, the generated one changed upstream
+    // when the subjects did: its placeholder is the "file" each side holds.
+    const derived = generated && s.base.kind === "absent" && s.theirs.kind === "absent";
+    const changed = derived
+      ? !sameBytes(participants.base, participants.theirs)
+      : identity(s.base) !== identity(s.theirs);
     const explained = eBase !== null || eTheirs !== null;
     // A side whose bytes a check needed and could not have: not evidence of anything.
     const unread = [s.base, s.theirs, s.ours].some(
@@ -612,7 +627,11 @@ export async function overlay(input: OverlayInput): Promise<OverlayResult> {
     const keep = cls === "keep-ours" || (cls === "take-theirs" && eTheirs !== null);
     const target: Target | { kind: "ours" } = keep
       ? { kind: "ours" }
-      : targetOf(p, s.theirs, { sentences: changesSentences, oursHasBidsignore });
+      : targetOf(p, s.theirs, {
+          sentences: changesSentences,
+          oursHasBidsignore,
+          generatedParticipants: generated ? participants.theirs : null,
+        });
     const sameAsOurs = target.kind !== "ours" && targetEqualsOurs(target, s.ours);
     const delta = target.kind !== "ours" && target.kind !== "absent" && !sameAsOurs;
     const deleted = target.kind === "absent" && s.ours.kind !== "absent";
@@ -650,6 +669,11 @@ export async function overlay(input: OverlayInput): Promise<OverlayResult> {
     fetchRefused: refusedOids.size,
     changesSentences,
   };
+}
+
+/** Two optional buffers hold the same bytes (two absences count as the same). */
+function sameBytes(a: Buffer | null, b: Buffer | null): boolean {
+  return a === null || b === null ? a === b : a.equals(b);
 }
 
 function descBytes(s: Side): { present: boolean; bytes: Buffer | null } {

@@ -11,8 +11,12 @@ import {
   normalizeUpstreamTag,
   sameUpstreamTag,
 } from "../../../shared/openneuro-tag.js";
-import { compareSourceTags, isSourceTag } from "../../../shared/source-snapshot.js";
-import type { LatestTagLookup } from "../openneuro.js";
+import { isSourceTag } from "../../../shared/source-snapshot.js";
+import {
+  type SnapshotOrder,
+  type UpstreamRead,
+  upstreamSnapshotOrder,
+} from "../../../shared/upstream-staleness.js";
 import { bumpVersion, parseVersion } from "../semver.js";
 import { bareVersion } from "./from-tag.js";
 import { readOnlyFetch } from "./read-only.js";
@@ -93,18 +97,24 @@ export function sourceCheck(args: {
 
 /**
  * `to_tag` (ADR 0111, decision 10, and the Phase 4a amendment: upstream's creation order decides,
- * not the number). The default is OpenNeuro's own latest snapshot (`latestSnapshot.tag`, Phase 3's
- * `fetchOpenNeuroLatestTag`, the tag an import pins to). It must have an OpenNeuro tag's shape, be a
- * tag the Phase 2 parser can record (`isSourceTag`, so the re-pull can be proved afterwards), and be
- * on the GitHub mirror; equal to `from_tag` is nothing to pull. A tag that is not OpenNeuro's latest,
- * or a plan made while OpenNeuro could not say, has an order the planner cannot prove, so the check
- * is `unchecked` and the plan is not executable.
+ * not the number). The default is OpenNeuro's own latest snapshot (`latestSnapshot.tag`, the field
+ * Phase 3's import pins its tag to), read with the snapshot list in one answer (`upstream`). It
+ * must have an OpenNeuro tag's shape, be a tag the Phase 2 parser can record (`isSourceTag`, so the
+ * re-pull can be proved afterwards), and be on the GitHub mirror; equal to `from_tag` is nothing to
+ * pull.
+ *
+ * It is `ok` only when it is OpenNeuro's latest AND OpenNeuro's own list shows it created after
+ * `from_tag` (`upstreamSnapshotOrder`, the helper the staleness report's verdict uses). Every
+ * other case is `unchecked` and the plan is not executable: a tag that is not OpenNeuro's latest,
+ * a plan made while OpenNeuro could not answer, and an order the list cannot establish (a date
+ * that does not read, a latest the list contradicts, a `from_tag` the list does not name, or a
+ * latest created no later than it). The numbers are never compared: `00006` comes before `1.0.0`.
  */
 export function toTagCheck(args: {
   flag: string | undefined;
   mirrorTags: string[];
   fromTag: string | null;
-  latest: LatestTagLookup;
+  upstream: UpstreamRead;
 }): { tag: string | null; check: Check } {
   // The tag's shape is Phase 3's (shared/openneuro-tag.ts): one definition for every place a tag
   // crosses a boundary, and `v1.1.0` names the same snapshot as `1.1.0`.
@@ -113,15 +123,25 @@ export function toTagCheck(args: {
     tag,
     check: { name: "to-tag" as const, status: "refused" as const, code, detail },
   });
+  const unverified = (tag: string, detail: string) => ({
+    tag,
+    check: {
+      name: "to-tag" as const,
+      status: "unchecked" as const,
+      code: "order-unverified",
+      detail,
+    },
+  });
   if (raw !== undefined && !isOpenNeuroTag(raw)) {
     return refused("to-tag-malformed", `${raw} is not an OpenNeuro snapshot tag`);
   }
-  const latest = args.latest.tag === null ? null : normalizeUpstreamTag(args.latest.tag);
+  const named = latestOf(args.upstream);
+  const latest = named.tag === null ? null : normalizeUpstreamTag(named.tag);
   const tag = raw !== undefined ? normalizeUpstreamTag(raw) : latest;
   if (tag === null) {
     return refused(
       "latest-unknown",
-      `${args.latest.tag === null ? args.latest.reason : "no tag"}; name one with --to-tag`,
+      `${named.tag === null ? named.reason : "no tag"}; name one with --to-tag`,
     );
   }
   if (!isSourceTag(tag)) {
@@ -136,37 +156,68 @@ export function toTagCheck(args: {
   if (args.fromTag !== null && sameUpstreamTag(tag, args.fromTag)) {
     return refused("nothing-to-pull", `${tag} is the mirrored tag`, tag);
   }
-  if (latest !== null && sameUpstreamTag(tag, latest)) {
-    // OpenNeuro's latest that is not numerically after from_tag may be real creation order
-    // (`00006` before `1.0.0`), or a step backwards (a withdrawn snapshot, or a mirror recorded
-    // ahead of upstream's latest). The tags cannot tell which, so it is unverified, never refused
-    // and never ok.
-    const order = args.fromTag === null ? 1 : compareSourceTags(tag, args.fromTag);
-    if (order === null || order <= 0) {
-      return {
-        tag,
-        check: {
-          name: "to-tag",
-          status: "unchecked",
-          code: "order-unverified",
-          detail: `${tag} is OpenNeuro's latest but not numerically after ${args.fromTag}; whether that is creation order or a step backwards is not proved`,
-        },
-      };
-    }
+  const read = args.upstream;
+  const mirrored = args.fromTag ?? "the mirrored tag (unknown)";
+  if (named.tag === null || latest === null || read.kind !== "snapshot" || read.latest === null) {
+    return unverified(
+      tag,
+      `OpenNeuro could not say which snapshot is latest (${named.tag === null ? named.reason : "no answer"}), so that ${tag} is newer than ${mirrored} is not proved`,
+    );
+  }
+  if (!sameUpstreamTag(tag, latest)) {
+    return unverified(
+      tag,
+      `${tag} is not OpenNeuro's latest snapshot (${latest}), so that it is newer than ${mirrored} is not proved`,
+    );
+  }
+  if (args.fromTag === null) {
+    return unverified(tag, `there is no from_tag to order ${tag} against`);
+  }
+  const order = upstreamSnapshotOrder(read.latest, read.snapshots, args.fromTag);
+  if (order.kind === "newer") {
     return { tag, check: { name: "to-tag", status: "ok", detail: `${tag} (OpenNeuro's latest)` } };
   }
-  return {
+  return unverified(
     tag,
-    check: {
-      name: "to-tag",
-      status: "unchecked",
-      code: "order-unverified",
-      detail:
-        latest === null
-          ? `OpenNeuro could not say which snapshot is latest (${args.latest.tag === null ? args.latest.reason : ""}), so that ${tag} is newer than ${args.fromTag} is not proved`
-          : `${tag} is not OpenNeuro's latest snapshot (${latest}), so that it is newer than ${args.fromTag} is not proved`,
-    },
-  };
+    `${orderGap(order, tag, args.fromTag)}, so OpenNeuro's creation order does not show ${tag} is newer; a re-pull to it is not executable`,
+  );
+}
+
+/** Why an order that is not `newer` does not establish `tag` after `fromTag`, in one clause. */
+function orderGap(
+  order: Exclude<SnapshotOrder, { kind: "newer" }>,
+  tag: string,
+  fromTag: string,
+): string {
+  switch (order.kind) {
+    case "same":
+      return `OpenNeuro's list names ${tag} as the mirrored ${fromTag}`;
+    case "latest_undated":
+      return `the creation date of OpenNeuro's latest ${tag} is unreadable`;
+    case "latest_inconsistent":
+      return `OpenNeuro calls ${tag} its latest, but ${order.later} in its own list was created later`;
+    case "recorded_absent":
+      return `the mirrored ${fromTag} is not among OpenNeuro's snapshots`;
+    case "recorded_undated":
+      return `the creation date of the mirrored ${fromTag} is unreadable`;
+    case "list_undated":
+      return `the creation date of ${order.undated} in OpenNeuro's list is unreadable, and it could be newer`;
+    case "not_after":
+      return `OpenNeuro's latest ${tag} was not created after the mirrored ${fromTag}`;
+  }
+}
+
+/** OpenNeuro's latest tag from its answer, or why there is none (the reasons the import gives). */
+function latestOf(read: UpstreamRead): { tag: string } | { tag: null; reason: string } {
+  if (read.kind === "error") return { tag: null, reason: read.reason };
+  if (read.kind !== "snapshot") return { tag: null, reason: `OpenNeuro: ${read.reason}` };
+  if (read.latest === null) {
+    return { tag: null, reason: "OpenNeuro names no snapshot for this dataset yet" };
+  }
+  if (!isOpenNeuroTag(read.latest.tag)) {
+    return { tag: null, reason: "OpenNeuro named a latest tag of an unexpected shape" };
+  }
+  return { tag: read.latest.tag };
 }
 
 // ---------------------------------------------------------------------------------------

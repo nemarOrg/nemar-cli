@@ -75,7 +75,7 @@ Standard edits, re-applied as functions rather than merged as text:
 - ADR 0091 date normalization (new and changed recordings only);
 - any change recorded in the dataset's privacy ledger (ADR 0085): 2.0.0 carries it, and a plan that would revert one refuses.
 
-A ledger line whose `action` is not `import-scrubbed` is a recorded correction; the ledger lists no files, so the plan cannot tell which paths one made and refuses, with no override, any plan with an unexplained path for a dataset whose ledger holds one.
+A ledger line whose `action` is neither `import-scrubbed` nor `repull-scrubbed` (the re-pull's own delta scrub, ADR 0111's Phase 6b amendment) is a recorded correction; the ledger lists no files, so the plan cannot tell which paths one made and refuses, with no override, any plan with an unexplained path for a dataset whose ledger holds one.
 
 "Explained" is checked mechanically: a scrubbed key is explained when NEMAR's git-annex branch marks the upstream key dead; a file moved into the annex is explained when its key hashes the base blob.
 `CHANGES` is upstream-owned; NEMAR never writes it.

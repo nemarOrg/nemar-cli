@@ -31,6 +31,10 @@
  * A re-import changes no date: its tree is the dataset NEMAR already holds, which may be public, and
  * ADR 0091 leaves that as it is.
  *
+ * An upstream re-pull (ADR 0111) runs the same scrub on its delta paths only (`scope`), with each
+ * key's source named by the caller (`sourceOf`), so a recording the re-pull does not touch keeps
+ * its bytes and its key. The importer passes neither, and nothing it does changes.
+ *
  * Images and documents are counted and left for the identifier screen, which holds them for a person;
  * nothing here removes a file.
  *
@@ -134,6 +138,16 @@ export const IMPORT_SCRUB_REFUSALS = [
   "scrub-unverified",
   /** The scrubbed recordings could not be annexed or uploaded from the host. */
   "upload-failed",
+  /**
+   * A scoped scrub (an upstream re-pull's) would change a header while a provenance file lies
+   * outside its scope, so the file would be committed without the sentence that says so.
+   */
+  "provenance-out-of-scope",
+  /**
+   * A scoped scrub's tree has changes, tracked or untracked, outside the scope it was given, which
+   * it would not read.
+   */
+  "scope-incomplete",
   /** Anything else went wrong inside the scrub; the detail is the error's class, never its text. */
   "scrub-failed",
 ] as const;
@@ -216,9 +230,14 @@ export type Download = { ok: true; bytes: number } | { ok: false; failure: ReadF
 /**
  * Where an upstream object is read from: the S3 object the server-side copy copies (by path), or,
  * for a whereis URL that is not an S3 endpoint, that URL itself, which is what the copy phase's
- * curl fallback fetches (`copyOne` in `s3-server-copy.ts`).
+ * curl fallback fetches (`copyOne` in `s3-server-copy.ts`), or one version of an S3 object, which
+ * is what an upstream re-pull copies (ADR 0111, decision 8: the copy pins the `versionId` upstream's
+ * `.log.rmet` records, so the scrub reads the same bytes the copy will copy).
  */
-export type UpstreamSource = { kind: "s3"; ref: S3Ref } | { kind: "url"; url: string };
+export type UpstreamSource =
+  | { kind: "s3"; ref: S3Ref }
+  | { kind: "url"; url: string }
+  | { kind: "pinned"; bucket: string; object: string; versionId: string; region?: string };
 
 /**
  * How the scrub reads the upstream objects the copy phase would copy. {@link httpUpstreamReader} is
@@ -244,8 +263,26 @@ export function upstreamObjectUrl(ref: S3Ref, baseUrl?: string): string {
   return `${host.replace(/\/+$/, "")}/${encodeURIComponent(ref.bucket)}/${path}`;
 }
 
+/**
+ * One version of an object, anonymously: {@link upstreamObjectUrl}'s path-style URL with every
+ * segment encoded, then `?versionId=`. The version is never dropped, so what is read is the pinned
+ * object and not whatever is current at the path.
+ */
+export function pinnedObjectUrl(
+  source: Extract<UpstreamSource, { kind: "pinned" }>,
+  baseUrl?: string,
+): string {
+  const path = upstreamObjectUrl(
+    { bucket: source.bucket, key: source.object, region: source.region },
+    baseUrl,
+  );
+  return `${path}?versionId=${encodeURIComponent(source.versionId)}`;
+}
+
 function urlOf(source: UpstreamSource, baseUrl?: string): string {
-  return source.kind === "s3" ? upstreamObjectUrl(source.ref, baseUrl) : source.url;
+  if (source.kind === "s3") return upstreamObjectUrl(source.ref, baseUrl);
+  if (source.kind === "pinned") return pinnedObjectUrl(source, baseUrl);
+  return source.url;
 }
 
 /** Local errors that a retry cannot fix and that are not the network's. */
@@ -297,7 +334,8 @@ async function readAtMost(res: Response, limit: number): Promise<Uint8Array> {
 
 /**
  * Anonymous HTTPS reads of upstream objects: an S3 source by path, which is what the server-side
- * copy copies (it drops the whereis URL's version), and any other source at its own URL. Retried on
+ * copy copies (it drops the whereis URL's version), a pinned source at its version
+ * ({@link pinnedObjectUrl}), and any other source at its own URL. Retried on
  * a timeout, a network error, a short read, a 5xx, a 408 and a 429; a failure is a fixed word
  * (`http-403`, `timeout`, `network`, `short-read`, `local-io`).
  *
@@ -308,7 +346,7 @@ async function readAtMost(res: Response, limit: number): Promise<Uint8Array> {
  */
 export function httpUpstreamReader(
   options: {
-    /** Only a test sets this; production reads `s3.amazonaws.com`. Applies to S3 sources only. */
+    /** Only a test sets this; production reads `s3.amazonaws.com`. Applies to S3 and pinned sources. */
     baseUrl?: string;
     attempts?: number;
     headerTimeoutMs?: number;
@@ -448,8 +486,10 @@ export interface ImportScrubCounts {
   provenance_annotated: number;
   /** 1 when the provenance README got the note, else 0. */
   provenance_readme_annotated: number;
-  /** Provenance files tracked but not annotated (not a regular file, or not a JSON object). */
+  /** Provenance files tracked but not annotated because they are not a regular file. */
   provenance_not_annotated: number;
+  /** Provenance files not annotated because their text is not a JSON object. */
+  provenance_malformed: number;
 }
 
 function zeroCounts(): ImportScrubCounts {
@@ -484,6 +524,7 @@ function zeroCounts(): ImportScrubCounts {
     provenance_annotated: 0,
     provenance_readme_annotated: 0,
     provenance_not_annotated: 0,
+    provenance_malformed: 0,
   };
 }
 
@@ -510,7 +551,7 @@ export interface ImportScrubResult {
 export interface ImportScrubInput {
   datasetPath: string;
   nemarId: string;
-  /** Upstream key -> whereis URL, as `getAnnexWhereisAll` built it. */
+  /** Upstream key -> whereis URL, as `getAnnexWhereisAll` built it; not read when `sourceOf` is given. */
   keyUrlMap: Map<string, string>;
   /** Files git holds that NEMAR policy calls data, as `findUnannexedData` found them. */
   unannexedData: Array<{ path: string; size: number }>;
@@ -530,6 +571,31 @@ export interface ImportScrubInput {
   now?: Date;
   /** The ledger line's actor; defaults to `GITHUB_ACTOR` when it is a handle. */
   actor?: string;
+  /**
+   * The paths the scrub may read and change; every tracked path when absent (the importer). An
+   * upstream re-pull scrubs its delta paths only (ADR 0111, decisions 1 and 2), so a recording, a
+   * JSON file or a scans table outside the scope is neither read nor changed, and the counts see
+   * only the scope. The scope must hold every path changed since HEAD, untracked ones included
+   * (`scope-incomplete` otherwise): for a re-pull that is every written delta path, every deleted
+   * one, and every `.gitattributes` the annex policy edited (ADR 0060). It must hold the
+   * provenance files whenever a header will change (`provenance-out-of-scope` otherwise), so
+   * nothing unscrubbed or unannotated is committed.
+   */
+  scope?: ReadonlySet<string>;
+  /**
+   * Where an annexed recording's header is read from, by key, in place of {@link keyUrlMap}: a
+   * source, `"held"` for a key NEMAR already holds, whose bytes are already in NEMAR's bucket where
+   * the identifier screen reads them (ADR 0086, ADR 0088), so it is not read again and keeps its
+   * key (counted `headers_not_read_nemar_held`), or null for a key nothing can supply (counted
+   * `headers_not_read_no_source`). Absent for the importer, whose sources are its whereis URLs.
+   */
+  sourceOf?: (key: string) => UpstreamSource | "held" | null;
+  /**
+   * The ledger line's action: `import-scrubbed` for the importer (the default), `repull-scrubbed`
+   * for an upstream re-pull's delta scrub, which runs before its one commit, so no history it
+   * pushes holds what it replaced (ADR 0111, decision 9).
+   */
+  ledgerAction?: "import-scrubbed" | "repull-scrubbed";
 }
 
 /** Run `fn` over `items` with at most `limit` in flight, keeping order. */
@@ -727,6 +793,25 @@ function isRegularFile(abs: string): boolean {
   }
 }
 
+/**
+ * Paths that differ from HEAD: tracked paths whose index or working-tree content changed (staged
+ * or not, deletions included), and untracked paths `.gitignore` does not exclude, which a later
+ * `git add` would take. From git's NUL-separated listings, so no path is quoted or split.
+ */
+async function changedSinceHead(datasetPath: string): Promise<string[]> {
+  const listings = [
+    ["git", "diff", "--name-only", "-z", "--no-renames", "HEAD", "--"],
+    ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+  ];
+  const out: string[] = [];
+  for (const cmd of listings) {
+    const r = await runCommand(cmd, { cwd: datasetPath });
+    if (r.exitCode !== 0) throw new Error("git could not list the paths changed since HEAD");
+    out.push(...r.stdout.split("\0").filter((p) => p !== ""));
+  }
+  return out;
+}
+
 async function stageAsGit(datasetPath: string, paths: string[]): Promise<void> {
   // `annex.largefiles=nothing`: these are git content (JSON, text, the ledger), and a plain `git add`
   // in an annexed repository can turn a file into an annex pointer whose content nothing uploads.
@@ -786,7 +871,20 @@ export async function scrubImportedTree(input: ImportScrubInput): Promise<Import
 async function scrubTree(input: ImportScrubInput): Promise<ImportScrubResult> {
   const { datasetPath } = input;
   const counts = zeroCounts();
-  const tracked = [...(await listTrackedPaths(datasetPath))].sort();
+  const allTracked = [...(await listTrackedPaths(datasetPath))].sort();
+  const scope = input.scope;
+  const tracked = scope ? allTracked.filter((p) => scope.has(p)) : allTracked;
+  // A caller that names a scope must name every path it changed: the scrub reads only the scope,
+  // so a changed path outside it would reach the commit unread (ADR 0111, decision 2).
+  if (scope) {
+    const outside = (await changedSinceHead(datasetPath)).filter((p) => !scope.has(p)).length;
+    if (outside > 0) {
+      throw new ImportScrubRefused(
+        "scope-incomplete",
+        `${outside} path(s) changed since HEAD, or untracked, are outside the scrub's scope`,
+      );
+    }
+  }
   const annexedKeys = await listAnnexedKeys(datasetPath);
   const recordings = tracked.filter((p) => RECORDING_PATH.test(p));
   counts.recordings = recordings.length;
@@ -814,6 +912,15 @@ async function scrubTree(input: ImportScrubInput): Promise<ImportScrubResult> {
       // An empty file is no EDF header, and a ranged read of it answers 416.
       counts.headers_not_edf++;
       headerReadKeys.add(key);
+      continue;
+    }
+    if (input.sourceOf) {
+      // The caller names each key's source (an upstream re-pull: the pinned object, or a key NEMAR
+      // already holds), so the whereis map is not read.
+      const named = input.sourceOf(key);
+      if (named === "held") counts.headers_not_read_nemar_held++;
+      else if (named === null) counts.headers_not_read_no_source++;
+      else upstream.push({ path, key, source: named });
       continue;
     }
     const url = input.keyUrlMap.get(key);
@@ -961,6 +1068,23 @@ async function scrubTree(input: ImportScrubInput): Promise<ImportScrubResult> {
   const datesKept = new Set(datesFit ? datesReplaceable : []);
   const toFetch = flaggedUpstream.filter((f) => f.change.scrub || datesKept.has(f));
   const toPatch: typeof toFetch = [];
+  // A header is about to change, and with it the sentence each provenance file must carry (ADR
+  // 0085's for a scrub, ADR 0091's for a date). A scoped scrub can write only what is in its
+  // scope, so a provenance file outside it refuses here: after the ranged header reads that decide
+  // it, and before any recording is downloaded, rather than being committed without the sentence.
+  // The rule counts a planned change, the safe side: a date-only recording whose download or hash
+  // later fails would leave its header as it was, and the scrub has refused already.
+  if (scope && (toFetch.length > 0 || flaggedGitHeld.length > 0)) {
+    const left = [PROVENANCE_PATH, PROVENANCE_README_PATH].filter(
+      (p) => !scope.has(p) && allTracked.includes(p),
+    ).length;
+    if (left > 0) {
+      throw new ImportScrubRefused(
+        "provenance-out-of-scope",
+        `${left} provenance file(s) are outside the scope of a scrub that changes headers`,
+      );
+    }
+  }
 
   // 3. Download, check, patch. Each download replaces the annex pointer at its path. A recording
   // the identifier scrub needs refuses on any failure; one whose only change is its date is left
@@ -1206,7 +1330,7 @@ async function scrubTree(input: ImportScrubInput): Promise<ImportScrubResult> {
         toStage.push(PROVENANCE_PATH);
         counts.provenance_annotated = 1;
       } else {
-        counts.provenance_not_annotated++;
+        counts.provenance_malformed++;
       }
     } else if (tracked.includes(PROVENANCE_PATH)) {
       counts.provenance_not_annotated++;
@@ -1234,7 +1358,7 @@ async function scrubTree(input: ImportScrubInput): Promise<ImportScrubResult> {
       version: 1,
       at: now.toISOString(),
       dataset: input.nemarId,
-      action: "import-scrubbed",
+      action: input.ledgerAction ?? "import-scrubbed",
       versions: [],
       counts: { ...counts },
       scanner: IMPORT_SCANNER_ID,
@@ -1358,6 +1482,32 @@ async function restrictToTree(
 // The step as prepare runs it
 // ---------------------------------------------------------------------------------------
 
+/**
+ * Refuse unless every recording a copy would bring from upstream had its header read by this run:
+ * an item of `items` that is not a local upload and whose key `tree` (path -> key, as
+ * `listAnnexedKeys` lists it) names at a recording path must be in `headerReadKeys`. The closing
+ * check of {@link prepareImportedTreeForCopy}, exported so an upstream re-pull, which copies by
+ * key too, closes its scrub with the same rule.
+ */
+export function assertCopiedRecordingsRead(
+  items: readonly ImportManifestItem[],
+  tree: ReadonlyMap<string, string>,
+  headerReadKeys: ReadonlySet<string>,
+): void {
+  const recordingKeys = new Set(
+    [...tree].filter(([p]) => RECORDING_PATH.test(p)).map(([, k]) => k),
+  );
+  const unread = items.filter(
+    (it) => !isLocallyUploaded(it) && recordingKeys.has(it.key) && !headerReadKeys.has(it.key),
+  ).length;
+  if (unread > 0) {
+    throw new ImportScrubRefused(
+      "header-unreadable",
+      `${unread} recording(s) in the copy manifest whose header this run did not read`,
+    );
+  }
+}
+
 export interface PreparedTree {
   scrub: ImportScrubResult;
   normalized: NormalizeImportResult;
@@ -1429,19 +1579,7 @@ export async function prepareImportedTreeForCopy(args: {
   } catch (err) {
     throw new ImportScrubRefused("scrub-failed", describeError(err));
   }
-  const recordingKeys = new Set(
-    [...tree].filter(([p]) => RECORDING_PATH.test(p)).map(([, k]) => k),
-  );
-  const unread = manifest.items.filter(
-    (it) =>
-      !isLocallyUploaded(it) && recordingKeys.has(it.key) && !scrub.headerReadKeys.has(it.key),
-  ).length;
-  if (unread > 0) {
-    throw new ImportScrubRefused(
-      "header-unreadable",
-      `${unread} recording(s) in the copy manifest whose header this run did not read`,
-    );
-  }
+  assertCopiedRecordingsRead(manifest.items, tree, scrub.headerReadKeys);
   return {
     scrub,
     normalized,

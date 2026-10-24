@@ -30,6 +30,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { sourceSnapshotOf } from "../shared/source-snapshot";
 import { buildDoiBadge } from "../shared/standard-edits/readme";
+import { PLANNER_VERSION } from "../src/lib/repull/digest";
 import { gitBlobOid } from "../src/lib/repull/edits";
 import { type PlanOptions, RepullCannotPlan, planRepull } from "../src/lib/repull/plan";
 import { listBucketObjects } from "../src/lib/repull/sources";
@@ -417,8 +418,8 @@ describe("a plan from tag A to tag B over an imported mirror", () => {
     }
   });
 
-  test("OpenNeuro's latest that is not numerically after from_tag is unverified, not ok", async () => {
-    // 00001 is on the mirror and numerically equal to the mirrored 1.0.0 without being that tag.
+  test("OpenNeuro's latest that its own list contradicts is unverified, not ok", async () => {
+    // 00001 is on the mirror, and OpenNeuro's list has 1.0.0 and 1.1.0 created after it.
     openNeuro.latest = "00001";
     try {
       const f = await plan(fx);
@@ -430,6 +431,67 @@ describe("a plan from tag A to tag B over an imported mirror", () => {
       expect(f.executable).toBe(false);
     } finally {
       openNeuro.latest = TAG_B;
+    }
+  });
+
+  test("the order is OpenNeuro's creation order: a mirror at legacy 00006 is behind a later 1.1.0", async () => {
+    // Numerically 1.1.0 is before 00006; OpenNeuro made 00006 first (ds000001's real history has
+    // 00006 in 2018 and 1.0.0 in 2020), so the latest is newer and the check is ok.
+    await gitIn(fx.upstreamRepo, ["tag", "00006", `refs/tags/${TAG_A}`]);
+    const saved = openNeuro.snapshots;
+    openNeuro.snapshots = [
+      { tag: "00006", created: "2018-03-01T00:00:00.000Z" },
+      { tag: TAG_B, created: "2026-06-01T00:00:00.000Z" },
+    ];
+    try {
+      const f = await plan(fx, {
+        catalog: {
+          dataset: DATASET_ROW,
+          versions: [{ version: "v1.0.0", source_version: "00006", source_version_basis: "doi" }],
+        },
+      });
+      expect(f.body.upstream).toMatchObject({ from_tag: "00006", to_tag: TAG_B });
+      expect(f.preflight.find((c) => c.name === "to-tag")).toMatchObject({
+        status: "ok",
+        detail: `${TAG_B} (OpenNeuro's latest)`,
+      });
+      // The same tags with OpenNeuro's list naming the latest no later than 00006: not proved.
+      openNeuro.snapshots = [
+        { tag: "00006", created: "2026-06-01T00:00:00.000Z" },
+        { tag: TAG_B, created: "2026-06-01T00:00:00.000Z" },
+      ];
+      const same = await plan(fx, {
+        catalog: {
+          dataset: DATASET_ROW,
+          versions: [{ version: "v1.0.0", source_version: "00006", source_version_basis: "doi" }],
+        },
+      });
+      expect(same.preflight.find((c) => c.name === "to-tag")).toMatchObject({
+        status: "unchecked",
+        code: "order-unverified",
+      });
+      expect(same.executable).toBe(false);
+    } finally {
+      openNeuro.snapshots = saved;
+      await gitIn(fx.upstreamRepo, ["tag", "-d", "00006"]);
+    }
+  });
+
+  test("numbers that say newer prove nothing: a latest OpenNeuro made with the mirrored tag is unverified", async () => {
+    const saved = openNeuro.snapshots;
+    openNeuro.snapshots = [
+      { tag: TAG_A, created: "2026-01-01T00:00:00.000Z" },
+      { tag: TAG_B, created: "2026-01-01T00:00:00.000Z" },
+    ];
+    try {
+      const f = await plan(fx);
+      expect(f.preflight.find((c) => c.name === "to-tag")).toMatchObject({
+        status: "unchecked",
+        code: "order-unverified",
+      });
+      expect(f.executable).toBe(false);
+    } finally {
+      openNeuro.snapshots = saved;
     }
   });
 
@@ -663,6 +725,20 @@ describe("the privacy ledger (ADR 0085)", () => {
     }
   });
 
+  test("an earlier re-pull's own repull-scrubbed line is not a recorded correction", async () => {
+    // The default fixture has a conflict and corrections, so a line counted as a recorded
+    // correction would refuse the plan.
+    const fx = await buildRepullFixture({ repullScrubbedLine: true });
+    try {
+      const body = (await plan(fx)).body as Body;
+      expect(body.ledger).toEqual({ status: "ok", lines: 2, recorded_corrections: 0 });
+      expect(counts(body).unexplained).toBeGreaterThan(0);
+      expect(body.refusals).toEqual([]);
+    } finally {
+      fx.cleanup();
+    }
+  });
+
   test("a ledger that does not parse, a gitlink, a stale badge and an unparseable .nemar/metadata.json", async () => {
     const fx = await buildRepullFixture({
       corruptLedger: true,
@@ -688,6 +764,85 @@ describe("the privacy ledger (ADR 0085)", () => {
         expect.objectContaining({ status: "unparseable", from: null, error: "SyntaxError" }),
       ]);
       expect(f.executable).toBe(false);
+    } finally {
+      fx.cleanup();
+    }
+  });
+});
+
+describe("the enrichment's generated participants.tsv is a standard edit", () => {
+  const placeholder = (...subjects: string[]) =>
+    `participant_id\tage\tsex\n${subjects.map((s) => `${s}\tn/a\tn/a\n`).join("")}`;
+
+  test("explained from upstream's tree, re-made from tag B's subjects, and no correction for the ledger rule", async () => {
+    // A recorded correction makes any unexplained path refuse the plan, so this also shows the
+    // generated file is not counted as one.
+    const fx = await buildRepullFixture({
+      generatedParticipants: true,
+      noContributorEdits: true,
+      recordedCorrection: true,
+    });
+    try {
+      const f = await plan(fx);
+      const body = f.body as Body;
+      expect(body.planner).toBe(PLANNER_VERSION);
+      const p = row(body, PATHS.participants);
+      expect(p).toMatchObject({
+        class: "take-theirs",
+        explained_by_base: "participants-generated",
+        explained_by_theirs: null,
+        decision: "theirs",
+        delta: true,
+      });
+      expect(p.target).toEqual({
+        kind: "git",
+        mode: "100644",
+        oid: gitBlobOid(Buffer.from(placeholder("sub-01", "sub-02", "sub-03"))),
+        computed: "participants-generated",
+      });
+      expect(counts(body).unexplained).toBe(0);
+      expect(body.refusals).toEqual([]);
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  test("with the same subjects at both tags, NEMAR's file is kept as it is", async () => {
+    const fx = await buildRepullFixture({
+      generatedParticipants: true,
+      noContributorEdits: true,
+      metadataOnlyB: true,
+    });
+    try {
+      const p = row((await plan(fx)).body as Body, PATHS.participants);
+      expect(p).toMatchObject({
+        class: "keep-ours",
+        explained_by_base: "participants-generated",
+        explained_by_theirs: "participants-generated",
+        decision: "ours",
+        delta: false,
+        deleted: false,
+      });
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  test("a placeholder edited afterwards is NEMAR's own addition, a correction", async () => {
+    const fx = await buildRepullFixture({
+      generatedParticipants: "edited",
+      noContributorEdits: true,
+    });
+    try {
+      const p = row((await plan(fx)).body as Body, PATHS.participants);
+      expect(p).toMatchObject({
+        class: "correction",
+        subtype: "nemar-added",
+        explained_by_base: null,
+        explained_by_theirs: null,
+        deleted: true,
+      });
+      expect(p.target).toEqual({ kind: "absent" });
     } finally {
       fx.cleanup();
     }

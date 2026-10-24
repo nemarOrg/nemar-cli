@@ -1,0 +1,164 @@
+/**
+ * OpenNeuro's snapshot lists, as one GraphQL request asks for them and as its answer is read
+ * (epic #1046; ADR 0111). PURE: the request is built and the answer parsed here, and the caller
+ * sends it, so the Worker's staleness report (`backend/src/services/openneuro-snapshots.ts`, many
+ * datasets to a request) and the CLI's re-pull plan (`src/lib/openneuro.ts`, one) read the same
+ * answer the same way.
+ *
+ * One request carries datasets as aliases (`a0: dataset(id: $a0) { ... }`), with the ids passed
+ * ONLY as variables so an id can never reach the query text. OpenNeuro answers a dataset it cannot
+ * serve with `data.aN: null` plus an `errors[]` entry whose `path` is `["aN"]`: `DELETED_DATASET`
+ * for a deleted one (the duplicates OpenNeuro retires) and "Dataset <id> does not exist." for a
+ * missing one (matched against that alias's own id, so another message containing "does not
+ * exist" is an error, not an absence). An `errors[]` entry for an alias that also has a node (a
+ * partial response) makes that id an `error` read.
+ *
+ * AN ERROR IS NEVER A VERDICT (ADR 0053, ADR 0054). A body that is not understood, a node that
+ * names another dataset, a `snapshots` that is not a list: each is an `error` read. A `snapshots`
+ * that is not an array is never read as `[]`, because an empty list would be a statement about
+ * upstream. The recorded request and response this is written against are in
+ * `backend/test/fixtures/openneuro-graphql/`.
+ */
+
+import type { UpstreamRead, UpstreamSnapshot } from "./upstream-staleness.js";
+
+const DELETED_CODE = "DELETED_DATASET";
+
+export interface UpstreamSnapshotQuery {
+  query: string;
+  variables: Record<string, string>;
+}
+
+/** The batched query for `ids`: aliases `a0..aN`, every id a variable, none in the text. */
+export function buildUpstreamSnapshotQuery(ids: readonly string[]): UpstreamSnapshotQuery {
+  const declarations = ids.map((_, i) => `$a${i}: ID!`).join(", ");
+  const selections = ids
+    .map(
+      (_, i) =>
+        `a${i}: dataset(id: $a${i}) { id latestSnapshot { tag created } snapshots { tag created } }`,
+    )
+    .join(" ");
+  const variables: Record<string, string> = {};
+  ids.forEach((id, i) => {
+    variables[`a${i}`] = id;
+  });
+  return { query: `query UpstreamSnapshots(${declarations}) { ${selections} }`, variables };
+}
+
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** A `{ tag, created }` entry, or null when it is not one. `created` may be absent. */
+function snapshotOf(value: unknown): UpstreamSnapshot | null {
+  if (!isObject(value) || typeof value.tag !== "string" || value.tag === "") return null;
+  const created = value.created;
+  if (created !== undefined && created !== null && typeof created !== "string") return null;
+  return { tag: value.tag, created: typeof created === "string" ? created : null };
+}
+
+function readNode(node: Record<string, unknown>, id: string): UpstreamRead {
+  if (node.id !== id) {
+    return {
+      kind: "error",
+      reason: `OpenNeuro answered ${String(node.id)} where ${id} was asked`,
+    };
+  }
+  if (!Array.isArray(node.snapshots)) {
+    return { kind: "error", reason: `OpenNeuro sent no snapshot list for ${id}` };
+  }
+  const snapshots: UpstreamSnapshot[] = [];
+  for (const entry of node.snapshots) {
+    const snapshot = snapshotOf(entry);
+    if (!snapshot)
+      return { kind: "error", reason: `OpenNeuro sent a malformed snapshot for ${id}` };
+    snapshots.push(snapshot);
+  }
+  let latest: UpstreamSnapshot | null = null;
+  if (node.latestSnapshot !== null && node.latestSnapshot !== undefined) {
+    latest = snapshotOf(node.latestSnapshot);
+    if (!latest) {
+      return { kind: "error", reason: `OpenNeuro sent a malformed latest snapshot for ${id}` };
+    }
+  } else if (snapshots.length > 0) {
+    // No latest beside a non-empty list is a contradiction, not "no snapshot": reading it as
+    // `upstream_no_snapshot` would call a live dataset empty.
+    return {
+      kind: "error",
+      reason: `OpenNeuro sent snapshots for ${id} but no latest snapshot`,
+    };
+  }
+  return { kind: "snapshot", latest, snapshots };
+}
+
+/** The `errors[]` entry whose `path` starts at `alias`, if there is one. */
+function errorFor(errors: unknown, alias: string): Record<string, unknown> | null {
+  if (!Array.isArray(errors)) return null;
+  for (const entry of errors) {
+    if (isObject(entry) && Array.isArray(entry.path) && entry.path[0] === alias) return entry;
+  }
+  return null;
+}
+
+/**
+ * Turn one batch response into a read per id. Pure. `ids[N]` is the dataset asked as alias `aN`.
+ * Anything that is not understood is `error`.
+ */
+export function parseUpstreamSnapshotBatch(
+  json: unknown,
+  ids: readonly string[],
+): Map<string, UpstreamRead> {
+  const reads = new Map<string, UpstreamRead>();
+  const data = isObject(json) ? json.data : undefined;
+  if (!isObject(json) || !isObject(data)) {
+    const first = isObject(json) && Array.isArray(json.errors) ? json.errors[0] : undefined;
+    const why =
+      isObject(first) && typeof first.message === "string"
+        ? first.message
+        : "the response carried no data";
+    for (const id of ids) reads.set(id, { kind: "error", reason: `OpenNeuro: ${why}` });
+    return reads;
+  }
+  ids.forEach((id, i) => {
+    const alias = `a${i}`;
+    const node = data[alias];
+    if (isObject(node)) {
+      // A partial response: a node and an error for the same alias. The node cannot be trusted.
+      const partial = errorFor(json.errors, alias);
+      if (partial) {
+        const why = typeof partial.message === "string" ? partial.message : "an error";
+        reads.set(id, {
+          kind: "error",
+          reason: `OpenNeuro sent data and an error for ${id}: ${why}`,
+        });
+        return;
+      }
+      reads.set(id, readNode(node, id));
+      return;
+    }
+    if (node === null) {
+      const err = errorFor(json.errors, alias);
+      const message = err && typeof err.message === "string" ? err.message : null;
+      const code = err && isObject(err.extensions) ? err.extensions.code : undefined;
+      if (message === null) {
+        reads.set(id, {
+          kind: "error",
+          reason: `OpenNeuro sent null for ${id} without saying why`,
+        });
+      } else if (code === DELETED_CODE) {
+        reads.set(id, { kind: "deleted", reason: message });
+      } else if (new RegExp(`^Dataset ${escapeRegExp(id)} does not exist\\.?$`).test(message)) {
+        reads.set(id, { kind: "absent", reason: message });
+      } else {
+        reads.set(id, { kind: "error", reason: message });
+      }
+      return;
+    }
+    reads.set(id, { kind: "error", reason: `OpenNeuro did not answer ${id}` });
+  });
+  return reads;
+}

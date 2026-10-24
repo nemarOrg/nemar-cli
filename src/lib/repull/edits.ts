@@ -18,7 +18,10 @@
  *   `normalizeScansTableDates`), and the provenance file's sentence and README note;
  * - the `.gitattributes` strip (`stripLargefilesAttributes`) and the `.bidsignore` line;
  * - the ADR 0085 privacy sentence appended to `CHANGES`, re-applied as a ledger edit (ADR 0111's
- *   Phase 5 amendment: `CHANGES` is upstream-owned except that sentence).
+ *   Phase 5 amendment: `CHANGES` is upstream-owned except that sentence);
+ * - the placeholder `participants.tsv` the enrichment commits when upstream ships none
+ *   (`buildPlaceholderParticipantsTsv` over `enumerateBidsSubjects`), a function of the tree's
+ *   subjects rather than of any upstream file.
  *
  * The README family and `dataset_description.json` are compared as units elsewhere
  * (`overlay.ts`, `description.ts`).
@@ -44,6 +47,10 @@ import {
   NEMAR_BIDSIGNORE_ENTRY,
   withBidsignoreEntry,
 } from "../../../shared/standard-edits/bidsignore.js";
+import {
+  buildPlaceholderParticipantsTsv,
+  enumerateBidsSubjects,
+} from "../../../shared/standard-edits/participants.js";
 import { isNeverAnnexedMetadata, shouldAnnex } from "../git-annex/policy.js";
 import { stripLargefilesAttributes } from "../import-normalize.js";
 import {
@@ -233,6 +240,23 @@ function stripReadmeNotes(text: string): string | null {
 }
 
 // ---------------------------------------------------------------------------------------
+// The generated participants.tsv
+// ---------------------------------------------------------------------------------------
+
+/** Where the enrichment writes its placeholder: the root, in BIDS's exact lowercase spelling. */
+export const PARTICIPANTS_PATH = "participants.tsv";
+
+/**
+ * The placeholder `participants.tsv` the enrichment commits for a tree with these paths and none
+ * of its own (`ensureParticipantsTsv`), or null when the tree has no `sub-*` directory, where the
+ * enrichment writes nothing.
+ */
+export function generatedParticipants(paths: Iterable<string>): Buffer | null {
+  const subjects = enumerateBidsSubjects([...paths].map((path) => ({ path })));
+  return subjects.length === 0 ? null : Buffer.from(buildPlaceholderParticipantsTsv(subjects));
+}
+
+// ---------------------------------------------------------------------------------------
 // Explaining one path
 // ---------------------------------------------------------------------------------------
 
@@ -249,12 +273,19 @@ export type EditName =
   | "json-blanked"
   | "provenance-note"
   | "provenance-readme-note"
-  | "scans-dates";
+  | "scans-dates"
+  | "participants-generated";
 
 /** What the overlay knows that a recognizer needs beyond the two sides' bytes. */
 export interface ExplainContext {
   /** True when NEMAR's git-annex branch marks this key dead. */
   isDeadAtNemar(key: string): boolean;
+  /**
+   * The placeholder `participants.tsv` the enrichment would generate for the upstream tree the
+   * side being explained comes from ({@link generatedParticipants}); null or absent when that
+   * tree has no subjects, and then nothing is explained by it.
+   */
+  generatedParticipants?: Buffer | null;
 }
 
 /**
@@ -400,6 +431,11 @@ export function explainEdit(
   }
 
   if (x.kind === "absent" && ours.kind === "git" && root && ours.bytes) {
+    if (path === PARTICIPANTS_PATH) {
+      // Generated only where upstream ships none, and only this exact content: a placeholder NEMAR
+      // or a contributor then edited is NEMAR's own change.
+      return equalBytes(ctx.generatedParticipants, ours.bytes) ? "participants-generated" : null;
+    }
     if (name === ".bidsignore") {
       return equalBytes(
         Buffer.from(withBidsignoreEntry("", NEMAR_BIDSIGNORE_ENTRY).content),
@@ -508,16 +544,21 @@ export type Target =
  * `T(x)` for an ordinary path (not the README family, not the description). `sentences` are the
  * ADR 0085 privacy sentences NEMAR's `CHANGES` carries, re-applied to upstream's `CHANGES`.
  * `oursHasBidsignore` says NEMAR holds a `.bidsignore` with its line, so an upstream without one
- * still gets it.
+ * still gets it. `generatedParticipants` is given only when NEMAR's `participants.tsv` is the
+ * enrichment's placeholder: it is the placeholder of `x`'s own tree, so an upstream without the
+ * file gets the one its subjects make (null when that tree has none, and the file goes).
  */
 export function targetOf(
   path: string,
   x: Side,
-  opts: { sentences: string[]; oursHasBidsignore: boolean },
+  opts: { sentences: string[]; oursHasBidsignore: boolean; generatedParticipants?: Buffer | null },
 ): Target {
   const name = baseName(path);
   const root = isRootPath(path);
   if (x.kind === "absent") {
+    if (path === PARTICIPANTS_PATH && opts.generatedParticipants) {
+      return computed("100644", opts.generatedParticipants, "participants-generated");
+    }
     if (root && name === ".bidsignore" && opts.oursHasBidsignore) {
       return computed(
         "100644",

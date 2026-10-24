@@ -481,7 +481,9 @@ export interface LedgerEntry {
     | "old-versions-deleted"
     | "published-again"
     // The importer's prepare step scrubbed the tree before its first push (ADR 0089).
-    | "import-scrubbed";
+    | "import-scrubbed"
+    // An upstream re-pull's delta scrub, before its one commit (ADR 0111).
+    | "repull-scrubbed";
   versions: string[];
   counts: Record<string, number>;
   scanner: string;
