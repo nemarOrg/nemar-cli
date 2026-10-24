@@ -16,6 +16,7 @@ import { join } from "node:path";
 import {
   type MirrorFacts,
   type MirrorProbe,
+  type SnapshotDelta,
   type SnapshotFile,
   UPSTREAM_STATES,
   type UpstreamRead,
@@ -26,6 +27,8 @@ import {
   summarizeSnapshotDelta,
   toWireRow,
 } from "../shared/upstream-staleness";
+
+import { type DeltaMeasurement, renderMeasurement, totalsOf } from "../src/lib/upstream-measure";
 
 const FILES = join(import.meta.dir, "fixtures/openneuro-snapshot-files");
 
@@ -371,5 +374,85 @@ describe("estimateRepullDoiVolume", () => {
     expect(v.mirrors_counted).toBe(0);
     expect(v.busiest_day).toBe(0);
     expect(Object.keys(v.excluded).length).toBe(UPSTREAM_STATES.length);
+  });
+});
+
+// ----------------------------------------------------------------------------
+// Totals and the rendering of unknowns
+// ----------------------------------------------------------------------------
+
+describe("totalsOf and renderMeasurement", () => {
+  // Built: deltas as `summarizeSnapshotDelta` returns them, for the combinations a handful of
+  // recorded datasets cannot reach (a new key with no known size; an odd catch-up count).
+  const delta = (over: Partial<SnapshotDelta> = {}): SnapshotDelta => ({
+    added: 1,
+    changed: 2,
+    deleted: 3,
+    annexed_added: 0,
+    annexed_changed: 0,
+    annexed_deleted: 0,
+    data_changing: false,
+    new_keys: 0,
+    bytes_to_copy: 0,
+    ...over,
+  });
+  const measured = (id: string, d: SnapshotDelta | null): DeltaMeasurement => ({
+    dataset_id: id,
+    ds: `ds${id.slice(2)}`,
+    from_tag: "1.0.0",
+    to_tag: "1.0.1",
+    delta: d,
+    reason: d === null ? "OpenNeuro GraphQL answered HTTP 503" : null,
+  });
+
+  test("the catch-up takes whole days: three re-pulls at a cap of two are two days", () => {
+    const t = totalsOf([measured("on000001", delta()), measured("on000002", delta())], 3, 3);
+    expect(t.catch_up_days).toBe(2);
+    expect(t.not_measured).toBe(1);
+    expect(t.bytes_to_copy).toBeNull();
+  });
+
+  test("a measured delta whose new key has no size makes the total null, not the known sum", () => {
+    const t = totalsOf(
+      [
+        measured("on000001", delta({ data_changing: true, new_keys: 1, bytes_to_copy: null })),
+        measured("on000002", delta({ data_changing: true, new_keys: 1, bytes_to_copy: 500 })),
+      ],
+      2,
+      2,
+    );
+    expect(t.bytes_to_copy).toBeNull();
+    expect(t.bytes_to_copy_known).toBe(500);
+    expect(t.measured).toBe(2);
+    expect(t.delta_unknown).toBe(0);
+  });
+
+  test("an unknown delta contributes nothing to the file counts and is counted", () => {
+    const t = totalsOf([measured("on000001", delta()), measured("on000002", null)], 2, 2);
+    expect(t.delta_unknown).toBe(1);
+    expect(t.measured).toBe(1);
+    expect([t.files_added, t.files_changed, t.files_deleted]).toEqual([1, 2, 3]);
+  });
+
+  test("the human block never prints an unknown as a number", () => {
+    const deltas = [
+      measured("on000001", delta({ bytes_to_copy: null })),
+      measured("on000002", null),
+    ];
+    const volume = estimateRepullDoiVolume([], Date.now());
+    const lines = renderMeasurement(
+      {
+        measured_at: "2026-10-24T12:00:00.000Z",
+        endpoint: "x",
+        deltas,
+        totals: totalsOf(deltas, 2, 2),
+        doi_volume: volume,
+      },
+      10,
+    ).join("\n");
+    expect(lines).toContain("Bytes to copy: unknown; at least 0 (0 B)");
+    expect(lines).toContain("size unknown");
+    expect(lines).toContain("delta unknown: OpenNeuro GraphQL answered HTTP 503");
+    expect(lines).toContain("at least: not every delta was read");
   });
 });

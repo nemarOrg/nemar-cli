@@ -14,16 +14,18 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "bun";
 import {
   UPSTREAM_STATES,
+  type UpstreamSnapshot,
   type UpstreamState,
   type UpstreamStatusRow,
   countUpstreamStates,
 } from "../shared/upstream-staleness";
+import { startOpenNeuroFilesStandin } from "./helpers/openneuro-files-standin";
 
 const CLI_ENTRY = join(import.meta.dir, "..", "src", "index.ts");
 const REPO_ROOT = join(import.meta.dir, "..");
@@ -84,9 +86,11 @@ afterEach(() => {
 async function runCli(
   args: string[],
   testApiUrl: string,
+  extraEnv: Record<string, string> = {},
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   const env = {
     ...process.env,
+    ...extraEnv,
     NEMAR_CONFIG_DIR: configDir,
     TEST_API_URL: testApiUrl,
     NEMAR_NO_UPDATE_CHECK: "1",
@@ -604,6 +608,229 @@ describe("nemar admin upstream-status --json", () => {
       expect(json.could_not_see.length).toBeGreaterThan(0);
       expect(json.errors).toEqual(["batch failed"]);
       expect(result.exitCode).toBe(2);
+    } finally {
+      server.stop();
+    }
+  });
+});
+
+// ----------------------------------------------------------------------------
+// --measure (Phase 4c)
+// ----------------------------------------------------------------------------
+
+describe("nemar admin upstream-status --measure", () => {
+  // The two recorded listings: ds002893 1.0.0 -> 2.0.0 (data-changing, 3,431,782,003 bytes to copy)
+  // and ds003082 1.0.0 -> 1.0.1 (metadata-only, a real zero). The wire rows are hand-written; their
+  // snapshot lists are the recorded ones, so the DOI volume reads real creation dates.
+  const GRAPHQL = join(import.meta.dir, "../backend/test/fixtures/openneuro-graphql");
+  const recordedSnapshots = (ds: string): UpstreamSnapshot[] => {
+    const request = JSON.parse(
+      readFileSync(join(GRAPHQL, "graphql-upstream-snapshots.request.json"), "utf-8"),
+    ) as { variables: Record<string, string> };
+    const response = JSON.parse(
+      readFileSync(join(GRAPHQL, "graphql-upstream-snapshots.response.json"), "utf-8"),
+    ) as { data: Record<string, { snapshots: { tag: string; created: string }[] } | null> };
+    const alias = Object.keys(request.variables).find((a) => request.variables[a] === ds);
+    return response.data[alias as string]?.snapshots ?? [];
+  };
+  const staleRow = (id: string, from: string, to: string) =>
+    row(id, "stale_ready", {
+      recorded: { version: "1.0.0", tag: from, basis: "doi" },
+      upstream: {
+        latest_tag: to,
+        latest_created: "2022-06-18T00:00:00.000Z",
+        snapshots: recordedSnapshots(`ds${id.slice(2)}`),
+      },
+    });
+  const DATA = staleRow("on002893", "1.0.0", "2.0.0");
+  const META = staleRow("on003082", "1.0.0", "1.0.1");
+
+  test("totals the two recorded deltas, in JSON and in the human block", async () => {
+    seedAuthenticatedConfig();
+    const server = startServer([{ body: page([META, DATA]) }]);
+    const files = startOpenNeuroFilesStandin();
+    try {
+      const env = { NEMAR_OPENNEURO_GRAPHQL_URL: files.url };
+      const json = await runCli(
+        ["admin", "upstream-status", "--measure", "--json"],
+        server.url,
+        env,
+      );
+      expect(json.exitCode).toBe(0);
+      const out = JSON.parse(json.stdout);
+      expect(out.measurement.totals).toEqual({
+        stale: 2,
+        measured: 2,
+        not_measured: 0,
+        metadata_only: 1,
+        data_changing: 1,
+        delta_unknown: 0,
+        files_added: 29,
+        files_changed: 326,
+        files_deleted: 76,
+        bytes_to_copy: 3431782003,
+        bytes_to_copy_known: 3431782003,
+        catch_up_days: 1,
+      });
+      expect(out.measurement.doi_volume.catch_up).toBe(2);
+      expect(out.measurement.deltas.map((d: { dataset_id: string }) => d.dataset_id)).toEqual([
+        "on002893",
+        "on003082",
+      ]);
+      // One request per mirror, asking for exactly the recorded and the latest tag.
+      expect(files.requests.map((r) => [r.ds, r.from, r.to])).toEqual([
+        ["ds002893", "1.0.0", "2.0.0"],
+        ["ds003082", "1.0.0", "1.0.1"],
+      ]);
+
+      const human = await runCli(["admin", "upstream-status", "--measure"], server.url, env);
+      expect(human.exitCode).toBe(0);
+      expect(human.stdout).toContain("Measured 2: metadata-only 1, data-changing 1");
+      expect(human.stdout).toContain("Files added 29, changed 326, deleted 76");
+      expect(human.stdout).toContain("Bytes to copy: 3431782003 (3.2 GiB)");
+      expect(human.stdout).toContain("REPULL_DAILY_OPEN_CAP=2 the catch-up takes 1 day(s)");
+      expect(human.stdout).toContain("upstream's between the two tags, not NEMAR's tree");
+      expect(human.stdout).toContain("a declaration, not a tree comparison");
+      expect(human.stdout).toContain("nemar admin repull plan");
+      expect(human.stdout).toMatch(/on002893 {2}ds002893 {2}1\.0\.0 -> 2\.0\.0 {2}data-changing/);
+      expect(human.stdout).toMatch(/on003082 {2}ds003082 {2}1\.0\.0 -> 1\.0\.1 {2}metadata-only/);
+    } finally {
+      server.stop();
+      files.stop();
+    }
+  }, 30_000);
+
+  test("a listing that cannot be read is an unknown delta, null bytes, an at-least sum, exit 2", async () => {
+    seedAuthenticatedConfig();
+    const server = startServer([{ body: page([META, DATA]) }]);
+    const files = startOpenNeuroFilesStandin();
+    files.failDataset("ds003082", 503);
+    try {
+      const env = { NEMAR_OPENNEURO_GRAPHQL_URL: files.url };
+      const json = await runCli(
+        ["admin", "upstream-status", "--measure", "--json"],
+        server.url,
+        env,
+      );
+      expect(json.exitCode).toBe(2);
+      const out = JSON.parse(json.stdout);
+      const t = out.measurement.totals;
+      expect(t.delta_unknown).toBe(1);
+      expect(t.measured).toBe(1);
+      expect(t.bytes_to_copy).toBeNull();
+      expect(t.bytes_to_copy_known).toBe(3431782003);
+      expect(out.complete).toBe(false);
+      const bad = out.measurement.deltas.find(
+        (d: { dataset_id: string }) => d.dataset_id === "on003082",
+      );
+      expect(bad.delta).toBeNull();
+      expect(bad.reason).toContain("HTTP 503");
+
+      const human = await runCli(["admin", "upstream-status", "--measure"], server.url, env);
+      expect(human.exitCode).toBe(2);
+      expect(human.stdout).toContain("unknown; at least 3431782003");
+      expect(human.stdout).toContain("delta unknown: OpenNeuro GraphQL answered HTTP 503");
+      expect(human.stdout).toContain("had a delta that could not be read");
+    } finally {
+      server.stop();
+      files.stop();
+    }
+  }, 30_000);
+
+  test("--measure-limit measures the first stale mirrors in order; the rest are not measured, not zero", async () => {
+    seedAuthenticatedConfig();
+    const server = startServer([{ body: page([META, DATA]) }]);
+    const files = startOpenNeuroFilesStandin();
+    try {
+      const env = { NEMAR_OPENNEURO_GRAPHQL_URL: files.url };
+      const result = await runCli(
+        ["admin", "upstream-status", "--measure", "--measure-limit", "1", "--json"],
+        server.url,
+        env,
+      );
+      expect(result.exitCode).toBe(0);
+      const t = JSON.parse(result.stdout).measurement.totals;
+      expect(t.measured).toBe(1);
+      expect(t.not_measured).toBe(1);
+      expect(t.bytes_to_copy).toBeNull();
+      expect(t.bytes_to_copy_known).toBe(3431782003);
+      expect(files.requests.length).toBe(1);
+    } finally {
+      server.stop();
+      files.stop();
+    }
+  }, 30_000);
+
+  test("without --measure OpenNeuro is never asked and the JSON has no measurement", async () => {
+    seedAuthenticatedConfig();
+    const server = startServer([{ body: page([META, DATA]) }]);
+    const files = startOpenNeuroFilesStandin();
+    try {
+      const env = { NEMAR_OPENNEURO_GRAPHQL_URL: files.url };
+      const result = await runCli(["admin", "upstream-status", "--json"], server.url, env);
+      expect(result.exitCode).toBe(0);
+      expect(JSON.parse(result.stdout)).not.toHaveProperty("measurement");
+      expect(files.requests.length).toBe(0);
+    } finally {
+      server.stop();
+      files.stop();
+    }
+  });
+
+  test("no stale mirror means nothing to copy: a real zero, and OpenNeuro is not asked", async () => {
+    seedAuthenticatedConfig();
+    const server = startServer([{ body: page([CURRENT]) }]);
+    const files = startOpenNeuroFilesStandin();
+    try {
+      const env = { NEMAR_OPENNEURO_GRAPHQL_URL: files.url };
+      const result = await runCli(
+        ["admin", "upstream-status", "--measure", "--json"],
+        server.url,
+        env,
+      );
+      expect(result.exitCode).toBe(0);
+      const t = JSON.parse(result.stdout).measurement.totals;
+      expect(t.stale).toBe(0);
+      expect(t.bytes_to_copy).toBe(0);
+      expect(files.requests.length).toBe(0);
+    } finally {
+      server.stop();
+      files.stop();
+    }
+  });
+
+  test("a failed pass is not measured: exit 1 and no measurement", async () => {
+    seedAuthenticatedConfig();
+    const server = startServer([{ status: 500, body: { error: "boom" } }]);
+    const files = startOpenNeuroFilesStandin();
+    try {
+      const env = { NEMAR_OPENNEURO_GRAPHQL_URL: files.url };
+      const result = await runCli(
+        ["admin", "upstream-status", "--measure", "--json"],
+        server.url,
+        env,
+      );
+      expect(result.exitCode).toBe(1);
+      expect(JSON.parse(result.stdout).measurement).toBeNull();
+      expect(files.requests.length).toBe(0);
+    } finally {
+      server.stop();
+      files.stop();
+    }
+  });
+
+  test("--measure-limit without --measure, or not a positive integer, exits 1", async () => {
+    seedAuthenticatedConfig();
+    const server = startServer([{ body: page([CURRENT]) }]);
+    try {
+      for (const args of [
+        ["--measure-limit", "3"],
+        ["--measure", "--measure-limit", "0"],
+      ]) {
+        const result = await runCli(["admin", "upstream-status", ...args], server.url);
+        expect(result.exitCode).toBe(1);
+      }
+      expect(server.requests.length).toBe(0);
     } finally {
       server.stop();
     }
