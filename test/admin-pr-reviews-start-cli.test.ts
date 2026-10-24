@@ -32,6 +32,7 @@ import type { Bindings } from "../backend/src/types/bindings";
 import { freshDb, realD1 } from "../backend/test/helpers/d1";
 import { makePrQueueApp } from "../backend/test/helpers/pr-queue-app";
 import { type PrSpec, SHA_A, prNode, seedReview } from "../backend/test/helpers/pr-queue-fixtures";
+import { REVIEW_MAX_TOKENS } from "../scripts/ci/pr-review";
 import { type GitHubStandin, WORKER_TOKEN, startGitHubStandin } from "./helpers/github-standin";
 
 setDefaultTimeout(30_000);
@@ -1195,19 +1196,28 @@ describe("nemar admin pr-reviews start --all --concurrency", () => {
         WHERE id = (SELECT id FROM pr_reviews WHERE state = 'dispatched' ORDER BY id LIMIT 1)`,
     );
   /** Sample how many reviews are in progress while a test plays the jobs finishing. */
+  const stoppers: Array<() => void> = [];
+  afterEach(() => {
+    // A test that failed before it stopped its jobs must not leave them finishing the next one's.
+    for (const stop of stoppers.splice(0)) stop();
+  });
   function playJobs(everyMs = 120) {
     const seen = { max: 0 };
     const sampler = setInterval(() => {
       seen.max = Math.max(seen.max, dispatchedCount());
     }, 8);
     const finisher = setInterval(finishOne, everyMs);
-    return {
-      seen,
-      stop: () => {
-        clearInterval(sampler);
-        clearInterval(finisher);
-      },
+    const stop = () => {
+      clearInterval(sampler);
+      clearInterval(finisher);
     };
+    stoppers.push(stop);
+    return { seen, stop };
+  }
+  /** Wait until `n` reviews are in progress, or give up (the caller's assertion then fails). */
+  async function untilDispatched(n: number) {
+    const t0 = Date.now();
+    while (dispatchedCount() < n && Date.now() - t0 < 20_000) await Bun.sleep(10);
   }
   const datasets = ["nm000201", "nm000202", "nm000203", "nm000204", "nm000205"];
   function waiting(n: number) {
@@ -1275,14 +1285,13 @@ describe("nemar admin pr-reviews start --all --concurrency", () => {
     waiting(3);
     const run = launch([...START, "--all", "--yes", "--concurrency", "1"], undefined, POLL);
     // The first review is started; the run is now waiting for it to report.
-    const t0 = Date.now();
-    while (dispatchedCount() < 1 && Date.now() - t0 < 20_000) await Bun.sleep(10);
-    expect(dispatchedCount()).toBe(1);
+    await untilDispatched(1);
     run.proc.kill("SIGINT");
 
     const r = await run.result;
 
     expect(r.exitCode).toBe(130);
+    expect(r.stdout).toContain("Stopping after the request in flight");
     expect(r.stdout).toContain("Interrupted: 2 pull requests not started");
     expect(r.stdout).toContain("Run the same command again");
     expect(r.stdout + r.stderr).not.toContain("--debug");
@@ -1296,17 +1305,7 @@ describe("nemar admin pr-reviews start --all --concurrency", () => {
       undefined,
       POLL,
     );
-    const t0 = Date.now();
-    while (
-      (
-        db.query("SELECT count(*) AS n FROM pr_reviews WHERE state = 'dispatched'").get() as {
-          n: number;
-        }
-      ).n < 1 &&
-      Date.now() - t0 < 20_000
-    ) {
-      await Bun.sleep(10);
-    }
+    await untilDispatched(1);
     run.proc.kill("SIGINT");
 
     const r = await run.result;
@@ -1314,7 +1313,125 @@ describe("nemar admin pr-reviews start --all --concurrency", () => {
     expect(r.exitCode).toBe(130);
     expect(r.stdout).toContain("Interrupted: 2 pull requests not started");
     expect(r.stdout).toMatch(/nemar admin pr-reviews start nm00020[2-5] 1 --redo/);
+    expect(r.stdout).toContain("Run these by name");
     expect(r.stdout).not.toContain("Run the same command again");
+  });
+
+  test("a review that left the list because its pull request was closed keeps its slot until it reports", async () => {
+    waiting(2);
+    const run = launch([...START, "--all", "--yes", "--concurrency", "1"], undefined, POLL);
+    await untilDispatched(1);
+    // The first pull request is closed: it drops out of the open pull requests the list is built
+    // from, while its review is still running.
+    const first = rows()[0]?.dataset_id;
+    gh.searchPages = [
+      (gh.searchPages[0] ?? []).filter((n) => (n.repository as { name: string }).name !== first),
+    ];
+    await Bun.sleep(500);
+    // Several polls have passed, and the second review has not started.
+    expect(rows()).toHaveLength(1);
+    finishOne();
+
+    const r = await run.result;
+
+    expect(r.exitCode).toBe(0);
+    expect(rows()).toHaveLength(2);
+  });
+
+  describe("with a front that can hang or alter the admin list and a start", () => {
+    let front: ReturnType<typeof Bun.serve>;
+    let mode: "pass" | "hang_list" | "hang_start_2" | "unreadable_list" = "pass";
+    beforeAll(() => {
+      front = Bun.serve({
+        port: 0,
+        async fetch(req) {
+          const url = new URL(req.url);
+          if (url.pathname === "/notices") return Response.json({ notices: [] });
+          if (url.pathname === "/datasets/facets") return Response.json({});
+          const isInProgressList =
+            req.method === "GET" &&
+            url.pathname === "/admin/pr-reviews" &&
+            url.searchParams.get("verdict") === "in_progress";
+          if (isInProgressList && mode === "hang_list")
+            return await new Promise<Response>(() => {});
+          if (
+            req.method === "POST" &&
+            mode === "hang_start_2" &&
+            url.pathname.includes("/nm000202/")
+          ) {
+            return await new Promise<Response>(() => {});
+          }
+          const res = await handle(req, env());
+          if (isInProgressList && mode === "unreadable_list") {
+            const body = (await res.json()) as { skipped: { unreadable: number } };
+            body.skipped.unreadable = 1;
+            return Response.json(body);
+          }
+          return res;
+        },
+      });
+    });
+    afterAll(() => front.stop(true));
+    beforeEach(() => {
+      mode = "pass";
+    });
+    const url = () => `http://127.0.0.1:${front.port}`;
+
+    test("a list read that never answers does not hold Ctrl-C", async () => {
+      mode = "hang_list";
+      waiting(3);
+      const run = launch([...START, "--all", "--yes", "--concurrency", "1"], url(), POLL);
+      await untilDispatched(1);
+      await Bun.sleep(300);
+      const t0 = Date.now();
+      run.proc.kill("SIGINT");
+
+      const r = await run.result;
+
+      expect(r.exitCode).toBe(130);
+      expect(Date.now() - t0).toBeLessThan(5_000);
+      expect(r.stdout).toContain("Interrupted: 2 pull requests not started");
+    });
+
+    test.each([
+      ["paced", ["--concurrency", "5"]],
+      ["unpaced", []],
+    ])(
+      "%s: a start that never answers stops after the first Ctrl-C only if it answers, and the second leaves at once",
+      async (_label, extra) => {
+        mode = "hang_start_2";
+        waiting(3);
+        const run = launch([...START, "--all", "--yes", ...extra], url(), POLL);
+        await untilDispatched(1);
+        await Bun.sleep(300);
+        run.proc.kill("SIGINT");
+        await Bun.sleep(900);
+        // The second request is still in flight, so the run is still there after the first Ctrl-C.
+        expect(run.proc.exitCode).toBeNull();
+        const t0 = Date.now();
+        run.proc.kill("SIGINT");
+
+        const r = await run.result;
+
+        expect(r.exitCode).toBe(130);
+        expect(Date.now() - t0).toBeLessThan(5_000);
+        expect(r.stdout).toContain("Stopping after the request in flight; press Ctrl-C again");
+      },
+    );
+
+    test("an unreadable pull request in the list cannot tell what finished, so ten such reads stop the run", async () => {
+      mode = "unreadable_list";
+      waiting(3);
+
+      const r = await cli([...START, "--all", "--yes", "--concurrency", "1"], url(), POLL);
+
+      expect(r.exitCode).toBe(1);
+      expect(r.stdout).toContain("could not be read completely 10 times in a row");
+      expect(r.stdout).toContain(
+        "could not read the admin list completely (1 of 10); still waiting",
+      );
+      expect(rows()).toHaveLength(1);
+    });
   });
 
   describe("when the admin list cannot be read", () => {
@@ -1348,7 +1465,7 @@ describe("nemar admin pr-reviews start --all --concurrency", () => {
       );
 
       expect(r.exitCode).toBe(1);
-      expect(r.stdout).toContain("could not be read 3 times in a row");
+      expect(r.stdout).toContain("could not be read completely 10 times in a row");
       expect(r.stdout).toContain("limit of 1 running at once cannot be kept");
       expect(r.stdout).toContain("2 pull requests not started");
       expect(rows()).toHaveLength(1);
@@ -1389,7 +1506,7 @@ describe("nemar admin pr-reviews start --all --concurrency", () => {
     clearTimeout(guard);
 
     expect(r.exitCode).toBe(1);
-    expect(r.stdout).toContain("could not be read 3 times in a row");
+    expect(r.stdout).toContain("could not be read completely 10 times in a row");
     expect(rows()).toHaveLength(1);
   });
 
@@ -1471,6 +1588,10 @@ describe("nemar admin pr-reviews start --all --concurrency", () => {
     const help = r.stdout.replace(/\s+/g, " ");
     expect(help).toContain("--concurrency <n>");
     expect(help).toContain("n x 128,000 fits the limit");
-    expect(help).toContain("Ctrl-C stops it after the start in flight");
+    // The figure is the review's output ceiling; a hand-kept copy of it must not drift.
+    expect(REVIEW_MAX_TOKENS.toLocaleString("en-US")).toBe("128,000");
+    expect(help).toContain("Ctrl-C ends any --all run, paced or not");
+    expect(help).toContain("A second Ctrl-C leaves at once");
+    expect(help).toContain("ten times in a row");
   });
 });
