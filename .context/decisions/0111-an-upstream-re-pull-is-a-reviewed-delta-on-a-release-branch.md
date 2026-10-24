@@ -332,7 +332,8 @@ The lead's rulings of 2026-10-23 settle three questions decision 10 left open, a
 - **An unreleased import whose tag moved is retargeted, not hard-reset (ruling 1).**
   `git reset --soft origin/main` keeps the new tag's tree and lands it as a fast-forward, so "prepared again at the tag the retry discovers" holds; the hard reset would have kept the old tree, #993's mismatch.
   "Released" is any `dataset_versions` row, read through `GET /datasets/:id/versions`, asked only when the tag moved; not being able to read it is a plain failure, never "unreleased".
-  A retarget is refused when origin's `.nemar/corrections.jsonl` holds any line other than the importer's own `import-scrubbed` one, because the new tree would drop it (ADR 0085).
+  A retarget is refused when origin's `.nemar/corrections.jsonl` holds a line the new tree would drop with consequence: a recorded correction (ADR 0085), or an `import-scrubbed` line whose scrub blanked a JSON value or scrubbed a git-held recording, because origin's history still holds those originals and only a hard reset keeps that hold (ADR 0089).
+  Step 5b's scrub writes the new tree's own ledger line; it does not carry the old ones.
 - **The guard fails closed, and says when it is inert.** An origin whose `main` cannot be fetched (anything but git's "couldn't find remote ref") stops prepare; the recorded tag is read before the branch name, so a detached or adjusted branch cannot skip it.
   When origin's `main` records no readable tag, prepare prints why, because the guard cannot fire then.
   The refusal of a released mirror names the repair that passes the guard, `nemar admin import-openneuro <ds> --tag <recorded tag>`; the retry engine dispatches no tag, so it never runs it.

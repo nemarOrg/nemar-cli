@@ -455,13 +455,16 @@ export async function baseOnOriginMain(
       `${args.sourceId}: ${args.nemarId} has released a version and its main records upstream tag ${recordedTag}; this import is at ${args.importTag}. Moving a released mirror to a new snapshot is an upstream re-pull (ADR 0111), not a re-import. Nothing was reset, copied or pushed. To repair the released version's data at the tag it mirrors: nemar admin import-openneuro ${args.sourceId} --tag ${recordedTag}`,
     );
   }
-  // A retarget takes the new tag's tree whole, so origin's `.nemar/` goes with the old one. The
-  // importer's own `import-scrubbed` line is re-applied by Step 5b's scrub; any other ledger line
-  // is a recorded correction (ADR 0085) that the retarget would drop, so it is refused instead.
-  const corrections = await originRecordedCorrections(datasetPath);
-  if (corrections !== 0) {
+  // A retarget takes the new tag's tree whole, so origin's `.nemar/` goes with the old one, and
+  // with it whatever the ledger records. Step 5b's scrub writes the new tree's own line from
+  // scratch; it does not carry the old ones. So a ledger line the retarget would lose refuses it:
+  // a recorded correction (ADR 0085), or an `import-scrubbed` line whose scrub changed git (a JSON
+  // value blanked, a git-held recording scrubbed), because origin's history still holds those
+  // originals and only a hard reset keeps the hold that says so (ADR 0089, earlierHistoryHold).
+  const kept = await originLedgerLinesARetargetDrops(datasetPath);
+  if (kept !== 0) {
     throw new Error(
-      `${args.nemarId}'s main ${corrections === "unreadable" ? `has a ${LEDGER_REPO_PATH} git could not read` : `records ${corrections} privacy correction(s) in ${LEDGER_REPO_PATH}`} (ADR 0085), which retargeting it from upstream tag ${recordedTag} to ${args.importTag} would drop. Nothing was reset or pushed; a person decides how this dataset moves.`,
+      `${args.nemarId}'s main ${kept === "unreadable" ? `has a ${LEDGER_REPO_PATH} git could not read` : `records ${kept} line(s) in ${LEDGER_REPO_PATH} that retargeting it from upstream tag ${recordedTag} to ${args.importTag} would drop`} (a privacy correction, ADR 0085, or a scrub whose originals origin's history still holds, ADR 0089). Nothing was reset or pushed; a person decides how this dataset moves.`,
     );
   }
   if (currentBranch.stdout.trim() !== "main") {
@@ -479,12 +482,15 @@ export async function baseOnOriginMain(
 }
 
 /**
- * How many lines of `origin/main`'s privacy ledger are recorded corrections: any line but the
- * importer's own `import-scrubbed` one, and a line that is not a JSON object counts too, because a
- * ledger that cannot be read cannot be shown to hold none. No ledger is 0; a ledger git cannot
- * read is `unreadable`.
+ * How many lines of `origin/main`'s privacy ledger a retarget would drop with consequence: any line
+ * but the importer's own `import-scrubbed` one, an `import-scrubbed` line whose scrub blanked a
+ * JSON value or scrubbed a git-held recording (origin's history holds those originals, ADR 0089),
+ * and a line that is not a JSON object, because a ledger that cannot be read cannot be shown to
+ * hold none. No ledger is 0; a ledger git cannot read is `unreadable`.
  */
-async function originRecordedCorrections(datasetPath: string): Promise<number | "unreadable"> {
+async function originLedgerLinesARetargetDrops(
+  datasetPath: string,
+): Promise<number | "unreadable"> {
   const shown = await runCommand(["git", "show", `origin/main:${LEDGER_REPO_PATH}`], {
     cwd: datasetPath,
   });
@@ -501,9 +507,16 @@ async function originRecordedCorrections(datasetPath: string): Promise<number | 
       count += 1;
       continue;
     }
-    const action =
-      typeof entry === "object" && entry !== null ? (entry as { action?: unknown }).action : null;
-    if (action !== "import-scrubbed") count += 1;
+    const record =
+      typeof entry === "object" && entry !== null
+        ? (entry as { action?: unknown; counts?: Record<string, unknown> })
+        : {};
+    if (record.action !== "import-scrubbed") {
+      count += 1;
+      continue;
+    }
+    const changed = (key: string) => Number(record.counts?.[key] ?? 0) > 0;
+    if (changed("json_values_blanked") || changed("git_held_recordings_scrubbed")) count += 1;
   }
   return count;
 }

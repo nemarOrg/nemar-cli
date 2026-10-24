@@ -26,7 +26,7 @@ earlier releases are described only by their generated notes.
 - **Step 4c guards a re-import whose upstream moved (#993).**
   The tag `origin/main` records is read from its `SourceDatasets` entries naming the dataset's own `ds` (their `Version`, DOI or URL, never NEMAR's top-level `Version`).
   When it differs from the tag being imported and the dataset has a `dataset_versions` row, prepare refuses with `[openneuro-upstream-moved]` before any reset, S3 setup or push; moving a released mirror is a re-pull's job. The refusal names the repair that passes the guard, `nemar admin import-openneuro <ds> --tag <recorded tag>`.
-  An unreleased import is moved to the new tag instead, as a fast-forward of `origin/main` (`git reset --soft`), which drops `.github/` until finalize deploys it again; it is refused instead when origin's privacy ledger holds a recorded correction (ADR 0085).
+  An unreleased import is moved to the new tag instead, as a fast-forward of `origin/main` (`git reset --soft`), which drops `.github/` until finalize deploys it again; it is refused instead when origin's privacy ledger holds a recorded correction (ADR 0085), or an import scrub that changed git, whose originals origin's history still holds (ADR 0089).
   An unrecorded tag, or the same one, takes the same-version hard reset as before, and an unreadable or missing record is printed as a warning, because the guard cannot fire then.
   An origin whose `main` cannot be fetched now stops prepare instead of reading as a first import.
 - **The #1320 preflight compares the bucket's `annex-uuid` with the `nemar-s3` uuids the git-annex branch records**, before the remote is configured, and refuses a disagreement with `[nemar-annex-uuid-conflict]`, both uuids and the recovery that fits.

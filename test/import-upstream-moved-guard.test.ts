@@ -342,13 +342,70 @@ describe("a retarget never drops a recorded privacy correction (ADR 0085)", () =
         nemarId: NEMAR_ID,
         released: async () => false,
       });
-      await expect(p).rejects.toThrow(
-        /records 1 privacy correction\(s\) in \.nemar\/corrections\.jsonl/,
-      );
+      await expect(p).rejects.toThrow(/records 1 line\(s\) in \.nemar\/corrections\.jsonl/);
       expect(await git(dir, "rev-parse", "HEAD")).toBe(upstream.commits["1.0.1"]);
       expect(await git(bare, "rev-parse", "main")).toBe(tip);
     }
   }, 120_000);
+});
+
+describe("a retarget never loses the hold an import scrub put on origin's history (ADR 0089)", () => {
+  async function withLedger(bare: string, lines: string[]): Promise<string> {
+    const editor = fresh("ledger-hold");
+    await run(["git", "clone", "-q", bare, editor]);
+    await git(editor, "config", "user.email", "test@test.com");
+    await git(editor, "config", "user.name", "Test");
+    mkdirSync(join(editor, ".nemar"), { recursive: true });
+    writeFileSync(join(editor, ".nemar", "corrections.jsonl"), `${lines.join("\n")}\n`);
+    await git(editor, "add", ".nemar/corrections.jsonl");
+    await git(editor, "commit", "-q", "-m", "ledger");
+    await git(editor, "push", "-q", "origin", "main");
+    return git(bare, "rev-parse", "main");
+  }
+
+  test("an import scrub that blanked JSON or scrubbed a git-held recording refuses the retarget", async () => {
+    // The pushed history still holds those originals. A hard reset keeps the ledger line, so the
+    // hold (earlierHistoryHold) survives; a retarget would drop it and report no hold.
+    for (const counts of [
+      { json_values_blanked: 2, git_held_recordings_scrubbed: 0, headers_scrubbed: 1 },
+      { json_values_blanked: 0, git_held_recordings_scrubbed: 1 },
+    ]) {
+      const { bare } = await originRecordedAt(RECORDED.doiOnly);
+      const tip = await withLedger(bare, [
+        JSON.stringify({ version: 1, action: "import-scrubbed", counts }),
+      ]);
+      const dir = await reimportClone(bare, "1.0.1");
+      const p = baseOnOriginMain(dir, {
+        sourceId: UPSTREAM_ID,
+        importTag: "1.0.1",
+        nemarId: NEMAR_ID,
+        released: async () => false,
+      });
+      await expect(p).rejects.toThrow(/originals origin's history still holds, ADR 0089/);
+      expect(await git(dir, "rev-parse", "HEAD")).toBe(upstream.commits["1.0.1"]);
+      expect(await git(bare, "rev-parse", "main")).toBe(tip);
+    }
+  }, 120_000);
+
+  test("an import scrub that changed nothing in git does not stop it", async () => {
+    const { bare } = await originRecordedAt(RECORDED.doiOnly);
+    const tip = await withLedger(bare, [
+      JSON.stringify({
+        version: 1,
+        action: "import-scrubbed",
+        counts: { json_values_blanked: 0, git_held_recordings_scrubbed: 0, headers_scrubbed: 3 },
+      }),
+    ]);
+    const dir = await reimportClone(bare, "1.0.1");
+    const base = await baseOnOriginMain(dir, {
+      sourceId: UPSTREAM_ID,
+      importTag: "1.0.1",
+      nemarId: NEMAR_ID,
+      released: async () => false,
+    });
+    expect(base.kind).toBe("retarget");
+    expect(await git(dir, "rev-parse", "HEAD")).toBe(tip);
+  }, 60_000);
 });
 
 describe("an unrecorded or unchanged tag never trips the guard", () => {
