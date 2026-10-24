@@ -1,36 +1,77 @@
 /**
- * The re-pull planner's only ways out of the process (ADR 0111, epic #1046 phase 5).
+ * The re-pull planner's guarded ways out of the process (ADR 0111, epic #1046 phase 5; the
+ * amendment for #1911).
  *
- * `nemar admin repull plan` is read-only on GitHub, S3 and the NEMAR API. Read-only is enforced
- * here rather than promised by each caller: every git subprocess the planner starts goes through
- * {@link readOnlyGit}, which refuses any subcommand outside a short list of reads, and every HTTP
- * request goes through {@link readOnlyFetch}, which refuses any method but GET and HEAD. A future
- * edit that reaches for `git push`, `git annex` or a POST fails loudly in the first test that
- * runs it, instead of writing to a dataset somebody else is reading.
+ * `nemar admin repull plan` writes nothing to GitHub, S3, D1 or the NEMAR API. That is enforced
+ * here rather than promised by each caller, for the calls that could write:
  *
- * `clone` and `fetch` write only into the planner's own scratch directory; neither changes the
- * remote. `rev-list` is here for `--missing=print`, the one listing of which blobs a partial clone
- * lacks that never fetches them. The one `aws` call the planner may make, when asked to read
- * presence from a bucket listing, is `s3api list-objects-v2` ({@link readOnlyAws}).
+ * - every git subprocess the planner starts goes through {@link readOnlyGit}, including the
+ *   git-annex branch reads (`readLocationLogsAt` takes this runner), and each subcommand may carry
+ *   only the options listed in {@link GIT_SPECS}, in the exact spelling the planner uses; anything
+ *   else, attached or separated (`-ccore.hooksPath=x`, `-u evil`, `--upload-pack=x`), throws;
+ * - `clone` and `ls-remote` take only a `https://github.com/<org>/<repo>` or `file:///` URL, and
+ *   `fetch` only the remote `origin`, so no transport helper can be named;
+ * - the one `aws` call, when a bucket listing is asked for, is `s3api list-objects-v2` with four
+ *   named options ({@link readOnlyAws});
+ * - the HTTP requests the planner makes itself (the open pull requests, the bucket's anonymous
+ *   `annex-uuid` marker) go through {@link readOnlyFetch}, GET and HEAD only.
+ *
+ * Outside this guard, and read-only by what they are: the NEMAR API's two GETs (the dataset row and
+ * its version rows), which the command makes through the API client before planning; `gh auth
+ * token`, which reads the administrator's stored GitHub token; reads of the test bases' local
+ * directories; and the planner's own scratch directory and plan file. `clone` and `fetch` write
+ * only into the scratch directory.
+ *
+ * `GIT_NO_LAZY_FETCH=1` is set on every git call, so a partial clone never fetches a missing blob
+ * on its own (git 2.44 and later honor it; an older git ignores it, and nothing here depends on it,
+ * because only blobs the clone holds are read and the missing ones are listed by
+ * `rev-list --missing=print`, which never fetches). The explicit blob fetch is the one way bytes
+ * beyond the filter arrive, under the plan's bound.
  */
 
-/** The git subcommands the planner may run. Nothing here writes to a remote. */
-export const READ_ONLY_GIT = new Set([
-  "clone",
-  "fetch",
-  "ls-remote",
-  "cat-file",
-  "ls-tree",
-  "rev-parse",
-  "rev-list",
-  "for-each-ref",
-]);
+/** One subcommand's permitted options: flags spelled exactly, and options that take one value. */
+interface GitSpec {
+  flags: readonly string[];
+  valued?: readonly string[];
+  /** `--` may end the options; everything after it is a path. */
+  endOfOptions?: boolean;
+  /** The first positional argument is a remote URL. */
+  url?: boolean;
+  /** The first positional argument must be this remote name. */
+  remote?: string;
+}
 
-/** The `-c key=value` settings a planner command may pass before its subcommand. */
-const ALLOWED_CONFIG = new Set(["fetch.negotiationAlgorithm"]);
+/** The git subcommands the planner may run, and the options each may carry. */
+export const GIT_SPECS: Readonly<Record<string, GitSpec>> = {
+  clone: {
+    flags: ["--bare", "--quiet", "--filter=blob:limit=1m", "--depth=1", "--no-tags"],
+    valued: ["--branch"],
+    url: true,
+  },
+  fetch: {
+    flags: [
+      "--quiet",
+      "--depth=1",
+      "--no-tags",
+      "--no-write-fetch-head",
+      "--recurse-submodules=no",
+      "--filter=blob:none",
+      "--stdin",
+    ],
+    remote: "origin",
+  },
+  "ls-remote": { flags: ["--refs"], url: true },
+  "cat-file": { flags: ["--batch"] },
+  "ls-tree": { flags: ["-r", "-z", "--full-tree"], endOfOptions: true },
+  "rev-parse": { flags: ["--verify", "--quiet", "--show-object-format"] },
+  "rev-list": { flags: ["--objects", "--missing=print", "--no-object-names"] },
+};
 
-/** Options that would let a clone or fetch run a program or a hook the planner did not choose. */
-const FORBIDDEN_OPTIONS = /^(?:--upload-pack|-u$|-c$|--config|--template|--exec|--receive-pack)/;
+/** The one `-c key=value` a planner command may pass, before its subcommand, as two arguments. */
+const ALLOWED_CONFIG = new Set(["fetch.negotiationAlgorithm=noop"]);
+
+/** A clone or ls-remote URL: a GitHub repository over HTTPS, or a local test base. */
+const ALLOWED_URL = /^(?:https:\/\/github\.com\/[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+|file:\/\/\/\S+)$/;
 
 export class ReadOnlyViolation extends Error {
   constructor(what: string) {
@@ -51,29 +92,50 @@ export interface ReadOnlyGitOptions {
   /** Extra environment (credential helpers), merged over the process environment. */
   env?: Record<string, string | undefined>;
   stdin?: string | Uint8Array;
-  /**
-   * Let git fetch a missing object of a partial clone on its own. Off by default
-   * (`GIT_NO_LAZY_FETCH=1`), so the only bytes the planner downloads are the ones it decided to,
-   * under its bound; the explicit blob fetch is the one caller that turns it on, for itself.
-   */
-  lazyFetch?: boolean;
 }
 
 /** Check one argv against the guard; throws {@link ReadOnlyViolation}. Exported for its test. */
 export function assertReadOnlyGit(args: readonly string[]): void {
   let i = 0;
-  while (args[i] === "-c") {
-    const setting = args[i + 1] ?? "";
-    const key = setting.split("=")[0] ?? "";
-    if (!ALLOWED_CONFIG.has(key)) throw new ReadOnlyViolation(`git -c ${key}`);
+  while (args[i]?.startsWith("-")) {
+    if (args[i] !== "-c" || !ALLOWED_CONFIG.has(args[i + 1] ?? "")) {
+      throw new ReadOnlyViolation(`git ${args[i]} ${args[i + 1] ?? ""}`.trim());
+    }
     i += 2;
   }
   const sub = args[i];
-  if (sub === undefined || !READ_ONLY_GIT.has(sub)) {
-    throw new ReadOnlyViolation(`git ${sub ?? "(nothing)"}`);
+  const spec = sub === undefined ? undefined : GIT_SPECS[sub];
+  if (sub === undefined || !spec) throw new ReadOnlyViolation(`git ${sub ?? "(nothing)"}`);
+  const positionals: string[] = [];
+  let ended = false;
+  for (let j = i + 1; j < args.length; j++) {
+    const arg = args[j] as string;
+    if (ended) {
+      positionals.push(arg);
+      continue;
+    }
+    if (arg === "--" && spec.endOfOptions) {
+      ended = true;
+      continue;
+    }
+    if (spec.flags.includes(arg)) continue;
+    if (spec.valued?.includes(arg)) {
+      const value = args[j + 1];
+      if (value === undefined || value.startsWith("-")) {
+        throw new ReadOnlyViolation(`git ${sub} ${arg} without a value`);
+      }
+      j++;
+      continue;
+    }
+    if (arg.startsWith("-")) throw new ReadOnlyViolation(`git ${sub} ${arg}`);
+    positionals.push(arg);
   }
-  for (const arg of args.slice(i + 1)) {
-    if (FORBIDDEN_OPTIONS.test(arg)) throw new ReadOnlyViolation(`git ${sub} ${arg}`);
+  const first = positionals[0];
+  if (spec.url && (first === undefined || !ALLOWED_URL.test(first))) {
+    throw new ReadOnlyViolation(`git ${sub} of a URL that is not GitHub or a local path`);
+  }
+  if (spec.remote !== undefined && first !== spec.remote) {
+    throw new ReadOnlyViolation(`git ${sub} from a remote other than ${spec.remote}`);
   }
 }
 
@@ -85,7 +147,7 @@ export async function readOnlyGit(args: string[], opts: ReadOnlyGitOptions = {})
     ...process.env,
     GIT_TERMINAL_PROMPT: "0",
     LC_ALL: "C",
-    ...(opts.lazyFetch ? {} : { GIT_NO_LAZY_FETCH: "1" }),
+    GIT_NO_LAZY_FETCH: "1",
     ...opts.env,
   };
   const proc = Bun.spawn(["git", ...(opts.cwd ? ["-C", opts.cwd] : []), ...args], {
@@ -102,6 +164,16 @@ export async function readOnlyGit(args: string[], opts: ReadOnlyGitOptions = {})
   return { stdout: Buffer.from(out), stderr: err, exitCode };
 }
 
+/**
+ * {@link readOnlyGit} in the shape `readLocationLogsAt` (scripts/scrub/git/git-lib.ts) takes as
+ * its runner, so the git-annex branch reads go through the guard as well.
+ */
+export function guardedGitRunner(
+  env?: Record<string, string | undefined>,
+): (repo: string, args: string[], stdin?: string | Uint8Array) => Promise<GitRun> {
+  return (repo, args, stdin) => readOnlyGit(args, { cwd: repo, env, stdin });
+}
+
 /** Run one read-only git command and return its stdout as text, or throw with its stderr. */
 export async function readOnlyGitText(
   args: string[],
@@ -116,10 +188,26 @@ export async function readOnlyGitText(
   return r.stdout.toString("utf8");
 }
 
-/** Check one `aws` argv: `s3api list-objects-v2` and nothing else. Exported for its test. */
+/** The options `aws s3api list-objects-v2` may carry, each with one value. */
+const AWS_VALUED = new Set(["--bucket", "--prefix", "--region", "--output"]);
+
+/**
+ * Check one `aws` argv: `s3api list-objects-v2` with `--bucket`, `--prefix`, `--region` and
+ * `--output json`, and nothing else. Exported for its test.
+ */
 export function assertReadOnlyAws(args: readonly string[]): void {
   if (args[0] !== "s3api" || args[1] !== "list-objects-v2") {
     throw new ReadOnlyViolation(`aws ${args.slice(0, 2).join(" ")}`);
+  }
+  for (let j = 2; j < args.length; j += 2) {
+    const option = args[j] as string;
+    const value = args[j + 1];
+    if (!AWS_VALUED.has(option) || value === undefined || value.startsWith("-")) {
+      throw new ReadOnlyViolation(`aws s3api list-objects-v2 ${option}`);
+    }
+    if (option === "--output" && value !== "json") {
+      throw new ReadOnlyViolation(`aws s3api list-objects-v2 --output ${value}`);
+    }
   }
 }
 
@@ -142,7 +230,7 @@ export async function readOnlyAws(
   return { stdout: Buffer.from(out), stderr: err, exitCode };
 }
 
-/** The one HTTP path out of the planner: GET and HEAD only. */
+/** The planner's own HTTP requests: GET and HEAD only. */
 export async function readOnlyFetch(url: string, init: RequestInit = {}): Promise<Response> {
   const method = (init.method ?? "GET").toUpperCase();
   if (method !== "GET" && method !== "HEAD") throw new ReadOnlyViolation(`HTTP ${method}`);
