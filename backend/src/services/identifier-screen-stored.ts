@@ -16,7 +16,9 @@
  */
 
 import {
+  REPORT_VERSION,
   type ScreenDescription,
+  type ScreenError,
   type ScreenReport,
   type ScreenState,
   describeScreen,
@@ -24,6 +26,24 @@ import {
   parseScreenReport,
 } from "../../../shared/identifier-screen-report.js";
 import { isSandboxDatasetId } from "./datasetId.js";
+
+/**
+ * A screen still pending this long after its dispatch has not reported, and is
+ * mailed as such. Above the workflow's own budget (a 35-minute script deadline
+ * inside a 45-minute job, plus queueing and callback retries), so the watchdog
+ * does not overtake a run that is merely slow. A report that arrives later still
+ * lands: marking a screen `unreported` keeps its nonce.
+ *
+ * Here rather than in `identifier-screen.ts` so a screen that mails nobody (the
+ * re-pull's, ADR 0111) can read the same deadline without importing a module
+ * that mails; `identifier-screen.ts` re-exports it.
+ */
+export const SCREEN_REPORT_DEADLINE_MINUTES = 50;
+
+/** A report the Worker writes itself, for a screen that produced none. */
+export function workerErrorReport(error: ScreenError): ScreenReport {
+  return parseScreenReport({ version: REPORT_VERSION, scanner: null, head: null, error });
+}
 
 /**
  * Sandbox (`xx`) datasets are not screened: the band is training and staging
