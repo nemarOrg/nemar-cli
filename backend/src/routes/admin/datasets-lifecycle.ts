@@ -1201,7 +1201,7 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
       // Backfill dataset_versions row if missing. Under the central manifest
       // workflow (#557), publish-time inserts run on /webhooks/manifest-ready;
       // a stranded version (manifest+S3 present, D1 row absent) needs this
-      // admin path to repair the gap. OR IGNORE keeps the legacy double-write
+      // admin path to repair the gap. ON CONFLICT DO NOTHING keeps the legacy double-write
       // path safe.
       const versionDoiForRow = versionDoi ?? manifest.doi ?? null;
       let dataset_versions_backfilled = false;

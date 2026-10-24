@@ -38,9 +38,17 @@ import { getDatasetsToken } from "./github-auth.js";
 import { GITHUB_RAW_ORIGIN, rawContentUrl } from "./github/shared.js";
 import { BIDS_METADATA_UNAVAILABLE, errorMessage } from "./repo-metadata.js";
 
-/** The one INSERT into `dataset_versions`: six columns, the last two the snapshot. */
+/**
+ * The one INSERT into `dataset_versions`: six columns, the last two the snapshot.
+ *
+ * `ON CONFLICT (dataset_id, version) DO NOTHING`, not `INSERT OR IGNORE`: a replayed insert for
+ * a version that exists is still a silent no-op (the pair is UNIQUE), but `OR IGNORE` would also
+ * swallow a CHECK violation, and a snapshot pair the CHECK refuses would then drop the whole row
+ * with no error. A refused row must raise, so the manifest-ready callback answers 500 and the job
+ * stays retryable.
+ */
 export const INSERT_DATASET_VERSION_SQL =
-  "INSERT OR IGNORE INTO dataset_versions (dataset_id, version, doi, provider, source_version, source_version_basis) VALUES (?, ?, ?, ?, ?, ?)";
+  "INSERT INTO dataset_versions (dataset_id, version, doi, provider, source_version, source_version_basis) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (dataset_id, version) DO NOTHING";
 
 /** The two snapshot columns of a `dataset_versions` row. NULL/NULL is "never examined". */
 export interface SnapshotColumns {

@@ -441,12 +441,51 @@ describe("INSERT_DATASET_VERSION_SQL", () => {
       source_version: "2.0.2",
       source_version_basis: "doi",
     });
-    // OR IGNORE: a replayed insert changes nothing, in particular not to NULL/NULL.
-    insert(null, null);
+    // A replayed insert for the same version is a silent no-op, in particular not NULL/NULL.
+    expect(() => insert(null, null)).not.toThrow();
     expect(snapshotOf("on000050", "1.0.0")).toEqual({
       source_version: "2.0.2",
       source_version_basis: "doi",
     });
+  });
+
+  test("an inconsistent snapshot pair raises and drops no row silently", () => {
+    seedDataset("on000051");
+    const insert = (tag: string | null, basis: string | null) =>
+      db
+        .prepare(INSERT_DATASET_VERSION_SQL)
+        .run("on000051", "1.0.0", "10.82901/y", "ezid", tag, basis);
+    for (const [tag, basis] of [
+      ["2.0.2", null],
+      ["2.0.2", "unknown"],
+      [null, "doi"],
+      ["2.0.2", "guess"],
+    ] as const) {
+      expect(() => insert(tag, basis)).toThrow(/CHECK constraint failed/);
+    }
+    expect(snapshotOf("on000051")).toBeNull();
+  });
+
+  test("the callback answers 500 and leaves the job dispatched when the row is refused", async () => {
+    // Make the insert's CHECK refuse every row, as an inconsistent pair would.
+    db.exec("DROP TABLE dataset_versions");
+    db.exec(
+      `CREATE TABLE dataset_versions (
+         id INTEGER PRIMARY KEY AUTOINCREMENT, dataset_id TEXT NOT NULL, version TEXT NOT NULL,
+         doi TEXT NOT NULL, provider TEXT NOT NULL DEFAULT 'ezid',
+         source_version TEXT, source_version_basis TEXT CHECK (source_version_basis = 'never'),
+         UNIQUE (dataset_id, version))`,
+    );
+    standin.describe("on000052", "1.0.0", {
+      SourceDatasets: [{ DOI: "10.18112/openneuro.ds000052.v1.0.0" }],
+    });
+    seedDataset("on000052");
+    const token = await seedManifestJob("on000052", "1.0.0", "nonce-52");
+    const { response } = manifestReady(token, "on000052", "1.0.0", env());
+    expect((await response).status).toBe(500);
+    expect(
+      db.query("SELECT status FROM manifest_jobs WHERE dataset_id = 'on000052'").get(),
+    ).toEqual({ status: "dispatched" });
   });
 });
 
@@ -515,9 +554,9 @@ describe("every INSERT into dataset_versions is the one statement", () => {
   test("the scan fires on a planted INSERT, including one split across a concatenation", () => {
     const planted = createTree({
       "services/planted.ts":
-        'export const SQL = "INSERT OR IGNORE INTO dataset_versions (dataset_id) VALUES (?)";',
+        'export const SQL = "INSERT INTO dataset_versions (dataset_id) VALUES (?)";',
       "services/planted-split.ts":
-        'export const SQL = "INSERT OR IGNORE INTO " + "dataset_versions (dataset_id) VALUES (?)";',
+        'export const SQL = "INSERT INTO " + "dataset_versions (dataset_id) VALUES (?)";',
     });
     expect(offenders(planted).sort()).toEqual([
       expect.stringContaining("planted-split.ts"),

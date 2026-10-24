@@ -70,7 +70,7 @@ export function registerManifestCallbackRoutes(webhooks: WebhookRouter): void {
    * confirm presence, then INSERTs the dataset_versions row that the
    * legacy in-Worker path used to write inline.
    *
-   * Idempotent on the dataset_versions INSERT via OR IGNORE; idempotent
+   * Idempotent on the dataset_versions INSERT via ON CONFLICT DO NOTHING; idempotent
    * on the manifest_jobs row via status='dispatched' -> 'ready' transition
    * gate. Replaying a callback for an already-completed job is a no-op
    * (200 still returned to keep the workflow's exit happy).
@@ -201,7 +201,7 @@ export function registerManifestCallbackRoutes(webhooks: WebhookRouter): void {
     }
 
     // Insert dataset_versions row (the contract piece that USED to live
-    // inline in publish-version-doi). OR IGNORE makes this idempotent if
+    // inline in publish-version-doi). ON CONFLICT DO NOTHING makes this idempotent if
     // the legacy path already wrote the row (paranoid double-write
     // protection during the soak period).
     //
