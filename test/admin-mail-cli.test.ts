@@ -815,7 +815,7 @@ describe("reprocess and help", () => {
     const server = startServer();
     try {
       const plain = await runCli(["--help"], server.url);
-      expect(plain.stdout).toContain("exit: 0 ok, 1 error, 2 usage, 3 not found");
+      expect(plain.stdout).toContain("exit: 0 ok, 1 error, 2 usage, 3 not found, 4 not permitted");
       const all = await runCli(["--help-all"], server.url);
       expect(all.stdout).toContain("Exit codes:");
       expect(all.stdout).toMatch(/3\s+not found or not visible/);

@@ -986,7 +986,7 @@ const reprocessCommand = new MailCommand("reprocess")
   });
 
 export const mailCommand = new MailCommand("mail")
-  .description("Support tickets (exit: 0 ok, 1 error, 2 usage, 3 not found)")
+  .description("Support tickets (exit: 0 ok, 1 error, 2 usage, 3 not found, 4 not permitted)")
   .addHelpText(
     "after",
     `${EXIT_HELP}
