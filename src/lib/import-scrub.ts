@@ -1068,9 +1068,12 @@ async function scrubTree(input: ImportScrubInput): Promise<ImportScrubResult> {
   const datesKept = new Set(datesFit ? datesReplaceable : []);
   const toFetch = flaggedUpstream.filter((f) => f.change.scrub || datesKept.has(f));
   const toPatch: typeof toFetch = [];
-  // A header is about to change, and with it the sentence each provenance file must carry. A
-  // scoped scrub can write only what is in its scope, so a provenance file outside it refuses
-  // here, before a byte moves, rather than being committed without the sentence (ADR 0085).
+  // A header is about to change, and with it the sentence each provenance file must carry (ADR
+  // 0085's for a scrub, ADR 0091's for a date). A scoped scrub can write only what is in its
+  // scope, so a provenance file outside it refuses here: after the ranged header reads that decide
+  // it, and before any recording is downloaded, rather than being committed without the sentence.
+  // The rule counts a planned change, the safe side: a date-only recording whose download or hash
+  // later fails would leave its header as it was, and the scrub has refused already.
   if (scope && (toFetch.length > 0 || flaggedGitHeld.length > 0)) {
     const left = [PROVENANCE_PATH, PROVENANCE_README_PATH].filter(
       (p) => !scope.has(p) && allTracked.includes(p),

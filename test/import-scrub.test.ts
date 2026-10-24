@@ -1844,6 +1844,28 @@ describe("a re-pull's header scrub never leaves a provenance file without its se
     expect(readFileSync(join(clone, PROVENANCE), "utf8")).toBe(`{\n  "files": []\n}\n`);
   }, 120_000);
 
+  test("a date-only recording is a header change too, so it refuses on the same rule", async () => {
+    // A date set to 1 January carries ADR 0091's sentence in the same file. The refusal counts the
+    // planned change, the safe side, before the recording is downloaded.
+    const datedOnly = "sub-05/eeg/sub-05_task-rest_eeg.edf";
+    const upstream = await buildUpstream([
+      ...deltaFixtures(),
+      { path: datedOnly, bytes: edfBytes("X X X X", 4000, 31) },
+      ...provenanceFixtures(),
+    ]);
+    const { clone } = await cloneForImport(upstream);
+    const key = await keyAt(clone, datedOnly);
+    const err = await refusal(
+      scrubDelta(clone, {
+        scope: new Set([datedOnly]),
+        sourceOf: (k) => (k === key ? upstreamS3(datedOnly) : null),
+      }),
+    );
+    expect(err.code).toBe("provenance-out-of-scope");
+    expect(err.message).toContain("2 provenance file(s)");
+    expect(requests.every((r) => r.range !== null)).toBe(true);
+  }, 120_000);
+
   test("with no header to change, a provenance file outside the scope is not the scrub's", async () => {
     const upstream = await buildUpstream([...deltaFixtures(), ...provenanceFixtures()]);
     const { clone } = await cloneForImport(upstream);
