@@ -21,6 +21,7 @@
  * - nemar admin notice list/set/clear - System notice management
  * - nemar admin notify              - Send broadcast email to users
  * - nemar admin pr-reviews          - Dataset pull requests awaiting approval, with the automated review
+ * - nemar admin mail               - Support tickets: list/show/reply/note/assign/status/close/escalate/queues/away/reprocess
  */
 
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
@@ -239,6 +240,7 @@ import {
   resolveWithdrawTargets,
   stillWithdrawn,
 } from "../lib/withdrawn-datasets.js";
+import { mailCommand } from "./admin-mail.js";
 import { prReviewsCommand } from "./admin-pr-reviews.js";
 import { publishCommand } from "./admin-publish.js";
 
@@ -10215,3 +10217,4 @@ neurobagelCommand
 
 adminCommand.addCommand(neurobagelCommand);
 adminCommand.addCommand(prReviewsCommand);
+adminCommand.addCommand(mailCommand);
