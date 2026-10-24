@@ -88,7 +88,7 @@ Everything in this section is designed and not yet built.
 - Its states are planned, prepared, copied, registered, pr_open, gates_clear, merged and released, then, when there is an N.0.1, patch_synthesized, patch_gates_clear, patch_merged and patch_released, and finally complete.
   Abandoned, failed, superseded and patch_declined are terminal, and superseded means a newer tag arrived before N.0.0 merged, so its pull request is closed and the plan made again from the same `from_tag`.
 - Every step checks its own end state before it acts, so `--resume` continues from the recorded status.
-- `--abandon` before N.0.0 merges closes its pull request, deletes its branch, reports the orphaned bytes and ends the row `abandoned`.
+- `--abandon` before N.0.0 merges closes its pull request and deletes its branch, when they exist, reports the orphaned bytes and ends the row `abandoned`.
   After N.0.0 has merged, it closes only N.0.1's pull request and branch, when they exist, and ends the row `patch_declined` (terminal).
   N.0.0 stays released, because its tag and DOI exist, and its corrections remain corrections in the next plan.
   A step that finds a recorded pull request closed unmerged ends the row the same way: `abandoned` before the N.0.0 merge, `patch_declined` after it.
@@ -147,7 +147,7 @@ For every other pull request the Worker neither approves nor merges.
 AGENTS.md's summary of ADR 0093 ("nothing merges without `--merge` or a `y`") is updated by the phase that builds the merge.
 
 A re-pull pull request that is not machine clean, or that an administrator opened, is merged by an administrator, through `nemar admin repull <id> --merge` or `nemar admin pr-reviews`, under ADR 0093, with a screen that is `clear` or carries the administrator's recorded acknowledgment (ADR 0086).
-`nemar admin pr-reviews` will require that screen for a re-pull pull request, which its `approve --merge` does not check today, and will claim the merge cap before the merge is sent.
+`nemar admin pr-reviews` will require that screen for a re-pull pull request other than an `xx` one (below), which its `approve --merge` does not check today, and will claim the merge cap before the merge is sent.
 
 An `xx` re-pull takes the administrator path only.
 ADR 0086 exempts `xx` from the identifier screen, so an `xx` re-pull never has a `clear` verdict and is never machine clean, and an administrator merges it under that exemption, with no screen.
@@ -187,7 +187,7 @@ ADR 0086 exempts `xx` from the identifier screen, so an `xx` re-pull never has a
 - **Two DOIs when N.0.1 has content.**
   N.0.0 cites upstream's snapshot without NEMAR's corrections, which is what its number says, and N.0.1 is the version a reader most likely wants.
 - **A window between N.0.0 and N.0.1.**
-  Between the two merges the public latest lacks NEMAR's corrections; the window lasts at least until N.0.0 is tagged and N.0.1 is synthesized and its gates pass, and a conflict keeps its correction out until an administrator resolves it.
+  Between the two merges the public latest lacks NEMAR's corrections; the window lasts until an administrator merges N.0.1, which can happen only once N.0.0 is tagged and N.0.1 is synthesized and its gates pass, and a conflict keeps its correction out until an administrator resolves it.
   A change the privacy ledger records, and a change a deterministic rule re-applies (the scrub, the date normalization), are standard edits, so N.0.0 carries them and the window never lacks them.
   Every other correction is in the window, including a privacy-minded one the ledger does not record.
 - **Orphan locked objects.**
@@ -204,7 +204,7 @@ ADR 0086 exempts `xx` from the identifier screen, so an `xx` re-pull never has a
 - **The Worker's merge has no staging rehearsal.**
   Outside production only `xx` datasets are re-pulled, and they never reach machine clean, so the Worker's merge first runs in production, behind its switch and with `REPULL_DAILY_MERGE_CAP` set to 1 for its first merges (G5).
 - **A NEMAR change that would deserve a major has no major on a mirror;** it takes a minor.
-- The importer changes as well: it clones a tag, and it refuses a re-import whose tag moved.
+- The importer changes as well: it clones a tag, and it refuses a re-import of a released mirror whose recorded tag moved.
 
 ## Alternatives considered
 
