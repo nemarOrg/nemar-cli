@@ -163,12 +163,22 @@ export function registerManifestRoutes(datasetRoutes: DatasetsRouter): void {
     }
 
     // Get version DOIs from database
+    // `source_version` and `source_version_basis` are the upstream snapshot each version
+    // mirrors (ADR 0111, decision 4). Both are always present: NULL/NULL means never examined,
+    // `unknown` with no tag means examined and unresolved, and a tag means a known one.
     const versions = await db
       .prepare(
-        "SELECT version, doi, provider, created_at FROM dataset_versions WHERE dataset_id = ? ORDER BY created_at DESC",
+        "SELECT version, doi, provider, created_at, source_version, source_version_basis FROM dataset_versions WHERE dataset_id = ? ORDER BY created_at DESC",
       )
       .bind(datasetId)
-      .all<{ version: string; doi: string; provider: string; created_at: string }>();
+      .all<{
+        version: string;
+        doi: string;
+        provider: string;
+        created_at: string;
+        source_version: string | null;
+        source_version_basis: string | null;
+      }>();
 
     // Emit versions in the canonical `vX.Y.Z` tag form, matching the listing's
     // `latest_version` and the data-plane responses (epic #896 #899). This
