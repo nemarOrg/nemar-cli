@@ -326,5 +326,8 @@ The lead's rulings of 2026-10-23 settle three questions decision 10 left open, a
 - **An unreleased import whose tag moved is retargeted, not hard-reset (ruling 1).**
   `git reset --soft origin/main` keeps the new tag's tree and lands it as a fast-forward, so "prepared again at the tag the retry discovers" holds; the hard reset would have kept the old tree, #993's mismatch.
   "Released" is any `dataset_versions` row, read through `GET /datasets/:id/versions`, asked only when the tag moved; not being able to read it is a plain failure, never "unreleased".
+- **The entry.** A first import, and a retarget, append `{DOI: doi:10.18112/openneuro.<ds>.v<tag>, URL: https://openneuro.org/datasets/<ds>/versions/<tag>, Version: <tag>}` to `SourceDatasets`, all three from the one tag, unless an entry already names the dataset.
+  It is not written after a hard reset, whose tree is origin's.
+  Publication's `applyConceptDoiToDescription` compares DOIs normalized and adds no second entry for a dataset an entry already names, so a stale or differently spelled upstream `DatasetDOI` cannot make the recorded tag unknown.
 - **Parked, not retried:** `upstream_moved`, and `annex_uuid_conflict` in both wordings (ruling 3), because each retry fails the same way.
   The #1320 preflight compares the bucket's `annex-uuid` with the `nemar-s3` uuids the git-annex branch records and refuses a disagreement with `[nemar-annex-uuid-conflict]`, naming both and the recovery.

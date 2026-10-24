@@ -23,7 +23,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import chalk from "chalk";
 import ora from "ora";
-import { isOpenNeuroTag, sameUpstreamTag } from "../../shared/openneuro-tag.js";
+import {
+  isOpenNeuroTag,
+  normalizeUpstreamTag,
+  sameUpstreamTag,
+} from "../../shared/openneuro-tag.js";
 import { decideReadme, readmeProvenanceStub } from "../../shared/standard-edits/readme.js";
 import { addCi, importDataset, reindexDataset } from "./api/admin.js";
 import { getDataset, getUserCiStatus, hasReleasedVersion } from "./api/datasets.js";
@@ -63,7 +67,7 @@ import {
   screenWaitBudget,
 } from "./import-publication.js";
 import { httpUpstreamReader, prepareImportedTreeForCopy } from "./import-scrub.js";
-import { recordedUpstreamTag } from "./import-upstream-tag.js";
+import { hasSourceEntryFor, recordedUpstreamTag } from "./import-upstream-tag.js";
 import { fetchOpenNeuroLatestTag } from "./openneuro.js";
 import {
   type ImportManifest,
@@ -865,6 +869,58 @@ export function seedMetadata(
 }
 
 /**
+ * The `SourceDatasets` entry an import records for the upstream snapshot it mirrors (ADR 0111
+ * decisions 1, 4 and 10): the snapshot's DOI, its page, and its tag, all three derived from the one
+ * tag, so the entry cannot disagree with itself. The DOI is what the version-DOI mint turns into
+ * `IsDerivedFrom` (decision 2), and the entry is what the upstream-moved guard reads back.
+ */
+export function sourceDatasetEntry(
+  openneuroId: string,
+  tag: string,
+): { DOI: string; URL: string; Version: string } {
+  const bare = normalizeUpstreamTag(tag);
+  return {
+    DOI: `doi:10.18112/openneuro.${openneuroId}.v${bare}`,
+    URL: `https://openneuro.org/datasets/${openneuroId}/versions/${bare}`,
+    Version: bare,
+  };
+}
+
+/**
+ * Append {@link sourceDatasetEntry} to the clone's `dataset_description.json`, read from disk now
+ * (the scrub in Step 5b may have blanked values in it since prepare first read it). Leaves the file
+ * alone when an entry already names this dataset's `ds`: NEMAR owns exactly one such entry, and a
+ * second would make the recorded tag disagree with itself. Kept in git, never the annex. Returns
+ * whether it wrote. Written as publication writes the file, two-space JSON.
+ */
+export async function appendSourceDatasetEntry(
+  datasetPath: string,
+  openneuroId: string,
+  tag: string,
+): Promise<boolean> {
+  const descPath = join(datasetPath, "dataset_description.json");
+  const desc = readBidsDescription(datasetPath);
+  if (hasSourceEntryFor(desc, openneuroId)) return false;
+  // A `SourceDatasets` that is not an array is kept as the first entry, as publication keeps it.
+  const existing = desc.SourceDatasets;
+  const sources: unknown[] = Array.isArray(existing)
+    ? [...existing]
+    : existing === undefined || existing === null
+      ? []
+      : [existing];
+  sources.push(sourceDatasetEntry(openneuroId, tag));
+  writeFileSync(descPath, `${JSON.stringify({ ...desc, SourceDatasets: sources }, null, 2)}\n`);
+  const add = await runCommand(
+    ["git", "-c", "annex.largefiles=nothing", "add", "dataset_description.json"],
+    { cwd: datasetPath },
+  );
+  if (add.exitCode !== 0) {
+    throw new Error(`Failed to stage dataset_description.json: ${add.stderr.trim()}`);
+  }
+  return true;
+}
+
+/**
  * Outcome of {@link ensureReadmeMd} so the caller can stage the right paths.
  *
  * - `renamed`: an upstream `README` (no extension) was renamed to `README.md`
@@ -1622,9 +1678,16 @@ async function prepareImportSteps(
   // GitHub renders it (#642). Content is never modified.
   const metaSpinner = ora("Seeding metadata...").start();
   let readmeOutcome: ReadmeOutcome;
+  let recordedEntry = false;
   try {
     seedMetadata(datasetPath, nemarId, openneuroId, bidsDesc, openNeuroDoi);
     readmeOutcome = ensureReadmeMd(datasetPath, openneuroId, openNeuroDoi);
+    // The upstream snapshot this tree is, recorded where the guard and the version-DOI mint read
+    // it (ADR 0111 decision 10). Only when the tree IS the pinned tag's: a first import or a
+    // retarget. After a hard reset the tree is origin's, and recording a tag there would be a guess.
+    if (base.kind !== "hard-reset") {
+      recordedEntry = await appendSourceDatasetEntry(datasetPath, openneuroId, pinned.tag);
+    }
   } catch (err) {
     metaSpinner.fail(
       `Failed to seed metadata: ${err instanceof Error ? err.message : String(err)}`,
@@ -1662,7 +1725,9 @@ async function prepareImportSteps(
       : readmeOutcome.kind === "kept"
         ? `kept upstream ${readmeOutcome.path}`
         : "wrote provenance stub README.md (no upstream README)";
-  metaSpinner.succeed(`Seeded .nemar/metadata.json (${readmeNote})`);
+  metaSpinner.succeed(
+    `Seeded .nemar/metadata.json (${readmeNote}${recordedEntry ? `; recorded upstream ${openneuroId} ${pinned.tag} in SourceDatasets` : ""})`,
+  );
 
   // Step 7: Push main + the git-annex branch (now carrying the nemar-s3 remote
   // config). Data blobs are copied in the next phase; finalize re-pushes the

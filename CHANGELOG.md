@@ -30,6 +30,8 @@ earlier releases are described only by their generated notes.
   An unrecorded tag, or the same one, takes the same-version hard reset as before.
 - **The #1320 preflight compares the bucket's `annex-uuid` with the `nemar-s3` uuids the git-annex branch records**, before the remote is configured, and refuses a disagreement with `[nemar-annex-uuid-conflict]`, both uuids and the recovery that fits; the retry engine now parks `annex_uuid_conflict`, in either wording, instead of re-dispatching it.
 - **Every refusal clears the dataset's `staging/` prefix** before it exits, so the copy and finalize jobs, which run under `if: !cancelled()`, find no manifest instead of acting on one an earlier attempt left.
+- **A first import, or a retargeted one, records the snapshot it mirrors** as a `SourceDatasets` entry `{DOI: doi:10.18112/openneuro.<ds>.v<tag>, URL, Version: <tag>}`, all from the tag and kept in git; it is not written after a same-version hard reset, or when an entry already names the dataset.
+  Publication no longer adds upstream's `DatasetDOI` as a second source when it is the same DOI spelled another way, or another version of a dataset an entry already names, so the recorded tag never disagrees with itself.
 
 ### Production behavior changes
 

@@ -8,8 +8,11 @@
  * a contributor's change. A copy in any one of them would drift from the others.
  *
  * Pure: no I/O, and no import from Node or the Worker runtime, so the Worker bundle and the CLI
- * both load it.
+ * both load it. Its two imports are shared modules held to the same rule.
  */
+
+import { normalizeDoiKey } from "../never-data-paper.js";
+import { openNeuroDatasetOfDoi } from "../openneuro-tag.js";
 
 /**
  * Put NEMAR's concept DOI into a dataset_description.json, keeping whatever DOI was
@@ -44,7 +47,18 @@ export function applyConceptDoiToDescription(
       : existing === undefined || existing === null
         ? []
         : [existing as Record<string, unknown>];
-    const alreadyPresent = sources.some((s) => typeof s.DOI === "string" && s.DOI === existingDoi);
+    // Compared as DOIs, not as strings: `doi:` and resolver prefixes and letter case do not make
+    // a different DOI. And an entry for the same OpenNeuro dataset already present -- the one an
+    // import records for the snapshot it mirrors (ADR 0111 decision 10) -- is not joined by a
+    // second, from upstream's own DatasetDOI: NEMAR owns one entry per mirrored `ds`, and two that
+    // named different versions would leave the recorded upstream tag unknown.
+    const ds = openNeuroDatasetOfDoi(existingDoi);
+    const alreadyPresent = sources.some(
+      (s) =>
+        typeof s.DOI === "string" &&
+        (normalizeDoiKey(s.DOI) === normalizeDoiKey(existingDoi) ||
+          (ds !== null && openNeuroDatasetOfDoi(s.DOI) === ds)),
+    );
     if (!alreadyPresent) {
       sources.push({ DOI: existingDoi });
       next.SourceDatasets = sources;

@@ -18,7 +18,11 @@ import { classifyImportFailure } from "../backend/src/services/import-failure-ca
 import { decideRetryAction } from "../backend/src/services/import-retry";
 import { pushToGitHub } from "../src/lib/git-annex/clone-push";
 import { ImportRefused, OPENNEURO_UPSTREAM_MOVED_MARKER } from "../src/lib/import-markers";
-import { baseOnOriginMain, cloneOpenNeuroAtTag } from "../src/lib/import-openneuro";
+import {
+  baseOnOriginMain,
+  cloneOpenNeuroAtTag,
+  sourceDatasetEntry,
+} from "../src/lib/import-openneuro";
 import { makeScratch, run } from "./helpers/annex-repo";
 import {
   type TaggedUpstream,
@@ -57,14 +61,8 @@ function fresh(name: string): string {
 
 /** How origin's `main` records upstream 1.0.0, in each form the guard meets. */
 const RECORDED = {
-  // What this import writes from now on.
-  entry: [
-    {
-      DOI: `doi:10.18112/openneuro.${UPSTREAM_ID}.v1.0.0`,
-      URL: `https://openneuro.org/datasets/${UPSTREAM_ID}/versions/1.0.0`,
-      Version: "1.0.0",
-    },
-  ],
+  // What this import writes from now on: the guard must read the entry its own import wrote.
+  entry: [sourceDatasetEntry(UPSTREAM_ID, "1.0.0")],
   // What publication leaves on every mirror today (on004362, on003645).
   doiOnly: [{ DOI: `doi:10.18112/openneuro.${UPSTREAM_ID}.v1.0.0` }],
   urlOnly: [{ URL: `https://openneuro.org/datasets/${UPSTREAM_ID}/versions/1.0.0` }],

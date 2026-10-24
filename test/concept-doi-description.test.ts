@@ -10,6 +10,8 @@
 
 import { describe, expect, test } from "bun:test";
 import { applyConceptDoiToDescription } from "../backend/src/services/doi";
+import { sourceDatasetEntry } from "../src/lib/import-openneuro";
+import { recordedUpstreamTag } from "../src/lib/import-upstream-tag";
 
 const CONCEPT = "10.82901/nemar.on002720";
 const UPSTREAM = "10.18112/openneuro.ds002720.v1.0.1";
@@ -73,5 +75,68 @@ describe("applyConceptDoiToDescription", () => {
     const snapshot = JSON.stringify(before);
     applyConceptDoiToDescription(before, CONCEPT);
     expect(JSON.stringify(before)).toBe(snapshot);
+  });
+
+  test("an import's entry is not joined by upstream's DOI spelled another way", () => {
+    // What a tag-pinned import leaves for publication (ADR 0111 decision 10): its own entry, and
+    // upstream's DatasetDOI for the same snapshot in a spelling of OpenNeuro's choosing. A string
+    // comparison added a second entry for each of these.
+    const entry = sourceDatasetEntry("ds002720", "1.0.1");
+    for (const upstream of [
+      UPSTREAM,
+      `doi:${UPSTREAM}`,
+      `https://doi.org/${UPSTREAM}`,
+      "doi:10.18112/OpenNeuro.ds002720.V1.0.1",
+    ]) {
+      const result = applyConceptDoiToDescription(
+        { DatasetDOI: upstream, Version: "1.0.0", SourceDatasets: [entry] },
+        CONCEPT,
+      );
+      expect(result.description.SourceDatasets).toEqual([entry]);
+      expect(result.preservedSourceDoi).toBeUndefined();
+      expect(result.description.DatasetDOI).toBe(CONCEPT);
+    }
+  });
+
+  test("a stale upstream DOI for another version of the same dataset does not unsettle the tag", () => {
+    // Upstream's DatasetDOI naming an older snapshot than the one imported: a second entry for the
+    // same ds would make the recorded tag disagree with itself, and an unknown tag never trips the
+    // upstream-moved guard.
+    const entry = sourceDatasetEntry("ds002720", "1.0.1");
+    const result = applyConceptDoiToDescription(
+      {
+        DatasetDOI: "doi:10.18112/openneuro.ds002720.v1.0.0",
+        Version: "1.0.0",
+        SourceDatasets: [entry],
+      },
+      CONCEPT,
+    );
+    expect(result.description.SourceDatasets).toEqual([entry]);
+    expect(recordedUpstreamTag(result.description, "ds002720")).toBe("1.0.1");
+  });
+
+  test("any DOI already a source is recognized in another spelling", () => {
+    // Not only OpenNeuro's: a DOI is case-insensitive and its prefix is presentation.
+    const result = applyConceptDoiToDescription(
+      {
+        DatasetDOI: "https://doi.org/10.5281/ZENODO.1234",
+        Version: "1.0.0",
+        SourceDatasets: [{ DOI: "doi:10.5281/zenodo.1234" }],
+      },
+      CONCEPT,
+    );
+    expect(result.description.SourceDatasets).toEqual([{ DOI: "doi:10.5281/zenodo.1234" }]);
+    expect(result.preservedSourceDoi).toBeUndefined();
+  });
+
+  test("a DOI of another dataset is still kept as a source", () => {
+    const entry = sourceDatasetEntry("ds002720", "1.0.1");
+    const other = "10.18112/openneuro.ds002721.v2.0.0";
+    const result = applyConceptDoiToDescription(
+      { DatasetDOI: other, Version: "1.0.0", SourceDatasets: [entry] },
+      CONCEPT,
+    );
+    expect(result.description.SourceDatasets).toEqual([entry, { DOI: other }]);
+    expect(result.preservedSourceDoi).toBe(other);
   });
 });

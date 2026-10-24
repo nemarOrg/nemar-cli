@@ -35,3 +35,13 @@ export function normalizeUpstreamTag(tag: string): string {
 export function sameUpstreamTag(a: string, b: string): boolean {
   return normalizeUpstreamTag(a) === normalizeUpstreamTag(b);
 }
+
+/**
+ * The OpenNeuro dataset a DOI belongs to (`ds004362` for `doi:10.18112/openneuro.ds004362.v1.0.0`,
+ * with or without its version, `doi:` or a resolver prefix), or null for any other DOI.
+ */
+export function openNeuroDatasetOfDoi(doi: string): string | null {
+  const bare = doi.trim().replace(/^(?:doi:|https?:\/\/(?:dx\.)?doi\.org\/)/i, "");
+  const m = /^10\.18112\/openneuro\.(ds\d{6})(?:\.v\S+)?$/i.exec(bare);
+  return m ? (m[1] as string).toLowerCase() : null;
+}

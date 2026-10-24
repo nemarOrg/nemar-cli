@@ -17,7 +17,12 @@ import { which } from "bun";
 import { classifyImportFailure } from "../backend/src/services/import-failure-cause";
 import { decideRetryAction } from "../backend/src/services/import-retry";
 import { ImportRefused, OPENNEURO_MIRROR_LAG_MARKER } from "../src/lib/import-markers";
-import { cloneOpenNeuroAtTag } from "../src/lib/import-openneuro";
+import {
+  appendSourceDatasetEntry,
+  cloneOpenNeuroAtTag,
+  sourceDatasetEntry,
+} from "../src/lib/import-openneuro";
+import { recordedUpstreamTag } from "../src/lib/import-upstream-tag";
 import { fetchOpenNeuroLatestTag } from "../src/lib/openneuro";
 import { makeScratch, run } from "./helpers/annex-repo";
 import {
@@ -279,4 +284,69 @@ describe("a refusal clears the staging an earlier attempt left", () => {
     },
     60_000,
   );
+});
+
+describe("the import records the snapshot it is, in SourceDatasets", () => {
+  async function pinnedAt(tag: "1.0.0" | "1.0.1"): Promise<string> {
+    const dir = cloneDir();
+    await cloneOpenNeuroAtTag(UPSTREAM_ID, dir, {
+      tag,
+      repoUrl: upstream.dir,
+      lookup: fastLookup(),
+    });
+    return dir;
+  }
+
+  test("appended beside upstream's own entries, read back as the tag, and staged as a git blob", async () => {
+    const dir = await pinnedAt("1.0.1");
+    const descPath = join(dir, "dataset_description.json");
+    // Upstream's own SourceDatasets, which is kept.
+    const upstreamDesc = JSON.parse(readFileSync(descPath, "utf8"));
+    const theirs = { URL: "https://example.org/raw-recordings" };
+    writeFileSync(descPath, JSON.stringify({ ...upstreamDesc, SourceDatasets: [theirs] }));
+
+    // A repository whose policy would annex everything (git-annex's default with no policy set,
+    // which some OpenNeuro mirrors effectively have for their metadata): the description must stay
+    // a git blob regardless.
+    await git(dir, "annex", "config", "--set", "annex.largefiles", "anything");
+
+    expect(await appendSourceDatasetEntry(dir, UPSTREAM_ID, "1.0.1")).toBe(true);
+
+    const staged = JSON.parse(await git(dir, "show", ":dataset_description.json"));
+    expect(staged.SourceDatasets).toEqual([theirs, sourceDatasetEntry(UPSTREAM_ID, "1.0.1")]);
+    expect(staged.SourceDatasets[1]).toEqual({
+      DOI: `doi:10.18112/openneuro.${UPSTREAM_ID}.v1.0.1`,
+      URL: `https://openneuro.org/datasets/${UPSTREAM_ID}/versions/1.0.1`,
+      Version: "1.0.1",
+    });
+    // Every other key is upstream's, untouched.
+    expect({ ...staged, SourceDatasets: undefined }).toEqual({
+      ...upstreamDesc,
+      SourceDatasets: undefined,
+    });
+    // What the upstream-moved guard reads back is the tag that was imported.
+    expect(recordedUpstreamTag(staged, UPSTREAM_ID)).toBe("1.0.1");
+    // A regular blob in git (mode 100644), never an annex pointer.
+    expect((await git(dir, "ls-files", "-s", "dataset_description.json")).split(" ")[0]).toBe(
+      "100644",
+    );
+    expect(await git(dir, "annex", "find", "--include", "*", "dataset_description.json")).toBe("");
+  });
+
+  test("never a second entry for the same dataset", async () => {
+    const dir = await pinnedAt("1.0.0");
+    expect(await appendSourceDatasetEntry(dir, UPSTREAM_ID, "1.0.0")).toBe(true);
+    const once = readFileSync(join(dir, "dataset_description.json"), "utf8");
+    expect(await appendSourceDatasetEntry(dir, UPSTREAM_ID, "1.0.0")).toBe(false);
+    // Nor when the entry already there names another version: one entry per ds, so the recorded
+    // tag never disagrees with itself.
+    expect(await appendSourceDatasetEntry(dir, UPSTREAM_ID, "1.0.1")).toBe(false);
+    expect(readFileSync(join(dir, "dataset_description.json"), "utf8")).toBe(once);
+  });
+
+  test("a leading v on the tag does not reach the DOI", () => {
+    expect(sourceDatasetEntry(UPSTREAM_ID, "v1.0.1").DOI).toBe(
+      `doi:10.18112/openneuro.${UPSTREAM_ID}.v1.0.1`,
+    );
+  });
 });
