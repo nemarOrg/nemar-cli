@@ -296,11 +296,13 @@ export function registerMailRoutes(admin: AdminRouter): void {
       }
       // The answer names a ticket, so it is subject to the same visibility as every other route:
       // an owner a ticket excludes learns nothing about it by replaying its raw key.
-      if (!(await loadVisibleTicket(c.env.DB, c.get("user"), result.ticketId))) {
-        throw new MailAdminError(404, "not_found", "That raw message is not in the bucket.");
-      }
+      const visible = await loadVisibleTicket(c.env.DB, c.get("user"), result.ticketId);
+      // A ticket this call just created is never silent, whoever can see it.
       if (result.outcome === "created" && !result.spam) {
         await notifyTicketCreated(c.env, c.env.DB, result.ticketId);
+      }
+      if (!visible) {
+        throw new MailAdminError(404, "not_found", "That raw message is not in the bucket.");
       }
       return c.json({
         outcome: result.outcome,
