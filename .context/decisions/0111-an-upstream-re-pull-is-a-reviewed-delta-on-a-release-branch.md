@@ -308,3 +308,23 @@ A dry run, which is the default, writes nothing.
 Outside production only `xx` datasets are re-pulled (decision 6), and nothing says how an `xx` dataset names its upstream `ds`.
 The parser takes the `ds` as an argument, but the insert sites and the backfill handle `on######` only.
 Whether an `xx` fixture maps through `import_jobs.source_id` is a Phase 4 and 5 question.
+
+## Amendment 2026-10-23 (#1909): decision 10, as built
+
+Phase 3 builds decision 10; the rest of the Decision section is still designed and not built.
+The lead's rulings of 2026-10-23 settle three questions decision 10 left open, and this records them with what was built.
+
+- **Which tag.** The auto-import passes the tag discovery found.
+  Every other entry point (the retry engine, `recover --execute`, a dispatch without `--tag`) passes none, and prepare asks OpenNeuro's GraphQL for `latestSnapshot.tag` when it runs, so "the tag the retry discovers" is the latest at the retry.
+  An explicit `--tag` is honored; when it is not the latest, prepare warns, because decision 8 is not built and the copy takes the object currently at each upstream path.
+- **Mirror lag.** A latest tag OpenNeuro cannot name refuses with `[openneuro-mirror-lag]` too, before the dataset record is created.
+  Recovery quarantines it as `mirror_lag`, so it stays retryable rather than `not_found_dataset`.
+  Retries are capped by the retry engine's 14-day window, counted from its first retry of the row; past it the row is parked as `mirror_lag` and one admin issue is filed then; no quarantine mail and no failure-time issue are sent for it (ruling 2).
+- **What "records a tag" reads.** The `SourceDatasets` entries naming the dataset's own `ds`: their `Version`, then a `10.18112/openneuro.<ds>.v<tag>` DOI, then the URL, all required to agree.
+  The top-level `Version` is NEMAR's own and records nothing about upstream.
+  Two tags are the same snapshot only when equal after a leading `v` is dropped, the safe direction.
+- **An unreleased import whose tag moved is retargeted, not hard-reset (ruling 1).**
+  `git reset --soft origin/main` keeps the new tag's tree and lands it as a fast-forward, so "prepared again at the tag the retry discovers" holds; the hard reset would have kept the old tree, #993's mismatch.
+  "Released" is any `dataset_versions` row, read through `GET /datasets/:id/versions`, asked only when the tag moved; not being able to read it is a plain failure, never "unreleased".
+- **Parked, not retried:** `upstream_moved`, and `annex_uuid_conflict` in both wordings (ruling 3), because each retry fails the same way.
+  The #1320 preflight compares the bucket's `annex-uuid` with the `nemar-s3` uuids the git-annex branch records and refuses a disagreement with `[nemar-annex-uuid-conflict]`, naming both and the recovery.

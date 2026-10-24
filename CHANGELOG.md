@@ -13,6 +13,36 @@ what merged, and this file says what it meant.
 Newest first. Dates are the tag's publication date, UTC. Backfilled from 0.9.16 onward;
 earlier releases are described only by their generated notes.
 
+## Unreleased
+
+### Changed
+
+- **An OpenNeuro import is pinned to an upstream snapshot tag, never the mirror's default HEAD (epic #1046 Phase 3, #1909; ADR 0111 decision 10).**
+  The auto-import dispatches the tag discovery found (`client_payload.openneuro_tag`, also in its `auto_import_dispatch` audit row), `nemar admin import-openneuro --tag <tag>` names one for a single dataset, and with neither, prepare asks OpenNeuro's GraphQL for `latestSnapshot.tag` when it runs, which is what a retry gets: the retry engine dispatches no tag.
+  The clone's branch is reset to `refs/tags/<tag>` before anything else happens.
+  When an explicit tag is not OpenNeuro's latest, prepare warns: the copy still takes the object currently at each upstream path (decision 8 is not built).
+- **A tag not yet on the GitHub mirror, or a latest tag OpenNeuro cannot name, refuses with `[openneuro-mirror-lag]` before the dataset record is created.**
+  The classifier calls it `mirror_lag`; recovery quarantines it as `mirror_lag` rather than `not_found_dataset`, sends no mail and files no issue; the retry engine retries it and, once its 14-day window has passed, parks it as `mirror_lag` and files its one admin issue.
+- **Step 4c guards a re-import whose upstream moved (#993).**
+  The tag `origin/main` records is read from its `SourceDatasets` entries naming the dataset's own `ds` (their `Version`, DOI or URL, never NEMAR's top-level `Version`).
+  When it differs from the tag being imported and the dataset has a `dataset_versions` row, prepare refuses with `[openneuro-upstream-moved]` before any reset, S3 setup or push, and the retry engine parks it as `upstream_moved`: moving a released mirror is a re-pull's job.
+  An unreleased import is moved to the new tag instead, as a fast-forward of `origin/main` (`git reset --soft`), which drops `.github/` until finalize deploys it again.
+  An unrecorded tag, or the same one, takes the same-version hard reset as before.
+- **The #1320 preflight compares the bucket's `annex-uuid` with the `nemar-s3` uuids the git-annex branch records**, before the remote is configured, and refuses a disagreement with `[nemar-annex-uuid-conflict]`, both uuids and the recovery that fits; the retry engine now parks `annex_uuid_conflict`, in either wording, instead of re-dispatching it.
+- **Every refusal clears the dataset's `staging/` prefix** before it exits, so the copy and finalize jobs, which run under `if: !cancelled()`, find no manifest instead of acting on one an earlier attempt left.
+
+### Production behavior changes
+
+- Imports that used to clone HEAD now clone the latest tag. On OpenNeuro's mirrors HEAD and the latest tag normally name the same commit, so most imports are unchanged; a dataset whose mirror carries commits past its latest snapshot is imported at the snapshot.
+- New tracking-issue labels `mirror-lag` and `upstream-moved` on `nemarDatasets/.github`; GitHub creates a label the first time an issue carries it.
+- A re-import of a released mirror whose upstream published a newer snapshot used to keep the old tree while copying the new tag's data (#993); it now refuses and parks until a re-pull exists.
+
+### Deploy coupling
+
+- The onboard workflow change (`openneuro_tag`) is its own pull request to `dev` with a copy to `nemarDatasets/.github`; it is inert with an older CLI (it passes `--tag` only when the installed CLI's help lists it) and with an older Worker (no tag in the payload).
+- No order is required between the Worker and the npm release. A CLI released before its Worker refuses a mirror lag that the older Worker quarantines as `not_found_dataset` with a mail and an issue; the new Worker's retry query keys on the marker in `last_error`, which recovery keeps, so it picks those rows up once deployed.
+- The jobs of one workflow run install the CLI independently; mixing versions inside a run is harmless, because only prepare changed.
+
 ## 0.10.23 - 2026-10-23
 
 The dataset pull request review now reads a large change as an exact summary the platform computes, and protects what the original authors published.
