@@ -61,8 +61,9 @@ Exit codes:
   0  the plan is executable.
   3  the plan was made and is not executable: a release-pr or annex-uuid check that is not ok,
      a version check that is refused or unchecked, from-tag-not-recorded (--from-tag on an
-     unrecorded tag), a to-tag whose order is unverified, an unpinned key, or a plan refusal (the privacy ledger, a gitlink, a target
-     that cannot be computed, a dead key, the fetch bound, a concept DOI that disagrees).
+     unrecorded tag), a to-tag whose order is unverified, an unpinned key, or a plan
+     refusal (the privacy ledger, a gitlink, a target that cannot be computed, a dead key,
+     the fetch bound, a concept DOI that disagrees).
      Conflicts and corrections alone do not stop a plan: N.0.0 takes upstream's side and N.0.1
      replays NEMAR's corrections.
   1  nothing was planned: a usage error, a dataset that is not an OpenNeuro mirror, a from-tag or

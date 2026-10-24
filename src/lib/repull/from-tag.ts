@@ -3,7 +3,7 @@
  *
  * `from_tag` is the `source_version` of the dataset's highest version row (`mirroredTagOf`). When
  * that row was never examined (the backfill has not reached it) or the rows cannot be read at all
- * (a dev worker's 404, or an older backend without the field), the planner reads the same file the
+ * (the versions route answered 404, as a backend without it does), the planner reads the same file the
  * backfill would, `v<version>/dataset_description.json` from NEMAR's clone, with the same parser
  * (`sourceSnapshotOf`), so there is still one parser and one answer.
  *
