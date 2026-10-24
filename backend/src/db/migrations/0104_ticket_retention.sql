@@ -12,8 +12,23 @@ ALTER TABLE mail_tickets ADD COLUMN summary_author_user_id INTEGER;
 ALTER TABLE mail_tickets ADD COLUMN summarized_at TEXT;
 ALTER TABLE mail_tickets ADD COLUMN purged_at TEXT;
 
+-- last_activity_at is what the purge measures, not last_message_at: a ticket reopened and worked
+-- through notes, assignments or escalation is alive. The services bump it (same
+-- `YYYY-MM-DD HH:MM:SS` format as datetime('now')) on an inbound message, reply, note, status
+-- change (reopening included), assign and escalate; NOT on writing a summary and NOT on the purge.
+-- ADD COLUMN cannot take a non-constant default, so the column starts at a sentinel and is
+-- backfilled from last_message_at; the insert trigger gives a ticket created without the column
+-- the same start, so a forgotten column can never read as "ancient" and be purged at once.
+ALTER TABLE mail_tickets ADD COLUMN last_activity_at TEXT NOT NULL DEFAULT '1970-01-01 00:00:00';
+UPDATE mail_tickets SET last_activity_at = last_message_at;
+CREATE TRIGGER IF NOT EXISTS mail_tickets_activity_default AFTER INSERT ON mail_tickets
+  WHEN NEW.last_activity_at = '1970-01-01 00:00:00'
+BEGIN
+  UPDATE mail_tickets SET last_activity_at = NEW.last_message_at WHERE id = NEW.id;
+END;
+
 -- The purge scan (oldest not-yet-purged first) and the "closed, still to summarize" list.
-CREATE INDEX IF NOT EXISTS idx_mail_tickets_purge ON mail_tickets (last_message_at)
+CREATE INDEX IF NOT EXISTS idx_mail_tickets_purge ON mail_tickets (last_activity_at, id)
   WHERE purged_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_mail_tickets_unsummarized ON mail_tickets (last_message_at)
   WHERE status = 'closed' AND purged_at IS NULL AND summary IS NULL;
@@ -29,7 +44,10 @@ CREATE TABLE IF NOT EXISTS mail_purged_raw_keys (
 );
 
 -- The event kinds gain 'summary' and 'purged'. A CHECK cannot be altered in place, so the table is
--- rebuilt (nothing references it).
+-- rebuilt (nothing references it). Dropping the table drops its sqlite_sequence row, and the new
+-- one restarts from the highest id copied below; that is at most the old maximum, and lower only
+-- if the newest rows had been deleted. It is harmless: event ids only order events within a
+-- ticket and nothing stores one elsewhere.
 CREATE TABLE mail_ticket_events_new (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   ticket_id INTEGER NOT NULL REFERENCES mail_tickets (id) ON DELETE CASCADE,

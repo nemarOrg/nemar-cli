@@ -265,6 +265,23 @@ function eventStatement(
     .bind(ticketId, kind, actor, JSON.stringify(detail));
 }
 
+/** An event row that is written only while the ticket is not purged (a purge may race a reply). */
+function liveEventStatement(
+  db: D1Database,
+  ticketId: number,
+  kind: string,
+  actor: number | null,
+  detail: unknown,
+): D1PreparedStatement {
+  return db
+    .prepare(
+      `INSERT INTO mail_ticket_events (ticket_id, kind, actor_user_id, detail)
+       SELECT ?1, ?2, ?3, ?4
+        WHERE EXISTS (SELECT 1 FROM mail_tickets WHERE id = ?1 AND purged_at IS NULL)`,
+    )
+    .bind(ticketId, kind, actor, JSON.stringify(detail));
+}
+
 async function reload(db: D1Database, id: number): Promise<TicketSummary> {
   const row = await db
     .prepare("SELECT * FROM mail_tickets WHERE id = ?")
@@ -496,6 +513,13 @@ async function sendAndRecord(
   const references = buildReferences(ids, headers["In-Reply-To"]);
   if (references) headers.References = references;
 
+  // A purge can have run since the ticket was loaded; nothing has been sent yet, so refuse.
+  const live = await db
+    .prepare("SELECT purged_at FROM mail_tickets WHERE id = ?")
+    .bind(ticket.id)
+    .first<{ purged_at: string | null }>();
+  if (live?.purged_at) assertNotPurged({ ...ticket, purged_at: live.purged_at });
+
   const subject = replySubject(ticket.subject);
   const { isDev } = resolveEmailConfig(env);
   const from = `NEMAR Support <${supportAddress}>`;
@@ -553,7 +577,8 @@ async function sendAndRecord(
       .prepare(
         `INSERT INTO mail_messages (ticket_id, direction, message_id, in_reply_to, references_ids,
             from_addr, to_addr, subject, text_body, author_user_id)
-         VALUES (?, 'out', ?, ?, ?, ?, ?, ?, ?, ?)`,
+         SELECT ?, 'out', ?, ?, ?, ?, ?, ?, ?, ?
+          WHERE EXISTS (SELECT 1 FROM mail_tickets WHERE id = ? AND purged_at IS NULL)`,
       )
       .bind(
         ticket.id,
@@ -565,17 +590,18 @@ async function sendAndRecord(
         subject,
         text.slice(0, 64 * 1024),
         viewer.id,
+        ticket.id,
       ),
     db
       .prepare(
-        "UPDATE mail_tickets SET last_message_at = datetime('now'), updated_at = datetime('now'), status = ? WHERE id = ?",
+        "UPDATE mail_tickets SET last_message_at = datetime('now'), last_activity_at = datetime('now'), updated_at = datetime('now'), status = ? WHERE id = ? AND purged_at IS NULL",
       )
       .bind(nextStatus, ticket.id),
-    eventStatement(db, ticket.id, "reply", viewer.id, { message_id: headerId }),
+    liveEventStatement(db, ticket.id, "reply", viewer.id, { message_id: headerId }),
   ];
   if (nextStatus !== ticket.status) {
     statements.push(
-      eventStatement(db, ticket.id, "status", viewer.id, {
+      liveEventStatement(db, ticket.id, "status", viewer.id, {
         from: ticket.status,
         to: nextStatus,
         reason: "reply",
@@ -620,6 +646,11 @@ async function sendAndRecord(
     .prepare("SELECT id FROM mail_messages WHERE ticket_id = ? AND message_id = ?")
     .bind(ticket.id, headerId)
     .first<{ id: number }>();
+  if (!stored) {
+    // The purge won the race after the mail went out: the guarded statements wrote nothing. The
+    // reply was sent, so report success; the ticket holds no trace of it by design.
+    console.warn(`[mail-admin] reply on ticket ${ticket.id} was sent after the ticket was purged`);
+  }
   return { message_id: stored?.id ?? 0, header_message_id: headerId, status: nextStatus };
 }
 
@@ -642,7 +673,11 @@ export async function addNote(
          VALUES (?, 'note', ?, ?)`,
       )
       .bind(ticket.id, text.slice(0, 64 * 1024), viewer.id),
-    db.prepare("UPDATE mail_tickets SET updated_at = datetime('now') WHERE id = ?").bind(ticket.id),
+    db
+      .prepare(
+        "UPDATE mail_tickets SET updated_at = datetime('now'), last_activity_at = datetime('now') WHERE id = ?",
+      )
+      .bind(ticket.id),
     eventStatement(db, ticket.id, "note", viewer.id, null),
   ]);
   const row = await db
@@ -681,7 +716,7 @@ export async function assignTicket(
   await db.batch([
     db
       .prepare(
-        "UPDATE mail_tickets SET assignee_user_id = ?, updated_at = datetime('now') WHERE id = ?",
+        "UPDATE mail_tickets SET assignee_user_id = ?, updated_at = datetime('now'), last_activity_at = datetime('now') WHERE id = ?",
       )
       .bind(userId, ticket.id),
     eventStatement(db, ticket.id, userId === null ? "unassigned" : "assigned", viewer.id, {
@@ -723,7 +758,9 @@ export async function setTicketStatus(
   }
   await db.batch([
     db
-      .prepare("UPDATE mail_tickets SET status = ?, updated_at = datetime('now') WHERE id = ?")
+      .prepare(
+        "UPDATE mail_tickets SET status = ?, updated_at = datetime('now'), last_activity_at = datetime('now') WHERE id = ?",
+      )
       .bind(status, ticket.id),
     eventStatement(db, ticket.id, "status", viewer.id, { from: ticket.status, to: status }),
   ]);
@@ -777,7 +814,7 @@ export async function escalateTicket(
   await db.batch([
     db
       .prepare(
-        "UPDATE mail_tickets SET status = 'escalated', assignee_user_id = ?, updated_at = datetime('now') WHERE id = ?",
+        "UPDATE mail_tickets SET status = 'escalated', assignee_user_id = ?, updated_at = datetime('now'), last_activity_at = datetime('now') WHERE id = ?",
       )
       .bind(ownerId, ticket.id),
     eventStatement(db, ticket.id, "escalated", viewer.id, { to: ownerId, reason }),
@@ -799,7 +836,8 @@ const ADDRESS_IN_TEXT = /[^\s@]+@[^\s@]+\.[^\s@]+/;
 
 /** Whether `text` contains something shaped like an email address. */
 export function containsEmailAddress(text: string): boolean {
-  return ADDRESS_IN_TEXT.test(text);
+  // NFKC folds look-alikes such as the full-width at sign into the ASCII one before the test.
+  return ADDRESS_IN_TEXT.test(text.normalize("NFKC"));
 }
 
 /**

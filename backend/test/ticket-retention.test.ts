@@ -9,7 +9,11 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:tes
 import { Hono } from "hono";
 import { Miniflare } from "miniflare";
 import { adminRoutes } from "../src/routes/admin";
-import { purgeExpiredTickets, retentionDays } from "../src/services/ticket-retention";
+import {
+  purgeExpiredTickets,
+  purgeOneTicket,
+  retentionDays,
+} from "../src/services/ticket-retention";
 import { ingestInboundMessage } from "../src/services/tickets";
 import { hashApiKey } from "../src/services/token";
 import type { Bindings, Variables } from "../src/types/bindings";
@@ -488,9 +492,10 @@ describe("a purged ticket is read-only", () => {
     });
     const made = await call("owner", "POST", "/reprocess", { raw_key: key });
     expect(made.status).toBe(200);
-    db.run("UPDATE mail_tickets SET last_message_at = '2020-01-01 10:00:00' WHERE id = ?", [
-      made.body.ticket_id,
-    ]);
+    db.run(
+      "UPDATE mail_tickets SET last_message_at = '2020-01-01 10:00:00', last_activity_at = '2020-01-01 10:00:00' WHERE id = ?",
+      [made.body.ticket_id],
+    );
     await purgeExpiredTickets(env(), new Date("2026-10-24T12:00:00Z"));
     const tickets = (db.query("SELECT COUNT(*) AS n FROM mail_tickets").get() as { n: number }).n;
     const again = await call("owner", "POST", "/reprocess", { raw_key: key });
@@ -523,5 +528,164 @@ describe("inbound mail after a purge", () => {
       matched_ticket_id: t,
       reason: "candidate_purged",
     });
+  });
+});
+
+describe("review round 1: failure isolation, activity, races", () => {
+  const NOW = new Date("2026-10-24T12:00:00Z");
+  const CUTOFF = "2024-10-24 12:00:00";
+  const OLD = "2023-01-01 00:00:00";
+
+  test("one ticket whose batch throws does not block the rest, and the run reports it", async () => {
+    const bad = ticket({ lastAt: "2022-01-01 00:00:00" });
+    const a = ticket({ lastAt: "2023-01-01 00:00:00" });
+    const b = ticket({ lastAt: "2023-01-02 00:00:00" });
+    // A real constraint in the database: the purge's claim on this one ticket aborts.
+    db.run(
+      `CREATE TRIGGER fail_one BEFORE UPDATE ON mail_tickets
+         WHEN NEW.id = ${bad} AND NEW.purged_at IS NOT NULL
+       BEGIN SELECT RAISE(ABORT, 'boom'); END`,
+    );
+    // A page of one: the failing ticket is first on every fresh page read, so only the keyset
+    // position lets the run move past it.
+    const r = await purgeExpiredTickets(env(), NOW, { pageSize: 1, maxPages: 5 });
+    expect(r).toMatchObject({ status: "ok", purged: 2, failed: 1 });
+    expect(row(bad).purged_at).toBeNull();
+    expect(row(a).purged_at).toBeTruthy();
+    expect(row(b).purged_at).toBeTruthy();
+    // Nothing of the failed ticket changed (its batch rolled back).
+    expect(row(bad).requester_email).toBe("ada@sender.example");
+    db.run("DROP TRIGGER fail_one");
+    expect(await purgeExpiredTickets(env(), NOW)).toMatchObject({ purged: 1, failed: 0 });
+  });
+
+  test("recent activity keeps a ticket: note, status change, assign, escalate, inbound message", async () => {
+    db.run("UPDATE mail_queues SET escalation_user_id = ? WHERE tag = '*'", [ids.owner]);
+    const note = ticket({ lastAt: OLD });
+    const status = ticket({ lastAt: OLD });
+    const assign = ticket({ lastAt: OLD });
+    const escalate = ticket({ lastAt: OLD, status: "open" });
+    const inbound = ticket({ lastAt: OLD, status: "open" });
+    expect((await call("admin", "POST", `/tickets/${note}/note`, { text: "n" })).status).toBe(200);
+    expect(
+      (await call("admin", "POST", `/tickets/${status}/status`, { status: "open" })).status,
+    ).toBe(200);
+    expect(
+      (await call("admin", "POST", `/tickets/${assign}/assign`, { user_id: ids.admin })).status,
+    ).toBe(200);
+    expect((await call("admin", "POST", `/tickets/${escalate}/escalate`, {})).status).toBe(200);
+    const ref = row(inbound).ref as string;
+    await ingestInboundMessage(realD1(db), {
+      rawKey: "inbound/raw/2026/10/24/4c9d8f3e-1111-4222-8333-444455556666.eml",
+      raw: eml({ from: "ada@sender.example", to: `support+t${ref}@nemar.org`, subject: "More" }),
+      envelopeFrom: "ada@sender.example",
+      envelopeTo: `support+t${ref}@nemar.org`,
+      receivedAt: new Date(),
+    });
+    for (const t of [note, status, assign, escalate, inbound]) {
+      expect(row(t).last_message_at <= OLD || t === inbound).toBe(true);
+      expect(row(t).last_activity_at > CUTOFF).toBe(true);
+    }
+    const r = await purgeExpiredTickets(env(), NOW);
+    expect(r).toMatchObject({ purged: 0 });
+    for (const t of [note, status, assign, escalate, inbound]) {
+      expect(row(t).purged_at).toBeNull();
+    }
+    expect(count("mail_messages", note)).toBe(1);
+  });
+
+  test("writing a summary does not postpone the purge", async () => {
+    const t = ticket({ lastAt: OLD });
+    const before = row(t).last_activity_at;
+    expect((await call("admin", "PUT", `/tickets/${t}/summary`, { summary: "s" })).status).toBe(
+      200,
+    );
+    expect(row(t).last_activity_at).toBe(before);
+    expect(await purgeExpiredTickets(env(), NOW)).toMatchObject({ purged: 1 });
+    expect(row(t).last_activity_at).toBe(before);
+    expect(row(t).summary).toBe("s");
+  });
+
+  test("a ticket created without last_activity_at starts at its last message, not at the epoch", () => {
+    const t = ticket({ lastAt: "2026-10-01 00:00:00" });
+    expect(row(t).last_activity_at).toBe("2026-10-01 00:00:00");
+  });
+
+  test("the per-ticket batch re-checks activity: a ticket that became active after the read is not purged", async () => {
+    const t = fullTicket(OLD);
+    // The page read saw it as old; then a message arrived.
+    db.run("UPDATE mail_tickets SET last_activity_at = '2026-10-24 11:59:00' WHERE id = ?", [t]);
+    expect(await purgeOneTicket(realD1(db), t, "2026-10-24 12:00:00", CUTOFF)).toBe(false);
+    expect(row(t).purged_at).toBeNull();
+    expect(count("mail_messages", t)).toBe(2);
+    expect(count("mail_reply_keys", t)).toBe(1);
+    expect(events(t).some((e) => e.kind === "purged")).toBe(false);
+    expect(events(t)[0].detail).toBe('{"queue":"support"}');
+    // And an already purged ticket is not purged twice.
+    db.run("UPDATE mail_tickets SET last_activity_at = ? WHERE id = ?", [OLD, t]);
+    expect(await purgeOneTicket(realD1(db), t, "2026-10-24 12:00:00", CUTOFF)).toBe(true);
+    expect(await purgeOneTicket(realD1(db), t, "2026-10-25 12:00:00", CUTOFF)).toBe(false);
+    expect(events(t).filter((e) => e.kind === "purged").length).toBe(1);
+  });
+
+  test("an ISO T timestamp compares as later than the same day's cutoff: it purges late, never early", async () => {
+    const sameDay = ticket({ lastAt: "2024-10-24 00:00:00" });
+    const earlierDay = ticket({ lastAt: "2024-10-23 00:00:00" });
+    db.run("UPDATE mail_tickets SET last_activity_at = '2024-10-24T00:00:00' WHERE id = ?", [
+      sameDay,
+    ]);
+    db.run("UPDATE mail_tickets SET last_activity_at = '2024-10-23T23:00:00' WHERE id = ?", [
+      earlierDay,
+    ]);
+    const early = ticket({ lastAt: "2024-10-25 00:00:00" });
+    db.run("UPDATE mail_tickets SET last_activity_at = '2024-10-25T00:00:00' WHERE id = ?", [
+      early,
+    ]);
+    await purgeExpiredTickets(env(), NOW);
+    expect(row(earlierDay).purged_at).toBeTruthy();
+    expect(row(sameDay).purged_at).toBeNull();
+    expect(row(early).purged_at).toBeNull();
+  });
+
+  test("a time budget is checked before each ticket", async () => {
+    ticket({ lastAt: OLD });
+    ticket({ lastAt: OLD });
+    const r = await purgeExpiredTickets(env(), NOW, { budgetMs: 0 });
+    expect(r).toMatchObject({ purged: 0 });
+  });
+
+  test("a full-width at sign does not smuggle an address into a summary", async () => {
+    const t = ticket();
+    const r = await call("admin", "PUT", `/tickets/${t}/summary`, {
+      summary: "Contact ada＠sender.example about it",
+    });
+    expect(r.status).toBe(400);
+    expect(r.body.code).toBe("summary_has_address");
+    expect(row(t).summary).toBeNull();
+  });
+
+  test("a reply whose ticket is purged while the mail is being sent returns success and records nothing", async () => {
+    const t = ticket({ status: "open" });
+    binding = recordingBinding(() => {
+      // The purge wins the race after the provider accepted the message.
+      db.run("DELETE FROM mail_messages WHERE ticket_id = ?", [t]);
+      db.run("UPDATE mail_tickets SET purged_at = '2026-10-24 12:00:00' WHERE id = ?", [t]);
+      return undefined;
+    });
+    const r = await call("admin", "POST", `/tickets/${t}/reply`, { text: "hello" });
+    expect(r.status).toBe(200);
+    expect(binding.sent.length).toBe(1);
+    expect(count("mail_messages", t)).toBe(0);
+    expect(events(t).some((e) => e.kind === "reply" || e.kind === "status")).toBe(false);
+    expect(row(t).status).toBe("open");
+    expect(row(t).purged_at).toBe("2026-10-24 12:00:00");
+  });
+
+  test("a reply on a purged ticket sends nothing", async () => {
+    const t = ticket({ lastAt: OLD, status: "open" });
+    await purgeExpiredTickets(env(), NOW);
+    const r = await call("owner", "POST", `/tickets/${t}/reply`, { text: "hi" });
+    expect(r.status).toBe(409);
+    expect(binding.sent.length).toBe(0);
   });
 });

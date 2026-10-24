@@ -437,8 +437,10 @@ async function ingestNew(db: D1Database, input: InboundTicketInput): Promise<Ing
     const statements: D1PreparedStatement[] = [
       messageInsert("?", [target.id]),
       db
-        .prepare("UPDATE mail_tickets SET last_message_at = ?, updated_at = ? WHERE id = ?")
-        .bind(created, created, target.id),
+        .prepare(
+          "UPDATE mail_tickets SET last_message_at = ?, last_activity_at = MAX(last_activity_at, ?), updated_at = ? WHERE id = ?",
+        )
+        .bind(created, created, created, target.id),
     ];
     for (const tag of tags) {
       statements.push(
@@ -522,8 +524,9 @@ async function ingestNew(db: D1Database, input: InboundTicketInput): Promise<Ing
     db
       .prepare(
         `INSERT INTO mail_tickets (ref, queue_tag, restricted, status, assignee_user_id,
-            requester_email, requester_user_id, subject, created_at, updated_at, last_message_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            requester_email, requester_user_id, subject, created_at, updated_at, last_message_at,
+            last_activity_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .bind(
         ref,
@@ -534,6 +537,7 @@ async function ingestNew(db: D1Database, input: InboundTicketInput): Promise<Ing
         fromAddr,
         requesterUserId,
         subject,
+        created,
         created,
         created,
         created,

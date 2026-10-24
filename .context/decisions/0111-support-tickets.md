@@ -76,7 +76,10 @@ Key rows are kept until their ticket is deleted.
 **Retention.**
 Raw messages live in R2 for two years in production and 30 days on staging, by bucket lifecycle rule.
 After the same period only a summary of a ticket is kept (epic #1893 phase 6a, #1943).
-`MAIL_RETENTION_DAYS` (a Worker variable in the configuration file: 730 in production, 30 on staging) sets the period; a daily purge takes every ticket whose last message is older than the cutoff.
+`MAIL_RETENTION_DAYS` (a Worker variable in the configuration file: 730 in production, 30 on staging) sets the period; a daily purge takes every ticket whose last activity is older than the cutoff.
+`last_activity_at` is bumped by an inbound message, a reply, a note, a status change (reopening included), an assignment and an escalation; it is not bumped by writing a summary or by the purge, so a ticket still being worked is never purged and a summary cannot postpone its own ticket's purge.
+The purge claims each ticket with a guarded statement that re-checks `purged_at IS NULL` and the cutoff, so a message arriving mid-run cancels that ticket's purge, and a ticket whose purge fails is logged by id, left for the next run, and does not stop the others.
+A reply sent while its ticket is purged is not recorded on it (the mail already went out; the ticket id is logged).
 A missing or invalid value deletes nothing, because there is no default that deletes.
 
 *The summary.* The Worker never calls a model.
