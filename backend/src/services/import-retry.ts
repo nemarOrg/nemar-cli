@@ -33,7 +33,7 @@ import { resolveEmailConfig, sendOpenNeuroMaintainerReport } from "./email.js";
 import { isNonProductionEnv } from "./environment.js";
 import { getDatasetsToken } from "./github-auth.js";
 import { triggerOpenNeuroOnboard } from "./github.js";
-import { isDeterministicScrubRefusal } from "./import-failure-cause.js";
+import { classifyImportFailure, isDeterministicScrubRefusal } from "./import-failure-cause.js";
 import {
   type ImportFailureIssueDeps,
   fileImportFailureIssueIfNeeded,
@@ -75,7 +75,13 @@ export type RetryDecision =
   | { action: "recover" }
   | {
       action: "blocklist";
-      reason: "upstream_403_after_window" | "no_source" | "identifier_scrub_refused" | "mirror_lag";
+      reason:
+        | "upstream_403_after_window"
+        | "no_source"
+        | "identifier_scrub_refused"
+        | "upstream_moved"
+        | "annex_uuid_conflict"
+        | "mirror_lag";
     }
   | { action: "dispatch"; nextRecoveryAttempt: number; nextRetryAt: number };
 
@@ -94,6 +100,9 @@ export type RetryDecision =
  *   4. Still incomplete, past the window, AND upstream-inaccessible -> park
  *      on the blocklist (`upstream_403_after_window`) instead of dispatching
  *      forever against a dataset OpenNeuro itself can't serve.
+ *   Before 3: a refusal no retry can clear -- a deterministic scrub refusal,
+ *      an upstream move of a released mirror, an annex-uuid conflict -- is
+ *      parked at once.
  *   5. Past the window AND still refused for a mirror lag (ADR 0111 decision
  *      10) -> park as `mirror_lag`. A lag is transient and retried, but a tag
  *      that has not reached OpenNeuro's GitHub mirror in 14 days is not going
@@ -119,6 +128,20 @@ export function decideRetryAction(args: {
   // the row if the import is completed another way (a host with a larger bound, say).
   if (isDeterministicScrubRefusal(args.lastError)) {
     return { action: "blocklist", reason: "identifier_scrub_refused" };
+  }
+  // Two more failures a retry cannot clear, parked the same way and read through the classifier, so
+  // the park and the tracking issue's label never disagree about what the message says:
+  //   - a released mirror whose upstream moved (ADR 0111 decision 10): moving it to the new tag is a
+  //     re-pull's job, and every re-dispatch refuses again before writing anything;
+  //   - a bucket annex-uuid the dataset's git-annex branch does not record as nemar-s3 (#1320, lead
+  //     ruling 2026-10-23): every attempt fails the same way and burns retry budget a transient
+  //     failure needs.
+  // Recovery quarantines both first, as a non-retryable reason, so this is the backstop for a row
+  // that reaches the sweep anyway (`failed` or `incomplete` carrying the message).
+  const cause = classifyImportFailure({ stage: "prepare", lastError: args.lastError }).cause;
+  if (cause === "upstream_moved") return { action: "blocklist", reason: "upstream_moved" };
+  if (cause === "annex_uuid_conflict") {
+    return { action: "blocklist", reason: "annex_uuid_conflict" };
   }
 
   const upstreamInaccessible = (args.lastError ?? "").includes(OPENNEURO_UPSTREAM_MARKER);

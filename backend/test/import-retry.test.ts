@@ -11,7 +11,11 @@
 
 import type { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
-import { OPENNEURO_MIRROR_LAG_MARKER } from "../../shared/import-markers";
+import {
+  NEMAR_ANNEX_UUID_CONFLICT_MARKER,
+  OPENNEURO_MIRROR_LAG_MARKER,
+  OPENNEURO_UPSTREAM_MOVED_MARKER,
+} from "../../shared/import-markers";
 import { OPENNEURO_UPSTREAM_MARKER } from "../src/services/import-recovery";
 import {
   BLOCKLIST_RECHECK_QUERY,
@@ -130,6 +134,29 @@ describe("decideRetryAction", () => {
         lastError: `[nemar-identifier-scrub] refused: ${word} (1 of 4 recording header(s) could not be read: network x1). Nothing was pushed, and the copy phase did not run.`,
       });
       expect(decision.action).toBe("dispatch");
+    }
+  });
+
+  test("an upstream move of a released mirror is parked at once, never re-dispatched (ADR 0111)", () => {
+    const moved = `${OPENNEURO_UPSTREAM_MOVED_MARKER} ds004362: on004362 has released a version and its main records upstream tag 1.0.0; this import is at 1.0.1.`;
+    // Inside the window and on the first attempt: a retry refuses again before writing anything.
+    expect(decideRetryAction({ ...base, lastError: moved })).toEqual({
+      action: "blocklist",
+      reason: "upstream_moved",
+    });
+  });
+
+  test("an annex-uuid conflict is parked at once, in both wordings (#1320)", () => {
+    for (const lastError of [
+      // git-annex's own, from a CLI older than the preflight.
+      "Failed to configure S3 remote: The bucket already exists, and its annex-uuid file indicates it is used by a different special remote.",
+      // the preflight's.
+      `${NEMAR_ANNEX_UUID_CONFLICT_MARKER} bucket 1a2b3c4d-0000-4000-8000-000000000001; branch none.`,
+    ]) {
+      expect(decideRetryAction({ ...base, lastError })).toEqual({
+        action: "blocklist",
+        reason: "annex_uuid_conflict",
+      });
     }
   });
 
