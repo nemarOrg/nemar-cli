@@ -19,6 +19,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "bun";
+import { countUpstreamStates } from "../shared/upstream-staleness";
 
 const CLI_ENTRY = join(import.meta.dir, "..", "src", "index.ts");
 const REPO_ROOT = join(import.meta.dir, "..");
@@ -161,6 +162,19 @@ const HEALTHY = {
     issuesRelabelled: 1,
     neurobagel: neurobagelWeek(),
     neurobagelFindings: 0,
+    upstream: {
+      population: 10,
+      examined: 10,
+      withdrawn: 1,
+      excluded_unmanaged: 0,
+      counts: {
+        ...countUpstreamStates([]),
+        stale: 3,
+        states: { ...countUpstreamStates([]).states, current: 7, stale_ready: 2, mirror_lag: 1 },
+      },
+      truncated: false,
+      errors: [],
+    },
     errors: [],
   },
   issue: null,
@@ -195,6 +209,51 @@ describe("nemar admin import-weekly: the report reads correctly", () => {
       expect(result.stdout).toContain("closed_this_week=3");
       expect(server.requests[0]?.pathname).toBe("/admin/imports/weekly-summary");
       expect(server.requests[0]?.searchParams.get("apply")).toBeNull();
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("the upstream line prints stale, current, anomaly, unknown and unchecked", async () => {
+    seedAuthenticatedConfig();
+    const server = startCaptureServer(HEALTHY);
+    try {
+      const result = await runCli(["admin", "import-weekly"], server.url);
+      expect(result.stdout).toContain(
+        "upstream: stale=3 current=7 anomaly=0 unknown=0 unchecked=0",
+      );
+      expect(result.exitCode).toBe(0);
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("upstream null or absent prints unknown, never zero, and asks for attention (exit 1)", async () => {
+    seedAuthenticatedConfig();
+    const absent: Record<string, unknown> = { ...HEALTHY.facts };
+    absent.upstream = undefined;
+    for (const facts of [{ ...HEALTHY.facts, upstream: null }, absent]) {
+      const server = startCaptureServer({ ...HEALTHY, facts });
+      try {
+        const result = await runCli(["admin", "import-weekly"], server.url);
+        expect(result.stdout).toContain("upstream=unknown");
+        expect(result.stdout).not.toContain("upstream: stale=");
+        expect(result.exitCode).toBe(1);
+      } finally {
+        server.stop();
+      }
+    }
+  });
+
+  test("a pass that did not reach every mirror says so", async () => {
+    seedAuthenticatedConfig();
+    const server = startCaptureServer({
+      ...HEALTHY,
+      facts: { ...HEALTHY.facts, upstream: { ...HEALTHY.facts.upstream, truncated: true } },
+    });
+    try {
+      const result = await runCli(["admin", "import-weekly"], server.url);
+      expect(result.stdout).toContain("did not reach every mirror");
     } finally {
       server.stop();
     }

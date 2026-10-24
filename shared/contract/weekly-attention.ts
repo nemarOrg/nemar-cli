@@ -72,6 +72,14 @@ export interface WeeklyAttentionFacts {
    * the consumer predates it, which is also unknown.
    */
   neurobagelFindings?: number | null;
+  /**
+   * The upstream freshness pass (epic #1046 phase 4b, ADR 0111): null when it did not run or
+   * failed, absent when the consumer predates it, which is also unknown. Stale mirrors are NOT a
+   * reason to ask for attention (an expected backlog until the scheduled re-pull exists, and a
+   * permanent alarm gets muted: ADR 0053); only not seeing is. A mirror that could not be
+   * compared, or a pass that stopped early, reaches the headline through `errors`.
+   */
+  upstream?: { counts: unknown; truncated: boolean } | null;
   errors: { stage: string; error: string }[];
 }
 
@@ -135,6 +143,9 @@ export function weeklyAttention(f: WeeklyAttentionFacts): WeeklyAttention {
     problems.push(
       `${f.neurobagelFindings} Neurobagel finding(s) need attention (see the audit log)`,
     );
+  }
+  if (f.upstream === null || f.upstream === undefined) {
+    problems.push("upstream freshness could not be determined");
   }
   if (f.errors.length > 0) problems.push(`${f.errors.length} part(s) of this report failed`);
   return { attention: problems.length > 0, problems, notChecked };

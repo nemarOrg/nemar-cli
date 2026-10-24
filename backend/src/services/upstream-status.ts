@@ -29,7 +29,9 @@ import {
   type ClassifiedMirror,
   type MirrorFacts,
   type MirrorProbe,
+  type UpstreamFleetSummary,
   type UpstreamStatusPage,
+  type UpstreamStatusRow,
   countUpstreamStates,
   diffStaleMirrors,
   needsUpstream,
@@ -328,5 +330,69 @@ export async function runUpstreamStatusPage(
     probes: { attempted, budget },
     errors: upstream.errors.slice(0, MAX_ERRORS),
     ...(blind ? { error: "OpenNeuro could not be read for any mirror that needed a verdict" } : {}),
+  };
+}
+
+export const UPSTREAM_FLEET_MAX_PAGES = 20;
+export const UPSTREAM_FLEET_PROBE_BUDGET = 25;
+
+/** A batch error names the datasets of its batch; the weekly report names none. */
+function withoutDatasetIds(message: string): string {
+  return message.replace(/\bds\d{6}\b(\.\.ds\d{6}\b)?:?\s*/g, "").trim();
+}
+
+/**
+ * The whole fleet, in counts, for the weekly report: {@link runUpstreamStatusPage} page after
+ * page, at most `maxPages` pages and `probeBudget` GitHub probes for the whole pass (a stale row
+ * the budget left out reads `stale_unverified`, which is still stale). It stops at the first
+ * refused page, because a page of an OpenNeuro that is down costs its timeout. Throws only when
+ * D1 cannot be read.
+ *
+ * Budget on the Monday tick, which shares one subrequest allowance with its other jobs: at most
+ * 20 pages of at most 2 GraphQL requests each (the common case is 10 pages and 10 requests, about
+ * ten seconds), at most 25 tag reads and 25 control reads, one token mint, and 3 D1 statements a
+ * page; typically about 60 subrequests, at worst about 120.
+ */
+export async function runUpstreamFleetSummary(
+  env: Bindings,
+  opts: { maxPages?: number; probeBudget?: number } = {},
+): Promise<UpstreamFleetSummary> {
+  const maxPages = opts.maxPages ?? UPSTREAM_FLEET_MAX_PAGES;
+  let probesLeft = opts.probeBudget ?? UPSTREAM_FLEET_PROBE_BUDGET;
+  const rows = new Map<string, UpstreamStatusRow>();
+  const errors: string[] = [];
+  let first: UpstreamStatusPage | null = null;
+  let last: UpstreamStatusPage | null = null;
+  let after: string | undefined;
+  let stoppedEarly = false;
+  for (let n = 0; n < maxPages; n++) {
+    const page = await runUpstreamStatusPage(env, { after, probeBudget: probesLeft });
+    first ??= page;
+    last = page;
+    for (const row of page.rows) rows.set(row.dataset_id, row);
+    for (const e of page.errors) errors.push(withoutDatasetIds(e));
+    probesLeft = Math.max(0, probesLeft - page.probes.attempted);
+    if (!page.ok) {
+      errors.push(withoutDatasetIds(page.error ?? "OpenNeuro could not be read"));
+      stoppedEarly = true;
+      break;
+    }
+    if (page.next_cursor === null) break;
+    after = page.next_cursor;
+    if (n === maxPages - 1) stoppedEarly = true;
+  }
+  const all = [...rows.values()];
+  const population = last?.population_total ?? 0;
+  return {
+    population,
+    examined: all.length,
+    withdrawn: last?.withdrawn ?? 0,
+    excluded_unmanaged: last?.excluded_unmanaged ?? 0,
+    counts: countUpstreamStates(all),
+    truncated:
+      stoppedEarly ||
+      all.length !== population ||
+      first?.population_total !== last?.population_total,
+    errors: errors.slice(0, MAX_ERRORS),
   };
 }

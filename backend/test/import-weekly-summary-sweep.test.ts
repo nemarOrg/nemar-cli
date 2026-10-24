@@ -16,9 +16,10 @@
  */
 
 import type { Database } from "bun:sqlite";
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { weeklyAttention } from "../../shared/contract/weekly-attention";
 import { NEUROBAGEL_STORE_CHECK } from "../src/services/anonymity-sweep";
 import type { GitHubIssue } from "../src/services/github/issues";
 import type { ImportCoverageSweepResult } from "../src/services/import-coverage-sweep";
@@ -38,12 +39,14 @@ import { readLedger, recordLedgerState } from "../src/services/neurobagel-plan";
 import { neurobagelStatus } from "../src/services/neurobagel-status";
 import { runNeurobagelVerificationSweep } from "../src/services/neurobagel-verify";
 import type { Bindings } from "../src/types/bindings";
-import { freshDb, realD1 } from "./helpers/d1";
+import { freshDb, realD1, wrapD1 } from "./helpers/d1";
 import {
   RECORDED,
   type UpstreamStandin,
   startUpstreamStandin,
 } from "./helpers/neurobagel-upstream";
+import { startOpenNeuroStandin } from "./helpers/openneuro-standin";
+import { startRawHost } from "./helpers/raw-mirror-standin";
 import { lastWeeklyCronFiring } from "./helpers/weekly-cron-firing";
 
 const WEEK_MS = 7 * 86_400_000;
@@ -128,8 +131,30 @@ const coveredWeekOf = (d: Date): string => isoWeekLabel(new Date(d.getTime() - W
 const runWeekOf = (d: Date): string => isoWeekLabel(d);
 const THIS_WEEK = coveredWeekOf(NOW);
 
+/**
+ * The OpenNeuro GraphQL endpoint and OpenNeuro's GitHub mirror, as local stand-ins. EVERY env
+ * built here points at them, so the real upstream freshness pass runs in every weekly test and no
+ * test can reach openneuro.org or raw.githubusercontent.com (the report has no dependency seam).
+ */
+const openneuro = startOpenNeuroStandin();
+const rawMirror = startRawHost();
+afterAll(() => {
+  openneuro.stop();
+  rawMirror.stop();
+});
+beforeEach(() => {
+  openneuro.reset();
+  rawMirror.reset();
+});
+
 function envFor(db: Database, environment = "test"): Bindings {
-  return { DB: realD1(db), ENVIRONMENT: environment } as unknown as Bindings;
+  return {
+    DB: realD1(db),
+    ENVIRONMENT: environment,
+    OPENNEURO_GRAPHQL_URL: openneuro.url,
+    GITHUB_RAW_BASE: rawMirror.base,
+    GITHUB_ADMIN_PAT: "weekly-test-pat",
+  } as unknown as Bindings;
 }
 
 function seedImported(db: Database, sourceId: string, opts: { daysAgo?: number } = {}): void {
@@ -333,6 +358,10 @@ describe("the report is produced from real queries", () => {
 
     expect(r.facts?.importedThisWeek).toBe(3);
     expect(r.facts?.importedTotal).toBe(4);
+    // Mirrors with no version are `unpublished`: none is sent to OpenNeuro, and the pass says 4.
+    expect(openneuro.log).toHaveLength(0);
+    expect(r.facts?.upstream?.population).toBe(4);
+    expect(r.facts?.upstream?.counts.states.unpublished).toBe(4);
   });
 
   test("a folded legacy shadow row counts as neither", async () => {
@@ -502,7 +531,9 @@ describe("a failure in one section does not zero it or abort the report", () => 
     expect(r.facts?.parked).toBeNull();
     // ...and the sections that could be read are intact.
     expect(r.facts?.importedThisWeek).toBe(1);
-    expect(r.facts?.errors?.map((e) => e.stage).sort()).toEqual(["failures", "parked"]);
+    // ...and the upstream pass, which joins import_jobs, is unknown too, listed under its own stage.
+    expect(r.facts?.errors?.map((e) => e.stage).sort()).toEqual(["failures", "parked", "upstream"]);
+    expect(r.facts?.upstream).toBeNull();
   });
 
   test("an unknown anywhere marks the week as needing attention", async () => {
@@ -510,6 +541,162 @@ describe("a failure in one section does not zero it or abort the report", () => 
     db.run("DROP TABLE import_jobs");
     const r = await runWeeklyImportSummary(envFor(db), { now: NOW }, recordingDeps());
     // A report that cannot see is not a report that found nothing.
+    expect(r.renderedBody).toContain("Needs attention");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Upstream freshness (epic #1046 phase 4b)
+// ---------------------------------------------------------------------------
+
+function seedMirror(
+  db: Database,
+  id: string,
+  versions: { version?: string; tag: string | null; basis: "doi" | "unknown" | null }[],
+): void {
+  db.query(
+    `INSERT INTO datasets (dataset_id, name, owner_user_id, source, source_id, status, visibility)
+     VALUES (?, ?, 1, 'openneuro', ?, 'active', 'public')`,
+  ).run(id, id, `ds${id.slice(2)}`);
+  for (const v of versions) {
+    db.query(
+      `INSERT INTO dataset_versions (dataset_id, version, doi, source_version, source_version_basis, created_at)
+       VALUES (?, ?, ?, ?, ?, '2025-06-01 00:00:00')`,
+    ).run(id, v.version ?? "1.0.0", `10.82901/${id}`, v.tag, v.basis);
+  }
+}
+
+describe("the upstream freshness section", () => {
+  test("stale mirrors are counted by state and are not a reason to ask for attention", async () => {
+    const db = freshDb();
+    seedMirror(db, "on003645", [{ tag: "2.0.2", basis: "doi" }]); // stale_ready
+    seedMirror(db, "on004362", [{ tag: "1.0.0", basis: "doi" }]); // mirror_lag
+    seedMirror(db, "on002893", [{ tag: "2.0.0", basis: "doi" }]); // current
+    rawMirror.serve("ds003645", "2.1.0");
+    rawMirror.serve("ds004362", "HEAD");
+
+    const r = await runWeeklyImportSummary(envFor(db), { now: NOW }, recordingDeps());
+
+    const counts = r.facts?.upstream?.counts;
+    expect(counts?.states.stale_ready).toBe(1);
+    expect(counts?.states.mirror_lag).toBe(1);
+    expect(counts?.states.current).toBe(1);
+    expect(counts?.stale).toBe(2);
+    expect(r.facts?.upstream?.truncated).toBe(false);
+    // Reported, not attention: no `upstream` error, and the attention rule names nothing upstream.
+    expect(r.facts?.errors?.filter((e) => e.stage === "upstream")).toEqual([]);
+    const problems = weeklyAttention(r.facts as NonNullable<typeof r.facts>).problems;
+    expect(problems.filter((p) => /upstream/i.test(p))).toEqual([]);
+    expect(r.renderedBody).toContain("## Upstream freshness");
+    expect(r.renderedBody).toContain("Stale in total: 2.");
+  });
+
+  test("the public report names no dataset of the pass", async () => {
+    const db = freshDb();
+    seedMirror(db, "on003645", [{ tag: "2.0.2", basis: "doi" }]);
+    seedMirror(db, "on004362", [{ tag: "1.0.0", basis: "doi" }]);
+    rawMirror.serve("ds003645", "2.1.0");
+    openneuro.status(503);
+    const r = await runWeeklyImportSummary(envFor(db), { now: NOW }, recordingDeps());
+    for (const id of ["on003645", "on004362", "ds003645", "ds004362"]) {
+      expect(r.renderedBody).not.toContain(id);
+    }
+  });
+
+  test("OpenNeuro down: the rows are unchecked, the week says so and asks for attention", async () => {
+    const db = freshDb();
+    seedMirror(db, "on003645", [{ tag: "2.0.2", basis: "doi" }]);
+    seedMirror(db, "on002893", [{ tag: "2.0.0", basis: "doi" }]);
+    openneuro.status(503);
+
+    const r = await runWeeklyImportSummary(envFor(db), { now: NOW }, recordingDeps());
+
+    expect(r.facts?.upstream?.counts.states.unchecked).toBe(2);
+    expect(r.facts?.upstream?.counts.stale).toBe(0);
+    const errors = r.facts?.errors?.filter((e) => e.stage === "upstream") ?? [];
+    expect(errors.some((e) => e.error.includes("2 mirror(s) could not be compared"))).toBe(true);
+    expect(errors.some((e) => e.error.includes("503"))).toBe(true);
+    // The pass stopped at the refused page: the population is 2, both examined, none missing.
+    expect(r.renderedBody).toContain("Needs attention");
+    expect(r.renderedBody).toContain("| Could not be compared (OpenNeuro unavailable) | 2 |");
+  });
+
+  test("a failed read of an unknown-tag mirror leaves it unknown, with nothing unchecked and no error", async () => {
+    const db = freshDb();
+    seedMirror(db, "on003082", [{ tag: null, basis: "unknown" }]);
+    openneuro.override("ds003082", { id: "ds000002", latestSnapshot: null, snapshots: [] });
+
+    const r = await runWeeklyImportSummary(envFor(db), { now: NOW }, recordingDeps());
+
+    // The documented caveat: `errors[]` carries batch-level failures only, so this row is not
+    // "verified clean"; it is counted as unknown, which the section says was not compared.
+    expect(r.facts?.upstream?.counts.states.unknown).toBe(1);
+    expect(r.facts?.upstream?.counts.states.unchecked).toBe(0);
+    expect(r.facts?.errors?.filter((e) => e.stage === "upstream")).toEqual([]);
+    expect(r.renderedBody).toContain("| Tag unknown (not compared) | 1 |");
+    expect(r.renderedBody).toContain("A mirror with an unknown tag was not compared.");
+  });
+
+  test("a batch failure with only unknown-tag mirrors is listed even though nothing is unchecked", async () => {
+    const db = freshDb();
+    seedMirror(db, "on003082", [{ tag: null, basis: "unknown" }]);
+    openneuro.status(503);
+
+    const r = await runWeeklyImportSummary(envFor(db), { now: NOW }, recordingDeps());
+
+    expect(r.facts?.upstream?.counts.states.unchecked).toBe(0);
+    expect(r.facts?.upstream?.counts.states.unknown).toBe(1);
+    const errors = r.facts?.errors?.filter((e) => e.stage === "upstream") ?? [];
+    expect(errors).toHaveLength(1);
+    expect(errors[0]?.error).toContain("OpenNeuro reported 1 problem(s)");
+    expect(errors[0]?.error).toContain("503");
+    expect(r.renderedBody).toContain("Needs attention");
+  });
+
+  test("a pass that stops before the end of a large fleet is listed as not reaching every mirror", async () => {
+    const db = freshDb();
+    // 2001 mirrors need 21 pages of 100; the pass reads at most 20. None has a version, so no
+    // network is involved.
+    db.run("BEGIN");
+    const insert = db.prepare(
+      `INSERT INTO datasets (dataset_id, name, owner_user_id, source, source_id, status, visibility)
+       VALUES (?, ?, 1, 'openneuro', ?, 'active', 'public')`,
+    );
+    for (let i = 0; i < 2001; i++) {
+      const id = `on${String(500000 + i)}`;
+      insert.run(id, id, `ds${id.slice(2)}`);
+    }
+    db.run("COMMIT");
+
+    const r = await runWeeklyImportSummary(envFor(db), { now: NOW }, recordingDeps());
+
+    expect(r.facts?.upstream?.truncated).toBe(true);
+    expect(r.facts?.upstream?.examined).toBe(2000);
+    expect(r.facts?.upstream?.population).toBe(2001);
+    const errors = r.facts?.errors?.filter((e) => e.stage === "upstream") ?? [];
+    expect(errors.some((e) => e.error.includes("did not reach every mirror: 2000 of 2001"))).toBe(
+      true,
+    );
+    expect(r.renderedBody).toContain("**The pass did not reach every mirror.**");
+    expect(r.renderedBody).toContain("Needs attention");
+  });
+
+  test("a D1 failure in the pass leaves upstream unknown and every other section intact", async () => {
+    const db = freshDb();
+    seedImported(db, "ds000001", { daysAgo: 1 });
+    const failing = wrapD1(realD1(db), (sql) => {
+      if (sql.includes("WITH page AS")) throw new Error("D1_ERROR: upstream page failed");
+    });
+    const env = { ...envFor(db), DB: failing } as Bindings;
+
+    const r = await runWeeklyImportSummary(env, { now: NOW }, recordingDeps());
+
+    expect(r.facts?.upstream).toBeNull();
+    const error = r.facts?.errors?.find((e) => e.stage === "upstream");
+    expect(error?.error).toContain("upstream page failed");
+    expect(r.facts?.importedThisWeek).toBe(1);
+    expect(r.facts?.coverageStatus).toBe("healthy");
+    expect(r.renderedBody).toContain("**unknown**, not zero");
     expect(r.renderedBody).toContain("Needs attention");
   });
 });

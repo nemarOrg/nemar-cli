@@ -9646,6 +9646,19 @@ importWeeklyCommand
           `closed_this_week=${weeklyCount(f.issuesClosed)} relabelled=${weeklyCount(f.issuesRelabelled)}`,
       ),
     );
+    // Epic #1046 phase 4b: the upstream freshness pass, as counts. Absent or null is unknown.
+    if (f.upstream == null) {
+      console.log(chalk.cyan(`upstream=${chalk.yellow("unknown")}`));
+    } else {
+      const u = f.upstream.counts.states;
+      const partial = f.upstream.truncated
+        ? ` ${chalk.yellow("(did not reach every mirror)")}`
+        : "";
+      const line =
+        `upstream: stale=${weeklyCount(f.upstream.counts.stale)} current=${weeklyCount(u.current)} ` +
+        `anomaly=${weeklyCount(u.anomaly)} unknown=${weeklyCount(u.unknown)} unchecked=${weeklyCount(u.unchecked)}`;
+      console.log(chalk.cyan(`${line}${partial}`));
+    }
 
     if (f.failuresByCause !== null) {
       const nonZero = Object.entries(f.failuresByCause).filter(([, n]) => n > 0);
