@@ -105,6 +105,7 @@ import {
   type ReviewRulesetOutcome,
   type SignalDefaultsSweepBatchResponse,
   type SummaryVersionCoverage,
+  type UpstreamBackfillResponse,
   type UserListItem,
   type WeeklySummaryResponse,
   type ZarrFidelitySweepBatchResponse,
@@ -178,6 +179,7 @@ import {
   updateDoi,
   updateEmailPreferences,
   uploadTierOf,
+  upstreamBackfill,
   validateCi,
   verifyImport,
   verifyUserById,
@@ -7722,6 +7724,141 @@ zarrFidelitySweepCommand
   });
 
 adminCommand.addCommand(zarrFidelitySweepCommand);
+
+// ============================================================================
+// Upstream snapshot backfill (epic #1046 phase 2, #1908; ADR 0111)
+// ============================================================================
+
+const BACKFILL_PAUSE_MS = 250;
+
+const upstreamBackfillCommand = new Command("upstream-backfill").description(
+  "Record which upstream snapshot each mirrored version came from (dry run unless --execute)",
+);
+
+upstreamBackfillCommand
+  .option("--execute", "Write the results; without it nothing is recorded")
+  .option("--limit <n>", "Version rows per batch (server clamps to [1,50])", "25")
+  .option("--after <cursor>", "Resume after this key, e.g. on000123@1.0.0 (skips a stuck row)")
+  .option("--max-batches <n>", "Stop after this many batches", "200")
+  .option("--json", "Output one JSON summary instead of progress lines")
+  .action(
+    async (options: {
+      execute?: boolean;
+      limit?: string;
+      after?: string;
+      maxBatches?: string;
+      json?: boolean;
+    }) => {
+      if (!requireAuth()) return;
+
+      const limit = Number.parseInt(options.limit ?? "25", 10) || 25;
+      const maxBatches = Number.parseInt(options.maxBatches ?? "200", 10) || 200;
+      const execute = options.execute === true;
+      const say = (line: string) => {
+        if (!options.json) console.log(line);
+      };
+      if (!execute) say(chalk.yellow("Dry run: nothing is written. Pass --execute to record."));
+
+      const total = {
+        batches: 0,
+        scanned: 0,
+        recorded: { doi: 0, unknown: 0 },
+        not_examined: 0,
+        unparseable: 0,
+        absent: 0,
+        skipped_existing: 0,
+      };
+      const errors: UpstreamBackfillResponse["errors"] = [];
+      let cursor = options.after;
+      let last: UpstreamBackfillResponse | null = null;
+      let failure: string | null = null;
+      let suspectCredential = false;
+
+      for (let batch = 0; batch < maxBatches; batch++) {
+        let res: UpstreamBackfillResponse;
+        try {
+          res = await upstreamBackfill({ execute, limit, after: cursor });
+        } catch (err) {
+          failure = errorDetail(err);
+          break;
+        }
+        last = res;
+        total.batches++;
+        total.scanned += res.scanned;
+        total.recorded.doi += res.recorded.doi;
+        total.recorded.unknown += res.recorded.unknown;
+        total.not_examined += res.not_examined;
+        total.unparseable += res.unparseable;
+        total.absent += res.absent;
+        total.skipped_existing += res.skipped_existing;
+        errors.push(...res.errors);
+        say(
+          `${chalk.cyan(`batch ${total.batches}`)}  scanned=${res.scanned} ${execute ? "recorded" : "would record"} doi=${res.recorded.doi} unknown=${res.recorded.unknown}  not_examined=${res.not_examined}  remaining=${res.remaining}`,
+        );
+        for (const sample of res.unknown_samples) {
+          say(
+            `    ${chalk.dim("unknown")} ${sample.dataset_id}@${sample.version}: ${sample.reason}`,
+          );
+        }
+        for (const e of res.errors) {
+          say(`    ${chalk.red("error")}   ${e.dataset_id}@${e.version}: ${e.error}`);
+        }
+        if (!res.ok) {
+          suspectCredential = res.suspect_credential;
+          failure = res.error ?? "the batch failed";
+          cursor = res.next_cursor ?? cursor;
+          break;
+        }
+        cursor = res.next_cursor ?? undefined;
+        if (!res.next_cursor) break;
+        await new Promise((resolve) => setTimeout(resolve, BACKFILL_PAUSE_MS));
+      }
+
+      const done = failure === null && last !== null && last.next_cursor === null;
+      const resumeCursor = done ? null : (cursor ?? null);
+
+      if (options.json) {
+        console.log(
+          JSON.stringify(
+            {
+              execute,
+              done,
+              failure,
+              suspect_credential: suspectCredential,
+              ...total,
+              errors,
+              next_cursor: resumeCursor,
+              counts: last?.counts ?? null,
+            },
+            null,
+            2,
+          ),
+        );
+      } else {
+        if (failure) console.error(chalk.red(`Stopped: ${failure}`));
+        if (!done && !failure) {
+          console.log(
+            chalk.yellow(`Stopped at --max-batches ${maxBatches}; the pass is not done.`),
+          );
+        }
+        if (resumeCursor) console.log(`Resume with: --after ${resumeCursor}`);
+        if (last) {
+          console.log(
+            chalk.cyan(
+              `On versions now: doi=${last.counts.doi} lineage=${last.counts.lineage} unknown=${last.counts.unknown} not_examined=${last.counts.not_examined}`,
+            ),
+          );
+        }
+        if (!execute) console.log(chalk.yellow("Dry run, pass --execute to record."));
+      }
+
+      // Non-zero on any error, any failed batch, and any pass that did not finish, so a
+      // caller never reads a partial or uncertain backfill as success.
+      if (failure !== null || errors.length > 0 || !done) process.exit(1);
+    },
+  );
+
+adminCommand.addCommand(upstreamBackfillCommand);
 
 // ============================================================================
 // Anonymity verification sweep (issue #1409, epic #1406)
