@@ -6,7 +6,7 @@
 
 Epic #1046, Phase 1 (#1907).
 Amends [ADR 0006](0006-upstream-re-pull-is-a-major-version-bump.md): its policy stands (a re-pull is a major bump), and this record adds the mechanism and says what major and patch mean on a mirror.
-Narrows [ADR 0093](0093-pull-requests-awaiting-approval-are-managed-from-one-admin-command-and-an-approval-is-the-administrators-own.md) for one class of pull request, the re-pull pull request (decision 7); for every other pull request ADR 0093 stands.
+Narrows [ADR 0093](0093-pull-requests-awaiting-approval-are-managed-from-one-admin-command-and-an-approval-is-the-administrators-own.md) in one aspect, the merge, for one class of pull request, the re-pull pull request the automatic path opened (decision 7); ADR 0107 already partially supersedes ADR 0093, and for every other pull request what remains of it stands.
 Builds on ADR 0001 (published datasets are PR-only), ADR 0016 (tags are CI's), ADR 0023 (`--clean` reconciles), ADR 0034 (the column budget), ADR 0060, ADR 0085, ADR 0086, ADR 0089 and ADR 0091 (what an imported tree goes through), and ADR 0053 and ADR 0054 (unknown is never zero).
 The analysis is `.context/design-upstream-repull.md`; where it and this record disagree, this record wins.
 Nothing here is built yet; the later phases of #1046 build it.
@@ -126,13 +126,15 @@ A re-pull pull request is machine clean when all of these hold:
 The merge is sent with the screened SHA, so GitHub refuses a branch that moved, and only when GitHub reports the pull request `clean`: the NEMAR App is a bypass actor (ADR 0001, ADR 0107), and `clean` is what keeps "never a bypass" true for a merge the App makes.
 The Worker submits no approving review on this class either, since ADR 0001 requires none; the record is the merge, the `upstream_repulls` row and the plan digest.
 
-**What this narrows in ADR 0093, for re-pull pull requests only:** its rule that accepting a change into a dataset's `main` is the administrator's own act, which its Decision states as "its approval is made by the administrator, from their machine, with their own GitHub login".
-A machine-clean re-pull pull request is accepted by the Worker, which merges it.
-ADR 0093's sentence "No Worker code path approves" stays literally true, because the Worker submits no review, and from now on reads as: no Worker code path approves, and the only Worker code path that merges is this record's merge of a machine-clean re-pull pull request.
-The amendment of 2026-10-10 ("it still does not approve or merge") is about `start` and is unchanged.
-For every other pull request the Worker neither approves nor merges, and ADR 0093 stands.
+**What this narrows in ADR 0093, for re-pull pull requests only.**
+ADR 0107 already partially supersedes ADR 0093; this record narrows one more aspect of it, the merge, and only for this class.
+ADR 0093's approval sentences stand as written, "its approval is made by the administrator, from their machine, with their own GitHub login" and "No Worker code path approves", because the Worker submits no review.
+What changes, for a re-pull pull request the automatic path opened, is that a merge no longer always follows an administrator's approval and `--merge` or `y`: the Worker merges one that is machine clean.
+For every other pull request the Worker neither approves nor merges.
+AGENTS.md's summary of ADR 0093 ("nothing merges without `--merge` or a `y`") is updated by the phase that builds the merge.
 
 A re-pull pull request that is not machine clean, or that an administrator opened, is merged by an administrator, through `nemar admin repull <id> --merge` or `nemar admin pr-reviews`, under ADR 0093, with a screen that is `clear` or carries the administrator's recorded acknowledgment (ADR 0086).
+`nemar admin pr-reviews` will require that screen for a re-pull pull request, which its `approve --merge` does not check today, and will claim the merge cap before the merge is sent.
 The Worker's merge call is not built until the ruleset check below is done.
 
 ### 8. A copy pins the object version, and nothing of the prior version is deleted
