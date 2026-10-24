@@ -4317,7 +4317,7 @@ adminCommand
   )
   .option(
     "--tag <tag>",
-    "Import this upstream snapshot tag (e.g. 1.0.1) instead of OpenNeuro's latest. One dataset only; with --phase, prepare only. Without it, prepare asks OpenNeuro for the latest tag; it never imports the mirror's default HEAD (ADR 0111). A tag not yet on the GitHub mirror is refused as a mirror lag.",
+    "Import this upstream snapshot tag (e.g. 1.0.1) instead of OpenNeuro's latest. One dataset only; with --phase, prepare only. Without it, prepare asks OpenNeuro for the latest tag; it never imports the mirror's default HEAD (ADR 0111). A tag not yet on the GitHub mirror is refused as a mirror lag. When dispatching the workflow, nemarDatasets/.github must carry the onboard-openneuro.yml that takes openneuro_tag (GitHub answers 422 otherwise).",
   )
   .action(
     async (
