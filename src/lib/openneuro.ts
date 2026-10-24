@@ -108,27 +108,44 @@ const SNAPSHOT_FILE_PAIR_QUERY = `query SnapshotFilePair($ds: ID!, $from: String
   b: snapshot(datasetId: $ds, tag: $to) { files(recursive: true) { id filename size annexed directory } }
 }`;
 
-/** A listing as OpenNeuro sends it, or the reason it is not one. Never an empty list by default. */
+/**
+ * A listing as OpenNeuro sends it, or the reason it is not one. A listing that cannot be a BIDS
+ * snapshot is a failure, never a delta: no non-directory entry (an empty tree would make every
+ * file of the other snapshot look added or deleted), no root `dataset_description.json`, a size
+ * that is not a non-negative integer, or two entries with one filename.
+ */
 function readFileList(node: unknown, which: string): SnapshotFile[] | string {
   const files = isRecord(node) ? node.files : undefined;
   if (!Array.isArray(files)) return `OpenNeuro sent no file list for the ${which} snapshot`;
   const out: SnapshotFile[] = [];
+  const seen = new Set<string>();
   for (const [i, f] of files.entries()) {
     const ok =
       isRecord(f) &&
       typeof f.filename === "string" &&
       typeof f.id === "string" &&
       typeof f.annexed === "boolean" &&
-      (f.size === null || typeof f.size === "number") &&
+      (f.size === null || (Number.isSafeInteger(f.size) && (f.size as number) >= 0)) &&
       (f.directory === undefined || f.directory === null || typeof f.directory === "boolean");
     if (!ok) return `OpenNeuro sent a malformed file entry (${which} snapshot, entry ${i})`;
+    const entry = f as Record<string, unknown>;
+    if (seen.has(entry.filename as string)) {
+      return `OpenNeuro listed ${entry.filename} twice (${which} snapshot, entry ${i})`;
+    }
+    seen.add(entry.filename as string);
     out.push({
-      filename: f.filename as string,
-      id: f.id as string,
-      size: f.size as number | null,
-      annexed: f.annexed as boolean,
-      directory: f.directory === true,
+      filename: entry.filename as string,
+      id: entry.id as string,
+      size: entry.size as number | null,
+      annexed: entry.annexed as boolean,
+      directory: entry.directory === true,
     });
+  }
+  if (!out.some((f) => !f.directory)) {
+    return `OpenNeuro sent an empty file list for the ${which} snapshot`;
+  }
+  if (!out.some((f) => !f.directory && f.filename === "dataset_description.json")) {
+    return `OpenNeuro sent a file list with no root dataset_description.json for the ${which} snapshot`;
   }
   return out;
 }
@@ -169,17 +186,21 @@ export async function fetchSnapshotFilePair(
   }
   const root = isRecord(json) ? json : {};
   const data = isRecord(root.data) ? root.data : {};
-  const from = readFileList(data.a, fromTag);
-  const to = readFileList(data.b, toTag);
-  if (typeof from !== "string" && typeof to !== "string") return { ok: true, from, to };
   const errors = Array.isArray(root.errors) ? root.errors : [];
   const message = errors
     .map((e) => (isRecord(e) && typeof e.message === "string" ? e.message : null))
     .filter((m): m is string => m !== null)
     .join("; ")
     .slice(0, 200);
+  // Data beside errors is a partial answer: nothing in it can be trusted as the whole listing.
+  if (errors.length > 0) {
+    return { ok: false, error: `OpenNeuro reported an error${message ? `: ${message}` : ""}` };
+  }
+  const from = readFileList(data.a, fromTag);
+  const to = readFileList(data.b, toTag);
+  if (typeof from !== "string" && typeof to !== "string") return { ok: true, from, to };
   const why = typeof from === "string" ? from : (to as string);
-  return { ok: false, error: message ? `${why}: ${message}` : why };
+  return { ok: false, error: why };
 }
 
 function delay(ms: number): Promise<void> {

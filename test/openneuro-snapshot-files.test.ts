@@ -87,28 +87,92 @@ describe("fetchSnapshotFilePair", () => {
     expect(res.ok).toBe(false);
   });
 
-  test("a malformed entry is a failure naming the entry", async () => {
-    standin.setText(
-      JSON.stringify({
-        data: {
-          a: { files: [{ id: "x", filename: "a", size: 1, annexed: false, directory: false }] },
-          b: { files: [{ id: "y", filename: "a", size: "big", annexed: false, directory: false }] },
-        },
-      }),
-    );
-    const res = await fetchSnapshotFilePair("ds003082", "1.0.0", "1.0.1", {
-      graphqlUrl: standin.url,
-    });
-    expect(res.ok).toBe(false);
-    if (res.ok) return;
-    expect(res.error).toContain("entry 0");
+  // Built from the recorded entry shape: OpenNeuro does not send these today, and each is a
+  // listing that, taken at face value, would turn into a confident wrong delta.
+  const entry = (over: Record<string, unknown> = {}) => ({
+    id: "26414282e75bda90d0f3a4c80b3dabfd9586aa9f",
+    filename: "dataset_description.json",
+    size: 755,
+    annexed: false,
+    directory: false,
+    ...over,
+  });
+  const GOOD = [entry()];
+  /** Serves `a` and `b` as the two listings and returns what the reader makes of them. */
+  async function read(a: unknown[], b: unknown[], extra: Record<string, unknown> = {}) {
+    standin.setText(JSON.stringify({ data: { a: { files: a }, b: { files: b } }, ...extra }));
+    return fetchSnapshotFilePair("ds003082", "1.0.0", "1.0.1", { graphqlUrl: standin.url });
+  }
+
+  test("a well-formed small listing is read", async () => {
+    const res = await read(GOOD, [entry({ id: "other" })]);
+    expect(res.ok).toBe(true);
   });
 
-  test("an empty listing that OpenNeuro really sent is an empty listing", async () => {
-    standin.setText(JSON.stringify({ data: { a: { files: [] }, b: { files: [] } } }));
-    const res = await fetchSnapshotFilePair("ds003082", "1.0.0", "1.0.1", {
-      graphqlUrl: standin.url,
-    });
-    expect(res).toEqual({ ok: true, from: [], to: [] });
+  test("an empty listing is a failure naming the snapshot, whichever side is empty", async () => {
+    for (const [a, b, tag] of [
+      [[], [], "1.0.0"],
+      [[], GOOD, "1.0.0"],
+      [GOOD, [], "1.0.1"],
+    ] as const) {
+      const res = await read([...a], [...b]);
+      expect(res.ok).toBe(false);
+      if (res.ok) continue;
+      expect(res.error).toContain("empty file list");
+      expect(res.error).toContain(tag);
+    }
+  });
+
+  test("a listing of directories only is empty", async () => {
+    const res = await read([entry({ filename: "sub-01", directory: true })], GOOD);
+    expect(res.ok).toBe(false);
+  });
+
+  test("a listing without a root dataset_description.json is not a snapshot", async () => {
+    const res = await read(GOOD, [entry({ filename: "sub-01/dataset_description.json" })]);
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.error).toContain("no root dataset_description.json");
+    expect(res.error).toContain("1.0.1");
+  });
+
+  test("data beside errors[] fails the pair, whatever the data says", async () => {
+    const res = await read(GOOD, GOOD, { errors: [{ message: "resolver exploded", path: ["b"] }] });
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.error).toContain("resolver exploded");
+  });
+
+  test("a negative or non-integer size fails; a null size is allowed", async () => {
+    expect((await read(GOOD, [entry({ size: -1 })])).ok).toBe(false);
+    expect((await read(GOOD, [entry({ size: 1.5 })])).ok).toBe(false);
+    expect((await read(GOOD, [entry({ size: null })])).ok).toBe(true);
+  });
+
+  test("two entries with one filename are a malformed listing", async () => {
+    const res = await read(GOOD, [entry(), entry({ id: "other" })]);
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.error).toContain("twice");
+  });
+
+  test("each field of an entry is checked: annexed, id, filename, directory, size", async () => {
+    for (const bad of [
+      { annexed: "yes" },
+      { annexed: undefined },
+      { id: 7 },
+      { id: undefined },
+      { filename: 7 },
+      { filename: undefined },
+      { directory: "no" },
+      { size: "big" },
+      { size: undefined },
+    ]) {
+      const res = await read(GOOD, [entry(), entry({ filename: "README", ...bad })]);
+      expect(res.ok).toBe(false);
+      if (res.ok) continue;
+      expect(res.error).toContain("malformed file entry");
+      expect(res.error).toContain("entry 1");
+    }
   });
 });
