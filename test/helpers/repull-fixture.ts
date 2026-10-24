@@ -38,6 +38,7 @@ import {
   withBidsignoreEntry,
 } from "../../shared/standard-edits/bidsignore";
 import { applyConceptDoiToDescription } from "../../shared/standard-edits/description";
+import { ensureParticipantsTsv } from "../../shared/standard-edits/participants";
 import {
   buildDoiBadge,
   planReadmeBadgeCommit,
@@ -175,6 +176,8 @@ export interface FixtureOptions {
   unpinnedSet?: boolean;
   /** Append a `headers-scrubbed` line (a recorded correction) to NEMAR's ledger. */
   recordedCorrection?: boolean;
+  /** Append the line an earlier re-pull's delta scrub writes (`repull-scrubbed`) to NEMAR's ledger. */
+  repullScrubbedLine?: boolean;
   /** Leave out NEMAR's contributor edits, so nothing is unexplained. */
   noContributorEdits?: boolean;
   /** What the bucket's `annex-uuid` marker says; the `nemar-s3` UUID by default, null for none. */
@@ -227,6 +230,12 @@ export interface FixtureOptions {
    * `.set` and moves the scrubbed recording, so N.0.0 would name two dead keys.
    */
   deadKeys?: boolean;
+  /**
+   * Upstream ships no `participants.tsv` at either tag, and NEMAR's holds the enrichment's
+   * placeholder for its own tree (`ensureParticipantsTsv`), or with `"edited"` that placeholder
+   * with one value filled in afterwards. Tag B adds sub-03, so its placeholder differs.
+   */
+  generatedParticipants?: true | "edited";
 }
 
 /** The ADR 0085 sentence a correction appends to `CHANGES` (`changeLogEntry`). */
@@ -268,28 +277,60 @@ export interface RepullFixture {
 }
 
 /**
- * OpenNeuro's GraphQL endpoint as the latest-snapshot query (`fetchOpenNeuroLatestTag`) reads it,
- * the way Phase 3's import tests stand in for it: `latest` is the tag it names, `null` answers that
- * the dataset has no snapshot, and `status` answers every request with that HTTP status instead.
+ * OpenNeuro's snapshots of the fixture's upstream, as its GraphQL lists them: oldest first, each
+ * with its creation time. The legacy `00001` was made first, so creation order and the numbers
+ * agree here; a test that needs them to disagree sets its own list.
+ */
+export const UPSTREAM_SNAPSHOTS: ReadonlyArray<{ tag: string; created: string | null }> = [
+  { tag: TAG_LEGACY, created: "2025-06-01T00:00:00.000Z" },
+  { tag: TAG_A, created: "2026-01-01T00:00:00.000Z" },
+  { tag: TAG_B, created: "2026-06-01T00:00:00.000Z" },
+];
+
+/**
+ * OpenNeuro's GraphQL endpoint as the planner's snapshot query (`fetchOpenNeuroSnapshots`, the
+ * staleness report's query for one dataset) reads it, in the shape OpenNeuro answers
+ * (`backend/test/fixtures/openneuro-graphql/`): `latest` is the tag it names as latest, with the
+ * creation time its entry in `snapshots` carries, and `null` answers that the dataset has no
+ * snapshot (and an empty list); `status` answers every request with that HTTP status instead.
  */
 export interface LatestSnapshotStandin {
   url: string;
   latest: string | null;
+  snapshots: Array<{ tag: string; created: string | null }>;
   status: number | null;
   requests: number;
   stop(): void;
 }
 
 export function startLatestSnapshotStandin(latest: string | null = TAG_B): LatestSnapshotStandin {
-  const state = { latest, status: null as number | null, requests: 0 };
+  const state = {
+    latest,
+    snapshots: UPSTREAM_SNAPSHOTS.map((s) => ({ ...s })),
+    status: null as number | null,
+    requests: 0,
+  };
   const server = Bun.serve({
     port: 0,
-    fetch(req) {
+    async fetch(req) {
       state.requests++;
       if (state.status !== null) return new Response("unavailable", { status: state.status });
       if (req.method !== "POST") return new Response("method", { status: 405 });
-      const snapshot = state.latest === null ? null : { tag: state.latest };
-      return Response.json({ data: { dataset: { latestSnapshot: snapshot } } });
+      const body = (await req.json()) as { variables?: Record<string, string> };
+      const id = body.variables?.a0;
+      if (typeof id !== "string") return Response.json({ errors: [{ message: "no a0" }] });
+      const node =
+        state.latest === null
+          ? { id, latestSnapshot: null, snapshots: [] }
+          : {
+              id,
+              latestSnapshot: {
+                tag: state.latest,
+                created: state.snapshots.find((s) => s.tag === state.latest)?.created ?? null,
+              },
+              snapshots: state.snapshots,
+            };
+      return Response.json({ data: { a0: node } });
     },
   });
   return {
@@ -299,6 +340,12 @@ export function startLatestSnapshotStandin(latest: string | null = TAG_B): Lates
     },
     set latest(v) {
       state.latest = v;
+    },
+    get snapshots() {
+      return state.snapshots;
+    },
+    set snapshots(v) {
+      state.snapshots = v;
     },
     get status() {
       return state.status;
@@ -459,7 +506,9 @@ async function build(
       ? {}
       : { [opts.readme === "md" ? "README.md" : "README"]: README_A }),
     [PATHS.changes]: `${TAG_A} 2026-01-01\n  - Initial snapshot.\n`,
-    [PATHS.participants]: "participant_id\tage\nsub-01\t30\nsub-02\t31\n",
+    ...(opts.generatedParticipants
+      ? {}
+      : { [PATHS.participants]: "participant_id\tage\nsub-01\t30\nsub-02\t31\n" }),
     [PATHS.flaggedEdf]: flagged,
     [PATHS.cleanEdf]: edfBytes("X X X X", 4000, 2, false),
     [PATHS.sidecar]: `{\n  "TaskName": "rest",\n  "SamplingFrequency": 256\n}\n`,
@@ -613,6 +662,19 @@ async function build(
       actor: "fixture-actor",
     });
   }
+  if (opts.repullScrubbedLine) {
+    appendLedger(join(clone, ".nemar/corrections.jsonl"), {
+      version: 1,
+      at: "2026-10-08T00:00:00.000Z",
+      dataset: NEMAR_ID,
+      action: "repull-scrubbed",
+      versions: [],
+      counts: { headers_scrubbed: 1, json_values_blanked: 1 },
+      scanner: IMPORT_SCANNER_ID,
+      verification: "scanner-clean+payload-identical",
+      actor: "fixture-actor",
+    });
+  }
   if (opts.changes) {
     const appended = {
       sentence: CHANGES_SENTENCE,
@@ -634,8 +696,24 @@ async function build(
       `{\n  "TaskName": "rest",\n  "SamplingFrequency": 256,\n  "PowerLineFrequency": 60\n}\n`,
     );
   }
+  if (opts.generatedParticipants) {
+    // The enrichment's commit, from the tree as it stands (GitHub's listing names files and their
+    // directories; the subjects are the same either way).
+    const listed = (await run(["git", "ls-files"], clone)).split("\n").filter(Boolean);
+    const placeholder = ensureParticipantsTsv(listed.map((path) => ({ path }))).contentToCommit;
+    if (placeholder === null) throw new Error("the fixture's tree has no subjects");
+    write(
+      clone,
+      PATHS.participants,
+      opts.generatedParticipants === "edited"
+        ? placeholder.replace("sub-01\tn/a\tn/a", "sub-01\t30\tn/a")
+        : placeholder,
+    );
+  }
   if (!opts.noContributorEdits && !opts.sidecarEditOnly) {
-    write(clone, PATHS.participants, "participant_id\tage\nsub-01\t29\nsub-02\t31\n");
+    if (!opts.generatedParticipants) {
+      write(clone, PATHS.participants, "participant_id\tage\nsub-01\t29\nsub-02\t31\n");
+    }
     const described = JSON.parse(readFileSync(join(clone, PATHS.description), "utf8"));
     described.HowToAcknowledge = "Cite the NEMAR mirror.";
     write(clone, PATHS.description, JSON.stringify(described, null, 2));
@@ -732,8 +810,10 @@ async function build(
       2,
     )}\n`,
     [PATHS.changes]: `${TAG_A} 2026-01-01\n  - Initial snapshot.\n${TAG_B} 2026-06-01\n  - Added sub-03.\n`,
-    [PATHS.participants]: "participant_id\tage\nsub-01\t30\nsub-02\t31\nsub-03\t32\n",
   };
+  if (!opts.generatedParticipants) {
+    changes[PATHS.participants] = "participant_id\tage\nsub-01\t30\nsub-02\t31\nsub-03\t32\n";
+  }
   if (opts.deadKeys) changes[PATHS.copiedSet] = files[PATHS.set] as Uint8Array;
   if (opts.subtypes) {
     changes[PATHS.bothAdded] = `{\n  "TaskName": "rest",\n  "SamplingFrequency": 128\n}\n`;

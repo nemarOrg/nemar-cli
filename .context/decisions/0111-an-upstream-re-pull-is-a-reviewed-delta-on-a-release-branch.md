@@ -510,6 +510,7 @@ The first matching step wins:
 12. The recorded tag is not among upstream's snapshots: `anomaly` (`recorded_tag_not_upstream`).
 13. The latest snapshot was created at the same time as the recorded one (`upstream_older`; an earlier latest is already `upstream_latest_inconsistent`, because the recorded tag is in the list), or either date is unreadable: `anomaly` (`upstream_older`, `upstream_dates_unreadable`).
     The latest's own date is tried first and its entry in the list second; if neither reads, the row is `upstream_dates_unreadable` before the tags are compared, so an undated latest never reads `current`.
+    *Annotated 2026-10-24 (Phase 6b): any other snapshot in the list whose date is unreadable (`list_undated`) is `upstream_dates_unreadable` too, before the times decide, because it could be the newest; see the Phase 6b amendment.*
 14. Otherwise upstream is newer, and the GitHub mirror decides between `stale_ready`, `mirror_lag` and `stale_unverified`.
 
 A row that cannot be compared (steps 1 to 5) is never sent to OpenNeuro.
@@ -812,3 +813,73 @@ Decision 2's "one ADR 0023 reconcile is queued" needs no new writer: the Zarr qu
 A release changes `latest_version`, so the stamp re-arm is the only new behavior.
 
 Checked only against stand-ins, until the canary and the first production runs: that GitHub's commit read resolves an annotated tag to its commit, the words its comparison answers with, and a squash-merged pull request's `head` and `merge_commit_sha` as this reads them.
+
+## Amendment 2026-10-24 (#1912): Phase 6b builds the seams execution shares with the import
+
+Epic #1046, Phase 6, the slice of shared seams: code the import runs that the later slices' execution will run too.
+Nothing here executes a re-pull, and the decision text above is unchanged.
+It builds the delta scrub's inputs, the ledger word that scrub writes, the generated `participants.tsv` as a standard edit, the order `to_tag` is checked in, and the finalize gate as functions.
+It makes two corrections, to decision 1's ledger rule and to the Phase 5 amendment's reading of `to_tag`'s order.
+
+### The scrub takes a scope, a source per key, and a pinned version
+
+Decision 2 says the scrub runs on the delta paths only.
+`scrubImportedTree` takes the paths it may read and change (`scope`), and a recording, a JSON file or a scans table outside them is neither read nor changed; its counts see only the scope.
+The scope must name every path changed since `HEAD`, staged or not, and every untracked path `.gitignore` does not exclude, or the scrub refuses (`scope-incomplete`) before it reads anything, because a changed path it does not read would reach the commit unscrubbed.
+So a re-pull's scope holds every delta path it wrote, every one it deleted, and every `.gitattributes` the annex policy edited (ADR 0060).
+A re-pull never commits a header change whose provenance file lacks its sentence (ADR 0085's for a scrub, ADR 0091's for a date): when a header in the scope will change and a provenance file (`sourcedata/sourcedata_provenance.json` or its README) lies outside the scope, the scrub refuses (`provenance-out-of-scope`) after the ranged header reads that decide it and before any recording is downloaded, and the caller puts both files in the scope (the lead's ruling of 2026-10-24, which settles the owner question this slice first left open).
+The rule counts a planned change, a date-only one included; a date-only recording whose download would later have failed, leaving its header as it was, is refused all the same, the safe side.
+A provenance file that is not a JSON object is counted on its own (`provenance_malformed`), apart from one that is not a regular file (`provenance_not_annotated`); the importer warns on either, as it did.
+The caller names each annexed recording's source (`sourceOf`) in place of the importer's whereis map: a source, a key NEMAR already holds, whose bytes are already in NEMAR's bucket where the identifier screen reads them (ADR 0086, ADR 0088), so it is counted and not read again, or none, which is counted.
+A source can be one version of an S3 object, read at its path-style URL with every segment encoded and `?versionId=` kept, for the header and for the download, so the scrub reads the bytes decision 8's pinned copy will copy; the rules that the object is the key's size and hashes to it are unchanged.
+The importer passes none of these, and its suites pass unedited.
+The manifest's closing check, every recording a copy brings from upstream had its header read, is a function of its own (`assertCopiedRecordingsRead`), for the re-pull's copy to close with.
+That `.log.rmet` records a `versionId` per key stays under "Not yet verified": this slice reads a pin it is given and verifies no upstream.
+
+### `repull-scrubbed`, and the ledger rule (correction)
+
+Decision 1 says a ledger line whose `action` is other than `import-scrubbed` is a recorded correction.
+Read literally, the re-pull's own delta scrub would then record a correction on every dataset it scrubs, and the next plan of that dataset would refuse any unexplained path.
+The delta scrub writes its own word, `repull-scrubbed`, before the one commit, so no history NEMAR pushes holds what it replaced (decision 9).
+The rule, corrected: a recorded correction is a line whose `action` is neither `import-scrubbed` nor `repull-scrubbed`.
+A `repull-scrubbed` line holds nothing: a re-import's history hold (ADR 0089) still reads `import-scrubbed` lines only.
+ADR 0085's fresh-clone proof tolerates a commit that appends `repull-scrubbed` lines beside other files, as it tolerates the importer's, because the re-pull's commit is one commit; without that, every re-pulled dataset would fail `ledger-commit-not-alone` for good.
+It does so only when that commit carries decision 2's `Upstream-Snapshot:` and `Repull-Plan:` trailers, as git reads trailers (the message's last paragraph), and edits no earlier line, so the merge that lands N.0.0 on `main` must end its commit message with both.
+GitHub's default squash message lists each commit of the pull request as a bullet, so the re-pull commit's trailers end up mid-message; the proof reads no trailers in such a merge and fails the dataset with `ledger-commit-not-alone`.
+Phase 6f writes the squash message itself so that it ends with both trailers.
+Neither scrub word can be typed: `ledger-cli.ts append` refuses `import-scrubbed` and `repull-scrubbed`, which only the scrub that wrote them, in the commit that carries what it scrubbed, may write.
+Decision 10's retarget of an unreleased import still refuses any line but the importer's own, `repull-scrubbed` included.
+A re-pull needs a released mirror, which the guard refuses before that rule runs, so the line should never meet it; if it does, dropping a record of a scrub is not the retarget's to decide, which is the safe direction.
+
+### The generated `participants.tsv` is a standard edit (closes the Phase 5 amendment's open item)
+
+The enrichment's placeholder `participants.tsv` (`ensureParticipantsTsv`, for a tree with `sub-*` directories and no file of its own) is one of decision 1's standard edits.
+Its rule moved to `shared/standard-edits/participants.ts`, which the enrichment still reaches through `backend/src/services/participants-tsv.ts`, so the plan recognizes the edit by calling the function the enrichment commits with.
+Where upstream ships no `participants.tsv` at a tag, NEMAR's file is explained from that tag when it is, byte for byte, the placeholder of that tag's subjects.
+The file is a function of the subjects, not of any upstream file, so it is upstream-changed when the subjects changed between the tags, and N.0.0's is the placeholder of `to_tag`'s subjects, or no file when `to_tag` has none.
+A placeholder edited afterwards is NEMAR's own addition and stays a correction.
+So a dataset whose ledger records a privacy correction is no longer refused for that file alone.
+
+### The plan records its planner
+
+The plan body's `planner` is 2 for this planner, so a plan Phase 5's planner made is refused by execution as made under other rules, never read under these (the refusal is a later slice's).
+
+### `to_tag` is ordered by OpenNeuro's creation order (correction to the Phase 5 amendment)
+
+The Phase 5 amendment took OpenNeuro's latest as `ok` when it was numerically after `from_tag`, and `order-unverified` otherwise; the Phase 4a amendment had already ruled that upstream's creation order decides, not the number.
+The plan now reads OpenNeuro's latest and its whole snapshot list, each with its creation time, in one answer: the query the staleness report sends, read by the same parser (`shared/openneuro-snapshots.ts`).
+It orders them with the helper the report's verdict uses (`upstreamSnapshotOrder`), so the two cannot disagree.
+The check is `ok` only when `to_tag` is OpenNeuro's latest and OpenNeuro's own list shows it created after `from_tag`.
+Every order the answer cannot establish is `unchecked` (`order-unverified`), never refused and never `ok`, and the plan is not executable: an unreadable creation date, of the latest, of `from_tag` or of any other snapshot in the list (which could be the newest of all), a latest its own list contradicts, a `from_tag` the list does not name, a latest created no later than `from_tag`, no `from_tag` to order against, and no answer at all with `--to-tag` named; without `--to-tag`, no answer plans nothing (`latest-unknown`).
+The staleness report reads the same helper, so another snapshot with an unreadable date makes a mirror `upstream_dates_unreadable` where it would have read stale or `upstream_older`; a mirror at the stated latest is still `current`.
+The numbers are never compared, so a mirror recorded at `00006` whose upstream made `1.0.0` later is re-pullable.
+A `--to-tag` that is not OpenNeuro's latest stays `unchecked`, as the Phase 5 amendment ruled, even when the list shows it newer.
+The latest tag is the same `latestSnapshot.tag` an import pins to, and the query is still a GraphQL POST that only asks, outside the plan's HTTP guard.
+
+### The import's refusal points at the re-pull
+
+Decision 10's `[openneuro-upstream-moved]` refusal of a released mirror now names the re-pull, `nemar admin repull plan <id>`, to OpenNeuro's latest snapshot by default or with `--to-tag` to the tag the import was at, which need not be the newer one, before the repair at the recorded tag, which is still the last thing it says.
+
+### The finalize gate is three functions
+
+The verify, tree gate and register steps of an import's finalize are `verifyManifestObjects`, `treeGate` and `registerTreeKeys` (`src/lib/import-finalize-gate.ts`), with every message as it was, because the Worker classifies them; the re-pull's register step will call the same three.

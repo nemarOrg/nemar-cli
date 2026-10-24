@@ -51,12 +51,13 @@ import {
   markInheritedOpenNeuroRemotesIgnored,
   preflightBucketAnnexUuid,
 } from "./git-annex/s3-remote.js";
+import { getAnnexWhereisAll, getRemoteUuid, listAnnexedKeys } from "./git-annex/transfer.js";
 import {
-  batchSetKeysPresent,
-  getAnnexWhereisAll,
-  getRemoteUuid,
-  listAnnexedKeys,
-} from "./git-annex/transfer.js";
+  DATA_AVAILABILITY_MARKER,
+  registerTreeKeys,
+  treeGate,
+  verifyManifestObjects,
+} from "./import-finalize-gate.js";
 import {
   ImportRefused,
   NEMAR_ANNEX_UUID_CONFLICT_MARKER,
@@ -77,16 +78,11 @@ import {
   type ImportManifest,
   type ImportManifestItem,
   type ImportPrivacyRecord,
-  MIN_DATA_AVAILABILITY,
-  annexKeyDeclaredSize,
   batchServerSideCopy,
   cleanupStaging,
-  dataAvailability,
   expectedSizesFromItems,
   filterAlreadyCopied,
-  isKeyPresentAtDeclaredSize,
   isLocallyUploaded,
-  keysWithoutObjects,
   listExistingObjects,
   parseS3Url,
   readManifestFromS3,
@@ -366,7 +362,8 @@ export interface ReimportBase {
  *   - the dataset has released a version: refuse with `[openneuro-upstream-moved]` before any
  *     reset, S3 setup or push. Moving a released mirror to a newer snapshot is a re-pull's job
  *     (ADR 0111), never a re-import's, and a re-import would keep the old tree while copying the
- *     new tag's data (#993).
+ *     new tag's data (#993). The refusal names both ways on: a re-pull, to OpenNeuro's latest
+ *     snapshot by default (`nemar admin repull plan`), and the repair at the recorded tag.
  *   - it has not: the same import, prepared again at the tag it now imports. `git reset --soft
  *     origin/main` moves HEAD onto origin's tip and keeps the new tag's tree in the index, so the
  *     commits that follow are a fast-forward of origin carrying that tree. Steps 5b and 6 re-apply
@@ -457,15 +454,17 @@ export async function baseOnOriginMain(
   if (released) {
     throw new ImportRefused(
       OPENNEURO_UPSTREAM_MOVED_MARKER,
-      `${args.sourceId}: ${args.nemarId} has released a version and its main records upstream tag ${recordedTag}; this import is at ${args.importTag}. Moving a released mirror to a new snapshot is an upstream re-pull (ADR 0111), not a re-import. Nothing was reset, copied or pushed. To repair the released version's data at the tag it mirrors: nemar admin import-openneuro ${args.sourceId} --tag ${recordedTag}`,
+      `${args.sourceId}: ${args.nemarId} has released a version and its main records upstream tag ${recordedTag}; this import is at ${args.importTag}. Moving a released mirror to a new snapshot is an upstream re-pull (ADR 0111), not a re-import. Nothing was reset, copied or pushed. To pull a newer snapshot as the next major, plan an upstream re-pull: \`nemar admin repull plan ${args.nemarId}\` (OpenNeuro's latest snapshot by default; \`--to-tag ${args.importTag}\` names this one). To repair the released version's data at the tag it mirrors: nemar admin import-openneuro ${args.sourceId} --tag ${recordedTag}`,
     );
   }
   // A retarget takes the new tag's tree whole, so origin's `.nemar/` goes with the old one, and
   // with it whatever the ledger records. Step 5b's scrub writes the new tree's own line from
   // scratch; it does not carry the old ones. So a ledger line the retarget would lose refuses it:
-  // a recorded correction (ADR 0085), or an `import-scrubbed` line whose scrub changed git (a JSON
-  // value blanked, a git-held recording scrubbed), because origin's history still holds those
-  // originals and only a hard reset keeps the hold that says so (ADR 0089, earlierHistoryHold).
+  // a recorded correction (ADR 0085), an upstream re-pull's `repull-scrubbed` line (ADR 0111; a
+  // re-pull needs a released mirror, refused above, so dropping its record is not a retarget's to
+  // decide), or an `import-scrubbed` line whose scrub changed git (a JSON value blanked, a git-held
+  // recording scrubbed), because origin's history still holds those originals and only a hard
+  // reset keeps the hold that says so (ADR 0089, earlierHistoryHold).
   const kept = await originLedgerLinesARetargetDrops(datasetPath);
   if (kept !== 0) {
     throw new Error(
@@ -503,7 +502,8 @@ async function originMainHasPath(
 
 /**
  * How many lines of `origin/main`'s privacy ledger a retarget would drop with consequence: any line
- * but the importer's own `import-scrubbed` one, an `import-scrubbed` line whose scrub blanked a
+ * but the importer's own `import-scrubbed` one (a re-pull's `repull-scrubbed` line included),
+ * an `import-scrubbed` line whose scrub blanked a
  * JSON value or scrubbed a git-held recording (origin's history holds those originals, ADR 0089),
  * and a line that is not a JSON object, because a ledger that cannot be read cannot be shown to
  * hold none. No ledger is 0; a ledger git cannot read is `unreadable`.
@@ -713,23 +713,8 @@ export function findAnnexedRootMetadata(datasetPath: string): string[] {
 /** Defined beside the scrub's marker (`import-markers.ts`); re-exported for existing callers. */
 export { OPENNEURO_UPSTREAM_MARKER };
 
-/**
- * Marker for "NEMAR's bucket cannot back this dataset's data keys" (#1396).
- *
- * Deliberately NOT the upstream marker. At this point we know one thing: the
- * tree names keys the bucket has no object for. We do NOT know whether the
- * content is gone at source or whether our copy phase simply did not finish,
- * and filing the first without measuring it is the mistake ADR 0064 exists to
- * correct -- nine datasets were filed `upstream_403` that way and six of them
- * were fetchable the whole time.
- *
- * So this marker claims only the shortfall, and carries the availability figure
- * so the tracking issue can be triaged by severity rather than by guess: one key
- * of 65,063 and 935 of 935 are the same sentence without it. `admin fleet
- * content-recovery <id>` is the command that turns it into a verdict about
- * upstream.
- */
-export const DATA_AVAILABILITY_MARKER = "[nemar-data-unavailable]";
+/** Defined beside the publish gate that prints it (`import-finalize-gate.ts`); re-exported for existing callers. */
+export { DATA_AVAILABILITY_MARKER };
 
 /**
  * Public CURRENT-version URL for a root file in an OpenNeuro dataset's S3 mirror.
@@ -1925,10 +1910,11 @@ async function prepareImportSteps(
     if (scrub.committed) {
       console.log(chalk.dim("  Committed the privacy correction and its ledger line"));
     }
-    if (c.provenance_not_annotated > 0) {
+    const notAnnotated = c.provenance_not_annotated + c.provenance_malformed;
+    if (notAnnotated > 0) {
       console.log(
         chalk.yellow(
-          `  Warning: ${c.provenance_not_annotated} provenance file(s) could not be annotated; their checksums still describe the upstream files without saying so`,
+          `  Warning: ${notAnnotated} provenance file(s) could not be annotated; their checksums still describe the upstream files without saying so`,
         ),
       );
     }
@@ -2199,27 +2185,9 @@ export async function finalizeImport(
     // counts as missing, same as a key that's absent entirely.
     const verifySpinner = ora("Verifying copied data...").start();
     const existing = await listExistingObjects(S3_BUCKET, `${nemarId}/objects/`, S3_REGION);
-    const missing = manifest.items.filter((it) => !isKeyPresentAtDeclaredSize(it.key, existing));
-    if (missing.length > 0) {
-      // Split the remedy by where the bytes were supposed to come from. The copy
-      // phase skips locally-uploaded keys by design, so telling an operator to
-      // re-run it for one of those sends them round a loop that cannot converge:
-      // only a prepare run, which holds the clone, can upload them (#1159).
-      const missingLocal = missing.filter((it) => isLocallyUploaded(it)).length;
-      const missingUpstream = missing.length - missingLocal;
-      const remedy = [
-        missingUpstream > 0
-          ? `${missingUpstream} copied from upstream: re-run the copy phase (a shard likely failed or was cancelled)`
-          : null,
-        missingLocal > 0
-          ? `${missingLocal} uploaded by prepare from the clone: re-run PREPARE, not copy -- the copy phase skips these keys by design and their content exists only in a clone`
-          : null,
-      ]
-        .filter(Boolean)
-        .join("; ");
-      verifySpinner.fail(
-        `${missing.length} of ${manifest.items.length} objects missing or wrong size at the destination. ${remedy}.`,
-      );
+    const verified = verifyManifestObjects(manifest.items, existing);
+    if (verified.message !== null) {
+      verifySpinner.fail(verified.message);
       process.exit(1);
     }
     verifySpinner.succeed(`Verified ${manifest.items.length} objects present`);
@@ -2267,89 +2235,33 @@ export async function finalizeImport(
       process.exit(1);
     }
 
-    // The manifest is what the copy phase BELIEVED it transferred, and the check
-    // above only asks whether those items landed. A copy phase that built a
-    // partial manifest passes it while the tree references keys nothing ever
-    // moved: sixteen datasets finalized that way, 12,039 keys with no object in
-    // the bucket, and the location log then told every clone NEMAR had them
-    // (#1396). So the gate is the TREE against the bucket, not the manifest
-    // against the bucket, which is ADR 0061's "a dataset with any annexed key
-    // the bucket cannot account for is reported and skipped" applied at the one
-    // place that can still stop a DOI being minted.
-    //
-    // **This gate is deliberately stricter than ADR 0064's 90%, and they are not
-    // in conflict because they answer different questions.** 0064 decides
-    // whether an ALREADY IMPORTED dataset stays listed when the missing content
-    // is gone from its source; the threshold is a floor on what a reader can
-    // still use. Here nothing is gone: a key with no object means OUR copy did
-    // not finish, which is retryable, so the answer is re-run the copy rather
-    // than mint a DOI over a 9% hole. Importing to 91% and calling it listable
-    // is how #1396 happened.
-    //
-    // `existing` is the listing from the verify step a few lines up; nothing
-    // writes to the prefix in between, and re-listing a 60,000-object dataset
-    // twice per finalize is not free.
+    // The gate is the TREE against the bucket, not the manifest against the
+    // bucket (#1396; `treeGate` says why). `existing` is the listing from the
+    // verify step a few lines up; nothing writes to the prefix in between, and
+    // re-listing a 60,000-object dataset twice per finalize is not free.
     const treeGateSpinner = ora("Checking every annexed key has an object...").start();
     const treeKeys = new Set((await listAnnexedKeys(datasetPath)).values());
-    const unbacked = keysWithoutObjects(treeKeys, existing);
-    if (unbacked.length > 0) {
-      // The ratio, not just the count, because the tracking issue filed from
-      // this failure is triaged by severity: one key missing of 65,063 and 935
-      // of 935 are the same sentence without it. Both denominators here are
-      // DISTINCT KEYS, which is what `treeKeys` holds. Computed by the one
-      // function that owns ADR 0064's rule, never inline here, so the zero-key
-      // case and the threshold cannot drift between the two. Data only, which
-      // is what `treeKeys` already is: metadata is never annexed (ADR 0015).
-      const available = dataAvailability({ annexed: [...treeKeys], missingContent: unbacked });
-      const belowThreshold =
-        available < MIN_DATA_AVAILABILITY
-          ? `, below the ${(MIN_DATA_AVAILABILITY * 100).toFixed(0)}% a listed dataset must reach (ADR 0064)`
-          : "";
-      treeGateSpinner.fail(
-        [
-          `${DATA_AVAILABILITY_MARKER} ${(available * 100).toFixed(1)}% of data keys available.`,
-          `${unbacked.length} of ${treeKeys.size} annexed key(s) in the tree have no object in s3://${S3_BUCKET}/${nemarId}/objects/`,
-          `(e.g. ${unbacked.slice(0, 3).join(", ")}).`,
-          `That is ${(available * 100).toFixed(1)}% of its data available${belowThreshold}.`,
-          `The manifest accounted for ${manifest.items.length}.`,
-          "Refusing to register: those keys would be advertised as NEMAR content that no clone can fetch.",
-          "Re-run the copy phase, or prepare if the content exists only in a clone.",
-          "If the copy phase cannot get them, check whether OpenNeuro still serves them before assuming a NEMAR bug:",
-          `\`nemar admin fleet content-recovery ${nemarId}\` reports, per key, whether any recorded source is readable.`,
-        ].join(" "),
-      );
+    const gate = treeGate(treeKeys, existing, {
+      bucket: S3_BUCKET,
+      datasetId: nemarId,
+      manifestItems: manifest.items.length,
+    });
+    if (!gate.ok) {
+      treeGateSpinner.fail(gate.message);
       process.exit(1);
     }
-    // A key whose name declares no size is accepted on its name alone, because
-    // there is no declared length to check it against (`git:` keys, and a
-    // `URL--` key from `addurl --relaxed`). That is #967's hole surviving inside
-    // #1396's fix, so it is counted and said out loud rather than folded into
-    // the reassuring total.
-    const unsized = [...treeKeys].filter((key) => annexKeyDeclaredSize(key) === null);
-    treeGateSpinner.succeed(
-      unsized.length === 0
-        ? `Every one of ${treeKeys.size} annexed key(s) has an object of its declared size`
-        : `Every one of ${treeKeys.size} annexed key(s) has an object; ${unsized.length} declare no size and were checked by name only`,
-    );
+    treeGateSpinner.succeed(gate.message);
 
-    const registerSpinner = ora("Registering files in git-annex...").start();
     // The TREE's keys, the same set the gate just proved, not `manifest.items`.
-    // A tree key with an object but no manifest entry passed the gate and was
-    // then published unregistered: present in the bucket and invisible to every
-    // clone. Quieter than the reverse, and still a dataset that does not serve.
-    const keys = [...treeKeys];
-    const regResult = await batchSetKeysPresent(datasetPath, keys, nemarUuid);
-    if (regResult.failed > 0) {
-      // Registration is the mechanism by which clones know a blob is in S3.
-      // A failure here would leave the data physically present but invisible to
-      // git-annex (uncloneable), so it's fatal. Finalize is idempotent — re-run
-      // to retry (re-clone, re-register, re-push).
-      registerSpinner.fail(
-        `${regResult.failed} of ${keys.length} git-annex key registrations are not in the location log (e.g. ${regResult.missing.slice(0, 3).join(", ")}). Aborting before publish — those blobs would be unfindable for clones. Re-run finalize to retry.`,
-      );
+    // A failure is fatal: the data would be present but uncloneable. Finalize is
+    // idempotent, so a re-run retries (re-clone, re-register, re-push).
+    const registerSpinner = ora("Registering files in git-annex...").start();
+    const registered = await registerTreeKeys(datasetPath, [...treeKeys], nemarUuid);
+    if (!registered.ok) {
+      registerSpinner.fail(registered.message);
       process.exit(1);
     }
-    registerSpinner.succeed(`Registered ${regResult.success} files in git-annex`);
+    registerSpinner.succeed(registered.message);
 
     const pushSpinner = ora("Pushing git-annex branch...").start();
     const pushResult = await pushToGitHub(datasetPath, "origin");

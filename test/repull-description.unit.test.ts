@@ -141,51 +141,66 @@ describe("bytesPhrase and orphanPhrase", () => {
   });
 });
 
-describe("toTagCheck orders OpenNeuro's latest against from_tag", () => {
-  const check = (fromTag: string, latest: string, mirror: string[]) =>
-    toTagCheck({ flag: undefined, mirrorTags: mirror, fromTag, latest: { tag: latest } }).check;
+describe("toTagCheck orders OpenNeuro's latest against from_tag by creation, never by number", () => {
+  /** OpenNeuro's answer: `order` lists the tags oldest first, a month apart, the last one latest. */
+  const answer = (order: string[]) => {
+    const snapshots = order.map((tag, i) => ({
+      tag,
+      created: `2026-${String(i + 1).padStart(2, "0")}-01T00:00:00.000Z`,
+    }));
+    return {
+      kind: "snapshot" as const,
+      latest: snapshots[snapshots.length - 1] ?? null,
+      snapshots,
+    };
+  };
+  const check = (fromTag: string | null, order: string[], mirror: string[]) =>
+    toTagCheck({ flag: undefined, mirrorTags: mirror, fromTag, upstream: answer(order) }).check;
 
-  test("a latest after from_tag is ok", () => {
-    expect(check("1.0.0", "2.0.0", ["1.0.0", "2.0.0"])).toMatchObject({ status: "ok" });
+  test("a latest created after from_tag is ok", () => {
+    expect(check("1.0.0", ["1.0.0", "2.0.0"], ["1.0.0", "2.0.0"])).toMatchObject({ status: "ok" });
   });
 
-  test("a latest before from_tag (a withdrawn snapshot, a mirror ahead) is unverified, never ok", () => {
-    expect(check("2.0.0", "1.0.0", ["1.0.0", "2.0.0"])).toMatchObject({
-      status: "unchecked",
-      code: "order-unverified",
-    });
+  test("a latest its own list shows older than from_tag (a withdrawn snapshot, a mirror ahead) is unverified, never ok", () => {
+    // OpenNeuro names 1.0.0 latest while its list has 2.0.0 created later.
+    const upstream = answer(["1.0.0", "2.0.0"]);
+    const c = toTagCheck({
+      flag: undefined,
+      mirrorTags: ["1.0.0", "2.0.0"],
+      fromTag: "2.0.0",
+      upstream: { ...upstream, latest: upstream.snapshots[0] ?? null },
+    }).check;
+    expect(c).toMatchObject({ status: "unchecked", code: "order-unverified" });
   });
 
-  test("a latest numerically equal but another tag is unverified; the same tag is nothing to pull", () => {
-    expect(check("1.0.0", "1", ["1", "1.0.0"])).toMatchObject({
-      status: "unchecked",
-      code: "order-unverified",
+  test("a latest numerically equal to from_tag is ordered like any other tag; the same tag is nothing to pull", () => {
+    // `1` and `1.0.0` are two snapshots, and OpenNeuro made `1` later.
+    expect(check("1.0.0", ["1.0.0", "1"], ["1", "1.0.0"])).toMatchObject({ status: "ok" });
+    expect(check("1.0.0", ["1", "1.0.0"], ["1", "1.0.0"])).toMatchObject({
+      status: "refused",
+      code: "nothing-to-pull",
     });
-    expect(check("1.0.0", "v1.0.0", ["1.0.0"])).toMatchObject({
+    expect(check("1.0.0", ["0.9.0", "v1.0.0"], ["1.0.0"])).toMatchObject({
       status: "refused",
       code: "nothing-to-pull",
     });
   });
 
-  test("00006 before 1.0.0 is legitimate creation order, so it is unverified, never refused", () => {
-    expect(check("00006", "1.0.0", ["00006", "1.0.0"])).toMatchObject({
-      status: "unchecked",
-      code: "order-unverified",
+  test("00006 then 1.0.0 is creation order, so 1.0.0 is newer and ok", () => {
+    expect(check("00006", ["00006", "1.0.0"], ["00006", "1.0.0"])).toMatchObject({
+      status: "ok",
     });
   });
 
-  test("a from_tag the tags cannot order is unverified; an unknown one leaves the latest ok", () => {
-    expect(check("draft", "1.0.0", ["1.0.0"])).toMatchObject({
+  test("a from_tag OpenNeuro's list does not name is unverified, and so is no from_tag at all", () => {
+    expect(check("draft", ["1.0.0"], ["1.0.0"])).toMatchObject({
       status: "unchecked",
       code: "order-unverified",
     });
-    const unknownFrom = toTagCheck({
-      flag: undefined,
-      mirrorTags: ["1.0.0"],
-      fromTag: null,
-      latest: { tag: "1.0.0" },
-    }).check;
-    expect(unknownFrom).toMatchObject({ status: "ok" });
+    expect(check(null, ["1.0.0"], ["1.0.0"])).toMatchObject({
+      status: "unchecked",
+      code: "order-unverified",
+    });
   });
 });
 
