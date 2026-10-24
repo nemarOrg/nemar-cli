@@ -287,8 +287,8 @@ const MESSAGE_ID = /^<[^<>\s]+>$/;
 
 /**
  * The `References` value for a reply: the ticket's Message-IDs oldest to newest, trimmed from the
- * OLDEST end until it fits `maxChars`. The id being replied to (`inReplyTo`) is always kept, then
- * the newest others.
+ * middle until it fits `maxChars`. The thread root (the first id) and the id being replied to
+ * (`inReplyTo`) are always kept, then the newest others that fit.
  */
 export function buildReferences(
   ids: string[],
@@ -305,9 +305,11 @@ export function buildReferences(
     return true;
   };
   const pinned = inReplyTo === undefined ? -1 : ids.lastIndexOf(inReplyTo);
+  // The id replied to comes first, so it wins if the two cannot both fit.
   if (pinned >= 0) add(pinned);
+  if (ids.length > 0 && pinned !== 0) add(0);
   for (let i = ids.length - 1; i >= 0; i--) {
-    if (i === pinned) continue;
+    if (i === pinned || i === 0) continue;
     if (!add(i)) break;
   }
   const kept = [...keep].sort((x, y) => x - y).map((i) => ids[i]);
@@ -445,10 +447,22 @@ async function sendAndRecord(
     )
     .bind(ticket.id, MAX_REFERENCES)
     .all<{ message_id: string }>();
+  const root = await db
+    .prepare(
+      `SELECT message_id FROM mail_messages
+        WHERE ticket_id = ? AND direction IN ('in', 'out') AND message_id IS NOT NULL
+        ORDER BY id LIMIT 1`,
+    )
+    .bind(ticket.id)
+    .first<{ message_id: string }>();
   const ids = (chain.results ?? [])
     .map((r) => r.message_id)
     .filter((id) => MESSAGE_ID.test(id))
     .reverse();
+  // The query holds only the newest messages; the thread's first one is read separately.
+  if (root && MESSAGE_ID.test(root.message_id) && !ids.includes(root.message_id)) {
+    ids.unshift(root.message_id);
+  }
   const headers: Record<string, string> = { "Message-ID": headerId };
   if (latestIn && MESSAGE_ID.test(latestIn.message_id)) {
     headers["In-Reply-To"] = latestIn.message_id;
@@ -659,7 +673,10 @@ export async function setTicketStatus(
 ): Promise<TicketSummary> {
   const ticket = await requireVisibleTicket(db, viewer, ticketId);
   if (ticket.status === status) return toSummary(ticket);
-  if (ticket.status === "closed" || ticket.status === "spam") {
+  if (
+    (ticket.status === "closed" || ticket.status === "spam") &&
+    (status === "open" || status === "pending")
+  ) {
     // Reopening puts the ticket back in a queue's hands. Its restricted flag was copied at
     // creation, so if the queue's rule has changed since, refuse rather than quietly keep a
     // ticket under a rule its queue no longer applies (or the reverse).

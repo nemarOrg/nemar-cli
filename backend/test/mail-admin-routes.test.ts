@@ -431,9 +431,9 @@ describe("reply", () => {
 });
 
 describe("long threads", () => {
-  test("References is trimmed from the oldest end, keeps In-Reply-To and the newest ids, and fits", async () => {
+  test("References keeps the thread root, the newest ids and In-Reply-To, and fits", async () => {
     const t = ticket();
-    for (let i = 0; i < 30; i++) {
+    for (let i = 0; i < 90; i++) {
       inbound(t, `<m${String(i).padStart(2, "0")}-${"x".repeat(60)}@sender.example>`);
     }
     const r = await call("admin", "POST", `/tickets/${t}/reply`, { text: "hi" });
@@ -441,19 +441,21 @@ describe("long threads", () => {
     const h = binding.sent[0].headers ?? {};
     expect((h.References ?? "").length).toBeLessThanOrEqual(998);
     const refs = (h.References ?? "").split(" ");
+    expect(refs[0]).toStartWith("<m00-");
     expect(refs.at(-1)).toBe(h["In-Reply-To"]);
-    expect(refs.some((x) => x.startsWith("<m29-"))).toBe(true);
-    expect(refs.some((x) => x.startsWith("<m00-"))).toBe(false);
-    // Contiguous newest run: nothing newer is dropped in favour of something older.
-    const nums = refs.map((x) => Number(x.slice(2, 4)));
-    expect(nums).toEqual([...nums].sort((a, b) => a - b));
-    expect(nums.at(-1)).toBe(29);
+    const rest = refs.slice(1).map((x) => Number(x.slice(2, 4)));
+    expect(rest.at(-1)).toBe(89);
+    expect(rest.length).toBeGreaterThan(5);
+    // After the root, a contiguous run of the newest ids.
+    expect(rest).toEqual(rest.map((_, i) => 89 - (rest.length - 1 - i)));
   });
 
   test("buildReferences pins the id replied to even when it is not the newest", () => {
     const ids = ["<a@x>", "<b@x>", "<c@x>", "<d@x>"];
-    expect(buildReferences(ids, "<b@x>", 11)).toBe("<b@x> <d@x>");
-    expect(buildReferences(ids, undefined, 11)).toBe("<c@x> <d@x>");
+    expect(buildReferences(ids, "<b@x>", 17)).toBe("<a@x> <b@x> <d@x>");
+    expect(buildReferences(ids, "<b@x>", 11)).toBe("<a@x> <b@x>");
+    expect(buildReferences(ids, undefined, 17)).toBe("<a@x> <c@x> <d@x>");
+    expect(buildReferences(ids, undefined, 11)).toBe("<a@x> <d@x>");
     expect(buildReferences([], undefined)).toBeUndefined();
   });
 
@@ -873,6 +875,30 @@ describe("review round 1: reprocess, counts, reopen, ids", () => {
     );
   });
 
+  test("a ticket created by a reprocess is announced even when the caller cannot see it", async () => {
+    db.run("UPDATE mail_queues SET strategy = 'pool', assignee_user_id = NULL WHERE tag = '*'");
+    const key = "inbound/raw/2026/10/24/2c9d8f3e-1111-4222-8333-444455556666.eml";
+    await bucket.put(key, eml({ subject: "Announce me" }), {
+      customMetadata: {
+        envelope_from: "ada@sender.example",
+        envelope_to: "support@nemar.org",
+        received_at: "2026-10-24T10:00:00.000Z",
+      },
+    });
+    // A trigger stands in for an exclusion present at creation: the new ticket excludes the caller.
+    db.run(
+      "CREATE TRIGGER excl AFTER INSERT ON mail_tickets BEGIN UPDATE mail_tickets SET excluded_user_id = " +
+        ids.owner2 +
+        " WHERE id = NEW.id; END",
+    );
+    const r = await call("owner2", "POST", "/reprocess", { raw_key: key });
+    expect(r.status).toBe(404);
+    expect(db.query("SELECT COUNT(*) AS n FROM mail_tickets").get()).toEqual({ n: 1 });
+    const to = binding.sent.map((m) => m.to as string);
+    expect(to.length).toBeGreaterThan(0);
+    expect(to).not.toContain("mail-owner2@example.org");
+  });
+
   test("open_tickets counts only tickets the viewer may see", async () => {
     ticket({ queue: "support" });
     ticket({ queue: "support", excluded: ids.admin });
@@ -903,6 +929,16 @@ describe("review round 1: reprocess, counts, reopen, ids", () => {
     const open = ticket({ queue: "security", restricted: false, status: "spam" });
     expect(
       (await call("owner", "POST", `/tickets/${open}/status`, { status: "open" })).body.code,
+    ).toBe("restriction_mismatch");
+    // Moving between closed and spam does not put the ticket back in anyone's hands.
+    expect(
+      (await call("owner", "POST", `/tickets/${stale}/status`, { status: "spam" })).status,
+    ).toBe(200);
+    expect(
+      (await call("owner", "POST", `/tickets/${stale}/status`, { status: "closed" })).status,
+    ).toBe(200);
+    expect(
+      (await call("owner", "POST", `/tickets/${stale}/status`, { status: "pending" })).body.code,
     ).toBe("restriction_mismatch");
     const fine = ticket({ queue: "security", restricted: true, status: "closed" });
     expect(
