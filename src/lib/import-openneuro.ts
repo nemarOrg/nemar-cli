@@ -8,6 +8,7 @@
 
 import {
   type Dirent,
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -23,12 +24,19 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import chalk from "chalk";
 import ora from "ora";
+import {
+  isOpenNeuroTag,
+  normalizeUpstreamTag,
+  sameUpstreamTag,
+} from "../../shared/openneuro-tag.js";
+import { isOwnSourceEntry, sourceSnapshotOf } from "../../shared/source-snapshot.js";
 import { decideReadme, readmeProvenanceStub } from "../../shared/standard-edits/readme.js";
 import { addCi, importDataset, reindexDataset } from "./api/admin.js";
-import { getDataset, getUserCiStatus } from "./api/datasets.js";
+import { getDataset, getUserCiStatus, hasReleasedVersion } from "./api/datasets.js";
 import { ApiError } from "./api/errors.js";
 import { requestPublication } from "./api/publish.js";
 
+import { LEDGER_REPO_PATH } from "../../scripts/scrub/ledger.js";
 import { cloneDataset, pushToGitHub } from "./git-annex/clone-push.js";
 import { configureGitHubRemote } from "./git-annex/github.js";
 import { isNeverAnnexedMetadata, shouldAnnex } from "./git-annex/policy.js";
@@ -36,8 +44,12 @@ import { ensureLocalMainBranch } from "./git-annex/repo-state.js";
 import { runCommand } from "./git-annex/run-command.js";
 import {
   type S3Credentials,
+  annexUuidPreflightAction,
+  awsCredentialEnv,
   configureS3Remote,
+  fetchOriginAnnexBranch,
   markInheritedOpenNeuroRemotesIgnored,
+  preflightBucketAnnexUuid,
 } from "./git-annex/s3-remote.js";
 import {
   batchSetKeysPresent,
@@ -45,7 +57,13 @@ import {
   getRemoteUuid,
   listAnnexedKeys,
 } from "./git-annex/transfer.js";
-import { OPENNEURO_UPSTREAM_MARKER } from "./import-markers.js";
+import {
+  ImportRefused,
+  NEMAR_ANNEX_UUID_CONFLICT_MARKER,
+  OPENNEURO_MIRROR_LAG_MARKER,
+  OPENNEURO_UPSTREAM_MARKER,
+  OPENNEURO_UPSTREAM_MOVED_MARKER,
+} from "./import-markers.js";
 import { annexCopyUpload } from "./import-normalize.js";
 import {
   type PublicationDecision,
@@ -54,6 +72,7 @@ import {
   screenWaitBudget,
 } from "./import-publication.js";
 import { httpUpstreamReader, prepareImportedTreeForCopy } from "./import-scrub.js";
+import { fetchOpenNeuroLatestTag } from "./openneuro.js";
 import {
   type ImportManifest,
   type ImportManifestItem,
@@ -115,6 +134,17 @@ interface ImportOptions {
    */
   screenWaitMs?: number;
   screenPollMs?: number;
+  /**
+   * The upstream snapshot tag to import (ADR 0111 decision 10). The auto-import passes the tag
+   * discovery found; with none, prepare asks OpenNeuro for its latest at run time. Never the
+   * mirror's default HEAD.
+   */
+  tag?: string;
+  /**
+   * Moves the OpenNeuro GraphQL endpoint prepare asks for the latest tag, and bounds its retries.
+   * For tests; a run leaves it unset and asks openneuro.org.
+   */
+  openNeuroLookup?: Parameters<typeof fetchOpenNeuroLatestTag>[1];
 }
 
 /**
@@ -262,30 +292,305 @@ export function decidePublicationRequestAction(
 }
 
 /**
- * Pure decision over whether a retried `prepare` (Step 4c, #990, epic #989
- * Phase 2) should reset the fresh clone's local `main` onto `origin/main`
- * before Step 6 seeds a new metadata commit. Re-importing onto an
- * already-published nemarDatasets repo (the #967 recovery case: re-copy data
- * for a version NEMAR already imported once) makes a brand-new OpenNeuro
- * clone whose `main` shares no history with origin's -- origin already
- * carries the FIRST import's metadata commit on the same files
- * (.nemar/metadata.json, README.md), so committing fresh metadata onto the
- * new clone's own history and pushing collides, and pushToGitHub's rebase
- * (clone-push.ts) hard-fails with "diverging commits and auto-rebase
- * failed".
+ * Pure decision over what Step 4c bases a fresh clone's `main` on (#990, #993; ADR 0111
+ * decision 10). Re-importing onto a repository that already has a `main` (the #967 recovery case:
+ * re-copy data for a version NEMAR already imported once) makes a brand-new OpenNeuro clone whose
+ * `main` shares no history with origin's -- origin already carries the FIRST import's metadata
+ * commit on the same files (.nemar/metadata.json, README.md), so committing fresh metadata onto
+ * the clone's own history and pushing collides, and pushToGitHub's rebase (clone-push.ts)
+ * hard-fails with "diverging commits and auto-rebase failed".
  *
- * `originMainSha` is null/empty when origin has no resolvable `main` yet --
- * a genuine first import, which must NOT reset (there is nothing to reset
- * onto). `currentBranch` excludes detached HEAD ("HEAD") and git-annex
- * adjusted branches ("adjusted/main(unlocked)") on purpose: pushToGitHub
- * special-cases both (HEAD:main push, no-rebase adjusted push) and neither
- * is safe to hard-reset the same way a plain `main` is.
+ *   - `none`: origin has no resolvable `main` (a genuine first import: nothing to base on), or
+ *     the tag is not moved and the clone is not on a plain `main`. Detached HEAD ("HEAD") and
+ *     git-annex adjusted branches ("adjusted/main(unlocked)") are not reset: pushToGitHub
+ *     special-cases both (HEAD:main push, no-rebase adjusted push) and neither is safe to reset
+ *     the same way.
+ *   - `hard-reset`: origin's `main` records no upstream tag, or records the tag being imported,
+ *     and the clone is on `main`. The same import again, so the tree becomes origin's, as before
+ *     the tag pin. An unrecorded tag lands here by design: it never trips the guard (ADR 0111
+ *     decision 10).
+ *   - `moved`: origin's `main` records a DIFFERENT upstream tag, whatever branch the clone is on:
+ *     the guard reads the tag first, so an odd branch can never skip it. What happens next depends
+ *     on whether the dataset has released a version, which costs a request, so it is asked only
+ *     now (see {@link baseOnOriginMain}).
  */
-export function decideReimportMainReset(args: {
+export function decideReimportBase(args: {
   originMainSha: string | null;
   currentBranch: string;
-}): boolean {
-  return args.originMainSha !== null && args.originMainSha !== "" && args.currentBranch === "main";
+  recordedTag: string | null;
+  importTag: string;
+}): "none" | "hard-reset" | "moved" {
+  if (args.originMainSha === null || args.originMainSha === "") return "none";
+  if (args.recordedTag !== null && !sameUpstreamTag(args.recordedTag, args.importTag)) {
+    return "moved";
+  }
+  return args.currentBranch === "main" ? "hard-reset" : "none";
+}
+
+/**
+ * Whether Step 6 records the pinned tag as a `SourceDatasets` entry (ADR 0111 decision 10): when
+ * the tree is the pinned tag's, a first import or a retarget. After a hard reset the tree is
+ * origin's, and recording a tag there would be a guess. Pure, for the test.
+ */
+export function shouldRecordSourceEntry(base: Pick<ReimportBase, "kind">): boolean {
+  return base.kind !== "hard-reset";
+}
+
+/** What Step 4c did to the clone's `main`, and the tag origin's `main` recorded. */
+export interface ReimportBase {
+  /**
+   * `none`: left as cloned (a first import, or a fallback). `hard-reset`: now origin's `main`,
+   * tree included. `retarget`: HEAD is origin's `main` and the index and working tree are still
+   * the clone's, so the next commit is a fast-forward of origin carrying the new tag's tree.
+   */
+  kind: "none" | "hard-reset" | "retarget";
+  recordedTag: string | null;
+  /**
+   * Set when origin has a `main` whose recorded tag could not be read, and why: the guard is
+   * inert then (ADR 0111: an unrecorded tag never trips it), which is said out loud, never left
+   * silent.
+   */
+  unrecorded?: string;
+}
+
+/**
+ * Step 4c of prepare: base the fresh clone's `main` on origin's tip BEFORE Step 6 seeds a new
+ * metadata commit, when origin already has a `main` (#990), and refuse when doing so would move a
+ * released mirror to a new upstream tag (#993; ADR 0111 decision 10).
+ *
+ * The tag origin's `main` records is read from its `dataset_description.json` with Phase 2's
+ * parser, `sourceSnapshotOf` (shared/source-snapshot.ts), the one every reader of the tag uses.
+ * When it differs from `importTag` (exactly, after a leading `v`: `sameUpstreamTag`, never the
+ * parser's numeric `compareSourceTags`, which calls `1.0` and `1.0.0` equal and would take the
+ * hard reset that keeps the old tree, #993):
+ *   - the dataset has released a version: refuse with `[openneuro-upstream-moved]` before any
+ *     reset, S3 setup or push. Moving a released mirror to a newer snapshot is a re-pull's job
+ *     (ADR 0111), never a re-import's, and a re-import would keep the old tree while copying the
+ *     new tag's data (#993).
+ *   - it has not: the same import, prepared again at the tag it now imports. `git reset --soft
+ *     origin/main` moves HEAD onto origin's tip and keeps the new tag's tree in the index, so the
+ *     commits that follow are a fast-forward of origin carrying that tree. Steps 5b and 6 re-apply
+ *     NEMAR's edits to it as on a first import; `.github/`, which finalize deploys, is dropped
+ *     until finalize deploys it again.
+ *
+ * `released` is called only in that case, and an error from it is a plain failure: not knowing
+ * whether a dataset is released must never read as "unreleased".
+ *
+ * An origin with no `main` is a first import, told by `git ls-remote --exit-code`'s status 2 (no
+ * matching ref), never by git's message, which is localized ("Konnte Remote-Referenz main nicht
+ * finden"; see src/lib/git-annex/init.ts on keying on statuses). Any other failure to ask or to
+ * fetch throws: an origin that could not be asked is not one with nothing to guard. A failed hard
+ * reset still warns and falls back to the normal push path, as before.
+ */
+export async function baseOnOriginMain(
+  datasetPath: string,
+  args: { sourceId: string; importTag: string; nemarId: string; released: () => Promise<boolean> },
+): Promise<ReimportBase> {
+  const originHasMain = await runCommand(
+    ["git", "ls-remote", "--exit-code", "origin", "refs/heads/main"],
+    { cwd: datasetPath },
+  );
+  // 2: origin answered and has no such ref, a first import.
+  if (originHasMain.exitCode === 2) return { kind: "none", recordedTag: null };
+  const originMainFetch =
+    originHasMain.exitCode === 0
+      ? await runCommand(["git", "fetch", "origin", "main"], { cwd: datasetPath })
+      : originHasMain;
+  if (originMainFetch.exitCode !== 0) {
+    throw new Error(
+      `Could not fetch ${args.nemarId}'s main from origin (${originMainFetch.stderr.trim()}). Without it the upstream-moved guard cannot run; nothing was reset or pushed.`,
+    );
+  }
+
+  const originMainRev = await runCommand(
+    ["git", "rev-parse", "--verify", "--quiet", "origin/main"],
+    { cwd: datasetPath },
+  );
+  const currentBranch = await runCommand(["git", "rev-parse", "--abbrev-ref", "HEAD"], {
+    cwd: datasetPath,
+  });
+  const recorded = await originRecordedTag(datasetPath, args.sourceId);
+  const recordedTag = recorded.tag;
+  const unrecorded =
+    recorded.tag === null && (originMainRev.stdout.trim() || null) !== null
+      ? recorded.why
+      : undefined;
+  if (unrecorded !== undefined) {
+    console.log(
+      chalk.yellow(
+        `  Warning: ${args.nemarId}'s main ${unrecorded}, so the upstream-moved guard cannot check this import at ${args.importTag}. If ${args.nemarId} has released a version and its upstream has moved since, this re-import keeps the old tree while copying the new tag's data (#993).`,
+      ),
+    );
+  }
+  const decision = decideReimportBase({
+    originMainSha: originMainRev.stdout.trim() || null,
+    currentBranch: currentBranch.stdout.trim(),
+    recordedTag,
+    importTag: args.importTag,
+  });
+
+  const extra = unrecorded !== undefined ? { unrecorded } : {};
+  if (decision === "none") return { kind: "none", recordedTag, ...extra };
+
+  if (decision === "hard-reset") {
+    const reset = await runCommand(["git", "reset", "--hard", "origin/main"], { cwd: datasetPath });
+    if (reset.exitCode !== 0) {
+      console.log(
+        chalk.yellow(
+          `  Warning: found origin/main for ${args.nemarId} (re-import) but could not reset onto it (${reset.stderr.trim()}). Falling back to the normal push path.`,
+        ),
+      );
+      return { kind: "none", recordedTag, ...extra };
+    }
+    return { kind: "hard-reset", recordedTag, ...extra };
+  }
+
+  // decision === "moved", so recordedTag is set.
+  let released: boolean;
+  try {
+    released = await args.released();
+  } catch (err) {
+    throw new Error(
+      `${args.nemarId}'s main records upstream tag ${recordedTag}, this import is at ${args.importTag}, and whether ${args.nemarId} has released a version could not be read (${err instanceof Error ? err.message : String(err)}). Nothing was reset or pushed; re-run once the backend answers.`,
+    );
+  }
+  if (released) {
+    throw new ImportRefused(
+      OPENNEURO_UPSTREAM_MOVED_MARKER,
+      `${args.sourceId}: ${args.nemarId} has released a version and its main records upstream tag ${recordedTag}; this import is at ${args.importTag}. Moving a released mirror to a new snapshot is an upstream re-pull (ADR 0111), not a re-import. Nothing was reset, copied or pushed. To repair the released version's data at the tag it mirrors: nemar admin import-openneuro ${args.sourceId} --tag ${recordedTag}`,
+    );
+  }
+  // A retarget takes the new tag's tree whole, so origin's `.nemar/` goes with the old one, and
+  // with it whatever the ledger records. Step 5b's scrub writes the new tree's own line from
+  // scratch; it does not carry the old ones. So a ledger line the retarget would lose refuses it:
+  // a recorded correction (ADR 0085), or an `import-scrubbed` line whose scrub changed git (a JSON
+  // value blanked, a git-held recording scrubbed), because origin's history still holds those
+  // originals and only a hard reset keeps the hold that says so (ADR 0089, earlierHistoryHold).
+  const kept = await originLedgerLinesARetargetDrops(datasetPath);
+  if (kept !== 0) {
+    throw new Error(
+      `${args.nemarId}'s main ${kept === "unreadable" ? `has a ${LEDGER_REPO_PATH} git could not read` : `records ${kept} line(s) in ${LEDGER_REPO_PATH} that retargeting it from upstream tag ${recordedTag} to ${args.importTag} would drop`} (a privacy correction, ADR 0085, or a scrub whose originals origin's history still holds, ADR 0089). Nothing was reset or pushed; a person decides how this dataset moves.`,
+    );
+  }
+  if (currentBranch.stdout.trim() !== "main") {
+    throw new Error(
+      `${args.nemarId}'s unreleased import moved from upstream tag ${recordedTag} to ${args.importTag}, but the clone is on ${currentBranch.stdout.trim()}, not main, which cannot be retargeted safely. Nothing was reset or pushed.`,
+    );
+  }
+  const soft = await runCommand(["git", "reset", "--soft", "origin/main"], { cwd: datasetPath });
+  if (soft.exitCode !== 0) {
+    throw new Error(
+      `Could not move ${args.nemarId}'s unreleased import from upstream tag ${recordedTag} to ${args.importTag}: git reset --soft origin/main failed (${soft.stderr.trim()}). Nothing was pushed.`,
+    );
+  }
+  return { kind: "retarget", recordedTag };
+}
+
+/**
+ * Whether `origin/main`'s tree has `path`, from `git ls-tree`'s listing (empty for an absent path)
+ * and its status, never from a localized message; `unreadable` when git could not list the tree.
+ */
+async function originMainHasPath(
+  datasetPath: string,
+  path: string,
+): Promise<boolean | "unreadable"> {
+  const listed = await runCommand(["git", "ls-tree", "--name-only", "origin/main", "--", path], {
+    cwd: datasetPath,
+  });
+  if (listed.exitCode !== 0) return "unreadable";
+  return listed.stdout.split("\n").some((line) => line === path);
+}
+
+/**
+ * How many lines of `origin/main`'s privacy ledger a retarget would drop with consequence: any line
+ * but the importer's own `import-scrubbed` one, an `import-scrubbed` line whose scrub blanked a
+ * JSON value or scrubbed a git-held recording (origin's history holds those originals, ADR 0089),
+ * and a line that is not a JSON object, because a ledger that cannot be read cannot be shown to
+ * hold none. No ledger is 0; a ledger git cannot read is `unreadable`.
+ */
+async function originLedgerLinesARetargetDrops(
+  datasetPath: string,
+): Promise<number | "unreadable"> {
+  const present = await originMainHasPath(datasetPath, LEDGER_REPO_PATH);
+  if (present === "unreadable") return "unreadable";
+  if (!present) return 0;
+  const shown = await runCommand(["git", "show", `origin/main:${LEDGER_REPO_PATH}`], {
+    cwd: datasetPath,
+  });
+  if (shown.exitCode !== 0) return "unreadable";
+  let count = 0;
+  for (const line of shown.stdout.split("\n")) {
+    if (line.trim() === "") continue;
+    let entry: unknown;
+    try {
+      entry = JSON.parse(line);
+    } catch {
+      count += 1;
+      continue;
+    }
+    const record =
+      typeof entry === "object" && entry !== null
+        ? (entry as { action?: unknown; counts?: Record<string, unknown> })
+        : {};
+    if (record.action !== "import-scrubbed") {
+      count += 1;
+      continue;
+    }
+    const changed = (key: string) => Number(record.counts?.[key] ?? 0) > 0;
+    if (changed("json_values_blanked") || changed("git_held_recordings_scrubbed")) count += 1;
+  }
+  return count;
+}
+
+/**
+ * Whether any `SourceDatasets` entry of `desc` is the dataset's own (`isOwnSourceEntry`: its DOI
+ * or URL names `sourceId`), tagged or not. `SourceDatasets` is read as the shared parser reads
+ * it: an array, or a single object standing for a one-entry array.
+ */
+export function hasSourceEntryFor(desc: unknown, sourceId: string): boolean {
+  if (!desc || typeof desc !== "object" || Array.isArray(desc)) return false;
+  const sd = (desc as Record<string, unknown>).SourceDatasets;
+  return (Array.isArray(sd) ? sd : [sd]).some((entry) => isOwnSourceEntry(entry, sourceId));
+}
+
+/**
+ * The upstream tag `origin/main`'s `dataset_description.json` records (`sourceSnapshotOf`), or
+ * why it records none: no such file, a file git could not read, one that is not JSON (an annex
+ * pointer, say), no entry for the dataset, or entries for it that give no single tag. Unknown
+ * never trips the guard; the caller says so.
+ */
+async function originRecordedTag(
+  datasetPath: string,
+  sourceId: string,
+): Promise<{ tag: string; why?: undefined } | { tag: null; why: string }> {
+  const present = await originMainHasPath(datasetPath, "dataset_description.json");
+  if (present === "unreadable") {
+    return { tag: null, why: "has a tree git could not list" };
+  }
+  if (!present) return { tag: null, why: "has no dataset_description.json" };
+  const shown = await runCommand(["git", "show", "origin/main:dataset_description.json"], {
+    cwd: datasetPath,
+  });
+  if (shown.exitCode !== 0) {
+    return {
+      tag: null,
+      why: `has a dataset_description.json git could not read (${shown.stderr.trim()})`,
+    };
+  }
+  let desc: unknown;
+  try {
+    desc = JSON.parse(shown.stdout);
+  } catch {
+    return { tag: null, why: "has a dataset_description.json that is not JSON" };
+  }
+  const snapshot = sourceSnapshotOf(desc, sourceId);
+  if (snapshot.source_version !== null) return { tag: snapshot.source_version };
+  return {
+    tag: null,
+    why: hasSourceEntryFor(desc, sourceId)
+      ? `names ${sourceId} in SourceDatasets but records no single upstream tag for it (no entry carries one, they disagree, or one names another dataset too)`
+      : `records no upstream tag for ${sourceId}`,
+  };
 }
 
 /**
@@ -729,6 +1034,128 @@ export function seedMetadata(
 }
 
 /**
+ * The `SourceDatasets` entry an import records for the upstream snapshot it mirrors (ADR 0111
+ * decisions 1, 4 and 10): the snapshot's DOI, its page, and its tag, all three derived from the one
+ * tag, so the entry cannot disagree with itself. The DOI is what the version-DOI mint turns into
+ * `IsDerivedFrom` (decision 2), and the entry is what the upstream-moved guard reads back.
+ */
+export function sourceDatasetEntry(
+  openneuroId: string,
+  tag: string,
+): { DOI: string; URL: string; Version: string } {
+  const bare = normalizeUpstreamTag(tag);
+  return {
+    DOI: `doi:10.18112/openneuro.${openneuroId}.v${bare}`,
+    URL: `https://openneuro.org/datasets/${openneuroId}/versions/${bare}`,
+    Version: bare,
+  };
+}
+
+/**
+ * Whether `entry` is the dataset's own and names nothing else: every DOI or URL it holds as text
+ * names `sourceId` by itself, as the shared parser reads it. A `null`, a non-object and an entry
+ * with a field naming another dataset (or nothing the parser knows, a Zenodo DOI say) are not.
+ */
+function namesOnlyThisDataset(entry: unknown, sourceId: string): entry is Record<string, unknown> {
+  if (!isOwnSourceEntry(entry, sourceId)) return false;
+  const e = entry as Record<string, unknown>;
+  return (["DOI", "URL"] as const).every((key) => {
+    const value = e[key];
+    return (
+      typeof value !== "string" ||
+      value.trim() === "" ||
+      isOwnSourceEntry({ [key]: value }, sourceId)
+    );
+  });
+}
+
+/**
+ * Record {@link sourceDatasetEntry} in the clone's `dataset_description.json`, read from disk now
+ * (the scrub in Step 5b may have blanked values in it since prepare first read it). What the file
+ * records is read with Phase 2's parser, `sourceSnapshotOf`, and the import writes only a record
+ * that parser then reads as `tag`. NEMAR owns one entry per mirrored `ds` (ADR 0111 decision 1),
+ * so:
+ *   - `already-recorded`: the description already gives a tag for this dataset; left alone.
+ *   - `completed`: an entry names this dataset and nothing else but records no tag (a concept DOI,
+ *     a dataset page); it gains `Version` and whichever of `DOI` and `URL` it lacks, in place, so
+ *     the description still has one entry for the dataset and the guard can read its tag. An
+ *     entry that already carries a `Version` (one that is not a tag) or a `DOI` or `URL` that is
+ *     not a string is someone else's statement: it is left alone, with a warning, and the record
+ *     is appended beside it.
+ *   - `appended`: otherwise, a new entry.
+ *   - `unreadable`: the record would still not read as `tag`, because an entry for this dataset
+ *     carries another tag or names another dataset too, or because `tag` is not one the parser
+ *     reads (it reads numeric dotted tags such as `1.0.0` and `00001`); the file is left alone
+ *     and a warning says so, because writing would only add to what a person has to settle.
+ * Kept in git, never the annex, and written as publication writes the file, two-space JSON.
+ * Entries of any shape, `null` included, are kept as they are.
+ */
+export async function appendSourceDatasetEntry(
+  datasetPath: string,
+  openneuroId: string,
+  tag: string,
+): Promise<"already-recorded" | "unreadable" | "completed" | "appended"> {
+  const descPath = join(datasetPath, "dataset_description.json");
+  const desc = readBidsDescription(datasetPath);
+  if (sourceSnapshotOf(desc, openneuroId).source_version !== null) return "already-recorded";
+  // A `SourceDatasets` that is not an array is kept as the first entry, as publication keeps it.
+  const existing = desc.SourceDatasets;
+  const sources: unknown[] = Array.isArray(existing)
+    ? [...existing]
+    : existing === undefined || existing === null
+      ? []
+      : [existing];
+  const entry = sourceDatasetEntry(openneuroId, tag);
+  const index = sources.findIndex((s) => namesOnlyThisDataset(s, openneuroId));
+  let outcome: "completed" | "appended";
+  const current = index >= 0 ? (sources[index] as Record<string, unknown>) : null;
+  const present = (key: string) =>
+    current !== null && current[key] !== undefined && current[key] !== null && current[key] !== "";
+  const completable =
+    current !== null &&
+    !present("Version") &&
+    (!present("DOI") || typeof current.DOI === "string") &&
+    (!present("URL") || typeof current.URL === "string");
+  if (current !== null && completable) {
+    sources[index] = {
+      ...current,
+      ...(present("DOI") ? {} : { DOI: entry.DOI }),
+      ...(present("URL") ? {} : { URL: entry.URL }),
+      Version: entry.Version,
+    };
+    outcome = "completed";
+  } else {
+    sources.push(entry);
+    outcome = "appended";
+  }
+  const next = { ...desc, SourceDatasets: sources };
+  if (sourceSnapshotOf(next, openneuroId).source_version !== entry.Version) {
+    console.log(
+      chalk.yellow(
+        `  Warning: recording upstream ${openneuroId} ${tag} would not make dataset_description.json read as that tag (an entry for ${openneuroId} carries another tag or names another dataset too, or ${tag} is not a tag the shared parser reads); left it as it is, so the upstream-moved guard stays inert for this dataset until a person settles it`,
+      ),
+    );
+    return "unreadable";
+  }
+  if (current !== null && !completable) {
+    console.log(
+      chalk.yellow(
+        `  Warning: left the existing SourceDatasets entry for ${openneuroId} as it is (it carries a Version that is not a tag, or a DOI or URL that is not text); recording ${tag} beside it`,
+      ),
+    );
+  }
+  writeFileSync(descPath, `${JSON.stringify(next, null, 2)}\n`);
+  const add = await runCommand(
+    ["git", "-c", "annex.largefiles=nothing", "add", "dataset_description.json"],
+    { cwd: datasetPath },
+  );
+  if (add.exitCode !== 0) {
+    throw new Error(`Failed to stage dataset_description.json: ${add.stderr.trim()}`);
+  }
+  return outcome;
+}
+
+/**
  * Outcome of {@link ensureReadmeMd} so the caller can stage the right paths.
  *
  * - `renamed`: an upstream `README` (no extension) was renamed to `README.md`
@@ -833,6 +1260,175 @@ export function buildManifestItems(
   return { items, skipped };
 }
 
+/** The longest an explicit tag's warning-only lookup of OpenNeuro's latest tag may take. */
+export const EXPLICIT_TAG_LOOKUP_MS = 10_000;
+
+/** Where OpenNeuro's GitHub mirror of a dataset lives. */
+export function openNeuroMirrorUrl(openneuroId: string): string {
+  return `https://github.com/${OPENNEURO_ORG}/${openneuroId}.git`;
+}
+
+/** A clone of OpenNeuro's mirror whose branch is at the upstream tag being imported. */
+export interface PinnedClone {
+  /** The tag the clone is at, and the tag this import records. */
+  tag: string;
+  /** The commit that tag names on the mirror. */
+  commit: string;
+  /**
+   * OpenNeuro's latest tag as this run read it. Null only when an explicit tag was given and the
+   * lookup failed: without one, a failed lookup refuses instead.
+   */
+  latestTag: string | null;
+}
+
+/**
+ * Step 1 of prepare: clone OpenNeuro's GitHub mirror at the upstream tag being imported, never the
+ * default HEAD (ADR 0111 decision 10).
+ *
+ * With no `tag`, the tag is OpenNeuro's latest, asked of its GraphQL API now -- the tag "the retry
+ * discovers" for a retry, which also means a retry never carries a tag that has since moved.
+ * Either way, a tag that cannot be resolved or that the mirror does not have yet refuses with
+ * `[openneuro-mirror-lag]` before anything is created: OpenNeuro tags a snapshot before its GitHub
+ * mirror receives it, and the retry engine retries the refusal until it lands (and parks it after
+ * its window). Any other clone failure is an ordinary error.
+ *
+ * With an explicit `tag`, OpenNeuro's latest is still asked for (best effort) so a caller can warn
+ * when they differ: the copy phase copies the object CURRENTLY at each upstream path (decision 8,
+ * the version-pinned copy, is not built), so a recording that changed between the two tags
+ * without changing size is copied with the newer bytes, and only the size check catches the rest.
+ *
+ * `repoUrl` and `lookup` (passed to `fetchOpenNeuroLatestTag`) move the two endpoints and bound
+ * the lookup's retries, for tests.
+ */
+export async function cloneOpenNeuroAtTag(
+  openneuroId: string,
+  datasetPath: string,
+  options: {
+    tag?: string;
+    repoUrl?: string;
+    lookup?: Parameters<typeof fetchOpenNeuroLatestTag>[1];
+  } = {},
+): Promise<PinnedClone> {
+  if (options.tag !== undefined && !isOpenNeuroTag(options.tag)) {
+    throw new Error(
+      `Invalid upstream tag ${JSON.stringify(options.tag)}: expected an OpenNeuro snapshot tag such as 1.0.0`,
+    );
+  }
+  const repoUrl = options.repoUrl ?? openNeuroMirrorUrl(openneuroId);
+  // With an explicit tag the lookup only decides a warning, so it gets one short try: a slow or
+  // absent OpenNeuro must not hold up an import that does not need its answer.
+  const lookup = await fetchOpenNeuroLatestTag(
+    openneuroId,
+    options.tag !== undefined
+      ? {
+          ...options.lookup,
+          attempts: 1,
+          timeoutMs: Math.min(
+            options.lookup?.timeoutMs ?? EXPLICIT_TAG_LOOKUP_MS,
+            EXPLICIT_TAG_LOOKUP_MS,
+          ),
+        }
+      : options.lookup,
+  );
+  const latestTag = lookup.tag;
+  let tag: string;
+  if (options.tag !== undefined) {
+    tag = options.tag;
+  } else if (lookup.tag !== null) {
+    tag = lookup.tag;
+  } else {
+    throw new ImportRefused(
+      OPENNEURO_MIRROR_LAG_MARKER,
+      `${openneuroId}: the upstream tag to import could not be resolved (${lookup.reason}). Nothing was created; the retry engine retries it.`,
+    );
+  }
+  const cloned = await cloneDataset(repoUrl, datasetPath, { tag });
+  if (cloned.missingTag) {
+    throw new ImportRefused(
+      OPENNEURO_MIRROR_LAG_MARKER,
+      `${openneuroId}: upstream tag ${tag} is not on ${repoUrl.replace(/\.git$/, "")} yet. Nothing was created; the retry engine retries it.`,
+    );
+  }
+  if (!cloned.success || cloned.commit === undefined) {
+    throw new Error(`Failed to clone: ${cloned.error ?? "unknown error"}`);
+  }
+  return { tag, commit: cloned.commit, latestTag };
+}
+
+/**
+ * Print `err` as the run's last failure line and stop. The one place a refusal (`ImportRefused`)
+ * from any step of prepare ends up: the onboard workflow's reporter forwards the LAST `✖` line,
+ * cut at 600 characters, so the marker has to be both the start of that line and the last thing
+ * to fail.
+ *
+ * Before printing it, when the run persists staging (the workflow's `--phase prepare` does), any
+ * staging an earlier attempt left is removed. The copy and finalize jobs still run, under
+ * `if: !cancelled()`, and now fail at once reading the missing manifest (`readManifestFromS3`
+ * throws) instead of copying and publishing what a previous prepare described. A run without
+ * staging (`--local`) has none to clear. A work directory this run created is removed too; one the
+ * caller named (`--dir`) is the caller's and stays.
+ *
+ * Exported for the tests that run it in a child process and feed its output to the workflow's own
+ * reporter.
+ */
+export async function refuseImport(
+  err: ImportRefused,
+  nemarId: string,
+  options: ImportOptions,
+  createdWorkDir: string | null = null,
+): Promise<never> {
+  if (options.persistStaging) {
+    // cleanupStaging reports a failed `aws s3 rm` itself; the catch is for what it lets through,
+    // a spawn failure such as no `aws` on PATH, which is said here rather than lost.
+    try {
+      await cleanupStaging(nemarId, S3_BUCKET, S3_REGION);
+    } catch (cleanupErr) {
+      console.log(
+        chalk.yellow(
+          `  Could not clear s3://${S3_BUCKET}/${nemarId}/staging/ (${cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr)})`,
+        ),
+      );
+    }
+  }
+  removeCreatedWorkDir(createdWorkDir);
+  ora().fail(err.message);
+  process.exit(1);
+}
+
+/**
+ * A failure of prepare that, like a refusal, ends the run before anything is reset or pushed, and
+ * whose work directory is removed when this run created it. Raised by the steps the tag pin added
+ * (the clone at the tag, the upstream-moved guard), and ended in one place by `prepareImport`.
+ */
+class PrepareStopped extends Error {}
+
+/** Remove a work directory this run created; git-annex leaves its object directories read-only. */
+function removeCreatedWorkDir(dir: string | null): void {
+  if (dir === null) return;
+  const makeWritable = (path: string): void => {
+    let entries: Dirent[];
+    try {
+      chmodSync(path, 0o755);
+      entries = readdirSync(path, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (entry.isDirectory()) makeWritable(join(path, entry.name));
+    }
+  };
+  try {
+    makeWritable(dir);
+    rmSync(dir, { recursive: true, force: true });
+  } catch (rmErr) {
+    console.log(
+      chalk.yellow(
+        `  Could not remove the work directory ${dir} (${rmErr instanceof Error ? rmErr.message : String(rmErr)})`,
+      ),
+    );
+  }
+}
+
 /**
  * Phase 1 (prepare): clone OpenNeuro, create the NEMAR record + repo, build the
  * key->source manifest, configure remotes (recording the nemar-s3 uuid in the
@@ -847,21 +1443,59 @@ export async function prepareImport(
   options: ImportOptions = {},
 ): Promise<ImportManifest> {
   const nemarId = mapDatasetId(openneuroId);
+  const createdWorkDir = options.workDir
+    ? null
+    : mkdtempSync(join(tmpdir(), `nemar-import-${nemarId}-`));
+  try {
+    return await prepareImportSteps(openneuroId, nemarId, {
+      ...options,
+      workDir: options.workDir ?? (createdWorkDir as string),
+    });
+  } catch (err) {
+    if (err instanceof ImportRefused) return refuseImport(err, nemarId, options, createdWorkDir);
+    if (err instanceof PrepareStopped) {
+      removeCreatedWorkDir(createdWorkDir);
+      ora().fail(err.message);
+      process.exit(1);
+    }
+    throw err;
+  }
+}
+
+async function prepareImportSteps(
+  openneuroId: string,
+  nemarId: string,
+  options: ImportOptions,
+): Promise<ImportManifest> {
   const workDir = options.workDir || mkdtempSync(join(tmpdir(), `nemar-import-${nemarId}-`));
   const datasetPath = join(workDir, nemarId);
 
   console.log(chalk.cyan(`\n[prepare] ${openneuroId} -> ${nemarId}\n`));
   console.log(chalk.dim(`Working directory: ${workDir}`));
 
-  // Step 1: Clone OpenNeuro dataset
+  // Step 1: Clone OpenNeuro's mirror at the upstream tag being imported, never its default HEAD
+  // (ADR 0111 decision 10). A tag that cannot be resolved, or is not on the mirror yet, refuses here
+  // with the mirror-lag marker, before the dataset record exists.
   const cloneSpinner = ora("Cloning OpenNeuro dataset...").start();
-  const openneuroUrl = `https://github.com/${OPENNEURO_ORG}/${openneuroId}.git`;
-  const cloneResult = await cloneDataset(openneuroUrl, datasetPath);
-  if (!cloneResult.success) {
-    cloneSpinner.fail(`Failed to clone: ${cloneResult.error}`);
-    process.exit(1);
+  let pinned: PinnedClone;
+  try {
+    pinned = await cloneOpenNeuroAtTag(openneuroId, datasetPath, {
+      tag: options.tag,
+      lookup: options.openNeuroLookup,
+    });
+  } catch (err) {
+    cloneSpinner.stop();
+    if (err instanceof ImportRefused) throw err;
+    throw new PrepareStopped(err instanceof Error ? err.message : String(err));
   }
-  cloneSpinner.succeed(`Cloned ${openneuroId}`);
+  cloneSpinner.succeed(`Cloned ${openneuroId} at upstream tag ${pinned.tag}`);
+  if (pinned.latestTag !== null && !sameUpstreamTag(pinned.latestTag, pinned.tag)) {
+    console.log(
+      chalk.yellow(
+        `  Warning: importing ${pinned.tag}, but OpenNeuro's latest is ${pinned.latestTag}. The copy takes the object currently at each upstream path (ADR 0111 decision 8 is not built), so a recording that changed between the two without changing size would be copied with the newer bytes.`,
+      ),
+    );
+  }
 
   // Ensure local branch is "main" (OpenNeuro repos may use "master" or other names)
   const branchOk = await ensureLocalMainBranch(datasetPath, { yes: true });
@@ -1058,81 +1692,47 @@ export async function prepareImport(
   // fast-forward. Best-effort: a brand-new repo (first-ever import) has no
   // git-annex branch to fetch yet, so this is a silent no-op on the common
   // path.
-  const annexFetchResult = await runCommand(["git", "fetch", "origin", "git-annex"], {
-    cwd: datasetPath,
-  });
-  if (annexFetchResult.exitCode === 0) {
-    const annexMergeResult = await runCommand(["git", "annex", "merge"], { cwd: datasetPath });
-    if (annexMergeResult.exitCode !== 0) {
-      console.log(
-        chalk.yellow(
-          `  Warning: found existing NEMAR git-annex state for ${nemarId} but could not merge it (${annexMergeResult.stderr.trim()}). A retry may register the S3 remote under a new UUID; investigate before re-running finalize.`,
-        ),
-      );
-    }
+  const originAnnex = await fetchOriginAnnexBranch(datasetPath);
+  if (originAnnex.state === "failed") {
+    console.log(
+      chalk.yellow(
+        `  Warning: could not fetch or merge ${nemarId}'s existing git-annex state (${originAnnex.error}). A retry may register the S3 remote under a new UUID; investigate before re-running finalize.`,
+      ),
+    );
   }
 
-  // Step 4c (re-import only, #990, epic #989 Phase 2): base this fresh
-  // clone's `main` on origin's tip BEFORE Step 6 seeds a new metadata
-  // commit, if origin already carries a `main` (i.e. this is a re-import
-  // onto an already-published repo, not a first-ever import). Without this,
-  // Step 6 commits fresh metadata onto the OpenNeuro clone's own (unrelated)
-  // history, and Step 7's push collides with origin/main -- which already
-  // has the FIRST import's metadata commit on the same files
-  // (.nemar/metadata.json, README.md) -- so pushToGitHub's rebase
-  // (clone-push.ts) hard-fails with "diverging commits and auto-rebase
-  // failed". This reset only moves this worktree's `main` ref + HEAD: the
-  // git-annex branch was already merged just above (Step 4b), and the S3
-  // remote config written to .git/config plus the in-memory
-  // keyUrlMap/manifest built in Step 3 are untouched by a `main` reset, so
-  // nothing else about this prepare run changes.
-  //
-  // SAME-VERSION ASSUMPTION: this covers the recovery use case -- re-copying
-  // data for a version NEMAR already imported once (the #967 empty-import
-  // incident). A genuinely NEW OpenNeuro snapshot arriving between imports
-  // (a real new version) is explicitly OUT OF SCOPE here; that needs its own
-  // new-version flow, not a silent overwrite onto `main`, so this step does
-  // not attempt to detect or reconcile that case (drift-detection guard
-  // tracked as #993). Best-effort only: on a fetch or reset failure it falls
-  // back to the normal push path unchanged (a diverging-history rebase
-  // failure from pushToGitHub below is then the expected, pre-existing
-  // behavior).
-  let didResetMain = false;
-  const originMainFetch = await runCommand(["git", "fetch", "origin", "main"], {
-    cwd: datasetPath,
-  });
-  if (originMainFetch.exitCode === 0) {
-    const originMainRev = await runCommand(
-      ["git", "rev-parse", "--verify", "--quiet", "origin/main"],
-      { cwd: datasetPath },
-    );
-    const currentBranchResult = await runCommand(["git", "rev-parse", "--abbrev-ref", "HEAD"], {
-      cwd: datasetPath,
+  // Step 4c (re-import only, #990, epic #989 Phase 2; #993, ADR 0111 decision 10): base this
+  // fresh clone's `main` on origin's tip BEFORE Step 6 seeds a new metadata commit, if origin
+  // already carries a `main`, or refuse when that would move a released mirror to a new upstream
+  // tag. This only moves this worktree's `main` ref + HEAD (and, for a hard reset, the tree): the
+  // git-annex branch was already merged just above (Step 4b), and the S3 remote config written to
+  // .git/config plus the in-memory keyUrlMap/manifest built in Step 3 are untouched, so nothing
+  // else about this prepare run changes. See baseOnOriginMain for the three outcomes.
+  let base: ReimportBase;
+  try {
+    base = await baseOnOriginMain(datasetPath, {
+      sourceId: openneuroId,
+      importTag: pinned.tag,
+      nemarId,
+      released: () => hasReleasedVersion(nemarId),
     });
-    const shouldResetMain = decideReimportMainReset({
-      originMainSha: originMainRev.stdout.trim() || null,
-      currentBranch: currentBranchResult.stdout.trim(),
-    });
-    if (shouldResetMain) {
-      const resetResult = await runCommand(["git", "reset", "--hard", "origin/main"], {
-        cwd: datasetPath,
-      });
-      if (resetResult.exitCode !== 0) {
-        console.log(
-          chalk.yellow(
-            `  Warning: found origin/main for ${nemarId} (re-import) but could not reset onto it (${resetResult.stderr.trim()}). Falling back to the normal push path.`,
-          ),
-        );
-      } else {
-        didResetMain = true;
-        console.log(
-          chalk.dim("  Re-import: based main on origin/main for an idempotent metadata commit"),
-        );
-      }
-    }
+  } catch (err) {
+    if (err instanceof ImportRefused) throw err;
+    throw new PrepareStopped(err instanceof Error ? err.message : String(err));
   }
-  // else: origin has no `main` ref yet -- the normal first-import path, no-op.
-  if (didResetMain && annexFetchResult.exitCode !== 0) {
+  const didResetMain = base.kind === "hard-reset";
+  if (didResetMain) {
+    console.log(
+      chalk.dim("  Re-import: based main on origin/main for an idempotent metadata commit"),
+    );
+  } else if (base.kind === "retarget") {
+    console.log(
+      chalk.dim(
+        `  Re-import of an unreleased dataset: moved from upstream tag ${base.recordedTag} to ${pinned.tag}, as a fast-forward of origin/main`,
+      ),
+    );
+  }
+  if (didResetMain && originAnnex.state !== "merged") {
     // The dead marks a correction left (ADR 0085, ADR 0089) live in that branch; without them only
     // the cut to the tree keeps a replaced key out of the copy. Said, not refused: the cut holds.
     console.log(
@@ -1153,7 +1753,8 @@ export async function prepareImport(
   let unannexedData: UnannexedDataFile[] = [];
   // Set by step 4c above when it really reset onto origin/main. Read by step 5b:
   // on that path the tree carries keys from a PREVIOUS prepare that no upstream
-  // source accounts for, and they have to be carried into the manifest.
+  // source accounts for, and they have to be carried into the manifest. A retarget
+  // is not that path: its tree is the new tag's, upstream's, as on a first import.
   const isReimportOntoExistingMain = didResetMain;
   if (!options.skipData) {
     try {
@@ -1187,6 +1788,23 @@ export async function prepareImport(
   if (!options.skipData && (keyUrlMap.size > 0 || unannexedData.length > 0)) {
     const s3Spinner = ora("Setting up NEMAR S3 remote...").start();
     s3Creds = resolveS3Credentials();
+    // #1320: an annex-uuid at the prefix that the git-annex branch (merged in Step 4b) does not
+    // record as nemar-s3 makes initremote/enableremote fail on this attempt and on every retry.
+    // Refused here, before the remote is touched, naming both uuids and the recovery that fits.
+    const preflight = annexUuidPreflightAction(
+      await preflightBucketAnnexUuid(datasetPath, {
+        bucket: S3_BUCKET,
+        prefix: `${nemarId}/objects`,
+        region: S3_REGION,
+        originAnnex: originAnnex.state,
+        env: awsCredentialEnv(s3Creds),
+      }),
+    );
+    if ("refuse" in preflight) {
+      s3Spinner.stop();
+      throw new ImportRefused(NEMAR_ANNEX_UUID_CONFLICT_MARKER, preflight.refuse);
+    }
+    if ("warn" in preflight) console.log(chalk.yellow(`  ${preflight.warn}`));
     const s3Result = await configureS3Remote(
       datasetPath,
       { name: "nemar-s3", bucket: S3_BUCKET, prefix: `${nemarId}/objects`, region: S3_REGION },
@@ -1362,9 +1980,16 @@ export async function prepareImport(
   // GitHub renders it (#642). Content is never modified.
   const metaSpinner = ora("Seeding metadata...").start();
   let readmeOutcome: ReadmeOutcome;
+  let recordedEntry: Awaited<ReturnType<typeof appendSourceDatasetEntry>> | null = null;
   try {
     seedMetadata(datasetPath, nemarId, openneuroId, bidsDesc, openNeuroDoi);
     readmeOutcome = ensureReadmeMd(datasetPath, openneuroId, openNeuroDoi);
+    // The upstream snapshot this tree is, recorded where the guard and the version-DOI mint read
+    // it (ADR 0111 decision 10). Only when the tree IS the pinned tag's: a first import or a
+    // retarget. After a hard reset the tree is origin's, and recording a tag there would be a guess.
+    if (shouldRecordSourceEntry(base)) {
+      recordedEntry = await appendSourceDatasetEntry(datasetPath, openneuroId, pinned.tag);
+    }
   } catch (err) {
     metaSpinner.fail(
       `Failed to seed metadata: ${err instanceof Error ? err.message : String(err)}`,
@@ -1402,7 +2027,9 @@ export async function prepareImport(
       : readmeOutcome.kind === "kept"
         ? `kept upstream ${readmeOutcome.path}`
         : "wrote provenance stub README.md (no upstream README)";
-  metaSpinner.succeed(`Seeded .nemar/metadata.json (${readmeNote})`);
+  metaSpinner.succeed(
+    `Seeded .nemar/metadata.json (${readmeNote}${recordedEntry === "appended" || recordedEntry === "completed" ? `; recorded upstream ${openneuroId} ${pinned.tag} in SourceDatasets` : ""})`,
+  );
 
   // Step 7: Push main + the git-annex branch (now carrying the nemar-s3 remote
   // config). Data blobs are copied in the next phase; finalize re-pushes the

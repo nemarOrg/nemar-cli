@@ -9,6 +9,7 @@
  * without DB/network.
  */
 
+import { OPENNEURO_MIRROR_LAG_MARKER } from "../../../shared/import-markers.js";
 import { auditLogStatement } from "../db/audit-log.js";
 import { SYSTEM_USER_ID } from "../lib/constants.js";
 import type { Bindings } from "../types/bindings.js";
@@ -70,15 +71,17 @@ export type ImportRecoveryDecision =
         | "has_doi"
         | "made_public"
         | "has_version"
-        | "upstream_inaccessible";
+        | "upstream_inaccessible"
+        | "mirror_lag";
     };
 
 /**
  * Marker the import CLI emits (and the onboard prepare step forwards into the
  * import-state callback's error_message) when OpenNeuro's own data can't be
  * fetched -- objects not anonymously readable and NEMAR has no signed OpenNeuro
- * login. Mirrors OPENNEURO_UPSTREAM_MARKER in src/lib/import-openneuro.ts (kept
- * in sync deliberately; the CLI and Worker don't share a module). When present
+ * login. Mirrors OPENNEURO_UPSTREAM_MARKER in src/lib/import-markers.ts: this
+ * marker predates `shared/import-markers.ts` and keeps its own copy, pinned to the
+ * CLI's by a test, while the tag pin's markers are imported from `shared/`. When present
  * in last_error, recovery records a distinct `upstream_inaccessible` quarantine
  * so these OpenNeuro-side failures are listable, not mistaken for NEMAR bugs.
  */
@@ -110,6 +113,19 @@ export function decideImportRecovery(s: ImportGuardState): ImportRecoveryDecisio
  * listable `upstream_inaccessible` reason rather than roll back or mislabel it
  * as a generic prepare miss, since it is an OpenNeuro-side problem, not a NEMAR
  * bug. Otherwise defer to decideImportRecovery. Pure -- no I/O.
+ *
+ * A mirror lag (ADR 0111 decision 10) overrides it the same way, as
+ * `mirror_lag`. It matters more here than for the upstream case: prepare
+ * refuses a lagging tag BEFORE it creates the dataset, so the leftover-state
+ * rule would answer `not_found_dataset`, which no engine retries -- and a
+ * transient refusal would be parked on its first occurrence.
+ *
+ * The override also bypasses `has_doi`, `made_public` and `has_version` for a
+ * dataset that already exists, on purpose: the refusal came before this run
+ * reset, copied or pushed anything, so whatever state those reasons protect
+ * was left by earlier runs and is untouched, and only a quarantine that stays
+ * retryable lets the lag clear. The retry that follows meets the same guards
+ * any import does (a released mirror whose upstream moved refuses and parks).
  */
 export function classifyRecovery(
   lastError: string | null,
@@ -118,8 +134,19 @@ export function classifyRecovery(
   if ((lastError ?? "").includes(OPENNEURO_UPSTREAM_MARKER)) {
     return { action: "quarantine", reason: "upstream_inaccessible" };
   }
+  if ((lastError ?? "").includes(OPENNEURO_MIRROR_LAG_MARKER)) {
+    return { action: "quarantine", reason: "mirror_lag" };
+  }
   return decideImportRecovery(state);
 }
+
+/**
+ * Quarantine reasons that send no admin mail. A mirror lag usually clears within minutes of a new
+ * snapshot and is retried by the retry engine for its whole window; mailing every occurrence would
+ * be mail about nothing. The one signal it gets is an issue when the engine parks it (lead ruling,
+ * 2026-10-23). Exported for the test that pins it.
+ */
+export const QUARANTINE_REASONS_WITHOUT_MAIL: ReadonlySet<string> = new Set(["mirror_lag"]);
 
 function isAutoRollbackEnabled(env: Bindings): boolean {
   return (env.IMPORT_AUTO_ROLLBACK ?? "").trim().toLowerCase() === "true";
@@ -314,7 +341,9 @@ export async function runImportRecovery(
     decision,
     autoRollbackEnabled: isAutoRollbackEnabled(env),
   });
-  await alertAdmins(db, env, datasetId, decision.reason, job);
+  if (!QUARANTINE_REASONS_WITHOUT_MAIL.has(decision.reason)) {
+    await alertAdmins(db, env, datasetId, decision.reason, job);
+  }
   console.warn(`[import-recovery] quarantined ${datasetId} (${decision.reason})`);
   return "quarantined";
 }

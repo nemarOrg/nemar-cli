@@ -13,6 +13,7 @@ import {
 } from "../../../shared/contract/index.js";
 import type { UploaderPreflight } from "../../../shared/identifier-screen-report.js";
 import { request } from "./client.js";
+import { ApiError, isRouteNotFound } from "./errors.js";
 
 /** ORCID identifier format: XXXX-XXXX-XXXX-XXXX (last char may be X) */
 export const ORCID_REGEX = /^\d{4}-\d{4}-\d{4}-\d{3}[\dX]$/;
@@ -496,6 +497,27 @@ export interface VersionHistoryResponse {
  */
 export async function getVersionHistory(datasetId: string): Promise<VersionHistoryResponse> {
   return request<VersionHistoryResponse>(`/datasets/${datasetId}/versions`, {}, true);
+}
+
+/**
+ * Whether a dataset has released a version: any `dataset_versions` row, read through
+ * `GET /datasets/:id/versions` (ADR 0111 decision 10, the import's upstream-moved guard). A dataset
+ * the backend does not have has released nothing, so its 404 is `false`. Any other failure --
+ * including a backend with no such route, which answers 404 with its route-not-found body --
+ * throws: not knowing must never read as "unreleased", because "unreleased" is what lets an import
+ * move a dataset to a new upstream tag.
+ */
+export async function hasReleasedVersion(datasetId: string): Promise<boolean> {
+  try {
+    const history = await getVersionHistory(datasetId);
+    if (!Array.isArray(history.versions)) {
+      throw new Error(`GET /datasets/${datasetId}/versions answered without a versions list`);
+    }
+    return history.versions.length > 0;
+  } catch (err) {
+    if (err instanceof ApiError && err.statusCode === 404 && !isRouteNotFound(err)) return false;
+    throw err;
+  }
 }
 
 export interface FileInfo {

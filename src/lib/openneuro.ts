@@ -6,6 +6,7 @@
  */
 
 import { spawn } from "bun";
+import { isOpenNeuroTag } from "../../shared/openneuro-tag.js";
 import { isAwsCliAvailable } from "./aws-cli.js";
 import { type RemoteFile, downloadFiles } from "./file-download.js";
 
@@ -16,6 +17,92 @@ const OPENNEURO_DATASET_REGEX = /^ds\d{6}$/;
 
 export function isOpenNeuroDatasetId(id: string): boolean {
   return OPENNEURO_DATASET_REGEX.test(id);
+}
+
+/** OpenNeuro's GraphQL endpoint: the same one the Worker's discovery reads. */
+export const OPENNEURO_GRAPHQL_URL = "https://openneuro.org/crn/graphql";
+
+/** The latest snapshot tag OpenNeuro names for a dataset, or why there is none. */
+export type LatestTagLookup = { tag: string } | { tag: null; reason: string };
+
+/**
+ * Ask OpenNeuro which snapshot tag is a dataset's latest (`latestSnapshot.tag`), the tag an import
+ * with no `--tag` is pinned to (ADR 0111 decision 10). Never throws: every way of not knowing --
+ * the API unreachable, an error answer, a dataset with no snapshot, a tag of an unexpected shape --
+ * comes back as `{ tag: null, reason }`, which prepare refuses as a mirror lag, so the retry engine
+ * tries again later rather than an import guessing at HEAD.
+ *
+ * `graphqlUrl` moves the endpoint for a test of the refusal paths; `attempts` bounds the retries
+ * of a transient failure (an HTTP error or a network error, not an answer that says "no snapshot").
+ */
+export async function fetchOpenNeuroLatestTag(
+  datasetId: string,
+  options: {
+    graphqlUrl?: string;
+    attempts?: number;
+    timeoutMs?: number;
+    retryDelayMs?: number;
+  } = {},
+): Promise<LatestTagLookup> {
+  const url = options.graphqlUrl ?? OPENNEURO_GRAPHQL_URL;
+  const attempts = Math.max(1, options.attempts ?? 3);
+  let reason = "no attempt was made";
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    let json: unknown;
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "User-Agent": "nemar-cli" },
+        body: JSON.stringify({
+          query: "query LatestTag($id: ID!) { dataset(id: $id) { latestSnapshot { tag } } }",
+          variables: { id: datasetId },
+        }),
+        signal: AbortSignal.timeout(options.timeoutMs ?? 30_000),
+      });
+      if (!res.ok) {
+        reason = `OpenNeuro GraphQL answered HTTP ${res.status}`;
+        if (attempt < attempts) await delay(options.retryDelayMs ?? 2_000 * attempt);
+        continue;
+      }
+      json = await res.json();
+    } catch (err) {
+      reason = `OpenNeuro GraphQL unreachable (${err instanceof Error ? err.message : String(err)})`;
+      if (attempt < attempts) await delay(options.retryDelayMs ?? 2_000 * attempt);
+      continue;
+    }
+    // An answer: whatever it says is final for this run, so no retry.
+    const root = isRecord(json) ? json : {};
+    const data = isRecord(root.data) ? root.data : {};
+    const dataset = isRecord(data.dataset) ? data.dataset : null;
+    const snapshot = dataset && isRecord(dataset.latestSnapshot) ? dataset.latestSnapshot : null;
+    const tag = snapshot?.tag;
+    if (isOpenNeuroTag(tag)) return { tag };
+    if (typeof tag === "string") {
+      return { tag: null, reason: "OpenNeuro named a latest tag of an unexpected shape" };
+    }
+    const errors = Array.isArray(root.errors) ? root.errors : [];
+    const message = errors
+      .map((e) => (isRecord(e) && typeof e.message === "string" ? e.message : null))
+      .filter((m): m is string => m !== null)
+      .join("; ")
+      .slice(0, 200);
+    if (dataset === null) {
+      return {
+        tag: null,
+        reason: message ? `OpenNeuro: ${message}` : "OpenNeuro knows no such dataset",
+      };
+    }
+    return { tag: null, reason: "OpenNeuro names no snapshot for this dataset yet" };
+  }
+  return { tag: null, reason };
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
 export interface S3Object {

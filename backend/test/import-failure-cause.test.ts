@@ -8,6 +8,11 @@
 
 import { describe, expect, test } from "bun:test";
 import {
+  NEMAR_ANNEX_UUID_CONFLICT_MARKER,
+  OPENNEURO_MIRROR_LAG_MARKER,
+  OPENNEURO_UPSTREAM_MOVED_MARKER,
+} from "../../shared/import-markers";
+import {
   IMPORT_DATA_UNAVAILABLE_MARKER_FOR_CLASSIFY,
   IMPORT_FAILURE_CAUSE_LABELS,
   IMPORT_IDENTIFIER_SCRUB_MARKER_FOR_CLASSIFY,
@@ -146,6 +151,47 @@ describe("the marker literal is duplicated, so pin the copies together", () => {
       classifyImportFailure({ stage: "prepare", lastError: `${OPENNEURO_UPSTREAM_MARKER} blah` })
         .cause,
     ).toBe("upstream_inaccessible");
+  });
+});
+
+describe("the tag pin's refusals (epic #1046, ADR 0111 decision 10)", () => {
+  // The markers are one definition in shared/, imported by the CLI that prints them and by this
+  // module, so there is no copy to pin. test/import-tag-pin.test.ts and
+  // test/import-upstream-moved-guard.test.ts pass the refusals the CLI really raised through here.
+  test("a mirror lag is its own cause, never unknown", () => {
+    const c = classifyImportFailure({
+      stage: "prepare",
+      lastError: `${OPENNEURO_MIRROR_LAG_MARKER} ds004362: upstream tag 1.0.2 is not on github.com/OpenNeuroDatasets/ds004362 yet. Nothing was created.`,
+    });
+    expect(c.cause).toBe("mirror_lag");
+    expect(c.label).toBe("mirror-lag");
+    expect(IMPORT_FAILURE_CAUSE_LABELS).toContain("mirror-lag");
+    expect(c.summary).toContain("14-day");
+  });
+
+  test("an upstream move is its own cause, never unknown", () => {
+    const c = classifyImportFailure({
+      stage: "prepare",
+      lastError: `${OPENNEURO_UPSTREAM_MOVED_MARKER} ds004362: on004362 has released a version and its main records upstream tag 1.0.0; this import is at 1.0.1.`,
+    });
+    expect(c.cause).toBe("upstream_moved");
+    expect(c.label).toBe("upstream-moved");
+    expect(IMPORT_FAILURE_CAUSE_LABELS).toContain("upstream-moved");
+    expect(c.summary).toContain("re-pull");
+    expect(c.summary).toContain("`nemar admin import-openneuro <ds> --tag <recorded tag>`");
+  });
+
+  test("the #1320 preflight's refusal is annex_uuid_conflict, like git-annex's own wording", () => {
+    const preflight = `${NEMAR_ANNEX_UUID_CONFLICT_MARKER} bucket 1a2b3c4d-0000-4000-8000-000000000001; branch none.`;
+    expect(classifyImportFailure({ stage: "prepare", lastError: preflight }).cause).toBe(
+      "annex_uuid_conflict",
+    );
+    expect(classifyImportFailure({ stage: "prepare", lastError: preflight }).summary).toContain(
+      "restarts the import by hand",
+    );
+    expect(classifyImportFailure({ stage: "prepare", lastError: REAL.annex }).cause).toBe(
+      "annex_uuid_conflict",
+    );
   });
 });
 

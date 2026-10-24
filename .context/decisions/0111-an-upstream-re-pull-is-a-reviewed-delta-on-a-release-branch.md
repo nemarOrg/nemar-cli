@@ -9,7 +9,7 @@ Amends [ADR 0006](0006-upstream-re-pull-is-a-major-version-bump.md): its policy 
 Narrows [ADR 0093](0093-pull-requests-awaiting-approval-are-managed-from-one-admin-command-and-an-approval-is-the-administrators-own.md) in one aspect, the merge, for one class of pull request, the re-pull pull request the automatic path opened (decision 7); ADR 0107 already partially supersedes ADR 0093, and for every other pull request what remains of it stands.
 Builds on ADR 0001 (published datasets are PR-only), ADR 0023 (`--clean` reconciles), ADR 0034 (the column budget), ADR 0060, ADR 0085, ADR 0086, ADR 0089 and ADR 0091 (what an imported tree goes through), and ADR 0053 and ADR 0054 (unknown is never zero).
 The analysis is `.context/design-upstream-repull.md`; where it and this record disagree, this record wins.
-Nothing in the Decision section is built yet: each rule there is designed here and built by the later phases of #1046, and its present tense states the rule, not today's behavior.
+Decisions 4 and 10 are built, as their dated amendments below record; every other rule in the Decision section is designed here and built by the later phases of #1046, and its present tense states the rule, not today's behavior.
 
 ## Context
 
@@ -17,6 +17,7 @@ ADR 0006 fixed the policy for an upstream re-pull and left the machinery to epic
 An imported mirror never re-enters candidacy: discovery parses `latestSnapshot.tag` into `DiscoveredDataset.latestTag`, which nothing reads or stores, and `diffNewDatasets` compares ids only.
 Running the importer again is not a re-pull: `POST /admin/datasets/import` answers 403 outside production first, then 409 when the dataset or its repository already exists, prepare's step 4c resets onto `origin/main` under a same-version assumption (#993), so the copy manifest follows the new upstream while the tree stays NEMAR's old one, and finalize skips publication for a public dataset (#985).
 Nothing records which upstream snapshot a version mirrors: the importer clones the default HEAD, no importer step sets `Version`, and neither `datasets` nor `dataset_versions` has a `source_version`.
+*Annotated 2026-10-24: the importer now clones a pinned upstream tag and records it in `SourceDatasets` (see Amendment 2026-10-24).*
 Early imports rewrote every commit, so on `on003645` NEMAR's history shares no ancestry with upstream's although the trees match upstream 2.0.2 plus `.github/`.
 `AUTO_IMPORT_ENABLED` is `"true"` in production (`backend/wrangler-sccn.toml`), so nothing a re-pull needs may reach the auto-import's candidate set.
 Measured staleness is real: `on004362` missed upstream's 1.0.1 metadata fix (#1810).
@@ -24,6 +25,7 @@ Measured staleness is real: `on004362` missed upstream's 1.0.1 metadata fix (#18
 ## Decision
 
 Everything in this section is designed and not yet built.
+*Annotated 2026-10-24: decisions 4 and 10 are built, as their dated amendments below record; every other rule is still designed and not built.*
 
 **An upstream re-pull replays the delta between two pinned upstream tags onto NEMAR's `main` as one synthesized commit on `release/vN.0.0`, landed through a pull request; N.0.0 is a pure mirror of the upstream snapshot, and NEMAR's corrections follow as N.0.1.**
 
@@ -171,6 +173,7 @@ ADR 0086 exempts `xx` from the identifier screen, so an `xx` re-pull never has a
 
 - A first import clones the discovered tag (`--tag`), never the default HEAD, and writes the `SourceDatasets` entry with `Version`.
 - A tag not yet on the GitHub mirror refuses with `[openneuro-mirror-lag]`, which is transient and retried, not parked.
+  *Annotated 2026-10-24: see Amendment 2026-10-24 (parked after 14 days).*
 - A re-pull's `from_tag` is the recorded `source_version`, and its `to_tag` is a tag.
 - The import path gets #993's guard, and only for a released mirror.
   Step 4c refuses with `[openneuro-upstream-moved]` when three things hold: `origin/main` records a tag; the dataset has released a version (a `dataset_versions` row exists); and the tag being imported differs from the recorded one.
@@ -308,3 +311,37 @@ A dry run, which is the default, writes nothing.
 Outside production only `xx` datasets are re-pulled (decision 6), and nothing says how an `xx` dataset names its upstream `ds`.
 The parser takes the `ds` as an argument, but the insert sites and the backfill handle `on######` only.
 Whether an `xx` fixture maps through `import_jobs.source_id` is a Phase 4 and 5 question.
+
+## Amendment 2026-10-24 (#1909): decision 10, as built
+
+Phase 3 builds decision 10, on the parser Phase 2 built for decision 4 (Amendment 2026-10-23 above); the rest of the Decision section is still designed and not built.
+The lead's rulings of 2026-10-23 settle three questions decision 10 left open, and this records them with what was built.
+
+- **Which tag.** The auto-import passes the tag discovery found.
+  Every other entry point (the retry engine, `recover --execute`, a dispatch without `--tag`) passes none, and prepare asks OpenNeuro's GraphQL for `latestSnapshot.tag` when it runs, so "the tag the retry discovers" is the latest at the retry.
+  An explicit `--tag` is honored; when it is not the latest, prepare warns, because decision 8 is not built and the copy takes the object currently at each upstream path.
+- **Mirror lag.** A latest tag OpenNeuro cannot name refuses with `[openneuro-mirror-lag]` too, before the dataset record is created.
+  Recovery quarantines it as `mirror_lag`, so it stays retryable rather than `not_found_dataset`.
+  Retries are capped by the retry engine's 14-day window, counted from its first retry of the row; past it the row is parked as `mirror_lag` and one admin issue is filed then; no quarantine mail and no failure-time issue are sent for it (ruling 2).
+  The window is the engine's existing `first_incomplete_at`, so a row whose window an earlier, unrelated retry opened and never closed parks at its first mirror lag, with its one issue.
+  The override also bypasses `has_doi`, `made_public` and `has_version`: the refusal came before this run changed anything, and only a quarantine that stays retryable lets the lag clear.
+- **What "records a tag" reads.** The guard reads origin's description with Phase 2's parser, `sourceSnapshotOf` in `shared/source-snapshot.ts`, the one reader of the tag; see Amendment 2026-10-23 for its rule.
+  Phase 3 first shipped a reader of its own, and where the two differed the parser won: a tag is numeric and dotted (`1.0.0`, `00001`), so a `2.1.0-rc1` that OpenNeuro's tag shape admits is no tag; an entry naming this dataset and another gives no tag at all; and of the GitHub mirror's URLs only the tree and release forms name the dataset, not the `.git` clone URL.
+  Two tags are the same snapshot only when equal after a leading `v` is dropped (`sameUpstreamTag`), the safe direction; the parser's `compareSourceTags` orders `1.0` and `1.0.0` as equal, so the guard does not use it.
+- **An unreleased import whose tag moved is retargeted, not hard-reset (ruling 1).**
+  `git reset --soft origin/main` keeps the new tag's tree and lands it as a fast-forward, so "prepared again at the tag the retry discovers" holds; the hard reset would have kept the old tree, #993's mismatch.
+  "Released" is any `dataset_versions` row, read through `GET /datasets/:id/versions`, asked only when the tag moved; not being able to read it is a plain failure, never "unreleased".
+  A retarget is refused when origin's `.nemar/corrections.jsonl` holds a line the new tree would drop with consequence: a recorded correction (ADR 0085), or an `import-scrubbed` line whose scrub blanked a JSON value or scrubbed a git-held recording, because origin's history still holds those originals and only a hard reset keeps that hold (ADR 0089).
+  Step 5b's scrub writes the new tree's own ledger line; it does not carry the old ones.
+- **The guard fails closed, and says when it is inert.** An origin whose `main` cannot be asked or fetched stops prepare (only `git ls-remote --exit-code`'s status 2, no such ref, is a first import; git's messages are localized, so none is matched); the recorded tag is read before the branch name, so a detached or adjusted branch cannot skip it.
+  When origin's `main` records no readable tag, prepare prints why, because the guard cannot fire then.
+  The refusal of a released mirror names the repair that passes the guard, `nemar admin import-openneuro <ds> --tag <recorded tag>`; the retry engine dispatches no tag, so it never runs it.
+- **The entry.** A first import, and a retarget, record `{DOI: doi:10.18112/openneuro.<ds>.v<tag>, URL: https://openneuro.org/datasets/<ds>/versions/<tag>, Version: <tag>}` in `SourceDatasets`, all three from the one tag, unless an entry already records a tag for the dataset.
+  An untagged entry that names the dataset alone (a concept DOI, a dataset page) is completed in place, so the dataset keeps one entry.
+  The import writes only a record the parser then reads as the tag: when an entry for the dataset carries another tag or names another dataset too, or the tag is not one the parser reads, the file is left alone and prepare warns that the guard stays inert for the dataset.
+  It is not written after a hard reset, whose tree is origin's.
+  Publication's `applyConceptDoiToDescription` (`shared/standard-edits/description.ts`) compares DOIs normalized and adds no second entry for a dataset an entry already names, judged by the parser's `isOwnSourceEntry`, so a stale or differently spelled upstream `DatasetDOI` cannot make the recorded tag unknown.
+- **`upstream_moved` and `annex_uuid_conflict` (ruling 3).** Recovery has no rule for either marker, so a failure usually quarantines the row by the dataset's state first (`has_doi` for a released mirror), and a quarantined row is no retry candidate.
+  The retry engine's park, in both wordings of the annex conflict, is the backstop for a `failed` or `incomplete` row that carries one and reaches the sweep, because each retry fails the same way; an operator restarts the import by hand after fixing the bucket marker.
+  The #1320 preflight compares the bucket's `annex-uuid` with the `nemar-s3` uuids the git-annex branch records and refuses a disagreement with `[nemar-annex-uuid-conflict]`, naming both and the recovery.
+  It answers unchecked, and prepare goes on as before with a warning, whenever the comparison is incomplete: Step 4b's fetch or merge failed, git cannot read the branch, the bucket cannot be asked, or origin has a git-annex branch that records no `nemar-s3`.

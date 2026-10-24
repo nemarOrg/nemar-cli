@@ -218,6 +218,8 @@ export async function autoImportTick(env: Bindings): Promise<void> {
       picked.id,
       JSON.stringify({
         dataset_id: datasetId,
+        // The upstream tag discovery saw, which the import is pinned to (ADR 0111 decision 10).
+        tag: picked.latestTag,
         modalities: picked.modalities,
         attempt: priorAttempts + 1,
         candidates: candidates.length,
@@ -242,8 +244,10 @@ export async function autoImportTick(env: Bindings): Promise<void> {
   }
 
   const token = await getDatasetsToken(env);
-  await triggerOpenNeuroOnboard(picked.id, token);
+  // Pinned to the tag discovery found, never the mirror's default HEAD (ADR 0111 decision 10). A
+  // workflow older than the pin ignores the key; the CLI resolves the latest tag itself then.
+  await triggerOpenNeuroOnboard(picked.id, token, { tag: picked.latestTag });
   console.log(
-    `[auto-import] dispatched ${picked.id} -> ${datasetId} (attempt ${priorAttempts + 1}, ${candidates.length} candidates)`,
+    `[auto-import] dispatched ${picked.id} -> ${datasetId} at ${picked.latestTag ?? "the latest tag"} (attempt ${priorAttempts + 1}, ${candidates.length} candidates)`,
   );
 }

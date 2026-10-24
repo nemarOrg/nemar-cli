@@ -71,6 +71,7 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "getManifest",
     "getUserCiStatus",
     "getVersionHistory",
+    "hasReleasedVersion",
     "inviteCollaborator",
     "listAccessRequests",
     "listCollaborators",
@@ -281,6 +282,7 @@ const POST_SPLIT_ADDITIONS = [
   "commentOnPublication", // ADR 0102: POST /admin/publish/:id/comment (mails the depositor an administrator's words)
   "reviewErrorCode", // ADR 0102: the closed word of a review route's refusal (rawBody.code, not ApiError.code)
   "isRouteNotFound", // a backend that predates a route answers its not-found body: say so, do not call it a bug
+  "hasReleasedVersion", // ADR 0111 decision 10: the import's upstream-moved guard asks GET /datasets/:id/versions
 ];
 
 /** The api.ts monolith's runtime surface, captured at #908 commit 1. */

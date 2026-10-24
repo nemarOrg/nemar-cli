@@ -38,7 +38,7 @@ import {
   selectAnnexS3Remote,
 } from "../src/lib/git-annex/s3-remote";
 import { extractWhereisKeyUrl } from "../src/lib/git-annex/transfer";
-import { decideReimportMainReset } from "../src/lib/import-openneuro";
+import { baseOnOriginMain } from "../src/lib/import-openneuro";
 import { setVerbose } from "../src/lib/verbose";
 
 describe("extractWhereisKeyUrl (#808 streaming whereis mapping)", () => {
@@ -1288,6 +1288,11 @@ describe("Step 4c: re-import main-reset avoids the diverging-history push failur
   // Step 4c fixes this by resetting the fresh clone's `main` onto
   // origin/main BEFORE the metadata commit, so there is nothing to diverge.
 
+  /** Step 4c asks whether the dataset is released only when its upstream tag moved. */
+  const notAsked = async (): Promise<boolean> => {
+    throw new Error("release state asked for, but origin records no upstream tag");
+  };
+
   async function writeMetadata(dir: string, version: number): Promise<void> {
     mkdirSync(join(dir, ".nemar"), { recursive: true });
     await Bun.write(join(dir, ".nemar", "metadata.json"), JSON.stringify({ version }));
@@ -1345,7 +1350,7 @@ describe("Step 4c: re-import main-reset avoids the diverging-history push failur
     const pushResult = await pushToGitHub(p2, "origin");
     expect(pushResult.success).toBe(false);
     expect(pushResult.error).toMatch(/diverging commits and auto-rebase failed/i);
-  });
+  }, 60_000);
 
   test("fix: Step 4c resets main onto origin/main first, so the same re-import push succeeds", async () => {
     const { src, bareDir } = await newUpstreamAndBare("b");
@@ -1365,21 +1370,16 @@ describe("Step 4c: re-import main-reset avoids the diverging-history push failur
     await runCmd(["git", "remote", "remove", "origin"], p2);
     expect((await runCmd(["git", "remote", "add", "origin", bareDir], p2)).exitCode).toBe(0);
 
-    // Step 4c, run exactly as import-openneuro.ts's prepare() does it.
-    const originMainFetch = await runCmd(["git", "fetch", "origin", "main"], p2);
-    expect(originMainFetch.exitCode).toBe(0);
-    const originMainRev = await runCmd(
-      ["git", "rev-parse", "--verify", "--quiet", "origin/main"],
-      p2,
-    );
-    const currentBranch = await runCmd(["git", "rev-parse", "--abbrev-ref", "HEAD"], p2);
-    const shouldReset = decideReimportMainReset({
-      originMainSha: originMainRev.stdout.trim() || null,
-      currentBranch: currentBranch.stdout.trim(),
+    // Step 4c, through the function prepare() calls. Origin records no upstream tag (this
+    // fixture has no dataset_description.json), so it is the same-version hard reset and the
+    // release state is never asked.
+    const base = await baseOnOriginMain(p2, {
+      sourceId: "ds000002",
+      importTag: "1.0.0",
+      nemarId: "on000002",
+      released: notAsked,
     });
-    expect(shouldReset).toBe(true);
-    const reset = await runCmd(["git", "reset", "--hard", "origin/main"], p2);
-    expect(reset.exitCode).toBe(0);
+    expect(base.kind).toBe("hard-reset");
 
     // Step 6, AFTER the reset: the metadata commit now lands on TOP of
     // origin/main (the first import's tip), not on the clone's own
@@ -1410,7 +1410,7 @@ describe("Step 4c: re-import main-reset avoids the diverging-history push failur
     expect(metadataCommitCount).toBe(2);
     const metadataContent = await Bun.file(join(checker, ".nemar", "metadata.json")).text();
     expect(JSON.parse(metadataContent).version).toBe(2);
-  });
+  }, 60_000);
 
   test("recovery: same-version re-import with identical metadata is a no-op commit and a no-op push (#990 Gap 1, primary recovery path)", async () => {
     // The actual #967 recovery scenario Step 4c exists for: re-copying data
@@ -1437,21 +1437,16 @@ describe("Step 4c: re-import main-reset avoids the diverging-history push failur
     await runCmd(["git", "remote", "remove", "origin"], p2);
     expect((await runCmd(["git", "remote", "add", "origin", bareDir], p2)).exitCode).toBe(0);
 
-    // Step 4c, run exactly as import-openneuro.ts's prepare() does it.
-    const originMainFetch = await runCmd(["git", "fetch", "origin", "main"], p2);
-    expect(originMainFetch.exitCode).toBe(0);
-    const originMainRev = await runCmd(
-      ["git", "rev-parse", "--verify", "--quiet", "origin/main"],
-      p2,
-    );
-    const currentBranch = await runCmd(["git", "rev-parse", "--abbrev-ref", "HEAD"], p2);
-    const shouldReset = decideReimportMainReset({
-      originMainSha: originMainRev.stdout.trim() || null,
-      currentBranch: currentBranch.stdout.trim(),
+    // Step 4c, through the function prepare() calls. Origin records no upstream tag (this
+    // fixture has no dataset_description.json), so it is the same-version hard reset and the
+    // release state is never asked.
+    const base = await baseOnOriginMain(p2, {
+      sourceId: "ds000003",
+      importTag: "1.0.0",
+      nemarId: "on000003",
+      released: notAsked,
     });
-    expect(shouldReset).toBe(true);
-    const reset = await runCmd(["git", "reset", "--hard", "origin/main"], p2);
-    expect(reset.exitCode).toBe(0);
+    expect(base.kind).toBe("hard-reset");
 
     // Step 6: re-seed IDENTICAL content (version 1, same as the first
     // import) -- `git add` stages nothing (content unchanged), so `git
@@ -1476,7 +1471,7 @@ describe("Step 4c: re-import main-reset avoids the diverging-history push failur
     expect(push2.success).toBe(true);
     expect(push2.warning).toBeUndefined();
     expect((await runCmd(["git", "rev-parse", "main"], p2)).stdout.trim()).toBe(firstImportSha);
-  });
+  }, 60_000);
 
   test("first import: origin has no main ref yet, so Step 4c's fetch is skipped and the plain push still succeeds (#990 Gap 2, must-not-regress)", async () => {
     // Codifies the single most important "must not regress" behavior: a
@@ -1501,13 +1496,16 @@ describe("Step 4c: re-import main-reset avoids the diverging-history push failur
     await runCmd(["git", "remote", "remove", "origin"], p1);
     expect((await runCmd(["git", "remote", "add", "origin", bareDir], p1)).exitCode).toBe(0);
 
-    // Step 4c's exact first command: origin has no `main` ref at all, so the
-    // fetch itself fails (git's "couldn't find remote ref main") and the
-    // whole Step 4c block -- rev-parse, decideReimportMainReset, reset -- is
-    // skipped silently, exactly like the `if (originMainFetch.exitCode ===
-    // 0)` guard in import-openneuro.ts.
-    const originMainFetch = await runCmd(["git", "fetch", "origin", "main"], p1);
-    expect(originMainFetch.exitCode).not.toBe(0);
+    // Step 4c, through the function prepare() calls: origin has no `main` ref at
+    // all, so its fetch fails (git's "couldn't find remote ref main") and the
+    // clone is left exactly as cloned.
+    const base = await baseOnOriginMain(p1, {
+      sourceId: "ds000004",
+      importTag: "1.0.0",
+      nemarId: "on000004",
+      released: notAsked,
+    });
+    expect(base.kind).toBe("none");
 
     // Step 6 + Step 7: the ordinary first-import metadata commit + push,
     // unaffected by Step 4c, must still succeed.
@@ -1516,5 +1514,5 @@ describe("Step 4c: re-import main-reset avoids the diverging-history push failur
     const push1 = await pushToGitHub(p1, "origin");
     expect(push1.success).toBe(true);
     expect(push1.warning).toBeUndefined();
-  });
+  }, 60_000);
 });

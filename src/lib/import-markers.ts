@@ -22,3 +22,33 @@ export const OPENNEURO_UPSTREAM_MARKER = "[openneuro-upstream-inaccessible]";
  * `refused:` says which, from a closed list (`IMPORT_SCRUB_REFUSALS` in `import-scrub.ts`).
  */
 export const IMPORT_SCRUB_MARKER = "[nemar-identifier-scrub]";
+
+/**
+ * The tag pin's and the #1320 preflight's markers (epic #1046). Defined in `shared/`, where the
+ * Worker imports them too, so unlike the two above they have no backend copy to pin.
+ */
+export {
+  NEMAR_ANNEX_UUID_CONFLICT_MARKER,
+  OPENNEURO_MIRROR_LAG_MARKER,
+  OPENNEURO_UPSTREAM_MOVED_MARKER,
+} from "../../shared/import-markers.js";
+import type { ImportRefusalMarker } from "../../shared/import-markers.js";
+export type { ImportRefusalMarker };
+
+/**
+ * A refusal by the import, carrying one of the markers above at the start of its message (the tag
+ * pin's and the #1320 preflight's). `prepareImport` catches it in one place, prints the message as
+ * the run's last failure line (the onboard workflow's reporter forwards the last `✖` line into
+ * `import_jobs.last_error`), clears stale staging when the run persists it, and exits non-zero. When one is thrown nothing
+ * has been reset, pushed or copied into the bucket, and a mirror lag has not even created the
+ * dataset; that is what makes it a refusal rather than a failure.
+ */
+export class ImportRefused extends Error {
+  constructor(
+    readonly marker: ImportRefusalMarker,
+    detail: string,
+  ) {
+    super(`${marker} ${detail}`);
+    this.name = "ImportRefused";
+  }
+}
