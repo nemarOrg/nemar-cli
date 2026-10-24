@@ -5,6 +5,7 @@
  *   nemar admin mail show <id>                   one ticket: header, tags, thread, events
  *   nemar admin mail reply <id> --text|--file|-  answer the requester (always with an Idempotency-Key)
  *   nemar admin mail note <id> --text|--file|-   an internal note
+ *   nemar admin mail summarize <id> --text|--file|-   the summary kept after the retention purge
  *   nemar admin mail assign <id> <user|me|none>
  *   nemar admin mail status <id> <open|pending|closed|spam>     (`close <id>` is `closed`)
  *   nemar admin mail escalate <id> [--reason r]
@@ -51,6 +52,7 @@ import {
   replyToMailTicket,
   reprocessMail,
   setMailTicketStatus,
+  setMailTicketSummary,
 } from "../lib/api/admin.js";
 import { getCurrentUser } from "../lib/api/auth.js";
 import { ApiError, errorDetail } from "../lib/api/errors.js";
@@ -131,6 +133,10 @@ export const MAIL_ERROR_GUIDANCE: Record<MailErrorCode, string> = {
   fallback_not_restrictable: "The '*' fallback queue is never restricted.",
   reply_not_sent:
     "Nothing was sent and the key is released; retry with the same key if you still want to reply.",
+  summary_has_address:
+    "The summary contains an email address. Rewrite it without names, addresses, account ids or quoted message text: describe the request and the outcome.",
+  ticket_purged:
+    "The ticket was purged under the retention policy; only its summary remains and nothing can be changed.",
   reply_delivery_unknown:
     "The mail provider did not confirm the send, so the reply may or may not have reached the requester. This key will never send it again, so retrying it is pointless: read the thread with 'nemar admin mail show', and ask the requester if needed. Only a new --idempotency-key sends again, and it may deliver a second copy.",
   inbound_not_configured:
@@ -360,7 +366,7 @@ class People {
 // ---------------------------------------------------------------------------------------------
 
 function ticketLine(t: TicketSummary, assignee: string): string {
-  return `#${t.id}  ${oneLine(t.ref)}  ${oneLine(t.status)}  ${oneLine(t.queue_tag)}${t.restricted ? " (restricted)" : ""}  assignee ${assignee}  ${oneLine(t.subject)}`;
+  return `#${t.id}  ${oneLine(t.ref)}  ${oneLine(t.status)}${t.purged ? " (purged)" : ""}  ${oneLine(t.queue_tag)}${t.restricted ? " (restricted)" : ""}  assignee ${assignee}  ${oneLine(t.subject)}`;
 }
 
 async function printTicketAction(verb: string, t: TicketSummary, people: People): Promise<void> {
@@ -377,7 +383,7 @@ async function renderList(tickets: TicketSummary[], people: People): Promise<voi
     rows.push([
       `#${t.id}`,
       oneLine(t.ref),
-      oneLine(t.status),
+      t.purged ? `${oneLine(t.status)} (purged)` : oneLine(t.status),
       `${oneLine(t.queue_tag)}${t.restricted ? "*" : ""}`,
       await people.name(t.assignee_user_id),
       oneLine(t.last_message_at),
@@ -413,6 +419,16 @@ async function renderTicket(detail: TicketDetail, people: People): Promise<strin
   out.push(`Tags:       ${detail.tags.length > 0 ? detail.tags.map(oneLine).join(", ") : "-"}`);
   out.push(`Created:    ${oneLine(t.created_at)}`);
   out.push(`Updated:    ${oneLine(t.updated_at)}`);
+  if (detail.purged_at) {
+    out.push(`Purged on:  ${oneLine(detail.purged_at)}  (retention: only the summary is kept)`);
+  }
+  if (detail.summary !== null && detail.summary !== undefined) {
+    const by = await people.name(detail.summary_author_user_id);
+    out.push(`\nSummary (by ${by}, ${oneLine(detail.summarized_at ?? "unknown time")})`);
+    out.push(indent(terminalSafeText(detail.summary)));
+  } else {
+    out.push("\nSummary:    (none)");
+  }
 
   out.push("\nThread (oldest first)");
   const messages = [...detail.messages].sort(
@@ -490,6 +506,7 @@ function ticketIdOf(raw: string): number {
 async function bodyText(
   opts: { text?: string; file?: string },
   source: string | undefined,
+  max = MAX_TEXT,
 ): Promise<string> {
   if (source !== undefined && source !== "-") {
     throw new UsageError(
@@ -513,8 +530,8 @@ async function bodyText(
   } else text = await Bun.stdin.text();
   text = text.trim();
   if (text === "") throw new UsageError("The text is empty; nothing was sent.");
-  if (text.length > MAX_TEXT) {
-    throw new UsageError(`The text is ${text.length} characters; the limit is ${MAX_TEXT}.`);
+  if (text.length > max) {
+    throw new UsageError(`The text is ${text.length} characters; the limit is ${max}.`);
   }
   return text;
 }
@@ -535,6 +552,9 @@ export function replyPreview(
 
 /** The Worker's own bound on a reply or note (TEXT_MAX in backend/src/routes/admin/mail.ts). */
 const MAX_TEXT = 20_000;
+
+/** The Worker's bound on a summary (SUMMARY_MAX in backend/src/routes/admin/mail.ts). */
+const MAX_SUMMARY = 4_000;
 
 const KEY_RE = /^[A-Za-z0-9._:-]{1,64}$/;
 
@@ -605,6 +625,7 @@ const listCommand = new MailCommand("list")
   .option("--queue <tag>", "Only this queue")
   .option("--mine", "Only tickets assigned to you")
   .option("--assignee <user>", "Only tickets assigned to this user, or 'none' for unassigned")
+  .option("--needs-summary", "Only closed tickets that still have no summary (not purged)")
   .option("--search <text>", "Part of the subject or the requester's address")
   .option("--limit <n>", "Page size, 1 to 100 (default 25; 100 with --all)")
   .option("--cursor <cursor>", "The next_cursor of the previous page")
@@ -617,6 +638,7 @@ const listCommand = new MailCommand("list")
         queue?: string;
         mine?: boolean;
         assignee?: string;
+        needsSummary?: boolean;
         search?: string;
         limit?: string;
         cursor?: string;
@@ -634,6 +656,7 @@ const listCommand = new MailCommand("list")
         const id = await people.resolve(o.assignee, "--assignee", true);
         query.assignee = id === null ? "none" : o.assignee === "me" ? "me" : String(id);
       }
+      if (o.needsSummary) query.summary = "missing";
       if (o.search) query.q = o.search;
       if (o.limit !== undefined) {
         if (!/^\d{1,3}$/.test(o.limit) || Number(o.limit) < 1 || Number(o.limit) > 100) {
@@ -738,6 +761,12 @@ a new key sends again, and it may deliver a second copy.`,
         else console.error(`Idempotency-Key: ${key}`);
         const sent = await replyToMailTicket(id, text, key);
         if (o.json) return printJson(sent);
+        if (sent.message_id === 0) {
+          console.log(
+            "Reply sent, but not recorded: the ticket was purged under the retention policy while it was being sent. Do not send it again.",
+          );
+          return;
+        }
         console.log(
           `Reply sent (message ${oneLine(sent.message_id)}); the ticket is now ${oneLine(sent.status)}.`,
         );
@@ -760,6 +789,33 @@ const noteCommand = new MailCommand("note")
       const added = await addMailNote(id, await bodyText(o, source));
       if (o.json) return printJson(added);
       console.log(`Note added to ticket #${id} (message ${oneLine(added.message_id)}).`);
+    });
+  });
+
+const summarizeCommand = new MailCommand("summarize")
+  .description("Write (or replace) the summary kept after the retention purge")
+  .argument("<id>", "Ticket id")
+  .argument("[source]", "'-' reads the summary from standard input")
+  .option("--text <text>", "The summary")
+  .option("--file <path>", "Read the summary from a file")
+  .option(...jsonOption)
+  .addHelpText(
+    "after",
+    `
+After the retention period a ticket keeps only this summary; its messages, address and subject are
+removed. Describe the request and the outcome in 1 to ${MAX_SUMMARY} characters. Do NOT include
+names, email addresses, account ids or quoted message text: a summary containing an email address
+is refused (summary_has_address). A later summary replaces an earlier one; a purged ticket cannot
+be summarized (ticket_purged). A restricted ticket can be summarized only by an owner. Find the
+tickets still to do with 'list --needs-summary'.`,
+  )
+  .action(async (rawId: string, source: string | undefined, _o, command: Command) => {
+    const o = optsOf<Common & { text?: string; file?: string }>(command);
+    await run(!!o.json, async () => {
+      const id = ticketIdOf(rawId);
+      const res = await setMailTicketSummary(id, await bodyText(o, source, MAX_SUMMARY));
+      if (o.json) return printJson(res);
+      console.log(`Summary saved on ticket #${id}.`);
     });
   });
 
@@ -1016,6 +1072,7 @@ Examples:
   .addCommand(showCommand)
   .addCommand(replyCommand)
   .addCommand(noteCommand)
+  .addCommand(summarizeCommand)
   .addCommand(assignCommand)
   .addCommand(statusCommand)
   .addCommand(closeCommand)

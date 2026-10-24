@@ -1,5 +1,5 @@
 /**
- * The wire shapes of the support-ticket admin routes (epic #1893 phase 3b, ADR 0111):
+ * The wire shapes of the support-ticket admin routes (epic #1893 phase 3b, ADR 0112):
  *
  *   GET  /admin/mail/tickets                    list, filtered, keyset-paged
  *   GET  /admin/mail/tickets/:id                one ticket: messages, tags, events
@@ -17,11 +17,16 @@
  *   GET  /admin/mail/availability/:userId       (owner) anyone's
  *   PUT  /admin/mail/availability/:userId       (owner) set anyone's
  *   POST /admin/mail/reprocess                  (owner) rebuild a ticket from a stored raw key
+ *   PUT  /admin/mail/tickets/:id/summary        write (or replace) the summary kept after the purge
  *
  * Access follows the account's role and the ticket's exclusion, never the account kind or the
  * username: an owner sees every ticket, an admin sees the unrestricted ones, and nobody sees a
  * ticket that excludes them. A ticket the caller may not see answers 404 `not_found`, on every
  * route, so its existence does not leak. The raw message is never returned.
+ *
+ * Retention (ADR 0112): after the retention period a ticket is purged, which keeps its summary and
+ * its metadata and removes everything else. A purged ticket is read-only: every route that changes
+ * it answers 409 `ticket_purged`.
  */
 
 export const TICKET_STATUSES = ["open", "pending", "escalated", "closed", "spam"] as const;
@@ -51,6 +56,8 @@ export type MailErrorCode =
   | "fallback_not_restrictable"
   | "reply_not_sent"
   | "reply_delivery_unknown"
+  | "summary_has_address"
+  | "ticket_purged"
   | "inbound_not_configured"
   | "internal";
 
@@ -72,6 +79,10 @@ export interface TicketSummary {
   created_at: string;
   updated_at: string;
   last_message_at: string;
+  /** A summary has been written (the text itself is on the detail only). */
+  has_summary: boolean;
+  /** The retention purge has run on this ticket: its messages are gone and its address and subject are empty. */
+  purged: boolean;
 }
 
 /** Query of the list route. `status` absent hides spam and closed tickets. */
@@ -82,6 +93,11 @@ export interface ListTicketsQuery {
   assignee?: string;
   /** Substring of the subject or the requester address. */
   q?: string;
+  /**
+   * `missing`: closed tickets that are not purged and have no summary yet, whatever their status
+   * (the default hiding of closed tickets does not apply). The queue of tickets to summarize.
+   */
+  summary?: "missing";
   /** The `next_cursor` of the previous page. */
   cursor?: string;
   /** 1 to 100, default 25. */
@@ -120,8 +136,15 @@ export interface TicketEvent {
 export interface TicketDetail {
   ticket: TicketSummary;
   tags: string[];
+  /** Empty once the ticket is purged. */
   messages: TicketMessage[];
+  /** After a purge each event keeps its kind, actor and time; `detail` is null. */
   events: TicketEvent[];
+  summary: string | null;
+  summary_author_user_id: number | null;
+  summarized_at: string | null;
+  /** When the retention purge ran, else null. */
+  purged_at: string | null;
 }
 
 /**
@@ -139,7 +162,11 @@ export interface ReplyRequest {
   text: string;
 }
 export interface ReplyResponse {
-  /** The id of the stored outgoing message (a `TicketMessage.id`). */
+  /**
+   * The id of the stored outgoing message (a `TicketMessage.id`). 0 means the reply WAS sent but
+   * not recorded: the retention purge claimed the ticket between the send and the write, so the
+   * ticket holds no trace of it. Replaying that key then answers 409 `ticket_purged`.
+   */
   message_id: number;
   /** The Message-ID the reply went out under. */
   header_message_id: string;
@@ -152,6 +179,21 @@ export interface NoteRequest {
 export interface NoteResponse {
   /** The id of the stored note (a `TicketMessage.id`). */
   message_id: number;
+}
+/**
+ * The summary kept after the retention purge: 1 to 4,000 characters after trimming. Describe the
+ * request and the outcome. Do not include names, email addresses, account ids or quoted message
+ * text: a summary containing an email address is refused (400 `summary_has_address`). The Worker
+ * never writes one itself; whoever may see the ticket does, under the same visibility as every
+ * other ticket route, so a restricted ticket is summarized only by an owner. Allowed on any ticket
+ * that is not purged (a later summary replaces an earlier one); a purged ticket is 409
+ * `ticket_purged`. The event records who wrote it, never the text.
+ */
+export interface SummaryRequest {
+  summary: string;
+}
+export interface SummaryResponse {
+  ticket: TicketSummary;
 }
 export interface AssignRequest {
   user_id: number | null;

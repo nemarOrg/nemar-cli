@@ -191,7 +191,7 @@ one at the first version tag, else with the merge base; the facts carry only cla
 0110 (mail is sent through the Cloudflare `send_email` binding behind a provider switch; Resend is
 a fallback only on a certain non-delivery limit or availability refusal, never on a timeout or an
 unknown error, so a sign-in code is never sent twice),
-0111 (inbound mail is a support ticket: the raw message is stored first and never lost, one
+0112 (inbound mail is a support ticket: the raw message is stored first and never lost, one
 visibility predicate decides every ticket read and write (restricted queues are owner-only and a
 conduct ticket can exclude a named account), ticket notifications are production-only with no
 first-admin fallback, and a reply whose outcome is unknown is never recorded as sent and never

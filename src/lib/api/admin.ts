@@ -46,6 +46,8 @@ import type {
   ReplyResponse,
   ReprocessResponse,
   SettableStatus,
+  SummaryRequest,
+  SummaryResponse,
   TicketActionResponse,
   TicketDetail,
 } from "../../../shared/contract/mail-admin.js";
@@ -1543,7 +1545,7 @@ export interface EmailPreferences {
   dataset_anonymity: boolean;
   /** Epic #1610 phase 5 (ADR 0088): the identifier sweep's weekly report. */
   identifier_sweep: boolean;
-  /** Epic #1893 phase 3 (ADR 0111): support tickets assigned, unassigned or escalated to you. */
+  /** Epic #1893 phase 3 (ADR 0112): support tickets assigned, unassigned or escalated to you. */
   support_tickets: boolean;
 }
 
@@ -2601,6 +2603,12 @@ export async function setMailTicketStatus(
   status: SettableStatus,
 ): Promise<TicketActionResponse> {
   return request(`/admin/mail/tickets/${id}/status`, post({ status }), true);
+}
+
+/** `PUT /admin/mail/tickets/:id/summary`: the summary kept after the retention purge. */
+export async function setMailTicketSummary(id: number, summary: string): Promise<SummaryResponse> {
+  const body: SummaryRequest = { summary };
+  return request(`/admin/mail/tickets/${id}/summary`, put(body), true);
 }
 
 /** `POST /admin/mail/tickets/:id/escalate`. */

@@ -1,5 +1,5 @@
 /**
- * The operations behind the support-ticket admin routes (epic #1893 phase 3b, ADR 0111).
+ * The operations behind the support-ticket admin routes (epic #1893 phase 3b, ADR 0112).
  *
  * Every function that touches a ticket takes the viewer and goes through {@link loadVisibleTicket},
  * which puts 3a's `ticketVisibleTo` predicate in the query. A ticket the viewer may not see is
@@ -61,6 +61,10 @@ export interface TicketRow {
   created_at: string;
   updated_at: string;
   last_message_at: string;
+  summary: string | null;
+  summary_author_user_id: number | null;
+  summarized_at: string | null;
+  purged_at: string | null;
 }
 
 export function toSummary(row: TicketRow): TicketSummary {
@@ -77,7 +81,23 @@ export function toSummary(row: TicketRow): TicketSummary {
     created_at: row.created_at,
     updated_at: row.updated_at,
     last_message_at: row.last_message_at,
+    has_summary: row.summary !== null,
+    purged: row.purged_at !== null,
   };
+}
+
+/** A purged ticket is read-only: its raw record is gone, so nothing may be added to it. */
+function assertNotPurged(ticket: TicketRow): void {
+  if (ticket.purged_at !== null) throwPurged();
+}
+
+/** A write was refused by its `purged_at IS NULL` gate: the purge claimed the ticket first. */
+function throwPurged(): never {
+  throw new MailAdminError(
+    409,
+    "ticket_purged",
+    "This ticket was purged under the retention policy and can no longer be changed.",
+  );
 }
 
 /** The ticket, if `viewer` may see it; else null, which every caller turns into `not_found`. */
@@ -110,6 +130,7 @@ export interface ListFilters {
   queue?: string;
   assignee?: string;
   q?: string;
+  summary?: "missing";
   cursor?: string;
   limit: number;
 }
@@ -124,10 +145,13 @@ export async function listTickets(
   const vis = ticketVisibleTo(viewer, "t");
   const where = [vis.sql];
   const binds: unknown[] = [...vis.binds];
+  if (f.summary === "missing") {
+    where.push("t.status = 'closed' AND t.purged_at IS NULL AND t.summary IS NULL");
+  }
   if (f.status) {
     where.push("t.status = ?");
     binds.push(f.status);
-  } else {
+  } else if (f.summary !== "missing") {
     where.push("t.status NOT IN ('spam', 'closed')");
   }
   if (f.queue) {
@@ -205,6 +229,10 @@ export async function ticketDetail(db: D1Database, ticket: TicketRow) {
     ticket: toSummary(ticket),
     tags: (tags.results ?? []).map((t) => t.tag),
     messages: messages.results ?? [],
+    summary: ticket.summary,
+    summary_author_user_id: ticket.summary_author_user_id,
+    summarized_at: ticket.summarized_at,
+    purged_at: ticket.purged_at,
     events: (events.results ?? []).map(
       (e): TicketEvent => ({
         id: e.id,
@@ -236,6 +264,23 @@ function eventStatement(
   return db
     .prepare(
       "INSERT INTO mail_ticket_events (ticket_id, kind, actor_user_id, detail) VALUES (?, ?, ?, ?)",
+    )
+    .bind(ticketId, kind, actor, JSON.stringify(detail));
+}
+
+/** An event row that is written only while the ticket is not purged (a purge may race a reply). */
+function liveEventStatement(
+  db: D1Database,
+  ticketId: number,
+  kind: string,
+  actor: number | null,
+  detail: unknown,
+): D1PreparedStatement {
+  return db
+    .prepare(
+      `INSERT INTO mail_ticket_events (ticket_id, kind, actor_user_id, detail)
+       SELECT ?1, ?2, ?3, ?4
+        WHERE EXISTS (SELECT 1 FROM mail_tickets WHERE id = ?1 AND purged_at IS NULL)`,
     )
     .bind(ticketId, kind, actor, JSON.stringify(detail));
 }
@@ -352,6 +397,7 @@ export async function replyToTicket(
 ): Promise<ReplyOutcome> {
   const db = env.DB;
   const ticket = await requireVisibleTicket(db, viewer, ticketId);
+  assertNotPurged(ticket);
   if (ticket.status === "spam") {
     throw new MailAdminError(409, "ticket_is_spam", "A spam ticket cannot be replied to.");
   }
@@ -470,6 +516,13 @@ async function sendAndRecord(
   const references = buildReferences(ids, headers["In-Reply-To"]);
   if (references) headers.References = references;
 
+  // A purge can have run since the ticket was loaded; nothing has been sent yet, so refuse.
+  const live = await db
+    .prepare("SELECT purged_at FROM mail_tickets WHERE id = ?")
+    .bind(ticket.id)
+    .first<{ purged_at: string | null }>();
+  if (live?.purged_at) assertNotPurged({ ...ticket, purged_at: live.purged_at });
+
   const subject = replySubject(ticket.subject);
   const { isDev } = resolveEmailConfig(env);
   const from = `NEMAR Support <${supportAddress}>`;
@@ -527,7 +580,8 @@ async function sendAndRecord(
       .prepare(
         `INSERT INTO mail_messages (ticket_id, direction, message_id, in_reply_to, references_ids,
             from_addr, to_addr, subject, text_body, author_user_id)
-         VALUES (?, 'out', ?, ?, ?, ?, ?, ?, ?, ?)`,
+         SELECT ?, 'out', ?, ?, ?, ?, ?, ?, ?, ?
+          WHERE EXISTS (SELECT 1 FROM mail_tickets WHERE id = ? AND purged_at IS NULL)`,
       )
       .bind(
         ticket.id,
@@ -539,17 +593,18 @@ async function sendAndRecord(
         subject,
         text.slice(0, 64 * 1024),
         viewer.id,
+        ticket.id,
       ),
     db
       .prepare(
-        "UPDATE mail_tickets SET last_message_at = datetime('now'), updated_at = datetime('now'), status = ? WHERE id = ?",
+        "UPDATE mail_tickets SET last_message_at = datetime('now'), last_activity_at = datetime('now'), updated_at = datetime('now'), status = ? WHERE id = ? AND purged_at IS NULL",
       )
       .bind(nextStatus, ticket.id),
-    eventStatement(db, ticket.id, "reply", viewer.id, { message_id: headerId }),
+    liveEventStatement(db, ticket.id, "reply", viewer.id, { message_id: headerId }),
   ];
   if (nextStatus !== ticket.status) {
     statements.push(
-      eventStatement(db, ticket.id, "status", viewer.id, {
+      liveEventStatement(db, ticket.id, "status", viewer.id, {
         from: ticket.status,
         to: nextStatus,
         reason: "reply",
@@ -594,6 +649,11 @@ async function sendAndRecord(
     .prepare("SELECT id FROM mail_messages WHERE ticket_id = ? AND message_id = ?")
     .bind(ticket.id, headerId)
     .first<{ id: number }>();
+  if (!stored) {
+    // The purge won the race after the mail went out: the guarded statements wrote nothing. The
+    // reply was sent, so report success; the ticket holds no trace of it by design.
+    console.warn(`[mail-admin] reply on ticket ${ticket.id} was sent after the ticket was purged`);
+  }
   return { message_id: stored?.id ?? 0, header_message_id: headerId, status: nextStatus };
 }
 
@@ -608,16 +668,23 @@ export async function addNote(
   text: string,
 ): Promise<number> {
   const ticket = await requireVisibleTicket(db, viewer, ticketId);
-  await db.batch([
+  assertNotPurged(ticket);
+  const results = await db.batch([
     db
       .prepare(
         `INSERT INTO mail_messages (ticket_id, direction, text_body, author_user_id)
-         VALUES (?, 'note', ?, ?)`,
+         SELECT ?1, 'note', ?2, ?3
+          WHERE EXISTS (SELECT 1 FROM mail_tickets WHERE id = ?1 AND purged_at IS NULL)`,
       )
       .bind(ticket.id, text.slice(0, 64 * 1024), viewer.id),
-    db.prepare("UPDATE mail_tickets SET updated_at = datetime('now') WHERE id = ?").bind(ticket.id),
-    eventStatement(db, ticket.id, "note", viewer.id, null),
+    db
+      .prepare(
+        "UPDATE mail_tickets SET updated_at = datetime('now'), last_activity_at = datetime('now') WHERE id = ? AND purged_at IS NULL",
+      )
+      .bind(ticket.id),
+    liveEventStatement(db, ticket.id, "note", viewer.id, null),
   ]);
+  if ((results[0]?.meta?.changes ?? 0) === 0) throwPurged();
   const row = await db
     .prepare("SELECT MAX(id) AS id FROM mail_messages WHERE ticket_id = ? AND direction = 'note'")
     .bind(ticket.id)
@@ -632,6 +699,7 @@ export async function assignTicket(
   userId: number | null,
 ): Promise<TicketSummary> {
   const ticket = await requireVisibleTicket(db, viewer, ticketId);
+  assertNotPurged(ticket);
   if (userId !== null) {
     const ok = await isEligibleAssignee(
       db,
@@ -650,18 +718,19 @@ export async function assignTicket(
     }
   }
   if (userId === ticket.assignee_user_id) return toSummary(ticket);
-  await db.batch([
+  const results = await db.batch([
     db
       .prepare(
-        "UPDATE mail_tickets SET assignee_user_id = ?, updated_at = datetime('now') WHERE id = ?",
+        "UPDATE mail_tickets SET assignee_user_id = ?, updated_at = datetime('now'), last_activity_at = datetime('now') WHERE id = ? AND purged_at IS NULL",
       )
       .bind(userId, ticket.id),
-    eventStatement(db, ticket.id, userId === null ? "unassigned" : "assigned", viewer.id, {
+    liveEventStatement(db, ticket.id, userId === null ? "unassigned" : "assigned", viewer.id, {
       from: ticket.assignee_user_id,
       to: userId,
       reason: "manual",
     }),
   ]);
+  if ((results[0]?.meta?.changes ?? 0) === 0) throwPurged();
   return reload(db, ticket.id);
 }
 
@@ -672,6 +741,7 @@ export async function setTicketStatus(
   status: SettableStatus,
 ): Promise<TicketSummary> {
   const ticket = await requireVisibleTicket(db, viewer, ticketId);
+  assertNotPurged(ticket);
   if (ticket.status === status) return toSummary(ticket);
   if (
     (ticket.status === "closed" || ticket.status === "spam") &&
@@ -692,12 +762,15 @@ export async function setTicketStatus(
       );
     }
   }
-  await db.batch([
+  const results = await db.batch([
     db
-      .prepare("UPDATE mail_tickets SET status = ?, updated_at = datetime('now') WHERE id = ?")
+      .prepare(
+        "UPDATE mail_tickets SET status = ?, updated_at = datetime('now'), last_activity_at = datetime('now') WHERE id = ? AND purged_at IS NULL",
+      )
       .bind(status, ticket.id),
-    eventStatement(db, ticket.id, "status", viewer.id, { from: ticket.status, to: status }),
+    liveEventStatement(db, ticket.id, "status", viewer.id, { from: ticket.status, to: status }),
   ]);
+  if ((results[0]?.meta?.changes ?? 0) === 0) throwPurged();
   return reload(db, ticket.id);
 }
 
@@ -721,6 +794,7 @@ export async function escalateTicket(
   reason: string | null,
 ): Promise<{ ticket: TicketSummary; ownerId: number }> {
   const ticket = await requireVisibleTicket(db, viewer, ticketId);
+  assertNotPurged(ticket);
   if (ticket.status === "escalated") {
     throw new MailAdminError(409, "already_escalated", "This ticket is already escalated.");
   }
@@ -744,18 +818,78 @@ export async function escalateTicket(
       "The escalation owner cannot hold this ticket. An owner should change the setting.",
     );
   }
-  await db.batch([
+  const results = await db.batch([
     db
       .prepare(
-        "UPDATE mail_tickets SET status = 'escalated', assignee_user_id = ?, updated_at = datetime('now') WHERE id = ?",
+        "UPDATE mail_tickets SET status = 'escalated', assignee_user_id = ?, updated_at = datetime('now'), last_activity_at = datetime('now') WHERE id = ? AND purged_at IS NULL",
       )
       .bind(ownerId, ticket.id),
-    eventStatement(db, ticket.id, "escalated", viewer.id, { to: ownerId, reason }),
-    eventStatement(db, ticket.id, "assigned", viewer.id, {
+    liveEventStatement(db, ticket.id, "escalated", viewer.id, { to: ownerId, reason }),
+    liveEventStatement(db, ticket.id, "assigned", viewer.id, {
       from: ticket.assignee_user_id,
       to: ownerId,
       reason: "escalation",
     }),
   ]);
+  if ((results[0]?.meta?.changes ?? 0) === 0) throwPurged();
   return { ticket: await reload(db, ticket.id), ownerId };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Summary (kept after the retention purge)
+// ---------------------------------------------------------------------------------------------
+
+/** A simple `local@domain.tld`, enough to refuse the common way an address ends up in a summary. */
+const ADDRESS_IN_TEXT = /[^\s@]+@[^\s@]+\.[^\s@]+/;
+
+/** Whether `text` contains something shaped like an email address. */
+export function containsEmailAddress(text: string): boolean {
+  // NFKC folds look-alikes such as the full-width at sign into the ASCII one before the test.
+  return ADDRESS_IN_TEXT.test(text.normalize("NFKC"));
+}
+
+/**
+ * Store the summary kept after the purge, replacing an earlier one. The viewer must be able to see
+ * the ticket (the same predicate as every route, so a restricted ticket is summarized only by an
+ * owner). Records who wrote it and a `summary` event with no text. Refused for a purged ticket and
+ * for a text holding an email address.
+ */
+export async function setTicketSummary(
+  db: D1Database,
+  viewer: Viewer,
+  ticketId: number,
+  summary: string,
+): Promise<TicketSummary> {
+  const ticket = await requireVisibleTicket(db, viewer, ticketId);
+  assertNotPurged(ticket);
+  if (containsEmailAddress(summary)) {
+    throw new MailAdminError(
+      400,
+      "summary_has_address",
+      "The summary contains an email address. Describe the request and the outcome without names, addresses or quoted text.",
+    );
+  }
+  await db.batch([
+    db
+      .prepare(
+        `UPDATE mail_tickets SET summary = ?, summary_author_user_id = ?,
+            summarized_at = datetime('now'), updated_at = datetime('now')
+          WHERE id = ? AND purged_at IS NULL`,
+      )
+      .bind(summary, viewer.id, ticket.id),
+    db
+      .prepare(
+        `INSERT INTO mail_ticket_events (ticket_id, kind, actor_user_id, detail)
+         SELECT ?, 'summary', ?, NULL WHERE changes() > 0`,
+      )
+      .bind(ticket.id, viewer.id),
+  ]);
+  const after = await db
+    .prepare("SELECT * FROM mail_tickets WHERE id = ?")
+    .bind(ticket.id)
+    .first<TicketRow>();
+  if (!after) throw new MailAdminError(404, "not_found", "No such ticket.");
+  // The purge can run between the read and the write; the guarded update then wrote nothing.
+  assertNotPurged(after);
+  return toSummary(after);
 }

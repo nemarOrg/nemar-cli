@@ -45,6 +45,8 @@ function ticket(over: Record<string, unknown> = {}) {
     created_at: NOW,
     updated_at: NOW,
     last_message_at: NOW,
+    has_summary: false,
+    purged: false,
     ...over,
   };
 }
@@ -347,6 +349,21 @@ describe("mail show", () => {
 
 describe("mail reply", () => {
   const sent = { message_id: "9", header_message_id: "<h9@example.org>", status: "pending" };
+
+  test("message_id 0 says the reply was sent but not recorded because the ticket was purged", async () => {
+    const server = startServer({
+      "POST /admin/mail/tickets/42/reply": () => Response.json({ ...sent, message_id: 0 }),
+    });
+    try {
+      const r = await runCli(["reply", "42", "--text", "Hello there", "--yes"], server.url);
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toContain("sent, but not recorded");
+      expect(r.stdout).toContain("purged");
+      expect(r.stdout).not.toContain("message 0");
+    } finally {
+      server.stop();
+    }
+  });
 
   test("sends a generated Idempotency-Key and prints it to stderr first", async () => {
     const server = startServer({ "POST /admin/mail/tickets/42/reply": () => Response.json(sent) });
@@ -1058,6 +1075,178 @@ describe("server-generated fields are escaped too", () => {
         expect(hasRaw(r.stdout), args[0]).toBe(false);
         expect(r.stdout).toContain("R\\x1b[1m");
       }
+    } finally {
+      server.stop();
+    }
+  });
+});
+
+describe("summaries and retention", () => {
+  test("summarize sends PUT with the trimmed text from --text, --file and stdin", async () => {
+    const server = startServer({
+      "PUT /admin/mail/tickets/42/summary": () =>
+        Response.json({ ticket: ticket({ status: "closed", has_summary: true }) }),
+    });
+    try {
+      const file = join(scratch, "summary.txt");
+      writeFileSync(file, "From a file.\n");
+      expect(
+        (await runCli(["summarize", "42", "--text", "  From text.  "], server.url)).exitCode,
+      ).toBe(0);
+      expect((await runCli(["summarize", "42", "--file", file], server.url)).exitCode).toBe(0);
+      const viaStdin = await runCli(["summarize", "42", "-"], server.url, "From stdin.\n");
+      expect(viaStdin.exitCode).toBe(0);
+      expect(viaStdin.stdout).toContain("Summary saved on ticket #42");
+      expect(server.mail().map((c) => [c.method, c.path, c.body])).toEqual([
+        ["PUT", "/admin/mail/tickets/42/summary", { summary: "From text." }],
+        ["PUT", "/admin/mail/tickets/42/summary", { summary: "From a file." }],
+        ["PUT", "/admin/mail/tickets/42/summary", { summary: "From stdin." }],
+      ]);
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("--json prints the API answer verbatim", async () => {
+    const answer = { ticket: ticket({ has_summary: true }) };
+    const server = startServer({
+      "PUT /admin/mail/tickets/42/summary": () => Response.json(answer),
+    });
+    try {
+      const r = await runCli(["summarize", "42", "--text", "ok", "--json"], server.url);
+      expect(r.exitCode).toBe(0);
+      expect(JSON.parse(r.stdout)).toEqual(answer);
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("input rules: exactly one source, not empty, at most 4000 characters; nothing is sent", async () => {
+    const server = startServer();
+    try {
+      expect((await runCli(["summarize", "42"], server.url)).exitCode).toBe(2);
+      expect((await runCli(["summarize", "42", "--text", "   "], server.url)).exitCode).toBe(2);
+      const long = await runCli(["summarize", "42", "--text", "x".repeat(4001)], server.url);
+      expect(long.exitCode).toBe(2);
+      expect(long.stderr).toContain("limit is 4000");
+      expect((await runCli(["summarize", "abc", "--text", "x"], server.url)).exitCode).toBe(2);
+      expect(server.mail()).toHaveLength(0);
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("summary_has_address and ticket_purged print the API sentence and guidance", async () => {
+    const server = startServer({
+      "PUT /admin/mail/tickets/42/summary": () =>
+        err(400, "summary_has_address", "Has an address."),
+      "PUT /admin/mail/tickets/43/summary": () => err(409, "ticket_purged", "Purged."),
+    });
+    try {
+      const a = await runCli(["summarize", "42", "--text", "mail me@example.org"], server.url);
+      expect(a.exitCode).toBe(1);
+      expect(a.stderr).toContain("Has an address.");
+      expect(a.stderr).toContain("without names");
+      const b = await runCli(["summarize", "43", "--text", "late"], server.url);
+      expect(b.exitCode).toBe(1);
+      expect(b.stderr).toContain("Purged.");
+      expect(b.stderr).toContain("only its summary remains");
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("help says what a summary must not contain", async () => {
+    const server = startServer();
+    try {
+      const r = await runCli(["summarize", "--help-all"], server.url);
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toContain("email addresses");
+      expect(r.stdout).toContain("quoted message text");
+      expect(r.stdout).toContain("1 to 4000 characters");
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("list --needs-summary asks for summary=missing", async () => {
+    const server = startServer({
+      "GET /admin/mail/tickets": () => Response.json({ tickets: [], next_cursor: null }),
+    });
+    try {
+      expect((await runCli(["list", "--needs-summary"], server.url)).exitCode).toBe(0);
+      await runCli(["list"], server.url);
+      expect(server.mail().map((c) => c.query.summary)).toEqual(["missing", undefined]);
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("list marks a purged ticket", async () => {
+    const server = startServer({
+      "GET /admin/mail/tickets": () =>
+        Response.json({
+          tickets: [ticket({ status: "closed", purged: true, requester_email: "", subject: "" })],
+          next_cursor: null,
+        }),
+    });
+    try {
+      const r = await runCli(["list", "--status", "closed"], server.url);
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toContain("closed (purged)");
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("show of a purged ticket prints the purge date and the summary, with no thread", async () => {
+    const detail = {
+      ticket: ticket({
+        status: "closed",
+        purged: true,
+        has_summary: true,
+        requester_email: "",
+        subject: "",
+      }),
+      tags: ["support"],
+      messages: [],
+      events: [{ id: 1, kind: "purged", actor_user_id: null, detail: null, created_at: NOW }],
+      summary: "Upload failed; fixed by retry.",
+      summary_author_user_id: 7,
+      summarized_at: NOW,
+      purged_at: "2026-10-24 12:00:00",
+    };
+    const server = startServer({ "GET /admin/mail/tickets/42": () => Response.json(detail) });
+    try {
+      const r = await runCli(["show", "42"], server.url);
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toContain("Purged on:  2026-10-24 12:00:00");
+      expect(r.stdout).toContain("Summary (by alice");
+      expect(r.stdout).toContain("Upload failed; fixed by retry.");
+      expect(r.stdout).toContain("(no messages)");
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("a hostile summary is escaped in human output and verbatim in --json", async () => {
+    const detail = {
+      ticket: ticket(),
+      tags: [],
+      messages: [],
+      events: [],
+      summary: "Bad\u001b[2J \u202etext\u0007",
+      summary_author_user_id: 9,
+      summarized_at: "2026\u001b-10",
+      purged_at: null,
+    };
+    const server = startServer({ "GET /admin/mail/tickets/42": () => Response.json(detail) });
+    try {
+      const human = await runCli(["show", "42"], server.url);
+      expect(hasRaw(human.stdout)).toBe(false);
+      expect(human.stdout).toContain("\\x1b[2J");
+      const json = await runCli(["show", "42", "--json"], server.url);
+      expect(JSON.parse(json.stdout).summary).toBe(detail.summary);
     } finally {
       server.stop();
     }

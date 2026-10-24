@@ -1,4 +1,4 @@
-# ADR 0111: Inbound mail becomes support tickets
+# ADR 0112: Inbound mail becomes support tickets
 
 **Status:** proposed
 **Date:** 2026-10-24
@@ -75,7 +75,26 @@ Key rows are kept until their ticket is deleted.
 
 **Retention.**
 Raw messages live in R2 for two years in production and 30 days on staging, by bucket lifecycle rule.
-Ticket rows are kept until the ticket is deleted; nothing deletes one automatically.
+After the same period only a summary of a ticket is kept (epic #1893 phase 6a, #1943).
+`MAIL_RETENTION_DAYS` (a Worker variable in the configuration file: 730 in production, 30 on staging) sets the period; a daily purge takes every ticket whose last activity is older than the cutoff.
+`last_activity_at` is bumped by an inbound message, a reply, a note, a status change (reopening included), an assignment and an escalation; it is not bumped by writing a summary or by the purge, so a ticket still being worked is never purged and a summary cannot postpone its own ticket's purge.
+The purge claims each ticket with a guarded statement that re-checks `purged_at IS NULL` and the cutoff, so a message arriving mid-run cancels that ticket's purge, and a ticket whose purge fails is logged by id, left for the next run, and does not stop the others.
+A reply sent while its ticket is purged is not recorded on it (the mail already went out; the ticket id is logged).
+A missing or invalid value deletes nothing, because there is no default that deletes.
+
+*The summary.* The Worker never calls a model.
+A summary is written through `PUT /admin/mail/tickets/:id/summary` by whoever may see the ticket, under the same single visibility predicate as every other ticket route, so a person or an agent holding an admin account writes it from the CLI (`nemar admin mail summarize`), and nothing is keyed on account kind or username.
+A restricted ticket (security, conduct) is never visible to an admin account, so it is summarized only by an owner, or not at all; no model reads it.
+A summary is 1 to 4,000 characters, describes the request and the outcome, and is refused when it contains an email address; names, account ids and quoted message text are asked for in the contract and the help text, not detected.
+A later summary replaces an earlier one, and the event records who wrote it, never the text.
+
+*The purge.* Each ticket is purged in one batch: its messages and reply keys are deleted, every event keeps its kind, actor and time but loses its detail, tags other than the queue tag are deleted, and the requester address and subject are cleared.
+`requester_email` and `subject` are NOT NULL in the original table, so they hold the empty string, not NULL; the table is not rebuilt for that.
+The requester and assignee references are nulled; the exclusion is kept and keeps applying to the detail, the list and the summary route, so an owner a conduct report excludes never reads its kept summary; open, pending and escalated tickets become `closed` while spam and closed keep their status; `purged_at` is set, the summary is kept, and a `purged` event is added.
+An open ticket past the cutoff is purged too, since its raw record has expired, and is counted separately in the log.
+A purged ticket is read-only (409 `ticket_purged`) and a later message to its address opens a new ticket.
+The raw keys of purged messages are kept in `mail_purged_raw_keys` (a random id and a date, nothing about the sender) so reprocessing a raw object that outlived its ticket cannot rebuild the conversation.
+The purge never touches R2 and never sends mail; it reads and writes only the mail tables of its own environment, which is why it also runs on the non-production daily tick.
 
 **Cascades.**
 Ending a person's admin standing (a demotion, a revocation, a soft delete) releases their open tickets to the pool, clears them from queue assignee, backup, escalation and rotation lists, and clears their away window, in the same batch as the statements that already revoke their credentials.

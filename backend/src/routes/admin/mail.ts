@@ -1,5 +1,5 @@
 /**
- * Support-ticket admin routes (epic #1893 phase 3b, ADR 0111). The wire shapes are in
+ * Support-ticket admin routes (epic #1893 phase 3b, ADR 0112). The wire shapes are in
  * shared/contract/mail-admin.ts, which lists the routes and what each refuses.
  *
  * Admin-only through the router's middleware; the owner-only routes check the role here and say
@@ -25,6 +25,7 @@ import {
   replyToTicket,
   requireVisibleTicket,
   setTicketStatus,
+  setTicketSummary,
   ticketDetail,
 } from "../../services/mail-admin";
 import { getAvailability, listQueues, putAvailability, putQueue } from "../../services/mail-queues";
@@ -33,6 +34,7 @@ import { reprocessRawKey } from "../../services/tickets";
 import type { AdminRouter } from "./shared";
 
 const TEXT_MAX = 20_000;
+const SUMMARY_MAX = 4_000;
 const id = z.number().int().positive();
 
 const replySchema = z.object({ text: z.string().trim().min(1).max(TEXT_MAX) }).strict();
@@ -40,6 +42,7 @@ const noteSchema = replySchema;
 const assignSchema = z.object({ user_id: id.nullable() }).strict();
 const statusSchema = z.object({ status: z.enum(SETTABLE_STATUSES) }).strict();
 const escalateSchema = z.object({ reason: z.string().trim().max(500).optional() }).strict();
+const summarySchema = z.object({ summary: z.string().trim().min(1).max(SUMMARY_MAX) }).strict();
 const queueSchema = z
   .object({
     restricted: z.boolean().optional(),
@@ -68,6 +71,7 @@ const listSchema = z.object({
   queue: z.string().max(64).optional(),
   assignee: z.string().max(20).optional(),
   q: z.string().max(100).optional(),
+  summary: z.enum(["missing"]).optional(),
   cursor: z.string().max(60).optional(),
   limit: z.coerce.number().int().min(1).max(100).default(25),
 });
@@ -222,6 +226,17 @@ export function registerMailRoutes(admin: AdminRouter): void {
     }
   });
 
+  admin.put("/mail/tickets/:id/summary", async (c) => {
+    try {
+      const n = ticketId(c);
+      await requireVisibleTicket(c.env.DB, c.get("user"), n);
+      const { summary } = await parseBody(c, summarySchema);
+      return c.json({ ticket: await setTicketSummary(c.env.DB, c.get("user"), n, summary) });
+    } catch (error) {
+      return fail(c, error);
+    }
+  });
+
   admin.get("/mail/queues", async (c) => {
     try {
       return c.json({ queues: await listQueues(c.env.DB, c.get("user")) });
@@ -291,6 +306,13 @@ export function registerMailRoutes(admin: AdminRouter): void {
         );
       }
       const result = await reprocessRawKey(c.env.DB, bucket, raw_key);
+      if (result.outcome === "purged") {
+        throw new MailAdminError(
+          409,
+          "ticket_purged",
+          "That message belongs to a ticket that was purged under the retention policy.",
+        );
+      }
       if (result.outcome === "missing") {
         throw new MailAdminError(404, "not_found", "That raw message is not in the bucket.");
       }
