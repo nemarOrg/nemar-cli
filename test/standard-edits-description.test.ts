@@ -65,6 +65,18 @@ describe("applyConceptDoiToDescription, at its shared path", () => {
     expect(result.description.SourceDatasets).toEqual([{ DOI: UPSTREAM, Version: "1.0.1" }]);
   });
 
+  test("a null entry in SourceDatasets is kept and skipped, at the shared module itself", () => {
+    // The de-dup predicate reads each entry's DOI and URL; a null entry must neither throw nor
+    // stand for the dataset, so upstream's DOI is still preserved beside it.
+    const result = applyConceptDoiToDescription(
+      { DatasetDOI: UPSTREAM, Version: "1.0.1", SourceDatasets: [null] },
+      CONCEPT,
+    );
+    expect(result.description.SourceDatasets).toEqual([null, { DOI: UPSTREAM }]);
+    expect(result.preservedSourceDoi).toBe(UPSTREAM);
+    expect(result.description.DatasetDOI).toBe(CONCEPT);
+  });
+
   test("an empty or non-string DatasetDOI is replaced and not preserved", () => {
     for (const value of ["", 42, null]) {
       const result = applyConceptDoiToDescription({ DatasetDOI: value, Version: "1.0.0" }, CONCEPT);

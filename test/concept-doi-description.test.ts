@@ -139,4 +139,52 @@ describe("applyConceptDoiToDescription", () => {
     expect(result.description.SourceDatasets).toEqual([entry, { DOI: other }]);
     expect(result.preservedSourceDoi).toBe(other);
   });
+
+  test("an upstream DOI newer than the recorded entry is dropped too: the re-pull moves the entry", () => {
+    const entry = sourceDatasetEntry("ds002720", "1.0.0");
+    const result = applyConceptDoiToDescription(
+      {
+        DatasetDOI: "doi:10.18112/openneuro.ds002720.v1.0.1",
+        Version: "1.0.0",
+        SourceDatasets: [entry],
+      },
+      CONCEPT,
+    );
+    expect(result.description.SourceDatasets).toEqual([entry]);
+    expect(recordedUpstreamTag(result.description, "ds002720")).toBe("1.0.0");
+  });
+
+  test("the live on004362 shape: a DOI-only entry, before publication and after it", () => {
+    const sources = [{ DOI: "doi:10.18112/openneuro.ds004362.v1.0.0" }];
+    const before = applyConceptDoiToDescription(
+      { DatasetDOI: "doi:10.18112/openneuro.ds004362.v1.0.0", SourceDatasets: sources },
+      "10.82901/nemar.on004362",
+    );
+    expect(before.description.SourceDatasets).toEqual(sources);
+    expect(before.description.DatasetDOI).toBe("10.82901/nemar.on004362");
+    // As nemarDatasets served it on 2026-10-24: publishing again changes nothing.
+    const after = applyConceptDoiToDescription(
+      { DatasetDOI: "10.82901/nemar.on004362", SourceDatasets: sources, Version: "1.0.0" },
+      "10.82901/nemar.on004362",
+    );
+    expect(after.changed).toBe(false);
+    expect(recordedUpstreamTag(after.description, "ds004362")).toBe("1.0.0");
+  });
+
+  test("an entry naming the dataset by its page only also stands for it", () => {
+    const page = { URL: "https://openneuro.org/datasets/ds002720/versions/1.0.1" };
+    const result = applyConceptDoiToDescription(
+      { DatasetDOI: UPSTREAM, Version: "1.0.0", SourceDatasets: [page] },
+      CONCEPT,
+    );
+    expect(result.description.SourceDatasets).toEqual([page]);
+  });
+
+  test("a null entry is kept and does not throw", () => {
+    const result = applyConceptDoiToDescription(
+      { DatasetDOI: UPSTREAM, Version: "1.0.0", SourceDatasets: [null] },
+      CONCEPT,
+    );
+    expect(result.description.SourceDatasets).toEqual([null, { DOI: UPSTREAM }]);
+  });
 });
