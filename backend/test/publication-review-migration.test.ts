@@ -61,10 +61,10 @@ interface ColumnInfo {
 }
 
 /** Every migration before 0098, applied in order: the schema this migration starts from. */
-function dbBefore0098(): Database {
+function dbBefore0098(upTo = "0098"): Database {
   const db = new Database(":memory:");
   for (const file of readdirSync(MIGRATIONS_DIR)
-    .filter((f) => f.endsWith(".sql") && f < "0098")
+    .filter((f) => f.endsWith(".sql") && f < upTo)
     .sort()) {
     db.exec(readFileSync(join(MIGRATIONS_DIR, file), "utf-8"));
   }
@@ -129,7 +129,9 @@ describe("0098 publication_reviews: columns", () => {
 describe("0098 adds one table and two indexes, and no column anywhere else", () => {
   test("datasets and publication_requests have the columns they had before 0098", () => {
     const before = dbBefore0098();
-    const after = freshDb();
+    // Through 0098 only: a later migration may add a column to these tables (0101 did, to
+    // dataset_versions), and this test is about what 0098 itself did.
+    const after = dbBefore0098("0099");
     for (const table of ["datasets", "publication_requests", "users", "dataset_versions"]) {
       const cols = (db: Database) =>
         (db.query(`PRAGMA table_info(${table})`).all() as ColumnInfo[]).map((c) => c.name);
