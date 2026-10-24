@@ -307,6 +307,12 @@ export interface EmailPreferences {
    * like every category here, so a stored row from before it existed receives it.
    */
   identifier_sweep: boolean;
+  /**
+   * A support ticket was assigned to the admin, or arrived unassigned in a queue they can work, or
+   * was escalated to them (epic #1893 phase 3, ADR 0111). Its own category so an admin can leave
+   * the ticket stream without losing approval or publication mail. Opted in by default.
+   */
+  support_tickets: boolean;
 }
 
 export type EmailCategory = keyof EmailPreferences;
@@ -317,6 +323,7 @@ export const DEFAULT_EMAIL_PREFERENCES: EmailPreferences = {
   announcements: true,
   dataset_anonymity: true,
   identifier_sweep: true,
+  support_tickets: true,
 };
 
 interface ResendResponse {
@@ -346,6 +353,7 @@ export function parseEmailPreferences(raw: string | null): EmailPreferences {
       // every current admin no anonymity mail at all.
       dataset_anonymity: parsed.dataset_anonymity !== false,
       identifier_sweep: parsed.identifier_sweep !== false,
+      support_tickets: parsed.support_tickets !== false,
     };
   } catch (err) {
     console.error("Corrupt email_preferences JSON, defaulting to all enabled:", raw, err);

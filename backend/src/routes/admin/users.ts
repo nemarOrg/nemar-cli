@@ -1822,6 +1822,8 @@ export function registerUsersRoutes(admin: AdminRouter): void {
     dataset_anonymity: z.boolean().optional(),
     /** Epic #1610 phase 5 (ADR 0088): the identifier sweep's weekly report. */
     identifier_sweep: z.boolean().optional(),
+    /** Epic #1893 phase 3 (ADR 0111): support tickets assigned, unassigned or escalated to you. */
+    support_tickets: z.boolean().optional(),
   });
 
   /**
@@ -1872,6 +1874,7 @@ export function registerUsersRoutes(admin: AdminRouter): void {
       announcements: body.announcements ?? current.announcements,
       dataset_anonymity: body.dataset_anonymity ?? current.dataset_anonymity,
       identifier_sweep: body.identifier_sweep ?? current.identifier_sweep,
+      support_tickets: body.support_tickets ?? current.support_tickets,
     };
 
     await db
