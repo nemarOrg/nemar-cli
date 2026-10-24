@@ -90,7 +90,7 @@ Measured staleness is real: `on004362` missed upstream's 1.0.1 metadata fix (#18
 A re-pull pull request is machine clean when all of these hold:
 
 - `AUTO_REPULL_MERGE_ENABLED` is on, and the pull request is the one `upstream_repulls` recorded for this re-pull (its branch, number and head SHA);
-- the plan had zero unexplained paths against the pure-mirror rule, and, for the N.0.1 pull request, zero conflicts;
+- the plan had zero unexplained paths against the pure-mirror rule, so there are no corrections to replay and no conflicts: the Worker never merges an N.0.1 pull request, because N.0.1 exists only when a correction does, and an administrator merges it;
 - the identifier screen, dispatched with `ref=<head sha>` and a callback bound to the re-pull row, says `clear`: never `unchecked`, never `rerun`, and never `acknowledge`, which needs a person (ADR 0086);
 - BIDS validation and `version-check` are green;
 - the pull request's head equals the screened SHA;
