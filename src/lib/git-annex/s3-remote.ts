@@ -593,17 +593,21 @@ export type OriginAnnexState = "merged" | "absent" | "failed";
 
 /**
  * Step 4b of prepare: fetch origin's git-annex branch and merge it into the clone's, and say which
- * of {@link OriginAnnexState} it reached. Only git's "couldn't find remote ref" is `absent`; any
- * other failure is `failed`, never mistaken for an origin with no branch.
+ * of {@link OriginAnnexState} it reached. `absent` is `git ls-remote --exit-code`'s status 2 (origin
+ * answered and has no such ref), never git's message, which is localized; any other failure is
+ * `failed`, never mistaken for an origin with no branch.
  */
 export async function fetchOriginAnnexBranch(
   datasetPath: string,
 ): Promise<{ state: OriginAnnexState; error?: string }> {
+  const listed = await runCommand(
+    ["git", "ls-remote", "--exit-code", "origin", "refs/heads/git-annex"],
+    { cwd: datasetPath },
+  );
+  if (listed.exitCode === 2) return { state: "absent" };
+  if (listed.exitCode !== 0) return { state: "failed", error: listed.stderr.trim() };
   const fetched = await runCommand(["git", "fetch", "origin", "git-annex"], { cwd: datasetPath });
-  if (fetched.exitCode !== 0) {
-    if (/couldn't find remote ref/i.test(fetched.stderr)) return { state: "absent" };
-    return { state: "failed", error: fetched.stderr.trim() };
-  }
+  if (fetched.exitCode !== 0) return { state: "failed", error: fetched.stderr.trim() };
   const merged = await runCommand(["git", "annex", "merge"], { cwd: datasetPath });
   if (merged.exitCode !== 0) return { state: "failed", error: merged.stderr.trim() };
   return { state: "merged" };

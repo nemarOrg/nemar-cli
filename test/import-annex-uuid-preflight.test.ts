@@ -97,6 +97,28 @@ function bucketHolds(nemarId: string, uuid: string): void {
   standin.putObject(BUCKET, `${nemarId}/objects/annex-uuid`, new TextEncoder().encode(`${uuid}\n`));
 }
 
+/**
+ * Run `fn` with git speaking German, where the locale exists (git falls back to English when it
+ * does not, so the assertions are on the outcome, never on a message). Restored with
+ * Reflect.deleteProperty: assigning undefined to process.env stores the string "undefined".
+ */
+async function inGerman<T>(fn: () => Promise<T>): Promise<T> {
+  const keys = ["LC_ALL", "LANG", "LANGUAGE"] as const;
+  const saved = keys.map((k) => process.env[k]);
+  process.env.LC_ALL = "de_DE.UTF-8";
+  process.env.LANG = "de_DE.UTF-8";
+  process.env.LANGUAGE = "de";
+  try {
+    return await fn();
+  } finally {
+    keys.forEach((k, i) => {
+      const v = saved[i];
+      if (v === undefined) Reflect.deleteProperty(process.env, k);
+      else process.env[k] = v;
+    });
+  }
+}
+
 function preflight(repo: string, nemarId: string, originAnnex: OriginAnnexState = "absent") {
   return preflightBucketAnnexUuid(repo, {
     bucket: BUCKET,
@@ -260,6 +282,8 @@ describe("Step 4b says which of merged, absent and failed it reached", () => {
     expect((await fetchOriginAnnexBranch(clone)).state).toBe("merged");
     await run(["git", "remote", "set-url", "origin", withoutBranch], clone);
     expect((await fetchOriginAnnexBranch(clone)).state).toBe("absent");
+    // The same in German: absent is read from a status, never from git's localized message.
+    expect((await inGerman(() => fetchOriginAnnexBranch(clone))).state).toBe("absent");
     await run(["git", "remote", "set-url", "origin", join(scratch.root, "no-such-origin")], clone);
     const failed = await fetchOriginAnnexBranch(clone);
     expect(failed.state).toBe("failed");

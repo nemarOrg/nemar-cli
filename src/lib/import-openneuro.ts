@@ -377,21 +377,27 @@ export interface ReimportBase {
  * `released` is called only in that case, and an error from it is a plain failure: not knowing
  * whether a dataset is released must never read as "unreleased".
  *
- * An origin with no `main` (git's "couldn't find remote ref main") is a first import. Any other
- * failure to fetch it throws: an origin that could not be asked is not one with nothing to guard.
- * A failed hard reset still warns and falls back to the normal push path, as before.
+ * An origin with no `main` is a first import, told by `git ls-remote --exit-code`'s status 2 (no
+ * matching ref), never by git's message, which is localized ("Konnte Remote-Referenz main nicht
+ * finden"; see src/lib/git-annex/init.ts on keying on statuses). Any other failure to ask or to
+ * fetch throws: an origin that could not be asked is not one with nothing to guard. A failed hard
+ * reset still warns and falls back to the normal push path, as before.
  */
 export async function baseOnOriginMain(
   datasetPath: string,
   args: { sourceId: string; importTag: string; nemarId: string; released: () => Promise<boolean> },
 ): Promise<ReimportBase> {
-  const originMainFetch = await runCommand(["git", "fetch", "origin", "main"], {
-    cwd: datasetPath,
-  });
+  const originHasMain = await runCommand(
+    ["git", "ls-remote", "--exit-code", "origin", "refs/heads/main"],
+    { cwd: datasetPath },
+  );
+  // 2: origin answered and has no such ref, a first import.
+  if (originHasMain.exitCode === 2) return { kind: "none", recordedTag: null };
+  const originMainFetch =
+    originHasMain.exitCode === 0
+      ? await runCommand(["git", "fetch", "origin", "main"], { cwd: datasetPath })
+      : originHasMain;
   if (originMainFetch.exitCode !== 0) {
-    if (/couldn't find remote ref/i.test(originMainFetch.stderr)) {
-      return { kind: "none", recordedTag: null };
-    }
     throw new Error(
       `Could not fetch ${args.nemarId}'s main from origin (${originMainFetch.stderr.trim()}). Without it the upstream-moved guard cannot run; nothing was reset or pushed.`,
     );
@@ -482,6 +488,21 @@ export async function baseOnOriginMain(
 }
 
 /**
+ * Whether `origin/main`'s tree has `path`, from `git ls-tree`'s listing (empty for an absent path)
+ * and its status, never from a localized message; `unreadable` when git could not list the tree.
+ */
+async function originMainHasPath(
+  datasetPath: string,
+  path: string,
+): Promise<boolean | "unreadable"> {
+  const listed = await runCommand(["git", "ls-tree", "--name-only", "origin/main", "--", path], {
+    cwd: datasetPath,
+  });
+  if (listed.exitCode !== 0) return "unreadable";
+  return listed.stdout.split("\n").some((line) => line === path);
+}
+
+/**
  * How many lines of `origin/main`'s privacy ledger a retarget would drop with consequence: any line
  * but the importer's own `import-scrubbed` one, an `import-scrubbed` line whose scrub blanked a
  * JSON value or scrubbed a git-held recording (origin's history holds those originals, ADR 0089),
@@ -491,12 +512,13 @@ export async function baseOnOriginMain(
 async function originLedgerLinesARetargetDrops(
   datasetPath: string,
 ): Promise<number | "unreadable"> {
+  const present = await originMainHasPath(datasetPath, LEDGER_REPO_PATH);
+  if (present === "unreadable") return "unreadable";
+  if (!present) return 0;
   const shown = await runCommand(["git", "show", `origin/main:${LEDGER_REPO_PATH}`], {
     cwd: datasetPath,
   });
-  if (shown.exitCode !== 0) {
-    return /does not exist in|exists on disk, but not in/.test(shown.stderr) ? 0 : "unreadable";
-  }
+  if (shown.exitCode !== 0) return "unreadable";
   let count = 0;
   for (const line of shown.stdout.split("\n")) {
     if (line.trim() === "") continue;
@@ -530,16 +552,19 @@ async function originRecordedTag(
   datasetPath: string,
   sourceId: string,
 ): Promise<{ tag: string; why?: undefined } | { tag: null; why: string }> {
+  const present = await originMainHasPath(datasetPath, "dataset_description.json");
+  if (present === "unreadable") {
+    return { tag: null, why: "has a tree git could not list" };
+  }
+  if (!present) return { tag: null, why: "has no dataset_description.json" };
   const shown = await runCommand(["git", "show", "origin/main:dataset_description.json"], {
     cwd: datasetPath,
   });
   if (shown.exitCode !== 0) {
-    return /does not exist in|exists on disk, but not in/.test(shown.stderr)
-      ? { tag: null, why: "has no dataset_description.json" }
-      : {
-          tag: null,
-          why: `has a dataset_description.json git could not read (${shown.stderr.trim()})`,
-        };
+    return {
+      tag: null,
+      why: `has a dataset_description.json git could not read (${shown.stderr.trim()})`,
+    };
   }
   let desc: unknown;
   try {

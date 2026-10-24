@@ -125,6 +125,28 @@ async function reimportClone(bare: string, tag: "1.0.0" | "1.0.1"): Promise<stri
   return dir;
 }
 
+/**
+ * Run `fn` with git speaking German, where the locale exists (git falls back to English when it
+ * does not, so the assertions are on the outcome, never on a message). Restored with
+ * Reflect.deleteProperty: assigning undefined to process.env stores the string "undefined".
+ */
+async function inGerman<T>(fn: () => Promise<T>): Promise<T> {
+  const keys = ["LC_ALL", "LANG", "LANGUAGE"] as const;
+  const saved = keys.map((k) => process.env[k]);
+  process.env.LC_ALL = "de_DE.UTF-8";
+  process.env.LANG = "de_DE.UTF-8";
+  process.env.LANGUAGE = "de";
+  try {
+    return await fn();
+  } finally {
+    keys.forEach((k, i) => {
+      const v = saved[i];
+      if (v === undefined) Reflect.deleteProperty(process.env, k);
+      else process.env[k] = v;
+    });
+  }
+}
+
 function releaseState(released: boolean) {
   const calls = { n: 0 };
   return {
@@ -209,6 +231,60 @@ describe("a released mirror whose upstream moved refuses, before anything moves"
     expect(await git(dir, "rev-parse", "HEAD")).toBe(upstream.commits["1.0.1"]);
     expect(await git(bare, "rev-parse", "main")).toBe(tip);
   }, 60_000);
+});
+
+describe("git's answers are read from statuses, never from its localized messages", () => {
+  test("in German: a first import, a missing description and a missing ledger all read right", async () => {
+    // First import: origin has no main at all.
+    const empty = fresh("origin-empty");
+    mkdirSync(empty, { recursive: true });
+    await git(empty, "init", "-q", "--bare", "-b", "main");
+    const first = await reimportClone(empty, "1.0.1");
+    const state = releaseState(true);
+    const none = await inGerman(() =>
+      baseOnOriginMain(first, {
+        sourceId: UPSTREAM_ID,
+        importTag: "1.0.1",
+        nemarId: NEMAR_ID,
+        released: state.released,
+      }),
+    );
+    expect(none).toEqual({ kind: "none", recordedTag: null });
+
+    // origin/main without a description: the guard is inert and says the file is missing.
+    const { bare } = await originRecordedAt(RECORDED.doiOnly);
+    const editor = fresh("editor-de");
+    await run(["git", "clone", "-q", bare, editor]);
+    await git(editor, "config", "user.email", "test@test.com");
+    await git(editor, "config", "user.name", "Test");
+    await git(editor, "rm", "-q", "dataset_description.json");
+    await git(editor, "commit", "-q", "-m", "no description");
+    await git(editor, "push", "-q", "origin", "main");
+    const dir = await reimportClone(bare, "1.0.1");
+    const inert = await inGerman(() =>
+      baseOnOriginMain(dir, {
+        sourceId: UPSTREAM_ID,
+        importTag: "1.0.1",
+        nemarId: NEMAR_ID,
+        released: state.released,
+      }),
+    );
+    expect(inert.unrecorded).toBe("has no dataset_description.json");
+    expect(state.calls.n).toBe(0);
+
+    // A moved, unreleased mirror with no ledger at all retargets: absent is not unreadable.
+    const moved = await originRecordedAt(RECORDED.doiOnly);
+    const clone = await reimportClone(moved.bare, "1.0.1");
+    const retarget = await inGerman(() =>
+      baseOnOriginMain(clone, {
+        sourceId: UPSTREAM_ID,
+        importTag: "1.0.1",
+        nemarId: NEMAR_ID,
+        released: async () => false,
+      }),
+    );
+    expect(retarget.kind).toBe("retarget");
+  }, 120_000);
 });
 
 describe("the guard cannot be skipped by a branch or a failed fetch", () => {
