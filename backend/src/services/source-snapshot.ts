@@ -81,7 +81,8 @@ export type DescriptionFetch =
 
 /**
  * `dataset_description.json` at a ref (a tag, or a branch for the control read of the backfill)
- * through the authenticated raw CDN. Only a 404 is `absent`; any other status, a network
+ * through the authenticated raw CDN (`org` defaults to nemarDatasets; the upstream staleness
+ * report reads OpenNeuro's own organization). Only a 404 is `absent`; any other status, a network
  * failure, a timeout and a body over {@link DESCRIPTION_MAX_BYTES} are `error`, which a caller
  * never folds into a verdict.
  */
@@ -90,12 +91,14 @@ export async function fetchDescriptionAtRef(
   repo: string,
   ref: string,
   pat: string,
+  org?: string,
 ): Promise<DescriptionFetch> {
   const url = rawContentUrl(
     env.GITHUB_RAW_BASE ?? GITHUB_RAW_ORIGIN,
     repo,
     ref,
     "dataset_description.json",
+    org,
   );
   let response: Response;
   try {

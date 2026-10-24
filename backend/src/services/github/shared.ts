@@ -24,6 +24,9 @@ export function GITHUB_API(): string {
 // Dataset repos (nm000XXX) live in nemarDatasets org; tooling repos live in nemarOrg
 export const ORG_NAME = "nemarDatasets";
 
+/** OpenNeuro's own GitHub organization, whose repositories NEMAR's mirrors are copied from. */
+export const OPENNEURO_GITHUB_ORG = "OpenNeuroDatasets";
+
 /**
  * GitHub's raw content host.
  *
@@ -43,18 +46,25 @@ export const GITHUB_RAW_ORIGIN = "https://raw.githubusercontent.com";
 /**
  * `<base>/<org>/<repo>/<ref>/<encoded path>` -- the one raw-content URL
  * builder. `ref` is a tag, branch or commit SHA; `repo` is the dataset id,
- * since nemarDatasets names each dataset's repo after its own id.
+ * since nemarDatasets names each dataset's repo after its own id. `org` defaults to
+ * nemarDatasets; the upstream staleness report reads {@link OPENNEURO_GITHUB_ORG}.
  *
  * Per-segment `encodeURIComponent` rather than `encodeURI`: a BIDS path
  * segment can contain characters that are legal in a filename and meaningful
  * in a URL.
  */
-export function rawContentUrl(base: string, repo: string, ref: string, path: string): string {
+export function rawContentUrl(
+  base: string,
+  repo: string,
+  ref: string,
+  path: string,
+  org: string = ORG_NAME,
+): string {
   const encoded = path
     .split("/")
     .map((seg) => encodeURIComponent(seg))
     .join("/");
-  return `${base}/${ORG_NAME}/${repo}/${ref}/${encoded}`;
+  return `${base}/${org}/${repo}/${ref}/${encoded}`;
 }
 
 export function errText(e: unknown): string {

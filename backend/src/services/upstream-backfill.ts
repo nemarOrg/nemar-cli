@@ -171,7 +171,7 @@ type Examined =
     };
 
 /** Run `work` over `items`, at most `width` at a time, keeping the order of the results. */
-async function mapBounded<T, R>(
+export async function mapBounded<T, R>(
   items: readonly T[],
   width: number,
   work: (item: T) => Promise<R>,
