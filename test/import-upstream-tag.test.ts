@@ -10,7 +10,11 @@
 
 import { describe, expect, test } from "bun:test";
 import { isOpenNeuroTag, sameUpstreamTag } from "../shared/openneuro-tag";
-import { hasSourceEntryFor, recordedUpstreamTag } from "../src/lib/import-upstream-tag";
+import {
+  hasSourceEntryFor,
+  readRecordedUpstreamTag,
+  recordedUpstreamTag,
+} from "../src/lib/import-upstream-tag";
 
 const ON003645 = {
   Name: "Face processing MEEG dataset with HED annotation",
@@ -158,6 +162,69 @@ describe("unknown is an answer, never a guess", () => {
     ]) {
       expect(recordedUpstreamTag(desc, ds)).toBeNull();
     }
+  });
+});
+
+describe("only OpenNeuro's own URLs, and its GitHub mirror's, name an OpenNeuro snapshot", () => {
+  const ds = "ds004362";
+  test("a URL on any other host is not this dataset's, whatever its path says", () => {
+    const elsewhere = "https://example.org/datasets/ds004362/versions/9.9.9";
+    expect(recordedUpstreamTag({ SourceDatasets: [{ URL: elsewhere }] }, ds)).toBeNull();
+    expect(hasSourceEntryFor({ SourceDatasets: [{ URL: elsewhere }] }, ds)).toBe(false);
+    // Beside a real entry it is another source, not a disagreement.
+    expect(
+      recordedUpstreamTag(
+        {
+          SourceDatasets: [
+            { DOI: "doi:10.18112/openneuro.ds004362.v1.0.0" },
+            { URL: elsewhere, Version: "9.9.9" },
+          ],
+        },
+        ds,
+      ),
+    ).toBe("1.0.0");
+    for (const URL of [
+      "https://openneuro.org.example.com/datasets/ds004362/versions/9.9.9",
+      "https://gitlab.com/OpenNeuroDatasets/ds004362/tree/9.9.9",
+      "ftp://openneuro.org/datasets/ds004362/versions/9.9.9",
+    ]) {
+      expect(recordedUpstreamTag({ SourceDatasets: [{ URL }] }, ds)).toBeNull();
+    }
+  });
+
+  test("the GitHub mirror's forms", () => {
+    for (const URL of [
+      "https://github.com/OpenNeuroDatasets/ds004362/tree/1.0.1",
+      "https://github.com/OpenNeuroDatasets/ds004362/releases/tag/1.0.1",
+      "https://github.com/openneurodatasets/ds004362/tree/1.0.1",
+    ]) {
+      expect(recordedUpstreamTag({ SourceDatasets: [{ URL }] }, ds)).toBe("1.0.1");
+    }
+    const untagged = {
+      SourceDatasets: [{ URL: "https://github.com/OpenNeuroDatasets/ds004362.git" }],
+    };
+    expect(hasSourceEntryFor(untagged, ds)).toBe(true);
+    expect(recordedUpstreamTag(untagged, ds)).toBeNull();
+  });
+});
+
+describe("why a description records nothing", () => {
+  const ds = "ds004362";
+  test("no entry with a tag, or entries that disagree, each said as such", () => {
+    expect(readRecordedUpstreamTag({ Version: "1.0.0" }, ds)).toEqual({ state: "none", tag: null });
+    expect(
+      readRecordedUpstreamTag(
+        {
+          SourceDatasets: [
+            null,
+            { DOI: "doi:10.18112/openneuro.ds004362.v1.0.0" },
+            { URL: "https://openneuro.org/datasets/ds004362/versions/1.0.1" },
+          ],
+        },
+        ds,
+      ),
+    ).toEqual({ state: "disagree", tag: null, tags: ["1.0.0", "1.0.1"] });
+    expect(readRecordedUpstreamTag(ON004362, ds)).toEqual({ state: "recorded", tag: "1.0.0" });
   });
 });
 

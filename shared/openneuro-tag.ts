@@ -38,11 +38,56 @@ export function sameUpstreamTag(a: string, b: string): boolean {
 }
 
 /**
- * The OpenNeuro dataset a DOI belongs to (`ds004362` for `doi:10.18112/openneuro.ds004362.v1.0.0`,
- * with or without its version, `doi:` or a resolver prefix), or null for any other DOI.
+ * What a DOI says about an OpenNeuro snapshot: the dataset (`ds004362` for
+ * `doi:10.18112/openneuro.ds004362.v1.0.0`) and, when the DOI names a version, the tag without its
+ * `v` (`1.0.0`; null for the concept DOI). `doi:` and resolver prefixes and letter case are
+ * presentation. Null for any DOI that is not OpenNeuro's.
  */
-export function openNeuroDatasetOfDoi(doi: string): string | null {
+export function openNeuroDoiParts(doi: string): { ds: string; tag: string | null } | null {
   const bare = doi.trim().replace(/^(?:doi:|https?:\/\/(?:dx\.)?doi\.org\/)/i, "");
-  const m = /^10\.18112\/openneuro\.(ds\d{6})(?:\.v\S+)?$/i.exec(bare);
-  return m ? (m[1] as string).toLowerCase() : null;
+  const m = /^10\.18112\/openneuro\.(ds\d{6})(?:\.(v[^/\s]+))?$/i.exec(bare);
+  if (!m) return null;
+  return { ds: (m[1] as string).toLowerCase(), tag: m[2] ? normalizeUpstreamTag(m[2]) : null };
+}
+
+/** The OpenNeuro dataset a DOI belongs to, or null for any other DOI (see {@link openNeuroDoiParts}). */
+export function openNeuroDatasetOfDoi(doi: string): string | null {
+  return openNeuroDoiParts(doi)?.ds ?? null;
+}
+
+/**
+ * What a URL says about an OpenNeuro snapshot, read only from the two places that name one:
+ * OpenNeuro's own pages (`https://openneuro.org/datasets/<ds>`, and `/versions/<tag>` under it) and
+ * OpenNeuro's GitHub mirror (`https://github.com/OpenNeuroDatasets/<ds>`, with `.git`, `/tree/<tag>`
+ * or `/releases/tag/<tag>`). Any other host, however its path reads, names no OpenNeuro dataset.
+ */
+export function openNeuroUrlParts(url: string): { ds: string; tag: string | null } | null {
+  let u: URL;
+  try {
+    u = new URL(url.trim());
+  } catch {
+    return null;
+  }
+  if (u.protocol !== "https:" && u.protocol !== "http:") return null;
+  const host = u.hostname.toLowerCase();
+  const segments = u.pathname.split("/").filter(Boolean);
+  let ds: string | undefined;
+  let tag: string | undefined;
+  if (host === "openneuro.org" || host === "www.openneuro.org") {
+    if (segments[0] !== "datasets") return null;
+    ds = segments[1];
+    if (segments[2] === "versions") tag = segments[3];
+  } else if (host === "github.com" || host === "www.github.com") {
+    if (segments[0]?.toLowerCase() !== "openneurodatasets") return null;
+    ds = segments[1]?.replace(/\.git$/i, "");
+    if (segments[2] === "tree") tag = segments[3];
+    else if (segments[2] === "releases" && segments[3] === "tag") tag = segments[4];
+  } else {
+    return null;
+  }
+  if (ds === undefined || !/^ds\d{6}$/i.test(ds)) return null;
+  return {
+    ds: ds.toLowerCase(),
+    tag: tag !== undefined ? normalizeUpstreamTag(tag) : null,
+  };
 }
