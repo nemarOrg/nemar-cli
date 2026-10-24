@@ -8416,7 +8416,10 @@ export function formatBroadcastStatus(s: BroadcastStatusResponse): string[] {
     const pending = s.queued_count - s.delivered_count - s.failure_count - s.unknown_count;
     if (pending > 0) lines.push(`  Pending: ${pending}`);
   }
-  for (const address of s.failed_recipients) lines.push(chalk.red(`  Failed: ${address}`));
+  if (s.failed_recipients.length > 0) {
+    lines.push("  Failed addresses are shown redacted and may not be unique:");
+    for (const address of s.failed_recipients) lines.push(chalk.red(`  Failed: ${address}`));
+  }
   return lines;
 }
 
@@ -8552,15 +8555,17 @@ adminCommand
         const result = await sendBroadcast(requestPayload);
 
         if ("broadcast_id" in result) {
-          if (result.status === "queued" && result.failure_count === 0) {
+          if (result.error === "queue_enqueue_failed") {
+            spinner.warn(
+              `Enqueue failed (ID ${result.broadcast_id}): ${result.recipient_count} queued, ${result.failure_count} not queued; check progress with: nemar admin notify --status ${result.broadcast_id}`,
+            );
+          } else if (result.status === "queued" && result.failure_count === 0) {
             spinner.succeed(
               `Queued ${result.recipient_count} announcement(s) (ID ${result.broadcast_id}); check progress with: nemar admin notify --status ${result.broadcast_id}`,
             );
           } else if (result.failure_count > 0) {
             spinner.warn(
-              result.status === "queued" || result.status === "done"
-                ? `Enqueue failed: ${result.recipient_count} queued, ${result.failure_count} not queued (ID ${result.broadcast_id})`
-                : `Email send: ${result.recipient_count} delivered, ${result.failure_count} failed`,
+              `Email send: ${result.recipient_count} delivered, ${result.failure_count} failed`,
             );
             for (const email of result.failed_recipients) {
               console.log(chalk.red(`  Failed: ${email}`));

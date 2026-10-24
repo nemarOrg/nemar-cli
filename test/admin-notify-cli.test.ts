@@ -132,6 +132,31 @@ describe("nemar admin notify", () => {
     }
   });
 
+  test("a 200 queue_enqueue_failed body shows the ID and both counts", async () => {
+    const server = startServer({
+      "POST /admin/notify": {
+        broadcast_id: 9,
+        status: "queued",
+        recipient_count: 100,
+        failure_count: 50,
+        failed_recipients: [],
+        suppressed_count: 0,
+        error: "queue_enqueue_failed",
+      },
+    });
+    try {
+      const r = await runCli(
+        ["admin", "notify", "--to", "all", "--subject", "S", "--body", "B", "--yes"],
+        server.url,
+      );
+      expect(r.exitCode).toBe(0);
+      expect(r.stderr).toContain("Enqueue failed (ID 9): 100 queued, 50 not queued");
+      expect(r.stderr).toContain("nemar admin notify --status 9");
+    } finally {
+      server.stop();
+    }
+  });
+
   test("--status prints the counts without needing --subject", async () => {
     const server = startServer({ "GET /admin/notify/7": STATUS_BODY });
     try {
@@ -144,6 +169,7 @@ describe("nemar admin notify", () => {
       expect(r.stdout).toContain("Failed: 1");
       expect(r.stdout).toContain("Unconfirmed: 1");
       expect(r.stdout).toContain("Pending: 2");
+      expect(r.stdout).toContain("shown redacted and may not be unique");
       expect(r.stdout).toContain("a***@nemar.test");
     } finally {
       server.stop();
