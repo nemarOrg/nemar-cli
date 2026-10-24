@@ -71,13 +71,13 @@ import {
   missingBlobs,
   objectFormat,
   originUrl,
+  planSources,
   readAnnexUuidMarker,
   readBlobs,
   readPinsAt,
   readRemoteLog,
   remoteEnv,
   upstreamUrl,
-  usesTestBases,
 } from "./sources.js";
 
 export const NEMAR_METADATA_PATH = ".nemar/metadata.json";
@@ -704,7 +704,7 @@ export async function planRepull(opts: PlanOptions): Promise<PlanOutcome> {
       digest: planDigest(body),
       created_at: (opts.now ?? new Date()).toISOString(),
       environment: opts.environment,
-      sources: usesTestBases(env) ? "test-bases" : "remotes",
+      sources: planSources(env, opts.openNeuroGraphqlUrl),
       preflight,
       executable,
       body,

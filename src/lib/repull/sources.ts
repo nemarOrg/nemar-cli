@@ -81,6 +81,14 @@ export function openNeuroGraphqlUrl(env: Env): string | undefined {
   );
 }
 
+/**
+ * What a plan file records in `sources`: `test-bases` when a test base or a stand-in OpenNeuro
+ * endpoint (from the environment, or passed by a library caller) redirected a read, else `remotes`.
+ */
+export function planSources(env: Env, openNeuroUrl: string | undefined): "test-bases" | "remotes" {
+  return usesTestBases(env) || openNeuroUrl !== undefined ? "test-bases" : "remotes";
+}
+
 /** True when any test base redirects a remote; the plan file records it. */
 export function usesTestBases(env: Env): boolean {
   return (
