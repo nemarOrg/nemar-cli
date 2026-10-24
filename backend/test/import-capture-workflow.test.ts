@@ -22,7 +22,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { classifyImportFailure } from "../src/services/import-failure-cause";
@@ -285,16 +285,22 @@ describe("the reporters survive a log with no failure marker", () => {
         'await refuseImport(new ImportRefused(OPENNEURO_MIRROR_LAG_MARKER, "ds000001: upstream tag 1.0.2 is not on github.com/OpenNeuroDatasets/ds000001 yet. Nothing was created; the retry engine retries it."), "on000001", {});',
       ].join("\n"),
     );
-    const child = Bun.spawn(["bun", script], {
-      env: { ...process.env, FORCE_COLOR: "1" },
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    const [childOut, childErr] = await Promise.all([
-      new Response(child.stdout).text(),
-      new Response(child.stderr).text(),
-    ]);
-    expect(await child.exited).toBe(1);
+    let childOut: string;
+    let childErr: string;
+    try {
+      const child = Bun.spawn(["bun", script], {
+        env: { ...process.env, FORCE_COLOR: "1" },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      [childOut, childErr] = await Promise.all([
+        new Response(child.stdout).text(),
+        new Response(child.stderr).text(),
+      ]);
+      expect(await child.exited).toBe(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
     const { code, out } = await runReporter("prepare", childOut + childErr);
     expect(code).toBe(0);
     const msg = out.trim();
