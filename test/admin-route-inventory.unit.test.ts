@@ -41,6 +41,7 @@ const EXPECTED_ENTRIES: Record<string, number> = {
   "GET /mail/availability/:userId": 1,
   "PUT /mail/availability/:userId": 1,
   "POST /mail/reprocess": 1,
+  "PUT /mail/tickets/:id/summary": 1,
 
   // Users / accounts
   "GET /users": 1,
@@ -250,7 +251,7 @@ describe("admin route inventory", () => {
   });
 
   test("entry total is pinned", () => {
-    expect(adminRoutes.routes.length).toBe(169);
+    expect(adminRoutes.routes.length).toBe(170);
   });
 
   // The count pin above can't see a SWAP of the router-level middleware

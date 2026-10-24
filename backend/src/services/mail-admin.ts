@@ -61,6 +61,10 @@ export interface TicketRow {
   created_at: string;
   updated_at: string;
   last_message_at: string;
+  summary: string | null;
+  summary_author_user_id: number | null;
+  summarized_at: string | null;
+  purged_at: string | null;
 }
 
 export function toSummary(row: TicketRow): TicketSummary {
@@ -77,7 +81,20 @@ export function toSummary(row: TicketRow): TicketSummary {
     created_at: row.created_at,
     updated_at: row.updated_at,
     last_message_at: row.last_message_at,
+    has_summary: row.summary !== null,
+    purged: row.purged_at !== null,
   };
+}
+
+/** A purged ticket is read-only: its raw record is gone, so nothing may be added to it. */
+function assertNotPurged(ticket: TicketRow): void {
+  if (ticket.purged_at !== null) {
+    throw new MailAdminError(
+      409,
+      "ticket_purged",
+      "This ticket was purged under the retention policy and can no longer be changed.",
+    );
+  }
 }
 
 /** The ticket, if `viewer` may see it; else null, which every caller turns into `not_found`. */
@@ -110,6 +127,7 @@ export interface ListFilters {
   queue?: string;
   assignee?: string;
   q?: string;
+  summary?: "missing";
   cursor?: string;
   limit: number;
 }
@@ -124,10 +142,13 @@ export async function listTickets(
   const vis = ticketVisibleTo(viewer, "t");
   const where = [vis.sql];
   const binds: unknown[] = [...vis.binds];
+  if (f.summary === "missing") {
+    where.push("t.status = 'closed' AND t.purged_at IS NULL AND t.summary IS NULL");
+  }
   if (f.status) {
     where.push("t.status = ?");
     binds.push(f.status);
-  } else {
+  } else if (f.summary !== "missing") {
     where.push("t.status NOT IN ('spam', 'closed')");
   }
   if (f.queue) {
@@ -205,6 +226,10 @@ export async function ticketDetail(db: D1Database, ticket: TicketRow) {
     ticket: toSummary(ticket),
     tags: (tags.results ?? []).map((t) => t.tag),
     messages: messages.results ?? [],
+    summary: ticket.summary,
+    summary_author_user_id: ticket.summary_author_user_id,
+    summarized_at: ticket.summarized_at,
+    purged_at: ticket.purged_at,
     events: (events.results ?? []).map(
       (e): TicketEvent => ({
         id: e.id,
@@ -352,6 +377,7 @@ export async function replyToTicket(
 ): Promise<ReplyOutcome> {
   const db = env.DB;
   const ticket = await requireVisibleTicket(db, viewer, ticketId);
+  assertNotPurged(ticket);
   if (ticket.status === "spam") {
     throw new MailAdminError(409, "ticket_is_spam", "A spam ticket cannot be replied to.");
   }
@@ -608,6 +634,7 @@ export async function addNote(
   text: string,
 ): Promise<number> {
   const ticket = await requireVisibleTicket(db, viewer, ticketId);
+  assertNotPurged(ticket);
   await db.batch([
     db
       .prepare(
@@ -632,6 +659,7 @@ export async function assignTicket(
   userId: number | null,
 ): Promise<TicketSummary> {
   const ticket = await requireVisibleTicket(db, viewer, ticketId);
+  assertNotPurged(ticket);
   if (userId !== null) {
     const ok = await isEligibleAssignee(
       db,
@@ -672,6 +700,7 @@ export async function setTicketStatus(
   status: SettableStatus,
 ): Promise<TicketSummary> {
   const ticket = await requireVisibleTicket(db, viewer, ticketId);
+  assertNotPurged(ticket);
   if (ticket.status === status) return toSummary(ticket);
   if (
     (ticket.status === "closed" || ticket.status === "spam") &&
@@ -721,6 +750,7 @@ export async function escalateTicket(
   reason: string | null,
 ): Promise<{ ticket: TicketSummary; ownerId: number }> {
   const ticket = await requireVisibleTicket(db, viewer, ticketId);
+  assertNotPurged(ticket);
   if (ticket.status === "escalated") {
     throw new MailAdminError(409, "already_escalated", "This ticket is already escalated.");
   }
@@ -758,4 +788,62 @@ export async function escalateTicket(
     }),
   ]);
   return { ticket: await reload(db, ticket.id), ownerId };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Summary (kept after the retention purge)
+// ---------------------------------------------------------------------------------------------
+
+/** A simple `local@domain.tld`, enough to refuse the common way an address ends up in a summary. */
+const ADDRESS_IN_TEXT = /[^\s@]+@[^\s@]+\.[^\s@]+/;
+
+/** Whether `text` contains something shaped like an email address. */
+export function containsEmailAddress(text: string): boolean {
+  return ADDRESS_IN_TEXT.test(text);
+}
+
+/**
+ * Store the summary kept after the purge, replacing an earlier one. The viewer must be able to see
+ * the ticket (the same predicate as every route, so a restricted ticket is summarized only by an
+ * owner). Records who wrote it and a `summary` event with no text. Refused for a purged ticket and
+ * for a text holding an email address.
+ */
+export async function setTicketSummary(
+  db: D1Database,
+  viewer: Viewer,
+  ticketId: number,
+  summary: string,
+): Promise<TicketSummary> {
+  const ticket = await requireVisibleTicket(db, viewer, ticketId);
+  assertNotPurged(ticket);
+  if (containsEmailAddress(summary)) {
+    throw new MailAdminError(
+      400,
+      "summary_has_address",
+      "The summary contains an email address. Describe the request and the outcome without names, addresses or quoted text.",
+    );
+  }
+  await db.batch([
+    db
+      .prepare(
+        `UPDATE mail_tickets SET summary = ?, summary_author_user_id = ?,
+            summarized_at = datetime('now'), updated_at = datetime('now')
+          WHERE id = ? AND purged_at IS NULL`,
+      )
+      .bind(summary, viewer.id, ticket.id),
+    db
+      .prepare(
+        `INSERT INTO mail_ticket_events (ticket_id, kind, actor_user_id, detail)
+         SELECT ?, 'summary', ?, NULL WHERE changes() > 0`,
+      )
+      .bind(ticket.id, viewer.id),
+  ]);
+  const after = await db
+    .prepare("SELECT * FROM mail_tickets WHERE id = ?")
+    .bind(ticket.id)
+    .first<TicketRow>();
+  if (!after) throw new MailAdminError(404, "not_found", "No such ticket.");
+  // The purge can run between the read and the write; the guarded update then wrote nothing.
+  assertNotPurged(after);
+  return toSummary(after);
 }

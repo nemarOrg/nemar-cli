@@ -225,10 +225,11 @@ interface TicketHead {
   excluded_user_id: number | null;
   assignee_user_id: number | null;
   requester_email: string;
+  purged_at: string | null;
 }
 
 const HEAD_COLUMNS =
-  "t.id, t.status, t.restricted, t.queue_tag, t.excluded_user_id, t.assignee_user_id, t.requester_email";
+  "t.id, t.status, t.restricted, t.queue_tag, t.excluded_user_id, t.assignee_user_id, t.requester_email, t.purged_at";
 
 async function findByRef(db: D1Database, plus: string): Promise<TicketHead | null> {
   const m = REF_TAG.exec(plus);
@@ -423,6 +424,7 @@ async function ingestNew(db: D1Database, input: InboundTicketInput): Promise<Ing
     if (candidate) {
       let reason: string | null = null;
       if (candidate.status === "spam") reason = "candidate_is_spam";
+      else if (candidate.purged_at !== null) reason = "candidate_purged";
       else if (queueRestricted && candidate.restricted !== 1) reason = "restriction_mismatch";
       else if (!(await isTicketParticipant(db, candidate, fromAddr)))
         reason = "sender_not_on_ticket";
@@ -587,9 +589,16 @@ export async function reprocessRawKey(
   db: D1Database,
   bucket: R2Bucket,
   rawKey: string,
-): Promise<IngestResult | { outcome: "missing" }> {
+): Promise<IngestResult | { outcome: "missing" } | { outcome: "purged" }> {
   const object = await bucket.get(rawKey);
   if (!object) return { outcome: "missing" };
+  // The retention purge deleted this message's row; rebuilding it would bring a purged
+  // conversation back as a new ticket. The raw object should be gone by now (its lifecycle rule).
+  const purged = await db
+    .prepare("SELECT 1 AS ok FROM mail_purged_raw_keys WHERE raw_key = ?")
+    .bind(rawKey)
+    .first<{ ok: number }>();
+  if (purged) return { outcome: "purged" };
   const meta = object.customMetadata ?? {};
   const receivedAt = new Date(meta.received_at ?? "");
   return ingestInboundMessage(db, {
