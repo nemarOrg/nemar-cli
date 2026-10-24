@@ -16,6 +16,7 @@ import { describe, expect, test } from "bun:test";
 import {
   compareSourceTags,
   isOwnSourceEntry,
+  mirrorFlagOf,
   mirroredTagOf,
   openNeuroSourceId,
   sourceSnapshotOf,
@@ -305,5 +306,62 @@ describe("mirroredTagOf: the highest NEMAR version speaks", () => {
   test("a row with a tag but no recognized basis is never trusted as known", () => {
     expect(mirroredTagOf([row("1.0.0", "2.0.2", null)]).state).toBe("unexamined");
     expect(mirroredTagOf([row("1.0.0", "2.0.2", "guess")]).state).toBe("unexamined");
+  });
+});
+
+describe("mirrorFlagOf: a version of an OpenNeuro mirror is a mirror only when its tag is known", () => {
+  const doi = { source_version: "2.0.2", source_version_basis: "doi" };
+  const lineage = { source_version: "3.0.0", source_version_basis: "lineage" };
+  const unknown = { source_version: null, source_version_basis: "unknown" };
+  const never = { source_version: null, source_version_basis: null };
+
+  test("true: an N.0.0 of an on###### dataset with a known tag, in any stored form", () => {
+    expect(mirrorFlagOf("on000001", { version: "1.0.0", ...doi })).toBe(true);
+    expect(mirrorFlagOf("on000001", { version: "v4.0.0", ...lineage })).toBe(true);
+    expect(mirrorFlagOf("on000001", { version: "10.0.0", ...doi })).toBe(true);
+  });
+
+  test("null: an N.0.0 of a mirror whose tag is unknown or was never examined; absent columns too", () => {
+    expect(mirrorFlagOf("on000001", { version: "2.0.0", ...unknown })).toBeNull();
+    expect(mirrorFlagOf("on000001", { version: "3.0.0", ...never })).toBeNull();
+    expect(mirrorFlagOf("on000001", { version: "3.0.0" })).toBeNull();
+    // A basis without a tag is not a known tag either (the table's CHECK forbids the row; the
+    // function does not rely on that).
+    expect(
+      mirrorFlagOf("on000001", {
+        version: "3.0.0",
+        source_version: null,
+        source_version_basis: "doi",
+      }),
+    ).toBeNull();
+    // A tag with no readable basis is not a known tag.
+    expect(
+      mirrorFlagOf("on000001", {
+        version: "3.0.0",
+        source_version: "1.0.0",
+        source_version_basis: null,
+      }),
+    ).toBeNull();
+    expect(
+      mirrorFlagOf("on000001", {
+        version: "3.0.0",
+        source_version: "1.0.0",
+        source_version_basis: "nope",
+      }),
+    ).toBeNull();
+  });
+
+  test("false: a version that is not N.0.0, whatever it knows", () => {
+    for (const version of ["1.0.1", "1.1.0", "v2.0.1", "1.0", "1.0.0.0", "x1.0.0", "1.0.00"]) {
+      expect(mirrorFlagOf("on000001", { version, ...doi })).toBe(false);
+      expect(mirrorFlagOf("on000001", { version, ...never })).toBe(false);
+    }
+  });
+
+  test("false: any dataset that is not an on###### mirror, even with a tag recorded", () => {
+    for (const id of ["nm000200", "xx000001", "ds000001", "on00001", "on0000011", "ON000001"]) {
+      expect(mirrorFlagOf(id, { version: "1.0.0", ...doi })).toBe(false);
+      expect(mirrorFlagOf(id, { version: "1.0.0", ...never })).toBe(false);
+    }
   });
 });

@@ -102,6 +102,7 @@ describe("GET /datasets/:id/versions: the upstream snapshot per version", () => 
         created_at: "2026-02-01 00:00:00",
         source_version: "3.0.0",
         source_version_basis: "lineage",
+        mirror: true,
       },
       {
         version: "v1.0.0",
@@ -110,6 +111,7 @@ describe("GET /datasets/:id/versions: the upstream snapshot per version", () => 
         created_at: "2026-01-01 00:00:00",
         source_version: "2.0.2",
         source_version_basis: "doi",
+        mirror: true,
       },
     ]);
   });
@@ -131,6 +133,11 @@ describe("GET /datasets/:id/versions: the upstream snapshot per version", () => 
     for (const row of rows) {
       expect(Object.keys(row)).toContain("source_version");
       expect(Object.keys(row)).toContain("source_version_basis");
+      expect(Object.keys(row)).toContain("mirror");
     }
+    // The flag: an N.0.0 whose tag was never examined or is unknown is null (not "no"); a
+    // version that is not N.0.0 is false whatever it knows.
+    expect(rows.find((r) => r.version === "v1.0.0")).toMatchObject({ mirror: null });
+    expect(rows.find((r) => r.version === "v1.0.1")).toMatchObject({ mirror: false });
   });
 });

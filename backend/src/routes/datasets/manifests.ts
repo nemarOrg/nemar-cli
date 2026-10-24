@@ -7,6 +7,7 @@
  */
 
 import { toVersionTag } from "../../../../shared/contract/index.js";
+import { mirrorFlagOf } from "../../../../shared/source-snapshot.js";
 import { authMiddleware, optionalAuthMiddleware } from "../../middleware/auth";
 import { getFileContent } from "../../services/github";
 import { getDatasetsToken } from "../../services/github-auth";
@@ -189,7 +190,13 @@ export function registerManifestRoutes(datasetRoutes: DatasetsRouter): void {
     return c.json({
       dataset_id: datasetId,
       current_version: toVersionTag(currentVersion),
-      versions: (versions.results ?? []).map((v) => ({ ...v, version: toVersionTag(v.version) })),
+      versions: (versions.results ?? []).map((v) => ({
+        ...v,
+        version: toVersionTag(v.version),
+        // Derived at read time, never stored (ADR 0111, decision 5): true, false, or null for an
+        // N.0.0 of an OpenNeuro mirror whose tag is unknown or was never examined.
+        mirror: mirrorFlagOf(datasetId, v),
+      })),
     });
   });
 }
