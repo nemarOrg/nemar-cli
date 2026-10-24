@@ -13,7 +13,8 @@
  *  - a transition takes only the allowed edge from the recorded status, writes only the columns
  *    the edge names, and cannot state a merge, a release or a screen;
  *  - the lineage word is written only for a row that may take it.
- * No route here sends mail: the suite has no mail binding and would fail on one.
+ * Mail is pinned by `repull-no-mail-scan.test.ts`, which scans what the re-pull code imports; this
+ * suite has no mail binding, so a route that tried to send would fail here only by accident.
  */
 
 import type { Database } from "bun:sqlite";
@@ -24,7 +25,12 @@ import { adminMiddleware, authMiddleware } from "../src/middleware/auth";
 import { registerUpstreamRepullRoutes } from "../src/routes/admin/upstream-repulls";
 import { deleteDatasetCascade } from "../src/services/deletion";
 import { hashApiKey } from "../src/services/token";
-import { LINEAGE_WRITE_SQL } from "../src/services/upstream-repull";
+import {
+  LINEAGE_WRITE_SQL,
+  REPULL_PAGE_DEFAULT,
+  REPULL_PAGE_MAX,
+  transitionRepull,
+} from "../src/services/upstream-repull";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
 import { DIGEST, type Row, SHA, rowAt } from "./helpers/repull-rows";
@@ -160,6 +166,13 @@ function plan(over: Record<string, unknown> = {}): Record<string, unknown> {
     ...over,
   };
 }
+
+/** The claim to merge for a seeded gates_clear row, which names the screened head. */
+const CLAIM = { merge_claimed_at: "2026-10-24 01:00:00", merge_claim_sha: SHA };
+const PATCH_CLAIM = {
+  patch_merge_claimed_at: "2026-10-24 01:00:00",
+  patch_merge_claim_sha: SHA,
+};
 
 const rows = () => db.query("SELECT * FROM upstream_repulls ORDER BY id").all() as Row[];
 const audits = (action?: string) =>
@@ -573,21 +586,74 @@ describe("create: attempts", () => {
     }
   });
 
-  test("a failed or abandoned attempt that holds a merge sha still blocks the tag", async () => {
+  test("a failed, abandoned or superseded attempt that holds a merge sha blocks the whole dataset", async () => {
     seedMirror("xx090123");
     for (const status of ["failed", "abandoned", "superseded"] as const) {
       db.run("DELETE FROM upstream_repulls");
       seedRow(status, { merge_sha: SHA });
-      const res = await call("POST", "/repulls", plan());
-      expect([status, res.status, res.body.code]).toEqual([status, 409, "tag-already-pulled"]);
+      for (const to_tag of ["1.0.1", "1.0.9"]) {
+        const res = await call("POST", "/repulls", plan({ to_tag }));
+        expect([status, to_tag, res.status, res.body.code]).toEqual([
+          status,
+          to_tag,
+          409,
+          "merge-unreconciled",
+        ]);
+      }
+    }
+    expect(rows().map((r) => r.status)).toEqual(["superseded"]);
+  });
+
+  test("a failed attempt that recorded a claim through the API blocks the dataset, for any tag", async () => {
+    seedMirror("xx090123");
+    const id = seedRow("gates_clear");
+    const claim = await move(id, { from: "gates_clear", to: "gates_clear", fields: CLAIM });
+    expect(claim.status).toBe(200);
+    const failed = await move(id, {
+      from: "gates_clear",
+      to: "failed",
+      error: "merge answer lost",
+    });
+    expect(failed.status).toBe(200);
+    for (const to_tag of ["1.0.1", "1.0.2"]) {
+      const res = await call("POST", "/repulls", plan({ to_tag }));
+      expect([to_tag, res.status, res.body.code]).toEqual([to_tag, 409, "merge-unreconciled"]);
+      expect(res.body.error).toContain(`#${id}`);
+    }
+    expect(rows()).toHaveLength(1);
+  });
+
+  test("the claim or merge of N.0.1 blocks the dataset too", async () => {
+    seedMirror("xx090123");
+    for (const over of [
+      { patch_merge_claimed_at: "2026-10-24 01:00:00" },
+      { patch_merge_sha: SHA },
+    ]) {
+      db.run("DELETE FROM upstream_repulls");
+      seedRow("failed", over);
+      const res = await call("POST", "/repulls", plan({ to_tag: "1.0.2" }));
+      expect([JSON.stringify(over), res.status, res.body.code]).toEqual([
+        JSON.stringify(over),
+        409,
+        "merge-unreconciled",
+      ]);
     }
   });
 
-  test("a failed attempt that holds a merge claim blocks the tag: the merge may have been sent", async () => {
+  test("a finished merge does not block the dataset: complete and patch_declined are reconciled", async () => {
     seedMirror("xx090123");
-    seedRow("failed", { merge_claimed_at: "2026-10-24 01:00:00" });
-    const res = await call("POST", "/repulls", plan());
-    expect([res.status, res.body.code]).toEqual([409, "tag-already-pulled"]);
+    for (const status of ["complete", "patch_declined"] as const) {
+      db.run("DELETE FROM upstream_repulls");
+      seedRow(status, { patch_merge_sha: null });
+      const res = await call("POST", "/repulls", plan({ to_tag: "1.0.2" }));
+      expect([status, res.status]).toEqual([status, 201]);
+    }
+  });
+
+  test("a failed attempt that never claimed or merged frees the dataset", async () => {
+    seedMirror("xx090123");
+    seedRow("failed");
+    expect((await call("POST", "/repulls", plan())).status).toBe(201);
   });
 
   test("tags are compared and stored without a leading v", async () => {
@@ -1025,7 +1091,7 @@ describe("transition: closing a record", () => {
     const id = seedRow("copied");
     expect((await move(id, { from: "copied", to: "failed" })).body.code).toBe("field-missing");
     expect((await move(id, { from: "copied", to: "failed", error: "   " })).body.code).toBe(
-      "field-missing",
+      "invalid-body",
     );
     const ok = await move(id, {
       from: "copied",
@@ -1138,5 +1204,598 @@ describe("deleting a dataset", () => {
     expect(result.steps.github.success).toBe(false);
     expect(rows().map((r) => r.dataset_id)).toEqual(["xx090124"]);
     expect(db.query("SELECT dataset_id FROM datasets").all()).toEqual([{ dataset_id: "xx090124" }]);
+  });
+});
+
+// ----------------------------------------------------------------------------
+// Interleaved writers
+// ----------------------------------------------------------------------------
+
+/** A D1 that runs `action` once, just before the first statement starting with `startsWith`. */
+function interleaved(startsWith: string, action: () => void): D1Database {
+  const real = realD1(db);
+  let done = false;
+  return {
+    ...real,
+    prepare(sql: string) {
+      if (!done && sql.startsWith(startsWith)) {
+        done = true;
+        action();
+      }
+      return real.prepare(sql);
+    },
+    batch: real.batch.bind(real),
+  } as unknown as D1Database;
+}
+
+async function callOn(d1: D1Database, method: "GET" | "POST", path: string, body?: unknown) {
+  const res = await app.request(
+    path,
+    {
+      method,
+      headers: {
+        Authorization: `Bearer ${ADMIN_KEY}`,
+        ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+      },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    },
+    { DB: d1, ENVIRONMENT: "test" } as unknown as Bindings,
+  );
+  return { status: res.status, body: (await res.json()) as Json };
+}
+
+describe("transition: two writers that read the same row", () => {
+  const again = (head: string) => ({
+    branch: "release/v2.0.0",
+    pr_number: 7,
+    head_sha: head,
+  });
+
+  test("a repeated status applies once: the second writer is told the row moved", async () => {
+    const id = seedRow("pr_open");
+    const other = "e".repeat(40);
+    const d1 = interleaved("UPDATE upstream_repulls", () =>
+      db.run(
+        `UPDATE upstream_repulls SET head_sha = '${other}', revision = revision + 1 WHERE id = ${id}`,
+      ),
+    );
+    const res = await callOn(d1, "POST", `/repulls/${id}/transition`, {
+      from: "pr_open",
+      to: "pr_open",
+      fields: again("f".repeat(40)),
+    });
+    expect([res.status, res.body.code]).toEqual([409, "stale-status"]);
+    expect(rowOf(id)).toMatchObject({ head_sha: other, revision: 1 });
+    expect(audits("repull_transition")).toEqual([]);
+  });
+
+  test("a claim set after the row was read stops the close that read it", async () => {
+    const id = seedRow("gates_clear");
+    const d1 = interleaved("UPDATE upstream_repulls", () =>
+      db.run(
+        `UPDATE upstream_repulls SET merge_claimed_at = '2026-10-24 01:00:00', merge_claim_sha = '${SHA}', revision = revision + 1 WHERE id = ${id}`,
+      ),
+    );
+    const res = await callOn(d1, "POST", `/repulls/${id}/transition`, {
+      from: "gates_clear",
+      to: "abandoned",
+    });
+    expect([res.status, res.body.code]).toEqual([409, "stale-status"]);
+    expect(rowOf(id)).toMatchObject({
+      status: "gates_clear",
+      merge_claimed_at: "2026-10-24 01:00:00",
+    });
+  });
+
+  test("every write bumps the revision, an error-only one included", async () => {
+    seedMirror("xx090123");
+    const id = (await call("POST", "/repulls", plan())).body.repull.id;
+    expect(rowOf(id).revision).toBe(0);
+    await move(id, { from: "planned", to: "planned", error: "scrub refused" });
+    expect(rowOf(id).revision).toBe(1);
+    const fields = { synth_tree: SHA, synth_sha: SHA, manifest_digest: DIGEST };
+    await move(id, { from: "planned", to: "prepared", fields });
+    await move(id, { from: "prepared", to: "prepared", fields });
+    await move(id, { from: "prepared", to: "copied" });
+    expect(rowOf(id).revision).toBe(4);
+    // A refused write changes nothing, the revision included.
+    await move(id, { from: "copied", to: "merged", fields: { merge_sha: SHA } });
+    await move(id, { from: "prepared", to: "copied" });
+    expect(rowOf(id).revision).toBe(4);
+  });
+
+  test("the winner's value stands and the stale writer's service call writes nothing", async () => {
+    const id = seedRow("pr_open");
+    const env2 = { DB: realD1(db), ENVIRONMENT: "test" } as unknown as Bindings;
+    const a = await transitionRepull(env2, { id: adminId }, id, {
+      from: "pr_open",
+      to: "pr_open",
+      fields: again("1".repeat(40)),
+    });
+    const b = await transitionRepull(env2, { id: adminId }, id, {
+      from: "pr_open",
+      to: "pr_open",
+      fields: again("2".repeat(40)),
+    });
+    expect("row" in a && "row" in b).toBe(true);
+    expect(rowOf(id)).toMatchObject({ head_sha: "2".repeat(40), revision: 2 });
+  });
+});
+
+// ----------------------------------------------------------------------------
+// The claim to merge
+// ----------------------------------------------------------------------------
+
+describe("transition: the claim to merge", () => {
+  test("it is recorded through the API on gates_clear, and nothing else changes", async () => {
+    const id = seedRow("gates_clear");
+    const before = rowOf(id);
+    const res = await move(id, { from: "gates_clear", to: "gates_clear", fields: CLAIM });
+    expect(res.status).toBe(200);
+    expect(res.body.repull).toMatchObject({ status: "gates_clear", ...CLAIM, revision: 1 });
+    const after = rowOf(id);
+    for (const key of Object.keys(before)) {
+      if (["merge_claimed_at", "merge_claim_sha", "revision", "updated_at"].includes(key)) continue;
+      expect([key, after[key]]).toEqual([key, before[key]]);
+    }
+    expect(JSON.parse(audits("repull_transition")[0]?.details as string)).toMatchObject({
+      from: "gates_clear",
+      to: "gates_clear",
+      fields: ["merge_claimed_at", "merge_claim_sha"],
+    });
+  });
+
+  test("it must name the screened head, both fields, in the shape SQLite writes", async () => {
+    const id = seedRow("gates_clear");
+    const cases: Array<[string, Record<string, unknown>, number, string]> = [
+      ["another head", { ...CLAIM, merge_claim_sha: "9".repeat(40) }, 400, "field-invalid"],
+      ["no sha", { merge_claimed_at: CLAIM.merge_claimed_at }, 400, "field-missing"],
+      ["no time", { merge_claim_sha: SHA }, 400, "field-missing"],
+      ["an ISO time", { ...CLAIM, merge_claimed_at: "2026-10-24T01:00:00Z" }, 400, "field-invalid"],
+      ["a date only", { ...CLAIM, merge_claimed_at: "2026-10-24" }, 400, "field-invalid"],
+      ["a head field", { ...CLAIM, head_sha: SHA }, 400, "field-not-allowed"],
+      [
+        "a patch claim",
+        { ...CLAIM, patch_merge_claimed_at: CLAIM.merge_claimed_at },
+        400,
+        "field-not-allowed",
+      ],
+    ];
+    for (const [what, fields, status, code] of cases) {
+      const res = await move(id, { from: "gates_clear", to: "gates_clear", fields });
+      expect([what, res.status, res.body.code]).toEqual([what, status, code]);
+    }
+    expect(rowOf(id).merge_claimed_at).toBeNull();
+  });
+
+  test("it cannot be recorded twice, or from a state that has no screened head", async () => {
+    const id = seedRow("gates_clear");
+    expect((await move(id, { from: "gates_clear", to: "gates_clear", fields: CLAIM })).status).toBe(
+      200,
+    );
+    const twice = await move(id, {
+      from: "gates_clear",
+      to: "gates_clear",
+      fields: { ...CLAIM, merge_claimed_at: "2026-10-25 01:00:00" },
+    });
+    expect([twice.status, twice.body.code]).toEqual([409, "merge-claim-held"]);
+    expect(rowOf(id).merge_claimed_at).toBe(CLAIM.merge_claimed_at);
+
+    const open = seedRow("pr_open", { dataset_id: "xx090124" });
+    const res = await move(open, {
+      from: "pr_open",
+      to: "pr_open",
+      fields: { ...CLAIM, branch: "release/v2.0.0", pr_number: 7, head_sha: SHA },
+    });
+    expect([res.status, res.body.code]).toEqual([400, "field-not-allowed"]);
+    expect(rowOf(open).merge_claimed_at).toBeNull();
+  });
+
+  test("while it is held the head cannot move and the pull request cannot be closed, but failed is allowed", async () => {
+    const refused: Array<[RepullStatus, Record<string, unknown>]> = [
+      ["pr_open", { fields: { branch: "release/v2.0.0", pr_number: 7, head_sha: "e".repeat(40) } }],
+      ["abandoned", {}],
+      ["superseded", {}],
+    ];
+    for (const [to, extra] of refused) {
+      db.run("DELETE FROM upstream_repulls");
+      const id = seedRow("gates_clear");
+      await move(id, { from: "gates_clear", to: "gates_clear", fields: CLAIM });
+      const before = rowOf(id);
+      const res = await move(id, { from: "gates_clear", to, ...extra });
+      expect([to, res.status, res.body.code]).toEqual([to, 409, "merge-claim-held"]);
+      expect(rowOf(id)).toEqual(before);
+    }
+    db.run("DELETE FROM upstream_repulls");
+    const id = seedRow("gates_clear");
+    await move(id, { from: "gates_clear", to: "gates_clear", fields: CLAIM });
+    const failed = await move(id, {
+      from: "gates_clear",
+      to: "failed",
+      error: "the merge answer was lost",
+    });
+    expect(failed.status).toBe(200);
+    expect(failed.body.repull).toMatchObject({ status: "failed", ...CLAIM });
+  });
+
+  test("N.0.1 has the same claim, with the same refusals", async () => {
+    const id = seedRow("patch_gates_clear");
+    const bad = await move(id, {
+      from: "patch_gates_clear",
+      to: "patch_gates_clear",
+      fields: { ...PATCH_CLAIM, patch_merge_claim_sha: "9".repeat(40) },
+    });
+    expect(bad.body.code).toBe("field-invalid");
+    const mixed = await move(id, {
+      from: "patch_gates_clear",
+      to: "patch_gates_clear",
+      fields: CLAIM,
+    });
+    expect(mixed.body.code).toBe("field-not-allowed");
+    const ok = await move(id, {
+      from: "patch_gates_clear",
+      to: "patch_gates_clear",
+      fields: PATCH_CLAIM,
+    });
+    expect(ok.status).toBe(200);
+    expect(ok.body.repull).toMatchObject({ status: "patch_gates_clear", ...PATCH_CLAIM });
+    expect(
+      (await move(id, { from: "patch_gates_clear", to: "patch_gates_clear", fields: PATCH_CLAIM }))
+        .body.code,
+    ).toBe("merge-claim-held");
+    const head = {
+      patch_version: "2.0.1",
+      patch_branch: "release/v2.0.1",
+      patch_pr_number: 8,
+      patch_head_sha: "e".repeat(40),
+      patch_base_sha: SHA,
+    };
+    const moved = await move(id, {
+      from: "patch_gates_clear",
+      to: "patch_synthesized",
+      fields: head,
+    });
+    expect([moved.status, moved.body.code]).toEqual([409, "merge-claim-held"]);
+    const declined = await move(id, { from: "patch_gates_clear", to: "patch_declined" });
+    expect([declined.status, declined.body.code]).toEqual([409, "merge-claim-held"]);
+    expect(
+      (await move(id, { from: "patch_gates_clear", to: "failed", error: "lost" })).status,
+    ).toBe(200);
+  });
+
+  test("before a claim, going back from gates_clear is allowed", async () => {
+    const id = seedRow("gates_clear");
+    const res = await move(id, {
+      from: "gates_clear",
+      to: "pr_open",
+      fields: { branch: "release/v2.0.0", pr_number: 7, head_sha: "e".repeat(40) },
+    });
+    expect(res.status).toBe(200);
+  });
+});
+
+describe("transition: the edges that record one thing", () => {
+  test("planned records why a step could not finish, and only that", async () => {
+    const id = seedRow("planned");
+    expect((await move(id, { from: "planned", to: "planned" })).body.code).toBe("field-missing");
+    const fields = await move(id, {
+      from: "planned",
+      to: "planned",
+      error: "x",
+      fields: { counts: { written: 1 } },
+    });
+    expect(fields.body.code).toBe("field-not-allowed");
+    const ok = await move(id, {
+      from: "planned",
+      to: "planned",
+      error: "scrub refused: a flagged header",
+    });
+    expect(ok.body.repull).toMatchObject({
+      status: "planned",
+      last_error: "scrub refused: a flagged header",
+      revision: 1,
+      terminal_at: null,
+    });
+  });
+
+  test("released records the count of locked objects, and only counts", async () => {
+    const id = seedRow("released");
+    expect((await move(id, { from: "released", to: "released" })).body.code).toBe("field-missing");
+    const tag = await move(id, {
+      from: "released",
+      to: "released",
+      fields: { counts: { locked: 3 }, tag_sha: SHA },
+    });
+    expect(tag.body.code).toBe("field-not-allowed");
+    const ok = await move(id, {
+      from: "released",
+      to: "released",
+      fields: { counts: { locked: 3 } },
+    });
+    expect(ok.status).toBe(200);
+    expect(ok.body.repull).toMatchObject({
+      status: "released",
+      counts: { locked: 3 },
+      tag_sha: SHA,
+      revision: 1,
+    });
+    // The state itself is still not stated here.
+    const merged = seedRow("merged", { dataset_id: "xx090124" });
+    const into = await move(merged, { from: "merged", to: "released", fields: { tag_sha: SHA } });
+    expect(into.body.code).toBe("use-verified-route");
+  });
+});
+
+describe("transition: last_error", () => {
+  const fields = { synth_tree: SHA, synth_sha: SHA, manifest_digest: DIGEST };
+
+  test("an edge into another open status clears it, because the step has since succeeded", async () => {
+    const id = seedRow("planned", { last_error: "scrub refused: a flagged header" });
+    const res = await move(id, { from: "planned", to: "prepared", fields });
+    expect(res.body.repull.last_error).toBeNull();
+  });
+
+  test("an edge that repeats a status, or ends the row, keeps it", async () => {
+    const id = seedRow("prepared", { last_error: "main moved" });
+    expect(
+      (await move(id, { from: "prepared", to: "prepared", fields })).body.repull.last_error,
+    ).toBe("main moved");
+    const failed = await move(id, {
+      from: "prepared",
+      to: "failed",
+      error: "terminal: prepare=failure",
+    });
+    expect(failed.body.repull.last_error).toBe("main moved");
+  });
+
+  test("a new error on a forward edge is stored as sent", async () => {
+    const id = seedRow("planned", { last_error: "an old specific error" });
+    const res = await move(id, {
+      from: "planned",
+      to: "prepared",
+      fields,
+      error: "terminal: prepare=failure",
+    });
+    expect(res.body.repull.last_error).toBe("terminal: prepare=failure");
+  });
+
+  test("a blank error is refused on every edge, and never stored", async () => {
+    const id = seedRow("planned");
+    for (const error of ["", "   ", "\n\t "]) {
+      for (const [from, to] of [
+        ["planned", "planned"],
+        ["planned", "prepared"],
+        ["planned", "abandoned"],
+      ] as const) {
+        const res = await move(id, { from, to, fields: to === "prepared" ? fields : {}, error });
+        expect([JSON.stringify(error), from, to, res.status, res.body.code]).toEqual([
+          JSON.stringify(error),
+          from,
+          to,
+          400,
+          "invalid-body",
+        ]);
+      }
+    }
+    expect(rowOf(id).last_error).toBeNull();
+    // The service refuses it too, for a caller that is not the route.
+    const direct = await transitionRepull(
+      { DB: realD1(db), ENVIRONMENT: "test" } as unknown as Bindings,
+      { id: adminId },
+      id,
+      {
+        from: "planned",
+        to: "planned",
+        error: "  ",
+      },
+    );
+    expect(direct).toMatchObject({ status: 400, code: "field-invalid" });
+    expect(rowOf(id).last_error).toBeNull();
+  });
+
+  test("an error is trimmed before it is stored", async () => {
+    const id = seedRow("planned");
+    const res = await move(id, { from: "planned", to: "planned", error: "  main moved  " });
+    expect(res.body.repull.last_error).toBe("main moved");
+  });
+});
+
+describe("the shape of a refusal", () => {
+  test("a malformed body is { error, code: invalid-body } on both writes, and echoes no value", async () => {
+    seedMirror("xx090123");
+    const id = seedRow("planned");
+    const create = await call(
+      "POST",
+      "/repulls",
+      plan({ base_sha: "secret-value-123", origin: "x" }),
+    );
+    expect(create.status).toBe(400);
+    expect(create.body.code).toBe("invalid-body");
+    expect(typeof create.body.error).toBe("string");
+    expect(create.body.error).toContain("base_sha");
+    expect(create.body.error).not.toContain("secret-value-123");
+    const move1 = await move(id, { from: "planned", to: "nonsense" });
+    expect([move1.status, move1.body.code]).toEqual([400, "invalid-body"]);
+    const move2 = await call("POST", `/repulls/${id}/transition`, "not json at all" as never);
+    expect(move2.status).toBe(400);
+    expect(move2.body.code).toBe("invalid-body");
+  });
+
+  test("a bad id or query is { error, code } too", async () => {
+    const cases: Array<[string, string]> = [
+      ["/repulls?limit=51", "invalid-query"],
+      ["/repulls?open=maybe", "invalid-query"],
+      ["/repulls?after=x", "invalid-query"],
+      ["/repulls?dataset=bad", "invalid-query"],
+      ["/repulls/abc", "invalid-id"],
+    ];
+    for (const [path, code] of cases) {
+      const res = await call("GET", path);
+      expect([path, res.status, res.body.code]).toEqual([path, 400, code]);
+    }
+    expect(
+      (await call("POST", "/repulls/abc/transition", { from: "planned", to: "failed" })).body.code,
+    ).toBe("invalid-id");
+  });
+
+  test("the migration hint is attached to a missing table or column only", async () => {
+    // Authentication runs on the same database, so only the re-pull table fails.
+    const throwing = (message: string): D1Database => {
+      const real = realD1(db);
+      return {
+        ...real,
+        prepare(sql: string) {
+          if (sql.includes("upstream_repulls")) throw new Error(message);
+          return real.prepare(sql);
+        },
+        batch: real.batch.bind(real),
+      } as unknown as D1Database;
+    };
+    const missing = await callOn(
+      throwing("D1_ERROR: no such table: upstream_repulls"),
+      "GET",
+      "/repulls/1",
+    );
+    expect(missing.status).toBe(500);
+    expect(missing.body.error).toContain("is migration 0105 applied?");
+    const column = await callOn(
+      throwing("D1_ERROR: no such column: revision"),
+      "GET",
+      "/repulls/1",
+    );
+    expect(column.body.error).toContain("is migration 0105 applied?");
+    const other = await callOn(throwing("D1_ERROR: boom"), "GET", "/repulls/1");
+    expect(other.status).toBe(500);
+    expect(other.body.error).toContain("boom");
+    expect(other.body.error).not.toContain("migration");
+    seedMirror("xx090123");
+    const create = await callOn(throwing("D1_ERROR: boom"), "POST", "/repulls", plan());
+    expect(create.status).toBe(500);
+    expect(create.body.error).not.toContain("migration");
+  });
+
+  test("next_after appears exactly when a page is full, at the default size", async () => {
+    // The documented sizes: a list of this size is a full page.
+    expect([REPULL_PAGE_DEFAULT, REPULL_PAGE_MAX]).toEqual([25, 50]);
+    for (let i = 1; i <= REPULL_PAGE_DEFAULT; i++) {
+      seedRow("abandoned", { attempt: i });
+    }
+    const full = await call("GET", "/repulls");
+    expect(full.body.repulls).toHaveLength(REPULL_PAGE_DEFAULT);
+    expect(full.body.next_after).toBe(full.body.repulls.at(-1).id);
+    const wider = await call("GET", "/repulls?limit=50");
+    expect(wider.body.repulls).toHaveLength(REPULL_PAGE_DEFAULT);
+    expect(wider.body.next_after).toBeNull();
+  });
+});
+
+describe("create: the lineage write and the race", () => {
+  test("a stored v-spelled tag is upgraded, and the response and audit row say so", async () => {
+    seedMirror("xx090123", { versions: [{ version: "v1.0.0", tag: "v1.0.0", basis: "doi" }] });
+    const res = await call("POST", "/repulls", plan({ lineage_recordable: true }));
+    expect(res.status).toBe(201);
+    expect(res.body.lineage_rows).toBe(1);
+    expect(snapshotOf("xx090123", "v1.0.0")).toEqual({
+      source_version: "1.0.0",
+      source_version_basis: "lineage",
+    });
+    expect(JSON.parse(audits("repull_created")[0]?.details as string)).toMatchObject({
+      lineage_rows: 1,
+      prior_basis: ["doi"],
+    });
+  });
+
+  test("the response counts what was written: none when the plan did not assert it", async () => {
+    seedMirror("xx090123");
+    expect((await call("POST", "/repulls", plan())).body.lineage_rows).toBe(0);
+    db.run("DELETE FROM upstream_repulls");
+    db.run("DELETE FROM audit_log");
+    const asserted = await call("POST", "/repulls", plan({ lineage_recordable: true }));
+    expect(asserted.body.lineage_rows).toBe(1);
+    // A rerun of the same plan returns the record and upgrades nothing.
+    const rerun = await call("POST", "/repulls", plan({ lineage_recordable: true }));
+    expect([rerun.status, rerun.body.lineage_rows]).toEqual([200, 0]);
+  });
+
+  test("a row never examined records its prior state as unexamined", async () => {
+    seedMirror("xx090123", { versions: [{ version: "1.0.0", tag: null, basis: null }] });
+    await call("POST", "/repulls", plan({ lineage_recordable: true }));
+    expect(JSON.parse(audits("repull_created")[0]?.details as string).prior_basis).toEqual([
+      "unexamined",
+    ]);
+  });
+
+  function raceThenFinish(winner: Row, finish: () => void): D1Database {
+    const real = realD1(db);
+    let inserted = false;
+    let factsReads = 0;
+    return {
+      ...real,
+      prepare(sql: string) {
+        if (!inserted && sql.startsWith("INSERT INTO upstream_repulls")) {
+          inserted = true;
+          const cols = Object.keys(winner);
+          db.query(
+            `INSERT INTO upstream_repulls (${cols.join(", ")}) VALUES (${cols.map(() => "?").join(", ")})`,
+          ).run(...(cols.map((c) => winner[c]) as never[]));
+        }
+        if (sql.includes("FROM datasets d LEFT JOIN import_jobs")) {
+          factsReads++;
+          if (factsReads === 2) finish();
+        }
+        return real.prepare(sql);
+      },
+      batch: real.batch.bind(real),
+    } as unknown as D1Database;
+  }
+
+  test("a winner that went terminal before the re-read leaves the next attempt free", async () => {
+    seedMirror("xx090123");
+    const winner = rowAt("planned", { dataset_id: "xx090123", actor_user_id: adminId });
+    const d1 = raceThenFinish(winner, () =>
+      db.run("UPDATE upstream_repulls SET status = 'abandoned', terminal_at = datetime('now')"),
+    );
+    const res = await callOn(d1, "POST", "/repulls", plan());
+    expect([res.status, res.body.created, res.body.repull.attempt]).toEqual([201, true, 2]);
+    expect(rows().map((r) => r.status)).toEqual(["abandoned", "planned"]);
+  });
+
+  test("a winner that merged before the re-read blocks the tag, not a 500", async () => {
+    seedMirror("xx090123");
+    const winner = rowAt("planned", { dataset_id: "xx090123", actor_user_id: adminId });
+    const d1 = raceThenFinish(winner, () => {
+      db.run("DELETE FROM upstream_repulls");
+      seedRow("complete");
+    });
+    const res = await callOn(d1, "POST", "/repulls", plan());
+    expect([res.status, res.body.code]).toEqual([409, "tag-already-pulled"]);
+  });
+
+  test("a second collision is a real fault and is a 500", async () => {
+    seedMirror("xx090123");
+    const real = realD1(db);
+    let inserts = 0;
+    let factsReads = 0;
+    const insertWinner = (attempt: number) => {
+      const winner = rowAt("planned", { dataset_id: "xx090123", actor_user_id: adminId, attempt });
+      const cols = Object.keys(winner);
+      db.query(
+        `INSERT INTO upstream_repulls (${cols.join(", ")}) VALUES (${cols.map(() => "?").join(", ")})`,
+      ).run(...(cols.map((c) => winner[c]) as never[]));
+    };
+    const collidesTwice = {
+      ...real,
+      prepare(sql: string) {
+        if (sql.startsWith("INSERT INTO upstream_repulls")) insertWinner(++inserts);
+        if (sql.includes("FROM datasets d LEFT JOIN import_jobs") && ++factsReads === 2) {
+          db.run("UPDATE upstream_repulls SET status = 'abandoned', terminal_at = datetime('now')");
+        }
+        return real.prepare(sql);
+      },
+      batch: real.batch.bind(real),
+    } as unknown as D1Database;
+    const res = await callOn(collidesTwice, "POST", "/repulls", plan());
+    expect(res.status).toBe(500);
+    expect(inserts).toBe(2);
   });
 });

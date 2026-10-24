@@ -12,16 +12,29 @@
  *    `nemarDatasets` organization is shared between production and dev (decision 6). The test is
  *    "ENVIRONMENT is exactly `production`", not "is not a known non-production value", so an
  *    unset or misspelled binding refuses an `on` dataset.
- *  - `not-a-mirror`, `anonymous-dataset` (a re-pull takes upstream's authors and README, which
- *    would undo ADR 0065's blind; there is no override), `withdrawn`, `import-in-flight`.
+ *  - `not-found`, `not-a-mirror`, `anonymous-dataset` (a re-pull takes upstream's authors and
+ *    README, which would undo ADR 0065's blind; there is no override), `withdrawn`,
+ *    `import-in-flight`.
+ *  - an open record: for this very plan it is returned (200) before anything below, so a rerun
+ *    finds it after N.0.0 is tagged; for any other plan it is `repull-in-flight`.
+ *  - `merge-unreconciled`: any record of the dataset that holds a merge claim or a merge sha and
+ *    is not finished (`complete`, or `patch_declined` after a released N.0.0) blocks every new
+ *    record, because a merge may be on `main` with its row not saying so.
  *  - `version-facts-disagree`: the dataset's own version rows must say what the plan says.
- *  - `repull-in-flight` and `tag-already-pulled`.
+ *  - `tag-already-pulled`.
+ * These run at create. Execution phases must re-check the anonymity, withdrawn and import fences
+ * when they move a record; a transition re-checks only the environment fence today.
+ *
+ * `lineage_recordable` is an administrator's assertion: the Worker has no evidence of it (it holds
+ * neither tree), so it is recorded in the audit row and nothing here verifies it.
  *
  * LINEAGE. Decision 4 reserves the basis word `lineage` for a tree compared with upstream's
- * outside the paths NEMAR owns. When the live plan says the from-version's tree was (and the
+ * outside the paths NEMAR owns. When the plan asserts that of the from-version's tree (and the
  * Worker confirms the row names the same tag, or none), create upgrades that row in the same
- * batch. {@link LINEAGE_WRITE_SQL} is the one statement that writes the word, and a source scan
- * keeps it so.
+ * batch, one way: `doi` becomes `lineage` and nothing writes it back. {@link LINEAGE_WRITE_SQL}
+ * is the one statement that writes the word, and a source scan keeps it so.
+ *
+ * NO MAIL. Nothing here or in the routes imports a mail service, and a source scan keeps it so.
  */
 
 import { z } from "zod";
@@ -41,11 +54,12 @@ import {
   SCREEN_GATED_STATUSES,
   SHA_RE,
   TERMINAL_STATUSES,
-  TRANSITION_FIELDS,
   VERIFIED_ONLY_STATUSES,
   canTransition,
   fieldProblem,
+  fieldsFor,
   isRepullStatus,
+  isTerminal,
   nextMajorVersion,
 } from "../../../shared/repull-state.js";
 import { AUDIT_IF_PREVIOUS_CHANGED_SQL, auditLogParams } from "../db/audit-log.js";
@@ -75,16 +89,34 @@ export const REPULL_LIST_SQL = `SELECT * FROM upstream_repulls
   ORDER BY id DESC LIMIT ?4`;
 
 /**
- * The next attempt number for a tag, and how many earlier attempts forbid another. An attempt
- * blocks unless it ended `abandoned`, `failed` or `superseded`, and it blocks even then when a
- * merge was claimed for it: a merge commit is on `main`, so the tag is pulled whatever the row
- * says. A held merge claim blocks too: the merge may have been sent and its answer lost, and a
- * failed row can keep the claim. `COUNT(CASE ...)` is 0 for no rows, never NULL.
+ * The next attempt number for a tag, and how many earlier attempts forbid another: any that did
+ * not end `abandoned`, `failed` or `superseded`. A failed or abandoned attempt that holds a merge
+ * claim or a merge sha is caught earlier, for the whole dataset, by {@link MERGE_UNRECONCILED_SQL}.
+ * `COUNT(CASE ...)` is 0 for no rows, never NULL.
  */
 export const REPULL_NEXT_ATTEMPT_SQL = `SELECT COALESCE(MAX(attempt), 0) + 1 AS next,
-  COUNT(CASE WHEN status NOT IN ('abandoned', 'failed', 'superseded') OR merge_sha IS NOT NULL
-    OR merge_claimed_at IS NOT NULL THEN 1 END) AS blocking
+  COUNT(CASE WHEN status NOT IN ('abandoned', 'failed', 'superseded') THEN 1 END) AS blocking
   FROM upstream_repulls WHERE dataset_id = ? AND to_tag = ?`;
+
+/**
+ * A record of the dataset, in any status, that holds a merge claim or a merge sha for either pull
+ * request and is not finished. `complete` is finished, and so is `patch_declined`: it is only
+ * reachable from a released N.0.0 and is refused while the patch claim is held. A `failed` or
+ * `released` row that holds a claim is not finished: the merge may be on `main` with nothing
+ * saying so, and a second major for the dataset would be a second DOI.
+ */
+export const MERGE_UNRECONCILED_SQL = `SELECT id, to_tag, status FROM upstream_repulls
+  WHERE dataset_id = ? AND status NOT IN ('complete', 'patch_declined')
+    AND (merge_claimed_at IS NOT NULL OR merge_sha IS NOT NULL
+         OR patch_merge_claimed_at IS NOT NULL OR patch_merge_sha IS NOT NULL)
+  ORDER BY id LIMIT 1`;
+
+export const REPULL_BY_ATTEMPT_SQL =
+  "SELECT * FROM upstream_repulls WHERE dataset_id = ? AND to_tag = ? AND attempt = ?";
+
+/** The page size of a list, and the most a caller may ask for. */
+export const REPULL_PAGE_DEFAULT = 25;
+export const REPULL_PAGE_MAX = 50;
 
 export const REPULL_INSERT_SQL = `INSERT INTO upstream_repulls
   (dataset_id, upstream_ds, from_tag, to_tag, attempt, from_version, to_version, plan_digest,
@@ -101,20 +133,23 @@ export const VERSION_FACTS_SQL =
   "SELECT version, source_version, source_version_basis FROM dataset_versions WHERE dataset_id = ?";
 
 /**
- * The one writer of the basis word `lineage`. `?1` the tag, `?2` the dataset, `?3` the version in
- * its bare spelling; rows spell a version `1.0.0` or `v1.0.0`, so both are matched. It writes
- * only a row that was never examined (NULL/NULL) or that already names this same tag by `doi` or
- * `lineage`; a row recorded `unknown`, or naming another tag, is never overwritten.
+ * The one writer of the basis word `lineage`. `?1` the tag (bare), `?2` the dataset, `?3` the
+ * version in its bare spelling. Rows spell a version `1.0.0` or `v1.0.0` and a tag `1.0.0` or
+ * `v1.0.0`, so both spellings of each are matched, as the facts check does with
+ * `sameUpstreamTag`; the tag is written bare. It writes only a row that was never examined
+ * (NULL/NULL) or that already names this same tag by `doi` or `lineage`; a row recorded
+ * `unknown`, or naming another tag, is never overwritten. The upgrade is one way.
  */
 export const LINEAGE_WRITE_SQL = `UPDATE dataset_versions SET source_version = ?1, source_version_basis = 'lineage'
  WHERE dataset_id = ?2 AND version IN (?3, 'v' || ?3)
    AND ((source_version_basis IS NULL AND source_version IS NULL)
-        OR (source_version_basis IN ('doi', 'lineage') AND source_version = ?1))`;
+        OR (source_version_basis IN ('doi', 'lineage') AND source_version IN (?1, 'v' || ?1)))`;
 
 /**
  * The audit row of a create: `?1` the actor, `?2` the details JSON, `?3` 1 when the statement
  * before it was the lineage write (so `changes()` is its count). It reads `last_insert_rowid()`
- * for the row's id, which the lineage UPDATE in between does not move.
+ * for the row's id, which the lineage UPDATE in between does not move; the response does not
+ * rely on it, it looks the row up by `(dataset_id, to_tag, attempt)`.
  */
 export const AUDIT_CREATED_SQL = `INSERT INTO audit_log (user_id, action, resource_type, resource_id, details)
   SELECT ?1, 'repull_created', 'upstream_repull', CAST(last_insert_rowid() AS TEXT),
@@ -171,7 +206,8 @@ export const transitionSchema = z
     from: z.enum(REPULL_STATUSES),
     to: z.enum(REPULL_STATUSES),
     fields: z.record(z.string(), z.unknown()).default({}),
-    error: z.string().max(2000).optional(),
+    // Never blank: `last_error` must not hold an empty string (ADR 0051 compares against it).
+    error: z.string().trim().min(1).max(2000).optional(),
   })
   .strict();
 
@@ -217,7 +253,7 @@ export async function listRepulls(
   db: D1Database,
   q: { dataset?: string; open?: boolean; after?: number; limit?: number },
 ): Promise<RepullRow[]> {
-  const limit = Math.min(Math.max(q.limit ?? 25, 1), 50);
+  const limit = Math.min(Math.max(q.limit ?? REPULL_PAGE_DEFAULT, 1), REPULL_PAGE_MAX);
   const { results } = await db
     .prepare(REPULL_LIST_SQL)
     .bind(q.dataset ?? null, q.open ? 1 : 0, q.after ?? null, limit)
@@ -314,37 +350,58 @@ const looksUnique = (err: unknown) => /UNIQUE constraint failed/i.test(String(er
 // Create
 // ----------------------------------------------------------------------------
 
+export interface CreateResult {
+  row: RepullRow;
+  created: boolean;
+  /** Version rows the lineage write upgraded; 0 when the plan did not assert it, or nothing matched. */
+  lineage_rows: number;
+}
+
+interface DatasetFacts {
+  source: string | null;
+  source_id: string | null;
+  anonymous: number;
+  withdrawn_at: string | null;
+  import_status: string | null;
+}
+
 export async function createRepull(
   env: Bindings,
   admin: { id: number },
   input: CreateRepullBody,
-): Promise<{ row: RepullRow; created: boolean } | RepullRefusal> {
+): Promise<CreateResult | RepullRefusal> {
   const body: CreateRepullBody = {
     ...input,
     from_tag: normalizeUpstreamTag(input.from_tag),
     to_tag: normalizeUpstreamTag(input.to_tag),
   };
-  const db = env.DB;
-
   const fence = envFenceRefusal(env, body.dataset_id);
   if (fence) return fence;
+  try {
+    return await createOnce(env, admin, body);
+  } catch (err) {
+    if (!looksUnique(err)) throw err;
+  }
+  // A concurrent create won the dataset's one open slot (or the attempt number) between the reads
+  // and the write, and the batch rolled back. Read everything again once: the winner may still be
+  // open (answer from it) or may already have gone terminal (the next attempt is then free, or
+  // the tag is pulled). A second collision is a real fault and raises.
+  return createOnce(env, admin, body);
+}
 
-  const [factsRes, versionsRes, openRes] = await db.batch([
+async function createOnce(
+  env: Bindings,
+  admin: { id: number },
+  body: CreateRepullBody,
+): Promise<CreateResult | RepullRefusal> {
+  const db = env.DB;
+  const [factsRes, versionsRes, openRes, unreconciledRes] = await db.batch([
     db.prepare(CREATE_FACTS_SQL).bind(body.dataset_id),
     db.prepare(VERSION_FACTS_SQL).bind(body.dataset_id),
     db.prepare(REPULL_OPEN_FOR_DATASET_SQL).bind(body.dataset_id),
+    db.prepare(MERGE_UNRECONCILED_SQL).bind(body.dataset_id),
   ]);
-  const facts = (
-    factsRes?.results as
-      | Array<{
-          source: string | null;
-          source_id: string | null;
-          anonymous: number;
-          withdrawn_at: string | null;
-          import_status: string | null;
-        }>
-      | undefined
-  )?.[0];
+  const facts = (factsRes?.results as DatasetFacts[] | undefined)?.[0];
   if (!facts) {
     return { status: 404, code: "not-found", message: `No dataset ${body.dataset_id}.` };
   }
@@ -374,20 +431,32 @@ export async function createRepull(
     };
   }
 
-  const open = (openRes?.results as RawRow[] | undefined)?.[0];
-  const sameOpen = (raw: RawRow | undefined) =>
-    raw !== undefined && raw.to_tag === body.to_tag && raw.plan_digest === body.plan_digest;
   // An open record for this very plan is returned before the version rows are consulted: once
   // N.0.0 is merged and tagged the highest version is no longer the plan's `from_version`, and a
   // rerun must still find its record.
+  const open = (openRes?.results as RawRow[] | undefined)?.[0];
   if (open) {
     const row = parseRow(open);
-    if (sameOpen(open)) return { row, created: false };
+    if (open.to_tag === body.to_tag && open.plan_digest === body.plan_digest) {
+      return { row, created: false, lineage_rows: 0 };
+    }
     return inFlight(row);
   }
 
+  const stuck = (
+    unreconciledRes?.results as Array<{ id: number; to_tag: string; status: string }>
+  )?.[0];
+  if (stuck) {
+    return {
+      status: 409,
+      code: "merge-unreconciled",
+      message: `Re-pull #${stuck.id} of ${body.dataset_id} (${stuck.to_tag}, ${stuck.status}) holds a merge claim or a merge, and nothing has reconciled it with GitHub; a new re-pull would risk a second major.`,
+    };
+  }
+
+  const versionRows = (versionsRes?.results ?? []) as VersionFactRow[];
   const problem = versionFactsProblem(
-    (versionsRes?.results ?? []) as VersionFactRow[],
+    versionRows,
     body.from_version,
     body.from_tag,
     body.lineage_recordable,
@@ -421,6 +490,10 @@ export async function createRepull(
     attempt: attempt.next,
     plan_digest: body.plan_digest,
     lineage_recordable: body.lineage_recordable,
+    // The basis the from-version row(s) held before any upgrade: the upgrade is one way.
+    prior_basis: versionRows
+      .filter((r) => bare(r.version) === body.from_version)
+      .map((r) => r.source_version_basis ?? "unexamined"),
   });
   const statements = [
     db
@@ -449,25 +522,18 @@ export async function createRepull(
     db.prepare(AUDIT_CREATED_SQL).bind(admin.id, details, body.lineage_recordable ? 1 : 0),
   );
 
-  let inserted: number;
-  try {
-    const results = await db.batch(statements);
-    inserted = Number(results[0]?.meta?.last_row_id);
-  } catch (err) {
-    if (!looksUnique(err)) throw err;
-    // A concurrent create won the dataset's one open slot (or the attempt number) between the
-    // read above and this write, and the batch rolled back. Answer from what is there now.
-    const now = (await db
-      .prepare(REPULL_OPEN_FOR_DATASET_SQL)
-      .bind(body.dataset_id)
-      .first<RawRow>()) as RawRow | null;
-    if (!now) throw err;
-    const row = parseRow(now);
-    return sameOpen(now) ? { row, created: false } : inFlight(row);
+  const results = await db.batch(statements);
+  const lineageRows = body.lineage_recordable ? (results[1]?.meta?.changes ?? 0) : 0;
+  const raw = await db
+    .prepare(REPULL_BY_ATTEMPT_SQL)
+    .bind(body.dataset_id, body.to_tag, attempt.next)
+    .first<RawRow>();
+  if (!raw) {
+    throw new Error(
+      `upstream_repulls ${body.dataset_id} ${body.to_tag} attempt ${attempt.next} was not readable after its insert`,
+    );
   }
-  const row = await getRepull(db, inserted);
-  if (!row) throw new Error(`upstream_repulls row ${inserted} was not readable after its insert`);
-  return { row, created: true };
+  return { row: parseRow(raw), created: true, lineage_rows: lineageRows };
 }
 
 function inFlight(row: RepullRow): RepullRefusal {
@@ -483,14 +549,34 @@ function inFlight(row: RepullRow): RepullRefusal {
 // Transition
 // ----------------------------------------------------------------------------
 
+/** The columns that hold the claim to merge, and the screened head it must name, per pull request. */
+const CLAIMS = {
+  gates_clear: {
+    claimedAt: "merge_claimed_at",
+    claimSha: "merge_claim_sha",
+    gatesSha: "gates_sha",
+  },
+  patch_gates_clear: {
+    claimedAt: "patch_merge_claimed_at",
+    claimSha: "patch_merge_claim_sha",
+    gatesSha: "patch_gates_sha",
+  },
+} as const;
+
 /**
  * Move a row along one edge. Every check that can be made without a second system is made here:
  * the edge, the states a caller may not state, the columns and their shapes, what is immutable
- * once set, and a held merge claim. Then one compare-and-set: the update applies only to a row
- * still at `from`, so two writers cannot both take the same step.
+ * once set, and a held merge claim. Then one compare-and-set on the row's status AND revision as
+ * they were read: the update applies only to that exact version of the row, so of two writers that
+ * read the same row only one applies, even when both repeat the same status. That also makes the
+ * checks above sound: nothing they read can have changed by the time the update applies, so the
+ * immutable columns and a claim set after the read need no separate guard in the statement.
+ * The loser is told the row has moved (`stale-status`) and nothing is written.
  *
  * `last_error` goes through {@link resolveImportError} (ADR 0051): a specific message is never
- * overwritten by a generic one. A transition that sends no `error` leaves it alone.
+ * overwritten by a generic one, and a blank one is refused. An edge into a different, non-terminal
+ * status clears the stored error, because the step it describes has since succeeded; an edge that
+ * repeats a status, or ends the row, keeps it unless a new one is sent.
  */
 export async function transitionRepull(
   env: Bindings,
@@ -521,7 +607,8 @@ export async function transitionRepull(
       row,
     };
   }
-  if ((VERIFIED_ONLY_STATUSES as readonly string[]).includes(t.to)) {
+  const repeats = t.from === t.to;
+  if (!repeats && (VERIFIED_ONLY_STATUSES as readonly string[]).includes(t.to)) {
     return {
       status: 409,
       code: "use-verified-route",
@@ -529,7 +616,7 @@ export async function transitionRepull(
       row,
     };
   }
-  if ((SCREEN_GATED_STATUSES as readonly string[]).includes(t.to)) {
+  if (!repeats && (SCREEN_GATED_STATUSES as readonly string[]).includes(t.to)) {
     return {
       status: 409,
       code: "screen-not-built",
@@ -542,12 +629,31 @@ export async function transitionRepull(
     return {
       status: 409,
       code: "merge-claim-held",
-      message: `A merge was claimed for re-pull #${id}; read GitHub before closing it, because the pull request may have merged.`,
+      message: `A merge was claimed for re-pull #${id}; read GitHub before closing the pull request or moving its head, because it may have merged.`,
       row,
     };
   }
+  const claim = repeats ? CLAIMS[t.to as keyof typeof CLAIMS] : undefined;
+  if (claim) {
+    if (row[claim.claimedAt] !== null) {
+      return {
+        status: 409,
+        code: "merge-claim-held",
+        message: `A merge is already claimed for re-pull #${id}.`,
+        row,
+      };
+    }
+    if (row[claim.gatesSha] === null) {
+      return {
+        status: 409,
+        code: "gates-not-set",
+        message: `Re-pull #${id} has no screened head to claim a merge for.`,
+        row,
+      };
+    }
+  }
 
-  const spec = TRANSITION_FIELDS[t.to];
+  const spec = fieldsFor(t.from, t.to);
   const fields = t.fields ?? {};
   for (const key of Object.keys(fields)) {
     if (!spec.may.includes(key)) {
@@ -567,12 +673,22 @@ export async function transitionRepull(
       };
     }
   }
-  if (t.to === "failed" && !t.error?.trim()) {
-    return { status: 400, code: "field-missing", message: "An edge into failed must say why." };
+  if (t.error !== undefined && !t.error.trim()) {
+    return { status: 400, code: "field-invalid", message: "error must not be blank." };
+  }
+  if (spec.requiresError && !t.error) {
+    return { status: 400, code: "field-missing", message: `This edge into ${t.to} must say why.` };
   }
   for (const [key, value] of Object.entries(fields)) {
     const problem = fieldProblem(key, value, row, fields);
     if (problem) return { status: 400, code: "field-invalid", message: problem };
+  }
+  if (claim && fields[claim.claimSha] !== row[claim.gatesSha]) {
+    return {
+      status: 400,
+      code: "field-invalid",
+      message: `${claim.claimSha} must be the screened head, ${claim.gatesSha}.`,
+    };
   }
   for (const key of IMMUTABLE_ONCE_SET) {
     const stored = row[key];
@@ -586,7 +702,7 @@ export async function transitionRepull(
     }
   }
 
-  // Column names below come from TRANSITION_FIELDS, checked against `may` above: never a request.
+  // Column names below come from the edge's field list, checked against `may` above: never a request.
   const sets: string[] = ["status = ?"];
   const binds: unknown[] = [t.to];
   for (const key of Object.keys(fields)) {
@@ -599,18 +715,22 @@ export async function transitionRepull(
     }
   }
   for (const key of spec.reset) if (!(key in fields)) sets.push(`${key} = NULL`);
+  const forward = !repeats && !isTerminal(t.to);
   if (t.error !== undefined) {
     sets.push("last_error = ?");
-    binds.push(resolveImportError(row.last_error, t.error));
+    binds.push(resolveImportError(forward ? null : row.last_error, t.error));
+  } else if (forward) {
+    sets.push("last_error = NULL");
   }
+  sets.push("revision = revision + 1");
   sets.push("updated_at = datetime('now')");
-  sets.push(
-    `terminal_at = ${(TERMINAL_STATUSES as readonly string[]).includes(t.to) ? "datetime('now')" : "NULL"}`,
-  );
+  sets.push(`terminal_at = ${isTerminal(t.to) ? "datetime('now')" : "NULL"}`);
 
   const update = db
-    .prepare(`UPDATE upstream_repulls SET ${sets.join(", ")} WHERE id = ? AND status = ?`)
-    .bind(...binds, id, t.from);
+    .prepare(
+      `UPDATE upstream_repulls SET ${sets.join(", ")} WHERE id = ? AND status = ? AND revision = ?`,
+    )
+    .bind(...binds, id, t.from, row.revision);
   const audit = db.prepare(AUDIT_IF_PREVIOUS_CHANGED_SQL).bind(
     ...auditLogParams({
       userId: admin.id,
