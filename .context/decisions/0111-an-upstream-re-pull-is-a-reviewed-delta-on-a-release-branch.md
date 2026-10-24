@@ -445,3 +445,43 @@ A page of only unknown-tag rows with OpenNeuro down is 200 with those rows `unkn
 A per-alias OpenNeuro read failure on an UNKNOWN-tag row leaves the row `unknown`, with `unchecked` at 0 and `errors[]` empty (`errors[]` carries batch-level failures only), so the command must not read unknown rows as verified clean: they are by definition not compared, and the reason text names the failure.
 So a 200 does not prove every mirror was compared: the command of the next part must treat a 200 whose rows include `unchecked`, or whose `errors[]` is not empty, as "could not see" and exit 2, not only a 502.
 
+
+## Amendment 2026-10-24 (#1910): Phase 4b builds the command, the weekly section and the mirror flag
+
+Epic #1046, Phase 4, second part.
+This part builds what the Phase 4a amendment said "will" be built: the command that walks the report, its section in the Monday report, and the derived mirror flag of decision 5.
+The decision text above and the Phase 4a amendment are unchanged.
+
+### The command
+
+`nemar admin upstream-status` walks `GET /admin/upstream-status` page by page and adds the pages up itself.
+It recounts the states from the deduplicated rows with the shared counter and never adds the pages' own `counts`, so a row seen on two pages is counted once.
+It exits 0 when everything it reached was compared, whatever the stale count: stale is a finding, not a failure.
+It exits 2 when the pass could not see: any `unchecked` row, any page the API refused (502, after which the walk stops, because a down OpenNeuro would cost its timeout on every remaining page), any page whose `errors[]` is not empty even on a 200, `--max-pages` reached before the end, or a population that changed during the pass.
+It exits 1 when a request fails.
+An `unknown` row is by definition not compared, and the command says so; a per-alias OpenNeuro failure on one leaves it `unknown`, so it is never read as verified clean.
+`--dataset` and `--after` examine part of the fleet and do not demand all of it.
+
+### The weekly section
+
+The Monday report gains `## Upstream freshness`, after Coverage: counts by state, rendered only through the one renderer that prints unknown as unknown, "Stale in total", the count of unknown-tag mirrors that look stale by date (display only), and a pointer to the command.
+No dataset is named in it, and none in the errors it adds, because the report is filed on a public-facing repository.
+Stale is reported and is not a reason for the week to ask for attention: it is the expected backlog until the scheduled re-pull exists, and an alarm that never clears gets muted (ADR 0053).
+Blindness is a reason, and arrives three ways.
+A pass that did not run or threw leaves `upstream` null, which the shared attention rule treats as unknown, and so does a backend that predates the field.
+A mirror that could not be compared (`unchecked`), a problem OpenNeuro reported, and a pass that did not reach every mirror each add one entry to the report's list of failed parts, which the headline counts.
+The pass is bounded for the Monday tick, which shares one subrequest allowance with its other jobs: at most 20 pages (about 20 GraphQL requests), and 25 GitHub probes for the whole pass, not per page; a stale row the budget left out reads `stale_unverified`, which is still stale.
+`nemar admin import-weekly` prints the same counts, `unknown` when the pass is null or absent, and exits 1 for that week.
+The log line gains `upstream_stale=` and `upstream_unchecked=`, `unknown` when null.
+
+### The mirror flag
+
+Decision 5 defines a mirror as a version row with `source_version` set and a version of the form N.0.0, and says the API exposes it as a derived flag.
+The flag is three-valued, because a literal boolean would have to say "not a mirror" for a version whose tag is unknown, which is the unknown-as-no that ADR 0054 forbids.
+`true`: an N.0.0 of an `on######` dataset whose row records a known tag (basis `doi` or `lineage`).
+`false`: any other dataset, or a version that is not N.0.0, whatever it records (NEMAR's own corrections are N.x.y).
+`null`: an N.0.0 of an `on######` dataset whose tag is unknown or was never examined; a consumer must not show it as a mirror.
+It is read from each row's own tag, not from the dataset's highest version, derived at read time and never stored, so `datasets` gains no column.
+It rides on every version of `GET /datasets/:id/versions` (beside the tag and its basis, which that owner-or-admin route already carried) and of the public landing, `data.nemar.org/<id>/` as JSON and the page bundle's landing, which exposes the flag only and neither the tag nor its basis.
+`metadata.json` is not changed.
+An `xx` fixture is `false` even after a rehearsal re-pull; how an `xx` names its upstream stays open (Left open, above).
