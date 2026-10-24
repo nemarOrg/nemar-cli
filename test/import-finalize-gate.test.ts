@@ -25,7 +25,11 @@ import {
   verifyManifestObjects,
 } from "../src/lib/import-finalize-gate";
 import { DATA_AVAILABILITY_MARKER as REEXPORTED } from "../src/lib/import-openneuro";
-import { type ImportManifestItem, listExistingObjects } from "../src/lib/s3-server-copy";
+import {
+  type ImportManifest,
+  type ImportManifestItem,
+  listExistingObjects,
+} from "../src/lib/s3-server-copy";
 import { initDirectoryRemote, makeScratch, run } from "./helpers/annex-repo";
 import { useTestGitIdentity } from "./helpers/git-identity";
 import { toolOrFail } from "./scrub/helpers/require-tools";
@@ -216,4 +220,161 @@ describe.skipIf(!awsInstalled)("the finalize publish gate", () => {
         "1 of 2 git-annex key registrations are not in the location log (e.g. not-a-valid-key). Aborting before publish — those blobs would be unfindable for clones. Re-run finalize to retry.",
     });
   }, 120_000);
+});
+
+/**
+ * `finalizeImport` itself, so the gate is proven wired in, not only correct on its own. It runs in
+ * a child process because finalize ends a failure with `process.exit(1)`.
+ *
+ * Nothing reaches GitHub, AWS or an API: the child's git config rewrites
+ * `https://github.com/nemarDatasets/` to a local bare origin (GIT_CONFIG_GLOBAL, no system
+ * config), its GitHub token is a dummy, its AWS endpoint is the S3 stand-in, and its API URL is a
+ * closed port. `nemar-s3` is an S3 remote record in the origin's git-annex branch, which
+ * `enableremote` sets up without a request.
+ */
+describe.skipIf(!awsInstalled)("finalizeImport stops at the gate", () => {
+  const FINAL_ID = "on099998";
+  const S3_PREFIX = `${FINAL_ID}/objects/`;
+  let root: { root: string; cleanup: () => void };
+  let restore: () => void;
+  let stand: S3Standin;
+  let childEnv: Record<string, string>;
+  let origin: string;
+  let backed: string;
+  let unbacked: string;
+  let remoteUuid: string;
+
+  beforeAll(async () => {
+    restore = useTestGitIdentity();
+    root = makeScratch("finalize-wiring");
+    stand = startS3Standin({ region: REGION });
+    const home = join(root.root, "aws-home");
+    mkdirSync(home, { recursive: true });
+    writeFileSync(join(home, "config"), "[profile finalize-wiring]\nregion = us-east-2\n");
+    writeFileSync(join(home, "credentials"), "");
+    const origins = join(root.root, "origins");
+    mkdirSync(origins, { recursive: true });
+    const gitconfig = join(root.root, "gitconfig");
+    writeFileSync(
+      gitconfig,
+      `[url "file://${origins}/"]\n\tinsteadOf = https://github.com/nemarDatasets/\n[init]\n\tdefaultBranch = main\n`,
+    );
+
+    // The dataset as prepare and copy left it: two annexed keys, nemar-s3 recorded in the branch.
+    const work = join(root.root, "work");
+    mkdirSync(join(work, "sub-01", "eeg"), { recursive: true });
+    await ok(["git", "init", "-q", "-b", "main"], work);
+    await ok(["git", "annex", "init", "-q", "prepare"], work);
+    writeFileSync(join(work, "dataset_description.json"), '{"Name": "gate wiring"}\n');
+    writeFileSync(join(work, "sub-01/eeg/backed.edf"), Buffer.alloc(150, 1));
+    writeFileSync(join(work, "sub-01/eeg/unbacked.edf"), Buffer.alloc(250, 2));
+    await ok(["git", "-c", "annex.largefiles=include=*.edf", "annex", "add", "-q", "."], work);
+    await ok(["git", "commit", "-qm", "prepared"], work);
+    const keys = await listAnnexedKeys(work);
+    backed = keys.get("sub-01/eeg/backed.edf") as string;
+    unbacked = keys.get("sub-01/eeg/unbacked.edf") as string;
+    remoteUuid = crypto.randomUUID();
+    const blob = (
+      await ok(
+        ["git", "hash-object", "-w", "--stdin"],
+        work,
+        `${remoteUuid} bucket=nemar datacenter=us-east-2 encryption=none fileprefix=${S3_PREFIX} name=nemar-s3 type=S3 timestamp=1790000000s\n`,
+      )
+    ).trim();
+    const index = join(root.root, "annex-index");
+    const env = { GIT_INDEX_FILE: index };
+    const inIndex = async (cmd: string[], stdin?: string) => {
+      const r = await run(cmd, work, stdin === undefined ? { env } : { env, stdin });
+      if (r.exitCode !== 0) throw new Error(`${cmd.join(" ")}: ${r.stderr}`);
+      return r.stdout.trim();
+    };
+    await inIndex(["git", "read-tree", "refs/heads/git-annex"]);
+    await inIndex(["git", "update-index", "--add", "--cacheinfo", `100644,${blob},remote.log`]);
+    const tree = await inIndex(["git", "write-tree"]);
+    const commit = await inIndex([
+      "git",
+      "commit-tree",
+      tree,
+      "-p",
+      "refs/heads/git-annex",
+      "-m",
+      "nemar-s3",
+    ]);
+    await ok(["git", "update-ref", "refs/heads/git-annex", commit], work);
+    origin = join(origins, `${FINAL_ID}.git`);
+    await ok(["git", "init", "-q", "--bare", "-b", "main", origin], root.root);
+    await ok(["git", "push", "-q", origin, "main", "git-annex"], work);
+
+    // The copy landed one key; the other never reached the bucket.
+    stand.putObject("nemar", `${S3_PREFIX}${backed}`, new Uint8Array(150));
+
+    childEnv = {
+      HOME: home,
+      AWS_ACCESS_KEY_ID: "ASIATESTDUMMY000001",
+      AWS_SECRET_ACCESS_KEY: "dummySecretAccessKeyForFinalizeWiring",
+      AWS_CONFIG_FILE: join(home, "config"),
+      AWS_SHARED_CREDENTIALS_FILE: join(home, "credentials"),
+      AWS_EC2_METADATA_DISABLED: "true",
+      AWS_MAX_ATTEMPTS: "1",
+      AWS_ENDPOINT_URL_S3: stand.url,
+      AWS_PROFILE: "finalize-wiring",
+      GH_TOKEN: "dummy-token-for-a-local-origin",
+      GIT_CONFIG_GLOBAL: gitconfig,
+      GIT_CONFIG_NOSYSTEM: "1",
+      NEMAR_CONFIG_DIR: join(root.root, "nemar-config"),
+      TEST_API_URL: "http://127.0.0.1:9",
+    };
+  }, 120_000);
+
+  afterAll(() => {
+    stand?.stop();
+    restore?.();
+    root?.cleanup();
+  });
+
+  test("a tree key with no object exits 1 with the availability line, and nothing is registered", async () => {
+    const before = await ok(["git", "rev-parse", "refs/heads/git-annex"], origin);
+    const manifest: ImportManifest = {
+      openneuroId: "ds099998",
+      nemarId: FINAL_ID,
+      nemarUuid: remoteUuid,
+      items: [item(backed)].map((it) => ({ ...it, destUri: `s3://nemar/${S3_PREFIX}${backed}` })),
+    };
+    const script = join(root.root, "finalize.ts");
+    writeFileSync(
+      script,
+      [
+        `import { finalizeImport } from ${JSON.stringify(join(import.meta.dir, "../src/lib/import-openneuro.ts"))};`,
+        'await finalizeImport("ds099998", { workDir: process.env.FINALIZE_WORKDIR }, JSON.parse(process.env.FINALIZE_MANIFEST));',
+        'console.log("FINALIZE-RETURNED");',
+        "",
+      ].join("\n"),
+    );
+    const workDir = join(root.root, "finalize-work");
+    mkdirSync(workDir, { recursive: true });
+    const child = Bun.spawn(["bun", "run", script], {
+      env: {
+        ...process.env,
+        ...childEnv,
+        FINALIZE_WORKDIR: workDir,
+        FINALIZE_MANIFEST: JSON.stringify(manifest),
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [out, err, code] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
+    const all = `${out}\n${err}`;
+    expect(code, all).toBe(1);
+    expect(all).toContain(
+      `${DATA_AVAILABILITY_MARKER} 50.0% of data keys available. 1 of 2 annexed key(s) in the tree have no object in s3://nemar/${S3_PREFIX} (e.g. ${unbacked}).`,
+    );
+    expect(all).not.toContain("Registered");
+    expect(all).not.toContain("FINALIZE-RETURNED");
+    // The origin's git-annex branch was not pushed: no key was advertised.
+    expect(await ok(["git", "rev-parse", "refs/heads/git-annex"], origin)).toBe(before);
+  }, 180_000);
 });
