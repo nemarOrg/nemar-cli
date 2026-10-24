@@ -103,7 +103,7 @@ Machine definition of clean (Worker merge; ADR 0111 narrows only ADR 0093's merg
 - the plan had zero unexplained paths, so there is no 2.0.1, which the Worker never merges;
 - the identifier screen is clear (never `unchecked`);
 - BIDS validation and `version-check` are green;
-- the ADR 0107 review of the head is not `declined`;
+- an ADR 0107 review is stored for the head and its verdict is `pass` (any other verdict, or none, is not clean);
 - the PR head equals the screened SHA;
 - the daily merge cap is not exhausted;
 - GitHub reports the PR `clean`, so the App's bypass is never used.

@@ -127,7 +127,7 @@ A re-pull pull request is machine clean when all of these hold:
 - the plan had zero unexplained paths, so there is no conflict and no correction to replay: the Worker never merges an N.0.1 pull request, because N.0.1 exists only when a correction does, and an administrator merges it;
 - the identifier screen, dispatched with `ref=<head sha>` and a callback bound to the re-pull row, says `clear`: never `unchecked`, never `rerun`, and never `acknowledge`, which needs a person (ADR 0086);
 - BIDS validation and `version-check` are green;
-- the ADR 0107 review stored for that head is not `declined`, which blocks even where the review's ruleset is only a shadow check;
+- an ADR 0107 review is stored for that head and its verdict is `pass`; any other verdict, or none, is not machine clean, because unknown is never treated as clean (ADR 0053, ADR 0054), and this holds even where the review's ruleset is only a shadow check;
 - the pull request's head equals the screened SHA;
 - the daily merge cap is not exhausted, and its claim is made before the merge is sent.
 
@@ -191,6 +191,7 @@ ADR 0086 exempts `xx` from the identifier screen, so an `xx` re-pull never has a
   NEMAR's log shows one commit per re-pull, named by its trailers, and not upstream's commits; upstream's repository and `CHANGES` remain the record of how the snapshot was made.
 - **Few re-pulls will be merged by the Worker at first.**
   Most mirrors are in formats the scanner does not parse, so their screen asks for an acknowledgment (ADR 0089, Consequences), and only an administrator can give one.
+  Machine clean also needs an ADR 0107 review that passes, which no re-pull diff is yet known to get.
 - **The merge cap binds NEMAR's tools only.**
   An organization administrator merging in the GitHub UI is not stopped by it.
 - **The Worker gains a path that merges into `main` of a public dataset.**
@@ -216,9 +217,8 @@ ADR 0086 exempts `xx` from the identifier screen, so an `xx` re-pull never has a
 - Where `source_version` is inserted under the central manifest flow.
 - Whether "explained" edits are detected on early rewritten imports (`on003645`, `on004362`); local dry-run plans count the unexplained paths.
 - Whether a plan can tell which paths a ledger-recorded correction changed, since the ledger lists no files; until it can, decision 1's refusal applies to every unexplained path of a dataset whose ledger records a correction.
-- What ADR 0107's review does to a re-pull pull request the App opens.
-  The App is not exempt, so the review runs; where its ruleset is in force GitHub reports `clean` only once the check passes, and whether a re-pull diff can pass at all is unknown, because ADR 0109 fails a changed `CHANGES` line and holds a replaced recording, both normal in a re-pull.
-  Whether `fail`, `uncertain` or `could_not_decide` should also stop the Worker where the ruleset is only a shadow check is not decided; only `declined` does.
+- Whether ADR 0107's review can ever pass a re-pull diff.
+  The App is not exempt, so the review runs, and ADR 0109 fails a changed `CHANGES` line and holds a replaced recording, both normal in a re-pull; until a re-pull's review passes, none is machine clean.
 - Whether enrichment commits on the release branch move its head after the screen read it.
 - Whether OpenNeuro writes S3 before it pushes to GitHub, and whether the object at a path lags the pinned `versionId`.
 - That upstream's `.log.rmet` records a `versionId` per key, which the design record states and nothing here has checked.
