@@ -8,6 +8,7 @@
 
 import {
   type Dirent,
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -1247,17 +1248,27 @@ export async function cloneOpenNeuroAtTag(
  * Print `err` as the run's last failure line and stop. The one place a refusal (`ImportRefused`)
  * from any step of prepare ends up: the onboard workflow's reporter forwards the LAST `✖` line,
  * cut at 600 characters, so the marker has to be both the start of that line and the last thing
- * to fail. Before printing it, any staging an earlier attempt left is removed, so the copy and
- * finalize jobs (which run under `if: !cancelled()`) find no manifest and do nothing, instead of
- * copying and publishing what a previous prepare described. Exported for the test that runs it in
- * a child process and feeds its output to the workflow's own reporter.
+ * to fail.
+ *
+ * Before printing it, when the run persists staging (the workflow's `--phase prepare` does), any
+ * staging an earlier attempt left is removed. The copy and finalize jobs still run, under
+ * `if: !cancelled()`, and now fail at once reading the missing manifest (`readManifestFromS3`
+ * throws) instead of copying and publishing what a previous prepare described. A run without
+ * staging (`--local`) has none to clear. A work directory this run created is removed too; one the
+ * caller named (`--dir`) is the caller's and stays.
+ *
+ * Exported for the tests that run it in a child process and feed its output to the workflow's own
+ * reporter.
  */
 export async function refuseImport(
   err: ImportRefused,
   nemarId: string,
   options: ImportOptions,
+  createdWorkDir: string | null = null,
 ): Promise<never> {
   if (options.persistStaging) {
+    // cleanupStaging reports a failed `aws s3 rm` itself; the catch is for what it lets through,
+    // a spawn failure such as no `aws` on PATH, which is said here rather than lost.
     try {
       await cleanupStaging(nemarId, S3_BUCKET, S3_REGION);
     } catch (cleanupErr) {
@@ -1268,8 +1279,43 @@ export async function refuseImport(
       );
     }
   }
+  removeCreatedWorkDir(createdWorkDir);
   ora().fail(err.message);
   process.exit(1);
+}
+
+/**
+ * A failure of prepare that, like a refusal, ends the run before anything is reset or pushed, and
+ * whose work directory is removed when this run created it. Raised by the steps the tag pin added
+ * (the clone at the tag, the upstream-moved guard), and ended in one place by `prepareImport`.
+ */
+class PrepareStopped extends Error {}
+
+/** Remove a work directory this run created; git-annex leaves its object directories read-only. */
+function removeCreatedWorkDir(dir: string | null): void {
+  if (dir === null) return;
+  const makeWritable = (path: string): void => {
+    let entries: Dirent[];
+    try {
+      chmodSync(path, 0o755);
+      entries = readdirSync(path, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (entry.isDirectory()) makeWritable(join(path, entry.name));
+    }
+  };
+  try {
+    makeWritable(dir);
+    rmSync(dir, { recursive: true, force: true });
+  } catch (rmErr) {
+    console.log(
+      chalk.yellow(
+        `  Could not remove the work directory ${dir} (${rmErr instanceof Error ? rmErr.message : String(rmErr)})`,
+      ),
+    );
+  }
 }
 
 /**
@@ -1286,10 +1332,21 @@ export async function prepareImport(
   options: ImportOptions = {},
 ): Promise<ImportManifest> {
   const nemarId = mapDatasetId(openneuroId);
+  const createdWorkDir = options.workDir
+    ? null
+    : mkdtempSync(join(tmpdir(), `nemar-import-${nemarId}-`));
   try {
-    return await prepareImportSteps(openneuroId, nemarId, options);
+    return await prepareImportSteps(openneuroId, nemarId, {
+      ...options,
+      workDir: options.workDir ?? (createdWorkDir as string),
+    });
   } catch (err) {
-    if (err instanceof ImportRefused) return refuseImport(err, nemarId, options);
+    if (err instanceof ImportRefused) return refuseImport(err, nemarId, options, createdWorkDir);
+    if (err instanceof PrepareStopped) {
+      removeCreatedWorkDir(createdWorkDir);
+      ora().fail(err.message);
+      process.exit(1);
+    }
     throw err;
   }
 }
@@ -1313,12 +1370,9 @@ async function prepareImportSteps(
   try {
     pinned = await cloneOpenNeuroAtTag(openneuroId, datasetPath, { tag: options.tag });
   } catch (err) {
-    if (err instanceof ImportRefused) {
-      cloneSpinner.stop();
-      throw err;
-    }
-    cloneSpinner.fail(err instanceof Error ? err.message : String(err));
-    process.exit(1);
+    cloneSpinner.stop();
+    if (err instanceof ImportRefused) throw err;
+    throw new PrepareStopped(err instanceof Error ? err.message : String(err));
   }
   cloneSpinner.succeed(`Cloned ${openneuroId} at upstream tag ${pinned.tag}`);
   if (pinned.latestTag !== null && !sameUpstreamTag(pinned.latestTag, pinned.tag)) {
@@ -1550,8 +1604,7 @@ async function prepareImportSteps(
     });
   } catch (err) {
     if (err instanceof ImportRefused) throw err;
-    ora().fail(err instanceof Error ? err.message : String(err));
-    process.exit(1);
+    throw new PrepareStopped(err instanceof Error ? err.message : String(err));
   }
   const didResetMain = base.kind === "hard-reset";
   if (didResetMain) {

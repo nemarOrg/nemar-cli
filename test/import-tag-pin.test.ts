@@ -11,7 +11,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { which } from "bun";
 import { classifyImportFailure } from "../backend/src/services/import-failure-cause";
@@ -240,6 +240,36 @@ describe("an explicit tag of the wrong shape is a usage error, not a refusal", (
     await p.catch((err) => expect(err).not.toBeInstanceOf(ImportRefused));
     expect(existsSync(dir)).toBe(false);
   });
+});
+
+describe("a refusal removes the work directory it made, never the caller's", () => {
+  test("the created directory goes, read-only annex directories and all; --dir stays", async () => {
+    const created = join(scratch.root, "created-work-dir");
+    const named = join(scratch.root, "named-work-dir");
+    // What a clone leaves: git-annex makes its object directories read-only.
+    mkdirSync(join(created, "on000001", ".git", "annex", "objects", "xx"), { recursive: true });
+    writeFileSync(join(created, "on000001", ".git", "annex", "objects", "xx", "KEY"), "x");
+    chmodSync(join(created, "on000001", ".git", "annex", "objects", "xx"), 0o555);
+    mkdirSync(named, { recursive: true });
+    const script = join(scratch.root, "refuse-workdir.ts");
+    writeFileSync(
+      script,
+      [
+        `import { ImportRefused, OPENNEURO_MIRROR_LAG_MARKER } from ${JSON.stringify(join(import.meta.dir, "..", "src/lib/import-markers.ts"))};`,
+        `import { refuseImport } from ${JSON.stringify(join(import.meta.dir, "..", "src/lib/import-openneuro.ts"))};`,
+        `await refuseImport(new ImportRefused(OPENNEURO_MIRROR_LAG_MARKER, "ds000001: test"), "on000001", { workDir: ${JSON.stringify(named)} }, ${JSON.stringify(created)});`,
+      ].join("\n"),
+    );
+    const child = Bun.spawn(["bun", script], {
+      env: { PATH: process.env.PATH ?? "", HOME: scratch.root },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text()]);
+    expect(await child.exited).toBe(1);
+    expect(existsSync(created)).toBe(false);
+    expect(existsSync(named)).toBe(true);
+  }, 60_000);
 });
 
 describe("a refusal clears the staging an earlier attempt left", () => {

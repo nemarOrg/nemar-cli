@@ -39,7 +39,7 @@ export type { ImportRefusalMarker };
  * A refusal by the import, carrying one of the markers above at the start of its message (the tag
  * pin's and the #1320 preflight's). `prepareImport` catches it in one place, prints the message as
  * the run's last failure line (the onboard workflow's reporter forwards the last `✖` line into
- * `import_jobs.last_error`), clears any stale staging, and exits non-zero. When one is thrown nothing
+ * `import_jobs.last_error`), clears stale staging when the run persists it, and exits non-zero. When one is thrown nothing
  * has been reset, pushed or copied into the bucket, and a mirror lag has not even created the
  * dataset; that is what makes it a refusal rather than a failure.
  */
