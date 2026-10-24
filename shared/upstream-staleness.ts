@@ -19,6 +19,7 @@
  * their own state; none is "current" and none is "not stale".
  */
 
+import { annexKeyDeclaredSize } from "./annex-key.js";
 import {
   type SourceVersionRow,
   isSourceTag,
@@ -509,4 +510,110 @@ export function countUpstreamStates(rows: readonly UpstreamStatusRow[]): Upstrea
   }
   const stale = STALE_STATES.reduce((sum, s) => sum + states[s], 0);
   return { states, anomalies, stale, probably_stale: probablyStale };
+}
+
+// ----------------------------------------------------------------------------
+// The measurement (Phase 4c): what a re-pull would carry
+// ----------------------------------------------------------------------------
+
+/** One entry of an OpenNeuro snapshot's recursive file listing (`DatasetFile`). */
+export interface SnapshotFile {
+  filename: string;
+  /** The git-annex key for an annexed file, the blob SHA for a git file. */
+  id: string;
+  size: number | null;
+  annexed: boolean;
+  directory?: boolean;
+}
+
+/**
+ * What changed between two snapshots of one dataset, as OpenNeuro lists them. It is UPSTREAM'S
+ * delta between the two tags, not NEMAR's tree: NEMAR's corrections, its scrubs and its annex
+ * policy are not in it (ADR 0111, Phase 4c amendment).
+ */
+export interface SnapshotDelta {
+  added: number;
+  changed: number;
+  deleted: number;
+  annexed_added: number;
+  annexed_changed: number;
+  annexed_deleted: number;
+  /** Any annexed file was added, changed or deleted. */
+  data_changing: boolean;
+  /** Distinct annex keys the target snapshot has and the source snapshot does not. */
+  new_keys: number;
+  /**
+   * Bytes of the new keys, from the size each key declares, falling back to the listing's size.
+   * Null when any new key has neither: an unknown size is never a zero.
+   */
+  bytes_to_copy: number | null;
+}
+
+/**
+ * Summarize the change from the `from` listing to the `to` listing.
+ *
+ * Directory entries are skipped. Files match by `filename`; `changed` means a different `id`
+ * (a content change, whatever the size). An annexed count follows the side that holds the file:
+ * the `to` entry for an addition, the `from` entry for a deletion, and EITHER side for a change,
+ * so a file moving between git and the annex counts as annexed.
+ */
+export function summarizeSnapshotDelta(
+  from: readonly SnapshotFile[],
+  to: readonly SnapshotFile[],
+): SnapshotDelta {
+  const before = new Map<string, SnapshotFile>();
+  for (const f of from) if (!f.directory) before.set(f.filename, f);
+  const after = new Map<string, SnapshotFile>();
+  for (const f of to) if (!f.directory) after.set(f.filename, f);
+
+  let added = 0;
+  let changed = 0;
+  let deleted = 0;
+  let annexedAdded = 0;
+  let annexedChanged = 0;
+  let annexedDeleted = 0;
+  for (const [name, f] of after) {
+    const old = before.get(name);
+    if (old === undefined) {
+      added++;
+      if (f.annexed) annexedAdded++;
+    } else if (old.id !== f.id) {
+      changed++;
+      if (f.annexed || old.annexed) annexedChanged++;
+    }
+  }
+  for (const [name, f] of before) {
+    if (!after.has(name)) {
+      deleted++;
+      if (f.annexed) annexedDeleted++;
+    }
+  }
+
+  const known = new Set<string>();
+  for (const f of before.values()) known.add(f.id);
+  const newKeys = new Map<string, SnapshotFile>();
+  for (const f of after.values()) {
+    if (f.annexed && !known.has(f.id) && !newKeys.has(f.id)) newKeys.set(f.id, f);
+  }
+  let bytes: number | null = 0;
+  for (const [key, f] of newKeys) {
+    const size = annexKeyDeclaredSize(key) ?? f.size;
+    if (size === null) {
+      bytes = null;
+      break;
+    }
+    bytes += size;
+  }
+
+  return {
+    added,
+    changed,
+    deleted,
+    annexed_added: annexedAdded,
+    annexed_changed: annexedChanged,
+    annexed_deleted: annexedDeleted,
+    data_changing: annexedAdded + annexedChanged + annexedDeleted > 0,
+    new_keys: newKeys.size,
+    bytes_to_copy: bytes,
+  };
 }
