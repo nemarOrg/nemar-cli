@@ -756,10 +756,13 @@ function datacenterOf(remoteLog: string, uuid: string): string | null {
   return found;
 }
 
-/** A parse error's own words, short; a ledger line holds counts, never a value (ADR 0085). */
+/**
+ * What a parse failure may say: its class, never its message. A JSON parser's message quotes a
+ * token of the file (`Unexpected identifier "Jane"`), and a file can hold a person's name; the
+ * message also differs between runtimes, which would move the digest.
+ */
 function errorWords(err: unknown): string {
-  const text = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
-  return text.slice(0, 200);
+  return err instanceof Error && /^[A-Za-z]{1,40}$/.test(err.name) ? err.name : "unparseable";
 }
 
 async function readLedger(
