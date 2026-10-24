@@ -345,3 +345,87 @@ The lead's rulings of 2026-10-23 settle three questions decision 10 left open, a
   The retry engine's park, in both wordings of the annex conflict, is the backstop for a `failed` or `incomplete` row that carries one and reaches the sweep, because each retry fails the same way; an operator restarts the import by hand after fixing the bucket marker.
   The #1320 preflight compares the bucket's `annex-uuid` with the `nemar-s3` uuids the git-annex branch records and refuses a disagreement with `[nemar-annex-uuid-conflict]`, naming both and the recovery.
   It answers unchecked, and prepare goes on as before with a warning, whenever the comparison is incomplete: Step 4b's fetch or merge failed, git cannot read the branch, the bucket cannot be asked, or origin has a git-annex branch that records no `nemar-s3`.
+
+## Amendment 2026-10-24 (#1910): Phase 4a builds the staleness report
+
+Epic #1046, Phase 4, first part.
+Decision 6 says staleness is "computed by its own report" and designs no more than that.
+This section says what the report is, in the words the code uses, and fixes three readings the decision text left open.
+The decision text above is unchanged.
+The command (`nemar admin upstream-status`), the weekly section and the mirror flag are built by the next part and recorded in its own amendment.
+
+### What it is
+
+`GET /admin/upstream-status[?limit=N][&after=onNNNNNN][&dataset=onNNNNNN]` is read-only and admin-only.
+It reads D1, asks OpenNeuro for the snapshot lists of the mirrors that need it (a batched GraphQL query, fifty datasets to a request, sequential, ids only as variables), and asks OpenNeuro's GitHub mirror whether a newer tag has arrived.
+It writes nothing to D1, GitHub or S3, sends no mail and files no issue (ADR 0052, ADR 0053, ADR 0055).
+The verdicts are one pure function in `shared/upstream-staleness.ts`, so the command, the weekly report and the later scheduler read the same answer.
+
+### The population
+
+The report covers managed `on######` mirrors: `source = 'openneuro'`, not owned by the system user.
+A withdrawn mirror is excluded from the pass and counted on its own, so the report says how many it left out.
+`xx` fixtures are not covered, and the "Left open" item above stays open for the re-pull phases.
+Every other managed mirror is classified, public or not; the row carries its visibility.
+Design §4 said "public"; the decision text does not, and a private mirror that is behind is still behind.
+
+### The states, and which wins
+
+A row is exactly one of `current`, `stale_ready`, `mirror_lag`, `stale_unverified`, `anomaly`, `unknown`, `not_examined`, `unpublished`, `in_progress`, `parked` or `unchecked`.
+"Stale" is the sum of the three `stale_*` states.
+The first matching step wins:
+
+1. An import is preparing, copying or finalizing and the row is not blocklisted: `in_progress`.
+2. The row is blocklisted, or its import is quarantined or rolled back: `parked`.
+3. `source_id` names another dataset than the id implies: `anomaly` (`source_id_mismatch`).
+4. No NEMAR version exists: `unpublished`.
+5. The highest version was never examined for its tag: `not_examined`.
+6. The highest version's tag is unknown: `unknown`, never current and never stale.
+7. The tag is known and OpenNeuro was not asked or could not answer: `unchecked`.
+8. Upstream is deleted or absent: `anomaly` (`upstream_deleted`, `upstream_absent`).
+9. Upstream has no snapshot: `anomaly` (`upstream_no_snapshot`).
+10. The latest tag equals the recorded one: `current`.
+11. The latest tag is not a numeric tag: `anomaly` (`upstream_tag_unparsable`).
+12. The recorded tag is not among upstream's snapshots: `anomaly` (`recorded_tag_not_upstream`).
+13. The latest snapshot was not created after the recorded one, or either date is unreadable: `anomaly` (`upstream_older`, `upstream_dates_unreadable`).
+14. Otherwise upstream is newer, and the GitHub mirror decides between `stale_ready`, `mirror_lag` and `stale_unverified`.
+
+A row that cannot be compared (steps 1 to 5) is never sent to OpenNeuro.
+`unchecked` is the state of a mirror whose answer could not be had, and it is never rendered as current or as not stale (ADR 0053, ADR 0054).
+
+### Upstream's creation order decides, not the number
+
+Design §4 said tags compare numerically, and the decision text does not fix an order.
+Real histories contradict the numeric reading: `ds000001` has snapshots `00006` (2018) and `1.0.0` (2020), and `1.0.0` is numerically smaller.
+Ordering by number would call a mirror recorded at `00006` an anomaly while it is stale.
+So the recorded tag must appear in upstream's snapshot list, and upstream's latest is newer when its creation time is later.
+`compareSourceTags` is not used for the verdict.
+A latest tag that the Phase 2 parser could never record (`57fecb0c...`, `v2.0.2.`) is an anomaly, because a re-pull to it could never be proved afterwards by a recorded `source_version`.
+
+### Mirror lag is proved, not inferred
+
+The report reads `dataset_description.json` of `OpenNeuroDatasets/<ds>` at the newer tag through the authenticated raw CDN.
+A hit is `stale_ready`.
+A 404 is `mirror_lag` only if a control read of the same repository at `HEAD`, with the same credential, succeeds, the proof the backfill uses for a 404 (Phase 2 amendment).
+An error, a 404 on the control too, or a call whose probe budget ran out is `stale_unverified` with the reason, and is still counted stale.
+One known limit: a tag whose root holds no `dataset_description.json` would read as lag, which is not seen in practice.
+Not yet verified: that the NEMAR installation token is accepted for another organization's public raw files; if it is not, every probe reads `stale_unverified` with the reason and the first production run shows it.
+
+### Probably stale, for display only
+
+An `unknown` row is compared with upstream by date only to say "probably stale": upstream's latest snapshot was created after the mirror's highest NEMAR version row.
+It is a separate count, never added to stale and never recorded as a tag (decision 4).
+
+### No cron, and nothing is filed
+
+Nothing acts on staleness before the scheduled re-pull, and ADR 0053 says an alarm needs outstanding work.
+The report runs on demand, and the Monday report carries a counts-only section (next part), which is the unconditional heartbeat ADR 0054 asks for.
+A daily job would spend subrequests on the busiest tick and produce a number nobody receives.
+The scheduler of the later phase calls the same service.
+
+### Two points the decision text should have made
+
+"In-progress" can mean only `import_jobs` today.
+When `upstream_repulls` exists, a non-terminal row there must join step 1, and candidates for a re-pull come from `stale_ready` alone.
+A report with stale mirrors is a successful report; the route answers 502 only when OpenNeuro could not be read for any mirror that needed it.
+
