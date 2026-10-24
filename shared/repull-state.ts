@@ -119,7 +119,11 @@ export const VERIFIED_ONLY_STATUSES = [
   "patch_released",
 ] as const satisfies readonly RepullStatus[];
 
-/** States that wait for the identifier screen to be bound to the row; no caller may state them. */
+/**
+ * States a caller reaches only while the identifier screen bound to the row (ADR 0111, decision 7)
+ * passes for the head it names: the Worker reads the screen itself and never takes the caller's
+ * word for it.
+ */
 export const SCREEN_GATED_STATUSES = [
   "gates_clear",
   "patch_gates_clear",
@@ -300,6 +304,70 @@ export const REPULL_COUNT_KEYS = [
   "headers_not_read_nemar_held",
   "headers_not_read_no_source",
 ] as const;
+
+/** A re-pull records two pull requests: `n0` is N.0.0's, `n1` is N.0.1's (the corrections). */
+export const REPULL_PULL_REQUESTS = ["n0", "n1"] as const;
+export type RepullPullRequest = (typeof REPULL_PULL_REQUESTS)[number];
+
+/** The columns and states that belong to one of the two pull requests. */
+export interface PullRequestColumns {
+  number: "pr_number" | "patch_pr_number";
+  branch: "branch" | "patch_branch";
+  head: "head_sha" | "patch_head_sha";
+  gates: "gates_sha" | "patch_gates_sha";
+  claimedAt: "merge_claimed_at" | "patch_merge_claimed_at";
+  claimSha: "merge_claim_sha" | "patch_merge_claim_sha";
+  mergeSha: "merge_sha" | "patch_merge_sha";
+  tagSha: "tag_sha" | "patch_tag_sha";
+  /** The version the pull request releases. */
+  version: "to_version" | "patch_version";
+  /** The status in which its head is screened (the pull request is open and not yet clear). */
+  open: RepullStatus;
+  gatesClear: RepullStatus;
+  merged: RepullStatus;
+  released: RepullStatus;
+}
+
+export const PULL_REQUEST_COLUMNS: Readonly<Record<RepullPullRequest, PullRequestColumns>> = {
+  n0: {
+    number: "pr_number",
+    branch: "branch",
+    head: "head_sha",
+    gates: "gates_sha",
+    claimedAt: "merge_claimed_at",
+    claimSha: "merge_claim_sha",
+    mergeSha: "merge_sha",
+    tagSha: "tag_sha",
+    version: "to_version",
+    open: "pr_open",
+    gatesClear: "gates_clear",
+    merged: "merged",
+    released: "released",
+  },
+  n1: {
+    number: "patch_pr_number",
+    branch: "patch_branch",
+    head: "patch_head_sha",
+    gates: "patch_gates_sha",
+    claimedAt: "patch_merge_claimed_at",
+    claimSha: "patch_merge_claim_sha",
+    mergeSha: "patch_merge_sha",
+    tagSha: "patch_tag_sha",
+    version: "patch_version",
+    open: "patch_synthesized",
+    gatesClear: "patch_gates_clear",
+    merged: "patch_merged",
+    released: "patch_released",
+  },
+};
+
+/** Which pull request a gates-clear status belongs to, or null for any other status. */
+export function pullRequestOfGatesStatus(status: RepullStatus): RepullPullRequest | null {
+  for (const pr of REPULL_PULL_REQUESTS) {
+    if (PULL_REQUEST_COLUMNS[pr].gatesClear === status) return pr;
+  }
+  return null;
+}
 
 /** The next major of an `N.N.N` version: the number a re-pull's N.0.0 takes. Null for a non-version. */
 export function nextMajorVersion(version: string): string | null {

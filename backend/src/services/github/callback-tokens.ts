@@ -282,6 +282,73 @@ export async function verifyIdentifierSweepCallbackToken(
 }
 
 // ============================================================================
+// Identifier-screen callback HMAC tokens of a re-pull (epic #1046 phase 6, ADR 0111)
+// ============================================================================
+//
+// A re-pull makes no publication request; its pull request is screened with a callback bound to
+// the re-pull row (ADR 0111, decision 7), through the same workflow as the publication screen and
+// the sweep, with a callback route and a token of its own kind. Signed with the same secret and
+// domain-separated the same way: the message begins with a tag line that no other kind's message
+// begins with (`identifier-screen` and `identifier-sweep` differ from it, and a pre-screen message
+// begins with a dataset id), so a token minted for one screen cannot answer for another.
+//
+// The token binds the dataset, the re-pull row, which of its two pull requests, the screened
+// commit and the attempt's nonce; the workflow echoes `request_id` 0. Single-use is enforced by
+// the screen row (its nonce, cleared when a result is stored), not by the HMAC.
+
+/** The first line of every re-pull identifier-screen message. Never shared with another token kind. */
+export const IDENTIFIER_REPULL_TOKEN_DOMAIN = "identifier-repull";
+
+export interface IdentifierRepullCallbackPayload {
+  datasetId: string;
+  repullId: number;
+  /** `n0` for N.0.0's pull request, `n1` for N.0.1's. */
+  pr: string;
+  sha: string;
+  nonce: string;
+}
+
+/** Canonical, domain-tagged payload encoding, pinned so signer and verifier agree. */
+function encodeIdentifierRepullCallbackPayload(payload: IdentifierRepullCallbackPayload): string {
+  return `${IDENTIFIER_REPULL_TOKEN_DOMAIN}\n${payload.datasetId}\n${payload.repullId}\n${payload.pr}\n${payload.sha}\n${payload.nonce}`;
+}
+
+/** Sign a re-pull identifier-screen callback payload with HMAC-SHA256 (hex digest). */
+export async function signIdentifierRepullCallbackToken(
+  payload: IdentifierRepullCallbackPayload,
+  secret: string,
+): Promise<string> {
+  if (!secret) {
+    throw new Error("signIdentifierRepullCallbackToken: secret is required");
+  }
+  const encoder = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    "raw",
+    encoder.encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const signature = await crypto.subtle.sign(
+    "HMAC",
+    key,
+    encoder.encode(encodeIdentifierRepullCallbackPayload(payload)),
+  );
+  return toHex(signature);
+}
+
+/** Verify a re-pull identifier-screen callback token (constant-time). */
+export async function verifyIdentifierRepullCallbackToken(
+  token: string,
+  payload: IdentifierRepullCallbackPayload,
+  secret: string,
+): Promise<boolean> {
+  if (!token || !secret) return false;
+  const expected = await signIdentifierRepullCallbackToken(payload, secret);
+  return timingSafeEqual(token, expected);
+}
+
+// ============================================================================
 // PR-review callback HMAC tokens (ADR 0092)
 // ============================================================================
 //

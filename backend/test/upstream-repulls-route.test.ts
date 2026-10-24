@@ -189,7 +189,8 @@ function snapshotOf(id: string, version = "1.0.0") {
 }
 
 function seedRow(status: RepullStatus, over: Row = {}): number {
-  const row = rowAt(status, { actor_user_id: adminId, ...over });
+  // The mirror `seedMirror` records by default, so a step that re-reads the dataset fences finds it.
+  const row = rowAt(status, { actor_user_id: adminId, upstream_ds: "ds099999", ...over });
   const cols = Object.keys(row);
   const r = db
     .query(
@@ -1000,16 +1001,19 @@ describe("transition: what is refused", () => {
     }
   });
 
-  test("the screen's states cannot be stated here either, until the screen is bound", async () => {
+  test("the screen's states cannot be stated here: the screen bound to the row must pass", async () => {
+    // An `on` dataset in production with no screen recorded: the Worker reads the screen itself,
+    // so stating the gates sha is not enough (the screen's own suite covers a passing screen).
+    seedMirror("on099999");
     const cases: Array<[RepullStatus, RepullStatus, Record<string, unknown>]> = [
       ["pr_open", "gates_clear", { gates_sha: SHA }],
       ["patch_synthesized", "patch_gates_clear", { patch_gates_sha: SHA }],
     ];
     for (const [from, to, fields] of cases) {
       db.run("DELETE FROM upstream_repulls");
-      const id = seedRow(from);
-      const res = await move(id, { from, to, fields });
-      expect([to, res.status, res.body.code]).toEqual([to, 409, "screen-not-built"]);
+      const id = seedRow(from, { dataset_id: "on099999" });
+      const res = await move(id, { from, to, fields }, { environment: "production" });
+      expect([to, res.status, res.body.code]).toEqual([to, 409, "screen-not-clear"]);
       expect(rowOf(id).status).toBe(from);
     }
   });
@@ -1364,6 +1368,9 @@ describe("transition: two writers that read the same row", () => {
 // ----------------------------------------------------------------------------
 
 describe("transition: the claim to merge", () => {
+  // The claim re-reads the dataset fences, so the record's dataset must exist and be a mirror.
+  beforeEach(() => seedMirror("xx090123"));
+
   test("it is recorded through the API on gates_clear, and nothing else changes", async () => {
     const id = seedRow("gates_clear");
     const before = rowOf(id);

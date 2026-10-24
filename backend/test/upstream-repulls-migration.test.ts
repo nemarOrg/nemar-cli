@@ -489,7 +489,12 @@ describe("the service on D1", () => {
       .first<{ id: number }>();
     const admin = { id: user?.id ?? 0 };
     const env = { DB: d1, ENVIRONMENT: "test" } as unknown as Bindings;
-    const row = rowAt("gates_clear", { dataset_id: "xx090123", actor_user_id: admin.id });
+    // The claim re-reads the dataset fences: the row names the mirror the dataset row records.
+    const row = rowAt("gates_clear", {
+      dataset_id: "xx090123",
+      upstream_ds: "ds099999",
+      actor_user_id: admin.id,
+    });
     const cols = Object.keys(row);
     const inserted = await d1
       .prepare(

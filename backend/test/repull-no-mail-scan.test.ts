@@ -14,7 +14,14 @@
 import { describe, expect, test } from "bun:test";
 import { SRC, type Tree, chainTo, createTree, importClosure, rel } from "./helpers/ts-scan";
 
-const ROOTS = [`${SRC}/services/upstream-repull.ts`, `${SRC}/routes/admin/upstream-repulls.ts`];
+const ROOTS = [
+  `${SRC}/services/upstream-repull.ts`,
+  `${SRC}/routes/admin/upstream-repulls.ts`,
+  // The screen bound to the re-pull row and its callback (ADR 0111, decision 7): the publication
+  // screen they share a workflow with mails its result, so their closure is pinned by name too.
+  `${SRC}/services/upstream-repull-screen.ts`,
+  `${SRC}/routes/callbacks/identifier-screen-repull.ts`,
+];
 
 /** Every module under `backend/src` that is a mail module, by name. */
 function mailModules(tree: Tree): Set<string> {
@@ -45,11 +52,29 @@ describe("the re-pull code sends no mail", () => {
       "services/upstream-repull.ts",
       "routes/admin/upstream-repulls.ts",
       "services/import-error.ts",
+      "services/upstream-repull-screen.ts",
+      "routes/callbacks/identifier-screen-repull.ts",
+      "services/identifier-screen-stored.ts",
+      "services/github/dispatch.ts",
     ]) {
       expect(closure.files.has(`${SRC}/${f}`)).toBe(true);
     }
     expect(mailModules(tree).size).toBeGreaterThan(0);
     expect(mailFindings(tree)).toEqual([]);
+  });
+
+  test("it fires when the re-pull screen reaches the publication screen, which mails", () => {
+    // The re-pull's screen reads the publication screen's helpers from the module that holds no
+    // mail; importing them from `identifier-screen.ts` instead would bring `email.ts` along.
+    const base = createTree();
+    const screen = `${SRC}/services/upstream-repull-screen.ts`;
+    const planted = createTree({
+      "services/upstream-repull-screen.ts": `${base.read(screen)}\nexport { screenEmailSection } from "./identifier-screen.js";\n`,
+    });
+    const findings = mailFindings(planted);
+    expect(findings.some((f) => f.includes("identifier-screen.ts") && f.includes("email.ts"))).toBe(
+      true,
+    );
   });
 
   test("it fires on a direct import of a mail module", () => {

@@ -22,8 +22,15 @@
  *    record, because a merge may be on `main` with its row not saying so.
  *  - `version-facts-disagree`: the dataset's own version rows must say what the plan says.
  *  - `tag-already-pulled`.
- * These run at create. Execution phases must re-check the anonymity, withdrawn and import fences
- * when they move a record; a transition re-checks only the environment fence today.
+ * These run at create. A transition re-checks the environment fence on every edge, and the
+ * mirror, anonymity, withdrawn and import fences on every step toward a merge: dispatching the
+ * screen, the edges into the gates-clear states and the claim to merge.
+ *
+ * THE SCREEN (ADR 0111, decision 7). The edges into `gates_clear` and `patch_gates_clear` are
+ * taken only while the identifier screen bound to the row (`upstream-repull-screen.ts`) passes
+ * for the recorded head, and the claim to merge only while it passes for the claimed head. Each
+ * re-asserts what it read in the statement that writes, so a verdict that changed in between is
+ * not relied on.
  *
  * `lineage_recordable` is an administrator's assertion: the Worker has no evidence of it (it holds
  * neither tree), so it is recorded in the audit row and nothing here verifies it.
@@ -44,14 +51,20 @@ import {
   sameUpstreamTag,
 } from "../../../shared/openneuro-tag.js";
 import {
+  ACKNOWLEDGMENT_MAX_LENGTH,
+  ACKNOWLEDGMENT_MIN_LENGTH,
+} from "../../../shared/publication-limits.js";
+import {
   DIGEST_RE,
   IMMUTABLE_ONCE_SET,
   MERGE_CLAIM_COLUMNS,
   NEMAR_VERSION_RE,
+  PULL_REQUEST_COLUMNS,
+  REPULL_PULL_REQUESTS,
   REPULL_STATUSES,
+  type RepullPullRequest,
   type RepullRow,
   type RepullStatus,
-  SCREEN_GATED_STATUSES,
   SHA_RE,
   TERMINAL_STATUSES,
   VERIFIED_ONLY_STATUSES,
@@ -61,11 +74,25 @@ import {
   isRepullStatus,
   isTerminal,
   nextMajorVersion,
+  pullRequestOfGatesStatus,
 } from "../../../shared/repull-state.js";
 import { AUDIT_IF_PREVIOUS_CHANGED_SQL, auditLogParams } from "../db/audit-log.js";
 import type { Bindings } from "../types/bindings.js";
 import { isValidDatasetId } from "./datasetId.js";
+import { isScreenExempt, readStoredReport } from "./identifier-screen-stored.js";
 import { resolveImportError } from "./import-error.js";
+import {
+  type RepullScreenGate,
+  type RepullScreenStart,
+  type RepullScreenView,
+  type SqlGuard,
+  acknowledgeRepullScreenRow,
+  listRepullScreenRows,
+  readRepullScreen,
+  repullScreenGate,
+  repullScreenView,
+  startRepullScreen,
+} from "./upstream-repull-screen.js";
 
 // ----------------------------------------------------------------------------
 // SQL. Exported so a test runs the statement the route runs, never a copy.
@@ -232,6 +259,8 @@ export type RepullRefusal = {
   message: string;
   /** The row a conflict is about, when naming it helps the caller (never a secret). */
   row?: RepullRow;
+  /** The screen a refusal is about, as the API shows it. */
+  screen?: RepullScreenView;
 };
 
 export function isRefusal(value: unknown): value is RepullRefusal {
@@ -293,6 +322,64 @@ export function envFenceRefusal(
 }
 
 const IN_FLIGHT_IMPORT = new Set(["preparing", "copying", "finalizing"]);
+
+interface DatasetFacts {
+  source: string | null;
+  source_id: string | null;
+  anonymous: number;
+  withdrawn_at: string | null;
+  import_status: string | null;
+}
+
+/**
+ * The dataset fences, from the dataset row and its import: a mirror of `upstreamDs`, not
+ * anonymous (a re-pull takes upstream's authors and README, which would undo ADR 0065's blind;
+ * there is no override), not withdrawn, and no import preparing, copying or finalizing. Create
+ * applies them first; a step toward a merge applies them again, because any of them can change
+ * while a re-pull is open.
+ */
+function datasetFactsRefusal(
+  facts: DatasetFacts,
+  datasetId: string,
+  upstreamDs: string,
+): RepullRefusal | null {
+  if (facts.source !== "openneuro" || facts.source_id !== upstreamDs) {
+    return {
+      status: 409,
+      code: "not-a-mirror",
+      message: `${datasetId} is not recorded as a mirror of ${upstreamDs}.`,
+    };
+  }
+  if (facts.anonymous === 1) {
+    return {
+      status: 409,
+      code: "anonymous-dataset",
+      message:
+        "An anonymous dataset is never re-pulled: the re-pull takes upstream's authors and README, which would undo the blind.",
+    };
+  }
+  if (facts.withdrawn_at !== null) {
+    return { status: 409, code: "withdrawn", message: `${datasetId} is withdrawn.` };
+  }
+  if (facts.import_status !== null && IN_FLIGHT_IMPORT.has(facts.import_status)) {
+    return {
+      status: 409,
+      code: "import-in-flight",
+      message: `An import of ${datasetId} is ${facts.import_status}; wait for it to finish.`,
+    };
+  }
+  return null;
+}
+
+/** The dataset fences, read fresh, for a step toward a merge. */
+export async function datasetFenceRefusal(
+  db: D1Database,
+  row: Pick<RepullRow, "dataset_id" | "upstream_ds">,
+): Promise<RepullRefusal | null> {
+  const facts = await db.prepare(CREATE_FACTS_SQL).bind(row.dataset_id).first<DatasetFacts>();
+  if (!facts) return { status: 404, code: "not-found", message: `No dataset ${row.dataset_id}.` };
+  return datasetFactsRefusal(facts, row.dataset_id, row.upstream_ds);
+}
 
 interface VersionFactRow {
   version: string;
@@ -366,14 +453,6 @@ export interface CreateResult {
   lineage_rows: number;
 }
 
-interface DatasetFacts {
-  source: string | null;
-  source_id: string | null;
-  anonymous: number;
-  withdrawn_at: string | null;
-  import_status: string | null;
-}
-
 export async function createRepull(
   env: Bindings,
   admin: { id: number },
@@ -414,31 +493,8 @@ async function createOnce(
   if (!facts) {
     return { status: 404, code: "not-found", message: `No dataset ${body.dataset_id}.` };
   }
-  if (facts.source !== "openneuro" || facts.source_id !== body.upstream_ds) {
-    return {
-      status: 409,
-      code: "not-a-mirror",
-      message: `${body.dataset_id} is not recorded as a mirror of ${body.upstream_ds}.`,
-    };
-  }
-  if (facts.anonymous === 1) {
-    return {
-      status: 409,
-      code: "anonymous-dataset",
-      message:
-        "An anonymous dataset is never re-pulled: the re-pull takes upstream's authors and README, which would undo the blind.",
-    };
-  }
-  if (facts.withdrawn_at !== null) {
-    return { status: 409, code: "withdrawn", message: `${body.dataset_id} is withdrawn.` };
-  }
-  if (facts.import_status !== null && IN_FLIGHT_IMPORT.has(facts.import_status)) {
-    return {
-      status: 409,
-      code: "import-in-flight",
-      message: `An import of ${body.dataset_id} is ${facts.import_status}; wait for it to finish.`,
-    };
-  }
+  const fenced = datasetFactsRefusal(facts, body.dataset_id, body.upstream_ds);
+  if (fenced) return fenced;
 
   // An open record for this very plan is returned before the version rows are consulted: once
   // N.0.0 is merged and tagged the highest version is no longer the plan's `from_version`, and a
@@ -558,19 +614,44 @@ function inFlight(row: RepullRow): RepullRefusal {
 // Transition
 // ----------------------------------------------------------------------------
 
-/** The columns that hold the claim to merge, and the screened head it must name, per pull request. */
-const CLAIMS = {
-  gates_clear: {
-    claimedAt: "merge_claimed_at",
-    claimSha: "merge_claim_sha",
-    gatesSha: "gates_sha",
-  },
-  patch_gates_clear: {
-    claimedAt: "patch_merge_claimed_at",
-    claimSha: "patch_merge_claim_sha",
-    gatesSha: "patch_gates_sha",
-  },
-} as const;
+/** The two self-edges that record a claim to merge, and the pull request each claims for. */
+const CLAIM_EDGES: Readonly<Partial<Record<RepullStatus, RepullPullRequest>>> = {
+  gates_clear: "n0",
+  patch_gates_clear: "n1",
+};
+
+/** A transition checked and built, not yet run. */
+export interface PreparedTransition {
+  row: RepullRow;
+  update: D1PreparedStatement;
+  audit: D1PreparedStatement;
+  /**
+   * Why the update matched nothing when the row itself had not moved: one of the conditions it
+   * carries beyond the compare-and-set (the screen's verdict) failed.
+   */
+  guardRefusal?: () => Promise<RepullRefusal>;
+}
+
+function screenRefusal(
+  gate: Extract<RepullScreenGate, { ok: false }>,
+  row: RepullRow,
+): RepullRefusal {
+  return {
+    status: 409,
+    code: "screen-not-clear",
+    message: `${gate.message} (gate: ${gate.gate})`,
+    row,
+  };
+}
+
+function screenChanged(row: RepullRow): RepullRefusal {
+  return {
+    status: 409,
+    code: "screen-changed",
+    message: `The identifier screen of re-pull #${row.id} changed while this write was checked; read it again.`,
+    row,
+  };
+}
 
 /**
  * Move a row along one edge. Every check that can be made without a second system is made here:
@@ -584,6 +665,13 @@ const CLAIMS = {
  * nothing is written. That holds for transitions only: deleting the dataset deletes the record
  * without touching its revision, and a row gone by then answers 404.
  *
+ * Two kinds of edge read a second table, and re-assert what they read in the same statement:
+ *  - into `gates_clear` or `patch_gates_clear`: the gates sha must be the recorded head, the
+ *    dataset fences must hold, and the identifier screen bound to the row must pass for that head
+ *    (ADR 0111, decision 7); the statement re-checks the screen's verdict;
+ *  - the claim to merge (the self-edge on either): the dataset fences and the screen for the
+ *    claimed head.
+ *
  * `last_error` goes through {@link resolveImportError} (ADR 0051): a specific message is never
  * overwritten by a generic one, and a blank one is refused. An edge into a different, non-terminal
  * status clears the stored error, because the step it describes has since succeeded; an edge that
@@ -595,9 +683,26 @@ export async function transitionRepull(
   id: number,
   t: { from: RepullStatus; to: RepullStatus; fields?: Record<string, unknown>; error?: string },
 ): Promise<{ row: RepullRow } | RepullRefusal> {
-  const db = env.DB;
-  const row = await getRepull(db, id);
+  const row = await getRepull(env.DB, id);
   if (!row) return { status: 404, code: "not-found", message: `No re-pull #${id}.` };
+  const prepared = await prepareTransition(env, admin, row, t);
+  if (isRefusal(prepared)) return prepared;
+  const done = await commitTransition(env.DB, prepared);
+  return isRefusal(done) ? done : { row: done.row };
+}
+
+/**
+ * The checks of {@link transitionRepull} and the statements it runs, without running them, so a
+ * caller that must write more in the same batch shares every check.
+ */
+export async function prepareTransition(
+  env: Bindings,
+  admin: { id: number },
+  row: RepullRow,
+  t: { from: RepullStatus; to: RepullStatus; fields?: Record<string, unknown>; error?: string },
+): Promise<PreparedTransition | RepullRefusal> {
+  const db = env.DB;
+  const id = row.id;
 
   const fence = envFenceRefusal(env, row.dataset_id);
   if (fence) return fence;
@@ -627,14 +732,6 @@ export async function transitionRepull(
       row,
     };
   }
-  if (!repeats && (SCREEN_GATED_STATUSES as readonly string[]).includes(t.to)) {
-    return {
-      status: 409,
-      code: "screen-not-built",
-      message: `${t.to} needs the identifier screen bound to the row, which this route cannot state.`,
-      row,
-    };
-  }
   const claimColumn = (MERGE_CLAIM_COLUMNS as Record<string, keyof RepullRow>)[t.to];
   if (claimColumn && row[claimColumn] !== null) {
     return {
@@ -644,16 +741,15 @@ export async function transitionRepull(
       row,
     };
   }
-  const claim = repeats ? CLAIMS[t.to as keyof typeof CLAIMS] : undefined;
-  if (claim) {
-    if (row[claim.claimedAt] !== null) {
-      return {
-        status: 409,
-        code: "merge-claim-held",
-        message: `A merge is already claimed for re-pull #${id}.`,
-        row,
-      };
-    }
+  const claimPr = repeats ? CLAIM_EDGES[t.to] : undefined;
+  const claim = claimPr ? PULL_REQUEST_COLUMNS[claimPr] : undefined;
+  if (claim && row[claim.claimedAt] !== null) {
+    return {
+      status: 409,
+      code: "merge-claim-held",
+      message: `A merge is already claimed for re-pull #${id}.`,
+      row,
+    };
   }
 
   const spec = fieldsFor(t.from, t.to);
@@ -686,11 +782,11 @@ export async function transitionRepull(
     const problem = fieldProblem(key, value, row, fields);
     if (problem) return { status: 400, code: "field-invalid", message: problem };
   }
-  if (claim && fields[claim.claimSha] !== row[claim.gatesSha]) {
+  if (claim && fields[claim.claimSha] !== row[claim.gates]) {
     return {
       status: 400,
       code: "field-invalid",
-      message: `${claim.claimSha} must be the screened head, ${claim.gatesSha}.`,
+      message: `${claim.claimSha} must be the screened head, ${claim.gates}.`,
     };
   }
   for (const key of IMMUTABLE_ONCE_SET) {
@@ -703,6 +799,35 @@ export async function transitionRepull(
         row,
       };
     }
+  }
+
+  // The edges that read the screen and re-assert it when they write.
+  const guards: SqlGuard[] = [];
+  let guardRefusal: PreparedTransition["guardRefusal"];
+  const gatedPr = repeats ? null : pullRequestOfGatesStatus(t.to);
+  const screenedPr = gatedPr ?? claimPr ?? null;
+  if (screenedPr !== null) {
+    const cols = PULL_REQUEST_COLUMNS[screenedPr];
+    const sha = (gatedPr ? fields[cols.gates] : fields[cols.claimSha]) as string;
+    if (gatedPr && sha !== row[cols.head]) {
+      return {
+        status: 400,
+        code: "field-invalid",
+        message: `${cols.gates} must be the recorded head, ${cols.head}: the screen is read on the commit the row names.`,
+      };
+    }
+    const fenced = await datasetFenceRefusal(db, row);
+    if (fenced) return { ...fenced, row };
+    const gate = await repullScreenGate(db, {
+      datasetId: row.dataset_id,
+      repullId: id,
+      pr: screenedPr,
+      sha,
+      actorId: admin.id,
+    });
+    if (!gate.ok) return screenRefusal(gate, row);
+    if (!gate.exempt) guards.push(gate.guard);
+    guardRefusal = async () => screenChanged(row);
   }
 
   // Column names below come from the edge's field list, checked against `may` above: never a request.
@@ -730,12 +855,11 @@ export async function transitionRepull(
   sets.push("revision = revision + 1");
   sets.push("updated_at = datetime('now')");
   sets.push(`terminal_at = ${isTerminal(t.to) ? "datetime('now')" : "NULL"}`);
+  const where = ["id = ?", "status = ?", "revision = ?", ...guards.map((g) => g.sql)];
 
   const update = db
-    .prepare(
-      `UPDATE upstream_repulls SET ${sets.join(", ")} WHERE id = ? AND status = ? AND revision = ?`,
-    )
-    .bind(...binds, id, t.from, row.revision);
+    .prepare(`UPDATE upstream_repulls SET ${sets.join(", ")} WHERE ${where.join(" AND ")}`)
+    .bind(...binds, id, t.from, row.revision, ...guards.flatMap((g) => g.binds));
   const audit = db.prepare(AUDIT_IF_PREVIOUS_CHANGED_SQL).bind(
     ...auditLogParams({
       userId: admin.id,
@@ -750,21 +874,199 @@ export async function transitionRepull(
       }),
     }),
   );
-  const results = await db.batch([update, audit]);
+  return { row, update, audit, guardRefusal };
+}
 
-  const after = await getRepull(db, id);
+/**
+ * Run a prepared transition, after `before` in the same batch. `before` must be guarded on the
+ * row as it was read (its status and revision), so that it applies exactly when the update does:
+ * a batch is one transaction, and the update is the only statement in it that moves the row.
+ */
+export async function commitTransition(
+  db: D1Database,
+  prepared: PreparedTransition,
+  before: D1PreparedStatement[] = [],
+): Promise<{ row: RepullRow; results: D1Result[] } | RepullRefusal> {
+  const { row } = prepared;
+  const results = await db.batch([...before, prepared.update, prepared.audit]);
+  const after = await getRepull(db, row.id);
   if (!after) {
     // Deleting a dataset deletes its records without touching the revision, so the row can be
     // gone between the read above and here.
-    return { status: 404, code: "not-found", message: `Re-pull #${id} was deleted.` };
+    return { status: 404, code: "not-found", message: `Re-pull #${row.id} was deleted.` };
   }
-  if ((results[0]?.meta?.changes ?? 0) === 0) {
+  if ((results[before.length]?.meta?.changes ?? 0) === 0) {
+    if (prepared.guardRefusal && after.status === row.status && after.revision === row.revision) {
+      return prepared.guardRefusal();
+    }
     return {
       status: 409,
       code: "stale-status",
-      message: `Re-pull #${id} moved before this write; it is ${after.status}.`,
+      message: `Re-pull #${row.id} moved before this write; it is ${after.status}.`,
       row: after,
     };
   }
-  return { row: after };
+  return { row: after, results };
+}
+
+// ----------------------------------------------------------------------------
+// The screen, as the routes reach it
+// ----------------------------------------------------------------------------
+
+export const screenTargetSchema = z
+  .object({
+    pr: z.enum(REPULL_PULL_REQUESTS),
+    sha: z.string().regex(SHA_RE, "sha must be a 40-character lowercase hex id"),
+  })
+  .strict();
+
+export type ScreenTarget = z.infer<typeof screenTargetSchema>;
+
+export const acknowledgeScreenSchema = z
+  .object({
+    pr: z.enum(REPULL_PULL_REQUESTS),
+    sha: z.string().regex(SHA_RE, "sha must be a 40-character lowercase hex id"),
+    // The publication path's rule for a reason (ADR 0086), one definition for both.
+    reason: z
+      .string()
+      .trim()
+      .min(
+        ACKNOWLEDGMENT_MIN_LENGTH,
+        `The acknowledgment needs a reason of at least ${ACKNOWLEDGMENT_MIN_LENGTH} characters`,
+      )
+      .max(
+        ACKNOWLEDGMENT_MAX_LENGTH,
+        `The acknowledgment is limited to ${ACKNOWLEDGMENT_MAX_LENGTH} characters`,
+      ),
+  })
+  .strict();
+
+export type AcknowledgeScreenBody = z.infer<typeof acknowledgeScreenSchema>;
+
+/**
+ * Dispatch the identifier screen of the recorded head of one of the re-pull's pull requests, while
+ * that pull request is open and before its gates are clear (`pr_open` for N.0.0,
+ * `patch_synthesized` for N.0.1). The environment and dataset fences apply: outside production
+ * only an `xx` dataset reaches here, and an `xx` dataset is not screened (ADR 0086), so a
+ * non-production Worker never dispatches a screen.
+ */
+export async function dispatchRepullScreen(
+  env: Bindings,
+  admin: { id: number },
+  id: number,
+  body: ScreenTarget,
+): Promise<{ outcome: Exclude<RepullScreenStart, { kind: "moved" }> } | RepullRefusal> {
+  const db = env.DB;
+  const row = await getRepull(db, id);
+  if (!row) return { status: 404, code: "not-found", message: `No re-pull #${id}.` };
+  const fence = envFenceRefusal(env, row.dataset_id);
+  if (fence) return fence;
+  const cols = PULL_REQUEST_COLUMNS[body.pr];
+  if (row.status !== cols.open) {
+    return {
+      status: 409,
+      code: "not-screenable",
+      message: `The ${body.pr} pull request is screened while the re-pull is ${cols.open}; re-pull #${id} is ${row.status}.`,
+      row,
+    };
+  }
+  if (row[cols.head] !== body.sha) {
+    return {
+      status: 409,
+      code: "not-the-head",
+      message: `The screen is dispatched for the recorded head (${cols.head}); ${body.sha.slice(0, 12)} is not it.`,
+      row,
+    };
+  }
+  const fenced = await datasetFenceRefusal(db, row);
+  if (fenced) return { ...fenced, row };
+  const outcome = await startRepullScreen(env, row, body.pr, body.sha, admin.id);
+  if (outcome.kind === "moved") {
+    const after = (await getRepull(db, id)) ?? row;
+    return {
+      status: 409,
+      code: "stale-status",
+      message: `Re-pull #${id} moved before the screen was recorded; it is ${after.status}.`,
+      row: after,
+    };
+  }
+  return { outcome };
+}
+
+/**
+ * Record an administrator's reason on a screen that asks for one (ADR 0086), for that screen's
+ * commit only. A direct identifier cannot be acknowledged, and neither can a screen with no
+ * verdict, or one whose report does not name its commit.
+ */
+export async function acknowledgeRepullScreen(
+  env: Bindings,
+  admin: { id: number },
+  id: number,
+  body: AcknowledgeScreenBody,
+): Promise<{ screen: RepullScreenView } | RepullRefusal> {
+  const db = env.DB;
+  const row = await getRepull(db, id);
+  if (!row) return { status: 404, code: "not-found", message: `No re-pull #${id}.` };
+  const fence = envFenceRefusal(env, row.dataset_id);
+  if (fence) return fence;
+  if (isTerminal(row.status)) {
+    return {
+      status: 409,
+      code: "bad-transition",
+      message: `Re-pull #${id} is ${row.status}; nothing about it is acknowledged any more.`,
+      row,
+    };
+  }
+  if (isScreenExempt(row.dataset_id)) {
+    return {
+      status: 409,
+      code: "screen-exempt",
+      message: "An xx dataset is not screened, so there is nothing to acknowledge.",
+      row,
+    };
+  }
+  const screen = await readRepullScreen(db, id, body.pr, body.sha);
+  if (!screen) {
+    return {
+      status: 404,
+      code: "screen-not-found",
+      message: `No identifier screen of commit ${body.sha.slice(0, 12)} is recorded for re-pull #${id}.`,
+    };
+  }
+  const view = repullScreenView(screen);
+  if (view.gate !== "acknowledge" || readStoredReport(screen.report)?.head !== body.sha) {
+    return {
+      status: 409,
+      code: view.gate === "blocks" ? "screen-blocks" : "screen-not-acknowledgeable",
+      message:
+        view.gate === "blocks"
+          ? `${view.headline}. A direct identifier cannot be acknowledged.`
+          : `${view.headline}. Only a screen that asks for a person can be acknowledged, and this one does not (gate: ${view.gate}).`,
+      row,
+      screen: view,
+    };
+  }
+  const recorded = await acknowledgeRepullScreenRow(db, {
+    row: screen,
+    datasetId: row.dataset_id,
+    adminUserId: admin.id,
+    reason: body.reason,
+  });
+  const after = await readRepullScreen(db, id, body.pr, body.sha);
+  if (!recorded || !after) {
+    return { ...screenChanged(row), ...(after ? { screen: repullScreenView(after) } : {}) };
+  }
+  return { screen: repullScreenView(after) };
+}
+
+/** The screens of a re-pull, newest first; an `xx` dataset is exempt and has none. */
+export async function listRepullScreens(
+  db: D1Database,
+  id: number,
+): Promise<{ exempt: boolean; screens: RepullScreenView[] } | RepullRefusal> {
+  const row = await getRepull(db, id);
+  if (!row) return { status: 404, code: "not-found", message: `No re-pull #${id}.` };
+  const exempt = isScreenExempt(row.dataset_id);
+  const screens = exempt ? [] : (await listRepullScreenRows(db, id)).map(repullScreenView);
+  return { exempt, screens };
 }
