@@ -110,14 +110,11 @@ describe("upstream status on Miniflare D1", () => {
   });
 
   test("the version rows the landing reads carry the two snapshot columns", async () => {
-    const row = await d1
-      .prepare(PUBLIC_DATASET_VERSIONS_SQL)
-      .bind("on002893")
-      .first<{
-        version: string;
-        source_version: string | null;
-        source_version_basis: string | null;
-      }>();
+    const row = await d1.prepare(PUBLIC_DATASET_VERSIONS_SQL).bind("on002893").first<{
+      version: string;
+      source_version: string | null;
+      source_version_basis: string | null;
+    }>();
     expect(row).toMatchObject({
       version: "1.0.0",
       source_version: "2.0.0",
