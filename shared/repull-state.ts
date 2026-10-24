@@ -69,6 +69,7 @@ const NON_TERMINAL: readonly RepullStatus[] = REPULL_STATUSES.filter((s) => !isT
  */
 export const REPULL_TRANSITIONS: Readonly<Record<RepullStatus, readonly RepullStatus[]>> = (() => {
   const forward: ReadonlyArray<readonly [RepullStatus, RepullStatus]> = [
+    ["planned", "planned"],
     ["planned", "prepared"],
     ["prepared", "prepared"],
     ["prepared", "copied"],
@@ -77,6 +78,7 @@ export const REPULL_TRANSITIONS: Readonly<Record<RepullStatus, readonly RepullSt
     ["pr_open", "pr_open"],
     ["pr_open", "gates_clear"],
     ["gates_clear", "pr_open"],
+    ["gates_clear", "gates_clear"],
     ["gates_clear", "merged"],
     ["merged", "released"],
     ["released", "released"],
@@ -85,6 +87,7 @@ export const REPULL_TRANSITIONS: Readonly<Record<RepullStatus, readonly RepullSt
     ["patch_synthesized", "patch_synthesized"],
     ["patch_synthesized", "patch_gates_clear"],
     ["patch_gates_clear", "patch_synthesized"],
+    ["patch_gates_clear", "patch_gates_clear"],
     ["patch_gates_clear", "patch_merged"],
     ["patch_merged", "patch_released"],
     ["patch_released", "complete"],
@@ -122,11 +125,18 @@ export const SCREEN_GATED_STATUSES = [
   "patch_gates_clear",
 ] as const satisfies readonly RepullStatus[];
 
-/** A claim to merge may have gone out; the row cannot be closed without reading GitHub. */
+/**
+ * While a claim to merge is held the merge may have gone out, so the edges that would close the
+ * pull request (`abandoned`, `superseded`, `patch_declined`) or move its head (`pr_open`,
+ * `patch_synthesized`) are refused until GitHub has been read. Each names the claim column that
+ * blocks it. `failed` is not here: a lost merge answer must stay reportable.
+ */
 export const MERGE_CLAIM_COLUMNS = {
   abandoned: "merge_claimed_at",
   superseded: "merge_claimed_at",
+  pr_open: "merge_claimed_at",
   patch_declined: "patch_merge_claimed_at",
+  patch_synthesized: "patch_merge_claimed_at",
 } as const;
 
 export interface TransitionFields {
@@ -136,6 +146,8 @@ export interface TransitionFields {
   must: readonly string[];
   /** Columns the transition clears, because their value belongs to a state it leaves. */
   reset: readonly string[];
+  /** The edge must say why (it goes to `last_error`). */
+  requiresError?: boolean;
 }
 
 const NONE: readonly string[] = [];
@@ -171,7 +183,7 @@ export const TRANSITION_FIELDS: Readonly<Record<RepullStatus, TransitionFields>>
   },
   gates_clear: { may: ["gates_sha", "counts"], must: ["gates_sha"], reset: NONE },
   merged: {
-    may: ["merge_sha", "merge_claimed_at", "merge_claim_sha", "counts"],
+    may: ["merge_sha", "counts"],
     must: ["merge_sha"],
     reset: NONE,
   },
@@ -194,17 +206,44 @@ export const TRANSITION_FIELDS: Readonly<Record<RepullStatus, TransitionFields>>
     reset: NONE,
   },
   patch_merged: {
-    may: ["patch_merge_sha", "patch_merge_claimed_at", "patch_merge_claim_sha", "counts"],
+    may: ["patch_merge_sha", "counts"],
     must: ["patch_merge_sha"],
     reset: NONE,
   },
   patch_released: { may: ["patch_tag_sha", "counts"], must: ["patch_tag_sha"], reset: NONE },
   complete: { may: ["counts"], must: NONE, reset: NONE },
   abandoned: { may: ["counts"], must: NONE, reset: NONE },
-  failed: { may: ["counts"], must: NONE, reset: NONE },
+  failed: { may: ["counts"], must: NONE, reset: NONE, requiresError: true },
   superseded: { may: ["counts"], must: NONE, reset: NONE },
   patch_declined: { may: ["counts"], must: NONE, reset: NONE },
 };
+
+/**
+ * Edges that repeat a state to write something other than the state's own facts. They override
+ * {@link TRANSITION_FIELDS} for `from === to` only:
+ *  - `planned`: record why a step could not finish (the error is the whole write);
+ *  - `released`: record the count of locked objects once the lock has been applied;
+ *  - `gates_clear` and `patch_gates_clear`: record the claim to merge, before the merge is sent.
+ */
+export const SELF_EDGE_FIELDS: Readonly<Partial<Record<RepullStatus, TransitionFields>>> = {
+  planned: { may: NONE, must: NONE, reset: NONE, requiresError: true },
+  released: { may: ["counts"], must: ["counts"], reset: NONE },
+  gates_clear: {
+    may: ["merge_claimed_at", "merge_claim_sha"],
+    must: ["merge_claimed_at", "merge_claim_sha"],
+    reset: NONE,
+  },
+  patch_gates_clear: {
+    may: ["patch_merge_claimed_at", "patch_merge_claim_sha"],
+    must: ["patch_merge_claimed_at", "patch_merge_claim_sha"],
+    reset: NONE,
+  },
+};
+
+/** What the edge `from` to `to` may and must write. */
+export function fieldsFor(from: RepullStatus, to: RepullStatus): TransitionFields {
+  return (from === to ? SELF_EDGE_FIELDS[to] : undefined) ?? TRANSITION_FIELDS[to];
+}
 
 /**
  * Columns that, once set, keep their value: a pull request is identified by its branch and
@@ -250,6 +289,10 @@ export const REPULL_COUNT_KEYS = [
   "locked",
   "orphan_objects",
   "orphan_bytes",
+  "skipped",
+  "bytes",
+  "headers_not_read_nemar_held",
+  "headers_not_read_no_source",
 ] as const;
 
 /** The next major of an `N.N.N` version: the number a re-pull's N.0.0 takes. Null for a non-version. */
@@ -304,6 +347,8 @@ export interface RepullRow {
   patch_merge_sha: string | null;
   patch_tag_sha: string | null;
   counts: Record<string, number>;
+  /** Writes to the row; every transition increments it and applies only to the revision it read. */
+  revision: number;
   last_error: string | null;
   workflow_run_url: string | null;
   created_at: string;

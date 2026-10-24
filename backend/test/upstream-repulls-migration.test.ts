@@ -226,6 +226,8 @@ describe("every stage invariant refuses its violation", () => {
     ],
     ["a patch_merged row without patch_merge_sha", "patch_merged", { patch_merge_sha: null }],
     ["a patch_released row without patch_merge_sha", "patch_released", { patch_merge_sha: null }],
+    ["a patch_released row without patch_tag_sha", "patch_released", { patch_tag_sha: null }],
+    ["a negative revision", "planned", { revision: -1 }],
     ["an open row with terminal_at set", "pr_open", { terminal_at: "2026-10-24 00:00:00" }],
     ["a planned row with terminal_at set", "planned", { terminal_at: "2026-10-24 00:00:00" }],
     ["a complete row without terminal_at", "complete", { terminal_at: null }],
@@ -285,13 +287,34 @@ describe("one open row per dataset, and one row per attempt", () => {
     let attempt = 0;
     for (const status of TERMINAL_STATUSES) {
       attempt++;
-      expect(await insert(e, rowAt(status, { attempt }))).toBeNull();
+      // A different tag each time: a merge is recorded once per tag (the next test).
+      expect(await insert(e, rowAt(status, { attempt, to_tag: `1.0.${attempt}` }))).toBeNull();
     }
     expect(await insert(e, rowAt("planned", { attempt: attempt + 1 }))).toBeNull();
     expect(await insert(e, rowAt("planned", { attempt: attempt + 2 }))).toMatch(
       /UNIQUE constraint failed/,
     );
   });
+
+  onEveryEngine(
+    "a tag is merged once: a second row with a merge sha for it is refused",
+    async (e) => {
+      expect(await insert(e, rowAt("complete"))).toBeNull();
+      // Another attempt at the same tag may exist; it may not also hold a merge.
+      expect(await insert(e, rowAt("complete", { attempt: 2 }))).toMatch(
+        /UNIQUE constraint failed/,
+      );
+      expect(await insert(e, rowAt("failed", { attempt: 2, merge_sha: SHA }))).toMatch(
+        /UNIQUE constraint failed/,
+      );
+      expect(await insert(e, rowAt("failed", { attempt: 2 }))).toBeNull();
+      // Another tag merges freely, and a flow that moves on to the next attempt is not blocked.
+      expect(await insert(e, rowAt("complete", { attempt: 3, to_tag: "1.0.2" }))).toBeNull();
+      expect(await insert(e, rowAt("planned", { attempt: 4, to_tag: "1.0.3" }))).toBeNull();
+      // Another dataset merges the same tag freely.
+      expect(await insert(e, rowAt("complete", { dataset_id: "xx090124" }))).toBeNull();
+    },
+  );
 
   onEveryEngine("(dataset_id, to_tag, attempt) is unique even among terminal rows", async (e) => {
     expect(await insert(e, rowAt("abandoned"))).toBeNull();
@@ -387,7 +410,8 @@ describe("the service on D1", () => {
     if (isRefusal(made)) throw new Error(`refused: ${made.code}`);
     expect(made).toMatchObject({
       created: true,
-      row: { status: "planned", attempt: 1, counts: { delta_paths: 4 } },
+      lineage_rows: 1,
+      row: { status: "planned", attempt: 1, revision: 0, counts: { delta_paths: 4 } },
     });
 
     const lineage = await d1
@@ -411,7 +435,11 @@ describe("the service on D1", () => {
       fields: { synth_tree: SHA, synth_sha: SHA, manifest_digest: DIGEST, counts: { written: 2 } },
     });
     if (isRefusal(moved)) throw new Error(`refused: ${moved.code}`);
-    expect(moved.row).toMatchObject({ status: "prepared", counts: { delta_paths: 4, written: 2 } });
+    expect(moved.row).toMatchObject({
+      status: "prepared",
+      revision: 1,
+      counts: { delta_paths: 4, written: 2 },
+    });
     const stale = await transitionRepull(env, ADMIN, made.row.id, {
       from: "planned",
       to: "prepared",
@@ -433,5 +461,54 @@ describe("the service on D1", () => {
     expect(second).toMatchObject({ created: true, row: { attempt: 2 } });
     const list = await listRepulls(d1, { dataset: "xx090123", open: true });
     expect(list.map((r) => r.attempt)).toEqual([2]);
+  });
+  test("a claim to merge, the revision check and the unreconciled-merge rule behave as on SQLite", async () => {
+    const d1 = await mf.getD1Database("DB");
+    await d1.prepare("DELETE FROM upstream_repulls").run();
+    const user = await d1
+      .prepare("SELECT id FROM users WHERE username = 'rplminiflare'")
+      .first<{ id: number }>();
+    const admin = { id: user?.id ?? 0 };
+    const env = { DB: d1, ENVIRONMENT: "test" } as unknown as Bindings;
+    const row = rowAt("gates_clear", { dataset_id: "xx090123", actor_user_id: admin.id });
+    const cols = Object.keys(row);
+    const inserted = await d1
+      .prepare(
+        `INSERT INTO upstream_repulls (${cols.join(", ")}) VALUES (${cols.map(() => "?").join(", ")}) RETURNING id`,
+      )
+      .bind(...cols.map((c) => row[c]))
+      .first<{ id: number }>();
+    const id = inserted?.id ?? 0;
+
+    const claim = await transitionRepull(env, admin, id, {
+      from: "gates_clear",
+      to: "gates_clear",
+      fields: { merge_claimed_at: "2026-10-24 01:00:00", merge_claim_sha: SHA },
+    });
+    if (isRefusal(claim)) throw new Error(`refused: ${claim.code}`);
+    expect(claim.row).toMatchObject({ merge_claimed_at: "2026-10-24 01:00:00", revision: 1 });
+    for (const to of ["abandoned", "pr_open"] as const) {
+      const refused = await transitionRepull(env, admin, id, {
+        from: "gates_clear",
+        to,
+        fields: to === "pr_open" ? { branch: "release/v2.0.0", pr_number: 7, head_sha: SHA } : {},
+      });
+      expect(refused).toMatchObject({ code: "merge-claim-held", status: 409 });
+    }
+    const failed = await transitionRepull(env, admin, id, {
+      from: "gates_clear",
+      to: "failed",
+      error: "merge answer lost",
+    });
+    if (isRefusal(failed)) throw new Error(`refused: ${failed.code}`);
+    expect(failed.row).toMatchObject({ status: "failed", revision: 2 });
+
+    // The dataset holds a claim nothing reconciled, so no new record opens for any tag.
+    const blocked = await createRepull(
+      env,
+      admin,
+      createRepullSchema.parse({ ...PLAN, to_tag: "1.0.7" }),
+    );
+    expect(blocked).toMatchObject({ code: "merge-unreconciled", status: 409 });
   });
 });

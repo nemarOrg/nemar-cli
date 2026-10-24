@@ -16,11 +16,13 @@ import {
   REPULL_TRANSITIONS,
   type RepullStatus,
   SCREEN_GATED_STATUSES,
+  SELF_EDGE_FIELDS,
   TERMINAL_STATUSES,
   TRANSITION_FIELDS,
   VERIFIED_ONLY_STATUSES,
   canTransition,
   fieldProblem,
+  fieldsFor,
   isTerminal,
   nextMajorVersion,
   patchVersionOf,
@@ -28,6 +30,7 @@ import {
 
 /** The edges, written out once more so the table cannot drift unseen. */
 const EDGES: ReadonlyArray<readonly [RepullStatus, RepullStatus]> = [
+  ["planned", "planned"],
   ["planned", "prepared"],
   ["prepared", "prepared"],
   ["prepared", "copied"],
@@ -36,6 +39,7 @@ const EDGES: ReadonlyArray<readonly [RepullStatus, RepullStatus]> = [
   ["pr_open", "pr_open"],
   ["pr_open", "gates_clear"],
   ["gates_clear", "pr_open"],
+  ["gates_clear", "gates_clear"],
   ["gates_clear", "merged"],
   ["merged", "released"],
   ["released", "released"],
@@ -44,6 +48,7 @@ const EDGES: ReadonlyArray<readonly [RepullStatus, RepullStatus]> = [
   ["patch_synthesized", "patch_synthesized"],
   ["patch_synthesized", "patch_gates_clear"],
   ["patch_gates_clear", "patch_synthesized"],
+  ["patch_gates_clear", "patch_gates_clear"],
   ["patch_gates_clear", "patch_merged"],
   ["patch_merged", "patch_released"],
   ["patch_released", "complete"],
@@ -149,6 +154,45 @@ describe("the columns an edge writes", () => {
     for (const column of IMMUTABLE_ONCE_SET) expect(writable.has(column)).toBe(true);
   });
 
+  test("the edges that repeat a state to write one thing say what they write", () => {
+    expect(Object.keys(SELF_EDGE_FIELDS).sort()).toEqual(
+      ["gates_clear", "patch_gates_clear", "planned", "released"].sort(),
+    );
+    for (const [status, spec] of Object.entries(SELF_EDGE_FIELDS)) {
+      expect(REPULL_TRANSITIONS[status as RepullStatus]).toContain(status);
+      for (const column of spec.must) expect(spec.may).toContain(column);
+    }
+    // The same status reached from another status is the state's own edge, not the override.
+    expect(fieldsFor("released", "released")).toBe(SELF_EDGE_FIELDS.released);
+    expect(fieldsFor("merged", "released")).toBe(TRANSITION_FIELDS.released);
+    expect(fieldsFor("pr_open", "gates_clear")).toBe(TRANSITION_FIELDS.gates_clear);
+    expect(fieldsFor("gates_clear", "gates_clear").must).toEqual([
+      "merge_claimed_at",
+      "merge_claim_sha",
+    ]);
+    // The claim is recorded on the edge that repeats gates_clear and nowhere else.
+    for (const status of REPULL_STATUSES) {
+      for (const column of [
+        "merge_claimed_at",
+        "merge_claim_sha",
+        "patch_merge_claimed_at",
+        "patch_merge_claim_sha",
+      ]) {
+        const claimEdge = status === "gates_clear" || status === "patch_gates_clear";
+        expect(TRANSITION_FIELDS[status].may.includes(column)).toBe(false);
+        expect(!!SELF_EDGE_FIELDS[status]?.may.includes(column)).toBe(
+          claimEdge && column.startsWith(status === "gates_clear" ? "merge" : "patch"),
+        );
+      }
+    }
+  });
+
+  test("an edge into failed, and the planned self-edge, must say why", () => {
+    expect(TRANSITION_FIELDS.failed.requiresError).toBe(true);
+    expect(SELF_EDGE_FIELDS.planned?.requiresError).toBe(true);
+    expect(TRANSITION_FIELDS.abandoned.requiresError).toBeUndefined();
+  });
+
   test("the columns that leave a state are cleared when the row goes back", () => {
     expect(TRANSITION_FIELDS.pr_open.reset).toContain("gates_sha");
     expect(TRANSITION_FIELDS.patch_synthesized.reset).toContain("patch_gates_sha");
@@ -210,6 +254,41 @@ describe("the shape of a value", () => {
     ).toBeNull();
     expect(fieldProblem("patch_branch", "release/v2.0.1", row)).not.toBeNull();
     expect(fieldProblem("patch_branch", "main", { ...row, patch_version: "2.0.1" })).not.toBeNull();
+  });
+
+  test("a workflow run is an https URL, and nothing else", () => {
+    expect(
+      fieldProblem("workflow_run_url", "https://github.com/o/r/actions/runs/1", row),
+    ).toBeNull();
+    for (const bad of [
+      "http://github.com/o/r/actions/runs/1",
+      "ftp://github.com/x",
+      "https://",
+      "https://a b",
+      `https://${"a".repeat(500)}`,
+      "javascript:alert(1)",
+      "",
+      null,
+    ]) {
+      expect(fieldProblem("workflow_run_url", bad, row)).not.toBeNull();
+    }
+  });
+
+  test("a merge claim time is a UTC datetime in the shape SQLite writes", () => {
+    for (const column of ["merge_claimed_at", "patch_merge_claimed_at"]) {
+      expect(fieldProblem(column, "2026-10-24 01:02:03", row)).toBeNull();
+      for (const bad of [
+        "2026-10-24T01:02:03Z",
+        "2026-10-24",
+        "yesterday",
+        "2026-10-24 01:02",
+        "",
+        5,
+        null,
+      ]) {
+        expect(fieldProblem(column, bad, row)).not.toBeNull();
+      }
+    }
   });
 
   test("a pull request number is a positive integer", () => {

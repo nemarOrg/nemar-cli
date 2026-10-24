@@ -27,12 +27,25 @@
 -- FALSE, never NULL: a CHECK passes on NULL, so a term that could be NULL would let the row in.
 --
 -- WHERE NULL MEANS WHAT. `patch_*` columns stay NULL until `patch_synthesized`, and for good when
--- the re-pull has no corrections to replay. `merge_claimed_at` and `merge_claim_sha` are set
--- before a merge is sent and kept when its outcome is unknown, so a lost answer is resolved from
--- GitHub and never repeated blind. `terminal_at` is NULL exactly while the row is open.
+-- the re-pull has no corrections to replay. `merge_claimed_at` and `merge_claim_sha` are recorded
+-- while the row is `gates_clear`, by a self-edge that needs `gates_sha`, and BEFORE the merge is
+-- sent; the claim is kept when the outcome is unknown, so a lost answer is resolved from GitHub
+-- and never repeated blind (the `patch_` twins do the same for N.0.1). `terminal_at` is NULL
+-- exactly while the row is open.
 --
--- NO FOREIGN KEY to `datasets`, as `import_jobs` (migration 0044): `deleteDatasetCascade` deletes
--- the rows. `datasets` gains nothing, so ADR 0034's column budget is untouched.
+-- `revision` counts the writes to a row. Every transition increments it and applies only to the
+-- revision it read, so two writers that read the same row cannot both apply, even when they repeat
+-- the same status (a head moved twice, a pull request recorded twice).
+--
+-- ONE MERGE PER TAG. The partial unique index on `(dataset_id, to_tag)` where `merge_sha` is set
+-- backs, in the database, the rule that a tag is merged as a major once, whatever the attempts.
+--
+-- NO FOREIGN KEY to `datasets`, as `import_jobs` (migration 0044). Unlike `import_jobs`, whose
+-- state row deliberately outlives the dataset so a rolled-back orphan stays auditable,
+-- `deleteDatasetCascade` DELETES these rows: a fixture dataset is deleted and re-created under
+-- one id, and a stale open row would block the re-created dataset for good. The DOI record of a
+-- merged re-pull lives in its own tables, not here. `datasets` gains nothing, so ADR 0034's column
+-- budget is untouched.
 
 CREATE TABLE upstream_repulls (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -73,6 +86,7 @@ CREATE TABLE upstream_repulls (
   patch_merge_sha TEXT,
   patch_tag_sha TEXT,
   counts TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(counts)),
+  revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
   last_error TEXT,
   workflow_run_url TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -96,6 +110,7 @@ CREATE TABLE upstream_repulls (
     OR (patch_version IS NOT NULL AND patch_branch IS NOT NULL AND patch_pr_number IS NOT NULL
         AND patch_head_sha IS NOT NULL AND patch_base_sha IS NOT NULL)),
   CHECK (status NOT IN ('patch_merged', 'patch_released') OR patch_merge_sha IS NOT NULL),
+  CHECK (status <> 'patch_released' OR patch_tag_sha IS NOT NULL),
   CHECK (status <> 'complete' OR patch_version IS NULL OR patch_tag_sha IS NOT NULL),
   CHECK ((terminal_at IS NULL) = (status NOT IN ('complete', 'abandoned', 'failed', 'superseded',
     'patch_declined')))
@@ -103,6 +118,9 @@ CREATE TABLE upstream_repulls (
 
 CREATE UNIQUE INDEX upstream_repulls_one_open ON upstream_repulls (dataset_id)
   WHERE status NOT IN ('complete', 'abandoned', 'failed', 'superseded', 'patch_declined');
+
+CREATE UNIQUE INDEX upstream_repulls_one_merge ON upstream_repulls (dataset_id, to_tag)
+  WHERE merge_sha IS NOT NULL;
 
 CREATE INDEX upstream_repulls_merge_claims ON upstream_repulls (merge_claimed_at)
   WHERE merge_claimed_at IS NOT NULL;
