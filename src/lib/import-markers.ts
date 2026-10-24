@@ -22,3 +22,13 @@ export const OPENNEURO_UPSTREAM_MARKER = "[openneuro-upstream-inaccessible]";
  * `refused:` says which, from a closed list (`IMPORT_SCRUB_REFUSALS` in `import-scrub.ts`).
  */
 export const IMPORT_SCRUB_MARKER = "[nemar-identifier-scrub]";
+
+/**
+ * The tag pin's and the #1320 preflight's markers (epic #1046). Defined in `shared/`, where the
+ * Worker imports them too, so unlike the two above they have no backend copy to pin.
+ */
+export {
+  NEMAR_ANNEX_UUID_CONFLICT_MARKER,
+  OPENNEURO_MIRROR_LAG_MARKER,
+  OPENNEURO_UPSTREAM_MOVED_MARKER,
+} from "../../shared/import-markers.js";
