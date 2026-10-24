@@ -111,6 +111,7 @@ import {
   uploadManifest,
   waitForPublicPropagation,
 } from "./s3";
+import { INSERT_DATASET_VERSION_SQL, columnsFromDescription } from "./source-snapshot";
 import { ZARR_REQUEUE_AT_PATH } from "./sweep-stamps";
 import {
   OWNER_NAME_MISSING_MESSAGE,
@@ -1839,11 +1840,21 @@ async function stepVersionDoi(c: ApproveStepContext): Promise<RespondOutcome | u
                   .run();
               }
 
+              const snapshot = columnsFromDescription(
+                datasetId,
+                repoMeta.bidsDescription,
+                repoMeta.warnings,
+              );
               await db
-                .prepare(
-                  "INSERT OR IGNORE INTO dataset_versions (dataset_id, version, doi, provider) VALUES (?, ?, ?, 'ezid')",
+                .prepare(INSERT_DATASET_VERSION_SQL)
+                .bind(
+                  datasetId,
+                  version,
+                  result.doi,
+                  "ezid",
+                  snapshot.source_version,
+                  snapshot.source_version_basis,
                 )
-                .bind(datasetId, version, result.doi)
                 .run();
             } catch (err) {
               dbError = errorMessage(err);

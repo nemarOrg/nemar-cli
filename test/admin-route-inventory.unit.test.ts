@@ -170,6 +170,9 @@ const EXPECTED_ENTRIES: Record<string, number> = {
   "POST /datasets/zarr-fidelity-sweep": 1,
   "POST /datasets/anonymity-sweep": 1,
 
+  // Upstream snapshot backfill (epic #1046 phase 2, #1908; ADR 0111): dry run by default.
+  "POST /datasets/upstream-backfill": 1,
+
   // Import coverage sweep (issue #1311, epic #1306 phase 3)
   "POST /imports/coverage-sweep": 1,
 
@@ -231,7 +234,7 @@ describe("admin route inventory", () => {
   });
 
   test("entry total is pinned", () => {
-    expect(adminRoutes.routes.length).toBe(154);
+    expect(adminRoutes.routes.length).toBe(155);
   });
 
   // The count pin above can't see a SWAP of the router-level middleware

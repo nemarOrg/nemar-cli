@@ -13,6 +13,10 @@ import { verifyManifestCallbackToken } from "../../services/github.js";
 import { scheduleNeurobagelSync } from "../../services/neurobagel-hooks.js";
 import { errorMessage } from "../../services/repo-metadata.js";
 import { headVersionArtifact } from "../../services/s3.js";
+import {
+  INSERT_DATASET_VERSION_SQL,
+  snapshotColumnsForInsert,
+} from "../../services/source-snapshot.js";
 import type { WebhookRouter } from "../webhooks/shared.js";
 
 /**
@@ -66,7 +70,7 @@ export function registerManifestCallbackRoutes(webhooks: WebhookRouter): void {
    * confirm presence, then INSERTs the dataset_versions row that the
    * legacy in-Worker path used to write inline.
    *
-   * Idempotent on the dataset_versions INSERT via OR IGNORE; idempotent
+   * Idempotent on the dataset_versions INSERT via ON CONFLICT DO NOTHING; idempotent
    * on the manifest_jobs row via status='dispatched' -> 'ready' transition
    * gate. Replaying a callback for an already-completed job is a no-op
    * (200 still returned to keep the workflow's exit happy).
@@ -197,7 +201,7 @@ export function registerManifestCallbackRoutes(webhooks: WebhookRouter): void {
     }
 
     // Insert dataset_versions row (the contract piece that USED to live
-    // inline in publish-version-doi). OR IGNORE makes this idempotent if
+    // inline in publish-version-doi). ON CONFLICT DO NOTHING makes this idempotent if
     // the legacy path already wrote the row (paranoid double-write
     // protection during the soak period).
     //
@@ -208,10 +212,19 @@ export function registerManifestCallbackRoutes(webhooks: WebhookRouter): void {
     const provider = job.doi_provider === "zenodo" ? "zenodo" : "ezid";
     if (job.doi) {
       try {
-        await c.env.DB.prepare(
-          "INSERT OR IGNORE INTO dataset_versions (dataset_id, version, doi, provider) VALUES (?, ?, ?, ?)",
-        )
-          .bind(body.dataset_id, body.version, job.doi, provider)
+        // The upstream snapshot this version mirrors (ADR 0111, decision 4). The central
+        // flow mints from the tagged description but carries nothing of it here, so it is
+        // read again; the lookup never throws and is bounded, so it cannot fail this insert.
+        const snapshot = await snapshotColumnsForInsert(c.env, body.dataset_id, body.version);
+        await c.env.DB.prepare(INSERT_DATASET_VERSION_SQL)
+          .bind(
+            body.dataset_id,
+            body.version,
+            job.doi,
+            provider,
+            snapshot.source_version,
+            snapshot.source_version_basis,
+          )
           .run();
       } catch (err) {
         const dbError = errorMessage(err);

@@ -233,3 +233,78 @@ ADR 0086 exempts `xx` from the identifier screen, so an `xx` re-pull never has a
 - Epic #1046 and its Phase 1, #1907; the design record `.context/design-upstream-repull.md`.
 - #993 (step 4c's same-version assumption), #1320 (the bucket's annex UUID belongs to another special remote), #985 (finalize skips publication for a published dataset), #1810 (`on004362` missed upstream's 1.0.1).
 - `src/lib/import-openneuro.ts` (`prepareImport`, step 4c, `finalizeImport`), `backend/src/routes/admin/imports.ts` (`POST /admin/datasets/import`), `backend/src/services/openneuro-discovery.ts` (`diffNewDatasets`, `latestTag`), `backend/src/services/auto-import.ts`, `backend/src/routes/admin/datasets-lifecycle.ts` (the `?reset=1` stamp resets), `backend/src/routes/callbacks/version-doi.ts`, `src/commands/dataset.ts` (`release --type`, `update --bump`), `backend/test/datasets-column-budget.test.ts`.
+
+## Amendment 2026-10-23 (#1908): Phase 2 builds decision 4, and the insert site is verified
+
+Epic #1046, Phase 2.
+Decision 4 is built: migration 0104 adds `dataset_versions.source_version` and `source_version_basis`, `shared/source-snapshot.ts` holds the one parser, the version insert records the snapshot, and `nemar admin upstream-backfill` records it for the mirrors that predate the columns.
+This section makes one correction and states three readings that the decision text left open.
+The correction is to a sentence in decision 4, "from the tagged `dataset_description.json` the version-DOI callback already reads", and it answers the "Not yet verified" item "Where `source_version` is inserted under the central manifest flow."
+The decision text above is unchanged.
+
+### Where `source_version` is inserted under the central manifest flow (verified)
+
+The item read "Where `source_version` is inserted under the central manifest flow."
+Decision 4 says the value is written "from the tagged `dataset_description.json` the version-DOI callback already reads".
+Under the central flow that sentence is wrong.
+The mint reads the tagged description (`mintEzidVersionDoi`, `backend/src/services/central-manifest.ts`) but returns only the DOI and its warnings, `dispatchCentralManifestJob` stores `manifest_jobs` without the description, and `/webhooks/manifest-ready`, which inserts the row, reads none.
+So the insert reads the tagged file itself, once, through the authenticated raw CDN (no REST quota), bounded by a 4 second fetch timeout and a 5 second deadline, and it can never fail the insert.
+
+`dataset_versions` is inserted at five sites, all through one statement, `INSERT_DATASET_VERSION_SQL` in `backend/src/services/source-snapshot.ts`, and a source scan keeps it the only one.
+
+| Site | Where | Live | How it gets the snapshot |
+|---|---|---|---|
+| A | `routes/callbacks/manifest.ts`, the manifest-ready callback | production, every central-flow publish | reads `v<version>/dataset_description.json` |
+| B | `routes/admin/datasets-lifecycle.ts`, admin manifest regeneration | production, manual recovery | the same read, with the repository and token the route already holds |
+| C | `services/publication-orchestrator.ts`, the inline path | dev only (`MANIFEST_VIA_CENTRAL_WORKFLOW` is `"false"` there) | the description `readRepoMetadata` returned |
+| D | `routes/callbacks/version-doi.ts`, the legacy EZID handler | dev only | the description `readRepoMetadata` returned |
+| E | `routes/callbacks/version-doi.ts`, the Zenodo handler | unreachable (EZID is the registrar, ADR 0007) | none; NULL/NULL |
+
+`MANIFEST_VIA_CENTRAL_WORKFLOW` is `"true"` in the production `[vars]` of `backend/wrangler-sccn.toml` and `"false"` under `[env.dev.vars]`, so A and B are the sites that matter.
+`readRepoMetadata` never throws: a failed read returns `{ Name }` and a `BIDS metadata unavailable` warning, and an absent file returns the same `{ Name }` with no warning.
+C and D therefore record NULL/NULL for either, and record `unknown` only for a description that was really read.
+
+### The parser reads the entry's `Version`, never the top-level one
+
+Decision 4 says the parser "reads `Version`, then a DOI ..., then the URL".
+The `Version` it reads is the one inside the dataset's own `SourceDatasets` entry.
+The top-level `Version` and `DatasetDOI` are NEMAR's (decision 1), and reading the top-level `Version` would record NEMAR's own version number as upstream's.
+An entry is the dataset's own only when its DOI or URL names the dataset's `ds`; an entry that names no `ds` is ignored, `Version` included.
+In practice the existing evidence is usually the DOI alone, because `applyConceptDoiToDescription` moves OpenNeuro's original `DatasetDOI` into `SourceDatasets` as `{DOI}` with no URL and no `Version`.
+
+The three signals are never ranked.
+Any disagreement between signals, between two own entries, or an entry that names two datasets is `unknown`; the order in the decision text decides only which signal is looked at first.
+A tag that cannot be read (`v2.0.2.`, `2.0.x`) is no signal, and a tag is stored exactly as upstream wrote it (`00001` is not `1`).
+
+### What `doi` means
+
+The basis word `doi` is kept as the decision fixed it, and it covers a tag found in the entry's `Version`, DOI or URL.
+It says the tag is declared by the version's own tagged description.
+It does not say the tree was compared with upstream's; early imports cloned the default HEAD, so a matching DOI is a claim.
+Only `lineage`, which a Phase 5 plan alone writes, says the tree was compared.
+
+### An absent file at insert time is not examined, and an error is never a verdict
+
+At insert time an absent file, a failed fetch, a timeout, a body over 1 MiB, a token that cannot be minted and a dataset that is not `on######` all leave NULL/NULL.
+A 404 shortly after a tag is pushed can be the raw CDN not having caught up, so an insert never turns "absent" into `unknown`.
+`unknown` is written at insert only for a description that was read and names no single tag, which is a property of the content: a tagged blob is immutable.
+Only the sites that read the raw file themselves (A and B) can see that the file is not JSON, so only they record `unknown` for it; the inline sites C and D go through `readRepoMetadata`, which turns unparseable JSON into a fallback and a warning, and that is NULL/NULL there.
+The insert is `ON CONFLICT (dataset_id, version) DO NOTHING`, not `INSERT OR IGNORE`, so a snapshot pair the table's CHECK refuses raises (the callback answers 500 and the job stays retryable) and does not drop the row silently; a replayed insert for an existing version is still a no-op.
+
+The backfill is the only writer that records `unknown` for an absent file, and `unknown` is final: nothing examines the row again.
+So a 404 is recorded only when it is proved to be about the tag and not about the credential, which GitHub also answers with 404.
+The proof is a control read: the same repository's `dataset_description.json` at `main`, with the same credential, must succeed.
+If the control read fails, the row is counted `not_examined` as a transient error, nothing is written, and the next pass tries it again.
+If the control read is also absent, the description is missing at the tag and at `main` (or the default branch is not `main`), nothing is written, and a rerun will not change that: the row is reported with `kind: "needs_admin"` and an administrator has to look at it.
+Both hold for a batch of any size, a single row included.
+The row must also be older than one hour, so a CDN-cached 404 on a fresh tag is never made final.
+A fetch error in the backfill writes nothing, and a batch in which no read proved the credential while at least one 404 is unconfirmed is refused as `suspect_credential` (502), whatever else errored beside it.
+Only a version of the form N.N.N is a candidate, and a ref is always the canonical `vX.Y.Z` tag, so a stored `v1.0.0` can never read `vv1.0.0`.
+The write is `WHERE source_version_basis IS NULL`, so it never overwrites a recorded value; its paging is a keyset on `(dataset_id, version)`, so a row that always errors cannot starve the rows behind it.
+A dry run, which is the default, writes nothing.
+
+### Left open
+
+Outside production only `xx` datasets are re-pulled (decision 6), and nothing says how an `xx` dataset names its upstream `ds`.
+The parser takes the `ds` as an argument, but the insert sites and the backfill handle `on######` only.
+Whether an `xx` fixture maps through `import_jobs.source_id` is a Phase 4 and 5 question.

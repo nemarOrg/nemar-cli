@@ -472,6 +472,17 @@ export interface VersionInfo {
   doi: string;
   provider: "ezid" | "zenodo";
   created_at: string;
+  /**
+   * The upstream tag this version mirrors (ADR 0111), or null. Optional on the wire: an older
+   * backend omits it, and an absent field means "unrecorded", never "unknown".
+   */
+  source_version?: string | null;
+  /**
+   * How `source_version` is known: `doi` (the version's own description declares it),
+   * `lineage` (a re-pull plan compared the tree), or `unknown` (examined, no single tag).
+   * Null with a null `source_version` means the version was never examined.
+   */
+  source_version_basis?: "doi" | "lineage" | "unknown" | null;
 }
 
 export interface VersionHistoryResponse {
