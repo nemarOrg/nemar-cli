@@ -148,6 +148,8 @@ export interface TransitionFields {
   reset: readonly string[];
   /** The edge must say why (it goes to `last_error`). */
   requiresError?: boolean;
+  /** Columns the Worker stamps with its own clock; a request must not carry them. */
+  stamp?: readonly string[];
 }
 
 const NONE: readonly string[] = [];
@@ -224,19 +226,23 @@ export const TRANSITION_FIELDS: Readonly<Record<RepullStatus, TransitionFields>>
  *  - `planned`: record why a step could not finish (the error is the whole write);
  *  - `released`: record the count of locked objects once the lock has been applied;
  *  - `gates_clear` and `patch_gates_clear`: record the claim to merge, before the merge is sent.
+ *    The caller names the screened head; the Worker stamps the time with its own clock, because a
+ *    caller-stated time could be backdated or set ahead and defeat the sweep for stuck claims.
  */
 export const SELF_EDGE_FIELDS: Readonly<Partial<Record<RepullStatus, TransitionFields>>> = {
   planned: { may: NONE, must: NONE, reset: NONE, requiresError: true },
   released: { may: ["counts"], must: ["counts"], reset: NONE },
   gates_clear: {
-    may: ["merge_claimed_at", "merge_claim_sha"],
-    must: ["merge_claimed_at", "merge_claim_sha"],
+    may: ["merge_claim_sha"],
+    must: ["merge_claim_sha"],
     reset: NONE,
+    stamp: ["merge_claimed_at"],
   },
   patch_gates_clear: {
-    may: ["patch_merge_claimed_at", "patch_merge_claim_sha"],
-    must: ["patch_merge_claimed_at", "patch_merge_claim_sha"],
+    may: ["patch_merge_claim_sha"],
+    must: ["patch_merge_claim_sha"],
     reset: NONE,
+    stamp: ["patch_merge_claimed_at"],
   },
 };
 
@@ -410,11 +416,6 @@ export function fieldProblem(
         ? null
         : "patch_branch must be the release branch of patch_version";
     }
-    case "merge_claimed_at":
-    case "patch_merge_claimed_at":
-      return typeof value === "string" && /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(value)
-        ? null
-        : `${column} must be a UTC datetime`;
     case "workflow_run_url":
       return typeof value === "string" && value.length <= 500 && /^https:\/\/[^\s]+$/.test(value)
         ? null

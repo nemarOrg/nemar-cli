@@ -625,6 +625,8 @@ A row with the same tag and the same plan digest is returned as it is (200), bef
 
 Create refuses (`merge-unreconciled`) when any record of the dataset holds a merge claim or a merge sha, for either pull request, and is not finished, whatever its status: `failed`, `released`, `merged` and `gates_clear` all count.
 `complete` is finished, and so is `patch_declined`, which is reachable only from a released N.0.0 and is refused while the patch claim is held.
+A `failed` row that has a tag sha and no patch claim or patch merge is finished too: N.0.0 is merged and tagged, so nothing is unreconciled, though its tag stays pulled.
+The case Phase 6f still owns is a `failed` row with a claim or a merge sha and no tag sha, or with any patch claim or patch merge: nothing in 6a writes out of it.
 `failed` stays writable on purpose, so a lost merge answer can be reported; it does not free the dataset, because a merge may be on `main` with no row saying so, and a second major would be a second DOI.
 Clearing a claim after GitHub confirms the pull request was not merged, and expiring a stuck open row, are written by Phase 6f (resume and reconcile); Phase 6a has no writer for either, and open rows never expire here.
 
@@ -653,7 +655,9 @@ A branch must be the release branch of the version the row carries.
 `last_error` goes through the ADR 0051 rule and is never blank; an edge into `failed`, or the `planned` edge that records why a step could not finish, must say why, and an edge into a different, non-terminal status clears the stored error.
 
 Four edges repeat a status to write one thing: `planned` (the error), `released` (the count of locked objects) and `gates_clear` and `patch_gates_clear` (the claim to merge).
-The claim is recorded before the merge is sent, needs the screened head, names exactly that head, and cannot be recorded twice.
+The claim is recorded before the merge is sent, names exactly the screened head, and cannot be recorded twice.
+The caller sends the head and nothing else: the Worker stamps the time with its own clock and refuses a request that carries one, because a caller-stated time could be backdated or set ahead and defeat the sweep for stuck claims that Phase 6f writes.
+The time and the head are set together or not at all (a CHECK).
 While it is held, closing the pull request (`abandoned`, `superseded`, `patch_declined`) and moving its head (`pr_open`, `patch_synthesized`) are refused, because the pull request may have merged; `failed` is not.
 
 Two kinds of state are not written by this route, so a caller cannot state them.

@@ -90,25 +90,34 @@ export const REPULL_LIST_SQL = `SELECT * FROM upstream_repulls
 
 /**
  * The next attempt number for a tag, and how many earlier attempts forbid another: any that did
- * not end `abandoned`, `failed` or `superseded`. A failed or abandoned attempt that holds a merge
- * claim or a merge sha is caught earlier, for the whole dataset, by {@link MERGE_UNRECONCILED_SQL}.
+ * not end `abandoned`, `failed` or `superseded`, and any that holds a merge sha (a `failed` row
+ * that was merged and tagged is exempt from {@link MERGE_UNRECONCILED_SQL} but still pulled the
+ * tag). A failed or abandoned attempt that holds a claim is caught earlier, for the whole
+ * dataset, by {@link MERGE_UNRECONCILED_SQL}.
  * `COUNT(CASE ...)` is 0 for no rows, never NULL.
  */
 export const REPULL_NEXT_ATTEMPT_SQL = `SELECT COALESCE(MAX(attempt), 0) + 1 AS next,
-  COUNT(CASE WHEN status NOT IN ('abandoned', 'failed', 'superseded') THEN 1 END) AS blocking
+  COUNT(CASE WHEN status NOT IN ('abandoned', 'failed', 'superseded')
+    OR merge_sha IS NOT NULL THEN 1 END) AS blocking
   FROM upstream_repulls WHERE dataset_id = ? AND to_tag = ?`;
 
 /**
  * A record of the dataset, in any status, that holds a merge claim or a merge sha for either pull
  * request and is not finished. `complete` is finished, and so is `patch_declined`: it is only
- * reachable from a released N.0.0 and is refused while the patch claim is held. A `failed` or
- * `released` row that holds a claim is not finished: the merge may be on `main` with nothing
- * saying so, and a second major for the dataset would be a second DOI.
+ * reachable from a released N.0.0 and is refused while the patch claim is held. A `failed` row
+ * that has a tag sha and no patch claim or patch merge is finished too: N.0.0 is merged and
+ * tagged, so the merge is reconciled (the tag itself is held by {@link REPULL_NEXT_ATTEMPT_SQL}).
+ * A row that holds a claim or a merge sha but no tag sha (a lost merge answer, a merge with no
+ * tag yet), or any patch claim or patch merge, is not finished whatever its status: the merge
+ * may be on `main` with nothing saying so, and a second major would be a second DOI. Reconciling
+ * those is Phase 6f's.
  */
 export const MERGE_UNRECONCILED_SQL = `SELECT id, to_tag, status FROM upstream_repulls
   WHERE dataset_id = ? AND status NOT IN ('complete', 'patch_declined')
     AND (merge_claimed_at IS NOT NULL OR merge_sha IS NOT NULL
          OR patch_merge_claimed_at IS NOT NULL OR patch_merge_sha IS NOT NULL)
+    AND NOT (status = 'failed' AND tag_sha IS NOT NULL
+             AND patch_merge_claimed_at IS NULL AND patch_merge_sha IS NULL)
   ORDER BY id LIMIT 1`;
 
 export const REPULL_BY_ATTEMPT_SQL =
@@ -569,9 +578,11 @@ const CLAIMS = {
  * once set, and a held merge claim. Then one compare-and-set on the row's status AND revision as
  * they were read: the update applies only to that exact version of the row, so of two writers that
  * read the same row only one applies, even when both repeat the same status. That also makes the
- * checks above sound: nothing they read can have changed by the time the update applies, so the
- * immutable columns and a claim set after the read need no separate guard in the statement.
- * The loser is told the row has moved (`stale-status`) and nothing is written.
+ * checks above sound against other transitions: nothing they read can have been changed by one
+ * by the time the update applies, so the immutable columns and a claim set after the read need no
+ * separate guard in the statement. The loser is told the row has moved (`stale-status`) and
+ * nothing is written. That holds for transitions only: deleting the dataset deletes the record
+ * without touching its revision, and a row gone by then answers 404.
  *
  * `last_error` goes through {@link resolveImportError} (ADR 0051): a specific message is never
  * overwritten by a generic one, and a blank one is refused. An edge into a different, non-terminal
@@ -643,14 +654,6 @@ export async function transitionRepull(
         row,
       };
     }
-    if (row[claim.gatesSha] === null) {
-      return {
-        status: 409,
-        code: "gates-not-set",
-        message: `Re-pull #${id} has no screened head to claim a merge for.`,
-        row,
-      };
-    }
   }
 
   const spec = fieldsFor(t.from, t.to);
@@ -715,6 +718,8 @@ export async function transitionRepull(
     }
   }
   for (const key of spec.reset) if (!(key in fields)) sets.push(`${key} = NULL`);
+  // The Worker's own clock, never a request's: see SELF_EDGE_FIELDS.
+  for (const key of spec.stamp ?? []) sets.push(`${key} = datetime('now')`);
   const forward = !repeats && !isTerminal(t.to);
   if (t.error !== undefined) {
     sets.push("last_error = ?");
@@ -748,7 +753,11 @@ export async function transitionRepull(
   const results = await db.batch([update, audit]);
 
   const after = await getRepull(db, id);
-  if (!after) throw new Error(`upstream_repulls row ${id} vanished during a transition`);
+  if (!after) {
+    // Deleting a dataset deletes its records without touching the revision, so the row can be
+    // gone between the read above and here.
+    return { status: 404, code: "not-found", message: `Re-pull #${id} was deleted.` };
+  }
   if ((results[0]?.meta?.changes ?? 0) === 0) {
     return {
       status: 409,

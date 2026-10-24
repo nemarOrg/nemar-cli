@@ -166,10 +166,15 @@ describe("the columns an edge writes", () => {
     expect(fieldsFor("released", "released")).toBe(SELF_EDGE_FIELDS.released);
     expect(fieldsFor("merged", "released")).toBe(TRANSITION_FIELDS.released);
     expect(fieldsFor("pr_open", "gates_clear")).toBe(TRANSITION_FIELDS.gates_clear);
-    expect(fieldsFor("gates_clear", "gates_clear").must).toEqual([
-      "merge_claimed_at",
-      "merge_claim_sha",
+    // The caller names the screened head; the Worker stamps the time, so a request cannot carry it.
+    expect(fieldsFor("gates_clear", "gates_clear").must).toEqual(["merge_claim_sha"]);
+    expect(fieldsFor("gates_clear", "gates_clear").stamp).toEqual(["merge_claimed_at"]);
+    expect(fieldsFor("patch_gates_clear", "patch_gates_clear").stamp).toEqual([
+      "patch_merge_claimed_at",
     ]);
+    for (const spec of [...Object.values(TRANSITION_FIELDS), ...Object.values(SELF_EDGE_FIELDS)]) {
+      for (const column of spec.stamp ?? []) expect(spec.may).not.toContain(column);
+    }
     // The claim is recorded on the edge that repeats gates_clear and nowhere else.
     for (const status of REPULL_STATUSES) {
       for (const column of [
@@ -180,8 +185,16 @@ describe("the columns an edge writes", () => {
       ]) {
         const claimEdge = status === "gates_clear" || status === "patch_gates_clear";
         expect(TRANSITION_FIELDS[status].may.includes(column)).toBe(false);
+        // The time is stamped, never sent: only the sha is a field of the claim edge.
         expect(!!SELF_EDGE_FIELDS[status]?.may.includes(column)).toBe(
-          claimEdge && column.startsWith(status === "gates_clear" ? "merge" : "patch"),
+          claimEdge &&
+            column.endsWith("claim_sha") &&
+            column.startsWith(status === "gates_clear" ? "merge" : "patch"),
+        );
+        expect(!!SELF_EDGE_FIELDS[status]?.stamp?.includes(column)).toBe(
+          claimEdge &&
+            column.endsWith("claimed_at") &&
+            column.startsWith(status === "gates_clear" ? "merge" : "patch"),
         );
       }
     }
@@ -274,20 +287,9 @@ describe("the shape of a value", () => {
     }
   });
 
-  test("a merge claim time is a UTC datetime in the shape SQLite writes", () => {
+  test("a claim time is not a field of any edge: it is stamped by the Worker", () => {
     for (const column of ["merge_claimed_at", "patch_merge_claimed_at"]) {
-      expect(fieldProblem(column, "2026-10-24 01:02:03", row)).toBeNull();
-      for (const bad of [
-        "2026-10-24T01:02:03Z",
-        "2026-10-24",
-        "yesterday",
-        "2026-10-24 01:02",
-        "",
-        5,
-        null,
-      ]) {
-        expect(fieldProblem(column, bad, row)).not.toBeNull();
-      }
+      expect(fieldProblem(column, "2026-10-24 01:02:03", row)).not.toBeNull();
     }
   });
 

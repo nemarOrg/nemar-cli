@@ -167,6 +167,17 @@ describe("every state accepts the row it should hold", () => {
     });
   }
 
+  onEveryEngine("a claim to merge is accepted when its time and sha come together", async (e) => {
+    const held = { merge_claimed_at: "2026-10-24 01:00:00", merge_claim_sha: SHA };
+    expect(await insert(e, rowAt("gates_clear", held))).toBeNull();
+    await e.reset();
+    const patchHeld = {
+      patch_merge_claimed_at: "2026-10-24 01:00:00",
+      patch_merge_claim_sha: SHA,
+    };
+    expect(await insert(e, rowAt("patch_gates_clear", patchHeld))).toBeNull();
+  });
+
   onEveryEngine(
     "a re-pull with no N.0.1 completes without a patch tag; one with N.0.1 needs it",
     async (e) => {
@@ -228,6 +239,14 @@ describe("every stage invariant refuses its violation", () => {
     ["a patch_released row without patch_merge_sha", "patch_released", { patch_merge_sha: null }],
     ["a patch_released row without patch_tag_sha", "patch_released", { patch_tag_sha: null }],
     ["a negative revision", "planned", { revision: -1 }],
+    ["a claim time without its sha", "gates_clear", { merge_claimed_at: "2026-10-24 01:00:00" }],
+    ["a claim sha without its time", "gates_clear", { merge_claim_sha: SHA }],
+    [
+      "a patch claim time without its sha",
+      "patch_gates_clear",
+      { patch_merge_claimed_at: "2026-10-24 01:00:00" },
+    ],
+    ["a patch claim sha without its time", "patch_gates_clear", { patch_merge_claim_sha: SHA }],
     ["an open row with terminal_at set", "pr_open", { terminal_at: "2026-10-24 00:00:00" }],
     ["a planned row with terminal_at set", "planned", { terminal_at: "2026-10-24 00:00:00" }],
     ["a complete row without terminal_at", "complete", { terminal_at: null }],
@@ -483,10 +502,11 @@ describe("the service on D1", () => {
     const claim = await transitionRepull(env, admin, id, {
       from: "gates_clear",
       to: "gates_clear",
-      fields: { merge_claimed_at: "2026-10-24 01:00:00", merge_claim_sha: SHA },
+      fields: { merge_claim_sha: SHA },
     });
     if (isRefusal(claim)) throw new Error(`refused: ${claim.code}`);
-    expect(claim.row).toMatchObject({ merge_claimed_at: "2026-10-24 01:00:00", revision: 1 });
+    expect(claim.row.merge_claimed_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+    expect(claim.row).toMatchObject({ merge_claim_sha: SHA, revision: 1 });
     for (const to of ["abandoned", "pr_open"] as const) {
       const refused = await transitionRepull(env, admin, id, {
         from: "gates_clear",

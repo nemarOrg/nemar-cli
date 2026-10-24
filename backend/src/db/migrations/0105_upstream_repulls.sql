@@ -28,9 +28,10 @@
 --
 -- WHERE NULL MEANS WHAT. `patch_*` columns stay NULL until `patch_synthesized`, and for good when
 -- the re-pull has no corrections to replay. `merge_claimed_at` and `merge_claim_sha` are recorded
--- while the row is `gates_clear`, by a self-edge that needs `gates_sha`, and BEFORE the merge is
--- sent; the claim is kept when the outcome is unknown, so a lost answer is resolved from GitHub
--- and never repeated blind (the `patch_` twins do the same for N.0.1). `terminal_at` is NULL
+-- while the row is `gates_clear`, by a self-edge that names the screened head (the Worker stamps
+-- the time with its own clock; the two columns are set together or not at all), and BEFORE the
+-- merge is sent; the claim is kept when the outcome is unknown, so a lost answer is resolved from
+-- GitHub and never repeated blind (the `patch_` twins do the same for N.0.1). `terminal_at` is NULL
 -- exactly while the row is open.
 --
 -- `revision` counts the writes to a row. Every transition increments it and applies only to the
@@ -111,6 +112,8 @@ CREATE TABLE upstream_repulls (
         AND patch_head_sha IS NOT NULL AND patch_base_sha IS NOT NULL)),
   CHECK (status NOT IN ('patch_merged', 'patch_released') OR patch_merge_sha IS NOT NULL),
   CHECK (status <> 'patch_released' OR patch_tag_sha IS NOT NULL),
+  CHECK ((merge_claimed_at IS NULL) = (merge_claim_sha IS NULL)),
+  CHECK ((patch_merge_claimed_at IS NULL) = (patch_merge_claim_sha IS NULL)),
   CHECK (status <> 'complete' OR patch_version IS NULL OR patch_tag_sha IS NOT NULL),
   CHECK ((terminal_at IS NULL) = (status NOT IN ('complete', 'abandoned', 'failed', 'superseded',
     'patch_declined')))
