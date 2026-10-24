@@ -194,7 +194,7 @@ interface Body {
   unparseable: number;
   absent: number;
   skipped_existing: number;
-  errors: { dataset_id: string; version: string; error: string }[];
+  errors: { dataset_id: string; version: string; error: string; kind: string }[];
   suspect_credential: boolean;
   next_cursor: string | null;
   remaining: number;
@@ -373,6 +373,7 @@ describe("upstream-backfill: errors are not verdicts", () => {
       expect.objectContaining({
         dataset_id: "on000001",
         error: expect.stringContaining("not recorded"),
+        kind: "needs_admin",
       }),
     ]);
     expect(snapshotOf("on000001")).toEqual(NOT_EXAMINED);
@@ -386,6 +387,7 @@ describe("upstream-backfill: errors are not verdicts", () => {
     const body = await json(await call("?execute=1"));
     expect(body.not_examined).toBe(1);
     expect(body.errors[0]?.error).toContain("control read of main failed");
+    expect(body.errors[0]?.kind).toBe("transient");
     expect(snapshotOf("on000001")).toEqual(NOT_EXAMINED);
   });
 

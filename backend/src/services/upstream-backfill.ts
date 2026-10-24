@@ -16,9 +16,11 @@
  *     404 becomes `unknown` only when it is proved to be about the tag and not about the
  *     credential. GitHub answers 404 for a credential that cannot see a repository, so a 404 is
  *     recorded only after a CONTROL READ succeeds: the same repository's `dataset_description.json`
- *     at `main`, with the same credential. If the control read is absent or fails, the row is
- *     counted `not_examined`, nothing is written, and the next pass retries it. This holds for a
- *     batch of any size, including one row.
+ *     at `main`, with the same credential. If the control read FAILS, the row is counted
+ *     `not_examined` as `transient` and the next pass retries it. If the control read is ABSENT
+ *     too, the description is missing at the tag and at `main` (or the default branch is not
+ *     `main`): the row is `needs_admin`, which no rerun fixes. Nothing is written in either case.
+ *     This holds for a batch of any size, including one row.
  *   - A batch in which no row proved the credential (nothing returned content, no 404 was
  *     confirmed by a control read) but at least one 404 was left unconfirmed is refused as
  *     `suspect_credential`, whatever else errored in the same batch.
@@ -103,6 +105,12 @@ export interface UpstreamBackfillError {
   dataset_id: string;
   version: string;
   error: string;
+  /**
+   * Why the row was not recorded. `transient`: a failed read, a failed control read or an
+   * unreadable write result, which a rerun can fix. `needs_admin`: the description is absent at
+   * the tag AND at `main` (or the default branch is not `main`), which a rerun never fixes.
+   */
+  kind: "transient" | "needs_admin";
 }
 
 export interface UpstreamBackfillResult {
@@ -112,7 +120,11 @@ export interface UpstreamBackfillResult {
   scanned: number;
   /** Rows written (execute), or that would be (dry run). */
   recorded: { doi: number; unknown: number };
-  /** Rows whose read failed: nothing was written and the next pass tries them again. */
+  /**
+   * Rows that were not recorded, each listed in `errors` with its `kind`: `transient` rows are
+   * retried by the next pass, `needs_admin` rows (no description at the tag or at `main`) never
+   * recover on their own.
+   */
   not_examined: number;
   /** Rows whose description was not JSON: counted in `recorded.unknown` too. */
   unparseable: number;
@@ -151,7 +163,12 @@ type Examined =
     }
   | { kind: "error"; candidate: Candidate; error: string }
   /** The tag read was absent and the control read did not show the credential sees the repo. */
-  | { kind: "unconfirmed"; candidate: Candidate; error: string };
+  | {
+      kind: "unconfirmed";
+      candidate: Candidate;
+      error: string;
+      cause: "transient" | "needs_admin";
+    };
 
 /** Run `work` over `items`, at most `width` at a time, keeping the order of the results. */
 async function mapBounded<T, R>(
@@ -273,6 +290,7 @@ export async function runUpstreamBackfill(
           return {
             kind: "unconfirmed",
             candidate: c,
+            cause: control.kind === "absent" ? "needs_admin" : "transient",
             error:
               control.kind === "absent"
                 ? "dataset_description.json is absent at the tag and at main, so the 404 may be the credential's; not recorded"
@@ -316,6 +334,7 @@ export async function runUpstreamBackfill(
         dataset_id: e.candidate.dataset_id,
         version: e.candidate.version,
         error: e.error,
+        kind: e.kind === "unconfirmed" ? e.cause : "transient",
       });
     }
 
@@ -369,6 +388,7 @@ export async function runUpstreamBackfill(
             dataset_id: r.candidate.dataset_id,
             version: r.candidate.version,
             error: "the write result carried no change count; whether it landed is unknown",
+            kind: "transient",
           });
         } else if (changes === 0) {
           result.skipped_existing++;

@@ -9,11 +9,11 @@
  * safe: the write never overwrites a recorded value, so rows already examined drop out of the
  * candidate set, and `after` exists only to step past a row that keeps erroring.
  *
- * 502 means the call must not be read as progress: every read failed, or every 404 was left
- * unconfirmed because no read in the batch proved the credential can see the repositories (a
- * credential GitHub cannot see them with answers 404 to all of them), and in both cases nothing
- * was written. 500 is a database
- * failure while choosing candidates. The service holds the rules; this file is the HTTP shell.
+ * 502 means the call must not be read as progress, and nothing was written. Either every read
+ * failed, or every 404 was left unconfirmed because no read in the batch proved the credential
+ * can see the repositories (a credential GitHub cannot see them with answers 404 to all of them).
+ * 500 is a database failure while choosing candidates. The service holds the rules; this file is
+ * the HTTP shell.
  */
 
 import { CURSOR_RE, runUpstreamBackfill } from "../../services/upstream-backfill";

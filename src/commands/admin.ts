@@ -7806,7 +7806,9 @@ upstreamBackfillCommand
           );
         }
         for (const e of res.errors) {
-          say(`    ${chalk.red("error")}   ${e.dataset_id}@${e.version}: ${e.error}`);
+          say(
+            `    ${chalk.red("error")}   ${e.dataset_id}@${e.version}${e.kind === "needs_admin" ? " [needs admin]" : ""}: ${e.error}`,
+          );
         }
         if (!res.ok) {
           suspectCredential = res.suspect_credential;
@@ -7848,11 +7850,26 @@ upstreamBackfillCommand
         }
         if (resumeCursor) console.log(`Resume with: --after ${resumeCursor}`);
         if (done && total.not_examined > 0) {
-          console.log(
-            chalk.yellow(
-              `${total.not_examined} row(s) were not examined and are still retryable: rerun without --after to try them again.`,
-            ),
-          );
+          // An error without a kind comes from an older backend; a rerun is the safe advice.
+          const needsAdmin = errors.filter((e) => e.kind === "needs_admin");
+          const transient = total.not_examined - needsAdmin.length;
+          if (transient > 0) {
+            console.log(
+              chalk.yellow(
+                `${transient} row(s) were not examined after a transient error: rerun without --after to try them again.`,
+              ),
+            );
+          }
+          if (needsAdmin.length > 0) {
+            console.log(
+              chalk.yellow(
+                `${needsAdmin.length} row(s) have no description at the tag or at main (or the default branch is not main): a rerun will not fix them and they need an admin look. They are the 'error' lines above (${needsAdmin
+                  .slice(0, 3)
+                  .map((e) => `${e.dataset_id}@${e.version}`)
+                  .join(", ")}${needsAdmin.length > 3 ? ", ..." : ""}).`,
+              ),
+            );
+          }
         }
         if (last) {
           console.log(

@@ -308,19 +308,20 @@ describe("nemar admin upstream-backfill: what the operator is told", () => {
     }
   });
 
-  test("a finished pass with rows not examined says to rerun without --after", async () => {
+  test("a finished pass with transient rows says to rerun without --after", async () => {
     seedAuthenticatedConfig();
     const server = startServer([
       {
         body: batch({
           not_examined: 2,
           errors: [
+            { dataset_id: "on000001", version: "1.0.0", error: "HTTP 500", kind: "transient" },
             {
-              dataset_id: "on000001",
+              dataset_id: "on000002",
               version: "1.0.0",
-              error: "absent at the tag and at main; not recorded",
+              error: "control failed",
+              kind: "transient",
             },
-            { dataset_id: "on000002", version: "1.0.0", error: "HTTP 500" },
           ],
         }),
       },
@@ -328,8 +329,47 @@ describe("nemar admin upstream-backfill: what the operator is told", () => {
     try {
       const result = await runCli(["admin", "upstream-backfill", "--execute"], server.url);
       expect(result.exitCode).toBe(1);
-      expect(result.stdout).toContain("2 row(s) were not examined");
+      expect(result.stdout).toContain("2 row(s) were not examined after a transient error");
       expect(result.stdout).toContain("rerun without --after");
+      expect(result.stdout).not.toContain("admin look");
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("rows absent at the tag and at main are told apart: no rerun, an admin look", async () => {
+    seedAuthenticatedConfig();
+    const server = startServer([
+      {
+        body: batch({
+          not_examined: 3,
+          errors: [
+            { dataset_id: "on000001", version: "1.0.0", error: "HTTP 500", kind: "transient" },
+            {
+              dataset_id: "on000002",
+              version: "1.0.0",
+              error: "absent at both",
+              kind: "needs_admin",
+            },
+            {
+              dataset_id: "on000003",
+              version: "2.0.0",
+              error: "absent at both",
+              kind: "needs_admin",
+            },
+          ],
+        }),
+      },
+    ]);
+    try {
+      const result = await runCli(["admin", "upstream-backfill", "--execute"], server.url);
+      expect(result.exitCode).toBe(1);
+      expect(result.stdout).toContain("1 row(s) were not examined after a transient error");
+      expect(result.stdout).toContain(
+        "2 row(s) have no description at the tag or at main (or the default branch is not main): a rerun will not fix them and they need an admin look",
+      );
+      expect(result.stdout).toContain("on000002@1.0.0, on000003@2.0.0");
+      expect(result.stdout).toContain("[needs admin]");
     } finally {
       server.stop();
     }

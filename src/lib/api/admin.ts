@@ -1893,7 +1893,13 @@ export interface UpstreamBackfillResponse {
   unparseable: number;
   absent: number;
   skipped_existing: number;
-  errors: { dataset_id: string; version: string; error: string }[];
+  errors: {
+    dataset_id: string;
+    version: string;
+    error: string;
+    /** `transient` is fixed by a rerun; `needs_admin` (absent at the tag and at main) is not. */
+    kind?: "transient" | "needs_admin";
+  }[];
   suspect_credential: boolean;
   /** Pass as `after` for the next call; null when the pass is done. */
   next_cursor: string | null;

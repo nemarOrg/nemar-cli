@@ -294,7 +294,9 @@ The insert is `ON CONFLICT (dataset_id, version) DO NOTHING`, not `INSERT OR IGN
 The backfill is the only writer that records `unknown` for an absent file, and `unknown` is final: nothing examines the row again.
 So a 404 is recorded only when it is proved to be about the tag and not about the credential, which GitHub also answers with 404.
 The proof is a control read: the same repository's `dataset_description.json` at `main`, with the same credential, must succeed.
-If the control read is absent or fails, the row is counted `not_examined`, nothing is written, and the next pass tries it again; this holds for a batch of any size, a single row included.
+If the control read fails, the row is counted `not_examined` as a transient error, nothing is written, and the next pass tries it again.
+If the control read is also absent, the description is missing at the tag and at `main` (or the default branch is not `main`), nothing is written, and a rerun will not change that: the row is reported with `kind: "needs_admin"` and an administrator has to look at it.
+Both hold for a batch of any size, a single row included.
 The row must also be older than one hour, so a CDN-cached 404 on a fresh tag is never made final.
 A fetch error in the backfill writes nothing, and a batch in which no read proved the credential while at least one 404 is unconfirmed is refused as `suspect_credential` (502), whatever else errored beside it.
 Only a version of the form N.N.N is a candidate, and a ref is always the canonical `vX.Y.Z` tag, so a stored `v1.0.0` can never read `vv1.0.0`.
