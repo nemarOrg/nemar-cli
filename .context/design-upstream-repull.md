@@ -53,7 +53,7 @@ Three-way decision per path (base = upstream at `from_tag`, theirs = upstream at
 Version policy on top of that (owner, 2026-10-23):
 
 - The 2.0.0 mirror takes upstream for every conflict, so a re-pull never blocks.
-- NEMAR's unexplained changes to upstream-owned paths that upstream did not touch are replayed as 2.0.1, a PR to `main` opened with the 2.0.0 PR, synthesized again on `main` once 2.0.0 has merged (squash) and been tagged, and merged by an administrator after its gates pass on that commit.
+- NEMAR's unexplained changes to upstream-owned paths that upstream did not touch are replayed as 2.0.1, a PR to `main` opened at `patch_synthesized`, on `main` once 2.0.0 has merged (squash) and been tagged, and merged by an administrator after its gates pass on that commit; until then the plan lists the corrections.
 - Conflicting corrections are listed for an administrator and stay out of 2.0.1 until resolved.
 - A version row with `source_version` set and version `N.0.0` is a mirror; the API exposes this derived flag and the website shows a mirror tag.
 
@@ -90,7 +90,7 @@ New behavior to build (no callback does this today): one ADR 0023 reconcile (`--
 ## 2. Landing path
 
 - Always a PR, never a bypass. Branch `release/v<N+1>.0.0`, so the webhook's enrichment on release branches gives the tag a fresh `.nemar/metadata.json`.
-- Version = next major of the highest of: `dataset_versions` rows, `v*` tags, `Version` on main. Refuse if another release PR is open (not counting this re-pull's own 2.0.1) or the three disagree.
+- Version = next major of the highest of: `dataset_versions` rows, `v*` tags, `Version` on main. Refuse if another release PR is open or the three disagree (2.0.1's PR opens only after 2.0.0's has merged).
 - Manual path: the administrator's machine pushes the branch and opens the PR under their own login (ADR 0107 review `skipped`); the Worker never merges a PR an administrator opened.
 - `xx` re-pulls take the manual path only: ADR 0086 exempts `xx` from the screen, so they are never machine clean.
 - Gates before merge: BIDS validation and `version-check` (required), and the identifier screen dispatched with `ref=<head sha>` and a callback bound to the re-pull row; it must be clear or carry a recorded administrator acknowledgment (ADR 0086).
