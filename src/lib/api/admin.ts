@@ -2582,10 +2582,21 @@ export async function replyToMailTicket(
   );
 }
 
-/** `POST /admin/mail/tickets/:id/note`. */
-export async function addMailNote(id: number, text: string): Promise<NoteResponse> {
+/**
+ * `POST /admin/mail/tickets/:id/note`. The `Idempotency-Key` makes a retry after a lost answer
+ * store the note once (a repeat returns the stored message id).
+ */
+export async function addMailNote(
+  id: number,
+  text: string,
+  idempotencyKey: string,
+): Promise<NoteResponse> {
   const body: NoteRequest = { text };
-  return request(`/admin/mail/tickets/${id}/note`, post(body), true);
+  return request(
+    `/admin/mail/tickets/${id}/note`,
+    post(body, { "Idempotency-Key": idempotencyKey }),
+    true,
+  );
 }
 
 /** `POST /admin/mail/tickets/:id/assign`; `null` unassigns. */

@@ -1252,3 +1252,87 @@ describe("summaries and retention", () => {
     }
   });
 });
+
+describe("note idempotency key", () => {
+  const added = () => Response.json({ message_id: 5 });
+
+  test("sends a generated Idempotency-Key and prints it to stderr first", async () => {
+    const server = startServer({ "POST /admin/mail/tickets/42/note": added });
+    try {
+      const r = await runCli(["note", "42", "--text", "internal"], server.url);
+      expect(r.exitCode).toBe(0);
+      const call = server.mail()[0];
+      expect(call.body).toEqual({ text: "internal" });
+      const key = call.headers.get("Idempotency-Key") ?? "";
+      expect(key).toMatch(/^[A-Za-z0-9._:-]{1,64}$/);
+      expect(r.stderr).toContain(`Idempotency-Key: ${key}`);
+      expect(r.stdout).toContain("Note added");
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("a supplied key is passed through, and a malformed one is refused locally", async () => {
+    const server = startServer({ "POST /admin/mail/tickets/42/note": added });
+    try {
+      const ok = await runCli(
+        ["note", "42", "--text", "x", "--idempotency-key", "work-item:17"],
+        server.url,
+      );
+      expect(ok.exitCode).toBe(0);
+      expect(server.mail()[0].headers.get("Idempotency-Key")).toBe("work-item:17");
+      const bad = await runCli(
+        ["note", "42", "--text", "x", "--idempotency-key", "bad key!"],
+        server.url,
+      );
+      expect(bad.exitCode).toBe(2);
+      expect(server.mail()).toHaveLength(1);
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("a 503 says to retry with the key, and --json carries it", async () => {
+    const server = startServer({
+      "POST /admin/mail/tickets/42/note": () =>
+        Response.json({ mode: "full", message: "Down for maintenance." }, { status: 503 }),
+    });
+    try {
+      const r = await runCli(["note", "42", "--text", "x", "--idempotency-key", "n-9"], server.url);
+      expect(r.exitCode).toBe(1);
+      expect(r.stderr).toContain("Retry with: --idempotency-key n-9");
+      expect(r.stderr).toContain("never stores the note twice");
+      const j = await runCli(
+        ["note", "42", "--text", "x", "--idempotency-key", "n-9", "--json"],
+        server.url,
+      );
+      expect(JSON.parse(j.stderr.trim().split("\n").at(-1) ?? "")).toMatchObject({
+        idempotency_key: "n-9",
+      });
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("a network failure says to retry with the key", async () => {
+    const server = startServer({});
+    const url = server.url;
+    server.stop();
+    const r = await runCli(["note", "42", "--text", "x", "--idempotency-key", "n-8"], url);
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toContain("Retry with: --idempotency-key n-8");
+  });
+
+  test("a definite 4xx refusal does not suggest a retry", async () => {
+    const server = startServer({
+      "POST /admin/mail/tickets/42/note": () => err(409, "ticket_purged", "Purged."),
+    });
+    try {
+      const r = await runCli(["note", "42", "--text", "x"], server.url);
+      expect(r.exitCode).toBe(1);
+      expect(r.stderr).not.toContain("Retry with");
+    } finally {
+      server.stop();
+    }
+  });
+});

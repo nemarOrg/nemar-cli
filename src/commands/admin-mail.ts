@@ -4,7 +4,7 @@
  *   nemar admin mail list [filters]              the tickets you may see, newest activity first
  *   nemar admin mail show <id>                   one ticket: header, tags, thread, events
  *   nemar admin mail reply <id> --text|--file|-  answer the requester (always with an Idempotency-Key)
- *   nemar admin mail note <id> --text|--file|-   an internal note
+ *   nemar admin mail note <id> --text|--file|-   an internal note (always with an Idempotency-Key)
  *   nemar admin mail summarize <id> --text|--file|-   the summary kept after the retention purge
  *   nemar admin mail assign <id> <user|me|none>
  *   nemar admin mail status <id> <open|pending|closed|spam>     (`close <id>` is `closed`)
@@ -159,6 +159,9 @@ function guidanceFor(word: string | undefined): string | undefined {
     : undefined;
 }
 
+/** The two commands that send an Idempotency-Key. */
+type KeyedKind = "reply" | "note";
+
 /**
  * Whether a reply is worth retrying under its key: the connection failed or the server answered 5xx
  * (including an HTML gateway error and maintenance mode), so the retry learns what happened, or the
@@ -166,7 +169,9 @@ function guidanceFor(word: string | undefined): string | undefined {
  * server answers every repeat of that key the same way and never sends it. Not a definite 4xx
  * refusal either: the same request would be refused again.
  */
-function retryableWithKey(error: ApiError): boolean {
+function retryableWithKey(error: ApiError, kind: KeyedKind = "reply"): boolean {
+  // A note sends no mail: only a lost answer (a network failure or a 5xx) is worth a retry.
+  if (kind === "note") return error.statusCode === 0 || error.statusCode >= 500;
   const word = mailErrorCode(error);
   if (word === "reply_delivery_unknown") return false;
   return (
@@ -177,9 +182,9 @@ function retryableWithKey(error: ApiError): boolean {
   );
 }
 
-function retryAdvice(error: ApiError, key: string): string | undefined {
-  return retryableWithKey(error)
-    ? `Retry with: --idempotency-key ${key}  (the same key never sends the reply twice)`
+function retryAdvice(error: ApiError, key: string, kind: KeyedKind): string | undefined {
+  return retryableWithKey(error, kind)
+    ? `Retry with: --idempotency-key ${key}  (the same key never ${kind === "note" ? "stores the note" : "sends the reply"} twice)`
     : undefined;
 }
 
@@ -194,7 +199,7 @@ interface Failure {
   answered: boolean;
 }
 
-function failureOf(error: unknown, replyKey?: string): Failure {
+function failureOf(error: unknown, replyKey?: string, kind: KeyedKind = "reply"): Failure {
   if (error instanceof UsageError) {
     return { message: error.message, code: "usage", exit: EXIT_USAGE, answered: true };
   }
@@ -203,14 +208,14 @@ function failureOf(error: unknown, replyKey?: string): Failure {
     const notFound = word === "not_found" || error.statusCode === 404;
     const notPermitted = word === "forbidden" || error.statusCode === 403;
     const guidance = guidanceFor(word);
-    const retry = replyKey ? retryAdvice(error, replyKey) : undefined;
+    const retry = replyKey ? retryAdvice(error, replyKey, kind) : undefined;
     const hint = [guidance, retry].filter(Boolean).join(" ") || undefined;
     return {
       message: error.message,
       code: word ?? (error.statusCode === 0 ? "network_error" : `http_${error.statusCode}`),
       exit: notFound ? EXIT_NOT_FOUND : notPermitted ? EXIT_NOT_PERMITTED : EXIT_ERROR,
       hint,
-      retryWithKey: replyKey !== undefined && retryableWithKey(error),
+      retryWithKey: replyKey !== undefined && retryableWithKey(error, kind),
       answered: error.statusCode >= 400 && error.statusCode < 500,
     };
   }
@@ -222,7 +227,12 @@ function failureOf(error: unknown, replyKey?: string): Failure {
  * (`{"error", "code"}` under `--json`) and an exit code of 1 to 4. `replyKey` is read when the
  * failure is made, so a reply that has not generated its key yet still reports correctly.
  */
-async function run(json: boolean, body: () => Promise<void>, replyKey?: () => string | undefined) {
+async function run(
+  json: boolean,
+  body: () => Promise<void>,
+  replyKey?: () => string | undefined,
+  kind: KeyedKind = "reply",
+) {
   if (!isAuthenticated()) {
     fail(json, {
       message: "Not authenticated. Run 'nemar auth login' first.",
@@ -235,7 +245,7 @@ async function run(json: boolean, body: () => Promise<void>, replyKey?: () => st
   try {
     await body();
   } catch (error) {
-    fail(json, failureOf(error, replyKey?.()), replyKey?.());
+    fail(json, failureOf(error, replyKey?.(), kind), replyKey?.());
   }
 }
 
@@ -781,15 +791,39 @@ const noteCommand = new MailCommand("note")
   .argument("[source]", "'-' reads the note from standard input")
   .option("--text <text>", "The note")
   .option("--file <path>", "Read the note from a file")
+  .option(
+    "--idempotency-key <key>",
+    "Your own key (1 to 64 of letters, digits . _ : -); default: generated",
+  )
   .option(...jsonOption)
+  .addHelpText(
+    "after",
+    `
+A note is sent with an Idempotency-Key, printed to standard error before anything is sent. If the
+answer is lost (a network failure or a 5xx), retry with --idempotency-key <that key>: the note is
+stored once, and the repeat returns the same message id. Note keys are separate from reply keys.`,
+  )
   .action(async (rawId: string, source: string | undefined, _o, command: Command) => {
-    const o = optsOf<Common & { text?: string; file?: string }>(command);
-    await run(!!o.json, async () => {
-      const id = ticketIdOf(rawId);
-      const added = await addMailNote(id, await bodyText(o, source));
-      if (o.json) return printJson(added);
-      console.log(`Note added to ticket #${id} (message ${oneLine(added.message_id)}).`);
-    });
+    const o = optsOf<Common & { text?: string; file?: string; idempotencyKey?: string }>(command);
+    let key: string | undefined;
+    await run(
+      !!o.json,
+      async () => {
+        const id = ticketIdOf(rawId);
+        if (o.idempotencyKey !== undefined && !KEY_RE.test(o.idempotencyKey)) {
+          throw new UsageError("--idempotency-key must be 1 to 64 letters, digits or . _ : -");
+        }
+        const text = await bodyText(o, source);
+        key = o.idempotencyKey ?? `nemar-cli-${crypto.randomUUID()}`;
+        if (o.json) console.error(JSON.stringify({ idempotency_key: key }));
+        else console.error(`Idempotency-Key: ${key}`);
+        const added = await addMailNote(id, text, key);
+        if (o.json) return printJson(added);
+        console.log(`Note added to ticket #${id} (message ${oneLine(added.message_id)}).`);
+      },
+      () => key,
+      "note",
+    );
   });
 
 const summarizeCommand = new MailCommand("summarize")
