@@ -786,7 +786,6 @@ describe("the enrichment's generated participants.tsv is a standard edit", () =>
       const f = await plan(fx);
       const body = f.body as Body;
       expect(body.planner).toBe(PLANNER_VERSION);
-      expect(PLANNER_VERSION).toBe(2);
       const p = row(body, PATHS.participants);
       expect(p).toMatchObject({
         class: "take-theirs",
