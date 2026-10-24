@@ -179,6 +179,11 @@ export async function deleteDatasetCascade(
         )
         .bind(datasetId),
       db.prepare("DELETE FROM user_s3_permissions WHERE s3_prefix = ?").bind(datasetId),
+      // The record of an upstream re-pull has no foreign key to `datasets` (migration 0105), so it
+      // is deleted here. Placed after the indexed results above so their positions do not move.
+      db
+        .prepare("DELETE FROM upstream_repulls WHERE dataset_id = ?")
+        .bind(datasetId),
       db.prepare("DELETE FROM datasets WHERE dataset_id = ?").bind(datasetId),
     ]);
 

@@ -88,6 +88,10 @@ export interface MirrorFacts {
   /** `import_jobs.blocklisted = 1`. */
   blocklisted: boolean;
   blocklistReason: string | null;
+  /** The status of the mirror's one open re-pull (`upstream_repulls`), null when none is open. */
+  repullStatus?: string | null;
+  /** The upstream tag that open re-pull is pulling. */
+  repullToTag?: string | null;
   versions: Array<SourceVersionRow & { created_at: string | null }>;
 }
 
@@ -236,6 +240,12 @@ function withoutUpstream(m: MirrorFacts, row: ClassifiedMirror): ClassifiedMirro
   // 1. An import is running; its tree is not settled, so nothing is said about its version.
   if (m.importStatus !== null && IN_PROGRESS.has(m.importStatus) && !m.blocklisted) {
     return settle(row, "in_progress", `an import is ${m.importStatus}; not compared`);
+  }
+  // 1b. A re-pull of this mirror is under way (a non-terminal `upstream_repulls` row); its tree is
+  //     no more settled than an import's, and a second re-pull cannot start beside it.
+  if (m.repullStatus != null) {
+    const to = m.repullToTag ? ` to ${m.repullToTag}` : "";
+    return settle(row, "in_progress", `a re-pull${to} is ${m.repullStatus}; not compared`);
   }
   // 2. Parked by the retry engine or an administrator; a re-pull is not this row's next step.
   if (m.blocklisted || (m.importStatus !== null && PARKED_STATUS.has(m.importStatus))) {

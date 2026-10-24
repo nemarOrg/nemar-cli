@@ -1,0 +1,85 @@
+/**
+ * No re-pull route or service sends mail (epic #1046 phase 6, #1912; ADR 0111, decision 6 and the
+ * Phase 6 amendment). The dev database holds real addresses, so the record of a re-pull is read by
+ * an administrator with `nemar admin repull status`, and nothing here may reach a person.
+ *
+ * A source scan on the syntax tree, as `repull-lineage-writer-scan.test.ts` does for the lineage
+ * word: the transitive import closure of the service and of the routes may contain no mail module
+ * (every file under `backend/src` whose name says email, mail or resend), and no file in it may
+ * name a mail binding or call a sender. Each rule is proven to fire on a planted violation.
+ * What this pins is the code the re-pull loads at run time; it cannot see a mail sent by a module
+ * a future import pulls in unless that module is in the closure, which is exactly what it checks.
+ */
+
+import { describe, expect, test } from "bun:test";
+import { SRC, type Tree, chainTo, createTree, importClosure, rel } from "./helpers/ts-scan";
+
+const ROOTS = [`${SRC}/services/upstream-repull.ts`, `${SRC}/routes/admin/upstream-repulls.ts`];
+
+/** Every module under `backend/src` that is a mail module, by name. */
+function mailModules(tree: Tree): Set<string> {
+  return new Set(tree.walk(SRC).filter((f) => /(^|\/)[^/]*(email|mail|resend)[^/]*\.ts$/i.test(f)));
+}
+
+const SENDERS = /\b(?:RESEND_API_KEY|SEND_EMAIL|sendEmail|sendMail|sendAdminEmail|notifyAdmins)\b/;
+
+/** Chains from a root to a mail module, and the files in the closure that name a sender. */
+function mailFindings(tree: Tree): string[] {
+  const closure = importClosure(tree, ROOTS, new Set());
+  const mail = mailModules(tree);
+  const found: string[] = [];
+  for (const file of closure.files) {
+    if (mail.has(file)) found.push(`imports ${chainTo(closure, file)}`);
+    else if (SENDERS.test(tree.read(file) ?? "")) found.push(`names a sender: ${rel(file)}`);
+  }
+  for (const u of closure.unanalyzable) found.push(`unanalyzable import in ${rel(u.file)}`);
+  return found;
+}
+
+describe("the re-pull code sends no mail", () => {
+  test("the closure of the service and the routes holds no mail module and names no sender", () => {
+    const tree = createTree();
+    const closure = importClosure(tree, ROOTS, new Set());
+    // The scan is only as good as the closure it walks: it must reach the code it is about.
+    for (const f of [
+      "services/upstream-repull.ts",
+      "routes/admin/upstream-repulls.ts",
+      "services/import-error.ts",
+    ]) {
+      expect(closure.files.has(`${SRC}/${f}`)).toBe(true);
+    }
+    expect(mailModules(tree).size).toBeGreaterThan(0);
+    expect(mailFindings(tree)).toEqual([]);
+  });
+
+  test("it fires on a direct import of a mail module", () => {
+    const base = createTree();
+    const planted = createTree({
+      "services/upstream-repull.ts": `${base.read(ROOTS[0] as string)}\nimport { sendEmail } from "./email";\n`,
+    });
+    expect(mailFindings(planted).some((f) => f.startsWith("imports"))).toBe(true);
+  });
+
+  test("it fires on a mail module reached through another file", () => {
+    const base = createTree();
+    const planted = createTree({
+      "services/import-error.ts": `${base.read(`${SRC}/services/import-error.ts`)}\nexport * from "./inbound-mail";\n`,
+    });
+    const findings = mailFindings(planted);
+    expect(
+      findings.some((f) => f.includes("import-error.ts") && f.includes("inbound-mail.ts")),
+    ).toBe(true);
+  });
+
+  test("it fires on a dynamic import and on a sender named without an import", () => {
+    const base = createTree();
+    const dynamic = createTree({
+      "routes/admin/upstream-repulls.ts": `${base.read(ROOTS[1] as string)}\nexport const later = () => import("../../services/email");\n`,
+    });
+    expect(mailFindings(dynamic).some((f) => f.startsWith("imports"))).toBe(true);
+    const named = createTree({
+      "services/datasetId.ts": `${base.read(`${SRC}/services/datasetId.ts`)}\nexport const x = (env: { RESEND_API_KEY?: string }) => env.RESEND_API_KEY;\n`,
+    });
+    expect(mailFindings(named).some((f) => f.startsWith("names a sender"))).toBe(true);
+  });
+});

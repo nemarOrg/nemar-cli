@@ -298,6 +298,40 @@ describe("precedence, first match wins", () => {
     expect(needsUpstream(facts({ importStatus: "copying" }))).toBe(false);
   });
 
+  test("an open re-pull beats a known stale tag and is never sent to OpenNeuro", () => {
+    const open = facts({ repullStatus: "pr_open", repullToTag: "2.1.0" });
+    const row = classifyMirror(open, stale, READY);
+    expect([row.state, row.reason]).toEqual([
+      "in_progress",
+      "a re-pull to 2.1.0 is pr_open; not compared",
+    ]);
+    expect(needsUpstream(open)).toBe(false);
+    // Without the tag the sentence still names the status.
+    expect(classifyMirror(facts({ repullStatus: "copied" }), stale, READY).reason).toBe(
+      "a re-pull is copied; not compared",
+    );
+  });
+
+  test("no open re-pull, in either spelling of absent, leaves the verdict alone", () => {
+    for (const over of [{}, { repullStatus: null }, { repullStatus: undefined }]) {
+      expect(classifyMirror(facts(over), stale, READY).state).toBe("stale_ready");
+      expect(needsUpstream(facts(over))).toBe(true);
+    }
+  });
+
+  test("a re-pull outranks the parked and the anomaly verdicts, which describe the import", () => {
+    for (const over of [
+      { blocklisted: true },
+      { importStatus: "quarantined" },
+      { sourceId: "ds000007" },
+      { versions: [] },
+    ]) {
+      expect(classifyMirror(facts({ ...over, repullStatus: "planned" }), stale, READY).state).toBe(
+        "in_progress",
+      );
+    }
+  });
+
   test("a blocklisted row is parked even while its status is in progress", () => {
     const row = classifyMirror(
       facts({
