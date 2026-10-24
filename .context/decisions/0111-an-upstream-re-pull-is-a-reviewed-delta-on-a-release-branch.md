@@ -170,7 +170,8 @@ ADR 0086 exempts `xx` from the identifier screen, so an `xx` re-pull never has a
 - A tag not yet on the GitHub mirror refuses with `[openneuro-mirror-lag]`, which is transient and retried, not parked.
 - A re-pull's `from_tag` is the recorded `source_version`, and its `to_tag` is a tag.
 - The import path gets #993's guard, and only for a released mirror.
-  Step 4c refuses with `[openneuro-upstream-moved]` when `origin/main` records a tag (its `SourceDatasets` entry), the dataset has released a version (a `dataset_versions` row exists), and the tag being imported differs from the recorded one.
+  Step 4c refuses with `[openneuro-upstream-moved]` when three things hold: `origin/main` records a tag; the dataset has released a version (a `dataset_versions` row exists); and the tag being imported differs from the recorded one.
+  "Records a tag" means `sourceSnapshotOf` (decision 4) finds one in `origin/main`'s `dataset_description.json`, not only in its `Version` key, so a legacy entry that names the tag only in its DOI or URL counts too.
   The classifier calls that `upstream_moved`, and the retry engine parks it like `identifier_scrub_refused`, because moving a released mirror to a new tag is a re-pull's job.
   An import that never released a version and is retried is prepared again at the tag the retry discovers: it is the same import, not a re-pull.
   An unrecorded tag, `origin/main` naming none or the released version's `source_version` being NULL, never trips the guard.
