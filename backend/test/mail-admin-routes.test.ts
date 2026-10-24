@@ -133,7 +133,7 @@ function ticket(
         requester_email, subject, last_message_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
-      `ref${seq}`,
+      `aaaaaaaa${String.fromCharCode(97 + (Math.floor(seq / 26) % 26))}${String.fromCharCode(97 + (seq % 26))}`,
       o.queue ?? "support",
       o.restricted ? 1 : 0,
       o.excluded ?? null,
@@ -387,7 +387,7 @@ describe("reply", () => {
     expect(r.body.code).toBe("reply_delivery_unknown");
     expect(db.query("SELECT COUNT(*) AS n FROM mail_messages").get()).toEqual({ n: 0 });
     const [event] = events(t);
-    expect(event.kind).toBe("reply");
+    expect(event.kind).toBe("reply_failed");
     expect(event.actor_user_id).toBe(ids.admin);
     const detail = JSON.parse(event.detail ?? "{}");
     expect(detail.delivery).toBe("unknown");

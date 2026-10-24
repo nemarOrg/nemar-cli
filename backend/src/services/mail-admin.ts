@@ -358,7 +358,7 @@ export async function replyToTicket(
     // and the requester's own reply (which carries that id) will thread if it did arrive.
     console.error(`[mail-admin] reply on ticket ${ticket.id} outcome unknown: ${reason}`);
     await db.batch([
-      eventStatement(db, ticket.id, "reply", viewer.id, {
+      eventStatement(db, ticket.id, "reply_failed", viewer.id, {
         delivery: "unknown",
         header_message_id: headerId,
       }),

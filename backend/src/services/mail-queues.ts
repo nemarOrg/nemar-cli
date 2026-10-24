@@ -15,15 +15,11 @@ import { MailAdminError } from "./mail-admin";
 import {
   FALLBACK_QUEUE_TAG,
   type MailQueueRow,
+  RESTRICTED_TAGS,
   isEligibleAssignee,
+  isRestrictedQueue,
   parseRrMembers,
 } from "./ticket-assignment";
-
-/**
- * Queues that are restricted by definition. They can neither be unrestricted nor lose the flag
- * through a PUT. (3a's review fix declares the same set in code; use that constant once it lands.)
- */
-export const LOCKED_RESTRICTED_TAGS: ReadonlySet<string> = new Set(["security", "conduct"]);
 
 const QUEUE_TAG = /^[a-z0-9._-]{1,64}$/;
 const MAX_RR_MEMBERS = 50;
@@ -35,7 +31,7 @@ interface QueueRowWithEscalation extends MailQueueRow {
 function toQueue(row: QueueRowWithEscalation, open: number): MailQueue {
   return {
     tag: row.tag,
-    restricted: row.restricted === 1,
+    restricted: isRestrictedQueue(row.tag, row),
     strategy: row.strategy,
     assignee_user_id: row.assignee_user_id,
     backup_user_id: row.backup_user_id,
@@ -51,10 +47,14 @@ export async function listQueues(db: D1Database, role: string): Promise<MailQueu
     .prepare(
       `SELECT q.*, (SELECT COUNT(*) FROM mail_tickets t
                      WHERE t.queue_tag = q.tag AND t.status <> 'closed') AS open_tickets
-         FROM mail_queues q ${role === "owner" ? "" : "WHERE q.restricted = 0"} ORDER BY q.tag`,
+         FROM mail_queues q ORDER BY q.tag`,
     )
     .all<QueueRowWithEscalation & { open_tickets: number }>();
-  return (rows.results ?? []).map((r) => toQueue(r, r.open_tickets));
+  // A queue's restricted state is its flag or its tag (3a's isRestrictedQueue), so the filter
+  // for a non-owner is applied here and not in SQL.
+  return (rows.results ?? [])
+    .map((r) => toQueue(r, r.open_tickets))
+    .filter((q) => role === "owner" || !q.restricted);
 }
 
 async function requireEligible(
@@ -91,8 +91,8 @@ export async function putQueue(
     .bind(tag)
     .first<QueueRowWithEscalation>();
 
-  const restricted = req.restricted ?? (existing ? existing.restricted === 1 : false);
-  if (LOCKED_RESTRICTED_TAGS.has(tag) && !restricted) {
+  const restricted = req.restricted ?? (existing ? isRestrictedQueue(tag, existing) : false);
+  if (RESTRICTED_TAGS.has(tag) && !restricted) {
     throw new MailAdminError(422, "restricted_locked", `The ${tag} queue is always restricted.`);
   }
   if (tag === FALLBACK_QUEUE_TAG && restricted) {
@@ -102,7 +102,7 @@ export async function putQueue(
       "The fallback queue cannot be restricted: it receives mail for every unrouted address.",
     );
   }
-  const wasRestricted = existing ? existing.restricted === 1 : false;
+  const wasRestricted = existing ? isRestrictedQueue(tag, existing) : false;
   if (existing && restricted !== wasRestricted) {
     // Open tickets copied the flag at creation, so changing the queue's would leave them on
     // the old rule. Refuse rather than rewrite who can see them.
