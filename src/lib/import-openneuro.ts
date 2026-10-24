@@ -23,6 +23,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import chalk from "chalk";
 import ora from "ora";
+import { isOpenNeuroTag, sameUpstreamTag } from "../../shared/openneuro-tag.js";
 import { decideReadme, readmeProvenanceStub } from "../../shared/standard-edits/readme.js";
 import { addCi, importDataset, reindexDataset } from "./api/admin.js";
 import { getDataset, getUserCiStatus } from "./api/datasets.js";
@@ -45,7 +46,11 @@ import {
   getRemoteUuid,
   listAnnexedKeys,
 } from "./git-annex/transfer.js";
-import { OPENNEURO_UPSTREAM_MARKER } from "./import-markers.js";
+import {
+  ImportRefused,
+  OPENNEURO_MIRROR_LAG_MARKER,
+  OPENNEURO_UPSTREAM_MARKER,
+} from "./import-markers.js";
 import { annexCopyUpload } from "./import-normalize.js";
 import {
   type PublicationDecision,
@@ -54,6 +59,7 @@ import {
   screenWaitBudget,
 } from "./import-publication.js";
 import { httpUpstreamReader, prepareImportedTreeForCopy } from "./import-scrub.js";
+import { fetchOpenNeuroLatestTag } from "./openneuro.js";
 import {
   type ImportManifest,
   type ImportManifestItem,
@@ -115,6 +121,12 @@ interface ImportOptions {
    */
   screenWaitMs?: number;
   screenPollMs?: number;
+  /**
+   * The upstream snapshot tag to import (ADR 0111 decision 10). The auto-import passes the tag
+   * discovery found; with none, prepare asks OpenNeuro for its latest at run time. Never the
+   * mirror's default HEAD.
+   */
+  tag?: string;
 }
 
 /**
@@ -833,6 +845,110 @@ export function buildManifestItems(
   return { items, skipped };
 }
 
+/** Where OpenNeuro's GitHub mirror of a dataset lives. */
+export function openNeuroMirrorUrl(openneuroId: string): string {
+  return `https://github.com/${OPENNEURO_ORG}/${openneuroId}.git`;
+}
+
+/** A clone of OpenNeuro's mirror whose branch is at the upstream tag being imported. */
+export interface PinnedClone {
+  /** The tag the clone is at, and the tag this import records. */
+  tag: string;
+  /** The commit that tag names on the mirror. */
+  commit: string;
+  /** OpenNeuro's latest tag when this run asked, or null when it did not or could not say. */
+  latestTag: string | null;
+}
+
+/**
+ * Step 1 of prepare: clone OpenNeuro's GitHub mirror at the upstream tag being imported, never the
+ * default HEAD (ADR 0111 decision 10).
+ *
+ * With no `tag`, the tag is OpenNeuro's latest, asked of its GraphQL API now -- the tag "the retry
+ * discovers" for a retry, which also means a retry never carries a tag that has since moved.
+ * Either way, a tag that cannot be resolved or that the mirror does not have yet refuses with
+ * `[openneuro-mirror-lag]` before anything is created: OpenNeuro tags a snapshot before its GitHub
+ * mirror receives it, and the retry engine retries the refusal until it lands (and parks it after
+ * its window). Any other clone failure is an ordinary error.
+ *
+ * With an explicit `tag`, OpenNeuro's latest is still asked for (best effort) so a caller can warn
+ * when they differ: the copy phase copies the object CURRENTLY at each upstream path (decision 8,
+ * the version-pinned copy, is not built), so a recording that changed between the two tags
+ * without changing size is copied with the newer bytes, and only the size check catches the rest.
+ *
+ * `repoUrl` and `lookup` (passed to `fetchOpenNeuroLatestTag`) move the two endpoints and bound
+ * the lookup's retries, for tests.
+ */
+export async function cloneOpenNeuroAtTag(
+  openneuroId: string,
+  datasetPath: string,
+  options: {
+    tag?: string;
+    repoUrl?: string;
+    lookup?: Parameters<typeof fetchOpenNeuroLatestTag>[1];
+  } = {},
+): Promise<PinnedClone> {
+  if (options.tag !== undefined && !isOpenNeuroTag(options.tag)) {
+    throw new Error(
+      `Invalid upstream tag ${JSON.stringify(options.tag)}: expected an OpenNeuro snapshot tag such as 1.0.0`,
+    );
+  }
+  const repoUrl = options.repoUrl ?? openNeuroMirrorUrl(openneuroId);
+  const lookup = await fetchOpenNeuroLatestTag(openneuroId, options.lookup);
+  const latestTag = lookup.tag;
+  let tag: string;
+  if (options.tag !== undefined) {
+    tag = options.tag;
+  } else if (lookup.tag !== null) {
+    tag = lookup.tag;
+  } else {
+    throw new ImportRefused(
+      OPENNEURO_MIRROR_LAG_MARKER,
+      `${openneuroId}: the upstream tag to import could not be resolved (${lookup.reason}). Nothing was created; the retry engine retries it.`,
+    );
+  }
+  const cloned = await cloneDataset(repoUrl, datasetPath, { tag });
+  if (cloned.missingTag) {
+    throw new ImportRefused(
+      OPENNEURO_MIRROR_LAG_MARKER,
+      `${openneuroId}: upstream tag ${tag} is not on ${repoUrl.replace(/\.git$/, "")} yet. Nothing was created; the retry engine retries it.`,
+    );
+  }
+  if (!cloned.success || cloned.commit === undefined) {
+    throw new Error(`Failed to clone: ${cloned.error ?? "unknown error"}`);
+  }
+  return { tag, commit: cloned.commit, latestTag };
+}
+
+/**
+ * Print `err` as the run's last failure line and stop. The one place a refusal (`ImportRefused`)
+ * from any step of prepare ends up: the onboard workflow's reporter forwards the LAST `✖` line,
+ * cut at 600 characters, so the marker has to be both the start of that line and the last thing
+ * to fail. Before printing it, any staging an earlier attempt left is removed, so the copy and
+ * finalize jobs (which run under `if: !cancelled()`) find no manifest and do nothing, instead of
+ * copying and publishing what a previous prepare described. Exported for the test that runs it in
+ * a child process and feeds its output to the workflow's own reporter.
+ */
+export async function refuseImport(
+  err: ImportRefused,
+  nemarId: string,
+  options: ImportOptions,
+): Promise<never> {
+  if (options.persistStaging) {
+    try {
+      await cleanupStaging(nemarId, S3_BUCKET, S3_REGION);
+    } catch (cleanupErr) {
+      console.log(
+        chalk.yellow(
+          `  Could not clear s3://${S3_BUCKET}/${nemarId}/staging/ (${cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr)})`,
+        ),
+      );
+    }
+  }
+  ora().fail(err.message);
+  process.exit(1);
+}
+
 /**
  * Phase 1 (prepare): clone OpenNeuro, create the NEMAR record + repo, build the
  * key->source manifest, configure remotes (recording the nemar-s3 uuid in the
@@ -847,21 +963,48 @@ export async function prepareImport(
   options: ImportOptions = {},
 ): Promise<ImportManifest> {
   const nemarId = mapDatasetId(openneuroId);
+  try {
+    return await prepareImportSteps(openneuroId, nemarId, options);
+  } catch (err) {
+    if (err instanceof ImportRefused) return refuseImport(err, nemarId, options);
+    throw err;
+  }
+}
+
+async function prepareImportSteps(
+  openneuroId: string,
+  nemarId: string,
+  options: ImportOptions,
+): Promise<ImportManifest> {
   const workDir = options.workDir || mkdtempSync(join(tmpdir(), `nemar-import-${nemarId}-`));
   const datasetPath = join(workDir, nemarId);
 
   console.log(chalk.cyan(`\n[prepare] ${openneuroId} -> ${nemarId}\n`));
   console.log(chalk.dim(`Working directory: ${workDir}`));
 
-  // Step 1: Clone OpenNeuro dataset
+  // Step 1: Clone OpenNeuro's mirror at the upstream tag being imported, never its default HEAD
+  // (ADR 0111 decision 10). A tag that cannot be resolved, or is not on the mirror yet, refuses here
+  // with the mirror-lag marker, before the dataset record exists.
   const cloneSpinner = ora("Cloning OpenNeuro dataset...").start();
-  const openneuroUrl = `https://github.com/${OPENNEURO_ORG}/${openneuroId}.git`;
-  const cloneResult = await cloneDataset(openneuroUrl, datasetPath);
-  if (!cloneResult.success) {
-    cloneSpinner.fail(`Failed to clone: ${cloneResult.error}`);
+  let pinned: PinnedClone;
+  try {
+    pinned = await cloneOpenNeuroAtTag(openneuroId, datasetPath, { tag: options.tag });
+  } catch (err) {
+    if (err instanceof ImportRefused) {
+      cloneSpinner.stop();
+      throw err;
+    }
+    cloneSpinner.fail(err instanceof Error ? err.message : String(err));
     process.exit(1);
   }
-  cloneSpinner.succeed(`Cloned ${openneuroId}`);
+  cloneSpinner.succeed(`Cloned ${openneuroId} at upstream tag ${pinned.tag}`);
+  if (pinned.latestTag !== null && !sameUpstreamTag(pinned.latestTag, pinned.tag)) {
+    console.log(
+      chalk.yellow(
+        `  Warning: importing ${pinned.tag}, but OpenNeuro's latest is ${pinned.latestTag}. The copy takes the object currently at each upstream path (ADR 0111 decision 8 is not built), so a recording that changed between the two without changing size would be copied with the newer bytes.`,
+      ),
+    );
+  }
 
   // Ensure local branch is "main" (OpenNeuro repos may use "master" or other names)
   const branchOk = await ensureLocalMainBranch(datasetPath, { yes: true });

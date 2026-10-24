@@ -268,6 +268,40 @@ describe("the reporters survive a log with no failure marker", () => {
     });
   }
 
+  test("a refusal the CLI really prints reaches the classifier with its marker first (ADR 0111)", async () => {
+    // The CLI's own `refuseImport`, run in a child process exactly as prepare reaches it, and its
+    // output, ANSI codes and all, fed to the workflow's own prepare reporter. The marker has to
+    // survive the ✖-window extraction at the start of the message, or the Worker classifies the
+    // refusal as unknown and the retry engine never sees a mirror lag.
+    const repo = join(import.meta.dir, "..", "..");
+    const dir = mkdtempSync(join(tmpdir(), "refusal-"));
+    const script = join(dir, "refuse.ts");
+    writeFileSync(
+      script,
+      [
+        `import { ImportRefused, OPENNEURO_MIRROR_LAG_MARKER } from ${JSON.stringify(join(repo, "src/lib/import-markers.ts"))};`,
+        `import { refuseImport } from ${JSON.stringify(join(repo, "src/lib/import-openneuro.ts"))};`,
+        'console.log("Cloning OpenNeuro dataset...");',
+        'await refuseImport(new ImportRefused(OPENNEURO_MIRROR_LAG_MARKER, "ds000001: upstream tag 1.0.2 is not on github.com/OpenNeuroDatasets/ds000001 yet. Nothing was created; the retry engine retries it."), "on000001", {});',
+      ].join("\n"),
+    );
+    const child = Bun.spawn(["bun", script], {
+      env: { ...process.env, FORCE_COLOR: "1" },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [childOut, childErr] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ]);
+    expect(await child.exited).toBe(1);
+    const { code, out } = await runReporter("prepare", childOut + childErr);
+    expect(code).toBe(0);
+    const msg = out.trim();
+    expect(msg.startsWith("[openneuro-mirror-lag] ds000001: upstream tag 1.0.2")).toBe(true);
+    expect(classifyImportFailure({ stage: "prepare", lastError: msg }).cause).toBe("mirror_lag");
+  });
+
   test("prepare still prefers the upstream-inaccessible marker when present", async () => {
     // Its own branch, and the one case whose wording the classifier keys on.
     const { code, out } = await runReporter(
