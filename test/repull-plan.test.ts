@@ -310,6 +310,22 @@ describe("a plan from tag A to tag B over an imported mirror", () => {
     expect(rowsOf(body).get("README")?.target ?? { kind: "absent" }).toEqual({ kind: "absent" });
   });
 
+  test("collect records the bytes of every computed target, and the digest does not move", async () => {
+    const collect = { computed: new Map<string, Buffer>() };
+    const again = await plan(fx, { collect });
+    expect(again.digest).toBe(file.digest);
+    const computedTargets = (body.paths as PathRow[]).filter(
+      (p) => p.target.kind === "git" && typeof p.target.computed === "string",
+    );
+    expect(computedTargets.map((p) => p.path)).toContain("README.md");
+    for (const p of computedTargets) {
+      const bytes = collect.computed.get(p.target.oid as string);
+      expect(bytes === undefined ? null : gitBlobOid(bytes)).toBe(p.target.oid as string);
+    }
+    const readme = collect.computed.get(row(body, "README.md").target.oid as string);
+    expect(readme?.toString("utf8")).toBe(`${buildDoiBadge(CONCEPT_DOI)}\n\n${README_B}`);
+  });
+
   test("a ledger with only the import's own line does not refuse a plan with unexplained paths", () => {
     expect(body.ledger).toEqual({ status: "ok", lines: 1, recorded_corrections: 0 });
     expect(counts(body).unexplained).toBe(3);
