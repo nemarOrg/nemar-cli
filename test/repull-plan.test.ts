@@ -20,6 +20,7 @@ import { buildDoiBadge } from "../shared/standard-edits/readme";
 import { gitBlobOid } from "../src/lib/repull/edits";
 import { type PlanOptions, planRepull } from "../src/lib/repull/plan";
 import { listBucketObjects } from "../src/lib/repull/sources";
+import { ADMIN_TOKEN, startGitHubStandin } from "./helpers/github-standin";
 import {
   CHANGES_SENTENCE,
   CONCEPT_DOI,
@@ -421,8 +422,13 @@ describe("dead keys", () => {
 describe("pins", () => {
   test("a copy key with no version pin makes the plan not executable", async () => {
     const fx = await buildRepullFixture({ unpinnedSet: true });
+    // Every preflight check answers ok (the open pull requests come from the stand-in), so the
+    // unpinned key is the only thing that keeps this plan from being executable.
+    const gh = startGitHubStandin();
     try {
-      const f = await plan(fx);
+      const f = await plan(fx, { github: { token: ADMIN_TOKEN, apiBase: gh.url } });
+      expect(f.preflight.every((c) => c.status === "ok")).toBe(true);
+      expect(f.body.refusals).toEqual([]);
       const copy = f.body.copy as {
         unpinned: string[];
         items: Array<{ key: string; pin: unknown }>;
@@ -432,6 +438,7 @@ describe("pins", () => {
       expect(counts(f.body as Body).copy_unpinned).toBe(1);
       expect(f.executable).toBe(false);
     } finally {
+      gh.stop();
       fx.cleanup();
     }
   });
@@ -443,6 +450,19 @@ describe("large blobs are fetched under the bound", () => {
     fx = await buildRepullFixture({ bigMotion: true, noContributorEdits: true });
   });
   afterAll(() => fx?.cleanup());
+
+  test("lineage holds when every path is explained from base, and is never recordable from --from-tag", async () => {
+    const recorded = await plan(fx);
+    expect(recorded.body.lineage).toEqual({ holds: true, recordable: true });
+    const flagged = await plan(fx, {
+      fromTag: TAG_A,
+      catalog: {
+        dataset: DATASET_ROW,
+        versions: [{ version: "v1.0.0", source_version: null, source_version_basis: "unknown" }],
+      },
+    });
+    expect(flagged.body.lineage).toEqual({ holds: true, recordable: false });
+  });
 
   test("within the bound, the 1.1 MiB git blob is fetched and NEMAR's annexed copy is explained", async () => {
     const f = await plan(fx);
