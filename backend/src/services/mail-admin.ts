@@ -546,7 +546,7 @@ export async function escalateTicket(
   }
   // Owner role is the setting's own rule; eligibility is rechecked now so a stale value, or a
   // restricted ticket that excludes the owner, refuses instead of widening access.
-  if (!(await isEligibleAssignee(db, ownerId, ticket.restricted === 1, ticket.excluded_user_id))) {
+  if (!(await isEligibleAssignee(db, ownerId, true, ticket.excluded_user_id))) {
     throw new MailAdminError(
       409,
       "escalation_owner_ineligible",

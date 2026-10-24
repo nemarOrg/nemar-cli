@@ -812,22 +812,31 @@ describe("ticket notifications", () => {
 });
 
 describe("cascades", () => {
-  test("removing a person clears them as an escalation owner, and a restricted-scope release only on restricted queues", async () => {
-    await call("owner", "PUT", "/queues/support", { escalation_user_id: ids.owner2 });
-    await call("owner", "PUT", "/queues/security", { escalation_user_id: ids.owner2 });
+  test("an escalation owner is cleared whenever the person stops being an owner, in either scope", async () => {
     const { mailReleaseStatements } = await import("../src/services/ticket-assignment");
-    const run = (scope: "all" | "restricted") => {
-      for (const s of mailReleaseStatements(ids.owner2, scope)) db.run(s.sql, s.binds as never[]);
-    };
-    run("restricted");
     const esc = (tag: string) =>
       (
         db.query("SELECT escalation_user_id AS e FROM mail_queues WHERE tag = ?").get(tag) as {
           e: number | null;
         }
       ).e;
-    expect([esc("support"), esc("security")]).toEqual([ids.owner2, null]);
-    run("all");
-    expect(esc("support")).toBeNull();
+    for (const scope of ["restricted", "all"] as const) {
+      await call("owner", "PUT", "/queues/support", { escalation_user_id: ids.owner2 });
+      await call("owner", "PUT", "/queues/security", { escalation_user_id: ids.owner2 });
+      expect([esc("support"), esc("security")]).toEqual([ids.owner2, ids.owner2]);
+      for (const st of mailReleaseStatements(ids.owner2, scope))
+        db.run(st.sql, st.binds as never[]);
+      expect([scope, esc("support"), esc("security")]).toEqual([scope, null, null]);
+    }
+  });
+
+  test("escalation always lands on an owner, even if the stored owner was demoted without the cascade", async () => {
+    await call("owner", "PUT", "/queues/support", { escalation_user_id: ids.owner2 });
+    db.run("UPDATE users SET role = 'admin' WHERE id = ?", [ids.owner2]);
+    const t = ticket();
+    expect((await call("admin", "POST", `/tickets/${t}/escalate`)).body.code).toBe(
+      "escalation_owner_ineligible",
+    );
+    expect(row(t).status).toBe("open");
   });
 });

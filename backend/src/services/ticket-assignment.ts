@@ -297,9 +297,11 @@ export function mailReleaseStatements(
              WHERE backup_user_id = ?${queueScope}`,
       binds: [userId],
     },
+    // Not scoped: an escalation owner must be an owner, so it is cleared whenever the person stops
+    // being one, including an owner demoted to admin (scope "restricted").
     {
       sql: `UPDATE mail_queues SET escalation_user_id = NULL, updated_at = datetime('now')
-             WHERE escalation_user_id = ?${queueScope}`,
+             WHERE escalation_user_id = ?`,
       binds: [userId],
     },
     {
