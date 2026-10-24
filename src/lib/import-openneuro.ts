@@ -735,7 +735,10 @@ export function seedMetadata(
  *   so GitHub renders it. The on-disk move has been done with `renameSync`;
  *   the caller must follow up with `git add README.md README` (or
  *   equivalent) so the index records both the deletion of the old path and
- *   the addition of the new one.
+ *   the addition of the new one. `from` is always `"README"`, even when the
+ *   renamed file was a bare README in another case (`readme`): a legacy quirk,
+ *   kept as is. On a case-sensitive filesystem the caller's `git add README`
+ *   then names a path git does not track, so such an import fails at staging.
  * - `kept`: an upstream README already had a recognised renderable extension
  *   (`.md`, `.rst`, `.txt`, ...). We do not touch the file or its content.
  * - `created`: no README of any shape existed upstream, so a provenance-only

@@ -93,7 +93,10 @@ describe("decideReadme, the import's rule over names", () => {
   });
 });
 
-describe("ensureReadmeMd makes decideReadme's decision on disk", () => {
+describe("ensureReadmeMd carries out decideReadme's decision on disk", () => {
+  // What this proves is the file I/O: which names it hands the rule, the rename, the stub it
+  // writes, and that a kept README is left alone. The rule itself is pinned by the direct
+  // decideReadme tests above.
   let root: string;
   beforeEach(() => {
     root = mkdtempSync(join(tmpdir(), "standard-edits-readme-"));
@@ -110,6 +113,8 @@ describe("ensureReadmeMd makes decideReadme's decision on disk", () => {
 
   const LAYOUTS: Record<string, (dir: string) => void> = {
     "bare README": (d) => writeFileSync(join(d, "README"), "bare body\n"),
+    // Renamed like any bare README, and still reported as `from: "README"`: that outcome
+    // spelling is the preserved legacy quirk (see ReadmeOutcome), not a bug for this move to fix.
     "lowercase bare readme": (d) => writeFileSync(join(d, "readme"), "lower body\n"),
     "README.md": (d) => writeFileSync(join(d, "README.md"), "md body\n"),
     "README.rst and README.txt": (d) => {
@@ -141,6 +146,7 @@ describe("ensureReadmeMd makes decideReadme's decision on disk", () => {
       const outcome = ensureReadmeMd(root, "ds000117", "10.18112/openneuro.ds000117.v1.0.0");
 
       if (decision.kind === "renamed") {
+        // `from` is always "README", whatever case the file had: the legacy outcome, kept as is.
         expect(outcome).toEqual({ kind: "renamed", from: "README", to: "README.md" });
         expect(readFileSync(join(root, "README.md"), "utf8")).toBe(bodyOfRenamed as string);
         expect(regularFiles()).not.toContain(decision.from);
