@@ -262,5 +262,6 @@ export function mirrorFlagOf(
   if (!MIRROR_VERSION_RE.test(row.version)) return false;
   const basis = row.source_version_basis ?? null;
   const tag = row.source_version ?? null;
-  return tag !== null && (basis === "doi" || basis === "lineage") ? true : null;
+  // The read side agrees with the write side: only a tag the parser could have recorded is known.
+  return isSourceTag(tag) && (basis === "doi" || basis === "lineage") ? true : null;
 }

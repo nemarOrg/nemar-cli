@@ -325,6 +325,24 @@ describe("mirrorFlagOf: a version of an OpenNeuro mirror is a mirror only when i
     expect(mirrorFlagOf("on000001", { version: "2.0.0", ...unknown })).toBeNull();
     expect(mirrorFlagOf("on000001", { version: "3.0.0", ...never })).toBeNull();
     expect(mirrorFlagOf("on000001", { version: "3.0.0" })).toBeNull();
+    // An empty or unreadable tag is not a known tag, whatever the basis says.
+    for (const tag of ["", "v2.0.2.", "57fecb0ccce88d000ac17538"]) {
+      expect(
+        mirrorFlagOf("on000001", {
+          version: "3.0.0",
+          source_version: tag,
+          source_version_basis: "doi",
+        }),
+      ).toBeNull();
+    }
+    // A legacy numeric tag still counts.
+    expect(
+      mirrorFlagOf("on000001", {
+        version: "3.0.0",
+        source_version: "00006",
+        source_version_basis: "doi",
+      }),
+    ).toBe(true);
     // A basis without a tag is not a known tag either (the table's CHECK forbids the row; the
     // function does not rely on that).
     expect(
