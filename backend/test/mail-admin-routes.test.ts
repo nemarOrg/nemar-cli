@@ -586,6 +586,92 @@ describe("reply idempotency and recording faults", () => {
   });
 });
 
+describe("note idempotency", () => {
+  const post = (who: Who, t: number, kind: "note" | "reply", key?: string, text = "n") =>
+    app
+      .request(
+        `/admin/mail/tickets/${t}/${kind}`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${KEYS[who]}`,
+            "Content-Type": "application/json",
+            ...(key ? { "Idempotency-Key": key } : {}),
+          },
+          body: JSON.stringify({ text }),
+        },
+        env(),
+      )
+      .then(async (res) => ({
+        status: res.status,
+        body: (await res.json()) as Record<string, any>,
+      }));
+  const notes = (t: number) =>
+    (
+      db
+        .query("SELECT COUNT(*) AS n FROM mail_messages WHERE ticket_id = ? AND direction = 'note'")
+        .get(t) as { n: number }
+    ).n;
+
+  test("a repeat with the same key returns the same message id and stores one note", async () => {
+    const t = ticket();
+    const first = await post("agent", t, "note", "n-1", "once");
+    const again = await post("agent", t, "note", "n-1", "different text is ignored");
+    expect(first.status).toBe(200);
+    expect(first.body.message_id).toBeGreaterThan(0);
+    expect(again).toEqual(first);
+    expect(notes(t)).toBe(1);
+    const events = db
+      .query("SELECT COUNT(*) AS n FROM mail_ticket_events WHERE ticket_id = ? AND kind = 'note'")
+      .get(t) as { n: number };
+    expect(events.n).toBe(1);
+    // The same key on another ticket is its own note.
+    const other = ticket();
+    expect((await post("agent", other, "note", "n-1")).status).toBe(200);
+    expect(notes(other)).toBe(1);
+    expect(binding.sent.length).toBe(0);
+  });
+
+  test("different keys, and no key, store separate notes", async () => {
+    const t = ticket();
+    const a = await post("agent", t, "note", "n-a");
+    const b = await post("agent", t, "note", "n-b");
+    const c = await post("agent", t, "note");
+    const d = await post("agent", t, "note");
+    expect(new Set([a, b, c, d].map((r) => r.body.message_id)).size).toBe(4);
+    expect(notes(t)).toBe(4);
+  });
+
+  test("a malformed key is refused and stores nothing", async () => {
+    const t = ticket();
+    expect((await post("agent", t, "note", "bad key!")).status).toBe(400);
+    expect((await post("agent", t, "note", "x".repeat(65))).status).toBe(400);
+    expect(notes(t)).toBe(0);
+  });
+
+  test("note keys and reply keys are separate namespaces", async () => {
+    const t = ticket();
+    const note = await post("agent", t, "note", "shared");
+    const reply = await post("agent", t, "reply", "shared", "a reply");
+    expect(reply.status).toBe(200);
+    expect(reply.body.message_id).not.toBe(note.body.message_id);
+    expect(binding.sent.length).toBe(1);
+    // And the other way round: a reply key does not satisfy a note.
+    await post("agent", t, "reply", "r-only");
+    const n2 = await post("agent", t, "note", "r-only", "fresh note");
+    expect(n2.status).toBe(200);
+    expect(notes(t)).toBe(2);
+    expect(binding.sent.length).toBe(2);
+  });
+
+  test("a purged ticket refuses a keyed note and stores no key", async () => {
+    const t = ticket();
+    db.run("UPDATE mail_tickets SET purged_at = datetime('now') WHERE id = ?", [t]);
+    expect((await post("agent", t, "note", "n-p")).status).toBe(409);
+    expect(db.query("SELECT COUNT(*) AS n FROM mail_note_keys").get()).toEqual({ n: 0 });
+  });
+});
+
 describe("note, assign, status", () => {
   test("a note records the actor and sends nothing", async () => {
     const t = ticket();

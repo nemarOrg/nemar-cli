@@ -182,7 +182,13 @@ export function registerMailRoutes(admin: AdminRouter): void {
       const n = ticketId(c);
       await requireVisibleTicket(c.env.DB, c.get("user"), n);
       const { text } = await parseBody(c, noteSchema);
-      const messageId = await addNote(c.env.DB, c.get("user"), n, text);
+      const messageId = await addNote(
+        c.env.DB,
+        c.get("user"),
+        n,
+        text,
+        c.req.header("Idempotency-Key") ?? undefined,
+      );
       return c.json({ message_id: messageId });
     } catch (error) {
       return fail(c, error);

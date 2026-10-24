@@ -170,6 +170,7 @@ function fullTicket(lastAt: string, status = "closed"): number {
     [t, ids.admin],
   );
   db.run("INSERT INTO mail_reply_keys (ticket_id, idem_key, state) VALUES (?, 'k1', 'sent')", [t]);
+  db.run("INSERT INTO mail_note_keys (ticket_id, idem_key, message_id) VALUES (?, 'n1', 1)", [t]);
   db.run(
     "INSERT INTO mail_ticket_tags (ticket_id, tag) VALUES (?, 'support'), (?, 'ada-private')",
     [t, t],
@@ -327,6 +328,7 @@ describe("purgeExpiredTickets", () => {
 
     expect(count("mail_messages", t)).toBe(0);
     expect(count("mail_reply_keys", t)).toBe(0);
+    expect(count("mail_note_keys", t)).toBe(0);
     const tags = db
       .query<{ tag: string }, [number]>("SELECT tag FROM mail_ticket_tags WHERE ticket_id = ?")
       .all(t);
@@ -627,6 +629,7 @@ describe("review round 1: failure isolation, activity, races", () => {
     expect(row(t).purged_at).toBeNull();
     expect(count("mail_messages", t)).toBe(2);
     expect(count("mail_reply_keys", t)).toBe(1);
+    expect(count("mail_note_keys", t)).toBe(1);
     expect(events(t).some((e) => e.kind === "purged")).toBe(false);
     expect(events(t)[0].detail).toBe('{"queue":"support"}');
     // And an already purged ticket is not purged twice.

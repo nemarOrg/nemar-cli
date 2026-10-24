@@ -173,6 +173,13 @@ export interface ReplyResponse {
   status: TicketStatus;
 }
 
+/**
+ * An optional `Idempotency-Key` header (1 to 64 of letters, digits and `. _ : -`) makes a retry
+ * safe: the key is unique per ticket, and a repeat returns the stored `message_id` with 200 and
+ * stores no second note. A note sends no mail, so there is no in-progress or unknown outcome.
+ * Note keys are a separate namespace from reply keys: a key used for a reply never answers a note,
+ * and the reverse. Without the header every request stores a note.
+ */
 export interface NoteRequest {
   text: string;
 }
