@@ -13,6 +13,10 @@ import { verifyManifestCallbackToken } from "../../services/github.js";
 import { scheduleNeurobagelSync } from "../../services/neurobagel-hooks.js";
 import { errorMessage } from "../../services/repo-metadata.js";
 import { headVersionArtifact } from "../../services/s3.js";
+import {
+  INSERT_DATASET_VERSION_SQL,
+  snapshotColumnsForInsert,
+} from "../../services/source-snapshot.js";
 import type { WebhookRouter } from "../webhooks/shared.js";
 
 /**
@@ -208,10 +212,19 @@ export function registerManifestCallbackRoutes(webhooks: WebhookRouter): void {
     const provider = job.doi_provider === "zenodo" ? "zenodo" : "ezid";
     if (job.doi) {
       try {
-        await c.env.DB.prepare(
-          "INSERT OR IGNORE INTO dataset_versions (dataset_id, version, doi, provider) VALUES (?, ?, ?, ?)",
-        )
-          .bind(body.dataset_id, body.version, job.doi, provider)
+        // The upstream snapshot this version mirrors (ADR 0111, decision 4). The central
+        // flow mints from the tagged description but carries nothing of it here, so it is
+        // read again; the lookup never throws and is bounded, so it cannot fail this insert.
+        const snapshot = await snapshotColumnsForInsert(c.env, body.dataset_id, body.version);
+        await c.env.DB.prepare(INSERT_DATASET_VERSION_SQL)
+          .bind(
+            body.dataset_id,
+            body.version,
+            job.doi,
+            provider,
+            snapshot.source_version,
+            snapshot.source_version_basis,
+          )
           .run();
       } catch (err) {
         const dbError = errorMessage(err);

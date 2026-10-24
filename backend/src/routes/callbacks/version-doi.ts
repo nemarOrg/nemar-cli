@@ -27,6 +27,10 @@ import { generateManifest } from "../../services/manifest.js";
 import { scheduleNeurobagelSync } from "../../services/neurobagel-hooks.js";
 import { errorMessage, extractRepoName, readRepoMetadata } from "../../services/repo-metadata.js";
 import { uploadManifest } from "../../services/s3.js";
+import {
+  INSERT_DATASET_VERSION_SQL,
+  columnsFromDescription,
+} from "../../services/source-snapshot.js";
 import * as zenodo from "../../services/zenodo.js";
 import type { Bindings } from "../../types/bindings.js";
 import type { WebhookContext, WebhookRouter } from "../webhooks/shared.js";
@@ -673,10 +677,20 @@ async function handleEzidVersionDoiLegacy(
         // Legacy path inserts the dataset_versions row inline. Under the
         // central flow the /webhooks/manifest-ready callback owns the
         // insert (so the row appears only once the manifest is on S3).
-        await c.env.DB.prepare(
-          "INSERT OR IGNORE INTO dataset_versions (dataset_id, version, doi, provider) VALUES (?, ?, ?, 'ezid')",
-        )
-          .bind(dataset.dataset_id, version, result.doi)
+        const snapshot = columnsFromDescription(
+          dataset.dataset_id,
+          bidsDescription,
+          repoMeta.warnings,
+        );
+        await c.env.DB.prepare(INSERT_DATASET_VERSION_SQL)
+          .bind(
+            dataset.dataset_id,
+            version,
+            result.doi,
+            "ezid",
+            snapshot.source_version,
+            snapshot.source_version_basis,
+          )
           .run();
       }
     } catch (err) {
@@ -940,10 +954,9 @@ async function handleZenodoVersionDoi(
         // Legacy path inserts the dataset_versions row inline. Under the
         // central flow the /webhooks/manifest-ready callback owns the
         // insert (so the row appears only once the manifest is on S3).
-        await c.env.DB.prepare(
-          "INSERT OR IGNORE INTO dataset_versions (dataset_id, version, doi, provider) VALUES (?, ?, ?, 'zenodo')",
-        )
-          .bind(dataset.dataset_id, version, published.doi)
+        // No description is read on this path, so the snapshot is not examined (NULL/NULL).
+        await c.env.DB.prepare(INSERT_DATASET_VERSION_SQL)
+          .bind(dataset.dataset_id, version, published.doi, "zenodo", null, null)
           .run();
       }
     } catch (err) {

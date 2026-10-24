@@ -68,6 +68,10 @@ import {
   SIGNAL_DEFAULTS_SWEEP_RESET_SQL,
   runSignalDefaultsSweep,
 } from "../../services/signal-defaults-sweep";
+import {
+  INSERT_DATASET_VERSION_SQL,
+  snapshotColumnsForInsert,
+} from "../../services/source-snapshot";
 import { hasRole } from "../../types/bindings";
 import { getS3Config } from "./shared";
 import type { AdminRouter } from "./shared";
@@ -1210,11 +1214,22 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
           // EZID is the sole provider (ADR 0007, #1182).
           const provider = "ezid";
           try {
+            // Same snapshot rule as the manifest-ready callback: read the tagged
+            // description, NULL/NULL when it cannot be read (ADR 0111, decision 4).
+            const snapshot = await snapshotColumnsForInsert(c.env, datasetId, version, {
+              repo: repoName,
+              pat,
+            });
             await db
-              .prepare(
-                "INSERT OR IGNORE INTO dataset_versions (dataset_id, version, doi, provider) VALUES (?, ?, ?, ?)",
+              .prepare(INSERT_DATASET_VERSION_SQL)
+              .bind(
+                datasetId,
+                version,
+                versionDoiForRow,
+                provider,
+                snapshot.source_version,
+                snapshot.source_version_basis,
               )
-              .bind(datasetId, version, versionDoiForRow, provider)
               .run();
             dataset_versions_backfilled = true;
           } catch (err) {
