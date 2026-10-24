@@ -170,8 +170,16 @@ type KeyedKind = "reply" | "note";
  * refusal either: the same request would be refused again.
  */
 function retryableWithKey(error: ApiError, kind: KeyedKind = "reply"): boolean {
-  // A note sends no mail: only a lost answer (a network failure or a 5xx) is worth a retry.
-  if (kind === "note") return error.statusCode === 0 || error.statusCode >= 500;
+  // A note sends no mail and a repeat is idempotent: a lost answer (a network failure, a 5xx) or a
+  // request that was not processed (408, 429) is worth a retry. A reply keeps its narrower rule.
+  if (kind === "note") {
+    return (
+      error.statusCode === 0 ||
+      error.statusCode >= 500 ||
+      error.statusCode === 408 ||
+      error.statusCode === 429
+    );
+  }
   const word = mailErrorCode(error);
   if (word === "reply_delivery_unknown") return false;
   return (
@@ -801,7 +809,10 @@ const noteCommand = new MailCommand("note")
     `
 A note is sent with an Idempotency-Key, printed to standard error before anything is sent. If the
 answer is lost (a network failure or a 5xx), retry with --idempotency-key <that key>: the note is
-stored once, and the repeat returns the same message id. Note keys are separate from reply keys.`,
+stored once, and the repeat returns the same message id. Note keys are separate from reply keys.
+A key identifies the intent, not the text: reusing a key with different text replays the first
+note and stores nothing new. A 408 or 429 is also safe to retry with the key.
+Under --json standard error is JSON Lines: the {"idempotency_key"} line first, then the error object.`,
   )
   .action(async (rawId: string, source: string | undefined, _o, command: Command) => {
     const o = optsOf<Common & { text?: string; file?: string; idempotencyKey?: string }>(command);

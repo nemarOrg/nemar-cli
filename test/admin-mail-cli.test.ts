@@ -1323,6 +1323,33 @@ describe("note idempotency key", () => {
     expect(r.stderr).toContain("Retry with: --idempotency-key n-8");
   });
 
+  test("408 and 429 advise a retry with the key for a note, but not for a reply", async () => {
+    for (const status of [408, 429]) {
+      const n = startServer({
+        "POST /admin/mail/tickets/42/note": () => err(status, "slow", "Try later."),
+      });
+      try {
+        const r = await runCli(["note", "42", "--text", "x", "--idempotency-key", "n-7"], n.url);
+        expect(r.stderr).toContain("Retry with: --idempotency-key n-7");
+      } finally {
+        n.stop();
+      }
+      const rep = startServer({
+        "POST /admin/mail/tickets/42/reply": () => err(status, "slow", "Try later."),
+      });
+      try {
+        const r = await runCli(
+          ["reply", "42", "--text", "x", "--yes", "--idempotency-key", "r-7"],
+          rep.url,
+        );
+        expect(r.exitCode).toBe(1);
+        expect(r.stderr).not.toContain("Retry with");
+      } finally {
+        rep.stop();
+      }
+    }
+  });
+
   test("a definite 4xx refusal does not suggest a retry", async () => {
     const server = startServer({
       "POST /admin/mail/tickets/42/note": () => err(409, "ticket_purged", "Purged."),
