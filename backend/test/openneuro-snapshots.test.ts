@@ -148,6 +148,62 @@ describe("parseUpstreamSnapshotBatch refuses what it does not understand", () =>
     ).toBe("deleted");
   });
 
+  test("a node beside an error for the same alias is an error, an error for another alias is not", () => {
+    const partial = readOf({
+      data: { a0: good },
+      errors: [{ message: "resolver failed", path: ["a0", "snapshots"] }],
+    });
+    expect(partial?.kind).toBe("error");
+    expect(partial).toEqual({
+      kind: "error",
+      reason: "OpenNeuro sent data and an error for ds003645: resolver failed",
+    });
+    const other = readOf({
+      data: { a0: good },
+      errors: [{ message: "x", path: ["a1"] }],
+    });
+    expect(other?.kind).toBe("snapshot");
+  });
+
+  test("no latestSnapshot beside a non-empty list is an error; beside an empty list it is none", () => {
+    const contradiction = readOf({
+      data: { a0: { ...good, latestSnapshot: null } },
+    });
+    expect(contradiction?.kind).toBe("error");
+    expect(readOf({ data: { a0: { ...good, latestSnapshot: undefined } } })?.kind).toBe("error");
+    expect(readOf({ data: { a0: { ...good, latestSnapshot: null, snapshots: [] } } })).toEqual({
+      kind: "snapshot",
+      latest: null,
+      snapshots: [],
+    });
+  });
+
+  test("'does not exist' is an absence only for this alias's own id", () => {
+    const nullWith = (message: string) =>
+      readOf({ data: { a0: null }, errors: [{ message, path: ["a0"] }] });
+    expect(nullWith("Dataset ds003645 does not exist.")?.kind).toBe("absent");
+    expect(nullWith("Dataset ds003645 does not exist")?.kind).toBe("absent");
+    for (const foreign of [
+      'relation "snapshots" does not exist',
+      "Dataset ds000002 does not exist.",
+      "The user does not exist",
+      "Dataset ds003645 does not exist. Retry later",
+      "Datasets ds003645 does not exist.",
+      "Error: Dataset ds003645 does not exist.",
+    ]) {
+      expect(nullWith(foreign)?.kind).toBe("error");
+    }
+    // The id is matched literally, not as a pattern.
+    const dotted = parseUpstreamSnapshotBatch(
+      {
+        data: { a0: null },
+        errors: [{ message: "Dataset dsX00001 does not exist.", path: ["a0"] }],
+      },
+      ["ds.00001"],
+    );
+    expect(dotted.get("ds.00001")?.kind).toBe("error");
+  });
+
   test("a missing alias is an error", () => {
     expect(readOf({ data: { a1: good } })?.kind).toBe("error");
   });

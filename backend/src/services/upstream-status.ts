@@ -3,13 +3,15 @@
  * Phase 4 amendment): which OpenNeuro mirrors are behind upstream.
  *
  * READ-ONLY. It reads D1 (the mirrors, their import state, their version rows), asks OpenNeuro
- * for the snapshot lists, and asks the GitHub mirror whether a newer tag has arrived. It writes
- * nothing to D1, GitHub or S3, sends no mail and files no issue (ADR 0052, ADR 0053, ADR 0055).
+ * for the snapshot lists, and asks the GitHub mirror whether a newer tag has arrived. The report
+ * itself writes nothing to D1, GitHub or S3, sends no mail and files no issue (ADR 0052, ADR 0053,
+ * ADR 0055); authentication, which wraps the route, still stamps `tokens.last_used_at`.
  * The verdicts are `shared/upstream-staleness.ts`; this file gathers the facts and pages them.
  *
  * POPULATION. Managed `on######` mirrors (`source = 'openneuro'`, not owned by the system user),
- * withdrawn ones excluded and counted on their own. `xx` fixtures are not covered: how an `xx`
- * names its upstream `ds` is an open item for the re-pull phases.
+ * withdrawn ones excluded and counted on their own. Any other `on######` row (another `source`, or
+ * owned by the system user) is left out and counted as `excluded_unmanaged`. `xx` fixtures are not
+ * covered: how an `xx` names its upstream `ds` is an open item for the re-pull phases.
  *
  * PAGING is a keyset on `dataset_id`, never an `IN (...)` list (D1 binds at most 100 parameters)
  * and never an OFFSET. A page asks OpenNeuro for the rows that need it in batches of 50, then
@@ -18,14 +20,15 @@
  * still stale.
  *
  * COST per call, for a page of 100: at most 2 GraphQL requests, at most `probeBudget` tag reads
- * plus as many control reads, one token mint, and 4 D1 statements.
+ * plus as many control reads, one token mint, and 3 D1 statements (the page, the remaining count
+ * and the totals; 2 when the page is empty, and 2 for `?dataset=`: the one row and the totals).
+ * The statements authentication runs are not counted.
  */
 
 import {
   type ClassifiedMirror,
   type MirrorFacts,
   type MirrorProbe,
-  type UpstreamRead,
   type UpstreamStatusPage,
   countUpstreamStates,
   diffStaleMirrors,
@@ -49,9 +52,10 @@ export const PROBE_CONCURRENCY = 5;
 const MAX_ERRORS = 10;
 
 /** Every managed mirror, withdrawn or not. */
-export const MIRROR_BASE = `d.dataset_id GLOB 'on[0-9][0-9][0-9][0-9][0-9][0-9]'
-  AND d.source = 'openneuro'
-  AND d.owner_user_id != ${SYSTEM_USER_ID}`;
+const ON_ID = `d.dataset_id GLOB 'on[0-9][0-9][0-9][0-9][0-9][0-9]'`;
+const MANAGED = `d.source = 'openneuro' AND d.owner_user_id != ${SYSTEM_USER_ID}`;
+export const MIRROR_BASE = `${ON_ID}
+  AND ${MANAGED}`;
 /** The mirrors the report compares. */
 export const MIRROR_POPULATION = `${MIRROR_BASE} AND d.withdrawn_at IS NULL`;
 
@@ -84,11 +88,15 @@ ${PAGE_JOINS}`;
 export const UPSTREAM_STATUS_REMAINING_SQL = `SELECT COUNT(*) AS n FROM datasets d
  WHERE ${MIRROR_POPULATION} AND d.dataset_id > ?`;
 
-/** The whole fleet, and the withdrawn mirrors the report leaves out. `COUNT(CASE ...)` is 0, never NULL. */
+/**
+ * The whole fleet, the withdrawn mirrors and the unmanaged `on######` rows the report leaves out.
+ * `COUNT(CASE ...)` is 0, never NULL; a NULL `source` is unmanaged (the CASE falls to ELSE).
+ */
 export const UPSTREAM_STATUS_TOTALS_SQL = `SELECT
-  COUNT(CASE WHEN d.withdrawn_at IS NULL THEN 1 END) AS population,
-  COUNT(CASE WHEN d.withdrawn_at IS NOT NULL THEN 1 END) AS withdrawn
- FROM datasets d WHERE ${MIRROR_BASE}`;
+  COUNT(CASE WHEN ${MANAGED} AND d.withdrawn_at IS NULL THEN 1 END) AS population,
+  COUNT(CASE WHEN ${MANAGED} AND d.withdrawn_at IS NOT NULL THEN 1 END) AS withdrawn,
+  COUNT(CASE WHEN ${MANAGED} THEN NULL ELSE 1 END) AS excluded_unmanaged
+ FROM datasets d WHERE ${ON_ID}`;
 
 interface PageRow {
   dataset_id: string;
@@ -135,11 +143,26 @@ function groupFacts(rows: readonly PageRow[]): MirrorFacts[] {
 }
 
 /**
- * Has `tag` reached OpenNeuro's GitHub mirror of `ds`? The proof is the one the backfill uses for
- * a 404 (ADR 0111, Phase 2 amendment): a 404 at the tag means "not there yet" only if a CONTROL
- * read of the same repository at `HEAD`, with the same credential, succeeds. Any error, or a
- * control that is absent too (the credential may not see the repository), is `unverified`.
+ * Has `tag` reached OpenNeuro's GitHub mirror of `ds`? The same kind of proof as the backfill's
+ * for a 404 (ADR 0111, Phase 2 amendment), with the control read at `HEAD` because OpenNeuro's
+ * default branch name varies (the backfill reads `main`): a 404 at the tag means "not there yet"
+ * only if a CONTROL read of the same repository at `HEAD`, with the same credential, succeeds.
+ * `ready` and `lag` both require a 200 whose body is a JSON object, so an HTML error page served
+ * with a 200 proves nothing. Any error, or a control that is absent too (the credential may not
+ * see the repository), is `unverified`. The raw CDN caches a 404 for about five minutes, so a tag
+ * that arrived minutes ago can read `mirror_lag`, and a re-check inside that window will not
+ * change it.
  */
+/** A 200 only proves the tag exists if the body is the JSON object a description is. */
+function isDescriptionBody(body: string): boolean {
+  try {
+    const parsed: unknown = JSON.parse(body);
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed);
+  } catch {
+    return false;
+  }
+}
+
 export async function probeGitHubMirror(
   env: Pick<Bindings, "GITHUB_RAW_BASE">,
   ds: string,
@@ -147,10 +170,24 @@ export async function probeGitHubMirror(
   pat: string,
 ): Promise<MirrorProbe> {
   const read = await fetchDescriptionAtRef(env, ds, tag, pat, OPENNEURO_GITHUB_ORG);
-  if (read.kind === "content") return { kind: "ready" };
+  if (read.kind === "content") {
+    return isDescriptionBody(read.body)
+      ? { kind: "ready" }
+      : {
+          kind: "unverified",
+          reason: `the GitHub mirror answered 200 at ${tag} with a body that is not a JSON object`,
+        };
+  }
   if (read.kind === "error") return { kind: "unverified", reason: read.reason };
   const control = await fetchDescriptionAtRef(env, ds, "HEAD", pat, OPENNEURO_GITHUB_ORG);
-  if (control.kind === "content") return { kind: "lag" };
+  if (control.kind === "content") {
+    return isDescriptionBody(control.body)
+      ? { kind: "lag" }
+      : {
+          kind: "unverified",
+          reason: "the GitHub mirror answered 200 at HEAD with a body that is not a JSON object",
+        };
+  }
   if (control.kind === "absent") {
     return { kind: "unverified", reason: "the GitHub mirror is not readable at HEAD" };
   }
@@ -168,6 +205,11 @@ export interface UpstreamStatusOptions {
   probeBudget?: number;
 }
 
+/**
+ * The page size. The route rejects a junk or non-positive `limit` with a 400 before this runs;
+ * here an absent or unusable one falls back to the default (the service is also called directly),
+ * and anything above {@link UPSTREAM_STATUS_MAX} is clamped to it.
+ */
 export function clampStatusLimit(limit: number | undefined): number {
   if (limit === undefined || !Number.isFinite(limit) || limit < 1) return UPSTREAM_STATUS_DEFAULT;
   return Math.min(Math.floor(limit), UPSTREAM_STATUS_MAX);
@@ -190,7 +232,8 @@ async function probeStale(
   } catch (err) {
     const reason = `no GitHub credential could be obtained: ${errorMessage(err)}`;
     for (const t of targets) probes.set(t.ds as string, { kind: "unverified", reason });
-    return { probes, attempted: targets.length };
+    // No request was made, so none is claimed.
+    return { probes, attempted: 0 };
   }
   const results = await mapBounded(targets, PROBE_CONCURRENCY, (t) =>
     probeGitHubMirror(env, t.ds as string, t.upstream?.latest_tag as string, pat),
@@ -201,20 +244,40 @@ async function probeStale(
   return { probes, attempted: targets.length };
 }
 
+/** A D1 statement failed. The route answers 500 naming the tables; any other error is not this. */
+export class UpstreamStatusDatabaseError extends Error {
+  constructor(cause: unknown) {
+    super(errorMessage(cause));
+    this.name = "UpstreamStatusDatabaseError";
+  }
+}
+
+/** Run one D1 call, tagging its failure so it can never be mistaken for a bug elsewhere. */
+async function readD1<T>(call: () => Promise<T>): Promise<T> {
+  try {
+    return await call();
+  } catch (err) {
+    throw new UpstreamStatusDatabaseError(err);
+  }
+}
+
 /**
- * One page of the report. Throws only when D1 cannot be read (the route answers 500); everything
- * about OpenNeuro and GitHub is reported in the result.
+ * One page of the report. Throws {@link UpstreamStatusDatabaseError} when D1 cannot be read (the
+ * route answers 500 naming the tables); everything about OpenNeuro and GitHub is reported in the
+ * result, and any other throw is a defect in this code, not a database failure.
  */
 export async function runUpstreamStatusPage(
   env: Bindings,
   opts: UpstreamStatusOptions = {},
 ): Promise<UpstreamStatusPage> {
   const limit = clampStatusLimit(opts.limit);
-  const pageRows = opts.dataset
-    ? await env.DB.prepare(UPSTREAM_STATUS_ONE_SQL).bind(opts.dataset).all<PageRow>()
-    : await env.DB.prepare(UPSTREAM_STATUS_PAGE_SQL)
-        .bind(opts.after ?? "", limit)
-        .all<PageRow>();
+  const pageRows = await readD1(() =>
+    opts.dataset
+      ? env.DB.prepare(UPSTREAM_STATUS_ONE_SQL).bind(opts.dataset).all<PageRow>()
+      : env.DB.prepare(UPSTREAM_STATUS_PAGE_SQL)
+          .bind(opts.after ?? "", limit)
+          .all<PageRow>(),
+  );
   const mirrors = groupFacts(pageRows.results);
 
   const asked = mirrors.filter(needsUpstream).map((m) => m.datasetId);
@@ -231,22 +294,26 @@ export async function runUpstreamStatusPage(
   let remaining = 0;
   let nextCursor: string | null = null;
   if (last && !opts.dataset) {
-    const left = await env.DB.prepare(UPSTREAM_STATUS_REMAINING_SQL)
-      .bind(last.datasetId)
-      .first<{ n: number }>();
+    const left = await readD1(() =>
+      env.DB.prepare(UPSTREAM_STATUS_REMAINING_SQL).bind(last.datasetId).first<{ n: number }>(),
+    );
     remaining = left?.n ?? 0;
     nextCursor = remaining > 0 ? last.datasetId : null;
   }
-  const totals = await env.DB.prepare(UPSTREAM_STATUS_TOTALS_SQL).first<{
-    population: number;
-    withdrawn: number;
-  }>();
-
-  // The call "could not see" when OpenNeuro was needed and every answer it gave was a failure.
-  const reads: UpstreamRead[] = sourceIds.map(
-    (ds) => upstream.reads.get(ds) ?? { kind: "error", reason: "not read" },
+  const totals = await readD1(() =>
+    env.DB.prepare(UPSTREAM_STATUS_TOTALS_SQL).first<{
+      population: number;
+      withdrawn: number;
+      excluded_unmanaged: number;
+    }>(),
   );
-  const blind = reads.length > 0 && reads.every((r) => r.kind === "error");
+
+  // The call "could not see" when rows needed an OpenNeuro VERDICT (a known tag) and every one of
+  // them ended `unchecked`. An unknown-tag row needs no verdict: with OpenNeuro down it stays
+  // `unknown`, and its reason names the failure.
+  const askedIds = new Set(asked);
+  const needingVerdict = rows.filter((r) => askedIds.has(r.dataset_id) && r.state !== "unknown");
+  const blind = needingVerdict.length > 0 && needingVerdict.every((r) => r.state === "unchecked");
 
   return {
     ok: !blind,
@@ -256,9 +323,10 @@ export async function runUpstreamStatusPage(
     remaining,
     population_total: totals?.population ?? 0,
     withdrawn: totals?.withdrawn ?? 0,
+    excluded_unmanaged: totals?.excluded_unmanaged ?? 0,
     upstream_requests: upstream.requests,
     probes: { attempted, budget },
     errors: upstream.errors.slice(0, MAX_ERRORS),
-    ...(blind ? { error: "OpenNeuro could not be read for any mirror on this page" } : {}),
+    ...(blind ? { error: "OpenNeuro could not be read for any mirror that needed a verdict" } : {}),
   };
 }

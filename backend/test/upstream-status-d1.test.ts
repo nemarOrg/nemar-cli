@@ -82,6 +82,7 @@ describe("upstream status on Miniflare D1", () => {
     expect(page.remaining).toBe(1);
     expect(page.population_total).toBe(3);
     expect(page.withdrawn).toBe(1);
+    expect(page.excluded_unmanaged).toBe(1);
 
     const next = await runUpstreamStatusPage(env(), {
       limit: 2,

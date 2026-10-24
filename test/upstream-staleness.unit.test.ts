@@ -144,16 +144,18 @@ describe("the verdict uses upstream's creation order, not the number", () => {
 });
 
 describe("anomalies a real response cannot produce (built from the recorded shape)", () => {
-  test("upstream_older: the latest tag was created before the recorded one", () => {
+  test("a stated latest created before the recorded tag contradicts the list", () => {
+    // The recorded tag is in the list, so a later one than the stated latest is a disagreement
+    // within the list before it is a question of order.
     const up = snapshotRead([
       ["2.0.2", "2023-04-14T14:27:58.000Z"],
       ["2.1.0", "2021-01-01T00:00:00.000Z"],
     ]);
     const row = classifyMirror(facts({ tag: "2.0.2" }), up);
-    expect([row.state, row.anomaly]).toEqual(["anomaly", "upstream_older"]);
+    expect([row.state, row.anomaly]).toEqual(["anomaly", "upstream_latest_inconsistent"]);
   });
 
-  test("equal creation times are not newer", () => {
+  test("upstream_older: equal creation times are not newer", () => {
     const up = snapshotRead([
       ["2.0.2", "2023-04-14T14:27:58.000Z"],
       ["2.1.0", "2023-04-14T14:27:58.000Z"],
@@ -189,6 +191,46 @@ describe("anomalies a real response cannot produce (built from the recorded shap
     ]);
     expect(classifyMirror(facts({ tag: "2.0.2" }), nullRecorded).anomaly).toBe(
       "upstream_dates_unreadable",
+    );
+  });
+
+  test("upstream_latest_inconsistent: a snapshot in the list was created after the stated latest", () => {
+    // A stale-looking or current-looking verdict from `latestSnapshot` alone would be wrong here.
+    const up = snapshotRead(
+      [
+        ["2.0.2", "2023-04-14T14:27:58.000Z"],
+        ["2.1.0", "2024-01-01T00:00:00.000Z"],
+        ["2.2.0", "2026-01-01T00:00:00.000Z"],
+      ],
+      "2.1.0",
+    );
+    const stale = classifyMirror(facts({ tag: "2.0.2" }), up, READY);
+    expect([stale.state, stale.anomaly]).toEqual(["anomaly", "upstream_latest_inconsistent"]);
+    expect(stale.reason).toContain("2.2.0");
+    // Even a mirror recorded at the stated latest is not "current".
+    const current = classifyMirror(facts({ tag: "2.1.0" }), up);
+    expect([current.state, current.anomaly]).toEqual(["anomaly", "upstream_latest_inconsistent"]);
+    // A list entry with an unreadable date cannot show a disagreement.
+    const unreadable = snapshotRead(
+      [
+        ["2.0.2", "2023-04-14T14:27:58.000Z"],
+        ["2.1.0", "2024-01-01T00:00:00.000Z"],
+        ["2.2.0", "not a date"],
+      ],
+      "2.1.0",
+    );
+    expect(classifyMirror(facts({ tag: "2.1.0" }), unreadable).state).toBe("current");
+    // The stated latest carries no date: its entry in the list supplies it for the comparison.
+    const undated: UpstreamRead = {
+      kind: "snapshot",
+      latest: { tag: "2.1.0", created: null },
+      snapshots: [
+        { tag: "2.1.0", created: "2024-01-01T00:00:00.000Z" },
+        { tag: "2.2.0", created: "2026-01-01T00:00:00.000Z" },
+      ],
+    };
+    expect(classifyMirror(facts({ tag: "2.1.0" }), undated).anomaly).toBe(
+      "upstream_latest_inconsistent",
     );
   });
 
@@ -408,6 +450,18 @@ describe("probably_stale, for unknown rows only", () => {
     ).toBeNull();
   });
 
+  test("an unknown row names why it could not be compared", () => {
+    const row = unknown("2025-01-01 00:00:00");
+    const failed = classifyMirror(row, { kind: "error", reason: "HTTP 503" });
+    expect(failed.state).toBe("unknown");
+    expect(failed.reason).toContain("OpenNeuro could not be read");
+    expect(failed.reason).toContain("HTTP 503");
+    expect(classifyMirror(row, undefined).reason).toContain("OpenNeuro was not asked");
+    expect(classifyMirror(row, { kind: "deleted", reason: "x" }).reason).toContain(
+      "cannot be compared",
+    );
+  });
+
   test("null for every other state", () => {
     const rows = [
       classifyMirror(facts({ tag: "2.1.0" }), up),
@@ -450,7 +504,7 @@ describe("every state and anomaly kind is reachable, and counts are zero-filled"
         facts({ tag: "2.0.2" }),
         snapshotRead([
           ["2.0.2", "2023-01-01T00:00:00Z"],
-          ["2.1.0", "2022-01-01T00:00:00Z"],
+          ["2.1.0", "2023-01-01T00:00:00Z"],
         ]),
       ),
       classifyMirror(
@@ -459,6 +513,17 @@ describe("every state and anomaly kind is reachable, and counts are zero-filled"
           ["2.0.2", "nope"],
           ["2.1.0", "2022-01-01T00:00:00Z"],
         ]),
+      ),
+      classifyMirror(
+        facts({ tag: "2.0.2" }),
+        snapshotRead(
+          [
+            ["2.0.2", "2023-01-01T00:00:00Z"],
+            ["2.1.0", "2024-01-01T00:00:00Z"],
+            ["2.2.0", "2025-01-01T00:00:00Z"],
+          ],
+          "2.1.0",
+        ),
       ),
     ];
     expect(new Set(rows.map((r) => r.state))).toEqual(new Set(UPSTREAM_STATES));

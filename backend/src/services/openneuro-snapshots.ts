@@ -5,7 +5,10 @@
  * (`a0: dataset(id: $a0) { ... }`), with the ids passed ONLY as variables so an id can never reach
  * the query text. OpenNeuro answers a dataset it cannot serve with `data.aN: null` plus an
  * `errors[]` entry whose `path` is `["aN"]`: `DELETED_DATASET` for a deleted one (the duplicates
- * OpenNeuro retires) and a plain "does not exist" message for a missing one.
+ * OpenNeuro retires) and "Dataset <id> does not exist." for a missing one (matched against that
+ * alias's own id, so another message containing "does not exist" is an error, not an absence).
+ * An `errors[]` entry for an alias that also has a node (a partial response) makes that id an
+ * `error` read.
  *
  * AN ERROR IS NEVER A VERDICT (ADR 0053, ADR 0054). A non-2xx, a network failure, a timeout, a
  * body that is not JSON, a node that names another dataset, a `snapshots` that is not a list:
@@ -50,6 +53,10 @@ export function buildUpstreamSnapshotQuery(ids: readonly string[]): UpstreamSnap
   return { query: `query UpstreamSnapshots(${declarations}) { ${selections} }`, variables };
 }
 
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -85,6 +92,13 @@ function readNode(node: Record<string, unknown>, id: string): UpstreamRead {
     if (!latest) {
       return { kind: "error", reason: `OpenNeuro sent a malformed latest snapshot for ${id}` };
     }
+  } else if (snapshots.length > 0) {
+    // No latest beside a non-empty list is a contradiction, not "no snapshot": reading it as
+    // `upstream_no_snapshot` would call a live dataset empty.
+    return {
+      kind: "error",
+      reason: `OpenNeuro sent snapshots for ${id} but no latest snapshot`,
+    };
   }
   return { kind: "snapshot", latest, snapshots };
 }
@@ -121,6 +135,16 @@ export function parseUpstreamSnapshotBatch(
     const alias = `a${i}`;
     const node = data[alias];
     if (isObject(node)) {
+      // A partial response: a node and an error for the same alias. The node cannot be trusted.
+      const partial = errorFor(json.errors, alias);
+      if (partial) {
+        const why = typeof partial.message === "string" ? partial.message : "an error";
+        reads.set(id, {
+          kind: "error",
+          reason: `OpenNeuro sent data and an error for ${id}: ${why}`,
+        });
+        return;
+      }
       reads.set(id, readNode(node, id));
       return;
     }
@@ -135,7 +159,7 @@ export function parseUpstreamSnapshotBatch(
         });
       } else if (code === DELETED_CODE) {
         reads.set(id, { kind: "deleted", reason: message });
-      } else if (/does not exist/i.test(message)) {
+      } else if (new RegExp(`^Dataset ${escapeRegExp(id)} does not exist\\.?$`).test(message)) {
         reads.set(id, { kind: "absent", reason: message });
       } else {
         reads.set(id, { kind: "error", reason: message });

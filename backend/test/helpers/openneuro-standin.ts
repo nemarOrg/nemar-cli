@@ -13,7 +13,7 @@ import type { Server } from "bun";
  * network cases a recording cannot hold: a status, a hang, a body that is not JSON.
  *
  * An id that is not in the recording is a test bug and answers 500 "not recorded: dsX", so it
- * shows, unless `synthetic` is on: then an unrecorded id gets a plain one-snapshot node, which is
+ * shows, unless `synthetic` is on: then an unrecorded id gets a plain two-snapshot node (0.9.0 then 1.0.0), so a mirror recorded at 0.9.0 is stale, which is
  * for tests of batching mechanics that need more ids than the recording holds.
  */
 
@@ -94,7 +94,10 @@ export function startOpenNeuroStandin() {
           data[alias] = {
             id: ds,
             latestSnapshot: { tag: "1.0.0", created: "2020-01-01T00:00:00.000Z" },
-            snapshots: [{ tag: "1.0.0", created: "2020-01-01T00:00:00.000Z" }],
+            snapshots: [
+              { tag: "0.9.0", created: "2019-01-01T00:00:00.000Z" },
+              { tag: "1.0.0", created: "2020-01-01T00:00:00.000Z" },
+            ],
           };
         } else {
           return new Response(`not recorded: ${ds}`, { status: 500 });

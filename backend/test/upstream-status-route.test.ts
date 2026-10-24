@@ -13,7 +13,8 @@
  *  - "mirror lag" is proved with a control read: a 404 at the tag alone is `stale_unverified`;
  *  - a failed OpenNeuro read is `unchecked`, never a verdict, and the route says so with a 502;
  *  - the keyset partitions the population: no row twice, none missing;
- *  - withdrawn, fixture, catalog and non-OpenNeuro rows stay out, and the report writes nothing.
+ *  - withdrawn, fixture, catalog and non-OpenNeuro rows stay out and are counted, and the report
+ *    itself writes nothing (authentication still stamps tokens.last_used_at).
  */
 
 import type { Database } from "bun:sqlite";
@@ -22,6 +23,7 @@ import type { Server } from "bun";
 import { Hono } from "hono";
 import type { UpstreamStatusPage } from "../../shared/upstream-staleness";
 import { adminMiddleware, authMiddleware } from "../src/middleware/auth";
+import { adminRoutes } from "../src/routes/admin";
 import { registerUpstreamStatusRoutes } from "../src/routes/admin/upstream-status";
 import { hashApiKey } from "../src/services/token";
 import {
@@ -53,28 +55,49 @@ interface RawRequest {
 }
 
 function startRawHost() {
-  const files = new Map<string, number>();
+  const files = new Map<string, { status: number; body: string }>();
   const log: RawRequest[] = [];
+  let delayMs = 0;
+  let inFlight = 0;
+  let maxInFlight = 0;
   const server: Server = Bun.serve({
     port: 0,
-    fetch(req) {
+    async fetch(req) {
       const path = decodeURIComponent(new URL(req.url).pathname);
       log.push({ path, authorization: req.headers.get("authorization") });
-      const status = files.get(path);
-      if (status === undefined) return new Response("404: Not Found", { status: 404 });
-      return new Response(status === 200 ? '{"Name":"x"}' : "error", { status });
+      inFlight++;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      try {
+        if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
+        const entry = files.get(path);
+        if (entry === undefined) return new Response("404: Not Found", { status: 404 });
+        return new Response(entry.body, { status: entry.status });
+      } finally {
+        inFlight--;
+      }
     },
   });
   return {
     base: `http://127.0.0.1:${server.port}`,
     log,
     /** Serve `dataset_description.json` of OpenNeuro's `ds` at `ref` with `status`. */
-    serve(ds: string, ref: string, status = 200) {
-      files.set(`/OpenNeuroDatasets/${ds}/${ref}/dataset_description.json`, status);
+    serve(ds: string, ref: string, status = 200, body?: string) {
+      files.set(`/OpenNeuroDatasets/${ds}/${ref}/dataset_description.json`, {
+        status,
+        body: body ?? (status === 200 ? '{"Name":"x"}' : "error"),
+      });
     },
+    /** Hold every response for `ms`, so concurrent requests overlap and can be counted. */
+    delay(ms: number) {
+      delayMs = ms;
+    },
+    maxInFlight: () => maxInFlight,
     reset() {
       files.clear();
       log.length = 0;
+      delayMs = 0;
+      inFlight = 0;
+      maxInFlight = 0;
     },
     stop: () => server.stop(true),
   };
@@ -418,6 +441,32 @@ describe("upstream-status: who is in the population", () => {
     expect(page.rows.map((r) => r.dataset_id)).not.toContain("ds003645");
     expect(page.population_total).toBe(POPULATION.length);
     expect(page.withdrawn).toBe(1);
+    // The one on###### row that is not a managed mirror (the system-owned catalog shadow) is said.
+    expect(page.excluded_unmanaged).toBe(1);
+  });
+
+  test("an id that only starts like on###### is not a mirror and is not counted as one", async () => {
+    seedFleet();
+    // source = 'openneuro' and a real owner, so only the id shape keeps them out.
+    for (const id of ["on1234567", "onabcdef", "on00000a", "on12345"]) seed(id, at("1.0.0"));
+    const page = await body(await call(""));
+    expect(page.rows.map((r) => r.dataset_id)).toEqual(POPULATION);
+    expect(page.population_total).toBe(POPULATION.length);
+    expect(page.excluded_unmanaged).toBe(1);
+    const asked = openneuro.log.flatMap((r) => r.ids);
+    for (const id of ["ds1234567", "dsabcdef", "ds00000a", "ds12345"]) {
+      expect(asked).not.toContain(id);
+    }
+  });
+
+  test("unmanaged on###### rows are counted whatever makes them unmanaged", async () => {
+    seed("on000010", { ...at("1.0.0"), source: "nemar.org" });
+    seed("on000011", { ...at("1.0.0"), owner: -1 });
+    seed("on000012");
+    const page = await body(await call(""));
+    expect(page.rows.map((r) => r.dataset_id)).toEqual(["on000012"]);
+    expect(page.excluded_unmanaged).toBe(2);
+    expect(page.population_total).toBe(1);
   });
 
   test("an empty fleet is zeros, never null", async () => {
@@ -425,14 +474,10 @@ describe("upstream-status: who is in the population", () => {
     expect(page.rows).toEqual([]);
     expect(page.population_total).toBe(0);
     expect(page.withdrawn).toBe(0);
+    expect(page.excluded_unmanaged).toBe(0);
     expect(page.ok).toBe(true);
     expect(page.upstream_requests).toBe(0);
     expect(Object.values(page.counts.states).every((n) => n === 0)).toBe(true);
-  });
-
-  test("a mirror whose source differs from openneuro is out", async () => {
-    seed("on000010", { ...at("1.0.0"), source: "nemar.org" });
-    expect((await body(await call(""))).rows).toEqual([]);
   });
 });
 
@@ -476,16 +521,23 @@ describe("upstream-status: keyset paging", () => {
     expect(page.ok).toBe(true);
   });
 
-  test("the limit is clamped to 100 and a junk limit falls back to the default", async () => {
+  test("a limit above 100 is clamped to 100; the default is 100", async () => {
     for (let i = 0; i < 105; i++) seed(`on${String(100000 + i)}`);
     const clamped = await body(await call("?limit=5000"));
     expect(clamped.rows).toHaveLength(100);
     expect(clamped.next_cursor).toBe("on100099");
     expect(clamped.remaining).toBe(5);
-    const junk = await body(await call("?limit=abc"));
-    expect(junk.rows).toHaveLength(100);
-    const zero = await body(await call("?limit=0"));
-    expect(zero.rows).toHaveLength(100);
+    expect((await body(await call(""))).rows).toHaveLength(100);
+    expect((await body(await call("?limit=2"))).rows).toHaveLength(2);
+  });
+
+  test("a limit that is not a positive integer is 400, and nothing is read", async () => {
+    seedFleet();
+    for (const bad of ["abc", "0", "-3", "", "1.5", "1e3", " 5", "5x"]) {
+      const res = await call(`?limit=${encodeURIComponent(bad)}`);
+      expect(res.status).toBe(400);
+    }
+    expect(openneuro.log).toHaveLength(0);
   });
 
   test("a page larger than D1's 100 bound parameters never builds an IN list", async () => {
@@ -512,9 +564,22 @@ describe("upstream-status: single dataset and input checks", () => {
       "?after=on12345",
       "?dataset=ds003645",
       "?after=",
+      "?after=xon000001",
+      "?after=on0000011",
+      "?after=on000001%0A",
+      "?dataset=xon000001",
+      "?dataset=on0000011",
+      "?dataset=on000001%0A",
     ]) {
       expect((await call(q)).status).toBe(400);
     }
+    expect(openneuro.log).toHaveLength(0);
+  });
+
+  test("dataset together with after is 400", async () => {
+    seedFleet();
+    const res = await call("?dataset=on003645&after=on000001");
+    expect(res.status).toBe(400);
     expect(openneuro.log).toHaveLength(0);
   });
 
@@ -542,6 +607,85 @@ describe("upstream-status: single dataset and input checks", () => {
       expect(res.status).toBe(404);
       expect(((await res.json()) as { error: string }).error).toContain("managed OpenNeuro mirror");
     }
+  });
+});
+
+describe("upstream-status: in-progress and unknown-tag rows", () => {
+  test("preparing, copying and finalizing are each in_progress and never sent to OpenNeuro", async () => {
+    seed("on000021", { ...at("1.0.0"), job: { status: "preparing" } });
+    seed("on000022", { ...at("1.0.0"), job: { status: "copying" } });
+    seed("on000023", { ...at("1.0.0"), job: { status: "finalizing" } });
+    seed("on000024", { ...at("1.0.0"), job: { status: "complete" } });
+    const rows = byId(await body(await call("")));
+    for (const id of ["on000021", "on000022", "on000023"]) {
+      expect(rows[id]?.state).toBe("in_progress");
+    }
+    expect(rows.on000024?.state).not.toBe("in_progress");
+    expect(openneuro.log.flatMap((r) => r.ids)).toEqual(["ds000024"]);
+  });
+
+  test("an unknown tag older than upstream's latest is probably stale, and still unknown", async () => {
+    seed("on003082", {
+      versions: [{ version: "1.0.0", tag: null, basis: "unknown", created: "2019-01-01 00:00:00" }],
+    });
+    const page = await body(await call(""));
+    const row = byId(page).on003082;
+    expect([row?.state, row?.probably_stale]).toEqual(["unknown", true]);
+    expect(page.counts.probably_stale).toBe(1);
+    expect(page.counts.stale).toBe(0);
+  });
+
+  test("only unknown-tag rows with OpenNeuro down is 200, each row unknown and naming the failure", async () => {
+    seed("on003082", {
+      versions: [{ version: "1.0.0", tag: null, basis: "unknown", created: "2019-01-01 00:00:00" }],
+    });
+    seed("on000042", {
+      versions: [{ version: "1.0.0", tag: null, basis: "unknown", created: "2019-01-01 00:00:00" }],
+    });
+    openneuro.synthetic(true);
+    openneuro.status(503);
+    const res = await call("");
+    expect(res.status).toBe(200);
+    const page = await body(res);
+    expect(page.ok).toBe(true);
+    expect(page.errors).toHaveLength(1);
+    for (const id of ["on003082", "on000042"]) {
+      const row = byId(page)[id];
+      expect(row?.state).toBe("unknown");
+      expect(row?.probably_stale).toBeNull();
+      expect(row?.reason).toContain("OpenNeuro could not be read");
+    }
+    expect(page.counts.states.unchecked).toBe(0);
+  });
+
+  test("an unknown row beside a known one: 502 only when the known one is unchecked too", async () => {
+    seed("on003082", {
+      versions: [{ version: "1.0.0", tag: null, basis: "unknown", created: "2019-01-01 00:00:00" }],
+    });
+    seed("on002893", at("2.0.0"));
+    openneuro.status(503);
+    expect((await call("")).status).toBe(502);
+    openneuro.reset();
+    expect((await call("")).status).toBe(200);
+  });
+});
+
+describe("upstream-status: through the real admin router", () => {
+  const request = (key: string | null) =>
+    adminRoutes.request(
+      "/upstream-status",
+      { method: "GET", headers: key ? { Authorization: `Bearer ${key}` } : {} },
+      env(),
+    );
+
+  test("401 without a credential, 403 for a member, 200 for an admin", async () => {
+    seedFleet();
+    expect((await request(null)).status).toBe(401);
+    expect((await request(MEMBER_KEY)).status).toBe(403);
+    expect(openneuro.log).toHaveLength(0);
+    const res = await request(ADMIN_KEY);
+    expect(res.status).toBe(200);
+    expect((await body(res)).rows.length).toBe(POPULATION.length);
   });
 });
 
@@ -627,6 +771,41 @@ describe("upstream-status: the probe budget", () => {
       expect(rows[id]?.reason).toContain("credential");
     }
     expect(raw.log).toHaveLength(0);
+    // No request was made, so none is claimed.
+    expect(page.probes.attempted).toBe(0);
+  });
+
+  test("a 200 whose body is not a JSON object proves nothing: unverified, never ready or lag", async () => {
+    seed("on003645", at("2.0.2"));
+    seed("on004362", at("1.0.0"));
+    seed("on000001", at("00006"));
+    raw.serve("ds003645", "2.1.0", 200, "<html><body>Not found, but 200</body></html>");
+    // A 404 at the tag and an HTML 200 at the control read.
+    raw.serve("ds004362", "HEAD", 200, "<html>login</html>");
+    // A JSON array is not a description either.
+    raw.serve("ds000001", "1.0.0", 200, "[]");
+    const rows = byId(await body(await call("")));
+    expect(rows.on003645?.state).toBe("stale_unverified");
+    expect(rows.on003645?.reason).toContain("not a JSON object");
+    expect(rows.on004362?.state).toBe("stale_unverified");
+    expect(rows.on004362?.reason).toContain("HEAD");
+    expect(rows.on004362?.reason).toContain("not a JSON object");
+    expect(rows.on000001?.state).toBe("stale_unverified");
+  });
+
+  test("probes run at most five at a time, and more than one at a time", async () => {
+    openneuro.synthetic(true);
+    for (let i = 0; i < 12; i++) {
+      const id = `on${String(100 + i).padStart(6, "0")}`;
+      seed(id, at("0.9.0"));
+      raw.serve(`ds${id.slice(2)}`, "HEAD"); // the control read succeeds: every row is mirror_lag
+    }
+    raw.delay(40);
+    const page = await runUpstreamStatusPage(env());
+    expect(page.probes.attempted).toBe(12);
+    expect(page.counts.states.mirror_lag).toBe(12);
+    expect(raw.maxInFlight()).toBeLessThanOrEqual(5);
+    expect(raw.maxInFlight()).toBeGreaterThan(1);
   });
 });
 
@@ -648,6 +827,24 @@ describe("upstream-status: read-only", () => {
     expect((await call("")).status).toBe(502);
     expect(snapshotOfTables()).toBe(before);
   });
+
+  test("every statement the report runs is a SELECT or WITH, apart from authentication's stamp", async () => {
+    seedFleet();
+    const statements: string[] = [];
+    const recording = wrapD1(realD1(db), (sql) => {
+      statements.push(sql.replace(/\s+/g, " ").trim());
+    });
+    expect((await call("", ADMIN_KEY, env({}, recording))).status).toBe(200);
+    expect((await call("?dataset=on003645", ADMIN_KEY, env({}, recording))).status).toBe(200);
+    expect(statements.length).toBeGreaterThan(3);
+    const writes = statements.filter((sql) => !/^(SELECT|WITH)\b/i.test(sql));
+    // Authentication, which wraps the route, stamps the token it just used; nothing else writes.
+    for (const sql of writes) expect(sql).toMatch(/^UPDATE tokens SET last_used_at\b/i);
+    expect(writes.length).toBeLessThanOrEqual(2);
+    // The report's own statements are the exported ones.
+    expect(statements.some((sql) => sql.startsWith("WITH page AS"))).toBe(true);
+    expect(statements.filter((sql) => sql.includes("COUNT(CASE"))).toHaveLength(2);
+  });
 });
 
 describe("upstream-status: a D1 failure", () => {
@@ -661,6 +858,34 @@ describe("upstream-status: a D1 failure", () => {
     const text = ((await res.json()) as { error: string }).error;
     expect(text).toContain("import_jobs");
     expect(openneuro.log).toHaveLength(0);
+  });
+
+  test("a defect after D1 was read is 500 but is not reported as a database failure", async () => {
+    seedFleet();
+    // The raw host base is read while probing; a throwing getter is a TypeError in the probe
+    // stage, long after every D1 statement of the page has run.
+    const broken = env();
+    Object.defineProperty(broken, "GITHUB_RAW_BASE", {
+      get() {
+        throw new TypeError("raw base exploded");
+      },
+    });
+    const res = await call("", ADMIN_KEY, broken);
+    expect(res.status).toBe(500);
+    const text = ((await res.json()) as { error: string }).error;
+    expect(text).toContain("raw base exploded");
+    expect(text).toContain("not a database failure");
+    expect(text).not.toContain("Failed to read datasets");
+  });
+
+  test("a failing remaining-count statement is a database failure too", async () => {
+    seedFleet();
+    const failing = wrapD1(realD1(db), (sql) => {
+      if (sql.includes("SELECT COUNT(*) AS n FROM datasets")) throw new Error("D1_ERROR: gone");
+    });
+    const res = await call("?limit=2", ADMIN_KEY, env({}, failing));
+    expect(res.status).toBe(500);
+    expect(((await res.json()) as { error: string }).error).toContain("Failed to read datasets");
   });
 
   test("a failing totals statement is 500, not a page with a made-up population", async () => {
@@ -683,6 +908,7 @@ describe("upstream-status: the exported statements are the ones that run", () =>
     expect(db.query(UPSTREAM_STATUS_TOTALS_SQL).get()).toEqual({
       population: POPULATION.length,
       withdrawn: 1,
+      excluded_unmanaged: 1,
     });
   });
 });

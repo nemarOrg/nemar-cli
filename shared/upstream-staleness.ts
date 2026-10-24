@@ -3,8 +3,9 @@
  * and the Phase 4 amendment).
  *
  * PURE. The Worker gathers the facts (D1 rows, OpenNeuro's snapshot lists, the GitHub mirror
- * probe) and this module classifies them, so the CLI and the later phases read the same verdict
- * and the rules can be tested without a network.
+ * probe) and this module classifies them, so that the route now, and the command, the weekly
+ * section and the scheduler (all still to be built) will read the same verdict, and the rules can
+ * be tested without a network.
  *
  * THE ORDER IS UPSTREAM'S CREATION ORDER, NOT THE NUMBER. `ds000001` has snapshots `00006`
  * (2018) and `1.0.0` (2020); numerically `1.0.0 < 00006`, so ordering by number would call a
@@ -53,6 +54,7 @@ export const ANOMALY_KINDS = [
   "recorded_tag_not_upstream",
   "upstream_older",
   "upstream_dates_unreadable",
+  "upstream_latest_inconsistent",
 ] as const;
 export type AnomalyKind = (typeof ANOMALY_KINDS)[number];
 
@@ -128,10 +130,15 @@ export interface UpstreamStateCounts {
 
 /** One page of the route's answer (also what the CLI aggregates). */
 export interface UpstreamStatusPage {
-  /** False only when rows needed OpenNeuro and every one of them came back `unchecked`. */
+  /**
+   * False only when at least one row on the page needed an OpenNeuro verdict (a known tag) and
+   * EVERY such row ended `unchecked`. A page of only unknown-tag rows with OpenNeuro down is
+   * `ok: true` with those rows `unknown`, their reasons naming the failure. A partial failure is
+   * also `ok: true`: a caller must read `errors[]` and the `unchecked` count, not only the status.
+   */
   ok: boolean;
   rows: UpstreamStatusRow[];
-  /** Counts for this page. */
+  /** Counts for THIS page only; summing pages (or recounting the rows) is the caller's job. */
   counts: UpstreamStateCounts;
   next_cursor: string | null;
   /** Mirrors after this page's last row. */
@@ -140,6 +147,11 @@ export interface UpstreamStatusPage {
   population_total: number;
   /** Withdrawn mirrors: excluded from the pass and counted on their own. */
   withdrawn: number;
+  /**
+   * `on######` rows that are NOT managed OpenNeuro mirrors (another `source`, or owned by the
+   * system user): left out of the report and counted here, so what was left out is said.
+   */
+  excluded_unmanaged: number;
   upstream_requests: number;
   probes: { attempted: number; budget: number };
   /** Batch-level problems, at most ten. */
@@ -286,13 +298,14 @@ export function classifyMirror(
     if (!Number.isNaN(latestCreated) && !Number.isNaN(versionCreated)) {
       row.probably_stale = latestCreated > versionCreated;
     }
-    return settle(
-      row,
-      "unknown",
-      row.probably_stale === true
-        ? `version ${mt.version} names no single upstream tag; upstream has a snapshot created after it, so it is probably stale`
-        : `version ${mt.version} names no single upstream tag, so it cannot be compared`,
-    );
+    const base = `version ${mt.version} names no single upstream tag`;
+    let why: string;
+    if (up?.kind === "error") why = `OpenNeuro could not be read for ${row.ds}: ${up.reason}`;
+    else if (!up) why = `OpenNeuro was not asked about ${row.ds}`;
+    else if (row.probably_stale === true) {
+      why = "upstream has a snapshot created after it, so it is probably stale";
+    } else why = "it cannot be compared";
+    return settle(row, "unknown", `${base}; ${why}`);
   }
   if (mt.state !== "known") {
     // withoutUpstream settled every other state; this keeps the type honest.
@@ -331,6 +344,19 @@ export function classifyMirror(
   const latest = up.latest;
   if (latest === null) {
     return settle(row, "anomaly", `upstream ${row.ds} has no snapshot`, "upstream_no_snapshot");
+  }
+  // 9b. The latest disagrees with the list: a snapshot in the list was created after it.
+  const latestMs = parseMs(latest.created ?? snapshotOf(up.snapshots, latest.tag)?.created);
+  if (!Number.isNaN(latestMs)) {
+    const later = up.snapshots.find((s) => parseMs(s.created) > latestMs);
+    if (later) {
+      return settle(
+        row,
+        "anomaly",
+        `upstream says its latest is ${latest.tag}, but ${later.tag} in its own list was created later`,
+        "upstream_latest_inconsistent",
+      );
+    }
   }
   // 10. The same tag: current.
   if (latest.tag === recorded) {
