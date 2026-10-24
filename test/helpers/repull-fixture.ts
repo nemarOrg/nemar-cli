@@ -1,0 +1,601 @@
+/**
+ * A mirror and its upstream, built the way production builds them, for the re-pull planner's
+ * tests (ADR 0111, epic #1046 phase 5).
+ *
+ * Nothing here stands in for the planner's business logic. The upstream `ds099999` is a real
+ * git-annex repository in OpenNeuro's shape: OpenNeuro's own `.gitattributes`, recordings over a
+ * size bar annexed with their public S3 URL registered, sidecars and tables in git, an `s3-PUBLIC`
+ * special remote on `openneuro.org` in `remote.log`, and `.log.rmet` version pins written by
+ * plumbing (nothing writes an `.rmet` from outside git-annex, as `fleet-content-recovery.test.ts`
+ * says). NEMAR's `on099999` is made by the REAL import step (`prepareImportedTreeForCopy`, with
+ * `nemar-s3` a `type=directory` special remote and upstream's bytes served by a local HTTP
+ * server), then the real README rename and metadata seed, then the publish step's shared edits
+ * (`applyConceptDoiToDescription`, `selectPublishReadmes` plus `planReadmeBadgeCommit`, the
+ * `.bidsignore` line). Its `main` is then given a fresh root commit, so it shares no ancestry with
+ * upstream, as an early rewritten import does not.
+ *
+ * Both origins are bare repositories served over `file://` with `uploadpack.allowFilter` and
+ * `uploadpack.allowAnySHA1InWant`, so the planner's blob-filtered, depth-1 clones and its blob
+ * fetches behave as they do against GitHub.
+ *
+ * Tag 1.0.0 (A) to tag 1.1.0 (B), upstream: an EDF added (pinned); `channels.tsv` modified; one
+ * sidecar deleted; `events.tsv` renamed; an MD5E `.set` re-keyed; a git-held `_motion.tsv`
+ * changed and another added; `code/run.sh` flipped from 644 to 755; `GeneratedBy` added to the
+ * description; a line appended to `CHANGES`; `participants.tsv` changed. NEMAR, after the import:
+ * a sidecar edited (a correction) and `participants.tsv` edited (a conflict).
+ *
+ * Every name, date and code in a header below is invented.
+ */
+
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { hashDirLower } from "../../scripts/scrub/git/git-lib";
+import { appendLedger, changeLogEntry } from "../../scripts/scrub/ledger";
+import { EDF_HEADER_BYTES } from "../../shared/identifier-scan";
+import {
+  NEMAR_BIDSIGNORE_ENTRY,
+  withBidsignoreEntry,
+} from "../../shared/standard-edits/bidsignore";
+import { applyConceptDoiToDescription } from "../../shared/standard-edits/description";
+import {
+  buildDoiBadge,
+  planReadmeBadgeCommit,
+  selectPublishReadmes,
+} from "../../shared/standard-edits/readme";
+import { runCommand } from "../../src/lib/git-annex/run-command";
+import { getAnnexWhereisAll, listAnnexedKeys } from "../../src/lib/git-annex/transfer";
+import { annexCopyUpload } from "../../src/lib/import-normalize";
+import {
+  buildManifestItems,
+  ensureReadmeMd,
+  findUnannexedData,
+  seedMetadata,
+} from "../../src/lib/import-openneuro";
+import {
+  IMPORT_SCANNER_ID,
+  httpUpstreamReader,
+  prepareImportedTreeForCopy,
+} from "../../src/lib/import-scrub";
+import { isLocallyUploaded } from "../../src/lib/s3-server-copy";
+
+/**
+ * Within the API's 0-99999 id cap (AGENTS.md, "Dataset ID bands"), so the real routers accept it.
+ * No OpenNeuro dataset has this number, and nothing here reaches a real remote: every remote is a
+ * local path or a loopback stand-in.
+ */
+export const NEMAR_ID = "on099999";
+export const UPSTREAM_ID = "ds099999";
+export const CONCEPT_DOI = "10.82901/nemar.on099999";
+export const TAG_A = "1.0.0";
+export const TAG_B = "1.1.0";
+/** A legacy-shaped tag that compares equal to 1.0.0, for the not-newer refusal. */
+export const TAG_LEGACY = "00001";
+const BUCKET_PATH = `openneuro.org/${UPSTREAM_ID}`;
+const PUBLIC_UUID = "9e1479f6-49e0-413b-8222-a7f8000f55a6";
+const FIXED_NOW = new Date("2026-10-06T12:00:00.000Z");
+
+export const PATHS = {
+  flaggedEdf: "sub-01/eeg/sub-01_task-rest_eeg.edf",
+  cleanEdf: "sub-02/eeg/sub-02_task-rest_eeg.edf",
+  addedEdf: "sub-03/eeg/sub-03_task-rest_eeg.edf",
+  sidecar: "sub-01/eeg/sub-01_task-rest_eeg.json",
+  deletedSidecar: "sub-02/eeg/sub-02_task-rest_eeg.json",
+  channels: "sub-01/eeg/sub-01_task-rest_channels.tsv",
+  events: "sub-01/eeg/sub-01_task-rest_events.tsv",
+  eventsRenamed: "sub-01/eeg/sub-01_task-rest_run-1_events.tsv",
+  set: "sub-01/eeg/sub-01_task-rest_eeg.set",
+  motion: "sub-01/motion/sub-01_task-walk_motion.tsv",
+  motionAdded: "sub-02/motion/sub-02_task-walk_motion.tsv",
+  script: "code/run.sh",
+  participants: "participants.tsv",
+  description: "dataset_description.json",
+  changes: "CHANGES",
+} as const;
+
+const UPSTREAM_GITATTRIBUTES = `* annex.backend=SHA256E
+**/.git* annex.largefiles=nothing
+*.json text eol=lf annex.largefiles=nothing
+*.tsv text eol=lf annex.largefiles=nothing
+*.md annex.largefiles=nothing
+README annex.largefiles=nothing
+CHANGES annex.largefiles=nothing
+*.sh annex.largefiles=nothing
+*.set annex.backend=MD5E
+*.set annex.largefiles=largerthan=2kb
+*.edf annex.largefiles=largerthan=2kb
+`;
+
+function edfBytes(patient: string, payloadBytes: number, seed: number, dated: boolean): Uint8Array {
+  const out = new Uint8Array(EDF_HEADER_BYTES + payloadBytes);
+  out.fill(0x20, 0, EDF_HEADER_BYTES);
+  const put = (text: string, start: number, width: number) => {
+    for (let i = 0; i < Math.min(text.length, width); i++) out[start + i] = text.charCodeAt(i);
+  };
+  put("0", 0, 8);
+  put(patient, 8, 80);
+  put(dated ? "Startdate 14-MAR-2023 X X X" : "Startdate 01-JAN-2023 X X X", 88, 80);
+  put(dated ? "14.03.23" : "01.01.23", 168, 8);
+  put("10.11.12", 176, 8);
+  noise(out, EDF_HEADER_BYTES, seed);
+  return out;
+}
+
+function noise(out: Uint8Array, from: number, seed: number): Uint8Array {
+  let x = seed >>> 0 || 1;
+  for (let i = from; i < out.length; i++) {
+    x ^= x << 13;
+    x ^= x >>> 17;
+    x ^= x << 5;
+    out[i] = x & 0xff;
+  }
+  return out;
+}
+
+const text = (s: string) => new TextEncoder().encode(s);
+
+/** A headerless motion recording of about `bytes` bytes, rows from a seeded sequence. */
+function motionTable(bytes: number, seed: number): string {
+  const rows: string[] = [];
+  let x = seed;
+  let n = 0;
+  while (n < bytes) {
+    x = (x * 1103515245 + 12345) % 2147483648;
+    const row = `${(x % 1000) / 10}\t${(x % 777) / 10}\t${(x % 555) / 10}\n`;
+    rows.push(row);
+    n += row.length;
+  }
+  return rows.join("");
+}
+
+/** A setup the tests can vary. */
+export interface FixtureOptions {
+  /** Leave the re-keyed `.set` without a version pin at tag B (test: an unpinned key). */
+  unpinnedSet?: boolean;
+  /** Append a `headers-scrubbed` line (a recorded correction) to NEMAR's ledger. */
+  recordedCorrection?: boolean;
+  /** Leave out NEMAR's contributor edits, so nothing is unexplained. */
+  noContributorEdits?: boolean;
+  /** What the bucket's `annex-uuid` marker says; the `nemar-s3` UUID by default, null for none. */
+  marker?: string | null;
+  /** Append ADR 0085's privacy sentence to NEMAR's `CHANGES`, as a correction's rewrite does. */
+  changesSentence?: boolean;
+  /**
+   * Make the git-held `_motion.tsv` 1.1 MiB, over the clones' 1 MiB blob filter, so the planner
+   * must fetch it to see that NEMAR's annexed copy hashes to it.
+   */
+  bigMotion?: boolean;
+}
+
+/** The ADR 0085 sentence a correction appends to `CHANGES` (`changeLogEntry`). */
+export const CHANGES_SENTENCE = `\n${changeLogEntry("2026-10-07", ["v1.0.0"])}\n`;
+
+/** Upstream's README at tag B. */
+export const README_B = "A fixture dataset for the re-pull planner.\nVersion 1.1.0 adds sub-03.\n";
+
+export interface RepullFixture {
+  root: string;
+  /** The planner's test bases. */
+  env: Record<string, string>;
+  originRepo: string;
+  upstreamRepo: string;
+  /** The `nemar-s3` directory special remote's store. */
+  store: string;
+  bucketBase: string;
+  nemarUuid: string;
+  keys: {
+    flaggedUpstream: string;
+    flaggedNemar: string;
+    motionNemar: string;
+    addedEdf: string;
+    setA: string;
+    setB: string;
+  };
+  cleanup(): void;
+}
+
+async function run(
+  args: string[],
+  cwd: string,
+  opts: { stdin?: string; env?: Record<string, string> } = {},
+) {
+  const r = await runCommand(args, {
+    cwd,
+    ...(opts.stdin ? { stdin: opts.stdin } : {}),
+    ...(opts.env ? { env: opts.env } : {}),
+  });
+  if (r.exitCode !== 0)
+    throw new Error(`${args.join(" ")} failed: ${r.stderr.trim() || `exit ${r.exitCode}`}`);
+  return r.stdout;
+}
+
+async function identity(dir: string, description: string): Promise<void> {
+  await run(["git", "config", "user.email", "test@nemar.test"], dir);
+  await run(["git", "config", "user.name", "NEMAR Test"], dir);
+  await run(["git", "annex", "init", "--quiet", description], dir);
+}
+
+function write(dir: string, path: string, bytes: Uint8Array | string): void {
+  const abs = join(dir, path);
+  mkdirSync(dirname(abs), { recursive: true });
+  rmSync(abs, { force: true });
+  writeFileSync(abs, bytes);
+}
+
+/** Commit one file onto a repository's git-annex branch (works in a bare repository too). */
+export async function writeAnnexBranchFile(
+  repo: string,
+  path: string,
+  content: string,
+): Promise<void> {
+  const blob = (
+    await run(["git", "hash-object", "-w", "--stdin"], repo, { stdin: content })
+  ).trim();
+  const indexDir = mkdtempSync(join(tmpdir(), "nemar-repull-index-"));
+  const env = { GIT_INDEX_FILE: join(indexDir, "index") };
+  try {
+    await run(["git", "read-tree", "refs/heads/git-annex"], repo, { env });
+    await run(["git", "update-index", "--add", "--cacheinfo", `100644,${blob},${path}`], repo, {
+      env,
+    });
+    const tree = (await run(["git", "write-tree"], repo, { env })).trim();
+    const commit = (
+      await run(
+        ["git", "commit-tree", tree, "-p", "refs/heads/git-annex", "-m", "test record"],
+        repo,
+        {
+          env: {
+            ...env,
+            GIT_AUTHOR_NAME: "t",
+            GIT_AUTHOR_EMAIL: "t@t",
+            GIT_COMMITTER_NAME: "t",
+            GIT_COMMITTER_EMAIL: "t@t",
+          },
+        },
+      )
+    ).trim();
+    await run(["git", "update-ref", "refs/heads/git-annex", commit], repo);
+  } finally {
+    rmSync(indexDir, { recursive: true, force: true });
+  }
+}
+
+async function bareOrigin(dir: string): Promise<void> {
+  mkdirSync(dir, { recursive: true });
+  await run(["git", "init", "-q", "--bare", "--initial-branch", "main", "."], dir);
+  await run(["git", "config", "uploadpack.allowFilter", "true"], dir);
+  await run(["git", "config", "uploadpack.allowAnySHA1InWant", "true"], dir);
+}
+
+/** Every ref of a repository, for the "nothing changed" check. */
+export async function refsOf(repo: string): Promise<string> {
+  return run(["git", "for-each-ref", "--format=%(refname) %(objectname)"], repo);
+}
+
+/** Build the fixture. The caller must call `cleanup()`. */
+export async function buildRepullFixture(opts: FixtureOptions = {}): Promise<RepullFixture> {
+  const root = mkdtempSync(join(tmpdir(), "nemar-repull-fixture-"));
+  const served = new Map<string, Uint8Array>();
+  const server = Bun.serve({
+    port: 0,
+    fetch(req) {
+      const path = decodeURIComponent(new URL(req.url).pathname.slice(1));
+      const bytes = served.get(path);
+      if (!bytes) return new Response("NoSuchKey", { status: 404 });
+      const m = /^bytes=(\d+)-(\d+)$/.exec(req.headers.get("range") ?? "");
+      if (m) {
+        const start = Number(m[1]);
+        const end = Math.min(Number(m[2]), bytes.length - 1);
+        return new Response(bytes.slice(start, end + 1), {
+          status: 206,
+          headers: { "Content-Range": `bytes ${start}-${end}/${bytes.length}` },
+        });
+      }
+      return new Response(bytes, { status: 200 });
+    },
+  });
+  try {
+    return await build(root, served, `http://localhost:${server.port}`, opts);
+  } catch (err) {
+    Bun.spawnSync(["chmod", "-R", "u+w", root]);
+    rmSync(root, { recursive: true, force: true });
+    throw err;
+  } finally {
+    server.stop(true);
+  }
+}
+
+async function build(
+  root: string,
+  served: Map<string, Uint8Array>,
+  baseUrl: string,
+  opts: FixtureOptions,
+): Promise<RepullFixture> {
+  const up = join(root, "upstream-work");
+  mkdirSync(up, { recursive: true });
+  await run(["git", "init", "-q", "--initial-branch", "main", "."], up);
+  await identity(up, "upstream");
+
+  // ---- Tag A ----
+  const flagged = edfBytes("Qwfixturelast M 14-MAR-1993 Zxfixturename", 4000, 1, true);
+  const files: Record<string, Uint8Array | string> = {
+    ".gitattributes": UPSTREAM_GITATTRIBUTES,
+    [PATHS.description]: `${JSON.stringify(
+      {
+        Name: "Repull fixture",
+        BIDSVersion: "1.9.0",
+        License: "CC0",
+        Authors: ["A. Fixture"],
+        DatasetDOI: `doi:10.18112/openneuro.${UPSTREAM_ID}.v${TAG_A}`,
+      },
+      null,
+      2,
+    )}\n`,
+    README: "A fixture dataset for the re-pull planner.\n",
+    [PATHS.changes]: `${TAG_A} 2026-01-01\n  - Initial snapshot.\n`,
+    [PATHS.participants]: "participant_id\tage\nsub-01\t30\nsub-02\t31\n",
+    [PATHS.flaggedEdf]: flagged,
+    [PATHS.cleanEdf]: edfBytes("X X X X", 4000, 2, false),
+    [PATHS.sidecar]: `{\n  "TaskName": "rest",\n  "SamplingFrequency": 256\n}\n`,
+    [PATHS.deletedSidecar]: `{\n  "TaskName": "rest",\n  "SamplingFrequency": 512\n}\n`,
+    [PATHS.channels]: "name\ttype\tunits\nFz\tEEG\tuV\n",
+    [PATHS.events]: "onset\tduration\ttrial_type\n1.0\t0.5\tgo\n",
+    [PATHS.set]: noise(new Uint8Array(3000), 0, 7),
+    [PATHS.motion]: opts.bigMotion
+      ? motionTable(1.1 * 1024 * 1024, 1)
+      : "0.1\t0.2\t0.3\n0.4\t0.5\t0.6\n",
+    [PATHS.script]: "#!/bin/sh\necho fixture\n",
+  };
+  for (const [p, b] of Object.entries(files)) {
+    write(up, p, b);
+    served.set(`${BUCKET_PATH}/${p}`, typeof b === "string" ? text(b) : b);
+  }
+  await run(["git", "annex", "add", "--quiet", "."], up);
+  await run(["git", "commit", "-qm", "upstream 1.0.0"], up);
+  await run(["git", "tag", TAG_A], up);
+  await run(["git", "tag", TAG_LEGACY], up);
+  for (const [path, key] of await listAnnexedKeys(up)) {
+    await run(
+      ["git", "annex", "registerurl", key, `https://s3.amazonaws.com/${BUCKET_PATH}/${path}`],
+      up,
+    );
+  }
+  const upKeysA = await listAnnexedKeys(up);
+
+  // ---- The import of tag A, as prepare runs it ----
+  const work = join(root, "import");
+  mkdirSync(work, { recursive: true });
+  const clone = join(work, NEMAR_ID);
+  await run(["git", "clone", "-q", up, clone], work);
+  await identity(clone, "import clone");
+  const store = join(root, "nemar-s3-store");
+  mkdirSync(store, { recursive: true });
+  await run(
+    [
+      "git",
+      "annex",
+      "initremote",
+      "nemar-s3",
+      "type=directory",
+      `directory=${store}`,
+      "encryption=none",
+    ],
+    clone,
+  );
+  const nemarUuid = (await run(["git", "config", "remote.nemar-s3.annex-uuid"], clone)).trim();
+  const unannexedData = await findUnannexedData(clone);
+  const { urlMap } = await getAnnexWhereisAll(clone);
+  const prepared = await prepareImportedTreeForCopy({
+    datasetPath: clone,
+    nemarId: NEMAR_ID,
+    bucket: "nemar",
+    remoteName: "nemar-s3",
+    keyUrlMap: urlMap,
+    upstreamItems: buildManifestItems(urlMap, NEMAR_ID).items,
+    unannexedData,
+    reimport: false,
+    skipData: false,
+    reader: httpUpstreamReader({ baseUrl, retryDelayMs: 1 }),
+    upload: annexCopyUpload({ credentials: "inherit" }),
+    now: FIXED_NOW,
+    actor: "fixture-actor",
+  });
+  const desc = JSON.parse(readFileSync(join(clone, PATHS.description), "utf8"));
+  const openNeuroDoi = String(desc.DatasetDOI).replace(/^doi:/, "");
+  ensureReadmeMd(clone, UPSTREAM_ID, openNeuroDoi);
+  seedMetadata(clone, NEMAR_ID, UPSTREAM_ID, desc, openNeuroDoi);
+  await run(
+    ["git", "-c", "annex.largefiles=nothing", "add", "-A", "--", "README", "README.md", ".nemar"],
+    clone,
+  );
+  await run(["git", "commit", "-qm", "Seed NEMAR metadata"], clone);
+  // The copy and finalize phases, as far as the git-annex branch sees them: every upstream key
+  // the manifest names is recorded present at nemar-s3.
+  const copied = prepared.manifest.items.filter((it) => !isLocallyUploaded(it)).map((it) => it.key);
+  if (copied.length > 0) {
+    await run(["git", "annex", "setpresentkey", "--batch"], clone, {
+      stdin: copied.map((k) => `${k} ${nemarUuid} 1\n`).join(""),
+    });
+  }
+
+  // ---- The publish step's shared edits ----
+  const applied = applyConceptDoiToDescription(desc, CONCEPT_DOI);
+  write(clone, PATHS.description, JSON.stringify(applied.description, null, 2));
+  const rootFiles = (await run(["git", "ls-tree", "--name-only", "HEAD"], clone))
+    .split("\n")
+    .filter(Boolean);
+  const readmes = selectPublishReadmes(rootFiles.map((path) => ({ path })));
+  const source = readmes.contentSource
+    ? readFileSync(join(clone, readmes.contentSource.path), "utf8")
+    : "";
+  const badge = planReadmeBadgeCommit({
+    readmeContent: source,
+    doiBadge: buildDoiBadge(CONCEPT_DOI),
+    conceptDoi: CONCEPT_DOI,
+    contentSourcePath: readmes.contentSource?.path,
+  });
+  if (badge.commit) write(clone, "README.md", badge.content);
+  for (const r of readmes.remove) rmSync(join(clone, r.path));
+  write(clone, ".bidsignore", withBidsignoreEntry("", NEMAR_BIDSIGNORE_ENTRY).content);
+  write(clone, ".github/workflows/validate.yml", "name: validate\non: push\njobs: {}\n");
+  if (opts.recordedCorrection) {
+    appendLedger(join(clone, ".nemar/corrections.jsonl"), {
+      version: 1,
+      at: "2026-10-07T00:00:00.000Z",
+      dataset: NEMAR_ID,
+      action: "headers-scrubbed",
+      versions: ["v1.0.0"],
+      counts: { headers_scrubbed: 1 },
+      scanner: IMPORT_SCANNER_ID,
+      verification: "scanner-clean",
+      actor: "fixture-actor",
+    });
+  }
+  if (opts.changesSentence) {
+    write(
+      clone,
+      PATHS.changes,
+      `${readFileSync(join(clone, PATHS.changes), "utf8")}${CHANGES_SENTENCE}`,
+    );
+  }
+  if (!opts.noContributorEdits) {
+    write(
+      clone,
+      PATHS.sidecar,
+      `{\n  "TaskName": "rest",\n  "SamplingFrequency": 256,\n  "PowerLineFrequency": 60\n}\n`,
+    );
+    write(clone, PATHS.participants, "participant_id\tage\nsub-01\t29\nsub-02\t31\n");
+  }
+  await run(["git", "-c", "annex.largefiles=nothing", "add", "-A"], clone);
+  await run(["git", "commit", "-qm", "Publish edits"], clone);
+
+  // A fresh root commit, as an early rewritten import has: no shared ancestry with upstream.
+  const tree = (await run(["git", "rev-parse", "HEAD^{tree}"], clone)).trim();
+  const rootCommit = (
+    await run(["git", "commit-tree", tree, "-m", "Import of ds099999 1.0.0"], clone)
+  ).trim();
+  await run(["git", "update-ref", "refs/heads/main", rootCommit], clone);
+  await run(["git", "tag", "v1.0.0", rootCommit], clone);
+
+  const originBase = join(root, "origins");
+  const originRepo = join(originBase, NEMAR_ID);
+  await bareOrigin(originRepo);
+  await run(["git", "remote", "add", "nemar", originRepo], clone);
+  await run(["git", "push", "-q", "nemar", "main", "git-annex", "refs/tags/v1.0.0"], clone);
+  // Production's nemar-s3 is an S3 remote with a bucket and a prefix; the planner reads its
+  // remote.log line, so the pushed line says what production's says (the store stays a directory).
+  await writeAnnexBranchFile(
+    originRepo,
+    "remote.log",
+    `${nemarUuid} bucket=nemar datacenter=us-east-2 encryption=none fileprefix=${NEMAR_ID}/objects/ name=nemar-s3 type=S3 timestamp=1790000000s\n`,
+  );
+
+  // ---- Tag B, upstream ----
+  const added = edfBytes("X X X X", 4000, 3, false);
+  const changes: Record<string, Uint8Array | string> = {
+    [PATHS.addedEdf]: added,
+    [PATHS.channels]: "name\ttype\tunits\nFz\tEEG\tuV\nCz\tEEG\tuV\n",
+    [PATHS.set]: noise(new Uint8Array(3000), 0, 8),
+    [PATHS.motion]: opts.bigMotion
+      ? motionTable(1.1 * 1024 * 1024, 2)
+      : "0.1\t0.2\t0.3\n0.4\t0.5\t0.7\n",
+    README: README_B,
+    [PATHS.motionAdded]: "1.1\t1.2\t1.3\n",
+    [PATHS.description]: `${JSON.stringify(
+      {
+        Name: "Repull fixture",
+        BIDSVersion: "1.9.0",
+        License: "CC0",
+        Authors: ["A. Fixture"],
+        DatasetDOI: `doi:10.18112/openneuro.${UPSTREAM_ID}.v${TAG_B}`,
+        GeneratedBy: [{ Name: "fixture-pipeline" }],
+      },
+      null,
+      2,
+    )}\n`,
+    [PATHS.changes]: `${TAG_A} 2026-01-01\n  - Initial snapshot.\n${TAG_B} 2026-06-01\n  - Added sub-03.\n`,
+    [PATHS.participants]: "participant_id\tage\nsub-01\t30\nsub-02\t31\nsub-03\t32\n",
+  };
+  for (const [p, b] of Object.entries(changes)) write(up, p, b);
+  await run(["git", "rm", "-q", PATHS.deletedSidecar], up);
+  await run(["git", "mv", PATHS.events, PATHS.eventsRenamed], up);
+  await run(["git", "annex", "add", "--quiet", "."], up);
+  await run(["git", "update-index", "--chmod=+x", PATHS.script], up);
+  await run(["git", "commit", "-qm", "upstream 1.1.0"], up);
+  await run(["git", "tag", TAG_B], up);
+  const upKeysB = await listAnnexedKeys(up);
+
+  // OpenNeuro's versioned bucket, as the git-annex branch records it: the remote and one pin per
+  // key it exported, `<versionId>#<object path>`.
+  await writeAnnexBranchFile(
+    up,
+    "remote.log",
+    `${PUBLIC_UUID} bucket=openneuro.org name=s3-PUBLIC type=S3 versioning=yes timestamp=1700000000s\n`,
+  );
+  const pin = async (path: string, key: string, version: string) =>
+    writeAnnexBranchFile(
+      up,
+      `${hashDirLower(key)}${key}.log.rmet`,
+      `1700000001s ${PUBLIC_UUID}:V +${version}#${UPSTREAM_ID}/${path}\n`,
+    );
+  const addedKey = upKeysB.get(PATHS.addedEdf) as string;
+  const setB = upKeysB.get(PATHS.set) as string;
+  await pin(PATHS.addedEdf, addedKey, "VERSIONADDED");
+  if (!opts.unpinnedSet) await pin(PATHS.set, setB, "VERSIONSETB");
+
+  const upstreamBase = join(root, "upstreams");
+  const upstreamRepo = join(upstreamBase, UPSTREAM_ID);
+  mkdirSync(upstreamBase, { recursive: true });
+  await run(["git", "clone", "-q", "--bare", up, upstreamRepo], root);
+  await run(["git", "config", "uploadpack.allowFilter", "true"], upstreamRepo);
+  await run(["git", "config", "uploadpack.allowAnySHA1InWant", "true"], upstreamRepo);
+  // A bare clone copies branches; make sure the git-annex branch and every tag are there.
+  await run(
+    [
+      "git",
+      "fetch",
+      "-q",
+      up,
+      "+refs/heads/git-annex:refs/heads/git-annex",
+      "+refs/tags/*:refs/tags/*",
+    ],
+    upstreamRepo,
+  );
+
+  const bucketBase = join(root, "bucket");
+  if (opts.marker !== null) {
+    write(bucketBase, `${NEMAR_ID}/objects/annex-uuid`, opts.marker ?? nemarUuid);
+  } else {
+    mkdirSync(bucketBase, { recursive: true });
+  }
+
+  const nemarKeys = await listAnnexedKeys(clone);
+  Bun.spawnSync(["chmod", "-R", "u+w", work]);
+  rmSync(work, { recursive: true, force: true });
+  const fixture: RepullFixture = {
+    root,
+    env: {
+      NEMAR_REPULL_ORIGIN_BASE: originBase,
+      NEMAR_REPULL_UPSTREAM_BASE: upstreamBase,
+      NEMAR_REPULL_BUCKET_BASE: bucketBase,
+    },
+    originRepo,
+    upstreamRepo,
+    store,
+    bucketBase,
+    nemarUuid,
+    keys: {
+      flaggedUpstream: upKeysA.get(PATHS.flaggedEdf) as string,
+      flaggedNemar: nemarKeys.get(PATHS.flaggedEdf) as string,
+      motionNemar: nemarKeys.get(PATHS.motion) as string,
+      addedEdf: addedKey,
+      setA: upKeysA.get(PATHS.set) as string,
+      setB,
+    },
+    cleanup() {
+      Bun.spawnSync(["chmod", "-R", "u+w", root]);
+      rmSync(root, { recursive: true, force: true });
+    },
+  };
+  return fixture;
+}
