@@ -296,6 +296,7 @@ export function registerUpstreamRepullRoutes(admin: AdminRouter): void {
         repull: result.row,
         merged_outside_tool: result.merged_outside_tool,
         merged_unscreened_head: result.merged_unscreened_head,
+        replayed: result.replayed,
       });
     } catch (err) {
       return c.json({ error: failure("record the merge", err) }, 500);
@@ -317,6 +318,7 @@ export function registerUpstreamRepullRoutes(admin: AdminRouter): void {
           repull: result.row,
           lineage_rows: result.lineage_rows,
           stamps_rearmed: result.stamps_rearmed,
+          replayed: result.replayed,
         });
       } catch (err) {
         return c.json({ error: failure("record the release", err) }, 500);

@@ -30,8 +30,11 @@
  * `patch_gates_clear` are taken only while the identifier screen bound to the row
  * (`upstream-repull-screen.ts`) passes for the recorded head, and the claim to merge only while
  * it passes for the claimed head and the day's merge cap (`REPULL_DAILY_MERGE_CAP`) has a unit
- * left. Each re-asserts what it read in the statement that writes, so a verdict or a unit that
- * changed in between is not relied on. A refusal writes nothing (ADR 0099).
+ * left. Before either, the Worker reads the live pull request on GitHub: open, unmerged, aimed at
+ * `main`, its head the sha being gated or claimed. Each re-asserts the screen's verdict in the
+ * statement that writes; the claim also re-asserts the cap and that the dataset is neither
+ * anonymous nor withdrawn, so those are atomic with it, while the mirror and import fences and
+ * the live head are read first. A refusal writes nothing (ADR 0099).
  *
  * `lineage_recordable` is an administrator's assertion: the Worker has no evidence of it (it holds
  * neither tree), so it is recorded in the audit row and nothing here verifies it.
@@ -83,6 +86,7 @@ import type { Bindings } from "../types/bindings.js";
 import { isValidDatasetId } from "./datasetId.js";
 import { isScreenExempt, readStoredReport } from "./identifier-screen-stored.js";
 import { resolveImportError } from "./import-error.js";
+import { liveHeadRefusal } from "./upstream-repull-github.js";
 import {
   type RepullScreenGate,
   type RepullScreenStart,
@@ -453,6 +457,13 @@ export const MERGE_CLAIMS_TODAY_SQL = `SELECT ${MERGE_CLAIMS_TODAY_EXPR} AS used
 /** The condition the claim's own UPDATE carries, `?` the cap: so the count and the claim are one statement. */
 export const MERGE_CAP_GUARD_SQL = `(${MERGE_CLAIMS_TODAY_EXPR}) < ?`;
 
+/**
+ * The two dataset fences the claim re-asserts in its own statement (`?` the dataset): neither
+ * anonymous nor withdrawn. The mirror and import fences are read before it.
+ */
+export const CLAIM_DATASET_GUARD_SQL =
+  "EXISTS (SELECT 1 FROM datasets WHERE dataset_id = ? AND anonymous = 0 AND withdrawn_at IS NULL)";
+
 export async function mergeClaimsToday(db: D1Database): Promise<number> {
   return (await db.prepare(MERGE_CLAIMS_TODAY_SQL).first<{ used: number }>())?.used ?? 0;
 }
@@ -783,7 +794,11 @@ function screenChanged(row: RepullRow): RepullRefusal {
  *    (ADR 0111, decision 7); the statement re-checks the screen's verdict;
  *  - the claim to merge (the self-edge on either): the dataset fences, the screen for the claimed
  *    head, and a unit of the day's merge cap, counted in the statement that claims it, so two
- *    claims racing for the last unit cannot both win (ADR 0111, decision 6; ADR 0099).
+ *    claims racing for the last unit cannot both win (ADR 0111, decision 6; ADR 0099). The
+ *    screen's verdict, the cap and the dataset being neither anonymous nor withdrawn are in the
+ *    claim's own statement; the mirror and import fences are a read before it.
+ * Both read the live pull request on GitHub first (`liveHeadRefusal`): the caller's word for the
+ * head is not taken.
  *
  * `last_error` goes through {@link resolveImportError} (ADR 0051): a specific message is never
  * overwritten by a generic one, and a blank one is refused. An edge into a different, non-terminal
@@ -951,10 +966,21 @@ export async function prepareTransition(
     const cap = repullMergeCap(env);
     if (cap.value === 0) return { ...mergeCapRefusal(cap, await mergeClaimsToday(db)), row };
     guards.push({ sql: MERGE_CAP_GUARD_SQL, binds: [cap.value] });
+    // Two of the dataset fences ride in the claim's own statement; the other two were read above.
+    guards.push({ sql: CLAIM_DATASET_GUARD_SQL, binds: [row.dataset_id] });
     guardRefusal = async () => {
       const used = await mergeClaimsToday(db);
-      return used >= cap.value ? { ...mergeCapRefusal(cap, used), row } : screenChanged(row);
+      if (used >= cap.value) return { ...mergeCapRefusal(cap, used), row };
+      const fenced = await datasetFenceRefusal(db, row);
+      return fenced ? { ...fenced, row } : screenChanged(row);
     };
+  }
+  if (screenedPr !== null) {
+    // GitHub's head, not the caller's: read last, so every refusal that needs no network comes first.
+    const cols = PULL_REQUEST_COLUMNS[screenedPr];
+    const sha = (gatedPr ? fields[cols.gates] : fields[cols.claimSha]) as string;
+    const moved = await liveHeadRefusal(env, row, screenedPr, sha);
+    if (moved) return moved;
   }
 
   // Column names below come from the edge's field list, checked against `may` above: never a request.
@@ -1162,6 +1188,15 @@ export async function acknowledgeRepullScreen(
     };
   }
   const view = repullScreenView(screen);
+  if (screen.ack_at !== null) {
+    return {
+      status: 409,
+      code: "already-acknowledged",
+      message: `This screen was acknowledged by administrator #${screen.ack_by} at ${screen.ack_at}; an acknowledgment is recorded once, and it counts only for that administrator.`,
+      row,
+      screen: view,
+    };
+  }
   if (view.gate !== "acknowledge" || readStoredReport(screen.report)?.head !== body.sha) {
     return {
       status: 409,
@@ -1182,6 +1217,15 @@ export async function acknowledgeRepullScreen(
   });
   const after = await readRepullScreen(db, id, body.pr, body.sha);
   if (!recorded || !after) {
+    if (after?.ack_at) {
+      return {
+        status: 409,
+        code: "already-acknowledged",
+        message: `This screen was acknowledged by administrator #${after.ack_by} at ${after.ack_at} while this request was checked.`,
+        row,
+        screen: repullScreenView(after),
+      };
+    }
     return { ...screenChanged(row), ...(after ? { screen: repullScreenView(after) } : {}) };
   }
   return { screen: repullScreenView(after) };

@@ -15,7 +15,6 @@ import {
   REPULL_STATUSES,
   REPULL_TRANSITIONS,
   type RepullStatus,
-  SCREEN_GATED_STATUSES,
   SELF_EDGE_FIELDS,
   TERMINAL_STATUSES,
   TRANSITION_FIELDS,
@@ -26,6 +25,7 @@ import {
   isTerminal,
   nextMajorVersion,
   patchVersionOf,
+  pullRequestOfGatesStatus,
 } from "../shared/repull-state";
 
 /** The edges, written out once more so the table cannot drift unseen. */
@@ -146,7 +146,13 @@ describe("the columns an edge writes", () => {
     expect([...VERIFIED_ONLY_STATUSES].sort()).toEqual(
       ["merged", "patch_merged", "patch_released", "released"].sort(),
     );
-    expect([...SCREEN_GATED_STATUSES].sort()).toEqual(["gates_clear", "patch_gates_clear"].sort());
+    // The screen-gated states are exactly the two gates-clear states, one per pull request.
+    expect(REPULL_STATUSES.filter((s) => pullRequestOfGatesStatus(s) !== null)).toEqual([
+      "gates_clear",
+      "patch_gates_clear",
+    ]);
+    expect(pullRequestOfGatesStatus("gates_clear")).toBe("n0");
+    expect(pullRequestOfGatesStatus("patch_gates_clear")).toBe("n1");
   });
 
   test("the immutable columns are columns an edge may set", () => {

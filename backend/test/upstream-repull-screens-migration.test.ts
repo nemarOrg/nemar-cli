@@ -29,6 +29,7 @@ import { LINEAGE_AT_RELEASE_SQL, STAMPS_REARM_SQL } from "../src/services/upstre
 import type { Bindings } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
 import { MIGRATIONS_DIR, applyMigrations, migrationFiles } from "./helpers/miniflare-d1";
+import { startRepullGitHub } from "./helpers/repull-github-standin";
 import { type Row, SHA, rowAt } from "./helpers/repull-rows";
 
 const FILE = "0106_upstream_repull_screens.sql";
@@ -437,7 +438,13 @@ describe("the service's own statements on D1", () => {
       actorId: admin.id,
     });
     expect(gate).toMatchObject({ ok: true, exempt: false });
-    const capped = { ...env, REPULL_DAILY_MERGE_CAP: "1" } as Bindings;
+    // The claim reads the live pull request: a stand-in answers it open at the head.
+    const gh = startRepullGitHub({ defaultHead: HEAD });
+    const capped = {
+      ...env,
+      REPULL_DAILY_MERGE_CAP: "1",
+      GITHUB_ADMIN_PAT: "ghp_repull_screens_d1",
+    } as Bindings;
     const claim = (id: number) =>
       transitionRepull(capped, admin, id, {
         from: "gates_clear",
@@ -448,6 +455,7 @@ describe("the service's own statements on D1", () => {
     if (isRefusal(won)) throw new Error(`refused: ${won.code}`);
     expect(won.row.merge_claimed_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
     expect(await claim(ids[1] as number)).toMatchObject({ code: "merge-cap", status: 429 });
+    gh.stop();
 
     // The release batch's two guarded statements: they apply to the row as read, and not after it moved.
     const r = await d1

@@ -9,7 +9,8 @@
  * the row is `upstream_repull_screens` (migration 0106), one per screened commit of one of the
  * re-pull's two pull requests, and the token is a kind of its own.
  *
- * This file is the screen alone: it does not load the re-pull row, apply its fences or move it.
+ * This file is the screen alone: it does not load the re-pull row into memory, apply its fences or
+ * move it.
  * `upstream-repull.ts` does that and calls in here with the row it read, so the two never import
  * each other.
  *
@@ -24,6 +25,7 @@
  */
 
 import {
+  DATASET_STATUSES,
   type ScreenGate,
   type ScreenReport,
   type ScreenState,
@@ -71,9 +73,24 @@ const EFFECTIVE_STATE = `CASE WHEN status = 'pending'
     AND dispatched_at < datetime('now', '-${SCREEN_REPORT_DEADLINE_MINUTES} minutes')
   THEN 'unreported' ELSE status END`;
 
-/** What a screen may be dispatched again from: no verdict, so the gate says run it again. */
-const RERUN_SQL = `(status IN ('error', 'unreported') OR (status = 'pending'
-    AND dispatched_at < datetime('now', '-${SCREEN_REPORT_DEADLINE_MINUTES} minutes')))`;
+/** The states that ask a person to look: an administrator may acknowledge them (ADR 0086). */
+const ASKING_STATES = DATASET_STATUSES.filter((s) => screenGate(s) === "acknowledge");
+
+/**
+ * What a screen may be dispatched again from: no verdict (an error, or no report by the
+ * deadline), or a verdict that asks for a person and that no administrator has acknowledged yet,
+ * so a rerun may still clear it. A clear verdict, a direct identifier, a run still out and an
+ * acknowledged verdict are not dispatched again; only a new commit is screened anew.
+ */
+const REDISPATCH_SQL = `(status IN ('error', 'unreported') OR (status = 'pending'
+    AND dispatched_at < datetime('now', '-${SCREEN_REPORT_DEADLINE_MINUTES} minutes'))
+  OR (status IN (${ASKING_STATES.map((s) => `'${s}'`).join(", ")}) AND ack_at IS NULL))`;
+
+/** The same rule, on a row as read. */
+export function mayDispatchAgain(row: Pick<RepullScreenRow, "state" | "ack_at">): boolean {
+  const gate = screenGate(isScreenState(row.state) ? row.state : null);
+  return gate === "rerun" || (gate === "acknowledge" && row.ack_at === null);
+}
 
 const SCREEN_COLUMNS = `id, repull_id, pr, sha, status, ${EFFECTIVE_STATE} AS state, report,
   dispatched_at, reported_at, ack_by, ack_reason, ack_at,
@@ -112,10 +129,13 @@ const SCREEN_FAILED_SQL = `UPDATE upstream_repull_screens
   SET status = 'error', report = ?, reported_at = datetime('now'), nonce = NULL
   WHERE id = ? AND status = 'pending' AND nonce = ?`;
 
-/** Record an acknowledgment on exactly the verdict the administrator was shown. */
+/**
+ * Record an acknowledgment on exactly the verdict the administrator was shown, once: a verdict
+ * that already carries one keeps it.
+ */
 const SCREEN_ACK_SQL = `UPDATE upstream_repull_screens
   SET ack_by = ?, ack_reason = ?, ack_at = datetime('now')
-  WHERE id = ? AND status = ?`;
+  WHERE id = ? AND status = ? AND ack_at IS NULL`;
 
 // ----------------------------------------------------------------------------
 // Rows and views
@@ -225,10 +245,11 @@ function errorText(err: unknown): string {
  * checked the row's status, its head and the fences; the claim checks the status and the head
  * again in the same statement that writes, so a row that moved in between is not screened.
  *
- * A commit is screened once: a second dispatch is refused while a run is out (`wait`) and once it
- * has a verdict, and is allowed only when the gate says to run it again (an error, or no report by
- * the deadline). Dispatching for a new head frees the nonce of any earlier screen of the re-pull,
- * so its run can no longer answer: one run is out per re-pull.
+ * A commit is screened again only while it has no verdict (an error, or no report by the
+ * deadline) or a verdict that asks for a person and is not yet acknowledged; a run still out, a
+ * clear verdict, a direct identifier and an acknowledged verdict are not dispatched again.
+ * Dispatching for a new head frees the nonce of any earlier screen of the re-pull, so its run can
+ * no longer answer: one run is out per re-pull.
  *
  * Deliberately not switchable off, as the publication screen: a Worker without the callback
  * secret, the API base or a GitHub credential records `dispatch-unconfigured`, which the gate
@@ -244,7 +265,7 @@ export async function startRepullScreen(
   if (isScreenExempt(row.dataset_id)) return { kind: "exempt" };
   const db = env.DB;
   const existing = await readRepullScreen(db, row.id, pr, sha);
-  if (existing && screenGate(stateOfRow(existing)) !== "rerun") {
+  if (existing && !mayDispatchAgain(existing)) {
     return { kind: "exists", screen: repullScreenView(existing) };
   }
 
@@ -281,7 +302,7 @@ export async function startRepullScreen(
   const rowGuard = `EXISTS (SELECT 1 FROM upstream_repulls WHERE id = ? AND status = ? AND ${cols.head} = ?)`;
   const rowBinds = [row.id, cols.open, sha];
   const claimable = existing
-    ? `EXISTS (SELECT 1 FROM upstream_repull_screens WHERE id = ? AND ${RERUN_SQL})`
+    ? `EXISTS (SELECT 1 FROM upstream_repull_screens WHERE id = ? AND ${REDISPATCH_SQL})`
     : "NOT EXISTS (SELECT 1 FROM upstream_repull_screens WHERE repull_id = ? AND pr = ? AND sha = ?)";
   const claimableBinds = existing ? [existing.id] : [row.id, pr, sha];
   const nonce = crypto.randomUUID();
@@ -298,7 +319,7 @@ export async function startRepullScreen(
           `UPDATE upstream_repull_screens
               SET status = 'pending', nonce = ?, report = NULL, reported_at = NULL,
                   ack_by = NULL, ack_reason = NULL, ack_at = NULL, dispatched_at = datetime('now')
-            WHERE id = ? AND ${RERUN_SQL} AND ${rowGuard}`,
+            WHERE id = ? AND ${REDISPATCH_SQL} AND ${rowGuard}`,
         )
         .bind(nonce, existing.id, ...rowBinds)
     : db
@@ -327,7 +348,7 @@ export async function startRepullScreen(
   }
   const mine = await readRepullScreen(db, row.id, pr, sha);
   if (!claimed) {
-    return mine && screenGate(stateOfRow(mine)) !== "rerun"
+    return mine && !mayDispatchAgain(mine)
       ? { kind: "exists", screen: repullScreenView(mine) }
       : { kind: "moved" };
   }
@@ -526,9 +547,10 @@ export async function repullScreenGate(
 
 /**
  * Record an administrator's acknowledgment of the verdict `row` holds, and audit it, in one batch.
- * Conditional on the stored state the administrator was shown, so it cannot attach to a verdict
- * that has since changed. The caller has checked the gate is `acknowledge`; the database refuses
- * an acknowledgment on any other state (migration 0106). False when the state moved.
+ * Conditional on the stored state the administrator was shown and on no acknowledgment being
+ * recorded yet, so it cannot attach to a verdict that has since changed or replace another
+ * administrator's. The caller has checked the gate is `acknowledge`; the database refuses an
+ * acknowledgment on any other state (migration 0106). False when the write did not apply.
  */
 export async function acknowledgeRepullScreenRow(
   db: D1Database,

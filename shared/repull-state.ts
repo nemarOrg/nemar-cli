@@ -120,16 +120,6 @@ export const VERIFIED_ONLY_STATUSES = [
 ] as const satisfies readonly RepullStatus[];
 
 /**
- * States a caller reaches only while the identifier screen bound to the row (ADR 0111, decision 7)
- * passes for the head it names: the Worker reads the screen itself and never takes the caller's
- * word for it.
- */
-export const SCREEN_GATED_STATUSES = [
-  "gates_clear",
-  "patch_gates_clear",
-] as const satisfies readonly RepullStatus[];
-
-/**
  * While a claim to merge is held the merge may have gone out, so the edges that would close the
  * pull request (`abandoned`, `superseded`, `patch_declined`) or move its head (`pr_open`,
  * `patch_synthesized`) are refused until GitHub has been read. Each names the claim column that
@@ -308,9 +298,10 @@ export const REPULL_COUNT_KEYS = [
 ] as const;
 
 /**
- * Count keys only the Worker writes, from what it read on GitHub itself: a pull request merged
- * without a NEMAR tool's claim, and one merged at a head other than the screened one. A request
- * that names one is refused, so no caller can set or clear the record of either.
+ * Count keys only the Worker writes, from what it read on GitHub itself, each on its own:
+ * `merged_outside_tool`, the pull request merged while no NEMAR tool held a claim to merge it;
+ * `merged_unscreened_head`, it merged at a head other than the screened one. A request that names
+ * one is refused, so no caller can set or clear the record of either.
  */
 export const WORKER_COUNT_KEYS = [
   "merged_outside_tool",
@@ -373,7 +364,11 @@ export const PULL_REQUEST_COLUMNS: Readonly<Record<RepullPullRequest, PullReques
   },
 };
 
-/** Which pull request a gates-clear status belongs to, or null for any other status. */
+/**
+ * Which pull request a gates-clear status belongs to, or null for any other status. A caller
+ * reaches a gates-clear status only while the identifier screen bound to the row (ADR 0111,
+ * decision 7) passes for the head it names: the Worker reads the screen itself.
+ */
 export function pullRequestOfGatesStatus(status: RepullStatus): RepullPullRequest | null {
   for (const pr of REPULL_PULL_REQUESTS) {
     if (PULL_REQUEST_COLUMNS[pr].gatesClear === status) return pr;

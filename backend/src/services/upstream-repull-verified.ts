@@ -7,18 +7,25 @@
  * transition route refuses them (`use-verified-route`) and these functions write them after
  * reading the facts themselves, with the Worker's own GitHub credential:
  *  - merged: GitHub says the recorded pull request (its number, its release branch, aimed at
- *    `main`) is merged. The merge commit is GitHub's. A merge with no claim from a NEMAR tool, or
- *    at a head other than the screened one, is still recorded, because it happened and a second
- *    major would be a second DOI; it is counted (`merged_outside_tool`, `merged_unscreened_head`)
- *    so the record says so. The cap binds NEMAR's tools only (ADR 0111, Consequences).
+ *    `main`) is merged. The merge commit is GitHub's. A merge for which no NEMAR tool held a claim
+ *    (`merged_outside_tool`), and one at a head other than the screened one
+ *    (`merged_unscreened_head`), is still recorded, because it happened and a second major would
+ *    be a second DOI; each is counted on its own so the record says which. The cap binds NEMAR's
+ *    tools only (ADR 0111, Consequences).
  *  - released: the version row exists with a DOI, the tag `v<version>` names the commit the
  *    caller reports, and that commit contains the merge. In the same batch, and only when the
  *    edge applies: the version's lineage when the caller verified the tagged tree (N.0.0 only,
  *    decision 4), and the dataset's hed, channel-montage, data and availability stamps are
  *    re-armed (decision 2), so each sweep reads the new version again.
- *  - a claim is released only when the caller says the merge was not sent or was refused, and
- *    GitHub says the pull request is not merged: an unknown outcome keeps the claim, so a lost
- *    answer is resolved from GitHub and never repeated blind.
+ *  - a claim is released only when the caller says the merge was not sent or was refused, the
+ *    claim is at least five minutes old, and GitHub says the pull request is not merged: an
+ *    unknown outcome keeps the claim, so a lost answer is resolved from GitHub and never repeated
+ *    blind. That is one read and an age, not proof: a merge that lands between the read and the
+ *    release is recorded later, by `merged`, as one no tool held a claim for.
+ *
+ * A retried `merged` or `released` that finds its fact already recorded, for the same commit,
+ * answers with the stored row (`replayed`), so a caller whose answer was lost can ask again; a
+ * different commit is refused.
  *
  * Every write here goes through the transition's own checks and compare-and-set
  * (`prepareTransition`, `commitTransition`), and nothing here mails anyone.
@@ -34,15 +41,18 @@ import {
 } from "../../../shared/repull-state.js";
 import { AUDIT_IF_PREVIOUS_CHANGED_SQL, auditLogParams } from "../db/audit-log.js";
 import type { Bindings } from "../types/bindings.js";
-import { getDatasetsTokenWithRefresher } from "./github-auth.js";
-import { GITHUB_API, ORG_NAME, ghHeaders } from "./github/shared.js";
-import { githubFetchWithRetry } from "./github/transport.js";
 import {
   AVAILABILITY_REPORT_AT_PATH,
   CHANNEL_MONTAGE_CHECKED_AT_PATH,
   DATA_CHECKED_AT_PATH,
   HED_CHECKED_AT_PATH,
 } from "./sweep-stamps.js";
+import {
+  githubRead,
+  isObject,
+  readRecordedPullRequest,
+  unreadable,
+} from "./upstream-repull-github.js";
 import {
   LINEAGE_WRITE_SQL,
   type RepullRefusal,
@@ -53,8 +63,8 @@ import {
   prepareTransition,
 } from "./upstream-repull.js";
 
-/** How long one GitHub read may take, so an administrator's request is answered. */
-export const VERIFIED_READ_TIMEOUT_MS = 10_000;
+/** How old a claim to merge must be before it may be released: a merge sent just now may still land. */
+export const CLAIM_RELEASE_MIN_AGE_MINUTES = 5;
 
 // ----------------------------------------------------------------------------
 // SQL
@@ -90,6 +100,11 @@ export const STAMPS_REARM_SQL = `UPDATE datasets
 export const RELEASED_VERSION_SQL = `SELECT 1 AS minted FROM dataset_versions
   WHERE dataset_id = ? AND version IN (?, 'v' || ?) AND doi IS NOT NULL AND doi <> '' LIMIT 1`;
 
+/** Whether a claim's Worker-stamped time is old enough to release (`?` id). Column from a constant. */
+const claimOldEnoughSql = (claimedAt: string) =>
+  `SELECT CASE WHEN ${claimedAt} <= datetime('now', '-${CLAIM_RELEASE_MIN_AGE_MINUTES} minutes') THEN 1 ELSE 0 END AS old
+     FROM upstream_repulls WHERE id = ?`;
+
 // ----------------------------------------------------------------------------
 // Request bodies
 // ----------------------------------------------------------------------------
@@ -117,123 +132,16 @@ export const releasedSchema = z
   .strict();
 
 // ----------------------------------------------------------------------------
-// GitHub reads
-// ----------------------------------------------------------------------------
-
-type Read = { ok: true; status: number; body: unknown } | { ok: false; refusal: RepullRefusal };
-
-function unreadable(what: string, why: string): RepullRefusal {
-  return {
-    status: 502,
-    code: "github-unreadable",
-    message: `GitHub could not be read (${what}: ${why}), so nothing was recorded.`,
-  };
-}
-
-/** One GET against the dataset's repository. A 404 or 422 is an answer; every other failure is a refusal. */
-async function githubRead(env: Bindings, datasetId: string, path: string): Promise<Read> {
-  let res: Response;
-  try {
-    const { token, refresh } = await getDatasetsTokenWithRefresher(env);
-    res = await githubFetchWithRetry(
-      `${GITHUB_API()}/repos/${ORG_NAME}/${datasetId}${path}`,
-      { headers: ghHeaders(token), signal: AbortSignal.timeout(VERIFIED_READ_TIMEOUT_MS) },
-      { kind: "interactive", maxAttempts: 2, refreshTokenOn401: refresh },
-    );
-  } catch (err) {
-    const why = err instanceof Error ? err.name : "error";
-    console.error(`[upstream-repull] GitHub read of ${datasetId}${path} failed (${why})`);
-    return { ok: false, refusal: unreadable(path, "no answer") };
-  }
-  if (res.status === 404 || res.status === 422) return { ok: true, status: res.status, body: null };
-  if (!res.ok) {
-    console.error(`[upstream-repull] GitHub answered HTTP ${res.status} for ${datasetId}${path}`);
-    return { ok: false, refusal: unreadable(path, `HTTP ${res.status}`) };
-  }
-  const body = (await res.json().catch(() => null)) as unknown;
-  if (typeof body !== "object" || body === null || Array.isArray(body)) {
-    return { ok: false, refusal: unreadable(path, "an answer that is not an object") };
-  }
-  return { ok: true, status: res.status, body };
-}
-
-interface PullRequestFacts {
-  merged: boolean;
-  mergeCommitSha: string | null;
-  headSha: string;
-  headRef: string;
-  baseRef: string;
-}
-
-const isObject = (x: unknown): x is Record<string, unknown> =>
-  typeof x === "object" && x !== null && !Array.isArray(x);
-
-/** The fields of GitHub's pull request this reads, each checked for its shape; null when one is off. */
-function pullRequestFacts(body: unknown): PullRequestFacts | null {
-  if (!isObject(body) || !isObject(body.head) || !isObject(body.base)) return null;
-  const { merged, merge_commit_sha: mergeCommitSha } = body;
-  const headSha = body.head.sha;
-  const headRef = body.head.ref;
-  const baseRef = body.base.ref;
-  if (typeof merged !== "boolean") return null;
-  if (typeof headSha !== "string" || !SHA_RE.test(headSha)) return null;
-  if (typeof headRef !== "string" || typeof baseRef !== "string") return null;
-  return {
-    merged,
-    mergeCommitSha:
-      typeof mergeCommitSha === "string" && SHA_RE.test(mergeCommitSha) ? mergeCommitSha : null,
-    headSha,
-    headRef,
-    baseRef,
-  };
-}
-
-/** The recorded pull request, read from GitHub, and checked to be the one the row names. */
-async function readRecordedPullRequest(
-  env: Bindings,
-  row: RepullRow,
-  pr: RepullPullRequest,
-): Promise<{ ok: true; facts: PullRequestFacts } | { ok: false; refusal: RepullRefusal }> {
-  const cols = PULL_REQUEST_COLUMNS[pr];
-  const number = row[cols.number];
-  const read = await githubRead(env, row.dataset_id, `/pulls/${number}`);
-  if (!read.ok) return read;
-  if (read.status !== 200) {
-    return {
-      ok: false,
-      refusal: {
-        status: 409,
-        code: "pull-request-missing",
-        message: `GitHub has no pull request #${number} on ${row.dataset_id} (or the Worker's token cannot see it).`,
-        row,
-      },
-    };
-  }
-  const facts = pullRequestFacts(read.body);
-  if (!facts) return { ok: false, refusal: unreadable(`pull request #${number}`, "its shape") };
-  if (facts.headRef !== row[cols.branch] || facts.baseRef !== "main") {
-    return {
-      ok: false,
-      refusal: {
-        status: 409,
-        code: "pull-request-mismatch",
-        message: `Pull request #${number} is ${facts.headRef} into ${facts.baseRef}, not the recorded ${row[cols.branch]} into main.`,
-        row,
-      },
-    };
-  }
-  return { ok: true, facts };
-}
-
-// ----------------------------------------------------------------------------
 // The claim, released
 // ----------------------------------------------------------------------------
 
 /**
  * Clear a claim to merge that was never sent, or that GitHub refused, so its unit of the day's cap
  * is free again. Only while the row is still at its gates-clear status with the claim naming
- * `sha`, and only when GitHub says the pull request is not merged: a merged one is recorded with
- * `merged`, and a claim whose outcome is unknown is never released.
+ * `sha`, only once the claim is {@link CLAIM_RELEASE_MIN_AGE_MINUTES} minutes old by the Worker's
+ * own stamp, and only when GitHub says the pull request is not merged: a merged one is recorded
+ * with `merged`, and a claim whose outcome is unknown is never released. The age and the one read
+ * are a guard, not proof that no merge is in flight.
  */
 export async function releaseMergeClaim(
   env: Bindings,
@@ -263,6 +171,15 @@ export async function releaseMergeClaim(
       row,
     };
   }
+  const age = await db.prepare(claimOldEnoughSql(cols.claimedAt)).bind(id).first<{ old: number }>();
+  if (age?.old !== 1) {
+    return {
+      status: 409,
+      code: "claim-too-recent",
+      message: `The claim was made less than ${CLAIM_RELEASE_MIN_AGE_MINUTES} minutes ago; a merge sent just now may still land, so it is released only once it is older.`,
+      row,
+    };
+  }
   const read = await readRecordedPullRequest(env, row, body.pr);
   if (!read.ok) return read.refusal;
   if (read.facts.merged) {
@@ -281,7 +198,8 @@ export async function releaseMergeClaim(
             SET ${cols.claimedAt} = NULL, ${cols.claimSha} = NULL,
                 revision = revision + 1, updated_at = datetime('now')
           WHERE id = ? AND status = ? AND revision = ? AND ${cols.claimSha} = ?
-            AND ${cols.mergeSha} IS NULL`,
+            AND ${cols.mergeSha} IS NULL
+            AND ${cols.claimedAt} <= datetime('now', '-${CLAIM_RELEASE_MIN_AGE_MINUTES} minutes')`,
       )
       .bind(id, row.status, row.revision, body.sha),
     db.prepare(AUDIT_IF_PREVIOUS_CHANGED_SQL).bind(
@@ -321,6 +239,8 @@ export interface MergedResult {
   row: RepullRow;
   merged_outside_tool: boolean;
   merged_unscreened_head: boolean;
+  /** The merge was already recorded with this merge commit; nothing was written. */
+  replayed: boolean;
 }
 
 /**
@@ -339,7 +259,8 @@ export async function recordRepullMerged(
   const fence = envFenceRefusal(env, row.dataset_id);
   if (fence) return fence;
   const cols = PULL_REQUEST_COLUMNS[body.pr];
-  if (row.status !== cols.gatesClear) {
+  const recorded = row[cols.mergeSha];
+  if (row.status !== cols.gatesClear && recorded === null) {
     return {
       status: 409,
       code: "bad-transition",
@@ -350,6 +271,23 @@ export async function recordRepullMerged(
   const read = await readRecordedPullRequest(env, row, body.pr);
   if (!read.ok) return read.refusal;
   const { facts } = read;
+  if (recorded !== null) {
+    // A retry after a lost answer: the stored merge stands when GitHub names the same commit.
+    if (facts.merged && facts.mergeCommitSha === recorded) {
+      return {
+        row,
+        merged_outside_tool: (row.counts.merged_outside_tool ?? 0) > 0,
+        merged_unscreened_head: (row.counts.merged_unscreened_head ?? 0) > 0,
+        replayed: true,
+      };
+    }
+    return {
+      status: 409,
+      code: "already-merged",
+      message: `Re-pull #${id} already records the merge ${recorded.slice(0, 12)}, and GitHub does not name that commit now.`,
+      row,
+    };
+  }
   if (!facts.merged) {
     return {
       status: 409,
@@ -361,8 +299,9 @@ export async function recordRepullMerged(
   if (facts.mergeCommitSha === null) {
     return unreadable(`pull request #${row[cols.number]}`, "a merge with no merge commit");
   }
-  const claimSha = row[cols.claimSha];
-  const outsideTool = claimSha === null || facts.headSha !== claimSha;
+  // Two facts, counted apart: no NEMAR tool held a claim, and the merged head is not the screened
+  // one. A claim that is held means a tool sent (or was about to send) the merge.
+  const outsideTool = row[cols.claimSha] === null;
   const unscreenedHead = facts.headSha !== row[cols.gates];
   const counts: Record<string, number> = {};
   if (outsideTool) counts.merged_outside_tool = 1;
@@ -393,13 +332,14 @@ export async function recordRepullMerged(
   if (isRefusal(done)) return done;
   if (outsideTool || unscreenedHead) {
     console.warn(
-      `[upstream-repull] ${row.dataset_id} re-pull ${id} ${body.pr}: merged${outsideTool ? " outside a NEMAR tool" : ""}${unscreenedHead ? " at a head other than the screened one" : ""}`,
+      `[upstream-repull] ${row.dataset_id} re-pull ${id} ${body.pr}: merged${outsideTool ? " with no claim held" : ""}${unscreenedHead ? " at a head other than the screened one" : ""}`,
     );
   }
   return {
     row: done.row,
     merged_outside_tool: outsideTool,
     merged_unscreened_head: unscreenedHead,
+    replayed: false,
   };
 }
 
@@ -411,8 +351,14 @@ export interface ReleasedResult {
   row: RepullRow;
   /** Version rows the lineage write upgraded: 0 unless N.0.0's tagged tree was verified. */
   lineage_rows: number;
-  /** 1 when the dataset's four sweep stamps were re-armed, 0 when it had none to remove. */
+  /**
+   * 1 when the statement that re-arms the dataset's four sweep stamps ran on its row (it reports a
+   * change even when none of the four was there to remove); 0 only when the dataset has no stamps
+   * object at all.
+   */
   stamps_rearmed: number;
+  /** The release was already recorded with this tag commit; nothing was written. */
+  replayed: boolean;
 }
 
 /**
@@ -433,6 +379,19 @@ export async function recordRepullReleased(
   const fence = envFenceRefusal(env, row.dataset_id);
   if (fence) return fence;
   const cols = PULL_REQUEST_COLUMNS[body.pr];
+  const recorded = row[cols.tagSha];
+  if (recorded !== null) {
+    // A retry after a lost answer: the stored release stands for the same tag commit.
+    if (recorded === body.tag_sha) {
+      return { row, lineage_rows: 0, stamps_rearmed: 0, replayed: true };
+    }
+    return {
+      status: 409,
+      code: "already-released",
+      message: `Re-pull #${id} already records the release at ${recorded.slice(0, 12)}, not ${body.tag_sha.slice(0, 12)}.`,
+      row,
+    };
+  }
   if (row.status !== cols.merged) {
     return {
       status: 409,
@@ -456,9 +415,15 @@ export async function recordRepullReleased(
     };
   }
   const tag = `v${version}`;
-  const tagRead = await githubRead(env, row.dataset_id, `/commits/tags/${encodeURIComponent(tag)}`);
+  // The commit the tag names, as its bare id: an annotated tag is peeled to its commit.
+  const tagRead = await githubRead(
+    env,
+    row.dataset_id,
+    `/commits/tags/${encodeURIComponent(tag)}`,
+    "application/vnd.github.sha",
+  );
   if (!tagRead.ok) return tagRead.refusal;
-  const tagged = isObject(tagRead.body) ? tagRead.body.sha : null;
+  const tagged = tagRead.text;
   if (tagRead.status !== 200 || typeof tagged !== "string" || !SHA_RE.test(tagged)) {
     return {
       status: 409,
@@ -477,7 +442,16 @@ export async function recordRepullReleased(
   }
   const compare = await githubRead(env, row.dataset_id, `/compare/${mergeSha}...${tagged}`);
   if (!compare.ok) return compare.refusal;
+  if (compare.status !== 200) {
+    return {
+      status: 409,
+      code: "compare-unresolved",
+      message: "GitHub could not compare the tag with the merge.",
+      row,
+    };
+  }
   const relation = isObject(compare.body) ? compare.body.status : null;
+  // `diverged` and `behind` say the tag does not contain the merge; anything else is not an answer.
   if (relation !== "identical" && relation !== "ahead") {
     return {
       status: 409,
@@ -513,5 +487,6 @@ export async function recordRepullReleased(
     row: done.row,
     lineage_rows: lineage ? (done.results[0]?.meta?.changes ?? 0) : 0,
     stamps_rearmed: done.results[lineage ? 1 : 0]?.meta?.changes ?? 0,
+    replayed: false,
   };
 }

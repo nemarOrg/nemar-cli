@@ -26,7 +26,6 @@
 
 import type { Database } from "bun:sqlite";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
-import type { Server } from "bun";
 import { Hono } from "hono";
 import { parseScreenReport } from "../../shared/identifier-screen-report";
 import type { RepullStatus } from "../../shared/repull-state";
@@ -46,6 +45,11 @@ import { hashApiKey } from "../src/services/token";
 import { REPULL_SCREEN_CALLBACK_PATH } from "../src/services/upstream-repull-screen";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
+import {
+  type Dispatch,
+  type RepullGitHub,
+  startRepullGitHub,
+} from "./helpers/repull-github-standin";
 import { type Row, rowAt } from "./helpers/repull-rows";
 import { type CapturedEmail, withFakeResend } from "./helpers/resend";
 
@@ -60,21 +64,9 @@ const DS = "on099999";
 // biome-ignore lint/suspicious/noExplicitAny: a response body read field by field in assertions
 type Json = Record<string, any>;
 
-interface Dispatch {
-  event_type: string;
-  client_payload: {
-    dataset_id: string;
-    ref: string;
-    request_id: number;
-    callback_token: string;
-    callback_url: string;
-  };
-}
-
-let server: Server;
-let dispatches: Dispatch[] = [];
-let githubRequests: string[] = [];
-let dispatchStatus = 204;
+// GitHub: the dispatch, and the live pull request the gates read, open at HEAD unless a test
+// says otherwise.
+let gh: RepullGitHub;
 let db: Database;
 let app: Hono<{ Bindings: Bindings; Variables: Variables }>;
 let adminId = 0;
@@ -84,29 +76,10 @@ let releaseMail: (() => void) | null = null;
 let mailDone: Promise<void> | null = null;
 
 beforeAll(() => {
-  server = Bun.serve({
-    port: 0,
-    async fetch(req) {
-      const url = new URL(req.url);
-      githubRequests.push(`${req.method} ${url.pathname}`);
-      if (req.method === "POST" && url.pathname === "/repos/nemarDatasets/.github/dispatches") {
-        const body = (await req.json()) as Dispatch;
-        if (dispatchStatus < 300) dispatches.push(body);
-        return new Response(dispatchStatus < 300 ? null : '{"message":"refused"}', {
-          status: dispatchStatus,
-        });
-      }
-      return new Response("not found", { status: 404 });
-    },
-  });
-  (globalThis as { NEMAR_GITHUB_API_URL?: string }).NEMAR_GITHUB_API_URL =
-    `http://127.0.0.1:${server.port}`;
+  gh = startRepullGitHub({ defaultHead: HEAD });
 });
 
-afterAll(() => {
-  (globalThis as { NEMAR_GITHUB_API_URL?: string }).NEMAR_GITHUB_API_URL = undefined;
-  server.stop(true);
-});
+afterAll(() => gh.stop());
 
 beforeEach(async () => {
   db = freshDb();
@@ -138,9 +111,7 @@ afterEach(async () => {
   releaseMail = null;
   mailDone = null;
   expect(mail).toEqual([]);
-  dispatches = [];
-  githubRequests = [];
-  dispatchStatus = 204;
+  gh.reset();
 });
 
 async function seedAdmin(username: string, key: string): Promise<number> {
@@ -220,6 +191,7 @@ async function callback(
   path: string,
   token: string,
   body: Record<string, unknown>,
+  over: Partial<Bindings> = {},
 ): Promise<{ status: number; body: Json }> {
   // `path` is the full path, as the dispatch's callback_url names it.
   const res = await app.request(
@@ -229,7 +201,38 @@ async function callback(
       headers: { "Content-Type": "application/json", "X-Webhook-Token": token },
       body: JSON.stringify(body),
     },
-    env(),
+    env(over),
+  );
+  return { status: res.status, body: (await res.json()) as Json };
+}
+
+/** A D1 that runs `action` once, just before the Worker prepares the first statement `match` names. */
+function racingDb(match: (sql: string) => boolean, action: () => void): D1Database {
+  const real = realD1(db);
+  let done = false;
+  return {
+    ...real,
+    prepare(sql: string) {
+      if (!done && match(sql)) {
+        done = true;
+        action();
+      }
+      return real.prepare(sql);
+    },
+    batch: real.batch.bind(real),
+  } as unknown as D1Database;
+}
+
+/** The dispatch route, on a given D1. */
+async function dispatchOn(d1: D1Database, id: number, sha = HEAD) {
+  const res = await app.request(
+    `/admin/repulls/${id}/screen`,
+    {
+      method: "POST",
+      headers: { Authorization: `Bearer ${ADMIN_KEY}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ pr: "n0", sha }),
+    },
+    { ...env(), DB: d1 },
   );
   return { status: res.status, body: (await res.json()) as Json };
 }
@@ -266,7 +269,7 @@ const dispatch = (id: number, pr = "n0", sha = HEAD, o: Parameters<typeof call>[
 async function screenWith(id: number, report: Record<string, unknown>, pr = "n0", sha = HEAD) {
   const sent = await dispatch(id, pr, sha);
   expect(sent.status).toBe(202);
-  const d = dispatches.at(-1) as Dispatch;
+  const d = gh.dispatches.at(-1) as Dispatch;
   return callback(REPULL_SCREEN_CALLBACK_PATH, d.client_payload.callback_token, {
     dataset_id: DS,
     request_id: 0,
@@ -306,8 +309,8 @@ describe("the dispatch", () => {
       dispatched: true,
       screen: { pr: "n0", sha: HEAD, state: "pending", gate: "wait", waiting: true },
     });
-    expect(dispatches).toHaveLength(1);
-    const d = dispatches[0] as Dispatch;
+    expect(gh.dispatches).toHaveLength(1);
+    const d = gh.dispatches[0] as Dispatch;
     expect(d.event_type).toBe("run-identifier-screen");
     expect(d.client_payload).toMatchObject({
       dataset_id: DS,
@@ -329,7 +332,7 @@ describe("the dispatch", () => {
     seedMirror(DS);
     const id = seedRepull("pr_open");
     await dispatch(id);
-    const token = (dispatches[0] as Dispatch).client_payload.callback_token;
+    const token = (gh.dispatches[0] as Dispatch).client_payload.callback_token;
     const nonce = screens(id)[0]?.nonce as string;
     const payload = { datasetId: DS, repullId: id, pr: "n0", sha: HEAD, nonce };
     expect(await verifyIdentifierRepullCallbackToken(token, payload, SECRET)).toBe(true);
@@ -379,7 +382,7 @@ describe("the dispatch", () => {
     // N.0.1's screen waits for N.0.1's pull request.
     const patch = await dispatch(open, "n1", HEAD);
     expect([patch.status, patch.body.code]).toEqual([409, "not-screenable"]);
-    expect(dispatches).toEqual([]);
+    expect(gh.dispatches).toEqual([]);
     expect(screens(open)).toEqual([]);
   });
 
@@ -397,7 +400,7 @@ describe("the dispatch", () => {
     const exempt = await dispatch(xx, "n0", HEAD, { env: { ENVIRONMENT: "test" } });
     expect(exempt.status).toBe(200);
     expect(exempt.body).toMatchObject({ exempt: true, dispatched: false });
-    expect(githubRequests).toEqual([]);
+    expect(gh.requests).toEqual([]);
     expect(db.query("SELECT COUNT(*) AS n FROM upstream_repull_screens").get()).toEqual({ n: 0 });
   });
 
@@ -414,18 +417,18 @@ describe("the dispatch", () => {
       [DS],
     );
     expect((await dispatch(id)).body.code).toBe("import-in-flight");
-    expect(dispatches).toEqual([]);
+    expect(gh.dispatches).toEqual([]);
   });
 
   test("GitHub refusing the dispatch records an error, and the screen can then be sent again", async () => {
     seedMirror(DS);
     const id = seedRepull("pr_open");
-    dispatchStatus = 422;
+    gh.dispatchStatus = 422;
     const failed = await dispatch(id);
     expect([failed.status, failed.body.code]).toEqual([502, "dispatch-failed"]);
     expect(screens(id)[0]).toMatchObject({ status: "error", nonce: null });
     expect(failed.body.screen).toMatchObject({ state: "error", gate: "rerun" });
-    dispatchStatus = 204;
+    gh.dispatchStatus = 204;
     const again = await dispatch(id);
     expect(again.status).toBe(202);
     expect(screens(id)).toHaveLength(1);
@@ -437,7 +440,7 @@ describe("the dispatch", () => {
     const id = seedRepull("pr_open");
     const res = await dispatch(id, "n0", HEAD, { env: { PRESCREEN_CALLBACK_SECRET: undefined } });
     expect([res.status, res.body.code]).toEqual([503, "dispatch-unconfigured"]);
-    expect(githubRequests).toEqual([]);
+    expect(gh.requests).toEqual([]);
     expect(screens(id)[0]).toMatchObject({ status: "error", nonce: null });
   });
 
@@ -458,9 +461,9 @@ describe("the dispatch", () => {
     const read = await call("GET", `/repulls/${id}/screens`);
     expect(read.body.screens[0]).toMatchObject({ state: "unreported", gate: "rerun" });
     expect(screens(id)[0]?.status).toBe("pending");
-    const oldToken = (dispatches[0] as Dispatch).client_payload.callback_token;
+    const oldToken = (gh.dispatches[0] as Dispatch).client_payload.callback_token;
     expect((await dispatch(id)).status).toBe(202);
-    expect(dispatches).toHaveLength(2);
+    expect(gh.dispatches).toHaveLength(2);
     // The new dispatch replaced the nonce, so the earlier run can no longer answer.
     const late = await callback(REPULL_SCREEN_CALLBACK_PATH, oldToken, {
       dataset_id: DS,
@@ -469,7 +472,7 @@ describe("the dispatch", () => {
     });
     expect(late.status).toBe(401);
     // A verdict stands: no second dispatch.
-    const d = dispatches.at(-1) as Dispatch;
+    const d = gh.dispatches.at(-1) as Dispatch;
     await callback(REPULL_SCREEN_CALLBACK_PATH, d.client_payload.callback_token, {
       dataset_id: DS,
       request_id: 0,
@@ -477,15 +480,15 @@ describe("the dispatch", () => {
     });
     const verdict = await dispatch(id);
     expect([verdict.status, verdict.body.screen.gate]).toEqual([409, "clear"]);
-    expect(dispatches).toHaveLength(2);
+    expect(gh.dispatches).toHaveLength(2);
   });
 
   test("a screen whose verdict lands between the read and the claim is not dispatched again", async () => {
     seedMirror(DS);
     const id = seedRepull("pr_open");
-    dispatchStatus = 422;
+    gh.dispatchStatus = 422;
     await dispatch(id);
-    dispatchStatus = 204;
+    gh.dispatchStatus = 204;
     expect(screens(id)[0]?.status).toBe("error");
     // The read sees an error (run it again); a verdict is stored before the claim's statement.
     const report = JSON.stringify(parseScreenReport(scanReport(HEAD)));
@@ -513,8 +516,122 @@ describe("the dispatch", () => {
     );
     expect(res.status).toBe(409);
     expect(((await res.json()) as Json).code).toBe("screen-exists");
-    expect(dispatches).toEqual([]);
+    expect(gh.dispatches).toEqual([]);
     expect(screens(id)[0]?.status).toBe("clean");
+  });
+
+  test("a verdict that asks for a person is dispatched again until it is acknowledged; clear and blocking ones are not", async () => {
+    seedMirror(DS);
+    const id = seedRepull("pr_open");
+    for (const state of [
+      "review",
+      "unchecked",
+      "not-screened",
+      "clean-edf-only-others-unscreened",
+    ]) {
+      db.run("DELETE FROM upstream_repull_screens");
+      markScreen(id, state);
+      const res = await dispatch(id);
+      expect([state, res.status]).toEqual([state, 202]);
+      expect(screens(id)[0]).toMatchObject({ status: "pending", report: null });
+    }
+    for (const state of ["clean", "direct-identifiers"]) {
+      db.run("DELETE FROM upstream_repull_screens");
+      markScreen(id, state);
+      const res = await dispatch(id);
+      expect([state, res.status, res.body.code]).toEqual([state, 409, "screen-exists"]);
+    }
+    db.run("DELETE FROM upstream_repull_screens");
+    markScreen(id, "review");
+    db.run(
+      "UPDATE upstream_repull_screens SET ack_by = ?, ack_reason = 'read it', ack_at = datetime('now')",
+      [adminId],
+    );
+    const acked = await dispatch(id);
+    expect([acked.status, acked.body.code]).toEqual([409, "screen-exists"]);
+    expect(gh.dispatches).toHaveLength(4);
+  });
+
+  test("an acknowledgment recorded between the read and the claim keeps the verdict", async () => {
+    seedMirror(DS);
+    const id = seedRepull("pr_open");
+    markScreen(id, "review");
+    const res = await dispatchOn(
+      racingDb(
+        (sql) => sql.includes("SET status = 'pending', nonce = ?"),
+        () =>
+          db.run(
+            "UPDATE upstream_repull_screens SET ack_by = ?, ack_reason = 'read it', ack_at = datetime('now')",
+            [adminId],
+          ),
+      ),
+      id,
+    );
+    expect([res.status, res.body.code]).toEqual([409, "screen-exists"]);
+    expect(screens(id)[0]).toMatchObject({ status: "review", ack_by: adminId });
+    expect(gh.dispatches).toEqual([]);
+  });
+
+  test("a run claimed by another dispatch between the read and the claim is not dispatched twice", async () => {
+    seedMirror(DS);
+    const id = seedRepull("pr_open");
+    gh.dispatchStatus = 422;
+    await dispatch(id);
+    gh.dispatchStatus = 204;
+    const res = await dispatchOn(
+      racingDb(
+        (sql) => sql.includes("SET status = 'pending', nonce = ?"),
+        () =>
+          db.run(
+            "UPDATE upstream_repull_screens SET status = 'pending', report = NULL, reported_at = NULL, nonce = 'theirs', dispatched_at = datetime('now')",
+          ),
+      ),
+      id,
+    );
+    expect([res.status, res.body.code]).toEqual([409, "screen-exists"]);
+    expect(screens(id)[0]?.nonce).toBe("theirs");
+    expect(gh.dispatches).toEqual([]);
+  });
+
+  test("a head that moves between the read and the claim is not screened: a new screen, a rerun and the freed run", async () => {
+    seedMirror(DS);
+    const moveHead = (sha: string) => () =>
+      db.run("UPDATE upstream_repulls SET head_sha = ?, revision = revision + 1", [sha]);
+    // A new screen.
+    const fresh = seedRepull("pr_open");
+    const inserted = await dispatchOn(
+      racingDb((sql) => sql.startsWith("INSERT INTO upstream_repull_screens"), moveHead(NEXT)),
+      fresh,
+    );
+    expect([inserted.status, inserted.body.code]).toEqual([409, "stale-status"]);
+    expect(screens(fresh)).toEqual([]);
+    // A rerun of an error.
+    db.run("DELETE FROM upstream_repulls");
+    const rerun = seedRepull("pr_open");
+    gh.dispatchStatus = 422;
+    await dispatch(rerun);
+    gh.dispatchStatus = 204;
+    const again = await dispatchOn(
+      racingDb((sql) => sql.includes("SET status = 'pending', nonce = ?"), moveHead(NEXT)),
+      rerun,
+    );
+    expect([again.status, again.body.code]).toEqual([409, "stale-status"]);
+    expect(screens(rerun)[0]?.status).toBe("error");
+    // The earlier head's run keeps its nonce when the new head's claim does not apply.
+    db.run("DELETE FROM upstream_repull_screens");
+    db.run("DELETE FROM upstream_repulls");
+    const freed = seedRepull("pr_open");
+    expect((await dispatch(freed)).status).toBe(202);
+    db.run("UPDATE upstream_repulls SET head_sha = ?", [NEXT]);
+    const third = "fedcba9876543210fedcba9876543210fedcba98";
+    const moved = await dispatchOn(
+      racingDb((sql) => sql.startsWith("INSERT INTO upstream_repull_screens"), moveHead(third)),
+      freed,
+      NEXT,
+    );
+    expect([moved.status, moved.body.code]).toEqual([409, "stale-status"]);
+    expect(screens(freed).map((r) => [r.sha, typeof r.nonce])).toEqual([[HEAD, "string"]]);
+    expect(gh.dispatches).toHaveLength(1);
   });
 
   test("a report that arrives after the deadline, before another dispatch, still lands", async () => {
@@ -524,7 +641,7 @@ describe("the dispatch", () => {
     db.run(
       `UPDATE upstream_repull_screens SET dispatched_at = datetime('now', '-${SCREEN_REPORT_DEADLINE_MINUTES + 30} minutes')`,
     );
-    const d = dispatches[0] as Dispatch;
+    const d = gh.dispatches[0] as Dispatch;
     const res = await callback(REPULL_SCREEN_CALLBACK_PATH, d.client_payload.callback_token, {
       dataset_id: DS,
       request_id: 0,
@@ -538,7 +655,7 @@ describe("the dispatch", () => {
     seedMirror(DS);
     const id = seedRepull("pr_open");
     await dispatch(id);
-    const oldToken = (dispatches[0] as Dispatch).client_payload.callback_token;
+    const oldToken = (gh.dispatches[0] as Dispatch).client_payload.callback_token;
     // The head moved (enrichment), recorded by the pr_open self-edge.
     const moved = await move(id, {
       from: "pr_open",
@@ -566,6 +683,21 @@ describe("the dispatch", () => {
 // ----------------------------------------------------------------------------
 
 describe("the callback", () => {
+  test("a Worker without the callback secret refuses every report", async () => {
+    seedMirror(DS);
+    const id = seedRepull("pr_open");
+    await dispatch(id);
+    const token = (gh.dispatches[0] as Dispatch).client_payload.callback_token;
+    const res = await callback(
+      REPULL_SCREEN_CALLBACK_PATH,
+      token,
+      { dataset_id: DS, request_id: 0, report: scanReport(HEAD) },
+      { PRESCREEN_CALLBACK_SECRET: undefined },
+    );
+    expect(res.status).toBe(500);
+    expect(screens(id)[0]?.status).toBe("pending");
+  });
+
   test("stores the verdict once: a replay is refused", async () => {
     seedMirror(DS);
     const id = seedRepull("pr_open");
@@ -575,7 +707,7 @@ describe("the callback", () => {
     expect(stored.body).toEqual({ ok: true, dataset_id: DS });
     expect(screens(id)[0]).toMatchObject({ status: "clean", nonce: null });
     expect(typeof screens(id)[0]?.reported_at).toBe("string");
-    const token = (dispatches[0] as Dispatch).client_payload.callback_token;
+    const token = (gh.dispatches[0] as Dispatch).client_payload.callback_token;
     const replay = await callback(REPULL_SCREEN_CALLBACK_PATH, token, {
       dataset_id: DS,
       request_id: 0,
@@ -652,7 +784,7 @@ describe("the callback", () => {
     seedMirror(DS);
     const id = seedRepull("pr_open");
     await dispatch(id);
-    const token = (dispatches[0] as Dispatch).client_payload.callback_token;
+    const token = (gh.dispatches[0] as Dispatch).client_payload.callback_token;
     const bad = await callback(REPULL_SCREEN_CALLBACK_PATH, token, {
       dataset_id: DS,
       request_id: 7,
@@ -710,6 +842,64 @@ describe("the acknowledgment", () => {
     expect(screens(id)[0]?.ack_at).toBeNull();
   });
 
+  test("is recorded once: a second administrator is refused, and the first reason stands", async () => {
+    seedMirror(DS);
+    const id = seedRepull("pr_open");
+    markScreen(id, "review");
+    expect((await ack(id)).status).toBe(200);
+    const second = await call(
+      "POST",
+      `/repulls/${id}/screen/acknowledge`,
+      { pr: "n0", sha: HEAD, reason: "Another reason, from another administrator." },
+      { key: OTHER_KEY },
+    );
+    expect([second.status, second.body.code]).toEqual([409, "already-acknowledged"]);
+    expect(screens(id)[0]).toMatchObject({ ack_by: adminId });
+    expect(screens(id)[0]?.ack_reason).toContain("site code");
+  });
+
+  test("an acknowledgment recorded between the read and the write is not replaced", async () => {
+    seedMirror(DS);
+    const id = seedRepull("pr_open");
+    markScreen(id, "review");
+    const res = await app.request(
+      `/admin/repulls/${id}/screen/acknowledge`,
+      {
+        method: "POST",
+        headers: { Authorization: `Bearer ${ADMIN_KEY}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ pr: "n0", sha: HEAD, reason: "My reason, long enough." }),
+      },
+      {
+        ...env(),
+        DB: racingDb(
+          (sql) => sql.startsWith("UPDATE upstream_repull_screens\n  SET ack_by"),
+          () =>
+            db.run(
+              "UPDATE upstream_repull_screens SET ack_by = ?, ack_reason = 'theirs', ack_at = datetime('now')",
+              [otherId],
+            ),
+        ),
+      },
+    );
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as Json).code).toBe("already-acknowledged");
+    expect(screens(id)[0]).toMatchObject({ ack_by: otherId, ack_reason: "theirs" });
+  });
+
+  test("outside production an on dataset's screen is not acknowledged", async () => {
+    seedMirror(DS);
+    const id = seedRepull("pr_open");
+    markScreen(id, "review");
+    const res = await call(
+      "POST",
+      `/repulls/${id}/screen/acknowledge`,
+      { pr: "n0", sha: HEAD, reason: "A reason long enough." },
+      { env: { ENVIRONMENT: "test" } },
+    );
+    expect([res.status, res.body.code]).toEqual([403, "env-fence"]);
+    expect(screens(id)[0]?.ack_at).toBeNull();
+  });
+
   test("needs a reason of the publication path's length, and is not taken on an xx dataset", async () => {
     seedMirror(DS);
     const id = seedRepull("pr_open");
@@ -757,9 +947,9 @@ describe("the gates-clear edges read the screen", () => {
     ] as const) {
       db.run("DELETE FROM upstream_repull_screens");
       if (state === "error") {
-        dispatchStatus = 422;
+        gh.dispatchStatus = 422;
         await dispatch(id);
-        dispatchStatus = 204;
+        gh.dispatchStatus = 204;
       } else {
         markScreen(id, state);
       }
@@ -870,6 +1060,7 @@ describe("the gates-clear edges read the screen", () => {
   test("N.0.1 is screened and gated the same way", async () => {
     seedMirror(DS);
     const id = seedRepull("patch_synthesized", { patch_head_sha: NEXT });
+    gh.pulls[`${DS}#8`] = { head: { sha: NEXT, ref: "release/v2.0.1" } };
     expect((await screenWith(id, scanReport(NEXT), "n1", NEXT)).status).toBe(200);
     expect(screens(id)[0]).toMatchObject({ pr: "n1", sha: NEXT, status: "clean" });
     const res = await move(id, {

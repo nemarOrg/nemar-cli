@@ -1,22 +1,28 @@
 /**
  * The daily merge cap, the claim to merge, and the facts only GitHub and the version row can state
  * (epic #1046 phase 6, #1912; ADR 0111, decisions 2, 3, 4 and 6), through their real entry points:
- * the transition route's claim edge, `POST /admin/repulls/:id/merge-claim/release`, `.../merged`
- * and `.../released`.
+ * the transition route's gates and claim edges, `POST /admin/repulls/:id/merge-claim/release`,
+ * `.../merged` and `.../released`.
  *
  * Real engine only: bun:sqlite behind realD1 with every migration applied, the real auth and admin
- * middleware, the real routes and services, and a `Bun.serve()` stand-in for api.github.com
- * (NEMAR_GITHUB_API_URL) that answers the three reads the Worker makes (a pull request, a tag's
- * commit, a comparison) and records each request. The cap's UTC day is D1's own clock, so
- * "yesterday" is a claim seeded with yesterday's time, never a mocked clock.
+ * middleware, the real routes and services, and the shared `Bun.serve()` stand-in for
+ * api.github.com (`helpers/repull-github-standin.ts`) that answers the reads the Worker makes (the
+ * live pull request, a tag's commit, a comparison) and records each request. The cap's UTC day is
+ * D1's own clock, so the day's edges are claims seeded at times computed by SQLite, never a mocked
+ * clock. Writes that race are staged by running the competing write just before the Worker
+ * prepares its own UPDATE, because the D1 stand-in runs statements one at a time.
  *
  * The properties, each with a test that fails when its line is changed:
  *  - every claim, N.0.0's and N.0.1's alike, takes one unit of the day's cap; a refusal writes
- *    nothing; two claims racing for the last unit cannot both win; an unreadable cap reads 0;
- *  - a claim is released only when GitHub says the pull request did not merge, and never for an
- *    unknown outcome;
- *  - `merged` is written from GitHub's answer, and a merge with no claim, or at another head, is
- *    recorded and counted, never hidden;
+ *    nothing; a claim landing between the read and the write takes the last unit; an unreadable
+ *    cap reads 0;
+ *  - the gates and the claim need GitHub's live head to be the sha they name, on an open pull
+ *    request; the claim's statement also holds the screen, the cap and two dataset fences;
+ *  - a claim is released only after five minutes, only when GitHub says the pull request did not
+ *    merge, and never for an unknown outcome;
+ *  - `merged` is written from GitHub's answer; a merge with no claim held and one at a head other
+ *    than the screened one are each counted on their own, never hidden; a retry is answered from
+ *    the stored row;
  *  - `released` needs the version row with a DOI and a tag on a commit that contains the merge;
  *    it writes N.0.0's lineage only when the caller verified the tree, and re-arms the four sweep
  *    stamps of that dataset only, in the same batch, and only when the transition applies.
@@ -24,12 +30,15 @@
 
 import type { Database } from "bun:sqlite";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
-import type { Server } from "bun";
 import { Hono } from "hono";
 import { parseScreenReport } from "../../shared/identifier-screen-report";
 import type { RepullStatus } from "../../shared/repull-state";
 import { adminMiddleware, authMiddleware } from "../src/middleware/auth";
 import { registerUpstreamRepullRoutes } from "../src/routes/admin/upstream-repulls";
+import {
+  __resetRateLimitStateForTests,
+  __seedRateLimitStateForTests,
+} from "../src/services/github/transport";
 import { hashApiKey } from "../src/services/token";
 import {
   REPULL_CAP_MAX,
@@ -39,35 +48,25 @@ import {
 } from "../src/services/upstream-repull";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
+import {
+  type PullAnswer,
+  type RepullGitHub,
+  STANDIN_MERGE_SHA,
+  startRepullGitHub,
+} from "./helpers/repull-github-standin";
 import { type Row, rowAt } from "./helpers/repull-rows";
 import { type CapturedEmail, withFakeResend } from "./helpers/resend";
 
 const ADMIN_KEY = "rpm-admin-key-0123456789abcdef0123456789abcdef012";
 const HEAD = "0123456789abcdef0123456789abcdef01234567";
 const OTHER = "89abcdef0123456789abcdef0123456789abcdef";
-const MERGE = "1111111111111111111111111111111111111111";
+const MERGE = STANDIN_MERGE_SHA;
 const TAG = "2222222222222222222222222222222222222222";
 
 // biome-ignore lint/suspicious/noExplicitAny: a response body read field by field in assertions
 type Json = Record<string, any>;
 
-interface PullAnswer {
-  status?: number;
-  merged?: boolean;
-  merge_commit_sha?: string | null;
-  head?: { sha: string; ref: string };
-  base?: { ref: string };
-}
-
-let server: Server;
-let requests: string[] = [];
-/** Answers keyed by `<dataset>#<number>`. */
-let pulls: Record<string, PullAnswer> = {};
-/** Tag commits keyed by `<dataset>@<tag>`; absent is a 404. */
-let tags: Record<string, string> = {};
-/** The comparison's status keyed by `<dataset>:<base>...<head>`; absent is `ahead`. */
-let compares: Record<string, string> = {};
-let githubDown = false;
+let gh: RepullGitHub;
 let db: Database;
 let app: Hono<{ Bindings: Bindings; Variables: Variables }>;
 let adminId = 0;
@@ -76,51 +75,10 @@ let releaseMail: (() => void) | null = null;
 let mailDone: Promise<void> | null = null;
 
 beforeAll(() => {
-  server = Bun.serve({
-    port: 0,
-    fetch(req) {
-      const url = new URL(req.url);
-      requests.push(`${req.method} ${url.pathname}`);
-      if (githubDown) return new Response("unavailable", { status: 503 });
-      const json = (body: unknown, status = 200) =>
-        new Response(JSON.stringify(body), {
-          status,
-          headers: { "Content-Type": "application/json" },
-        });
-      let m = /^\/repos\/nemarDatasets\/([a-z]{2}\d{6})\/pulls\/(\d+)$/.exec(url.pathname);
-      if (m) {
-        const a = pulls[`${m[1]}#${m[2]}`];
-        if (!a) return json({ message: "Not Found" }, 404);
-        if (a.status && a.status !== 200) return json({ message: "no" }, a.status);
-        return json({
-          number: Number(m[2]),
-          merged: a.merged ?? false,
-          merge_commit_sha: a.merge_commit_sha === undefined ? MERGE : a.merge_commit_sha,
-          head: a.head ?? { sha: HEAD, ref: "release/v2.0.0" },
-          base: a.base ?? { ref: "main" },
-        });
-      }
-      m = /^\/repos\/nemarDatasets\/([a-z]{2}\d{6})\/commits\/tags\/(.+)$/.exec(url.pathname);
-      if (m) {
-        const sha = tags[`${m[1]}@${decodeURIComponent(m[2] as string)}`];
-        return sha ? json({ sha }) : json({ message: "No commit found" }, 422);
-      }
-      m =
-        /^\/repos\/nemarDatasets\/([a-z]{2}\d{6})\/compare\/([0-9a-f]{40})\.\.\.([0-9a-f]{40})$/.exec(
-          url.pathname,
-        );
-      if (m) return json({ status: compares[`${m[1]}:${m[2]}...${m[3]}`] ?? "ahead" });
-      return json({ message: "Not Found" }, 404);
-    },
-  });
-  (globalThis as { NEMAR_GITHUB_API_URL?: string }).NEMAR_GITHUB_API_URL =
-    `http://127.0.0.1:${server.port}`;
+  gh = startRepullGitHub({ defaultHead: HEAD });
 });
 
-afterAll(() => {
-  (globalThis as { NEMAR_GITHUB_API_URL?: string }).NEMAR_GITHUB_API_URL = undefined;
-  server.stop(true);
-});
+afterAll(() => gh.stop());
 
 beforeEach(async () => {
   db = freshDb();
@@ -155,11 +113,8 @@ afterEach(async () => {
   releaseMail?.();
   await mailDone;
   expect(mail).toEqual([]);
-  requests = [];
-  pulls = {};
-  tags = {};
-  compares = {};
-  githubDown = false;
+  gh.reset();
+  __resetRateLimitStateForTests();
 });
 
 function env(over: Partial<Bindings> = {}): Bindings {
@@ -173,17 +128,40 @@ function env(over: Partial<Bindings> = {}): Bindings {
   } as Bindings;
 }
 
-async function call(path: string, body: unknown, o: { env?: Partial<Bindings> } = {}) {
+async function call(
+  path: string,
+  body?: unknown,
+  o: { env?: Partial<Bindings>; db?: D1Database } = {},
+) {
   const res = await app.request(
     path,
-    {
-      method: "POST",
-      headers: { Authorization: `Bearer ${ADMIN_KEY}`, "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    },
-    env(o.env),
+    body === undefined
+      ? { headers: { Authorization: `Bearer ${ADMIN_KEY}` } }
+      : {
+          method: "POST",
+          headers: { Authorization: `Bearer ${ADMIN_KEY}`, "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        },
+    { ...env(o.env), ...(o.db ? { DB: o.db } : {}) },
   );
   return { status: res.status, body: (await res.json()) as Json };
+}
+
+/** A D1 that runs `action` once, just before the Worker prepares the statement starting `prefix`. */
+function racing(prefix: string, action: () => void): D1Database {
+  const real = realD1(db);
+  let done = false;
+  return {
+    ...real,
+    prepare(sql: string) {
+      if (!done && sql.startsWith(prefix)) {
+        done = true;
+        action();
+      }
+      return real.prepare(sql);
+    },
+    batch: real.batch.bind(real),
+  } as unknown as D1Database;
 }
 
 function seedMirror(id: string, o: { anonymous?: boolean; stamps?: Record<string, string> } = {}) {
@@ -252,18 +230,12 @@ function ready(datasetId = "on099999", status: RepullStatus = "gates_clear"): nu
   return id;
 }
 
-const claim = (id: number, o: { env?: Partial<Bindings> } = {}) =>
-  call(
-    `/repulls/${id}/transition`,
-    {
-      from: "gates_clear",
-      to: "gates_clear",
-      fields: { merge_claim_sha: HEAD },
-    },
-    o,
-  );
+const CLAIM_BODY = { from: "gates_clear", to: "gates_clear", fields: { merge_claim_sha: HEAD } };
 
-const patchClaim = (id: number, o: { env?: Partial<Bindings> } = {}) =>
+const claim = (id: number, o: Parameters<typeof call>[2] = {}) =>
+  call(`/repulls/${id}/transition`, CLAIM_BODY, o);
+
+const patchClaim = (id: number, o: Parameters<typeof call>[2] = {}) =>
   call(
     `/repulls/${id}/transition`,
     {
@@ -273,6 +245,15 @@ const patchClaim = (id: number, o: { env?: Partial<Bindings> } = {}) =>
     },
     o,
   );
+
+/** Put a claim on `id` at a time SQLite computes from `when` (a datetime() modifier list). */
+function claimAt(id: number, when: string, column = "merge_claimed_at") {
+  const sha = column === "merge_claimed_at" ? "merge_claim_sha" : "patch_merge_claim_sha";
+  db.run(`UPDATE upstream_repulls SET ${column} = datetime(${when}), ${sha} = ? WHERE id = ?`, [
+    HEAD,
+    id,
+  ]);
+}
 
 const rowOf = (id: number) =>
   db.query("SELECT * FROM upstream_repulls WHERE id = ?").get(id) as Row;
@@ -321,50 +302,62 @@ describe("REPULL_DAILY_MERGE_CAP", () => {
 // ----------------------------------------------------------------------------
 
 describe("the claim takes a unit of the day's cap", () => {
+  const capped = (n: string) => ({ env: { REPULL_DAILY_MERGE_CAP: n } });
+
   test("with a cap of 1 the second claim of the UTC day is refused, and writes nothing", async () => {
     const a = ready("on099999");
     const b = ready("on099998");
-    const capped = { env: { REPULL_DAILY_MERGE_CAP: "1" } };
-    expect((await claim(a, capped)).status).toBe(200);
+    expect((await claim(a, capped("1"))).status).toBe(200);
     const before = rowOf(b);
     const audits = auditCount();
-    const refused = await claim(b, capped);
+    const refused = await claim(b, capped("1"));
     expect([refused.status, refused.body.code]).toEqual([429, "merge-cap"]);
     expect(refused.body.merge_cap).toEqual({ value: 1, source: "set", used: 1 });
     expect(rowOf(b)).toEqual(before);
     expect(auditCount()).toBe(audits);
   });
 
-  test("yesterday's claims do not count", async () => {
-    const a = ready("on099999");
-    const b = ready("on099998");
-    expect((await claim(a, { env: { REPULL_DAILY_MERGE_CAP: "1" } })).status).toBe(200);
+  test("the day is the UTC day: a claim one second before midnight does not count, one at midnight does", async () => {
+    const earlier = ready("on099997");
+    const a = ready("on099998");
+    const b = ready("on099999");
+    claimAt(earlier, "'now', 'start of day', '-1 second'");
+    expect((await claim(a, capped("1"))).status).toBe(200);
     db.run(
-      "UPDATE upstream_repulls SET merge_claimed_at = datetime('now', '-1 day') WHERE id = ?",
+      "UPDATE upstream_repulls SET merge_claimed_at = NULL, merge_claim_sha = NULL WHERE id = ?",
       [a],
     );
-    expect((await claim(b, { env: { REPULL_DAILY_MERGE_CAP: "1" } })).status).toBe(200);
+    claimAt(earlier, "'now', 'start of day'");
+    expect((await claim(b, capped("1"))).body.code).toBe("merge-cap");
+  });
+
+  test("N.0.1's claims keep the same day", async () => {
+    const patch = ready("on099998", "patch_gates_clear");
+    const n0 = ready("on099999");
+    claimAt(patch, "'now', 'start of day', '-1 second'", "patch_merge_claimed_at");
+    expect((await claim(n0, capped("1"))).status).toBe(200);
+    db.run("UPDATE upstream_repulls SET merge_claimed_at = NULL, merge_claim_sha = NULL");
+    claimAt(patch, "'now', 'start of day'", "patch_merge_claimed_at");
+    expect((await claim(n0, capped("1"))).body.code).toBe("merge-cap");
   });
 
   test("an N.0.1 claim takes a unit too, and an N.0.0 claim takes N.0.1's", async () => {
     const patch = ready("on099998", "patch_gates_clear");
     const n0 = ready("on099999");
-    const capped = { env: { REPULL_DAILY_MERGE_CAP: "1" } };
-    expect((await patchClaim(patch, capped)).status).toBe(200);
-    expect((await claim(n0, capped)).body.code).toBe("merge-cap");
+    expect((await patchClaim(patch, capped("1"))).status).toBe(200);
+    expect((await claim(n0, capped("1"))).body.code).toBe("merge-cap");
     db.run(
       "UPDATE upstream_repulls SET patch_merge_claimed_at = NULL, patch_merge_claim_sha = NULL",
     );
-    expect((await claim(n0, capped)).status).toBe(200);
-    expect((await patchClaim(patch, capped)).body.code).toBe("merge-cap");
+    expect((await claim(n0, capped("1"))).status).toBe(200);
+    expect((await patchClaim(patch, capped("1"))).body.code).toBe("merge-cap");
   });
 
   test("the cap is the number of claims: two of two pass, the third does not", async () => {
     const ids = [ready("on099997"), ready("on099998"), ready("on099999")];
-    const capped = { env: { REPULL_DAILY_MERGE_CAP: "2" } };
-    expect((await claim(ids[0] as number, capped)).status).toBe(200);
-    expect((await claim(ids[1] as number, capped)).status).toBe(200);
-    const third = await claim(ids[2] as number, capped);
+    expect((await claim(ids[0] as number, capped("2"))).status).toBe(200);
+    expect((await claim(ids[1] as number, capped("2"))).status).toBe(200);
+    const third = await claim(ids[2] as number, capped("2"));
     expect([third.status, third.body.code, third.body.merge_cap.used]).toEqual([
       429,
       "merge-cap",
@@ -372,18 +365,18 @@ describe("the claim takes a unit of the day's cap", () => {
     ]);
   });
 
-  test("two claims racing for the last unit: exactly one wins", async () => {
+  test("a claim that lands between the read and the write takes the last unit", async () => {
     const used = ready("on099997");
-    const a = ready("on099998");
-    const b = ready("on099999");
-    const capped = { env: { REPULL_DAILY_MERGE_CAP: "2" } };
-    expect((await claim(used, capped)).status).toBe(200);
-    const results = await Promise.all([claim(a, capped), claim(b, capped)]);
-    expect(results.map((r) => r.status).sort()).toEqual([200, 429]);
-    const held = db
-      .query("SELECT COUNT(*) AS n FROM upstream_repulls WHERE merge_claimed_at IS NOT NULL")
-      .get() as Row;
-    expect(held.n).toBe(2);
+    const competing = ready("on099998");
+    const mine = ready("on099999");
+    expect((await claim(used, capped("2"))).status).toBe(200);
+    const res = await claim(mine, {
+      ...capped("2"),
+      db: racing("UPDATE upstream_repulls SET", () => claimAt(competing, "'now'")),
+    });
+    expect([res.status, res.body.code]).toEqual([429, "merge-cap"]);
+    expect(rowOf(mine).merge_claimed_at).toBeNull();
+    expect(rowOf(competing).merge_claim_sha).toBe(HEAD);
   });
 
   test("absent, the cap is 5; set to 0, or set but unreadable, nothing is claimed", async () => {
@@ -394,10 +387,10 @@ describe("the claim takes a unit of the day's cap", () => {
     expect((await claim(ids[5] as number)).body.code).toBe("merge-cap");
 
     const fresh = ready("on099999");
-    const zero = await claim(fresh, { env: { REPULL_DAILY_MERGE_CAP: "0" } });
+    const zero = await claim(fresh, capped("0"));
     expect([zero.status, zero.body.code]).toEqual([429, "merge-cap"]);
     for (const raw of ["x", "21", ""]) {
-      const res = await claim(fresh, { env: { REPULL_DAILY_MERGE_CAP: raw } });
+      const res = await claim(fresh, capped(raw));
       expect([raw, res.status, res.body.code, res.body.merge_cap?.source]).toEqual([
         raw,
         429,
@@ -425,35 +418,119 @@ describe("the claim takes a unit of the day's cap", () => {
 
   test("a screen that changes between the read and the claim is not relied on", async () => {
     const id = ready("on099999");
-    const real = realD1(db);
-    let done = false;
-    const racing = {
-      ...real,
-      prepare(sql: string) {
-        if (!done && sql.startsWith("UPDATE upstream_repulls SET")) {
-          done = true;
-          db.run("UPDATE upstream_repull_screens SET status = 'direct-identifiers'");
-        }
-        return real.prepare(sql);
-      },
-      batch: real.batch.bind(real),
-    } as unknown as D1Database;
-    const res = await app.request(
-      `/repulls/${id}/transition`,
-      {
-        method: "POST",
-        headers: { Authorization: `Bearer ${ADMIN_KEY}`, "Content-Type": "application/json" },
-        body: JSON.stringify({
-          from: "gates_clear",
-          to: "gates_clear",
-          fields: { merge_claim_sha: HEAD },
-        }),
-      },
-      { ...env(), DB: racing },
-    );
-    expect(res.status).toBe(409);
-    expect(((await res.json()) as Json).code).toBe("screen-changed");
+    const res = await claim(id, {
+      db: racing("UPDATE upstream_repulls SET", () =>
+        db.run("UPDATE upstream_repull_screens SET status = 'direct-identifiers'"),
+      ),
+    });
+    expect([res.status, res.body.code]).toEqual([409, "screen-changed"]);
     expect(rowOf(id).merge_claimed_at).toBeNull();
+  });
+
+  test("an acknowledgment that changes hands, or is removed, between the read and the claim is not relied on", async () => {
+    for (const change of [
+      "UPDATE upstream_repull_screens SET ack_by = ack_by + 1000",
+      "UPDATE upstream_repull_screens SET ack_by = NULL, ack_reason = NULL, ack_at = NULL",
+    ]) {
+      db.run("DELETE FROM upstream_repull_screens");
+      db.run("DELETE FROM upstream_repulls");
+      if (!db.query("SELECT 1 FROM datasets").get()) seedMirror("on099999");
+      const id = seedRepull("gates_clear");
+      markScreen(id, "review");
+      db.run(
+        "UPDATE upstream_repull_screens SET ack_by = ?, ack_reason = 'read it', ack_at = datetime('now')",
+        [adminId],
+      );
+      const res = await claim(id, {
+        db: racing("UPDATE upstream_repulls SET", () => db.run(change)),
+      });
+      expect([change, res.status, res.body.code]).toEqual([change, 409, "screen-changed"]);
+      expect(rowOf(id).merge_claimed_at).toBeNull();
+    }
+  });
+
+  test("a dataset made anonymous or withdrawn between the read and the claim is not claimed for", async () => {
+    for (const [change, code] of [
+      ["UPDATE datasets SET anonymous = 1", "anonymous-dataset"],
+      ["UPDATE datasets SET withdrawn_at = datetime('now')", "withdrawn"],
+    ] as const) {
+      db.run("DELETE FROM upstream_repull_screens");
+      db.run("DELETE FROM upstream_repulls");
+      db.run("DELETE FROM datasets");
+      const id = ready("on099999");
+      const res = await claim(id, {
+        db: racing("UPDATE upstream_repulls SET", () => db.run(change)),
+      });
+      expect([code, res.status, res.body.code]).toEqual([code, 409, code]);
+      expect(rowOf(id).merge_claimed_at).toBeNull();
+    }
+  });
+});
+
+// ----------------------------------------------------------------------------
+// The live head
+// ----------------------------------------------------------------------------
+
+describe("the gates and the claim read the live pull request", () => {
+  const gates = (id: number) =>
+    call(`/repulls/${id}/transition`, {
+      from: "pr_open",
+      to: "gates_clear",
+      fields: { gates_sha: HEAD },
+    });
+
+  test("a head that moved, a closed or merged pull request, or another base refuses both, and nothing is written", async () => {
+    const cases: Array<[string, PullAnswer]> = [
+      ["moved", { head: { sha: OTHER, ref: "release/v2.0.0" } }],
+      ["closed", { state: "closed" }],
+      ["merged", { merged: true }],
+      ["another base", { base: { ref: "dev" } }],
+      ["missing", { status: 404 }],
+    ];
+    for (const [what, answer] of cases) {
+      db.run("DELETE FROM upstream_repull_screens");
+      db.run("DELETE FROM upstream_repulls");
+      db.run("DELETE FROM datasets");
+      const claiming = ready("on099999");
+      seedMirror("on099998");
+      const opening = seedRepull("pr_open", { dataset_id: "on099998" });
+      markScreen(opening, "clean");
+      gh.pulls = { "on099999#7": answer, "on099998#7": answer };
+      const c = await claim(claiming);
+      const g = await gates(opening);
+      expect([what, c.status, c.body.code, g.status, g.body.code]).toEqual([
+        what,
+        409,
+        "head-moved",
+        409,
+        "head-moved",
+      ]);
+      expect(rowOf(claiming).merge_claimed_at).toBeNull();
+      expect(rowOf(opening).status).toBe("pr_open");
+    }
+  });
+
+  test("a GitHub that cannot be read refuses with 502, and the transport's retry time is passed on", async () => {
+    const id = ready("on099999");
+    gh.down = true;
+    const down = await claim(id);
+    expect([down.status, down.body.code]).toEqual([502, "github-unreadable"]);
+    gh.down = false;
+    __seedRateLimitStateForTests({
+      resource: "core",
+      remaining: 0,
+      resetEpoch: Math.floor(Date.now() / 1000) + 120,
+    });
+    const throttled = await claim(id);
+    expect([throttled.status, throttled.body.code]).toEqual([502, "github-unreadable"]);
+    expect(throttled.body.error).toMatch(/HTTP 503, retry in \d+s/);
+    expect(rowOf(id).merge_claimed_at).toBeNull();
+  });
+
+  test("the live read is GitHub's, made for the claimed pull request", async () => {
+    const id = ready("on099999");
+    expect((await claim(id)).status).toBe(200);
+    expect(gh.requests).toEqual(["GET /repos/nemarDatasets/on099999/pulls/7"]);
   });
 });
 
@@ -462,35 +539,67 @@ describe("the claim takes a unit of the day's cap", () => {
 // ----------------------------------------------------------------------------
 
 describe("releasing a claim", () => {
-  const release = (id: number, outcome: string, sha = HEAD) =>
-    call(`/repulls/${id}/merge-claim/release`, { pr: "n0", sha, outcome });
+  const release = (id: number, outcome: string, sha = HEAD, o: Parameters<typeof call>[2] = {}) =>
+    call(`/repulls/${id}/merge-claim/release`, { pr: "n0", sha, outcome }, o);
+  /** Claim through the API, then age the Worker's stamp by `minutes`. */
+  const agedClaim = async (id: number, minutes = 10) => {
+    expect((await claim(id)).status).toBe(200);
+    db.run(
+      `UPDATE upstream_repulls SET merge_claimed_at = datetime(merge_claimed_at, '-${minutes} minutes') WHERE id = ?`,
+      [id],
+    );
+  };
 
   test("a merge not sent, or refused, frees the unit once GitHub says it did not merge", async () => {
     const a = ready("on099998");
     const b = ready("on099999");
-    const capped = { env: { REPULL_DAILY_MERGE_CAP: "1" } };
-    expect((await claim(a, capped)).status).toBe(200);
-    pulls["on099998#7"] = { merged: false };
+    await agedClaim(a);
+    gh.pulls["on099998#7"] = { merged: false };
     const res = await release(a, "refused");
     expect(res.status).toBe(200);
     expect(res.body.repull).toMatchObject({ merge_claimed_at: null, merge_claim_sha: null });
-    expect(requests).toContain("GET /repos/nemarDatasets/on099998/pulls/7");
+    expect(gh.requests.filter((r) => r.endsWith("/on099998/pulls/7"))).toHaveLength(2);
     const audit = db
       .query("SELECT details FROM audit_log WHERE action = 'repull_merge_claim_released'")
       .get() as Row;
     expect(JSON.parse(audit.details as string)).toMatchObject({ outcome: "refused" });
-    expect((await claim(b, capped)).status).toBe(200);
+    expect((await claim(b, { env: { REPULL_DAILY_MERGE_CAP: "1" } })).status).toBe(200);
+  });
+
+  test("a claim younger than five minutes is not released, and GitHub is not read for it", async () => {
+    const id = ready("on099999");
+    await agedClaim(id, 4);
+    gh.requests = [];
+    const recent = await release(id, "not_sent");
+    expect([recent.status, recent.body.code]).toEqual([409, "claim-too-recent"]);
+    expect(gh.requests).toEqual([]);
+    db.run(
+      "UPDATE upstream_repulls SET merge_claimed_at = datetime(merge_claimed_at, '-2 minutes')",
+    );
+    expect((await release(id, "not_sent")).status).toBe(200);
+  });
+
+  test("a claim made again between the age check and the release is not released", async () => {
+    const id = ready("on099999");
+    await agedClaim(id);
+    const res = await release(id, "not_sent", HEAD, {
+      db: racing("UPDATE upstream_repulls\n            SET merge_claimed_at = NULL", () =>
+        db.run("UPDATE upstream_repulls SET merge_claimed_at = datetime('now') WHERE id = ?", [id]),
+      ),
+    });
+    expect([res.status, res.body.code]).toEqual([409, "stale-status"]);
+    expect(rowOf(id).merge_claim_sha).toBe(HEAD);
   });
 
   test("an unknown outcome cannot release, and neither can a merged pull request or an unread GitHub", async () => {
     const id = ready("on099999");
-    expect((await claim(id)).status).toBe(200);
+    await agedClaim(id);
     const unknown = await release(id, "unknown");
     expect(unknown.status).toBe(400);
-    pulls["on099999#7"] = { merged: true };
+    gh.pulls["on099999#7"] = { merged: true };
     const merged = await release(id, "not_sent");
     expect([merged.status, merged.body.code]).toEqual([409, "pull-request-merged"]);
-    githubDown = true;
+    gh.down = true;
     const down = await release(id, "not_sent");
     expect([down.status, down.body.code]).toEqual([502, "github-unreadable"]);
     expect(rowOf(id).merge_claim_sha).toBe(HEAD);
@@ -499,10 +608,20 @@ describe("releasing a claim", () => {
   test("no claim, another sha, or another pull request is refused", async () => {
     const id = ready("on099999");
     expect((await release(id, "not_sent")).body.code).toBe("no-claim");
-    await claim(id);
+    await agedClaim(id);
     expect((await release(id, "not_sent", OTHER)).body.code).toBe("claim-mismatch");
-    pulls["on099999#7"] = { merged: false, head: { sha: HEAD, ref: "release/v3.0.0" } };
+    gh.pulls["on099999#7"] = { merged: false, head: { sha: HEAD, ref: "release/v3.0.0" } };
     expect((await release(id, "not_sent")).body.code).toBe("pull-request-mismatch");
+    expect(rowOf(id).merge_claim_sha).toBe(HEAD);
+  });
+
+  test("outside production an on dataset's claim is not released, and GitHub is not read", async () => {
+    const id = ready("on099999");
+    await agedClaim(id);
+    gh.requests = [];
+    const res = await release(id, "not_sent", HEAD, { env: { ENVIRONMENT: "test" } });
+    expect([res.status, res.body.code]).toEqual([403, "env-fence"]);
+    expect(gh.requests).toEqual([]);
     expect(rowOf(id).merge_claim_sha).toBe(HEAD);
   });
 });
@@ -512,57 +631,103 @@ describe("releasing a claim", () => {
 // ----------------------------------------------------------------------------
 
 describe("recording the merge", () => {
-  const merged = (id: number, pr = "n0", o: { env?: Partial<Bindings> } = {}) =>
+  const merged = (id: number, pr = "n0", o: Parameters<typeof call>[2] = {}) =>
     call(`/repulls/${id}/merged`, { pr }, o);
 
   test("a merge at the claimed head is recorded with GitHub's merge commit", async () => {
     const id = ready("on099999");
     await claim(id);
-    pulls["on099999#7"] = { merged: true, merge_commit_sha: MERGE };
+    gh.requests = [];
+    gh.pulls["on099999#7"] = { merged: true, merge_commit_sha: MERGE };
     const res = await merged(id);
     expect(res.status).toBe(200);
-    expect(res.body).toMatchObject({ merged_outside_tool: false, merged_unscreened_head: false });
+    expect(res.body).toMatchObject({
+      merged_outside_tool: false,
+      merged_unscreened_head: false,
+      replayed: false,
+    });
     expect(res.body.repull).toMatchObject({ status: "merged", merge_sha: MERGE, counts: {} });
-    expect(requests).toEqual(["GET /repos/nemarDatasets/on099999/pulls/7"]);
+    expect(gh.requests).toEqual(["GET /repos/nemarDatasets/on099999/pulls/7"]);
   });
 
   test("an open pull request is not recorded as merged", async () => {
     const id = ready("on099999");
     await claim(id);
-    pulls["on099999#7"] = { merged: false };
+    gh.pulls["on099999#7"] = { merged: false };
     const before = rowOf(id);
     const res = await merged(id);
     expect([res.status, res.body.code]).toEqual([409, "not-merged"]);
     expect(rowOf(id)).toEqual(before);
   });
 
-  test("a merge with no claim is recorded and counted as outside NEMAR's tools", async () => {
+  test("a merge with no claim held is counted as outside NEMAR's tools, and only that", async () => {
     const id = ready("on099999");
-    pulls["on099999#7"] = { merged: true };
+    gh.pulls["on099999#7"] = { merged: true };
     const res = await merged(id);
     expect(res.status).toBe(200);
     expect(res.body.repull.counts).toEqual({ merged_outside_tool: 1 });
     expect(res.body.merged_outside_tool).toBe(true);
   });
 
-  test("a merge at a head other than the screened one is recorded and counted as such", async () => {
+  test("with a claim held, a merge at another head is counted as unscreened, and only that", async () => {
     const id = ready("on099999");
     await claim(id);
-    pulls["on099999#7"] = { merged: true, head: { sha: OTHER, ref: "release/v2.0.0" } };
+    gh.pulls["on099999#7"] = { merged: true, head: { sha: OTHER, ref: "release/v2.0.0" } };
     const res = await merged(id);
     expect(res.status).toBe(200);
+    expect(res.body.repull.counts).toEqual({ merged_unscreened_head: 1 });
+    expect(res.body).toMatchObject({ merged_outside_tool: false, merged_unscreened_head: true });
+  });
+
+  test("with no claim and another head, both are counted, each on its own", async () => {
+    const id = ready("on099999");
+    gh.pulls["on099999#7"] = { merged: true, head: { sha: OTHER, ref: "release/v2.0.0" } };
+    const res = await merged(id);
     expect(res.body.repull.counts).toEqual({ merged_outside_tool: 1, merged_unscreened_head: 1 });
   });
 
-  test("a merge GitHub cannot name, a missing pull request and a moved one are refused", async () => {
+  test("the administrator sees the counts in the list of re-pulls", async () => {
     const id = ready("on099999");
-    pulls["on099999#7"] = { merged: true, merge_commit_sha: null };
-    expect((await merged(id)).body.code).toBe("github-unreadable");
-    pulls = {};
-    expect((await merged(id)).body.code).toBe("pull-request-missing");
-    pulls["on099999#7"] = { merged: true, base: { ref: "dev" } };
-    expect((await merged(id)).body.code).toBe("pull-request-mismatch");
+    gh.pulls["on099999#7"] = { merged: true, head: { sha: OTHER, ref: "release/v2.0.0" } };
+    expect((await merged(id)).status).toBe(200);
+    const list = await call("/repulls?dataset=on099999");
+    expect(list.status).toBe(200);
+    expect(list.body.repulls[0].counts).toEqual({
+      merged_outside_tool: 1,
+      merged_unscreened_head: 1,
+    });
+  });
+
+  test("a merge GitHub cannot name, a malformed answer, a missing pull request and a moved one are refused", async () => {
+    const id = ready("on099999");
+    for (const [answer, code] of [
+      [{ merged: true, merge_commit_sha: null }, "github-unreadable"],
+      [{ merged: "true" }, "github-unreadable"],
+      [{ merged: true, omit: ["merged"] }, "github-unreadable"],
+      [{ status: 404 }, "pull-request-missing"],
+      [{ merged: true, base: { ref: "dev" } }, "pull-request-mismatch"],
+    ] as const) {
+      gh.pulls = { "on099999#7": answer as PullAnswer };
+      const res = await merged(id);
+      expect([JSON.stringify(answer), res.body.code]).toEqual([JSON.stringify(answer), code]);
+    }
     expect(rowOf(id).status).toBe("gates_clear");
+  });
+
+  test("a retried merge is answered from the stored row; another merge commit is refused", async () => {
+    const id = ready("on099999");
+    await claim(id);
+    gh.pulls["on099999#7"] = { merged: true };
+    expect((await merged(id)).status).toBe(200);
+    const stored = rowOf(id);
+    const again = await merged(id);
+    expect(again.status).toBe(200);
+    expect(again.body).toMatchObject({ replayed: true, repull: { merge_sha: MERGE } });
+    expect(rowOf(id)).toEqual(stored);
+    gh.pulls["on099999#7"] = { merged: true, merge_commit_sha: OTHER };
+    const other = await merged(id);
+    expect([other.status, other.body.code]).toEqual([409, "already-merged"]);
+    expect(rowOf(id)).toEqual(stored);
   });
 
   test("only from gates_clear, only in production for an on dataset, and the transition route cannot state it", async () => {
@@ -571,10 +736,11 @@ describe("recording the merge", () => {
     expect((await merged(open)).body.code).toBe("bad-transition");
     db.run("DELETE FROM upstream_repulls");
     const id = ready("on099999");
-    pulls["on099999#7"] = { merged: true };
+    gh.requests = [];
+    gh.pulls["on099999#7"] = { merged: true };
     const fenced = await merged(id, "n0", { env: { ENVIRONMENT: "test" } });
     expect([fenced.status, fenced.body.code]).toEqual([403, "env-fence"]);
-    expect(requests).toEqual([]);
+    expect(gh.requests).toEqual([]);
     const stated = await call(`/repulls/${id}/transition`, {
       from: "gates_clear",
       to: "merged",
@@ -610,8 +776,8 @@ describe("recording the merge", () => {
 
   test("N.0.1's merge is recorded the same way", async () => {
     const id = ready("on099999", "patch_gates_clear");
-    await patchClaim(id);
-    pulls["on099999#8"] = { merged: true, head: { sha: HEAD, ref: "release/v2.0.1" } };
+    expect((await patchClaim(id)).status).toBe(200);
+    gh.pulls["on099999#8"] = { merged: true, head: { sha: HEAD, ref: "release/v2.0.1" } };
     const res = await merged(id, "n1");
     expect(res.status).toBe(200);
     expect(res.body.repull).toMatchObject({ status: "patch_merged", patch_merge_sha: MERGE });
@@ -639,12 +805,12 @@ describe("recording the release", () => {
        VALUES ('on099999', ?, '10.82901/on099999.v2.0.0', ?, ?)`,
       [version, basis === "unknown" ? null : "1.0.1", basis],
     );
-    tags["on099999@v2.0.0"] = TAG;
+    gh.tags["on099999@v2.0.0"] = TAG;
     return seedRepull("merged", { merge_sha: MERGE });
   }
 
-  const released = (id: number, body: Record<string, unknown> = {}) =>
-    call(`/repulls/${id}/released`, { pr: "n0", tag_sha: TAG, tree_verified: true, ...body });
+  const released = (id: number, body: Record<string, unknown> = {}, o = {}) =>
+    call(`/repulls/${id}/released`, { pr: "n0", tag_sha: TAG, tree_verified: true, ...body }, o);
 
   const stampsOf = (id: string) =>
     JSON.parse(
@@ -663,13 +829,13 @@ describe("recording the release", () => {
     const id = releasedFixture();
     const res = await released(id);
     expect(res.status).toBe(200);
-    expect(res.body).toMatchObject({ lineage_rows: 1, stamps_rearmed: 1 });
+    expect(res.body).toMatchObject({ lineage_rows: 1, stamps_rearmed: 1, replayed: false });
     expect(res.body.repull).toMatchObject({ status: "released", tag_sha: TAG });
     expect(basisOf()).toEqual({ source_version: "1.0.1", source_version_basis: "lineage" });
     expect(stampsOf("on099999")).toEqual({ zarr_checked_at: "2026-10-01 00:00:00" });
     // Every other dataset's stamps and values are as they were.
     expect(stampsOf("on099998")).toEqual(STAMPS);
-    expect(requests).toEqual([
+    expect(gh.requests).toEqual([
       "GET /repos/nemarDatasets/on099999/commits/tags/v2.0.0",
       `GET /repos/nemarDatasets/on099999/compare/${MERGE}...${TAG}`,
     ]);
@@ -699,64 +865,84 @@ describe("recording the release", () => {
     expect(basisOf()).toEqual({ source_version: null, source_version_basis: "unknown" });
   });
 
-  test("no version row with a DOI, no tag, a tag on another commit, or one without the merge: nothing is written", async () => {
+  test("no version row, no tag, a tag on another commit, or one without the merge: nothing is written", async () => {
     seedMirror("on099999", { stamps: STAMPS });
     const id = seedRepull("merged", { merge_sha: MERGE });
     expect((await released(id)).body.code).toBe("not-released");
-    expect(requests).toEqual([]);
+    expect(gh.requests).toEqual([]);
     db.run(
       "INSERT INTO dataset_versions (dataset_id, version, doi) VALUES ('on099999', '2.0.0', '10.82901/x')",
     );
     expect((await released(id)).body.code).toBe("tag-missing");
-    tags["on099999@v2.0.0"] = OTHER;
+    gh.tags["on099999@v2.0.0"] = OTHER;
     expect((await released(id)).body.code).toBe("tag-mismatch");
-    tags["on099999@v2.0.0"] = TAG;
-    compares[`on099999:${MERGE}...${TAG}`] = "diverged";
-    expect((await released(id)).body.code).toBe("tag-mismatch");
+    gh.tags["on099999@v2.0.0"] = TAG;
+    for (const relation of ["diverged", "behind"]) {
+      gh.compares[`on099999:${MERGE}...${TAG}`] = relation;
+      expect([relation, (await released(id)).body.code]).toEqual([relation, "tag-mismatch"]);
+    }
+    for (const status of [404, 422]) {
+      gh.compares[`on099999:${MERGE}...${TAG}`] = status;
+      const res = await released(id);
+      expect([status, res.status, res.body.code, res.body.error]).toEqual([
+        status,
+        409,
+        "compare-unresolved",
+        "GitHub could not compare the tag with the merge.",
+      ]);
+    }
     expect(rowOf(id).status).toBe("merged");
     expect(stampsOf("on099999")).toEqual(STAMPS);
   });
 
   test("a tag at a descendant of the merge (enrichment after it) is accepted", async () => {
     const id = releasedFixture();
-    compares[`on099999:${MERGE}...${TAG}`] = "ahead";
+    gh.compares[`on099999:${MERGE}...${TAG}`] = "ahead";
     expect((await released(id)).status).toBe(200);
     db.run("DELETE FROM upstream_repulls");
     db.run("DELETE FROM datasets");
     db.run("DELETE FROM dataset_versions");
     const same = releasedFixture();
-    tags["on099999@v2.0.0"] = MERGE;
-    compares[`on099999:${MERGE}...${MERGE}`] = "identical";
+    gh.tags["on099999@v2.0.0"] = MERGE;
+    gh.compares[`on099999:${MERGE}...${MERGE}`] = "identical";
     expect((await released(same, { tag_sha: MERGE })).status).toBe(200);
+  });
+
+  test("a retried release is answered from the stored row; another tag commit is refused", async () => {
+    const id = releasedFixture();
+    expect((await released(id)).status).toBe(200);
+    const stored = rowOf(id);
+    gh.requests = [];
+    const again = await released(id);
+    expect(again.status).toBe(200);
+    expect(again.body).toMatchObject({ replayed: true, stamps_rearmed: 0, lineage_rows: 0 });
+    expect(rowOf(id)).toEqual(stored);
+    const other = await released(id, { tag_sha: OTHER });
+    expect([other.status, other.body.code]).toEqual([409, "already-released"]);
+    expect(rowOf(id)).toEqual(stored);
+  });
+
+  test("outside production an on dataset's release is not recorded, and GitHub is not read", async () => {
+    const id = releasedFixture();
+    const res = await released(id, {}, { env: { ENVIRONMENT: "test" } });
+    expect([res.status, res.body.code]).toEqual([403, "env-fence"]);
+    expect(gh.requests).toEqual([]);
+    expect(rowOf(id).status).toBe("merged");
   });
 
   test("when the row moves before the batch runs, neither the lineage nor the stamps are written", async () => {
     const id = releasedFixture();
-    const real = realD1(db);
-    let done = false;
-    const racing = {
-      ...real,
-      prepare(sql: string) {
-        if (!done && sql.startsWith("UPDATE upstream_repulls SET")) {
-          done = true;
-          // Another writer moves the row (a count recorded) after this request read it.
-          db.run("UPDATE upstream_repulls SET revision = revision + 1 WHERE id = ?", [id]);
-        }
-        return real.prepare(sql);
-      },
-      batch: real.batch.bind(real),
-    } as unknown as D1Database;
-    const res = await app.request(
-      `/repulls/${id}/released`,
+    const res = await released(
+      id,
+      {},
       {
-        method: "POST",
-        headers: { Authorization: `Bearer ${ADMIN_KEY}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ pr: "n0", tag_sha: TAG, tree_verified: true }),
+        db: racing("UPDATE upstream_repulls SET", () =>
+          // Another writer moves the row (a count recorded) after this request read it.
+          db.run("UPDATE upstream_repulls SET revision = revision + 1 WHERE id = ?", [id]),
+        ),
       },
-      { ...env(), DB: racing },
     );
-    expect(res.status).toBe(409);
-    expect(((await res.json()) as Json).code).toBe("stale-status");
+    expect([res.status, res.body.code]).toEqual([409, "stale-status"]);
     expect(basisOf()).toEqual({ source_version: "1.0.1", source_version_basis: "doi" });
     expect(stampsOf("on099999")).toEqual(STAMPS);
     expect(rowOf(id).status).toBe("merged");
@@ -768,7 +954,7 @@ describe("recording the release", () => {
       `INSERT INTO dataset_versions (dataset_id, version, doi, source_version, source_version_basis)
        VALUES ('on099999', '2.0.0', '10.82901/a', '1.0.1', 'doi'), ('on099999', '2.0.1', '10.82901/b', NULL, NULL)`,
     );
-    tags["on099999@v2.0.1"] = TAG;
+    gh.tags["on099999@v2.0.1"] = TAG;
     const id = seedRepull("patch_merged", { patch_merge_sha: MERGE });
     const res = await call(`/repulls/${id}/released`, {
       pr: "n1",

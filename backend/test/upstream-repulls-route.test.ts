@@ -18,7 +18,7 @@
  */
 
 import type { Database } from "bun:sqlite";
-import { beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { Hono } from "hono";
 import { REPULL_STATUSES, type RepullStatus, TERMINAL_STATUSES } from "../../shared/repull-state";
 import { adminMiddleware, authMiddleware } from "../src/middleware/auth";
@@ -33,6 +33,7 @@ import {
 } from "../src/services/upstream-repull";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
+import { type RepullGitHub, startRepullGitHub } from "./helpers/repull-github-standin";
 import { DIGEST, type Row, SHA, rowAt } from "./helpers/repull-rows";
 
 const ADMIN_KEY = "rpl-admin-key-0123456789abcdef0123456789abcdef01";
@@ -74,6 +75,14 @@ async function seedUsers(): Promise<void> {
   }
 }
 
+// The gates and the claim read the live pull request on GitHub; the stand-in answers every one
+// open at the fixtures' head, so this suite's edges see the head they name.
+let gh: RepullGitHub;
+beforeAll(() => {
+  gh = startRepullGitHub({ defaultHead: SHA });
+});
+afterAll(() => gh.stop());
+
 beforeEach(async () => {
   db = freshDb();
   app = newApp();
@@ -81,7 +90,11 @@ beforeEach(async () => {
 });
 
 function env(environment: string | undefined = "test"): Bindings {
-  return { DB: realD1(db), ENVIRONMENT: environment } as unknown as Bindings;
+  return {
+    DB: realD1(db),
+    ENVIRONMENT: environment,
+    GITHUB_ADMIN_PAT: "ghp_repull_route_test",
+  } as unknown as Bindings;
 }
 
 async function call(
@@ -455,7 +468,11 @@ describe("create: a concurrent create wins the slot between the read and the wri
         headers: { Authorization: `Bearer ${ADMIN_KEY}`, "Content-Type": "application/json" },
         body: JSON.stringify(body),
       },
-      { DB: d1, ENVIRONMENT: "test" } as unknown as Bindings,
+      {
+        DB: d1,
+        ENVIRONMENT: "test",
+        GITHUB_ADMIN_PAT: "ghp_repull_route_test",
+      } as unknown as Bindings,
     );
 
   test("the same plan: the winner's record is returned, 200, and nothing is half written", async () => {
@@ -949,7 +966,11 @@ describe("transition: what is refused", () => {
           fields: { synth_tree: SHA, synth_sha: SHA, manifest_digest: DIGEST },
         }),
       },
-      { DB: racing, ENVIRONMENT: "test" } as unknown as Bindings,
+      {
+        DB: racing,
+        ENVIRONMENT: "test",
+        GITHUB_ADMIN_PAT: "ghp_repull_route_test",
+      } as unknown as Bindings,
     );
     expect(res.status).toBe(409);
     const body = (await res.json()) as Json;
@@ -1267,7 +1288,11 @@ async function callOn(d1: D1Database, method: "GET" | "POST", path: string, body
       },
       body: body === undefined ? undefined : JSON.stringify(body),
     },
-    { DB: d1, ENVIRONMENT: "test" } as unknown as Bindings,
+    {
+      DB: d1,
+      ENVIRONMENT: "test",
+      GITHUB_ADMIN_PAT: "ghp_repull_route_test",
+    } as unknown as Bindings,
   );
   return { status: res.status, body: (await res.json()) as Json };
 }
@@ -1347,7 +1372,11 @@ describe("transition: two writers that read the same row", () => {
 
   test("two writers one after the other both apply, each on the revision the last left", async () => {
     const id = seedRow("pr_open");
-    const env2 = { DB: realD1(db), ENVIRONMENT: "test" } as unknown as Bindings;
+    const env2 = {
+      DB: realD1(db),
+      ENVIRONMENT: "test",
+      GITHUB_ADMIN_PAT: "ghp_repull_route_test",
+    } as unknown as Bindings;
     const a = await transitionRepull(env2, { id: adminId }, id, {
       from: "pr_open",
       to: "pr_open",
@@ -1660,7 +1689,11 @@ describe("transition: last_error", () => {
     expect(rowOf(id).last_error).toBeNull();
     // The service refuses it too, for a caller that is not the route.
     const direct = await transitionRepull(
-      { DB: realD1(db), ENVIRONMENT: "test" } as unknown as Bindings,
+      {
+        DB: realD1(db),
+        ENVIRONMENT: "test",
+        GITHUB_ADMIN_PAT: "ghp_repull_route_test",
+      } as unknown as Bindings,
       { id: adminId },
       id,
       {

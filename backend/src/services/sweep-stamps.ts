@@ -113,10 +113,11 @@ export const ZARR_REQUEUE_AT_PATH = "$.zarr_requeue_at";
 // ============================================================================
 //
 // Each sweep's candidates are the datasets whose marker is absent, so removing a
-// dataset's marker is the whole of re-queueing it for that sweep. The sweep
-// routes in `routes/admin/datasets-lifecycle.ts` still spell these paths by hand;
-// a re-pull's release (ADR 0111, decision 2) removes all four for the one dataset
-// it changed, through these names.
+// dataset's marker is the whole of re-queueing it for that sweep. Two files still
+// spell these paths by hand: the sweep routes in `routes/admin/datasets-lifecycle.ts`
+// and the archive callback in `routes/callbacks/archive-ready.ts` (which removes
+// `availability_report_at`). A re-pull's release (ADR 0111, decision 2) removes all
+// four for the one dataset it changed, through these names.
 
 /** When the channel and montage sweep last read the dataset. */
 export const CHANNEL_MONTAGE_CHECKED_AT_PATH = "$.channel_montage_checked_at";

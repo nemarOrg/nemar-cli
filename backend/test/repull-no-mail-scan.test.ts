@@ -55,6 +55,7 @@ describe("the re-pull code sends no mail", () => {
       "services/import-error.ts",
       "services/upstream-repull-screen.ts",
       "services/upstream-repull-verified.ts",
+      "services/upstream-repull-github.ts",
       "routes/callbacks/identifier-screen-repull.ts",
       "services/identifier-screen-stored.ts",
       "services/github/dispatch.ts",
