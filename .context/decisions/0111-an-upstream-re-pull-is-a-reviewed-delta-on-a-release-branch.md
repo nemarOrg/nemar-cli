@@ -32,6 +32,9 @@ Measured staleness is real: `on004362` missed upstream's 1.0.1 metadata fix (#18
   Other `SourceDatasets` entries are kept from both sides, and every other key and path is upstream-owned.
   `CHANGES` is upstream-owned, and NEMAR never writes it.
 - The standard edits are re-applied as functions, never merged as text: the README rename and DOI badge, the `.nemar/` line in `.bidsignore`, ADR 0060's annex policy, moving git-resident data into the annex, ADR 0089's scrub with its provenance sentence, and ADR 0091's date normalization.
+- A change recorded in the dataset's privacy ledger (`.nemar/corrections.jsonl`, ADR 0085) is a standard edit: N.0.0 carries it, and a plan that would revert one refuses.
+  The ledger holds counts and no per-file list (ADR 0036), so when it records a correction and the plan cannot tell whether an unexplained path belongs to it, the plan refuses rather than revert it.
+  This keeps ADR 0085's promise that a re-pull is scrubbed again and does not reintroduce what was corrected.
 - Base is upstream at `from_tag`, theirs is upstream at `to_tag`, and ours is NEMAR `main`.
   An upstream-changed path is one that differs between base and theirs.
   A delta path is one the re-pull's commit adds or changes relative to ours.
@@ -154,7 +157,8 @@ The Worker's merge call is not built until the ruleset check below is done.
   N.0.0 cites upstream's snapshot without NEMAR's corrections, which is what its number says, and N.0.1 is the version a reader most likely wants.
 - **A window between N.0.0 and N.0.1.**
   Between the two merges the public latest lacks NEMAR's corrections; merging N.0.1 right after N.0.0 keeps the window short, and a conflict keeps its correction out until an administrator resolves it.
-  The identifier scrub is a standard edit, so N.0.0 carries it and the window never lacks it.
+  A change the privacy ledger records, and a change a deterministic rule re-applies (the scrub, the date normalization), are standard edits, so N.0.0 carries them and the window never lacks them.
+  Every other correction is in the window, including a privacy-minded one the ledger does not record.
 - **Orphan locked objects.**
   An abandoned re-pull leaves copied objects under the governance lock; they cost storage and are reported, not deleted.
 - **One synthesized commit instead of upstream's history.**
@@ -183,6 +187,7 @@ The Worker's merge call is not built until the ruleset check below is done.
 - Whether the rulesets let the GitHub App merge without a human review, and without using its bypass; the merge call is not built until this is checked.
 - Where `source_version` is inserted under the central manifest flow.
 - Whether "explained" edits are detected on early rewritten imports (`on003645`, `on004362`); local dry-run plans count the unexplained paths.
+- Whether a plan can tell which paths a ledger-recorded correction changed, since the ledger lists no files; until it can, decision 1's refusal applies to every unexplained path of a dataset whose ledger records a correction.
 - How ADR 0107's review treats a re-pull pull request the App opens: the App is not exempt, and where the review's ruleset is in force its verdict decides whether GitHub ever reports `clean`.
 - Whether enrichment commits on the release branch move its head after the screen read it.
 - Whether OpenNeuro writes S3 before it pushes to GitHub, and whether the object at a path lags the pinned `versionId`.
