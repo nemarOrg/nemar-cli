@@ -302,6 +302,13 @@ export interface Bindings {
   // change, once ADR 0102's "Before it is switched on" is done.
   PUBLICATION_REVIEW_ENABLED?: string; // "1" enables the review
 
+  // Upstream re-pull merges a day (ADR 0111, decision 6). Every merge a NEMAR tool makes of a
+  // re-pull pull request claims one unit first, N.0.0's and N.0.1's alike, in a fixed UTC day, and
+  // a refused claim merges nothing, because every merge mints a DOI that cannot be withdrawn.
+  // Absent: 5. "0" to "20": that many ("0" stops every merge). Anything else is unreadable and
+  // reads 0, so a typo stops merging instead of falling back to the default.
+  REPULL_DAILY_MERGE_CAP?: string;
+
   // Import recovery (issue #754). onboard-openneuro.yml POSTs import state to
   // /webhooks/import-state (bearer NEMAR_WEBHOOK_TOKEN). On a terminal failure
   // an unambiguous orphan (private, no DOI, no versions, never completed) is

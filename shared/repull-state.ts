@@ -119,12 +119,6 @@ export const VERIFIED_ONLY_STATUSES = [
   "patch_released",
 ] as const satisfies readonly RepullStatus[];
 
-/** States that wait for the identifier screen to be bound to the row; no caller may state them. */
-export const SCREEN_GATED_STATUSES = [
-  "gates_clear",
-  "patch_gates_clear",
-] as const satisfies readonly RepullStatus[];
-
 /**
  * While a claim to merge is held the merge may have gone out, so the edges that would close the
  * pull request (`abandoned`, `superseded`, `patch_declined`) or move its head (`pr_open`,
@@ -299,7 +293,88 @@ export const REPULL_COUNT_KEYS = [
   "bytes",
   "headers_not_read_nemar_held",
   "headers_not_read_no_source",
+  "merged_outside_tool",
+  "merged_unscreened_head",
 ] as const;
+
+/**
+ * Count keys only the Worker writes, from what it read on GitHub itself, each on its own:
+ * `merged_outside_tool`, the pull request merged while no NEMAR tool held a claim to merge it;
+ * `merged_unscreened_head`, it merged at a head other than the screened one. A request that names
+ * one is refused, so no caller can set or clear the record of either.
+ */
+export const WORKER_COUNT_KEYS = [
+  "merged_outside_tool",
+  "merged_unscreened_head",
+] as const satisfies readonly (typeof REPULL_COUNT_KEYS)[number][];
+
+/** A re-pull records two pull requests: `n0` is N.0.0's, `n1` is N.0.1's (the corrections). */
+export const REPULL_PULL_REQUESTS = ["n0", "n1"] as const;
+export type RepullPullRequest = (typeof REPULL_PULL_REQUESTS)[number];
+
+/** The columns and states that belong to one of the two pull requests. */
+export interface PullRequestColumns {
+  number: "pr_number" | "patch_pr_number";
+  branch: "branch" | "patch_branch";
+  head: "head_sha" | "patch_head_sha";
+  gates: "gates_sha" | "patch_gates_sha";
+  claimedAt: "merge_claimed_at" | "patch_merge_claimed_at";
+  claimSha: "merge_claim_sha" | "patch_merge_claim_sha";
+  mergeSha: "merge_sha" | "patch_merge_sha";
+  tagSha: "tag_sha" | "patch_tag_sha";
+  /** The version the pull request releases. */
+  version: "to_version" | "patch_version";
+  /** The status in which its head is screened (the pull request is open and not yet clear). */
+  open: RepullStatus;
+  gatesClear: RepullStatus;
+  merged: RepullStatus;
+  released: RepullStatus;
+}
+
+export const PULL_REQUEST_COLUMNS: Readonly<Record<RepullPullRequest, PullRequestColumns>> = {
+  n0: {
+    number: "pr_number",
+    branch: "branch",
+    head: "head_sha",
+    gates: "gates_sha",
+    claimedAt: "merge_claimed_at",
+    claimSha: "merge_claim_sha",
+    mergeSha: "merge_sha",
+    tagSha: "tag_sha",
+    version: "to_version",
+    open: "pr_open",
+    gatesClear: "gates_clear",
+    merged: "merged",
+    released: "released",
+  },
+  n1: {
+    number: "patch_pr_number",
+    branch: "patch_branch",
+    head: "patch_head_sha",
+    gates: "patch_gates_sha",
+    claimedAt: "patch_merge_claimed_at",
+    claimSha: "patch_merge_claim_sha",
+    mergeSha: "patch_merge_sha",
+    tagSha: "patch_tag_sha",
+    version: "patch_version",
+    open: "patch_synthesized",
+    gatesClear: "patch_gates_clear",
+    merged: "patch_merged",
+    released: "patch_released",
+  },
+};
+
+/**
+ * Which pull request a gates-clear status belongs to, or null for any other status. A caller
+ * reaches a gates-clear status only while the identifier screen bound to the row (ADR 0111,
+ * decision 7) passes for the head it names: the Worker reads the screen itself.
+ */
+export function pullRequestOfGatesStatus(status: RepullStatus): RepullPullRequest | null {
+  for (const pr of REPULL_PULL_REQUESTS) {
+    if (PULL_REQUEST_COLUMNS[pr].gatesClear === status) return pr;
+  }
+  return null;
+}
 
 /** The next major of an `N.N.N` version: the number a re-pull's N.0.0 takes. Null for a non-version. */
 export function nextMajorVersion(version: string): string | null {

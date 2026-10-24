@@ -31,6 +31,7 @@ import {
 import type { Bindings } from "../src/types/bindings";
 import { freshDb } from "./helpers/d1";
 import { MIGRATIONS_DIR, applyMigrations, migrationFiles } from "./helpers/miniflare-d1";
+import { startRepullGitHub } from "./helpers/repull-github-standin";
 import { DIGEST, type Row, SHA, rowAt } from "./helpers/repull-rows";
 
 const FILE = "0105_upstream_repulls.sql";
@@ -488,8 +489,19 @@ describe("the service on D1", () => {
       .prepare("SELECT id FROM users WHERE username = 'rplminiflare'")
       .first<{ id: number }>();
     const admin = { id: user?.id ?? 0 };
-    const env = { DB: d1, ENVIRONMENT: "test" } as unknown as Bindings;
-    const row = rowAt("gates_clear", { dataset_id: "xx090123", actor_user_id: admin.id });
+    const env = {
+      DB: d1,
+      ENVIRONMENT: "test",
+      GITHUB_ADMIN_PAT: "ghp_repull_migration_test",
+    } as unknown as Bindings;
+    // The claim reads the live pull request: a stand-in answers it open at the row's head.
+    const gh = startRepullGitHub({ defaultHead: SHA });
+    // The claim re-reads the dataset fences: the row names the mirror the dataset row records.
+    const row = rowAt("gates_clear", {
+      dataset_id: "xx090123",
+      upstream_ds: "ds099999",
+      actor_user_id: admin.id,
+    });
     const cols = Object.keys(row);
     const inserted = await d1
       .prepare(
@@ -530,5 +542,6 @@ describe("the service on D1", () => {
       createRepullSchema.parse({ ...PLAN, to_tag: "1.0.7" }),
     );
     expect(blocked).toMatchObject({ code: "merge-unreconciled", status: 409 });
+    gh.stop();
   });
 });

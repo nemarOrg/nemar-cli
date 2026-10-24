@@ -36,8 +36,6 @@
  */
 
 import {
-  REPORT_VERSION,
-  type ScreenError,
   type ScreenGate,
   type ScreenReport,
   type ScreenState,
@@ -64,30 +62,33 @@ import {
   triggerIdentifierScreenRun,
 } from "./github.js";
 import {
+  SCREEN_REPORT_DEADLINE_MINUTES,
   type ScreenView,
   isScreenExempt,
   readStoredReport,
   readStoredState,
   screenView,
+  workerErrorReport,
 } from "./identifier-screen-stored.js";
 import { reviewInFlightSql } from "./publication-review-rows.js";
 import { publicationReviewEmailSection, reviewEnabled } from "./publication-review-view.js";
 
 // The two readers of a stored screen, the sandbox exemption and the screen's status view live in
 // their own module so the publication review (ADR 0102) can use them without importing this one;
-// re-exported for every existing importer. The same goes for the function that says whether an
-// approval has started publishing, which moved to `shared/publication-steps.ts`.
-export { type ScreenView, isScreenExempt, readStoredReport, readStoredState, screenView };
+// re-exported for every existing importer. The same goes for the report deadline and the Worker's
+// own error report, which the re-pull's screen (ADR 0111) shares and which must not pull in this
+// module's mail, and for the function that says whether an approval has started publishing, which
+// moved to `shared/publication-steps.ts`.
+export {
+  SCREEN_REPORT_DEADLINE_MINUTES,
+  type ScreenView,
+  isScreenExempt,
+  readStoredReport,
+  readStoredState,
+  screenView,
+  workerErrorReport,
+};
 export { hasStartedPublishing } from "../../../shared/publication-steps.js";
-
-/**
- * A screen still pending this long after its dispatch has not reported, and is
- * mailed as such. Above the workflow's own budget (a 35-minute script deadline
- * inside a 45-minute job, plus queueing and callback retries), so the watchdog
- * does not overtake a run that is merely slow. A report that arrives later still
- * lands: marking a screen `unreported` keeps its nonce.
- */
-export const SCREEN_REPORT_DEADLINE_MINUTES = 50;
 
 /**
  * How long the admin-mail lease holds: a stored result whose mail has not gone
@@ -138,11 +139,6 @@ export const RERUN_GUARD_SQL = `AND status IN ('requested', 'blocked', 'approvin
          AND NOT (COALESCE(identifier_screen_status, '') = 'pending'
                   AND COALESCE(identifier_screen_dispatched_at, '')
                       >= datetime('now', '-${SCREEN_REPORT_DEADLINE_MINUTES} minutes'))`;
-
-/** A report the Worker writes itself, for a screen that produced none. */
-export function workerErrorReport(error: ScreenError): ScreenReport {
-  return parseScreenReport({ version: REPORT_VERSION, scanner: null, head: null, error });
-}
 
 /** The sentence that tells an admin what approval may do next, by gate. Worker-fixed words. */
 function nextStep(gate: ScreenGate, datasetId: string): string | undefined {

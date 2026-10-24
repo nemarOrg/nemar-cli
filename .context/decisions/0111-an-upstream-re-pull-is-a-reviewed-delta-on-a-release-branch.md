@@ -10,6 +10,7 @@ Narrows [ADR 0093](0093-pull-requests-awaiting-approval-are-managed-from-one-adm
 Builds on ADR 0001 (published datasets are PR-only), ADR 0023 (`--clean` reconciles), ADR 0034 (the column budget), ADR 0060, ADR 0085, ADR 0086, ADR 0089 and ADR 0091 (what an imported tree goes through), and ADR 0053 and ADR 0054 (unknown is never zero).
 The analysis is `.context/design-upstream-repull.md`; where it and this record disagree, this record wins.
 Decisions 4 and 10 are built, as their dated amendments below record, and so are the record of decision 3 (the table, its routes and its fences) and the fences of decision 6 (Amendment 2026-10-24 (#1912), Phase 6a); every other rule in the Decision section is designed here and built by the later phases of #1046, and its present tense states the rule, not today's behavior.
+*Annotated 2026-10-24: superseded in part by the Phase 6e amendment (#1912): the identifier screen bound to the re-pull row (decision 7), the merge cap of decision 6, and the verified merge and release are built too.*
 
 ## Context
 
@@ -26,6 +27,7 @@ Measured staleness is real: `on004362` missed upstream's 1.0.1 metadata fix (#18
 
 Everything in this section is designed and not yet built.
 *Annotated 2026-10-24: decisions 4 and 10 are built, as their dated amendments below record; the record of decision 3 and the fences of decision 6 are built by Phase 6a (#1912); every other rule is still designed and not built.*
+*Annotated 2026-10-24: superseded in part by the Phase 6e amendment: the screen bound to the row, the merge cap and the verified merge and release are built as well.*
 
 **An upstream re-pull replays the delta between two pinned upstream tags onto NEMAR's `main` as one synthesized commit on `release/vN.0.0`, landed through a pull request; N.0.0 is a pure mirror of the upstream snapshot, and NEMAR's corrections follow as N.0.1.**
 
@@ -231,6 +233,8 @@ ADR 0086 exempts `xx` from the identifier screen, so an `xx` re-pull never has a
 - That upstream's `.log.rmet` records a `versionId` per key, which the design record states and nothing here has checked.
 - That the dataset workflows tag the squash merge of a re-pull pull request as they tag other merges to `main`.
 - Whether the NEMAR installation token is accepted for another organization's public raw files (`OpenNeuroDatasets`), which the staleness report's mirror probe uses; if it is not, every probe reads `stale_unverified` with the reason and the first production run shows it.
+- That the central `run-identifier-screen` workflow posts a re-pull screen's report to its own callback path (`/webhooks/identifier-screen-repull-result`); the workflow accepts any plain https `callback_url` (read), and no run has used this one yet (added by the Phase 6e amendment).
+- GitHub's answers to the reads the re-pull's release and merge make (`commits/tags/<tag>` asked for `application/vnd.github.sha`, `compare/<merge>...<tag>` and its status words, a squash-merged pull request's `head` and `merge_commit_sha`); only stand-ins have answered them (added by the Phase 6e amendment).
 
 ## Receipts
 
@@ -640,6 +644,7 @@ Clearing a claim after GitHub confirms the pull request was not merged, and expi
   A re-pull takes upstream's authors and README, which would undo ADR 0065's blind.
 - **A withdrawn dataset**, **an import that is preparing, copying or finalizing**, and **a dataset not recorded as a mirror of that `ds`** are refused, each by its own code.
   These run at create only: the execution phases must re-check the anonymity, withdrawn and import fences when they move a record, which a transition does not do today.
+  *Annotated 2026-10-24: superseded by the Phase 6e amendment: the mirror, anonymity, withdrawn and import fences now also run at the screen's dispatch, at the gates and at the claim to merge.*
 - **The dataset's own version rows must agree with the plan.**
   The highest version (both `1.0.0` and `v1.0.0` spellings, ordered by number) must be the plan's `from_version`, and every row at it must name `from_tag` by `doi` or `lineage`.
   A row recorded `unknown` is never re-pulled (decision 4).
@@ -664,6 +669,7 @@ Two kinds of state are not written by this route, so a caller cannot state them.
 `merged`, `released`, `patch_merged` and `patch_released` are facts about GitHub and the version row, and are written only by routes that read them.
 `gates_clear` and `patch_gates_clear` are written only when the identifier screen is bound to the row.
 Both groups are refused here (`use-verified-route`, `screen-not-built`) except for the repeating edges above, so the record cannot be used to skip the screen or to claim a merge that did not happen.
+*Annotated 2026-10-24: superseded by the Phase 6e amendment: `screen-not-built` no longer exists; `gates_clear` and `patch_gates_clear` are accepted through the transition route when the screen bound to the row passes for the pull request's live head.*
 
 ### The record is deleted with its dataset
 
@@ -738,3 +744,71 @@ A listing that OpenNeuro answered but that is unusable for one dataset (a snapsh
 Only a complete pass is measured: one that threw, was refused, stopped at `--max-pages`, saw the population change, had an `unchecked` row or carried `errors[]` may hold a partial set of stale mirrors, and totaling a part of the fleet would read as the whole.
 Such a pass reports `measurement` as null with the reason and keeps its own exit code.
 The measurement is read-only: it writes nothing to NEMAR or to OpenNeuro, and the only requests it sends OpenNeuro are read queries.
+
+## Amendment 2026-10-24 (#1912): Phase 6e binds the screen to the row, caps the merge and verifies the release
+
+A further slice of the Phase 6 amendment above, built by Phase 6e.
+
+### The screen is bound to the row
+
+This slice is the screen of decision 7, the merge cap of decision 6, and the two facts the record could not state before, the merge and the release.
+Nothing here merges, opens or closes a pull request, and nothing mails anyone; the source scan that pins the record's import closure now covers the screen, its callback and the verified service too.
+
+A re-pull's screens live in `upstream_repull_screens` (migration 0106): one row per screened commit of one of the two pull requests, `n0` for N.0.0's and `n1` for N.0.1's.
+`POST /admin/repulls/:id/screen` dispatches the publication screen's workflow with `ref` set to the recorded head, `request_id` 0, and a callback of its own, `/webhooks/identifier-screen-repull-result`, whose token is a kind of its own.
+The token binds the dataset, the row, the pull request, the commit and a one-shot nonce, under a domain line no other kind's message begins with.
+A screen is dispatched only while its pull request is open and not yet clear (`pr_open`, `patch_synthesized`), only for the head the row records, and only while the environment and dataset fences hold.
+Outside production only an `xx` dataset passes the environment fence, and ADR 0086 exempts `xx` from the screen, so a non-production Worker never dispatches one.
+The workflow resolves a 40-character `ref` to that commit and reports it as the screened head (read in `scripts/identifier-screen-ci-lib.ts`, not run).
+
+The publication screen mails its result; this one does not, so it reads the publication screen's helpers from the module that mails nobody.
+The report deadline and the Worker's own error report moved there for that reason, and the publication screen re-exports both.
+
+Unknown is never clear.
+No screen, a screen that errored, and one still pending 50 minutes after its dispatch all read as "run it again"; the last reads `unreported` when it is read, so no cron writes it, and its run may still report until a new dispatch replaces the nonce.
+A report about another commit or another dataset, or outside the contract, is stored as the Worker's `workflow-failed` error, never as a verdict.
+A commit is dispatched again while it has no verdict, and while its verdict asks for a person (review, unchecked, not screened, clean in EDF only) and no administrator has acknowledged it, so a rerun may still clear it; a run still out, a clear verdict, a direct identifier and an acknowledged verdict are not, and only a new commit is screened anew.
+Dispatching for a new head frees the earlier run, so at most one run per re-pull waits for a report, which the callback needs because the workflow echoes only the dataset.
+
+An acknowledgment (ADR 0086) attaches only to a verdict that asks for a person, never to a direct identifier, with a reason of the publication path's length, and the database refuses one on any other state.
+It counts only for the administrator who recorded it, the publication path's rule, so a reason one administrator gave does not stand in for another's at the gates or at the merge.
+It is recorded once: a second administrator is refused (`already-acknowledged`), and the write itself holds only while none is recorded.
+So if the administrator who recorded it is absent, or is no longer an administrator, nothing else unblocks the pull request: only a new head, screened anew, does.
+
+The edges into `gates_clear` and `patch_gates_clear` were refused by the record until the screen was bound (`screen-not-built`); they now open.
+The gates sha must be the head the row records, the dataset fences are read again, and the screen must pass for that head; the statement that writes the edge re-asserts the verdict it read, so a verdict that changed in between is not relied on (`screen-changed`).
+The caller's word for the head is not taken: before the gates and before the claim the Worker reads the live pull request on GitHub, which must be open, not a draft, unmerged, aimed at `main` from the recorded release branch, with its head at the sha being gated or claimed; a GitHub that cannot be read refuses (502), a draft is `pr-draft` (409) and takes no unit of the cap, and any other mismatch is `head-moved` (409), with nothing recorded.
+The live read is followed by the UPDATE and then the caller's merge, so the head check holds only if Phase 6f's merge call passes that same `sha` to GitHub's merge API, which refuses a head that moved: GitHub's `head.sha` can lag just after a push, in the unsafe direction, and the merge's own `sha` is the check that closes that gap.
+The dataset fences are read again by the Worker at every step toward a merge: the dispatch, the gates and the claim; the other edges still re-check only the environment fence.
+
+### The merge cap, as built
+
+The claim to merge stays the self-edge the first slice built, and it now also needs the dataset fences, the screen passing for the claimed head, the live head, and one unit of `REPULL_DAILY_MERGE_CAP`.
+The screen's verdict, the unit and two of the dataset fences (neither anonymous nor withdrawn) are in the statement that writes the claim, so they are atomic with it, and two claims racing for the last unit cannot both win; the mirror and import fences and the live head are read before it.
+A refused claim writes nothing (ADR 0099).
+The day is a fixed UTC day on D1's own clock, and N.0.0's and N.0.1's claims count together, because each merge mints a DOI.
+The binding reads as Phase 7's caps will: absent, the default 5; one or two digits from 0 to 20, that number, and 0 stops every merge; anything else reads 0, and the refusal says the cap is unreadable (`merge-cap-unreadable`) rather than quietly falling back to the default.
+Reporting that as attention in the weekly report is Phase 7's.
+
+A claim is released only when the caller says the merge was not sent or was refused, while the row is still at its gates-clear status holding that claim, only once the claim is five minutes old by the Worker's own stamp (`claim-too-recent` before that), and only when GitHub says the pull request did not merge; an unknown outcome cannot release, so a lost answer is resolved from GitHub.
+That is a guard of one read and an age, not proof that no merge is in flight: a merge that lands between the read and the release is recorded later, by the merge route, as one no tool held a claim for.
+The route is built here; Phase 6f's resume is its caller.
+
+### The merge and the release, verified
+
+`merged` and `patch_merged` are written by `POST /admin/repulls/:id/merged`, after the Worker reads the recorded pull request on GitHub with its own credential: its number, its release branch, aimed at `main`, merged, and GitHub's merge commit.
+A merge with no claim held by a NEMAR tool, and a merge at a head other than the screened one, are still recorded, because they happened and the record must say so before a second major could follow; each is counted on its own, `merged_outside_tool` meaning only that no claim was held and `merged_unscreened_head` only that the merged head is not the screened one, and those two counts are written only by the Worker and shown in the record.
+The cap binds NEMAR's tools only (Consequences); this is how a merge outside them shows.
+A pull request merged while the row is still `pr_open` has no edge here; the row stays open, which blocks a new re-pull, and Phase 6f's resume owns it.
+
+`released` and `patch_released` are written by `POST /admin/repulls/:id/released` once the version row exists with a DOI (either spelling of the version), the tag `v<version>` resolves to the commit the caller reports, and that commit contains the merge.
+Containing, not equal: the dataset workflow tags `main`'s head when it runs, which can be an enrichment commit after the merge.
+A comparison that says `diverged` or `behind`, or a tag on another commit, is `tag-mismatch`; a comparison GitHub could not make is `compare-unresolved`.
+A retried `merged` or `released` that finds its fact already recorded for the same commit answers with the stored row (`replayed`), so a caller whose answer was lost may ask again; another commit is refused.
+In the same batch, and only when the transition itself applies: N.0.0's version row is upgraded to `lineage` when the caller verified the tagged tree outside the paths NEMAR owns (an assertion recorded in the audit row, as at create; never for N.0.1, which carries NEMAR's corrections), and the dataset's hed, channel-montage, data and availability stamps are removed, so each of those sweeps reads the new version again.
+Only that dataset's stamps are touched, and the values the sweeps wrote stay until each sweep overwrites them.
+
+Decision 2's "one ADR 0023 reconcile is queued" needs no new writer: the Zarr queue's `reconcile` already re-queues a public dataset whose `latest_version` differs from the version it converted, and every conversion runs `--clean`, which reconciles (`scripts/zarr/zarr_queue.py`, `scripts/zarr/hallu-zarr.sh`, read).
+A release changes `latest_version`, so the stamp re-arm is the only new behavior.
+
+Checked only against stand-ins, until the canary and the first production runs: that GitHub's commit read resolves an annotated tag to its commit, the words its comparison answers with, and a squash-merged pull request's `head` and `merge_commit_sha` as this reads them.
