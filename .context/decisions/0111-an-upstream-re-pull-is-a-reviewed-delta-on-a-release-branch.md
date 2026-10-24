@@ -32,19 +32,34 @@ Measured staleness is real: `on004362` missed upstream's 1.0.1 metadata fix (#18
   Other `SourceDatasets` entries are kept from both sides, and every other key and path is upstream-owned.
   `CHANGES` is upstream-owned, and NEMAR never writes it.
 - The standard edits are re-applied as functions, never merged as text: the README rename and DOI badge, the `.nemar/` line in `.bidsignore`, ADR 0060's annex policy, moving git-resident data into the annex, ADR 0089's scrub with its provenance sentence, and ADR 0091's date normalization.
-- A NEMAR change to an upstream-owned path is explained when ours equals a standard edit applied to base, checked mechanically: a scrubbed key is explained when NEMAR's git-annex branch marks the upstream key dead, and a file moved into the annex is explained when its key hashes the base blob.
-- An unexplained NEMAR change is a correction when upstream did not change that path between `from_tag` and `to_tag`, and a conflict when it did.
-- A conflict takes upstream's side in N.0.0, so a re-pull never blocks on one; the plan lists it for an administrator, and it stays out of N.0.1 until an administrator resolves it.
+- Base is upstream at `from_tag`, theirs is upstream at `to_tag`, and ours is NEMAR `main`.
+  An upstream-changed path is one that differs between base and theirs.
+  A delta path is one the re-pull's commit adds or changes relative to ours.
+  A path present on one side only differs from that side.
+- An unexplained path is an upstream-owned path where ours differs from base, ours is not a standard edit applied to base, and ours is not already theirs with the standard edits applied.
+  "Explained" is checked mechanically: a scrubbed key is explained when NEMAR's git-annex branch marks the upstream key dead, and a file moved into the annex is explained when its key hashes the base blob.
+- An unexplained path is a conflict when it is upstream-changed and a correction when it is not, so "zero unexplained paths" means no conflict and no correction.
+- N.0.0 takes, per upstream-owned path:
+  ours, when the path is neither upstream-changed nor unexplained, so no standard edit is run on it again;
+  theirs with the standard edits applied, when it is upstream-changed and not unexplained;
+  theirs with the standard edits applied, for a conflict, so a re-pull never blocks on one;
+  and theirs with the standard edits applied, for a correction, which N.0.1 then replays.
+- The conflict cases each take upstream's side in N.0.0, and the plan lists NEMAR's side for an administrator:
+  upstream deleted a path NEMAR changed (N.0.0 deletes it);
+  NEMAR deleted a path upstream changed (N.0.0 has upstream's new file);
+  and both added a path with different content (N.0.0 has upstream's).
+  A path NEMAR added or deleted that upstream did not change is a correction: N.0.0 follows upstream, and N.0.1 replays NEMAR's addition or deletion.
+- A conflict stays out of N.0.1 until an administrator resolves it.
 - Corrections replay as N.0.1, the next patch, in a second pull request stacked on the first, opened with it and merged right after it.
   A re-pull with no corrections opens no N.0.1.
 
 ### 2. The delta is replayed as one commit, through a pull request
 
-- The plan compares, per path, base (upstream at `from_tag`), theirs (upstream at `to_tag`) and ours (NEMAR `main`), on a clone of `nemarDatasets/<id>` at `main` (so `enableremote nemar-s3` reuses the bucket's UUID, avoiding #1320) and metadata-only clones of upstream at the two tags.
+- The plan compares base, theirs and ours per path (decision 1), on a clone of `nemarDatasets/<id>` at `main` (so `enableremote nemar-s3` reuses the bucket's UUID, avoiding #1320) and metadata-only clones of upstream at the two tags.
 - The result is one commit on `release/vN.0.0`, carrying the trailers `Upstream-Snapshot: <ds>@<to_tag>` and `Repull-Plan: <digest>`.
   N is the next major after the highest of the `dataset_versions` rows, the `v*` tags and `Version` on `main`; the plan refuses when the three disagree or another release pull request is open.
 - It lands through a pull request, never a bypass and never a direct push, and it is never a git merge of upstream's history: upstream's commits are not pushed to NEMAR.
-- The scrub, the annex policy and the date normalization run on the delta paths only, which are the paths the commit adds or changes relative to `main`, and they run before the commit, so unscrubbed bytes never enter NEMAR's history.
+- The scrub, the annex policy and the date normalization run on the delta paths only (decision 1), and they run before the commit, so unscrubbed bytes never enter NEMAR's history.
   A recording the commit does not touch keeps its bytes and its key.
 - `nemar admin repull <id>` is a dry run by default, and `--execute` requires `--plan <file>` with the digest of the reviewed plan; when `main` moved since the plan, it plans again unless the new commits touch only `.nemar/**`.
 - The merge changes nothing downstream: the existing workflows tag the merge, the tag mints the version DOI through EZID (ADR 0007), and the DOI carries `IsDerivedFrom` `openneuro.<ds>.v<to_tag>` because the mint reads `SourceDatasets` at the tag.
@@ -82,7 +97,7 @@ Measured staleness is real: `on004362` missed upstream's 1.0.1 metadata fix (#18
   Both are off when absent, and the scheduled path is production-only through the dev cron's allowlist.
 - `REPULL_DAILY_OPEN_CAP` (default 2) bounds the re-pull pull requests the automatic path opens in a day.
 - `REPULL_DAILY_MERGE_CAP` (default 5) bounds merges: every merge a NEMAR tool makes of a re-pull pull request, the Worker's and the manual ones (`nemar admin repull <id> --merge`, `nemar admin pr-reviews`) alike, first claims one from the backend, and a refused claim merges nothing, because every merge mints an irreversible DOI.
-- The automatic path takes only a plan with zero conflicts and zero unexplained paths.
+- The automatic path takes only a plan with zero unexplained paths.
 - Outside production, the re-pull routes refuse every dataset that is not `xx`, because the GitHub organization is shared, and re-pull mail goes through the admin-only fence.
 
 ### 7. The Worker may merge a re-pull pull request, and nothing else, when it is machine clean
@@ -90,7 +105,7 @@ Measured staleness is real: `on004362` missed upstream's 1.0.1 metadata fix (#18
 A re-pull pull request is machine clean when all of these hold:
 
 - `AUTO_REPULL_MERGE_ENABLED` is on, and the pull request is the one `upstream_repulls` recorded for this re-pull (its branch, number and head SHA);
-- the plan had zero unexplained paths against the pure-mirror rule, so there are no corrections to replay and no conflicts: the Worker never merges an N.0.1 pull request, because N.0.1 exists only when a correction does, and an administrator merges it;
+- the plan had zero unexplained paths, so there is no conflict and no correction to replay: the Worker never merges an N.0.1 pull request, because N.0.1 exists only when a correction does, and an administrator merges it;
 - the identifier screen, dispatched with `ref=<head sha>` and a callback bound to the re-pull row, says `clear`: never `unchecked`, never `rerun`, and never `acknowledge`, which needs a person (ADR 0086);
 - BIDS validation and `version-check` are green;
 - the pull request's head equals the screened SHA;
@@ -121,7 +136,7 @@ The Worker's merge call is not built until the ruleset check below is done.
 - It makes no publication request; the identifier screen gates its merge (decision 7) instead.
 - ADR 0089's forward-fix hold does not apply.
   That hold exists because an import pushes upstream's history, which still holds what the scrub replaced; a re-pull pushes none and scrubs its delta paths before its one commit, so nothing it adds to NEMAR's history holds an original.
-- ADR 0091's date normalization applies to new and changed recordings only, so nothing already published is changed.
+- ADR 0091's date normalization applies on delta paths only, so nothing already published is changed.
 
 ### 10. The upstream tag is pinned, never HEAD
 
