@@ -64,7 +64,8 @@ Measured staleness is real: `on004362` missed upstream's 1.0.1 metadata fix (#18
 - The result is one commit on `release/vN.0.0`, carrying the trailers `Upstream-Snapshot: <ds>@<to_tag>` and `Repull-Plan: <digest>`.
   N is the next major after the highest of the `dataset_versions` rows, the `v*` tags and `Version` on `main`; the plan refuses when the three disagree or another release pull request is open, not counting this re-pull's own N.0.1.
 - It lands through a pull request, never a bypass and never a direct push, and it is never a git merge of upstream's history: upstream's commits are not pushed to NEMAR.
-- The scrub, the annex policy and the date normalization run on the delta paths only (decision 1), and they run before the commit, so unscrubbed bytes never enter NEMAR's history.
+- The scrub, the annex policy and the date normalization run on the delta paths only (decision 1), before the copy and before the commit.
+  An object the copy writes is anonymously readable by key (ADR 0089), so nothing unscrubbed is copied into NEMAR's bucket, and nothing unscrubbed enters NEMAR's history.
   A recording the commit does not touch keeps its bytes and its key.
 - `nemar admin repull <id>` is a dry run by default, and `--execute` requires `--plan <file>` with the digest of the reviewed plan; when `main` moved since the plan, it plans again unless the new commits touch only `.nemar/**`.
 - The merge changes nothing downstream: the existing workflows tag the merge, the tag mints the version DOI through EZID (ADR 0007), and the DOI carries `IsDerivedFrom` `openneuro.<ds>.v<to_tag>` because the mint reads `SourceDatasets` at the tag.
@@ -134,7 +135,7 @@ The Worker's merge call is not built until the ruleset check below is done.
 
 ### 8. A copy pins the object version, and nothing of the prior version is deleted
 
-- The copy manifest is the keys the new tree names that are not present and not dead, written to `<id>/staging/repull-<tag>.json`.
+- The copy manifest is the keys the scrubbed new tree names that are not present and not dead, written to `<id>/staging/repull-<tag>.json`.
 - Each copy item carries the S3 `versionId` upstream's `.log.rmet` records for its key, and the copy pins it; an item without a `versionId` is refused, never copied by path.
   Today `parseS3Url` drops the query string, so the import copy takes whatever object is current at the path.
 - Prior-version objects stay under their governance lock, and the old version's manifest, DOI and data-plane routes are unchanged.
@@ -144,7 +145,7 @@ The Worker's merge call is not built until the ruleset check below is done.
 
 - It makes no publication request; the identifier screen gates its merge (decision 7) instead.
 - ADR 0089's forward-fix hold does not apply.
-  That hold exists because an import pushes upstream's history, which still holds what the scrub replaced; a re-pull pushes none and scrubs its delta paths before its one commit, so nothing it adds to NEMAR's history holds an original.
+  That hold exists because an import pushes upstream's history, which still holds what the scrub replaced; a re-pull pushes none and scrubs its delta paths before its copy and its one commit, so nothing it copies or adds to NEMAR's history holds an original.
 - ADR 0091's date normalization applies on delta paths only, so nothing already published is changed.
 
 ### 10. The upstream tag is pinned, never HEAD

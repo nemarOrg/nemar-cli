@@ -181,7 +181,7 @@ A re-import is unchanged.
 ## Amendment 2026-10-23 (#1046): a re-pull scrubs its delta paths before its commit
 
 An upstream re-pull ([ADR 0111](0111-an-upstream-re-pull-is-a-reviewed-delta-on-a-release-branch.md)) is not an import: it writes no `import_jobs` row and makes no publication request.
-It runs this record's scrub on its delta paths only, the paths its one synthesized commit adds or changes relative to `main`, and runs it before that commit, so unscrubbed bytes never enter NEMAR's history.
+It runs this record's scrub on its delta paths only, the paths its one synthesized commit adds or changes relative to `main`, and runs it before the copy and before that commit, as an import does, so nothing unscrubbed is copied into the bucket, where an object is anonymously readable by key, and nothing unscrubbed enters NEMAR's history.
 A recording the commit does not touch keeps its key and is not read again.
 It pushes none of upstream's history, so the forward-fix hold does not apply to it; the identifier screen gates its merge instead of a publication.
 The copy manifest rule stands (the new tree's keys, minus those present and those dead), and each re-pull copy item also pins its S3 `versionId`.
