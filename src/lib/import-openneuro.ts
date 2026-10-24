@@ -67,7 +67,7 @@ import {
   screenWaitBudget,
 } from "./import-publication.js";
 import { httpUpstreamReader, prepareImportedTreeForCopy } from "./import-scrub.js";
-import { hasSourceEntryFor, recordedUpstreamTag } from "./import-upstream-tag.js";
+import { recordedUpstreamTag, untaggedEntryIndexFor } from "./import-upstream-tag.js";
 import { fetchOpenNeuroLatestTag } from "./openneuro.js";
 import {
   type ImportManifest,
@@ -887,20 +887,25 @@ export function sourceDatasetEntry(
 }
 
 /**
- * Append {@link sourceDatasetEntry} to the clone's `dataset_description.json`, read from disk now
- * (the scrub in Step 5b may have blanked values in it since prepare first read it). Leaves the file
- * alone when an entry already names this dataset's `ds`: NEMAR owns exactly one such entry, and a
- * second would make the recorded tag disagree with itself. Kept in git, never the annex. Returns
- * whether it wrote. Written as publication writes the file, two-space JSON.
+ * Record {@link sourceDatasetEntry} in the clone's `dataset_description.json`, read from disk now
+ * (the scrub in Step 5b may have blanked values in it since prepare first read it). NEMAR owns one
+ * entry per mirrored `ds` (ADR 0111 decision 1), so:
+ *   - `already-recorded`: an entry already records a tag for this dataset; the file is left alone.
+ *   - `completed`: an entry names this dataset and nothing else but records no tag (a concept DOI,
+ *     a dataset page); it gains `Version` and whichever of `DOI` and `URL` it lacks, in place, so
+ *     the description still has one entry for the dataset and the guard can read its tag.
+ *   - `appended`: otherwise, a new entry. An entry that also names another dataset is left alone.
+ * Kept in git, never the annex, and written as publication writes the file, two-space JSON.
+ * Entries of any shape, `null` included, are kept as they are.
  */
 export async function appendSourceDatasetEntry(
   datasetPath: string,
   openneuroId: string,
   tag: string,
-): Promise<boolean> {
+): Promise<"already-recorded" | "completed" | "appended"> {
   const descPath = join(datasetPath, "dataset_description.json");
   const desc = readBidsDescription(datasetPath);
-  if (hasSourceEntryFor(desc, openneuroId)) return false;
+  if (recordedUpstreamTag(desc, openneuroId) !== null) return "already-recorded";
   // A `SourceDatasets` that is not an array is kept as the first entry, as publication keeps it.
   const existing = desc.SourceDatasets;
   const sources: unknown[] = Array.isArray(existing)
@@ -908,7 +913,23 @@ export async function appendSourceDatasetEntry(
     : existing === undefined || existing === null
       ? []
       : [existing];
-  sources.push(sourceDatasetEntry(openneuroId, tag));
+  const entry = sourceDatasetEntry(openneuroId, tag);
+  const index = untaggedEntryIndexFor({ SourceDatasets: sources }, openneuroId);
+  let outcome: "completed" | "appended";
+  if (index >= 0) {
+    const current = sources[index] as Record<string, unknown>;
+    const has = (key: string) => typeof current[key] === "string" && current[key] !== "";
+    sources[index] = {
+      ...current,
+      ...(has("DOI") ? {} : { DOI: entry.DOI }),
+      ...(has("URL") ? {} : { URL: entry.URL }),
+      Version: entry.Version,
+    };
+    outcome = "completed";
+  } else {
+    sources.push(entry);
+    outcome = "appended";
+  }
   writeFileSync(descPath, `${JSON.stringify({ ...desc, SourceDatasets: sources }, null, 2)}\n`);
   const add = await runCommand(
     ["git", "-c", "annex.largefiles=nothing", "add", "dataset_description.json"],
@@ -917,7 +938,7 @@ export async function appendSourceDatasetEntry(
   if (add.exitCode !== 0) {
     throw new Error(`Failed to stage dataset_description.json: ${add.stderr.trim()}`);
   }
-  return true;
+  return outcome;
 }
 
 /**
@@ -1681,7 +1702,7 @@ async function prepareImportSteps(
   // GitHub renders it (#642). Content is never modified.
   const metaSpinner = ora("Seeding metadata...").start();
   let readmeOutcome: ReadmeOutcome;
-  let recordedEntry = false;
+  let recordedEntry: Awaited<ReturnType<typeof appendSourceDatasetEntry>> | null = null;
   try {
     seedMetadata(datasetPath, nemarId, openneuroId, bidsDesc, openNeuroDoi);
     readmeOutcome = ensureReadmeMd(datasetPath, openneuroId, openNeuroDoi);
@@ -1729,7 +1750,7 @@ async function prepareImportSteps(
         ? `kept upstream ${readmeOutcome.path}`
         : "wrote provenance stub README.md (no upstream README)";
   metaSpinner.succeed(
-    `Seeded .nemar/metadata.json (${readmeNote}${recordedEntry ? `; recorded upstream ${openneuroId} ${pinned.tag} in SourceDatasets` : ""})`,
+    `Seeded .nemar/metadata.json (${readmeNote}${recordedEntry === "appended" || recordedEntry === "completed" ? `; recorded upstream ${openneuroId} ${pinned.tag} in SourceDatasets` : ""})`,
   );
 
   // Step 7: Push main + the git-annex branch (now carrying the nemar-s3 remote

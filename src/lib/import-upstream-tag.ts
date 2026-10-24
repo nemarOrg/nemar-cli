@@ -121,3 +121,16 @@ export function hasSourceEntryFor(desc: unknown, sourceId: string): boolean {
   if (!isRecord(desc) || !Array.isArray(desc.SourceDatasets)) return false;
   return desc.SourceDatasets.some((entry) => readEntry(entry, sourceId).names);
 }
+
+/**
+ * The index of the first `SourceDatasets` entry that names `sourceId` and nothing else and records
+ * no tag, which the import may complete in place; -1 when there is none. An entry that also names
+ * another dataset is not this import's to edit.
+ */
+export function untaggedEntryIndexFor(desc: unknown, sourceId: string): number {
+  if (!isRecord(desc) || !Array.isArray(desc.SourceDatasets)) return -1;
+  return desc.SourceDatasets.findIndex((entry) => {
+    const reading = readEntry(entry, sourceId);
+    return reading.namesOnly && reading.tags.length === 0;
+  });
+}

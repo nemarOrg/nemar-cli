@@ -310,7 +310,7 @@ describe("the import records the snapshot it is, in SourceDatasets", () => {
     // a git blob regardless.
     await git(dir, "annex", "config", "--set", "annex.largefiles", "anything");
 
-    expect(await appendSourceDatasetEntry(dir, UPSTREAM_ID, "1.0.1")).toBe(true);
+    expect(await appendSourceDatasetEntry(dir, UPSTREAM_ID, "1.0.1")).toBe("appended");
 
     const staged = JSON.parse(await git(dir, "show", ":dataset_description.json"));
     expect(staged.SourceDatasets).toEqual([theirs, sourceDatasetEntry(UPSTREAM_ID, "1.0.1")]);
@@ -335,13 +335,69 @@ describe("the import records the snapshot it is, in SourceDatasets", () => {
 
   test("never a second entry for the same dataset", async () => {
     const dir = await pinnedAt("1.0.0");
-    expect(await appendSourceDatasetEntry(dir, UPSTREAM_ID, "1.0.0")).toBe(true);
+    expect(await appendSourceDatasetEntry(dir, UPSTREAM_ID, "1.0.0")).toBe("appended");
     const once = readFileSync(join(dir, "dataset_description.json"), "utf8");
-    expect(await appendSourceDatasetEntry(dir, UPSTREAM_ID, "1.0.0")).toBe(false);
+    expect(await appendSourceDatasetEntry(dir, UPSTREAM_ID, "1.0.0")).toBe("already-recorded");
     // Nor when the entry already there names another version: one entry per ds, so the recorded
     // tag never disagrees with itself.
-    expect(await appendSourceDatasetEntry(dir, UPSTREAM_ID, "1.0.1")).toBe(false);
+    expect(await appendSourceDatasetEntry(dir, UPSTREAM_ID, "1.0.1")).toBe("already-recorded");
     expect(readFileSync(join(dir, "dataset_description.json"), "utf8")).toBe(once);
+  });
+
+  /** Rewrite the clone's description with `sources`, then record 1.0.1 and return what is staged. */
+  async function recordOver(sources: unknown[]): Promise<{
+    outcome: string;
+    staged: Record<string, unknown> & { SourceDatasets: unknown[] };
+  }> {
+    const dir = await pinnedAt("1.0.1");
+    const descPath = join(dir, "dataset_description.json");
+    const upstreamDesc = JSON.parse(readFileSync(descPath, "utf8"));
+    writeFileSync(descPath, JSON.stringify({ ...upstreamDesc, SourceDatasets: sources }));
+    const outcome = await appendSourceDatasetEntry(dir, UPSTREAM_ID, "1.0.1");
+    return { outcome, staged: JSON.parse(await git(dir, "show", ":dataset_description.json")) };
+  }
+
+  test("an untagged entry for this dataset alone is completed in place, never joined by a second", async () => {
+    // Left untouched, an untagged entry was enough to skip the record, and then nothing recorded a
+    // tag: the upstream-moved guard could never fire on this dataset.
+    const entry = sourceDatasetEntry(UPSTREAM_ID, "1.0.1");
+    const conceptDoi = `doi:10.18112/openneuro.${UPSTREAM_ID}`;
+    const page = `https://openneuro.org/datasets/${UPSTREAM_ID}`;
+
+    const doiOnly = await recordOver([{ DOI: conceptDoi }]);
+    expect(doiOnly.outcome).toBe("completed");
+    expect(doiOnly.staged.SourceDatasets).toEqual([
+      { DOI: conceptDoi, URL: entry.URL, Version: "1.0.1" },
+    ]);
+    expect(recordedUpstreamTag(doiOnly.staged, UPSTREAM_ID)).toBe("1.0.1");
+
+    const urlOnly = await recordOver([{ URL: page, Name: "upstream's own label" }]);
+    expect(urlOnly.outcome).toBe("completed");
+    expect(urlOnly.staged.SourceDatasets).toEqual([
+      { URL: page, Name: "upstream's own label", DOI: entry.DOI, Version: "1.0.1" },
+    ]);
+    expect(recordedUpstreamTag(urlOnly.staged, UPSTREAM_ID)).toBe("1.0.1");
+  });
+
+  test("an entry that already records a tag, in the live on004362 shape, is left alone", async () => {
+    const tagged = [{ DOI: `doi:10.18112/openneuro.${UPSTREAM_ID}.v1.0.0` }];
+    const { outcome } = await recordOver(tagged);
+    expect(outcome).toBe("already-recorded");
+  });
+
+  test("an entry naming two datasets is not edited; the record is appended beside it", async () => {
+    const twoDatasets = {
+      DOI: `doi:10.18112/openneuro.${UPSTREAM_ID}`,
+      URL: "https://openneuro.org/datasets/ds000002",
+    };
+    const { outcome, staged } = await recordOver([twoDatasets, null]);
+    expect(outcome).toBe("appended");
+    expect(staged.SourceDatasets).toEqual([
+      twoDatasets,
+      null,
+      sourceDatasetEntry(UPSTREAM_ID, "1.0.1"),
+    ]);
+    expect(recordedUpstreamTag(staged, UPSTREAM_ID)).toBe("1.0.1");
   });
 
   test("a leading v on the tag does not reach the DOI", () => {
