@@ -35,6 +35,19 @@ describe("terminalSafeText", () => {
     expect(displayName(text)).toBe(expected);
   });
 
+  test("escapes the other format and look-alike invisible characters", () => {
+    const text = "a\u00adb\u034fc\u2061d\u180ee\u115ff\u3164g\ufe0fh\u{e0041}i\u{e0100}j";
+    const expected =
+      "a\\xadb\\u034fc\\u2061d\\u180ee\\u115ff\\u3164g\\ufe0fh\\u{e0041}i\\u{e0100}j";
+    expect(terminalSafeText(text)).toBe(expected);
+    expect(displayName(text)).toBe(expected);
+  });
+
+  test("keeps ordinary letters from other scripts", () => {
+    const text = "Shir\u0101z\u012b \u0634\u06cc\u0631\u0627\u0632 \u5317\u4eac";
+    expect(terminalSafeText(text)).toBe(text);
+  });
+
   test("writes every escape the way displayName does", () => {
     const hostile = "\u001b\r\u0000\u007f\u009b\u202e\u2066\u2028";
     expect(terminalSafeText(hostile)).toBe(displayName(hostile));
