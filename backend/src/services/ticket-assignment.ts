@@ -31,6 +31,9 @@ export interface MailQueueRow {
 export interface AssignmentContext {
   /** An account that must never hold the ticket, even if it is an owner. */
   excludedUserId?: number | null;
+  /** The ticket's own restriction, ORed with the queue's: a restricted ticket in an open queue
+   *  still goes only to an owner. */
+  restricted?: boolean;
 }
 
 /**
@@ -157,7 +160,7 @@ export async function resolveAssignee(
     .bind(queueTag)
     .first<MailQueueRow>();
   if (!queue) return null;
-  const restricted = isRestrictedQueue(queueTag, queue);
+  const restricted = isRestrictedQueue(queueTag, queue) || context.restricted === true;
   const excluded = context.excludedUserId ?? null;
 
   if (queue.strategy === "fixed") {
