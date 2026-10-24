@@ -43,7 +43,7 @@ export function registerUpstreamBackfillRoutes(admin: AdminRouter): void {
       const msg = err instanceof Error ? err.message : String(err);
       console.error("[upstream-backfill] database failure:", msg);
       return c.json(
-        { error: `Failed to read or write dataset_versions (is migration 0101 applied?): ${msg}` },
+        { error: `Failed to read or write dataset_versions (is migration 0104 applied?): ${msg}` },
         500,
       );
     }

@@ -237,7 +237,7 @@ ADR 0086 exempts `xx` from the identifier screen, so an `xx` re-pull never has a
 ## Amendment 2026-10-23 (#1908): Phase 2 builds decision 4, and the insert site is verified
 
 Epic #1046, Phase 2.
-Decision 4 is built: migration 0101 adds `dataset_versions.source_version` and `source_version_basis`, `shared/source-snapshot.ts` holds the one parser, the version insert records the snapshot, and `nemar admin upstream-backfill` records it for the mirrors that predate the columns.
+Decision 4 is built: migration 0104 adds `dataset_versions.source_version` and `source_version_basis`, `shared/source-snapshot.ts` holds the one parser, the version insert records the snapshot, and `nemar admin upstream-backfill` records it for the mirrors that predate the columns.
 This section makes one correction and states three readings that the decision text left open.
 The correction is to a sentence in decision 4, "from the tagged `dataset_description.json` the version-DOI callback already reads", and it answers the "Not yet verified" item "Where `source_version` is inserted under the central manifest flow."
 The decision text above is unchanged.

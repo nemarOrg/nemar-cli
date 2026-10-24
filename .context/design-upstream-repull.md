@@ -173,4 +173,4 @@ The automatic path takes only plans with zero unexplained paths (conflicts are a
 
 See the epic body of #1046.
 Dependencies: 2, 3 and 5 are independent after 1 (5 needs 2's parser); 4 follows 2; 6 follows 5; 7 follows 4 and 6; 8 follows 4 and 6.
-As of 2026-10-23, 0111 is taken by ADR 0111. Phase 2's migration is 0101 because 0100 is reserved by an in-flight branch (the email epic, #1893); the gap is harmless and must not be renumbered.
+As of 2026-10-23, 0111 is taken by ADR 0111. Phase 2's migration is 0104 because the email epic (#1893) took 0100 and 0101 on dev and its branches reach 0103; re-check origin/dev before the epic merges.

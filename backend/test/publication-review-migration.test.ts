@@ -129,7 +129,7 @@ describe("0098 publication_reviews: columns", () => {
 describe("0098 adds one table and two indexes, and no column anywhere else", () => {
   test("datasets and publication_requests have the columns they had before 0098", () => {
     const before = dbBefore0098();
-    // Through 0098 only: a later migration may add a column to these tables (0101 did, to
+    // Through 0098 only: a later migration may add a column to these tables (0104 did, to
     // dataset_versions), and this test is about what 0098 itself did.
     const after = dbBefore0098("0099");
     for (const table of ["datasets", "publication_requests", "users", "dataset_versions"]) {
