@@ -40,19 +40,21 @@ One predicate decides who may read or act on a ticket and is put in every query 
 A ticket a caller may not see answers 404, never 403, so its existence is not disclosed, and the same predicate guards writes.
 Assignment follows the same rule: only an owner who is not the excluded account can hold a restricted ticket, eligibility is rechecked at every assignment, and a stale queue row can only refuse, never widen access.
 A queue's restricted flag cannot change while it has tickets that are not closed, because open tickets carry the flag they were created with.
+For the same reason a closed or spam ticket whose flag no longer matches its queue's cannot be reopened (409 `restriction_mismatch`); an owner resolves it explicitly.
+A queue's open-ticket count, like everything else, counts only tickets the caller may see, and replaying a raw key through the owner reprocess route answers 404 for a ticket the caller may not see.
 No rule reads an account's kind or username.
 
 **Administrators are one class.**
 A human and an agent holding an admin account have the same access, the same notifications and the same audit trail; every reply and note records the acting account.
 
 **Default assignee, routine replies.**
-Ordinary queues resolve to the platform's service administrator account (`nemarAdmin`) by default, through the fallback queue's fixed assignee, when that account exists; otherwise the pool, where any eligible admin takes the ticket.
+Ordinary queues resolve by default to the fallback queue's fixed assignee (seeded as the platform's service admin account) when that account exists; otherwise the pool, where any eligible admin takes the ticket.
 That account is allowed to send routine replies on its own authority, because a reply that records its actor is attributable and an escalation exists for anything that is not routine.
 Restricted queues start unassigned and an owner sets who holds them.
 
 **Escalation.**
 Any administrator who can see a ticket can escalate it: it moves to the queue's escalation owner (the fallback queue's if the queue has none), its status becomes `escalated`, and the owner is notified.
-The escalation owner must be an owner, and is rechecked against the ticket's restriction and exclusion when used, so a ticket that excludes that owner refuses to escalate rather than reach them.
+The escalation owner must be an owner, and is rechecked as an owner (whatever the ticket's own restriction) and against its exclusion when used, so a ticket that excludes that owner refuses to escalate rather than reach them.
 
 **Notifications.**
 A new category, `support_tickets`, opted in by default, follows the existing admin fence: production only unless `DEV_ADMIN_NOTIFICATIONS` is `1`.
@@ -64,6 +66,9 @@ Notification is best effort and never fails ingest.
 **Replies that may not have been sent.**
 A reply whose provider refused it certainly sent nothing: the route returns a typed error and stores nothing.
 A reply whose outcome is unknown (a timeout, an internal error) records an event naming its Message-ID and returns an error telling the administrator not to resend blindly; the message is not stored as sent.
+A reply that was sent but could not be recorded writes the same kind of event, best effort, and the failure to write any such event never hides the error.
+A header the sender refuses (an over-long or malformed value) is a certain non-delivery, and `References` is trimmed from its oldest end so a long thread still fits.
+A reply may carry an idempotency key, stored unique per ticket before the send, because the default assignee may be an agent that retries after a lost response: a repeat of a sent reply returns its stored outcome without sending, a repeat while one is in flight is refused as in progress, and a repeat after an unknown outcome is refused and never re-sent.
 
 **Retention.**
 Raw messages live in R2 for two years in production and 30 days on staging, by bucket lifecycle rule.
@@ -71,7 +76,7 @@ Ticket rows are kept until the ticket is deleted; nothing deletes one automatica
 
 **Cascades.**
 Ending a person's admin standing (a demotion, a revocation, a soft delete) releases their open tickets to the pool, clears them from queue assignee, backup, escalation and rotation lists, and clears their away window, in the same batch as the statements that already revoke their credentials.
-An owner demoted to admin loses only what is restricted.
+An owner demoted to admin loses only what is restricted, except that the escalation owner setting is cleared whenever the person stops being an owner, in either case, because that setting is owner-only.
 
 ## Consequences
 
