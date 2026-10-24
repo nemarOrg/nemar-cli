@@ -288,9 +288,9 @@ It left the administrator without a way to re-judge the pull requests already re
 `nemar admin pr-reviews start <dataset> <pr> --redo` asks for it by name, and `start --all --redo` asks for every open pull request whose current commit has a finished review (pass, fail or uncertain), behind the same cost question and `--dry-run` as `--all`, with each finished review marked in the list.
 The Worker takes `?redo=1` on the start route and restarts the commit on its row through the restart that edits use: the nonce is replaced, so the superseded job's claim and report are refused, the verdict and report are cleared, the check goes back to running, and `attempts` goes up by one when the earlier run could have cost a call.
 A redo is not an edit, so it leaves the row's count of edit restarts as it is: a bulk redo must not give a contributor who is one edit from the cap five more.
-(A start of a commit refused at the cap, which is a different row, begins the count again, as before.)
+(Any other administrator's start, of a declined, errored, unreported or capped row, begins the count again, as before.)
 Everything else a start is held to still applies: the dataset must be reviewable, the pull request is read from GitHub, and an owner's or administrator's pull request is not reviewed unless a review of its current commit is on record, in which case it is handled like anyone's, as [ADR 0107](0107-dataset-pull-requests-are-screened-on-content-owners-and-administrators-are-exempt-and-the-review-check-is-required.md) says of every start.
-A block on the contributor answers `contributor_paused` and writes nothing: a redo does not change the text the review judged, so the finished review is not replaced by a decline (an edit does replace it, because the text changed).
+A block on the contributor answers `contributor_paused` and leaves the row's result alone: a redo does not change the text the review judged, so the finished review is not replaced by a decline (an edit does replace it, because the text changed).
 
 Two further limits are part of the decision.
 A review that is running is never started again, by a redo or by a plain start; the redo's answer is `review_running`.
