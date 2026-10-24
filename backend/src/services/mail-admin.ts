@@ -275,12 +275,16 @@ function liveEventStatement(
   kind: string,
   actor: number | null,
   detail: unknown,
+  /** Write only if the statement just before it changed a row (an idempotent winner's chain). */
+  afterChange = false,
 ): D1PreparedStatement {
   return db
     .prepare(
       `INSERT INTO mail_ticket_events (ticket_id, kind, actor_user_id, detail)
        SELECT ?1, ?2, ?3, ?4
-        WHERE EXISTS (SELECT 1 FROM mail_tickets WHERE id = ?1 AND purged_at IS NULL)`,
+        WHERE EXISTS (SELECT 1 FROM mail_tickets WHERE id = ?1 AND purged_at IS NULL)${
+          afterChange ? " AND changes() > 0" : ""
+        }`,
     )
     .bind(ticketId, kind, actor, JSON.stringify(detail));
 }
@@ -723,13 +727,18 @@ export async function addNote(
         .bind(ticket.id, idempotencyKey),
     );
   }
+  // Keyed: the bump and the event run only if the statement before them changed a row, so a race
+  // loser (whose note and key inserts wrote nothing) neither moves the retention clock nor logs.
+  const gate = idempotencyKey !== undefined;
   statements.push(
     db
       .prepare(
-        "UPDATE mail_tickets SET updated_at = datetime('now'), last_activity_at = datetime('now') WHERE id = ? AND purged_at IS NULL",
+        `UPDATE mail_tickets SET updated_at = datetime('now'), last_activity_at = datetime('now') WHERE id = ? AND purged_at IS NULL${
+          gate ? " AND changes() > 0" : ""
+        }`,
       )
       .bind(ticket.id),
-    liveEventStatement(db, ticket.id, "note", viewer.id, null),
+    liveEventStatement(db, ticket.id, "note", viewer.id, null, gate),
   );
   const results = await db.batch(statements);
   if ((results[0]?.meta?.changes ?? 0) === 0) {
@@ -740,7 +749,14 @@ export async function addNote(
     }
     throwPurged();
   }
-  if (idempotencyKey !== undefined) return (await storedFor(idempotencyKey)) ?? 0;
+  if (idempotencyKey !== undefined) {
+    const stored = await storedFor(idempotencyKey);
+    if (stored === null) {
+      // An invariant broke; the route answers an unexpected error as 500 `internal`.
+      throw new Error("A keyed note was stored but its key is missing.");
+    }
+    return stored;
+  }
   const row = await db
     .prepare("SELECT MAX(id) AS id FROM mail_messages WHERE ticket_id = ? AND direction = 'note'")
     .bind(ticket.id)

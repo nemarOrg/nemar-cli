@@ -15,7 +15,7 @@ import { buildReferences } from "../src/services/mail-admin";
 import { hashApiKey } from "../src/services/token";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { bindingError, recordingBinding } from "./helpers/cloudflare-email";
-import { freshDb, realD1, yieldingD1 } from "./helpers/d1";
+import { freshDb, realD1, wrapD1, yieldingD1 } from "./helpers/d1";
 import { withFakeResend } from "./helpers/resend";
 import { eml } from "./helpers/tickets";
 
@@ -662,6 +662,78 @@ describe("note idempotency", () => {
     expect(n2.status).toBe(200);
     expect(notes(t)).toBe(2);
     expect(binding.sent.length).toBe(2);
+  });
+
+  /** A D1 that runs `between` after the route's reads and just before its batch. */
+  const withGap = (between: () => void) => {
+    const inner = wrapD1(realD1(db), () => {});
+    return {
+      ...inner,
+      prepare: inner.prepare.bind(inner),
+      batch: async (stmts: unknown[]) => {
+        between();
+        return (inner as unknown as { batch(s: unknown[]): Promise<unknown> }).batch(stmts);
+      },
+    } as unknown as D1Database;
+  };
+
+  test("a race loser replays the winner's id and neither logs nor moves the retention clock", async () => {
+    const t = ticket();
+    db.run("UPDATE mail_tickets SET last_activity_at = '2026-01-01 00:00:00' WHERE id = ?", [t]);
+    let winnerId = 0;
+    envOverrides = {
+      DB: withGap(() => {
+        const r = db.run(
+          "INSERT INTO mail_messages (ticket_id, direction, text_body, author_user_id) VALUES (?, 'note', 'winner', ?)",
+          [t, ids.agent],
+        );
+        winnerId = Number(r.lastInsertRowid);
+        db.run(
+          "INSERT INTO mail_note_keys (ticket_id, idem_key, message_id) VALUES (?, 'race', ?)",
+          [t, winnerId],
+        );
+        db.run(
+          "INSERT INTO mail_ticket_events (ticket_id, kind, actor_user_id) VALUES (?, 'note', ?)",
+          [t, ids.agent],
+        );
+      }),
+    };
+    const loser = await post("agent", t, "note", "race", "loser");
+    expect(loser.status).toBe(200);
+    expect(loser.body.message_id).toBe(winnerId);
+    expect(notes(t)).toBe(1);
+    expect(
+      (
+        db
+          .query(
+            "SELECT COUNT(*) AS n FROM mail_ticket_events WHERE ticket_id = ? AND kind = 'note'",
+          )
+          .get(t) as { n: number }
+      ).n,
+    ).toBe(1);
+    expect(row(t).last_activity_at).toBe("2026-01-01 00:00:00");
+  });
+
+  test("a purge landing between the pre-check and the batch gives 409 with no note and no key", async () => {
+    const t = ticket();
+    envOverrides = {
+      DB: withGap(() => {
+        db.run("UPDATE mail_tickets SET purged_at = datetime('now') WHERE id = ?", [t]);
+      }),
+    };
+    const r = await post("agent", t, "note", "n-late", "x");
+    expect(r.status).toBe(409);
+    expect(notes(t)).toBe(0);
+    expect(db.query("SELECT COUNT(*) AS n FROM mail_note_keys").get()).toEqual({ n: 0 });
+  });
+
+  test("deleting a ticket row cascades its note keys", async () => {
+    const t = ticket();
+    await post("agent", t, "note", "n-c");
+    expect(db.query("SELECT COUNT(*) AS n FROM mail_note_keys").get()).toEqual({ n: 1 });
+    db.run("PRAGMA foreign_keys = ON");
+    db.run("DELETE FROM mail_tickets WHERE id = ?", [t]);
+    expect(db.query("SELECT COUNT(*) AS n FROM mail_note_keys").get()).toEqual({ n: 0 });
   });
 
   test("a purged ticket refuses a keyed note and stores no key", async () => {
