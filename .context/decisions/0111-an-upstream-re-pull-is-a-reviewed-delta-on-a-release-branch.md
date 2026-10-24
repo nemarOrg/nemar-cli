@@ -773,10 +773,12 @@ Dispatching for a new head frees the earlier run, so at most one run per re-pull
 An acknowledgment (ADR 0086) attaches only to a verdict that asks for a person, never to a direct identifier, with a reason of the publication path's length, and the database refuses one on any other state.
 It counts only for the administrator who recorded it, the publication path's rule, so a reason one administrator gave does not stand in for another's at the gates or at the merge.
 It is recorded once: a second administrator is refused (`already-acknowledged`), and the write itself holds only while none is recorded.
+So if the administrator who recorded it is absent, or is no longer an administrator, nothing else unblocks the pull request: only a new head, screened anew, does.
 
 The edges into `gates_clear` and `patch_gates_clear` were refused by the record until the screen was bound (`screen-not-built`); they now open.
 The gates sha must be the head the row records, the dataset fences are read again, and the screen must pass for that head; the statement that writes the edge re-asserts the verdict it read, so a verdict that changed in between is not relied on (`screen-changed`).
-The caller's word for the head is not taken: before the gates and before the claim the Worker reads the live pull request on GitHub, which must be open, unmerged, aimed at `main` from the recorded release branch, with its head at the sha being gated or claimed; a GitHub that cannot be read refuses (502), and any other mismatch is `head-moved` (409), with nothing recorded.
+The caller's word for the head is not taken: before the gates and before the claim the Worker reads the live pull request on GitHub, which must be open, not a draft, unmerged, aimed at `main` from the recorded release branch, with its head at the sha being gated or claimed; a GitHub that cannot be read refuses (502), a draft is `pr-draft` (409) and takes no unit of the cap, and any other mismatch is `head-moved` (409), with nothing recorded.
+The live read is followed by the UPDATE and then the caller's merge, so the head check holds only if Phase 6f's merge call passes that same `sha` to GitHub's merge API, which refuses a head that moved: GitHub's `head.sha` can lag just after a push, in the unsafe direction, and the merge's own `sha` is the check that closes that gap.
 The dataset fences are read again by the Worker at every step toward a merge: the dispatch, the gates and the claim; the other edges still re-check only the environment fence.
 
 ### The merge cap, as built
