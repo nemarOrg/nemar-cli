@@ -61,7 +61,7 @@ export function localBase(env: Env, which: keyof typeof BASE_ENV): string | null
 }
 
 /**
- * OpenNeuro's GraphQL endpoint for the latest-snapshot query: the real one, or a test's stand-in
+ * OpenNeuro's GraphQL endpoint for the snapshot query: the real one, or a test's stand-in
  * through `NEMAR_REPULL_OPENNEURO_URL`, honored only for a loopback http address (the
  * `NEMAR_GITHUB_API_URL` rule); a set value that is not one refuses.
  */

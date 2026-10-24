@@ -6,8 +6,12 @@
  */
 
 import { spawn } from "bun";
+import {
+  buildUpstreamSnapshotQuery,
+  parseUpstreamSnapshotBatch,
+} from "../../shared/openneuro-snapshots.js";
 import { isOpenNeuroTag } from "../../shared/openneuro-tag.js";
-import type { SnapshotFile } from "../../shared/upstream-staleness.js";
+import type { SnapshotFile, UpstreamRead } from "../../shared/upstream-staleness.js";
 import { isAwsCliAvailable } from "./aws-cli.js";
 import { type RemoteFile, downloadFiles } from "./file-download.js";
 
@@ -216,6 +220,65 @@ export async function fetchSnapshotFilePair(
   if (typeof from !== "string" && typeof to !== "string") return { ok: true, from, to };
   const why = typeof from === "string" ? from : (to as string);
   return { ok: false, error: why, transport: false };
+}
+
+/**
+ * Ask OpenNeuro for one dataset's latest snapshot and its whole snapshot list, each with its
+ * creation time: the query the Worker's staleness report sends (`shared/openneuro-snapshots.ts`),
+ * read with the same parser, so the re-pull plan orders tags by OpenNeuro's creation order as the
+ * report does (ADR 0111's Phase 4a amendment) and never by the number. `latestSnapshot.tag` is
+ * the same field {@link fetchOpenNeuroLatestTag} reads.
+ *
+ * Never throws. A transient failure (an HTTP error, the network, a body that is not JSON) is
+ * retried up to `attempts` times and then is an `error` read; an answer is final for this run,
+ * whatever it says (`deleted`, `absent`, an empty list, or an `error` the parser did not
+ * understand).
+ */
+export async function fetchOpenNeuroSnapshots(
+  datasetId: string,
+  options: {
+    graphqlUrl?: string;
+    attempts?: number;
+    timeoutMs?: number;
+    retryDelayMs?: number;
+  } = {},
+): Promise<UpstreamRead> {
+  const url = options.graphqlUrl ?? OPENNEURO_GRAPHQL_URL;
+  const attempts = Math.max(1, options.attempts ?? 3);
+  let reason = "no attempt was made";
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    let json: unknown;
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+          "User-Agent": "nemar-cli",
+        },
+        body: JSON.stringify(buildUpstreamSnapshotQuery([datasetId])),
+        signal: AbortSignal.timeout(options.timeoutMs ?? 30_000),
+      });
+      if (!res.ok) {
+        await res.body?.cancel().catch(() => {});
+        reason = `OpenNeuro GraphQL answered HTTP ${res.status}`;
+        if (attempt < attempts) await delay(options.retryDelayMs ?? 2_000 * attempt);
+        continue;
+      }
+      json = await res.json();
+    } catch (err) {
+      reason = `OpenNeuro GraphQL unreachable (${err instanceof Error ? err.message : String(err)})`;
+      if (attempt < attempts) await delay(options.retryDelayMs ?? 2_000 * attempt);
+      continue;
+    }
+    return (
+      parseUpstreamSnapshotBatch(json, [datasetId]).get(datasetId) ?? {
+        kind: "error",
+        reason: `OpenNeuro did not answer ${datasetId}`,
+      }
+    );
+  }
+  return { kind: "error", reason };
 }
 
 function delay(ms: number): Promise<void> {

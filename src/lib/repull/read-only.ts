@@ -16,8 +16,9 @@
  * - the HTTP requests the planner makes itself (the open pull requests, the bucket's anonymous
  *   `annex-uuid` marker) go through {@link readOnlyFetch}, GET and HEAD only.
  *
- * Outside this guard, and read-only by what they are: OpenNeuro's latest-snapshot query
- * (`fetchOpenNeuroLatestTag`, a GraphQL POST that asks, the same call an import pins its tag with);
+ * Outside this guard, and read-only by what they are: OpenNeuro's snapshot query
+ * (`fetchOpenNeuroSnapshots`, a GraphQL POST that asks: the latest an import pins its tag to, and
+ * the snapshot list with creation times the staleness report orders by);
  * the NEMAR API's two GETs (the dataset row and its version rows), which the command makes through
  * the API client before planning; `gh auth token`, which reads the administrator's stored GitHub
  * token; reads of the test bases' local directories; and the planner's own scratch directory and

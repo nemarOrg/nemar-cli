@@ -277,28 +277,60 @@ export interface RepullFixture {
 }
 
 /**
- * OpenNeuro's GraphQL endpoint as the latest-snapshot query (`fetchOpenNeuroLatestTag`) reads it,
- * the way Phase 3's import tests stand in for it: `latest` is the tag it names, `null` answers that
- * the dataset has no snapshot, and `status` answers every request with that HTTP status instead.
+ * OpenNeuro's snapshots of the fixture's upstream, as its GraphQL lists them: oldest first, each
+ * with its creation time. The legacy `00001` was made first, so creation order and the numbers
+ * agree here; a test that needs them to disagree sets its own list.
+ */
+export const UPSTREAM_SNAPSHOTS: ReadonlyArray<{ tag: string; created: string | null }> = [
+  { tag: TAG_LEGACY, created: "2025-06-01T00:00:00.000Z" },
+  { tag: TAG_A, created: "2026-01-01T00:00:00.000Z" },
+  { tag: TAG_B, created: "2026-06-01T00:00:00.000Z" },
+];
+
+/**
+ * OpenNeuro's GraphQL endpoint as the planner's snapshot query (`fetchOpenNeuroSnapshots`, the
+ * staleness report's query for one dataset) reads it, in the shape OpenNeuro answers
+ * (`backend/test/fixtures/openneuro-graphql/`): `latest` is the tag it names as latest, with the
+ * creation time its entry in `snapshots` carries, and `null` answers that the dataset has no
+ * snapshot (and an empty list); `status` answers every request with that HTTP status instead.
  */
 export interface LatestSnapshotStandin {
   url: string;
   latest: string | null;
+  snapshots: Array<{ tag: string; created: string | null }>;
   status: number | null;
   requests: number;
   stop(): void;
 }
 
 export function startLatestSnapshotStandin(latest: string | null = TAG_B): LatestSnapshotStandin {
-  const state = { latest, status: null as number | null, requests: 0 };
+  const state = {
+    latest,
+    snapshots: UPSTREAM_SNAPSHOTS.map((s) => ({ ...s })),
+    status: null as number | null,
+    requests: 0,
+  };
   const server = Bun.serve({
     port: 0,
-    fetch(req) {
+    async fetch(req) {
       state.requests++;
       if (state.status !== null) return new Response("unavailable", { status: state.status });
       if (req.method !== "POST") return new Response("method", { status: 405 });
-      const snapshot = state.latest === null ? null : { tag: state.latest };
-      return Response.json({ data: { dataset: { latestSnapshot: snapshot } } });
+      const body = (await req.json()) as { variables?: Record<string, string> };
+      const id = body.variables?.a0;
+      if (typeof id !== "string") return Response.json({ errors: [{ message: "no a0" }] });
+      const node =
+        state.latest === null
+          ? { id, latestSnapshot: null, snapshots: [] }
+          : {
+              id,
+              latestSnapshot: {
+                tag: state.latest,
+                created: state.snapshots.find((s) => s.tag === state.latest)?.created ?? null,
+              },
+              snapshots: state.snapshots,
+            };
+      return Response.json({ data: { a0: node } });
     },
   });
   return {
@@ -308,6 +340,12 @@ export function startLatestSnapshotStandin(latest: string | null = TAG_B): Lates
     },
     set latest(v) {
       state.latest = v;
+    },
+    get snapshots() {
+      return state.snapshots;
+    },
+    set snapshots(v) {
+      state.snapshots = v;
     },
     get status() {
       return state.status;

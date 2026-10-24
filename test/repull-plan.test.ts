@@ -418,8 +418,8 @@ describe("a plan from tag A to tag B over an imported mirror", () => {
     }
   });
 
-  test("OpenNeuro's latest that is not numerically after from_tag is unverified, not ok", async () => {
-    // 00001 is on the mirror and numerically equal to the mirrored 1.0.0 without being that tag.
+  test("OpenNeuro's latest that its own list contradicts is unverified, not ok", async () => {
+    // 00001 is on the mirror, and OpenNeuro's list has 1.0.0 and 1.1.0 created after it.
     openNeuro.latest = "00001";
     try {
       const f = await plan(fx);
@@ -431,6 +431,67 @@ describe("a plan from tag A to tag B over an imported mirror", () => {
       expect(f.executable).toBe(false);
     } finally {
       openNeuro.latest = TAG_B;
+    }
+  });
+
+  test("the order is OpenNeuro's creation order: a mirror at legacy 00006 is behind a later 1.1.0", async () => {
+    // Numerically 1.1.0 is before 00006; OpenNeuro made 00006 first (ds000001's real history has
+    // 00006 in 2018 and 1.0.0 in 2020), so the latest is newer and the check is ok.
+    await gitIn(fx.upstreamRepo, ["tag", "00006", `refs/tags/${TAG_A}`]);
+    const saved = openNeuro.snapshots;
+    openNeuro.snapshots = [
+      { tag: "00006", created: "2018-03-01T00:00:00.000Z" },
+      { tag: TAG_B, created: "2026-06-01T00:00:00.000Z" },
+    ];
+    try {
+      const f = await plan(fx, {
+        catalog: {
+          dataset: DATASET_ROW,
+          versions: [{ version: "v1.0.0", source_version: "00006", source_version_basis: "doi" }],
+        },
+      });
+      expect(f.body.upstream).toMatchObject({ from_tag: "00006", to_tag: TAG_B });
+      expect(f.preflight.find((c) => c.name === "to-tag")).toMatchObject({
+        status: "ok",
+        detail: `${TAG_B} (OpenNeuro's latest)`,
+      });
+      // The same tags with OpenNeuro's list naming the latest no later than 00006: not proved.
+      openNeuro.snapshots = [
+        { tag: "00006", created: "2026-06-01T00:00:00.000Z" },
+        { tag: TAG_B, created: "2026-06-01T00:00:00.000Z" },
+      ];
+      const same = await plan(fx, {
+        catalog: {
+          dataset: DATASET_ROW,
+          versions: [{ version: "v1.0.0", source_version: "00006", source_version_basis: "doi" }],
+        },
+      });
+      expect(same.preflight.find((c) => c.name === "to-tag")).toMatchObject({
+        status: "unchecked",
+        code: "order-unverified",
+      });
+      expect(same.executable).toBe(false);
+    } finally {
+      openNeuro.snapshots = saved;
+      await gitIn(fx.upstreamRepo, ["tag", "-d", "00006"]);
+    }
+  });
+
+  test("numbers that say newer prove nothing: a latest OpenNeuro made with the mirrored tag is unverified", async () => {
+    const saved = openNeuro.snapshots;
+    openNeuro.snapshots = [
+      { tag: TAG_A, created: "2026-01-01T00:00:00.000Z" },
+      { tag: TAG_B, created: "2026-01-01T00:00:00.000Z" },
+    ];
+    try {
+      const f = await plan(fx);
+      expect(f.preflight.find((c) => c.name === "to-tag")).toMatchObject({
+        status: "unchecked",
+        code: "order-unverified",
+      });
+      expect(f.executable).toBe(false);
+    } finally {
+      openNeuro.snapshots = saved;
     }
   });
 
