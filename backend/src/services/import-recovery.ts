@@ -79,8 +79,9 @@ export type ImportRecoveryDecision =
  * Marker the import CLI emits (and the onboard prepare step forwards into the
  * import-state callback's error_message) when OpenNeuro's own data can't be
  * fetched -- objects not anonymously readable and NEMAR has no signed OpenNeuro
- * login. Mirrors OPENNEURO_UPSTREAM_MARKER in src/lib/import-openneuro.ts (kept
- * in sync deliberately; the CLI and Worker don't share a module). When present
+ * login. Mirrors OPENNEURO_UPSTREAM_MARKER in src/lib/import-markers.ts: this
+ * marker predates `shared/import-markers.ts` and keeps its own copy, pinned to the
+ * CLI's by a test, while the tag pin's markers are imported from `shared/`. When present
  * in last_error, recovery records a distinct `upstream_inaccessible` quarantine
  * so these OpenNeuro-side failures are listable, not mistaken for NEMAR bugs.
  */

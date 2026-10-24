@@ -32,6 +32,8 @@ export {
   OPENNEURO_MIRROR_LAG_MARKER,
   OPENNEURO_UPSTREAM_MOVED_MARKER,
 } from "../../shared/import-markers.js";
+import type { ImportRefusalMarker } from "../../shared/import-markers.js";
+export type { ImportRefusalMarker };
 
 /**
  * A refusal by the import, carrying one of the markers above at the start of its message (the tag
@@ -43,7 +45,7 @@ export {
  */
 export class ImportRefused extends Error {
   constructor(
-    readonly marker: string,
+    readonly marker: ImportRefusalMarker,
     detail: string,
   ) {
     super(`${marker} ${detail}`);

@@ -3,8 +3,9 @@
  * ADR 0111 decision 10).
  *
  * One definition for the three places a tag crosses a boundary: the Worker before it puts one in a
- * `repository_dispatch` payload, the onboard workflow's `parse-ids` (which repeats the pattern in
- * bash, pinned to this one by test/onboard-workflow.test.ts), and the CLI's `--tag`.
+ * `repository_dispatch` payload, the onboard workflow's `parse-ids`, and the CLI's `--tag`. The
+ * workflow repeats the pattern in bash; it will be pinned to this one by the workflow pull request's
+ * test/onboard-workflow.test.ts, which runs `parse-ids` over the same accepted and refused tags.
  */
 
 /**

@@ -30,3 +30,9 @@ export const OPENNEURO_UPSTREAM_MOVED_MARKER = "[openneuro-upstream-moved]";
  * fail the same way, so the import refuses with both uuids and the retry engine parks it.
  */
 export const NEMAR_ANNEX_UUID_CONFLICT_MARKER = "[nemar-annex-uuid-conflict]";
+
+/** The markers an import refusal (`ImportRefused` in `src/lib/import-markers.ts`) may carry. */
+export type ImportRefusalMarker =
+  | typeof OPENNEURO_MIRROR_LAG_MARKER
+  | typeof OPENNEURO_UPSTREAM_MOVED_MARKER
+  | typeof NEMAR_ANNEX_UUID_CONFLICT_MARKER;

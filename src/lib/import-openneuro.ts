@@ -1036,7 +1036,10 @@ export interface PinnedClone {
   tag: string;
   /** The commit that tag names on the mirror. */
   commit: string;
-  /** OpenNeuro's latest tag when this run asked, or null when it did not or could not say. */
+  /**
+   * OpenNeuro's latest tag as this run read it. Null only when an explicit tag was given and the
+   * lookup failed: without one, a failed lookup refuses instead.
+   */
   latestTag: string | null;
 }
 
