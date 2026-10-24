@@ -1014,9 +1014,30 @@ describe("nemar admin pr-reviews start --redo", () => {
 
   test("--dry-run marks the finished reviews, in the text and in the JSON, and only under --redo", async () => {
     finishedAndWaiting();
+    // A fail and an uncertain review are finished too.
+    openPr({ ds: "nm000202", n: 2, author: "bob", authorId: 43 });
+    seedReview(db, {
+      ds: "nm000202",
+      n: 2,
+      sha: SHA_A,
+      authorId: 43,
+      state: "reported",
+      verdict: "fail",
+    });
+    openPr({ ds: "nm000204", n: 4, author: "dave", authorId: 45 });
+    seedReview(db, {
+      ds: "nm000204",
+      n: 4,
+      sha: SHA_A,
+      authorId: 45,
+      state: "reported",
+      verdict: "uncertain",
+    });
 
     const text = await cli([...START, "--all", "--redo", "--dry-run"]);
     expect(text.stdout).toMatch(/nm000203 #3 .*finished: pass/);
+    expect(text.stdout).toMatch(/nm000202 #2 .*finished: fail/);
+    expect(text.stdout).toMatch(/nm000204 #4 .*finished: uncertain/);
     expect(text.stdout).not.toMatch(/nm000201 #1 .*finished/);
 
     const json = await cli([...START, "--all", "--redo", "--dry-run", "--json"]);
@@ -1024,6 +1045,8 @@ describe("nemar admin pr-reviews start --redo", () => {
       would_start: Array<{ pr_number: number; verdict?: string }>;
     };
     expect(out.would_start.find((e) => e.pr_number === 3)?.verdict).toBe("pass");
+    expect(out.would_start.find((e) => e.pr_number === 2)?.verdict).toBe("fail");
+    expect(out.would_start.find((e) => e.pr_number === 4)?.verdict).toBe("uncertain");
     expect(out.would_start.find((e) => e.pr_number === 1)?.verdict).toBe("not_reviewed");
 
     const plain = await cli([...START, "--all", "--dry-run", "--json"]);
@@ -1105,6 +1128,30 @@ describe("nemar admin pr-reviews start --redo", () => {
       expect(r.stdout).toContain("This Worker does not know --redo yet");
       expect(r.stdout).toContain("1 pull request was not tried");
       expect(r.stdout + r.stderr).not.toContain("--debug");
+    });
+
+    test("by name, an older Worker's fault is reported with the ignored flag, and keeps its own hint", async () => {
+      answer = { dispatched: false, reason: "dispatch_failed" };
+      const r = await cli([...START, "nm000201", "1", "--redo"], oldUrl());
+      expect(r.exitCode).toBe(1);
+      expect(r.stdout).toContain("GitHub did not accept the dispatch");
+      expect(r.stdout).toContain("This Worker does not know --redo yet");
+    });
+
+    test("--all --redo with one entry does not say that 0 pull requests were not tried", async () => {
+      openPr({ ds: "nm000203", n: 3, author: "carol", authorId: 44 });
+      seedReview(db, {
+        ds: "nm000203",
+        n: 3,
+        sha: SHA_A,
+        authorId: 44,
+        state: "reported",
+        verdict: "pass",
+      });
+      const r = await cli([...START, "--all", "--redo", "--yes"], oldUrl());
+      expect(r.exitCode).toBe(1);
+      expect(r.stdout).toContain("This Worker does not know --redo yet");
+      expect(r.stdout).not.toContain("not tried");
     });
 
     test("--all --redo --json prints the one document with the answer it got and redo_ignored", async () => {

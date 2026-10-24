@@ -1219,7 +1219,8 @@ skipped when the rule finds nothing (or an administrator waived it for this comm
 refuses the title or the new dataset name, and one that needs a person when the name could not be
 read. No count of reviews, and no record of rejected pull requests, holds a start back. A commit
 whose review was declined, ended in an error or never reported is started again, and so is one
-handed to GitHub more than 60 minutes ago that never came back; one that is running or has a
+handed to GitHub more than 60 minutes ago that never came back and that no job claimed in the last
+50 minutes; one that is running or has a
 result is not started again. A start that restarts a review that already ran costs a second run.
 A commit whose review was refused for too many edits (five restarts by edits, reopenings and
 markings as ready) is left out of --all, so that a bulk start never lifts the cap unasked; start it
@@ -1311,19 +1312,19 @@ any other and declined by the Worker, which says so; after 'allow', the same com
         );
       } else {
         const text = notStartedText(r);
-        const fault = START_FAULTS.has(r.reason);
         console.log(
-          `${chalk.bold(`${dataset} #${pr}`)}  ${fault ? chalk.red(text) : chalk.yellow(text)}`,
+          `${chalk.bold(`${dataset} #${pr}`)}  ${START_FAULTS.has(r.reason) ? chalk.red(text) : chalk.yellow(text)}`,
         );
-        if (fault) process.exit(1);
       }
       envNote(r.environment);
       if (ignored) {
         console.log(chalk.red(REDO_IGNORED));
-        // An answer about the Worker's version, not a fault in the command: no invitation to file a bug.
-        markReportedExit();
+        // An answer about the Worker's version, not a fault in the command: no invitation to file a
+        // bug. A fault the Worker also reported (a dispatch GitHub refused) keeps its own hint.
+        if (r.dispatched || !START_FAULTS.has(r.reason)) markReportedExit();
         process.exit(1);
       }
+      if (!r.dispatched && START_FAULTS.has(r.reason)) process.exit(1);
     },
   );
 
@@ -1563,13 +1564,15 @@ async function startAll(options: {
       const left = todo.length - results.length;
       console.log(
         chalk.red(
-          `${REDO_IGNORED} ${left} pull request${left === 1 ? " was" : "s were"} not tried.`,
+          left > 0
+            ? `${REDO_IGNORED} ${left} pull request${left === 1 ? " was" : "s were"} not tried.`
+            : REDO_IGNORED,
         ),
       );
     }
   }
   // An answer about the Worker's version, not a fault in the command: no invitation to file a bug.
-  if (redoIgnored) markReportedExit();
+  if (redoIgnored && failed === 0) markReportedExit();
   const faulted = results.some((r) => "reason" in r && !r.dispatched && START_FAULTS.has(r.reason));
   if (failed > 0 || faulted || redoIgnored) process.exit(1);
 }
