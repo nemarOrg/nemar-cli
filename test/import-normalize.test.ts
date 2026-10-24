@@ -10,7 +10,7 @@
  *    never governed an imported tree, and a config-based fixture would test a
  *    repo shape no import ever sees.
  *  - the branch is plain locked `main`, which is what a fresh OpenNeuro clone is
- *    (and what `decideReimportMainReset` requires), rather than the
+ *    (and what `decideReimportBase` requires), rather than the
  *    adjusted-unlock branch `initDataset` leaves behind. One test covers the
  *    unlocked shape explicitly, because an annexed file there is a pointer file
  *    rather than a symlink.

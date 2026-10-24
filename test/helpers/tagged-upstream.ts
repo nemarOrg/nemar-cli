@@ -73,3 +73,26 @@ export async function buildTaggedUpstream(root: string): Promise<TaggedUpstream>
   const head = await snapshot(dir, "draft");
   return { dir, commits: { "1.0.0": first, "1.0.1": second, head } };
 }
+
+/**
+ * A local endpoint that answers as OpenNeuro's GraphQL does when it is down (HTTP 503), for tests
+ * that pass an explicit tag and must not reach the real API for the "latest" lookup. An error-path
+ * fixture only: with it, the lookup says it does not know, which is what it would say.
+ */
+export function startUnavailableGraphql(): {
+  lookup: { graphqlUrl: string; attempts: number; retryDelayMs: number };
+  stop: () => void;
+} {
+  const server = Bun.serve({
+    port: 0,
+    fetch: () => new Response("unavailable", { status: 503 }),
+  });
+  return {
+    lookup: {
+      graphqlUrl: `http://127.0.0.1:${server.port}/crn/graphql`,
+      attempts: 1,
+      retryDelayMs: 1,
+    },
+    stop: () => server.stop(true),
+  };
+}

@@ -18,7 +18,7 @@ import {
   OPENNEURO_UPSTREAM_MARKER,
   coerceFunding,
   decidePublicationRequestAction,
-  decideReimportMainReset,
+  decideReimportBase,
   decideSkipCiCheck,
   detectModalitiesFromDataset,
   ensureReadmeMd,
@@ -657,35 +657,41 @@ describe("decidePublicationRequestAction (#985 recover idempotency)", () => {
   });
 });
 
-describe("decideReimportMainReset (#990, Step 4c re-import divergence)", () => {
-  test("resets on plain main when origin already has a main tip (re-import)", () => {
-    expect(decideReimportMainReset({ originMainSha: "abc123", currentBranch: "main" })).toBe(true);
+describe("decideReimportBase (#990, #993: Step 4c)", () => {
+  const reimport = { originMainSha: "abc123", currentBranch: "main", importTag: "1.0.1" };
+
+  test("origin's main records the tag being imported, or none: the same-version hard reset", () => {
+    expect(decideReimportBase({ ...reimport, recordedTag: "1.0.1" })).toBe("hard-reset");
+    expect(decideReimportBase({ ...reimport, recordedTag: "v1.0.1" })).toBe("hard-reset");
+    // An unrecorded tag never trips the guard (ADR 0111 decision 10).
+    expect(decideReimportBase({ ...reimport, recordedTag: null })).toBe("hard-reset");
   });
 
-  test("no reset when origin has no main ref yet (genuine first import)", () => {
-    expect(decideReimportMainReset({ originMainSha: null, currentBranch: "main" })).toBe(false);
+  test("origin's main records another tag: moved, whatever the release state", () => {
+    expect(decideReimportBase({ ...reimport, recordedTag: "1.0.0" })).toBe("moved");
   });
 
-  test("no reset when origin/main rev-parse resolved to an empty string", () => {
+  test("no base when origin has no main ref yet (genuine first import)", () => {
+    expect(decideReimportBase({ ...reimport, originMainSha: null, recordedTag: null })).toBe(
+      "none",
+    );
+  });
+
+  test("no base when origin/main rev-parse resolved to an empty string", () => {
     // `git rev-parse --verify --quiet` on a nonexistent ref exits non-zero
     // with empty stdout; the caller passes that through as "" rather than
     // null, so the decider must treat both the same way.
-    expect(decideReimportMainReset({ originMainSha: "", currentBranch: "main" })).toBe(false);
+    expect(decideReimportBase({ ...reimport, originMainSha: "", recordedTag: "1.0.0" })).toBe(
+      "none",
+    );
   });
 
-  test("no reset on a git-annex adjusted branch, even with an origin main tip", () => {
+  test("no base on a git-annex adjusted branch or in detached HEAD, even with an origin main tip", () => {
     // DataLad adjusted branches ("adjusted/main(unlocked)") are rebased
-    // never; pushToGitHub special-cases them, and a hard reset here would
+    // never; pushToGitHub special-cases them, and a reset here would
     // fight that.
-    expect(
-      decideReimportMainReset({
-        originMainSha: "abc123",
-        currentBranch: "adjusted/main(unlocked)",
-      }),
-    ).toBe(false);
-  });
-
-  test("no reset in detached HEAD, even with an origin main tip", () => {
-    expect(decideReimportMainReset({ originMainSha: "abc123", currentBranch: "HEAD" })).toBe(false);
+    for (const currentBranch of ["adjusted/main(unlocked)", "HEAD"]) {
+      expect(decideReimportBase({ ...reimport, currentBranch, recordedTag: "1.0.0" })).toBe("none");
+    }
   });
 });

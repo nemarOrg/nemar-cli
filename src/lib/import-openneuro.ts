@@ -26,7 +26,7 @@ import ora from "ora";
 import { isOpenNeuroTag, sameUpstreamTag } from "../../shared/openneuro-tag.js";
 import { decideReadme, readmeProvenanceStub } from "../../shared/standard-edits/readme.js";
 import { addCi, importDataset, reindexDataset } from "./api/admin.js";
-import { getDataset, getUserCiStatus } from "./api/datasets.js";
+import { getDataset, getUserCiStatus, hasReleasedVersion } from "./api/datasets.js";
 import { ApiError } from "./api/errors.js";
 import { requestPublication } from "./api/publish.js";
 
@@ -50,6 +50,7 @@ import {
   ImportRefused,
   OPENNEURO_MIRROR_LAG_MARKER,
   OPENNEURO_UPSTREAM_MARKER,
+  OPENNEURO_UPSTREAM_MOVED_MARKER,
 } from "./import-markers.js";
 import { annexCopyUpload } from "./import-normalize.js";
 import {
@@ -59,6 +60,7 @@ import {
   screenWaitBudget,
 } from "./import-publication.js";
 import { httpUpstreamReader, prepareImportedTreeForCopy } from "./import-scrub.js";
+import { recordedUpstreamTag } from "./import-upstream-tag.js";
 import { fetchOpenNeuroLatestTag } from "./openneuro.js";
 import {
   type ImportManifest,
@@ -274,30 +276,149 @@ export function decidePublicationRequestAction(
 }
 
 /**
- * Pure decision over whether a retried `prepare` (Step 4c, #990, epic #989
- * Phase 2) should reset the fresh clone's local `main` onto `origin/main`
- * before Step 6 seeds a new metadata commit. Re-importing onto an
- * already-published nemarDatasets repo (the #967 recovery case: re-copy data
- * for a version NEMAR already imported once) makes a brand-new OpenNeuro
- * clone whose `main` shares no history with origin's -- origin already
- * carries the FIRST import's metadata commit on the same files
- * (.nemar/metadata.json, README.md), so committing fresh metadata onto the
- * new clone's own history and pushing collides, and pushToGitHub's rebase
- * (clone-push.ts) hard-fails with "diverging commits and auto-rebase
- * failed".
+ * Pure decision over what Step 4c bases a fresh clone's `main` on (#990, #993; ADR 0111
+ * decision 10). Re-importing onto a repository that already has a `main` (the #967 recovery case:
+ * re-copy data for a version NEMAR already imported once) makes a brand-new OpenNeuro clone whose
+ * `main` shares no history with origin's -- origin already carries the FIRST import's metadata
+ * commit on the same files (.nemar/metadata.json, README.md), so committing fresh metadata onto
+ * the clone's own history and pushing collides, and pushToGitHub's rebase (clone-push.ts)
+ * hard-fails with "diverging commits and auto-rebase failed".
  *
- * `originMainSha` is null/empty when origin has no resolvable `main` yet --
- * a genuine first import, which must NOT reset (there is nothing to reset
- * onto). `currentBranch` excludes detached HEAD ("HEAD") and git-annex
- * adjusted branches ("adjusted/main(unlocked)") on purpose: pushToGitHub
- * special-cases both (HEAD:main push, no-rebase adjusted push) and neither
- * is safe to hard-reset the same way a plain `main` is.
+ *   - `none`: origin has no resolvable `main` (a genuine first import: nothing to base on), or
+ *     the clone is not on a plain `main`. Detached HEAD ("HEAD") and git-annex adjusted branches
+ *     ("adjusted/main(unlocked)") are excluded on purpose: pushToGitHub special-cases both
+ *     (HEAD:main push, no-rebase adjusted push) and neither is safe to reset the same way.
+ *   - `hard-reset`: origin's `main` records no upstream tag, or records the tag being imported.
+ *     The same import again, so the tree becomes origin's, as before the tag pin. An unrecorded
+ *     tag lands here by design: it never trips the guard (ADR 0111 decision 10).
+ *   - `moved`: origin's `main` records a DIFFERENT upstream tag. What happens next depends on
+ *     whether the dataset has released a version, which costs a request, so it is asked only now
+ *     (see {@link baseOnOriginMain}).
  */
-export function decideReimportMainReset(args: {
+export function decideReimportBase(args: {
   originMainSha: string | null;
   currentBranch: string;
-}): boolean {
-  return args.originMainSha !== null && args.originMainSha !== "" && args.currentBranch === "main";
+  recordedTag: string | null;
+  importTag: string;
+}): "none" | "hard-reset" | "moved" {
+  if (args.originMainSha === null || args.originMainSha === "" || args.currentBranch !== "main") {
+    return "none";
+  }
+  if (args.recordedTag === null || sameUpstreamTag(args.recordedTag, args.importTag)) {
+    return "hard-reset";
+  }
+  return "moved";
+}
+
+/** What Step 4c did to the clone's `main`, and the tag origin's `main` recorded. */
+export interface ReimportBase {
+  /**
+   * `none`: left as cloned (a first import, or a fallback). `hard-reset`: now origin's `main`,
+   * tree included. `retarget`: HEAD is origin's `main` and the index and working tree are still
+   * the clone's, so the next commit is a fast-forward of origin carrying the new tag's tree.
+   */
+  kind: "none" | "hard-reset" | "retarget";
+  recordedTag: string | null;
+}
+
+/**
+ * Step 4c of prepare: base the fresh clone's `main` on origin's tip BEFORE Step 6 seeds a new
+ * metadata commit, when origin already has a `main` (#990), and refuse when doing so would move a
+ * released mirror to a new upstream tag (#993; ADR 0111 decision 10).
+ *
+ * The tag origin's `main` records is read from its `dataset_description.json`
+ * ({@link recordedUpstreamTag}). When it differs from `importTag`:
+ *   - the dataset has released a version: refuse with `[openneuro-upstream-moved]` before any
+ *     reset, S3 setup or push. Moving a released mirror to a newer snapshot is a re-pull's job
+ *     (ADR 0111), never a re-import's, and a re-import would keep the old tree while copying the
+ *     new tag's data (#993).
+ *   - it has not: the same import, prepared again at the tag it now imports. `git reset --soft
+ *     origin/main` moves HEAD onto origin's tip and keeps the new tag's tree in the index, so the
+ *     commits that follow are a fast-forward of origin carrying that tree. Steps 5b and 6 re-apply
+ *     NEMAR's edits to it as on a first import; `.github/`, which finalize deploys, is dropped
+ *     until finalize deploys it again.
+ *
+ * `released` is called only in that case, and an error from it is a plain failure: not knowing
+ * whether a dataset is released must never read as "unreleased".
+ *
+ * Best-effort where it always was: an origin with no `main` (or one this clone cannot fetch) is a
+ * first import, and a failed hard reset warns and falls back to the normal push path, as before.
+ */
+export async function baseOnOriginMain(
+  datasetPath: string,
+  args: { sourceId: string; importTag: string; nemarId: string; released: () => Promise<boolean> },
+): Promise<ReimportBase> {
+  const originMainFetch = await runCommand(["git", "fetch", "origin", "main"], {
+    cwd: datasetPath,
+  });
+  if (originMainFetch.exitCode !== 0) return { kind: "none", recordedTag: null };
+
+  const originMainRev = await runCommand(
+    ["git", "rev-parse", "--verify", "--quiet", "origin/main"],
+    { cwd: datasetPath },
+  );
+  const currentBranch = await runCommand(["git", "rev-parse", "--abbrev-ref", "HEAD"], {
+    cwd: datasetPath,
+  });
+  const recordedTag = await originRecordedTag(datasetPath, args.sourceId);
+  const decision = decideReimportBase({
+    originMainSha: originMainRev.stdout.trim() || null,
+    currentBranch: currentBranch.stdout.trim(),
+    recordedTag,
+    importTag: args.importTag,
+  });
+
+  if (decision === "none") return { kind: "none", recordedTag };
+
+  if (decision === "hard-reset") {
+    const reset = await runCommand(["git", "reset", "--hard", "origin/main"], { cwd: datasetPath });
+    if (reset.exitCode !== 0) {
+      console.log(
+        chalk.yellow(
+          `  Warning: found origin/main for ${args.nemarId} (re-import) but could not reset onto it (${reset.stderr.trim()}). Falling back to the normal push path.`,
+        ),
+      );
+      return { kind: "none", recordedTag };
+    }
+    return { kind: "hard-reset", recordedTag };
+  }
+
+  // decision === "moved", so recordedTag is set.
+  let released: boolean;
+  try {
+    released = await args.released();
+  } catch (err) {
+    throw new Error(
+      `${args.nemarId}'s main records upstream tag ${recordedTag}, this import is at ${args.importTag}, and whether ${args.nemarId} has released a version could not be read (${err instanceof Error ? err.message : String(err)}). Nothing was reset or pushed; re-run once the backend answers.`,
+    );
+  }
+  if (released) {
+    throw new ImportRefused(
+      OPENNEURO_UPSTREAM_MOVED_MARKER,
+      `${args.sourceId}: ${args.nemarId} has released a version and its main records upstream tag ${recordedTag}; this import is at ${args.importTag}. Moving a released mirror to a new snapshot is an upstream re-pull (ADR 0111), not a re-import. Nothing was reset, copied or pushed.`,
+    );
+  }
+  const soft = await runCommand(["git", "reset", "--soft", "origin/main"], { cwd: datasetPath });
+  if (soft.exitCode !== 0) {
+    throw new Error(
+      `Could not move ${args.nemarId}'s unreleased import from upstream tag ${recordedTag} to ${args.importTag}: git reset --soft origin/main failed (${soft.stderr.trim()}). Nothing was pushed.`,
+    );
+  }
+  return { kind: "retarget", recordedTag };
+}
+
+/** The upstream tag `origin/main`'s `dataset_description.json` records, or null for none or unreadable. */
+async function originRecordedTag(datasetPath: string, sourceId: string): Promise<string | null> {
+  const shown = await runCommand(["git", "show", "origin/main:dataset_description.json"], {
+    cwd: datasetPath,
+  });
+  if (shown.exitCode !== 0) return null;
+  try {
+    return recordedUpstreamTag(JSON.parse(shown.stdout), sourceId);
+  } catch {
+    // An annex pointer or a broken file records nothing: unknown, which never trips the guard.
+    return null;
+  }
 }
 
 /**
@@ -1215,66 +1336,38 @@ async function prepareImportSteps(
     }
   }
 
-  // Step 4c (re-import only, #990, epic #989 Phase 2): base this fresh
-  // clone's `main` on origin's tip BEFORE Step 6 seeds a new metadata
-  // commit, if origin already carries a `main` (i.e. this is a re-import
-  // onto an already-published repo, not a first-ever import). Without this,
-  // Step 6 commits fresh metadata onto the OpenNeuro clone's own (unrelated)
-  // history, and Step 7's push collides with origin/main -- which already
-  // has the FIRST import's metadata commit on the same files
-  // (.nemar/metadata.json, README.md) -- so pushToGitHub's rebase
-  // (clone-push.ts) hard-fails with "diverging commits and auto-rebase
-  // failed". This reset only moves this worktree's `main` ref + HEAD: the
-  // git-annex branch was already merged just above (Step 4b), and the S3
-  // remote config written to .git/config plus the in-memory
-  // keyUrlMap/manifest built in Step 3 are untouched by a `main` reset, so
-  // nothing else about this prepare run changes.
-  //
-  // SAME-VERSION ASSUMPTION: this covers the recovery use case -- re-copying
-  // data for a version NEMAR already imported once (the #967 empty-import
-  // incident). A genuinely NEW OpenNeuro snapshot arriving between imports
-  // (a real new version) is explicitly OUT OF SCOPE here; that needs its own
-  // new-version flow, not a silent overwrite onto `main`, so this step does
-  // not attempt to detect or reconcile that case (drift-detection guard
-  // tracked as #993). Best-effort only: on a fetch or reset failure it falls
-  // back to the normal push path unchanged (a diverging-history rebase
-  // failure from pushToGitHub below is then the expected, pre-existing
-  // behavior).
-  let didResetMain = false;
-  const originMainFetch = await runCommand(["git", "fetch", "origin", "main"], {
-    cwd: datasetPath,
-  });
-  if (originMainFetch.exitCode === 0) {
-    const originMainRev = await runCommand(
-      ["git", "rev-parse", "--verify", "--quiet", "origin/main"],
-      { cwd: datasetPath },
-    );
-    const currentBranchResult = await runCommand(["git", "rev-parse", "--abbrev-ref", "HEAD"], {
-      cwd: datasetPath,
+  // Step 4c (re-import only, #990, epic #989 Phase 2; #993, ADR 0111 decision 10): base this
+  // fresh clone's `main` on origin's tip BEFORE Step 6 seeds a new metadata commit, if origin
+  // already carries a `main`, or refuse when that would move a released mirror to a new upstream
+  // tag. This only moves this worktree's `main` ref + HEAD (and, for a hard reset, the tree): the
+  // git-annex branch was already merged just above (Step 4b), and the S3 remote config written to
+  // .git/config plus the in-memory keyUrlMap/manifest built in Step 3 are untouched, so nothing
+  // else about this prepare run changes. See baseOnOriginMain for the three outcomes.
+  let base: ReimportBase;
+  try {
+    base = await baseOnOriginMain(datasetPath, {
+      sourceId: openneuroId,
+      importTag: pinned.tag,
+      nemarId,
+      released: () => hasReleasedVersion(nemarId),
     });
-    const shouldResetMain = decideReimportMainReset({
-      originMainSha: originMainRev.stdout.trim() || null,
-      currentBranch: currentBranchResult.stdout.trim(),
-    });
-    if (shouldResetMain) {
-      const resetResult = await runCommand(["git", "reset", "--hard", "origin/main"], {
-        cwd: datasetPath,
-      });
-      if (resetResult.exitCode !== 0) {
-        console.log(
-          chalk.yellow(
-            `  Warning: found origin/main for ${nemarId} (re-import) but could not reset onto it (${resetResult.stderr.trim()}). Falling back to the normal push path.`,
-          ),
-        );
-      } else {
-        didResetMain = true;
-        console.log(
-          chalk.dim("  Re-import: based main on origin/main for an idempotent metadata commit"),
-        );
-      }
-    }
+  } catch (err) {
+    if (err instanceof ImportRefused) throw err;
+    ora().fail(err instanceof Error ? err.message : String(err));
+    process.exit(1);
   }
-  // else: origin has no `main` ref yet -- the normal first-import path, no-op.
+  const didResetMain = base.kind === "hard-reset";
+  if (didResetMain) {
+    console.log(
+      chalk.dim("  Re-import: based main on origin/main for an idempotent metadata commit"),
+    );
+  } else if (base.kind === "retarget") {
+    console.log(
+      chalk.dim(
+        `  Re-import of an unreleased dataset: moved from upstream tag ${base.recordedTag} to ${pinned.tag}, as a fast-forward of origin/main`,
+      ),
+    );
+  }
   if (didResetMain && annexFetchResult.exitCode !== 0) {
     // The dead marks a correction left (ADR 0085, ADR 0089) live in that branch; without them only
     // the cut to the tree keeps a replaced key out of the copy. Said, not refused: the cut holds.
@@ -1296,7 +1389,8 @@ async function prepareImportSteps(
   let unannexedData: UnannexedDataFile[] = [];
   // Set by step 4c above when it really reset onto origin/main. Read by step 5b:
   // on that path the tree carries keys from a PREVIOUS prepare that no upstream
-  // source accounts for, and they have to be carried into the manifest.
+  // source accounts for, and they have to be carried into the manifest. A retarget
+  // is not that path: its tree is the new tag's, upstream's, as on a first import.
   const isReimportOntoExistingMain = didResetMain;
   if (!options.skipData) {
     try {
