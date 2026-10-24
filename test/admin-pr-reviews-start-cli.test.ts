@@ -127,11 +127,14 @@ afterEach(() => {
   rmSync(configDir, { recursive: true, force: true });
 });
 
-async function cli(args: string[]): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+async function cli(
+  args: string[],
+  apiUrl = `http://127.0.0.1:${apiServer.port}`,
+): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   const childEnv: Record<string, string | undefined> = {
     ...process.env,
     NEMAR_CONFIG_DIR: configDir,
-    TEST_API_URL: `http://127.0.0.1:${apiServer.port}`,
+    TEST_API_URL: apiUrl,
     NEMAR_GITHUB_API_URL: gh.url,
     NEMAR_NO_UPDATE_CHECK: "1",
     NO_COLOR: "1",
@@ -854,5 +857,197 @@ describe("what must not start anything, and what a refused dispatch is", () => {
     expect(overdue.stdout).toMatch(/1 started/);
     expect(overdue.stdout).not.toContain("already has a review");
     expect(dispatches()).toHaveLength(1);
+  });
+});
+
+describe("nemar admin pr-reviews start --redo", () => {
+  /** A finished review of the current commit, and a pull request still waiting for one. */
+  function finishedAndWaiting() {
+    openPr({ ds: "nm000203", n: 3, author: "carol", authorId: 44 });
+    seedReview(db, {
+      ds: "nm000203",
+      n: 3,
+      sha: SHA_A,
+      authorId: 44,
+      state: "reported",
+      verdict: "pass",
+    });
+    openPr({ ds: "nm000201", n: 1, author: "alice", authorId: 42 });
+  }
+
+  test("by name: a finished review is left alone without --redo and started again with it, on the same row", async () => {
+    finishedAndWaiting();
+    const before = rows().find((x) => x.pr_number === 3);
+
+    const plain = await cli([...START, "nm000203", "3"]);
+    expect(plain.stdout).toContain("already has a review");
+    expect(dispatches()).toHaveLength(0);
+
+    const r = await cli([...START, "nm000203", "3", "--redo"]);
+
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("started again");
+    expect(dispatches()).toHaveLength(1);
+    expect(rows().find((x) => x.pr_number === 3)).toMatchObject({
+      id: before?.id,
+      state: "dispatched",
+      verdict: null,
+      attempts: 2,
+    });
+  });
+
+  test("by name: a review that is running says so, and nothing is started", async () => {
+    openPr({ ds: "nm000203", n: 3, author: "carol", authorId: 44 });
+    seedReview(db, { ds: "nm000203", n: 3, sha: SHA_A, authorId: 44, state: "dispatched" });
+
+    const r = await cli([...START, "nm000203", "3", "--redo"]);
+
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain(
+      "a review of this commit is running, and a redo waits until it reports",
+    );
+    expect(dispatches()).toHaveLength(0);
+  });
+
+  test("by name, --json carries redo and the Worker's word", async () => {
+    finishedAndWaiting();
+
+    const r = await cli([...START, "nm000203", "3", "--redo", "--json"]);
+
+    expect(r.exitCode).toBe(0);
+    expect(JSON.parse(r.stdout)).toMatchObject({
+      dispatched: true,
+      reason: "redispatched",
+      redo: true,
+    });
+  });
+
+  test("--all does not offer the finished review, --all --redo --dry-run does, and neither starts anything", async () => {
+    finishedAndWaiting();
+
+    const plain = await cli([...START, "--all", "--dry-run"]);
+    expect(plain.stdout).toContain("nm000201 #1");
+    expect(plain.stdout).not.toContain("nm000203 #3");
+
+    const r = await cli([...START, "--all", "--redo", "--dry-run"]);
+
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("nm000201 #1");
+    expect(r.stdout).toContain("nm000203 #3");
+    expect(r.stdout).toContain("2 pull requests to start or redo (1 with a finished review");
+    expect(r.stdout).toContain("dry run");
+    expect(dispatches()).toHaveLength(0);
+  });
+
+  test("--all --redo leaves out a draft, a review in progress and a commit capped by edits", async () => {
+    finishedAndWaiting();
+    openPr({ ds: "nm000205", n: 5, author: "erin", authorId: 46, draft: true });
+    openPr({ ds: "nm000202", n: 2, author: "bob", authorId: 43 });
+    seedReview(db, { ds: "nm000202", n: 2, sha: SHA_A, authorId: 43, state: "dispatched" });
+    openPr({ ds: "nm000204", n: 4, author: "dave", authorId: 45 });
+    seedReview(db, {
+      ds: "nm000204",
+      n: 4,
+      sha: SHA_A,
+      authorId: 45,
+      state: "errored",
+      detail: "edit_limit",
+    });
+    db.run("UPDATE pr_reviews SET edit_restarts = 5 WHERE pr_number = 4");
+
+    const r = await cli([...START, "--all", "--redo", "--dry-run", "--json"]);
+
+    expect(r.exitCode).toBe(0);
+    const out = JSON.parse(r.stdout) as {
+      redo: boolean;
+      would_start: Array<{ dataset_id: string; pr_number: number }>;
+      capped: Array<{ pr_number: number }>;
+    };
+    expect(out.redo).toBe(true);
+    expect(out.would_start.map((e) => e.pr_number).sort()).toEqual([1, 3]);
+    expect(out.capped.map((e) => e.pr_number)).toEqual([4]);
+  });
+
+  test("--all --redo asks before spending, and a closed stdin is a no", async () => {
+    finishedAndWaiting();
+
+    const r = await cli([...START, "--all", "--redo"]);
+
+    expect(r.exitCode).toBe(1);
+    expect(r.stdout + r.stderr).toContain("--yes");
+    expect(dispatches()).toHaveLength(0);
+  });
+
+  test("--all --redo --yes starts the waiting one and redoes the finished one", async () => {
+    finishedAndWaiting();
+
+    const r = await cli([...START, "--all", "--redo", "--yes"]);
+
+    expect(r.exitCode).toBe(0);
+    expect(dispatches()).toHaveLength(2);
+    expect(r.stdout).toMatch(/2 started/);
+    expect(rows().find((x) => x.pr_number === 3)).toMatchObject({
+      state: "dispatched",
+      verdict: null,
+      attempts: 2,
+    });
+    expect(rows().find((x) => x.pr_number === 1)).toMatchObject({ state: "dispatched" });
+  });
+
+  test("--dry-run goes with --all, redo or not", async () => {
+    const r = await cli([...START, "nm000203", "3", "--redo", "--dry-run"]);
+    expect(r.exitCode).toBe(1);
+    expect(r.stdout + r.stderr).toContain("--dry-run goes with --all");
+  });
+
+  test("the help describes --redo, its cost and that a running review is not touched", async () => {
+    const r = await cli([...START, "--help-all"]);
+    expect(r.exitCode).toBe(0);
+    const help = r.stdout.replace(/\s+/g, " ");
+    expect(help).toContain("--redo");
+    expect(help).toContain("a review that is running is never started again");
+    expect(help).toContain("costs a second run of up to two model calls");
+  });
+
+  describe("a Worker that predates --redo ignores the flag, and the command says so", () => {
+    let old: ReturnType<typeof Bun.serve>;
+    beforeAll(() => {
+      // The real router answers every read; only the start is the older Worker's: it never echoes
+      // `redo`, and for a finished review it says duplicate.
+      old = Bun.serve({
+        port: 0,
+        fetch(req) {
+          const url = new URL(req.url);
+          if (url.pathname === "/notices") return Response.json({ notices: [] });
+          if (url.pathname === "/datasets/facets") return Response.json({});
+          if (req.method === "POST" && url.pathname.endsWith("/start")) {
+            return Response.json({
+              environment: "production",
+              dispatched: false,
+              reason: "duplicate",
+              review_id: 1,
+              author_login: null,
+            });
+          }
+          return handle(req, env());
+        },
+      });
+    });
+    afterAll(() => old.stop(true));
+
+    test("by name: exit 1 with the explanation, not 'already has a review'", async () => {
+      finishedAndWaiting();
+      const r = await cli([...START, "nm000203", "3", "--redo"], `http://127.0.0.1:${old.port}`);
+      expect(r.exitCode).toBe(1);
+      expect(r.stdout).toContain("This Worker does not know --redo yet");
+      expect(r.stdout).not.toContain("already has a review");
+    });
+
+    test("--all: stops at the first answer with the explanation", async () => {
+      finishedAndWaiting();
+      const r = await cli([...START, "--all", "--redo", "--yes"], `http://127.0.0.1:${old.port}`);
+      expect(r.exitCode).toBe(1);
+      expect(r.stdout).toContain("This Worker does not know --redo yet");
+    });
   });
 });
