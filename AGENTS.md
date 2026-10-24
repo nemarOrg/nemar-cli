@@ -187,7 +187,15 @@ an unrelocated or unkept removal is then a platform blocker that only lowers, pl
 original authors' content is protected by facts the platform computes: a README or CHANGES line
 altered beyond a minor edit, an author-owned field or a participant value changed fails, a replaced
 recording or an undecidable comparison holds the pull request, and the README is compared with the
-one at the first version tag, else with the merge base; the facts carry only class words and counts).
+one at the first version tag, else with the merge base; the facts carry only class words and counts),
+0110 (mail is sent through the Cloudflare `send_email` binding behind a provider switch; Resend is
+a fallback only on a certain non-delivery limit or availability refusal, never on a timeout or an
+unknown error, so a sign-in code is never sent twice),
+0111 (inbound mail is a support ticket: the raw message is stored first and never lost, one
+visibility predicate decides every ticket read and write (restricted queues are owner-only and a
+conduct ticket can exclude a named account), ticket notifications are production-only with no
+first-admin fallback, and a reply whose outcome is unknown is never recorded as sent and never
+re-sent under its key).
 
 **Account copy and the profile-gap matrix are declared once, in
 [`shared/contract/account-copy.ts`](shared/contract/account-copy.ts) and
