@@ -87,6 +87,7 @@ import type { Bindings } from "../types/bindings.js";
 import { isValidDatasetId } from "./datasetId.js";
 import { isScreenExempt, readStoredReport } from "./identifier-screen-stored.js";
 import { resolveImportError } from "./import-error.js";
+import { type CapReading, REPULL_CAP_MAX, isExactProduction, readCap } from "./repull-switches.js";
 import { liveHeadRefusal } from "./upstream-repull-github.js";
 import {
   type RepullScreenGate,
@@ -334,7 +335,7 @@ export function envFenceRefusal(
   env: Pick<Bindings, "ENVIRONMENT">,
   datasetId: string,
 ): RepullRefusal | null {
-  if (env.ENVIRONMENT === "production" || datasetId.startsWith("xx")) return null;
+  if (isExactProduction(env) || datasetId.startsWith("xx")) return null;
   return {
     status: 403,
     code: "env-fence",
@@ -409,37 +410,14 @@ export async function datasetFenceRefusal(
 
 /** `REPULL_DAILY_MERGE_CAP` when the binding is absent. */
 export const REPULL_MERGE_CAP_DEFAULT = 5;
-/** The largest cap a binding may set; a larger value is unreadable, not clamped. */
-export const REPULL_CAP_MAX = 20;
-
-export interface CapReading {
-  value: number;
-  /** `default` when absent, `set` when read, `unreadable` when set to anything else. */
-  source: "default" | "set" | "unreadable";
-}
 
 export interface MergeCapState extends CapReading {
   /** Claims made today (UTC), N.0.0's and N.0.1's together. */
   used: number;
 }
 
-/**
- * A cap from its binding. Absent: the default. One or two digits and at most
- * {@link REPULL_CAP_MAX}: that number (`0` stops every merge). Anything else (a sign, a decimal,
- * a space, an empty string, a larger number) is unreadable and reads 0, so a typo stops merging
- * rather than falling back to the default, and the refusal says why.
- */
-export function readRepullCap(raw: string | undefined, fallback: number): CapReading {
-  if (raw === undefined) return { value: fallback, source: "default" };
-  if (/^\d{1,2}$/.test(raw)) {
-    const value = Number(raw);
-    if (value <= REPULL_CAP_MAX) return { value, source: "set" };
-  }
-  return { value: 0, source: "unreadable" };
-}
-
 export function repullMergeCap(env: Pick<Bindings, "REPULL_DAILY_MERGE_CAP">): CapReading {
-  return readRepullCap(env.REPULL_DAILY_MERGE_CAP, REPULL_MERGE_CAP_DEFAULT);
+  return readCap(env.REPULL_DAILY_MERGE_CAP, REPULL_MERGE_CAP_DEFAULT);
 }
 
 /**

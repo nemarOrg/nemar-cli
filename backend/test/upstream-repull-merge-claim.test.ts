@@ -39,13 +39,9 @@ import {
   __resetRateLimitStateForTests,
   __seedRateLimitStateForTests,
 } from "../src/services/github/transport";
+import { REPULL_CAP_MAX, readCap } from "../src/services/repull-switches";
 import { hashApiKey } from "../src/services/token";
-import {
-  REPULL_CAP_MAX,
-  REPULL_MERGE_CAP_DEFAULT,
-  readRepullCap,
-  repullMergeCap,
-} from "../src/services/upstream-repull";
+import { REPULL_MERGE_CAP_DEFAULT, repullMergeCap } from "../src/services/upstream-repull";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
 import {
@@ -272,7 +268,7 @@ const auditCount = () =>
 
 describe("REPULL_DAILY_MERGE_CAP", () => {
   test("absent takes the default; one or two digits up to the maximum are read; anything else is 0", () => {
-    expect(readRepullCap(undefined, REPULL_MERGE_CAP_DEFAULT)).toEqual({
+    expect(readCap(undefined, REPULL_MERGE_CAP_DEFAULT)).toEqual({
       value: 5,
       source: "default",
     });
@@ -283,7 +279,7 @@ describe("REPULL_DAILY_MERGE_CAP", () => {
       ["5", 5],
       [String(REPULL_CAP_MAX), REPULL_CAP_MAX],
     ] as const) {
-      expect([raw, readRepullCap(raw, 5)]).toEqual([raw, { value, source: "set" }]);
+      expect([raw, readCap(raw, 5)]).toEqual([raw, { value, source: "set" }]);
     }
     for (const raw of [
       String(REPULL_CAP_MAX + 1),
@@ -296,7 +292,7 @@ describe("REPULL_DAILY_MERGE_CAP", () => {
       "x",
       "1e1",
     ]) {
-      expect([raw, readRepullCap(raw, 5)]).toEqual([raw, { value: 0, source: "unreadable" }]);
+      expect([raw, readCap(raw, 5)]).toEqual([raw, { value: 0, source: "unreadable" }]);
     }
     expect(repullMergeCap({ REPULL_DAILY_MERGE_CAP: "3" })).toEqual({ value: 3, source: "set" });
   });
