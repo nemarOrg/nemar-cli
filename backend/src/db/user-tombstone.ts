@@ -1,6 +1,6 @@
 import { DOCS_GRANTS_PURGE_SQL } from "../services/docs-auth";
 import { PRIVATE_GRANTS_PURGE_SQL } from "../services/private-auth";
-import { mailReleaseStatements } from "../services/ticket-assignment";
+import { mailReleaseStatements, mailTombstoneStatements } from "../services/ticket-assignment";
 
 // Shared SQL for the user tombstone (soft delete), so the DELETE
 // /admin/users/by-id/:id endpoint, the scheduled sweep of the live-test accounts
@@ -176,6 +176,8 @@ export async function tombstoneUserCascade(
     // Support tickets, queue references and the away window (phase 3). Each statement is
     // keyed by user_id, so under a guarded call it applies only when the mask did.
     ...mailReleaseStatements(id, "all").map((s) => step(s.sql, ...s.binds)),
+    // The account link on tickets they wrote goes too; the correspondence stays by address.
+    ...mailTombstoneStatements(id).map((s) => step(s.sql, ...s.binds)),
     // Expire any outstanding passwordless login codes for the original email so
     // a code issued just before deletion can't be submitted (it would otherwise
     // be consumed and then cleanly denied; this avoids even that round-trip).

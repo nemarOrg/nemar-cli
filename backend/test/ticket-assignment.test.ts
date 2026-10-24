@@ -7,7 +7,11 @@ import type { Database } from "bun:sqlite";
 import { beforeEach, describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { resolveAssignee, ticketVisibleTo } from "../src/services/ticket-assignment";
+import {
+  isRestrictedQueue,
+  resolveAssignee,
+  ticketVisibleTo,
+} from "../src/services/ticket-assignment";
 import { freshDb, realD1 } from "./helpers/d1";
 import { seedUser } from "./helpers/tickets";
 
@@ -306,5 +310,65 @@ describe("ticketVisibleTo", () => {
     const u = seedTickets();
     expect(visible({ id: u.member, role: "member" })).toEqual([]);
     expect(() => ticketVisibleTo({ id: 1, role: "owner" }, "t; DROP TABLE x")).toThrow();
+  });
+});
+
+describe("restricted tags do not depend on the queue row", () => {
+  test("security and conduct are restricted with no row, and resolve to nobody", async () => {
+    db.run("DELETE FROM mail_queues WHERE tag IN ('security', 'conduct')");
+    expect(isRestrictedQueue("security")).toBe(true);
+    expect(isRestrictedQueue("conduct", { restricted: 0 })).toBe(true);
+    expect(isRestrictedQueue("support", { restricted: 0 })).toBe(false);
+    expect(isRestrictedQueue("support", { restricted: 1 })).toBe(true);
+    expect(await resolveAssignee(d1, "security", {}, NOW)).toBeNull();
+  });
+
+  test("a reserved queue row edited to restricted = 0 still admits owners only", async () => {
+    const admin = seedUser(db, { role: "admin" });
+    const owner = seedUser(db, { role: "owner" });
+    queue("security", {
+      restricted: 0,
+      strategy: "round_robin",
+      rr_members: JSON.stringify([admin, owner]),
+    });
+    expect(await resolveAssignee(d1, "security", {}, NOW)).toBe(owner);
+  });
+});
+
+describe("away windows: malformed and offset-bearing values", () => {
+  test("an offset-bearing timestamp is compared in UTC", async () => {
+    const a = seedUser(db);
+    queue("support", { strategy: "fixed", assignee_user_id: a });
+    // 15:00+02:00 is 13:00Z, after NOW (12:00Z): still away.
+    away(a, "2026-10-01T00:00:00+02:00", "2026-10-24T15:00:00+02:00");
+    expect(await resolveAssignee(d1, "support", {}, NOW)).toBeNull();
+    db.run("DELETE FROM mail_availability");
+    // 13:00+02:00 is 11:00Z, before NOW: the window has ended.
+    away(a, "2026-10-01T00:00:00+02:00", "2026-10-24T13:00:00+02:00");
+    expect(await resolveAssignee(d1, "support", {}, NOW)).toBe(a);
+  });
+
+  test("a malformed value never makes the window apply, and never throws", async () => {
+    const a = seedUser(db);
+    queue("support", { strategy: "fixed", assignee_user_id: a });
+    for (const [from, until] of [
+      ["not a date", null],
+      [null, "garbage"],
+      ["2026-13-45", "2026-99-99"],
+      ["", ""],
+    ] as const) {
+      db.run("DELETE FROM mail_availability");
+      away(a, from, until);
+      expect(await resolveAssignee(d1, "support", {}, NOW)).toBe(a);
+    }
+  });
+});
+
+describe("concurrent round-robin claims", () => {
+  test("simultaneous tickets take distinct turns", async () => {
+    const members = [seedUser(db), seedUser(db), seedUser(db)];
+    queue("support", { strategy: "round_robin", rr_members: JSON.stringify(members) });
+    const got = await Promise.all([0, 1, 2].map(() => resolveAssignee(d1, "support", {}, NOW)));
+    expect([...got].sort()).toEqual([...members].sort());
   });
 });

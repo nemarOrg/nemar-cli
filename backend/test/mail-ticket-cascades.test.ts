@@ -237,3 +237,39 @@ describe("guarded tombstone (the scheduled sweep's form)", () => {
     expect(JSON.parse(queueRow("rr")?.rr_members ?? "[]")).toEqual([w.other, w.target, 999]);
   });
 });
+
+describe("the account link on a ticket", () => {
+  const link = (w: World) => {
+    db.run("UPDATE mail_tickets SET requester_user_id = ? WHERE id = ?", [
+      w.target,
+      w.othersTicket,
+    ]);
+  };
+  const row = (id: number) =>
+    db
+      .query<{ requester_user_id: number | null; requester_email: string }, [number]>(
+        "SELECT requester_user_id, requester_email FROM mail_tickets WHERE id = ?",
+      )
+      .get(id);
+
+  test("a soft delete clears the link and keeps the correspondence address", async () => {
+    const w = seedWorld("admin");
+    link(w);
+    expect((await call("DELETE", `/admin/users/by-id/${w.target}`)).status).toBe(200);
+    expect(row(w.othersTicket)).toEqual({
+      requester_user_id: null,
+      requester_email: "a@example.com",
+    });
+  });
+
+  test("a revocation or a demotion keeps the account, so keeps the link", async () => {
+    const w = seedWorld("admin");
+    link(w);
+    expect((await call("POST", "/admin/users/mailtarget/role", { role: "member" })).status).toBe(
+      200,
+    );
+    expect(row(w.othersTicket)?.requester_user_id).toBe(w.target);
+    expect((await call("POST", "/admin/revoke/mailtarget")).status).toBe(200);
+    expect(row(w.othersTicket)?.requester_user_id).toBe(w.target);
+  });
+});

@@ -33,6 +33,19 @@ export interface AssignmentContext {
   excludedUserId?: number | null;
 }
 
+/**
+ * Queues that are restricted whatever their row says, or whether they have one. The row is
+ * data an operator can delete or edit; confidentiality must not depend on it, so a ticket for
+ * one of these tags is restricted even if the queue row is missing (a missing row assigns
+ * nobody, the pool, but never unrestricts).
+ */
+export const RESTRICTED_TAGS: ReadonlySet<string> = new Set(["security", "conduct"]);
+
+/** Whether tickets of `tag` are restricted, given the queue row if there is one. */
+export function isRestrictedQueue(tag: string, row?: { restricted: number } | null): boolean {
+  return RESTRICTED_TAGS.has(tag) || row?.restricted === 1;
+}
+
 /** The fallback queue's tag: routes any recipient tag that has no queue of its own. */
 export const FALLBACK_QUEUE_TAG = "*";
 
@@ -144,7 +157,7 @@ export async function resolveAssignee(
     .bind(queueTag)
     .first<MailQueueRow>();
   if (!queue) return null;
-  const restricted = queue.restricted === 1;
+  const restricted = isRestrictedQueue(queueTag, queue);
   const excluded = context.excludedUserId ?? null;
 
   if (queue.strategy === "fixed") {
@@ -301,4 +314,18 @@ export function mailReleaseStatements(
     );
   }
   return statements;
+}
+
+/**
+ * Statements only the soft delete (tombstone) runs: the person's account link on tickets is
+ * erased, because the account is gone. The requester's address stays on the ticket as the
+ * correspondence record. A demotion or a revocation keeps the account, so keeps the link.
+ */
+export function mailTombstoneStatements(userId: number): MailReleaseStatement[] {
+  return [
+    {
+      sql: "UPDATE mail_tickets SET requester_user_id = NULL WHERE requester_user_id = ?",
+      binds: [userId],
+    },
+  ];
 }
