@@ -365,7 +365,7 @@ An entry of any shape, `null` included, is merged as a value and never passed to
 
 Decision 4 says a mirror whose tag is unknown is never re-pulled.
 `plan` refuses one with `from-tag-unknown`, and `--from-tag` on one makes the plan with the check refused as `from-tag-not-recorded`: it is shown, it is never executable, and its lineage is marked not recordable, so Phase 6 never records `lineage` from it.
-`--from-tag` that disagrees with a recorded tag refuses as `from-tag-disagrees`, and a tag that is not an upstream tag at all (`v2.0.0`) as `from-tag-malformed` or `to-tag-malformed`.
+`--from-tag` that disagrees with a recorded tag refuses as `from-tag-disagrees`, and a tag that is not an OpenNeuro snapshot tag at all (by `isOpenNeuroTag`, the shape decision 10's import also uses: `1..2`, `a/b`) as `from-tag-malformed` or `to-tag-malformed`; `v1.1.0` names the same snapshot as `1.1.0` (`sameUpstreamTag`).
 A highest version row that was never examined (both columns NULL), or rows that cannot be read at all (a versions route that answers 404), is not unknown: the plan reads that version's tagged `dataset_description.json` from its own clone with `sourceSnapshotOf`, the file and the parser the backfill would use, and says so in `from_tag_source` (`tagged-description`).
 
 ### Which `ds` a mirror names (closes the Phase 2 amendment's open item)
