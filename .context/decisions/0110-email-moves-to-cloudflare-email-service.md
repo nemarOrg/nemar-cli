@@ -24,10 +24,11 @@ Mail moves to the Cloudflare Email Service in phases, and Resend is retired afte
   After the soak Resend is removed.
 - **Announcements go through a Queue** when the Cloudflare provider is active: `nemar admin notify` enqueues one message per recipient and the same Worker consumes them one send at a time.
   A send that may have been accepted (a timeout, an internal error) is counted as unknown and never retried, because a retry could deliver the announcement twice.
-  A rate or daily limit refusal says nothing was delivered, so that message is retried after a delay.
+  A rate or daily limit refusal says nothing was delivered, so that message is retried with a growing delay and the rest of its batch waits too; after ten retries it is recorded as a failure.
+  Recipients are de-duplicated, and each recipient's outcome is recorded once, so a redelivered message is neither sent nor counted twice.
   Progress is read with `nemar admin notify --status <id>`.
 - **Bounce and complaint events** are published by Cloudflare into a Queue through an event subscription per sending domain, and this Worker stores `message.bounced` and `message.complained` in D1 for 180 days.
-  Delivered and deferred events are acknowledged and dropped, and the message subject is never stored.
+  Every other event type is acknowledged and dropped, and the message subject is never stored.
   Cloudflare suppresses those recipients itself; the table is the platform's own record.
 - **Production flips by configuration only.**
   It carries the binding from the start, but `EMAIL_PROVIDER` is set to `cloudflare` only after Cloudflare raises the daily sending limit and staging has run cleanly.

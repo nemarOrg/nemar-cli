@@ -31,7 +31,7 @@ export function isEmailEventMessage(body: unknown): boolean {
     typeof body === "object" &&
     body !== null &&
     typeof (body as { type?: unknown }).type === "string" &&
-    ((body as { type: string }).type as string).startsWith(EMAIL_EVENT_TYPE_PREFIX)
+    (body as { type: string }).type.startsWith(EMAIL_EVENT_TYPE_PREFIX)
   );
 }
 
@@ -139,9 +139,14 @@ export async function handleEmailEventBatch(
         `[email-events] store failed for ${redactRecipient(r.recipient)}; retrying:`,
         err instanceof Error ? err.message : "unknown error",
       );
-      message.retry();
+      message.retry({ delaySeconds: eventRetryDelaySeconds(message.attempts) });
     }
   }
+}
+
+/** A D1 write that failed waits 30 s, then longer each attempt, so a short outage cannot spend every retry at once. */
+export function eventRetryDelaySeconds(attempts: number): number {
+  return Math.min(30 * Math.max(1, attempts), 600);
 }
 
 /** Delete events older than the retention window; returns the number deleted. */

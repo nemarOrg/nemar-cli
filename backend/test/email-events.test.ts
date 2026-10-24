@@ -7,7 +7,11 @@
 import type { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
 import { dispatchQueueBatch } from "../src/index";
-import { handleEmailEventBatch, pruneEmailDeliveryEvents } from "../src/services/email-events";
+import {
+  eventRetryDelaySeconds,
+  handleEmailEventBatch,
+  pruneEmailDeliveryEvents,
+} from "../src/services/email-events";
 import type { Bindings } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
 import { recordingBatch } from "./helpers/queue-binding";
@@ -153,7 +157,7 @@ describe("handleEmailEventBatch", () => {
     console.error = (...a: unknown[]) => logged.push(a.join(" "));
     try {
       const [r] = await run(db, [event("bounced")]);
-      expect(r.retried).not.toBeNull();
+      expect(r.retried).toEqual({ delaySeconds: eventRetryDelaySeconds(1) });
       expect(r.acked).toBe(false);
     } finally {
       console.error = orig;
@@ -187,6 +191,10 @@ describe("pruneEmailDeliveryEvents", () => {
     insert.run("edge", "2026-04-26T00:00:00.000Z"); // 180 days
     insert.run("new", "2026-10-01T00:00:00.000Z");
     expect(await pruneEmailDeliveryEvents(env.DB, now)).toBe(1);
-    expect(rows(db).map((r) => r.event_id).sort()).toEqual(["edge", "new"]);
+    expect(
+      rows(db)
+        .map((r) => r.event_id)
+        .sort(),
+    ).toEqual(["edge", "new"]);
   });
 });
