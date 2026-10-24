@@ -8,9 +8,15 @@
  * over a file the scrub cannot rewrite anyway. `test/import-scrub.test.ts` has no case that reads
  * such a header (its empty recording is never read), so this is the one that does.
  *
+ * The path it exercises is the GIT-HELD header: the recordings are committed to git, so the scrub
+ * reads their first bytes from the clone (`readLocalHeader`), not by an upstream ranged read, and
+ * no upstream object is annexed, so nothing is read over the network. The upstream path reaches
+ * the same `patchHeader` and is driven by `test/import-scrub.test.ts`.
+ *
  * Real git and git-annex, a real `type=directory` special remote named `nemar-s3`, and the real
- * `findUnannexedData` deciding what git holds that policy calls data. No upstream object is
- * annexed, so nothing is read over the network. Every value is invented.
+ * `findUnannexedData` deciding what git holds that policy calls data. Without git-annex the suite
+ * skips on a developer machine and FAILS when `NEMAR_REQUIRE_SCRUB_TOOLS=1` (`toolOrFail`), so it
+ * can never pass vacuously in CI. Every value is invented.
  */
 
 import { afterAll, describe, expect, test } from "bun:test";
@@ -22,8 +28,17 @@ import { listAnnexedKeys } from "../src/lib/git-annex/transfer";
 import { annexCopyUpload } from "../src/lib/import-normalize";
 import { findUnannexedData } from "../src/lib/import-openneuro";
 import { httpUpstreamReader, prepareImportedTreeForCopy } from "../src/lib/import-scrub";
+import { toolOrFail } from "./scrub/helpers/require-tools";
 
-const HAVE_ANNEX = Bun.spawnSync(["git", "annex", "version"], { stdout: "ignore" }).exitCode === 0;
+function probe(cmd: string[]): boolean {
+  try {
+    return Bun.spawnSync(cmd, { stdout: "ignore", stderr: "ignore" }).exitCode === 0;
+  } catch {
+    return false;
+  }
+}
+
+const HAVE_ANNEX = toolOrFail("git-annex", probe(["git", "annex", "version"]));
 const SUITE = HAVE_ANNEX ? describe : describe.skip;
 
 const scratch: string[] = [];
