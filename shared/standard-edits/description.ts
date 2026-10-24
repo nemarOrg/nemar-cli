@@ -8,11 +8,12 @@
  * a contributor's change. A copy in any one of them would drift from the others.
  *
  * Pure: no I/O, and no import from Node or the Worker runtime, so the Worker bundle and the CLI
- * both load it. Its two imports are shared modules held to the same rule.
+ * both load it. Its imports are shared modules held to the same rule.
  */
 
 import { normalizeDoiKey } from "../never-data-paper.js";
-import { openNeuroDatasetOfDoi, openNeuroUrlParts } from "../openneuro-tag.js";
+import { openNeuroDatasetOfDoi } from "../openneuro-tag.js";
+import { isOwnSourceEntry } from "../source-snapshot.js";
 
 /**
  * Put NEMAR's concept DOI into a dataset_description.json, keeping whatever DOI was
@@ -53,19 +54,18 @@ export function applyConceptDoiToDescription(
     // second, from upstream's own DatasetDOI: NEMAR owns one entry per mirrored `ds`, and two that
     // named different versions would leave the recorded upstream tag unknown. So upstream's own
     // DatasetDOI is dropped when an entry for the same `ds` exists at another tag, older or newer;
-    // moving the entry to a new tag is a re-pull's edit, never publication's. Entries of any
-    // shape, `null` included, are tolerated: only an object can match.
+    // moving the entry to a new tag is a re-pull's edit, never publication's. "An entry for the
+    // same dataset" is the shared parser's `isOwnSourceEntry` (shared/source-snapshot.ts), so this
+    // edit and every reader of the tag agree on which entries are the dataset's: one the parser
+    // would not read as the dataset's never stands in for upstream's DOI. Entries of any shape,
+    // `null` included, are tolerated: only an object can match.
     const ds = openNeuroDatasetOfDoi(existingDoi);
     const alreadyPresent = sources.some((s) => {
       if (typeof s !== "object" || s === null) return false;
-      const doi = typeof s.DOI === "string" ? s.DOI : null;
-      const url = typeof s.URL === "string" ? s.URL : null;
-      if (doi !== null && normalizeDoiKey(doi) === normalizeDoiKey(existingDoi)) return true;
-      if (ds === null) return false;
-      return (
-        (doi !== null && openNeuroDatasetOfDoi(doi) === ds) ||
-        (url !== null && openNeuroUrlParts(url)?.ds === ds)
-      );
+      if (typeof s.DOI === "string" && normalizeDoiKey(s.DOI) === normalizeDoiKey(existingDoi)) {
+        return true;
+      }
+      return ds !== null && isOwnSourceEntry(s, ds);
     });
     if (!alreadyPresent) {
       sources.push({ DOI: existingDoi });

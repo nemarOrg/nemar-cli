@@ -77,6 +77,25 @@ describe("applyConceptDoiToDescription, at its shared path", () => {
     expect(result.description.DatasetDOI).toBe(CONCEPT);
   });
 
+  test("an entry stands for the dataset exactly when the shared parser reads it as the dataset's", () => {
+    // The GitHub mirror's tree URL is the dataset's own entry, so upstream's DOI is not added.
+    const tree = { URL: "https://github.com/OpenNeuroDatasets/ds002720/tree/1.0.0" };
+    const kept = applyConceptDoiToDescription(
+      { DatasetDOI: UPSTREAM, Version: "1.0.1", SourceDatasets: [tree] },
+      CONCEPT,
+    );
+    expect(kept.description.SourceDatasets).toEqual([tree]);
+    // Its `.git` clone URL is not (isOwnSourceEntry), so upstream's DOI is kept beside it and the
+    // tag stays readable rather than resting on an entry no reader counts.
+    const cloneUrl = { URL: "https://github.com/OpenNeuroDatasets/ds002720.git" };
+    const added = applyConceptDoiToDescription(
+      { DatasetDOI: UPSTREAM, Version: "1.0.1", SourceDatasets: [cloneUrl] },
+      CONCEPT,
+    );
+    expect(added.description.SourceDatasets).toEqual([cloneUrl, { DOI: UPSTREAM }]);
+    expect(added.preservedSourceDoi).toBe(UPSTREAM);
+  });
+
   test("an empty or non-string DatasetDOI is replaced and not preserved", () => {
     for (const value of ["", 42, null]) {
       const result = applyConceptDoiToDescription({ DatasetDOI: value, Version: "1.0.0" }, CONCEPT);

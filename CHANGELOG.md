@@ -36,7 +36,7 @@ earlier releases are described only by their generated notes.
 - **A first import, or a retargeted one, records the snapshot it mirrors** as a `SourceDatasets` entry `{DOI: doi:10.18112/openneuro.<ds>.v<tag>, URL, Version: <tag>}`, all from the tag and kept in git; it is not written after a same-version hard reset, or when an entry already records a tag for the dataset, and an untagged entry naming the dataset alone is completed in place instead of joined by a second.
   The tag is read with Phase 2's parser, `sourceSnapshotOf`, by the guard and by the record alike, and a record that parser would not read as the tag (an entry for the dataset carrying another tag or naming another dataset too, or a tag such as `2.1.0-rc1` that is not numeric) is not written; prepare warns instead.
   DataCite gets one `IsDerivedFrom` for it, the DOI: the OpenNeuro page of the same dataset is not a second relation.
-  Publication no longer adds upstream's `DatasetDOI` as a second source when it is the same DOI spelled another way, or another version of a dataset an entry already names, so the recorded tag never disagrees with itself.
+  Publication no longer adds upstream's `DatasetDOI` as a second source when it is the same DOI spelled another way, or another version of a dataset an entry already names (the parser's `isOwnSourceEntry`), so the recorded tag never disagrees with itself.
 
 ### Production behavior changes
 
