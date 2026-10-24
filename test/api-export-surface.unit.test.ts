@@ -193,6 +193,7 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "sendBroadcast",
     "setAccountKind",
     "setMailTicketStatus",
+    "setMailTicketSummary",
     "setPrReviewAuthor",
     "signalDefaultsSweep",
     "signalDefaultsSweepReset",
@@ -305,6 +306,7 @@ const POST_SPLIT_ADDITIONS = [
   "putMailAvailability", // epic #1893 phase 4: `nemar admin mail`, routes in shared/contract/mail-admin.ts
   "putMailQueue", // epic #1893 phase 4: `nemar admin mail`, routes in shared/contract/mail-admin.ts
   "reprocessMail", // epic #1893 phase 4: `nemar admin mail`, routes in shared/contract/mail-admin.ts
+  "setMailTicketSummary", // epic #1893 phase 6a: `nemar admin mail summarize`, PUT /admin/mail/tickets/:id/summary
   "replyToMailTicket", // epic #1893 phase 4: `nemar admin mail`, routes in shared/contract/mail-admin.ts
   "setMailTicketStatus", // epic #1893 phase 4: `nemar admin mail`, routes in shared/contract/mail-admin.ts
 ];
