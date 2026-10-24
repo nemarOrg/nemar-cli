@@ -24,7 +24,7 @@ import {
   assertReadOnlyGit,
   readOnlyFetch,
 } from "../src/lib/repull/read-only";
-import { remoteEnv } from "../src/lib/repull/sources";
+import { localBase, openNeuroGraphqlUrl, remoteEnv } from "../src/lib/repull/sources";
 
 const BODY: PlanBody = {
   planner: 1,
@@ -264,5 +264,26 @@ describe("the credential environment of a remote", () => {
     expect(gh.GIT_CONFIG_KEY_1).toBe("credential.https://github.com.helper");
     // A token is never offered to a host that is not GitHub, a local test base included.
     expect(remoteEnv("file:///tmp/origins/on099999", "tok")).toBeUndefined();
+  });
+});
+
+describe("the test seams refuse anything but a local target", () => {
+  test("NEMAR_REPULL_OPENNEURO_URL is honored only for a loopback http address", () => {
+    expect(openNeuroGraphqlUrl({})).toBeUndefined();
+    expect(
+      openNeuroGraphqlUrl({ NEMAR_REPULL_OPENNEURO_URL: "http://127.0.0.1:9/crn/graphql" }),
+    ).toBe("http://127.0.0.1:9/crn/graphql");
+    for (const url of ["https://openneuro.org/crn/graphql", "http://evil.example/x", "nonsense"]) {
+      expect(() => openNeuroGraphqlUrl({ NEMAR_REPULL_OPENNEURO_URL: url })).toThrow(
+        /loopback|127/,
+      );
+    }
+  });
+
+  test("a remote base is honored only as an absolute local path", () => {
+    expect(localBase({ NEMAR_REPULL_ORIGIN_BASE: "/tmp/origins/" }, "origin")).toBe("/tmp/origins");
+    for (const value of ["relative/dir", "https://github.com/x", "file:///tmp/x"]) {
+      expect(() => localBase({ NEMAR_REPULL_ORIGIN_BASE: value }, "origin")).toThrow(/absolute/);
+    }
   });
 });
