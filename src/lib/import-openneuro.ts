@@ -1148,6 +1148,9 @@ export function buildManifestItems(
   return { items, skipped };
 }
 
+/** The longest an explicit tag's warning-only lookup of OpenNeuro's latest tag may take. */
+export const EXPLICIT_TAG_LOOKUP_MS = 10_000;
+
 /** Where OpenNeuro's GitHub mirror of a dataset lives. */
 export function openNeuroMirrorUrl(openneuroId: string): string {
   return `https://github.com/${OPENNEURO_ORG}/${openneuroId}.git`;
@@ -1200,7 +1203,21 @@ export async function cloneOpenNeuroAtTag(
     );
   }
   const repoUrl = options.repoUrl ?? openNeuroMirrorUrl(openneuroId);
-  const lookup = await fetchOpenNeuroLatestTag(openneuroId, options.lookup);
+  // With an explicit tag the lookup only decides a warning, so it gets one short try: a slow or
+  // absent OpenNeuro must not hold up an import that does not need its answer.
+  const lookup = await fetchOpenNeuroLatestTag(
+    openneuroId,
+    options.tag !== undefined
+      ? {
+          ...options.lookup,
+          attempts: 1,
+          timeoutMs: Math.min(
+            options.lookup?.timeoutMs ?? EXPLICIT_TAG_LOOKUP_MS,
+            EXPLICIT_TAG_LOOKUP_MS,
+          ),
+        }
+      : options.lookup,
+  );
   const latestTag = lookup.tag;
   let tag: string;
   if (options.tag !== undefined) {

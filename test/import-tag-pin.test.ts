@@ -18,6 +18,7 @@ import { classifyImportFailure } from "../backend/src/services/import-failure-ca
 import { decideRetryAction } from "../backend/src/services/import-retry";
 import { ImportRefused, OPENNEURO_MIRROR_LAG_MARKER } from "../src/lib/import-markers";
 import {
+  EXPLICIT_TAG_LOOKUP_MS,
   appendSourceDatasetEntry,
   cloneOpenNeuroAtTag,
   sourceDatasetEntry,
@@ -117,6 +118,22 @@ describe("the clone is at the tag, not at HEAD", () => {
       expect(pinned.latestTag).toBeNull();
     });
   }
+});
+
+describe("with an explicit tag the latest-tag lookup is one short try", () => {
+  test("a failing OpenNeuro is asked once, not retried, and the clone goes ahead", async () => {
+    graphqlAnswer = () => new Response("unavailable", { status: 503 });
+    graphqlRequests = 0;
+    // The fixture allows two attempts; an explicit tag must still make only one.
+    const pinned = await cloneOpenNeuroAtTag(UPSTREAM_ID, cloneDir(), {
+      tag: "1.0.0",
+      repoUrl: upstream.dir,
+      lookup: fastLookup(),
+    });
+    expect(graphqlRequests).toBe(1);
+    expect(pinned.latestTag).toBeNull();
+    expect(EXPLICIT_TAG_LOOKUP_MS).toBeLessThanOrEqual(10_000);
+  });
 });
 
 describe("a tag the mirror does not have refuses as a mirror lag", () => {
