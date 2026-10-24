@@ -1790,7 +1790,7 @@ describe("an upstream re-pull scrubs its delta paths only (ADR 0111)", () => {
         }),
       );
       expect(err.code, `staged: ${stage}`).toBe("scope-incomplete");
-      expect(err.message).toContain("1 path(s) changed since HEAD");
+      expect(err.message).toContain("1 path(s) changed since HEAD, or untracked");
       expectNoSecret(err.message);
       expect((await run(["git", "rev-parse", "HEAD"], clone)).trim()).toBe(head);
       // The same change inside the scope is the caller's delta, and the scrub reads it.
@@ -1801,6 +1801,22 @@ describe("an upstream re-pull scrubs its delta paths only (ADR 0111)", () => {
       expect(ok.counts.json_files_read).toBe(2);
     }
   }, 180_000);
+
+  test("an untracked path the scope does not name refuses too; in the scope it is the caller's", async () => {
+    // git diff sees tracked paths only, and a later `git add` would take this one.
+    const upstream = await buildUpstream(deltaFixtures());
+    const { clone } = await cloneForImport(upstream);
+    const added = "sub-05/eeg/sub-05_task-rest_eeg.json";
+    mkdirSync(dirname(join(clone, added)), { recursive: true });
+    writeFileSync(join(clone, added), `{"TaskName": "added by the caller"}\n`);
+    const err = await refusal(
+      scrubDelta(clone, { scope: new Set([SIDECAR]), sourceOf: () => null }),
+    );
+    expect(err.code).toBe("scope-incomplete");
+    expect(err.message).toContain("1 path(s)");
+    const ok = await scrubDelta(clone, { scope: new Set([SIDECAR, added]), sourceOf: () => null });
+    expect(ok.counts.json_values_blanked).toBe(1);
+  }, 120_000);
 });
 
 describe("a re-pull's header scrub never leaves a provenance file without its sentence", () => {

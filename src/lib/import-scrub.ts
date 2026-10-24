@@ -143,7 +143,10 @@ export const IMPORT_SCRUB_REFUSALS = [
    * outside its scope, so the file would be committed without the sentence that says so.
    */
   "provenance-out-of-scope",
-  /** A scoped scrub's tree has changes outside the scope it was given, which it would not read. */
+  /**
+   * A scoped scrub's tree has changes, tracked or untracked, outside the scope it was given, which
+   * it would not read.
+   */
   "scope-incomplete",
   /** Anything else went wrong inside the scrub; the detail is the error's class, never its text. */
   "scrub-failed",
@@ -572,9 +575,11 @@ export interface ImportScrubInput {
    * The paths the scrub may read and change; every tracked path when absent (the importer). An
    * upstream re-pull scrubs its delta paths only (ADR 0111, decisions 1 and 2), so a recording, a
    * JSON file or a scans table outside the scope is neither read nor changed, and the counts see
-   * only the scope. The scope must hold every path changed since HEAD (`scope-incomplete`
-   * otherwise), and the provenance files whenever a header will change
-   * (`provenance-out-of-scope` otherwise), so nothing unscrubbed or unannotated is committed.
+   * only the scope. The scope must hold every path changed since HEAD, untracked ones included
+   * (`scope-incomplete` otherwise): for a re-pull that is every written delta path, every deleted
+   * one, and every `.gitattributes` the annex policy edited (ADR 0060). It must hold the
+   * provenance files whenever a header will change (`provenance-out-of-scope` otherwise), so
+   * nothing unscrubbed or unannotated is committed.
    */
   scope?: ReadonlySet<string>;
   /**
@@ -789,15 +794,22 @@ function isRegularFile(abs: string): boolean {
 }
 
 /**
- * Tracked paths whose index or working-tree content differs from HEAD (staged or not, deletions
- * included), from git's NUL-separated listing so no path is quoted or split.
+ * Paths that differ from HEAD: tracked paths whose index or working-tree content changed (staged
+ * or not, deletions included), and untracked paths `.gitignore` does not exclude, which a later
+ * `git add` would take. From git's NUL-separated listings, so no path is quoted or split.
  */
 async function changedSinceHead(datasetPath: string): Promise<string[]> {
-  const r = await runCommand(["git", "diff", "--name-only", "-z", "--no-renames", "HEAD", "--"], {
-    cwd: datasetPath,
-  });
-  if (r.exitCode !== 0) throw new Error("git could not list the paths changed since HEAD");
-  return r.stdout.split("\0").filter((p) => p !== "");
+  const listings = [
+    ["git", "diff", "--name-only", "-z", "--no-renames", "HEAD", "--"],
+    ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+  ];
+  const out: string[] = [];
+  for (const cmd of listings) {
+    const r = await runCommand(cmd, { cwd: datasetPath });
+    if (r.exitCode !== 0) throw new Error("git could not list the paths changed since HEAD");
+    out.push(...r.stdout.split("\0").filter((p) => p !== ""));
+  }
+  return out;
 }
 
 async function stageAsGit(datasetPath: string, paths: string[]): Promise<void> {
@@ -869,7 +881,7 @@ async function scrubTree(input: ImportScrubInput): Promise<ImportScrubResult> {
     if (outside > 0) {
       throw new ImportScrubRefused(
         "scope-incomplete",
-        `${outside} path(s) changed since HEAD are outside the scrub's scope`,
+        `${outside} path(s) changed since HEAD, or untracked, are outside the scrub's scope`,
       );
     }
   }
