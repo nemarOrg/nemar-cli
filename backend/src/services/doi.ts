@@ -562,121 +562,15 @@ export async function createEzidVersionDoi(
   };
 }
 
-/** Decision for the publish orchestrator's update_readme step.
- *  `commit=false` means the README is already correct on disk and the
- *  step should make no GitHub call. `commit=true` means write `content`
- *  to README.md with `message` as the commit subject. */
-export type ReadmeBadgePlan =
-  | { commit: false; reason: string }
-  | { commit: true; content: string; message: string };
-
 /**
- * Put NEMAR's concept DOI into a dataset_description.json, keeping whatever DOI was
- * there before as a source.
- *
- * An imported dataset arrives carrying OpenNeuro's DOI. Overwriting it outright would
- * erase the provenance link, so the previous value moves into `SourceDatasets` -- the
- * BIDS field for exactly that -- and only then does `DatasetDOI` become ours. Both
- * the publication orchestrator and the #1386 repair go through here, because they are
- * the same edit made at different times and must not drift.
- *
- * Pure, and idempotent: re-running on a description that already carries the concept
- * DOI adds nothing and duplicates no source.
+ * NEMAR's standard edits to a dataset's dataset_description.json and README. They
+ * live in `shared/standard-edits/` so the upstream re-pull's planner (ADR 0111)
+ * recognizes the same edits publish makes; the orchestrator and the #1386 repair keep
+ * reaching them through this module.
  */
-export function applyConceptDoiToDescription(
-  description: Record<string, unknown>,
-  conceptDoi: string,
-): { description: Record<string, unknown>; changed: boolean; preservedSourceDoi?: string } {
-  const next = { ...description };
-  let changed = false;
-  let preservedSourceDoi: string | undefined;
-
-  const existingDoi = next.DatasetDOI;
-  if (typeof existingDoi === "string" && existingDoi && existingDoi !== conceptDoi) {
-    // A `SourceDatasets` that is not an array is not ours to discard. BIDS says
-    // array, but an imported description can carry an object or a string, and
-    // replacing it wholesale would erase provenance on published metadata during a
-    // bulk repair. Keep it as the first entry instead.
-    const existing = next.SourceDatasets;
-    const sources: Array<Record<string, unknown>> = Array.isArray(existing)
-      ? [...(existing as Array<Record<string, unknown>>)]
-      : existing === undefined || existing === null
-        ? []
-        : [existing as Record<string, unknown>];
-    const alreadyPresent = sources.some((s) => typeof s.DOI === "string" && s.DOI === existingDoi);
-    if (!alreadyPresent) {
-      sources.push({ DOI: existingDoi });
-      next.SourceDatasets = sources;
-      preservedSourceDoi = existingDoi;
-      changed = true;
-    }
-  }
-
-  if (next.DatasetDOI !== conceptDoi) {
-    next.DatasetDOI = conceptDoi;
-    changed = true;
-  }
-
-  // A published dataset needs a Version; the orchestrator defaults it here so
-  // create_tag does not have to write a separate [skip ci] commit.
-  if (!next.Version) {
-    next.Version = "1.0.0";
-    changed = true;
-  }
-
-  return { description: next, changed, preservedSourceDoi };
-}
-
-/**
- * The README badge for a concept DOI, in the one spelling NEMAR uses.
- *
- * EZID is the sole registrar (ADR 0007, #1182), so it is always the shields.io form;
- * the Zenodo badge went with the `doi_provider` column. Shared with the #1386 repair
- * so a re-badged README matches what publish would have written.
- */
-export function buildDoiBadge(conceptDoi: string): string {
-  const doiUrl = `https://doi.org/${conceptDoi}`;
-  const badgeImg = `https://img.shields.io/badge/DOI-${encodeURIComponent(conceptDoi)}-blue`;
-  return `[![DOI](${badgeImg})](${doiUrl})`;
-}
-
-/**
- * Decide whether the update_readme step should ship a commit.
- *
- * Skips when the existing README.md already contains a badge whose URL encodes the
- * *current* conceptDoi. Without the DOI match, a stale badge from a re-registered or
- * migrated DOI would be silently kept.
- */
-export function planReadmeBadgeCommit(args: {
-  readmeContent: string;
-  doiBadge: string;
-  conceptDoi: string;
-  contentSourcePath: string | undefined;
-}): ReadmeBadgePlan {
-  const { readmeContent, doiBadge, conceptDoi, contentSourcePath } = args;
-  const isRename = contentSourcePath !== undefined && contentSourcePath !== "README.md";
-
-  const hasAnyBadge =
-    readmeContent.includes("zenodo.org/badge/DOI") ||
-    readmeContent.includes("img.shields.io/badge/DOI");
-
-  const encodedDoi = encodeURIComponent(conceptDoi);
-  const hasCurrentBadge =
-    hasAnyBadge && (readmeContent.includes(conceptDoi) || readmeContent.includes(encodedDoi));
-
-  if (hasCurrentBadge && !isRename) {
-    return { commit: false, reason: "badge already points to current concept DOI" };
-  }
-
-  const nextContent = hasCurrentBadge ? readmeContent : `${doiBadge}\n\n${readmeContent}`;
-  const verb = hasAnyBadge && !hasCurrentBadge ? "Replace stale" : "Add";
-  const renameVerb = isRename
-    ? `Rename ${contentSourcePath} to README.md and ${verb.toLowerCase()}`
-    : verb;
-
-  return {
-    commit: true,
-    content: nextContent,
-    message: `${renameVerb} DOI badge: ${conceptDoi}`,
-  };
-}
+export { applyConceptDoiToDescription } from "../../../shared/standard-edits/description.js";
+export {
+  type ReadmeBadgePlan,
+  buildDoiBadge,
+  planReadmeBadgeCommit,
+} from "../../../shared/standard-edits/readme.js";

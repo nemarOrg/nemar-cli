@@ -67,21 +67,13 @@ import { pipeline } from "node:stream/promises";
 import { ANNEX_KEY } from "../../scripts/scrub/contract.js";
 import { annexRegistry, isDead, locationLogs } from "../../scripts/scrub/git/git-lib.js";
 import { LEDGER_REPO_PATH, appendLedger, readLedger } from "../../scripts/scrub/ledger.js";
+import { EDF_HEADER_BYTES, scanPaths } from "../../shared/identifier-scan.js";
 import {
-  DATE_KINDS,
-  EDF_HEADER_BYTES,
-  scanEdfHeader,
-  scanPaths,
-} from "../../shared/identifier-scan.js";
-import {
+  type ImportHeaderChange,
   JsonBlankUnverified,
-  ScrubRefused,
   blankIdentifierJsonKeys,
-  normalizeEdfDates,
+  importHeaderPatch,
   normalizeScansTableDates,
-  scrubEdfHeader,
-  verifyDateNormalization,
-  verifyScrub,
 } from "../../shared/identifier-scrub.js";
 import {
   PROVENANCE_NOTE_KEY,
@@ -198,10 +190,16 @@ export const MAX_JSON_BYTES = 1024 * 1024;
 /** Inline scans tables over this are not edited, and keep their dates. */
 export const MAX_SCANS_TABLE_BYTES = 8 * 1024 * 1024;
 
-const RECORDING = /\.(edf|bdf)$/i;
-const JSON_FILE = /\.json$/i;
+// The paths the scrub reads, by name alone. Exported so the upstream re-pull's planner (ADR 0111)
+// forecasts the scrub over the same paths it will run on. None has a `g` or `y` flag, so `test`
+// keeps no state between calls.
+
+/** A recording whose header the scrub reads and may patch: EDF or BDF, any case. */
+export const RECORDING_PATH = /\.(edf|bdf)$/i;
+/** An inline JSON document whose identifier-keyed values the scrub blanks. */
+export const JSON_PATH = /\.json$/i;
 /** The tables the screen reads `acq_time` from (`identifier-fleet-lib.ts`), spelled the same way. */
-const SCANS_TABLE = /_scans\.tsv$/;
+export const SCANS_TABLE_PATH = /_scans\.tsv$/;
 
 // ---------------------------------------------------------------------------------------
 // Reading upstream
@@ -577,62 +575,24 @@ function readLocalHeader(path: string): Uint8Array | null {
   }
 }
 
-/** What the import's patch does to one header. */
-interface HeaderChange {
-  /** `scrubEdfHeader` rewrites an identification field. */
-  scrub: boolean;
-  /** `normalizeEdfDates` sets an acquisition date, after the scrub (first import only). */
-  dates: boolean;
-  /** The header as the patch would leave it still holds an acquisition date (a layout the rule leaves). */
-  datesLeft: boolean;
-  /** The date rule faulted or could not prove its result, so the dates were left (never a refusal). */
-  datesUnproven: boolean;
-}
+/** What the import's patch does to one header (`ImportHeaderChange`, shared with the re-pull planner). */
+type HeaderChange = ImportHeaderChange;
 
 /**
- * The import's patch of one header and its proof: the identifier scrub (ADR 0085's rule, proven by
- * `verifyScrub`), then, when `dates` is set, the date rule on the scrubbed header (ADR 0091, proven
- * by `verifyDateNormalization`). Null when it is not an EDF or BDF header. The scrub may rewrite all
- * of bytes 8..168, and the slot date lies inside them, so the order matters: the date rule reads
- * the scrubbed header, and each proof is of its own step, so the composite differs from the original
- * only where one of them may write. A scrub that cannot be proven refuses; a date rule that faults
+ * The import's patch of one header and its proof, as {@link importHeaderPatch} computes it (the
+ * identifier scrub proven by `verifyScrub`, then, when `dates` is set, the date rule on the
+ * scrubbed header proven by `verifyDateNormalization`). Null when it is not an EDF or BDF header.
+ * A scrub that cannot be proven refuses with {@link ImportScrubRefused}; a date rule that faults
  * or cannot be proven leaves the dates (ADR 0090: a date never gates).
  */
 function patchHeader(
   before: Uint8Array,
   dates: boolean,
 ): { header: Uint8Array; change: HeaderChange } | null {
-  let scrubbed: ReturnType<typeof scrubEdfHeader>;
-  try {
-    scrubbed = scrubEdfHeader(before);
-  } catch (err) {
-    if (err instanceof ScrubRefused) return null;
-    throw err;
-  }
-  if (scrubbed.changed && !verifyScrub(before, scrubbed.header).ok) {
-    throw new ImportScrubRefused("scrub-unverified", "a patched header failed its proof");
-  }
-  let header = scrubbed.header;
-  let datesChanged = false;
-  let datesUnproven = false;
-  if (dates) {
-    try {
-      const normalized = normalizeEdfDates(scrubbed.header);
-      if (normalized.changed && verifyDateNormalization(scrubbed.header, normalized.header).ok) {
-        header = normalized.header;
-        datesChanged = true;
-      } else if (normalized.changed) {
-        datesUnproven = true;
-      }
-    } catch {
-      datesUnproven = true;
-    }
-  }
-  const datesLeft = scanEdfHeader(header).some((f) => DATE_KINDS.has(f.kind));
-  return {
-    header,
-    change: { scrub: scrubbed.changed, dates: datesChanged, datesLeft, datesUnproven },
-  };
+  const patch = importHeaderPatch(before, dates);
+  if (patch.ok) return { header: patch.header, change: patch.change };
+  if (patch.reason === "not-edf") return null;
+  throw new ImportScrubRefused("scrub-unverified", "a patched header failed its proof");
 }
 
 /**
@@ -828,7 +788,7 @@ async function scrubTree(input: ImportScrubInput): Promise<ImportScrubResult> {
   const counts = zeroCounts();
   const tracked = [...(await listTrackedPaths(datasetPath))].sort();
   const annexedKeys = await listAnnexedKeys(datasetPath);
-  const recordings = tracked.filter((p) => RECORDING.test(p));
+  const recordings = tracked.filter((p) => RECORDING_PATH.test(p));
   counts.recordings = recordings.length;
 
   // A re-import's tree is the dataset NEMAR already holds, which may be public: no date is changed.
@@ -1140,7 +1100,7 @@ async function scrubTree(input: ImportScrubInput): Promise<ImportScrubResult> {
 
   // 6. Blank identifier-keyed values in inline JSON.
   for (const path of tracked) {
-    if (!JSON_FILE.test(path)) continue;
+    if (!JSON_PATH.test(path)) continue;
     if (annexedKeys.has(path)) {
       counts.json_files_annexed++;
       continue;
@@ -1176,7 +1136,7 @@ async function scrubTree(input: ImportScrubInput): Promise<ImportScrubResult> {
   // (ADR 0091), at the head of the tree, as the JSON above is blanked there.
   if (normalizeDates) {
     for (const path of tracked) {
-      if (!SCANS_TABLE.test(path)) continue;
+      if (!SCANS_TABLE_PATH.test(path)) continue;
       if (annexedKeys.has(path)) {
         counts.scans_tables_annexed++;
         continue;
@@ -1469,7 +1429,9 @@ export async function prepareImportedTreeForCopy(args: {
   } catch (err) {
     throw new ImportScrubRefused("scrub-failed", describeError(err));
   }
-  const recordingKeys = new Set([...tree].filter(([p]) => RECORDING.test(p)).map(([, k]) => k));
+  const recordingKeys = new Set(
+    [...tree].filter(([p]) => RECORDING_PATH.test(p)).map(([, k]) => k),
+  );
   const unread = manifest.items.filter(
     (it) =>
       !isLocallyUploaded(it) && recordingKeys.has(it.key) && !scrub.headerReadKeys.has(it.key),

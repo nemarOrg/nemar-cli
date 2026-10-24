@@ -32,6 +32,7 @@ import {
   ACKNOWLEDGMENT_MIN_LENGTH,
 } from "../../../shared/publication-limits.js";
 import { REASON_CODES } from "../../../shared/publication-review.js";
+import { selectPublishReadmes } from "../../../shared/standard-edits/readme.js";
 import {
   AUDIT_IF_PREVIOUS_CHANGED_SQL,
   type AuditLogEntry,
@@ -1317,7 +1318,8 @@ async function stepUpdateMetadata(c: ApproveStepContext): Promise<RespondOutcome
       if (isRespond(descResult)) return descResult;
       const datasetDesc = descResult;
 
-      // The rule lives in doi.ts so the #1386 repair applies the same edit.
+      // The rule lives in shared/standard-edits/description.ts (re-exported by doi.ts), so the
+      // #1386 repair and the upstream re-pull's planner apply the same edit. Never copy it here.
       const applied = applyConceptDoiToDescription(datasetDesc, conceptDoi);
       if (applied.preservedSourceDoi) {
         console.log(
@@ -1380,16 +1382,11 @@ async function stepUpdateReadme(c: ApproveStepContext): Promise<RespondOutcome |
       const doiBadge = buildDoiBadge(conceptDoi);
 
       const tree = await getTreeAtRef(repoName, "main", pat);
-      // Find all README variants in the repo
-      const readmeCandidates = ["README.md", "README.rst", "README.txt", "README"];
-      const foundReadmes: { path: string; sha: string }[] = [];
-      for (const candidate of readmeCandidates) {
-        const found = tree.find((f) => f.path === candidate);
-        if (found) foundReadmes.push(found);
-      }
-
-      // Use the best available README for content (prefer README.md, then others in order)
-      const contentSource = foundReadmes[0];
+      // Find the root README variants, and the one whose content becomes README.md
+      // (README.md first, then the others in order). The rule is shared with the
+      // upstream re-pull's planner (ADR 0111), which has to recognize this edit.
+      const readmes = selectPublishReadmes(tree);
+      const contentSource = readmes.contentSource;
       let readmeContent = "";
       if (contentSource) {
         readmeContent = await getBlobContent(repoName, contentSource.sha, pat);
@@ -1414,8 +1411,7 @@ async function stepUpdateReadme(c: ApproveStepContext): Promise<RespondOutcome |
       }
 
       // Delete any non-.md README files (handles both fresh rename and resume after partial run)
-      for (const readme of foundReadmes) {
-        if (readme.path === "README.md") continue;
+      for (const readme of readmes.remove) {
         await deleteRepoFile(
           repoName,
           readme.path,
