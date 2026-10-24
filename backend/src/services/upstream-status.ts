@@ -205,6 +205,17 @@ export interface UpstreamStatusOptions {
   dataset?: string;
   /** The most GitHub tag probes this call makes; defaults to the page size. */
   probeBudget?: number;
+  /**
+   * The GitHub credential for the probes, shared by the pages of one pass so the token is asked
+   * for once, and a failed mint is remembered instead of being retried on every page.
+   */
+  probeAuth?: ProbeAuth;
+}
+
+/** The credential of one pass: the token once minted, or why it could not be. */
+export interface ProbeAuth {
+  pat?: string;
+  failure?: string;
 }
 
 /**
@@ -222,21 +233,27 @@ async function probeStale(
   env: Bindings,
   first: readonly ClassifiedMirror[],
   budget: number,
+  auth: ProbeAuth,
 ): Promise<{ probes: Map<string, MirrorProbe>; attempted: number }> {
   const probes = new Map<string, MirrorProbe>();
   const targets = first
     .filter((r) => r.needs_probe && r.ds !== null && r.upstream?.latest_tag)
     .slice(0, Math.max(0, budget));
   if (targets.length === 0) return { probes, attempted: 0 };
-  let pat: string;
-  try {
-    pat = await getDatasetsToken(env);
-  } catch (err) {
-    const reason = `no GitHub credential could be obtained: ${errorMessage(err)}`;
+  if (auth.pat === undefined && auth.failure === undefined) {
+    try {
+      auth.pat = await getDatasetsToken(env);
+    } catch (err) {
+      auth.failure = `no GitHub credential could be obtained: ${errorMessage(err)}`;
+    }
+  }
+  if (auth.pat === undefined) {
+    const reason = auth.failure ?? "no GitHub credential could be obtained";
     for (const t of targets) probes.set(t.ds as string, { kind: "unverified", reason });
     // No request was made, so none is claimed.
     return { probes, attempted: 0 };
   }
+  const pat = auth.pat;
   const results = await mapBounded(targets, PROBE_CONCURRENCY, (t) =>
     probeGitHubMirror(env, t.ds as string, t.upstream?.latest_tag as string, pat),
   );
@@ -288,7 +305,7 @@ export async function runUpstreamStatusPage(
   const first = diffStaleMirrors(mirrors, upstream.reads);
 
   const budget = opts.probeBudget ?? limit;
-  const { probes, attempted } = await probeStale(env, first, budget);
+  const { probes, attempted } = await probeStale(env, first, budget, opts.probeAuth ?? {});
   const final = diffStaleMirrors(mirrors, upstream.reads, probes);
   const rows = final.map(toWireRow);
 
@@ -333,7 +350,15 @@ export async function runUpstreamStatusPage(
   };
 }
 
+/**
+ * The most pages the weekly pass reads. A page is 100 mirrors, so this is a CEILING of 2,000
+ * managed mirrors: past it `truncated` is always true, and every Monday would add a "did not reach
+ * every mirror" entry to the report, a permanent alarm that gets muted (ADR 0053). When the fleet
+ * nears 2,000 (the report's own "Examined N of M" line says how near), raise this. Each added page
+ * costs up to 5 subrequests on the Monday tick: 2 GraphQL batches of 50 and 3 D1 statements.
+ */
 export const UPSTREAM_FLEET_MAX_PAGES = 20;
+/** GitHub probes for the whole pass (tag reads; each may be followed by one control read). */
 export const UPSTREAM_FLEET_PROBE_BUDGET = 25;
 
 /** A batch error names the datasets of its batch; the weekly report names none. */
@@ -348,10 +373,11 @@ function withoutDatasetIds(message: string): string {
  * refused page, because a page of an OpenNeuro that is down costs its timeout. Throws only when
  * D1 cannot be read.
  *
- * Budget on the Monday tick, which shares one subrequest allowance with its other jobs: at most
- * 20 pages of at most 2 GraphQL requests each (the common case is 10 pages and 10 requests, about
- * ten seconds), at most 25 tag reads and 25 control reads, one token mint, and 3 D1 statements a
- * page; typically about 60 subrequests, at worst about 120.
+ * Budget on the Monday tick, which shares ONE subrequest allowance with its other jobs. A page of
+ * 100 mirrors is at most 2 GraphQL requests (batches of 50) and 3 D1 statements, so the worst case
+ * is 20 pages x 5 = 100, plus at most 25 tag reads and 25 control reads, plus one token mint: about
+ * 151. A fleet of about 1,000 mirrors is 10 pages, so about 50 + 51 = 101. The token is minted
+ * once for the pass, and a failed mint is remembered rather than retried on every page.
  */
 export async function runUpstreamFleetSummary(
   env: Bindings,
@@ -359,17 +385,19 @@ export async function runUpstreamFleetSummary(
 ): Promise<UpstreamFleetSummary> {
   const maxPages = opts.maxPages ?? UPSTREAM_FLEET_MAX_PAGES;
   let probesLeft = opts.probeBudget ?? UPSTREAM_FLEET_PROBE_BUDGET;
-  const rows = new Map<string, UpstreamStatusRow>();
+  // Cursor pages cannot overlap, so the rows are simply collected.
+  const all: UpstreamStatusRow[] = [];
+  const probeAuth: ProbeAuth = {};
   const errors: string[] = [];
   let first: UpstreamStatusPage | null = null;
   let last: UpstreamStatusPage | null = null;
   let after: string | undefined;
   let stoppedEarly = false;
   for (let n = 0; n < maxPages; n++) {
-    const page = await runUpstreamStatusPage(env, { after, probeBudget: probesLeft });
+    const page = await runUpstreamStatusPage(env, { after, probeBudget: probesLeft, probeAuth });
     first ??= page;
     last = page;
-    for (const row of page.rows) rows.set(row.dataset_id, row);
+    all.push(...page.rows);
     for (const e of page.errors) errors.push(withoutDatasetIds(e));
     probesLeft = Math.max(0, probesLeft - page.probes.attempted);
     if (!page.ok) {
@@ -381,7 +409,6 @@ export async function runUpstreamFleetSummary(
     after = page.next_cursor;
     if (n === maxPages - 1) stoppedEarly = true;
   }
-  const all = [...rows.values()];
   const population = last?.population_total ?? 0;
   return {
     population,

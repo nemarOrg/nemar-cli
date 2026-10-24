@@ -913,6 +913,84 @@ describe("runUpstreamFleetSummary: the whole fleet in counts, for the weekly rep
     expect(summary.truncated).toBe(true);
   });
 
+  test("a mirror withdrawn and another created mid-pass leaves the count unchanged and the set wrong", async () => {
+    for (const id of ids(200000, 130)) seed(id);
+    let pages = 0;
+    const racing = wrapD1(realD1(db), (sql) => {
+      if (sql.includes("WITH page AS") && ++pages === 2) {
+        // One already-read mirror leaves and one new one arrives past the cursor: the population
+        // is 130 at both ends, but the rows reached are not the fleet that exists.
+        db.run("UPDATE datasets SET withdrawn_at = datetime('now') WHERE dataset_id = 'on200005'");
+        seed("on999998");
+      }
+    });
+    const summary = await runUpstreamFleetSummary(env({}, racing));
+    expect(summary.population).toBe(130);
+    expect(summary.examined).toBe(131);
+    expect(summary.truncated).toBe(true);
+  });
+
+  test("exactly the page cap with nothing more to read is not truncated (2,000 mirrors)", async () => {
+    db.run("BEGIN");
+    for (const id of ids(300000, 2000)) seed(id);
+    db.run("COMMIT");
+    const summary = await runUpstreamFleetSummary(env());
+    expect(summary.population).toBe(2000);
+    expect(summary.examined).toBe(2000);
+    expect(summary.truncated).toBe(false);
+    expect(summary.errors).toEqual([]);
+  });
+
+  test("past the 2,000-mirror ceiling the pass is truncated, and says how many it reached", async () => {
+    db.run("BEGIN");
+    for (const id of ids(300000, 2001)) seed(id);
+    db.run("COMMIT");
+    const summary = await runUpstreamFleetSummary(env());
+    expect(summary.examined).toBe(2000);
+    expect(summary.population).toBe(2001);
+    expect(summary.truncated).toBe(true);
+  });
+
+  test("with 130 stale mirrors over two pages a pass makes at most 25 tag reads and 25 controls", async () => {
+    openneuro.synthetic(true);
+    for (const id of ids(400000, 130)) {
+      seed(id, at("0.9.0"));
+      raw.serve(`ds${id.slice(2)}`, "HEAD");
+    }
+    const summary = await runUpstreamFleetSummary(env());
+    expect(summary.counts.states.mirror_lag).toBe(25);
+    expect(summary.counts.states.stale_unverified).toBe(105);
+    expect(raw.log).toHaveLength(50);
+  });
+
+  test("the GitHub token is asked for once per pass, and a failed mint is remembered, not retried per page", async () => {
+    openneuro.synthetic(true);
+    for (const id of ids(500000, 105)) seed(id, at("0.9.0"));
+    const readsOf = async (extra: Partial<Bindings>, rows: number) => {
+      let reads = 0;
+      const counting = env(extra);
+      Object.defineProperty(counting, "GITHUB_ADMIN_PAT", {
+        get() {
+          reads++;
+          return extra.GITHUB_ADMIN_PAT;
+        },
+      });
+      // `rows` mirrors per pass: 5 is one page, 105 is two.
+      db.run("UPDATE datasets SET withdrawn_at = NULL");
+      db.run(
+        `UPDATE datasets SET withdrawn_at = datetime('now') WHERE dataset_id > 'on${500000 + rows - 1}'`,
+      );
+      await runUpstreamFleetSummary(counting);
+      return reads;
+    };
+    for (const pat of [undefined, "ups-test-pat"]) {
+      const onePage = await readsOf({ GITHUB_ADMIN_PAT: pat }, 5);
+      const twoPages = await readsOf({ GITHUB_ADMIN_PAT: pat }, 105);
+      expect(onePage).toBeGreaterThan(0);
+      expect(twoPages).toBe(onePage);
+    }
+  });
+
   test("the budget is spent across pages: 105 stale mirrors, budget 3, only 3 are probed", async () => {
     openneuro.synthetic(true);
     for (const id of ids(600000, 105)) {
