@@ -132,7 +132,7 @@ export const MAIL_ERROR_GUIDANCE: Record<MailErrorCode, string> = {
   reply_not_sent:
     "Nothing was sent and the key is released; retry with the same key if you still want to reply.",
   reply_delivery_unknown:
-    "The mail provider's answer was lost, so the reply may or may not have gone; read the thread before retrying, and retry only with the same key, which never sends twice.",
+    "The mail provider did not confirm the send, so the reply may or may not have reached the requester. This key will never send it again, so retrying it is pointless: read the thread with 'nemar admin mail show', and ask the requester if needed. Only a new --idempotency-key sends again, and it may deliver a second copy.",
   inbound_not_configured:
     "This deployment has no inbound mail bucket, so there is nothing to reprocess.",
   internal: "The mail routes failed unexpectedly; try again, and report it if it keeps happening.",
@@ -154,15 +154,17 @@ function guidanceFor(word: string | undefined): string | undefined {
 }
 
 /**
- * Whether the outcome of a reply is unknown or retryable under its key: the connection failed, the
- * server answered 5xx (including an HTML gateway error and maintenance mode), or the route said so.
- * A definite 4xx refusal is not retried with the key: the same request would be refused again.
+ * Whether a reply is worth retrying under its key: the connection failed or the server answered 5xx
+ * (including an HTML gateway error and maintenance mode), so the retry learns what happened, or the
+ * route said the send is still running or certainly sent nothing. Not `reply_delivery_unknown`: the
+ * server answers every repeat of that key the same way and never sends it. Not a definite 4xx
+ * refusal either: the same request would be refused again.
  */
 function retryableWithKey(error: ApiError): boolean {
   const word = mailErrorCode(error);
+  if (word === "reply_delivery_unknown") return false;
   return (
     word === "reply_in_progress" ||
-    word === "reply_delivery_unknown" ||
     word === "reply_not_sent" ||
     error.statusCode === 0 ||
     error.statusCode >= 500
@@ -234,7 +236,10 @@ async function run(json: boolean, body: () => Promise<void>, replyKey?: () => st
 function fail(json: boolean, f: Failure, replyKey?: string): void {
   if (json) {
     const payload: Record<string, string> = { error: f.message, code: f.code };
-    if (replyKey && f.retryWithKey) payload.idempotency_key = replyKey;
+    // The key is reported whenever the send may have happened, so the caller can record it.
+    if (replyKey && (f.retryWithKey || f.code === "reply_delivery_unknown")) {
+      payload.idempotency_key = replyKey;
+    }
     console.error(JSON.stringify(payload));
   } else {
     console.error(`Error: ${oneLine(f.message)}`);
@@ -695,12 +700,13 @@ const replyCommand = new MailCommand("reply")
     `
 A reply reaches a person, so it is sent with an Idempotency-Key: a repeat of the same key never
 sends twice. The key is printed to standard error before anything is sent. If the answer is lost
-(a network failure, reply_delivery_unknown, reply_in_progress) retry with --idempotency-key <that key>.
+(a network failure, a 5xx, reply_in_progress) retry with --idempotency-key <that key>.
 With a terminal the recipient, subject and text are shown and you confirm; without one, --yes is
 required and the command refuses (exit 2, nothing sent) otherwise.
 Reusing a key replays the earlier result and sends no new text: a changed --text under a key that
-was already used is not sent. A reply that failed with an unknown outcome (a network error, a 5xx,
-reply_delivery_unknown) is retried with the same key, never with a new one.`,
+was already used is not sent. reply_delivery_unknown is final for its key: the provider did not
+confirm the send, and the same key will never send it. Read the thread and ask the requester; only
+a new key sends again, and it may deliver a second copy.`,
   )
   .action(async (rawId: string, source: string | undefined, _o, command: Command) => {
     const o = optsOf<

@@ -433,7 +433,7 @@ describe("mail reply", () => {
     }
   });
 
-  test("502 reply_delivery_unknown tells the caller to retry with the same key", async () => {
+  test("502 reply_delivery_unknown says the key will never send and does not advise a retry", async () => {
     const server = startServer({
       "POST /admin/mail/tickets/42/reply": () => err(502, "reply_delivery_unknown", "Unknown."),
     });
@@ -442,14 +442,16 @@ describe("mail reply", () => {
       expect(r.exitCode).toBe(1);
       const key = server.mail()[0].headers.get("Idempotency-Key") ?? "";
       expect(key).not.toBe("");
-      expect(r.stderr).toContain(`--idempotency-key ${key}`);
-      expect(r.stderr).toContain("may or may not have gone");
+      // The key is still printed (before sending), but no retry is advised.
+      expect(r.stderr).toContain(key);
+      expect(r.stderr).not.toContain("Retry with:");
+      expect(r.stderr).toContain("will never send it again");
     } finally {
       server.stop();
     }
   });
 
-  test("--json reports the failure as {error, code} on stderr, with the key to retry with", async () => {
+  test("--json reports the failure as {error, code} on stderr, with the key it was sent under", async () => {
     const server = startServer({
       "POST /admin/mail/tickets/42/reply": () => err(502, "reply_delivery_unknown", "Unknown."),
     });
