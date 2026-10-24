@@ -9,7 +9,10 @@
  * `whereis --key --json` for who holds a key, and `examinekey` plus `git show` for the log text.
  * The URL key is there because its log is stored under an ESCAPED name (`:` is `&c`, `/` is `%`,
  * `&` is `&a`, `%` is `&s`) while the hash directory is the md5 of the key itself, which a plain
- * read has to reproduce exactly or it answers "no log" for a key git-annex knows.
+ * read has to reproduce exactly or it answers "no log" for a key git-annex knows. Two branches no
+ * git-annex would write are added to the bare clone with `git mktree`: one whose tree names a log
+ * by an object the clone does not have (what a partial or blobless clone looks like), and one
+ * with no `uuid.log`; both must refuse rather than read as "no log".
  *
  * Skipped when git-annex is unavailable, and failed then in CI (`NEMAR_REQUIRE_SCRUB_TOOLS=1`).
  */
@@ -47,6 +50,10 @@ interface Fixture {
   dead: string;
   /** A well-formed key nothing ever recorded. */
   unknown: string;
+  /** A branch with `uuid.log` whose tree names `dead`'s log by an object this clone lacks. */
+  partialRef: string;
+  /** A branch naming `dead`'s real log but with no `uuid.log`: not a git-annex branch. */
+  noUuidRef: string;
 }
 
 function whereis(repo: string, key: string): string[] {
@@ -71,6 +78,28 @@ function locationLog(repo: string, key: string): string {
 
 function lookupkey(repo: string, path: string): string {
   return sh(repo, ["git", "annex", "lookupkey", path]).trim();
+}
+
+/**
+ * A commit on `ref` in `repo` whose tree holds `files` (path -> blob oid), and nothing else.
+ * `--missing` lets a tree name a blob the repository does not have, which is what a partial or
+ * blobless clone looks like to a reader.
+ */
+function commitTree(repo: string, ref: string, files: Record<string, string>): void {
+  const build = (entries: Array<[string[], string]>): string => {
+    const lines: string[] = [];
+    const dirs = new Map<string, Array<[string[], string]>>();
+    for (const [parts, oid] of entries) {
+      const [head, ...rest] = parts as [string, ...string[]];
+      if (rest.length === 0) lines.push(`100644 blob ${oid}\t${head}`);
+      else dirs.set(head, [...(dirs.get(head) ?? []), [rest, oid]]);
+    }
+    for (const [dir, inner] of dirs) lines.push(`040000 tree ${build(inner)}\t${dir}`);
+    return sh(repo, ["git", "mktree", "--missing"], `${lines.join("\n")}\n`).trim();
+  };
+  const tree = build(Object.entries(files).map(([path, oid]) => [path.split("/"), oid]));
+  const commit = sh(repo, ["git", "commit-tree", "-m", "fixture", tree]).trim();
+  git(repo, "update-ref", ref, commit);
 }
 
 function build(): Fixture {
@@ -119,6 +148,25 @@ function build(): Fixture {
   sh(source, ["git", "annex", "merge"]);
 
   sh(root, ["git", "clone", "-q", "--bare", "--no-local", source, bare]);
+
+  // Two branches no git-annex would write, built in the bare clone from git-annex's own paths.
+  const deadLog = sh(source, [
+    "git",
+    "annex",
+    "examinekey",
+    "--format=${hashdirlower}${key}.log",
+    dead,
+  ]).trim();
+  const uuidLog = git(bare, "rev-parse", "refs/heads/git-annex:uuid.log").trim();
+  const deadBlob = git(bare, "rev-parse", `refs/heads/git-annex:${deadLog}`).trim();
+  const absentBlob = "0123456789abcdef0123456789abcdef01234567";
+  expect(shAny(bare, ["git", "cat-file", "-e", absentBlob]).code).not.toBe(0);
+  commitTree(bare, "refs/heads/partial-annex", { "uuid.log": uuidLog, [deadLog]: absentBlob });
+  commitTree(bare, "refs/heads/annex-without-uuid", { [deadLog]: deadBlob });
+  commitTree(bare, "refs/heads/log-is-a-directory", {
+    "uuid.log": uuidLog,
+    [`${deadLog}/inner`]: deadBlob,
+  });
   return {
     source,
     bare,
@@ -128,6 +176,8 @@ function build(): Fixture {
     both,
     dead,
     unknown: `SHA256E-s10--${sha("never-recorded")}.edf`,
+    partialRef: "refs/heads/partial-annex",
+    noUuidRef: "refs/heads/annex-without-uuid",
   };
 }
 
@@ -196,6 +246,62 @@ SUITE("readLocationLogsAt", () => {
       const err = await readLocationLogsAt(fx.bare, "git-annex", [key]).catch((e: unknown) => e);
       expect(err, JSON.stringify(key)).toBeInstanceOf(ContractError);
     }
+  });
+
+  test("a ref that resolves but is not a git-annex branch refuses, whatever it names", async () => {
+    // HEAD and main are the dataset's own tree: no log is under them, and reading one as
+    // "nothing recorded" would call every key absent and nothing dead.
+    for (const ref of ["HEAD", "main", "refs/heads/main", fx.noUuidRef]) {
+      const err = await readLocationLogsAt(fx.bare, ref, [fx.dead]).catch((e: unknown) => e);
+      expect(err, ref).toBeInstanceOf(GitScrubError);
+      expect((err as GitScrubError).message, ref).toBe("refused: annex-ref-not-git-annex");
+      expect((err as GitScrubError).detail, ref).toBe("git ls-tree");
+    }
+    // The same log, under a branch that is one, reads.
+    expect((await readLocationLogsAt(fx.bare, "git-annex", [fx.dead]))[0]).toBe(
+      locationLog(fx.source, fx.dead),
+    );
+  });
+
+  test("a log the tree names but this clone lacks refuses; a log it does not name is empty", async () => {
+    const err = await readLocationLogsAt(fx.bare, fx.partialRef, [fx.dead]).catch(
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(GitScrubError);
+    expect((err as GitScrubError).message).toBe("refused: annex-log-unreadable");
+    expect((err as GitScrubError).detail).toBe("git cat-file");
+    // A log path that is a directory is not a log either.
+    const dir = await readLocationLogsAt(fx.bare, "refs/heads/log-is-a-directory", [fx.dead]).catch(
+      (e: unknown) => e,
+    );
+    expect((dir as GitScrubError).message).toBe("refused: annex-log-unreadable");
+    // Genuinely absent: the branch never recorded these keys, which is an answer, not a failure.
+    expect(await readLocationLogsAt(fx.bare, fx.partialRef, [fx.unknown, fx.remoteOnly])).toEqual([
+      "",
+      "",
+    ]);
+  });
+
+  test("a key named twice gets the same answer twice, in the order asked", async () => {
+    const keys = [URL_KEY, fx.dead, fx.unknown, fx.dead, URL_KEY, fx.unknown, fx.both];
+    const once = await readLocationLogsAt(fx.bare, "git-annex", [
+      URL_KEY,
+      fx.dead,
+      fx.unknown,
+      fx.both,
+    ]);
+    const [url, dead, unknown, both] = once;
+    expect(await readLocationLogsAt(fx.bare, "git-annex", keys)).toEqual([
+      url,
+      dead,
+      unknown,
+      dead,
+      url,
+      unknown,
+      both,
+    ]);
+    expect(dead).toBe(locationLog(fx.source, fx.dead));
+    expect(unknown).toBe("");
   });
 
   test("no keys is no logs, once the ref is known to exist", async () => {

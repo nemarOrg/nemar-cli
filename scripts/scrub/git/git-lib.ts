@@ -1638,18 +1638,58 @@ function annexKeyFile(key: string): string {
   return key.replace(/[&%:/]/g, (c) => escapes[c] as string);
 }
 
+/** How many paths one `ls-tree` names: far under any argv limit, few processes for a large dataset. */
+const LS_TREE_BATCH = 1000;
+
+/** Each `<mode> <type> <oid>\t<path>` entry of an `ls-tree -z` listing, by path. */
+async function treeEntries(
+  repo: string,
+  commit: string,
+  paths: string[],
+): Promise<Map<string, { type: string; oid: string }>> {
+  const out = new Map<string, { type: string; oid: string }>();
+  for (let i = 0; i < paths.length; i += LS_TREE_BATCH) {
+    // ls-tree matches its paths literally (it turns wildcards off), and a log path starts with
+    // its hash directory, never `:`, so no pathspec magic applies to a key's file name.
+    const r = await gitRaw(repo, [
+      "ls-tree",
+      "-z",
+      "--full-tree",
+      commit,
+      "--",
+      ...paths.slice(i, i + LS_TREE_BATCH),
+    ]);
+    if (r.exitCode !== 0) throw new GitScrubError("git-command-failed", "git ls-tree", r.stderr);
+    for (const entry of r.stdout.toString("utf8").split("\0")) {
+      const m = /^[0-7]{6} (\S+) ([0-9a-f]{40}(?:[0-9a-f]{24})?)\t([\s\S]+)$/.exec(entry);
+      if (m) out.set(m[3] as string, { type: m[1] as string, oid: m[2] as string });
+    }
+  }
+  return out;
+}
+
 /**
- * Location-log text for each key as the git-annex branch records it at `ref`; "" when there is
- * none. Plain git only (one `rev-parse` and one `cat-file --batch`): unlike {@link locationLogs},
- * which asks `git annex examinekey` for each path, it computes the path itself, so it works in a
- * bare clone with no git-annex installed. Like `locationLogs` it reads what was COMMITTED, never a
- * journal, and unlike `whereis` it merges no remote git-annex branch: name the ref to read.
+ * Location-log text for each key as the git-annex branch records it at `ref`; "" when the branch
+ * has no log for the key (git-annex never recorded it). Plain git only (`rev-parse`, `ls-tree`
+ * and one `cat-file --batch`): unlike {@link locationLogs}, which asks `git annex examinekey` for
+ * each path, it computes the path itself, so it works in a bare clone with no git-annex installed.
+ * Like `locationLogs` it reads what was COMMITTED, never a journal, and unlike `whereis` it merges
+ * no remote git-annex branch: name the ref to read. A key named twice gets the same answer twice.
  *
  * `ref` is resolved to one commit first and every log is read from that commit, so a branch that
- * moves during the read cannot mix two states. A ref that does not resolve refuses
- * (`annex-ref-missing`) rather than answering "no log" for every key, which would read as nothing
- * dead and nothing present. Exported for the upstream re-pull's planner (ADR 0111), which reads
- * dead marks and `nemar-s3` presence from a bare clone.
+ * moves during the read cannot mix two states. Every way of reading "no log" for a reason other
+ * than the branch having none refuses instead, because "" reads as nothing dead and nothing
+ * present:
+ *
+ * - a ref that does not resolve: `refused: annex-ref-missing` (`git rev-parse`);
+ * - a ref that resolves but is not a git-annex branch (`HEAD`, `main`): its tree has no
+ *   `uuid.log`, which every git-annex branch has: `refused: annex-ref-not-git-annex`
+ *   (`git ls-tree`);
+ * - a log the tree names whose object this clone does not have (a partial or blobless clone), or
+ *   a log path that is not a file: `refused: annex-log-unreadable` (`git cat-file`).
+ *
+ * Exported for the upstream re-pull's planner (ADR 0111), which reads dead marks and `nemar-s3`
+ * presence from a bare clone.
  */
 export async function readLocationLogsAt(
   repo: string,
@@ -1667,12 +1707,29 @@ export async function readLocationLogsAt(
   if (resolved.exitCode !== 0 || !/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(commit)) {
     throw new GitScrubError("refused: annex-ref-missing", "git rev-parse", resolved.stderr);
   }
+  if ((await treeEntries(repo, commit, ["uuid.log"])).get("uuid.log")?.type !== "blob") {
+    throw new GitScrubError("refused: annex-ref-not-git-annex", "git ls-tree");
+  }
   if (keys.length === 0) return [];
+  const paths = keys.map((k) => `${hashDirLower(k)}${annexKeyFile(k)}.log`);
+  const unique = [...new Set(paths)];
+  const entries = await treeEntries(repo, commit, unique);
+  const named = unique.filter((p) => entries.has(p));
+  if (named.some((p) => entries.get(p)?.type !== "blob")) {
+    throw new GitScrubError("refused: annex-log-unreadable", "git cat-file");
+  }
   const contents = await readObjects(
     repo,
-    keys.map((k) => `${commit}:${hashDirLower(k)}${annexKeyFile(k)}.log`),
+    named.map((p) => entries.get(p)?.oid as string),
   );
-  return contents.map((c) => (c ? c.toString("utf8") : ""));
+  const text = new Map<string, string>();
+  named.forEach((p, i) => {
+    const c = contents[i];
+    // The tree names this log, so a missing object is this clone lacking it, never "no log".
+    if (!c) throw new GitScrubError("refused: annex-log-unreadable", "git cat-file");
+    text.set(p, c.toString("utf8"));
+  });
+  return paths.map((p) => text.get(p) ?? "");
 }
 
 /** Dead: some repository's newest line is `X` and none is present. */
