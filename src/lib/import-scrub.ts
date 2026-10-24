@@ -67,21 +67,13 @@ import { pipeline } from "node:stream/promises";
 import { ANNEX_KEY } from "../../scripts/scrub/contract.js";
 import { annexRegistry, isDead, locationLogs } from "../../scripts/scrub/git/git-lib.js";
 import { LEDGER_REPO_PATH, appendLedger, readLedger } from "../../scripts/scrub/ledger.js";
+import { EDF_HEADER_BYTES, scanPaths } from "../../shared/identifier-scan.js";
 import {
-  DATE_KINDS,
-  EDF_HEADER_BYTES,
-  scanEdfHeader,
-  scanPaths,
-} from "../../shared/identifier-scan.js";
-import {
+  type ImportHeaderChange,
   JsonBlankUnverified,
-  ScrubRefused,
   blankIdentifierJsonKeys,
-  normalizeEdfDates,
+  importHeaderPatch,
   normalizeScansTableDates,
-  scrubEdfHeader,
-  verifyDateNormalization,
-  verifyScrub,
 } from "../../shared/identifier-scrub.js";
 import {
   PROVENANCE_NOTE_KEY,
@@ -577,62 +569,24 @@ function readLocalHeader(path: string): Uint8Array | null {
   }
 }
 
-/** What the import's patch does to one header. */
-interface HeaderChange {
-  /** `scrubEdfHeader` rewrites an identification field. */
-  scrub: boolean;
-  /** `normalizeEdfDates` sets an acquisition date, after the scrub (first import only). */
-  dates: boolean;
-  /** The header as the patch would leave it still holds an acquisition date (a layout the rule leaves). */
-  datesLeft: boolean;
-  /** The date rule faulted or could not prove its result, so the dates were left (never a refusal). */
-  datesUnproven: boolean;
-}
+/** What the import's patch does to one header (`ImportHeaderChange`, shared with the re-pull planner). */
+type HeaderChange = ImportHeaderChange;
 
 /**
- * The import's patch of one header and its proof: the identifier scrub (ADR 0085's rule, proven by
- * `verifyScrub`), then, when `dates` is set, the date rule on the scrubbed header (ADR 0091, proven
- * by `verifyDateNormalization`). Null when it is not an EDF or BDF header. The scrub may rewrite all
- * of bytes 8..168, and the slot date lies inside them, so the order matters: the date rule reads
- * the scrubbed header, and each proof is of its own step, so the composite differs from the original
- * only where one of them may write. A scrub that cannot be proven refuses; a date rule that faults
+ * The import's patch of one header and its proof, as {@link importHeaderPatch} computes it (the
+ * identifier scrub proven by `verifyScrub`, then, when `dates` is set, the date rule on the
+ * scrubbed header proven by `verifyDateNormalization`). Null when it is not an EDF or BDF header.
+ * A scrub that cannot be proven refuses with {@link ImportScrubRefused}; a date rule that faults
  * or cannot be proven leaves the dates (ADR 0090: a date never gates).
  */
 function patchHeader(
   before: Uint8Array,
   dates: boolean,
 ): { header: Uint8Array; change: HeaderChange } | null {
-  let scrubbed: ReturnType<typeof scrubEdfHeader>;
-  try {
-    scrubbed = scrubEdfHeader(before);
-  } catch (err) {
-    if (err instanceof ScrubRefused) return null;
-    throw err;
-  }
-  if (scrubbed.changed && !verifyScrub(before, scrubbed.header).ok) {
-    throw new ImportScrubRefused("scrub-unverified", "a patched header failed its proof");
-  }
-  let header = scrubbed.header;
-  let datesChanged = false;
-  let datesUnproven = false;
-  if (dates) {
-    try {
-      const normalized = normalizeEdfDates(scrubbed.header);
-      if (normalized.changed && verifyDateNormalization(scrubbed.header, normalized.header).ok) {
-        header = normalized.header;
-        datesChanged = true;
-      } else if (normalized.changed) {
-        datesUnproven = true;
-      }
-    } catch {
-      datesUnproven = true;
-    }
-  }
-  const datesLeft = scanEdfHeader(header).some((f) => DATE_KINDS.has(f.kind));
-  return {
-    header,
-    change: { scrub: scrubbed.changed, dates: datesChanged, datesLeft, datesUnproven },
-  };
+  const patch = importHeaderPatch(before, dates);
+  if (patch.ok) return { header: patch.header, change: patch.change };
+  if (patch.reason === "not-edf") return null;
+  throw new ImportScrubRefused("scrub-unverified", "a patched header failed its proof");
 }
 
 /**
