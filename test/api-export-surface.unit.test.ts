@@ -109,10 +109,12 @@ const MODULE_EXPORTS: Record<string, string[]> = {
   ],
   admin: [
     "addCi",
+    "addMailNote",
     "anonymitySweep",
     "anonymitySweepReset",
     "approveUser",
     "approveUserById",
+    "assignMailTicket",
     "availabilityReport",
     "availabilityReportSweep",
     "availabilityReportSweepReset",
@@ -136,6 +138,7 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "editAdminUser",
     "enforceBulk",
     "enforceDataset",
+    "escalateMailTicket",
     "getAdminUserById",
     "getAdminUserByUsername",
     "getBroadcastStatus",
@@ -144,11 +147,14 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "getEmailPreferences",
     "getFleetDrift",
     "getImportStatus",
+    "getMailAvailability",
+    "getMailTicket",
     "getNeurobagelStatus",
     "getPrReview",
     "getPrReviewAuthor",
     "getSummaryCoverage",
     "getUserDuplicates",
+    "getUsernameById",
     "hedSweep",
     "hedSweepReset",
     "importCoverageSweep",
@@ -156,6 +162,8 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "importIssueTriage",
     "importWeeklySummary",
     "listKeysFor",
+    "listMailQueues",
+    "listMailTickets",
     "listPrReviews",
     "listUsers",
     "neurobagelRegenerate",
@@ -163,11 +171,15 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "publishDataset",
     "publishVersionDoi",
     "publishZarrCatalog",
+    "putMailAvailability",
+    "putMailQueue",
     "recordingStatsSweep",
     "recordingStatsSweepReset",
     "reindexBulk",
     "reindexDataset",
     "remintExemplarDois",
+    "replyToMailTicket",
+    "reprocessMail",
     "resetTestDataset",
     "restoreDataset",
     "retryImport",
@@ -180,6 +192,7 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "rollbackImport",
     "sendBroadcast",
     "setAccountKind",
+    "setMailTicketStatus",
     "setPrReviewAuthor",
     "signalDefaultsSweep",
     "signalDefaultsSweepReset",
@@ -281,6 +294,19 @@ const POST_SPLIT_ADDITIONS = [
   "commentOnPublication", // ADR 0102: POST /admin/publish/:id/comment (mails the depositor an administrator's words)
   "reviewErrorCode", // ADR 0102: the closed word of a review route's refusal (rawBody.code, not ApiError.code)
   "isRouteNotFound", // a backend that predates a route answers its not-found body: say so, do not call it a bug
+  "addMailNote", // epic #1893 phase 4: `nemar admin mail`, routes in shared/contract/mail-admin.ts
+  "assignMailTicket", // epic #1893 phase 4: `nemar admin mail`, routes in shared/contract/mail-admin.ts
+  "escalateMailTicket", // epic #1893 phase 4: `nemar admin mail`, routes in shared/contract/mail-admin.ts
+  "getMailAvailability", // epic #1893 phase 4: `nemar admin mail`, routes in shared/contract/mail-admin.ts
+  "getMailTicket", // epic #1893 phase 4: `nemar admin mail`, routes in shared/contract/mail-admin.ts
+  "getUsernameById", // epic #1893 phase 4: `nemar admin mail`, routes in shared/contract/mail-admin.ts
+  "listMailQueues", // epic #1893 phase 4: `nemar admin mail`, routes in shared/contract/mail-admin.ts
+  "listMailTickets", // epic #1893 phase 4: `nemar admin mail`, routes in shared/contract/mail-admin.ts
+  "putMailAvailability", // epic #1893 phase 4: `nemar admin mail`, routes in shared/contract/mail-admin.ts
+  "putMailQueue", // epic #1893 phase 4: `nemar admin mail`, routes in shared/contract/mail-admin.ts
+  "reprocessMail", // epic #1893 phase 4: `nemar admin mail`, routes in shared/contract/mail-admin.ts
+  "replyToMailTicket", // epic #1893 phase 4: `nemar admin mail`, routes in shared/contract/mail-admin.ts
+  "setMailTicketStatus", // epic #1893 phase 4: `nemar admin mail`, routes in shared/contract/mail-admin.ts
 ];
 
 /** The api.ts monolith's runtime surface, captured at #908 commit 1. */
