@@ -12,6 +12,9 @@
 -- mail_tickets: ref is the short random token of the plus address support+t<ref>@; a reply to
 --   it threads here. restricted is copied from the queue at creation. excluded_user_id names an
 --   account that must never see or hold the ticket, even if it is an owner.
+-- mail_ticket_tags: descriptive labels from the recipient address. A tag is chosen by whoever
+--   writes the address, so it must NEVER be used for an access decision; restricted and
+--   excluded_user_id on the ticket are the only inputs to access.
 -- mail_messages: raw_key is UNIQUE so processing one stored message twice stores it once.
 -- mail_availability: away window with a backup person; away_until NULL is open-ended.
 CREATE TABLE IF NOT EXISTS mail_queues (
@@ -28,8 +31,8 @@ CREATE TABLE IF NOT EXISTS mail_queues (
 
 CREATE TABLE IF NOT EXISTS mail_tickets (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  ref TEXT NOT NULL,
-  queue_tag TEXT NOT NULL,
+  ref TEXT NOT NULL CHECK (length(ref) = 10 AND ref NOT GLOB '*[^a-z2-7]*'),
+  queue_tag TEXT NOT NULL CHECK (length(queue_tag) > 0),
   restricted INTEGER NOT NULL DEFAULT 0 CHECK (restricted IN (0, 1)),
   excluded_user_id INTEGER,
   status TEXT NOT NULL DEFAULT 'open'
@@ -48,6 +51,9 @@ CREATE INDEX IF NOT EXISTS idx_mail_tickets_status ON mail_tickets (status, last
 CREATE INDEX IF NOT EXISTS idx_mail_tickets_queue ON mail_tickets (queue_tag, last_message_at);
 CREATE INDEX IF NOT EXISTS idx_mail_tickets_assignee
   ON mail_tickets (assignee_user_id, last_message_at);
+-- The release statements and the tombstone privacy clear look tickets up by these two.
+CREATE INDEX IF NOT EXISTS idx_mail_tickets_requester_user ON mail_tickets (requester_user_id);
+CREATE INDEX IF NOT EXISTS idx_mail_tickets_excluded_user ON mail_tickets (excluded_user_id);
 
 CREATE TABLE IF NOT EXISTS mail_messages (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -84,7 +90,8 @@ CREATE TABLE IF NOT EXISTS mail_ticket_events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   ticket_id INTEGER NOT NULL REFERENCES mail_tickets (id) ON DELETE CASCADE,
   kind TEXT NOT NULL
-    CHECK (kind IN ('created', 'assigned', 'unassigned', 'escalated', 'status', 'reply', 'note')),
+    CHECK (kind IN ('created', 'assigned', 'unassigned', 'escalated', 'status', 'reopened',
+                    'restricted', 'excluded', 'reply', 'reply_failed', 'note')),
   actor_user_id INTEGER,
   detail TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -100,6 +107,10 @@ CREATE TABLE IF NOT EXISTS mail_availability (
   note TEXT,
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE INDEX IF NOT EXISTS idx_mail_queues_assignee ON mail_queues (assignee_user_id);
+CREATE INDEX IF NOT EXISTS idx_mail_queues_backup ON mail_queues (backup_user_id);
+CREATE INDEX IF NOT EXISTS idx_mail_availability_backup ON mail_availability (backup_user_id);
 
 -- security and conduct are restricted and start unassigned, so owners see them until an owner
 -- sets themself. '*' is the fallback queue: fixed to the default admin when that account

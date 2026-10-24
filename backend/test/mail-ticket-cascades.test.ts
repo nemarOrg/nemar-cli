@@ -74,10 +74,10 @@ function seedWorld(targetRole: "admin" | "owner"): World {
   const world = {
     target,
     other,
-    openTicket: ticket("open1", "open", 0, target),
-    closedTicket: ticket("closed1", "closed", 0, target),
-    restrictedTicket: ticket("restr1", "open", 1, target),
-    othersTicket: ticket("other1", "open", 0, other),
+    openTicket: ticket("openaaaaaa", "open", 0, target),
+    closedTicket: ticket("closedaaaa", "closed", 0, target),
+    restrictedTicket: ticket("restraaaaa", "open", 1, target),
+    othersTicket: ticket("otheraaaaa", "open", 0, other),
   };
   db.run(
     "INSERT INTO mail_availability (user_id, away_from, backup_user_id) VALUES (?, '2026-10-01', ?)",

@@ -75,9 +75,26 @@ describe("migration 0102", () => {
         "INSERT INTO mail_tickets (ref, queue_tag, status, requester_email) VALUES (?, 'support', ?, 'a@example.com')",
         [ref, status],
       );
-    expect(() => ins("bogus", "r1")).toThrow();
-    ins("open", "r1");
-    expect(() => ins("open", "r1")).toThrow();
+    expect(() => ins("bogus", "raaaaaaaaa")).toThrow();
+    expect(() => ins("open", "short")).toThrow(); // ref must be ten characters
+    expect(() => ins("open", "UPPERCASE2")).toThrow(); // and lowercase base32
+    expect(() => ins("open", "aaaaaaaaa1")).toThrow(); // 1 is not in the base32 alphabet
+    expect(() =>
+      db.run(
+        "INSERT INTO mail_tickets (ref, queue_tag, requester_email) VALUES ('baaaaaaaaa', '', 'a@example.com')",
+      ),
+    ).toThrow();
+    for (const kind of ["reopened", "restricted", "excluded", "reply_failed"]) {
+      db.run(
+        "INSERT INTO mail_tickets (ref, queue_tag, requester_email) VALUES ('kaaaaaaaaa', 'q', 'a@example.com') ON CONFLICT DO NOTHING",
+      );
+      db.run(
+        "INSERT INTO mail_ticket_events (ticket_id, kind) VALUES ((SELECT id FROM mail_tickets WHERE ref = 'kaaaaaaaaa'), ?)",
+        [kind],
+      );
+    }
+    ins("open", "raaaaaaaaa");
+    expect(() => ins("open", "raaaaaaaaa")).toThrow();
     expect(() =>
       db.run("INSERT INTO mail_queues (tag, strategy) VALUES ('x', 'random')"),
     ).toThrow();
@@ -248,10 +265,10 @@ describe("ticketVisibleTo", () => {
         "INSERT INTO mail_tickets (ref, queue_tag, restricted, excluded_user_id, requester_email) VALUES (?, 'q', ?, ?, 'a@example.com')",
         [ref, restricted, excluded],
       );
-    t("open1", 0, null);
-    t("restr1", 1, null);
-    t("conduct1", 1, otherOwner);
-    t("openx", 0, admin);
+    t("openaaaaaa", 0, null);
+    t("restraaaaa", 1, null);
+    t("conductaaa", 1, otherOwner);
+    t("openxaaaaa", 0, admin);
     return { owner, otherOwner, admin, agent, member };
   }
   const visible = (viewer: { id: number; role: string }, alias?: string) => {
@@ -267,18 +284,22 @@ describe("ticketVisibleTo", () => {
   test("an owner sees everything except tickets that exclude them", () => {
     const u = seedTickets();
     expect(visible({ id: u.owner, role: "owner" })).toEqual([
-      "conduct1",
-      "open1",
-      "openx",
-      "restr1",
+      "conductaaa",
+      "openaaaaaa",
+      "openxaaaaa",
+      "restraaaaa",
     ]);
-    expect(visible({ id: u.otherOwner, role: "owner" })).toEqual(["open1", "openx", "restr1"]);
+    expect(visible({ id: u.otherOwner, role: "owner" })).toEqual([
+      "openaaaaaa",
+      "openxaaaaa",
+      "restraaaaa",
+    ]);
   });
 
   test("an admin, person or agent, sees unrestricted tickets only, and not those excluding them", () => {
     const u = seedTickets();
-    expect(visible({ id: u.agent, role: "admin" }, "t")).toEqual(["open1", "openx"]);
-    expect(visible({ id: u.admin, role: "admin" }, "t")).toEqual(["open1"]);
+    expect(visible({ id: u.agent, role: "admin" }, "t")).toEqual(["openaaaaaa", "openxaaaaa"]);
+    expect(visible({ id: u.admin, role: "admin" }, "t")).toEqual(["openaaaaaa"]);
   });
 
   test("a member sees nothing, and a bad alias is refused", () => {
