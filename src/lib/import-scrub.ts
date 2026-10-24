@@ -31,6 +31,10 @@
  * A re-import changes no date: its tree is the dataset NEMAR already holds, which may be public, and
  * ADR 0091 leaves that as it is.
  *
+ * An upstream re-pull (ADR 0111) runs the same scrub on its delta paths only (`scope`), with each
+ * key's source named by the caller (`sourceOf`), so a recording the re-pull does not touch keeps
+ * its bytes and its key. The importer passes neither, and nothing it does changes.
+ *
  * Images and documents are counted and left for the identifier screen, which holds them for a person;
  * nothing here removes a file.
  *
@@ -448,7 +452,10 @@ export interface ImportScrubCounts {
   provenance_annotated: number;
   /** 1 when the provenance README got the note, else 0. */
   provenance_readme_annotated: number;
-  /** Provenance files tracked but not annotated (not a regular file, or not a JSON object). */
+  /**
+   * Provenance files tracked but not annotated: not a regular file, not a JSON object, or outside
+   * the scrub's scope.
+   */
   provenance_not_annotated: number;
 }
 
@@ -510,7 +517,7 @@ export interface ImportScrubResult {
 export interface ImportScrubInput {
   datasetPath: string;
   nemarId: string;
-  /** Upstream key -> whereis URL, as `getAnnexWhereisAll` built it. */
+  /** Upstream key -> whereis URL, as `getAnnexWhereisAll` built it; not read when `sourceOf` is given. */
   keyUrlMap: Map<string, string>;
   /** Files git holds that NEMAR policy calls data, as `findUnannexedData` found them. */
   unannexedData: Array<{ path: string; size: number }>;
@@ -530,6 +537,20 @@ export interface ImportScrubInput {
   now?: Date;
   /** The ledger line's actor; defaults to `GITHUB_ACTOR` when it is a handle. */
   actor?: string;
+  /**
+   * The paths the scrub may read and change; every tracked path when absent (the importer). An
+   * upstream re-pull scrubs its delta paths only (ADR 0111, decisions 1 and 2), so a recording, a
+   * JSON file or a scans table outside the scope is neither read nor changed, and the counts see
+   * only the scope. A provenance file outside it is not annotated and is counted as not annotated.
+   */
+  scope?: ReadonlySet<string>;
+  /**
+   * Where an annexed recording's header is read from, by key, in place of {@link keyUrlMap}: a
+   * source, `"held"` for a key NEMAR already holds (it keeps its bytes, ADR 0091, and is counted
+   * `headers_not_read_nemar_held`), or null for a key nothing can supply (counted
+   * `headers_not_read_no_source`). Absent for the importer, whose sources are its whereis URLs.
+   */
+  sourceOf?: (key: string) => UpstreamSource | "held" | null;
 }
 
 /** Run `fn` over `items` with at most `limit` in flight, keeping order. */
@@ -786,7 +807,9 @@ export async function scrubImportedTree(input: ImportScrubInput): Promise<Import
 async function scrubTree(input: ImportScrubInput): Promise<ImportScrubResult> {
   const { datasetPath } = input;
   const counts = zeroCounts();
-  const tracked = [...(await listTrackedPaths(datasetPath))].sort();
+  const allTracked = [...(await listTrackedPaths(datasetPath))].sort();
+  const scope = input.scope;
+  const tracked = scope ? allTracked.filter((p) => scope.has(p)) : allTracked;
   const annexedKeys = await listAnnexedKeys(datasetPath);
   const recordings = tracked.filter((p) => RECORDING_PATH.test(p));
   counts.recordings = recordings.length;
@@ -814,6 +837,15 @@ async function scrubTree(input: ImportScrubInput): Promise<ImportScrubResult> {
       // An empty file is no EDF header, and a ranged read of it answers 416.
       counts.headers_not_edf++;
       headerReadKeys.add(key);
+      continue;
+    }
+    if (input.sourceOf) {
+      // The caller names each key's source (an upstream re-pull: the pinned object, or a key NEMAR
+      // already holds), so the whereis map is not read.
+      const named = input.sourceOf(key);
+      if (named === "held") counts.headers_not_read_nemar_held++;
+      else if (named === null) counts.headers_not_read_no_source++;
+      else upstream.push({ path, key, source: named });
       continue;
     }
     const url = input.keyUrlMap.get(key);
@@ -1192,6 +1224,11 @@ async function scrubTree(input: ImportScrubInput): Promise<ImportScrubResult> {
         ? "dates-set"
         : null;
   if (headerChange !== null) {
+    // A provenance file outside the scope is not this run's to change; it is counted, so the
+    // result says a sentence it would have carried is missing.
+    for (const p of [PROVENANCE_PATH, PROVENANCE_README_PATH]) {
+      if (scope && !scope.has(p) && allTracked.includes(p)) counts.provenance_not_annotated++;
+    }
     const provenance = join(datasetPath, PROVENANCE_PATH);
     if (tracked.includes(PROVENANCE_PATH) && isRegularFile(provenance)) {
       const text = readFileSync(provenance, "utf8");
@@ -1358,6 +1395,32 @@ async function restrictToTree(
 // The step as prepare runs it
 // ---------------------------------------------------------------------------------------
 
+/**
+ * Refuse unless every recording a copy would bring from upstream had its header read by this run:
+ * an item of `items` that is not a local upload and whose key `tree` (path -> key, as
+ * `listAnnexedKeys` lists it) names at a recording path must be in `headerReadKeys`. The closing
+ * check of {@link prepareImportedTreeForCopy}, exported so an upstream re-pull, which copies by
+ * key too, closes its scrub with the same rule.
+ */
+export function assertCopiedRecordingsRead(
+  items: readonly ImportManifestItem[],
+  tree: ReadonlyMap<string, string>,
+  headerReadKeys: ReadonlySet<string>,
+): void {
+  const recordingKeys = new Set(
+    [...tree].filter(([p]) => RECORDING_PATH.test(p)).map(([, k]) => k),
+  );
+  const unread = items.filter(
+    (it) => !isLocallyUploaded(it) && recordingKeys.has(it.key) && !headerReadKeys.has(it.key),
+  ).length;
+  if (unread > 0) {
+    throw new ImportScrubRefused(
+      "header-unreadable",
+      `${unread} recording(s) in the copy manifest whose header this run did not read`,
+    );
+  }
+}
+
 export interface PreparedTree {
   scrub: ImportScrubResult;
   normalized: NormalizeImportResult;
@@ -1429,19 +1492,7 @@ export async function prepareImportedTreeForCopy(args: {
   } catch (err) {
     throw new ImportScrubRefused("scrub-failed", describeError(err));
   }
-  const recordingKeys = new Set(
-    [...tree].filter(([p]) => RECORDING_PATH.test(p)).map(([, k]) => k),
-  );
-  const unread = manifest.items.filter(
-    (it) =>
-      !isLocallyUploaded(it) && recordingKeys.has(it.key) && !scrub.headerReadKeys.has(it.key),
-  ).length;
-  if (unread > 0) {
-    throw new ImportScrubRefused(
-      "header-unreadable",
-      `${unread} recording(s) in the copy manifest whose header this run did not read`,
-    );
-  }
+  assertCopiedRecordingsRead(manifest.items, tree, scrub.headerReadKeys);
   return {
     scrub,
     normalized,

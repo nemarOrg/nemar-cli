@@ -51,9 +51,11 @@ import {
   IMPORT_SCRUB_REFUSALS,
   ImportScrubRefused,
   MAX_SCANS_TABLE_BYTES,
+  assertCopiedRecordingsRead,
   httpUpstreamReader,
   prepareImportedTreeForCopy,
   restrictManifestToTree,
+  scrubImportedTree,
   setTopLevelString,
 } from "../src/lib/import-scrub";
 import type { ImportManifestItem } from "../src/lib/s3-server-copy";
@@ -1595,5 +1597,179 @@ describe("the ledger names the rules it ran under", () => {
       hash.update("\0");
     }
     expect(IMPORT_SCANNER_ID).toBe(`identifier-scan@${hash.digest("hex").slice(0, 16)}`);
+  });
+});
+
+// ---------------------------------------------------------------------------------------
+// An upstream re-pull's delta scrub (ADR 0111): a scope, and a source named per key
+// ---------------------------------------------------------------------------------------
+
+const OUT_EDF = "sub-04/eeg/sub-04_task-rest_eeg.edf";
+const OUT_JSON = "sub-04/eeg/sub-04_task-rest_eeg.json";
+const IN_SCANS = "sub-01/sub-01_scans.tsv";
+const OUT_SCANS = "sub-04/sub-04_scans.tsv";
+const OUT_PROVENANCE = "sourcedata/sourcedata_provenance.json";
+
+/** A tree in which every rule the scrub runs has work both inside and outside a re-pull's scope. */
+function deltaFixtures(): Fixture[] {
+  const sidecar = text(
+    `{\n  "TaskName": "rest",\n  "Acq": {\n    "PatientName": "${GIVEN} ${SURNAME}"\n  }\n}\n`,
+  );
+  return [
+    {
+      path: "dataset_description.json",
+      bytes: text(`{"Name": "fixture", "BIDSVersion": "1.9.0"}\n`),
+    },
+    { path: FLAGGED_ANNEXED, bytes: edfBytes(FLAGGED_PATIENT, 4000, 21) },
+    { path: CLEAN_ANNEXED, bytes: edfBytes("X X X X", 4000, 22, YEAR_ONLY) },
+    { path: OUT_EDF, bytes: edfBytes(FLAGGED_PATIENT, 4000, 23) },
+    { path: SIDECAR, bytes: sidecar },
+    { path: OUT_JSON, bytes: sidecar },
+    { path: IN_SCANS, bytes: text(SCANS_TEXT) },
+    { path: OUT_SCANS, bytes: text(SCANS_TEXT) },
+    { path: OUT_PROVENANCE, bytes: text(`{\n  "files": []\n}\n`) },
+  ];
+}
+
+/** `scrubImportedTree` as an upstream re-pull calls it: no whereis map, a first import's dates. */
+function scrubDelta(clone: string, over: Partial<Parameters<typeof scrubImportedTree>[0]> = {}) {
+  return scrubImportedTree({
+    datasetPath: clone,
+    nemarId: NEMAR_ID,
+    keyUrlMap: new Map(),
+    unannexedData: [],
+    reimport: false,
+    skipData: false,
+    reader: httpUpstreamReader({ baseUrl, retryDelayMs: 1 }),
+    upload: inheritUpload,
+    remoteName: "nemar-s3",
+    bucket: "nemar",
+    now: FIXED_NOW,
+    actor: "fixture-actor",
+    ...over,
+  });
+}
+
+const upstreamS3 = (path: string) => ({
+  kind: "s3" as const,
+  ref: { bucket: "openneuro.org", key: `${UPSTREAM_ID}/${path}` },
+});
+
+describe("an upstream re-pull scrubs its delta paths only (ADR 0111)", () => {
+  test("nothing outside the scope is read or changed, and a held key is counted, not read", async () => {
+    const files = deltaFixtures();
+    const upstream = await buildUpstream(files);
+    const { clone } = await cloneForImport(upstream);
+    const flaggedKey = await keyAt(clone, FLAGGED_ANNEXED);
+    const heldKey = await keyAt(clone, CLEAN_ANNEXED);
+    const outKey = await keyAt(clone, OUT_EDF);
+    const asked: string[] = [];
+
+    const result = await scrubDelta(clone, {
+      scope: new Set([FLAGGED_ANNEXED, CLEAN_ANNEXED, SIDECAR, IN_SCANS]),
+      sourceOf: (key) => {
+        asked.push(key);
+        if (key === flaggedKey) return upstreamS3(FLAGGED_ANNEXED);
+        return key === heldKey ? "held" : null;
+      },
+    });
+
+    // Only the scope's recordings are asked about, and only the flagged one is read.
+    expect(asked).toEqual([flaggedKey, heldKey]);
+    expect(new Set(requests.map((r) => r.path))).toEqual(
+      new Set([`${BUCKET_PATH}/${FLAGGED_ANNEXED}`]),
+    );
+    expect((await keyAt(clone, FLAGGED_ANNEXED)) === flaggedKey).toBe(false);
+    expect(result.replacedKeys).toEqual(new Set([flaggedKey]));
+    expect(await keyAt(clone, CLEAN_ANNEXED)).toBe(heldKey);
+    expect(await keyAt(clone, OUT_EDF)).toBe(outKey);
+
+    // In scope the rules ran; outside it every byte is as upstream wrote it.
+    const original = (p: string) => Buffer.from(fixtureBytes(files, p)).toString("utf8");
+    expect(readFileSync(join(clone, SIDECAR), "utf8")).not.toBe(original(SIDECAR));
+    expect(readFileSync(join(clone, OUT_JSON), "utf8")).toBe(original(OUT_JSON));
+    expect(readFileSync(join(clone, IN_SCANS), "utf8")).toBe(
+      SCANS_TEXT.replace("2023-03-14T", "2023-01-01T"),
+    );
+    expect(readFileSync(join(clone, OUT_SCANS), "utf8")).toBe(SCANS_TEXT);
+    expect(readFileSync(join(clone, OUT_PROVENANCE), "utf8")).toBe(original(OUT_PROVENANCE));
+
+    expect(result.counts).toMatchObject({
+      recordings: 2,
+      headers_read: 1,
+      headers_not_read_nemar_held: 1,
+      headers_not_read_no_source: 0,
+      headers_scrubbed: 1,
+      json_files_read: 1,
+      json_files_blanked: 1,
+      scans_tables_read: 1,
+      scans_tables_normalized: 1,
+      // The provenance file is outside the scope: not annotated, and said.
+      provenance_annotated: 0,
+      provenance_not_annotated: 1,
+    });
+
+    // The scrub's commit carries the scope's changes and nothing else.
+    const committed = (await run(["git", "show", "--name-only", "--format=", "HEAD"], clone))
+      .split("\n")
+      .filter(Boolean)
+      .sort();
+    expect(committed).toEqual(
+      [".nemar/corrections.jsonl", FLAGGED_ANNEXED, IN_SCANS, SIDECAR].sort(),
+    );
+  }, 120_000);
+
+  test("a key with no source is counted and never read", async () => {
+    const upstream = await buildUpstream(deltaFixtures());
+    const { clone } = await cloneForImport(upstream);
+    const result = await scrubDelta(clone, {
+      scope: new Set([FLAGGED_ANNEXED, CLEAN_ANNEXED]),
+      sourceOf: () => null,
+    });
+    expect(requests).toEqual([]);
+    expect(result.counts).toMatchObject({
+      recordings: 2,
+      headers_read: 0,
+      headers_not_read_no_source: 2,
+      headers_not_read_nemar_held: 0,
+    });
+    expect(result.committed).toBe(false);
+  }, 120_000);
+});
+
+describe("assertCopiedRecordingsRead", () => {
+  const item = (key: string, origin?: "local"): ImportManifestItem => ({
+    key,
+    sourceUrl: null,
+    source: null,
+    destUri: `s3://nemar/${NEMAR_ID}/objects/${key}`,
+    ...(origin ? { origin } : {}),
+  });
+  const tree = new Map([
+    [FLAGGED_ANNEXED, "SHA256E-s10--a.edf"],
+    ["sub-01/eeg/sub-01_task-rest_eeg.set", "MD5E-s10--b.set"],
+  ]);
+
+  test("an upstream recording whose header was not read refuses; a read one passes", () => {
+    expect(() => assertCopiedRecordingsRead([item("SHA256E-s10--a.edf")], tree, new Set())).toThrow(
+      ImportScrubRefused,
+    );
+    expect(() =>
+      assertCopiedRecordingsRead(
+        [item("SHA256E-s10--a.edf")],
+        tree,
+        new Set(["SHA256E-s10--a.edf"]),
+      ),
+    ).not.toThrow();
+  });
+
+  test("a local upload and a key at a path that is not a recording are not the check's", () => {
+    expect(() =>
+      assertCopiedRecordingsRead(
+        [item("SHA256E-s10--a.edf", "local"), item("MD5E-s10--b.set")],
+        tree,
+        new Set(),
+      ),
+    ).not.toThrow();
   });
 });
