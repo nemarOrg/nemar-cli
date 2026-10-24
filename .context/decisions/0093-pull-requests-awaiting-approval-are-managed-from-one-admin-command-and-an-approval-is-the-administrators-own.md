@@ -278,3 +278,23 @@ anything.
 The observation does not say what the state is for the held verdicts (`uncertain`, `declined`,
 `errored`, which are `action_required`), and it does not settle whether `unstable` should be accepted
 when both required checks pass: that stays the maintainer's decision, tracked in issue #1743.
+
+## Amendment 2026-10-24: `start --redo`
+
+A commit whose review has a result was never started again by an administrator: `start` answered `duplicate`, and a finished review ran again only when the pull request's title, body or base was edited, or it was reopened or marked ready, at most five times for one commit ([ADR 0107](0107-dataset-pull-requests-are-screened-on-content-owners-and-administrators-are-exempt-and-the-review-check-is-required.md), decision 4).
+That is the right rule for a contributor, who must not be able to buy a second model call by resending the same commit.
+It left the administrator without a way to re-judge the pull requests already reviewed after the rules or the prompt changed (release 0.10.23 changed both), which is the one time a second run is wanted.
+
+`nemar admin pr-reviews start <dataset> <pr> --redo` asks for it by name, and `start --all --redo` asks for every open pull request whose current commit has a finished review (pass, fail or uncertain), behind the same cost question and `--dry-run` as `--all`.
+The Worker takes `?redo=1` on the start route and restarts the commit on its row through the restart that edits use: the nonce is replaced, so the superseded job's claim and report are refused, the verdict and report are cleared, the check goes back to running, `attempts` goes up by one when the earlier run could have cost a call, and the count of edits begins again, as for every administrator's start.
+Everything a start is held to still applies: the dataset must be reviewable, the pull request is read from GitHub, a block on the contributor declines it, and an owner's or administrator's pull request is not reviewed.
+
+Two limits are part of the decision.
+A review that is running is never started again by a redo; the answer is `review_running`, because superseding a claimed job wastes its model calls and could cut off one about to report (one that never reports is closed after the watchdog's 60 minutes and can be redone then).
+And `--all --redo` leaves out drafts, reviews in progress, exempt pull requests and the commits capped for edits, which are started by name, as `--all` does.
+
+The Worker echoes `redo: true` in every answer to a start that asked for it.
+A CLI that sent the flag and does not see the echo knows the Worker predates it, prints that the flag was ignored and exits 1, so an older Worker's `duplicate` is never read as "nothing to redo".
+There is no migration: the restart is the SQL that already exists.
+The cost is the administrator's to decide (a review is up to two model calls, and a bulk redo of about a hundred reviews is a hundred runs); nothing automatic redoes a review.
+A `--limit` to stage a bulk redo is not built.
