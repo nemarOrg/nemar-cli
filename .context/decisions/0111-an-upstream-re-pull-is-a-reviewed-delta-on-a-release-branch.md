@@ -129,6 +129,7 @@ A re-pull pull request is machine clean when all of these hold:
 
 The merge is sent with the screened SHA, so GitHub refuses a branch that moved, and only when GitHub reports the pull request `clean`: the NEMAR App is a bypass actor (ADR 0001, ADR 0107), and `clean` is what keeps "never a bypass" true for a merge the App makes.
 The Worker submits no approving review on this class either, since ADR 0001 requires none; the record is the merge, the `upstream_repulls` row and the plan digest.
+The Worker's merge call is not built until the ruleset check under "Not yet verified" is done.
 
 **What this narrows in ADR 0093, for re-pull pull requests only.**
 ADR 0107 already partially supersedes ADR 0093; this record narrows one more aspect of it, the merge, and only for this class.
@@ -142,7 +143,6 @@ A re-pull pull request that is not machine clean, or that an administrator opene
 
 An `xx` re-pull takes the administrator path only.
 ADR 0086 exempts `xx` from the identifier screen, so an `xx` re-pull never has a `clear` verdict and is never machine clean, and an administrator merges it under that exemption, with no screen.
-The Worker's merge call is not built until the ruleset check below is done.
 
 ### 8. A copy pins the object version, and nothing of the prior version is deleted
 
