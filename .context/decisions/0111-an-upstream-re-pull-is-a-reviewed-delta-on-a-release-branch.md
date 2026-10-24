@@ -9,8 +9,7 @@ Amends [ADR 0006](0006-upstream-re-pull-is-a-major-version-bump.md): its policy 
 Narrows [ADR 0093](0093-pull-requests-awaiting-approval-are-managed-from-one-admin-command-and-an-approval-is-the-administrators-own.md) in one aspect, the merge, for one class of pull request, the re-pull pull request the automatic path opened (decision 7); ADR 0107 already partially supersedes ADR 0093, and for every other pull request what remains of it stands.
 Builds on ADR 0001 (published datasets are PR-only), ADR 0023 (`--clean` reconciles), ADR 0034 (the column budget), ADR 0060, ADR 0085, ADR 0086, ADR 0089 and ADR 0091 (what an imported tree goes through), and ADR 0053 and ADR 0054 (unknown is never zero).
 The analysis is `.context/design-upstream-repull.md`; where it and this record disagree, this record wins.
-Nothing in the Decision section is built yet: each rule there is designed here and built by the later phases of #1046, and its present tense states the rule, not today's behavior.
-*Annotated 2026-10-24: decisions 4 and 10 are built, as their dated amendments below record; every other rule is still designed and not built.*
+Decisions 4 and 10 are built, as their dated amendments below record; every other rule in the Decision section is designed here and built by the later phases of #1046, and its present tense states the rule, not today's behavior.
 
 ## Context
 
