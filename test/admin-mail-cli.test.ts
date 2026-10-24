@@ -977,6 +977,8 @@ describe("names", () => {
         const r = await runCli(["show", "42"], server.url);
         expect(r.exitCode, String(status)).not.toBe(0);
         expect(r.stderr).toContain("Lookup refused.");
+        // Nothing of the ticket is printed before the failure.
+        expect(r.stdout, String(status)).toBe("");
       } finally {
         server.stop();
       }

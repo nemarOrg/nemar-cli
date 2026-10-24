@@ -66,6 +66,12 @@ import { terminalSafeText } from "../lib/display-name.js";
  * command's `exitOverride`, so the exit code cannot be set there; `error` is what Commander calls
  * for all of these, and it is overridden for this tree alone.
  */
+/** `--json` among the options, ignoring anything after a `--` terminator. */
+function jsonRequested(argv: readonly string[]): boolean {
+  const end = argv.indexOf("--");
+  return (end === -1 ? argv : argv.slice(0, end)).includes("--json");
+}
+
 class MailCommand extends Command {
   override createCommand(name?: string): Command {
     return new MailCommand(name);
@@ -73,7 +79,7 @@ class MailCommand extends Command {
 
   override error(message: string): never {
     const clean = message.replace(/^error: /, "").trim();
-    if (process.argv.includes("--json")) {
+    if (jsonRequested(process.argv)) {
       console.error(JSON.stringify({ error: clean, code: "usage" }));
     } else {
       console.error(`Error: ${oneLine(clean)}`);
@@ -386,78 +392,82 @@ async function renderList(tickets: TicketSummary[], people: People): Promise<voi
   console.log("\n* restricted queue");
 }
 
-async function renderTicket(detail: TicketDetail, people: People): Promise<void> {
+async function renderTicket(detail: TicketDetail, people: People): Promise<string[]> {
+  const out: string[] = [];
   const t = detail.ticket;
-  console.log(`Ticket #${t.id}  ${oneLine(t.ref)}`);
-  console.log(`Subject:    ${oneLine(t.subject)}`);
-  console.log(`Status:     ${oneLine(t.status)}`);
-  console.log(`Queue:      ${oneLine(t.queue_tag)}${t.restricted ? " (restricted)" : ""}`);
-  console.log(`Assignee:   ${await people.name(t.assignee_user_id)}`);
+  out.push(`Ticket #${t.id}  ${oneLine(t.ref)}`);
+  out.push(`Subject:    ${oneLine(t.subject)}`);
+  out.push(`Status:     ${oneLine(t.status)}`);
+  out.push(`Queue:      ${oneLine(t.queue_tag)}${t.restricted ? " (restricted)" : ""}`);
+  out.push(`Assignee:   ${await people.name(t.assignee_user_id)}`);
   const requester =
     t.requester_user_id === null
       ? oneLine(t.requester_email)
       : `${oneLine(t.requester_email)} (account ${await people.name(t.requester_user_id)})`;
-  console.log(`Requester:  ${requester}`);
-  console.log(`Tags:       ${detail.tags.length > 0 ? detail.tags.map(oneLine).join(", ") : "-"}`);
-  console.log(`Created:    ${oneLine(t.created_at)}`);
-  console.log(`Updated:    ${oneLine(t.updated_at)}`);
+  out.push(`Requester:  ${requester}`);
+  out.push(`Tags:       ${detail.tags.length > 0 ? detail.tags.map(oneLine).join(", ") : "-"}`);
+  out.push(`Created:    ${oneLine(t.created_at)}`);
+  out.push(`Updated:    ${oneLine(t.updated_at)}`);
 
-  console.log("\nThread (oldest first)");
+  out.push("\nThread (oldest first)");
   const messages = [...detail.messages].sort(
     (a, b) => a.created_at.localeCompare(b.created_at) || a.id - b.id,
   );
-  if (messages.length === 0) console.log("  (no messages)");
+  if (messages.length === 0) out.push("  (no messages)");
   for (const m of messages) {
     const kind = m.direction === "in" ? "IN" : m.direction === "out" ? "OUT" : "NOTE";
     const who =
       m.direction === "note"
         ? `by ${await people.name(m.author_user_id)}`
         : `${oneLine(m.from_addr)} -> ${oneLine(m.to_addr)}`;
-    console.log(`\n[${oneLine(m.created_at)}] ${kind} #${m.id}  ${who}`);
+    out.push(`\n[${oneLine(m.created_at)}] ${kind} #${m.id}  ${who}`);
     if (m.direction === "in") {
-      console.log(
-        `  auth: spf=${oneLine(m.spf)} dkim=${oneLine(m.dkim)} dmarc=${oneLine(m.dmarc)}`,
-      );
+      out.push(`  auth: spf=${oneLine(m.spf)} dkim=${oneLine(m.dkim)} dmarc=${oneLine(m.dmarc)}`);
     }
-    console.log(`  subject: ${oneLine(m.subject)}`);
-    console.log(indent(terminalSafeText(m.text_body)));
+    out.push(`  subject: ${oneLine(m.subject)}`);
+    out.push(indent(terminalSafeText(m.text_body)));
   }
 
-  console.log("\nEvents");
+  out.push("\nEvents");
   const events = [...detail.events].sort(
     (a, b) => a.created_at.localeCompare(b.created_at) || a.id - b.id,
   );
-  if (events.length === 0) console.log("  (none)");
+  if (events.length === 0) out.push("  (none)");
   for (const e of events) {
     const detailText =
       e.detail === null || e.detail === undefined ? "" : `  ${oneLine(JSON.stringify(e.detail))}`;
-    console.log(
+    out.push(
       `  [${oneLine(e.created_at)}] ${oneLine(e.kind)} by ${await people.name(e.actor_user_id)}${detailText}`,
     );
   }
+  return out;
 }
 
-async function renderQueue(q: MailQueue, people: People): Promise<void> {
-  console.log(`${oneLine(q.tag)}${q.restricted ? " (restricted)" : ""}`);
-  console.log(`  strategy:    ${oneLine(q.strategy)}`);
-  console.log(`  assignee:    ${await people.name(q.assignee_user_id)}`);
-  console.log(`  backup:      ${await people.name(q.backup_user_id)}`);
-  console.log(`  members:     ${await people.list(q.rr_members)}`);
-  console.log(`  escalation:  ${await people.name(q.escalation_user_id)}`);
-  console.log(`  open:        ${oneLine(q.open_tickets)}`);
+async function renderQueue(q: MailQueue, people: People): Promise<string[]> {
+  const out: string[] = [];
+  out.push(`${oneLine(q.tag)}${q.restricted ? " (restricted)" : ""}`);
+  out.push(`  strategy:    ${oneLine(q.strategy)}`);
+  out.push(`  assignee:    ${await people.name(q.assignee_user_id)}`);
+  out.push(`  backup:      ${await people.name(q.backup_user_id)}`);
+  out.push(`  members:     ${await people.list(q.rr_members)}`);
+  out.push(`  escalation:  ${await people.name(q.escalation_user_id)}`);
+  out.push(`  open:        ${oneLine(q.open_tickets)}`);
+  return out;
 }
 
-async function renderAvailability(a: Availability, people: People): Promise<void> {
-  console.log(`User:    ${await people.name(a.user_id)}`);
+async function renderAvailability(a: Availability, people: People): Promise<string[]> {
+  const out: string[] = [];
+  out.push(`User:    ${await people.name(a.user_id)}`);
   if (!a.away_until && !a.away_from) {
-    console.log("Away:    no window set");
-    return;
+    out.push("Away:    no window set");
+    return out;
   }
-  console.log(
+  out.push(
     `Away:    ${a.away_from ? oneLine(a.away_from) : "now"} until ${a.away_until ? oneLine(a.away_until) : "further notice"}`,
   );
-  console.log(`Backup:  ${await people.name(a.backup_user_id)}`);
-  console.log(`Note:    ${a.note ? oneLine(a.note) : "-"}`);
+  out.push(`Backup:  ${await people.name(a.backup_user_id)}`);
+  out.push(`Note:    ${a.note ? oneLine(a.note) : "-"}`);
+  return out;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -664,7 +674,7 @@ const showCommand = new MailCommand("show")
     await run(!!o.json, async () => {
       const detail = await getMailTicket(ticketIdOf(rawId));
       if (o.json) return printJson(detail);
-      await renderTicket(detail, new People());
+      console.log((await renderTicket(detail, new People())).join("\n"));
     });
   });
 
@@ -864,8 +874,8 @@ const queuesSetCommand = new MailCommand("set")
       }
       const res = await putMailQueue(tag, body);
       if (o.json) return printJson(res);
-      console.log("Queue saved.");
-      await renderQueue(res.queue, people);
+      const lines = await renderQueue(res.queue, people);
+      console.log(["Queue saved.", ...lines].join("\n"));
     });
   });
 
@@ -879,10 +889,9 @@ const queuesCommand = new MailCommand("queues")
       if (o.json) return printJson(res);
       if (res.queues.length === 0) return console.log("No queues.");
       const people = new People();
-      for (const q of res.queues) {
-        await renderQueue(q, people);
-        console.log("");
-      }
+      const blocks: string[] = [];
+      for (const q of res.queues) blocks.push((await renderQueue(q, people)).join("\n"));
+      console.log(blocks.join("\n\n"));
     });
   })
   .addCommand(queuesSetCommand);
@@ -902,7 +911,7 @@ async function showAway(o: Common & { user?: string }): Promise<void> {
     const userId = o.user ? ((await people.resolve(o.user, "--user")) as number) : undefined;
     const res = await getMailAvailability(userId);
     if (o.json) return printJson(res);
-    await renderAvailability(res.availability, people);
+    console.log((await renderAvailability(res.availability, people)).join("\n"));
   });
 }
 
@@ -934,8 +943,8 @@ const awaySetCommand = new MailCommand("set")
       const userId = o.user ? ((await people.resolve(o.user, "--user")) as number) : undefined;
       const res = await putMailAvailability(body, userId);
       if (o.json) return printJson(res);
-      console.log("Away window set.");
-      await renderAvailability(res.availability, people);
+      const lines = await renderAvailability(res.availability, people);
+      console.log(["Away window set.", ...lines].join("\n"));
     });
   });
 
@@ -953,8 +962,8 @@ const awayClearCommand = new MailCommand("clear")
         userId,
       );
       if (o.json) return printJson(res);
-      console.log("Away window cleared.");
-      await renderAvailability(res.availability, people);
+      const lines = await renderAvailability(res.availability, people);
+      console.log(["Away window cleared.", ...lines].join("\n"));
     });
   });
 
