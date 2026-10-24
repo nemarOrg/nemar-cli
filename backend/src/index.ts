@@ -62,6 +62,11 @@ import {
   sendStalenessAdminReviewEmail,
   sendStalenessWarningEmail,
 } from "./services/email";
+import {
+  handleEmailEventBatch,
+  isEmailEventMessage,
+  pruneEmailDeliveryEvents,
+} from "./services/email-events";
 import { handleOutboxBatch, isBroadcastOutboxMessage } from "./services/email-outbox";
 import { isNonProductionEnv } from "./services/environment";
 import { resolveHostRoute } from "./services/host-routing";
@@ -873,6 +878,16 @@ async function scheduledCleanup(env: Bindings): Promise<void> {
     testAccountSweep = await cleanUpLiveTestAccounts(env);
   }
 
+  // 7. Retention for the Email Sending bounce and complaint events (ADR 0110): rows older than
+  //    180 days go. D1 only, so it is safe in every environment. A failure is logged and
+  //    leaves the rows for the next run.
+  try {
+    const pruned = await pruneEmailDeliveryEvents(db, now);
+    if (pruned > 0) console.log(`Scheduled cleanup: pruned ${pruned} email delivery event(s)`);
+  } catch (err) {
+    console.error("Scheduled cleanup: email delivery event retention failed:", err);
+  }
+
   // Log summary to audit_log. `deleted`/`failed` cover only sandbox (xx)
   // datasets now; nm datasets are warned, not deleted, by this job.
   const deleted = results.filter((r) => r.success).length;
@@ -909,9 +924,12 @@ async function scheduledCleanup(env: Bindings): Promise<void> {
  */
 export async function dispatchQueueBatch(batch: MessageBatch<unknown>, env: Bindings) {
   const broadcasts: Message<BroadcastOutboxMessage>[] = [];
+  const emailEvents: Message<unknown>[] = [];
   for (const message of batch.messages) {
     if (isBroadcastOutboxMessage(message.body)) {
       broadcasts.push(message as Message<BroadcastOutboxMessage>);
+    } else if (isEmailEventMessage(message.body)) {
+      emailEvents.push(message);
     } else {
       // Stable tag: alert on "[queue] unrecognised message".
       console.warn(`[queue] unrecognised message queue=${batch.queue}; acking`);
@@ -919,6 +937,7 @@ export async function dispatchQueueBatch(batch: MessageBatch<unknown>, env: Bind
     }
   }
   if (broadcasts.length > 0) await handleOutboxBatch(broadcasts, env);
+  if (emailEvents.length > 0) await handleEmailEventBatch(emailEvents, env);
 }
 
 export default {

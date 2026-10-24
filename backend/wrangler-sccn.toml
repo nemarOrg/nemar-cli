@@ -417,6 +417,15 @@ max_concurrency = 1
 max_retries = 10
 dead_letter_queue = "nemar-email-outbox-dlq"
 
+# Bounce and complaint events (epic #1893 phase 2, ADR 0110). Consumer only: Cloudflare
+# publishes into this queue through an event subscription per sending domain, which the
+# operator creates; the queues exist already. Stored by services/email-events.ts.
+[[queues.consumers]]
+queue = "nemar-email-events"
+max_batch_size = 25
+max_retries = 5
+dead_letter_queue = "nemar-email-events-dlq"
+
 # Development environment (SCCN account)
 [env.dev]
 name = "nemar-api-dev"
@@ -529,6 +538,15 @@ max_batch_size = 10
 max_concurrency = 1
 max_retries = 10
 dead_letter_queue = "nemar-email-outbox-dev-dlq"
+
+# Bounce and complaint events (epic #1893 phase 2, ADR 0110). Consumer only: Cloudflare
+# publishes into this queue through an event subscription per sending domain, which the
+# operator creates; the queues exist already. Stored by services/email-events.ts.
+[[env.dev.queues.consumers]]
+queue = "nemar-email-events-dev"
+max_batch_size = 25
+max_retries = 5
+dead_letter_queue = "nemar-email-events-dev-dlq"
 
 # Observability for dev (not inherited from top-level)
 [env.dev.observability]
