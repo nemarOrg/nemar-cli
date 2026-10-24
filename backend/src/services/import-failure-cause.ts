@@ -139,7 +139,7 @@ const RULES: {
     cause: "upstream_moved",
     label: "upstream-moved",
     summary:
-      "The dataset has released a version that mirrors one upstream tag, and the import was at another. A released mirror moves to a newer snapshot through an upstream re-pull (ADR 0111), never by re-importing, so nothing was reset, copied or pushed, and the retry engine parks it.",
+      "The dataset has released a version that mirrors one upstream tag, and the import was at another. A released mirror moves to a newer snapshot through an upstream re-pull (ADR 0111), never by re-importing, so nothing was reset, copied or pushed. To repair the released version's data at the tag it mirrors, run the command the refusal line names, `nemar admin import-openneuro <ds> --tag <recorded tag>`, which passes the guard; the retry engine dispatches no tag, so it never does this by itself.",
     match: literalMatch(OPENNEURO_UPSTREAM_MOVED_MARKER),
   },
   {
@@ -153,7 +153,7 @@ const RULES: {
     cause: "annex_uuid_conflict",
     label: "annex-uuid-conflict",
     summary:
-      "The S3 prefix already carries an annex-uuid that the dataset's git-annex branch does not record as nemar-s3, so initialising the special remote conflicts and every retry would too. Affects re-imports only. The preflight's refusal names both uuids: when the branch records none, the bucket's marker was left by a lost attempt and can be removed (`aws s3 rm s3://nemar/<id>/objects/annex-uuid`; the objects are key-addressed and stay), then prepare re-run; when it records a different uuid, delete nothing and reconcile per nemarOrg/nemar-cli#1320.",
+      "The S3 prefix already carries an annex-uuid that the dataset's git-annex branch does not record as nemar-s3, so initialising the special remote conflicts and every retry would too. Affects re-imports only. The preflight's refusal names both uuids: when the branch records none, the bucket's marker was left by a lost attempt and can be removed (`aws s3 rm s3://nemar/<id>/objects/annex-uuid`; the objects are key-addressed and stay), then prepare re-run; when it records a different uuid, delete nothing and reconcile per nemarOrg/nemar-cli#1320. The retry engine parks it, so after the bucket marker is fixed an operator restarts the import by hand (`nemar admin import retry <id>`, then `nemar admin import-openneuro <ds>`).",
     // git-annex's own wording, from before the preflight existed, and the preflight's marker.
     match: new RegExp(
       `annex-uuid file indicates it is used by a different special remote|${escapeRegExp(NEMAR_ANNEX_UUID_CONFLICT_MARKER)}`,

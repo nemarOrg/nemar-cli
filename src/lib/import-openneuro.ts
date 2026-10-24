@@ -437,7 +437,7 @@ export async function baseOnOriginMain(
   if (released) {
     throw new ImportRefused(
       OPENNEURO_UPSTREAM_MOVED_MARKER,
-      `${args.sourceId}: ${args.nemarId} has released a version and its main records upstream tag ${recordedTag}; this import is at ${args.importTag}. Moving a released mirror to a new snapshot is an upstream re-pull (ADR 0111), not a re-import. Nothing was reset, copied or pushed.`,
+      `${args.sourceId}: ${args.nemarId} has released a version and its main records upstream tag ${recordedTag}; this import is at ${args.importTag}. Moving a released mirror to a new snapshot is an upstream re-pull (ADR 0111), not a re-import. Nothing was reset, copied or pushed. To repair the released version's data at the tag it mirrors: nemar admin import-openneuro ${args.sourceId} --tag ${recordedTag}`,
     );
   }
   // A retarget takes the new tag's tree whole, so origin's `.nemar/` goes with the old one. The

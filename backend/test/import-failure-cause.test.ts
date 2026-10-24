@@ -178,12 +178,16 @@ describe("the tag pin's refusals (epic #1046, ADR 0111 decision 10)", () => {
     expect(c.label).toBe("upstream-moved");
     expect(IMPORT_FAILURE_CAUSE_LABELS).toContain("upstream-moved");
     expect(c.summary).toContain("re-pull");
+    expect(c.summary).toContain("`nemar admin import-openneuro <ds> --tag <recorded tag>`");
   });
 
   test("the #1320 preflight's refusal is annex_uuid_conflict, like git-annex's own wording", () => {
     const preflight = `${NEMAR_ANNEX_UUID_CONFLICT_MARKER} bucket 1a2b3c4d-0000-4000-8000-000000000001; branch none.`;
     expect(classifyImportFailure({ stage: "prepare", lastError: preflight }).cause).toBe(
       "annex_uuid_conflict",
+    );
+    expect(classifyImportFailure({ stage: "prepare", lastError: preflight }).summary).toContain(
+      "restarts the import by hand",
     );
     expect(classifyImportFailure({ stage: "prepare", lastError: REAL.annex }).cause).toBe(
       "annex_uuid_conflict",

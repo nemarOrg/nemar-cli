@@ -163,6 +163,11 @@ describe("a released mirror whose upstream moved refuses, before anything moves"
       );
       expect(refusal.message).toContain("1.0.0");
       expect(refusal.message).toContain("1.0.1");
+      // The repair that passes the guard: the recorded tag, named.
+      expect(
+        refusal.message.endsWith(`nemar admin import-openneuro ${UPSTREAM_ID} --tag 1.0.0`),
+      ).toBe(true);
+      expect(refusal.message.length).toBeLessThan(600);
       expect(state.calls.n).toBe(1);
       // Nothing reset: the clone is still at the tag it cloned, with a clean tree.
       expect(await git(dir, "rev-parse", "HEAD")).toBe(upstream.commits["1.0.1"]);
