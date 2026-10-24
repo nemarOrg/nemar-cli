@@ -730,10 +730,11 @@ A listing that could not be read leaves that delta null with its reason and coun
 A stale mirror left out by `--measure-limit` is counted as not measured.
 While either count is above zero, or a new key in a measured delta has no known size, the total bytes to copy is null, and the sum over the deltas with a known size is printed beside it as "at least".
 A total also says what it does not cover.
-Only stale mirrors are measured, so the measurement carries the scope of the pass (the whole fleet, one mirror, or the mirrors after a cursor) and a count of the mirrors it cannot measure: unknown tag (and how many of those look stale by date), never examined, unchecked and anomaly.
-The measurement is marked incomplete while any delta is unknown or not measured, and a deliberate `--measure-limit` leaves the exit code at 0.
+Only stale mirrors are measured, so the measurement carries the scope of the pass (the whole fleet, one mirror, or the mirrors after a cursor) and a count of the mirrors it cannot measure: unknown tag (and how many of those look stale by date), never examined, unchecked, anomaly, in progress, parked and unpublished.
+The measurement is marked incomplete while any delta is unknown or not measured or a new key has no known size, so a complete measurement always has a known byte total; a deliberate `--measure-limit` leaves the exit code at 0.
 A delta that could not be read exits 2, as an `unchecked` row does: the pass could not see.
-Reading is sequential, with a progress line every ten mirrors, and stops after five consecutive failed reads: the rest are recorded as unknown with that reason, because OpenNeuro being down would otherwise cost the timeout on every remaining mirror.
+Reading is sequential, with a progress line every ten mirrors, and stops after five consecutive failed reads to reach OpenNeuro (a network error, a timeout or an HTTP error): the rest are recorded as unknown with that reason, because OpenNeuro being down would otherwise cost the timeout on every remaining mirror.
+A listing that OpenNeuro answered but that is unusable for one dataset (a snapshot deleted upstream, no root `dataset_description.json`, errors beside the data) marks only that mirror unknown and does not count toward the stop.
 Only a complete pass is measured: one that threw, was refused, stopped at `--max-pages`, saw the population change, had an `unchecked` row or carried `errors[]` may hold a partial set of stale mirrors, and totaling a part of the fleet would read as the whole.
 Such a pass reports `measurement` as null with the reason and keeps its own exit code.
 The measurement is read-only: it writes nothing to NEMAR or to OpenNeuro, and the only requests it sends OpenNeuro are read queries.
