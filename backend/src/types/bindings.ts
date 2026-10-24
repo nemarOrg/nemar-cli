@@ -121,8 +121,9 @@ export interface Bindings {
   EMAIL?: CloudflareSendEmail;
   /** Inbound mail bucket (epic #1893 phase 1): raw messages from Email Routing,
    *  stored at `inbound/raw/YYYY/MM/DD/<uuid>.eml` by services/inbound-mail.ts.
-   *  `nemar-mail-dev` in [env.dev] only; absent elsewhere, and a Worker with no
-   *  bucket rejects the message. */
+   *  `nemar-mail-dev` in [env.dev] and `nemar-mail` in production (inert until
+   *  a routing rule targets the Worker, phase 6); a Worker with no bucket rejects
+   *  the message. */
   MAIL_INBOUND?: R2Bucket;
   /** Announcement outbox queue (epic #1893 phase 2): `nemar-email-outbox` in production,
    *  `nemar-email-outbox-dev` in [env.dev]. Optional: with no binding `nemar admin notify`

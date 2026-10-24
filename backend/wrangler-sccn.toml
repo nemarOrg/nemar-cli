@@ -214,6 +214,15 @@ bucket_name = "nemar-neurobagel"
 name = "EMAIL"
 allowed_sender_addresses = ["noreply@nemar.org", "support@nemar.org"]
 
+# Inbound mail (epic #1893 phase 3b, ADR 0111). The production raw-message bucket: private, with a
+# 730-day expiry rule. NO production Email Routing rule targets this Worker until the Phase 6
+# cutover, so the binding is inert until then; a Worker with the binding but no routing rule
+# receives nothing. Must exist before the next production deploy
+# (`wrangler r2 bucket create nemar-mail`), or that deploy fails.
+[[r2_buckets]]
+binding = "MAIL_INBOUND"
+bucket_name = "nemar-mail"
+
 # Workers Observability (Workers Paid plan).
 # Captures invocation logs (inbound request shape, response status, duration,
 # subrequest count) and console.log output for searchable runtime telemetry.
