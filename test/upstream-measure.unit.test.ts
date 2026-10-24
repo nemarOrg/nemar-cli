@@ -170,6 +170,16 @@ describe("summarizeSnapshotDelta on built listings", () => {
     expect(d.bytes_to_copy).toBe(42);
   });
 
+  test("a key's name is not read as its size: the strict field wins over the listing", () => {
+    // The documented exception in annexKeyDeclaredSize: `WORM-s5-m17--a-s9--b` reads as 9 there.
+    // The field parser reads 5; the listing's 1000 is only a fallback for a key with no size.
+    const d = summarizeSnapshotDelta(
+      [],
+      [file("a.bin", "WORM-s5-m17--a-s9--b", { annexed: true, size: 1000 })],
+    );
+    expect(d.bytes_to_copy).toBe(5);
+  });
+
   test("a new key with no size anywhere makes bytes_to_copy null, never 0", () => {
     const d = summarizeSnapshotDelta(
       [],
@@ -330,12 +340,72 @@ describe("estimateRepullDoiVolume", () => {
       import_status: "complete",
       probably_stale: null,
     });
-    const now = Date.parse("2026-01-01T00:00:00Z");
+    const now = Date.parse("2025-12-31T00:00:00Z");
     const bad = estimateRepullDoiVolume([row("not a date")], now);
     expect(bad.snapshots_with_unreadable_dates).toBe(1);
-    expect(bad.per_snapshot).toBe(0);
+    // The unreadable date could be the earliest, so the import cannot be identified and the
+    // readable first snapshot is counted: the estimate errs high, never low.
+    expect(bad.per_snapshot).toBe(1);
     expect(estimateRepullDoiVolume([row(null)], now).snapshots_with_unreadable_dates).toBe(1);
     expect(estimateRepullDoiVolume([row("2025-06-01T00:00:00Z")], now).per_snapshot).toBe(1);
+  });
+
+  test("the import is the earliest by date, wherever the list puts it", () => {
+    // Built: upstream lists in creation order today; the rule must not rely on list position.
+    const mk = (snapshots: { tag: string; created: string | null }[]): UpstreamStatusRow => ({
+      dataset_id: "on000009",
+      ds: "ds000009",
+      visibility: "public",
+      state: "current",
+      anomaly: null,
+      reason: "x",
+      recorded: { version: "1.0.0", tag: "1.0.1", basis: "doi" },
+      upstream: { latest_tag: "1.0.1", latest_created: null, snapshots },
+      import_status: "complete",
+      probably_stale: null,
+    });
+    const now = Date.parse("2025-12-31T00:00:00Z");
+    const reversed = mk([
+      { tag: "1.0.1", created: "2025-06-01T00:00:00Z" },
+      { tag: "1.0.0", created: "2020-01-01T00:00:00Z" },
+    ]);
+    expect(estimateRepullDoiVolume([reversed], now).per_snapshot).toBe(1);
+    // An unreadable date anywhere means the earliest cannot be named: nothing is excluded.
+    const unreadableLater = mk([
+      { tag: "1.0.0", created: "2025-01-01T00:00:00Z" },
+      { tag: "1.0.1", created: "2025-06-01T00:00:00Z" },
+      { tag: "1.0.2", created: "garbage" },
+    ]);
+    const v = estimateRepullDoiVolume([unreadableLater], now);
+    expect(v.per_snapshot).toBe(2);
+    expect(v.snapshots_with_unreadable_dates).toBe(1);
+  });
+
+  test("a snapshot dated after now is counted as future-dated, not dropped", () => {
+    // Built: OpenNeuro does not send a future creation date today.
+    const row: UpstreamStatusRow = {
+      dataset_id: "on000009",
+      ds: "ds000009",
+      visibility: "public",
+      state: "current",
+      anomaly: null,
+      reason: "x",
+      recorded: { version: "1.0.0", tag: "1.0.1", basis: "doi" },
+      upstream: {
+        latest_tag: "1.0.2",
+        latest_created: null,
+        snapshots: [
+          { tag: "1.0.0", created: "2025-01-01T00:00:00Z" },
+          { tag: "1.0.1", created: "2025-06-01T00:00:00Z" },
+          { tag: "1.0.2", created: "2027-01-01T00:00:00Z" },
+        ],
+      },
+      import_status: "complete",
+      probably_stale: null,
+    };
+    const v = estimateRepullDoiVolume([row], Date.parse("2026-01-01T00:00:00Z"));
+    expect(v.per_snapshot).toBe(1);
+    expect(v.snapshots_dated_in_the_future).toBe(1);
   });
 
   test("snapshots exactly the gap apart are both counted; one day less is one", () => {

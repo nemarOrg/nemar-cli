@@ -19,7 +19,7 @@
  * their own state; none is "current" and none is "not stale".
  */
 
-import { annexKeyDeclaredSize } from "./annex-key.js";
+import { annexKeyFieldSize } from "./annex-key.js";
 import {
   type SourceVersionRow,
   isSourceTag,
@@ -543,8 +543,8 @@ export interface SnapshotDelta {
   /** Distinct annex keys the target snapshot has and the source snapshot does not. */
   new_keys: number;
   /**
-   * Bytes of the new keys, from the size each key declares, falling back to the listing's size.
-   * Null when any new key has neither: an unknown size is never a zero.
+   * Bytes of the new keys, from the size each key declares in its fields, falling back to the
+   * listing's size. Null when any new key has neither: an unknown size is never a zero.
    */
   bytes_to_copy: number | null;
 }
@@ -597,7 +597,9 @@ export function summarizeSnapshotDelta(
   }
   let bytes: number | null = 0;
   for (const [key, f] of newKeys) {
-    const size = annexKeyDeclaredSize(key) ?? f.size;
+    // The strict field parser: a free-text name such as `WORM-s5-m17--a-s9--b` must not be read as
+    // 9 bytes (the looser `annexKeyDeclaredSize` does). Without a size field, the listing's size.
+    const size = annexKeyFieldSize(key) ?? f.size;
     if (size === null) {
       bytes = null;
       break;
@@ -625,7 +627,12 @@ export interface DoiVolume {
   window_days: number;
   /** Mirrors in `current` or a `stale_*` state: a known tag and a snapshot list were read. */
   mirrors_counted: number;
-  /** Mirrors left out, by state, zero-filled; the counted states are 0 here by construction. */
+  /**
+   * Mirrors left out, by state, zero-filled. A mirror in a state with no snapshot comparison
+   * (unknown, not_examined, unchecked, anomaly, and so on) is left out under its own state. A
+   * `current` or stale row that somehow carries no upstream data would also land here under its
+   * state; the classifier always sets it, so those two stay 0 in practice.
+   */
   excluded: Record<UpstreamState, number>;
   /** One re-pull straight to the latest tag for each stale mirror. */
   catch_up: number;
@@ -643,6 +650,8 @@ export interface DoiVolume {
   };
   /** Snapshots whose `created` did not parse: left out of the figures above, never read as old. */
   snapshots_with_unreadable_dates: number;
+  /** Snapshots dated after `now`: left out of the figures above, counted so they cannot vanish. */
+  snapshots_dated_in_the_future: number;
 }
 
 /** A snapshot's creation time in ms, NaN when absent or unparsable. */
@@ -655,9 +664,10 @@ const COUNTED_STATES: readonly UpstreamState[] = ["current", ...STALE_STATES];
 /**
  * Estimate the DOI volume of re-pulling (ADR 0111). Whether a re-pull carries corrections, and so
  * a second DOI, is known only from a plan (`nemar admin repull plan`), so the figure is a range:
- * the base and its doubling. The first snapshot of a dataset was the import, not a re-pull, so it
- * is not counted (and when the first listed snapshot has no readable date, nothing is excluded:
- * the estimate errs high rather than guess which one was the import).
+ * the base and its doubling. The first snapshot of a dataset (the earliest by creation date) was
+ * the import, not a re-pull, so it is not counted. When any snapshot of a dataset has an
+ * unreadable date the earliest cannot be identified, so none is excluded for that dataset and its
+ * figures can be high by one: the estimate errs high rather than guess which one was the import.
  */
 export function estimateRepullDoiVolume(
   rows: readonly UpstreamStatusRow[],
@@ -677,6 +687,7 @@ export function estimateRepullDoiVolume(
   let perSnapshot = 0;
   let spaced = 0;
   let unreadable = 0;
+  let future = 0;
   const perDay = new Map<string, number>();
 
   for (const row of rows) {
@@ -688,14 +699,19 @@ export function estimateRepullDoiVolume(
     if ((STALE_STATES as readonly string[]).includes(row.state)) catchUp++;
 
     const times = row.upstream.snapshots.map((s) => createdMs(s.created));
-    unreadable += times.filter((t) => Number.isNaN(t)).length;
     const stamped = times.filter((t) => !Number.isNaN(t)).sort((a, b) => a - b);
-    const firstReadable = times.length > 0 && !Number.isNaN(times[0] as number);
-    // Drop the import (the earliest snapshot); keep everything when it cannot be identified.
-    const candidates = firstReadable ? stamped.slice(1) : stamped;
+    const unreadableHere = times.length - stamped.length;
+    unreadable += unreadableHere;
+    // Drop the import (the earliest by date); keep everything when a date is unreadable, because
+    // the unreadable one could be the earliest.
+    const candidates = unreadableHere === 0 ? stamped.slice(1) : stamped;
     let lastCounted = Number.NEGATIVE_INFINITY;
     for (const t of candidates) {
-      if (t <= since || t > nowMs) continue;
+      if (t > nowMs) {
+        future++;
+        continue;
+      }
+      if (t <= since) continue;
       perSnapshot++;
       const day = new Date(t).toISOString().slice(0, 10);
       perDay.set(day, (perDay.get(day) ?? 0) + 1);
@@ -720,5 +736,6 @@ export function estimateRepullDoiVolume(
       at_most_every_30_days: spaced * 2,
     },
     snapshots_with_unreadable_dates: unreadable,
+    snapshots_dated_in_the_future: future,
   };
 }
