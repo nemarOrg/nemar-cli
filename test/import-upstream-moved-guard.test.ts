@@ -427,6 +427,26 @@ describe("a retarget never drops a recorded privacy correction (ADR 0085)", () =
       expect(await git(bare, "rev-parse", "main")).toBe(tip);
     }
   }, 120_000);
+
+  test("a re-pull's repull-scrubbed line refuses too: only the importer's own line is dropped", async () => {
+    // A re-pull runs only on a released mirror, which the guard refuses before this rule, so an
+    // unreleased import never meets the line. If one does, dropping a record of a scrub is not the
+    // retarget's to decide, which is the safe direction.
+    const { bare } = await originRecordedAt(RECORDED.doiOnly);
+    const tip = await withLedger(bare, [
+      scrubbed,
+      JSON.stringify({ version: 1, action: "repull-scrubbed", counts: {} }),
+    ]);
+    const dir = await reimportClone(bare, "1.0.1");
+    const p = baseOnOriginMain(dir, {
+      sourceId: UPSTREAM_ID,
+      importTag: "1.0.1",
+      nemarId: NEMAR_ID,
+      released: async () => false,
+    });
+    await expect(p).rejects.toThrow(/records 1 line\(s\) in \.nemar\/corrections\.jsonl/);
+    expect(await git(bare, "rev-parse", "main")).toBe(tip);
+  }, 60_000);
 });
 
 describe("a retarget never loses the hold an import scrub put on origin's history (ADR 0089)", () => {

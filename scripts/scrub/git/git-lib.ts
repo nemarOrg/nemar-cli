@@ -1376,15 +1376,16 @@ export async function verifyRewrite(opts: VerifyOptions): Promise<VerifyResult> 
 }
 
 /**
- * Whether the lines a commit appended to the ledger are all the importer's own `import-scrubbed`
- * line. The importer commits that line in the SAME commit as the files it scrubbed (ADR 0089), so a
- * dataset imported that way would otherwise fail `ledger-commit-not-alone` for good. Anything else
+ * Whether the lines a commit appended to the ledger are all a scrub's own line: the importer's
+ * `import-scrubbed`, or an upstream re-pull's `repull-scrubbed`. Each is committed in the SAME
+ * commit as the files it scrubbed (ADR 0089; ADR 0111's one re-pull commit), so a dataset imported
+ * or re-pulled that way would otherwise fail `ledger-commit-not-alone` for good. Anything else
  * (a line that is not an append, one of another action, one that does not parse) is not that.
  *
- * What this does NOT prove: that the other files in the commit are the importer's. Nothing in the
- * repository tells the importer's commit from one made by hand with the same line, so the bound is
- * on what the commit may do to the LEDGER (append `import-scrubbed` lines, edit nothing before
- * them); the lines themselves are validated for this dataset at every head tip (`ledger-invalid`).
+ * What this does NOT prove: that the other files in the commit are the scrub's. Nothing in the
+ * repository tells the scrub's commit from one made by hand with the same line, so the bound is
+ * on what the commit may do to the LEDGER (append scrub lines, edit nothing before them); the
+ * lines themselves are validated for this dataset at every head tip (`ledger-invalid`).
  */
 async function addsOnlyImportLines(repo: string, sha: string): Promise<boolean> {
   const lines = async (rev: string): Promise<string[] | undefined> => {
@@ -1402,7 +1403,7 @@ async function addsOnlyImportLines(repo: string, sha: string): Promise<boolean> 
   try {
     return now.slice(before.length).every((l) => {
       const entry = JSON.parse(l) as { action?: unknown };
-      return entry.action === "import-scrubbed";
+      return entry.action === "import-scrubbed" || entry.action === "repull-scrubbed";
     });
   } catch {
     return false;

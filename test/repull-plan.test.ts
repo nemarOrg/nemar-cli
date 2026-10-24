@@ -664,6 +664,20 @@ describe("the privacy ledger (ADR 0085)", () => {
     }
   });
 
+  test("an earlier re-pull's own repull-scrubbed line is not a recorded correction", async () => {
+    // The default fixture has a conflict and corrections, so a line counted as a recorded
+    // correction would refuse the plan.
+    const fx = await buildRepullFixture({ repullScrubbedLine: true });
+    try {
+      const body = (await plan(fx)).body as Body;
+      expect(body.ledger).toEqual({ status: "ok", lines: 2, recorded_corrections: 0 });
+      expect(counts(body).unexplained).toBeGreaterThan(0);
+      expect(body.refusals).toEqual([]);
+    } finally {
+      fx.cleanup();
+    }
+  });
+
   test("a ledger that does not parse, a gitlink, a stale badge and an unparseable .nemar/metadata.json", async () => {
     const fx = await buildRepullFixture({
       corruptLedger: true,

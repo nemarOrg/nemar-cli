@@ -45,6 +45,9 @@ const ACTIONS: ReadonlySet<LedgerEntry["action"]> = new Set([
   // Written by the importer, not by an operator: the tree was scrubbed before its first push, so no
   // version existed yet and `versions` is empty (ADR 0089).
   "import-scrubbed",
+  // Written by an upstream re-pull's delta scrub before the commit, so no history holds the
+  // original (ADR 0111, decision 9): it holds nothing, and it is not a recorded correction.
+  "repull-scrubbed",
 ]);
 
 /**

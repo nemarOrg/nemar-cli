@@ -757,6 +757,13 @@ function errorWords(err: unknown): string {
   return err instanceof Error && /^[A-Za-z]{1,40}$/.test(err.name) ? err.name : "unparseable";
 }
 
+/**
+ * The ledger lines a scrub writes itself and a re-pull re-applies as a function: the importer's
+ * own (`import-scrubbed`) and a re-pull's delta scrub (`repull-scrubbed`). Every other line is a
+ * recorded correction (ADR 0111, decision 1, as the Phase 6b amendment reads it).
+ */
+const SCRUB_ACTIONS: ReadonlySet<string> = new Set(["import-scrubbed", "repull-scrubbed"]);
+
 async function readLedger(
   tree: Map<string, { oid: string }>,
   store: BlobStore,
@@ -783,7 +790,7 @@ async function readLedger(
     return {
       status: "ok",
       lines: lines.length,
-      recordedCorrections: lines.filter((l) => l.action !== "import-scrubbed").length,
+      recordedCorrections: lines.filter((l) => !SCRUB_ACTIONS.has(l.action)).length,
       error: null,
     };
   } catch (err) {

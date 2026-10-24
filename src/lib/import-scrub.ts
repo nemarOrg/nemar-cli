@@ -575,6 +575,12 @@ export interface ImportScrubInput {
    * `headers_not_read_no_source`). Absent for the importer, whose sources are its whereis URLs.
    */
   sourceOf?: (key: string) => UpstreamSource | "held" | null;
+  /**
+   * The ledger line's action: `import-scrubbed` for the importer (the default), `repull-scrubbed`
+   * for an upstream re-pull's delta scrub, which runs before its one commit, so no history it
+   * pushes holds what it replaced (ADR 0111, decision 9).
+   */
+  ledgerAction?: "import-scrubbed" | "repull-scrubbed";
 }
 
 /** Run `fn` over `items` with at most `limit` in flight, keeping order. */
@@ -1295,7 +1301,7 @@ async function scrubTree(input: ImportScrubInput): Promise<ImportScrubResult> {
       version: 1,
       at: now.toISOString(),
       dataset: input.nemarId,
-      action: "import-scrubbed",
+      action: input.ledgerAction ?? "import-scrubbed",
       versions: [],
       counts: { ...counts },
       scanner: IMPORT_SCANNER_ID,

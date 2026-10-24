@@ -31,7 +31,8 @@ export const PLAN_FILE_VERSION = 1;
  * Which planner made a plan, in its body (`planner`), so in its digest. Execution refuses a plan
  * an older planner made rather than reading it under rules it was not made with.
  *
- * 1: Phase 5's planner. 2: the enrichment's generated `participants.tsv` is a standard edit.
+ * 1: Phase 5's planner. 2: the enrichment's generated `participants.tsv` is a standard edit, and
+ * a `repull-scrubbed` ledger line is not a recorded correction.
  */
 export const PLANNER_VERSION = 2;
 

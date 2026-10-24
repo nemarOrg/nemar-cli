@@ -1846,3 +1846,61 @@ describe("a pinned source is read at its version, never at the path's current ob
     ]);
   }, 120_000);
 });
+
+describe("a re-pull's ledger line is its own word (ADR 0111)", () => {
+  test("ledgerAction writes repull-scrubbed, under the ledger's own guard", async () => {
+    const upstream = await buildUpstream(deltaFixtures());
+    const { clone } = await cloneForImport(upstream);
+    const flaggedKey = await keyAt(clone, FLAGGED_ANNEXED);
+    await scrubDelta(clone, {
+      scope: new Set([FLAGGED_ANNEXED, SIDECAR]),
+      sourceOf: (key) => (key === flaggedKey ? upstreamS3(FLAGGED_ANNEXED) : null),
+      ledgerAction: "repull-scrubbed",
+    });
+    const lines = readLedger(join(clone, ".nemar/corrections.jsonl"));
+    expect(lines.map((l) => l.action)).toEqual(["repull-scrubbed"]);
+    expect(lines[0]?.counts).toMatchObject({ headers_scrubbed: 1, json_values_blanked: 1 });
+  }, 120_000);
+
+  test("a repull-scrubbed line holds no history on a re-import; the importer's own line does", async () => {
+    // A re-pull scrubs before its one commit, so nothing it pushed holds an original (ADR 0111,
+    // decision 9); an import's line that blanked JSON is a hold, because the import pushed
+    // upstream's history (ADR 0089).
+    const files = baseFixtures().filter((f) => f.path !== FLAGGED_ANNEXED && f.path !== SIDECAR);
+    const holds: boolean[] = [];
+    for (const action of ["repull-scrubbed", "import-scrubbed"] as const) {
+      const upstream = await buildUpstream(files);
+      const nemarRepo = await bareRepo();
+      const first = await cloneForImport(upstream);
+      await prepare(first.clone, await upstreamView(first.clone));
+      const ledger = join(first.clone, ".nemar/corrections.jsonl");
+      mkdirSync(dirname(ledger), { recursive: true });
+      writeFileSync(
+        ledger,
+        `${JSON.stringify({
+          version: 1,
+          at: FIXED_NOW.toISOString(),
+          dataset: NEMAR_ID,
+          action,
+          versions: [],
+          counts: { json_values_blanked: 2, git_held_recordings_scrubbed: 0 },
+          scanner: IMPORT_SCANNER_ID,
+          verification: "scanner-clean+payload-identical",
+          actor: "fixture-actor",
+        })}\n`,
+      );
+      await run(
+        ["git", "-c", "annex.largefiles=nothing", "add", ".nemar/corrections.jsonl"],
+        first.clone,
+      );
+      await run(["git", "commit", "-qm", "ledger"], first.clone);
+      await run(["git", "remote", "add", "nemar", nemarRepo], first.clone);
+      await run(["git", "push", "-q", "nemar", "main", "git-annex"], first.clone);
+      const again = await reimportClone(upstream, nemarRepo);
+      holds.push(
+        (await prepare(again.clone, again.view, { reimport: true })).privacy.historyHoldsOriginals,
+      );
+    }
+    expect(holds).toEqual([false, true]);
+  }, 240_000);
+});

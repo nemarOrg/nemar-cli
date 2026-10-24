@@ -176,6 +176,8 @@ export interface FixtureOptions {
   unpinnedSet?: boolean;
   /** Append a `headers-scrubbed` line (a recorded correction) to NEMAR's ledger. */
   recordedCorrection?: boolean;
+  /** Append the line an earlier re-pull's delta scrub writes (`repull-scrubbed`) to NEMAR's ledger. */
+  repullScrubbedLine?: boolean;
   /** Leave out NEMAR's contributor edits, so nothing is unexplained. */
   noContributorEdits?: boolean;
   /** What the bucket's `annex-uuid` marker says; the `nemar-s3` UUID by default, null for none. */
@@ -619,6 +621,19 @@ async function build(
       counts: { headers_scrubbed: 1 },
       scanner: IMPORT_SCANNER_ID,
       verification: "scanner-clean",
+      actor: "fixture-actor",
+    });
+  }
+  if (opts.repullScrubbedLine) {
+    appendLedger(join(clone, ".nemar/corrections.jsonl"), {
+      version: 1,
+      at: "2026-10-08T00:00:00.000Z",
+      dataset: NEMAR_ID,
+      action: "repull-scrubbed",
+      versions: [],
+      counts: { headers_scrubbed: 1, json_values_blanked: 1 },
+      scanner: IMPORT_SCANNER_ID,
+      verification: "scanner-clean+payload-identical",
       actor: "fixture-actor",
     });
   }

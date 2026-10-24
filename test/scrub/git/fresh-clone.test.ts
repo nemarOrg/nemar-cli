@@ -268,6 +268,25 @@ SUITE("verify --fresh-clone: the pushed repository (I1, I11)", () => {
     git(repo, "push", "-q", "--force", "origin", "main");
   }, 240_000);
 
+  test("an upstream re-pull's own commit (a repull-scrubbed line beside its delta) is tolerated", async () => {
+    // ADR 0111: the re-pull's delta scrub writes its line before the one commit that carries the
+    // delta, so the commit touches the ledger and other files, as the importer's does.
+    const repullLine = LEDGER_LINE.replace("history-rewritten", "repull-scrubbed");
+    const repo = fresh();
+    const file = join(repo, ".nemar", "corrections.jsonl");
+    const before = existsSync(file) ? readFileSync(file, "utf8") : "";
+    write(repo, ".nemar/corrections.jsonl", `${before}${repullLine}`);
+    write(repo, "repulled-alongside.txt", "the re-pull's delta");
+    git(repo, "add", ".");
+    git(repo, "commit", "-q", "-m", "Re-pull of the next upstream snapshot");
+    git(repo, "push", "-q", "origin", "main");
+    const ok = await verifyFresh(fresh());
+    expect(ok.code, ok.out).toBe(0);
+    // Undo, so later tests see the tolerated state.
+    git(repo, "reset", "-q", "--hard", "HEAD~1");
+    git(repo, "push", "-q", "--force", "origin", "main");
+  }, 240_000);
+
   test("a ledger that is not a valid ledger of this dataset fails", async () => {
     const repo = fresh();
     write(repo, ".nemar/corrections.jsonl", LEDGER_LINE.replace(DATASET, "nm000123"));
