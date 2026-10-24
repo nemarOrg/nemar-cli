@@ -1124,7 +1124,7 @@ function stopFor(assessed: { stop: Stop }): never {
 const NOT_STARTED: Record<string, string> = {
   duplicate: "this commit already has a review (running or finished)",
   review_running:
-    "a review of this commit is running, and a redo waits until it reports (one that never reports is closed after 60 minutes)",
+    "a review of this commit is running, and a redo waits until it reports or its time (about an hour) is up",
   contributor_paused: "the contributor is blocked by an administrator",
   exempt_author: "its author is a NEMAR owner or administrator, so it is not reviewed",
   exempt_naming_waived:
@@ -1192,7 +1192,7 @@ export function notStartedText(r: StartReviewResponse): string {
 prReviewsCommand
   .command("start [dataset] [pr]")
   .description(
-    "Review a pull request that is already open, or start again one whose review ended without a verdict",
+    "Review a pull request that is already open, or start again one whose review ended without a verdict (or, with --redo, has a result)",
   )
   .option(
     "--all",
@@ -1228,9 +1228,12 @@ by name, which starts its review and lifts the cap.
 A finished review is not run again by anything but --redo, or by an edit of the pull request's title,
 description or target branch, a reopening or a marking as ready (five of those at most for one commit).
 --redo starts it again on the same review: its old result leaves the pull request's check while the new
-run is going, a blocked contributor is still declined, an owner's or administrator's pull request is
-still not reviewed, and a review that is running is never started again, so a redo waits for it. It
-begins the count of edits again, as every start does, and costs a second run of up to two model calls.
+run is going. A blocked contributor's pull request is not redone: the block is the answer and the
+finished review stands. An owner's or administrator's pull request is still not reviewed unless a
+review of its current commit is on record. A review that is running, or whose job has not had its
+time yet, is never started again, so a redo waits for it. A redo leaves the count of edits as it is
+(it is no edit), and costs a second run of up to two model calls. A bulk redo cannot be resumed:
+running it again redoes the reviews that finished in between.
 
   nemar admin pr-reviews start nm000108 12
   nemar admin pr-reviews start nm000108 12 --redo
@@ -1292,17 +1295,14 @@ any other and declined by the Worker, which says so; after 'allow', the same com
         }
         failApi(err, spinner, "Could not start the review", options.json);
       }
-      if (options.redo && r.redo !== true) {
-        // An older Worker ignores the flag and would have answered as for a start, which for a
-        // finished review is "already has a review": say what happened instead.
-        const text = REDO_IGNORED;
-        if (options.json) console.error(text);
-        else console.log(chalk.red(text));
-        process.exit(1);
-      }
+      // An older Worker ignores the flag: what it did is reported as it was (it starts a commit
+      // that has no review, and says "already has a review" of one that has), and then the
+      // command says the flag did nothing and fails.
+      const ignored = options.redo === true && r.redo !== true;
       if (options.json) {
-        console.log(JSON.stringify(r, null, 2));
-        if (!r.dispatched && START_FAULTS.has(r.reason)) process.exit(1);
+        console.log(JSON.stringify(ignored ? { ...r, redo_ignored: true } : r, null, 2));
+        if (ignored) markReportedExit();
+        if (ignored || (!r.dispatched && START_FAULTS.has(r.reason))) process.exit(1);
         return;
       }
       if (r.dispatched) {
@@ -1318,6 +1318,12 @@ any other and declined by the Worker, which says so; after 'allow', the same com
         if (fault) process.exit(1);
       }
       envNote(r.environment);
+      if (ignored) {
+        console.log(chalk.red(REDO_IGNORED));
+        // An answer about the Worker's version, not a fault in the command: no invitation to file a bug.
+        markReportedExit();
+        process.exit(1);
+      }
     },
   );
 
@@ -1340,7 +1346,7 @@ export function startAllQuestion(count: number, redo = false): string {
 
 /** What `start --redo` says when the Worker answered without the echo that says it honored the flag. */
 export const REDO_IGNORED =
-  "This Worker does not know --redo yet, so the flag was ignored and nothing was redone. Deploy the Worker (or run this against the environment that has it), then run the command again.";
+  "This Worker does not know --redo yet, so it ignored the flag: a finished review was not redone (a commit with no review was started as usual). Deploy the Worker, or run this against an environment that has it, then run the command again.";
 
 /** The queue verdicts `start --all` takes up: a current commit with no review, or one that ended without a verdict. */
 export const START_VERDICTS: QueueVerdict[] = ["not_reviewed", "could_not_decide"];
@@ -1350,6 +1356,11 @@ export const START_VERDICTS: QueueVerdict[] = ["not_reviewed", "could_not_decide
  * (a redo never supersedes a running review) and an exempt pull request has none to redo.
  */
 export const REDO_VERDICTS: QueueVerdict[] = [...START_VERDICTS, "pass", "fail", "uncertain"];
+
+/** Whether an entry's current commit has a finished review: the ones only a redo takes up. */
+function isFinished(e: Pick<QueueEntry, "verdict">): boolean {
+  return !START_VERDICTS.includes(e.verdict);
+}
 
 /** Whether the review of an entry's current commit was refused at the cap on restarts by edits. */
 function isCapped(e: Pick<QueueEntry, "verdict" | "detail">): boolean {
@@ -1405,9 +1416,7 @@ async function startAll(options: {
   // starts the review and begins the count again, which is the one thing a bulk start must not do
   // without being asked: an administrator starts it by name and so means it.
   const { drafts, capped, todo } = splitStartCandidates(q.entries, redo);
-  const finished = todo.filter(
-    (e) => e.verdict !== "not_reviewed" && e.verdict !== "could_not_decide",
-  );
+  const finished = todo.filter(isFinished);
   const incomplete = q.truncated || q.skipped.unreadable > 0;
   const common = {
     environment: q.environment,
@@ -1439,8 +1448,9 @@ async function startAll(options: {
         ),
       );
       for (const e of todo) {
+        const mark = isFinished(e) ? `  ${chalk.yellow(`finished: ${e.verdict}`)}` : "";
         console.log(
-          `  ${e.dataset_id} #${e.pr_number}  ${plain(e.author_login)}  ${chalk.dim(clip(e.title, 60))}`,
+          `  ${e.dataset_id} #${e.pr_number}  ${plain(e.author_login)}  ${chalk.dim(clip(e.title, 60))}${mark}`,
         );
       }
     }
@@ -1478,6 +1488,8 @@ async function startAll(options: {
         dataset_id: e.dataset_id,
         pr_number: e.pr_number,
         author_login: e.author_login,
+        // Under --redo, which of them have a finished review that would be spent again.
+        ...(redo ? { verdict: e.verdict } : {}),
       }));
       console.log(JSON.stringify({ ...common, dry_run: true, would_start: would }, null, 2));
     } else {
@@ -1495,21 +1507,23 @@ async function startAll(options: {
 
   const results: StartResult[] = [];
   let failed = 0;
+  // An older Worker ignores the flag. The first answer without the echo says so: it is kept like
+  // any other (the Worker may have started the commit, which has no review), the run stops there so
+  // that nothing more is asked of a Worker that cannot do what was asked, and the end reports both.
+  let redoIgnored = false;
   for (const e of todo) {
     const label = `${e.dataset_id} #${e.pr_number}`;
     try {
       const r = await startPrReview(e.dataset_id, e.pr_number, { redo });
-      if (redo && r.redo !== true) {
-        // An older Worker ignored the flag: stop at the first answer instead of going through the
-        // list, so what is reported is true and nothing more is asked of it.
-        (json ? console.error : console.log)(chalk.red(REDO_IGNORED));
-        process.exit(1);
-      }
       results.push({ ...r, dataset_id: e.dataset_id, pr_number: e.pr_number });
       if (!json) {
         console.log(
           `  ${label}  ${r.dispatched ? chalk.green(startedWord(r)) : chalk.yellow(notStartedText(r))}`,
         );
+      }
+      if (redo && r.redo !== true) {
+        redoIgnored = true;
+        break;
       }
     } catch (err) {
       failed++;
@@ -1526,7 +1540,13 @@ async function startAll(options: {
   }
 
   if (json) {
-    console.log(JSON.stringify({ ...common, results, failed }, null, 2));
+    console.log(
+      JSON.stringify(
+        { ...common, results, failed, ...(redoIgnored ? { redo_ignored: true } : {}) },
+        null,
+        2,
+      ),
+    );
   } else {
     const answered = results.filter(
       (r): r is StartReviewResponse & { dataset_id: string; pr_number: number } => "reason" in r,
@@ -1539,9 +1559,19 @@ async function startAll(options: {
       `${started} started, ${had} already had a review, ${other} not started, ${failed} failed`,
     );
     envNote(q.environment);
+    if (redoIgnored) {
+      const left = todo.length - results.length;
+      console.log(
+        chalk.red(
+          `${REDO_IGNORED} ${left} pull request${left === 1 ? " was" : "s were"} not tried.`,
+        ),
+      );
+    }
   }
+  // An answer about the Worker's version, not a fault in the command: no invitation to file a bug.
+  if (redoIgnored) markReportedExit();
   const faulted = results.some((r) => "reason" in r && !r.dispatched && START_FAULTS.has(r.reason));
-  if (failed > 0 || faulted) process.exit(1);
+  if (failed > 0 || faulted || redoIgnored) process.exit(1);
 }
 
 // -- approve ------------------------------------------------------------------------------------

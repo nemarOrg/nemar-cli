@@ -1169,7 +1169,7 @@ describe("start --redo wording", () => {
       redo: true,
     } satisfies StartReviewResponse);
     expect(text).toBe(
-      "not started: a review of this commit is running, and a redo waits until it reports (one that never reports is closed after 60 minutes)",
+      "not started: a review of this commit is running, and a redo waits until it reports or its time (about an hour) is up",
     );
   });
 

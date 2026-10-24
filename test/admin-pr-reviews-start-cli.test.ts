@@ -1005,15 +1005,42 @@ describe("nemar admin pr-reviews start --redo", () => {
     expect(r.exitCode).toBe(0);
     const help = r.stdout.replace(/\s+/g, " ");
     expect(help).toContain("--redo");
-    expect(help).toContain("a review that is running is never started again");
+    expect(help).toContain("is never started again, so a redo waits for it");
+    expect(help).toContain("A blocked contributor's pull request is not redone");
+    expect(help).toContain("A redo leaves the count of edits as it is");
     expect(help).toContain("costs a second run of up to two model calls");
+    expect(help).toContain("cannot be resumed");
+  });
+
+  test("--dry-run marks the finished reviews, in the text and in the JSON, and only under --redo", async () => {
+    finishedAndWaiting();
+
+    const text = await cli([...START, "--all", "--redo", "--dry-run"]);
+    expect(text.stdout).toMatch(/nm000203 #3 .*finished: pass/);
+    expect(text.stdout).not.toMatch(/nm000201 #1 .*finished/);
+
+    const json = await cli([...START, "--all", "--redo", "--dry-run", "--json"]);
+    const out = JSON.parse(json.stdout) as {
+      would_start: Array<{ pr_number: number; verdict?: string }>;
+    };
+    expect(out.would_start.find((e) => e.pr_number === 3)?.verdict).toBe("pass");
+    expect(out.would_start.find((e) => e.pr_number === 1)?.verdict).toBe("not_reviewed");
+
+    const plain = await cli([...START, "--all", "--dry-run", "--json"]);
+    const plainOut = JSON.parse(plain.stdout) as { would_start: Array<Record<string, unknown>> };
+    expect(plainOut.would_start.every((e) => !("verdict" in e))).toBe(true);
   });
 
   describe("a Worker that predates --redo ignores the flag, and the command says so", () => {
     let old: ReturnType<typeof Bun.serve>;
+    let startCalls = 0;
+    /** What the older Worker answers to a start: it never echoes `redo`. */
+    let answer: { dispatched: boolean; reason: string } = {
+      dispatched: false,
+      reason: "duplicate",
+    };
     beforeAll(() => {
-      // The real router answers every read; only the start is the older Worker's: it never echoes
-      // `redo`, and for a finished review it says duplicate.
+      // The real router answers every read; only the start is the older Worker's.
       old = Bun.serve({
         port: 0,
         fetch(req) {
@@ -1021,12 +1048,12 @@ describe("nemar admin pr-reviews start --redo", () => {
           if (url.pathname === "/notices") return Response.json({ notices: [] });
           if (url.pathname === "/datasets/facets") return Response.json({});
           if (req.method === "POST" && url.pathname.endsWith("/start")) {
+            startCalls++;
             return Response.json({
               environment: "production",
-              dispatched: false,
-              reason: "duplicate",
               review_id: 1,
               author_login: null,
+              ...answer,
             });
           }
           return handle(req, env());
@@ -1034,20 +1061,60 @@ describe("nemar admin pr-reviews start --redo", () => {
       });
     });
     afterAll(() => old.stop(true));
+    beforeEach(() => {
+      startCalls = 0;
+      answer = { dispatched: false, reason: "duplicate" };
+    });
+    const oldUrl = () => `http://127.0.0.1:${old.port}`;
 
-    test("by name: exit 1 with the explanation, not 'already has a review'", async () => {
+    test("by name, a finished review: what the Worker said, then the explanation, exit 1, no bug-report hint", async () => {
       finishedAndWaiting();
-      const r = await cli([...START, "nm000203", "3", "--redo"], `http://127.0.0.1:${old.port}`);
+      const r = await cli([...START, "nm000203", "3", "--redo"], oldUrl());
       expect(r.exitCode).toBe(1);
+      expect(r.stdout).toContain("already has a review");
       expect(r.stdout).toContain("This Worker does not know --redo yet");
-      expect(r.stdout).not.toContain("already has a review");
+      expect(r.stdout + r.stderr).not.toContain("--debug");
     });
 
-    test("--all: stops at the first answer with the explanation", async () => {
-      finishedAndWaiting();
-      const r = await cli([...START, "--all", "--redo", "--yes"], `http://127.0.0.1:${old.port}`);
+    test("by name, a commit with no review: the start the Worker made is reported, not hidden", async () => {
+      answer = { dispatched: true, reason: "dispatched" };
+      const r = await cli([...START, "nm000201", "1", "--redo"], oldUrl());
       expect(r.exitCode).toBe(1);
+      expect(r.stdout).toContain("started");
       expect(r.stdout).toContain("This Worker does not know --redo yet");
+      expect(r.stdout + r.stderr).not.toContain("--debug");
+    });
+
+    test("by name, --json keeps the Worker's answer and adds redo_ignored", async () => {
+      answer = { dispatched: true, reason: "dispatched" };
+      const r = await cli([...START, "nm000201", "1", "--redo", "--json"], oldUrl());
+      expect(r.exitCode).toBe(1);
+      expect(JSON.parse(r.stdout)).toMatchObject({
+        dispatched: true,
+        reason: "dispatched",
+        redo_ignored: true,
+      });
+    });
+
+    test("--all --redo stops after the first answer, reports it, and says how many were not tried", async () => {
+      finishedAndWaiting();
+      const r = await cli([...START, "--all", "--redo", "--yes"], oldUrl());
+      expect(r.exitCode).toBe(1);
+      expect(startCalls).toBe(1);
+      expect(r.stdout).toMatch(/already had a review|not started/);
+      expect(r.stdout).toContain("This Worker does not know --redo yet");
+      expect(r.stdout).toContain("1 pull request was not tried");
+      expect(r.stdout + r.stderr).not.toContain("--debug");
+    });
+
+    test("--all --redo --json prints the one document with the answer it got and redo_ignored", async () => {
+      finishedAndWaiting();
+      const r = await cli([...START, "--all", "--redo", "--yes", "--json"], oldUrl());
+      expect(r.exitCode).toBe(1);
+      expect(startCalls).toBe(1);
+      const out = JSON.parse(r.stdout) as { redo_ignored: boolean; results: unknown[] };
+      expect(out.redo_ignored).toBe(true);
+      expect(out.results).toHaveLength(1);
     });
   });
 });
