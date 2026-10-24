@@ -27,6 +27,8 @@ Everything in this section is designed and not yet built.
 
 **An upstream re-pull replays the delta between two pinned upstream tags onto NEMAR's `main` as one synthesized commit on `release/vN.0.0`, landed through a pull request; N.0.0 is a pure mirror of the upstream snapshot, and NEMAR's corrections follow as N.0.1.**
 
+`from_tag` is the upstream tag NEMAR's latest version mirrors, the `source_version` of its highest version row (decision 4), and `to_tag` is the upstream tag being pulled; both are tags, never a branch head (decision 10).
+
 ### 1. N.0.0 is a pure mirror, and upstream wins every conflict
 
 - The N.0.0 tree is upstream's tree at `to_tag` with NEMAR's standard edits applied, and nothing else outside the paths NEMAR owns.
