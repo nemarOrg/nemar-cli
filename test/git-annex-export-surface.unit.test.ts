@@ -16,8 +16,9 @@
  *   pass-through re-export and the deprecated createDataladDataset/
  *   isDataladDataset aliases), plus the declared addition of
  *   batchSetKeysAbsent in #1396, the counterpart that withdraws a presence
- *   claim the bucket cannot back, and of preflightBucketAnnexUuid in #1909,
- *   the #1320 check prepare runs before configuring nemar-s3.
+ *   claim the bucket cannot back, and of preflightBucketAnnexUuid,
+ *   fetchOriginAnnexBranch and annexUuidPreflightAction in #1909, the #1320
+ *   check prepare runs before configuring nemar-s3 and the Step 4b it reads.
  *
  * INTERNAL_WIRING lists symbols exported ONLY so sibling git-annex/* modules
  * can import them (declared in #908): not part of the CLI-facing surface.
@@ -84,11 +85,13 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "DEFAULT_S3_PARTSIZE",
     "NEMAR_S3_REMOTE_NAME",
     "annexRemoteExists",
+    "annexUuidPreflightAction",
     "awsCredentialEnv",
     "buildS3RemoteArgs",
     "clearAnnexCredentials",
     "configureS3Remote",
     "enableS3Remote",
+    "fetchOriginAnnexBranch",
     "getAnnexS3Remotes",
     "initOrEnableSpecialRemote",
     "markInheritedOpenNeuroRemotesIgnored",
@@ -287,6 +290,7 @@ const MONOLITH_EXPORTS = [
   "NEMAR_S3_REMOTE_NAME",
   "acceptGitHubInvitation",
   "annexRemoteExists",
+  "annexUuidPreflightAction",
   "awsCredentialEnv",
   "batchSetKeysAbsent",
   "batchSetKeysPresent",
@@ -312,6 +316,7 @@ const MONOLITH_EXPORTS = [
   "ensureGitAnnexInitialized",
   "ensureLocalMainBranch",
   "extractWhereisKeyUrl",
+  "fetchOriginAnnexBranch",
   "getAnnexS3Remotes",
   "getAnnexWhereisAll",
   "getCurrentBranch",

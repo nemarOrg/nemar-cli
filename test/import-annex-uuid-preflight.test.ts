@@ -11,7 +11,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { which } from "bun";
 import { classifyImportFailure } from "../backend/src/services/import-failure-cause";
@@ -19,6 +19,9 @@ import { decideRetryAction } from "../backend/src/services/import-retry";
 import { NEMAR_ANNEX_UUID_CONFLICT_MARKER } from "../shared/import-markers";
 import {
   NEMAR_S3_REMOTE_NAME,
+  type OriginAnnexState,
+  annexUuidPreflightAction,
+  fetchOriginAnnexBranch,
   preflightBucketAnnexUuid,
   uuidsNamedInRemoteLog,
 } from "../src/lib/git-annex/s3-remote";
@@ -94,13 +97,25 @@ function bucketHolds(nemarId: string, uuid: string): void {
   standin.putObject(BUCKET, `${nemarId}/objects/annex-uuid`, new TextEncoder().encode(`${uuid}\n`));
 }
 
-function preflight(repo: string, nemarId: string) {
+function preflight(repo: string, nemarId: string, originAnnex: OriginAnnexState = "absent") {
   return preflightBucketAnnexUuid(repo, {
     bucket: BUCKET,
     prefix: `${nemarId}/objects`,
     region: REGION,
+    originAnnex,
     env: awsEnv,
   });
+}
+
+/** A bare repository holding `repo`'s main and git-annex branches, as a dataset's origin would. */
+async function bareOriginOf(repo: string): Promise<string> {
+  n += 1;
+  const bare = join(scratch.root, `origin-${n}`);
+  mkdirSync(bare, { recursive: true });
+  await run(["git", "init", "-q", "--bare", "-b", "main"], bare);
+  await run(["git", "commit", "-q", "--allow-empty", "-m", "init"], repo);
+  await run(["git", "push", "-q", bare, "main", "git-annex"], repo);
+  return bare;
 }
 
 const OTHER_UUID = "0e6c1f3a-9b1d-4c2e-8f00-000000000001";
@@ -124,7 +139,9 @@ describe.skipIf(!awsInstalled)("the bucket's annex-uuid against the git-annex br
     expect(result.kind).toBe("conflict");
     if (result.kind !== "conflict") return;
     expect(result.detail).toContain(`bucket ${OTHER_UUID}; branch none.`);
-    expect(result.detail).toContain("aws s3 rm s3://nemar/on001003/objects/annex-uuid");
+    expect(result.detail).toContain(
+      `Once no clone records ${OTHER_UUID}: aws s3 rm s3://nemar/on001003/objects/annex-uuid`,
+    );
     expect(result.detail).not.toContain("Delete nothing");
 
     // The line the Worker receives, as prepare raises it: annex_uuid_conflict, parked at once.
@@ -172,6 +189,45 @@ describe.skipIf(!awsInstalled)("the bucket's annex-uuid against the git-annex br
     expect(result.branchUuids.sort()).toEqual([a.uuid, b.uuid].sort());
   }, 60_000);
 
+  test("a failed Step 4b is unchecked, never a conflict, and prepare is told to warn and go on", async () => {
+    // Without origin's branch merged, the clone's branch cannot say which remote the bucket is.
+    const repo = await annexRepo("unmerged");
+    bucketHolds("on001007", OTHER_UUID);
+    const result = await preflight(repo, "on001007", "failed");
+    expect(result.kind).toBe("unchecked");
+    const action = annexUuidPreflightAction(result);
+    expect("warn" in action && action.warn).toContain("could not be fetched or merged");
+    expect("refuse" in action).toBe(false);
+  }, 60_000);
+
+  test("a git failure reading the branch is unchecked, not 'no remote'", async () => {
+    const { repo } = await repoWithRemote();
+    bucketHolds("on001008", OTHER_UUID);
+    // The blob holding remote.log goes missing: git can list it and cannot read it.
+    const blob = (await run(["git", "rev-parse", "git-annex:remote.log"], repo)).stdout.trim();
+    const objectPath = join(repo, ".git", "objects", blob.slice(0, 2), blob.slice(2));
+    chmodSync(objectPath, 0o644);
+    rmSync(objectPath);
+    const result = await preflight(repo, "on001008");
+    expect(result.kind).toBe("unchecked");
+    expect(result.kind === "unchecked" && result.reason).toContain("reading remote.log failed");
+  }, 60_000);
+
+  test("origin's branch exists and records no nemar-s3: unchecked, never 'remove the marker'", async () => {
+    // A clone of a dataset whose origin has a git-annex branch without the remote. That branch
+    // should have named it; not finding it is not evidence the marker is stale.
+    const source = await annexRepo("origin-without-remote");
+    const bare = await bareOriginOf(source);
+    n += 1;
+    const clone = join(scratch.root, `clone-${n}`);
+    await run(["git", "clone", "-q", bare, clone]);
+    bucketHolds("on001009", OTHER_UUID);
+    for (const state of ["merged", "absent"] as const) {
+      const result = await preflight(clone, "on001009", state);
+      expect(result.kind).toBe("unchecked");
+    }
+  }, 60_000);
+
   test("a bucket that cannot be asked is unchecked, never clear and never a conflict", async () => {
     const { repo } = await repoWithRemote();
     bucketHolds("on001006", OTHER_UUID);
@@ -183,6 +239,62 @@ describe.skipIf(!awsInstalled)("the bucket's annex-uuid against the git-annex br
     expect(reading.kind).toBe("unchecked");
     standin.clearFaults();
   }, 60_000);
+});
+
+describe("Step 4b says which of merged, absent and failed it reached", () => {
+  test("an origin without a git-annex branch is absent; an unreachable one is failed", async () => {
+    const withBranch = await annexRepo("has-branch");
+    const bareWith = await bareOriginOf(withBranch);
+    n += 1;
+    const withoutBranch = join(scratch.root, `origin-bare-empty-${n}`);
+    mkdirSync(withoutBranch, { recursive: true });
+    await run(["git", "init", "-q", "--bare", "-b", "main"], withoutBranch);
+
+    const clone = await annexRepo("step4b");
+    await run(["git", "remote", "add", "origin", bareWith], clone);
+    expect((await fetchOriginAnnexBranch(clone)).state).toBe("merged");
+    await run(["git", "remote", "set-url", "origin", withoutBranch], clone);
+    expect((await fetchOriginAnnexBranch(clone)).state).toBe("absent");
+    await run(["git", "remote", "set-url", "origin", join(scratch.root, "no-such-origin")], clone);
+    const failed = await fetchOriginAnnexBranch(clone);
+    expect(failed.state).toBe("failed");
+    expect(failed.error).toBeTruthy();
+  }, 60_000);
+
+  // Directory permissions do not bind root, so the failure cannot be induced there.
+  test.skipIf(process.getuid?.() === 0)(
+    "a fetch that lands and a merge that fails is failed, not merged",
+    async () => {
+      const source = await annexRepo("merge-source");
+      const bare = await bareOriginOf(source);
+      const clone = await annexRepo("merge-target");
+      await run(["git", "remote", "add", "origin", bare], clone);
+      // git-annex cannot write its own state, so `git annex merge` fails after the fetch succeeds.
+      const annexDir = join(clone, ".git", "annex");
+      chmodSync(annexDir, 0o555);
+      try {
+        const result = await fetchOriginAnnexBranch(clone);
+        expect(result.state).toBe("failed");
+      } finally {
+        chmodSync(annexDir, 0o755);
+      }
+    },
+    60_000,
+  );
+
+  test("what prepare does with each answer", () => {
+    expect(annexUuidPreflightAction({ kind: "clear", bucketUuid: null })).toEqual({
+      proceed: true,
+    });
+    expect(
+      annexUuidPreflightAction({
+        kind: "conflict",
+        bucketUuid: OTHER_UUID,
+        branchUuids: [],
+        detail: "the detail",
+      }),
+    ).toEqual({ refuse: "the detail" });
+  });
 });
 
 describe("which uuids remote.log names nemar-s3", () => {

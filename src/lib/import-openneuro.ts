@@ -41,8 +41,10 @@ import { ensureLocalMainBranch } from "./git-annex/repo-state.js";
 import { runCommand } from "./git-annex/run-command.js";
 import {
   type S3Credentials,
+  annexUuidPreflightAction,
   awsCredentialEnv,
   configureS3Remote,
+  fetchOriginAnnexBranch,
   markInheritedOpenNeuroRemotesIgnored,
   preflightBucketAnnexUuid,
 } from "./git-annex/s3-remote.js";
@@ -1405,18 +1407,13 @@ async function prepareImportSteps(
   // fast-forward. Best-effort: a brand-new repo (first-ever import) has no
   // git-annex branch to fetch yet, so this is a silent no-op on the common
   // path.
-  const annexFetchResult = await runCommand(["git", "fetch", "origin", "git-annex"], {
-    cwd: datasetPath,
-  });
-  if (annexFetchResult.exitCode === 0) {
-    const annexMergeResult = await runCommand(["git", "annex", "merge"], { cwd: datasetPath });
-    if (annexMergeResult.exitCode !== 0) {
-      console.log(
-        chalk.yellow(
-          `  Warning: found existing NEMAR git-annex state for ${nemarId} but could not merge it (${annexMergeResult.stderr.trim()}). A retry may register the S3 remote under a new UUID; investigate before re-running finalize.`,
-        ),
-      );
-    }
+  const originAnnex = await fetchOriginAnnexBranch(datasetPath);
+  if (originAnnex.state === "failed") {
+    console.log(
+      chalk.yellow(
+        `  Warning: could not fetch or merge ${nemarId}'s existing git-annex state (${originAnnex.error}). A retry may register the S3 remote under a new UUID; investigate before re-running finalize.`,
+      ),
+    );
   }
 
   // Step 4c (re-import only, #990, epic #989 Phase 2; #993, ADR 0111 decision 10): base this
@@ -1451,7 +1448,7 @@ async function prepareImportSteps(
       ),
     );
   }
-  if (didResetMain && annexFetchResult.exitCode !== 0) {
+  if (didResetMain && originAnnex.state !== "merged") {
     // The dead marks a correction left (ADR 0085, ADR 0089) live in that branch; without them only
     // the cut to the tree keeps a replaced key out of the copy. Said, not refused: the cut holds.
     console.log(
@@ -1510,23 +1507,20 @@ async function prepareImportSteps(
     // #1320: an annex-uuid at the prefix that the git-annex branch (merged in Step 4b) does not
     // record as nemar-s3 makes initremote/enableremote fail on this attempt and on every retry.
     // Refused here, before the remote is touched, naming both uuids and the recovery that fits.
-    const preflight = await preflightBucketAnnexUuid(datasetPath, {
-      bucket: S3_BUCKET,
-      prefix: `${nemarId}/objects`,
-      region: S3_REGION,
-      env: awsCredentialEnv(s3Creds),
-    });
-    if (preflight.kind === "conflict") {
+    const preflight = annexUuidPreflightAction(
+      await preflightBucketAnnexUuid(datasetPath, {
+        bucket: S3_BUCKET,
+        prefix: `${nemarId}/objects`,
+        region: S3_REGION,
+        originAnnex: originAnnex.state,
+        env: awsCredentialEnv(s3Creds),
+      }),
+    );
+    if ("refuse" in preflight) {
       s3Spinner.stop();
-      throw new ImportRefused(NEMAR_ANNEX_UUID_CONFLICT_MARKER, preflight.detail);
+      throw new ImportRefused(NEMAR_ANNEX_UUID_CONFLICT_MARKER, preflight.refuse);
     }
-    if (preflight.kind === "unchecked") {
-      console.log(
-        chalk.yellow(
-          `  Warning: could not compare the bucket's annex-uuid with the git-annex branch (${preflight.reason}); configuring the remote as before`,
-        ),
-      );
-    }
+    if ("warn" in preflight) console.log(chalk.yellow(`  ${preflight.warn}`));
     const s3Result = await configureS3Remote(
       datasetPath,
       { name: "nemar-s3", bucket: S3_BUCKET, prefix: `${nemarId}/objects`, region: S3_REGION },
