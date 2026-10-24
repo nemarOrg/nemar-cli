@@ -24,6 +24,7 @@
  * logic is exhaustively unit-tested without D1 or GitHub.
  */
 
+import { OPENNEURO_MIRROR_LAG_MARKER } from "../../../shared/import-markers.js";
 import { auditLogStatement } from "../db/audit-log.js";
 import type { Bindings } from "../types/bindings.js";
 import { parseSqliteUtc } from "./auto-import.js";
@@ -33,6 +34,10 @@ import { isNonProductionEnv } from "./environment.js";
 import { getDatasetsToken } from "./github-auth.js";
 import { triggerOpenNeuroOnboard } from "./github.js";
 import { isDeterministicScrubRefusal } from "./import-failure-cause.js";
+import {
+  type ImportFailureIssueDeps,
+  fileImportFailureIssueIfNeeded,
+} from "./import-failure-issue.js";
 import type { DatasetVersionIntegrityResult } from "./import-integrity.js";
 import { integrityAuditSummary, verifyDatasetVersionS3 } from "./import-integrity.js";
 import { OPENNEURO_UPSTREAM_MARKER } from "./import-recovery.js";
@@ -70,7 +75,7 @@ export type RetryDecision =
   | { action: "recover" }
   | {
       action: "blocklist";
-      reason: "upstream_403_after_window" | "no_source" | "identifier_scrub_refused";
+      reason: "upstream_403_after_window" | "no_source" | "identifier_scrub_refused" | "mirror_lag";
     }
   | { action: "dispatch"; nextRecoveryAttempt: number; nextRetryAt: number };
 
@@ -89,6 +94,11 @@ export type RetryDecision =
  *   4. Still incomplete, past the window, AND upstream-inaccessible -> park
  *      on the blocklist (`upstream_403_after_window`) instead of dispatching
  *      forever against a dataset OpenNeuro itself can't serve.
+ *   5. Past the window AND still refused for a mirror lag (ADR 0111 decision
+ *      10) -> park as `mirror_lag`. A lag is transient and retried, but a tag
+ *      that has not reached OpenNeuro's GitHub mirror in 14 days is not going
+ *      to by itself; the sweep files one admin issue when it parks one (lead
+ *      ruling, 2026-10-23).
  *
  * Pure -- `firstIncompleteAtMs` and `now` are both resolved by the caller
  * (COALESCE(first_incomplete_at, now) parsed to epoch ms) so the window
@@ -116,6 +126,9 @@ export function decideRetryAction(args: {
   if (pastWindow && upstreamInaccessible) {
     return { action: "blocklist", reason: "upstream_403_after_window" };
   }
+  if (pastWindow && isMirrorLag(args.lastError)) {
+    return { action: "blocklist", reason: "mirror_lag" };
+  }
 
   const nextRecoveryAttempt = args.recoveryAttempts + 1;
   return {
@@ -123,6 +136,11 @@ export function decideRetryAction(args: {
     nextRecoveryAttempt,
     nextRetryAt: args.now + retryBackoffMs(nextRecoveryAttempt),
   };
+}
+
+/** True when `last_error` carries the tag pin's mirror-lag refusal (ADR 0111 decision 10). */
+export function isMirrorLag(lastError: string | null | undefined): boolean {
+  return (lastError ?? "").includes(OPENNEURO_MIRROR_LAG_MARKER);
 }
 
 export interface RetryCandidateInput {
@@ -195,12 +213,19 @@ export function decideMaintainerNotification(args: {
 /**
  * Retry candidates: `incomplete` / `failed` rows always qualify; `quarantined`
  * rows qualify ONLY when last_error carries the upstream-inaccessible marker
- * -- every other quarantine reason (has_doi, made_public, system_owned,
- * has_version, reached_complete, not_found_dataset, or a partial-cascade
- * rollback failure) means something real already exists or NEMAR-side state
- * needs a human, so those are left for manual review, never auto-retried.
- * `rolled_back` and `complete` are excluded by the status IN list; blocklisted
- * rows are excluded (they live in BLOCKLIST_RECHECK_QUERY instead).
+ * or the mirror-lag marker -- every other quarantine reason (has_doi,
+ * made_public, system_owned, has_version, reached_complete,
+ * not_found_dataset, or a partial-cascade rollback failure) means something
+ * real already exists or NEMAR-side state needs a human, so those are left for
+ * manual review, never auto-retried. `rolled_back` and `complete` are excluded
+ * by the status IN list; blocklisted rows are excluded (they live in
+ * BLOCKLIST_RECHECK_QUERY instead).
+ *
+ * Both markers are matched in `last_error`, never in the quarantine reason: a
+ * row an older Worker quarantined as `not_found_dataset` while it carried the
+ * mirror-lag marker (a CLI released before its Worker) is picked up all the
+ * same once this query is deployed. Neither marker holds `%` or `_`, so LIKE
+ * reads both literally.
  */
 export const IMPORT_RETRY_CANDIDATES_QUERY = `
   SELECT dataset_id, source_id, recovery_attempts, first_incomplete_at, last_error
@@ -208,7 +233,9 @@ export const IMPORT_RETRY_CANDIDATES_QUERY = `
    WHERE blocklisted = 0
      AND status IN ('incomplete', 'failed', 'quarantined')
      AND (next_retry_at IS NULL OR next_retry_at <= ?)
-     AND (status != 'quarantined' OR last_error LIKE '%${OPENNEURO_UPSTREAM_MARKER}%')
+     AND (status != 'quarantined'
+          OR last_error LIKE '%${OPENNEURO_UPSTREAM_MARKER}%'
+          OR last_error LIKE '%${OPENNEURO_MIRROR_LAG_MARKER}%')
    ORDER BY updated_at ASC
    LIMIT ?`;
 
@@ -424,6 +451,149 @@ export async function recoverRow(db: D1Database, datasetId: string): Promise<voi
 }
 
 /**
+ * Transport seams for {@link applyRetryPlan}, for tests: the dispatch and the
+ * issue write reach GitHub, and nothing else is replaced. The one real caller
+ * (`sweepImportRetries`) omits them.
+ */
+export interface RetryPlanDeps {
+  token?: (env: Bindings) => Promise<string>;
+  dispatch?: (sourceId: string, pat: string) => Promise<void>;
+  issueDeps?: ImportFailureIssueDeps;
+}
+
+/**
+ * Act on a tick's plan: recover, park (blocklist), or re-dispatch each item, and
+ * file the one admin issue a parked mirror lag gets. Split out of
+ * {@link sweepImportRetries} so the decisions' effects on D1 are testable: the
+ * sweep itself runs only in production, where the S3 reads it starts with cannot
+ * be pointed at a stand-in.
+ */
+export async function applyRetryPlan(
+  env: Bindings,
+  plan: RetryPlanItem[],
+  now: number,
+  deps: RetryPlanDeps = {},
+): Promise<{
+  recovered: number;
+  blocklisted: number;
+  dispatched: number;
+  newlyBlocklisted: Array<{ datasetId: string; sourceId: string | null }>;
+}> {
+  const token = deps.token ?? getDatasetsToken;
+  const dispatch =
+    deps.dispatch ?? ((sourceId: string, pat: string) => triggerOpenNeuroOnboard(sourceId, pat));
+  const newlyBlocklisted: Array<{ datasetId: string; sourceId: string | null }> = [];
+  const newlyParkedMirrorLag: Array<{ datasetId: string; sourceId: string }> = [];
+  let recovered = 0;
+  let blocklisted = 0;
+  let dispatched = 0;
+
+  let pat: string | null = null;
+  for (const item of plan) {
+    if (item.decision.action === "recover") {
+      // Already stamped at verify time, by the sweep that built the plan (#980) -- no re-stamp here.
+      await recoverRow(env.DB, item.datasetId);
+      recovered++;
+      continue;
+    }
+    if (item.decision.action === "blocklist") {
+      const upd = await env.DB.prepare(
+        `UPDATE import_jobs
+            SET blocklisted = 1,
+                blocklist_reason = ?,
+                next_retry_at = ?,
+                updated_at = datetime('now')
+          WHERE dataset_id = ?`,
+      )
+        .bind(item.decision.reason, nowSqlite(now + BLOCKLIST_RECHECK_MS), item.datasetId)
+        .run();
+      if ((upd.meta.changes ?? 0) === 0) {
+        console.error(`[import-retry] blocklist UPDATE matched 0 rows for ${item.datasetId}`);
+      }
+      await writeAudit(env.DB, "import_blocklisted", item.datasetId, {
+        reason: item.decision.reason,
+      });
+      blocklisted++;
+      if (item.decision.reason === "upstream_403_after_window") {
+        newlyBlocklisted.push({ datasetId: item.datasetId, sourceId: item.sourceId });
+      }
+      if (item.decision.reason === "mirror_lag" && item.sourceId) {
+        newlyParkedMirrorLag.push({ datasetId: item.datasetId, sourceId: item.sourceId });
+      }
+      continue;
+    }
+    // dispatch
+    if (!item.sourceId) continue; // planRetryTick never emits dispatch without a source_id
+    try {
+      pat ??= await token(env);
+      await dispatch(item.sourceId, pat);
+      const upd = await env.DB.prepare(
+        `UPDATE import_jobs
+            SET recovery_attempts = ?,
+                first_incomplete_at = COALESCE(first_incomplete_at, datetime('now')),
+                next_retry_at = ?,
+                updated_at = datetime('now')
+          WHERE dataset_id = ?`,
+      )
+        .bind(
+          item.decision.nextRecoveryAttempt,
+          nowSqlite(item.decision.nextRetryAt),
+          item.datasetId,
+        )
+        .run();
+      if ((upd.meta.changes ?? 0) === 0) {
+        // The dispatch already fired (just above), so a
+        // 0-row match here means recovery_attempts/next_retry_at won't
+        // advance even though the workflow is running -- surface it rather
+        // than silently under-counting the retry budget.
+        console.error(
+          `[import-retry] dispatch-tracking UPDATE matched 0 rows for ${item.datasetId}`,
+        );
+      }
+      await writeAudit(env.DB, "import_retry_dispatched", item.datasetId, {
+        attempt: item.decision.nextRecoveryAttempt,
+      });
+      dispatched++;
+    } catch (err) {
+      console.error(
+        `[import-retry] dispatch failed for ${item.datasetId}:`,
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+  }
+
+  // A parked mirror lag gets its one admin issue here: the failure callback deliberately files
+  // none for it (shouldFileImportFailureIssue), and no mail goes out per attempt. Best-effort, as
+  // every issue write is; the row is parked whether or not the issue lands, and the blocklist is
+  // listed by `nemar admin import status --blocklisted`.
+  for (const parked of newlyParkedMirrorLag) {
+    try {
+      await fileImportFailureIssueIfNeeded(
+        env.DB,
+        env,
+        {
+          datasetId: parked.datasetId,
+          sourceId: parked.sourceId,
+          stage: "prepare",
+          errorMessage: null,
+          workflowRunUrl: null,
+          resultingStatus: "blocklisted",
+          parked: true,
+        },
+        deps.issueDeps,
+      );
+    } catch (err) {
+      console.error(
+        `[import-retry] mirror-lag issue for ${parked.datasetId} failed:`,
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+  }
+
+  return { recovered, blocklisted, dispatched, newlyBlocklisted };
+}
+
+/**
  * Prod-only cron sweep: reclassify, then retry/blocklist eligible candidates,
  * then re-check blocklisted rows. Defense-in-depth guard mirrors
  * archiveRetrySweep/reconcileReservedVersionDois -- the dev/staging D1 is a
@@ -495,81 +665,11 @@ export async function sweepImportRetries(env: Bindings): Promise<void> {
 
   const plan = planRetryTick(inputs, { now, maxDispatches: MAX_RECOVERY_DISPATCHES_PER_TICK });
 
-  const newlyBlocklisted: Array<{ datasetId: string; sourceId: string | null }> = [];
-  let recovered = 0;
-  let blocklisted = 0;
-  let dispatched = 0;
-
-  let pat: string | null = null;
-  for (const item of plan) {
-    if (item.decision.action === "recover") {
-      // Already stamped above at verify time (#980) -- no re-stamp here.
-      await recoverRow(env.DB, item.datasetId);
-      recovered++;
-      continue;
-    }
-    if (item.decision.action === "blocklist") {
-      const upd = await env.DB.prepare(
-        `UPDATE import_jobs
-            SET blocklisted = 1,
-                blocklist_reason = ?,
-                next_retry_at = ?,
-                updated_at = datetime('now')
-          WHERE dataset_id = ?`,
-      )
-        .bind(item.decision.reason, nowSqlite(now + BLOCKLIST_RECHECK_MS), item.datasetId)
-        .run();
-      if ((upd.meta.changes ?? 0) === 0) {
-        console.error(`[import-retry] blocklist UPDATE matched 0 rows for ${item.datasetId}`);
-      }
-      await writeAudit(env.DB, "import_blocklisted", item.datasetId, {
-        reason: item.decision.reason,
-      });
-      blocklisted++;
-      if (item.decision.reason === "upstream_403_after_window") {
-        newlyBlocklisted.push({ datasetId: item.datasetId, sourceId: item.sourceId });
-      }
-      continue;
-    }
-    // dispatch
-    if (!item.sourceId) continue; // planRetryTick never emits dispatch without a source_id
-    try {
-      pat ??= await getDatasetsToken(env);
-      await triggerOpenNeuroOnboard(item.sourceId, pat);
-      const upd = await env.DB.prepare(
-        `UPDATE import_jobs
-            SET recovery_attempts = ?,
-                first_incomplete_at = COALESCE(first_incomplete_at, datetime('now')),
-                next_retry_at = ?,
-                updated_at = datetime('now')
-          WHERE dataset_id = ?`,
-      )
-        .bind(
-          item.decision.nextRecoveryAttempt,
-          nowSqlite(item.decision.nextRetryAt),
-          item.datasetId,
-        )
-        .run();
-      if ((upd.meta.changes ?? 0) === 0) {
-        // The dispatch already fired (triggerOpenNeuroOnboard above), so a
-        // 0-row match here means recovery_attempts/next_retry_at won't
-        // advance even though the workflow is running -- surface it rather
-        // than silently under-counting the retry budget.
-        console.error(
-          `[import-retry] dispatch-tracking UPDATE matched 0 rows for ${item.datasetId}`,
-        );
-      }
-      await writeAudit(env.DB, "import_retry_dispatched", item.datasetId, {
-        attempt: item.decision.nextRecoveryAttempt,
-      });
-      dispatched++;
-    } catch (err) {
-      console.error(
-        `[import-retry] dispatch failed for ${item.datasetId}:`,
-        err instanceof Error ? err.message : String(err),
-      );
-    }
-  }
+  const { recovered, blocklisted, dispatched, newlyBlocklisted } = await applyRetryPlan(
+    env,
+    plan,
+    now,
+  );
 
   // Blocklist slow re-check: cheap S3-only re-verify, no GitHub dispatch.
   let recheckRows: CandidateRow[] = [];

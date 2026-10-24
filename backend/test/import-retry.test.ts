@@ -11,6 +11,7 @@
 
 import type { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
+import { OPENNEURO_MIRROR_LAG_MARKER } from "../../shared/import-markers";
 import { OPENNEURO_UPSTREAM_MARKER } from "../src/services/import-recovery";
 import {
   BLOCKLIST_RECHECK_QUERY,
@@ -130,6 +131,29 @@ describe("decideRetryAction", () => {
       });
       expect(decision.action).toBe("dispatch");
     }
+  });
+
+  test("a mirror lag is retried for its whole window, then parked as mirror_lag (ADR 0111)", () => {
+    const lag = `${OPENNEURO_MIRROR_LAG_MARKER} ds004362: upstream tag 1.0.2 is not on github.com/OpenNeuroDatasets/ds004362 yet. Nothing was created; the retry engine retries it.`;
+    const hour = 60 * 60 * 1000;
+    expect(
+      decideRetryAction({
+        ...base,
+        lastError: lag,
+        firstIncompleteAtMs: base.now - (RETRY_WINDOW_MS - hour),
+      }).action,
+    ).toBe("dispatch");
+    expect(
+      decideRetryAction({
+        ...base,
+        lastError: lag,
+        firstIncompleteAtMs: base.now - RETRY_WINDOW_MS,
+      }),
+    ).toEqual({ action: "blocklist", reason: "mirror_lag" });
+    // Never parked early, however many times it has been tried.
+    expect(decideRetryAction({ ...base, lastError: lag, recoveryAttempts: 40 }).action).toBe(
+      "dispatch",
+    );
   });
 
   test("dispatch bumps recoveryAttempts and computes next_retry_at via retryBackoffMs", () => {
@@ -408,6 +432,22 @@ describe("IMPORT_RETRY_CANDIDATES_QUERY", () => {
     });
     insertJob(db, { dataset_id: "on000005", status: "quarantined", last_error: null });
     expect(candidateIds(db)).toEqual(["on000001"]);
+  });
+
+  test("a quarantined mirror lag qualifies too, whatever reason recovery gave it", () => {
+    const db = freshDb();
+    const lag = `${OPENNEURO_MIRROR_LAG_MARKER} ds000001: upstream tag 1.0.2 is not on github.com/OpenNeuroDatasets/ds000001 yet. Nothing was created; the retry engine retries it.`;
+    // What this Worker writes: recovery keeps the CLI's line (ADR 0051).
+    insertJob(db, { dataset_id: "on000001", status: "quarantined", last_error: lag });
+    // A CLI released before its Worker: an older Worker quarantined the same refusal as
+    // not_found_dataset, and kept the same line. The query reads the line, so it is picked up.
+    insertJob(db, { dataset_id: "on000002", status: "quarantined", last_error: lag });
+    insertJob(db, {
+      dataset_id: "on000003",
+      status: "quarantined",
+      last_error: "quarantined: not_found_dataset",
+    });
+    expect(candidateIds(db).sort()).toEqual(["on000001", "on000002"]);
   });
 });
 

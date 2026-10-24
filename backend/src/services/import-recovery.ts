@@ -9,6 +9,7 @@
  * without DB/network.
  */
 
+import { OPENNEURO_MIRROR_LAG_MARKER } from "../../../shared/import-markers.js";
 import { auditLogStatement } from "../db/audit-log.js";
 import { SYSTEM_USER_ID } from "../lib/constants.js";
 import type { Bindings } from "../types/bindings.js";
@@ -70,7 +71,8 @@ export type ImportRecoveryDecision =
         | "has_doi"
         | "made_public"
         | "has_version"
-        | "upstream_inaccessible";
+        | "upstream_inaccessible"
+        | "mirror_lag";
     };
 
 /**
@@ -110,6 +112,12 @@ export function decideImportRecovery(s: ImportGuardState): ImportRecoveryDecisio
  * listable `upstream_inaccessible` reason rather than roll back or mislabel it
  * as a generic prepare miss, since it is an OpenNeuro-side problem, not a NEMAR
  * bug. Otherwise defer to decideImportRecovery. Pure -- no I/O.
+ *
+ * A mirror lag (ADR 0111 decision 10) overrides it the same way, as
+ * `mirror_lag`. It matters more here than for the upstream case: prepare
+ * refuses a lagging tag BEFORE it creates the dataset, so the leftover-state
+ * rule would answer `not_found_dataset`, which no engine retries -- and a
+ * transient refusal would be parked on its first occurrence.
  */
 export function classifyRecovery(
   lastError: string | null,
@@ -118,8 +126,19 @@ export function classifyRecovery(
   if ((lastError ?? "").includes(OPENNEURO_UPSTREAM_MARKER)) {
     return { action: "quarantine", reason: "upstream_inaccessible" };
   }
+  if ((lastError ?? "").includes(OPENNEURO_MIRROR_LAG_MARKER)) {
+    return { action: "quarantine", reason: "mirror_lag" };
+  }
   return decideImportRecovery(state);
 }
+
+/**
+ * Quarantine reasons that send no admin mail. A mirror lag usually clears within minutes of a new
+ * snapshot and is retried by the retry engine for its whole window; mailing every occurrence would
+ * be mail about nothing. The one signal it gets is an issue when the engine parks it (lead ruling,
+ * 2026-10-23). Exported for the test that pins it.
+ */
+export const QUARANTINE_REASONS_WITHOUT_MAIL: ReadonlySet<string> = new Set(["mirror_lag"]);
 
 function isAutoRollbackEnabled(env: Bindings): boolean {
   return (env.IMPORT_AUTO_ROLLBACK ?? "").trim().toLowerCase() === "true";
@@ -314,7 +333,9 @@ export async function runImportRecovery(
     decision,
     autoRollbackEnabled: isAutoRollbackEnabled(env),
   });
-  await alertAdmins(db, env, datasetId, decision.reason, job);
+  if (!QUARANTINE_REASONS_WITHOUT_MAIL.has(decision.reason)) {
+    await alertAdmins(db, env, datasetId, decision.reason, job);
+  }
   console.warn(`[import-recovery] quarantined ${datasetId} (${decision.reason})`);
   return "quarantined";
 }
