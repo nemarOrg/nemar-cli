@@ -313,6 +313,71 @@ Outside production only `xx` datasets are re-pulled (decision 6), and nothing sa
 The parser takes the `ds` as an argument, but the insert sites and the backfill handle `on######` only.
 Whether an `xx` fixture maps through `import_jobs.source_id` is a Phase 4 and 5 question.
 
+## Amendment 2026-10-23 (#1911): Phase 5 builds the plan, and five readings are settled
+
+Epic #1046, Phase 5.
+`nemar admin repull plan <id>` is built: a read-only plan, written to a file under its digest, that Phase 6's `nemar admin repull execute` will take.
+This section records the owner's and the lead's rulings of 2026-10-23 that the decision text left open, and two corrections to it.
+The decision text above is unchanged.
+
+### The command is `nemar admin repull plan <id>`, then `nemar admin repull execute`
+
+Decision 2 says `nemar admin repull <id>` is a dry run by default and `--execute` takes `--plan <file>`.
+The built shape is two subcommands: `plan` makes the plan and never writes anywhere but its scratch directory and the plan file, and `execute` (Phase 6) takes the plan file.
+The plan is read-only by construction, not by convention: every git subprocess goes through a guard that allows `clone`, `fetch`, `ls-remote`, `cat-file`, `ls-tree`, `rev-parse`, `rev-list` and `for-each-ref` only, every HTTP request through one that allows GET and HEAD only, and the one `aws` call, when asked for, is `s3api list-objects-v2`.
+The plan file is mode 0600, because a path can itself be an identifier, and the default output holds counts and no path or key.
+Its digest is the sha256 of the plan body's canonical JSON; the time, the environment and the preflight answers are outside the body, so the same remotes always give the same digest.
+Exit 0 means the plan is executable, 3 that it was made and is not, and 1 that nothing could be planned.
+
+### `CHANGES` is upstream-owned, except ADR 0085's privacy sentence (correction)
+
+Decision 1 says "`CHANGES` is upstream-owned, and NEMAR never writes it".
+ADR 0085's correction does write it: its git plan appends one `changeLogEntry` sentence to `CHANGES` in every rewritten commit.
+Read literally, decision 1 would make every corrected dataset's `CHANGES` unexplained, and decision 1's ledger rule would then refuse every re-pull of it.
+The ruling: `CHANGES` stays upstream-owned, and the privacy sentence is a ledger edit, a standard edit like the provenance sentence.
+A plan recognizes NEMAR's `CHANGES` as upstream's text followed by one or more sentences that `changeLogEntry` itself rebuilds byte for byte, and N.0.0's `CHANGES` is upstream's new text with the same sentences appended.
+Any other NEMAR change to `CHANGES` is unexplained.
+
+### `SourceDatasets` merges three-way
+
+"Other `SourceDatasets` entries are kept from both sides" means a three-way merge of the entries as a set, by canonical value: an entry either side added is kept, an entry upstream removed is not brought back, and an entry NEMAR removed stays removed.
+The entry naming the dataset's own `ds` is NEMAR's and is replaced, as decision 1 says, by `{DOI: "doi:10.18112/openneuro.<ds>.v<to_tag>", URL, Version: to_tag}`.
+An entry of any shape, `null` included, is merged as a value and never passed to `applyConceptDoiToDescription`, which throws on a `null` entry.
+
+### A mirror whose tag is unknown gets a dry run only
+
+Decision 4 says a mirror whose tag is unknown is never re-pulled.
+`plan` refuses one with `from-tag-unknown`, and `--from-tag` on one makes the plan with the check refused as `from-tag-not-recorded`: it is shown, it is never executable, and its lineage is marked not recordable, so Phase 6 never records `lineage` from it.
+`--from-tag` that disagrees with a recorded tag refuses as `from-tag-disagrees`.
+A highest version row that was never examined (both columns NULL), or rows that cannot be read at all (a dev worker's 404), is not unknown: the plan reads that version's tagged `dataset_description.json` from its own clone with `sourceSnapshotOf`, the file and the parser the backfill would use, and says so in `from_tag_source` (`tagged-description`).
+
+### Legacy badges, an inherited `.gitattributes` and un-annexed root metadata are explained
+
+The standard edits a plan recognizes include the forms early imports and publications left:
+a README under one or more DOI badges in either spelling NEMAR has written (the shields.io form `buildDoiBadge` makes, and the Zenodo form it made before #1182), each counted only when its image and its link name the same DOI;
+an inherited `.gitattributes` with its `annex.largefiles` attributes stripped (ADR 0060), and a git-held file NEMAR's policy annexed whose key hashes upstream's blob;
+and root metadata upstream annexed that the import un-annexed, whose bytes hash to upstream's key.
+The README family is compared as a unit, the import's rename (any case and extension, #642) applied before the publish step's (four exact spellings).
+
+### Presence comes from the location log, or from a bucket listing when asked
+
+A key NEMAR already holds is not copied.
+By default "holds" is read from NEMAR's git-annex branch (the newest `nemar-s3` status is present, or `main` names the key), and the plan says `presence_basis: "location-log"`.
+`--bucket-listing` reads a listing of `nemar-s3`'s prefix instead, with the ambient AWS credentials, and holds a key only when its object is there at the size the key declares (`bucket-listing`), because the location log can claim content the bucket never received (#1396).
+A dead key is judged before presence, so an object that outlives its dead mark under the governance lock is never counted as held, copied or named.
+
+### Readings of decision 8 and decision 1 the plan needed (corrections and clarifications)
+
+- "The keys the scrubbed new tree names" cannot be known before the scrub runs.
+  The plan binds the pre-scrub manifest, and Phase 6 must check that what it copies is a subset of the plan's copy keys plus its own local uploads.
+- Deletions are not delta paths as decision 1 defines them; the plan lists them separately, and reports a deleted path and an added path with the same content as one rename, without deciding anything from it.
+- #1911's text says a plan refuses on a starting-point mismatch; decision 1 supersedes it, and the plan classifies such a path by the table instead.
+
+### Left open
+
+- A file NEMAR's enrichment adds that upstream lacks (the generated `participants.tsv` of `ensureParticipantsTsv`) is not among decision 1's standard edits, so a plan counts it as a correction.
+- The `CHANGES` sentence is matched only at the end of the file; a sentence followed by upstream text that ADR 0085's rewrite never produces is unexplained.
+
 ## Amendment 2026-10-24 (#1909): decision 10, as built
 
 Phase 3 builds decision 10, on the parser Phase 2 built for decision 4 (Amendment 2026-10-23 above); the rest of the Decision section is still designed and not built.
