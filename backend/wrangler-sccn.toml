@@ -214,6 +214,15 @@ bucket_name = "nemar-neurobagel"
 name = "EMAIL"
 allowed_sender_addresses = ["noreply@nemar.org", "support@nemar.org"]
 
+# Inbound mail (epic #1893 phase 3b, ADR 0112). The production raw-message bucket: private, with a
+# 730-day expiry rule. NO production Email Routing rule targets this Worker until the Phase 6
+# cutover, so the binding is inert until then; a Worker with the binding but no routing rule
+# receives nothing. Must exist before the next production deploy
+# (`wrangler r2 bucket create nemar-mail`), or that deploy fails.
+[[r2_buckets]]
+binding = "MAIL_INBOUND"
+bucket_name = "nemar-mail"
+
 # Workers Observability (Workers Paid plan).
 # Captures invocation logs (inbound request shape, response status, duration,
 # subrequest count) and console.log output for searchable runtime telemetry.
@@ -246,6 +255,10 @@ ENVIRONMENT = "production"
 # set as a Worker secret is deleted as one instead). (d) Repeat (a) and (b) once more, for the
 # datasets that changed in between. Only then switch the review off.
 PR_REVIEW_ENABLED = "1"
+# Support-ticket retention (epic #1893 phase 6a, ADR 0112): days a ticket's raw record is kept
+# before the daily purge keeps only its summary. Two years in production; staging uses 30 days,
+# matching its raw-mail bucket's lifecycle rule. A missing or invalid value deletes nothing.
+MAIL_RETENTION_DAYS = "730"
 # PR_REVIEW_AUTO_REQUIRE is deliberately not set in this file. Unset, publishing, a visibility
 # change and the enforce routes put the review ruleset on no repository (they still take it off a
 # repository whose dataset is not reviewed). The owner adds it here, in a reviewed change, when the
@@ -559,6 +572,8 @@ invocation_logs = true
 
 [env.dev.vars]
 ENVIRONMENT = "development"
+# Support-ticket retention (ADR 0112): 30 days on staging, matching its raw-mail bucket's lifecycle.
+MAIL_RETENTION_DAYS = "30"
 # Claude Platform on AWS (same values as prod [vars]; env vars do not inherit).
 # ANTHROPIC_API_KEY must be set as a dev-env secret separately:
 #   wrangler secret put ANTHROPIC_API_KEY --env dev -c backend/wrangler-sccn.toml

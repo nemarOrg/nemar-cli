@@ -914,6 +914,7 @@ describe("the committed configuration is OFF", () => {
       "publishZarrCatalog",
       "runZarrFidelitySweep",
       "fetchAndSyncDataPapers",
+      "purgeExpiredTickets",
     ]);
   });
 

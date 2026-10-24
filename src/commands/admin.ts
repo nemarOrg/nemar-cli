@@ -21,6 +21,7 @@
  * - nemar admin notice list/set/clear - System notice management
  * - nemar admin notify              - Send broadcast email to users
  * - nemar admin pr-reviews          - Dataset pull requests awaiting approval, with the automated review
+ * - nemar admin mail               - Support tickets: list/show/reply/note/assign/status/close/escalate/queues/away/reprocess
  */
 
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
@@ -239,6 +240,7 @@ import {
   resolveWithdrawTargets,
   stillWithdrawn,
 } from "../lib/withdrawn-datasets.js";
+import { mailCommand } from "./admin-mail.js";
 import { prReviewsCommand } from "./admin-pr-reviews.js";
 import { publishCommand } from "./admin-publish.js";
 
@@ -8120,6 +8122,7 @@ emailPrefsCommand
         { key: "announcements", label: "Announcement emails" },
         { key: "dataset_anonymity", label: "Anonymity sweep findings" },
         { key: "identifier_sweep", label: "Identifier sweep weekly report" },
+        { key: "support_tickets", label: "Support tickets assigned to you" },
       ];
 
       for (const cat of categories) {
@@ -8144,6 +8147,7 @@ emailPrefsCommand
   .option("--announcements <bool>", "Enable/disable announcement emails")
   .option("--dataset-anonymity <bool>", "Enable/disable anonymity sweep findings")
   .option("--identifier-sweep <bool>", "Enable/disable the identifier sweep weekly report")
+  .option("--support-tickets <bool>", "Enable/disable support ticket notifications")
   .option("--all <bool>", "Enable/disable all notifications")
   .option("--user <username>", "(owner only) update another user's preferences")
   .action(
@@ -8153,6 +8157,7 @@ emailPrefsCommand
       announcements?: string;
       datasetAnonymity?: string;
       identifierSweep?: string;
+      supportTickets?: string;
       all?: string;
       user?: string;
     }) => {
@@ -8181,19 +8186,22 @@ emailPrefsCommand
         updates.announcements = val;
         updates.dataset_anonymity = val;
         updates.identifier_sweep = val;
+        updates.support_tickets = val;
       } else {
         const ua = parseBool(options.userApproval);
         const pr = parseBool(options.publicationRequest);
         const ann = parseBool(options.announcements);
         const anon = parseBool(options.datasetAnonymity);
         const sweep = parseBool(options.identifierSweep);
+        const tickets = parseBool(options.supportTickets);
 
         if (
           ua === undefined &&
           pr === undefined &&
           ann === undefined &&
           anon === undefined &&
-          sweep === undefined
+          sweep === undefined &&
+          tickets === undefined
         ) {
           console.error(chalk.red("No preferences specified."));
           console.log("  --user-approval <bool>        User approval notifications");
@@ -8201,6 +8209,7 @@ emailPrefsCommand
           console.log("  --announcements <bool>         Announcement emails");
           console.log("  --dataset-anonymity <bool>     Anonymity sweep findings");
           console.log("  --identifier-sweep <bool>      Identifier sweep weekly report");
+          console.log("  --support-tickets <bool>       Support ticket notifications");
           console.log("  --all <bool>                   All notifications");
           process.exit(1);
         }
@@ -8210,6 +8219,7 @@ emailPrefsCommand
         if (ann !== undefined) updates.announcements = ann;
         if (anon !== undefined) updates.dataset_anonymity = anon;
         if (sweep !== undefined) updates.identifier_sweep = sweep;
+        if (tickets !== undefined) updates.support_tickets = tickets;
       }
 
       const spinner = ora("Updating email preferences...").start();
@@ -8232,6 +8242,9 @@ emailPrefsCommand
         );
         console.log(
           `  Identifier sweep:      ${result.identifier_sweep ? chalk.green("enabled") : chalk.dim("disabled")}`,
+        );
+        console.log(
+          `  Support tickets:       ${result.support_tickets ? chalk.green("enabled") : chalk.dim("disabled")}`,
         );
       } catch (err) {
         spinner.fail("Failed to update preferences");
@@ -10204,3 +10217,4 @@ neurobagelCommand
 
 adminCommand.addCommand(neurobagelCommand);
 adminCommand.addCommand(prReviewsCommand);
+adminCommand.addCommand(mailCommand);
