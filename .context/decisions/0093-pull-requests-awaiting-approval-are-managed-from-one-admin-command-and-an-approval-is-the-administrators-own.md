@@ -316,13 +316,18 @@ It is a sliding window, not fixed batches, because a batch waits for its slowest
 
 The pacing is in the CLI alone.
 While it waits it reads the admin list (`verdict=in_progress`) every 30 seconds, one request that answers for every pull request, and a started review counts as running while it is in that list.
-A review the Worker calls overdue leaves the list after its 60 minutes, so no wait is without end.
-A list that is incomplete (GitHub returned fewer pull requests than exist, or some could not be read) or a request that fails cannot tell what finished, so it is never taken as "finished": the window stays full, and three such reads in a row stop the run, because it cannot keep its limit blind.
+Leaving the list is not proof of finishing: the list is built from GitHub's search of open pull requests, so a pull request that was closed or merged, or that the search leaves out for a moment, drops out of it while its job may still be running.
+A review that left the list is therefore confirmed finished by a read of its stored review (`show`) before its slot is freed, and a read that fails keeps the slot; a pull request GitHub no longer has counts as finished.
+No slot is held for ever: a job cannot outlive its limit, so a slot is freed after 100 minutes whatever the queue says (the Worker's 60-minute deadline plus 30 minutes of grace is 90, and the queue stops showing an overdue review as running after that).
+A start that fails with a connection error or a 5xx may have reached the Worker before it failed, so it takes a slot until the queue shows it is not running; a refusal with a 4xx cannot have started anything and takes none.
 An answer that is not a start (a blocked contributor, an exempt author, `review_running`) takes no slot.
 Only the reviews this run started are counted: reviews that contributors' pushes started are running too, but counting them would let a busy hour stall the run for something it did not cause.
 
-Ctrl-C stops the run after the start in flight and lists the pull requests never started, as commands to continue by name for a redo (a rerun of `--all --redo` would redo the finished ones again), and exits 130.
-The same list is printed when three reads fail (exit 1).
+A list that is incomplete (GitHub returned fewer pull requests than exist, or some could not be read) or a request that fails cannot tell what finished, so it is never taken as "finished": the window stays full, the run says so, and ten such reads in a row (about five minutes) stop it, because it cannot keep its limit blind.
+
+Ctrl-C ends any `--all` run, paced or not: it stops after the request in flight, lists the pull requests never started, as commands to continue by name for a redo (a rerun of `--all --redo` would redo the finished ones again), lists any start that failed so it can be checked, and exits 130.
+A second Ctrl-C leaves at once, because a request in flight cannot be taken back.
+The same list is printed when ten reads fail (exit 1).
 Reviews already started keep running on the Worker either way.
-Without the flag nothing changes, except that above ten starts at once the list ends with a line naming the limit and the flag.
+Without the flag the starts are unchanged, except that every `--all` run now ends on Ctrl-C this way, and above ten starts at once the list ends with a line naming the limit and the flag.
 The administrator chooses `n` from the workspace's limit (`n` x 128,000 output tokens must fit it); the CLI does not read or guess that limit.
