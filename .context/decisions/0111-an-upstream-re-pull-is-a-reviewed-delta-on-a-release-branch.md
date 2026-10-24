@@ -824,8 +824,10 @@ It makes two corrections, to decision 1's ledger rule and to the Phase 5 amendme
 
 Decision 2 says the scrub runs on the delta paths only.
 `scrubImportedTree` takes the paths it may read and change (`scope`), and a recording, a JSON file or a scans table outside them is neither read nor changed; its counts see only the scope.
-A provenance file outside the scope is not annotated, and is counted as not annotated (`provenance_not_annotated`), so the record says a sentence is missing; whether such a re-pull should refuse instead is left open below.
-The caller names each annexed recording's source (`sourceOf`) in place of the importer's whereis map: a source, a key NEMAR already holds, which keeps its bytes and is counted and not read (ADR 0091), or none, which is counted.
+The scope must name every path changed since `HEAD`, staged or not, or the scrub refuses (`scope-incomplete`) before it reads anything, because a changed path it does not read would reach the commit unscrubbed.
+A re-pull never commits a header change whose provenance file lacks ADR 0085's sentence: when a header in the scope will change and a provenance file (`sourcedata/sourcedata_provenance.json` or its README) lies outside the scope, the scrub refuses (`provenance-out-of-scope`) before a byte is downloaded, and the caller puts both files in the scope (the lead's ruling of 2026-10-24, which settles the owner question this slice first left open).
+A provenance file that is not a JSON object is counted on its own (`provenance_malformed`), apart from one that is not a regular file (`provenance_not_annotated`); the importer warns on either, as it did.
+The caller names each annexed recording's source (`sourceOf`) in place of the importer's whereis map: a source, a key NEMAR already holds, whose bytes are already in NEMAR's bucket where the identifier screen reads them (ADR 0086, ADR 0088), so it is counted and not read again, or none, which is counted.
 A source can be one version of an S3 object, read at its path-style URL with every segment encoded and `?versionId=` kept, for the header and for the download, so the scrub reads the bytes decision 8's pinned copy will copy; the rules that the object is the key's size and hashes to it are unchanged.
 The importer passes none of these, and its suites pass unedited.
 The manifest's closing check, every recording a copy brings from upstream had its header read, is a function of its own (`assertCopiedRecordingsRead`), for the re-pull's copy to close with.
@@ -839,6 +841,8 @@ The delta scrub writes its own word, `repull-scrubbed`, before the one commit, s
 The rule, corrected: a recorded correction is a line whose `action` is neither `import-scrubbed` nor `repull-scrubbed`.
 A `repull-scrubbed` line holds nothing: a re-import's history hold (ADR 0089) still reads `import-scrubbed` lines only.
 ADR 0085's fresh-clone proof tolerates a commit that appends `repull-scrubbed` lines beside other files, as it tolerates the importer's, because the re-pull's commit is one commit; without that, every re-pulled dataset would fail `ledger-commit-not-alone` for good.
+It does so only when that commit carries decision 2's `Upstream-Snapshot:` and `Repull-Plan:` trailers and edits no earlier line, so the merge that lands N.0.0 on `main` must keep both trailers in its commit message.
+Neither scrub word can be typed: `ledger-cli.ts append` refuses `import-scrubbed` and `repull-scrubbed`, which only the scrub that wrote them, in the commit that carries what it scrubbed, may write.
 Decision 10's retarget of an unreleased import still refuses any line but the importer's own, `repull-scrubbed` included.
 A re-pull needs a released mirror, which the guard refuses before that rule runs, so the line should never meet it; if it does, dropping a record of a scrub is not the retarget's to decide, which is the safe direction.
 
@@ -861,19 +865,16 @@ The Phase 5 amendment took OpenNeuro's latest as `ok` when it was numerically af
 The plan now reads OpenNeuro's latest and its whole snapshot list, each with its creation time, in one answer: the query the staleness report sends, read by the same parser (`shared/openneuro-snapshots.ts`).
 It orders them with the helper the report's verdict uses (`upstreamSnapshotOrder`), so the two cannot disagree.
 The check is `ok` only when `to_tag` is OpenNeuro's latest and OpenNeuro's own list shows it created after `from_tag`.
-Every order the answer cannot establish is `unchecked` (`order-unverified`), never refused and never `ok`, and the plan is not executable: an unreadable creation date, a latest its own list contradicts, a `from_tag` the list does not name, a latest created no later than `from_tag`, no `from_tag` to order against, and no answer at all.
+Every order the answer cannot establish is `unchecked` (`order-unverified`), never refused and never `ok`, and the plan is not executable: an unreadable creation date, of the latest, of `from_tag` or of any other snapshot in the list (which could be the newest of all), a latest its own list contradicts, a `from_tag` the list does not name, a latest created no later than `from_tag`, no `from_tag` to order against, and no answer at all with `--to-tag` named; without `--to-tag`, no answer plans nothing (`latest-unknown`).
+The staleness report reads the same helper, so another snapshot with an unreadable date makes a mirror `upstream_dates_unreadable` where it would have read stale or `upstream_older`; a mirror at the stated latest is still `current`.
 The numbers are never compared, so a mirror recorded at `00006` whose upstream made `1.0.0` later is re-pullable.
 A `--to-tag` that is not OpenNeuro's latest stays `unchecked`, as the Phase 5 amendment ruled, even when the list shows it newer.
 The latest tag is the same `latestSnapshot.tag` an import pins to, and the query is still a GraphQL POST that only asks, outside the plan's HTTP guard.
 
 ### The import's refusal points at the re-pull
 
-Decision 10's `[openneuro-upstream-moved]` refusal of a released mirror now names the re-pull to the new tag, `nemar admin repull plan <id> --to-tag <tag>`, before the repair at the recorded tag, which is still the last thing it says.
+Decision 10's `[openneuro-upstream-moved]` refusal of a released mirror now names the re-pull, `nemar admin repull plan <id>`, to OpenNeuro's latest snapshot by default or with `--to-tag` to the tag the import was at, which need not be the newer one, before the repair at the recorded tag, which is still the last thing it says.
 
 ### The finalize gate is three functions
 
 The verify, tree gate and register steps of an import's finalize are `verifyManifestObjects`, `treeGate` and `registerTreeKeys` (`src/lib/import-finalize-gate.ts`), with every message as it was, because the Worker classifies them; the re-pull's register step will call the same three.
-
-### Left open
-
-- A provenance file that is not a delta path is counted and not annotated; whether such a re-pull should refuse instead is the owner's decision.
