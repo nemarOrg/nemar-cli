@@ -39,6 +39,7 @@ import type {
   ListTicketsResponse,
   MailQueue,
   NoteRequest,
+  NoteResponse,
   PutAvailabilityRequest,
   PutQueueRequest,
   ReplyRequest,
@@ -2580,7 +2581,7 @@ export async function replyToMailTicket(
 }
 
 /** `POST /admin/mail/tickets/:id/note`. */
-export async function addMailNote(id: number, text: string): Promise<{ message_id: number }> {
+export async function addMailNote(id: number, text: string): Promise<NoteResponse> {
   const body: NoteRequest = { text };
   return request(`/admin/mail/tickets/${id}/note`, post(body), true);
 }

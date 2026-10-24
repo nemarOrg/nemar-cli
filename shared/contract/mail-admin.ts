@@ -139,7 +139,8 @@ export interface ReplyRequest {
   text: string;
 }
 export interface ReplyResponse {
-  message_id: string;
+  /** The id of the stored outgoing message (a `TicketMessage.id`). */
+  message_id: number;
   /** The Message-ID the reply went out under. */
   header_message_id: string;
   status: TicketStatus;
@@ -147,6 +148,10 @@ export interface ReplyResponse {
 
 export interface NoteRequest {
   text: string;
+}
+export interface NoteResponse {
+  /** The id of the stored note (a `TicketMessage.id`). */
+  message_id: number;
 }
 export interface AssignRequest {
   user_id: number | null;
