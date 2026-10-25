@@ -163,7 +163,9 @@ function guidanceFor(word: string | undefined): string | undefined {
 type KeyedKind = "reply" | "note";
 
 /**
- * Whether a reply is worth retrying under its key: the connection failed or the server answered 5xx
+ * Whether a reply is worth retrying under its key (decided by the closed `code` first, since the
+ * mail routes answer 409 and 422 and not 502, which a proxy can strip of its body): the connection
+ * failed or the server answered 5xx
  * (including an HTML gateway error and maintenance mode), so the retry learns what happened, or the
  * route said the send is still running or certainly sent nothing. Not `reply_delivery_unknown`: the
  * server answers every repeat of that key the same way and never sends it. Not a definite 4xx

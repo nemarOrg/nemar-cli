@@ -390,7 +390,7 @@ describe("reply", () => {
     envOverrides = { ENVIRONMENT: "development", DEV_EMAIL_ALLOWLIST: "someone@else.example" };
     const t = ticket();
     const r = await call("admin", "POST", `/tickets/${t}/reply`, { text: "hi" });
-    expect(r.status).toBe(502);
+    expect(r.status).toBe(422);
     expect(r.body.code).toBe("reply_not_sent");
     expect(JSON.stringify(r.body)).not.toContain("ada@sender");
     expect(binding.sent.length).toBe(0);
@@ -403,7 +403,7 @@ describe("reply", () => {
     binding = recordingBinding(() => bindingError("E_RECIPIENT_SUPPRESSED", "suppressed"));
     const t = ticket();
     const r = await call("admin", "POST", `/tickets/${t}/reply`, { text: "hi" });
-    expect(r.status).toBe(502);
+    expect(r.status).toBe(422);
     expect(r.body.code).toBe("reply_not_sent");
     expect(db.query("SELECT COUNT(*) AS n FROM mail_messages").get()).toEqual({ n: 0 });
     expect(events(t)).toEqual([]);
@@ -413,7 +413,7 @@ describe("reply", () => {
     binding = recordingBinding(() => bindingError("E_INTERNAL_SERVER_ERROR", "boom"));
     const t = ticket();
     const r = await call("admin", "POST", `/tickets/${t}/reply`, { text: "hi" });
-    expect(r.status).toBe(502);
+    expect(r.status).toBe(409);
     expect(r.body.code).toBe("reply_delivery_unknown");
     expect(db.query("SELECT COUNT(*) AS n FROM mail_messages").get()).toEqual({ n: 0 });
     const [event] = events(t);
@@ -493,7 +493,7 @@ describe("long threads", () => {
     const t = ticket();
     inbound(t, `<${"y".repeat(997)}>`);
     const r = await call("admin", "POST", `/tickets/${t}/reply`, { text: "hi" });
-    expect(r.status).toBe(502);
+    expect(r.status).toBe(422);
     expect(r.body.code).toBe("reply_not_sent");
     expect(binding.sent.length).toBe(0);
     expect(events(t)).toEqual([]);
@@ -555,7 +555,7 @@ describe("reply idempotency and recording faults", () => {
       "UPDATE mail_reply_keys SET created_at = datetime('now', '-10 minutes') WHERE idem_key = 'k-2'",
     );
     const stale = await send("agent", t, "k-2");
-    expect([stale.status, stale.body.code]).toEqual([502, "reply_delivery_unknown"]);
+    expect([stale.status, stale.body.code]).toEqual([409, "reply_delivery_unknown"]);
     expect(binding.sent.length).toBe(0);
   });
 
@@ -572,7 +572,7 @@ describe("reply idempotency and recording faults", () => {
     const t = ticket();
     expect((await send("agent", t, "k-4")).body.code).toBe("reply_delivery_unknown");
     const retry = await send("agent", t, "k-4");
-    expect([retry.status, retry.body.code]).toEqual([502, "reply_delivery_unknown"]);
+    expect([retry.status, retry.body.code]).toEqual([409, "reply_delivery_unknown"]);
     expect(binding.sent.length).toBe(1);
 
     let refuse = true;
@@ -584,14 +584,14 @@ describe("reply idempotency and recording faults", () => {
     expect(binding.sent.length).toBe(2);
   });
 
-  test("if the event write fails too, the 502 and its clear text still come back", async () => {
+  test("if the event write fails too, the 409 and its clear text still come back", async () => {
     binding = recordingBinding(() => bindingError("E_INTERNAL_SERVER_ERROR", "boom"));
     db.run(
       "CREATE TRIGGER no_failed_events BEFORE INSERT ON mail_ticket_events WHEN NEW.kind = 'reply_failed' BEGIN SELECT RAISE(ABORT, 'disk'); END",
     );
     const t = ticket();
     const r = await send("agent", t, "k-6");
-    expect([r.status, r.body.code]).toEqual([502, "reply_delivery_unknown"]);
+    expect([r.status, r.body.code]).toEqual([409, "reply_delivery_unknown"]);
     expect(r.body.error).toContain("may or may not have gone out");
     expect(events(t)).toEqual([]);
   });
@@ -602,7 +602,7 @@ describe("reply idempotency and recording faults", () => {
     );
     const t = ticket();
     const r = await send("agent", t, "k-7");
-    expect([r.status, r.body.code]).toEqual([502, "reply_delivery_unknown"]);
+    expect([r.status, r.body.code]).toEqual([409, "reply_delivery_unknown"]);
     expect(r.body.error).toContain("Do not send it again");
     expect(binding.sent.length).toBe(1);
     const [event] = events(t);
@@ -611,7 +611,7 @@ describe("reply idempotency and recording faults", () => {
       delivery: "sent_unrecorded",
       header_message_id: "<1.recorded@staging.nemar.test>",
     });
-    expect((await send("agent", t, "k-7")).status).toBe(502);
+    expect((await send("agent", t, "k-7")).status).toBe(409);
     expect(binding.sent.length).toBe(1);
   });
 });
@@ -1170,7 +1170,7 @@ describe("reprocess", () => {
     );
   });
 
-  test("a missing key is 404, a malformed one 400, and no bucket is 503", async () => {
+  test("a missing key is 404, a malformed one 400, and no bucket is 409", async () => {
     const absent = "inbound/raw/2026/10/24/aaaaaaaa-1111-4222-8333-444455556666.eml";
     expect((await call("owner", "POST", "/reprocess", { raw_key: absent })).status).toBe(404);
     expect((await call("owner", "POST", "/reprocess", { raw_key: "../etc/passwd" })).status).toBe(

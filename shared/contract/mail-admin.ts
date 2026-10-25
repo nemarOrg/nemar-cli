@@ -154,7 +154,7 @@ export interface TicketDetail {
  * agent that can retry after a lost response SHOULD. The key is unique per ticket and stored
  * before anything is sent: a repeat of a reply that was sent returns the same response without
  * sending; a repeat while the first is still being sent is 409 `reply_in_progress`; a repeat of a
- * reply whose outcome was unknown is 502 `reply_delivery_unknown` again and is never re-sent; a
+ * reply whose outcome was unknown is 409 `reply_delivery_unknown` again and is never re-sent; a
  * reply that certainly sent nothing (`reply_not_sent`) releases its key so the retry can go. Without
  * a key every request sends.
  */

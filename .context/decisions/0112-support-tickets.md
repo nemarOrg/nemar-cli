@@ -124,3 +124,18 @@ Production holds the inbound bucket binding from this change, but no routing rul
 
 - ADR 0110 (the mail platform and the raw record in R2).
 - Epic #1893, phase 3, issue #1896.
+
+## Amendment, 2026-10-25: replies do not set Message-ID
+
+The Cloudflare Email Service owns `Message-ID` (and `Date`, `MIME-Version`, `Content-Type`) and refuses the whole send for a caller-supplied one (`E_HEADER_NOT_ALLOWED`); line 28 above is superseded on that point.
+A reply now sets only `In-Reply-To` and `References`.
+The outgoing message row stores the provider's returned id as its `message_id` only when that is a valid RFC 5322 msg-id (brackets added when absent), otherwise NULL; Resend's opaque id is therefore NULL.
+The requester's answer threads by the reply-to plus address first, so a NULL id costs nothing.
+Every header handed to the Cloudflare binding is checked against its allowlist before the call and a refusal is a certain non-delivery.
+`header_message_id` stays in the reply response and is now nullable.
+
+## Amendment, 2026-10-25: mail errors avoid 502
+
+The website's same-origin proxy on Cloudflare Pages appears to replace the body of a 502 while keeping its status, so the client lost the `code` and showed a generic message.
+The mail routes therefore answer no gateway status: `reply_not_sent` is 422 (a definite refusal, nothing sent) and `reply_delivery_unknown` is 409 (the outcome is fixed for that key; do not retry), and `inbound_not_configured` is 409 instead of 503.
+Clients decide by `code`, never by status; an unexpected `internal` stays 500.

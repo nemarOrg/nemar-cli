@@ -32,7 +32,7 @@ import { ticketPlusTag } from "./tickets";
 
 export class MailAdminError extends Error {
   constructor(
-    readonly status: 400 | 403 | 404 | 409 | 422 | 502 | 503,
+    readonly status: 400 | 403 | 404 | 409 | 422,
     readonly code: MailErrorCode,
     message: string,
   ) {
@@ -390,7 +390,7 @@ async function tryRun(label: string, work: () => Promise<unknown>): Promise<void
  * Send a reply and record it. With an `idempotencyKey` a retry is safe: the key is stored unique
  * per ticket BEFORE anything is sent, a repeat of a sent reply returns its stored outcome without
  * sending, a repeat while the first is still in flight is 409 `reply_in_progress`, and a repeat of
- * a reply whose outcome was unknown is the same 502 again (never a second send). A reply that
+ * a reply whose outcome was unknown is the same 409 again (never a second send). A reply that
  * certainly sent nothing releases its key so the retry can go.
  */
 export async function replyToTicket(
@@ -433,7 +433,7 @@ export async function replyToTicket(
       if (prior?.state === "sent" && prior.outcome)
         return JSON.parse(prior.outcome) as ReplyOutcome;
       if (prior && (prior.state === "unknown" || prior.stale === 1)) {
-        throw new MailAdminError(502, "reply_delivery_unknown", UNKNOWN_MESSAGE);
+        throw new MailAdminError(409, "reply_delivery_unknown", UNKNOWN_MESSAGE);
       }
       throw new MailAdminError(
         409,
@@ -558,7 +558,7 @@ async function sendAndRecord(
     if (isCertainNonDelivery(error)) {
       console.warn(`[mail-admin] reply on ticket ${ticket.id} not sent: ${reason}`);
       throw new MailAdminError(
-        502,
+        422,
         "reply_not_sent",
         error instanceof DevEmailFenceError
           ? "Nothing was sent: this environment does not deliver to that recipient."
@@ -571,7 +571,7 @@ async function sendAndRecord(
     // invite a second send; storing it as sent would claim a delivery nobody saw. So the
     // attempt is recorded as an event, the admin is told it is unknown, and the requester's own
     // reply (which comes back through the plus address) will thread if it did arrive. The
-    // writes are best effort: a failing database must not hide the 502 and its clear text.
+    // writes are best effort: a failing database must not hide the 409 and its clear text.
     console.error(`[mail-admin] reply on ticket ${ticket.id} outcome unknown: ${reason}`);
     await tryRun("recording the unknown reply", () =>
       eventStatement(db, ticket.id, "reply_failed", viewer.id, {
@@ -580,7 +580,7 @@ async function sendAndRecord(
       }).run(),
     );
     await tryRun("marking the reply key unknown", () => setKey("unknown", null));
-    throw new MailAdminError(502, "reply_delivery_unknown", UNKNOWN_MESSAGE);
+    throw new MailAdminError(409, "reply_delivery_unknown", UNKNOWN_MESSAGE);
   }
 
   const nextStatus: TicketStatus = ticket.status === "open" ? "pending" : ticket.status;
@@ -646,7 +646,7 @@ async function sendAndRecord(
       `[mail-admin] reply on ticket ${ticket.id} was sent but not recorded: ${error instanceof Error ? error.message : String(error)}`,
     );
     // The mail went out, so leave a trace that names it (best effort, like the unknown case),
-    // and make a repeat of the same key answer 502 and not send again.
+    // and make a repeat of the same key answer 409 and not send again.
     await tryRun("recording the unrecorded reply", () =>
       eventStatement(db, ticket.id, "reply_failed", viewer.id, {
         delivery: "sent_unrecorded",
@@ -655,7 +655,7 @@ async function sendAndRecord(
     );
     await tryRun("marking the reply key unknown", () => setKey("unknown", providerId));
     throw new MailAdminError(
-      502,
+      409,
       "reply_delivery_unknown",
       "The reply was sent but could not be recorded. Do not send it again.",
     );
