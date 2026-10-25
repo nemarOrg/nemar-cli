@@ -2076,6 +2076,25 @@ describe("create: the automatic path", () => {
   const dispatchOf = (id: number) =>
     db.query("SELECT * FROM upstream_repull_dispatches WHERE id = ?").get(id) as Row;
 
+  /** {@link callOn} as the production Worker with the automatic path on. */
+  async function callOnProd(d1: D1Database, body: unknown) {
+    const res = await app.request(
+      "/repulls",
+      {
+        method: "POST",
+        headers: { Authorization: `Bearer ${ADMIN_KEY}`, "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+      {
+        DB: d1,
+        ENVIRONMENT: "production",
+        GITHUB_ADMIN_PAT: "ghp_repull_route_test",
+        ...ON,
+      } as unknown as Bindings,
+    );
+    return { status: res.status, body: (await res.json()) as Json };
+  }
+
   /** Nothing about the record was written: no row, no create audit, the dispatch unlinked. */
   function nothingRecorded(dispatchId: number) {
     expect(rows()).toEqual([]);
@@ -2179,13 +2198,13 @@ describe("create: the automatic path", () => {
     nothingRecorded(c.id);
   });
 
-  test("the dispatch must exist, be live, carry the Worker's token, and name this plan", async () => {
+  test("the dispatch must carry the Worker's token over a live dispatch, and name this plan", async () => {
     seedMirror(AUTO);
     seedMirror("on099992");
     const c = await claim();
     const other = await claim("on099992");
     const cases: Array<[string, Record<string, unknown>, number, string]> = [
-      ["no such dispatch", autoPlan(c, { dispatch_id: 999_999 }), 404, "dispatch-not-found"],
+      ["no such dispatch", autoPlan(c, { dispatch_id: 999_999 }), 401, "dispatch-token"],
       ["a token of zeros", autoPlan(c, { dispatch_token: "0".repeat(64) }), 401, "dispatch-token"],
       [
         "another dispatch's token",
@@ -2225,7 +2244,7 @@ describe("create: the automatic path", () => {
       }),
     ).toMatchObject({ status: 200 });
     const ended = await call("POST", "/repulls", autoPlan(c), prod());
-    expect(ended).toMatchObject({ status: 409, body: { code: "dispatch-not-live" } });
+    expect(ended).toMatchObject({ status: 401, body: { code: "dispatch-token" } });
     expect(rows()).toEqual([]);
 
     // A finish dispatch, of a merged automatic row of another dataset, is not a create's.
@@ -2248,6 +2267,94 @@ describe("create: the automatic path", () => {
     );
     expect(res).toMatchObject({ status: 409, body: { code: "dispatch-mismatch" } });
     expect(rows().map((r) => r.id)).toEqual([merged]);
+  });
+
+  test("an unknown dispatch, an ended one and a wrong token are one answer, and no answer names a status", async () => {
+    seedMirror(AUTO);
+    const live = await claim();
+    seedMirror("on099992");
+    const ended = await claim("on099992");
+    expect(
+      await storeDispatchReport(env("production", ON), ended.token, {
+        dispatch_id: ended.id,
+        dataset_id: "on099992",
+        phase: "failed",
+        code: "runner-failed",
+      }),
+    ).toMatchObject({ status: 200 });
+    const answers = [
+      await call("POST", "/repulls", autoPlan(live, { dispatch_id: 999_999 }), prod()),
+      await call(
+        "POST",
+        "/repulls",
+        autoPlan(ended, { dataset_id: "on099992", dispatch_token: ended.token }),
+        prod(),
+      ),
+      await call("POST", "/repulls", autoPlan(live, { dispatch_token: "0".repeat(64) }), prod()),
+      await call("POST", "/repulls", autoPlan(live, { dispatch_token: ended.token }), prod()),
+    ];
+    for (const a of answers) expect(a).toEqual(answers[0] as (typeof answers)[number]);
+    expect(answers[0]?.status).toBe(401);
+    expect(answers[0]?.body.code).toBe("dispatch-token");
+    // No status word and no id in the message.
+    expect(JSON.stringify(answers[0]?.body)).not.toMatch(
+      /dispatched|started|failed|unreported|#\d|999999/,
+    );
+    nothingRecorded(live.id);
+  });
+
+  test("a Worker with no callback secret answers 503 at the create, and writes nothing", async () => {
+    seedMirror(AUTO);
+    const c = await claim();
+    for (const secret of [undefined, ""]) {
+      const res = await call(
+        "POST",
+        "/repulls",
+        autoPlan(c),
+        prod({ PRESCREEN_CALLBACK_SECRET: secret }),
+      );
+      expect([secret, res.status, res.body.code]).toEqual([secret, 503, "dispatch-unconfigured"]);
+    }
+    nothingRecorded(c.id);
+  });
+
+  test("a dispatch that ends between the check and the insert creates nothing and links nothing", async () => {
+    seedMirror(AUTO);
+    const c = await claim();
+    const end = () =>
+      db.run(
+        "UPDATE upstream_repull_dispatches SET status = 'unreported', nonce = NULL WHERE id = ?",
+        [c.id],
+      );
+    const res = await callOnProd(interleaved("INSERT INTO upstream_repulls", end), autoPlan(c));
+    expect(res).toMatchObject({ status: 401, body: { code: "dispatch-token" } });
+    // The batch rolled back whole: no record, no create audit, no lineage write, no link.
+    expect(rows()).toEqual([]);
+    expect(audits("repull_created")).toEqual([]);
+    expect(dispatchOf(c.id)).toMatchObject({ repull_id: null, status: "unreported", nonce: null });
+  });
+
+  test("a dispatch that ends before it is linked to a record it found links nothing", async () => {
+    seedMirror(AUTO);
+    const c = await claim();
+    const id = seedRow("planned", {
+      dataset_id: AUTO,
+      origin: "automatic",
+      planner: 2,
+      upstream_ds: "ds099999",
+    });
+    const end = () =>
+      db.run(
+        "UPDATE upstream_repull_dispatches SET status = 'unreported', nonce = NULL WHERE id = ?",
+        [c.id],
+      );
+    const res = await callOnProd(
+      interleaved("UPDATE upstream_repull_dispatches SET repull_id", end),
+      autoPlan(c),
+    );
+    expect(res).toMatchObject({ status: 401, body: { code: "dispatch-token" } });
+    expect(dispatchOf(c.id)).toMatchObject({ repull_id: null, status: "unreported" });
+    expect(rows().map((r) => r.id)).toEqual([id]);
   });
 
   test("the plan must be this planner's, with zero unexplained paths, conflicts and corrections stated", async () => {

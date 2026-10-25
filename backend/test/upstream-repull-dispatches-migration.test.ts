@@ -27,6 +27,7 @@ import {
 import { deleteDatasetCascade } from "../src/services/deletion";
 import {
   DISPATCH_LINK_BY_KEY_SQL,
+  DISPATCH_LINK_GUARD_SQL,
   claimFinishDispatch,
   claimOpenDispatch,
   storeDispatchReport,
@@ -470,9 +471,15 @@ describe("the dispatch service's own statements on D1", () => {
         "a".repeat(40),
       )
       .first<{ id: number }>();
+    const claimNonce = (
+      await d1
+        .prepare("SELECT nonce FROM upstream_repull_dispatches WHERE id = ?")
+        .bind(claim.id)
+        .first<{ nonce: string }>()
+    )?.nonce;
     const link = await d1
       .prepare(DISPATCH_LINK_BY_KEY_SQL)
-      .bind("on099991", "1.0.1", 1, claim.id)
+      .bind("on099991", "1.0.1", 1, claim.id, claimNonce)
       .run();
     expect(link.meta.changes).toBe(1);
 
@@ -531,5 +538,93 @@ describe("the dispatch service's own statements on D1", () => {
         .all<{ details: string }>()
     ).results;
     expect(marked.map((r) => JSON.parse(r.details))).toEqual([{ marked: 1, deadline_hours: 8 }]);
+  });
+});
+
+describe("the claim's refusals under concurrency, on D1", () => {
+  const SECRET = "dispatch-migration-race-secret";
+  const base = {
+    DB: undefined as unknown as D1Database,
+    ENVIRONMENT: "production",
+    AUTO_REPULL_ENABLED: "1",
+    PRESCREEN_CALLBACK_SECRET: SECRET,
+  };
+  const cand = (id: string) => ({
+    datasetId: id,
+    upstreamDs: "ds099991",
+    fromTag: "1.0.0",
+    toTag: "1.0.1",
+  });
+  const word = (r: Awaited<ReturnType<typeof claimOpenDispatch>>) =>
+    "id" in r ? "won" : r.refused;
+
+  async function clean() {
+    for (const t of ["upstream_repull_dispatches", "upstream_repulls", "audit_log"]) {
+      await d1.prepare(`DELETE FROM ${t}`).run();
+    }
+  }
+
+  test("three claims racing for one unit of the cap: one wins, two are cap, and only the winner wrote", async () => {
+    await clean();
+    const env = { ...base, DB: d1, REPULL_DAILY_OPEN_CAP: "1" } as unknown as Bindings;
+    const race = await Promise.all(
+      ["on099991", "on099992", "on099993"].map((id) => claimOpenDispatch(env, cand(id))),
+    );
+    expect(race.map(word).sort()).toEqual(["cap", "cap", "won"]);
+    expect(
+      (await d1.prepare("SELECT status FROM upstream_repull_dispatches").all()).results,
+    ).toHaveLength(1);
+    expect(
+      (await d1.prepare("SELECT id FROM audit_log WHERE action = 'repull_dispatch'").all()).results,
+    ).toHaveLength(1);
+  });
+
+  test("two claims of one dataset with the cap to spare: the unique index answers, and D1's error reads live", async () => {
+    await clean();
+    const env = { ...base, DB: d1, REPULL_DAILY_OPEN_CAP: "5" } as unknown as Bindings;
+    const race = await Promise.all([
+      claimOpenDispatch(env, cand("on099991")),
+      claimOpenDispatch(env, cand("on099991")),
+    ]);
+    expect(race.map(word).sort()).toEqual(["live", "won"]);
+    expect(
+      (await d1.prepare("SELECT status FROM upstream_repull_dispatches").all()).results,
+    ).toHaveLength(1);
+    // The refused claim left no audit row of its own.
+    expect(
+      (await d1.prepare("SELECT id FROM audit_log WHERE action = 'repull_dispatch'").all()).results,
+    ).toHaveLength(1);
+  });
+
+  test("the link's guard raises integer overflow on D1 only when the link changed nothing, and rolls the batch back", async () => {
+    await clean();
+    await d1
+      .prepare(
+        "INSERT INTO upstream_repull_dispatches (kind, dataset_id, upstream_ds, from_tag, to_tag, nonce, status) VALUES ('open', 'on099991', 'ds099991', '1.0.0', '1.0.1', ?, 'dispatched')",
+      )
+      .bind(NONCE)
+      .run();
+    const linkAnd = (nonce: string) => [
+      d1.prepare(
+        "INSERT INTO audit_log (user_id, action, resource_type) VALUES (NULL, 'guard-probe', 'probe')",
+      ),
+      d1
+        .prepare(
+          "UPDATE upstream_repull_dispatches SET repull_id = 9 WHERE nonce = ? AND repull_id IS NULL",
+        )
+        .bind(nonce),
+      d1.prepare(DISPATCH_LINK_GUARD_SQL),
+    ];
+    // A link that changed a row passes the guard.
+    await d1.batch(linkAnd(NONCE));
+    expect(
+      (await d1.prepare("SELECT id FROM audit_log WHERE action = 'guard-probe'").all()).results,
+    ).toHaveLength(1);
+    // A link that changed none (already linked) fails it, and the audit row before it is undone.
+    await d1.prepare("DELETE FROM audit_log").run();
+    await expect(d1.batch(linkAnd(NONCE))).rejects.toThrow(/integer overflow/i);
+    expect(
+      (await d1.prepare("SELECT id FROM audit_log WHERE action = 'guard-probe'").all()).results,
+    ).toHaveLength(0);
   });
 });

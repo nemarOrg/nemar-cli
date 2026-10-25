@@ -19,7 +19,13 @@
  *    row that stalled before its pull request opened;
  *  - the report's edges, and that every edge but `started` ends the dispatch, so a replay fails;
  *  - another kind's token is refused at this door, and this kind's at another's;
- *  - the watchdog ends a dispatch that said nothing in time, and only in exact production.
+ *  - the watchdog ends a dispatch that said nothing in time (and not one a minute short of it),
+ *    only in exact production, and never reports an absent count as zero;
+ *  - the callback reads no switch, and a Worker without its secret answers 503 there and refuses
+ *    the finish claim;
+ *  - a claim that committed and then could not be read back or signed is ended, not stranded;
+ *  - the guards behind the service's own checks (the dataset of a linked re-pull, the nonce, a
+ *    link made once) hold when a row or a caller disagrees with them.
  */
 
 import type { Database } from "bun:sqlite";
@@ -34,6 +40,9 @@ import {
 } from "../src/services/github";
 import {
   DISPATCH_DEADLINE_HOURS,
+  DISPATCH_LINK_BY_KEY_SQL,
+  DISPATCH_LINK_SQL,
+  DISPATCH_REPORT_SQL,
   OPEN_DISPATCHES_TODAY_SQL,
   claimFinishDispatch,
   claimOpenDispatch,
@@ -41,7 +50,7 @@ import {
   sweepUnreportedDispatches,
 } from "../src/services/upstream-repull-dispatch";
 import type { Bindings } from "../src/types/bindings";
-import { freshDb, realD1 } from "./helpers/d1";
+import { freshDb, realD1, wrapD1, yieldingD1 } from "./helpers/d1";
 import { type Row, rowAt } from "./helpers/repull-rows";
 import { type CapturedEmail, withFakeResend } from "./helpers/resend";
 
@@ -195,16 +204,27 @@ describe("claiming an open dispatch: the fences", () => {
     expect(tableState()).toEqual({ dispatches: [], audit: [] });
   });
 
-  test("a candidate that is not an on mirror with two tags throws, and nothing is written", async () => {
+  test("a candidate that is not an on mirror throws, and nothing is written", async () => {
     for (const bad of [
       candidate("xx090123"),
       candidate("nm000103"),
       candidate(DS, { upstreamDs: "ds12345" }),
-      candidate(DS, { toTag: "refs/x" }),
-      candidate(DS, { toTag: "v1.0.0" }),
       candidate(DS, { repullId: 0 }),
     ]) {
       await expect(claimOpenDispatch(env(), bad)).rejects.toThrow(/candidate/);
+    }
+    expect(tableState()).toEqual({ dispatches: [], audit: [] });
+  });
+
+  test("an upstream tag from outside that is not a tag, or two that name one, is a refusal and writes nothing", async () => {
+    for (const bad of [
+      candidate(DS, { toTag: "refs/x" }),
+      candidate(DS, { fromTag: "has space" }),
+      candidate(DS, { toTag: "" }),
+      candidate(DS, { toTag: "v1.0.0" }),
+      candidate(DS, { toTag: "1.0.0" }),
+    ]) {
+      expect([bad, await claimOpenDispatch(env(), bad)]).toEqual([bad, { refused: "candidate" }]);
     }
     expect(tableState()).toEqual({ dispatches: [], audit: [] });
   });
@@ -321,18 +341,63 @@ describe("the open cap", () => {
     expect(await claimOpenDispatch(env(), candidate("on099993"))).toEqual({ refused: "cap" });
   });
 
-  test("REPULL_DAILY_OPEN_CAP 0 claims nothing; an unreadable cap reads 0; 1 is one", async () => {
-    for (const cap of ["0", "x", "21", " 2", ""]) {
-      expect([
-        cap,
-        await claimOpenDispatch(env({ REPULL_DAILY_OPEN_CAP: cap }), candidate()),
-      ]).toEqual([cap, { refused: "cap" }]);
-    }
+  test("REPULL_DAILY_OPEN_CAP 0 claims nothing; 1 is one", async () => {
+    expect(await claimOpenDispatch(env({ REPULL_DAILY_OPEN_CAP: "0" }), candidate())).toEqual({
+      refused: "cap",
+    });
     expect(tableState()).toEqual({ dispatches: [], audit: [] });
     await claimed(candidate("on099991"), env({ REPULL_DAILY_OPEN_CAP: "1" }));
     expect(
       await claimOpenDispatch(env({ REPULL_DAILY_OPEN_CAP: "1" }), candidate("on099992")),
     ).toEqual({ refused: "cap" });
+  });
+});
+
+describe("which dispatches keep their unit", () => {
+  const today = () =>
+    db.query<{ t: string }, []>("SELECT date('now') || ' 00:00:01' AS t").get()?.t as string;
+
+  test("an unreported dispatch (its answer lost) keeps its unit; a dispatch_failed one frees it", async () => {
+    const id = insert("upstream_repull_dispatches", {
+      kind: "open",
+      dataset_id: "on099995",
+      upstream_ds: "ds099991",
+      from_tag: "1.0.0",
+      to_tag: "1.0.1",
+      status: "unreported",
+      dispatched_at: today(),
+    });
+    const one = env({ REPULL_DAILY_OPEN_CAP: "1" });
+    expect(db.query(OPEN_DISPATCHES_TODAY_SQL).get()).toEqual({ used: 1 });
+    expect(await claimOpenDispatch(one, candidate())).toEqual({ refused: "cap" });
+    db.run(
+      "UPDATE upstream_repull_dispatches SET status = 'dispatch_failed', code = 'dispatch-refused' WHERE id = ?",
+      [id],
+    );
+    expect(db.query(OPEN_DISPATCHES_TODAY_SQL).get()).toEqual({ used: 0 });
+    await claimed(candidate(), one);
+  });
+});
+
+describe("an unreadable cap is not a full day", () => {
+  test("a cap that is not one or two digits up to 20 is cap-unreadable, carrying the reader's source", async () => {
+    for (const cap of ["x", "2.5", "21", " 2", "", "-1", "+1", "02x"]) {
+      expect([
+        cap,
+        await claimOpenDispatch(env({ REPULL_DAILY_OPEN_CAP: cap }), candidate()),
+      ]).toEqual([cap, { refused: "cap-unreadable", source: "unreadable" }]);
+    }
+    expect(tableState()).toEqual({ dispatches: [], audit: [] });
+  });
+
+  test("a day's exhaustion still reads cap, and a readable cap claims", async () => {
+    const one = env({ REPULL_DAILY_OPEN_CAP: "1" });
+    await claimed(candidate("on099991"), one);
+    expect(await claimOpenDispatch(one, candidate("on099992"))).toEqual({ refused: "cap" });
+    for (const cap of ["02", "20"]) {
+      await claimed(candidate("on099993"), env({ REPULL_DAILY_OPEN_CAP: cap }));
+      db.run("DELETE FROM upstream_repull_dispatches WHERE dataset_id = 'on099993'");
+    }
   });
 });
 
@@ -363,6 +428,20 @@ describe("resuming a stalled automatic re-pull", () => {
       refused: "row",
     });
     expect(tableState()).toEqual({ dispatches: [], audit: [] });
+  });
+});
+
+describe("a resume names the row's own upstream dataset and from-tag", () => {
+  test("another ds, or another from_tag, is refused, and nothing is written", async () => {
+    const id = automaticRow("copied");
+    expect(
+      await claimOpenDispatch(env(), candidate(DS, { repullId: id, upstreamDs: "ds099999" })),
+    ).toEqual({ refused: "row" });
+    expect(
+      await claimOpenDispatch(env(), candidate(DS, { repullId: id, fromTag: "0.9.0" })),
+    ).toEqual({ refused: "row" });
+    expect(tableState()).toEqual({ dispatches: [], audit: [] });
+    await claimed(candidate(DS, { repullId: id }));
   });
 });
 
@@ -443,6 +522,97 @@ describe("claiming a finish", () => {
       }),
     ).toEqual({ refused: "row" });
     expect(tableState()).toEqual({ dispatches: [], audit: [] });
+  });
+});
+
+describe("claiming a finish without a callback secret", () => {
+  test("it is refused as unconfigured and writes nothing, so no orphan holds the dataset's slot", async () => {
+    const id = automaticRow("merged");
+    const row = {
+      id,
+      dataset_id: DS,
+      origin: "automatic" as const,
+      status: "merged" as const,
+      from_tag: "1.0.0",
+      to_tag: "1.0.1",
+    };
+    for (const secret of [undefined, ""]) {
+      expect(await claimFinishDispatch(env({ PRESCREEN_CALLBACK_SECRET: secret }), row)).toEqual({
+        refused: "unconfigured",
+      });
+    }
+    expect(tableState()).toEqual({ dispatches: [], audit: [] });
+    // The dataset's one live slot is free for the claim that can be signed.
+    expect("id" in (await claimFinishDispatch(env(), row))).toBe(true);
+  });
+});
+
+describe("a claim that committed and could not be handed out", () => {
+  const readBackFails = () =>
+    wrapD1(realD1(db), (sql) => {
+      if (sql.includes("WHERE nonce = ?")) throw new Error("D1_ERROR: network connection lost");
+    });
+
+  test("an open claim whose row cannot be read back is ended as dispatch-failed, freeing its unit and the slot", async () => {
+    const e = env({ REPULL_DAILY_OPEN_CAP: "1" });
+    (e as unknown as { DB: D1Database }).DB = readBackFails();
+    await expect(claimOpenDispatch(e, candidate())).rejects.toThrow(/network connection lost/);
+    expect(dispatches()).toHaveLength(1);
+    expect(dispatches()[0]).toMatchObject({
+      status: "dispatch_failed",
+      code: "dispatch-failed",
+      nonce: null,
+    });
+    expect(db.query(OPEN_DISPATCHES_TODAY_SQL).get()).toEqual({ used: 0 });
+    // Neither the day's only unit nor the dataset's live slot is held.
+    await claimed(candidate(), env({ REPULL_DAILY_OPEN_CAP: "1" }));
+  });
+
+  test("a finish claim whose row cannot be read back is ended too, so the merged record can be finished", async () => {
+    const id = automaticRow("merged");
+    const row = {
+      id,
+      dataset_id: DS,
+      origin: "automatic" as const,
+      status: "merged" as const,
+      from_tag: "1.0.0",
+      to_tag: "1.0.1",
+    };
+    const e = env();
+    (e as unknown as { DB: D1Database }).DB = readBackFails();
+    await expect(claimFinishDispatch(e, row)).rejects.toThrow(/network connection lost/);
+    expect(dispatches()[0]).toMatchObject({
+      kind: "finish",
+      status: "dispatch_failed",
+      code: "dispatch-failed",
+      nonce: null,
+    });
+    expect("id" in (await claimFinishDispatch(env(), row))).toBe(true);
+  });
+});
+
+describe("what a claim's audit row says", () => {
+  test("it is built from the inserted row, so a caller's stale row cannot change it", async () => {
+    const id = automaticRow("merged", { from_tag: "1.0.0", to_tag: "1.0.1" });
+    // The caller read other tags and another dataset than the database holds.
+    const claim = await claimFinishDispatch(env(), {
+      id,
+      dataset_id: DS,
+      origin: "automatic",
+      status: "merged",
+      from_tag: "0.1.0",
+      to_tag: "0.2.0",
+    });
+    if (!("id" in claim)) throw new Error(`refused: ${claim.refused}`);
+    const [audit] = audits("repull_dispatch");
+    expect(JSON.parse(audit?.details as string)).toEqual({
+      dataset_id: DS,
+      kind: "finish",
+      from_tag: "1.0.0",
+      to_tag: "1.0.1",
+      repull_id: id,
+    });
+    expect(dispatchRow(claim.id)).toMatchObject({ from_tag: "1.0.0", to_tag: "1.0.1" });
   });
 });
 
@@ -530,6 +700,124 @@ describe("the report: edges", () => {
       code: "runner-disk",
       nonce: null,
     });
+  });
+
+  test("the callback reads no switch: a dispatched run still says how it ended", async () => {
+    for (const switchValue of [undefined, "0"]) {
+      db.run("DELETE FROM upstream_repulls");
+      db.run("DELETE FROM upstream_repull_dispatches");
+      const off = env({ AUTO_REPULL_ENABLED: switchValue, REPULL_DAILY_OPEN_CAP: "0" });
+      const claim = await claimed();
+      const ok = async (body: Record<string, unknown>) =>
+        expect([switchValue, body.phase, (await report(body, claim.token, off)).status]).toEqual([
+          switchValue,
+          body.phase,
+          200,
+        ]);
+      await ok({ dispatch_id: claim.id, dataset_id: DS, phase: "started" });
+      const id = automaticRow("pr_open");
+      db.run("UPDATE upstream_repull_dispatches SET repull_id = ? WHERE id = ?", [id, claim.id]);
+      await ok({ dispatch_id: claim.id, dataset_id: DS, phase: "opened", repull_id: id });
+      expect(dispatchRow(claim.id).status).toBe("opened");
+
+      db.run("DELETE FROM upstream_repulls");
+      db.run("DELETE FROM upstream_repull_dispatches");
+      const failing = await claimed();
+      expect(
+        (
+          await report(
+            { dispatch_id: failing.id, dataset_id: DS, phase: "failed", code: "runner-failed" },
+            failing.token,
+            off,
+          )
+        ).status,
+      ).toBe(200);
+      expect(dispatchRow(failing.id).status).toBe("failed");
+    }
+  });
+
+  test("a Worker without its callback secret answers 503, and stores nothing", async () => {
+    const claim = await claimed();
+    for (const secret of [undefined, ""]) {
+      expect(
+        await report(
+          { dispatch_id: claim.id, dataset_id: DS, phase: "started" },
+          claim.token,
+          env({ PRESCREEN_CALLBACK_SECRET: secret }),
+        ),
+      ).toMatchObject({ status: 503, body: { code: "dispatch-unconfigured" } });
+    }
+    expect(dispatchRow(claim.id)).toMatchObject({ status: "dispatched", reported_at: null });
+  });
+
+  test("two reports racing on one dispatch: one is stored, the other finds it moved", async () => {
+    const claim = await claimed();
+    const racing = env();
+    (racing as unknown as { DB: D1Database }).DB = yieldingD1(realD1(db));
+    const results = await Promise.all([
+      report(
+        { dispatch_id: claim.id, dataset_id: DS, phase: "failed", code: "runner-failed" },
+        claim.token,
+        racing,
+      ),
+      report(
+        { dispatch_id: claim.id, dataset_id: DS, phase: "refused", code: "auto-not-clean-plan" },
+        claim.token,
+        racing,
+      ),
+    ]);
+    expect(results.map((r) => [r.status, r.body.code]).sort()).toEqual([
+      [200, "stored"],
+      [409, "stale-dispatch"],
+    ]);
+    const stored = results.find((r) => r.status === 200);
+    const status = dispatchRow(claim.id).status;
+    expect(status).toBe(stored && results[0] === stored ? "failed" : "refused");
+    expect(dispatchRow(claim.id).nonce).toBeNull();
+  });
+
+  test("a run URL is kept once set: a later, different one does not replace it", async () => {
+    const claim = await claimed();
+    const other = "https://github.com/nemarDatasets/.github/actions/runs/111";
+    await report(
+      { dispatch_id: claim.id, dataset_id: DS, phase: "started", workflow_run_url: RUN_URL },
+      claim.token,
+    );
+    expect(
+      (
+        await report(
+          {
+            dispatch_id: claim.id,
+            dataset_id: DS,
+            phase: "failed",
+            code: "runner-failed",
+            workflow_run_url: other,
+          },
+          claim.token,
+        )
+      ).status,
+    ).toBe(200);
+    expect(dispatchRow(claim.id)).toMatchObject({ status: "failed", workflow_run_url: RUN_URL });
+  });
+
+  test("opened is refused for a row that ended after pr_open (abandoned, failed, superseded)", async () => {
+    for (const status of ["abandoned", "failed", "superseded"] as const) {
+      db.run("DELETE FROM upstream_repulls");
+      db.run("DELETE FROM upstream_repull_dispatches");
+      const claim = await claimed();
+      const id = automaticRow("pr_open");
+      db.run("UPDATE upstream_repull_dispatches SET repull_id = ? WHERE id = ?", [id, claim.id]);
+      db.run(
+        `UPDATE upstream_repulls SET status = '${status}', terminal_at = datetime('now'), last_error = 'x' WHERE id = ?`,
+        [id],
+      );
+      const res = await report(
+        { dispatch_id: claim.id, dataset_id: DS, phase: "opened", repull_id: id },
+        claim.token,
+      );
+      expect([status, res.status, res.body.code]).toEqual([status, 409, "repull-not-ready"]);
+      expect(dispatchRow(claim.id)).toMatchObject({ status: "dispatched" });
+    }
   });
 
   test("opened needs this dispatch's own row, automatic, at pr_open or later", async () => {
@@ -678,6 +966,18 @@ describe("the report: what it refuses", () => {
       { ...base, phase: "unreported" },
       { ...base, phase: "dispatch_failed", code: "dispatch-refused" },
       { ...base, phase: "started", workflow_run_url: "https://example.org/actions/runs/1" },
+      {
+        ...base,
+        phase: "started",
+        workflow_run_url: "https://github.com/other/repo/actions/runs/1",
+      },
+      { ...base, phase: "started", workflow_run_url: `${RUN_URL}?attempt=1` },
+      { ...base, phase: "started", workflow_run_url: `${RUN_URL}/jobs/1` },
+      {
+        ...base,
+        phase: "started",
+        workflow_run_url: `https://github.com/nemarDatasets/.github/actions/runs/${"9".repeat(21)}`,
+      },
       { ...base, phase: "started", extra: 1 },
       { ...base, dataset_id: "xx090123", phase: "started" },
       { ...base, dispatch_id: "1", phase: "started" },
@@ -722,8 +1022,9 @@ describe("the report: what it refuses", () => {
     expect(dispatchRow(claim.id)).toMatchObject({ status: "dispatched", reported_at: null });
   });
 
-  test("every word the callback stores is a dispatch code", () => {
-    // The closed list is what keeps a path or a message out of the column.
+  test("the closed list of codes holds only fixed words", () => {
+    // The shape is what keeps a path or a message out of the column; that the callback stores
+    // nothing outside the list is the 400 on an unknown word in the test above.
     for (const code of DISPATCH_CODES) expect(code).toMatch(/^[a-z0-9-]{1,64}$/);
   });
 });
@@ -775,6 +1076,49 @@ describe("the watchdog", () => {
     await claimed(candidate("on099991"), env({ REPULL_DAILY_OPEN_CAP: "5" }));
   });
 
+  test("the bound is eight hours: seven and a half hours ends nothing, eight and a half ends it", async () => {
+    const claim = await claimed();
+    const ageBy = (interval: string) =>
+      db.run(
+        `UPDATE upstream_repull_dispatches SET dispatched_at = datetime('now', ${interval}) WHERE id = ?`,
+        [claim.id],
+      );
+    for (const interval of [
+      "'-7 hours'",
+      "'-7 hours', '-30 minutes'",
+      "'-7 hours', '-59 minutes'",
+    ]) {
+      ageBy(interval);
+      expect([interval, await sweepUnreportedDispatches(env())]).toEqual([interval, { marked: 0 }]);
+      expect(dispatchRow(claim.id).status).toBe("dispatched");
+    }
+    expect(audits("repull_dispatch_unreported")).toEqual([]);
+    ageBy("'-8 hours', '-30 minutes'");
+    expect(await sweepUnreportedDispatches(env())).toEqual({ marked: 1 });
+    expect(dispatchRow(claim.id)).toMatchObject({ status: "unreported", nonce: null });
+  });
+
+  test("a count the database does not report is an error, never zero marked", async () => {
+    const claim = await claimed();
+    db.run(
+      "UPDATE upstream_repull_dispatches SET dispatched_at = datetime('now', '-9 hours') WHERE id = ?",
+      [claim.id],
+    );
+    const real = realD1(db);
+    const silent = {
+      prepare: real.prepare.bind(real),
+      // The real results of the real batch, with the count the caller reads left out.
+      batch: async (stmts: unknown[]) =>
+        ((await real.batch(stmts as never)) as unknown as Array<{ meta: object }>).map((r) => ({
+          ...r,
+          meta: {},
+        })),
+    } as unknown as D1Database;
+    const e = env();
+    (e as unknown as { DB: D1Database }).DB = silent;
+    await expect(sweepUnreportedDispatches(e)).rejects.toThrow(/did not report how many/);
+  });
+
   test("outside exact production it is null and writes nothing; it does not read the switches", async () => {
     const claim = await claimed();
     age(claim.id, DISPATCH_DEADLINE_HOURS + 1);
@@ -786,5 +1130,102 @@ describe("the watchdog", () => {
     expect(await sweepUnreportedDispatches(env({ AUTO_REPULL_ENABLED: undefined }))).toEqual({
       marked: 1,
     });
+  });
+});
+
+// ----------------------------------------------------------------------------
+// The guards behind the service's own checks
+// ----------------------------------------------------------------------------
+
+describe("the statements hold when a row or a caller disagrees with the service", () => {
+  test("a dispatch linked to another dataset's re-pull cannot report opened or finished", async () => {
+    // Opened: the dispatch (of DS) is linked, by direct SQL, to a pr_open row of OTHER.
+    const open = await claimed();
+    const foreign = automaticRow("pr_open", { dataset_id: OTHER });
+    db.run("UPDATE upstream_repull_dispatches SET repull_id = ? WHERE id = ?", [foreign, open.id]);
+    expect(
+      await report(
+        { dispatch_id: open.id, dataset_id: DS, phase: "opened", repull_id: foreign },
+        open.token,
+      ),
+    ).toMatchObject({ status: 409, body: { code: "repull-not-ready" } });
+    expect(dispatchRow(open.id)).toMatchObject({ status: "dispatched" });
+    expect(dispatchRow(open.id).nonce).not.toBeNull();
+
+    // Finished: a finish dispatch of DS whose row is changed to a complete row of OTHER.
+    db.run("DELETE FROM upstream_repull_dispatches");
+    const mine = automaticRow("released");
+    const finish = await claimFinishDispatch(env(), {
+      id: mine,
+      dataset_id: DS,
+      origin: "automatic",
+      status: "released",
+      from_tag: "1.0.0",
+      to_tag: "1.0.1",
+    });
+    if (!("id" in finish)) throw new Error(`refused: ${finish.refused}`);
+    const theirs = automaticRow("complete", { dataset_id: OTHER, attempt: 2 });
+    db.run("UPDATE upstream_repull_dispatches SET repull_id = ? WHERE id = ?", [theirs, finish.id]);
+    expect(
+      await report({ dispatch_id: finish.id, dataset_id: DS, phase: "finished" }, finish.token),
+    ).toMatchObject({ status: 409, body: { code: "repull-not-ready" } });
+    expect(dispatchRow(finish.id).status).toBe("dispatched");
+  });
+
+  test("a report statement applies only under the nonce that verified", async () => {
+    const claim = await claimed();
+    const row = dispatchRow(claim.id);
+    const bind = (nonce: string) => [row.id, nonce, "dispatched", "runner-failed", null, null];
+    expect(
+      db.query(DISPATCH_REPORT_SQL.failed).run(...(bind(`${row.nonce}0`) as never[])).changes,
+    ).toBe(0);
+    expect(dispatchRow(claim.id).status).toBe("dispatched");
+    expect(
+      db.query(DISPATCH_REPORT_SQL.failed).run(...(bind(row.nonce as string) as never[])).changes,
+    ).toBe(1);
+    expect(dispatchRow(claim.id)).toMatchObject({ status: "failed", nonce: null });
+  });
+
+  test("a dispatch is linked once, to a live dispatch, under its own nonce", async () => {
+    const claim = await claimed();
+    const nonce = dispatchRow(claim.id).nonce as string;
+    const id = automaticRow("planned");
+    const link = (repull: number, dispatch: number, n: string) =>
+      db.query(DISPATCH_LINK_SQL).run(repull, dispatch, n).changes;
+    // Another nonce links nothing, by either statement.
+    expect(link(id, claim.id, `${nonce}0`)).toBe(0);
+    const key = db
+      .query("SELECT dataset_id, to_tag, attempt FROM upstream_repulls WHERE id = ?")
+      .get(id) as { dataset_id: string; to_tag: string; attempt: number };
+    expect(
+      db
+        .query(DISPATCH_LINK_BY_KEY_SQL)
+        .run(key.dataset_id, key.to_tag, key.attempt, claim.id, `${nonce}0`).changes,
+    ).toBe(0);
+    expect(dispatchRow(claim.id).repull_id).toBeNull();
+    expect(
+      db
+        .query(DISPATCH_LINK_BY_KEY_SQL)
+        .run(key.dataset_id, key.to_tag, key.attempt, claim.id, nonce).changes,
+    ).toBe(1);
+    db.run("UPDATE upstream_repull_dispatches SET repull_id = NULL WHERE id = ?", [claim.id]);
+    expect(link(id, claim.id, nonce)).toBe(1);
+    // Already linked: a second link, even to another row, changes nothing.
+    const other = automaticRow("planned", { dataset_id: OTHER });
+    expect(link(other, claim.id, nonce)).toBe(0);
+    expect(dispatchRow(claim.id).repull_id).toBe(id);
+
+    // An ended dispatch is not linked, by either statement.
+    db.run("DELETE FROM upstream_repull_dispatches");
+    db.run("DELETE FROM upstream_repulls");
+    const ended = await claimed();
+    const target = automaticRow("planned");
+    const endedNonce = dispatchRow(ended.id).nonce as string;
+    db.run("UPDATE upstream_repull_dispatches SET status = 'unreported', nonce = NULL");
+    expect(link(target, ended.id, endedNonce)).toBe(0);
+    expect(
+      db.query(DISPATCH_LINK_BY_KEY_SQL).run(DS, "1.0.1", 1, ended.id, endedNonce).changes,
+    ).toBe(0);
+    expect(dispatchRow(ended.id).repull_id).toBeNull();
   });
 });
