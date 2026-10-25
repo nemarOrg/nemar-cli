@@ -139,6 +139,14 @@ export const DISPATCH_SEND_FAILED_SQL = `UPDATE upstream_repull_dispatches
   WHERE id = ?2 AND status = 'dispatched'`;
 
 /**
+ * The same end, found by the claim's nonce, for a claim whose id is not known (the insert reported
+ * none): `?1` the code, `?2` the nonce. The nonce is random and held by no other row.
+ */
+export const DISPATCH_SEND_FAILED_BY_NONCE_SQL = `UPDATE upstream_repull_dispatches
+  SET status = 'dispatch_failed', nonce = NULL, code = ?1
+  WHERE nonce = ?2 AND status = 'dispatched'`;
+
+/**
  * A run's report, one statement per phase, each a compare-and-set on the id, the nonce that
  * verified and the status it was read in. `?1` id, `?2` nonce, `?3` the status read, `?4` code,
  * `?5` workflow run URL (kept once set), `?6` the re-pull the report names (`opened` only). Every
@@ -228,7 +236,8 @@ const looksUnique = (err: unknown) => /UNIQUE constraint failed/i.test(String(er
  * `dispatch-failed` before the error goes on, because a row left `dispatched` would hold one unit
  * of the cap and the dataset's one live slot for the eight hours until the watchdog, with no run
  * to report. It is ended by the id the claim's own insert returned, never by a read, since a read
- * is what may have failed.
+ * is what may have failed; when the insert reported no id it is ended by its nonce. If the ending
+ * itself fails, both errors are logged and the original goes on.
  */
 async function issued(
   env: Bindings,
@@ -245,8 +254,17 @@ async function issued(
     );
     return { id: row.id, token };
   } catch (err) {
-    if (claimId !== undefined && claimId >= 1) {
-      await markDispatchSendFailed(env.DB, claimId, "dispatch-failed");
+    try {
+      if (claimId !== undefined && claimId >= 1) {
+        await markDispatchSendFailed(env.DB, claimId, "dispatch-failed");
+      } else {
+        await env.DB.prepare(DISPATCH_SEND_FAILED_BY_NONCE_SQL)
+          .bind("dispatch-failed", nonce)
+          .run();
+      }
+    } catch (cleanupErr) {
+      console.error("[repull-dispatch] a committed claim could not be ended:", cleanupErr);
+      console.error("[repull-dispatch] the claim failed with:", err);
     }
     throw err;
   }

@@ -1082,7 +1082,7 @@ The token and the callback.
 - Then the plan (decision 6, "the automatic path takes only a plan with zero unexplained paths"): it was made by the planner the CLI runs today (planner 2, which a test pins to the CLI's), and it states `unexplained`, `conflicts` and `corrections`, each zero, because a count left out is not zero; and it states the size of its copy, at most 1 TiB, so one run fits a runner's job.
   The administrator's path has no such bound.
   The Worker can check only what the plan states; the run checks the live plan itself before it writes, which is a later slice's.
-- The insert links the dispatch to its record in the same batch, by the record's key and never by `last_insert_rowid()`, which the audit row moves, and only while the dispatch is still live under the nonce that verified: a dispatch that ended between the check and the write links nothing, the batch rolls back on the link's guard, and the create writes nothing and answers as any other failure of the token.
+- The insert links the dispatch to its record in the same batch, by the record's key and never by `last_insert_rowid()`, which the audit row moves, and only while the dispatch is still live under the nonce that verified: a dispatch that ended between the check and the write links nothing, the batch rolls back on the link's guard, and the create writes nothing and answers as any other failure of the token; when two creates of one valid dispatch race, the loser therefore gets that same 401 rather than `created: false`, which is kept because a retry converges on the winner's record.
 
 The same plan is the same record, for a caller of the same origin (clarification of the Phase 6 amendment).
 

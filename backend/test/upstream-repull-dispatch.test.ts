@@ -568,6 +568,59 @@ describe("a claim that committed and could not be handed out", () => {
     await claimed(candidate(), env({ REPULL_DAILY_OPEN_CAP: "1" }));
   });
 
+  /** The real batch results, with the id the insert reported left out. */
+  const withoutInsertId = (d1: D1Database) =>
+    ({
+      prepare: d1.prepare.bind(d1),
+      batch: async (stmts: unknown[]) =>
+        ((await d1.batch(stmts as never)) as unknown as Array<{ meta: object }>).map((r) => ({
+          ...r,
+          meta: { ...r.meta, last_row_id: undefined },
+        })),
+    }) as unknown as D1Database;
+
+  test("a claim whose insert reported no id is ended by its nonce", async () => {
+    const e = env({ REPULL_DAILY_OPEN_CAP: "1" });
+    const failing = wrapD1(realD1(db), (sql) => {
+      if (sql.includes("WHERE nonce = ?") && sql.startsWith("SELECT")) {
+        throw new Error("D1_ERROR: network connection lost");
+      }
+    });
+    (e as unknown as { DB: D1Database }).DB = withoutInsertId(failing);
+    await expect(claimOpenDispatch(e, candidate())).rejects.toThrow(/network connection lost/);
+    expect(dispatches()[0]).toMatchObject({
+      status: "dispatch_failed",
+      code: "dispatch-failed",
+      nonce: null,
+    });
+    await claimed(candidate(), env({ REPULL_DAILY_OPEN_CAP: "1" }));
+  });
+
+  test("when ending the claim fails too, both errors are logged and the original is thrown", async () => {
+    const logged: unknown[][] = [];
+    const original = console.error;
+    console.error = (...a: unknown[]) => {
+      logged.push(a);
+    };
+    try {
+      const e = env();
+      (e as unknown as { DB: D1Database }).DB = wrapD1(realD1(db), (sql) => {
+        if (sql.startsWith("SELECT") && sql.includes("WHERE nonce = ?")) {
+          throw new Error("read-back lost");
+        }
+        if (sql.includes("SET status = 'dispatch_failed'")) throw new Error("cleanup lost");
+      });
+      await expect(claimOpenDispatch(e, candidate())).rejects.toThrow(/read-back lost/);
+    } finally {
+      console.error = original;
+    }
+    const text = logged.map((a) => a.map(String).join(" ")).join("\n");
+    expect(text).toContain("cleanup lost");
+    expect(text).toContain("read-back lost");
+    // The claim is stranded, as the log says; the watchdog is what ends it.
+    expect(dispatches()[0]).toMatchObject({ status: "dispatched" });
+  });
+
   test("a finish claim whose row cannot be read back is ended too, so the merged record can be finished", async () => {
     const id = automaticRow("merged");
     const row = {
