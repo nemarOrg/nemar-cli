@@ -169,7 +169,9 @@ contributor back, which ADR 0107 settled).
 belongs to the commit it read, an approval is the administrator's OWN act from their machine with their
 own GitHub login and no Worker code path approves, a failing, running or unreadable review needs
 `--force`, nothing merges without `--merge` or a `y` in `nemar admin pr-reviews next`, both of which
-read GitHub's state before approving and need `clean`, each Worker lists only the datasets it
+read GitHub's state before approving and need `clean`, an upstream re-pull's pull request merges
+only through the one gate those two and `nemar admin repull merge` share (the daily merge cap
+claimed and the identifier screen read, ADR 0111), each Worker lists only the datasets it
 owns, and an administrator runs a finished review again only with `start --redo`, which never
 supersedes a running one).
 0094 (the upload save step skips re-reading annexed content only once recorded annexed bytes reach
