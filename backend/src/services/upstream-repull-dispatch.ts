@@ -362,10 +362,14 @@ export async function claimFinishDispatch(
 }
 
 /**
- * GitHub refused the dispatch, so its run never started: the unit of the cap is freed. Only a
- * refusal ends it this way; a dispatch whose answer was lost (a timeout, a network error) stays
- * `dispatched` and counts, because it may be running, and the watchdog ends it. Applies only while
- * the dispatch is still `dispatched`. A code outside DISPATCH_CODES is a defect and throws.
+ * End a dispatch that was claimed and never sent, so its run never started: the unit of the cap
+ * is freed and the dataset's live slot released. Three callers, each for a dispatch nothing ran:
+ * the scheduler when GitHub refused the send (a 4xx, `dispatch-refused`); `issued()` here when the
+ * committed claim could not be read back or signed (`dispatch-failed`); and the scheduler when the
+ * payload could not be built after the claim (`dispatch-failed`). A dispatch whose answer was lost
+ * (a 5xx, a timeout, a network error) is never ended this way: it stays `dispatched` and counts,
+ * because it may be running, and the watchdog ends it. Applies only while the dispatch is still
+ * `dispatched`. A code outside DISPATCH_CODES is a defect and throws.
  */
 export async function markDispatchSendFailed(
   db: D1Database,

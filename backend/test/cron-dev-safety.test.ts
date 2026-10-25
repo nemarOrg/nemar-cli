@@ -43,6 +43,8 @@ import {
 import { deleteDatasetCascade } from "../src/services/deletion";
 import { reconcileReservedVersionDois } from "../src/services/doi-reconcile";
 import { blockedCandidateQuery } from "../src/services/publication-sweep";
+import { sweepUnreportedDispatches } from "../src/services/upstream-repull-dispatch";
+import { runRepullSchedulerCron } from "../src/services/upstream-repull-scheduler";
 import type { Bindings } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
 
@@ -401,5 +403,64 @@ describe("the dev cleanup cron never selects a reserved fixture (#1440)", () => 
     expect(isDevEphemeralSandboxId("xx099900")).toBe(false); // but never auto-deleted
     expect(isDevOwnedDatasetId("nm099999")).toBe(false); // production has it too
     expect(isDevOwnedDatasetId("nm000104")).toBe(false);
+  });
+});
+
+describe("the automatic re-pull's cron jobs refuse outside exact production (#1913)", () => {
+  // The scheduler dispatches against the shared nemarDatasets org and the watchdog writes the
+  // dispatch table, which only the production Worker fills. Both test `ENVIRONMENT` for the exact
+  // string `production`, the REVERSE of isNonProductionEnv's fail-closed reading: here the danger
+  // is acting, so an unset or misspelled binding must leave them off (ADR 0111, the Phase 7a
+  // slice). A D1 that throws on first use proves nothing was read or written.
+  const untouched = () => {
+    let touched = false;
+    const db = {
+      prepare() {
+        touched = true;
+        throw new Error("reached-d1");
+      },
+      batch() {
+        touched = true;
+        throw new Error("reached-d1");
+      },
+    } as unknown as D1Database;
+    return { db, touched: () => touched };
+  };
+
+  for (const environment of [
+    "development",
+    "staging",
+    "test",
+    "",
+    undefined,
+    "prod",
+    "Production",
+    " production",
+  ]) {
+    test(`ENVIRONMENT=${JSON.stringify(environment)}: both return null with D1 untouched`, async () => {
+      const p = untouched();
+      const e = {
+        ENVIRONMENT: environment,
+        DB: p.db,
+        AUTO_REPULL_ENABLED: "1",
+        AUTO_REPULL_MERGE_ENABLED: "1",
+        PRESCREEN_CALLBACK_SECRET: "s",
+      } as unknown as Bindings;
+      expect(await runRepullSchedulerCron(e, { cliVersion: "1.2.3" })).toBeNull();
+      expect(await sweepUnreportedDispatches(e)).toBeNull();
+      expect(p.touched()).toBe(false);
+    });
+  }
+
+  test("in production both reach D1, so the probe above is not vacuous", async () => {
+    const db = realD1(freshDb());
+    const e = { ENVIRONMENT: "production", DB: db } as unknown as Bindings;
+    // The open switch is off: the scheduler only stamps its row.
+    expect((await runRepullSchedulerCron(e, { cliVersion: "1.2.3" }))?.outcome).toBe("switch-off");
+    expect(await sweepUnreportedDispatches(e)).toEqual({ marked: 0 });
+    const p = untouched();
+    const reached = { ENVIRONMENT: "production", DB: p.db } as unknown as Bindings;
+    await runRepullSchedulerCron(reached, { cliVersion: "1.2.3" });
+    expect(p.touched()).toBe(true);
   });
 });

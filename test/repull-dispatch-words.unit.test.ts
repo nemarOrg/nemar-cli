@@ -26,6 +26,7 @@ import {
   DISPATCH_FINAL_CODES,
   FIXED_WORD_RE,
   REPULL_HOLD_REASONS,
+  REPULL_SCHEDULER_OUTCOMES,
 } from "../shared/repull-state";
 import { IMPORT_SCRUB_REFUSALS } from "../src/lib/import-scrub";
 import { PLANNER_VERSION } from "../src/lib/repull/digest";
@@ -110,9 +111,12 @@ describe("DISPATCH_CODES holds every word a run can meet", () => {
   });
 
   test("every word has the stored shape, and none repeats", () => {
-    for (const w of [...DISPATCH_CODES, ...REPULL_HOLD_REASONS]) expect(w).toMatch(FIXED_WORD_RE);
+    for (const w of [...DISPATCH_CODES, ...REPULL_HOLD_REASONS, ...REPULL_SCHEDULER_OUTCOMES]) {
+      expect(w).toMatch(FIXED_WORD_RE);
+    }
     expect(new Set(DISPATCH_CODES).size).toBe(DISPATCH_CODES.length);
     expect(new Set(REPULL_HOLD_REASONS).size).toBe(REPULL_HOLD_REASONS.length);
+    expect(new Set(REPULL_SCHEDULER_OUTCOMES).size).toBe(REPULL_SCHEDULER_OUTCOMES.length);
     expect(new Set(DISPATCH_FINAL_CODES).size).toBe(DISPATCH_FINAL_CODES.length);
     for (const w of DISPATCH_FINAL_CODES) expect(listed.has(w)).toBe(true);
   });

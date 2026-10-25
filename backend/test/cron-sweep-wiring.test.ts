@@ -134,6 +134,11 @@ const SWEEP_WIRING: Record<
   // refuses outside exact production on its own; it is absent from DEV_CRON_ALLOWLIST because
   // only the production Worker makes dispatch rows.
   sweepUnreportedDispatches: "prod-only",
+  // ADR 0111, the Phase 7c slice: the automatic re-pull's scheduler. It dispatches the central
+  // re-pull workflow against the shared nemarDatasets org, so it is production-only and absent
+  // from DEV_CRON_ALLOWLIST; it also refuses outside exact production on its own, and acts only
+  // while AUTO_REPULL_ENABLED is exactly "1".
+  runRepullSchedulerCron: "prod-only",
   sweepBlockedBidsValidationRequests: "all-envs",
   // #1789: tombstones the live integration tests' accounts. It runs ONLY outside production,
   // from a section of scheduledCleanup (`cleanUpLiveTestAccounts`); the dedicated block at the
@@ -396,6 +401,14 @@ describe("every sweep service is declared and driven", () => {
         // be dangerous. Do not read this comment as evidence that it would.
         // #1167 review, finding 3.
         expect(callCount(allCode, name)).toBe(callCount(prodOnlyCode, name));
+      });
+
+      test(`${name} is NOT in DEV_CRON_ALLOWLIST`, () => {
+        // The allowlist is the declared set of daily jobs safe on the dev worker; a prod-only
+        // job named there would be a declaration that contradicts its call site (#1913).
+        const allowlist = /DEV_CRON_ALLOWLIST[^;]*;/s.exec(allCode)?.[0] ?? "";
+        expect(allowlist).toContain("DEV_CRON_ALLOWLIST");
+        expect(allowlist).not.toContain(`"${name}"`);
       });
     }
   }

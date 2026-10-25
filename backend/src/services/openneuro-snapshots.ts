@@ -21,7 +21,7 @@ import {
 } from "../../../shared/openneuro-snapshots.js";
 import type { UpstreamRead } from "../../../shared/upstream-staleness.js";
 import type { Bindings } from "../types/bindings.js";
-import { OPENNEURO_GRAPHQL_URL } from "./openneuro-discovery.js";
+import { OPENNEURO_GRAPHQL_URL } from "./openneuro-endpoint.js";
 import { errorMessage } from "./repo-metadata.js";
 
 export {
