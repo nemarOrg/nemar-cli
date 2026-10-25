@@ -329,6 +329,45 @@ describe("the Worker's start of an automatic re-pull's review", () => {
   });
 });
 
+describe("the review queue shows the App's pull request under the App's name", () => {
+  const detail = async () => {
+    const res = await app.request(
+      `/admin/pr-reviews/${DS}/7`,
+      { headers: { Authorization: `Bearer ${ADMIN_KEY}` } },
+      env(),
+    );
+    expect(res.status).toBe(200);
+    return (await res.json()) as {
+      review: { author_login: string; author_id: number } | null;
+      live: { author_login: string; author_id: number | null } | null;
+      author: { login: string; author_id: number } | null;
+    };
+  };
+
+  test("the stored review, GitHub's record and the author's standing all name the App", async () => {
+    await startForRecord();
+    const d = await detail();
+    expect(d.review).toMatchObject({
+      author_login: NEMAR_APP_BOT_LOGIN,
+      author_id: NEMAR_APP_BOT_USER_ID,
+    });
+    expect(d.live).toMatchObject({
+      author_login: NEMAR_APP_BOT_LOGIN,
+      author_id: NEMAR_APP_BOT_USER_ID,
+    });
+    expect(d.author).toMatchObject({
+      login: NEMAR_APP_BOT_LOGIN,
+      author_id: NEMAR_APP_BOT_USER_ID,
+    });
+  });
+
+  test("a bot that only borrows the App's login is not shown as the App", async () => {
+    pulls[`${DS}#7`] = appPull({ user: { ...APP, id: 1 } });
+    const d = await detail();
+    expect(d.live?.author_login).toBe("(unknown)");
+  });
+});
+
 describe("the start refuses everything but the App's recorded pull request", () => {
   const refusals: Array<[string, () => void, string]> = [
     [
