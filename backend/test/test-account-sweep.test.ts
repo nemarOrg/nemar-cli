@@ -206,6 +206,21 @@ describe("what the sweep tombstones", () => {
     expect(isTombstoned(id)).toBe(true);
   });
 
+  test("a generated address with an open upload-access request is swept and leaves the queue", async () => {
+    const id = seedUser(generated("dcli", "signup-flags"), { uploadRequested: true });
+    const awaiting = "SELECT COUNT(*) AS n FROM users WHERE upload_access_requested_at IS NOT NULL";
+    expect(count(awaiting)).toBe(1);
+    const result = await sweepCiTestAccounts(env());
+    expect(result.tombstoned).toBe(1);
+    expect(isTombstoned(id)).toBe(true);
+    // The tombstone clears the stamp, so the admin awaiting-approval filter cannot see it even
+    // with include_deleted.
+    expect(count(awaiting)).toBe(0);
+    expect(count("SELECT COUNT(*) AS n FROM users WHERE id = ? AND service_access = 0", id)).toBe(
+      1,
+    );
+  });
+
   test("an account just over the age floor is swept, and just under it is not", async () => {
     const over = seedUser(generated("pl"), { ageDays: TEST_ACCOUNT_SWEEP_MIN_AGE_DAYS + 1 });
     const under = seedUser(generated("pl"), { ageDays: TEST_ACCOUNT_SWEEP_MIN_AGE_DAYS - 1 });
@@ -298,8 +313,18 @@ describe("what the sweep must never touch", () => {
     untouched("an account with legacy IAM credentials", () =>
       seedUser(generated("pl"), { iam: "legacy-iam-user" }),
     ),
-    untouched("an account with an open upload-access request", () =>
-      seedUser(generated("pl"), { uploadRequested: true }),
+    untouched("a real-looking address with an open upload-access request", () =>
+      seedUser("jane.doe@example.org", { uploadRequested: true }),
+    ),
+    untouched("a real address shaped like a generated one, with an open upload request", () =>
+      seedUser("dcli-full-loop-1760000000001-abcdef@example.com", { uploadRequested: true }),
+    ),
+    untouched("a generated address whose upload access was granted", () =>
+      seedUser(generated("dcli", "signup-flags"), {
+        status: "approved",
+        serviceAccess: true,
+        uploadRequested: true,
+      }),
     ),
     untouched("an account holding upload access", () =>
       seedUser(generated("pl"), { status: "approved", serviceAccess: true }),
@@ -466,6 +491,11 @@ describe("the batch bound", () => {
 
     const third = await sweepCiTestAccounts(env());
     expect(third.tombstoned).toBe(0);
+  });
+
+  test("the batch bound is the declared one and the scan cap follows it", () => {
+    expect(TEST_ACCOUNT_SWEEP_BATCH).toBe(300);
+    expect(TEST_ACCOUNT_SWEEP_SCAN_CAP).toBe(TEST_ACCOUNT_SWEEP_BATCH * 10);
   });
 
   test("rows the pattern rejects do not starve the batch", async () => {

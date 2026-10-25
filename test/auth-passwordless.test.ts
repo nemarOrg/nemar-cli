@@ -23,8 +23,9 @@
  * to produce, so the rest of the assertions are unchanged.
  */
 
-import { beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import "./setup";
+import { deleteSeededAccounts, rememberSeededAccount } from "./helpers/seeded-account-teardown";
 import { LIVE_TARGET_BLOCKED, TEST_CONFIG } from "./setup";
 
 const API = TEST_CONFIG.apiUrl;
@@ -60,7 +61,14 @@ async function seedWebUser(
   if (r.status !== 200) {
     throw new Error(`seedWebUser failed (${r.status}): ${await r.text()}`);
   }
+  rememberSeededAccount(await r.json());
 }
+
+// Best effort: tombstone this run's seeded accounts; the daily sweep is the backstop.
+afterAll(async () => {
+  if (PROD_GUARD_ACTIVE) return;
+  await deleteSeededAccounts(API, baseHeaders);
+});
 
 function freshEmail(label: string): string {
   // Unique per run so per-email rate limits and code rotation can't
