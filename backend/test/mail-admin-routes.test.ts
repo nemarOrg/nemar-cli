@@ -311,7 +311,7 @@ describe("reply", () => {
     const sent = binding.sent[0];
     const ref = row(t).ref as string;
     expect(sent.from).toEqual({ email: "support@nemar.org", name: "NEMAR Support" });
-    expect(sent.replyTo).toBe(`support+t${ref}@nemar.org`);
+    expect(sent.replyTo).toBe(`support+t${ref}@nemar.org`); // a legacy ten-character ref
     expect(sent.to).toBe("ada@sender.example");
     expect(sent.subject).toBe("Re: Help with an upload");
     expect(sent.headers?.["In-Reply-To"]).toBe("<second@sender.example>");
@@ -342,6 +342,14 @@ describe("reply", () => {
     expect(binding.sent[1].headers?.References).toBe(
       "<first@sender.example> <second@sender.example> <1.recorded@staging.nemar.test>",
     );
+  });
+
+  test("a word-ref ticket replies to support+t-<ref>@, which threads the answer back", async () => {
+    const t = ticket();
+    db.run("UPDATE mail_tickets SET ref = 'amber-falcon-river' WHERE id = ?", [t]);
+    const r = await call("admin", "POST", `/tickets/${t}/reply`, { text: "hi" });
+    expect(r.status).toBe(200);
+    expect(binding.sent[0].replyTo).toBe("support+t-amber-falcon-river@nemar.org");
   });
 
   test("a provider id that is not a Message-ID is stored as NULL, and the plus-tag still threads", async () => {

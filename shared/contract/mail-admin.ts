@@ -68,6 +68,11 @@ export interface MailErrorBody {
 
 export interface TicketSummary {
   id: number;
+  /**
+   * The ticket's reference: three lowercase words joined by dashes (`amber-falcon-river`) for a
+   * ticket created from 2026-10-25, or ten lowercase base32 characters (`wphdw6vce6`) for an older
+   * one. Never rewritten. Display it as is.
+   */
   ref: string;
   queue_tag: string;
   restricted: boolean;

@@ -8,8 +8,10 @@ import type { Database } from "bun:sqlite";
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { Miniflare } from "miniflare";
 import { handleInboundEmail } from "../src/services/inbound-mail";
+import { TICKET_WORDS } from "../src/services/ticket-words";
 import {
   type InboundTicketInput,
+  type IngestOptions,
   TEXT_BODY_MAX_BYTES,
   aligned,
   extractMessageIds,
@@ -19,6 +21,7 @@ import {
   parseAuthResults,
   reprocessRawKey,
   splitRecipient,
+  ticketPlusTag,
 } from "../src/services/tickets";
 import { freshDb, realD1 } from "./helpers/d1";
 import { type EmlOptions, eml, seedUser } from "./helpers/tickets";
@@ -32,7 +35,12 @@ beforeEach(() => {
   d1 = realD1(db);
 });
 
-function ingest(o: EmlOptions = {}, to = "support@staging.nemar.test", at = new Date()) {
+function ingest(
+  o: EmlOptions = {},
+  to = "support@staging.nemar.test",
+  at = new Date(),
+  options?: IngestOptions,
+) {
   n += 1;
   const input: InboundTicketInput = {
     rawKey: `inbound/raw/2026/10/24/test-${n}.eml`,
@@ -41,7 +49,7 @@ function ingest(o: EmlOptions = {}, to = "support@staging.nemar.test", at = new 
     envelopeTo: to,
     receivedAt: at,
   };
-  return ingestInboundMessage(d1, input).then((r) => ({ ...r, rawKey: input.rawKey }));
+  return ingestInboundMessage(d1, input, options).then((r) => ({ ...r, rawKey: input.rawKey }));
 }
 
 const ticket = (id: number) =>
@@ -156,7 +164,97 @@ describe("pure helpers", () => {
       "<b@x>",
       "<c@x>",
     ]);
-    expect(newTicketRef()).toMatch(/^[a-z2-7]{10}$/);
+  });
+});
+
+describe("ticket references", () => {
+  test("three words from the committed list, joined by dashes", () => {
+    const words = new Set(TICKET_WORDS);
+    expect(TICKET_WORDS.length).toBe(1295);
+    expect(words.size).toBe(TICKET_WORDS.length);
+    for (const word of TICKET_WORDS) expect(word).toMatch(/^[a-z]+$/);
+    for (let i = 0; i < 200; i++) {
+      const ref = newTicketRef();
+      expect(ref).toMatch(/^[a-z]+-[a-z]+-[a-z]+$/);
+      for (const word of ref.split("-")) expect(words.has(word)).toBe(true);
+    }
+  });
+
+  test("every word is reachable and the choice is not obviously skewed", () => {
+    const seen = new Map<string, number>();
+    for (let i = 0; i < 20000; i++) {
+      for (const word of newTicketRef().split("-")) seen.set(word, (seen.get(word) ?? 0) + 1);
+    }
+    // 60,000 draws over 1,295 words: mean 46. A modulo-biased or stuck source falls outside this.
+    expect(seen.size).toBeGreaterThan(1280);
+    expect(Math.max(...seen.values())).toBeLessThan(120);
+  });
+
+  test("the plus tag is t-<ref> for a word ref and t<ref> for a legacy one", () => {
+    expect(ticketPlusTag("amber-falcon-river")).toBe("t-amber-falcon-river");
+    expect(ticketPlusTag("wphdw6vce6")).toBe("twphdw6vce6");
+  });
+
+  test("a legacy and a word ref both thread by their plus tag", async () => {
+    for (const ref of ["wphdw6vce6", "amber-falcon-river"]) {
+      db.run(
+        "INSERT INTO mail_tickets (ref, queue_tag, requester_email, subject) VALUES (?, 'support', 'ada@sender.example', 'Help')",
+        [ref],
+      );
+      const id = (db.query("SELECT id FROM mail_tickets WHERE ref = ?").get(ref) as { id: number })
+        .id;
+      const reply = await ingest(
+        { subject: "Re: Help" },
+        `support+${ticketPlusTag(ref)}@staging.nemar.test`,
+      );
+      expect([reply.outcome, reply.ticketId]).toEqual(["threaded", id]);
+    }
+  });
+
+  test("a collision with an existing ticket retries with a fresh ref and stores everything once", async () => {
+    db.run(
+      "INSERT INTO mail_tickets (ref, queue_tag, requester_email, subject) VALUES ('amber-falcon-river', 'support', 'other@sender.example', 'Old')",
+    );
+    const offered: string[] = [];
+    const queue = ["amber-falcon-river", "amber-falcon-river", "quiet-otter-lamp"];
+    const created = await ingest({ subject: "Collide" }, "support@staging.nemar.test", new Date(), {
+      newRef: () => {
+        const ref = queue.shift() ?? "never-reached-here";
+        offered.push(ref);
+        return ref;
+      },
+    });
+    expect(created.outcome).toBe("created");
+    expect(offered).toEqual(["amber-falcon-river", "amber-falcon-river", "quiet-otter-lamp"]);
+    const row = db.query("SELECT id, ref FROM mail_tickets WHERE id = ?").get(created.ticketId) as {
+      id: number;
+      ref: string;
+    };
+    expect(row.ref).toBe("quiet-otter-lamp");
+    for (const table of ["mail_messages", "mail_ticket_events"]) {
+      const n = db
+        .query(`SELECT COUNT(*) AS n FROM ${table} WHERE ticket_id = ?`)
+        .get(created.ticketId) as { n: number };
+      expect(n.n).toBeGreaterThanOrEqual(1);
+    }
+    expect((db.query("SELECT COUNT(*) AS n FROM mail_messages").get() as { n: number }).n).toBe(1);
+  });
+
+  test("a collision that persists gives up after a bounded number of attempts", async () => {
+    db.run(
+      "INSERT INTO mail_tickets (ref, queue_tag, requester_email, subject) VALUES ('amber-falcon-river', 'support', 'other@sender.example', 'Old')",
+    );
+    let calls = 0;
+    await expect(
+      ingest({}, "support@staging.nemar.test", new Date(), {
+        newRef: () => {
+          calls++;
+          return "amber-falcon-river";
+        },
+      }),
+    ).rejects.toThrow();
+    expect(calls).toBe(5);
+    expect((db.query("SELECT COUNT(*) AS n FROM mail_messages").get() as { n: number }).n).toBe(0);
   });
 });
 
@@ -180,7 +278,7 @@ describe("a new ticket", () => {
       subject: "Help",
       assignee_user_id: admin,
     });
-    expect(t.ref).toMatch(/^[a-z2-7]{10}$/);
+    expect(t.ref).toMatch(/^[a-z]+-[a-z]+-[a-z]+$/);
     const msg = db
       .query<Record<string, string>, [number]>("SELECT * FROM mail_messages WHERE ticket_id = ?")
       .get(r.ticketId);
@@ -258,7 +356,10 @@ describe("threading", () => {
   test("by the plus ref of the recipient, whatever the headers say", async () => {
     const first = await ingest();
     const ref = ticket(first.ticketId).ref as string;
-    const reply = await ingest({ subject: "Re: x" }, `support+t${ref}@staging.nemar.test`);
+    const reply = await ingest(
+      { subject: "Re: x" },
+      `support+${ticketPlusTag(ref)}@staging.nemar.test`,
+    );
     expect(reply.outcome).toBe("threaded");
     expect(reply.ticketId).toBe(first.ticketId);
     expect(
@@ -322,7 +423,7 @@ describe("spam", () => {
         auth: "mx.cloudflare.net; spf=pass; dkim=pass; dmarc=fail",
         inReplyTo: "<s@sender.example>",
       },
-      `support+t${ref}@staging.nemar.test`,
+      `support+${ticketPlusTag(ref)}@staging.nemar.test`,
     );
     expect(bad).toMatchObject({
       outcome: "created",
@@ -548,7 +649,7 @@ describe("restriction is decided before threading and never fails open", () => {
   test("a restricted recipient never appends to an unrestricted ticket", async () => {
     const first = await ingest({ messageId: "<pub@sender.example>" });
     const ref = ticket(first.ticketId).ref as string;
-    const viaRef = await ingest({}, `security+t${ref}@staging.nemar.test`);
+    const viaRef = await ingest({}, `security+${ticketPlusTag(ref)}@staging.nemar.test`);
     expect(viaRef.outcome).toBe("created");
     expect(ticket(viaRef.ticketId)).toMatchObject({ restricted: 1, queue_tag: "security" });
     expect(createdDetail(viaRef.ticketId)).toMatchObject({
@@ -566,11 +667,11 @@ describe("restriction is decided before threading and never fails open", () => {
   test("an unrestricted recipient may append to a restricted ticket for its own requester", async () => {
     const first = await ingest({}, "security@staging.nemar.test");
     const ref = ticket(first.ticketId).ref as string;
-    const reply = await ingest({}, `support+t${ref}@staging.nemar.test`);
+    const reply = await ingest({}, `support+${ticketPlusTag(ref)}@staging.nemar.test`);
     expect(reply).toMatchObject({ outcome: "threaded", ticketId: first.ticketId });
     const stranger = await ingest(
       { from: strangerFrom, auth: strangerAuth },
-      `support+t${ref}@staging.nemar.test`,
+      `support+${ticketPlusTag(ref)}@staging.nemar.test`,
     );
     expect(stranger.ticketId).not.toBe(first.ticketId);
   });
@@ -582,7 +683,7 @@ describe("threading needs the sender to be on the ticket", () => {
     const ref = ticket(first.ticketId).ref as string;
     const byRef = await ingest(
       { from: strangerFrom, auth: strangerAuth },
-      `support+t${ref}@staging.nemar.test`,
+      `support+${ticketPlusTag(ref)}@staging.nemar.test`,
     );
     expect(byRef.outcome).toBe("created");
     expect(createdDetail(byRef.ticketId)).toMatchObject({
@@ -641,7 +742,7 @@ describe("threading needs the sender to be on the ticket", () => {
     const ref = ticket(spamTicket.ticketId).ref as string;
     const reply = await ingest(
       { inReplyTo: "<sp@sender.example>" },
-      `support+t${ref}@staging.nemar.test`,
+      `support+${ticketPlusTag(ref)}@staging.nemar.test`,
     );
     expect(reply.outcome).toBe("created");
     expect(reply.status).toBe("open");
