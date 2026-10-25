@@ -120,6 +120,8 @@ export interface PlanFacts {
   toTag: string;
   toCommit: string;
   mainCommit: string;
+  /** NEMAR's git-annex branch as the plan read it. */
+  annexCommit: string;
   fromVersion: string;
   toVersion: string;
   patchVersion: string | null;
@@ -143,6 +145,7 @@ export function planFacts(body: PlanBody): PlanFacts {
     toTag: s(up?.to_tag),
     toCommit: s(up?.to_commit),
     mainCommit: s(nemar?.main_commit),
+    annexCommit: s(nemar?.annex_commit),
     fromVersion: s(versions?.current),
     toVersion: s(versions?.n0),
   };

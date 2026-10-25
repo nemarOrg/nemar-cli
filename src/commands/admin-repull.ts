@@ -14,7 +14,7 @@
  *
  * What it writes: nothing to the mirror, S3, D1 or the NEMAR API. It writes a scratch directory,
  * deleted on exit, on SIGINT and on SIGTERM unless `--keep-workdir`, and the plan file, its output,
- * mode 0600 in the administrator's config directory. `nemar admin repull execute` is Phase 6.
+ * mode 0600 in the administrator's config directory. `nemar admin repull execute` is not built yet.
  */
 
 import chalk from "chalk";

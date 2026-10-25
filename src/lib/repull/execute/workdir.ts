@@ -11,13 +11,24 @@
  *  - `plan/`, the planner's bare clones of the live plan (`nemar.git`, `upstream.git`), the second
  *    being where upstream's blobs are read from; made again on every run, since the plan is;
  *  - `upload/`, `awsCliUpload`'s staging, outside the clone so it is never a changed path.
- * It is kept until the pull request is open, so a crash leaves it to resume.
+ * It is kept until the pull request is open. Only a `prepared` row resumes from it (its working
+ * clone, or the checkpoint beside it); a `planned` row is prepared again from scratch.
  *
  * Every git call here carries its credentials in the environment (`fleetCloneEnv`), never in the
- * argv or the URL, and no message it throws repeats git's stderr, which names files.
+ * argv or the URL, reads neither the global nor the system git configuration
+ * ({@link ISOLATED_GIT_ENV}), and no message it throws repeats git's stderr, which names files.
  */
 
-import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, rmSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join } from "node:path";
 import { fleetCloneEnv } from "../../fleet-key-registration.js";
 import { runCommand } from "../../git-annex/run-command.js";
@@ -37,6 +48,8 @@ export interface WorkPaths {
   upload: string;
   /** The checkpoint bundle, beside the plan files: `$NEMAR_CONFIG_DIR/repull/<id>/<digest8>.bundle`. */
   bundle: string;
+  /** The one execution's lock: `$NEMAR_CONFIG_DIR/repull/<id>/<digest8>.lock`. */
+  lock: string;
 }
 
 export function digest8(digest: string): string {
@@ -52,6 +65,7 @@ export function workPaths(configDir: string, datasetId: string, digest: string):
     plan: join(root, "plan"),
     upload: join(root, "upload"),
     bundle: join(dsDir, `${digest8(digest)}.bundle`),
+    lock: join(dsDir, `${digest8(digest)}.lock`),
   };
 }
 
@@ -62,6 +76,50 @@ export function privateDir(path: string, top: string): void {
   for (let dir = path; dir.startsWith(top); dir = dirname(dir)) {
     chmodSync(dir, 0o700);
     if (dir === top) break;
+  }
+}
+
+/**
+ * The environment every git and git-annex call of an execution runs with: neither the
+ * administrator's global configuration nor the system's is read, so nothing on the machine
+ * (`annex.addunlocked`, `core.autocrlf`, a global attributes or excludes file, a hook, a backend)
+ * can change what is prepared. The working clone's own configuration is set where it is made.
+ */
+export const ISOLATED_GIT_ENV = {
+  GIT_CONFIG_GLOBAL: "/dev/null",
+  GIT_CONFIG_NOSYSTEM: "1",
+} as const;
+
+/**
+ * The working clone's local configuration, set when it is cloned so even its first checkout obeys
+ * it: no background gc or maintenance (a writer in the clone would race its removal), locked
+ * annexed files, no line-ending conversion, no hooks, and no attributes or excludes file but the
+ * tree's own.
+ */
+const CLONE_CONFIG = [
+  "gc.auto=0",
+  "maintenance.auto=false",
+  "annex.addunlocked=false",
+  "core.autocrlf=false",
+  "core.hooksPath=/dev/null",
+  "core.attributesFile=/dev/null",
+  "core.excludesFile=/dev/null",
+] as const;
+
+/**
+ * Run `fn` with {@link ISOLATED_GIT_ENV} in the process environment, which every git subprocess
+ * inherits, the importer's scrub and upload included; the previous values are put back after.
+ */
+export async function withIsolatedGit<T>(fn: () => Promise<T>): Promise<T> {
+  const saved = Object.keys(ISOLATED_GIT_ENV).map((k) => [k, process.env[k]] as const);
+  Object.assign(process.env, ISOLATED_GIT_ENV);
+  try {
+    return await fn();
+  } finally {
+    for (const [k, v] of saved) {
+      if (v === undefined) Reflect.deleteProperty(process.env, k);
+      else process.env[k] = v;
+    }
   }
 }
 
@@ -88,7 +146,7 @@ export async function git(
   const r = await runCommand(["git", ...args], {
     cwd: repo,
     ...(opts.stdin !== undefined ? { stdin: opts.stdin } : {}),
-    ...(opts.env ? { env: opts.env } : {}),
+    env: { ...ISOLATED_GIT_ENV, ...opts.env },
   });
   if (r.exitCode !== 0 && !opts.ok) {
     throw new ExecuteRefused(
@@ -103,7 +161,7 @@ export async function git(
 export async function hasCommit(repo: string, sha: string): Promise<boolean> {
   const r = await runCommand(["git", "cat-file", "-e", `${sha}^{commit}`], {
     cwd: repo,
-    env: { GIT_NO_LAZY_FETCH: "1" },
+    env: { ...ISOLATED_GIT_ENV, GIT_NO_LAZY_FETCH: "1" },
   });
   return r.exitCode === 0;
 }
@@ -119,6 +177,8 @@ export async function workClone(args: {
   originUrl: string;
   baseSha: string;
   token: string | null;
+  /** The git-annex commit the plan read; the clone refuses one that moved (`plan-stale`). */
+  annexCommit: string;
 }): Promise<string> {
   removeTree(args.dir);
   const env = fleetCloneEnv(args.originUrl, args.token);
@@ -129,18 +189,13 @@ export async function workClone(args: {
       "--quiet",
       "--no-tags",
       "--depth=2",
-      // No detached gc or maintenance after a fetch: a background writer in the clone would race
-      // its removal, and nothing here needs it.
-      "--config",
-      "gc.auto=0",
-      "--config",
-      "maintenance.auto=false",
+      ...CLONE_CONFIG.flatMap((c) => ["--config", c]),
       "--branch",
       "main",
       args.originUrl,
       args.dir,
     ],
-    env ? { env } : {},
+    { env: { ...ISOLATED_GIT_ENV, ...env } },
   );
   if (clone.exitCode !== 0) {
     throw new ExecuteRefused(
@@ -178,6 +233,19 @@ export async function workClone(args: {
     ],
     { ...opts, code: "clone-failed", step: "fetch of the git-annex branch" },
   );
+  // NEMAR's git-annex branch is where the plan read it, or the plan is stale: presence, dead marks
+  // and remote.log all come from it, and the copy manifest was made against it.
+  const annex = (
+    await git(repo, ["rev-parse", "--verify", "--quiet", "refs/remotes/origin/git-annex"], {
+      ok: true,
+    })
+  ).stdout.trim();
+  if (annex !== args.annexCommit) {
+    throw new ExecuteRefused(
+      "plan-stale",
+      "NEMAR's git-annex branch moved since the plan was made again: plan again and review the new digest.",
+    );
+  }
   await git(repo, ["annex", "init", "--quiet", "--no-autoenable", "nemar-repull"], {
     code: "clone-failed",
     step: "annex init",
@@ -211,10 +279,19 @@ export async function saveCheckpoint(repo: string, bundle: string, baseSha: stri
   chmodSync(bundle, 0o600);
 }
 
+/** Why a checkpoint was not used, in fixed words, for the operator. */
+export type RestoreCause =
+  | "no-checkpoint"
+  | "clone-failed"
+  | "checkpoint-unverified"
+  | "checkpoint-unreadable"
+  | "commit-not-in-checkpoint"
+  | "annex-merge-failed";
+
 /**
- * Restore a checkpoint into a fresh working clone. True only when the bundle verifies and delivers
- * the recorded commit `synthSha`, the clone is checked out at it with the tree `synthTree` on the
- * parent `baseSha`, and the bundle's git-annex branch is merged; false otherwise (the caller
+ * Restore a checkpoint into a fresh working clone. Null when the bundle verifies and delivers the
+ * recorded commit `synthSha`, the clone is checked out at it with the tree `synthTree` on the
+ * parent `baseSha`, and the bundle's git-annex branch is merged; otherwise why not (the caller
  * prepares again).
  */
 export async function restoreCheckpoint(args: {
@@ -223,10 +300,11 @@ export async function restoreCheckpoint(args: {
   originUrl: string;
   baseSha: string;
   token: string | null;
+  annexCommit: string;
   synthSha: string;
   synthTree: string;
-}): Promise<boolean> {
-  if (!existsSync(args.bundle)) return false;
+}): Promise<RestoreCause | null> {
+  if (!existsSync(args.bundle)) return "no-checkpoint";
   let repo: string;
   try {
     repo = await workClone({
@@ -234,12 +312,13 @@ export async function restoreCheckpoint(args: {
       originUrl: args.originUrl,
       baseSha: args.baseSha,
       token: args.token,
+      annexCommit: args.annexCommit,
     });
   } catch {
-    return false;
+    return "clone-failed";
   }
   const verified = await git(repo, ["bundle", "verify", "--quiet", args.bundle], { ok: true });
-  if (verified.exitCode !== 0) return false;
+  if (verified.exitCode !== 0) return "checkpoint-unverified";
   const fetched = await git(
     repo,
     [
@@ -252,7 +331,7 @@ export async function restoreCheckpoint(args: {
     ],
     { ok: true },
   );
-  if (fetched.exitCode !== 0) return false;
+  if (fetched.exitCode !== 0) return "checkpoint-unreadable";
   // The clone must end at the recorded commit, whose tree is the recorded tree: whatever ref the
   // bundle names, only the commit itself, by its id, is taken.
   await git(repo, ["checkout", "--quiet", "-B", WORK_BRANCH, args.synthSha], { ok: true });
@@ -263,11 +342,62 @@ export async function restoreCheckpoint(args: {
     (await rev("HEAD^{tree}")) !== args.synthTree ||
     (await rev("HEAD^")) !== args.baseSha
   ) {
-    return false;
+    return "commit-not-in-checkpoint";
   }
   // `git annex merge` takes every `refs/remotes/*/git-annex`, the checkpoint's included.
   const merged = await git(repo, ["annex", "merge", "--quiet"], { ok: true });
-  return merged.exitCode === 0;
+  return merged.exitCode === 0 ? null : "annex-merge-failed";
+}
+
+/**
+ * Hold the one execution of a plan: a directory created atomically beside the plan's working
+ * directory, holding the process id. A second execution of the same plan refuses
+ * (`execution-locked`) rather than delete a live run's clones; a lock whose process is gone (a
+ * crash) is taken over. Returns the release.
+ */
+export function acquireLock(path: string): () => void {
+  const pidFile = join(path, "pid");
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      mkdirSync(path, { mode: 0o700 });
+      writeFileSync(pidFile, `${process.pid}\n`, { mode: 0o600 });
+      return () => rmSync(path, { recursive: true, force: true });
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+    }
+    const pid = Number.parseInt(
+      (() => {
+        try {
+          return readFileSync(pidFile, "utf8");
+        } catch {
+          return "";
+        }
+      })(),
+      10,
+    );
+    if (Number.isSafeInteger(pid) && pid > 0 && isAlive(pid)) {
+      throw new ExecuteRefused(
+        "execution-locked",
+        `Another execution of this plan is running (process ${pid}); wait for it to finish.`,
+      );
+    }
+    // A crashed run's lock, or one being written right now: removed and tried once more.
+    rmSync(path, { recursive: true, force: true });
+  }
+  throw new ExecuteRefused(
+    "execution-locked",
+    "Another execution of this plan holds its lock; wait for it to finish.",
+  );
+}
+
+function isAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    // EPERM: it exists, and belongs to someone else.
+    return (err as NodeJS.ErrnoException).code === "EPERM";
+  }
 }
 
 /** Give the owner write access to every directory under `path` (git-annex makes its objects' read-only). */

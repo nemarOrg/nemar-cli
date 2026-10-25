@@ -5,7 +5,7 @@
  * checks what it can read itself.
  *
  *   S0  read the plan file, prove it is the reviewed one, plan again from live sources
- *       (`verify-plan.ts`); nothing is written anywhere before this passes;
+ *       (`verify-plan.ts`); no API write, push or upload happens before this passes;
  *   S1  `POST /admin/repulls`: the record, or the open one for this same plan (`planned`);
  *   S2  a working clone at the base, the delta materialized, scrubbed, uploaded where the scrub
  *       re-keyed or annexed, and synthesized into one commit; the checkpoint saved; then
@@ -13,18 +13,21 @@
  *
  * It copies nothing from upstream, pushes nothing and opens no pull request: those steps follow
  * `prepared` and are built after it. The uploads it makes are those of the import's own scrub and
- * annex policy, to `<id>/objects/` only.
+ * annex policy, to `<id>/objects/` only. Every git and git-annex call it makes, the planner's
+ * included, reads neither the administrator's global configuration nor the system's.
  *
- * Every step checks its own end state first, so a rerun continues: a row found `prepared` whose
- * working clone still holds its commit is left as it is; one whose clone is gone is restored from
- * the checkpoint, or prepared again, and must give the same tree and commit
- * (`prepare-not-reproducible` otherwise: the row stays, its error set, and abandoning it is the
- * way out). A step that fails records why on the row (`planned -> planned`, or `prepared ->
- * prepared` with the facts it already holds) and refuses; the message names counts, never a path.
+ * Only a `prepared` row resumes from what is on disk: one whose working clone still holds its
+ * commit is left as it is; otherwise the clone is restored from the checkpoint, or prepared again,
+ * which must give the same tree, commit and manifest (`prepare-not-reproducible` otherwise: the
+ * row stays, its error set, and abandoning it is the way out). A `planned` row is prepared again
+ * from scratch, which re-clones, re-scrubs and re-uploads, deterministically. A step that fails
+ * records why on the row (`planned -> planned`, or `prepared -> prepared` with the facts it already
+ * holds) and refuses; the message names counts, never a path. One execution of a plan runs at a
+ * time (a lock beside its working directory).
  */
 
-import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readdirSync, rmdirSync } from "node:fs";
+import { dirname, join } from "node:path";
 import {
   PROVENANCE_PATH,
   PROVENANCE_README_PATH,
@@ -57,11 +60,13 @@ import { type Entry, readIndex, readTree, rowTime, synthesizeCommit } from "./sy
 import { ExecuteRefused, peekPlan, readExecutablePlan } from "./verify-plan.js";
 import {
   type WorkPaths,
+  acquireLock,
   git,
   privateDir,
   removeTree,
   restoreCheckpoint,
   saveCheckpoint,
+  withIsolatedGit,
   workClone,
   workPaths,
 } from "./workdir.js";
@@ -144,6 +149,26 @@ function errorWords(err: unknown): string {
   return `[prepare-failed] The preparation failed: ${describeError(err)}.`;
 }
 
+/** Remove a directory the run made, telling the operator rather than failing the run when it cannot. */
+function removeQuietly(path: string, out: (line: string) => void): void {
+  try {
+    removeTree(path);
+  } catch (err) {
+    out(
+      `The scratch directory ${path} could not be removed (${err instanceof ExecuteRefused ? err.code : describeError(err)}); remove it by hand.`,
+    );
+  }
+}
+
+/** Remove `dir` when it is empty; nothing otherwise. */
+function removeIfEmpty(dir: string): void {
+  try {
+    if (readdirSync(dir).length === 0) rmdirSync(dir);
+  } catch {
+    // absent, or not empty: left as it is
+  }
+}
+
 /** Run through `prepared` (or `opts.until`). See the module comment. */
 export async function executeRepull(
   opts: ExecuteOptions,
@@ -156,104 +181,134 @@ export async function executeRepull(
       `This build prepares a re-pull through prepared; it does not reach ${until}.`,
     );
   }
+  return withIsolatedGit(() => execute(opts, env, until));
+}
 
-  // S0. The reviewed plan, made again from live sources. Nothing is written before it passes; a
-  // test override that is set and not a loopback address refuses here, before anything is read.
+async function execute(
+  opts: ExecuteOptions,
+  env: Env,
+  until: RepullStatus,
+): Promise<{ row: RepullRow; stoppedAt: RepullStatus }> {
+  // S0. The reviewed plan, made again from live sources. No API write, push or upload happens
+  // before it passes; a test override that is set and not a loopback address refuses here.
   const { datasetId, digest } = peekPlan(opts.planPath);
   const apiBase = githubApiBase(env);
   const openNeuroGraphqlUrl = openNeuroUrlFromEnv(env);
   const objectsBase = upstreamObjectsBase(env);
-  const token = await adminGitHubToken(env);
-  if (!token.ok) opts.out(`No GitHub token (${token.reason}); release-pr will be unchecked.`);
-  const catalog = await readCatalogFacts(datasetId);
   const configDir = getConfigDir();
   const paths = workPaths(configDir, datasetId, digest);
   const top = join(configDir, "repull");
-  removeTree(paths.plan);
-  privateDir(paths.plan, top);
-  const computed = new Map<string, Buffer>();
-  const verified = await readExecutablePlan(opts.planPath, {
-    catalog,
-    github: { token: token.ok ? token.token : null, apiBase },
-    environment: getApiUrl(),
-    env,
-    workRoot: paths.plan,
-    collect: { computed },
-    openNeuroGraphqlUrl,
-    ...(opts.maxFetchBytes !== undefined ? { maxFetchBytes: opts.maxFetchBytes } : {}),
-  });
-  const ctx: RunContext = {
-    env,
-    token: token.ok ? token.token : null,
-    datasetId,
-    digest,
-    body: verified.live.body,
-    paths,
-    plannerDir: verified.workdir,
-    computed,
-    objectsBase,
-    normalizeMaxBytes: opts.normalizeMaxBytes ?? NORMALIZE_MAX_BYTES,
-    out: opts.out,
-  };
+  privateDir(dirname(paths.lock), top);
+  const release = acquireLock(paths.lock);
   try {
-    const facts = planFacts(verified.live.body);
-    const baseSha = verified.rebasedOnto ?? facts.mainCommit;
-    if (verified.rebasedOnto) {
-      opts.out("NEMAR's main moved by .nemar/** only since the plan; executing on the live main.");
-    }
-
-    // S1. The record.
-    const counts = planCounts(verified.live.body);
-    let created: Awaited<ReturnType<typeof createRepull>>;
+    const token = await adminGitHubToken(env);
+    if (!token.ok) opts.out(`No GitHub token (${token.reason}); release-pr will be unchecked.`);
+    const catalog = await readCatalogFacts(datasetId);
+    removeTree(paths.plan);
+    privateDir(paths.plan, top);
+    const computed = new Map<string, Buffer>();
+    let verified: Awaited<ReturnType<typeof readExecutablePlan>>;
     try {
-      created = await createRepull({
-        dataset_id: datasetId,
-        upstream_ds: facts.ds,
-        from_tag: facts.fromTag,
-        to_tag: facts.toTag,
-        from_version: facts.fromVersion,
-        to_version: facts.toVersion,
-        plan_digest: digest,
-        planner: facts.planner,
-        base_sha: baseSha,
-        lineage_recordable: facts.lineageRecordable,
-        counts: {
-          delta_paths: counts.delta_paths ?? 0,
-          unexplained: counts.unexplained ?? 0,
-          conflicts: counts.conflicts ?? 0,
-          corrections: counts.corrections ?? 0,
-        },
+      verified = await readExecutablePlan(opts.planPath, {
+        catalog,
+        github: { token: token.ok ? token.token : null, apiBase },
+        environment: getApiUrl(),
+        env,
+        workRoot: paths.plan,
+        collect: { computed },
+        openNeuroGraphqlUrl,
+        ...(opts.maxFetchBytes !== undefined ? { maxFetchBytes: opts.maxFetchBytes } : {}),
       });
     } catch (err) {
-      if (err instanceof ApiError) throw recordRefused(err);
+      // Refused before anything was prepared: leave no empty directory behind it.
+      removeQuietly(paths.plan, opts.out);
+      removeIfEmpty(paths.root);
+      removeIfEmpty(dirname(paths.root));
       throw err;
     }
-    let row = created.repull;
-    opts.out(
-      created.created
-        ? `Recorded re-pull #${row.id} of ${datasetId} (${facts.fromTag} -> ${facts.toTag}), planned.`
-        : `Found re-pull #${row.id} of ${datasetId}, ${row.status}.`,
-    );
-    if (until === "planned" || !REACHABLE.includes(row.status)) {
-      if (!REACHABLE.includes(row.status)) {
-        opts.out(
-          `Re-pull #${row.id} is ${row.status}; this build prepares only, so it stops here.`,
-        );
-      }
-      return { row, stoppedAt: row.status };
+    const ctx: RunContext = {
+      env,
+      token: token.ok ? token.token : null,
+      datasetId,
+      digest,
+      body: verified.live.body,
+      paths,
+      plannerDir: verified.workdir,
+      computed,
+      objectsBase,
+      normalizeMaxBytes: opts.normalizeMaxBytes ?? NORMALIZE_MAX_BYTES,
+      out: opts.out,
+    };
+    try {
+      return await recordAndPrepare(ctx, verified.rebasedOnto, until);
+    } finally {
+      if (!opts.keepWorkdir) removeQuietly(paths.plan, opts.out);
     }
+  } finally {
+    release();
+  }
+}
 
-    // S2. Prepared.
-    privateDir(paths.root, top);
-    if (row.status === "planned") {
-      row = await prepareFromPlanned(ctx, row, baseSha);
-    } else {
-      row = await resumePrepared(ctx, row, baseSha);
+/** S1 and S2: the record, then `prepared`. */
+async function recordAndPrepare(
+  ctx: RunContext,
+  rebasedOnto: string | null,
+  until: RepullStatus,
+): Promise<{ row: RepullRow; stoppedAt: RepullStatus }> {
+  const facts = planFacts(ctx.body);
+  const baseSha = rebasedOnto ?? facts.mainCommit;
+  if (rebasedOnto) {
+    ctx.out("NEMAR's main moved by .nemar/** only since the plan; executing on the live main.");
+  }
+
+  // S1. The record. Its `delta_paths` count is the plan's (paths written, deletions aside); the
+  // `prepared` edge replaces it with what the preparation wrote, deleted and edited.
+  const counts = planCounts(ctx.body);
+  let created: Awaited<ReturnType<typeof createRepull>>;
+  try {
+    created = await createRepull({
+      dataset_id: ctx.datasetId,
+      upstream_ds: facts.ds,
+      from_tag: facts.fromTag,
+      to_tag: facts.toTag,
+      from_version: facts.fromVersion,
+      to_version: facts.toVersion,
+      plan_digest: ctx.digest,
+      planner: facts.planner,
+      base_sha: baseSha,
+      lineage_recordable: facts.lineageRecordable,
+      counts: {
+        delta_paths: counts.delta_paths ?? 0,
+        unexplained: counts.unexplained ?? 0,
+        conflicts: counts.conflicts ?? 0,
+        corrections: counts.corrections ?? 0,
+      },
+    });
+  } catch (err) {
+    if (err instanceof ApiError) throw recordRefused(err);
+    throw err;
+  }
+  let row = created.repull;
+  ctx.out(
+    created.created
+      ? `Recorded re-pull #${row.id} of ${ctx.datasetId} (${facts.fromTag} -> ${facts.toTag}), planned.`
+      : `Found re-pull #${row.id} of ${ctx.datasetId}, ${row.status}.`,
+  );
+  if (until === "planned" || !REACHABLE.includes(row.status)) {
+    if (!REACHABLE.includes(row.status)) {
+      ctx.out(`Re-pull #${row.id} is ${row.status}; this build prepares only, so it stops here.`);
     }
     return { row, stoppedAt: row.status };
-  } finally {
-    if (!opts.keepWorkdir) removeTree(paths.plan);
   }
+
+  // S2. Prepared.
+  privateDir(ctx.paths.root, dirname(dirname(ctx.paths.lock)));
+  if (row.status === "planned") {
+    row = await prepareFromPlanned(ctx, row, baseSha);
+  } else {
+    row = await resumePrepared(ctx, row, baseSha);
+  }
+  return { row, stoppedAt: row.status };
 }
 
 /** `planned -> prepared`, recording why on the row when the preparation fails. */
@@ -266,7 +321,7 @@ async function prepareFromPlanned(
   try {
     prepared = await prepareOnce(ctx, row, baseSha);
   } catch (err) {
-    await recordError(row, "planned", {}, err);
+    await recordError(ctx, row, "planned", {}, err);
     throw err;
   }
   const next = await transition(row, "prepared", {
@@ -280,27 +335,46 @@ async function prepareFromPlanned(
   return next;
 }
 
+/** The facts a `prepared` row holds, as the self-edge sends them again. */
+function recordedFacts(row: RepullRow): {
+  synth_tree: string;
+  synth_sha: string;
+  manifest_digest: string;
+} {
+  return {
+    synth_tree: row.synth_tree as string,
+    synth_sha: row.synth_sha as string,
+    manifest_digest: row.manifest_digest as string,
+  };
+}
+
+/**
+ * A `prepared` row whose facts were shown to hold again: when it carries an error from an earlier
+ * failed step, the self-edge records its stage again with no error, which clears it.
+ */
+async function restate(row: RepullRow): Promise<RepullRow> {
+  if (row.last_error === null) return row;
+  return transition(row, "prepared", recordedFacts(row));
+}
+
 /**
  * A row already `prepared`: on the same base, its working clone (or checkpoint) must hold its
- * commit, or a preparation from scratch must give the same tree and commit; on a base that moved
- * by `.nemar/**` only, it is prepared again there and the self-edge records the new facts.
+ * commit, or a preparation from scratch must give the same tree, commit and manifest; on a base
+ * that moved by `.nemar/**` only, it is prepared again there and the self-edge records the new
+ * facts.
  */
 async function resumePrepared(
   ctx: RunContext,
   row: RepullRow,
   baseSha: string,
 ): Promise<RepullRow> {
-  const recorded = {
-    synth_tree: row.synth_tree as string,
-    synth_sha: row.synth_sha as string,
-    manifest_digest: row.manifest_digest as string,
-  };
+  const recorded = recordedFacts(row);
   if (baseSha !== row.base_sha) {
     let prepared: Prepared;
     try {
       prepared = await prepareOnce(ctx, row, baseSha);
     } catch (err) {
-      await recordError(row, "prepared", recorded, err);
+      await recordError(ctx, row, "prepared", recorded, err);
       throw err;
     }
     ctx.out(`Re-pull #${row.id} prepared again onto the live main.`);
@@ -312,30 +386,34 @@ async function resumePrepared(
       counts: prepared.counts,
     });
   }
-  if (await cloneHolds(ctx.paths.repo, recorded.synth_sha, recorded.synth_tree)) {
+  const held = await cloneHolds(ctx.paths.repo, recorded.synth_sha, recorded.synth_tree);
+  if (held === null) {
     ctx.out(`Re-pull #${row.id} is prepared, and its working clone holds its commit.`);
     if (!existsSync(ctx.paths.bundle))
       await saveCheckpoint(ctx.paths.repo, ctx.paths.bundle, baseSha);
-    return row;
+    return restate(row);
   }
+  ctx.out(`Re-pull #${row.id}'s working clone is not usable (${held}).`);
   const restored = await restoreCheckpoint({
     dir: ctx.paths.repo,
     bundle: ctx.paths.bundle,
     originUrl: originUrl(ctx.datasetId, ctx.env),
     baseSha,
     token: ctx.token,
+    annexCommit: planFacts(ctx.body).annexCommit,
     synthSha: recorded.synth_sha,
     synthTree: recorded.synth_tree,
   });
-  if (restored) {
+  if (restored === null) {
     ctx.out(`Re-pull #${row.id} is prepared; its working clone was restored from the checkpoint.`);
-    return row;
+    return restate(row);
   }
+  ctx.out(`Re-pull #${row.id}'s checkpoint was not used (${restored}); preparing again.`);
   let again: Prepared;
   try {
     again = await prepareOnce(ctx, row, baseSha);
   } catch (err) {
-    await recordError(row, "prepared", recorded, err);
+    await recordError(ctx, row, "prepared", recorded, err);
     throw err;
   }
   if (
@@ -345,26 +423,36 @@ async function resumePrepared(
   ) {
     const err = new ExecuteRefused(
       "prepare-not-reproducible",
-      "Preparing again from the same plan and base gave another tree or commit than the one recorded; abandon this re-pull and plan again.",
+      "Preparing again from the same plan and base gave another tree, commit or copy manifest than the one recorded; abandon this re-pull and plan again.",
     );
-    await recordError(row, "prepared", recorded, err);
+    await recordError(ctx, row, "prepared", recorded, err);
     throw err;
   }
   ctx.out(
     `Re-pull #${row.id} is prepared; its working clone was prepared again, to the same commit.`,
   );
-  return row;
+  return restate(row);
 }
 
-/** True when the working clone's branch is the recorded commit and tree. */
-async function cloneHolds(repo: string, synthSha: string, synthTree: string): Promise<boolean> {
+/**
+ * Null when the working clone's branch is the recorded commit and tree; otherwise why not, in
+ * fixed words for the operator.
+ */
+async function cloneHolds(
+  repo: string,
+  synthSha: string,
+  synthTree: string,
+): Promise<"no-working-clone" | "clone-at-another-commit" | null> {
+  let head: string;
+  let tree: string;
   try {
-    const head = await git(repo, ["rev-parse", "--verify", "--quiet", "HEAD"], { ok: true });
-    const tree = await git(repo, ["rev-parse", "--verify", "--quiet", "HEAD^{tree}"], { ok: true });
-    return head.stdout.trim() === synthSha && tree.stdout.trim() === synthTree;
+    head = (await git(repo, ["rev-parse", "--verify", "--quiet", "HEAD"], { ok: true })).stdout;
+    tree = (await git(repo, ["rev-parse", "--verify", "--quiet", "HEAD^{tree}"], { ok: true }))
+      .stdout;
   } catch {
-    return false;
+    return "no-working-clone";
   }
+  return head.trim() === synthSha && tree.trim() === synthTree ? null : "clone-at-another-commit";
 }
 
 async function transition(
@@ -386,8 +474,12 @@ async function transition(
   }
 }
 
-/** Record why a step failed on the row, as a self-edge; a failure to record is not the one reported. */
+/**
+ * Record why a step failed on the row, as a self-edge. When the API refuses or cannot be reached
+ * the operator is told; the failure itself is still what the caller reports.
+ */
 async function recordError(
+  ctx: RunContext,
   row: RepullRow,
   status: "planned" | "prepared",
   fields: Record<string, unknown>,
@@ -400,8 +492,10 @@ async function recordError(
       fields,
       error: errorWords(err).slice(0, 2000),
     });
-  } catch {
-    // The failure itself is what the caller reports; the record stays as it was.
+  } catch (recordErr) {
+    ctx.out(
+      `The failure could not be recorded on re-pull #${row.id} (${repullErrorCode(recordErr) ?? (recordErr instanceof ApiError ? `HTTP ${recordErr.statusCode}` : describeError(recordErr))}); its record keeps the last error it had.`,
+    );
   }
 }
 
@@ -417,6 +511,7 @@ async function prepareOnce(ctx: RunContext, row: RepullRow, baseSha: string): Pr
     originUrl: originUrl(datasetId, ctx.env),
     baseSha,
     token: ctx.token,
+    annexCommit: facts.annexCommit,
   });
 
   // NEMAR's bucket and the uuid uploads register against: what remote.log names, as the plan read.
@@ -458,6 +553,11 @@ async function prepareOnce(ctx: RunContext, row: RepullRow, baseSha: string): Pr
     reader,
     scratch,
   });
+  if (mat.nemarOwned.left.length > 0) {
+    ctx.out(
+      `NEMAR-owned edit(s) the plan listed and the preparation left as they are: ${mat.nemarOwned.left.length} (${mat.nemarOwned.left.join(", ")}).`,
+    );
+  }
   // The scope: every path written or deleted, and the provenance files the scrub annotates when a
   // header changes (they may not be delta paths; the scrub refuses rather than leave them out).
   const scope = new Set(mat.deltaPaths);
@@ -520,6 +620,7 @@ async function prepareOnce(ctx: RunContext, row: RepullRow, baseSha: string): Pr
     synthTree: synth.synthTree,
     manifestDigest: synth.manifestDigest,
     counts: {
+      // At `prepared`: the paths written, deleted and edited (the NEMAR-owned edit included).
       delta_paths: mat.deltaPaths.size,
       written: mat.written,
       deleted: mat.deleted,
@@ -532,6 +633,14 @@ async function prepareOnce(ctx: RunContext, row: RepullRow, baseSha: string): Pr
       scrubbed_json: c.json_files_blanked,
       headers_not_read_nemar_held: c.headers_not_read_nemar_held,
       headers_not_read_no_source: c.headers_not_read_no_source,
+      // What the scrub could not read or prove: unknown is never recorded as nothing.
+      json_files_unread: c.json_files_unread,
+      json_files_annexed: c.json_files_annexed,
+      scans_tables_unread: c.scans_tables_unread,
+      headers_dates_unproven: c.headers_dates_unproven,
+      headers_dates_left: c.headers_dates_left,
+      nemar_owned_edits: mat.nemarOwned.applied,
+      nemar_owned_edits_left: mat.nemarOwned.left.length,
     },
   };
 }

@@ -302,6 +302,15 @@ export const REPULL_COUNT_KEYS = [
   "bytes",
   "headers_not_read_nemar_held",
   "headers_not_read_no_source",
+  // What the delta scrub could not read or prove, kept so unknown is never read as zero.
+  "json_files_unread",
+  "json_files_annexed",
+  "scans_tables_unread",
+  "headers_dates_unproven",
+  "headers_dates_left",
+  // NEMAR-owned edits the plan listed and the preparation applied, or left with another status.
+  "nemar_owned_edits",
+  "nemar_owned_edits_left",
   "merged_outside_tool",
   "merged_unscreened_head",
 ] as const;
