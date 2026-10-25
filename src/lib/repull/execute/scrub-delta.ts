@@ -47,9 +47,13 @@ import { guardedGitRunner } from "../read-only.js";
 import { copyItems, copySection, planPaths } from "./body.js";
 import { ExecuteRefused } from "./verify-plan.js";
 
-/** A scrub refusal as execution's own, its word as the code and whether upstream may serve later. */
+/**
+ * A scrub refusal as execution's own: its word as the code and its message as it is, which keeps
+ * the OpenNeuro-upstream marker a refusal carries when upstream stopped serving its bytes. That
+ * marker text, not a field, is what says the failure may pass on a later run.
+ */
 function fromScrub(err: ImportScrubRefused): ExecuteRefused {
-  return new ExecuteRefused(err.code, err.message, [], err.upstreamInaccessible);
+  return new ExecuteRefused(err.code, err.message);
 }
 
 /** The ledger line's actor: fixed, so a re-preparation by another administrator writes the same line. */

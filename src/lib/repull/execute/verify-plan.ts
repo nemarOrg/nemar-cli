@@ -44,11 +44,6 @@ export class ExecuteRefused extends Error {
     message: string,
     /** Lines an operator reads beside the message (the live preflight), when there are any. */
     readonly lines: string[] = [],
-    /**
-     * True when the refusal is upstream not serving its bytes (an HTTP 403 or 404 for a pinned
-     * object), which a later run may get past; the scrub's own judgment of that is kept here.
-     */
-    readonly retryable = false,
   ) {
     super(message);
     this.name = "ExecuteRefused";

@@ -159,7 +159,7 @@ export class ImportScrubRefused extends Error {
     readonly code: ImportScrubRefusal,
     detail: string,
     /** Prefix the upstream marker: the failure is OpenNeuro not serving its bytes (#808). */
-    readonly upstreamInaccessible = false,
+    upstreamInaccessible = false,
   ) {
     super(
       `${upstreamInaccessible ? `${OPENNEURO_UPSTREAM_MARKER} ` : ""}${IMPORT_SCRUB_MARKER} refused: ${code} (${detail}). Nothing was pushed, and the copy phase did not run.`,
