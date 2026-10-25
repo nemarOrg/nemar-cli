@@ -12,7 +12,8 @@
  *  - the CLI version must be a release, so a development build never dispatches;
  *  - the payload is strings only, at most nine keys, and `repull_id` only when one is continued;
  *  - a 2xx is `sent`, a 4xx is `refused` with its status, and a 5xx, a lost connection or the
- *    timeout is `unknown`, because GitHub may have queued the event and lost only the answer.
+ *    timeout is `unknown`, because GitHub may have queued the event and lost only the answer;
+ *  - a send with no answer is logged by its error's class only, never its text.
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
@@ -21,6 +22,7 @@ import {
   UPSTREAM_REPULL_EVENT,
   type UpstreamRepullDispatchFields,
   buildUpstreamRepullPayload,
+  errorClassName,
   triggerUpstreamRepullRun,
 } from "../src/services/github/dispatch";
 
@@ -208,5 +210,46 @@ describe("triggerUpstreamRepullRun", () => {
     } finally {
       g.NEMAR_GITHUB_API_URL = kept;
     }
+  });
+
+  test("a send with no answer is logged by its error's class only, never its text or the token", async () => {
+    const lines: string[] = [];
+    const real = console.error;
+    console.error = (...args: unknown[]) => {
+      lines.push(args.map(String).join(" "));
+    };
+    const message = `refused at ${TOKEN} for on099991`;
+    try {
+      // A failure on this side with a message that carries the token: only the class may show.
+      const failing = (async () => {
+        throw new TypeError(message);
+      }) as unknown as typeof fetch;
+      expect(await triggerUpstreamRepullRun(payload(), "pat", { fetchImpl: failing })).toBe(
+        "unknown",
+      );
+      answer = "hang";
+      expect(await triggerUpstreamRepullRun(payload(), "pat", { timeoutMs: 150 })).toBe("unknown");
+    } finally {
+      console.error = real;
+    }
+    expect(lines).toEqual([
+      "[repull-dispatch] the dispatch got no answer: TypeError",
+      "[repull-dispatch] the dispatch got no answer: TimeoutError",
+    ]);
+    for (const line of lines) {
+      expect(line).not.toContain(TOKEN);
+      expect(line).not.toContain("refused at");
+    }
+  });
+});
+
+describe("errorClassName", () => {
+  test("a plain identifier is kept; anything else, or no error, reads Error", () => {
+    expect(errorClassName(new RangeError("x"))).toBe("RangeError");
+    const odd = new Error("x");
+    odd.name = "not a name: with text";
+    expect(errorClassName(odd)).toBe("Error");
+    expect(errorClassName("a string")).toBe("Error");
+    expect(errorClassName(null)).toBe("Error");
   });
 });

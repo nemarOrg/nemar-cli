@@ -440,10 +440,23 @@ export function buildUpstreamRepullPayload(p: UpstreamRepullDispatchFields): {
 export type UpstreamRepullSend = "sent" | { refused: number } | "unknown";
 
 /**
+ * The class of an error as a fixed word (`TypeError`, `TimeoutError`), never its message: a
+ * message can carry a URL, a path or a value, and the callers log this where a token must never
+ * appear. A name that is not a plain identifier reads `Error`.
+ */
+export function errorClassName(err: unknown): string {
+  const name = err instanceof Error ? err.name : "";
+  return /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(name) ? name : "Error";
+}
+
+/**
  * Send a `run-upstream-repull` dispatch to the central workflow repository. It never throws and
  * never forwards GitHub's body: the answer is one of three words (see {@link UpstreamRepullSend}),
- * so no error text can carry the token or a dataset's path. `pat` must carry dispatch write on
- * `nemarDatasets/.github` (use `getDatasetsToken()`). `fetchImpl` defaults to the global fetch.
+ * so no error text can carry the token or a dataset's path. A send that got no answer is logged
+ * by its error's class only ({@link errorClassName}), so a failure that repeats on this side (a
+ * malformed base URL, a runtime refusal) can be told from a timeout without echoing any text.
+ * `pat` must carry dispatch write on `nemarDatasets/.github` (use `getDatasetsToken()`).
+ * `fetchImpl` defaults to the global fetch.
  */
 export async function triggerUpstreamRepullRun(
   payload: ReturnType<typeof buildUpstreamRepullPayload>,
@@ -464,7 +477,8 @@ export async function triggerUpstreamRepullRun(
       body: JSON.stringify(payload),
       signal: AbortSignal.timeout(options.timeoutMs ?? UPSTREAM_REPULL_DISPATCH_TIMEOUT_MS),
     });
-  } catch {
+  } catch (err) {
+    console.error(`[repull-dispatch] the dispatch got no answer: ${errorClassName(err)}`);
     return "unknown";
   }
   // The body is not read: it is GitHub's, not ours to forward.
