@@ -1173,8 +1173,9 @@ describe("transition: closing a record", () => {
     expect(rowOf(id).last_error).toBe("scrub refused: a flagged header");
     await move(id, { from: "prepared", to: "prepared", fields, error: "main moved" });
     expect(rowOf(id).last_error).toBe("main moved");
+    // A prepared self-edge with no error records the whole stage again: the step succeeded.
     await move(id, { from: "prepared", to: "prepared", fields });
-    expect(rowOf(id).last_error).toBe("main moved");
+    expect(rowOf(id).last_error).toBeNull();
   });
 
   test("N.0.1 opens from released with all five patch columns, on the branch of its own version", async () => {
@@ -1645,16 +1646,26 @@ describe("transition: last_error", () => {
   });
 
   test("an edge that repeats a status, or ends the row, keeps it", async () => {
-    const id = seedRow("prepared", { last_error: "main moved" });
+    const id = seedRow("pr_open", { last_error: "main moved" });
+    const head = { branch: "release/v2.0.0", pr_number: 7, head_sha: SHA };
     expect(
-      (await move(id, { from: "prepared", to: "prepared", fields })).body.repull.last_error,
+      (await move(id, { from: "pr_open", to: "pr_open", fields: head })).body.repull.last_error,
     ).toBe("main moved");
     const failed = await move(id, {
-      from: "prepared",
+      from: "pr_open",
       to: "failed",
       error: "terminal: prepare=failure",
     });
     expect(failed.body.repull.last_error).toBe("main moved");
+  });
+
+  test("a prepared self-edge with no error clears it: it records the whole stage again", async () => {
+    const id = seedRow("prepared", { last_error: "[prepare-not-reproducible] another tree" });
+    const cleared = await move(id, { from: "prepared", to: "prepared", fields });
+    expect(cleared.body.repull.last_error).toBeNull();
+    // With an error of its own it records that one, under ADR 0051's rule as before.
+    const again = await move(id, { from: "prepared", to: "prepared", fields, error: "main moved" });
+    expect(again.body.repull.last_error).toBe("main moved");
   });
 
   test("a new error on a forward edge is stored as sent", async () => {

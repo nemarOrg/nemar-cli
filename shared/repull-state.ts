@@ -240,6 +240,15 @@ export const SELF_EDGE_FIELDS: Readonly<Partial<Record<RepullStatus, TransitionF
   },
 };
 
+/**
+ * Self-edges that record the whole stage again, so the step they repeat succeeded: they clear a
+ * stored error when they carry none, as an edge into another non-terminal status does. A
+ * `prepared` row found intact, restored from its checkpoint, prepared again to the same commit, or
+ * prepared again onto a moved base takes this edge. The other self-edges write one thing beside
+ * the stage and keep the error.
+ */
+export const CLEARING_SELF_EDGES = ["prepared"] as const satisfies readonly RepullStatus[];
+
 /** What the edge `from` to `to` may and must write. */
 export function fieldsFor(from: RepullStatus, to: RepullStatus): TransitionFields {
   return (from === to ? SELF_EDGE_FIELDS[to] : undefined) ?? TRANSITION_FIELDS[to];
