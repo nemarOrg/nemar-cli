@@ -230,9 +230,10 @@ export const TRANSITION_FIELDS: Readonly<Record<RepullStatus, TransitionFields>>
  *    `registered`; the edge forward clears it;
  *  - `merged` and `patch_merged`: record why the release could not be recorded yet (no tag, a tag
  *    on another commit, no version row), the error being the whole write, as `planned`'s;
- *  - `released`: record the count of locked objects once the lock has been applied, or why the
- *    lock did not complete (the Worker refuses one that carries neither); the row cannot leave
- *    `released` for `complete` or N.0.1 until the count is recorded ({@link LOCK_COUNT_KEY});
+ *  - `released`: record the count of locked objects once every object N.0.0's copy and uploads
+ *    wrote is locked, or why the lock did not complete (the Worker refuses one that carries
+ *    neither, and a count below what the copy wrote); the row cannot leave `released` for
+ *    `complete` or N.0.1 until the count is recorded ({@link LOCK_COUNT_KEY});
  *  - `gates_clear` and `patch_gates_clear`: record the claim to merge, before the merge is sent.
  *    The caller names the screened head; the Worker stamps the time with its own clock, because a
  *    caller-stated time could be backdated or set ahead and defeat the sweep for stuck claims.
@@ -275,10 +276,12 @@ export const CLEARING_SELF_EDGES = [
 ] as const satisfies readonly RepullStatus[];
 
 /**
- * The count a released N.0.0 must record before it moves on: its objects locked under the
- * governance lock (ADR 0111, decision 8). Until it is recorded the row stays `released`, the state
- * a lock that failed leaves it in, and a run takes the lock up again; `complete` and N.0.1 are
- * refused (`lock-unrecorded`).
+ * The count a released N.0.0 must record before it moves on: the objects its copy and its uploads
+ * wrote (the copy manifest's keys, never the rest of the prefix), each locked under the governance
+ * lock (ADR 0111, decision 8). The Worker accepts only a count of all of them (`lock-incomplete`
+ * below the record's `copied`, `skipped` and `local_uploads`). Until it is recorded the row stays
+ * `released`, the state a lock that failed leaves it in, and a run takes the lock up again;
+ * `complete` and N.0.1 are refused (`lock-unrecorded`).
  */
 export const LOCK_COUNT_KEY = "locked" as const satisfies (typeof REPULL_COUNT_KEYS)[number];
 
@@ -766,17 +769,23 @@ export const DISPATCH_CODES = [
   "upstream-unreadable",
   "write-refused",
   // Past the open pull request (Phase 6f): resume, the re-synthesis onto a moved `main`, the
-  // release and the lock. A run reports them as `[gates:<word>]`, `[release:<word>]` or
-  // `[lock:<word>]` on the record; `github-failed` and `release-failed` are the words of a failure
-  // no more specific word names.
+  // merge gate, the release and the lock. A run reports them as `[gates:<word>]`,
+  // `[release:<word>]` or `[lock:<word>]` on the record. `gates-failed`, `release-failed` and
+  // `lock-failed` are the words a step records for a failure no more specific word names, and
+  // `github-failed` the word of an API call that got no usable answer.
   "branch-moved",
+  "gates-failed",
   "github-failed",
   "lock-failed",
   "lock-incomplete",
+  "merge-trailers",
+  "merge-unreadable",
   "not-built",
   "release-failed",
   "resume-looped",
+  "staging-unreadable",
   "use-execute",
+  "claim-too-old",
   // The scrub's refusals (`IMPORT_SCRUB_REFUSALS`), which execution passes on as they are.
   "already-imported-unscrubbed",
   "bound-exceeded",

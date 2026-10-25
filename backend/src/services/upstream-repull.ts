@@ -177,8 +177,11 @@ export const REPULL_NEXT_ATTEMPT_SQL = `SELECT COALESCE(MAX(attempt), 0) + 1 AS 
  * tagged, so the merge is reconciled (the tag itself is held by {@link REPULL_NEXT_ATTEMPT_SQL}).
  * A row that holds a claim or a merge sha but no tag sha (a lost merge answer, a merge with no
  * tag yet), or any patch claim or patch merge, is not finished whatever its status: the merge
- * may be on `main` with nothing saying so, and a second major would be a second DOI. Reconciling
- * those is Phase 6f's.
+ * may be on `main` with nothing saying so, and a second major would be a second DOI. An open
+ * record in that state is taken on by `nemar admin repull resume`, which reads GitHub and records
+ * the merge or expires the claim. A `failed` one is not: no tool writes `failed`, nothing
+ * reconciles such a record, and the dataset stays blocked until an administrator resolves it by
+ * hand, which the ADR 0111 Phase 6f amendment names as the open item it is.
  */
 export const MERGE_UNRECONCILED_SQL = `SELECT id, to_tag, status FROM upstream_repulls
   WHERE dataset_id = ? AND status NOT IN ('complete', 'patch_declined')
@@ -451,12 +454,13 @@ function datasetFactsRefusal(
 /**
  * Whether an edge re-reads the dataset fences: every step that moves the record past `prepared`
  * and keeps it open (the copy, the registration, the pull request and its head, the gates, the
- * lock's count), because any fence can change while a re-pull is open. Not an edge that ends the
- * row (giving up must stay possible on a withdrawn or anonymous dataset), not a self-edge that
- * writes nothing but why a step failed (an error, and every field the value the row already holds,
- * which a count, merged key by key, never is), and not a fact a verified route writes from GitHub or the version row (a
- * merge that happened is recorded whatever the dataset has become since). The gates and the claim
- * read the fences on their own, with the screen.
+ * lock's count), because any fence can change while a re-pull is open. Exempt are: an edge that
+ * ends the row, so giving up stays possible on a withdrawn or anonymous dataset; a self-edge that
+ * records only why a step failed, which carries an error and no field other than the values the
+ * row already holds (a count is never one of those, since it is merged key by key); and a fact a
+ * verified route writes from GitHub or the version row, since a merge that happened is recorded
+ * whatever the dataset has become since. The gates and the claim read the fences on their own,
+ * with the screen.
  */
 export function datasetFencedEdge(
   row: RepullRow,
@@ -471,6 +475,18 @@ export function datasetFencedEdge(
     Object.entries(fields).every(([k, v]) => (row as unknown as Record<string, unknown>)[k] === v);
   if (onlyWhy) return false;
   return REPULL_STATUSES.indexOf(t.to) > REPULL_STATUSES.indexOf("prepared");
+}
+
+/**
+ * How many objects N.0.0's copy and uploads wrote, from the counts the record holds: those the
+ * copy copied and those it found present at their size (`copied`, `skipped`, the copy manifest's
+ * items) and those preparation uploaded (`local_uploads`). Null when any of the three is not
+ * recorded: unknown is never zero.
+ */
+export function lockExpected(row: Pick<RepullRow, "counts">): number | null {
+  const n = ["copied", "skipped", "local_uploads"].map((k) => row.counts[k]);
+  if (!n.every((v) => typeof v === "number" && Number.isSafeInteger(v) && v >= 0)) return null;
+  return (n as number[]).reduce((a, b) => a + b, 0);
 }
 
 /** The dataset fences, read fresh, for a step toward a merge. */
@@ -1068,9 +1084,10 @@ export async function prepareTransition(
     };
   }
 
-  // N.0.0's objects are locked at `released` (ADR 0111, decision 8) before the row goes on to
-  // `complete` or to N.0.1, so a lock that failed leaves it there to be taken up again, never
-  // silently finished. Giving up (`failed`, `patch_declined`) is not held to it.
+  // N.0.0's new objects (the ones its copy and its uploads wrote) are locked at `released` (ADR
+  // 0111, decision 8) before the row goes on to `complete` or to N.0.1, so a lock that failed
+  // leaves it there to be taken up again, never silently finished. Giving up (`failed`,
+  // `patch_declined`) is not held to it.
   if (
     t.from === "released" &&
     (t.to === "complete" || t.to === "patch_synthesized") &&
@@ -1079,7 +1096,7 @@ export async function prepareTransition(
     return {
       status: 409,
       code: "lock-unrecorded",
-      message: `Re-pull #${id} records no count of locked objects; N.0.0's objects are locked before it goes on.`,
+      message: `Re-pull #${id} records no count of locked objects; the objects N.0.0's copy and uploads wrote are locked before it goes on.`,
       row,
     };
   }
@@ -1121,6 +1138,21 @@ export async function prepareTransition(
       message:
         "A released self-edge records the count of locked objects (counts) or why the lock did not complete (error), and this one carries neither.",
     };
+  }
+  const lockedCount = (fields.counts as Record<string, unknown> | undefined)?.[LOCK_COUNT_KEY];
+  if (repeats && t.to === "released" && lockedCount !== undefined) {
+    const wrote = lockExpected(row);
+    if (wrote === null || typeof lockedCount !== "number" || lockedCount < wrote) {
+      return {
+        status: 409,
+        code: "lock-incomplete",
+        message:
+          wrote === null
+            ? `Re-pull #${id} does not record how many objects its copy and uploads wrote (copied, skipped, local_uploads), so no count of locked objects is accepted.`
+            : `Re-pull #${id}'s copy and uploads wrote ${wrote} object(s), and ${String(lockedCount)} is not a count of all of them locked.`,
+        row,
+      };
+    }
   }
   for (const [key, value] of Object.entries(fields)) {
     const problem = fieldProblem(key, value, row, fields);

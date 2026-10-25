@@ -1771,7 +1771,10 @@ describe("transition: the edges that record one thing", () => {
 
   test("released records the count of locked objects, and only counts", async () => {
     seedMirror("xx090123");
-    const id = seedRow("released");
+    // Its copy and uploads wrote three objects, the count the lock must reach.
+    const id = seedRow("released", {
+      counts: JSON.stringify({ copied: 2, skipped: 1, local_uploads: 0 }),
+    });
     expect((await move(id, { from: "released", to: "released" })).body.code).toBe("field-missing");
     const tag = await move(id, {
       from: "released",
@@ -1787,7 +1790,7 @@ describe("transition: the edges that record one thing", () => {
     expect(ok.status).toBe(200);
     expect(ok.body.repull).toMatchObject({
       status: "released",
-      counts: { locked: 3 },
+      counts: { copied: 2, skipped: 1, local_uploads: 0, locked: 3 },
       tag_sha: SHA,
       revision: 1,
     });

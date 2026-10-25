@@ -182,6 +182,14 @@ const move = (id: number, body: Record<string, unknown>) => call(`/repulls/${id}
 
 const PR = { branch: "release/v2.0.0", pr_number: 7, head_sha: HEAD };
 
+/** What a record's copy and uploads wrote, as `copied`, `skipped` and `local_uploads` record it. */
+const WROTE = (copied: number, skipped = 0, local = 0) =>
+  JSON.stringify({ copied, skipped, local_uploads: local });
+
+/** A record seeded at `status`; a released one records that its copy wrote three objects. */
+const seedAt = (status: RepullStatus) =>
+  seedRepull(status, status === "released" ? { counts: WROTE(3) } : {});
+
 // ----------------------------------------------------------------------------
 // A merge found while the row is pr_open
 // ----------------------------------------------------------------------------
@@ -289,7 +297,7 @@ describe("every step past prepared re-reads the dataset fences", () => {
       seedMirror(seed);
       for (const [from, to, fields] of steps) {
         db.run("DELETE FROM upstream_repulls");
-        const id = seedRepull(from);
+        const id = seedAt(from);
         const before = rowOf(id);
         const res = await move(id, { from, to, fields });
         expect([`${from}>${to}`, res.status, res.body.code]).toEqual([`${from}>${to}`, 409, code]);
@@ -307,7 +315,7 @@ describe("every step past prepared re-reads the dataset fences", () => {
       expect([moved.status, moved.body.code]).toEqual([409, code]);
       // Nor a count.
       db.run("DELETE FROM upstream_repulls");
-      const released = seedRepull("released");
+      const released = seedRepull("released", { counts: WROTE(1) });
       const counted = await move(released, {
         from: "released",
         to: "released",
@@ -322,7 +330,7 @@ describe("every step past prepared re-reads the dataset fences", () => {
     seedMirror();
     for (const [from, to, fields] of steps) {
       db.run("DELETE FROM upstream_repulls");
-      const id = seedRepull(from);
+      const id = seedAt(from);
       const res = await move(id, { from, to, fields });
       expect([`${from}>${to}`, res.status]).toEqual([`${from}>${to}`, 200]);
     }
@@ -393,7 +401,7 @@ describe("every step past prepared re-reads the dataset fences", () => {
 describe("a released N.0.0 locks its objects before it goes on", () => {
   test("complete and N.0.1 are refused until the locked count is recorded; giving up is not", async () => {
     seedMirror();
-    const id = seedRepull("released");
+    const id = seedRepull("released", { counts: WROTE(2, 1, 1) });
     const before = rowOf(id);
     const done = await move(id, { from: "released", to: "complete" });
     expect([done.status, done.body.code]).toEqual([409, "lock-unrecorded"]);
@@ -412,12 +420,12 @@ describe("a released N.0.0 locks its objects before it goes on", () => {
     expect(rowOf(id)).toEqual(before);
 
     expect(
-      (await move(id, { from: "released", to: "released", fields: { counts: { locked: 0 } } }))
+      (await move(id, { from: "released", to: "released", fields: { counts: { locked: 4 } } }))
         .status,
     ).toBe(200);
     const complete = await move(id, { from: "released", to: "complete" });
     expect(complete.status).toBe(200);
-    expect(complete.body.repull).toMatchObject({ status: "complete", counts: { locked: 0 } });
+    expect(complete.body.repull).toMatchObject({ status: "complete", counts: { locked: 4 } });
 
     db.run("DELETE FROM upstream_repulls");
     const other = seedRepull("released");
@@ -429,9 +437,40 @@ describe("a released N.0.0 locks its objects before it goes on", () => {
     expect(failed.status).toBe(200);
   });
 
+  test("a count below what the copy and uploads wrote is refused, a zero one included", async () => {
+    seedMirror();
+    const id = seedRepull("released", { counts: WROTE(2, 1, 1) });
+    const before = rowOf(id);
+    for (const locked of [0, 3]) {
+      const res = await move(id, {
+        from: "released",
+        to: "released",
+        fields: { counts: { locked } },
+      });
+      expect([locked, res.status, res.body.code]).toEqual([locked, 409, "lock-incomplete"]);
+    }
+    expect(rowOf(id)).toEqual(before);
+    // A record that does not say what its copy wrote accepts no count: unknown is never zero.
+    db.run("DELETE FROM upstream_repulls");
+    const unknown = seedRepull("released");
+    const res = await move(unknown, {
+      from: "released",
+      to: "released",
+      fields: { counts: { locked: 9 } },
+    });
+    expect([res.status, res.body.code]).toEqual([409, "lock-incomplete"]);
+    // A re-pull that copied nothing (metadata only) records zero locked objects.
+    db.run("DELETE FROM upstream_repulls");
+    const none = seedRepull("released", { counts: WROTE(0, 0, 0) });
+    expect(
+      (await move(none, { from: "released", to: "released", fields: { counts: { locked: 0 } } }))
+        .status,
+    ).toBe(200);
+  });
+
   test("the released self-edge carries the count or why the lock did not complete, and the count clears that", async () => {
     seedMirror();
-    const id = seedRepull("released");
+    const id = seedRepull("released", { counts: WROTE(5) });
     const neither = await move(id, { from: "released", to: "released" });
     expect([neither.status, neither.body.code]).toEqual([400, "field-missing"]);
     const failedLock = await move(id, {

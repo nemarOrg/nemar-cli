@@ -1296,9 +1296,12 @@ export async function getZarrIndex(
  * batches and tripped the cap on the SCCN deployment for datasets with
  * even a few hundred objects. See #385 for the regression analysis.
  *
- * Idempotent on retry: 403 responses (already-locked objects) are
- * counted as success, so re-invoking with the same continuation token
- * after a transient failure is safe.
+ * Idempotent on retry: an object whose lock is already in place counts as
+ * locked, so re-invoking with the same continuation token after a transient
+ * failure is safe. A 403 on PutObjectRetention is NOT taken for "already
+ * locked" on its word: S3 answers 403 for a credential that lacks the
+ * permission too, so the object's retention is read back
+ * ({@link lockOneObject}) and only a lock this route would set counts.
  */
 export interface ObjectLockFailure {
   key: string;
@@ -1318,6 +1321,103 @@ export interface ObjectLockFailure {
  */
 export const OBJECT_LOCK_BATCH_SIZE = 100;
 
+/**
+ * A retention read back on an object counts as this module's lock only when it is at least this
+ * many years ahead: the lock sets 100, and a short retention (one a test or a mistake set) is not
+ * the archival lock a release relies on.
+ */
+export const CONFIRMED_RETENTION_YEARS = 50;
+
+/** The 100-year GOVERNANCE retention every lock here asks for, and its Content-MD5. */
+async function retentionRequest(): Promise<{ xml: string; md5: string }> {
+  const retainUntil = new Date();
+  retainUntil.setFullYear(retainUntil.getFullYear() + 100);
+  const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<Retention xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Mode>GOVERNANCE</Mode>
+  <RetainUntilDate>${retainUntil.toISOString()}</RetainUntilDate>
+</Retention>`;
+  // Content-MD5 is required by S3 PutObjectRetention.
+  return { xml, md5: await computeMd5Base64(new TextEncoder().encode(xml)) };
+}
+
+/**
+ * Whether the object (or the named version of it) holds a GOVERNANCE or COMPLIANCE retention at
+ * least {@link CONFIRMED_RETENTION_YEARS} years ahead, read with GetObjectRetention. Any other
+ * answer, an error included, is false: unknown is never "locked".
+ */
+async function retentionConfirmed(
+  aws: ReturnType<typeof createS3Client>,
+  url: string,
+): Promise<boolean> {
+  try {
+    const signed = await aws.sign(url, { method: "GET" });
+    const res = await fetch(signed);
+    if (!res.ok) return false;
+    const xml = await res.text();
+    const mode = /<Mode>([A-Z]+)<\/Mode>/.exec(xml)?.[1];
+    const until = Date.parse(/<RetainUntilDate>([^<]+)<\/RetainUntilDate>/.exec(xml)?.[1] ?? "");
+    const floor = new Date();
+    floor.setFullYear(floor.getFullYear() + CONFIRMED_RETENTION_YEARS);
+    return (
+      (mode === "GOVERNANCE" || mode === "COMPLIANCE") &&
+      Number.isFinite(until) &&
+      until >= floor.getTime()
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Lock one object (or one version of it): PutObjectRetention, and on a 403 a read-back of the
+ * retention, which must be one this module sets. `encodedKey` is the full key, each segment
+ * encoded; `versionId`, when given, names the version.
+ */
+async function lockOneObject(
+  aws: ReturnType<typeof createS3Client>,
+  origin: string,
+  encodedKey: string,
+  versionId: string | null,
+  request: { xml: string; md5: string },
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const version = versionId ? `&versionId=${encodeURIComponent(versionId)}` : "";
+  const url = `${origin}/${encodedKey}?retention${version}`;
+  try {
+    const signed = await aws.sign(url, {
+      method: "PUT",
+      headers: { "Content-Type": "application/xml", "Content-MD5": request.md5 },
+      body: request.xml,
+    });
+    const res = await fetch(signed);
+    if (res.ok) return { ok: true };
+    const errorText = await res.text().catch(() => "");
+    if (res.status === 403) {
+      // An object already under a lock this route would set stays locked; a 403 that is a
+      // credential without the permission does not, and the read-back tells them apart.
+      if (await retentionConfirmed(aws, url)) return { ok: true };
+      return {
+        ok: false,
+        error: "HTTP 403, and the object's retention read back is not a lock this route sets",
+      };
+    }
+    return { ok: false, error: `HTTP ${res.status}: ${errorText}`.trim() };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/** The bucket's origin: the test-only endpoint override when set, else the real host. */
+function bucketOrigin(options: PresignedUrlOptions): string {
+  const { bucket, region, endpointUrl } = options;
+  // endpointUrl: the same test-only origin override every other function in this file honors (see
+  // PresignedUrlOptions), unset in every deployment, so a test drives the lock through its real
+  // route against a local stand-in.
+  return (endpointUrl ?? `https://${bucket}.s3.${region}.amazonaws.com`).replace(/\/+$/, "");
+}
+
+const encodeKeyPath = (key: string) => key.split("/").map(encodeURIComponent).join("/");
+
 export async function applyObjectLockBatch(
   options: PresignedUrlOptions,
   datasetId: string,
@@ -1329,15 +1429,8 @@ export async function applyObjectLockBatch(
   hasMore: boolean;
   nextContinuationToken?: string;
 }> {
-  const { bucket, region, endpointUrl } = options;
   const aws = createS3Client(options);
-  // endpointUrl: the same test-only origin override every other function in this file honors (see
-  // PresignedUrlOptions), unset in every deployment, so a test drives the lock through its real
-  // route against a local stand-in (the re-pull's release locks N.0.0's objects, ADR 0111).
-  const origin = (endpointUrl ?? `https://${bucket}.s3.${region}.amazonaws.com`).replace(
-    /\/+$/,
-    "",
-  );
+  const origin = bucketOrigin(options);
 
   // Single-page list with max-keys=batchSize. This is the only LIST call
   // per invocation — no full pagination here.
@@ -1395,66 +1488,24 @@ export async function applyObjectLockBatch(
     };
   }
 
-  // Retention date: 100 years from now
-  const retainUntil = new Date();
-  retainUntil.setFullYear(retainUntil.getFullYear() + 100);
-  const retainUntilStr = retainUntil.toISOString();
-
-  const retentionXml = `<?xml version="1.0" encoding="UTF-8"?>
-<Retention xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
-  <Mode>GOVERNANCE</Mode>
-  <RetainUntilDate>${retainUntilStr}</RetainUntilDate>
-</Retention>`;
-
-  // Compute Content-MD5 (required by S3 PutObjectRetention)
-  const bodyBytes = new TextEncoder().encode(retentionXml);
-  const contentMd5 = await computeMd5Base64(bodyBytes);
-
+  const request = await retentionRequest();
   // Parallelize the PUTs. Subrequest count is identical to a sequential
   // loop (each fetch counts once regardless of order), but wall time
-  // drops from ~50ms × N to roughly the slowest individual PUT — for
-  // 100 keys that's ~500ms instead of ~5s. Workers Paid gives us a 30s
-  // CPU budget, so signing 100 requests in parallel is comfortable.
+  // drops from ~50ms × N to roughly the slowest individual PUT. A 403 adds
+  // one read-back GET, so a page costs at most 2 × batchSize subrequests.
   // Failure ordering becomes nondeterministic; for a partial-fail
   // batch the CLI replays via the same continuation token, so order
   // doesn't affect correctness.
   const lockResults = await Promise.all(
-    keys.map(async (key) => {
-      // Encode each path segment individually, preserving "/" separators
-      const encodedKey = key.split("/").map(encodeURIComponent).join("/");
-      const url = `${origin}/${encodedKey}?retention`;
-      try {
-        const signed = await aws.sign(url, {
-          method: "PUT",
-          headers: {
-            "Content-Type": "application/xml",
-            "Content-MD5": contentMd5,
-          },
-          body: retentionXml,
-        });
-
-        const res = await fetch(signed);
-        if (res.ok || res.status === 403) {
-          // 200: newly locked; 403: already locked (object protected)
-          return { ok: true as const };
-        }
-        const errorText = await res.text().catch(() => "");
-        return {
-          ok: false as const,
-          failure: { key, error: `HTTP ${res.status}: ${errorText}`.trim() },
-        };
-      } catch (err) {
-        return {
-          ok: false as const,
-          failure: { key, error: err instanceof Error ? err.message : String(err) },
-        };
-      }
-    }),
+    keys.map(async (key) => ({
+      key,
+      result: await lockOneObject(aws, origin, encodeKeyPath(key), null, request),
+    })),
   );
 
-  for (const r of lockResults) {
-    if (r.ok) locked++;
-    else failed.push(r.failure);
+  for (const { key, result } of lockResults) {
+    if (result.ok) locked++;
+    else failed.push({ key, error: result.error });
   }
 
   return {
@@ -1463,6 +1514,83 @@ export async function applyObjectLockBatch(
     hasMore: !!nextContinuationToken,
     nextContinuationToken,
   };
+}
+
+/**
+ * The shape of a key `lockObjectKeys` takes: one annex key (`SHA256E-s123--<hex>.edf`), a single
+ * path segment of the characters git-annex writes, never a path.
+ */
+export const LOCKABLE_KEY_RE = /^[A-Za-z0-9][A-Za-z0-9._+=,~@-]{0,254}$/;
+
+/**
+ * Lock exactly the named objects of a dataset, `<datasetId>/objects/<key>` each, at the version
+ * that is current now, and say which version was locked: an upstream re-pull's release locks the
+ * objects its copy and its uploads wrote (ADR 0111, decision 8), and nothing else under the
+ * prefix. At most {@link OBJECT_LOCK_BATCH_SIZE} keys per call, each a single segment
+ * ({@link LOCKABLE_KEY_RE}). Per key: one HEAD for the current version, then the lock of that
+ * version (with its read-back on a 403), so a call costs at most 3 × the batch in subrequests. An
+ * absent object is a failure, never skipped.
+ */
+export async function lockObjectKeys(
+  options: PresignedUrlOptions,
+  datasetId: string,
+  keys: readonly string[],
+): Promise<{
+  locked: number;
+  failed: ObjectLockFailure[];
+  objects: Array<{ key: string; version_id: string | null }>;
+}> {
+  if (keys.length > OBJECT_LOCK_BATCH_SIZE) {
+    throw new Error(`at most ${OBJECT_LOCK_BATCH_SIZE} objects are locked per call`);
+  }
+  for (const key of keys) {
+    if (!LOCKABLE_KEY_RE.test(key) || key.includes("..")) {
+      throw new Error("an object to lock is named by one annex key, never a path");
+    }
+  }
+  const aws = createS3Client(options);
+  const origin = bucketOrigin(options);
+  const request = await retentionRequest();
+  const results = await Promise.all(
+    keys.map(async (key) => {
+      const encodedKey = encodeKeyPath(`${datasetId}/objects/${key}`);
+      try {
+        const signed = await aws.sign(`${origin}/${encodedKey}`, { method: "HEAD" });
+        const head = await fetch(signed);
+        if (!head.ok) {
+          return {
+            key,
+            versionId: null,
+            result: {
+              ok: false as const,
+              error:
+                head.status === 404 ? "the object is absent" : `HEAD answered HTTP ${head.status}`,
+            },
+          };
+        }
+        const versionId = head.headers.get("x-amz-version-id");
+        const usable = versionId && versionId !== "null" ? versionId : null;
+        return {
+          key,
+          versionId: usable,
+          result: await lockOneObject(aws, origin, encodedKey, usable, request),
+        };
+      } catch (err) {
+        return {
+          key,
+          versionId: null,
+          result: { ok: false as const, error: err instanceof Error ? err.message : String(err) },
+        };
+      }
+    }),
+  );
+  const failed: ObjectLockFailure[] = [];
+  const objects: Array<{ key: string; version_id: string | null }> = [];
+  for (const r of results) {
+    if (r.result.ok) objects.push({ key: r.key, version_id: r.versionId });
+    else failed.push({ key: r.key, error: r.result.error });
+  }
+  return { locked: objects.length, failed, objects };
 }
 
 /**
