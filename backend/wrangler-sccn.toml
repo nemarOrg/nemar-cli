@@ -308,8 +308,10 @@ SANDBOX_ID_CEILING = "89999"
 # FROM_EMAIL must be verified with that provider (the Resend account tied to
 # RESEND_API_KEY, or the Cloudflare Email Service); otherwise sends are
 # refused and resolveEmailConfig logs once but does not propagate the failure.
+# A reply to account mail goes to support@, where the nemar.org catch-all makes it a ticket
+# (epic #1893 phase 6, ADR 0112).
 FROM_EMAIL = "NEMAR Archive <noreply@nemar.org>"
-REPLY_TO = "info@nemar.org"
+REPLY_TO = "support@nemar.org"
 # DEV_EMAIL_ALLOWLIST (issue #957) is not set here: the delivery fence in
 # services/email.ts / services/broadcast.ts only engages outside
 # ENVIRONMENT="production", so production sends are never restricted by it.
@@ -643,7 +645,8 @@ FROM_EMAIL = "NEMAR Staging <noreply@test.nemar.org>"
 REPLY_TO = "support@test.nemar.org"
 # DEV_EMAIL_ALLOWLIST is a dev Worker SECRET, not a var: exact human addresses
 # only, never a domain. "@nemar.org" delivered every fixture notice to that
-# domain's catch-all (a real inbox: 52 mails in one CI day), and "@nemar.test"
+# domain's catch-all (then a real inbox, 52 mails in one CI day; since the phase 6 cutover,
+# a production support ticket each), and "@nemar.test"
 # fixtures never need delivery because their sign-in codes are echoed in the
 # response (nonProdCodeEchoAllowed). With no allow-list at all the fence fails
 # closed and the dev worker sends nothing, which is the safe default.
