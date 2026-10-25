@@ -67,7 +67,10 @@ export interface TicketRow {
   purged_at: string | null;
 }
 
-export function toSummary(row: TicketRow): TicketSummary {
+/** `TicketRow` plus the `unread` column the list query adds (0 or 1). */
+export type TicketListRow = TicketRow & { unread?: number };
+
+export function toSummary(row: TicketListRow): TicketSummary {
   return {
     id: row.id,
     ref: row.ref,
@@ -83,7 +86,68 @@ export function toSummary(row: TicketRow): TicketSummary {
     last_message_at: row.last_message_at,
     has_summary: row.summary !== null,
     purged: row.purged_at !== null,
+    unread: row.unread === 1,
   };
+}
+
+/**
+ * SQL for "ticket `alias` has mail `viewer` has not read": an inbound message above the viewer's
+ * marker, or any inbound message when there is no marker. Outgoing replies and notes never count.
+ * One bind, the viewer id.
+ */
+function unreadSql(alias: string, viewerId: number): { sql: string; binds: unknown[] } {
+  return {
+    sql: `EXISTS (SELECT 1 FROM mail_messages m
+                   WHERE m.ticket_id = ${alias}.id AND m.direction = 'in'
+                     AND m.id > COALESCE((SELECT r.read_message_id FROM mail_ticket_reads r
+                                           WHERE r.user_id = ? AND r.ticket_id = ${alias}.id), 0))`,
+    binds: [viewerId],
+  };
+}
+
+/**
+ * Tickets the viewer may see (the same predicate as the list), that are not closed or spam, and
+ * that have mail the viewer has not read: the Mail badge.
+ */
+export async function countUnreadTickets(db: D1Database, viewer: Viewer): Promise<number> {
+  const vis = ticketVisibleTo(viewer, "t");
+  const unread = unreadSql("t", viewer.id);
+  const row = await db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM mail_tickets t
+        WHERE ${vis.sql} AND t.status NOT IN ('closed', 'spam') AND ${unread.sql}`,
+    )
+    .bind(...vis.binds, ...unread.binds)
+    .first<{ n: number }>();
+  return row?.n ?? 0;
+}
+
+/**
+ * Record that `viewer` has read `ticketId` up to its newest message. Call only after the
+ * visibility check has passed. Never throws: a failed marker must not fail the read.
+ */
+export async function markTicketRead(
+  db: D1Database,
+  viewer: Viewer,
+  ticketId: number,
+): Promise<void> {
+  try {
+    await db
+      .prepare(
+        `INSERT INTO mail_ticket_reads (user_id, ticket_id, read_message_id)
+         SELECT ?1, ?2, MAX(id) FROM mail_messages WHERE ticket_id = ?2 HAVING COUNT(*) > 0
+         ON CONFLICT(user_id, ticket_id) DO UPDATE SET
+           read_message_id = MAX(read_message_id, excluded.read_message_id),
+           read_at = datetime('now')`,
+      )
+      .bind(viewer.id, ticketId)
+      .run();
+  } catch (error) {
+    console.warn(
+      "[admin/mail] could not record the read marker:",
+      error instanceof Error ? error.message : String(error),
+    );
+  }
 }
 
 /** A purged ticket is read-only: its raw record is gone, so nothing may be added to it. */
@@ -181,13 +245,14 @@ export async function listTickets(
     where.push("(t.last_message_at < ? OR (t.last_message_at = ? AND t.id < ?))");
     binds.push(m[1], m[1], Number(m[2]));
   }
+  const unread = unreadSql("t", viewer.id);
   const rows = await db
     .prepare(
-      `SELECT t.* FROM mail_tickets t WHERE ${where.join(" AND ")}
+      `SELECT t.*, ${unread.sql} AS unread FROM mail_tickets t WHERE ${where.join(" AND ")}
         ORDER BY t.last_message_at DESC, t.id DESC LIMIT ?`,
     )
-    .bind(...binds, f.limit + 1)
-    .all<TicketRow>();
+    .bind(...unread.binds, ...binds, f.limit + 1)
+    .all<TicketListRow>();
   const all = rows.results ?? [];
   const page = all.slice(0, f.limit);
   const last = page[page.length - 1];

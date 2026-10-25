@@ -259,6 +259,9 @@ export interface MailReleaseStatement {
  * (which both the owner-only soft delete and the scheduled sweep run, so it counts once). A
  * fourth path that removes an admin needs these statements too.
  *
+ * The person's `mail_ticket_reads` markers (migration 0110) go with the rest under `scope: "all"`;
+ * every caller named above gets them through this function, so none needs its own line.
+ *
  * `scope: "all"` is for a person who is no longer an admin (a demotion to member, a revoke, a
  * delete). `scope: "restricted"` is for an owner demoted to admin, who still works ordinary
  * tickets: only restricted tickets and restricted-queue references are dropped.
@@ -317,6 +320,8 @@ export function mailReleaseStatements(
   if (all) {
     statements.push(
       { sql: "DELETE FROM mail_availability WHERE user_id = ?", binds: [userId] },
+      // The person's read markers (migration 0110): they are not an admin any more.
+      { sql: "DELETE FROM mail_ticket_reads WHERE user_id = ?", binds: [userId] },
       {
         sql: "UPDATE mail_availability SET backup_user_id = NULL, updated_at = datetime('now') WHERE backup_user_id = ?",
         binds: [userId],

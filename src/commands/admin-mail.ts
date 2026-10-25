@@ -400,6 +400,7 @@ async function renderList(tickets: TicketSummary[], people: People): Promise<voi
   const rows: string[][] = [];
   for (const t of tickets) {
     rows.push([
+      t.unread ? "new" : "",
       `#${t.id}`,
       oneLine(t.ref),
       t.purged ? `${oneLine(t.status)} (purged)` : oneLine(t.status),
@@ -410,7 +411,17 @@ async function renderList(tickets: TicketSummary[], people: People): Promise<voi
       oneLine(t.subject),
     ]);
   }
-  const head = ["ID", "REF", "STATUS", "QUEUE", "ASSIGNEE", "LAST MESSAGE", "FROM", "SUBJECT"];
+  const head = [
+    "NEW",
+    "ID",
+    "REF",
+    "STATUS",
+    "QUEUE",
+    "ASSIGNEE",
+    "LAST MESSAGE",
+    "FROM",
+    "SUBJECT",
+  ];
   const widths = head.map((h, i) => Math.max(h.length, ...rows.map((r) => r[i].length)));
   const line = (cells: string[]) =>
     cells

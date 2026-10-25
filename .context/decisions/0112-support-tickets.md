@@ -147,3 +147,13 @@ The reply-to plus tag is `support+t-<ref>@<domain>`; the legacy `support+t<ten b
 This changes the reference size stated under Threading above from 50 bits to about 31 for new tickets; the reference still only routes and never authorizes, and the unique index on `ref` is the only collision check, so creating a ticket retries up to five times with a fresh reference when that index refuses one.
 Migration 0109 rebuilds `mail_tickets` with a CHECK that accepts either form.
 It copies the five cascading child tables aside and restores them, because dropping the parent cascades their deletes even under `PRAGMA defer_foreign_keys`, which defers only the violation check.
+
+## Amendment, 2026-10-25: unread is per admin
+
+The Mail badge counted only open tickets assigned to the viewer, so new unassigned mail showed nothing.
+A ticket is now unread for an admin when it has an incoming message newer than that admin's marker, or the admin has no marker and the ticket has any incoming message.
+Outgoing replies and notes never make a ticket unread.
+The marker is a row in `mail_ticket_reads` (migration 0110), written when the admin opens the ticket (`GET /admin/mail/tickets/:id`), after the visibility check and never fatally; one admin opening a ticket marks nothing for another.
+The list carries `unread` per ticket, and `GET /admin/mail/unread-count` counts the unread tickets that are visible to the caller (the list's own predicate) and not closed or spam.
+The rows are removed by `mailReleaseStatements` with the rest of an admin's mail references.
+`mail_ticket_reads` is a sixth child table of `mail_tickets`, so any future rebuild of that table must back it up and restore it as 0109 does for the others.
