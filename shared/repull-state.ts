@@ -73,7 +73,9 @@ export const REPULL_TRANSITIONS: Readonly<Record<RepullStatus, readonly RepullSt
     ["planned", "prepared"],
     ["prepared", "prepared"],
     ["prepared", "copied"],
+    ["copied", "copied"],
     ["copied", "registered"],
+    ["registered", "registered"],
     ["registered", "pr_open"],
     ["pr_open", "pr_open"],
     ["pr_open", "gates_clear"],
@@ -217,7 +219,9 @@ export const TRANSITION_FIELDS: Readonly<Record<RepullStatus, TransitionFields>>
 /**
  * Edges that repeat a state to write something other than the state's own facts. They override
  * {@link TRANSITION_FIELDS} for `from === to` only:
- *  - `planned`: record why a step could not finish (the error is the whole write);
+ *  - `planned`, `copied` and `registered`: record why a step could not finish (the error is the
+ *    whole write): the registration that follows `copied`, the pull request that follows
+ *    `registered`; the edge forward clears it;
  *  - `released`: record the count of locked objects once the lock has been applied;
  *  - `gates_clear` and `patch_gates_clear`: record the claim to merge, before the merge is sent.
  *    The caller names the screened head; the Worker stamps the time with its own clock, because a
@@ -225,6 +229,8 @@ export const TRANSITION_FIELDS: Readonly<Record<RepullStatus, TransitionFields>>
  */
 export const SELF_EDGE_FIELDS: Readonly<Partial<Record<RepullStatus, TransitionFields>>> = {
   planned: { may: NONE, must: NONE, reset: NONE, requiresError: true },
+  copied: { may: NONE, must: NONE, reset: NONE, requiresError: true },
+  registered: { may: NONE, must: NONE, reset: NONE, requiresError: true },
   released: { may: ["counts"], must: ["counts"], reset: NONE },
   gates_clear: {
     may: ["merge_claim_sha"],
