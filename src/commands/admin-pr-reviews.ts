@@ -60,7 +60,7 @@ import {
 import { getCurrentUser } from "../lib/api/auth.js";
 import { ApiError, errorDetail } from "../lib/api/errors.js";
 import { openInBrowser } from "../lib/browser.js";
-import { isAuthenticated } from "../lib/config.js";
+import { getConfigDir, isAuthenticated } from "../lib/config.js";
 import { confirm } from "../lib/confirm.js";
 import { dlog, markReportedExit } from "../lib/debug-log.js";
 import {
@@ -99,6 +99,13 @@ import {
   sleepUnlessAborted,
 } from "../lib/pr-review-pace.js";
 import { LineReader, PASTE_SETTLE_MS } from "../lib/prompt-lines.js";
+import {
+  type PrReviewsGate,
+  type RepullMergeCheck,
+  doiLine,
+  prReviewsGate,
+  sendRepullMerge,
+} from "../lib/repull/merge.js";
 import { ageOf, clip, plain } from "../lib/terminal-text.js";
 
 // Moved to `lib/terminal-text.ts`; re-exported because `test/pr-reviews-render.unit.test.ts` imports
@@ -1939,6 +1946,7 @@ prReviewsCommand
         dryRun?: boolean;
         yes?: boolean;
       },
+      command: Command,
     ) => {
       if (!requireAuth()) process.exit(1);
       const dataset = checkDataset(datasetArg);
@@ -1970,10 +1978,37 @@ prReviewsCommand
 
       if (gate.kind === "needs_force" && !options.force) die(gate.reason);
 
+      // An upstream re-pull's pull request merges only through the re-pull's gate (ADR 0111): its
+      // checks run before anything is written, and its merge is the gate's (a squash at the
+      // screened head, under the daily merge cap), never the one below.
+      const repullGate = async (): Promise<RepullMergeCheck | null> => {
+        const g: PrReviewsGate = await prReviewsGate({
+          datasetId: dataset,
+          prNumber: pr,
+          headRef: live.headRef,
+          token,
+          base,
+          env: process.env,
+          configDir: getConfigDir(),
+          force: options.force === true,
+        });
+        if (g.kind === "refused") die(`${g.reason} Nothing was approved or merged.`);
+        return g.kind === "repull" ? g.check : null;
+      };
+      let repull: RepullMergeCheck | null = null;
+      if (options.merge) {
+        repull = await repullGate();
+        if (repull && method !== "squash" && command.getOptionValueSource("method") === "cli") {
+          die(
+            `An upstream re-pull's pull request is squash-merged (ADR 0111), and --method ${method} was asked for. Nothing was approved or merged.`,
+          );
+        }
+      }
+
       // A merge that was asked for is only worth an approval if it can be made, so GitHub's word on
       // that comes BEFORE anything is written (ADR 0093). The look after the approval stays, for a
       // state that changes in between, but it can only leave an approval standing.
-      if (options.merge) {
+      if (options.merge && !repull) {
         const merge = await checkMergeable(token, dataset, pr, live, { base });
         if (!merge.ok) refuseMerge(merge, { dataset, pr });
       }
@@ -1989,7 +2024,12 @@ prReviewsCommand
       );
       if (gate.kind === "confirm") console.log(chalk.yellow(`  ${gate.warning}`));
       if (gate.kind === "needs_force") console.log(chalk.yellow("  Approving anyway (--force)."));
-      if (options.merge) console.log(`  Then:     merge (${method}) if GitHub reports it clean`);
+      if (options.merge && repull) {
+        console.log(`  Then:     squash-merge through the re-pull's gate. ${doiLine(repull.row)}`);
+        for (const w of repull.warnings) console.log(chalk.yellow(`            ${w}`));
+      } else if (options.merge) {
+        console.log(`  Then:     merge (${method}) if GitHub reports it clean`);
+      }
 
       if (options.dryRun) {
         console.log();
@@ -2005,8 +2045,15 @@ prReviewsCommand
       }
 
       // The confirmation can take as long as the administrator takes, and an approval cannot be
-      // taken back: look at the state once more right before writing it.
-      if (options.merge) {
+      // taken back: look at the state once more right before writing it. A re-pull's gate is run
+      // again whole, the review it reads included.
+      if (options.merge && repull) {
+        repull = await repullGate();
+        if (!repull)
+          die(
+            "This is no longer a re-pull's pull request it can merge. Nothing was approved or merged.",
+          );
+      } else if (options.merge) {
         const late = await recheckBeforeApproval(token, dataset, pr, head, { base });
         if (!late.ok) refuseMerge(late, { dataset, pr });
       }
@@ -2043,6 +2090,26 @@ prReviewsCommand
               : "  It is not merged. Run approve again with --merge (this records another approval), or merge it on GitHub.",
           ),
         );
+        return;
+      }
+      if (repull) {
+        const gated = await sendRepullMerge(
+          {
+            datasetId: dataset,
+            token,
+            base,
+            env: process.env,
+            configDir: getConfigDir(),
+            force: options.force === true,
+          },
+          repull,
+          { out: (line) => console.log(chalk.dim(`  ${line}`)) },
+        );
+        if (!gated.merged) {
+          console.log(chalk.yellow(`Not merged (${gated.stage}): ${gated.reason}`));
+          process.exit(1);
+        }
+        console.log(chalk.green(`Merged ${dataset} #${pr} (squash, through the re-pull's gate).`));
         return;
       }
       const merged = await mergeWhenClean(token, dataset, pr, head, method, { base });
@@ -2307,13 +2374,30 @@ an impatient Enter cannot answer a pull request you have not seen; piped answers
         const merge = await checkMergeable(session.token, e.dataset_id, e.pr_number, a.live, {
           base,
         });
-        const allowed = approveAllowed({
+        // An upstream re-pull's pull request merges only through the re-pull's gate (ADR 0111).
+        const gateFor = () =>
+          prReviewsGate({
+            datasetId: e.dataset_id,
+            prNumber: e.pr_number,
+            headRef: a.live.headRef,
+            token: session.token,
+            base,
+            env: process.env,
+            configDir: getConfigDir(),
+            force: options.force === true,
+          });
+        const repullGated = await gateFor();
+        const allowedByChecks = approveAllowed({
           gate: a.gate,
           force: options.force === true,
           bids,
           version,
           merge,
         });
+        const allowed =
+          repullGated.kind === "refused"
+            ? { ok: false as const, reason: repullGated.reason }
+            : allowedByChecks;
         // The stored verdict and the report can disagree (ADR 0093: the stricter is used).
         const shown = a.outcome as ReviewOutcome | null | undefined;
         const rederived = shown?.kind === "reported" ? verdictOf(shown.report) : null;
@@ -2332,6 +2416,11 @@ an impatient Enter cannot answer a pull request you have not seen; piped answers
         console.log(`  Review:   ${reviewCell(a)}`);
         console.log(`  Checks:   BIDS ${checkCell(bids, 0)}   version ${checkCell(version, 0)}`);
         if (!merge.ok) console.log(chalk.yellow(`  Merge:    ${merge.card}`));
+        if (repullGated.kind === "repull") {
+          console.log(
+            `  Re-pull:  #${repullGated.check.row.id}; y squash-merges it through the re-pull's gate. ${doiLine(repullGated.check.row)}`,
+          );
+        }
         if (a.contributorNote) console.log(chalk.yellow(`  ${plain(a.contributorNote)}`));
         if (a.gate.kind === "confirm") console.log(chalk.yellow(`  ${a.gate.warning}`));
         if (a.gate.kind === "needs_force" && options.force) {
@@ -2403,14 +2492,26 @@ an impatient Enter cannot answer a pull request you have not seen; piped answers
               console.log(chalk.yellow(`  Not approved: ${allowed.reason}`));
               continue;
             }
-            // The card was built some time ago: look at the state once more right before the approval.
-            const late = await recheckBeforeApproval(
-              session.token,
-              e.dataset_id,
-              e.pr_number,
-              a.head,
-              { base },
-            );
+            // The card was built some time ago: look at the state once more right before the
+            // approval. A re-pull's gate is run again whole, the review it reads included, and a
+            // refusal writes nothing.
+            let regated: PrReviewsGate | null = null;
+            if (repullGated.kind !== "ordinary") {
+              regated = await gateFor();
+              if (regated.kind !== "repull") {
+                console.log(
+                  chalk.yellow(
+                    `  Not approved: ${regated.kind === "refused" ? regated.reason : "it is no longer a re-pull's pull request this run can merge."}`,
+                  ),
+                );
+                continue;
+              }
+            }
+            const late = regated
+              ? ({ ok: true } as const)
+              : await recheckBeforeApproval(session.token, e.dataset_id, e.pr_number, a.head, {
+                  base,
+                });
             if (!late.ok) {
               console.log(chalk.yellow(`  Not approved: ${late.why}`));
               const advice = mergeAdvice(late.advice, "next", {
@@ -2446,6 +2547,29 @@ an impatient Enter cannot answer a pull request you have not seen; piped answers
                 `Approved ${e.dataset_id} #${e.pr_number} at ${short(a.head)} as @${login}.`,
               ),
             );
+            if (regated?.kind === "repull") {
+              const gated = await sendRepullMerge(regated.ctx, regated.check, {
+                out: (line) => console.log(chalk.dim(`  ${line}`)),
+              });
+              if (gated.merged) {
+                console.log(
+                  chalk.green(
+                    `Merged ${e.dataset_id} #${e.pr_number} (squash, through the re-pull's gate).`,
+                  ),
+                );
+                tally.merged++;
+                break;
+              }
+              console.log(chalk.yellow(`Not merged (${gated.stage}): ${gated.reason}`));
+              if (gated.claimHeld) {
+                // A merge that may have happened: stop, as for any write whose outcome is unknown.
+                tally.unknown++;
+                stopped = true;
+                break run;
+              }
+              tally.approved++;
+              break;
+            }
             const merged = await mergeWhenClean(
               session.token,
               e.dataset_id,
