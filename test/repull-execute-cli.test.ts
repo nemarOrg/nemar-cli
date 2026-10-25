@@ -618,11 +618,31 @@ describe.skipIf(!awsInstalled)("execute through the pull request", () => {
         ["git", "clone", "-q", "--branch", "release/v2.0.0", fx.originRepo, clone],
         {},
       );
-      await runCommand(["git", "annex", "init", "-q", "check"], { cwd: clone });
+      const init = await runCommand(["git", "annex", "init", "-q", "check"], { cwd: clone });
+      expect(init.exitCode, `git annex init in the fresh clone: ${init.stderr.trim()}`).toBe(0);
+      // The precondition, whatever git-annex's version prints: the clone's own git-annex branch
+      // (merged from origin's at init) holds the registration for the key.
+      const [seen] = await readLocationLogsAt(clone, "refs/heads/git-annex", [added]);
+      expect(
+        presentIn(seen ?? "").has(fx.nemarUuid),
+        `the fresh clone's git-annex branch does not record ${added} at nemar-s3 after init`,
+      ).toBe(true);
       const where = await runCommand(["git", "annex", "whereis", "--json", "--key", added], {
         cwd: clone,
       });
-      const holders = JSON.parse(where.stdout.trim()) as { whereis: Array<{ uuid: string }> };
+      const said = where.stdout.trim();
+      expect(
+        where.exitCode === 0 && said !== "",
+        `git annex whereis --json --key ${added} exited ${where.exitCode} and printed ${said === "" ? "nothing" : "output"}; stderr: ${where.stderr.trim()}`,
+      ).toBe(true);
+      let holders: { whereis: Array<{ uuid: string }> };
+      try {
+        holders = JSON.parse(said.split("\n")[0] as string);
+      } catch {
+        throw new Error(
+          `git annex whereis --json --key ${added} printed unparseable output: ${said}`,
+        );
+      }
       expect(holders.whereis.map((w) => w.uuid)).toEqual([fx.nemarUuid]);
     } finally {
       Bun.spawnSync(["chmod", "-R", "u+w", join(clone, "..")]);
