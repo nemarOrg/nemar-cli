@@ -541,6 +541,15 @@ describe("nothing else about bot authors changes", () => {
     expect(reason(appPull({ user: { login: "dependabot[bot]", id: 49699333, type: "Bot" } }))).toBe(
       "bot_author",
     );
+    // A bot is a bot by its type or by its login's suffix, either one, and a person's login must
+    // have a login's shape.
+    expect(reason(appPull({ user: { login: "sneaky", id: 700, type: "Bot" } }))).toBe("bot_author");
+    expect(reason(appPull({ user: { login: "helper[bot]", id: 701, type: "User" } }))).toBe(
+      "bot_author",
+    );
+    expect(reason(appPull({ user: { login: "not a login!", id: 702, type: "User" } }))).toBe(
+      "malformed",
+    );
     // A person's pull request is read as it always was, with or without the option.
     expect(reason(appPull({ user: { login: "ada", id: 612, type: "User" } }))).toBe("ok:ada:false");
   });
