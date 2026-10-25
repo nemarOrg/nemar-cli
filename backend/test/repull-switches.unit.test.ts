@@ -121,6 +121,8 @@ describe("caps", () => {
 
   test("anything else reads 0 and is unreadable, never the default", () => {
     for (const raw of [
+      "005",
+      "000",
       "21",
       "99",
       "100",
