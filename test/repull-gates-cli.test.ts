@@ -2,8 +2,9 @@
  * `nemar admin repull resume <id>` and `status <id>` past the open pull request (ADR 0111, decisions
  * 2, 3, 6 and 7; epic #1046 phase 6, #1912), driven through the real entry point
  * (`bun run src/index.ts admin repull ...`) as a subprocess against `repull-pr-world.ts`: a re-pull
- * executed to `pr_open` by the real `execute`, the real API over bun:sqlite, the real `git`, and
- * stand-ins for GitHub and S3 only. No mocks.
+ * executed to `pr_open` by the real `execute`, the real API over bun:sqlite reached through
+ * TEST_API_URL in the child's environment, the real `git`, and stand-ins for GitHub and S3 only.
+ * No mocks.
  *
  * The properties, each with a test that fails when its line is changed:
  *  - the identifier screen is dispatched for the recorded head, once, and waiting for it exits 3;

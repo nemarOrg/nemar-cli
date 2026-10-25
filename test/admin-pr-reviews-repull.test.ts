@@ -3,7 +3,8 @@
  * epic #1046 phase 6, #1912): `approve --merge` and `y` in `next` merge it only through the
  * re-pull's gate, whose checks run before the approval is written, and an ordinary release pull
  * request is merged as before. Driven through the real entry point against `repull-pr-world.ts`
- * (the real `execute`, `resume` and API; stand-ins for GitHub and S3 only). No mocks.
+ * (the real `execute`, `resume` and API, reached through TEST_API_URL in the child's environment;
+ * stand-ins for GitHub and S3 only). No mocks.
  *
  * The properties, each with a test that fails when its line is changed:
  *  - `approve --merge` on a re-pull pull request approves, then claims the cap and squash-merges

@@ -7,7 +7,7 @@
  * each, with the record's own values, as the proof's patterns read them. GitHub's default squash
  * message, which lists each commit as a bullet and so puts the trailers mid-message, is refused.
  *
- * CI TIER: unit (runs git, reads no repository).
+ * CI TIER: unit-pure (runs git, reads no repository).
  */
 
 import { describe, expect, test } from "bun:test";

@@ -2,8 +2,9 @@
  * `nemar admin repull merge <id>`: the one gate a re-pull's pull request merges through (ADR 0111,
  * decisions 1, 6 and 7; epic #1046 phase 6, #1912), driven through the real entry point against
  * `repull-pr-world.ts` (a re-pull executed to `pr_open` by the real `execute`, then taken to
- * `gates_clear` by the real `resume`; the real API over bun:sqlite; stand-ins for GitHub and S3
- * only, GitHub's squash merge committing onto the bare origin's `main`). No mocks.
+ * `gates_clear` by the real `resume`; the real API over bun:sqlite, reached through TEST_API_URL in
+ * the child's environment; stand-ins for GitHub and S3 only, GitHub's squash merge committing onto
+ * the bare origin's `main`). No mocks.
  *
  * The properties, each with a test that fails when its line is changed:
  *  - the merge is a squash at the screened `sha`, sent after the claim, with a message whose last

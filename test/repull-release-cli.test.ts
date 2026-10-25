@@ -8,7 +8,8 @@
  * DOI and its upstream tag, as `/webhooks/manifest-ready` writes it); everything the re-pull does
  * itself is real: the Worker's verified release route reads the tag and the comparison on the
  * GitHub stand-in, and the lock is the real s3-lock route, signing its requests to the S3
- * stand-in through the test endpoint override. No mocks.
+ * stand-in through the test endpoint override. The API is reached through TEST_API_URL in the
+ * child's environment. No mocks.
  *
  * The properties, each with a test that fails when its line is changed:
  *  - resume waits for the tag, then for the version row, records the release with `lineage` for
