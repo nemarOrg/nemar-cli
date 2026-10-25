@@ -219,9 +219,15 @@ export async function readExecutablePlan(path: string, live: LiveSources): Promi
   }
   // An anonymous deposit is never re-pulled (ADR 0065): N.0.0 takes upstream's authors and README.
   // The Worker refuses it too; this stops it before anything is cloned.
+  if (!live.catalog.dataset) {
+    throw new ExecuteRefused(
+      "dataset-missing",
+      "The NEMAR API has no dataset row for the plan's dataset.",
+    );
+  }
   // Only a row that says `anonymous` is exactly 0 is not anonymous: an absent or unreadable field
   // is unknown, never clean.
-  const anonymous = live.catalog.dataset?.anonymous;
+  const anonymous = live.catalog.dataset.anonymous;
   if (anonymous !== 0) {
     throw new ExecuteRefused(
       anonymous === 1 ? "anonymous-dataset" : "anonymity-unknown",
