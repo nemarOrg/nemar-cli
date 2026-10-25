@@ -101,7 +101,13 @@ export const REPULL_SCAN_PAGES = 3;
 export const REPULL_SCAN_PROBE_BUDGET = 10;
 /** A dataset gets at most one first dispatch, or one re-pull, in this many days. */
 export const REPULL_WINDOW_DAYS = 30;
-/** A dataset whose last this-many dispatches all ended `unreported` is not dispatched again. */
+/**
+ * A dataset whose last this-many dispatches all ended `unreported` is not dispatched again
+ * (`unreported-streak`), and the tick's log line is raised to warn while it skips one. Nothing
+ * clears the streak: only a later dispatch that reports would, and the scheduler sends that dataset
+ * none. The mirror stays on the administrator's path: an administrator re-pulls it by hand (`nemar
+ * admin repull plan`, then `execute`), and a later staleness of it is the administrator's again.
+ */
 export const REPULL_UNREPORTED_STREAK = 3;
 /**
  * A candidate whose own reads throw, or a tick whose every probe failed, is held at one place for
@@ -617,6 +623,10 @@ async function tick(
     // bounded like a candidate's, because a stale mirror whose OpenNeuro repository is gone probes
     // unverified on every pass, and holding for it alone would stop the rotation for good.
     r.error = "probes-unverified";
+    // Held before anything is read or written: if the count or the audit row fails, the tick
+    // stamps no new cursor, so nothing it could not see is passed by on one database error.
+    const passed = moved.cursor;
+    moved.cursor = null;
     const held =
       (await db.prepare(PROBES_HELD_COUNT_SQL).bind(start).first<{ n: number }>())?.n ?? 0;
     if (held < REPULL_CANDIDATE_HOLD_TICKS - 1) {
@@ -624,9 +634,10 @@ async function tick(
         .prepare(PROBES_HELD_AUDIT_SQL)
         .bind(start, r.probed, held + 1)
         .run();
-      moved.cursor = null;
       return "blind";
     }
+    // Held long enough at this place: pass on, as far as the scan reached.
+    moved.cursor = passed;
   }
   return outcome;
 }
@@ -682,11 +693,12 @@ export async function runRepullSchedulerCron(
  * The tick's one log line, and its level: error for an outcome that means the tick could not do
  * its work or was not configured to, and for any dispatch GitHub refused or did not answer, any
  * mirror the report could not compare, any probe that could not answer and any candidate that
- * threw. Counts and fixed words only: the error is a {@link SchedulerError} word and its class a
- * plain identifier, never a message.
+ * threw. Warn, short of that, while it skips a mirror for `unreported-streak`, which only an
+ * administrator's re-pull by hand takes care of. Counts and fixed words only: the error is a
+ * {@link SchedulerError} word and its class a plain identifier, never a message.
  */
 export function repullSchedulerLogLine(r: SchedulerTickResult): {
-  level: "info" | "error";
+  level: "info" | "warn" | "error";
   line: string;
 } {
   const skipped =
@@ -719,5 +731,6 @@ export function repullSchedulerLogLine(r: SchedulerTickResult): {
     r.unchecked > 0 ||
     r.probeUnverified > 0 ||
     r.candidateErrors > 0;
-  return { level: trouble ? "error" : "info", line };
+  if (trouble) return { level: "error", line };
+  return { level: (r.skipped["unreported-streak"] ?? 0) > 0 ? "warn" : "info", line };
 }

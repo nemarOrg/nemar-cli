@@ -223,6 +223,8 @@ describe("the scheduler's statements on D1", () => {
     expect(await d1.prepare(CANDIDATE_HELD_COUNT_SQL).bind("on099901").first()).toEqual({ n: 1 });
     expect(await d1.prepare(CANDIDATE_HELD_COUNT_SQL).bind("on099902").first()).toEqual({ n: 0 });
     expect(await d1.prepare(PROBES_HELD_COUNT_SQL).bind("").first()).toEqual({ n: 1 });
+    // A hold is counted at its own cursor only.
+    expect(await d1.prepare(PROBES_HELD_COUNT_SQL).bind("on099900").first()).toEqual({ n: 0 });
 
     // The stamp keeps the cursor for a NULL and takes a new one otherwise.
     await d1.prepare(SCHEDULER_STAMP_SQL).bind("on099901", "ran").run();

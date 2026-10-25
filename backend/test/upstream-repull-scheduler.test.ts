@@ -42,6 +42,7 @@ import {
   CANDIDATE_BLOCKERS_SQL,
   type CandidateBlockers,
   MANUAL_RUN_PROOF_SQL,
+  PROBES_HELD_AUDIT_SQL,
   REPULL_G4_DATASETS,
   REPULL_SCAN_PAGES,
   REPULL_SCAN_PROBE_BUDGET,
@@ -522,6 +523,8 @@ describe("which mirrors are dispatched", () => {
     const r = await tick();
     expect(r.skipped).toEqual({ "unreported-streak": 1 });
     expect(sentFor()).toEqual(["on099902", "on099903"]);
+    // Nothing clears the streak on its own, so the skip is logged at warn to be seen.
+    expect(repullSchedulerLogLine(r).level).toBe("warn");
   });
 
   test("an unpublished mirror is never a candidate, whatever upstream did", async () => {
@@ -818,6 +821,23 @@ describe("what keeps a tick from dispatching", () => {
     expect(sent).toEqual([]);
     expect(scheduler().scan_after).toBe("");
     expect(repullSchedulerLogLine(r).line).toContain("error=probe-credential-missing");
+  });
+
+  test("a hold whose audit row cannot be written still holds the cursor, and is not ran", async () => {
+    manualRunDone();
+    for (const id of ["on099901", "on099902", "on099903", "on099904"]) {
+      mirror(id, { mirror: "error" });
+    }
+    setCursor("on099900");
+    // The scan reached the end of the fleet before the hold, so a cursor stamped from it would be ''.
+    const d1 = wrapD1(realD1(db), (sql) => {
+      if (sql === PROBES_HELD_AUDIT_SQL) throw new Error("D1_ERROR: simulated");
+    });
+    const r = await tick(env({}, d1));
+    expect(r.outcome).not.toBe("ran");
+    expect(r).toMatchObject({ outcome: "error", error: "tick-failed", probeUnverified: 4 });
+    expect(scheduler()).toMatchObject({ scan_after: "on099900", last_outcome: "error" });
+    expect(sent).toEqual([]);
   });
 
   test("every probe failing is blind and holds the cursor, for two ticks at most", async () => {
@@ -1189,6 +1209,14 @@ describe("the log line", () => {
       { candidateErrors: 1 },
     ]) {
       expect(repullSchedulerLogLine({ ...base, ...trouble }).level).toBe("error");
+      // Trouble outranks the streak's warn.
+      expect(
+        repullSchedulerLogLine({ ...base, ...trouble, skipped: { "unreported-streak": 1 } }).level,
+      ).toBe("error");
     }
+    expect(repullSchedulerLogLine({ ...base, skipped: { "unreported-streak": 2 } }).level).toBe(
+      "warn",
+    );
+    expect(repullSchedulerLogLine({ ...base, skipped: { recent: 2 } }).level).toBe("info");
   });
 });

@@ -1219,6 +1219,7 @@ export default {
             if (!r) return;
             const { level, line } = repullSchedulerLogLine(r);
             if (level === "error") console.error(line);
+            else if (level === "warn") console.warn(line);
             else console.log(line);
           })
           .catch((err) =>
