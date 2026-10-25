@@ -21,7 +21,14 @@
  * a copy source without `?versionId=` is refused, so nothing is ever copied by path. Never
  * `--bypass-governance-retention`, never a `--metadata-directive`, never a lock or ACL option:
  * every call's options are an allowlist. The canary's own calls (a scratch prefix, its copies
- * deleted again by version id, the prefix listed by version) are allowed only in canary mode.
+ * deleted again by version id, the prefix listed by version and its open multipart uploads listed)
+ * are allowed only in canary mode. The one write outside the canary that is not a copy is
+ * `delete-object` by version id under the destination prefix, which removes a copy S3 reported as
+ * made from another version than the pinned one (never the staging key).
+ *
+ * A key or a prefix with a `.` or `..` segment, or an empty one (`a//b`), is refused before any
+ * prefix test: the test is lexical, and `<id>/objects/../../<other>/objects/K` begins with the
+ * prefix.
  */
 
 import type { AwsRunner } from "../../../scripts/scrub/s3/s3-lib.js";
@@ -111,8 +118,12 @@ export interface AwsGuardContext {
   canary?: boolean;
 }
 
-/** S3 version ids are URL-ready; anything else is refused rather than encoded. */
+/**
+ * S3 version ids are URL-ready; anything else is refused rather than encoded. Older S3 version ids
+ * can contain `+` and `/`; those are refused too (fail closed) and the refusal says why.
+ */
 const VERSION_ID = /^[A-Za-z0-9._-]{1,1024}$/;
+const VERSION_ID_REFUSED = "version id has a character the guard does not allow";
 const UPLOAD_ID = /^[A-Za-z0-9._~=+/-]{1,1024}$/;
 
 /** `--flag value` pairs; a flag twice, a bare value or `--no-paginate` with a value is refused. */
@@ -168,10 +179,11 @@ const ALLOWED: Record<string, readonly string[]> = {
     "--key-marker",
     "--version-id-marker",
   ],
+  "list-multipart-uploads": ["--bucket", "--prefix", "--max-uploads", "--no-paginate"],
 };
 
 /** The operations only the canary makes. */
-const CANARY_ONLY = new Set(["delete-object", "list-object-versions"]);
+const CANARY_ONLY = new Set(["list-object-versions", "list-multipart-uploads"]);
 
 /** Every operation that names one destination object by `--key`. */
 const DEST_KEYED = new Set([
@@ -182,12 +194,20 @@ const DEST_KEYED = new Set([
   "abort-multipart-upload",
 ]);
 
+/** Whether a path has a `.` or `..` segment, or an empty one (a trailing `/` is allowed). */
+function hasDotSegment(path: string, allowTrailingSlash = false): boolean {
+  const segments = path.split("/");
+  if (allowTrailingSlash && segments[segments.length - 1] === "") segments.pop();
+  return segments.some((s) => s === "" || s === "." || s === "..");
+}
+
 function underPrefix(key: string | undefined, prefix: string): boolean {
   return (
     typeof key === "string" &&
     prefix.endsWith("/") &&
     key.startsWith(prefix) &&
-    key.length > prefix.length
+    key.length > prefix.length &&
+    !hasDotSegment(key)
   );
 }
 
@@ -198,7 +218,7 @@ function assertCopySource(value: string | undefined, ctx: AwsGuardContext): void
   if (at < 0) throw new RepullWriteRefused("copy-source-unversioned");
   const path = value.slice(0, at);
   const version = value.slice(at + "?versionId=".length);
-  if (!VERSION_ID.test(version)) throw new RepullWriteRefused("copy-source-version-id");
+  if (!VERSION_ID.test(version)) throw new RepullWriteRefused(VERSION_ID_REFUSED);
   if (!path.startsWith(`${ctx.sourceBucket}/`)) throw new RepullWriteRefused("copy-source-bucket");
   if (!underPrefix(path.slice(ctx.sourceBucket.length + 1), ctx.sourcePrefix)) {
     throw new RepullWriteRefused("copy-source-prefix");
@@ -210,7 +230,12 @@ function assertCopySource(value: string | undefined, ctx: AwsGuardContext): void
  * one the module comment lists.
  */
 export function assertRepullAws(op: string, args: readonly string[], ctx: AwsGuardContext): void {
-  if (!ctx.prefix.endsWith("/") || !ctx.sourcePrefix.endsWith("/")) {
+  if (
+    !ctx.prefix.endsWith("/") ||
+    !ctx.sourcePrefix.endsWith("/") ||
+    hasDotSegment(ctx.prefix, true) ||
+    hasDotSegment(ctx.sourcePrefix, true)
+  ) {
     throw new RepullWriteRefused("bad-context");
   }
   const allowed = ALLOWED[op];
@@ -227,9 +252,9 @@ export function assertRepullAws(op: string, args: readonly string[], ctx: AwsGua
     if (bucket === ctx.sourceBucket) {
       if (!underPrefix(key, ctx.sourcePrefix)) throw new RepullWriteRefused("source-key-prefix");
       // Upstream is read at the pinned version only.
-      if (!VERSION_ID.test(a.get("--version-id") ?? "")) {
-        throw new RepullWriteRefused("source-read-unversioned");
-      }
+      const pinned = a.get("--version-id") ?? "";
+      if (pinned === "") throw new RepullWriteRefused("source-read-unversioned");
+      if (!VERSION_ID.test(pinned)) throw new RepullWriteRefused(VERSION_ID_REFUSED);
       return;
     }
     if (bucket !== ctx.destBucket) throw new RepullWriteRefused("bucket-not-allowed");
@@ -261,9 +286,13 @@ export function assertRepullAws(op: string, args: readonly string[], ctx: AwsGua
     return;
   }
 
-  if (op === "list-objects-v2" || op === "list-object-versions") {
+  if (
+    op === "list-objects-v2" ||
+    op === "list-object-versions" ||
+    op === "list-multipart-uploads"
+  ) {
     const prefix = a.get("--prefix");
-    if (prefix === undefined || !prefix.startsWith(ctx.prefix)) {
+    if (prefix === undefined || !prefix.startsWith(ctx.prefix) || hasDotSegment(prefix, true)) {
       throw new RepullWriteRefused("listing-outside-prefix");
     }
     return;
@@ -276,11 +305,12 @@ export function assertRepullAws(op: string, args: readonly string[], ctx: AwsGua
   }
 
   if (op === "delete-object") {
-    // The canary deletes what it wrote, by version id, so no delete marker is ever left behind.
-    if (!VERSION_ID.test(a.get("--version-id") ?? "")) {
-      throw new RepullWriteRefused("delete-unversioned");
-    }
-    if (key !== ctx.stagingKey && !underPrefix(key, ctx.prefix)) {
+    // By version id, so no delete marker is ever left behind. The canary deletes what it wrote
+    // (its staging-shaped key too); a copy deletes only an object under the prefix.
+    const version = a.get("--version-id") ?? "";
+    if (version === "") throw new RepullWriteRefused("delete-unversioned");
+    if (!VERSION_ID.test(version)) throw new RepullWriteRefused(VERSION_ID_REFUSED);
+    if (!underPrefix(key, ctx.prefix) && !(ctx.canary && key === ctx.stagingKey)) {
       throw new RepullWriteRefused("key-outside-prefix");
     }
     return;

@@ -5,12 +5,17 @@
  *
  * For each item: an object already at the destination at the size its key declares is skipped; one
  * at another size is copied again (#967). Otherwise upstream's object is headed AT THE PIN: absent
- * is `pin-absent`, another size than the key declares is `pin-size-mismatch` (a key that declares
- * no size is copied and its headed size is the one checked, never zero). Then one `copy-object`
+ * is `pin-absent`, an answer that does not name the pinned version (or names none) is
+ * `pin-version-mismatch`, another size than the key declares is `pin-size-mismatch`. A key that
+ * declares no size is skipped only when the destination already holds the pinned object's size,
+ * and is otherwise copied; the headed size is the one checked, never zero. Then one `copy-object`
  * with `--copy-source <bucket>/<object>?versionId=<v>` and `--copy-source-if-match` on that
  * version's ETag, or above {@link SINGLE_COPY_MAX} a multipart upload whose every part is copied
- * from the same version under the same condition (any failure aborts it). The destination is
- * headed after, and must be the size that was copied.
+ * from the same version under the same condition (any failure aborts it). S3 must name the pinned
+ * version as the one it copied from (`CopySourceVersionId`), for the copy and for every part: any
+ * other answer, or none, is `pin-version-mismatch`, a single copy that already landed is deleted
+ * by its version id, and a multipart upload is aborted. The destination is headed after, and must
+ * be the size that was copied.
  *
  * A refusal of one item stops new items from starting; the step refuses once the ones in flight
  * have finished, so nothing is registered for a partial copy and a rerun skips what landed.
@@ -167,14 +172,22 @@ export function partSizeFor(size: number, partBytes: number): number {
   return Math.max(partBytes, Math.ceil(size / MAX_PARTS));
 }
 
+/** A multipart upload the abort of a failed copy could not close. */
+export interface OpenUpload {
+  key: string;
+  uploadId: string;
+}
+
 async function copyMultipart(args: {
   aws: AwsRunner;
   source: string;
+  version: string;
   etag: string;
   size: number;
   bucket: string;
   key: string;
   partBytes: number;
+  open: OpenUpload[];
 }): Promise<void> {
   const { aws, bucket, key } = args;
   const created = await aws.api("create-multipart-upload", ["--bucket", bucket, "--key", key]);
@@ -208,6 +221,13 @@ async function copyMultipart(args: {
       const result = out.CopyPartResult as Record<string, unknown> | undefined;
       const etag = result ? str(result.ETag) : undefined;
       if (!etag) throw new AwsCliError("bad-output", "UploadPartCopy");
+      // S3 names the source version it copied this part from; unknown is not the pin.
+      if (str(out.CopySourceVersionId) !== args.version) {
+        throw new ExecuteRefused(
+          "pin-version-mismatch",
+          `S3 copied part ${n} of a multipart copy from another version than the pinned one`,
+        );
+      }
       parts.push({ ETag: etag, PartNumber: n });
     }
     await aws.api(
@@ -235,9 +255,28 @@ async function copyMultipart(args: {
         uploadId,
       ]);
     } catch {
-      // The upload is left open; S3's lifecycle or an operator removes it. The failure stands.
+      // The upload stays open and holds billed parts: the step's refusal names it, so an operator
+      // can abort it. The copy's own failure stands.
+      args.open.push({ key, uploadId });
     }
     throw err;
+  }
+}
+
+/** Delete a copy that landed from the wrong version, by the version id its answer names. */
+async function removeLanded(
+  aws: AwsRunner,
+  bucket: string,
+  key: string,
+  out: Record<string, unknown>,
+): Promise<boolean> {
+  const versionId = str(out.VersionId);
+  if (versionId === undefined) return false;
+  try {
+    await aws.api("delete-object", ["--bucket", bucket, "--key", key, "--version-id", versionId]);
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -290,6 +329,7 @@ export async function copyPinned(args: {
   let skipped = 0;
   let bytes = 0;
   const refusals: ExecuteRefused[] = [];
+  const open: OpenUpload[] = [];
   const items = args.manifest.items;
   await runPool(
     items,
@@ -306,10 +346,11 @@ export async function copyPinned(args: {
         if (!pinned) {
           throw new ExecuteRefused("pin-absent", "a pinned upstream version is not served");
         }
-        if (pinned.versionId !== undefined && pinned.versionId !== item.version) {
+        // Unknown is never success: an answer that names no version is not the pin either.
+        if (pinned.versionId !== item.version) {
           throw new ExecuteRefused(
             "pin-version-mismatch",
-            "upstream answered for another version than the pinned one",
+            "upstream answered for another version than the pinned one, or for none",
           );
         }
         if (declared !== null && pinned.size !== declared) {
@@ -326,7 +367,7 @@ export async function copyPinned(args: {
         const key = `${args.prefix}${item.key}`;
         const source = copySourceOf(item);
         if (pinned.size <= singleCopyMax) {
-          await args.aws.dest.api(
+          const out = await args.aws.dest.api(
             "copy-object",
             [
               "--bucket",
@@ -340,15 +381,28 @@ export async function copyPinned(args: {
             ],
             { slow: true },
           );
+          // S3 names the source version it copied from; unknown is not the pin. The copy has
+          // landed, and a rerun would skip it at the declared size, so it is removed by version.
+          if (str(out.CopySourceVersionId) !== item.version) {
+            const removed = await removeLanded(args.aws.dest, args.destBucket, key, out);
+            throw new ExecuteRefused(
+              "pin-version-mismatch",
+              removed
+                ? "S3 copied from another version than the pinned one; the copy was removed"
+                : "S3 copied from another version than the pinned one and the copy could not be removed: delete it by hand before a rerun",
+            );
+          }
         } else {
           await copyMultipart({
             aws: args.aws.dest,
             source,
+            version: item.version,
             etag: pinned.etag,
             size: pinned.size,
             bucket: args.destBucket,
             key,
             partBytes,
+            open,
           });
         }
         const landed = await head(args.aws.dest, args.destBucket, key);
@@ -368,9 +422,13 @@ export async function copyPinned(args: {
   );
   if (refusals.length > 0) {
     const first = refusals[0] as ExecuteRefused;
+    const left =
+      open.length > 0
+        ? ` ${open.length} multipart upload(s) could not be aborted and stay open (abort them with abort-multipart-upload): ${open.map((o) => o.uploadId).join(", ")}.`
+        : "";
     throw new ExecuteRefused(
       first.code,
-      `The copy stopped: ${first.message}; ${refusals.length} of ${items.length} item(s) refused, ${copied} copied and ${skipped} already present this run. Nothing is registered for a partial copy, and a rerun skips what landed.`,
+      `The copy stopped: ${first.message}; ${refusals.length} of ${items.length} item(s) refused, ${copied} copied and ${skipped} already present this run. Nothing is registered for a partial copy, and a rerun skips what landed.${left}`,
     );
   }
   return { copied, skipped, bytes };

@@ -72,6 +72,25 @@ function runners(guarded = true): { source: AwsRunner; dest: AwsRunner } {
     : { source, dest };
 }
 
+/**
+ * A real runner whose answer to one operation is edited on the way back: the fault injection for an
+ * endpoint that answers wrongly, over the real `aws` CLI and the stand-in's real answer.
+ */
+function tampered(
+  inner: AwsRunner,
+  op: string,
+  edit: (out: Record<string, unknown>) => void,
+  when: (args: readonly string[]) => boolean = () => true,
+): AwsRunner {
+  return {
+    async api(o, args, opts) {
+      const out = await inner.api(o, args, opts);
+      if (o === op && when(args)) edit(out);
+      return out;
+    },
+  };
+}
+
 function noise(n: number, seed: number): Uint8Array {
   const out = new Uint8Array(n);
   let x = seed >>> 0 || 1;
@@ -320,5 +339,163 @@ describe.skipIf(!awsInstalled)("the pinned copy", () => {
   test("a part count over S3's limit grows the part size", () => {
     expect(partSizeFor(12 * MIB, 5 * MIB)).toBe(5 * MIB);
     expect(partSizeFor(10_000 * 5 * MIB + 1, 5 * MIB)).toBeGreaterThan(5 * MIB);
+  });
+
+  test("S3 that copies from another version than the pinned one is refused and the copy removed", async () => {
+    // An endpoint that ignores the version, says so, and ignores the condition too.
+    s3.setCopySourceVersionMode("ignore");
+    s3.setIgnoreIfMatch(true);
+    const a = upstream("sub-01/eeg/a.edf", 2000, 20);
+    const err = await refusal(copy([a]));
+    expect(err.code).toBe("pin-version-mismatch");
+    expect(err.message).toContain("the copy was removed");
+    // The newer bytes are not at the destination: a rerun would otherwise skip them at the size.
+    expect(destBytes(a.key)).toBeUndefined();
+    expect(s3.calls("DeleteObject").every((d) => typeof d.versionId === "string")).toBe(true);
+    expect(s3.keys("nemar", PREFIX)).toEqual([]);
+  });
+
+  test("a multipart copy whose parts S3 took from another version is refused, aborted, and lands nothing", async () => {
+    s3.setCopySourceVersionMode("ignore");
+    s3.setIgnoreIfMatch(true);
+    const big = upstream("sub-02/eeg/b.edf", 11 * MIB, 21);
+    const err = await refusal(copy([big], { singleCopyMax: MIB, partBytes: 5 * MIB }));
+    expect(err.code).toBe("pin-version-mismatch");
+    expect(err.message).toContain("part 1");
+    expect(s3.calls("AbortMultipartUpload")).toHaveLength(1);
+    expect(s3.calls("CompleteMultipartUpload")).toEqual([]);
+    expect(s3.openUploads()).toBe(0);
+    expect(destBytes(big.key)).toBeUndefined();
+  });
+
+  test("an endpoint that names the pinned version while copying the current one is stopped by the ETag condition", async () => {
+    s3.setCopySourceVersionMode("lie");
+    const a = upstream("sub-01/eeg/a.edf", 2000, 22);
+    const big = upstream("sub-02/eeg/b.edf", 11 * MIB, 23);
+    expect((await refusal(copy([a]))).code).toBe("pin-changed");
+    expect(destBytes(a.key)).toBeUndefined();
+    const multi = await refusal(copy([big], { singleCopyMax: MIB, partBytes: 5 * MIB }));
+    expect(multi.code).toBe("pin-changed");
+    expect(s3.openUploads()).toBe(0);
+    expect(destBytes(big.key)).toBeUndefined();
+  });
+
+  test("an answer that names no source version is not the pin: refused, and the copy removed", async () => {
+    const a = upstream("sub-01/eeg/a.edf", 1500, 24);
+    const aws = runners();
+    const err = await refusal(
+      copy([a], {
+        aws: {
+          source: aws.source,
+          dest: tampered(aws.dest, "copy-object", (out) => {
+            out.CopySourceVersionId = undefined;
+          }),
+        },
+      }),
+    );
+    expect(err.code).toBe("pin-version-mismatch");
+    expect(destBytes(a.key)).toBeUndefined();
+    // Every part must name it too.
+    const big = upstream("sub-02/eeg/b.edf", 11 * MIB, 25);
+    const parts = await refusal(
+      copy([big], {
+        aws: {
+          source: aws.source,
+          dest: tampered(aws.dest, "upload-part-copy", (out) => {
+            out.CopySourceVersionId = undefined;
+          }),
+        },
+        singleCopyMax: MIB,
+        partBytes: 5 * MIB,
+      }),
+    );
+    expect(parts.code).toBe("pin-version-mismatch");
+    expect(s3.openUploads()).toBe(0);
+  });
+
+  test("a copy that landed and cannot be removed says so, so no rerun trusts it", async () => {
+    s3.setCopySourceVersionMode("ignore");
+    s3.setIgnoreIfMatch(true);
+    s3.inject("DeleteObject", { code: "AccessDenied", status: 403 });
+    const a = upstream("sub-01/eeg/a.edf", 2000, 26);
+    const err = await refusal(copy([a]));
+    expect(err.code).toBe("pin-version-mismatch");
+    expect(err.message).toContain("could not be removed");
+    expect(err.message).toContain("delete it by hand");
+  });
+
+  test("a head that names another version, or none, is pin-version-mismatch", async () => {
+    const a = upstream("sub-01/eeg/a.edf", 1000, 27);
+    const aws = runners();
+    const onSource = (args: readonly string[]) => args.includes("--version-id");
+    for (const edit of [
+      (out: Record<string, unknown>) => {
+        out.VersionId = "standin-v-other";
+      },
+      (out: Record<string, unknown>) => {
+        out.VersionId = undefined;
+      },
+    ]) {
+      const err = await refusal(
+        copy([a], {
+          aws: { source: tampered(aws.source, "head-object", edit, onSource), dest: aws.dest },
+        }),
+      );
+      expect(err.code).toBe("pin-version-mismatch");
+    }
+    expect(s3.calls("CopyObject")).toEqual([]);
+  });
+
+  test("a precondition S3 refuses is pin-changed; a head with no ETag is a failed call", async () => {
+    const a = upstream("sub-01/eeg/a.edf", 1000, 28);
+    s3.inject("CopyObject", { code: "PreconditionFailed", status: 412 });
+    expect((await refusal(copy([a]))).code).toBe("pin-changed");
+    s3.clearFaults();
+    const aws = runners();
+    const noEtag = await refusal(
+      copy([a], {
+        aws: {
+          source: tampered(aws.source, "head-object", (out) => {
+            out.ETag = undefined;
+          }),
+          dest: aws.dest,
+        },
+      }),
+    );
+    expect(noEtag.code).toBe("copy-failed");
+    expect(noEtag.message).toContain("HeadObject:bad-output");
+  });
+
+  test("a failed part and a failed abort leave the refusal naming the open upload", async () => {
+    const big = upstream("sub-02/eeg/b.edf", 11 * MIB, 29);
+    s3.inject("UploadPartCopy", { code: "InternalError", status: 500, after: 1 });
+    s3.inject("AbortMultipartUpload", { code: "InternalError", status: 500 });
+    const err = await refusal(copy([big], { singleCopyMax: MIB, partBytes: 5 * MIB }));
+    expect(err.code).toBe("copy-failed");
+    expect(s3.openUploads()).toBe(1);
+    expect(err.message).toMatch(/1 multipart upload\(s\) could not be aborted and stay open/);
+    expect(err.message).toMatch(/: [A-Za-z0-9._~=+/-]{8,}\.$/);
+  });
+
+  test("a key that declares no size is copied again when the destination holds it at another size", async () => {
+    const a = upstream("sub-01/eeg/a.edf", 1500, 30);
+    const unsized = { ...a, key: `SHA256E--${sha256(a.bytes)}.edf` };
+    s3.putObject("nemar", `${PREFIX}${unsized.key}`, new Uint8Array(10));
+    expect(await copy([unsized])).toEqual({ copied: 1, skipped: 0, bytes: 1500 });
+    expect(destBytes(unsized.key)?.length).toBe(1500);
+    expect(Buffer.from(destBytes(unsized.key) as Uint8Array).equals(Buffer.from(a.bytes))).toBe(
+      true,
+    );
+  });
+
+  test("after a refusal no new item starts: with two items and one at a time, the second is never headed", async () => {
+    const a = upstream("sub-01/eeg/a.edf", 1000, 31);
+    const b = upstream("sub-01/eeg/b.edf", 1000, 32);
+    const gone = { ...a, version: "standin-v-gone" };
+    const err = await refusal(copy([gone, b], { concurrency: 1 }));
+    expect(err.code).toBe("pin-absent");
+    expect(err.message).toContain("1 of 2 item(s) refused");
+    expect(s3.calls("HeadObject").map((h) => h.key)).toEqual([a.object]);
+    expect(s3.calls("CopyObject")).toEqual([]);
   });
 });

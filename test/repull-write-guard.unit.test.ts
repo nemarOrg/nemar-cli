@@ -162,6 +162,7 @@ const AWS: AwsGuardContext = {
   sourceBucket: "openneuro.org",
   sourcePrefix: "ds099999/",
 };
+const VERSION_REFUSED = "version id has a character the guard does not allow";
 const SRC = "openneuro.org/ds099999/sub-01/eeg/sub-01_task-rest_eeg.edf?versionId=abc.DEF_12-3";
 const KEY = "on099999/objects/SHA256E-s4256--abc.edf";
 
@@ -237,8 +238,12 @@ describe("S3 calls", () => {
         '"e"',
       ]);
     expect(copy("openneuro.org/ds099999/sub-01/eeg/x.edf")).toBe("copy-source-unversioned");
-    expect(copy("openneuro.org/ds099999/x.edf?versionId=")).toBe("copy-source-version-id");
-    expect(copy("openneuro.org/ds099999/x.edf?versionId=a&b=c")).toBe("copy-source-version-id");
+    // A version id with a character the guard does not allow is refused, and the refusal says so
+    // (older S3 version ids can hold `+` and `/`; this fails closed).
+    expect(copy("openneuro.org/ds099999/x.edf?versionId=")).toBe(VERSION_REFUSED);
+    expect(copy("openneuro.org/ds099999/x.edf?versionId=a&b=c")).toBe(VERSION_REFUSED);
+    expect(copy("openneuro.org/ds099999/x.edf?versionId=a+b")).toBe(VERSION_REFUSED);
+    expect(copy("openneuro.org/ds099999/x.edf?versionId=a/b")).toBe(VERSION_REFUSED);
     expect(copy("elsewhere/ds099999/x.edf?versionId=v")).toBe("copy-source-bucket");
     expect(copy("openneuro.org/ds000001/x.edf?versionId=v")).toBe("copy-source-prefix");
     expect(copy("nemar/on099999/objects/K?versionId=v")).toBe("copy-source-bucket");
@@ -318,8 +323,8 @@ describe("S3 calls", () => {
       "delete-objects",
       "put-object-retention",
       "put-object-acl",
-      "delete-object",
       "list-object-versions",
+      "list-multipart-uploads",
     ]) {
       expect(refusedAws(op, ["--bucket", "nemar", "--key", KEY])).toBe("operation-not-allowed");
     }
@@ -395,5 +400,165 @@ describe("S3 calls", () => {
       RepullWriteRefused,
     );
     expect(calls).toEqual(["head-object"]);
+  });
+});
+
+describe("S3 calls, the cases that must not pass", () => {
+  const copyArgs = (over: Record<string, string> = {}) => {
+    const base: Record<string, string> = {
+      "--bucket": "nemar",
+      "--key": KEY,
+      "--upload-id": "up-1",
+      "--part-number": "1",
+      "--copy-source": SRC,
+      "--copy-source-range": "bytes=0-99",
+      "--copy-source-if-match": '"e"',
+      ...over,
+    };
+    return Object.entries(base).flat();
+  };
+
+  test("upload-part-copy refuses a bad part number, range or upload id", () => {
+    for (const n of ["0", "10001", "1.5", "x", "-1"]) {
+      expect(refusedAws("upload-part-copy", copyArgs({ "--part-number": n }))).toBe("part-number");
+    }
+    for (const range of ["bytes=0-", "0-99", "bytes=-5", "bytes=a-b", "bytes=0-99,100-199"]) {
+      expect(refusedAws("upload-part-copy", copyArgs({ "--copy-source-range": range }))).toBe(
+        "copy-source-range",
+      );
+    }
+    for (const id of ["", "a b", "a;b", "a$b", "a\nb"]) {
+      expect(refusedAws("upload-part-copy", copyArgs({ "--upload-id": id }))).toBe("upload-id");
+    }
+    expect(refusedAws("abort-multipart-upload", ["--bucket", "nemar", "--key", KEY])).toBe(
+      "upload-id",
+    );
+  });
+
+  test("a head names upstream only under its dataset at a version, and NEMAR's bucket only under the prefix", () => {
+    const head = (bucket: string, key: string, version?: string) =>
+      refusedAws("head-object", [
+        "--bucket",
+        bucket,
+        "--key",
+        key,
+        ...(version ? ["--version-id", version] : []),
+      ]);
+    expect(head("openneuro.org", "ds000001/x.edf", "v1")).toBe("source-key-prefix");
+    expect(head("openneuro.org", "x.edf", "v1")).toBe("source-key-prefix");
+    expect(head("openneuro.org", "ds099999/sub/x.edf", "a+b")).toBe(VERSION_REFUSED);
+    expect(head("nemar", "on099998/objects/K")).toBe("key-outside-prefix");
+    expect(head("nemar", "on099999/staging/other.json")).toBe("key-outside-prefix");
+    expect(head("other-bucket", KEY)).toBe("bucket-not-allowed");
+  });
+
+  test("a key or prefix with a dot or empty segment is refused before the prefix test", () => {
+    const dotted = [
+      "on099999/objects/../../on000103/objects/K",
+      "on099999/objects/./K",
+      "on099999/objects//K",
+      "on099999/objects/a/../K",
+      "on099999/objects/..",
+    ];
+    for (const key of dotted) {
+      expect(
+        refusedAws("copy-object", [
+          "--bucket",
+          "nemar",
+          "--key",
+          key,
+          "--copy-source",
+          SRC,
+          "--copy-source-if-match",
+          '"e"',
+        ]),
+      ).toBe("key-outside-prefix");
+      expect(refusedAws("head-object", ["--bucket", "nemar", "--key", key])).toBe(
+        "key-outside-prefix",
+      );
+      expect(
+        refusedAws("delete-object", ["--bucket", "nemar", "--key", key, "--version-id", "v"]),
+      ).toBe("key-outside-prefix");
+    }
+    for (const prefix of ["on099999/objects/../", "on099999/objects//", "on099999/objects/./x"]) {
+      expect(refusedAws("list-objects-v2", ["--bucket", "nemar", "--prefix", prefix])).toBe(
+        "listing-outside-prefix",
+      );
+    }
+    // A source key is held to the same rule.
+    expect(
+      refusedAws("head-object", [
+        "--bucket",
+        "openneuro.org",
+        "--key",
+        "ds099999/../ds000001/x.edf",
+        "--version-id",
+        "v1",
+      ]),
+    ).toBe("source-key-prefix");
+    expect(
+      refusedAws("copy-object", [
+        "--bucket",
+        "nemar",
+        "--key",
+        KEY,
+        "--copy-source",
+        "openneuro.org/ds099999/../ds000001/x.edf?versionId=v1",
+        "--copy-source-if-match",
+        '"e"',
+      ]),
+    ).toBe("copy-source-prefix");
+    // A context whose own prefix is dotted is refused outright.
+    expect(
+      refusedAws("head-object", ["--bucket", "nemar", "--key", "a/../b/K"], {
+        ...AWS,
+        prefix: "a/../b/",
+      }),
+    ).toBe("bad-context");
+  });
+
+  test("outside the canary, delete-object is by version id under the prefix and never the staging key", () => {
+    const del = (key: string, version?: string) =>
+      refusedAws("delete-object", [
+        "--bucket",
+        "nemar",
+        "--key",
+        key,
+        ...(version ? ["--version-id", version] : []),
+      ]);
+    expect(() =>
+      assertRepullAws(
+        "delete-object",
+        ["--bucket", "nemar", "--key", KEY, "--version-id", "v1"],
+        AWS,
+      ),
+    ).not.toThrow();
+    expect(del(KEY)).toBe("delete-unversioned");
+    expect(del(KEY, "a+b")).toBe(VERSION_REFUSED);
+    expect(del("on099998/objects/K", "v1")).toBe("key-outside-prefix");
+    expect(del(AWS.stagingKey, "v1")).toBe("key-outside-prefix");
+    // list-object-versions and list-multipart-uploads are the canary's alone.
+    expect(
+      refusedAws("list-multipart-uploads", ["--bucket", "nemar", "--prefix", AWS.prefix]),
+    ).toBe("operation-not-allowed");
+  });
+
+  test("the canary may list open multipart uploads under its prefix only", () => {
+    const canary: AwsGuardContext = {
+      ...AWS,
+      prefix: "nm099999/repull-canary-x/",
+      stagingKey: "nm099999/repull-canary-x/staging/repull-canary.json",
+      canary: true,
+    };
+    expect(() =>
+      assertRepullAws(
+        "list-multipart-uploads",
+        ["--bucket", "nemar", "--prefix", canary.prefix, "--no-paginate"],
+        canary,
+      ),
+    ).not.toThrow();
+    expect(
+      refusedAws("list-multipart-uploads", ["--bucket", "nemar", "--prefix", "nm099999/"], canary),
+    ).toBe("listing-outside-prefix");
   });
 });
