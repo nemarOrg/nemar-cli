@@ -224,10 +224,15 @@ export async function readExecutablePlan(path: string, live: LiveSources): Promi
   }
   // An anonymous deposit is never re-pulled (ADR 0065): N.0.0 takes upstream's authors and README.
   // The Worker refuses it too; this stops it before anything is cloned.
-  if (live.catalog.dataset?.anonymous === 1) {
+  // Only a row that says `anonymous` is exactly 0 is not anonymous: an absent or unreadable field
+  // is unknown, never clean.
+  const anonymous = live.catalog.dataset?.anonymous;
+  if (anonymous !== 0) {
     throw new ExecuteRefused(
-      "anonymous-dataset",
-      "An anonymous dataset is never re-pulled: the re-pull takes upstream's authors and README, which would undo the blind.",
+      anonymous === 1 ? "anonymous-dataset" : "anonymity-unknown",
+      anonymous === 1
+        ? "An anonymous dataset is never re-pulled: the re-pull takes upstream's authors and README, which would undo the blind."
+        : "The dataset row does not say whether it is an anonymous deposit, and an anonymous one is never re-pulled.",
     );
   }
 
