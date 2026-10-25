@@ -498,4 +498,32 @@ describe.skipIf(!awsInstalled)("the pinned copy", () => {
     expect(s3.calls("HeadObject").map((h) => h.key)).toEqual([a.object]);
     expect(s3.calls("CopyObject")).toEqual([]);
   });
+
+  test("the removal of a wrongly copied object deletes only the key that copy wrote, by that copy's version", async () => {
+    s3.setCopySourceVersionMode("ignore");
+    s3.setIgnoreIfMatch(true);
+    const a = upstream("sub-01/eeg/a.edf", 2000, 40);
+    const b = upstream("sub-01/eeg/b.edf", 2000, 41);
+    // Neighbours under the prefix, and an older object at the very key the copy then overwrites.
+    const bystander = `${PREFIX}SHA256E-s5--bystander.edf`;
+    s3.putObject("nemar", bystander, new Uint8Array(5));
+    const older = s3.putObject("nemar", `${PREFIX}${a.key}`, new Uint8Array(10));
+    const err = await refusal(copy([a, b], { concurrency: 1 }));
+    expect(err.code).toBe("pin-version-mismatch");
+    const deletes = s3.calls("DeleteObject");
+    // One delete, of the first item's key, by the version id its copy was written as (not the
+    // older one's), and the second item was never started.
+    expect(deletes.map((d) => d.key)).toEqual([`${PREFIX}${a.key}`]);
+    const copied = s3
+      .versions("nemar", `${PREFIX}${a.key}`)
+      .map((v) => v.versionId)
+      .filter((v) => v !== older);
+    expect(copied).toEqual([]);
+    expect(deletes[0]?.versionId).not.toBe(older);
+    // The older object and the bystander are untouched; the second key was never written.
+    expect(s3.current("nemar", `${PREFIX}${a.key}`)?.versionId).toBe(older);
+    expect(s3.current("nemar", bystander)?.data.length).toBe(5);
+    expect(destBytes(b.key)).toBeUndefined();
+    expect(s3.calls("CopyObject")).toHaveLength(1);
+  });
 });

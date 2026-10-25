@@ -307,6 +307,10 @@ export function assertRepullAws(op: string, args: readonly string[], ctx: AwsGua
   if (op === "delete-object") {
     // By version id, so no delete marker is ever left behind. The canary deletes what it wrote
     // (its staging-shaped key too); a copy deletes only an object under the prefix.
+    // The guard does NOT tie the version id to a copy this run made: any version under the prefix
+    // passes. That limit lives at the call site: `removeLanded` in `execute/copy.ts` is the only
+    // caller outside the canary, and it deletes only the key its own copy just wrote, by the
+    // version id that copy's answer named (`test/repull-copy.test.ts` locks this).
     const version = a.get("--version-id") ?? "";
     if (version === "") throw new RepullWriteRefused("delete-unversioned");
     if (!VERSION_ID.test(version)) throw new RepullWriteRefused(VERSION_ID_REFUSED);
