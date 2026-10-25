@@ -15,8 +15,9 @@
  *  - `not-found`, `not-a-mirror`, `anonymous-dataset` (a re-pull takes upstream's authors and
  *    README, which would undo ADR 0065's blind; there is no override), `withdrawn`,
  *    `import-in-flight`.
- *  - an open record: for this very plan it is returned (200) before anything below, so a rerun
- *    finds it after N.0.0 is tagged; for any other plan it is `repull-in-flight`.
+ *  - an open record: for this very plan, and a caller of the record's own origin, it is returned
+ *    (200) before anything below, so a rerun finds it after N.0.0 is tagged; for any other plan
+ *    or origin it is `repull-in-flight`.
  *  - `merge-unreconciled`: any record of the dataset that holds a merge claim or a merge sha and
  *    is not finished (`complete`, or `patch_declined` after a released N.0.0) blocks every new
  *    record, because a merge may be on `main` with its row not saying so.
@@ -35,6 +36,16 @@
  * statement that writes; the claim also re-asserts the cap and that the dataset is neither
  * anonymous nor withdrawn, so those are atomic with it, while the mirror and import fences and
  * the live head are read first. A refusal writes nothing (ADR 0099).
+ *
+ * THE AUTOMATIC CREATE (ADR 0111, decision 6). A create that carries `dispatch_id` and
+ * `dispatch_token` is a dispatched run's, and is the only way a record is written with
+ * `origin = 'automatic'`. Before the fences above, in order: exact production
+ * (`auto-production-only`), the open switch (`auto-repull-off`), an `on` dataset
+ * (`auto-on-only`); then the dispatch (`upstream-repull-dispatch.ts`: it exists, is live, its token
+ * is the Worker's, and it names this dataset, `ds` and both tags); then the plan: this planner
+ * (`auto-planner-version`), zero unexplained paths, conflicts and corrections, each stated
+ * (`auto-not-clean-plan`), and a copy of stated size within the bound (`auto-copy-too-large`). The
+ * insert links the dispatch to its record in the same batch.
  *
  * `lineage_recordable` is an administrator's assertion: the Worker has no evidence of it (it holds
  * neither tree), so it is recorded in the audit row and nothing here verifies it.
@@ -59,8 +70,12 @@ import {
   ACKNOWLEDGMENT_MIN_LENGTH,
 } from "../../../shared/publication-limits.js";
 import {
+  AUTO_MAX_COPY_BYTES,
   CLEARING_SELF_EDGES,
+  CURRENT_PLANNER_VERSION,
   DIGEST_RE,
+  DISPATCH_TOKEN_RE,
+  type DispatchRow,
   IMMUTABLE_ONCE_SET,
   MERGE_CLAIM_COLUMNS,
   NEMAR_VERSION_RE,
@@ -90,9 +105,15 @@ import { resolveImportError } from "./import-error.js";
 import {
   type CapReading,
   REPULL_CAP_MAX,
+  autoRepullEnabled,
   isExactProduction,
   repullMergeCap,
 } from "./repull-switches.js";
+import {
+  DISPATCH_LINK_BY_KEY_SQL,
+  DISPATCH_LINK_SQL,
+  verifyAutomaticDispatch,
+} from "./upstream-repull-dispatch.js";
 import { liveHeadRefusal } from "./upstream-repull-github.js";
 import {
   type RepullScreenGate,
@@ -167,10 +188,15 @@ export const REPULL_BY_ATTEMPT_SQL =
 export const REPULL_PAGE_DEFAULT = 25;
 export const REPULL_PAGE_MAX = 50;
 
+/**
+ * The insert of a new record. `origin` is bound, never stated by a request: the service binds
+ * `automatic` only for a create that presented a live, Worker-signed dispatch, and `administrator`
+ * for every other.
+ */
 export const REPULL_INSERT_SQL = `INSERT INTO upstream_repulls
   (dataset_id, upstream_ds, from_tag, to_tag, attempt, from_version, to_version, plan_digest,
    planner, origin, actor_user_id, status, base_sha, counts)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'administrator', ?, 'planned', ?, ?)`;
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'planned', ?, ?)`;
 
 /** What create needs from the dataset row and from the import that may be running on it. */
 export const CREATE_FACTS_SQL = `SELECT d.source AS source, d.source_id AS source_id,
@@ -242,9 +268,24 @@ export const createRepullSchema = z
     base_sha: z.string().regex(SHA_RE, "base_sha must be a 40-character lowercase hex id"),
     lineage_recordable: z.boolean(),
     counts: countsSchema.default({}),
+    // The automatic path: the dispatch the run was sent, and its token. Both or neither; `origin`
+    // is not in the schema, so no caller states it (a create with a live, Worker-signed dispatch
+    // is automatic, and every other is the administrator's).
+    dispatch_id: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER).optional(),
+    dispatch_token: z
+      .string()
+      .regex(DISPATCH_TOKEN_RE, "dispatch_token must be the token the dispatch was sent")
+      .optional(),
   })
   .strict()
   .superRefine((body, ctx) => {
+    if ((body.dispatch_id === undefined) !== (body.dispatch_token === undefined)) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["dispatch_token"],
+        message: "dispatch_id and dispatch_token are sent together or not at all",
+      });
+    }
     if (body.to_version !== nextMajorVersion(body.from_version)) {
       ctx.addIssue({
         code: "custom",
@@ -552,24 +593,119 @@ export async function createRepull(
     from_tag: normalizeUpstreamTag(input.from_tag),
     to_tag: normalizeUpstreamTag(input.to_tag),
   };
+  const automatic = body.dispatch_id !== undefined;
+  if (automatic) {
+    const refused = automaticEnvRefusal(env, body);
+    if (refused) return refused;
+  }
   const fence = envFenceRefusal(env, body.dataset_id);
   if (fence) return fence;
   try {
-    return await createOnce(env, admin, body);
+    return await createChecked(env, admin, body);
   } catch (err) {
     if (!looksUnique(err)) throw err;
   }
   // A concurrent create won the dataset's one open slot (or the attempt number) between the reads
   // and the write, and the batch rolled back. Read everything again once: the winner may still be
   // open (answer from it) or may already have gone terminal (the next attempt is then free, or
-  // the tag is pulled). A second collision is a real fault and raises.
-  return createOnce(env, admin, body);
+  // the tag is pulled). A second collision is a real fault and raises. An automatic create reads
+  // its dispatch again too: the winner may have linked it.
+  return createChecked(env, admin, body);
+}
+
+/**
+ * What an automatic create needs before anything is read (ADR 0111, decision 6): exact production,
+ * the open switch on (so switching it off stops a run before its first write), and an `on`
+ * dataset (the `nemarDatasets` organization is shared with dev, and an `xx` re-pull takes the
+ * administrator's path only).
+ */
+function automaticEnvRefusal(env: Bindings, body: CreateRepullBody): RepullRefusal | null {
+  if (!isExactProduction(env)) {
+    return {
+      status: 403,
+      code: "auto-production-only",
+      message: "An automatic re-pull is recorded only by the production Worker.",
+    };
+  }
+  if (!autoRepullEnabled(env)) {
+    return {
+      status: 409,
+      code: "auto-repull-off",
+      message: "AUTO_REPULL_ENABLED is off, so no automatic re-pull is recorded.",
+    };
+  }
+  if (!/^on\d{6}$/.test(body.dataset_id)) {
+    return {
+      status: 403,
+      code: "auto-on-only",
+      message: "Only an on mirror is re-pulled automatically.",
+    };
+  }
+  return null;
+}
+
+/**
+ * What an automatic create's plan must be (ADR 0111, decision 6, "the automatic path takes only a
+ * plan with zero unexplained paths"): made by this planner, with `unexplained`, `conflicts` and
+ * `corrections` each stated and 0 (a count left out is not 0), and a copy whose size is stated and
+ * within {@link AUTO_MAX_COPY_BYTES}. The administrator's path has none of these bounds.
+ */
+function automaticPlanRefusal(body: CreateRepullBody): RepullRefusal | null {
+  if (body.planner !== CURRENT_PLANNER_VERSION) {
+    return {
+      status: 409,
+      code: "auto-planner-version",
+      message: `An automatic re-pull takes only a plan of planner ${CURRENT_PLANNER_VERSION}.`,
+    };
+  }
+  const counts = body.counts as Record<string, number | undefined>;
+  if (["unexplained", "conflicts", "corrections"].some((k) => counts[k] !== 0)) {
+    return {
+      status: 409,
+      code: "auto-not-clean-plan",
+      message:
+        "An automatic re-pull takes only a plan that states zero unexplained paths, zero conflicts and zero corrections.",
+    };
+  }
+  const bytes = counts.copy_bytes;
+  if (bytes === undefined || bytes > AUTO_MAX_COPY_BYTES) {
+    return {
+      status: 409,
+      code: "auto-copy-too-large",
+      message: `An automatic re-pull takes only a plan whose copy size is stated and at most ${AUTO_MAX_COPY_BYTES} bytes.`,
+    };
+  }
+  return null;
+}
+
+/** The dispatch checks (an automatic create only), then {@link createOnce}. */
+async function createChecked(
+  env: Bindings,
+  admin: { id: number },
+  body: CreateRepullBody,
+): Promise<CreateResult | RepullRefusal> {
+  if (body.dispatch_id === undefined || body.dispatch_token === undefined) {
+    return createOnce(env, admin, body, null);
+  }
+  const verified = await verifyAutomaticDispatch(env, {
+    dispatchId: body.dispatch_id,
+    token: body.dispatch_token,
+    datasetId: body.dataset_id,
+    upstreamDs: body.upstream_ds,
+    fromTag: body.from_tag,
+    toTag: body.to_tag,
+  });
+  if (isRefusal(verified)) return verified;
+  const plan = automaticPlanRefusal(body);
+  if (plan) return plan;
+  return createOnce(env, admin, body, verified.dispatch);
 }
 
 async function createOnce(
   env: Bindings,
   admin: { id: number },
   body: CreateRepullBody,
+  dispatch: DispatchRow | null,
 ): Promise<CreateResult | RepullRefusal> {
   const db = env.DB;
   const [factsRes, versionsRes, openRes, unreconciledRes] = await db.batch([
@@ -588,13 +724,33 @@ async function createOnce(
   // An open record for this very plan is returned before the version rows are consulted: once
   // N.0.0 is merged and tagged the highest version is no longer the plan's `from_version`, and a
   // rerun must still find its record.
+  // It is returned only to a caller of the same origin: an administrator's create never takes
+  // over a record a dispatched run is working on, and a run never takes over an administrator's.
+  // A dispatch that names its re-pull (a resume, or one its own create already recorded) takes
+  // only that record.
+  const origin = dispatch ? "automatic" : "administrator";
   const open = (openRes?.results as RawRow[] | undefined)?.[0];
   if (open) {
     const row = parseRow(open);
-    if (open.to_tag === body.to_tag && open.plan_digest === body.plan_digest) {
+    if (
+      open.to_tag === body.to_tag &&
+      open.plan_digest === body.plan_digest &&
+      open.origin === origin &&
+      (dispatch?.repull_id ?? open.id) === open.id
+    ) {
+      if (dispatch && dispatch.repull_id === null) {
+        await db.prepare(DISPATCH_LINK_SQL).bind(open.id, dispatch.id).run();
+      }
       return { row, created: false, lineage_rows: 0 };
     }
     return inFlight(row);
+  }
+  if (dispatch && dispatch.repull_id !== null) {
+    return {
+      status: 409,
+      code: "dispatch-mismatch",
+      message: `Re-pull dispatch #${dispatch.id} continues re-pull #${dispatch.repull_id}, which is no longer open; it creates no other record.`,
+    };
   }
 
   const stuck = (
@@ -644,6 +800,8 @@ async function createOnce(
     attempt: attempt.next,
     plan_digest: body.plan_digest,
     lineage_recordable: body.lineage_recordable,
+    origin,
+    ...(dispatch ? { dispatch_id: dispatch.id } : {}),
     // The basis the from-version row(s) held before any upgrade: the upgrade is one way.
     prior_basis: versionRows
       .filter((r) => bare(r.version) === body.from_version)
@@ -662,6 +820,7 @@ async function createOnce(
         body.to_version,
         body.plan_digest,
         body.planner,
+        origin,
         admin.id,
         body.base_sha,
         JSON.stringify(body.counts),
@@ -675,6 +834,14 @@ async function createOnce(
   statements.push(
     db.prepare(AUDIT_CREATED_SQL).bind(admin.id, details, body.lineage_recordable ? 1 : 0),
   );
+  // Last, so the audit row above reads the insert's id and the lineage write's count unmoved.
+  if (dispatch) {
+    statements.push(
+      db
+        .prepare(DISPATCH_LINK_BY_KEY_SQL)
+        .bind(body.dataset_id, body.to_tag, attempt.next, dispatch.id),
+    );
+  }
 
   const results = await db.batch(statements);
   const lineageRows = body.lineage_recordable ? (results[1]?.meta?.changes ?? 0) : 0;
