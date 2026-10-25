@@ -14,7 +14,8 @@
  *   GET  /admin/repulls/:id/screens      its identifier screens, newest first
  *   POST /admin/repulls/:id/screen       dispatch the screen of a pull request's recorded head
  *   POST /admin/repulls/:id/screen/acknowledge   record a reason on a screen that asks for one
- *   POST /admin/repulls/:id/merge-claim/release  clear a claim that was not sent or was refused
+ *   POST /admin/repulls/:id/merge-claim/release  clear a claim that was not sent, was refused, or
+ *                                        is stuck (expired: its outcome unknown, long past)
  *   POST /admin/repulls/:id/merged       record a merge, after reading it on GitHub
  *   POST /admin/repulls/:id/released     record a release, after reading the version row and tag
  *
@@ -28,7 +29,8 @@
  * `lineage_recordable` on create is the administrator's assertion that the plan compared the
  * from-version's tree with upstream's. The Worker holds neither tree and cannot check it; it
  * records the assertion in the audit row and upgrades the version row only when that row names
- * the same tag (or none). Open records never expire here: closing a stuck one is a later phase.
+ * the same tag (or none). An open record never expires by itself: a stuck claim is expired
+ * through the claim's release (`expired`), which `nemar admin repull resume` sends.
  */
 
 import { zValidator } from "@hono/zod-validator";

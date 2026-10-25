@@ -753,10 +753,12 @@ describe("recording the merge", () => {
     expect(rowOf(id)).toEqual(stored);
   });
 
-  test("only from gates_clear, only in production for an on dataset, and the transition route cannot state it", async () => {
+  test("only from pr_open or gates_clear, only in production for an on dataset, and the transition route cannot state it", async () => {
     seedMirror("on099999");
-    const open = seedRepull("pr_open");
-    expect((await merged(open)).body.code).toBe("bad-transition");
+    // A pull request merged while the row is pr_open is recorded too (upstream-repull-resume-routes
+    // test); one that is not yet open has no pull request to have merged.
+    const registered = seedRepull("registered");
+    expect((await merged(registered)).body.code).toBe("bad-transition");
     db.run("DELETE FROM upstream_repulls");
     const id = ready("on099999");
     gh.requests = [];

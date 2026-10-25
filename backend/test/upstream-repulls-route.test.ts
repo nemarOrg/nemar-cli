@@ -998,6 +998,8 @@ describe("transition: the path N.0.0 takes through this route", () => {
   });
 
   test("a step that repeats sends the stage again, and the pull request does not change", async () => {
+    // A step past prepared re-reads the dataset fences, so the record's dataset is a mirror.
+    seedMirror("xx090123");
     const id = seedRow("pr_open");
     const again = {
       branch: "release/v2.0.0",
@@ -1018,6 +1020,7 @@ describe("transition: the path N.0.0 takes through this route", () => {
   });
 
   test("going back from gates_clear clears the gates sha", async () => {
+    seedMirror("xx090123");
     const id = seedRow("gates_clear", { gates_sha: "f".repeat(40) });
     const res = await move(id, {
       from: "gates_clear",
@@ -1277,6 +1280,7 @@ describe("transition: closing a record", () => {
         "xx090131",
       ],
     ] as const) {
+      seedMirror(dataset);
       const id = seedRow(status, { dataset_id: dataset });
       // The error is the whole write: none is refused, and so is any column.
       expect((await move(id, { from: status, to: status })).body.code).toBe("field-missing");
@@ -1331,7 +1335,9 @@ describe("transition: closing a record", () => {
   });
 
   test("N.0.1 opens from released with all five patch columns, on the branch of its own version", async () => {
-    const id = seedRow("released");
+    seedMirror("xx090123");
+    // N.0.0's objects are locked before N.0.1 opens.
+    const id = seedRow("released", { counts: JSON.stringify({ locked: 3 }) });
     const fields = {
       patch_version: "2.0.1",
       patch_branch: "release/v2.0.1",
@@ -1458,6 +1464,7 @@ describe("transition: two writers that read the same row", () => {
   });
 
   test("a repeated status applies once: the second writer is told the row moved", async () => {
+    seedMirror("xx090123");
     const id = seedRow("pr_open");
     const other = "e".repeat(40);
     const d1 = interleaved("UPDATE upstream_repulls", () =>
@@ -1524,6 +1531,7 @@ describe("transition: two writers that read the same row", () => {
   });
 
   test("two writers one after the other both apply, each on the revision the last left", async () => {
+    seedMirror("xx090123");
     const id = seedRow("pr_open");
     const env2 = {
       DB: realD1(db),
@@ -1762,6 +1770,7 @@ describe("transition: the edges that record one thing", () => {
   });
 
   test("released records the count of locked objects, and only counts", async () => {
+    seedMirror("xx090123");
     const id = seedRow("released");
     expect((await move(id, { from: "released", to: "released" })).body.code).toBe("field-missing");
     const tag = await move(id, {

@@ -40,18 +40,23 @@ const EDGES: ReadonlyArray<readonly [RepullStatus, RepullStatus]> = [
   ["registered", "pr_open"],
   ["pr_open", "pr_open"],
   ["pr_open", "gates_clear"],
+  // A pull request merged before its gates were recorded, written only by the verified route.
+  ["pr_open", "merged"],
   ["gates_clear", "pr_open"],
   ["gates_clear", "gates_clear"],
   ["gates_clear", "merged"],
+  ["merged", "merged"],
   ["merged", "released"],
   ["released", "released"],
   ["released", "complete"],
   ["released", "patch_synthesized"],
   ["patch_synthesized", "patch_synthesized"],
   ["patch_synthesized", "patch_gates_clear"],
+  ["patch_synthesized", "patch_merged"],
   ["patch_gates_clear", "patch_synthesized"],
   ["patch_gates_clear", "patch_gates_clear"],
   ["patch_gates_clear", "patch_merged"],
+  ["patch_merged", "patch_merged"],
   ["patch_merged", "patch_released"],
   ["patch_released", "complete"],
   // abandoned and superseded: before N.0.0 merges
@@ -164,8 +169,21 @@ describe("the columns an edge writes", () => {
 
   test("the edges that repeat a state to write one thing say what they write", () => {
     expect(Object.keys(SELF_EDGE_FIELDS).sort()).toEqual(
-      ["copied", "gates_clear", "patch_gates_clear", "planned", "registered", "released"].sort(),
+      [
+        "copied",
+        "gates_clear",
+        "merged",
+        "patch_gates_clear",
+        "patch_merged",
+        "planned",
+        "registered",
+        "released",
+      ].sort(),
     );
+    // The lock's count, or why the lock did not complete: neither is required by the table alone
+    // (the Worker refuses a released self-edge that carries neither).
+    expect(fieldsFor("released", "released").must).toEqual([]);
+    expect(fieldsFor("released", "released").may).toEqual(["counts"]);
     for (const [status, spec] of Object.entries(SELF_EDGE_FIELDS)) {
       expect(REPULL_TRANSITIONS[status as RepullStatus]).toContain(status);
       for (const column of spec.must) expect(spec.may).toContain(column);
@@ -208,9 +226,9 @@ describe("the columns an edge writes", () => {
     }
   });
 
-  test("an edge into failed, and the planned, copied and registered self-edges, must say why", () => {
+  test("an edge into failed, and the planned, copied, registered and merged self-edges, must say why", () => {
     expect(TRANSITION_FIELDS.failed.requiresError).toBe(true);
-    for (const s of ["planned", "copied", "registered"] as const) {
+    for (const s of ["planned", "copied", "registered", "merged", "patch_merged"] as const) {
       expect(SELF_EDGE_FIELDS[s]?.requiresError).toBe(true);
       // The error is the whole write: no column, so a failure cannot restate a stage's facts.
       expect(SELF_EDGE_FIELDS[s]?.may).toEqual([]);

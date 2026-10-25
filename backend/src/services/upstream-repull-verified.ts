@@ -11,7 +11,8 @@
  *    (`merged_outside_tool`), and one at a head other than the screened one
  *    (`merged_unscreened_head`), is still recorded, because it happened and a second major would
  *    be a second DOI; each is counted on its own so the record says which. The cap binds NEMAR's
- *    tools only (ADR 0111, Consequences).
+ *    tools only (ADR 0111, Consequences). It is recorded from the open status too, for a pull
+ *    request merged before its gates were (both counts then say so).
  *  - released: the version row exists with a DOI, the tag `v<version>` names the commit the
  *    caller reports, and that commit contains the merge. In the same batch, and only when the
  *    edge applies: the version's lineage when the caller verified the tagged tree (N.0.0 only,
@@ -20,8 +21,11 @@
  *  - a claim is released only when the caller says the merge was not sent or was refused, the
  *    claim is at least five minutes old, and GitHub says the pull request is not merged: an
  *    unknown outcome keeps the claim, so a lost answer is resolved from GitHub and never repeated
- *    blind. That is one read and an age, not proof: a merge that lands between the read and the
- *    release is recorded later, by `merged`, as one no tool held a claim for.
+ *    blind. A caller that does not know what became of the merge (`expired`, how a stuck claim
+ *    ends) needs the claim thirty minutes old, long past any merge a tool can have in flight, and
+ *    the same answer from GitHub. That is one read and an age, not proof: a merge that lands
+ *    between the read and the release is recorded later, by `merged`, as one no tool held a claim
+ *    for.
  *
  * A retried `merged` or `released` that finds its fact already recorded, for the same commit,
  * answers with the stored row (`replayed`), so a caller whose answer was lost can ask again; a
@@ -66,6 +70,13 @@ import {
 /** How old a claim to merge must be before it may be released: a merge sent just now may still land. */
 export const CLAIM_RELEASE_MIN_AGE_MINUTES = 5;
 
+/**
+ * How old a claim must be before a caller that does not know what became of its merge may expire
+ * it (`expired`): long past any merge a NEMAR tool can have in flight (each request is bounded in
+ * seconds), so GitHub's answer, read again, is the whole truth of whether it merged.
+ */
+export const CLAIM_EXPIRE_MIN_AGE_MINUTES = 30;
+
 // ----------------------------------------------------------------------------
 // SQL
 // ----------------------------------------------------------------------------
@@ -100,10 +111,18 @@ export const STAMPS_REARM_SQL = `UPDATE datasets
 export const RELEASED_VERSION_SQL = `SELECT 1 AS minted FROM dataset_versions
   WHERE dataset_id = ? AND version IN (?, 'v' || ?) AND doi IS NOT NULL AND doi <> '' LIMIT 1`;
 
-/** Whether a claim's Worker-stamped time is old enough to release (`?` id). Column from a constant. */
-const claimOldEnoughSql = (claimedAt: string) =>
-  `SELECT CASE WHEN ${claimedAt} <= datetime('now', '-${CLAIM_RELEASE_MIN_AGE_MINUTES} minutes') THEN 1 ELSE 0 END AS old
+/**
+ * Whether a claim's Worker-stamped time is old enough to release (`?` id), `minutes` one of the two
+ * constants above. Column and bound from constants, never a request.
+ */
+const claimOldEnoughSql = (claimedAt: string, minutes: number) =>
+  `SELECT CASE WHEN ${claimedAt} <= datetime('now', '-${minutes} minutes') THEN 1 ELSE 0 END AS old
      FROM upstream_repulls WHERE id = ?`;
+
+/** The age a release needs: a caller that knows what became of its merge, or one that does not. */
+function releaseAgeMinutes(outcome: ReleaseOutcome): number {
+  return outcome === "expired" ? CLAIM_EXPIRE_MIN_AGE_MINUTES : CLAIM_RELEASE_MIN_AGE_MINUTES;
+}
 
 // ----------------------------------------------------------------------------
 // Request bodies
@@ -111,12 +130,22 @@ const claimOldEnoughSql = (claimedAt: string) =>
 
 const sha = z.string().regex(SHA_RE, "must be a 40-character lowercase hex id");
 
+/**
+ * What the caller knows of the merge its claim was for: `not_sent` (it decided not to send it) and
+ * `refused` (GitHub answered that it did not merge), or `expired`, a claim whose outcome the caller
+ * does not know (a lost answer, a run that stopped between the claim and the merge), released
+ * only once it is {@link CLAIM_EXPIRE_MIN_AGE_MINUTES} minutes old, which is how a stuck claim is
+ * expired. `unknown` is not here on purpose: a merge whose answer was just lost may have happened,
+ * and only GitHub, read after the merge could still be in flight, says it did not.
+ */
+export const RELEASE_OUTCOMES = ["not_sent", "refused", "expired"] as const;
+export type ReleaseOutcome = (typeof RELEASE_OUTCOMES)[number];
+
 export const releaseClaimSchema = z
   .object({
     pr: z.enum(REPULL_PULL_REQUESTS),
     sha,
-    // `unknown` is not here on purpose: a merge whose answer was lost may have happened.
-    outcome: z.enum(["not_sent", "refused"]),
+    outcome: z.enum(RELEASE_OUTCOMES),
   })
   .strict();
 
@@ -171,12 +200,19 @@ export async function releaseMergeClaim(
       row,
     };
   }
-  const age = await db.prepare(claimOldEnoughSql(cols.claimedAt)).bind(id).first<{ old: number }>();
+  const minutes = releaseAgeMinutes(body.outcome);
+  const age = await db
+    .prepare(claimOldEnoughSql(cols.claimedAt, minutes))
+    .bind(id)
+    .first<{ old: number }>();
   if (age?.old !== 1) {
     return {
       status: 409,
       code: "claim-too-recent",
-      message: `The claim was made less than ${CLAIM_RELEASE_MIN_AGE_MINUTES} minutes ago; a merge sent just now may still land, so it is released only once it is older.`,
+      message:
+        body.outcome === "expired"
+          ? `The claim was made less than ${minutes} minutes ago and what became of its merge is not known, so it expires only once it is older.`
+          : `The claim was made less than ${minutes} minutes ago; a merge sent just now may still land, so it is released only once it is older.`,
       row,
     };
   }
@@ -199,7 +235,7 @@ export async function releaseMergeClaim(
                 revision = revision + 1, updated_at = datetime('now')
           WHERE id = ? AND status = ? AND revision = ? AND ${cols.claimSha} = ?
             AND ${cols.mergeSha} IS NULL
-            AND ${cols.claimedAt} <= datetime('now', '-${CLAIM_RELEASE_MIN_AGE_MINUTES} minutes')`,
+            AND ${cols.claimedAt} <= datetime('now', '-${minutes} minutes')`,
       )
       .bind(id, row.status, row.revision, body.sha),
     db.prepare(AUDIT_IF_PREVIOUS_CHANGED_SQL).bind(
@@ -245,7 +281,10 @@ export interface MergedResult {
 
 /**
  * Record that the recorded pull request merged, from GitHub's own answer: `gates_clear` to
- * `merged` (or the N.0.1 twin) with GitHub's merge commit.
+ * `merged` (or the N.0.1 twin) with GitHub's merge commit. From `pr_open` too (or
+ * `patch_synthesized`): a pull request merged before its gates were recorded, on GitHub's page or
+ * by any other hand, held no claim and was merged at no screened head, so both counts say so;
+ * without this edge the row would stay open with a minted DOI behind it.
  */
 export async function recordRepullMerged(
   env: Bindings,
@@ -260,11 +299,11 @@ export async function recordRepullMerged(
   if (fence) return fence;
   const cols = PULL_REQUEST_COLUMNS[body.pr];
   const recorded = row[cols.mergeSha];
-  if (row.status !== cols.gatesClear && recorded === null) {
+  if (row.status !== cols.gatesClear && row.status !== cols.open && recorded === null) {
     return {
       status: 409,
       code: "bad-transition",
-      message: `A merge of the ${body.pr} pull request is recorded from ${cols.gatesClear}; re-pull #${id} is ${row.status}.`,
+      message: `A merge of the ${body.pr} pull request is recorded from ${cols.open} or ${cols.gatesClear}; re-pull #${id} is ${row.status}.`,
       row,
     };
   }
@@ -313,7 +352,7 @@ export async function recordRepullMerged(
     admin,
     row,
     {
-      from: cols.gatesClear,
+      from: row.status,
       to: cols.merged,
       fields: {
         [cols.mergeSha]: facts.mergeCommitSha,

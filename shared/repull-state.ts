@@ -79,18 +79,24 @@ export const REPULL_TRANSITIONS: Readonly<Record<RepullStatus, readonly RepullSt
     ["registered", "pr_open"],
     ["pr_open", "pr_open"],
     ["pr_open", "gates_clear"],
+    // A pull request merged before its gates were recorded (on GitHub's page, say): only the
+    // verified route writes it, from GitHub's own answer, and counts it as outside the tools.
+    ["pr_open", "merged"],
     ["gates_clear", "pr_open"],
     ["gates_clear", "gates_clear"],
     ["gates_clear", "merged"],
+    ["merged", "merged"],
     ["merged", "released"],
     ["released", "released"],
     ["released", "complete"],
     ["released", "patch_synthesized"],
     ["patch_synthesized", "patch_synthesized"],
     ["patch_synthesized", "patch_gates_clear"],
+    ["patch_synthesized", "patch_merged"],
     ["patch_gates_clear", "patch_synthesized"],
     ["patch_gates_clear", "patch_gates_clear"],
     ["patch_gates_clear", "patch_merged"],
+    ["patch_merged", "patch_merged"],
     ["patch_merged", "patch_released"],
     ["patch_released", "complete"],
   ];
@@ -222,7 +228,11 @@ export const TRANSITION_FIELDS: Readonly<Record<RepullStatus, TransitionFields>>
  *  - `planned`, `copied` and `registered`: record why a step could not finish (the error is the
  *    whole write): the registration that follows `copied`, the pull request that follows
  *    `registered`; the edge forward clears it;
- *  - `released`: record the count of locked objects once the lock has been applied;
+ *  - `merged` and `patch_merged`: record why the release could not be recorded yet (no tag, a tag
+ *    on another commit, no version row), the error being the whole write, as `planned`'s;
+ *  - `released`: record the count of locked objects once the lock has been applied, or why the
+ *    lock did not complete (the Worker refuses one that carries neither); the row cannot leave
+ *    `released` for `complete` or N.0.1 until the count is recorded ({@link LOCK_COUNT_KEY});
  *  - `gates_clear` and `patch_gates_clear`: record the claim to merge, before the merge is sent.
  *    The caller names the screened head; the Worker stamps the time with its own clock, because a
  *    caller-stated time could be backdated or set ahead and defeat the sweep for stuck claims.
@@ -231,7 +241,9 @@ export const SELF_EDGE_FIELDS: Readonly<Partial<Record<RepullStatus, TransitionF
   planned: { may: NONE, must: NONE, reset: NONE, requiresError: true },
   copied: { may: NONE, must: NONE, reset: NONE, requiresError: true },
   registered: { may: NONE, must: NONE, reset: NONE, requiresError: true },
-  released: { may: ["counts"], must: ["counts"], reset: NONE },
+  merged: { may: NONE, must: NONE, reset: NONE, requiresError: true },
+  patch_merged: { may: NONE, must: NONE, reset: NONE, requiresError: true },
+  released: { may: ["counts"], must: NONE, reset: NONE },
   gates_clear: {
     may: ["merge_claim_sha"],
     must: ["merge_claim_sha"],
@@ -252,10 +264,23 @@ export const SELF_EDGE_FIELDS: Readonly<Partial<Record<RepullStatus, TransitionF
  * `prepared` row prepared again onto a moved base takes this edge, and so does one found intact,
  * restored from its checkpoint or prepared again to the same commit, but execution sends it then
  * only when the stored error is a preparation's own (its words begin `[prepare:`), so an error a
- * later step recorded is not cleared by a preparation that holds. The other self-edges write one
- * thing beside the stage and keep the error.
+ * later step recorded is not cleared by a preparation that holds. A `released` self-edge that
+ * records the count of locked objects with no error records the lock's stage, which is the whole
+ * of what `released` waits for, so it clears the error a lock that did not complete recorded. The
+ * other self-edges write one thing beside the stage and keep the error.
  */
-export const CLEARING_SELF_EDGES = ["prepared"] as const satisfies readonly RepullStatus[];
+export const CLEARING_SELF_EDGES = [
+  "prepared",
+  "released",
+] as const satisfies readonly RepullStatus[];
+
+/**
+ * The count a released N.0.0 must record before it moves on: its objects locked under the
+ * governance lock (ADR 0111, decision 8). Until it is recorded the row stays `released`, the state
+ * a lock that failed leaves it in, and a run takes the lock up again; `complete` and N.0.1 are
+ * refused (`lock-unrecorded`).
+ */
+export const LOCK_COUNT_KEY = "locked" as const satisfies (typeof REPULL_COUNT_KEYS)[number];
 
 /** What the edge `from` to `to` may and must write. */
 export function fieldsFor(from: RepullStatus, to: RepullStatus): TransitionFields {
@@ -803,6 +828,7 @@ export const DISPATCH_CODES = [
   "pull-request-missing",
   "tag-mismatch",
   "tag-missing",
+  "lock-unrecorded",
 ] as const;
 export type DispatchCode = (typeof DISPATCH_CODES)[number];
 

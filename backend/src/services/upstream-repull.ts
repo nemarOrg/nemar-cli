@@ -24,8 +24,9 @@
  *  - `version-facts-disagree`: the dataset's own version rows must say what the plan says.
  *  - `tag-already-pulled`.
  * These run at create. A transition re-checks the environment fence on every edge, and the
- * mirror, anonymity, withdrawn and import fences on every step toward a merge: dispatching the
- * screen, the edges into the gates-clear states and the claim to merge.
+ * mirror, anonymity, withdrawn and import fences on every step that moves the record past
+ * `prepared` and keeps it open ({@link datasetFencedEdge}) and on dispatching the screen; the
+ * edges into the gates-clear states and the claim to merge read them with the screen.
  *
  * THE SCREEN AND THE CAP (ADR 0111, decisions 6 and 7). The edges into `gates_clear` and
  * `patch_gates_clear` are taken only while the identifier screen bound to the row
@@ -79,6 +80,7 @@ import {
   DISPATCH_TOKEN_RE,
   type DispatchRow,
   IMMUTABLE_ONCE_SET,
+  LOCK_COUNT_KEY,
   MERGE_CLAIM_COLUMNS,
   NEMAR_VERSION_RE,
   PULL_REQUEST_COLUMNS,
@@ -444,6 +446,31 @@ function datasetFactsRefusal(
     };
   }
   return null;
+}
+
+/**
+ * Whether an edge re-reads the dataset fences: every step that moves the record past `prepared`
+ * and keeps it open (the copy, the registration, the pull request and its head, the gates, the
+ * lock's count), because any fence can change while a re-pull is open. Not an edge that ends the
+ * row (giving up must stay possible on a withdrawn or anonymous dataset), not a self-edge that
+ * writes nothing but why a step failed (an error, and every field the value the row already holds,
+ * which a count, merged key by key, never is), and not a fact a verified route writes from GitHub or the version row (a
+ * merge that happened is recorded whatever the dataset has become since). The gates and the claim
+ * read the fences on their own, with the screen.
+ */
+export function datasetFencedEdge(
+  row: RepullRow,
+  t: { from: RepullStatus; to: RepullStatus; error?: string },
+  fields: Readonly<Record<string, unknown>>,
+  opts: TransitionOptions,
+): boolean {
+  if (opts.verified || isTerminal(t.to)) return false;
+  const onlyWhy =
+    t.from === t.to &&
+    t.error !== undefined &&
+    Object.entries(fields).every(([k, v]) => (row as unknown as Record<string, unknown>)[k] === v);
+  if (onlyWhy) return false;
+  return REPULL_STATUSES.indexOf(t.to) > REPULL_STATUSES.indexOf("prepared");
 }
 
 /** The dataset fences, read fresh, for a step toward a merge. */
@@ -1041,6 +1068,22 @@ export async function prepareTransition(
     };
   }
 
+  // N.0.0's objects are locked at `released` (ADR 0111, decision 8) before the row goes on to
+  // `complete` or to N.0.1, so a lock that failed leaves it there to be taken up again, never
+  // silently finished. Giving up (`failed`, `patch_declined`) is not held to it.
+  if (
+    t.from === "released" &&
+    (t.to === "complete" || t.to === "patch_synthesized") &&
+    typeof row.counts[LOCK_COUNT_KEY] !== "number"
+  ) {
+    return {
+      status: 409,
+      code: "lock-unrecorded",
+      message: `Re-pull #${id} records no count of locked objects; N.0.0's objects are locked before it goes on.`,
+      row,
+    };
+  }
+
   const spec = fieldsFor(t.from, t.to);
   const fields = t.fields ?? {};
   for (const key of Object.keys(fields)) {
@@ -1071,6 +1114,14 @@ export async function prepareTransition(
   if (spec.requiresError && !t.error) {
     return { status: 400, code: "field-missing", message: `This edge into ${t.to} must say why.` };
   }
+  if (repeats && t.to === "released" && fields.counts === undefined && t.error === undefined) {
+    return {
+      status: 400,
+      code: "field-missing",
+      message:
+        "A released self-edge records the count of locked objects (counts) or why the lock did not complete (error), and this one carries neither.",
+    };
+  }
   for (const [key, value] of Object.entries(fields)) {
     const problem = fieldProblem(key, value, row, fields);
     if (problem) return { status: 400, code: "field-invalid", message: problem };
@@ -1099,6 +1150,10 @@ export async function prepareTransition(
   let guardRefusal: PreparedTransition["guardRefusal"];
   const gatedPr = repeats ? null : pullRequestOfGatesStatus(t.to);
   const screenedPr = gatedPr ?? claimPr ?? null;
+  if (screenedPr === null && datasetFencedEdge(row, t, fields, opts)) {
+    const fenced = await datasetFenceRefusal(db, row);
+    if (fenced) return { ...fenced, row };
+  }
   if (screenedPr !== null) {
     const cols = PULL_REQUEST_COLUMNS[screenedPr];
     const sha = (gatedPr ? fields[cols.gates] : fields[cols.claimSha]) as string;
