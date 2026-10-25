@@ -1028,3 +1028,68 @@ The split of the ruleset check, which the merge call waits for:
   That half stays an owner step before the Worker's merge is built: `gh auth refresh -h github.com -s admin:org`, then `gh api orgs/nemarDatasets/rulesets --jq '.[] | {id, name, target, enforcement}'`.
   It passes when no organization ruleset targets default branches, or each one that does has the App as a bypass actor and asks for nothing the Worker does not read.
   If it fails, the Worker's merge is not built, `AUTO_REPULL_MERGE_ENABLED` has no effect, and an administrator merges each automatic pull request under the cap and the screen.
+
+### 7b, 2026-10-25: the dispatch record, and an automatic record only through it
+
+Phase 7b builds the record the automatic path keeps of what the Worker asked a run to do, the run's report back, and the one way a re-pull is recorded with `origin` automatic.
+Nothing here sends a dispatch, schedules anything or merges: the Worker that sends dispatches, the scheduler, the unattended run and the merge are later slices, so this slice is inert until they land, and nothing in it sends mail (the source scan covers its service and its callback).
+
+The record.
+
+- Migration 0109 adds `upstream_repull_dispatches`, one row per dispatch, keyed by nothing but its id: a dispatch exists before any re-pull row does, a run that refuses before its create leaves none, and one re-pull may have many (a first dispatch, its resumes, its finish).
+  A dispatch is `open` (run a plan to an open pull request, or resume a row that stalled before it) or `finish` (walk a merged re-pull to `complete`).
+- Its states are `dispatched` and `started` while it is live, then the run's own last word (`opened`, `finished`, `refused`, `failed`) or the Worker's: `dispatch_failed` when GitHub refused the dispatch, so it never ran, and `unreported` when the run said nothing in time.
+- A one-shot nonce is held exactly while the dispatch is live, and the edge that ends it clears it, so a token replayed after its run ended has nothing to verify against.
+  One live dispatch per dataset, which also keeps two runs from working on one dataset at once.
+- Only an `on` dataset has dispatches; the table refuses any other id, so an `xx` re-pull, which takes the administrator's path only (decision 7), cannot reach the automatic one even by a writer that skips the service.
+- The same migration adds the scheduler's one row and, on `upstream_repulls`, `hold_reason` and `hold_since`, which a later slice writes: a fixed word and since when, set together, on an automatic row only.
+  The record, as Phase 6 said, is deleted with its dataset, and so are its dispatches, those with no re-pull row included.
+
+Production only.
+
+- Claiming a dispatch needs `ENVIRONMENT` exactly `production` and the open switch on; claiming the finish of a re-pull that already merged needs exact production only, because turning the switches off must not strand a minted DOI's lineage, lock and `complete`.
+  The report callback and the watchdog read no switch either, for the same reason: a run dispatched before the switch went off must still be able to say how it ended, and its live row must not hold the dataset's one live slot for good.
+- Outside exact production nothing is claimed, verified, stored or swept, and nothing is read: the `nemarDatasets` organization is shared with dev.
+
+The open cap (decision 6).
+
+- `REPULL_DAILY_OPEN_CAP` counts the day's `open` dispatches, first ones and resumes alike, on D1's own clock in a fixed UTC day, and the count is in the statement that claims the unit, so two claims racing for the last unit cannot both win; a refused claim writes nothing (ADR 0099).
+- A dispatch GitHub refused never ran, so it frees its unit; one whose answer was lost keeps it, because it may be running.
+  A `finish` never counts: its merge already minted the DOI the cap exists to bound.
+- The cap bounds dispatches, so it bounds the pull requests opened in a day only while every run that opens one starts on the day its unit was claimed; the later slice that schedules dispatches pins the timing that makes the two the same.
+- A first dispatch is refused for a dataset with an open re-pull, and a resume names an automatic row of the same dataset and tags that stalled before its pull request opened, both read in the statement that claims.
+
+The token and the callback.
+
+- The dispatch token is a kind of its own, signed with the callback secret every other kind uses and domain-separated the same way: its message begins with a line no other kind's begins with, and binds the dispatch, its dataset and its nonce.
+- A run reports to `POST /webhooks/repull-state`: `started` once, then `opened` (for the automatic record its dispatch is linked to, at `pr_open` or later), `finished` (a finish whose record is `complete`), or `refused` or `failed` with a code.
+  Each is a compare-and-set on the dispatch's id, its nonce and the status it was read in, and the record's state is read in the statement that writes, so it holds when the report is stored.
+  Every refusal of the token is one answer, whether the dispatch does not exist, belongs to another dataset, has ended or the token is wrong, so the door does not say which dispatches exist.
+- A code is a word from a closed list, never a message, a path or a key, because the weekly report will count codes on a public-facing repository.
+  The callback refuses any other word, a run reports `no-code` for a refusal whose word the list does not hold, and a source scan requires every literal refusal word of the plan, the execution, the scrub and the Worker's re-pull routes to be on it.
+- The watchdog ends a live dispatch eight hours after it was sent (the job's bound of 330 minutes, plus queueing) as `unreported`, and writes one audit row when it marked any; a later slice calls it from the production cron.
+
+`origin` automatic only through a Worker-signed dispatch.
+
+- `POST /admin/repulls` takes an optional `dispatch_id` and `dispatch_token`, both or neither, and `origin` is in no request: a create with a live dispatch whose token the Worker signed is automatic, and every other is the administrator's.
+- Before the record's fences, in order: exact production, the open switch (so switching it off stops a run before its first write), and an `on` dataset; then the dispatch: it exists, is live, its token verifies, it is an `open` dispatch, and it names this dataset, this `ds` and both tags.
+- Then the plan (decision 6, "the automatic path takes only a plan with zero unexplained paths"): it was made by the planner the CLI runs today (planner 2, which a test pins to the CLI's), and it states `unexplained`, `conflicts` and `corrections`, each zero, because a count left out is not zero; and it states the size of its copy, at most 1 TiB, so one run fits a runner's job.
+  The administrator's path has no such bound.
+  The Worker can check only what the plan states; the run checks the live plan itself before it writes, which is a later slice's.
+- The insert links the dispatch to its record in the same batch, by the record's key and never by `last_insert_rowid()`, which the audit row moves.
+
+The same plan is the same record, for a caller of the same origin (clarification of the Phase 6 amendment).
+
+- The Phase 6 amendment returns an open record with the same tag and plan digest as it is.
+  That is now so only for a caller of the record's own origin: an administrator's create never takes over a record a dispatched run is working on, and a run never takes over an administrator's; each is `repull-in-flight`, which names the record.
+  Two executions of one record from two machines would each push its branch and open its pull request.
+- A dispatch that names its record (a resume, or one whose own create already recorded it) takes only that record, and once that record has ended it creates none (`dispatch-mismatch`), so a resume never starts a second re-pull.
+- An administrator who wants to take over a stalled automatic record abandons it and plans again; the record's history stays.
+
+What later slices use from here.
+
+- The hold words, the content refusals that end the automatic path for a tag, and the prefix of every error the automatic path records on a re-pull row, `[auto:`, which is not the preparation's `[prepare:`, so a `prepared` self-edge never clears one (the Phase 6c amendment's rule).
+- An administrator can now reset a stored review pass on the same head (`nemar admin pr-reviews start --redo`), so the slices that read the review for machine clean read it at each stage, the gates and the merge, and never carry one stage's reading to the next.
+
+Every statement here was run on bun:sqlite and on Miniflare's D1.
+Not checked here, and left to the later slices' canary and the first production run: that a run reaches the callback at the API host, and that the token survives the dispatch payload and the run's environment unchanged.
