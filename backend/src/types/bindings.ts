@@ -323,8 +323,8 @@ export interface Bindings {
   // reads 0, so a typo stops merging instead of falling back to the default.
   REPULL_DAILY_MERGE_CAP?: string;
 
-  // The automatic upstream re-pull (ADR 0111; services/repull-switches.ts). Each reads as on only
-  // when it is exactly "1" AND ENVIRONMENT is exactly "production"; unset, "true" and anything
+  // The automatic upstream re-pull (ADR 0111; services/repull-switches.ts). Each switch reads as on
+  // only when it is exactly "1" AND ENVIRONMENT is exactly "production"; unset, "true" and anything
   // else are off. AUTO_REPULL_MERGE_ENABLED acts only while AUTO_REPULL_ENABLED is also on.
   // Deliberately absent from every vars block in wrangler-sccn.toml: the owner turns them on in a
   // reviewed change, never in the dashboard alone (the next deploy drops a dashboard-only value).

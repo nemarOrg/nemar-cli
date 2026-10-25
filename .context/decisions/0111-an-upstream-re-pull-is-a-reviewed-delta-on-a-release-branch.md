@@ -983,11 +983,11 @@ That `aws s3 sync` and `list-objects-v2` answer the uploads as the stand-in does
 ## Amendment 2026-10-24 (#1913): Phase 7 builds the automatic path
 
 Phase 7 builds the scheduled path of decision 6 and the Worker's merge of decision 7, in the slices below, one per pull request.
-Nothing in this phase turns a switch on: the owner does, in a reviewed change, after the first re-pulls have been run by hand.
+Nothing in this phase turns a switch on: the owner does, in a reviewed change, once the first two re-pulls have been run by hand.
 
 ### 7a: the switches and the caps are declared, and off
 
-The automatic path has three variables, and the Worker's configuration file sets none of them, so it is off.
+The automatic path has four variables, two switches and two caps, and the Worker's configuration file sets none of them, so it is off.
 
 - A switch is on only as the exact string `"1"`, as `PR_REVIEW_ENABLED` is; `"true"`, `" 1"`, an empty string and an unset binding are all off.
 - A switch is honored only when `ENVIRONMENT` is exactly `production`: no trim, no case fold, and an unset binding is not production.
@@ -996,9 +996,9 @@ The automatic path has three variables, and the Worker's configuration file sets
 - `REPULL_DAILY_OPEN_CAP` defaults to 2 and `REPULL_DAILY_MERGE_CAP` to 5 when absent.
   A cap that is set to anything but one or two digits no larger than 20 (a sign, a decimal, a space, an empty string, 21) reads 0 and is reported as unreadable, so a typo stops the work instead of falling back to a number the owner never chose.
   Both caps read through one function, so the merge cap of Phase 6e and the open cap cannot drift apart; the merge cap's behavior is unchanged.
-- The three variables are absent from `[vars]` and from `[env.dev.vars]`, a test pins that, and a value set only in the dashboard is dropped by the next deploy, so the owner sets them in the file.
+- The four variables are absent from `[vars]` and from `[env.dev.vars]`, a test pins that for every table of the file, and a value set only in the dashboard is dropped by the next deploy, so the owner sets them in the file.
   The first Worker merges run with `REPULL_DAILY_MERGE_CAP` set to `"1"`.
-- `GET /admin/repulls/switches` reports what the Worker reads (production or not, both switches, the open cap and how it was read) and no binding value.
+- `GET /admin/repulls/switches` reports what the Worker reads (production or not, both switches, and the open cap and the merge cap, each with how it was read) and no binding value.
   It is read-only, admin-only and sends no mail.
 - The App's bot user is named once, beside the App's id: `nemar-publish-bot[bot]`, user id 283755542, type `Bot`, as `GET /users/nemar-publish-bot%5Bbot%5D` answered on 2026-10-24.
   A pull request is the App's only when both the login and the id match.
@@ -1021,7 +1021,7 @@ Read-only, 2026-10-24.
 
 The split of the ruleset check, which the merge call waits for:
 
-- Read by the lead on 2026-10-24 with the `neuromechanist` login: the `nemarDatasets` installation of App 3679074 has `contents: write`, `pull_requests: write`, `actions: write`, `administration: write`, `checks: write`, `workflows: write` and `issues: write`, with `repository_selection: all`.
+- Read by an administrator with the `neuromechanist` login on 2026-10-24: the `nemarDatasets` installation of App 3679074 has `contents: write`, `pull_requests: write`, `actions: write`, `administration: write`, `checks: write`, `workflows: write` and `issues: write`, with `repository_selection: all`.
   The App can therefore open a pull request, and the permission half of the check passes.
 - Not read: the organization's rulesets.
   Listing them needs the `admin:org` scope, which that token does not hold, so whether an organization ruleset targets default branches, and whether the App is a bypass actor of it, is unknown.
