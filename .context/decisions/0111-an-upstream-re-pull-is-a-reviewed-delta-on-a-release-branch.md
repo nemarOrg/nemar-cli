@@ -1110,7 +1110,7 @@ Not checked here, and left to the later slices' canary and the first production 
 A further slice of the Phase 6 amendment above, built by Phase 6d.
 It builds the second half of decision 2's execution and decision 8's copy: from `prepared` the record goes to `copied`, `registered` and `pr_open`, where `nemar admin repull execute` stops.
 It never merges: a merge mints a version DOI that cannot be withdrawn, and is the administrator's own act through the merge path a later slice builds.
-Nothing here adds a route, so nothing here can send mail; the record's header and three sentences of earlier slices are annotated where this one builds, decides or corrects them.
+Nothing here adds a route, so nothing here can send mail; five annotations are added to earlier text (two on the record's header, three on sentences of earlier slices) where this one builds, decides or corrects them.
 
 ### The command, and a record past `prepared`
 
@@ -1121,7 +1121,7 @@ Exit 0 means the requested status was reached, 3 that a step stopped and left th
 
 A record for the same digest past `prepared` is taken up without planning again.
 A live plan cannot be compared with the reviewed one any more: the registration moved NEMAR's git-annex branch, which the plan reads, and the release branch and its pull request exist, which the release-pr check refuses.
-Such a run proves the file instead (its digest, its planner, the API and the remotes it was made against), and takes the working clone, or the checkpoint when the clone is gone, as preparation left it; with neither it refuses (`checkpoint-lost`), and abandoning is the way out.
+Such a run proves the file instead (its digest, its planner, the API and the remotes it was made against), and takes the working clone, or the checkpoint when the clone is gone, as preparation left it; with neither it refuses (`checkpoint-lost`), and abandoning the record is the way out, for which no command is built yet.
 Every run, whatever the record's status, first refuses a dataset whose catalog row does not say `anonymous` is exactly 0, before anything is written, as the Worker refuses one at the record.
 Before each step past `prepared`, upstream's tag must still be the commit the plan read, because the commit's trailers name it (`upstream-tag-moved`): OpenNeuro has re-created a tag before.
 
@@ -1130,8 +1130,11 @@ Before each step past `prepared`, upstream's tag must still be the commit the pl
 The copy manifest is rebuilt from the synthesized commit and the plan, of which it is a function, and must hash to the digest recorded at `prepared` (`manifest-mismatch`).
 It is written to `<id>/staging/repull-<to_tag>.json` before the first copy, as decision 8 says, because an abandoned attempt's orphans are read from it.
 Each key it copies is skipped when the bucket holds it at the size the key declares, and copied again at any other size (#967).
-Otherwise upstream's object is headed at the pinned version: a version upstream no longer serves is `pin-absent`, another size than the key declares is `pin-size-mismatch`, and an answer for another version is `pin-version-mismatch`; a key that declares no size is checked against the size the pin has, never zero.
+Otherwise upstream's object is headed at the pinned version: a version upstream no longer serves is `pin-absent`, another size than the key declares is `pin-size-mismatch`, and an answer for another version, or for none, is `pin-version-mismatch` (unknown is never success); a key that declares no size is skipped only when the destination holds the pinned object's size, and otherwise copied, its pinned size being the one checked, never zero.
 The copy is one server-side `copy-object` with `?versionId=` on the source and `--copy-source-if-match` on that version's ETag, or, above S3's 5 GiB single-copy limit, a multipart upload whose parts are each copied from the same version under the same condition, aborted when any part fails.
+S3 must name the pinned version as the one it copied from (`CopySourceVersionId`), for the copy and for every part; any other answer, or none, is `pin-version-mismatch`, a single copy that already landed is deleted by its version id (a rerun would otherwise skip it at the declared size), and a multipart upload is aborted.
+An abort that fails leaves the upload open, and the refusal names the count and the upload ids.
+An endpoint that ignores the version and says so is refused here; one that ignores both the version and the ETag condition and says it copied the pinned version can only be shown up by the canary, which compares the copy's ETag.
 The destination is headed after and must be the size copied.
 A refusal stops new copies, the step refuses once those in flight have finished, and nothing is registered for a partial copy; a rerun skips what landed.
 `prepared -> copied` is written only after a fresh listing shows every key of the manifest, copied or uploaded at preparation, at its declared size (`copy-unverified`).
@@ -1143,6 +1146,9 @@ Every push and every `aws s3api` call after `prepared` passes an allowlist befor
 A push goes to `origin` only, one refspec at a time, from a commit id, and only to `release/v<N.0.0>` (or `release/v<N.0.1>`) or to `git-annex`, never forced; a release branch may also be deleted, or leased onto a re-synthesized commit, which later slices use.
 Never `main`, never a tag, never `+`, `--force`, `--mirror` or any option the list does not name.
 An S3 call writes only under `<id>/objects/` or to the one staging key, copies only from upstream's bucket under the dataset's own `ds/` and only at a version id, and names no lock, ACL, metadata directive or governance bypass.
+The one other write is `delete-object` by version id under `<id>/objects/`, which removes a copy S3 reported as made from another version than the pinned one.
+A key or prefix with a `.` or `..` segment, or an empty one, is refused before the prefix test, because the test is lexical; a version id with a character the guard does not allow (older S3 version ids can hold `+` and `/`) is refused with that cause, which fails closed.
+A push that origin's own rule refuses (a hook, a protected branch) is told apart from one that lost a race with a moved branch, and is not tried again; a push that fails carries a fixed-word cause (credentials, the network, or unknown).
 
 ### The registration publishes no holder NEMAR does not control (decides the Phase 6c amendment's open point)
 
@@ -1172,17 +1178,18 @@ The body also says what the Phase 6b amendment requires of the merge: the squash
 
 `copied` and `registered` repeat, as `planned` does, to record why the step that follows them failed; the error is the whole write, and the edge forward clears it.
 A step's error begins with its step, `[copy:`, `[register:` or `[pr:`, and never with `[prepare:`, which only a preparation clears; a `prepared` record that holds a copy's error keeps it until it is copied.
-At `pr_open` the working directory is removed unless `--keep-workdir`, because it holds the delta's unscrubbed originals in the local commit preparation made before the scrub.
+At `pr_open`, and on any later run that finds the record at `pr_open` or past it (one killed before the removal), the working directory is removed unless `--keep-workdir`, because it holds the delta's unscrubbed originals in the local commit preparation made before the scrub.
 That commit is never pushed and never in the checkpoint: the suites check that neither origin nor the bundle holds the original blob of a JSON file the scrub blanked, and that the upstream key of a re-keyed recording is neither copied into the bucket nor anything but dead on origin.
 The checkpoint is kept for the slices that follow.
 
 ### The canary
 
 `nemar admin repull canary --prefix <p> --source <ds>/<path>@<versionId> --multipart-source <ds>/<path>@<versionId>` is the real-bucket check of what the copy believes, for the owner to run before the first production re-pull.
-The prefix must be `nm099999/repull-canary-<word>/` or `xx09NNNN/repull-canary-<word>/`, never a dataset's `objects/` or `staging/`, and the two objects must belong to one dataset.
+The prefix must be `nm099999/repull-canary-<word>/` or `xx<090001 to 099899>/repull-canary-<word>/`, never a dataset's `objects/` or `staging/` and never the permanent exemplar fleet (`xx099900` to `xx099999`, ADR 0068), the bucket must be NEMAR's, and the two objects must belong to one dataset; the run itself checks all of it, so no caller can skip it.
 A dry run, the default, makes no call and prints the calls.
 With `--execute` it heads both sources at their versions, copies the small one with one `copy-object` and the other, over 10 MiB, in 5 MiB parts with `upload-part-copy`, through the same write guard; it requires S3 to name the pinned version as the one it copied, for the copy and for every part, compares the copies' sizes, and the small copy's ETag with its source's when the source is a single-part object.
 It then writes a staging-shaped key, deletes it and both copies by version id, and lists the prefix's versions, which must hold neither a version nor a delete marker.
+Every object it writes is deleted by version id on every path, including when a check of the copy fails, and an upload left open under the prefix is a failed step.
 It never locks and never bypasses a lock, so a bucket whose default retention locks new objects makes the canary fail at its deletes, which is what an owner needs to know before a re-pull's orphans are counted.
 
 ### Checked only against stand-ins
