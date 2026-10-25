@@ -165,6 +165,7 @@ describe("the scheduler's statements on D1", () => {
       open_rows: 0,
       live: 0,
       final_refusals: 0,
+      unreported_last: 0,
       recent_rows: 0,
       recent_dispatches: 0,
     });

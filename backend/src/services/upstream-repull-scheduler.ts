@@ -16,11 +16,12 @@
  * a dataset that is not exactly non-anonymous (`anonymous`, or `missing` when its row is gone), one
  * holding a merge nothing reconciled (the create's own rule, imported), one with an open re-pull or
  * a live dispatch, one whose run already refused this tag for content (a content refusal ends the
- * automatic path for that tag), and one with a re-pull created, or a first dispatch sent, in the
- * last {@link REPULL_WINDOW_DAYS} days, except a dispatch GitHub refused (it never ran). Then the
- * create's dataset fences are read again (a mirror of that `ds`, not withdrawn, no import in
- * flight) through the record's own function. The automatic create checks everything again when
- * the run arrives.
+ * automatic path for that tag), one whose last {@link REPULL_UNREPORTED_STREAK} dispatches all
+ * ended `unreported` (a run that never reports would be sent again on every rotation), and one
+ * with a re-pull created, or a first dispatch sent, in the last {@link REPULL_WINDOW_DAYS} days,
+ * except a dispatch GitHub refused (it never ran). Then the create's dataset fences are read again
+ * (a mirror of that `ds`, not withdrawn, no import in flight) through the record's own function.
+ * The automatic create checks everything again when the run arrives.
  *
  * THE CAP. Every dispatch goes through the dispatch record's claim (`claimOpenDispatch`), which
  * counts the UTC day's `open` dispatches on D1's clock in the statement that claims the unit, so
@@ -100,6 +101,8 @@ export const REPULL_SCAN_PAGES = 3;
 export const REPULL_SCAN_PROBE_BUDGET = 10;
 /** A dataset gets at most one first dispatch, or one re-pull, in this many days. */
 export const REPULL_WINDOW_DAYS = 30;
+/** A dataset whose last this-many dispatches all ended `unreported` is not dispatched again. */
+export const REPULL_UNREPORTED_STREAK = 3;
 /**
  * A candidate whose own reads throw, or a tick whose every probe failed, is held at one place for
  * fewer than this many ticks in {@link REPULL_WINDOW_DAYS} days: the first two stop there, and the
@@ -168,6 +171,9 @@ export const CANDIDATE_BLOCKERS_SQL = `SELECT
   (SELECT COUNT(*) FROM upstream_repull_dispatches
     WHERE dataset_id = ?1 AND to_tag = ?2 AND status = 'refused'
       AND code IN (${quoted(DISPATCH_FINAL_CODES)})) AS final_refusals,
+  (SELECT COUNT(*) FROM (SELECT status FROM upstream_repull_dispatches
+      WHERE dataset_id = ?1 ORDER BY id DESC LIMIT ${REPULL_UNREPORTED_STREAK}) AS last_sent
+    WHERE last_sent.status = 'unreported') AS unreported_last,
   (SELECT COUNT(*) FROM upstream_repulls
     WHERE dataset_id = ?1
       AND created_at > datetime('now', '-${REPULL_WINDOW_DAYS} days')) AS recent_rows,
@@ -234,6 +240,7 @@ export interface CandidateBlockers {
   open_rows: number;
   live: number;
   final_refusals: number;
+  unreported_last: number;
   recent_rows: number;
   recent_dispatches: number;
 }
@@ -246,6 +253,7 @@ export type CandidateSkip =
   | "open-row"
   | "live"
   | "final-refusal"
+  | "unreported-streak"
   | "recent";
 
 const COUNTS = [
@@ -253,6 +261,7 @@ const COUNTS = [
   "open_rows",
   "live",
   "final_refusals",
+  "unreported_last",
   "recent_rows",
   "recent_dispatches",
 ] as const satisfies readonly (keyof CandidateBlockers)[];
@@ -288,6 +297,7 @@ export function candidateSkip(b: CandidateBlockers | null): CandidateSkip | null
   if (b.open_rows > 0) return "open-row";
   if (b.live > 0) return "live";
   if (b.final_refusals > 0) return "final-refusal";
+  if (b.unreported_last >= REPULL_UNREPORTED_STREAK) return "unreported-streak";
   if (b.recent_rows > 0 || b.recent_dispatches > 0) return "recent";
   return null;
 }

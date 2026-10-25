@@ -252,6 +252,9 @@ function manualRun(id: string, over: Row = {}): void {
   repull(id, "complete", { origin: "administrator", created_at: "2026-01-01 00:00:00", ...over });
 }
 
+/** What an ended dispatch that its run never reported looks like. */
+const unreported: Row = { status: "unreported", code: null, reported_at: null };
+
 /** Gate G4: both re-pulls the design record names, run by an administrator to `complete`. */
 function manualRunDone(): void {
   for (const id of REPULL_G4_DATASETS) manualRun(id);
@@ -503,6 +506,22 @@ describe("which mirrors are dispatched", () => {
     const r = await tick();
     expect(r).toMatchObject({ staleReady: 5, dispatched: 2, scanned: 6 });
     expect(r.staleReady).toBe(r.dispatched + Object.values(r.skipped).reduce((a, b) => a + b, 0));
+  });
+
+  test("a mirror whose last three dispatches all went unreported is not dispatched again", async () => {
+    manualRunDone();
+    mirror("on099901");
+    mirror("on099902");
+    mirror("on099903");
+    // Each beyond the 30-day window, so only the streak can stop them.
+    for (const days of [100, 70, 40]) pastDispatch("on099901", days, unreported);
+    // Two in a row are not a streak; nor three whose last one reported.
+    for (const days of [70, 40]) pastDispatch("on099902", days, unreported);
+    for (const days of [100, 70]) pastDispatch("on099903", days, unreported);
+    pastDispatch("on099903", 40);
+    const r = await tick();
+    expect(r.skipped).toEqual({ "unreported-streak": 1 });
+    expect(sentFor()).toEqual(["on099902", "on099903"]);
   });
 
   test("an unpublished mirror is never a candidate, whatever upstream did", async () => {
@@ -990,6 +1009,7 @@ describe("CANDIDATE_BLOCKERS_SQL", () => {
     open_rows: 0,
     live: 0,
     final_refusals: 0,
+    unreported_last: 0,
     recent_rows: 0,
     recent_dispatches: 0,
   };
@@ -1041,6 +1061,13 @@ describe("CANDIDATE_BLOCKERS_SQL", () => {
           }),
         { unreconciled: 1 },
       ],
+      [
+        "three dispatches that went unreported, long ago",
+        () => {
+          for (const days of [100, 90, 80]) pastDispatch("on099901", days, unreported);
+        },
+        { unreported_last: 3 },
+      ],
       ["a re-pull created this month", () => repull("on099901", "abandoned"), { recent_rows: 1 }],
       ["a first dispatch this month", () => pastDispatch("on099901", 3), { recent_dispatches: 1 }],
     ];
@@ -1083,6 +1110,14 @@ describe("CANDIDATE_BLOCKERS_SQL", () => {
     expect(candidateSkip(b)).toBe("final-refusal");
     // The raw spelling would not have matched.
     expect(read("on099901", "v1.0.0").final_refusals).toBe(0);
+  });
+
+  test("only the last three dispatches make a streak, and an older reported one does not break it", () => {
+    mirror("on099901");
+    pastDispatch("on099901", 200);
+    for (const days of [100, 90, 80]) pastDispatch("on099901", days, unreported);
+    expect(read().unreported_last).toBe(3);
+    expect(candidateSkip(read())).toBe("unreported-streak");
   });
 
   test("candidateSkip: unknown anonymity is never clean, and an unreadable count stops the tick", () => {
