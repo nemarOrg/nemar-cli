@@ -182,7 +182,7 @@ export async function deleteDatasetCascade(
       // The record of an upstream re-pull has no foreign key to `datasets` (migration 0105), so it
       // is deleted here, its screens first (migration 0106): their foreign key cascades on D1, but
       // the delete does not rely on the pragma. Placed after the indexed results above so their
-      // positions do not move. The automatic path's dispatches (migration 0109) have no foreign
+      // positions do not move. The automatic path's dispatches (migration 0111) have no foreign
       // key either, and some have no re-pull row at all (a run refused before its create), so they
       // go by dataset, before the re-pull rows.
       db

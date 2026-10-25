@@ -1042,6 +1042,7 @@ Nothing here sends a dispatch, schedules anything or merges: the Worker that sen
 The record.
 
 - Migration 0109 adds `upstream_repull_dispatches`, one row per dispatch, keyed by nothing but its id: a dispatch exists before any re-pull row does, a run that refuses before its create leaves none, and one re-pull may have many (a first dispatch, its resumes, its finish).
+  *Annotated 2026-10-25: the migration is numbered 0111, not 0109; origin/dev took 0109 and 0110 for the ticket work after this slice was written.*
   A dispatch is `open` (run a plan to an open pull request, or resume a row that stalled before it) or `finish` (walk a merged re-pull to `complete`).
 - Its states are `dispatched` and `started` while it is live, then the run's own last word (`opened`, `finished`, `refused`, `failed`) or the Worker's: `dispatch_failed` when GitHub refused the dispatch, so it never ran, and `unreported` when the run said nothing in time.
 - A one-shot nonce is held exactly while the dispatch is live, and the edge that ends it clears it, so a token replayed after its run ended has nothing to verify against.
