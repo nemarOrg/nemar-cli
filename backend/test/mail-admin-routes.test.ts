@@ -863,7 +863,7 @@ describe("escalate", () => {
     expect(binding.sent.length).toBe(1);
     expect(binding.sent[0].to).toBe("mail-owner2@example.org");
     expect(binding.sent[0].subject).toBe(
-      "[NEMAR support] Escalated " + row(t).ref + ": Broken <upload>",
+      `[NEMAR support] Escalated ${row(t).ref}: Broken <upload>`,
     );
     expect(binding.sent[0].html).toContain("Broken &lt;upload&gt;");
     expect(binding.sent[0].html).toContain("needs an owner &lt;now&gt;");
@@ -1083,9 +1083,7 @@ describe("review round 1: reprocess, counts, reopen, ids", () => {
     });
     // A trigger stands in for an exclusion present at creation: the new ticket excludes the caller.
     db.run(
-      "CREATE TRIGGER excl AFTER INSERT ON mail_tickets BEGIN UPDATE mail_tickets SET excluded_user_id = " +
-        ids.owner2 +
-        " WHERE id = NEW.id; END",
+      `CREATE TRIGGER excl AFTER INSERT ON mail_tickets BEGIN UPDATE mail_tickets SET excluded_user_id = ${ids.owner2} WHERE id = NEW.id; END`,
     );
     const r = await call("owner2", "POST", "/reprocess", { raw_key: key });
     expect(r.status).toBe(404);
