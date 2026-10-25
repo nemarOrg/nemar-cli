@@ -22,15 +22,20 @@
  *    unreconciled one;
  *  - the cap is the dispatch record's: a full day asks OpenNeuro nothing, a refused send frees its
  *    unit, an unanswered one keeps it, and two ticks at once cannot pass it;
- *  - nothing is dispatched before both of gate G4's re-pulls were run by hand to `complete`, from a development
- *    build, or from what OpenNeuro or the GitHub credential could not show;
- *  - the cursor rotates, wraps, never passes a stale mirror the probes did not reach, and a tick
- *    reads at most three pages.
+ *  - a refusal the next mirror would meet too (401, 403, 404, 429, or a second one) stops the tick
+ *    as `send-refused` before that mirror;
+ *  - nothing is dispatched before both of gate G4's re-pulls were run by hand to `complete`, from a
+ *    development build, or from what OpenNeuro, the probes or their credential could not show;
+ *  - the cursor rotates, wraps, never passes a stale mirror the probes did not reach, passes a
+ *    mirror the report could not compare, and is held by one that always throws (or by probes
+ *    that all fail) for two ticks at most; a tick reads at most three pages, makes at most ten
+ *    probes, and its subrequests are counted.
  */
 
 import type { Database } from "bun:sqlite";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import type { Server } from "bun";
+import pkg from "../../package.json" with { type: "json" };
 import type { DispatchRow } from "../../shared/repull-state";
 import { verifyRepullDispatchToken } from "../src/services/github";
 import {
@@ -42,6 +47,7 @@ import {
   REPULL_SCAN_PROBE_BUDGET,
   type SchedulerTickResult,
   candidateSkip,
+  readCandidateBlockers,
   repullSchedulerLogLine,
   runRepullSchedulerCron,
 } from "../src/services/upstream-repull-scheduler";
@@ -252,11 +258,11 @@ function manualRunDone(): void {
 }
 
 /**
- * The fleet the plan's acceptance test names: four eligible `stale_ready` mirrors (01, 06, 11,
- * 12), one `current`, one `unknown`, one `unpublished` with upstream newer, an anonymous
- * `stale_ready`, one with an open re-pull, one dispatched ten days ago, one refused for content at
- * the same tag, one with an unreconciled merge claim, one whose tag has not reached the GitHub
- * mirror and one the mirror could not answer for.
+ * A fleet with every case ADR 0111's Phase 7 amendment (the 7c slice) names: four eligible
+ * `stale_ready` mirrors (01, 06, 11, 12), one `current`, one `unknown`, one `unpublished` with
+ * upstream newer, an anonymous `stale_ready`, one with an open re-pull, one dispatched ten days
+ * ago, one refused for content at the same tag, one with an unreconciled merge claim, one whose tag
+ * has not reached the GitHub mirror and one the mirror could not answer for.
  */
 function fleet(): void {
   manualRunDone();
@@ -488,6 +494,17 @@ describe("which mirrors are dispatched", () => {
     expect(sentFor()).toEqual(["on099902"]);
   });
 
+  test("staleReady counts the stale_ready mirrors the tick considered, dispatched or skipped", async () => {
+    fleet();
+    setCursor("on099906");
+    pastDispatch("on099901", 1);
+    pastDispatch("on099906", 1);
+    // 08 (recent), 09 (final refusal), 10 (unreconciled), 11 and 12 (dispatched); 07 is in progress.
+    const r = await tick();
+    expect(r).toMatchObject({ staleReady: 5, dispatched: 2, scanned: 6 });
+    expect(r.staleReady).toBe(r.dispatched + Object.values(r.skipped).reduce((a, b) => a + b, 0));
+  });
+
   test("an unpublished mirror is never a candidate, whatever upstream did", async () => {
     manualRunDone();
     mirror("on099904", { unpublished: true });
@@ -552,21 +569,51 @@ describe("the open cap is the dispatch record's", () => {
     expect(repullSchedulerLogLine(r).level).toBe("error");
   });
 
-  test("a credential GitHub refuses stops the tick before the mirror, which the next tick takes first", async () => {
+  for (const status of [401, 403, 404]) {
+    test(`a credential GitHub refuses (${status}) stops the tick as send-refused before the mirror`, async () => {
+      fleet();
+      answers = [status];
+      const r = await tick();
+      expect(r).toMatchObject({
+        outcome: "send-refused",
+        dispatched: 0,
+        sendFailed: 1,
+        refusedStatus: status,
+      });
+      expect(sent).toHaveLength(1);
+      expect(scheduler()).toMatchObject({ scan_after: "", last_outcome: "send-refused" });
+      expect(repullSchedulerLogLine(r)).toMatchObject({ level: "error" });
+      // The refused dispatch freed its unit, and the next tick takes that mirror first.
+      await tick();
+      expect(sentFor()).toEqual(["on099901", "on099901", "on099906"]);
+    });
+  }
+
+  test("a rate limit (429) on every send stops the tick at once and passes nothing by", async () => {
     fleet();
-    answers = [401];
+    answers = [429, 429, 429, 429];
     const r = await tick();
-    expect(r).toMatchObject({ outcome: "ran", dispatched: 0, sendFailed: 1 });
+    expect(r).toMatchObject({ outcome: "send-refused", sendFailed: 1, refusedStatus: 429 });
+    expect(r.skipped).toEqual({});
     expect(sent).toHaveLength(1);
     expect(scheduler().scan_after).toBe("");
-    await tick();
-    expect(sentFor()).toEqual(["on099901", "on099901", "on099906"]);
+  });
+
+  test("a second refusal in one tick stops it before that mirror; the first frees and moves on", async () => {
+    fleet();
+    answers = [422, 422];
+    const r = await tick();
+    expect(r).toMatchObject({ outcome: "send-refused", dispatched: 0, sendFailed: 2 });
+    expect(sentFor()).toEqual(["on099901", "on099906"]);
+    // Past the first (its unit freed), before the second.
+    expect(scheduler().scan_after).toBe("on099905");
+    expect(dispatches().filter((d) => d.status === "dispatch_failed")).toHaveLength(2);
   });
 
   test("a dispatch whose answer was lost keeps its unit and stays dispatched (a 5xx, and a hang)", async () => {
     fleet();
     answers = [502, "hang"];
-    const r = await tick(env(), { dispatchTimeoutMs: 200 });
+    const r = await tick(env(), { dispatchTimeoutMs: 2_000 });
     expect(r).toMatchObject({ outcome: "ran", dispatched: 0, unconfirmed: 2, sendFailed: 0 });
     expect(liveDispatches().map((d) => d.dataset_id)).toEqual(["on099901", "on099906"]);
     // Both units are used: the day is full.
@@ -577,12 +624,42 @@ describe("the open cap is the dispatch record's", () => {
   test("two ticks at once cannot pass the cap or dispatch one mirror twice", async () => {
     fleet();
     const d1 = yieldingD1(realD1(db));
-    await Promise.all([tick(env({}, d1)), tick(env({}, d1))]);
+    const results = await Promise.all([tick(env({}, d1)), tick(env({}, d1))]);
     const claimed = dispatches().filter((d) => d.status === "dispatched");
-    expect(claimed.length).toBeLessThanOrEqual(2);
+    expect(claimed).toHaveLength(2);
     expect(new Set(claimed.map((d) => d.dataset_id)).size).toBe(claimed.length);
     expect(sent.length).toBe(claimed.length);
+    // The day filled while one of them ran: the claim stopped it with the cap's own word.
+    expect(results.map((x) => x.outcome)).toContain("cap-reached");
   });
+
+  // The claim reads the switch, the secret and the cap when it claims, so a binding that changed
+  // since the tick's own checks ends the tick with the claim's word. The change is landed between
+  // the candidate's reads and its claim.
+  for (const [name, change, outcome] of [
+    ["the open switch went off", { AUTO_REPULL_ENABLED: undefined }, "switch-off"],
+    ["the callback secret went", { PRESCREEN_CALLBACK_SECRET: undefined }, "unconfigured"],
+    ["the cap became unreadable", { REPULL_DAILY_OPEN_CAP: "x" }, "cap-unreadable"],
+    ["the cap went to zero", { REPULL_DAILY_OPEN_CAP: "0" }, "cap-reached"],
+  ] as const) {
+    test(`the claim's own refusal ends the tick: ${name} is ${outcome}`, async () => {
+      fleet();
+      const bindings = env() as unknown as Record<string, unknown>;
+      bindings.DB = wrapD1(realD1(db), (sql) => {
+        if (sql !== CANDIDATE_BLOCKERS_SQL) return;
+        for (const [k, v] of Object.entries(change)) {
+          if (v === undefined) delete bindings[k];
+          else bindings[k] = v;
+        }
+      });
+      const r = await tick(bindings as unknown as Bindings);
+      expect(r.outcome).toBe(outcome);
+      expect(sent).toEqual([]);
+      expect(dispatches().filter((d) => d.status === "dispatched")).toEqual([]);
+      // Stopped before the mirror, so the next tick starts with it.
+      expect(scheduler()).toMatchObject({ scan_after: "", last_outcome: outcome });
+    });
+  }
 });
 
 // ----------------------------------------------------------------------------
@@ -641,6 +718,15 @@ describe("what keeps a tick from dispatching", () => {
     expect(db.query(MANUAL_RUN_PROOF_SQL).get()).toEqual({ n: 1 });
   });
 
+  test("the default CLI version is the Worker's own, and only a release opens the path", async () => {
+    fleet();
+    const r = await runRepullSchedulerCron(env());
+    const release = /^\d+\.\d+\.\d+$/.test(pkg.version);
+    expect([pkg.version, r?.outcome === "cli-unreleased"]).toEqual([pkg.version, !release]);
+    if (release) expect(sent.map((x) => x.body.client_payload.cli_version)).toContain(pkg.version);
+    else expect(sent).toEqual([]);
+  });
+
   test("a development build of the Worker is cli-unreleased", async () => {
     fleet();
     const r = await tick(env(), { cliVersion: "0.10.24-dev11" });
@@ -686,23 +772,112 @@ describe("what keeps a tick from dispatching", () => {
     expect(repullSchedulerLogLine(r).level).toBe("error");
   });
 
+  test("a lone mirror at the tail that OpenNeuro could not answer for does not wedge the rotation", async () => {
+    manualRunDone();
+    mirror("on099901", { tag: "1.0.0" });
+    mirror("on099902");
+    openneuro.override("ds099902", {
+      id: "ds099902",
+      latestSnapshot: null,
+      snapshots: [{ tag: "0.9.0", created: "2019-01-01T00:00:00.000Z" }],
+    });
+    setCursor("on099901");
+    // Its page holds only that mirror, so every row needing a verdict is `unchecked`; with no
+    // batch failure that is per-dataset trouble, and the cursor passes it and wraps.
+    const r = await tick();
+    expect(r).toMatchObject({ outcome: "ran", scanned: 1, unchecked: 1 });
+    expect(scheduler().scan_after).toBe("");
+    const next = await tick();
+    expect(next).toMatchObject({ outcome: "ran", scanned: 2 });
+  });
+
   test("no GitHub credential for the probes is blind, and the cursor stops before the first stale mirror", async () => {
     fleet();
     const r = await tick(env({ GITHUB_ADMIN_PAT: undefined }));
-    expect(r.outcome).toBe("blind");
+    expect(r).toMatchObject({ outcome: "blind", error: "probe-credential-missing" });
     expect(raw.log).toEqual([]);
     expect(sent).toEqual([]);
     expect(scheduler().scan_after).toBe("");
+    expect(repullSchedulerLogLine(r).line).toContain("error=probe-credential-missing");
   });
 
-  test("a failure is the outcome error, stamped, and never a throw", async () => {
+  test("every probe failing is blind and holds the cursor, for two ticks at most", async () => {
+    manualRunDone();
+    for (const id of ["on099901", "on099902", "on099903", "on099904"]) {
+      mirror(id, { mirror: "error" });
+    }
+    setCursor("on099900");
+    for (let held = 1; held <= 2; held++) {
+      const r = await tick();
+      expect(r).toMatchObject({
+        outcome: "blind",
+        error: "probes-unverified",
+        probed: 4,
+        probeUnverified: 4,
+      });
+      expect(scheduler()).toMatchObject({ scan_after: "on099900", last_outcome: "blind" });
+      expect(repullSchedulerLogLine(r).level).toBe("error");
+    }
+    // The third tick at that place passes on, still at error level, so a mirror whose OpenNeuro
+    // repository is gone cannot hold the rotation for good.
+    const third = await tick();
+    expect(third).toMatchObject({ outcome: "ran", error: "probes-unverified", probeUnverified: 4 });
+    expect(scheduler().scan_after).toBe("");
+    expect(repullSchedulerLogLine(third).level).toBe("error");
+    expect(sent).toEqual([]);
+  });
+
+  test("some probes failing is not blind, but is logged at error level with the counts", async () => {
+    manualRunDone();
+    mirror("on099901", { mirror: "error" });
+    mirror("on099902");
+    const r = await tick();
+    expect(r).toMatchObject({ outcome: "ran", probed: 2, probeUnverified: 1, dispatched: 1 });
+    const log = repullSchedulerLogLine(r);
+    expect(log.level).toBe("error");
+    expect(log.line).toContain("probed=2 probe_unverified=1");
+  });
+
+  test("a candidate that always throws holds the tick twice, then is passed by and counted", async () => {
+    manualRunDone();
+    mirror("on099901");
+    mirror("on099902");
+    const d1 = wrapD1(realD1(db), (sql, binds) => {
+      if (sql === CANDIDATE_BLOCKERS_SQL && binds[0] === "on099901") {
+        throw new Error(`D1_ERROR: simulated for ${binds[0]}`);
+      }
+    });
+    for (let held = 1; held <= 2; held++) {
+      const r = await tick(env({}, d1));
+      expect(r).toMatchObject({
+        outcome: "error",
+        error: "candidate-failed",
+        errorClass: "Error",
+        candidateErrors: 1,
+      });
+      expect(scheduler()).toMatchObject({ scan_after: "", last_outcome: "error" });
+      // A fixed word and a class, never the message.
+      expect(repullSchedulerLogLine(r).line).not.toContain("simulated");
+    }
+    expect(sent).toEqual([]);
+    const third = await tick(env({}, d1));
+    expect(third).toMatchObject({ outcome: "ran", candidateErrors: 1, dispatched: 1 });
+    expect(third.skipped).toEqual({ "candidate-error": 1 });
+    expect(sentFor()).toEqual(["on099902"]);
+    expect(
+      db.query("SELECT COUNT(*) AS n FROM audit_log WHERE action = 'repull_scheduler_held'").get(),
+    ).toEqual({ n: 2 });
+  });
+
+  test("a failure outside any candidate is the outcome error, stamped, and never a throw", async () => {
     fleet();
     const d1 = wrapD1(realD1(db), (sql) => {
-      if (sql === CANDIDATE_BLOCKERS_SQL) throw new Error("D1_ERROR: simulated");
+      if (sql.includes("FROM upstream_repull_scheduler WHERE id = 1") && sql.startsWith("SELECT")) {
+        throw new Error("D1_ERROR: simulated");
+      }
     });
     const r = await tick(env({}, d1));
-    expect(r.outcome).toBe("error");
-    expect(r.error).toContain("simulated");
+    expect(r).toMatchObject({ outcome: "error", error: "tick-failed", errorClass: "Error" });
     expect(sent).toEqual([]);
     expect(scheduler().last_outcome).toBe("error");
   });
@@ -747,6 +922,51 @@ describe("the cursor and the probe budget", () => {
     const next = await tick();
     expect(next.scanned).toBe(1);
     expect(scheduler().scan_after).toBe("");
+  });
+
+  test("the probe budget is the whole tick's: five stale mirrors on each of three pages get ten probes", async () => {
+    manualRunDone();
+    const ids = Array.from({ length: 300 }, (_, i) => `on09${String(9000 + i).padStart(4, "0")}`);
+    for (const [i, id] of ids.entries()) {
+      // Five anonymous (never dispatched) stale mirrors on each page of 100; the rest current.
+      const stale = i % 100 < 5;
+      mirror(id, stale ? { anonymous: 1 } : { tag: "1.0.0" });
+    }
+    const r = await tick();
+    const probes = raw.log.filter((l) => l.path.endsWith("/1.0.0/dataset_description.json"));
+    expect(probes.length).toBeLessThanOrEqual(REPULL_SCAN_PROBE_BUDGET);
+    expect(probes).toHaveLength(10);
+    // The budget ran out at the end of the second page, so the third is not read at all.
+    expect(r).toMatchObject({ outcome: "ran", probed: 10, deferred: false, scanned: 200 });
+    expect(r.skipped).toEqual({ anonymous: 10 });
+    expect(openneuro.log).toHaveLength(4);
+    expect(scheduler().scan_after).toBe(ids[199]);
+  });
+
+  test("the heaviest tick the suite builds: three pages, ten probes, ten dispatches, 79 calls", async () => {
+    manualRunDone();
+    const ids = Array.from({ length: 300 }, (_, i) => `on09${String(9000 + i).padStart(4, "0")}`);
+    // Three eligible stale mirrors on each of the first two pages and four on the third.
+    const eligible = new Set([0, 1, 2, 100, 101, 102, 200, 201, 202, 203]);
+    for (const [i, id] of ids.entries()) mirror(id, eligible.has(i) ? {} : { tag: "1.0.0" });
+    let d1Calls = 0;
+    const inner = realD1(db);
+    const counting = wrapD1(inner, () => {
+      d1Calls++;
+    });
+    const counted = {
+      prepare: (sql: string) => counting.prepare(sql),
+      batch: (stmts: D1PreparedStatement[]) => {
+        d1Calls++;
+        return counting.batch(stmts);
+      },
+    } as unknown as D1Database;
+    const r = await tick(env({ REPULL_DAILY_OPEN_CAP: "20" }, counted));
+    expect(r).toMatchObject({ outcome: "ran", dispatched: 10, probed: 10 });
+    const requests = openneuro.log.length + raw.log.length + sent.length;
+    // 6 GraphQL and 10 probes and 10 sends; 3 + 3 x 3 + 10 x 4 + 1 D1 calls (a token, not an App).
+    expect({ requests, d1Calls }).toEqual({ requests: 26, d1Calls: 53 });
+    expect(requests + d1Calls).toBe(79);
   });
 
   test("a stored cursor that is not a dataset id restarts the rotation", async () => {
@@ -855,6 +1075,16 @@ describe("CANDIDATE_BLOCKERS_SQL", () => {
     expect(read()).toEqual(zero);
   });
 
+  test("a refusal recorded at 1.0.0 blocks a pull to v1.0.0: the tag is normalized before it is bound", async () => {
+    mirror("on099901");
+    pastDispatch("on099901", 90, { status: "refused", code: "gitlink" });
+    const b = await readCandidateBlockers(realD1(db), "on099901", "v1.0.0");
+    expect(b?.final_refusals).toBe(1);
+    expect(candidateSkip(b)).toBe("final-refusal");
+    // The raw spelling would not have matched.
+    expect(read("on099901", "v1.0.0").final_refusals).toBe(0);
+  });
+
   test("candidateSkip: unknown anonymity is never clean, and an unreadable count stops the tick", () => {
     expect(candidateSkip(null)).toBe("missing");
     expect(candidateSkip({ ...zero, anonymous: 2 })).toBe("anonymous");
@@ -872,17 +1102,32 @@ describe("the log line", () => {
       scanned: 3,
       staleReady: 2,
       unchecked: 0,
+      probed: 2,
+      probeUnverified: 0,
       dispatched: 1,
       sendFailed: 0,
+      refusedStatus: null,
       unconfirmed: 0,
+      candidateErrors: 0,
       skipped: { recent: 1 },
       deferred: false,
       error: null,
+      errorClass: null,
     };
     expect(repullSchedulerLogLine(base)).toEqual({
       level: "info",
-      line: "[repull-scheduler] outcome=ran scanned=3 stale_ready=2 unchecked=0 dispatched=1 send_failed=0 unconfirmed=0 deferred=false skipped=recent:1",
+      line: "[repull-scheduler] outcome=ran scanned=3 stale_ready=2 unchecked=0 probed=2 probe_unverified=0 dispatched=1 send_failed=0 unconfirmed=0 candidate_error=0 deferred=false skipped=recent:1",
     });
+    expect(
+      repullSchedulerLogLine({
+        ...base,
+        outcome: "send-refused",
+        sendFailed: 1,
+        refusedStatus: 403,
+        error: "tick-failed",
+        errorClass: "TypeError",
+      }).line,
+    ).toEndWith(" refused_status=403 error=tick-failed error_class=TypeError");
     for (const outcome of [
       "switch-off",
       "cap-zero",
@@ -894,13 +1139,20 @@ describe("the log line", () => {
     for (const outcome of [
       "blind",
       "error",
+      "send-refused",
       "cap-unreadable",
       "cli-unreleased",
       "unconfigured",
     ] as const) {
       expect(repullSchedulerLogLine({ ...base, outcome }).level).toBe("error");
     }
-    for (const trouble of [{ sendFailed: 1 }, { unconfirmed: 1 }, { unchecked: 1 }]) {
+    for (const trouble of [
+      { sendFailed: 1 },
+      { unconfirmed: 1 },
+      { unchecked: 1 },
+      { probeUnverified: 1 },
+      { candidateErrors: 1 },
+    ]) {
       expect(repullSchedulerLogLine({ ...base, ...trouble }).level).toBe("error");
     }
   });

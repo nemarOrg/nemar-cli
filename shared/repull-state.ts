@@ -883,15 +883,23 @@ export const REPULL_HOLD_REASONS = [
 export type HoldReason = (typeof REPULL_HOLD_REASONS)[number];
 
 /**
- * What the scheduler's daily tick concluded (`upstream_repull_scheduler.last_outcome`), in the
- * order it decides them. Before the scan: the open switch is off (`switch-off`); the open cap is
- * set to something unreadable (`cap-unreadable`) or to 0 (`cap-zero`); the Worker is not a release
+ * What the scheduler's daily tick concluded (`upstream_repull_scheduler.last_outcome`).
+ *
+ * Before the scan, in this order: the open switch is off (`switch-off`); the open cap is set to
+ * something unreadable (`cap-unreadable`) or to 0 (`cap-zero`); the Worker is not a release
  * build, so a run could not install its CLI (`cli-unreleased`); the Worker has no callback secret,
  * so no dispatch token can be signed (`unconfigured`); the two first re-pulls have not both been
- * run by hand to `complete` (`waiting-for-manual-run`); today's units are used (`cap-reached`). After it: the
- * scan ran, whether or not it dispatched anything (`ran`); OpenNeuro, or the GitHub credential the
- * probes need, could not be read, so nothing was dispatched from what it could not see (`blind`);
- * something failed (`error`). A tick outside exact production stores nothing at all.
+ * run by hand to `complete` (`waiting-for-manual-run`); today's units are used (`cap-reached`).
+ *
+ * During the scan the dispatch record's claim can end the tick with four of the same words, read
+ * at the moment it claims: `switch-off`, `cap-unreadable`, `unconfigured`, and `cap-reached` when
+ * the day filled while the tick ran (another tick claimed the last unit). After the scan: it ran,
+ * whether or not it dispatched anything (`ran`); GitHub refused a send in a way the next mirror
+ * would meet too (a credential it does not take, a rate limit, or a second refusal in one tick),
+ * so the tick stopped before that mirror (`send-refused`); OpenNeuro, or every probe of OpenNeuro's
+ * GitHub mirror, could not be read, so nothing was dispatched from what could not be seen and the
+ * cursor did not move (`blind`); something failed (`error`). A tick outside exact production
+ * stores nothing at all.
  */
 export const REPULL_SCHEDULER_OUTCOMES = [
   "switch-off",
@@ -902,6 +910,7 @@ export const REPULL_SCHEDULER_OUTCOMES = [
   "waiting-for-manual-run",
   "cap-reached",
   "ran",
+  "send-refused",
   "blind",
   "error",
 ] as const;

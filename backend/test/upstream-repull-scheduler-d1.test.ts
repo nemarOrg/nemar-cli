@@ -4,10 +4,11 @@
  *
  * bun:sqlite is more lenient than D1 in places that matter here: numbered parameters (`?1`, `?2`)
  * beside the create's own rule nested as a subquery, a COALESCE over a bound NULL in the stamp, and
- * the staleness report's page joins. So the blockers and the proof are run on D1 for each fact, and
- * one whole tick is run on D1 against the same loopback stand-ins the SQLite suite uses (OpenNeuro
- * in its synthetic mode, its GitHub mirror, and GitHub's dispatch endpoint). In-process only: no
- * `wrangler dev` and no server of the Worker's own.
+ * the staleness report's page joins. So the blockers, the proof and the holds' audit rows are run
+ * on D1 for each fact, and one whole tick (with gate G4's two re-pulls recorded) is run on D1
+ * against the same loopback stand-ins the SQLite suite uses (OpenNeuro in its synthetic mode, its
+ * GitHub mirror, and GitHub's dispatch endpoint). In-process only: no `wrangler dev` and no server
+ * of the Worker's own.
  */
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
@@ -15,7 +16,11 @@ import type { Server } from "bun";
 import { Miniflare } from "miniflare";
 import {
   CANDIDATE_BLOCKERS_SQL,
+  CANDIDATE_HELD_AUDIT_SQL,
+  CANDIDATE_HELD_COUNT_SQL,
   MANUAL_RUN_PROOF_SQL,
+  PROBES_HELD_AUDIT_SQL,
+  PROBES_HELD_COUNT_SQL,
   REPULL_G4_DATASETS,
   SCHEDULER_STAMP_SQL,
   runRepullSchedulerCron,
@@ -210,6 +215,13 @@ describe("the scheduler's statements on D1", () => {
     expect(await d1.prepare(MANUAL_RUN_PROOF_SQL).first()).toEqual({ n: 0 });
     await g4Done();
     expect(await d1.prepare(MANUAL_RUN_PROOF_SQL).first()).toEqual({ n: 2 });
+
+    // The holds are counted from the audit rows they write, by dataset and by cursor.
+    await d1.prepare(CANDIDATE_HELD_AUDIT_SQL).bind("on099901", "Error", 1).run();
+    await d1.prepare(PROBES_HELD_AUDIT_SQL).bind("", 4, 1).run();
+    expect(await d1.prepare(CANDIDATE_HELD_COUNT_SQL).bind("on099901").first()).toEqual({ n: 1 });
+    expect(await d1.prepare(CANDIDATE_HELD_COUNT_SQL).bind("on099902").first()).toEqual({ n: 0 });
+    expect(await d1.prepare(PROBES_HELD_COUNT_SQL).bind("").first()).toEqual({ n: 1 });
 
     // The stamp keeps the cursor for a NULL and takes a new one otherwise.
     await d1.prepare(SCHEDULER_STAMP_SQL).bind("on099901", "ran").run();

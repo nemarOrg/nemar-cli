@@ -27,7 +27,9 @@
  * nothing here can dispatch past `REPULL_DAILY_OPEN_CAP`. The day's count is also read once before
  * the scan, only so a day that is already full costs no OpenNeuro request (`cap-reached`); the
  * claim alone decides a unit. A dispatch GitHub refused (a 4xx) frees its unit; one whose answer
- * was lost (a 5xx, a lost connection, the timeout) keeps it, because it may be running.
+ * was lost (a 5xx, a lost connection, the timeout) keeps it, because it may be running. A refusal
+ * the next mirror would meet too (401, 403, 404: the credential; 429: the rate limit; or a second
+ * refusal in one tick) stops the tick before that mirror (`send-refused`).
  *
  * PRODUCTION ONLY. Outside `ENVIRONMENT` exactly `production` the tick returns null before it
  * reads or writes anything, and it is called only from the production-only daily block, absent
@@ -43,15 +45,26 @@
  * `stale_ready` are bounded per tick ({@link REPULL_SCAN_PROBE_BUDGET}); a stale row the budget did
  * not reach reads `stale_unverified`, so the cursor stops before the first such row and the next
  * tick probes it, rather than passing it by until the next rotation (which would starve every
- * stale mirror behind ten ineligible ones). A page OpenNeuro could not answer, or a pass with no
- * GitHub credential, is `blind`: nothing is dispatched from what it could not see, and the cursor
- * does not move past it.
+ * stale mirror behind ten ineligible ones). The tick is `blind`, dispatches nothing from what it
+ * could not see and does not move the cursor past it, in three cases: OpenNeuro failed a batch
+ * (the page carries `errors`), the probes had no GitHub credential, or every probe the tick made
+ * came back unverified. A mirror the report could not compare on its own (`unchecked`, with no
+ * batch failure) is passed by and counted, so one dataset that always fails cannot hold the
+ * cursor. A candidate whose own reads throw holds the tick (the cursor stays before it), and so
+ * does a tick whose every probe came back unverified, but each holds at most two ticks at one
+ * place in {@link REPULL_WINDOW_DAYS} days; the third passes it by (a candidate as
+ * `candidate-error`), so neither one mirror that always throws nor one whose OpenNeuro repository
+ * is gone can hold the rotation for good.
  *
- * COST on the daily tick, which shares one subrequest allowance with every daily job: per page, at
- * most 2 GraphQL requests and 3 D1 statements; at most 10 tag probes and 10 control reads; one
- * token; 6 D1 statements before the scan and one after; and per `stale_ready` mirror (at most 10,
- * one per probe) 2 statements to skip it, or about 5 to dispatch it (the blockers, the fences, the
- * claim's batch and read-back, the send), one more when GitHub refuses. About 100 in the worst case.
+ * COST on the daily tick, which shares one subrequest allowance with every daily job, counted from
+ * the code: 3 D1 statements before the first page (the proof, the day's count, the cursor) and 1
+ * after it (the stamp); per page, 3 D1 statements and at most 2 GraphQL requests; at most 10 tag
+ * probes and, for a tag that is not there, 10 control reads; one token for an App credential (none
+ * for a token); and per `stale_ready` mirror (at most 10, one per probe) 2 D1 statements to skip
+ * it, or 4 and the send to dispatch it (the blockers, the fences, the claim's batch and its read-
+ * back), one more when GitHub refuses. A tick of three pages, ten probes and ten dispatches
+ * measures 79 (`upstream-repull-scheduler.test.ts` pins it), and by the count above no tick can
+ * exceed about 85.
  *
  * NO MAIL. Nothing here imports a mail service (`repull-no-mail-scan.test.ts`), and nothing here
  * reaches discovery or the auto-import (`repull-discovery-separation.test.ts`).
@@ -66,13 +79,12 @@ import {
 } from "../../../shared/repull-state.js";
 import { STALE_STATES, type UpstreamStatusRow } from "../../../shared/upstream-staleness.js";
 import type { Bindings } from "../types/bindings.js";
-import { getDatasetsToken } from "./github-auth.js";
 import {
   UPSTREAM_REPULL_DISPATCH_TIMEOUT_MS,
   buildUpstreamRepullPayload,
+  errorClassName,
   triggerUpstreamRepullRun,
 } from "./github/dispatch.js";
-import { errorMessage } from "./repo-metadata.js";
 import { autoRepullEnabled, isExactProduction, repullOpenCap } from "./repull-switches.js";
 import {
   OPEN_DISPATCHES_TODAY_SQL,
@@ -89,20 +101,31 @@ export const REPULL_SCAN_PROBE_BUDGET = 10;
 /** A dataset gets at most one first dispatch, or one re-pull, in this many days. */
 export const REPULL_WINDOW_DAYS = 30;
 /**
+ * A candidate whose own reads throw, or a tick whose every probe failed, is held at one place for
+ * fewer than this many ticks in {@link REPULL_WINDOW_DAYS} days: the first two stop there, and the
+ * third passes it by.
+ */
+export const REPULL_CANDIDATE_HOLD_TICKS = 3;
+/**
  * The re-pulls the design record's gate G4 names, run by hand before anything runs on its own
  * (`on004362`, then `on003645`, or the reverse when upstream's snapshot of one is late). Both must
  * have been run by an administrator to `complete` with their tags before the scheduler dispatches.
  */
 export const REPULL_G4_DATASETS = ["on003645", "on004362"] as const;
 
-/** GitHub answers these when the credential cannot reach the central repository at all. */
-const SYSTEMIC_REFUSALS: ReadonlySet<number> = new Set([401, 403, 404]);
+/**
+ * Refusals the next mirror would meet as well, so the tick stops before the mirror instead of
+ * spending its unit: 401, 403 and 404 say the credential cannot reach the central repository, and
+ * 429 is GitHub's rate limit.
+ */
+const STOPPING_REFUSALS: ReadonlySet<number> = new Set([401, 403, 404, 429]);
 /** A version the run can install from npm as a release. */
 const RELEASE_VERSION = /^\d+\.\d+\.\d+$/;
 /** The outcomes an operator must see: the tick could not do its work, or was not configured to. */
 const TROUBLE: ReadonlySet<SchedulerOutcome> = new Set([
   "blind",
   "error",
+  "send-refused",
   "cap-unreadable",
   "cli-unreleased",
   "unconfigured",
@@ -131,8 +154,9 @@ const UNRECONCILED_FOR_DATASET_1 = (() => {
 
 /**
  * Why a `stale_ready` mirror is not dispatched, as one row of facts; `?1` the dataset, `?2` the
- * tag the dispatch would pull (as the dispatch record stores it, without a leading `v`). Each
- * count is 0, never NULL; `anonymous` is NULL only when the dataset's row is gone.
+ * tag the dispatch would pull, as the dispatch record stores it (without a leading `v`; bind it
+ * through {@link readCandidateBlockers}, which normalizes it). Each count is 0, never NULL;
+ * `anonymous` is NULL only when the dataset's row is gone.
  */
 export const CANDIDATE_BLOCKERS_SQL = `SELECT
   (SELECT anonymous FROM datasets WHERE dataset_id = ?1) AS anonymous,
@@ -170,11 +194,34 @@ export const SCHEDULER_CURSOR_SQL = "SELECT scan_after FROM upstream_repull_sche
 
 /**
  * Stamp the tick, in one statement: `?1` the new cursor (NULL keeps the stored one, for a tick
- * that stopped before its scan), `?2` the outcome.
+ * that stopped before its scan or did not move), `?2` the outcome.
  */
 export const SCHEDULER_STAMP_SQL = `UPDATE upstream_repull_scheduler
   SET scan_after = COALESCE(?1, scan_after), last_tick_at = datetime('now'), last_outcome = ?2
   WHERE id = 1`;
+
+/** The ticks a candidate held in the window: `?` the dataset. */
+export const CANDIDATE_HELD_COUNT_SQL = `SELECT COUNT(*) AS n FROM audit_log
+  WHERE action = 'repull_scheduler_held' AND resource_type = 'dataset' AND resource_id = ?
+    AND timestamp > datetime('now', '-${REPULL_WINDOW_DAYS} days')`;
+
+/**
+ * One tick a candidate held: `?1` the dataset, `?2` its error's class (a fixed word, never the
+ * message), `?3` how many ticks it has held, this one included.
+ */
+export const CANDIDATE_HELD_AUDIT_SQL = `INSERT INTO audit_log (user_id, action, resource_type, resource_id, details)
+  VALUES (NULL, 'repull_scheduler_held', 'dataset', ?1,
+    json_object('error_class', ?2, 'held_ticks', ?3))`;
+
+/** The ticks held in the window because every probe failed, at one cursor: `?` the cursor. */
+export const PROBES_HELD_COUNT_SQL = `SELECT COUNT(*) AS n FROM audit_log
+  WHERE action = 'repull_scheduler_probes_held' AND resource_type = 'scheduler_cursor'
+    AND resource_id = ? AND timestamp > datetime('now', '-${REPULL_WINDOW_DAYS} days')`;
+
+/** One tick held because every probe failed: `?1` the cursor it held, `?2` the probes, `?3` the ticks held. */
+export const PROBES_HELD_AUDIT_SQL = `INSERT INTO audit_log (user_id, action, resource_type, resource_id, details)
+  VALUES (NULL, 'repull_scheduler_probes_held', 'scheduler_cursor', ?1,
+    json_object('probed', ?2, 'held_ticks', ?3))`;
 
 // ----------------------------------------------------------------------------
 // One candidate
@@ -211,10 +258,25 @@ const COUNTS = [
 ] as const satisfies readonly (keyof CandidateBlockers)[];
 
 /**
+ * The blockers of one candidate, with the tag normalized as the dispatch record stores it: a
+ * refusal recorded at `1.0.0` blocks a pull to `v1.0.0`, which names the same snapshot.
+ */
+export function readCandidateBlockers(
+  db: D1Database,
+  datasetId: string,
+  toTag: string,
+): Promise<CandidateBlockers | null> {
+  return db
+    .prepare(CANDIDATE_BLOCKERS_SQL)
+    .bind(datasetId, normalizeUpstreamTag(toTag))
+    .first<CandidateBlockers>();
+}
+
+/**
  * Why the facts forbid a dispatch, or null when they allow one. A dataset is dispatched only when
  * it says `anonymous` is exactly 0: a NULL (the row is gone) is `missing`, and any other value is
- * `anonymous`, because unknown is never clean. A count that is not a number is a defect, and the
- * tick stops rather than read it as zero.
+ * `anonymous`, because unknown is never clean. A count that is not a number is a defect, and it
+ * throws rather than read as zero (the tick then holds at that candidate).
  */
 export function candidateSkip(b: CandidateBlockers | null): CandidateSkip | null {
   if (b === null || b.anonymous === null) return "missing";
@@ -238,8 +300,8 @@ type Considered =
   | { kind: "dispatched" }
   /** GitHub's answer was lost: the dispatch stays `dispatched` and keeps its unit. */
   | { kind: "unconfirmed" }
-  /** GitHub refused it (a 4xx): ended `dispatch_failed`, its unit freed. */
-  | { kind: "send-failed"; systemic: boolean }
+  /** GitHub refused it (a 4xx, with its status): ended `dispatch_failed`, its unit freed. */
+  | { kind: "send-failed"; status: number }
   /** The claim says the tick cannot go on (the day is full, or the Worker cannot claim at all). */
   | { kind: "stop"; outcome: SchedulerOutcome };
 
@@ -247,8 +309,8 @@ interface TickContext {
   env: Bindings;
   cliVersion: string;
   timeoutMs: number;
-  /** The GitHub credential of the tick: the probes' token, or minted once for the dispatch. */
-  pat: () => Promise<string>;
+  /** The probes' GitHub credential, which the dispatch is sent with. */
+  probeAuth: ProbeAuth;
 }
 
 async function considerCandidate(ctx: TickContext, row: UpstreamStatusRow): Promise<Considered> {
@@ -256,20 +318,20 @@ async function considerCandidate(ctx: TickContext, row: UpstreamStatusRow): Prom
   const ds = row.ds;
   const fromTag = row.recorded?.tag ?? null;
   const toTag = row.upstream?.latest_tag ?? null;
-  if (ds === null || fromTag === null || toTag === null)
+  if (ds === null || fromTag === null || toTag === null) {
     return { kind: "skip", word: "incomplete" };
-  const to = normalizeUpstreamTag(toTag);
+  }
 
-  const blockers = await env.DB.prepare(CANDIDATE_BLOCKERS_SQL)
-    .bind(row.dataset_id, to)
-    .first<CandidateBlockers>();
-  const skip = candidateSkip(blockers);
+  const skip = candidateSkip(await readCandidateBlockers(env.DB, row.dataset_id, toTag));
   if (skip) return { kind: "skip", word: skip };
   const fenced = await datasetFenceRefusal(env.DB, { dataset_id: row.dataset_id, upstream_ds: ds });
   if (fenced) return { kind: "skip", word: fenced.code };
 
-  // The credential first: a claim made and then not sent would hold a unit and the live slot.
-  const pat = await ctx.pat();
+  // A row is `stale_ready` only after a probe of OpenNeuro's GitHub mirror answered, and the probe
+  // sets the pass's credential first; it is read before the claim, so a claim is never made that
+  // could not then be sent.
+  const pat = ctx.probeAuth.pat;
+  if (pat === undefined) throw new Error("a stale_ready row without the probes' credential");
   const claim = await claimOpenDispatch(env, {
     datasetId: row.dataset_id,
     upstreamDs: ds,
@@ -302,14 +364,16 @@ async function considerCandidate(ctx: TickContext, row: UpstreamStatusRow): Prom
       datasetId: row.dataset_id,
       upstreamDs: ds,
       fromTag: normalizeUpstreamTag(fromTag),
-      toTag: to,
+      toTag: normalizeUpstreamTag(toTag),
       dispatchId: claim.id,
       repullId: null,
       token: claim.token,
       cliVersion: ctx.cliVersion,
     });
   } catch (err) {
-    // Nothing was sent, so the claim must not hold its unit and the live slot until the watchdog.
+    // Every field was checked before the claim, so this guards drift between the builder's rules
+    // and the claim's. Nothing was sent: the claim must not hold its unit and the live slot until
+    // the watchdog.
     await markDispatchSendFailed(env.DB, claim.id, "dispatch-failed");
     throw err;
   }
@@ -317,12 +381,21 @@ async function considerCandidate(ctx: TickContext, row: UpstreamStatusRow): Prom
   if (sent === "sent") return { kind: "dispatched" };
   if (sent === "unknown") return { kind: "unconfirmed" };
   await markDispatchSendFailed(env.DB, claim.id, "dispatch-refused");
-  return { kind: "send-failed", systemic: SYSTEMIC_REFUSALS.has(sent.refused) };
+  return { kind: "send-failed", status: sent.refused };
 }
 
 // ----------------------------------------------------------------------------
 // The tick
 // ----------------------------------------------------------------------------
+
+/** Why a tick failed or saw nothing, in fixed words; never a message. */
+export type SchedulerError =
+  | "openneuro-unreadable"
+  | "probe-credential-missing"
+  | "probes-unverified"
+  | "candidate-failed"
+  | "tick-failed"
+  | "stamp-failed";
 
 export interface SchedulerTickResult {
   outcome: SchedulerOutcome;
@@ -331,22 +404,33 @@ export interface SchedulerTickResult {
   /** Of them, the `stale_ready` ones (dispatched or skipped). */
   staleReady: number;
   /**
-   * Of them, the ones the report could not compare with upstream (`unchecked`): passed by, so one
-   * mirror that always fails cannot hold the cursor, and met again on the next rotation.
+   * Of them, the ones the report could not compare with upstream (`unchecked`) with no batch
+   * failure: passed by, so one mirror that always fails cannot hold the cursor, and met again on
+   * the next rotation.
    */
   unchecked: number;
+  /** Stale rows the tick's probes reached. */
+  probed: number;
+  /** Of them, the ones whose probe could not answer (`stale_unverified`). */
+  probeUnverified: number;
   /** Dispatches GitHub took. */
   dispatched: number;
   /** Dispatches GitHub refused (a 4xx): ended `dispatch_failed`, their units freed. */
   sendFailed: number;
+  /** The status of the last refusal, or null. */
+  refusedStatus: number | null;
   /** Dispatches whose answer was lost: still `dispatched`, their units kept. */
   unconfirmed: number;
+  /** Candidates whose own reads threw (held, or passed by as `candidate-error`). */
+  candidateErrors: number;
   /** Why each `stale_ready` mirror that was not dispatched was skipped, by word. */
   skipped: Record<string, number>;
   /** The probe budget ran out before the stale rows did; the next tick starts at the first left. */
   deferred: boolean;
-  /** For `error`: what failed. */
-  error: string | null;
+  /** Why the tick failed or saw nothing, as a fixed word. */
+  error: SchedulerError | null;
+  /** The class of the error that failed it ({@link errorClassName}), never its message. */
+  errorClass: string | null;
 }
 
 export interface SchedulerOptions {
@@ -355,6 +439,8 @@ export interface SchedulerOptions {
   /** How long a dispatch waits for GitHub; {@link UPSTREAM_REPULL_DISPATCH_TIMEOUT_MS} by default. */
   dispatchTimeoutMs?: number;
 }
+
+const isStale = (row: UpstreamStatusRow) => (STALE_STATES as readonly string[]).includes(row.state);
 
 /**
  * The index of the first stale row the probes did not reach, or the page's length. The report
@@ -365,7 +451,7 @@ export interface SchedulerOptions {
 function probedPrefix(rows: readonly UpstreamStatusRow[], attempted: number): number {
   let stale = 0;
   for (let i = 0; i < rows.length; i++) {
-    if ((STALE_STATES as readonly string[]).includes((rows[i] as UpstreamStatusRow).state)) {
+    if (isStale(rows[i] as UpstreamStatusRow)) {
       if (stale === attempted) return i;
       stale++;
     }
@@ -400,19 +486,14 @@ async function tick(
   const stored = await db.prepare(SCHEDULER_CURSOR_SQL).first<{ scan_after: string }>();
   if (!stored) throw new Error("the scheduler's row is missing");
   // A stored cursor that is not a dataset id restarts the rotation; it is never guessed at.
-  let cursor = CURSOR_RE.test(stored.scan_after) ? stored.scan_after : "";
+  const start = CURSOR_RE.test(stored.scan_after) ? stored.scan_after : "";
+  let cursor = start;
 
-  const probeAuth: ProbeAuth = {};
-  let minted: Promise<string> | null = null;
   const ctx: TickContext = {
     env,
     cliVersion,
     timeoutMs: opts.dispatchTimeoutMs ?? UPSTREAM_REPULL_DISPATCH_TIMEOUT_MS,
-    pat: () => {
-      if (probeAuth.pat !== undefined) return Promise.resolve(probeAuth.pat);
-      minted ??= getDatasetsToken(env);
-      return minted;
-    },
+    probeAuth: {},
   };
   const advance = (row: UpstreamStatusRow) => {
     r.scanned++;
@@ -422,21 +503,55 @@ async function tick(
     moved.cursor = cursor;
   };
 
+  let outcome: SchedulerOutcome = "ran";
   let probesLeft = REPULL_SCAN_PROBE_BUDGET;
-  for (let page = 0; page < REPULL_SCAN_PAGES && probesLeft > 0; page++) {
+  scan: for (let page = 0; page < REPULL_SCAN_PAGES && probesLeft > 0; page++) {
     const p = await runUpstreamStatusPage(env, {
       after: cursor,
       probeBudget: probesLeft,
-      probeAuth,
+      probeAuth: ctx.probeAuth,
     });
-    if (!p.ok) return "blind";
+    // A batch OpenNeuro failed: its mirrors were not seen, so neither they nor the rest of the page
+    // are passed by. A page whose rows are all `unchecked` with no batch failure is per-dataset
+    // trouble, and is passed by below.
+    if (p.errors.length > 0) {
+      r.error = "openneuro-unreadable";
+      outcome = "blind";
+      break;
+    }
     const reached = probedPrefix(p.rows, p.probes.attempted);
     for (const row of p.rows.slice(0, reached)) {
+      if (isStale(row)) {
+        r.probed++;
+        if (row.state === "stale_unverified") r.probeUnverified++;
+      }
       if (row.state !== "stale_ready") {
         advance(row);
         continue;
       }
-      const c = await considerCandidate(ctx, row);
+      let c: Considered;
+      try {
+        c = await considerCandidate(ctx, row);
+      } catch (err) {
+        r.candidateErrors++;
+        r.errorClass = errorClassName(err);
+        const held =
+          (await db.prepare(CANDIDATE_HELD_COUNT_SQL).bind(row.dataset_id).first<{ n: number }>())
+            ?.n ?? 0;
+        if (held >= REPULL_CANDIDATE_HOLD_TICKS - 1) {
+          // It has held the rotation long enough: pass it by, so everything behind it is reached.
+          r.skipped["candidate-error"] = (r.skipped["candidate-error"] ?? 0) + 1;
+          advance(row);
+          continue;
+        }
+        await db
+          .prepare(CANDIDATE_HELD_AUDIT_SQL)
+          .bind(row.dataset_id, r.errorClass, held + 1)
+          .run();
+        r.error = "candidate-failed";
+        outcome = "error";
+        break scan;
+      }
       switch (c.kind) {
         case "skip":
           r.skipped[c.word] = (r.skipped[c.word] ?? 0) + 1;
@@ -448,34 +563,60 @@ async function tick(
           else r.unconfirmed++;
           advance(row);
           remaining--;
-          if (remaining <= 0) return "ran";
+          if (remaining <= 0) break scan;
           break;
         case "send-failed":
           r.sendFailed++;
-          // A credential that cannot reach the central repository is no fault of this mirror:
-          // stop, and leave the cursor before it so the next tick starts with it.
-          if (c.systemic) return "ran";
+          r.refusedStatus = c.status;
+          // A refusal the next mirror would meet too stops the tick before this mirror, so the
+          // next tick starts with it; one other refusal frees its unit and the scan goes on.
+          if (STOPPING_REFUSALS.has(c.status) || r.sendFailed > 1) {
+            outcome = "send-refused";
+            break scan;
+          }
           advance(row);
           break;
         case "stop":
-          return c.outcome;
+          outcome = c.outcome;
+          break scan;
       }
     }
     if (reached < p.rows.length) {
       // Stale rows the probes did not reach: the next tick starts with the first of them.
-      if (probeAuth.failure !== undefined) return "blind";
-      r.deferred = true;
-      return "ran";
+      if (ctx.probeAuth.failure !== undefined) {
+        r.error = "probe-credential-missing";
+        outcome = "blind";
+      } else {
+        r.deferred = true;
+      }
+      break;
     }
     probesLeft -= p.probes.attempted;
     if (p.next_cursor === null) {
       // The end of the fleet: the next tick starts again from the first mirror.
       cursor = "";
       moved.cursor = "";
-      return "ran";
+      break;
     }
   }
-  return "ran";
+  if (outcome === "ran" && r.probed > 0 && r.probeUnverified === r.probed) {
+    // Every probe failed (an expired token, GitHub's raw host down, a credential that cannot read
+    // OpenNeuro's repositories): no stale mirror was seen, so none is passed by. The hold is
+    // bounded like a candidate's, because a stale mirror whose OpenNeuro repository is gone probes
+    // unverified on every pass, and holding for it alone would stop the rotation for good.
+    r.error = "probes-unverified";
+    const held =
+      (await db.prepare(PROBES_HELD_COUNT_SQL).bind(start).first<{ n: number }>())?.n ?? 0;
+    if (held < REPULL_CANDIDATE_HOLD_TICKS - 1) {
+      await db
+        .prepare(PROBES_HELD_AUDIT_SQL)
+        .bind(start, r.probed, held + 1)
+        .run();
+      moved.cursor = null;
+      return "blind";
+    }
+  }
+  return outcome;
 }
 
 /**
@@ -494,37 +635,43 @@ export async function runRepullSchedulerCron(
     scanned: 0,
     staleReady: 0,
     unchecked: 0,
+    probed: 0,
+    probeUnverified: 0,
     dispatched: 0,
     sendFailed: 0,
+    refusedStatus: null,
     unconfirmed: 0,
+    candidateErrors: 0,
     skipped: {},
     deferred: false,
     error: null,
+    errorClass: null,
   };
   const moved: { cursor: string | null } = { cursor: null };
   try {
     r.outcome = await tick(env, opts, r, moved);
   } catch (err) {
     r.outcome = "error";
-    r.error = errorMessage(err);
+    r.error = "tick-failed";
+    r.errorClass = errorClassName(err);
   }
   try {
     const res = await env.DB.prepare(SCHEDULER_STAMP_SQL).bind(moved.cursor, r.outcome).run();
     if (res.meta?.changes !== 1) throw new Error("the scheduler's row is missing");
   } catch (err) {
-    r.error = [r.error, `the tick could not be stamped: ${errorMessage(err)}`]
-      .filter((e) => e !== null)
-      .join("; ");
     r.outcome = "error";
+    r.error = "stamp-failed";
+    r.errorClass = errorClassName(err);
   }
   return r;
 }
 
 /**
  * The tick's one log line, and its level: error for an outcome that means the tick could not do
- * its work or was not configured to, for any dispatch GitHub refused or did not answer, and for any
- * mirror the report could not compare.
- * Counts and fixed words only.
+ * its work or was not configured to, and for any dispatch GitHub refused or did not answer, any
+ * mirror the report could not compare, any probe that could not answer and any candidate that
+ * threw. Counts and fixed words only: the error is a {@link SchedulerError} word and its class a
+ * plain identifier, never a message.
  */
 export function repullSchedulerLogLine(r: SchedulerTickResult): {
   level: "info" | "error";
@@ -535,12 +682,30 @@ export function repullSchedulerLogLine(r: SchedulerTickResult): {
       .sort(([a], [b]) => a.localeCompare(b))
       .map(([word, n]) => `${word}:${n}`)
       .join(",") || "none";
-  const line =
-    `[repull-scheduler] outcome=${r.outcome} scanned=${r.scanned} stale_ready=${r.staleReady} ` +
-    `unchecked=${r.unchecked} ` +
-    `dispatched=${r.dispatched} send_failed=${r.sendFailed} unconfirmed=${r.unconfirmed} ` +
-    `deferred=${r.deferred} skipped=${skipped}${r.error ? ` error=${JSON.stringify(r.error)}` : ""}`;
+  const fields = [
+    `outcome=${r.outcome}`,
+    `scanned=${r.scanned}`,
+    `stale_ready=${r.staleReady}`,
+    `unchecked=${r.unchecked}`,
+    `probed=${r.probed}`,
+    `probe_unverified=${r.probeUnverified}`,
+    `dispatched=${r.dispatched}`,
+    `send_failed=${r.sendFailed}`,
+    `unconfirmed=${r.unconfirmed}`,
+    `candidate_error=${r.candidateErrors}`,
+    `deferred=${r.deferred}`,
+    `skipped=${skipped}`,
+  ];
+  if (r.refusedStatus !== null) fields.push(`refused_status=${r.refusedStatus}`);
+  if (r.error !== null) fields.push(`error=${r.error}`);
+  if (r.errorClass !== null) fields.push(`error_class=${r.errorClass}`);
+  const line = `[repull-scheduler] ${fields.join(" ")}`;
   const trouble =
-    TROUBLE.has(r.outcome) || r.sendFailed > 0 || r.unconfirmed > 0 || r.unchecked > 0;
+    TROUBLE.has(r.outcome) ||
+    r.sendFailed > 0 ||
+    r.unconfirmed > 0 ||
+    r.unchecked > 0 ||
+    r.probeUnverified > 0 ||
+    r.candidateErrors > 0;
   return { level: trouble ? "error" : "info", line };
 }
