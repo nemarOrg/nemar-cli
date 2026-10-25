@@ -82,11 +82,17 @@ BEGIN
   UPDATE mail_tickets SET last_activity_at = NEW.last_message_at WHERE id = NEW.id;
 END;
 
--- The cascade emptied the children when the old parent went; restore them with their ids.
+-- The cascade emptied the children when the old parent went; restore them with their ids. Each
+-- DELETE is a no-op after that cascade and keeps the restore exact if a runner ever skipped it.
+DELETE FROM mail_messages;
 INSERT INTO mail_messages SELECT * FROM mail_bak_messages;
+DELETE FROM mail_ticket_tags;
 INSERT INTO mail_ticket_tags SELECT * FROM mail_bak_tags;
+DELETE FROM mail_ticket_events;
 INSERT INTO mail_ticket_events SELECT * FROM mail_bak_events;
+DELETE FROM mail_reply_keys;
 INSERT INTO mail_reply_keys SELECT * FROM mail_bak_reply_keys;
+DELETE FROM mail_note_keys;
 INSERT INTO mail_note_keys SELECT * FROM mail_bak_note_keys;
 
 -- The sequence never goes backwards.

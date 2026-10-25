@@ -23,11 +23,11 @@ A queue is chosen by the local part of the address the mail was sent to (`suppor
 Plus tags other than a ticket reference are kept as tags.
 
 **Threading.**
-A reply from NEMAR is sent from `support@<domain>` with reply-to `support+t<ref>@<domain>`, so the requester's answer reaches the ticket by the plus address even if their client drops every header.
+A reply from NEMAR is sent from `support@<domain>` with reply-to `support+t<ref>@<domain>` (amended 2026-10-25: `support+t-<ref>@<domain>` for a three-word reference), so the requester's answer reaches the ticket by the plus address even if their client drops every header.
 Failing that, an inbound message threads by `In-Reply-To` and then `References` against stored Message-IDs.
-NEMAR sets its own `Message-ID`, `In-Reply-To` (the latest inbound message) and `References` (the chain) on every reply; the sender accepts only those three header names, with no control characters, so no value can add a header.
+NEMAR sets its own `Message-ID` (amended 2026-10-25: no longer; the mail provider sets it), `In-Reply-To` (the latest inbound message) and `References` (the chain) on every reply; the sender accepts only those three header names, with no control characters, so no value can add a header.
 The domain comes from `FROM_EMAIL`, so staging replies come from the staging subdomain and production from the apex, each an allowed sender of its own binding.
-A ticket reference is 50 random bits, not a secret: it routes, it does not authorize, and a message judged spam is never threaded.
+A ticket reference is 50 random bits (amended 2026-10-25: about 31 bits for a three-word reference), not a secret: it routes, it does not authorize, and a message judged spam is never threaded.
 
 **Spam.**
 A message whose sender fails DMARC, or that passes no authentication mechanism at all, is stored with status `spam`: kept, never assigned, never notified, and not replyable.
