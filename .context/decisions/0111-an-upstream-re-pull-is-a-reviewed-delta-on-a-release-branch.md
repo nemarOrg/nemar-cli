@@ -122,7 +122,7 @@ Everything in this section is designed and not yet built.
 - `diffNewDatasets` stays id-only, so the live auto-import never sees a stale mirror; staleness is computed by its own report.
 - `AUTO_REPULL_ENABLED` lets the scheduled path open re-pull pull requests, and `AUTO_REPULL_MERGE_ENABLED` lets the Worker merge them (decision 7).
   Both are off when absent, and the scheduled path is production-only through the dev cron's allowlist.
-- `REPULL_DAILY_OPEN_CAP` (default 2) bounds the re-pull pull requests the automatic path opens in a day.
+- `REPULL_DAILY_OPEN_CAP` (default 2) bounds the dispatches the automatic path claims to open a re-pull in a day; the pull requests follow only under the timing the Phase 7b amendment ("The open cap") says a later slice pins.
 - `REPULL_DAILY_MERGE_CAP` (default 5) bounds merges: every merge a NEMAR tool makes of a re-pull pull request, the Worker's and the manual ones (`nemar admin repull <id> --merge`, `nemar admin pr-reviews`) alike, first claims one from the backend, and a refused claim merges nothing, because every merge mints an irreversible DOI.
 - The automatic path takes only a plan with zero unexplained paths.
 - Outside production, the re-pull routes refuse every dataset that is not `xx`, because the GitHub organization is shared, and re-pull mail goes through the admin-only fence.
@@ -1054,8 +1054,12 @@ Production only.
 The open cap (decision 6).
 
 - `REPULL_DAILY_OPEN_CAP` counts the day's `open` dispatches, first ones and resumes alike, on D1's own clock in a fixed UTC day, and the count is in the statement that claims the unit, so two claims racing for the last unit cannot both win; a refused claim writes nothing (ADR 0099).
-- A dispatch GitHub refused never ran, so it frees its unit; one whose answer was lost keeps it, because it may be running.
+- A dispatch GitHub refused never ran, so it frees its unit; one whose answer was lost keeps it, because it may be running, and so does one the watchdog ended `unreported`.
+  A claim whose token could not be signed or whose row could not be read back is ended the same way, `dispatch-failed`, before the error goes on, so a claim that committed but was never sent does not hold a unit and the dataset's live slot for eight hours.
   A `finish` never counts: its merge already minted the DOI the cap exists to bound.
+- The cap counts surviving rows: deleting a dataset deletes its dispatches (an administrator-only path), which frees that day's units.
+- A cap set to something unreadable is `cap-unreadable`, not `cap`: it reads 0 but is not a full day, and the caller says which.
+  An upstream tag that is not a tag, or two that name one snapshot, is the refusal `candidate`, because it comes from outside.
 - The cap bounds dispatches, so it bounds the pull requests opened in a day only while every run that opens one starts on the day its unit was claimed; the later slice that schedules dispatches pins the timing that makes the two the same.
 - A first dispatch is refused for a dataset with an open re-pull, and a resume names an automatic row of the same dataset and tags that stalled before its pull request opened, both read in the statement that claims.
 
@@ -1064,7 +1068,9 @@ The token and the callback.
 - The dispatch token is a kind of its own, signed with the callback secret every other kind uses and domain-separated the same way: its message begins with a line no other kind's begins with, and binds the dispatch, its dataset and its nonce.
 - A run reports to `POST /webhooks/repull-state`: `started` once, then `opened` (for the automatic record its dispatch is linked to, at `pr_open` or later), `finished` (a finish whose record is `complete`), or `refused` or `failed` with a code.
   Each is a compare-and-set on the dispatch's id, its nonce and the status it was read in, and the record's state is read in the statement that writes, so it holds when the report is stored.
-  Every refusal of the token is one answer, whether the dispatch does not exist, belongs to another dataset, has ended or the token is wrong, so the door does not say which dispatches exist.
+  Every refusal of the token is one answer, at the callback (`invalid-token`) and at the automatic create alike (`dispatch-token`, 401, the same body whatever the cause), whether the dispatch does not exist, belongs to another dataset, has ended or the token is wrong, so neither door says which dispatches exist or how they ended; the token is checked before anything else is said about the dispatch, and no answer names a status.
+  The one answer at the create door that is not a token answer is a Worker with no callback secret, which is configuration and answers 503 `dispatch-unconfigured` at both doors.
+  A token that leaks (the later slice that sends a dispatch masks it in the step output, and this record asks that of it) lets anyone end a live dispatch as `failed` for up to eight hours; it is denial only, since a report stores fixed words and the record it opens or finishes is checked in the statement that writes.
 - A code is a word from a closed list, never a message, a path or a key, because the weekly report will count codes on a public-facing repository.
   The callback refuses any other word, a run reports `no-code` for a refusal whose word the list does not hold, and a source scan requires every literal refusal word of the plan, the execution, the scrub and the Worker's re-pull routes to be on it.
 - The watchdog ends a live dispatch eight hours after it was sent (the job's bound of 330 minutes, plus queueing) as `unreported`, and writes one audit row when it marked any; a later slice calls it from the production cron.
@@ -1072,11 +1078,11 @@ The token and the callback.
 `origin` automatic only through a Worker-signed dispatch.
 
 - `POST /admin/repulls` takes an optional `dispatch_id` and `dispatch_token`, both or neither, and `origin` is in no request: a create with a live dispatch whose token the Worker signed is automatic, and every other is the administrator's.
-- Before the record's fences, in order: exact production, the open switch (so switching it off stops a run before its first write), and an `on` dataset; then the dispatch: it exists, is live, its token verifies, it is an `open` dispatch, and it names this dataset, this `ds` and both tags.
+- Before the record's fences, in order: exact production, the open switch (so switching it off stops a run before its first write), and an `on` dataset; then the dispatch: its token verifies over a live dispatch (one answer for every failure of it, above), it is an `open` dispatch, and it names this dataset, this `ds` and both tags.
 - Then the plan (decision 6, "the automatic path takes only a plan with zero unexplained paths"): it was made by the planner the CLI runs today (planner 2, which a test pins to the CLI's), and it states `unexplained`, `conflicts` and `corrections`, each zero, because a count left out is not zero; and it states the size of its copy, at most 1 TiB, so one run fits a runner's job.
   The administrator's path has no such bound.
   The Worker can check only what the plan states; the run checks the live plan itself before it writes, which is a later slice's.
-- The insert links the dispatch to its record in the same batch, by the record's key and never by `last_insert_rowid()`, which the audit row moves.
+- The insert links the dispatch to its record in the same batch, by the record's key and never by `last_insert_rowid()`, which the audit row moves, and only while the dispatch is still live under the nonce that verified: a dispatch that ended between the check and the write links nothing, the batch rolls back on the link's guard, and the create writes nothing and answers as any other failure of the token.
 
 The same plan is the same record, for a caller of the same origin (clarification of the Phase 6 amendment).
 
