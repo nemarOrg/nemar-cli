@@ -38,7 +38,7 @@ function body(): PlanBody {
     planner: 2,
     dataset: "xx099999",
     upstream: { ds: "ds099999", from_tag: "1.0.0", to_tag: "1.1.0", to_commit: OID(1) },
-    nemar: { main_commit: OID(2) },
+    nemar: { main_commit: OID(2), annex_commit: OID(15) },
     versions: { current: "1.0.0", n0: "2.0.0", n1: null },
     paths: [],
     copy: {
@@ -67,7 +67,8 @@ const blob = (oid: string, mode = "100644"): Entry => ({ mode, oid, key: null })
 
 function scrubResult(over: Partial<ImportScrubResult> = {}): ImportScrubResult {
   return {
-    counts: {} as ImportScrubResult["counts"],
+    // The scrub re-keyed a recording, so it wrote its one ledger line.
+    counts: { headers_scrubbed: 1 } as ImportScrubResult["counts"],
     items: [local(K.rekeyed)],
     replacedKeys: new Set([K.upstreamFlagged]),
     handledPaths: new Set(),
@@ -97,8 +98,12 @@ function passing() {
     ["sub-02/eeg/gone.json", blob(OID(4))],
     ["sourcedata/sourcedata_provenance.json", blob(OID(5))],
     [".nemar/corrections.jsonl", blob(OID(6))],
+    [".nemar/metadata.json", blob(OID(10))],
+    [".github/workflows/validate.yml", blob(OID(11))],
   ]);
   const expected = new Map<string, string>([
+    // The NEMAR-owned edit: IsIdenticalTo names the new snapshot.
+    [".nemar/metadata.json", `G:100644:${"e".repeat(40)}`],
     ["sub-03/a.edf", `A:${K.copied}`],
     ["sub-04/b.edf", `A:${K.upstreamFlagged}`],
     ["sub-02/motion/m_motion.tsv", `L:${OID(7)}`],
@@ -111,6 +116,8 @@ function passing() {
     // Annotated by the scrub, which reads the provenance files whenever a header changes.
     ["sourcedata/sourcedata_provenance.json", blob("a".repeat(40))],
     [".nemar/corrections.jsonl", blob("b".repeat(40))],
+    [".nemar/metadata.json", blob("e".repeat(40))],
+    [".github/workflows/validate.yml", blob(OID(11))],
     ["sub-03/a.edf", annex(K.copied)],
     ["sub-04/b.edf", annex(K.rekeyed)],
     ["sub-02/motion/m_motion.tsv", annex(K.motion)],
@@ -133,7 +140,27 @@ function passing() {
     [...tree].filter(([p, e]) => e.key && !p.startsWith(".nemar/")).map(([, e]) => e.key as string),
   );
   const manifest = buildCopyManifest({ named, body: b, digest: `sha256:${"0".repeat(64)}`, held });
-  return { tree, base, expected, preScrub, scope, body: b, scrub, uploaded, held, manifest };
+  const ledger = { base: LEDGER_BASE, synth: `${LEDGER_BASE}${scrubLine()}\n` };
+  return {
+    tree,
+    base,
+    expected,
+    preScrub,
+    scope,
+    body: b,
+    scrub,
+    uploaded,
+    held,
+    manifest,
+    ledger,
+  };
+}
+
+/** The import's own line, as the base's ledger holds it. */
+const LEDGER_BASE = `${JSON.stringify({ version: 1, action: "import-scrubbed", counts: {} })}\n`;
+
+function scrubLine(action = "repull-scrubbed"): string {
+  return JSON.stringify({ version: 1, action, counts: { headers_scrubbed: 1 } });
 }
 
 function refusalOf(fn: () => void): ExecuteRefused | null {
@@ -286,5 +313,125 @@ describe("assertSynthesized", () => {
     const tree = new Map(args.tree);
     tree.set("sub-02/eeg/gone.json", blob(OID(4)));
     expect(refusalOf(() => assertSynthesized({ ...args, tree }))?.code).toBe("synthesis-mismatch");
+  });
+
+  test("a path under .github/** or .nemar/** that NEMAR's side does not hold refuses", () => {
+    const args = passing();
+    const tree = new Map(args.tree);
+    tree.set(".github/smuggled.txt", blob(OID(12)));
+    expect(refusalOf(() => assertSynthesized({ ...args, tree }))?.message).toContain("NEMAR-owned");
+    const changed = new Map(args.tree);
+    changed.set(".github/workflows/validate.yml", blob(OID(13)));
+    expect(refusalOf(() => assertSynthesized({ ...args, tree: changed }))?.code).toBe(
+      "synthesis-mismatch",
+    );
+    const flipped = new Map(args.tree);
+    flipped.set(".github/workflows/validate.yml", blob(OID(11), "100755"));
+    expect(refusalOf(() => assertSynthesized({ ...args, tree: flipped }))?.code).toBe(
+      "synthesis-mismatch",
+    );
+    const gone = new Map(args.tree);
+    gone.delete(".github/workflows/validate.yml");
+    expect(refusalOf(() => assertSynthesized({ ...args, tree: gone }))?.code).toBe(
+      "synthesis-mismatch",
+    );
+  });
+
+  test(".nemar/metadata.json is what the NEMAR-owned edit wrote, or NEMAR's side when none was", () => {
+    const args = passing();
+    const tree = new Map(args.tree);
+    tree.set(".nemar/metadata.json", blob(OID(14)));
+    expect(refusalOf(() => assertSynthesized({ ...args, tree }))?.message).toContain("NEMAR-owned");
+    // The edit was left (another status): the file must be the base's.
+    const expected = new Map(args.expected);
+    expected.delete(".nemar/metadata.json");
+    expect(refusalOf(() => assertSynthesized({ ...args, expected }))?.code).toBe(
+      "synthesis-mismatch",
+    );
+    const kept = new Map(args.tree);
+    kept.set(".nemar/metadata.json", blob(OID(10)));
+    expect(refusalOf(() => assertSynthesized({ ...args, expected, tree: kept }))).toBeNull();
+  });
+
+  test("the ledger is the base's plus exactly one repull-scrubbed line, and nothing else", () => {
+    const args = passing();
+    const cases: Array<{ base: string | null; synth: string | null }> = [
+      // An earlier line edited, its length kept.
+      {
+        base: LEDGER_BASE,
+        synth: `${LEDGER_BASE.replace("import-scrubbed", "import-scrubbex")}${scrubLine()}\n`,
+      },
+      // An earlier line edited, its length changed.
+      { base: LEDGER_BASE, synth: `${LEDGER_BASE.replace("import", "imported")}${scrubLine()}\n` },
+      // The scrub's line followed by an empty one.
+      { base: LEDGER_BASE, synth: `${LEDGER_BASE}${scrubLine()}\n\n` },
+      // The ledger deleted.
+      { base: LEDGER_BASE, synth: null },
+      // Two lines.
+      { base: LEDGER_BASE, synth: `${LEDGER_BASE}${scrubLine()}\n${scrubLine()}\n` },
+      // A line of another action.
+      { base: LEDGER_BASE, synth: `${LEDGER_BASE}${scrubLine("headers-scrubbed")}\n` },
+      // No line, though the scrub changed something.
+      { base: LEDGER_BASE, synth: LEDGER_BASE },
+      // A line that does not end the file.
+      { base: LEDGER_BASE, synth: `${LEDGER_BASE}${scrubLine()}` },
+    ];
+    for (const ledger of cases) {
+      expect(refusalOf(() => assertSynthesized({ ...args, ledger }))?.message).toContain("ledger");
+    }
+    // A ledger NEMAR did not have, begun by the scrub's line.
+    const base = new Map(args.base);
+    base.delete(".nemar/corrections.jsonl");
+    expect(
+      refusalOf(() =>
+        assertSynthesized({ ...args, base, ledger: { base: null, synth: `${scrubLine()}\n` } }),
+      ),
+    ).toBeNull();
+  });
+
+  test("a scrub that changed nothing leaves the ledger exactly as it was", () => {
+    const args = passing();
+    const scrub = scrubResult({ counts: {} as ImportScrubResult["counts"] });
+    // The tree's ledger differs from the base's: refused.
+    expect(refusalOf(() => assertSynthesized({ ...args, scrub }))?.message).toContain("ledger");
+    const tree = new Map(args.tree);
+    tree.set(".nemar/corrections.jsonl", blob(OID(6)));
+    expect(
+      refusalOf(() =>
+        assertSynthesized({
+          ...args,
+          scrub,
+          tree,
+          ledger: { base: LEDGER_BASE, synth: LEDGER_BASE },
+        }),
+      ),
+    ).toBeNull();
+  });
+
+  test("a mode the plan did not ask for refuses: a blanked JSON made executable, an annexed pointer", () => {
+    const args = passing();
+    const exec = new Map(args.tree);
+    exec.set("sub-03/a.json", blob("c".repeat(40), "100755"));
+    expect(refusalOf(() => assertSynthesized({ ...args, tree: exec }))?.code).toBe(
+      "synthesis-mismatch",
+    );
+    // A copied key as an unlocked pointer file rather than a symlink.
+    const pointer = new Map(args.tree);
+    pointer.set("sub-03/a.edf", { mode: "100644", oid: OID(9), key: K.copied });
+    expect(refusalOf(() => assertSynthesized({ ...args, tree: pointer }))?.code).toBe(
+      "synthesis-mismatch",
+    );
+    // Git-held data annexed as a pointer.
+    const motion = new Map(args.tree);
+    motion.set("sub-02/motion/m_motion.tsv", { mode: "100644", oid: OID(9), key: K.motion });
+    expect(refusalOf(() => assertSynthesized({ ...args, tree: motion }))?.code).toBe(
+      "synthesis-mismatch",
+    );
+    // A recording the plan does not touch, its symlink turned into a pointer.
+    const kept = new Map(args.tree);
+    kept.set("sub-01/eeg/kept.edf", { mode: "100644", oid: OID(9), key: K.held });
+    expect(refusalOf(() => assertSynthesized({ ...args, tree: kept }))?.code).toBe(
+      "synthesis-mismatch",
+    );
   });
 });

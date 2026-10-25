@@ -4,14 +4,15 @@
  *
  * It is synthesized with `git commit-tree`, so its only parent is the base: the local commits made
  * on the way (the materialized delta's and the scrub's) are never an ancestor, and nothing they
- * held is reachable from it. Its
- * identity is fixed and its dates are the row's `created_at`, so preparing twice from the same
- * plan gives the same tree and the same commit, which is what lets a lost working directory be
- * prepared again and compared with the recorded `synth_tree`.
+ * held is reachable from it. Its identity is fixed and its dates are the row's `created_at`, so
+ * preparing twice from the same plan gives the same tree and the same commit, which is what lets
+ * a lost working directory be prepared again and compared with the recorded `synth_tree`.
  *
  * Before the commit is accepted, {@link assertSynthesized} checks the tree against the plan, and
- * after it, the originals of what the scrub changed in git are shown unreachable from it. Every
- * refusal is `synthesis-mismatch` and names counts only.
+ * after it, the originals of what the scrub changed in git are shown unreachable from it within
+ * what the clone holds: the commit, the base and the base's parent (the clone is two commits
+ * deep), so an original only older history reaches is not seen. Every refusal is
+ * `synthesis-mismatch` and names counts only.
  */
 
 import { createHash } from "node:crypto";
@@ -174,15 +175,69 @@ function mismatch(what: string, n: number): ExecuteRefused {
 
 const PROVENANCE = new Set([PROVENANCE_PATH, PROVENANCE_README_PATH]);
 
+/** The privacy ledger (ADR 0085), and the one NEMAR-owned file a re-pull rewrites. */
+const LEDGER_PATH = ".nemar/corrections.jsonl";
+const METADATA_PATH = ".nemar/metadata.json";
+
+/** An entry's identity with its mode, an annexed one's included: `A:<mode>:<key>`, `G:<mode>:<oid>`. */
+function fullIdOf(e: Entry | undefined): string {
+  if (!e) return "absent";
+  return e.key ? `A:${e.mode}:${e.key}` : `G:${e.mode}:${e.oid}`;
+}
+
+/** The mode every annexed entry a re-pull writes has: a symlink, as a locked annexed file is. */
+const ANNEX_LINK_MODE = "120000";
+
+/** True when the scrub's counts say it changed something, so it wrote its one ledger line. */
+export function scrubChanged(scrub: ImportScrubResult): boolean {
+  const c = scrub.counts;
+  return (
+    (c.headers_scrubbed ?? 0) > 0 ||
+    (c.headers_dates_normalized ?? 0) > 0 ||
+    (c.json_values_blanked ?? 0) > 0 ||
+    (c.scans_values_normalized ?? 0) > 0
+  );
+}
+
+/**
+ * Whether the synthesized ledger is the base's with exactly the scrub's line: when the scrub
+ * changed something, the base's text, byte for byte, then one more line whose action is
+ * `repull-scrubbed`; when it changed nothing, the base's entry as it was. An earlier line edited or
+ * removed, the file deleted, a second line or a line of another action is not.
+ */
+function ledgerHolds(args: {
+  got: Entry | undefined;
+  base: Entry | undefined;
+  text: { base: string | null; synth: string | null };
+  changed: boolean;
+}): boolean {
+  if (!args.changed) return fullIdOf(args.got) === fullIdOf(args.base);
+  if (!args.got || args.got.key !== null || args.got.mode !== "100644") return false;
+  const before = args.text.base ?? "";
+  const after = args.text.synth;
+  if (after === null || !after.startsWith(before)) return false;
+  const added = after.slice(before.length);
+  if (!added.endsWith("\n") || added.slice(0, -1).includes("\n") || added === "\n") return false;
+  try {
+    return (JSON.parse(added) as { action?: unknown }).action === "repull-scrubbed";
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Refuse unless the synthesized tree is the plan's N.0.0 with the scrub's changes and nothing else:
- *  1. every path outside `.nemar/**` and `.github/**` has the plan's target (or, for a path the
- *     plan does not list, NEMAR's side as it was), except a recording the scrub re-keyed (its old
- *     key replaced, its new one uploaded), a git-held data file annexed (its key uploaded), a JSON
- *     the scrub blanked, a scans table whose dates it set, and a provenance file it annotated;
- *  2. no key the scrub replaced is named;
- *  3. every named key is one the plan counted held, one it copies, or one this host uploaded;
- *  4. the copy manifest is a subset of the plan's copy keys, and its local part only what this host
+ *  1. every path outside `.nemar/**` and `.github/**` has the plan's target, mode included (or,
+ *     for a path the plan does not list, NEMAR's side as it was), except a recording the scrub
+ *     re-keyed (its old key replaced, its new one uploaded), a git-held data file annexed (its key
+ *     uploaded), each a symlink, and a JSON the scrub blanked, a scans table whose dates it set and
+ *     a provenance file it annotated, each with its mode kept;
+ *  2. every path under `.nemar/**` and `.github/**` is NEMAR's side as it was, except
+ *     `.nemar/metadata.json`, which is what the NEMAR-owned edit wrote when it was applied, and the
+ *     privacy ledger, which is the base's plus the scrub's one line when the scrub changed anything;
+ *  3. no key the scrub replaced is named;
+ *  4. every named key is one the plan counted held, one it copies, or one this host uploaded;
+ *  5. the copy manifest is a subset of the plan's copy keys, and its local part only what this host
  *     uploaded, every upload being a local one that the tree names.
  */
 export function assertSynthesized(args: {
@@ -196,30 +251,52 @@ export function assertSynthesized(args: {
   uploaded: readonly ImportManifestItem[];
   held: ReadonlySet<string>;
   manifest: CopyManifest;
+  /** The privacy ledger's text at the base and in the synthesized tree; null where it is absent. */
+  ledger: { base: string | null; synth: string | null };
 }): void {
   const { tree, base, expected, preScrub, scope, scrub } = args;
   const localKeys = new Set(args.uploaded.map((i) => i.key));
+  const isLink = (e: Entry | undefined) => e?.mode === ANNEX_LINK_MODE;
 
-  // 1. Path by path.
+  // 1 and 2. Path by path.
   let wrong = 0;
+  let owned = 0;
+  let ledger = 0;
   const paths = new Set([...tree.keys(), ...base.keys(), ...expected.keys()]);
   for (const p of paths) {
-    if (isNemarOwnedPath(p)) continue;
     const got = tree.get(p);
     const gotId = identityOf(got);
     const want = expected.get(p);
+    if (isNemarOwnedPath(p)) {
+      if (p === LEDGER_PATH) {
+        const ok = ledgerHolds({
+          got,
+          base: base.get(p),
+          text: args.ledger,
+          changed: scrubChanged(scrub),
+        });
+        if (!ok) ledger++;
+      } else if (p === METADATA_PATH && want !== undefined) {
+        if (gotId !== want || got?.key !== null) owned++;
+      } else if (fullIdOf(got) !== fullIdOf(base.get(p))) {
+        owned++;
+      }
+      continue;
+    }
     // A git blob the scrub rewrote in place (a JSON blanked, a scans table dated, a provenance file
-    // annotated): what was staged before the scrub is what the plan wanted.
+    // annotated): what was staged before the scrub is what the plan wanted, and its mode is kept.
     const scrubbedInPlace = (wantId: string) =>
       scope.has(p) &&
       got !== undefined &&
       got.key === null &&
       identityOf(preScrub.get(p)) === wantId &&
+      got.mode === preScrub.get(p)?.mode &&
       gotId !== wantId &&
       (JSON_PATH.test(p) || SCANS_TABLE_PATH.test(p) || PROVENANCE.has(p));
     if (want === undefined) {
-      const baseId = identityOf(base.get(p));
-      if (gotId !== baseId && !(PROVENANCE.has(p) && scrubbedInPlace(baseId))) wrong++;
+      const baseEntry = base.get(p);
+      const kept = fullIdOf(got) === fullIdOf(baseEntry);
+      if (!kept && !(PROVENANCE.has(p) && scrubbedInPlace(identityOf(baseEntry)))) wrong++;
       continue;
     }
     if (want === "absent") {
@@ -233,19 +310,22 @@ export function assertSynthesized(args: {
         scrub.replacedKeys.has(key) &&
         got?.key != null &&
         localKeys.has(got.key);
-      if (gotId !== want && !rekeyed) wrong++;
+      if ((gotId !== want && !rekeyed) || !isLink(got)) wrong++;
       continue;
     }
     if (want.startsWith("L:")) {
       // A git-held data file NEMAR's policy annexes: annexed, and its content uploaded from here.
-      if (!got?.key || !localKeys.has(got.key)) wrong++;
+      if (!got?.key || !localKeys.has(got.key) || !isLink(got)) wrong++;
       continue;
     }
     if (gotId !== want && !scrubbedInPlace(want)) wrong++;
   }
   if (wrong > 0) throw mismatch("path(s) differ from their target", wrong);
+  if (owned > 0) throw mismatch("NEMAR-owned path(s) differ from NEMAR's side", owned);
+  if (ledger > 0)
+    throw mismatch("privacy ledger(s) not the base's plus the scrub's one line", ledger);
 
-  // 2 and 3. The keys the tree names.
+  // 3 and 4. The keys the tree names.
   const named = new Set<string>();
   for (const [p, e] of tree) if (e.key && !isNemarOwnedPath(p)) named.add(e.key);
   const replaced = [...named].filter((k) => scrub.replacedKeys.has(k)).length;
@@ -262,7 +342,7 @@ export function assertSynthesized(args: {
     throw mismatch("named key(s) are neither held, copied by the plan, nor uploaded", unaccounted);
   }
 
-  // 4. The manifest: a subset of the plan's copy keys, plus what this host uploaded.
+  // 5. The manifest: a subset of the plan's copy keys, plus what this host uploaded.
   const outside = args.manifest.items.filter((i) => !copied.has(i.key)).length;
   if (outside > 0) throw mismatch("copy key(s) are outside the plan", outside);
   const strayLocal = args.manifest.local.filter((i) => !localKeys.has(i.key)).length;
@@ -346,6 +426,11 @@ export async function synthesizeCommit(args: {
     digest: args.digest,
     held: args.held,
   });
+  const blobText = async (spec: string): Promise<string | null> => {
+    const r = await git(work, ["cat-file", "blob", spec], { ok: true });
+    return r.exitCode === 0 ? r.stdout : null;
+  };
+  const synthLedger = tree.get(LEDGER_PATH);
   assertSynthesized({
     tree,
     base: args.base,
@@ -357,6 +442,10 @@ export async function synthesizeCommit(args: {
     uploaded: args.uploaded,
     held: args.held,
     manifest,
+    ledger: {
+      base: args.base.has(LEDGER_PATH) ? await blobText(`${args.baseSha}:${LEDGER_PATH}`) : null,
+      synth: synthLedger ? await blobText(synthLedger.oid) : null,
+    },
   });
 
   const c = args.scrub.counts;
