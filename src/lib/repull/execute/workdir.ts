@@ -185,6 +185,91 @@ export async function workClone(args: {
   return repo;
 }
 
+/**
+ * Save the prepared state as a git bundle, mode 0600: the synthesized commit (on
+ * {@link WORK_BRANCH}) and the local git-annex branch, which holds what this host uploaded and the
+ * keys the scrub retired. Its prerequisites are the base and origin's git-annex branch as fetched,
+ * so it holds only what the preparation added. A lost working directory is restored from it
+ * without preparing again.
+ */
+export async function saveCheckpoint(repo: string, bundle: string, baseSha: string): Promise<void> {
+  rmSync(bundle, { force: true });
+  await git(
+    repo,
+    [
+      "bundle",
+      "create",
+      "--quiet",
+      bundle,
+      `refs/heads/${WORK_BRANCH}`,
+      "refs/heads/git-annex",
+      `^${baseSha}`,
+      "^refs/remotes/origin/git-annex",
+    ],
+    { code: "checkpoint-failed", step: "bundle create" },
+  );
+  chmodSync(bundle, 0o600);
+}
+
+/**
+ * Restore a checkpoint into a fresh working clone. True only when the bundle verifies and delivers
+ * the recorded commit `synthSha`, the clone is checked out at it with the tree `synthTree` on the
+ * parent `baseSha`, and the bundle's git-annex branch is merged; false otherwise (the caller
+ * prepares again).
+ */
+export async function restoreCheckpoint(args: {
+  dir: string;
+  bundle: string;
+  originUrl: string;
+  baseSha: string;
+  token: string | null;
+  synthSha: string;
+  synthTree: string;
+}): Promise<boolean> {
+  if (!existsSync(args.bundle)) return false;
+  let repo: string;
+  try {
+    repo = await workClone({
+      dir: args.dir,
+      originUrl: args.originUrl,
+      baseSha: args.baseSha,
+      token: args.token,
+    });
+  } catch {
+    return false;
+  }
+  const verified = await git(repo, ["bundle", "verify", "--quiet", args.bundle], { ok: true });
+  if (verified.exitCode !== 0) return false;
+  const fetched = await git(
+    repo,
+    [
+      "fetch",
+      "--quiet",
+      "--no-tags",
+      args.bundle,
+      `refs/heads/${WORK_BRANCH}:refs/remotes/checkpoint/${WORK_BRANCH}`,
+      "refs/heads/git-annex:refs/remotes/checkpoint/git-annex",
+    ],
+    { ok: true },
+  );
+  if (fetched.exitCode !== 0) return false;
+  // The clone must end at the recorded commit, whose tree is the recorded tree: whatever ref the
+  // bundle names, only the commit itself, by its id, is taken.
+  await git(repo, ["checkout", "--quiet", "-B", WORK_BRANCH, args.synthSha], { ok: true });
+  const rev = async (spec: string) =>
+    (await git(repo, ["rev-parse", "--verify", "--quiet", spec], { ok: true })).stdout.trim();
+  if (
+    (await rev("HEAD")) !== args.synthSha ||
+    (await rev("HEAD^{tree}")) !== args.synthTree ||
+    (await rev("HEAD^")) !== args.baseSha
+  ) {
+    return false;
+  }
+  // `git annex merge` takes every `refs/remotes/*/git-annex`, the checkpoint's included.
+  const merged = await git(repo, ["annex", "merge", "--quiet"], { ok: true });
+  return merged.exitCode === 0;
+}
+
 /** Give the owner write access to every directory under `path` (git-annex makes its objects' read-only). */
 function makeWritable(path: string): void {
   let st: ReturnType<typeof lstatSync>;
