@@ -1378,11 +1378,11 @@ One annotation is added to earlier text, on the sentence of "Not yet verified" t
 - Nothing else about bot authors changes.
   A delivery GitHub sends for the App's pull request, and an administrator's `nemar admin pr-reviews start` of it, still answer `bot_author`, and every other bot's pull request is skipped as before.
 - The App has no NEMAR account and its login is not a person's login, so it is never exempt, and every other rule of ADR 0107 applies to it unchanged: a reviewable dataset, an administrator's block, the per-commit row and the edit cap.
-  The Worker's start is not an administrator's: it does not start again a commit whose review ended without a verdict, and only a dispatch GitHub never ran is tried again.
+  The Worker's start is not an administrator's: it does not start again a commit whose review errored, was declined or went unreported, and only a review whose dispatch failed (`dispatch_failed`, a run GitHub never started) is tried again.
 - 2026-10-25: this narrows ADR 0092's "not bots" for one class only, the NEMAR App's automatic re-pull pull request, which is reviewed when the Worker starts its review; for every other pull request ADR 0092 stands as written, and its header says so.
 - Keeping the webhook out has two consequences.
   An edit of the App's pull request's title or body, which ADR 0107 re-reviews for anyone else, is not taken up, so a stored pass stands across it; a change of its base is still refused by machine clean.
-  And nobody can start the review of the App's pull request again on the same head, an administrator's `--redo` included.
+  And nobody but the Worker's own start can restart the review of the App's pull request on the same head, and that start restarts only a review whose dispatch failed (`dispatch_failed`, a run GitHub never started); an administrator's `--redo` cannot.
   So once a review of a head has errored, been declined or gone unreported, the re-pull holds at `review-not-pass` until its pull request has a new head, and an administrator's merge is the only other way on.
 - The review queue's detail view names the App's pull request's author `nemar-publish-bot[bot]`, from the stored review and from GitHub when the login and the numeric id both match, where it showed `(unknown)` and a mangled login before; every other login is reduced to a login's characters as before.
 
