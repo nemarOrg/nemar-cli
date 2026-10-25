@@ -292,7 +292,7 @@ function confirmQuestion(s: ExecuteSummary): string {
     s.status === null
       ? `Execute the re-pull of ${s.datasetId}, upstream ${s.fromTag} to ${s.toTag}, as v${s.toVersion}`
       : `Continue the re-pull of ${s.datasetId} (${s.fromTag} to ${s.toTag}, v${s.toVersion}) from ${s.status}`;
-  return `${where}, through ${s.until}: copy ${s.copyItems} object(s) from upstream by version, push release/v${s.toVersion} and open its pull request. Execute never merges; the merge will mint ${s.doiCount} version DOI(s), which cannot be withdrawn. Proceed?`;
+  return `${where}, through ${s.until}: copy up to ${s.copyItems} object(s) from upstream by version, push release/v${s.toVersion} and open its pull request. Execute never merges; the merge will mint ${s.doiCount} version DOI(s), which cannot be withdrawn. Proceed?`;
 }
 
 repullCommand

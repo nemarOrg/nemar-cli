@@ -92,6 +92,7 @@ export interface ExecuteSummary {
   toVersion: string;
   /** The version DOIs the re-pull's merges mint (N.0.0, and N.0.1 when there are corrections). */
   doiCount: number;
+  /** The keys the plan copies, an upper bound because the scrub's re-keyed recordings are uploaded instead of copied. */
   copyItems: number;
   /** The record's status when the run starts, or null when it creates the record. */
   status: RepullStatus | null;
@@ -215,7 +216,7 @@ function removeIfEmpty(dir: string): void {
   }
 }
 
-/** Run through `prepared` (or `opts.until`). See the module comment. */
+/** Run through `pr_open` (or `opts.until`); never further. See the module comment. */
 export async function executeRepull(
   opts: ExecuteOptions,
 ): Promise<{ row: RepullRow; stoppedAt: RepullStatus }> {
