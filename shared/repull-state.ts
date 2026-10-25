@@ -455,6 +455,10 @@ export interface RepullRow {
   created_at: string;
   updated_at: string;
   terminal_at: string | null;
+  /** Why an automatic re-pull waits where it is (a {@link REPULL_HOLD_REASONS} word), or null. */
+  hold_reason: string | null;
+  /** Since when it has waited for that reason; set exactly when `hold_reason` is. */
+  hold_since: string | null;
 }
 
 function isPositiveInt(v: unknown): v is number {
@@ -531,4 +535,352 @@ export function fieldProblem(
     default:
       return `${column} is not a column a transition writes`;
   }
+}
+
+// ----------------------------------------------------------------------------
+// The automatic path (epic #1046 phase 7, #1913; ADR 0111, decisions 6 and 7)
+// ----------------------------------------------------------------------------
+
+/**
+ * A dispatch asks a central workflow run to do one thing: `open` runs a plan to an open pull
+ * request (or resumes a row that stalled before it), `finish` walks a merged re-pull to
+ * `complete`. Its row is `upstream_repull_dispatches` (migration 0109).
+ */
+export const DISPATCH_KINDS = ["open", "finish"] as const;
+export type DispatchKind = (typeof DISPATCH_KINDS)[number];
+
+/**
+ * A dispatch's states. `dispatched` and `started` are live (the run may still report, and the row
+ * holds its one-shot nonce); the run ends it with `opened`, `finished`, `refused` or `failed`, and
+ * the Worker ends it with `dispatch_failed` (GitHub refused the dispatch, so nothing ran) or
+ * `unreported` (the run said nothing within its deadline).
+ */
+export const DISPATCH_STATUSES = [
+  "dispatched",
+  "started",
+  "opened",
+  "finished",
+  "refused",
+  "failed",
+  "unreported",
+  "dispatch_failed",
+] as const;
+export type DispatchStatus = (typeof DISPATCH_STATUSES)[number];
+
+/** The live states: the row holds its nonce, so a run's token still verifies. */
+export const DISPATCH_LIVE = ["dispatched", "started"] as const satisfies readonly DispatchStatus[];
+
+/** What a run may report about itself; the Worker writes the other states. */
+export const DISPATCH_PHASES = [
+  "started",
+  "opened",
+  "finished",
+  "refused",
+  "failed",
+] as const satisfies readonly DispatchStatus[];
+export type DispatchPhase = (typeof DISPATCH_PHASES)[number];
+
+/**
+ * The fixed words a dispatch's `code` may hold: why it was refused, why it failed, or why the
+ * Worker could not send it. Closed on purpose. A code is shown to administrators and counted in
+ * the weekly report, which is filed on a public-facing repository, so it must never be able to
+ * carry a path, a key, a subject label or a message; a word that is not here is refused by the
+ * callback, and a run reports `no-code` for a refusal whose word this list does not hold, so a new
+ * word is added here deliberately. `repull-dispatch-codes.unit.test.ts` pins that every literal
+ * refusal word of the CLI's plan and execution, of the scrub, and of the Worker's re-pull routes
+ * is here.
+ */
+export const DISPATCH_CODES = [
+  // The Worker's own, at the automatic create and when it sends or ends a dispatch.
+  "auto-production-only",
+  "auto-repull-off",
+  "auto-on-only",
+  "auto-planner-version",
+  "auto-not-clean-plan",
+  "auto-copy-too-large",
+  "dispatch-token",
+  "dispatch-not-found",
+  "dispatch-not-live",
+  "dispatch-mismatch",
+  "dispatch-unconfigured",
+  "dispatch-refused",
+  "dispatch-failed",
+  // The Worker's answers to a run's report, which the run may pass on when it then fails.
+  "invalid-token",
+  "already-started",
+  "kind-mismatch",
+  "repull-mismatch",
+  "repull-not-ready",
+  "stale-dispatch",
+  // The unattended run's own words.
+  "auto-no-app-token",
+  "key-without-pin",
+  "head-foreign",
+  "finish-not-merged",
+  "runner-failed",
+  "runner-disk",
+  "no-code",
+  // The plan: its preflight checks, its refusals, and why it planned nothing.
+  "annex-uuid-mismatch",
+  "concept-doi-disagrees",
+  "dead-recording-unpinned",
+  "fetch-bound",
+  "from-tag-disagrees",
+  "from-tag-malformed",
+  "from-tag-not-recorded",
+  "from-tag-unknown",
+  "github-error",
+  "github-unreachable",
+  "gitlink",
+  "latest-unknown",
+  "ledger-correction-unexplained",
+  "ledger-unreadable",
+  "mirror-lag",
+  "nemar-s3-ambiguous",
+  "never-released",
+  "no-bucket",
+  "no-nemar-s3",
+  "no-nemar-s3-remote",
+  "no-source-id",
+  "no-token",
+  "nothing-to-pull",
+  "order-unverified",
+  "preflight",
+  "release-branch-exists",
+  "release-pr-open",
+  "rows-unavailable",
+  "source",
+  "source-disagrees",
+  "target-names-dead-key",
+  "target-unknown",
+  "to-tag-malformed",
+  "to-tag-unrecordable",
+  "too-many-open",
+  "version",
+  "versions-disagree",
+  // Execution: the plan proved, the record, the preparation and what follows it.
+  "anonymity-unknown",
+  "blob-unavailable",
+  "checkpoint-failed",
+  "clone-failed",
+  "computed-missing",
+  "dataset-missing",
+  "destination-prefix",
+  "execution-locked",
+  "git-failed",
+  "main-moved",
+  "materialize-failed",
+  "nemar-owned-moved",
+  "not-executable",
+  "not-planned",
+  "path-conflict",
+  "path-unsafe",
+  "plan-environment",
+  "plan-schema",
+  "plan-sources",
+  "plan-stale",
+  "plan-tampered",
+  "plan-unreadable",
+  "planner-version",
+  "prepare-failed",
+  "prepare-not-reproducible",
+  "record-refused",
+  "synthesis-failed",
+  "synthesis-mismatch",
+  "target-mismatch",
+  "test-base-refused",
+  "unannex-content-mismatch",
+  "unannex-unreadable",
+  "unpinned-key",
+  "until-not-built",
+  "workdir-busy",
+  // The scrub's refusals (`IMPORT_SCRUB_REFUSALS`), which execution passes on as they are.
+  "already-imported-unscrubbed",
+  "bound-exceeded",
+  "content-mismatch",
+  "header-unreadable",
+  "old-key-still-named",
+  "provenance-out-of-scope",
+  "retire-failed",
+  "scope-incomplete",
+  "scrub-failed",
+  "scrub-unverified",
+  "unsupported-key-backend",
+  "upload-failed",
+  "upstream-size-mismatch",
+  // The Worker's record of a re-pull, as a run meets it (create, transition, screen, merge).
+  "invalid-body",
+  "invalid-id",
+  "env-fence",
+  "not-found",
+  "not-a-mirror",
+  "anonymous-dataset",
+  "withdrawn",
+  "import-in-flight",
+  "repull-in-flight",
+  "merge-unreconciled",
+  "version-facts-disagree",
+  "tag-already-pulled",
+  "stale-status",
+  "bad-transition",
+  "use-verified-route",
+  "merge-claim-held",
+  "field-not-allowed",
+  "field-missing",
+  "field-invalid",
+  "immutable-field",
+  "screen-not-clear",
+  "screen-changed",
+  "screen-exempt",
+  "screen-exists",
+  "screen-not-found",
+  "screen-blocks",
+  "screen-not-acknowledgeable",
+  "not-screenable",
+  "not-the-head",
+  "head-moved",
+  "pr-draft",
+  "github-unreadable",
+  "merge-cap",
+  "merge-cap-unreadable",
+  "already-acknowledged",
+  "already-merged",
+  "already-released",
+  "claim-mismatch",
+  "claim-too-recent",
+  "compare-unresolved",
+  "no-claim",
+  "not-merged",
+  "not-released",
+  "pull-request-merged",
+  "pull-request-mismatch",
+  "pull-request-missing",
+  "tag-mismatch",
+  "tag-missing",
+] as const;
+export type DispatchCode = (typeof DISPATCH_CODES)[number];
+
+export function isDispatchCode(value: unknown): value is DispatchCode {
+  return typeof value === "string" && (DISPATCH_CODES as readonly string[]).includes(value);
+}
+
+/**
+ * Refusals about the content of `to_tag` itself, which another run at the same tag would meet
+ * again: a dataset refused for one of these is not dispatched again for that tag (an administrator
+ * may still re-pull it by hand). `auto-not-clean-plan` is the word for a plan with any unexplained
+ * path (a conflict or a correction), and `key-without-pin` for a copy key upstream records no
+ * pinned version for; the others are the plan's and the Worker's own refusals.
+ */
+export const DISPATCH_FINAL_CODES = [
+  "auto-not-clean-plan",
+  "auto-copy-too-large",
+  "ledger-correction-unexplained",
+  "key-without-pin",
+  "dead-recording-unpinned",
+  "target-names-dead-key",
+  "concept-doi-disagrees",
+  "gitlink",
+  "anonymous-dataset",
+  "not-a-mirror",
+] as const satisfies readonly DispatchCode[];
+
+/**
+ * Why an automatic re-pull waits where it is (`upstream_repulls.hold_reason`): the first rule of
+ * the machine-clean definition that does not hold, or a bound the automatic path reached. A hold
+ * is an observation, never a transition.
+ */
+export const REPULL_HOLD_REASONS = [
+  "not-production",
+  "switch-off",
+  "merge-switch-off",
+  "not-automatic",
+  "has-corrections",
+  "dataset-anonymous",
+  "dataset-withdrawn",
+  "import-in-flight",
+  "pr-unreadable",
+  "pr-closed",
+  "pr-mismatch",
+  "pr-not-app",
+  "head-moved",
+  "main-unreadable",
+  "main-moved",
+  "checks-unreadable",
+  "bids-pending",
+  "bids-failed",
+  "version-check-pending",
+  "version-check-failed",
+  "screen-pending",
+  "screen-unreported",
+  "screen-acknowledge",
+  "screen-blocks",
+  "screen-unchecked",
+  "screen-rerun",
+  "screen-error",
+  "screen-unreadable",
+  "review-absent",
+  "review-running",
+  "review-not-pass",
+  "review-exempt",
+  "review-unreadable",
+  "not-clean",
+  "cap-exhausted",
+  "claim-held",
+  "resume-exhausted",
+  "finish-exhausted",
+  "merge-refused",
+] as const;
+export type HoldReason = (typeof REPULL_HOLD_REASONS)[number];
+
+/**
+ * The shape of every fixed word the automatic path stores (a dispatch code, a hold reason, the
+ * scheduler's outcome): what migration 0109's CHECKs admit, so the database refuses anything a
+ * message or a path could look like even from a writer that skips the service.
+ */
+export const FIXED_WORD_RE = /^[a-z0-9-]{1,64}$/;
+
+/**
+ * The planner whose plans the automatic path takes. A plan another planner made was made under
+ * other rules, so the Worker refuses it at the automatic create (`auto-planner-version`); the CLI's
+ * `PLANNER_VERSION` must equal it.
+ */
+export const CURRENT_PLANNER_VERSION = 2;
+
+/**
+ * The most an automatic plan may copy, in bytes (1 TiB): a larger copy, or one of unknown size, is
+ * refused at the automatic create (`auto-copy-too-large`), so one run fits a runner's job. The
+ * administrator's path has no such bound.
+ */
+export const AUTO_MAX_COPY_BYTES = 1024 ** 4;
+
+/** A dispatch token as the Worker signs it: an HMAC-SHA256 digest in lowercase hex. */
+export const DISPATCH_TOKEN_RE = /^[0-9a-f]{64}$/;
+
+/** The one place a run's log may be: a run of the central workflow in `nemarDatasets/.github`. */
+export const DISPATCH_RUN_URL_RE =
+  /^https:\/\/github\.com\/nemarDatasets\/\.github\/actions\/runs\/\d{1,20}$/;
+
+/**
+ * How every error the automatic path records on a re-pull row begins: `[auto:<code>]`. It is not
+ * the preparation's prefix (`[prepare:`), so a `prepared` self-edge, which clears an error of the
+ * preparation's own, never clears one the automatic path recorded.
+ */
+export const AUTOMATIC_ERROR_PREFIX = "[auto:";
+
+/** A dispatch row as the Worker reads it. */
+export interface DispatchRow {
+  id: number;
+  kind: DispatchKind;
+  dataset_id: string;
+  upstream_ds: string;
+  from_tag: string;
+  to_tag: string;
+  repull_id: number | null;
+  /** The one-shot secret, set exactly while the dispatch is live. Never leaves the Worker. */
+  nonce: string | null;
+  status: DispatchStatus;
+  code: string | null;
+  workflow_run_url: string | null;
+  dispatched_at: string;
+  reported_at: string | null;
 }
