@@ -189,8 +189,9 @@ export interface S3Standin {
   /** Operators without s3:BypassGovernanceRetention: the bypass header is refused too. */
   setDenyBypass(deny: boolean): void;
   /**
-   * An endpoint that ignores `If-Match` on PutObject and GetObject, as one without conditional
-   * writes would: the request succeeds whatever ETag it names. What a canary must catch.
+   * An endpoint that ignores `If-Match` on PutObject and GetObject, and
+   * `x-amz-copy-source-if-match` on CopyObject and UploadPartCopy, as one without conditional
+   * requests would: the request succeeds whatever ETag it names. What a canary must catch.
    */
   setIgnoreIfMatch(ignore: boolean): void;
   /** Entries per ListObjectVersions / ListObjectsV2 page. */
@@ -211,6 +212,12 @@ export interface S3Standin {
    */
   holdNext(op: StandinOp, ms: number, times?: number): void;
   holding(): number;
+  /**
+   * How CopyObject and UploadPartCopy treat a source's `?versionId=`: honored (`honor`, as S3
+   * documents); ignored, the current version copied and named (`ignore`); or ignored while the
+   * answer names the version asked for (`lie`). What the canary exists to catch on a real endpoint.
+   */
+  setCopySourceVersionMode(mode: "honor" | "ignore" | "lie"): void;
   inject(op: StandinOp, fault: Fault): void;
   clearFaults(): void;
   /** Run `fn` just before the Nth call (1-based) of `op` is handled. */
@@ -316,6 +323,12 @@ export function startS3Standin(options: { region?: string } = {}): S3Standin {
       held -= 1;
     }
   };
+  let copyMode: "honor" | "ignore" | "lie" = "honor";
+  /** The source version a copy reads: the named one, or the current one when the mode ignores it. */
+  const copyVersion = (named: string | null) => (copyMode === "honor" ? named : null);
+  /** The source version a copy says it read: the true one, or the named one when the mode lies. */
+  const reportedVersion = (named: string | null, used: string) =>
+    copyMode === "lie" && named ? named : used;
   /** `<bucket>/<key>` and its version id from an `x-amz-copy-source` header. */
   const parseCopySource = (copySource: string) => {
     const qm = copySource.indexOf("?");
@@ -767,12 +780,12 @@ export function startS3Standin(options: { region?: string } = {}): S3Standin {
             return s3Error("NoSuchUpload", 404);
           }
           const parsed = parseCopySource(copySource);
-          const src = pick(parsed.bucket, parsed.key, parsed.version);
+          const src = pick(parsed.bucket, parsed.key, copyVersion(parsed.version));
           if (!src || src.deleteMarker) {
             record({ ...base, status: 404 });
             return s3Error("NoSuchKey", 404);
           }
-          if (ifMatch && ifMatch !== src.etag) {
+          if (ifMatch && !ignoreIfMatch && ifMatch !== src.etag) {
             record({ ...base, status: 412 });
             return s3Error("PreconditionFailed", 412);
           }
@@ -788,6 +801,8 @@ export function startS3Standin(options: { region?: string } = {}): S3Standin {
           record({ ...base, status: 200, size: data.length });
           return xml(
             `<CopyPartResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><LastModified>${new Date().toISOString()}</LastModified><ETag>${xmlEscape(etag)}</ETag></CopyPartResult>`,
+            200,
+            { "x-amz-copy-source-version-id": reportedVersion(parsed.version, src.versionId) },
           );
         }
         const body = new Uint8Array(await req.arrayBuffer());
@@ -915,12 +930,12 @@ export function startS3Standin(options: { region?: string } = {}): S3Standin {
           record({ ...base, status: 499 });
           return new Response(null, { status: 499 });
         }
-        const src = pick(parsed.bucket, parsed.key, parsed.version);
+        const src = pick(parsed.bucket, parsed.key, copyVersion(parsed.version));
         if (!src || src.deleteMarker) {
           record({ ...base, status: 404 });
           return s3Error(parsed.version ? "NoSuchVersion" : "NoSuchKey", 404);
         }
-        if (ifMatch && ifMatch !== src.etag) {
+        if (ifMatch && !ignoreIfMatch && ifMatch !== src.etag) {
           record({ ...base, status: 412 });
           return s3Error("PreconditionFailed", 412);
         }
@@ -939,7 +954,10 @@ export function startS3Standin(options: { region?: string } = {}): S3Standin {
         return xml(
           `<CopyObjectResult><LastModified>${lastModified}</LastModified><ETag>${xmlEscape(etag)}</ETag></CopyObjectResult>`,
           200,
-          { "x-amz-version-id": id, "x-amz-copy-source-version-id": src.versionId },
+          {
+            "x-amz-version-id": id,
+            "x-amz-copy-source-version-id": reportedVersion(parsed.version, src.versionId),
+          },
         );
       }
 
@@ -1153,6 +1171,7 @@ export function startS3Standin(options: { region?: string } = {}): S3Standin {
       stalls.length = 0;
       bodyStalls.length = 0;
       holds.length = 0;
+      copyMode = "honor";
     },
     openUploads: () => uploads.size,
     setDenyBypass(deny) {
@@ -1177,6 +1196,9 @@ export function startS3Standin(options: { region?: string } = {}): S3Standin {
       holds.push({ op, ms, times });
     },
     holding: () => held,
+    setCopySourceVersionMode(mode) {
+      copyMode = mode;
+    },
     inject(op, fault) {
       const list = faults.get(op) ?? [];
       list.push({ ...fault, seen: 0, failed: 0 });

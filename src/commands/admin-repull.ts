@@ -19,6 +19,8 @@
  *   nemar admin repull execute <plan-file>   the reviewed plan, executed on this machine through
  *                                            its pull request: record, prepare, copy, register,
  *                                            push, open (`lib/repull/execute/`); it never merges
+ *   nemar admin repull canary                the real-bucket check of the copy's S3 calls on a
+ *                                            scratch prefix (`lib/repull/canary.ts`)
  */
 
 import chalk from "chalk";
@@ -28,8 +30,15 @@ import { getApiUrl } from "../lib/api/client.js";
 import { ApiError, errorDetail } from "../lib/api/errors.js";
 import { getConfigDir } from "../lib/config.js";
 import { confirm } from "../lib/confirm.js";
-import { markReportedExit } from "../lib/debug-log.js";
+import { markReportedExit, markUsageExit } from "../lib/debug-log.js";
 import { adminGitHubToken, githubApiBase } from "../lib/pr-review-approve.js";
+import {
+  CANARY_PREFIX_RE,
+  canaryArgsProblem,
+  canaryCalls,
+  parseCanarySource,
+  runCanary,
+} from "../lib/repull/canary.js";
 import { defaultPlanPath, planFileJson, writePlanFile } from "../lib/repull/digest.js";
 import { EXECUTE_STATUSES } from "../lib/repull/execute/advance.js";
 import { readCatalogFacts } from "../lib/repull/execute/catalog.js";
@@ -352,6 +361,94 @@ repullCommand
           return;
         }
         failMessage(`Execution failed: ${errorDetail(err)}`, { json, answered: false });
+      }
+    },
+  );
+
+const CANARY_HELP = `
+Checks, against the real buckets, the S3 calls the copy step makes: a copy by version id from
+upstream's bucket, a multipart copy in 5 MiB parts, the copies' sizes and ETag, a staging-shaped
+key, and deletes by version id that leave the prefix empty (list-object-versions). Run it before
+the first production re-pull; only stand-ins have answered these calls otherwise.
+
+--prefix must be nm099999/repull-canary-<word>/ or xx09NNNN/repull-canary-<word>/, a scratch
+prefix; it is never a dataset's objects/ or staging/. A dry run (the default) makes no call and
+prints the calls --execute would make. It never locks and never bypasses a lock. It uses the
+ambient short-lived AWS credentials (ASIA keys), as the copy does.
+
+Exit codes: 0 every step passed (or a dry run); 1 a step failed or the arguments were refused.`;
+
+repullCommand
+  .command("canary")
+  .description("Check the re-pull's S3 calls against the real buckets on a scratch prefix")
+  .requiredOption(
+    "--prefix <prefix>",
+    "nm099999/repull-canary-<word>/ or xx09NNNN/repull-canary-<word>/",
+  )
+  .requiredOption("--source <object>", "A small upstream object: <ds>/<path>@<versionId>")
+  .requiredOption(
+    "--multipart-source <object>",
+    "An upstream object over 10 MiB: <ds>/<path>@<versionId>",
+  )
+  .option("--bucket <bucket>", "NEMAR's bucket", "nemar")
+  .option("--region <region>", "NEMAR's bucket's region", "us-east-2")
+  .option("--execute", "Make the calls (a write to the real bucket)")
+  .option("--json", "Print the steps as JSON")
+  .addHelpText("after", CANARY_HELP)
+  .action(
+    async (options: {
+      prefix: string;
+      source: string;
+      multipartSource: string;
+      bucket: string;
+      region: string;
+      execute?: boolean;
+      json?: boolean;
+    }) => {
+      const json = options.json === true;
+      const out = say(json);
+      const single = parseCanarySource(options.source);
+      const multipart = parseCanarySource(options.multipartSource);
+      if (!single || !multipart) {
+        failMessage("--source and --multipart-source take <ds>/<path>@<versionId>.", {
+          json,
+          answered: true,
+        });
+        markUsageExit();
+        return;
+      }
+      const args = {
+        prefix: options.prefix,
+        single,
+        multipart,
+        bucket: options.bucket,
+        region: options.region,
+      };
+      const problem = canaryArgsProblem(args);
+      if (problem || !CANARY_PREFIX_RE.test(args.prefix)) {
+        failMessage(`Refused: ${problem ?? "the prefix is not a canary prefix"}.`, {
+          json,
+          answered: true,
+        });
+        markUsageExit();
+        return;
+      }
+      if (!options.execute) {
+        if (json) {
+          console.log(JSON.stringify({ dry_run: true, calls: canaryCalls(args) }, null, 2));
+        } else {
+          console.log("Dry run; --execute makes these calls:");
+          for (const call of canaryCalls(args)) console.log(`  ${call}`);
+        }
+        return;
+      }
+      const result = await runCanary({ ...args, env: process.env, out });
+      if (json) console.log(JSON.stringify(result, null, 2));
+      else
+        console.log(result.ok ? "The canary passed." : "The canary FAILED; see the steps above.");
+      if (!result.ok) {
+        process.exitCode = 1;
+        markReportedExit();
       }
     },
   );
