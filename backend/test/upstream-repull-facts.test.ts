@@ -750,6 +750,69 @@ describe("GitHub that cannot be read is never clean", () => {
   });
 });
 
+describe("a record that cannot be read is never clean", () => {
+  /** The real database, with every statement whose SQL holds `needle` refused at prepare. */
+  function refusing(needle: string): D1Database {
+    const real = realD1(db);
+    return {
+      ...real,
+      prepare(sql: string) {
+        if (sql.includes(needle)) throw new Error("D1_ERROR: injected fault");
+        return real.prepare(sql);
+      },
+      batch: real.batch.bind(real),
+    } as unknown as D1Database;
+  }
+
+  /** Write a row as a writer that skips the schema's CHECKs would leave it. */
+  function unchecked(write: () => void): void {
+    db.run("PRAGMA ignore_check_constraints = ON");
+    try {
+      write();
+    } finally {
+      db.run("PRAGMA ignore_check_constraints = OFF");
+    }
+  }
+
+  test("a screen table that cannot be read holds screen-unreadable", async () => {
+    db.run("DROP TABLE upstream_repull_screens");
+    expect((await decide()).hold).toBe("screen-unreadable");
+  });
+
+  test("a review table that cannot be read holds review-unreadable", async () => {
+    db.run("DROP TABLE pr_reviews");
+    expect((await decide()).hold).toBe("review-unreadable");
+  });
+
+  test("a dataset that cannot be read holds as anonymous, and GitHub is asked nothing", async () => {
+    const row = await getRepull(realD1(db), repullId);
+    const facts = await gatherMachineCleanFacts(
+      { ...env(), DB: refusing("FROM datasets d LEFT JOIN import_jobs") },
+      row as NonNullable<typeof row>,
+      "gates",
+    );
+    const v = machineClean(facts);
+    expect(v.clean ? "clean" : v.hold).toBe("dataset-anonymous");
+    expect(facts.dataset.anonymous).toBeNull();
+    expect(gh.requests).toEqual([]);
+  });
+
+  test("a screen in a state the vocabulary does not know is unreadable", async () => {
+    unchecked(() => db.run("UPDATE upstream_repull_screens SET status = 'bogus'"));
+    expect(await readScreenFact(realD1(db), { id: repullId, dataset_id: DS }, HEAD)).toBe(
+      "unreadable",
+    );
+    expect((await decide()).hold).toBe("screen-unreadable");
+  });
+
+  test("a review in a state the vocabulary does not know is unreadable, whatever its verdict", async () => {
+    // A pass with a report that re-derives a pass: only the state is wrong.
+    unchecked(() => db.run("UPDATE pr_reviews SET state = 'foo'"));
+    expect(await readReviewFact(realD1(db), DS, 7, HEAD)).toBe("unreadable");
+    expect((await decide()).hold).toBe("review-unreadable");
+  });
+});
+
 describe("the check runs are the App's own, the latest of each", () => {
   test("another App's run of the same name is not read, even when GitHub ignores the filter", async () => {
     // A failing App run and a passing GitHub Actions run of the same name: only the App's counts.
