@@ -7,11 +7,13 @@
 import { describe, expect, test } from "bun:test";
 import {
   REPULL_CAP_MAX,
+  REPULL_MERGE_CAP_DEFAULT,
   REPULL_OPEN_CAP_DEFAULT,
   autoRepullEnabled,
   autoRepullMergeEnabled,
   isExactProduction,
   readCap,
+  repullMergeCap,
   repullOpenCap,
   repullSwitchesReport,
 } from "../src/services/repull-switches";
@@ -19,7 +21,11 @@ import type { Bindings } from "../src/types/bindings";
 
 type E = Pick<
   Bindings,
-  "ENVIRONMENT" | "AUTO_REPULL_ENABLED" | "AUTO_REPULL_MERGE_ENABLED" | "REPULL_DAILY_OPEN_CAP"
+  | "ENVIRONMENT"
+  | "AUTO_REPULL_ENABLED"
+  | "AUTO_REPULL_MERGE_ENABLED"
+  | "REPULL_DAILY_OPEN_CAP"
+  | "REPULL_DAILY_MERGE_CAP"
 >;
 
 const ENVIRONMENTS = [
@@ -34,7 +40,7 @@ const ENVIRONMENTS = [
   "",
   undefined,
 ] as const;
-const SWITCH_VALUES = ["1", "true", "0", " 1", "1 ", "yes", "", undefined] as const;
+const SWITCH_VALUES = ["1", "true", "0", " 1", "1 ", "1\n", "yes", "", undefined] as const;
 
 const env = (o: Record<string, string | undefined>): E => o as unknown as E;
 
@@ -121,6 +127,10 @@ describe("caps", () => {
 
   test("anything else reads 0 and is unreadable, never the default", () => {
     for (const raw of [
+      "5\n",
+      "\n5",
+      "5\t",
+      "1\n2",
       "005",
       "000",
       "21",
@@ -145,38 +155,104 @@ describe("caps", () => {
   });
 });
 
+describe("the merge cap", () => {
+  test("reads through the same rule, with its own default", () => {
+    expect(repullMergeCap(env({}))).toEqual({ value: REPULL_MERGE_CAP_DEFAULT, source: "default" });
+    expect(REPULL_MERGE_CAP_DEFAULT).toBe(5);
+    expect(repullMergeCap(env({ REPULL_DAILY_MERGE_CAP: "1" }))).toEqual({
+      value: 1,
+      source: "set",
+    });
+    expect(repullMergeCap(env({ REPULL_DAILY_MERGE_CAP: "5\n" }))).toEqual({
+      value: 0,
+      source: "unreadable",
+    });
+  });
+});
+
 describe("repullSwitchesReport", () => {
-  test("carries the four facts and nothing else", () => {
-    const report = repullSwitchesReport(
-      env({
+  const report = (o: Record<string, string | undefined>) => repullSwitchesReport(env(o));
+  const shape = (
+    production: boolean,
+    open: boolean,
+    merge: boolean,
+    openCap: { value: number; source: string },
+    mergeCap: { value: number; source: string },
+  ) => ({
+    environment_is_production: production,
+    auto_repull_enabled: open,
+    auto_repull_merge_enabled: merge,
+    open_cap: openCap,
+    merge_cap: mergeCap,
+  });
+  const defaults = {
+    open: { value: 2, source: "default" },
+    merge: { value: 5, source: "default" },
+  };
+
+  test("production with both switches on and both caps set", () => {
+    expect(
+      report({
         ENVIRONMENT: "production",
         AUTO_REPULL_ENABLED: "1",
         AUTO_REPULL_MERGE_ENABLED: "1",
         REPULL_DAILY_OPEN_CAP: "3",
+        REPULL_DAILY_MERGE_CAP: "1",
       }),
-    );
-    expect(report).toEqual({
-      environment_is_production: true,
-      auto_repull_enabled: true,
-      auto_repull_merge_enabled: true,
-      open_cap: { value: 3, source: "set" },
-    });
+    ).toEqual(shape(true, true, true, { value: 3, source: "set" }, { value: 1, source: "set" }));
   });
 
-  test("outside production everything reads off, the cap included as it was set", () => {
-    const report = repullSwitchesReport(
-      env({
+  test("production, open on, merge unset: merge reads off", () => {
+    expect(report({ ENVIRONMENT: "production", AUTO_REPULL_ENABLED: "1" })).toEqual(
+      shape(true, true, false, defaults.open, defaults.merge),
+    );
+  });
+
+  test("production, merge on, open off: both read off", () => {
+    expect(report({ ENVIRONMENT: "production", AUTO_REPULL_MERGE_ENABLED: "1" })).toEqual(
+      shape(true, false, false, defaults.open, defaults.merge),
+    );
+  });
+
+  test("production, open on, merge set to something that is not 1: merge reads off", () => {
+    expect(
+      report({
+        ENVIRONMENT: "production",
+        AUTO_REPULL_ENABLED: "1",
+        AUTO_REPULL_MERGE_ENABLED: "true",
+      }),
+    ).toEqual(shape(true, true, false, defaults.open, defaults.merge));
+  });
+
+  test("production with everything unset", () => {
+    expect(report({ ENVIRONMENT: "production" })).toEqual(
+      shape(true, false, false, defaults.open, defaults.merge),
+    );
+  });
+
+  test("outside production everything reads off, the caps as they were set", () => {
+    expect(
+      report({
         ENVIRONMENT: "development",
         AUTO_REPULL_ENABLED: "1",
         AUTO_REPULL_MERGE_ENABLED: "1",
         REPULL_DAILY_OPEN_CAP: "x",
+        REPULL_DAILY_MERGE_CAP: "4",
       }),
+    ).toEqual(
+      shape(false, false, false, { value: 0, source: "unreadable" }, { value: 4, source: "set" }),
     );
-    expect(report).toEqual({
-      environment_is_production: false,
-      auto_repull_enabled: false,
-      auto_repull_merge_enabled: false,
-      open_cap: { value: 0, source: "unreadable" },
-    });
+  });
+
+  test("an unreadable merge cap is reported unreadable beside a readable open cap", () => {
+    expect(
+      report({
+        ENVIRONMENT: "production",
+        REPULL_DAILY_OPEN_CAP: "2",
+        REPULL_DAILY_MERGE_CAP: "21",
+      }),
+    ).toEqual(
+      shape(true, false, false, { value: 2, source: "set" }, { value: 0, source: "unreadable" }),
+    );
   });
 });

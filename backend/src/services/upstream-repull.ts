@@ -87,7 +87,12 @@ import type { Bindings } from "../types/bindings.js";
 import { isValidDatasetId } from "./datasetId.js";
 import { isScreenExempt, readStoredReport } from "./identifier-screen-stored.js";
 import { resolveImportError } from "./import-error.js";
-import { type CapReading, REPULL_CAP_MAX, isExactProduction, readCap } from "./repull-switches.js";
+import {
+  type CapReading,
+  REPULL_CAP_MAX,
+  isExactProduction,
+  repullMergeCap,
+} from "./repull-switches.js";
 import { liveHeadRefusal } from "./upstream-repull-github.js";
 import {
   type RepullScreenGate,
@@ -408,16 +413,9 @@ export async function datasetFenceRefusal(
 // The daily merge cap (ADR 0111, decision 6)
 // ----------------------------------------------------------------------------
 
-/** `REPULL_DAILY_MERGE_CAP` when the binding is absent. */
-export const REPULL_MERGE_CAP_DEFAULT = 5;
-
 export interface MergeCapState extends CapReading {
   /** Claims made today (UTC), N.0.0's and N.0.1's together. */
   used: number;
-}
-
-export function repullMergeCap(env: Pick<Bindings, "REPULL_DAILY_MERGE_CAP">): CapReading {
-  return readCap(env.REPULL_DAILY_MERGE_CAP, REPULL_MERGE_CAP_DEFAULT);
 }
 
 /**

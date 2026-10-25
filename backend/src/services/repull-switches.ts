@@ -2,8 +2,8 @@
  * The switches and caps of the automatic upstream re-pull (epic #1046 phase 7, #1913; ADR 0111).
  *
  * Nothing here acts. These readers say whether a Worker job may act and how much it may do in a
- * day; each job that reads them also tests the environment itself, because the switches live in
- * configuration that a dev build and a production build both carry.
+ * day; each job that reads them also tests the environment itself, because the switches would
+ * live in one wrangler file read by both environments.
  *
  * The rules, each one deliberate:
  *  - Production is exactly the string `production`. No trim, no case fold, and an unset binding is
@@ -26,6 +26,8 @@ import type { Bindings } from "../types/bindings";
 
 /** `REPULL_DAILY_OPEN_CAP` when the binding is absent: re-pull pull requests opened in a UTC day. */
 export const REPULL_OPEN_CAP_DEFAULT = 2;
+/** `REPULL_DAILY_MERGE_CAP` when the binding is absent: re-pull merges claimed in a UTC day. */
+export const REPULL_MERGE_CAP_DEFAULT = 5;
 /** The largest cap a binding may set; a larger value is unreadable, not clamped. */
 export const REPULL_CAP_MAX = 20;
 
@@ -73,18 +75,27 @@ export function repullOpenCap(env: Pick<Bindings, "REPULL_DAILY_OPEN_CAP">): Cap
   return readCap(env.REPULL_DAILY_OPEN_CAP, REPULL_OPEN_CAP_DEFAULT);
 }
 
+export function repullMergeCap(env: Pick<Bindings, "REPULL_DAILY_MERGE_CAP">): CapReading {
+  return readCap(env.REPULL_DAILY_MERGE_CAP, REPULL_MERGE_CAP_DEFAULT);
+}
+
 /** What the Worker reads, as the admin route reports it. It holds no secret and no binding value. */
 export interface RepullSwitchesReport {
   environment_is_production: boolean;
   auto_repull_enabled: boolean;
   auto_repull_merge_enabled: boolean;
   open_cap: CapReading;
+  merge_cap: CapReading;
 }
 
 export function repullSwitchesReport(
   env: Pick<
     Bindings,
-    "ENVIRONMENT" | "AUTO_REPULL_ENABLED" | "AUTO_REPULL_MERGE_ENABLED" | "REPULL_DAILY_OPEN_CAP"
+    | "ENVIRONMENT"
+    | "AUTO_REPULL_ENABLED"
+    | "AUTO_REPULL_MERGE_ENABLED"
+    | "REPULL_DAILY_OPEN_CAP"
+    | "REPULL_DAILY_MERGE_CAP"
   >,
 ): RepullSwitchesReport {
   return {
@@ -92,5 +103,6 @@ export function repullSwitchesReport(
     auto_repull_enabled: autoRepullEnabled(env),
     auto_repull_merge_enabled: autoRepullMergeEnabled(env),
     open_cap: repullOpenCap(env),
+    merge_cap: repullMergeCap(env),
   };
 }

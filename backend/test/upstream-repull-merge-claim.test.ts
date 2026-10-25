@@ -39,9 +39,13 @@ import {
   __resetRateLimitStateForTests,
   __seedRateLimitStateForTests,
 } from "../src/services/github/transport";
-import { REPULL_CAP_MAX, readCap } from "../src/services/repull-switches";
+import {
+  REPULL_CAP_MAX,
+  REPULL_MERGE_CAP_DEFAULT,
+  readCap,
+  repullMergeCap,
+} from "../src/services/repull-switches";
 import { hashApiKey } from "../src/services/token";
-import { REPULL_MERGE_CAP_DEFAULT, repullMergeCap } from "../src/services/upstream-repull";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
 import {

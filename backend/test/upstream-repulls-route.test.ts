@@ -89,16 +89,18 @@ beforeEach(async () => {
   await seedUsers();
 });
 
+/** An `undefined` environment leaves the binding truly unset: the key is absent, not "test". */
 function env(
-  environment: string | undefined = "test",
+  environment: string | undefined,
   extra: Record<string, string | undefined> = {},
 ): Bindings {
-  return {
+  const bindings: Record<string, string | D1Database | undefined> = {
     DB: realD1(db),
-    ENVIRONMENT: environment,
     GITHUB_ADMIN_PAT: "ghp_repull_route_test",
     ...extra,
-  } as unknown as Bindings;
+  };
+  if (environment !== undefined) bindings.ENVIRONMENT = environment;
+  return bindings as unknown as Bindings;
 }
 
 async function call(
@@ -261,6 +263,7 @@ describe("GET /repulls/switches", () => {
         auto_repull_enabled: false,
         auto_repull_merge_enabled: false,
         open_cap: { value: 2, source: "default" },
+        merge_cap: { value: 5, source: "default" },
       },
     });
   });
@@ -270,6 +273,7 @@ describe("GET /repulls/switches", () => {
       AUTO_REPULL_ENABLED: "1",
       AUTO_REPULL_MERGE_ENABLED: "1",
       REPULL_DAILY_OPEN_CAP: "3",
+      REPULL_DAILY_MERGE_CAP: "1",
     };
     const prod = await call("GET", "/repulls/switches", undefined, {
       environment: "production",
@@ -280,26 +284,35 @@ describe("GET /repulls/switches", () => {
       auto_repull_enabled: true,
       auto_repull_merge_enabled: true,
       open_cap: { value: 3, source: "set" },
+      merge_cap: { value: 1, source: "set" },
     });
     for (const environment of ["Production", "development", "staging", undefined]) {
       const res = await call("GET", "/repulls/switches", undefined, { environment, bindings: on });
-      expect([environment, res.body.switches]).toEqual([
+      expect([environment, res.status, res.body.switches]).toEqual([
         environment,
+        200,
         {
           environment_is_production: false,
           auto_repull_enabled: false,
           auto_repull_merge_enabled: false,
           open_cap: { value: 3, source: "set" },
+          merge_cap: { value: 1, source: "set" },
         },
       ]);
     }
   });
 
-  test("an unreadable cap is reported as unreadable and reads 0", async () => {
+  test("an unreadable cap is reported as unreadable and reads 0, each cap on its own", async () => {
     const res = await call("GET", "/repulls/switches", undefined, {
-      bindings: { REPULL_DAILY_OPEN_CAP: "two" },
+      bindings: { REPULL_DAILY_OPEN_CAP: "two", REPULL_DAILY_MERGE_CAP: "3" },
     });
     expect(res.body.switches.open_cap).toEqual({ value: 0, source: "unreadable" });
+    expect(res.body.switches.merge_cap).toEqual({ value: 3, source: "set" });
+    const other = await call("GET", "/repulls/switches", undefined, {
+      bindings: { REPULL_DAILY_MERGE_CAP: "21" },
+    });
+    expect(other.body.switches.open_cap).toEqual({ value: 2, source: "default" });
+    expect(other.body.switches.merge_cap).toEqual({ value: 0, source: "unreadable" });
   });
 
   test("a member is refused, a missing key is refused, and the report carries no secret", async () => {
