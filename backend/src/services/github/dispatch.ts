@@ -7,7 +7,7 @@
  * intentional changes are import paths.
  */
 
-import { isOpenNeuroTag } from "../../../../shared/openneuro-tag";
+import { isOpenNeuroTag, sameUpstreamTag } from "../../../../shared/openneuro-tag";
 import { GITHUB_API, VALIDATOR_VERSION } from "./shared";
 
 /**
@@ -346,6 +346,132 @@ export async function triggerOpenNeuroOnboard(
     const error = await response.text();
     throw new Error(`Failed to trigger OpenNeuro onboard: HTTP ${response.status} - ${error}`);
   }
+}
+
+/** The event the central re-pull workflow listens for (epic #1046 phase 7, #1913; ADR 0111). */
+export const UPSTREAM_REPULL_EVENT = "run-upstream-repull";
+
+/** How long a re-pull dispatch waits for GitHub before its answer counts as lost. */
+export const UPSTREAM_REPULL_DISPATCH_TIMEOUT_MS = 10_000;
+
+/** What a re-pull dispatch names: the claimed dispatch row, its token, and the CLI the run installs. */
+export interface UpstreamRepullDispatchFields {
+  /** `open` runs a plan to an open pull request, or resumes a row that stalled before it; `finish` walks a merged re-pull to `complete`. */
+  mode: "open" | "finish";
+  datasetId: string;
+  upstreamDs: string;
+  fromTag: string;
+  toTag: string;
+  dispatchId: number;
+  /** The recorded re-pull a resume or a finish continues; null for a first dispatch. */
+  repullId: number | null;
+  /** The dispatch token the Worker signed over the claimed row. A secret: never logged. */
+  token: string;
+  /** The version of `nemar-cli` the run installs: the dispatching Worker's own, a release only. */
+  cliVersion: string;
+}
+
+const DISPATCH_TOKEN_SHAPE = /^[0-9a-f]{64}$/;
+const RELEASE_VERSION = /^\d+\.\d+\.\d+$/;
+
+/**
+ * The `client_payload` of a `run-upstream-repull` dispatch (ADR 0111, the Phase 7 slices). Pure,
+ * for the test.
+ *
+ * The run is unattended and its log is public, so every field is checked here and a malformed one
+ * THROWS before anything is sent: a value the workflow would have to refuse, or worse echo, never
+ * leaves the Worker. The messages name the field and never its value, because one of them is the
+ * token. The values are strings, as the workflow's `env` reads them; `repull_id` is present only
+ * when the dispatch continues a recorded re-pull (a resume or a finish), and a finish must name
+ * one. There are at most nine keys, under GitHub's limit of ten top-level properties of a
+ * `client_payload`. The CLI version must be a release (`X.Y.Z`), so a Worker built from a
+ * development version can never dispatch a run that installs one.
+ *
+ * The token rides in the payload because the run presents it at the automatic create and at its
+ * report callback; the workflow masks it before any step can print it, and nothing here logs it.
+ */
+export function buildUpstreamRepullPayload(p: UpstreamRepullDispatchFields): {
+  event_type: typeof UPSTREAM_REPULL_EVENT;
+  client_payload: Record<string, string>;
+} {
+  const bad = (field: string): never => {
+    throw new Error(`buildUpstreamRepullPayload: ${field} is malformed`);
+  };
+  if (p.mode !== "open" && p.mode !== "finish") bad("mode");
+  if (!/^on\d{6}$/.test(p.datasetId)) bad("the dataset id");
+  if (!/^ds\d{6}$/.test(p.upstreamDs)) bad("the upstream dataset");
+  if (!isOpenNeuroTag(p.fromTag)) bad("the from tag");
+  if (!isOpenNeuroTag(p.toTag)) bad("the to tag");
+  if (sameUpstreamTag(p.fromTag, p.toTag)) bad("the tag pair");
+  if (!(Number.isSafeInteger(p.dispatchId) && p.dispatchId >= 1)) bad("the dispatch id");
+  if (p.repullId !== null && !(Number.isSafeInteger(p.repullId) && p.repullId >= 1)) {
+    bad("the re-pull id");
+  }
+  if (p.mode === "finish" && p.repullId === null) bad("the re-pull id of a finish");
+  if (typeof p.token !== "string" || !DISPATCH_TOKEN_SHAPE.test(p.token)) bad("the dispatch token");
+  if (!RELEASE_VERSION.test(p.cliVersion)) bad("the CLI version");
+
+  const client_payload: Record<string, string> = {
+    mode: p.mode,
+    dataset_id: p.datasetId,
+    upstream_ds: p.upstreamDs,
+    from_tag: p.fromTag,
+    to_tag: p.toTag,
+    dispatch_id: String(p.dispatchId),
+    dispatch_token: p.token,
+    cli_version: p.cliVersion,
+  };
+  if (p.repullId !== null) client_payload.repull_id = String(p.repullId);
+  return { event_type: UPSTREAM_REPULL_EVENT, client_payload };
+}
+
+/**
+ * What GitHub's answer to a re-pull dispatch says about the run:
+ *  - `sent`: a 2xx. GitHub took the event; whether a workflow listens is not shown (it answers 204
+ *    for an event no workflow takes), which is why the dispatch row waits for the run's report and
+ *    the watchdog ends one that never comes;
+ *  - `{ refused }`: a 4xx. GitHub refused the request before it created an event, so nothing ran
+ *    and the caller frees the unit of the cap;
+ *  - `unknown`: a 5xx, a network error or the timeout. GitHub may have queued the event and lost
+ *    only the answer (a 502, 503 or 504 can come from GitHub's edge after the event was accepted,
+ *    the reasoning {@link DispatchRejectedError} records), so the caller must not assume nothing
+ *    started: the unit stays used.
+ */
+export type UpstreamRepullSend = "sent" | { refused: number } | "unknown";
+
+/**
+ * Send a `run-upstream-repull` dispatch to the central workflow repository. It never throws and
+ * never forwards GitHub's body: the answer is one of three words (see {@link UpstreamRepullSend}),
+ * so no error text can carry the token or a dataset's path. `pat` must carry dispatch write on
+ * `nemarDatasets/.github` (use `getDatasetsToken()`). `fetchImpl` defaults to the global fetch.
+ */
+export async function triggerUpstreamRepullRun(
+  payload: ReturnType<typeof buildUpstreamRepullPayload>,
+  pat: string,
+  options: { fetchImpl?: typeof fetch; timeoutMs?: number } = {},
+): Promise<UpstreamRepullSend> {
+  const fetchImpl = options.fetchImpl ?? fetch;
+  let response: Response;
+  try {
+    response = await fetchImpl(`${GITHUB_API()}/repos/${CENTRAL_WORKFLOW_REPO}/dispatches`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${pat}`,
+        Accept: "application/vnd.github.v3+json",
+        "User-Agent": "NEMAR-API",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(options.timeoutMs ?? UPSTREAM_REPULL_DISPATCH_TIMEOUT_MS),
+    });
+  } catch {
+    return "unknown";
+  }
+  // The body is not read: it is GitHub's, not ours to forward.
+  await response.body?.cancel().catch(() => undefined);
+  if (response.ok) return "sent";
+  if (response.status >= 400 && response.status < 500) return { refused: response.status };
+  return "unknown";
 }
 
 /**
