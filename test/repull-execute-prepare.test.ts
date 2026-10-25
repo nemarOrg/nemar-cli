@@ -29,16 +29,18 @@ import {
   test,
 } from "bun:test";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { which } from "bun";
 import { hashApiKey } from "../backend/src/services/token";
 import type { Bindings } from "../backend/src/types/bindings";
@@ -49,7 +51,9 @@ import { EDF_HEADER_BYTES } from "../shared/identifier-scan";
 import { PROVENANCE_NOTE_KEY } from "../shared/privacy-correction-text";
 import { getApiUrl } from "../src/lib/api/client";
 import { runCommand } from "../src/lib/git-annex/run-command";
+import { listAnnexedKeys } from "../src/lib/git-annex/transfer";
 import { httpUpstreamReader } from "../src/lib/import-scrub";
+import { awsCliUpload } from "../src/lib/normalize-dataset";
 import { defaultPlanPath, readPlanFile, writePlanFile } from "../src/lib/repull/digest";
 import { commitMaterialized, materializeDelta } from "../src/lib/repull/execute/materialize";
 import {
@@ -57,7 +61,8 @@ import {
   executeRepull,
   upstreamObjectsBase,
 } from "../src/lib/repull/execute/run";
-import { ExecuteRefused } from "../src/lib/repull/execute/verify-plan";
+import { scrubDelta } from "../src/lib/repull/execute/scrub-delta";
+import { ExecuteRefused, readExecutablePlan } from "../src/lib/repull/execute/verify-plan";
 import { removeTree, workClone, workPaths } from "../src/lib/repull/execute/workdir";
 import { type PlanOptions, planRepull } from "../src/lib/repull/plan";
 import {
@@ -92,6 +97,11 @@ const ADMIN_KEY = "repull-execute-admin-key-0123456789abcdef0123456789ab";
 const XX_A = "xx099991";
 const XX_B = "xx099992";
 const XX_C = "xx099993";
+const XX_D = "xx099994";
+const XX_E = "xx099995";
+const XX_F = "xx099996";
+const XX_G = "xx099997";
+const XX_H = "xx099998";
 const REGION = "us-east-2";
 
 let gh: GitHubStandin;
@@ -104,6 +114,8 @@ let environment = "test";
 const handle = makeRepullApp();
 /** Every request to the API that is not a GET, in order. */
 const apiWrites: string[] = [];
+/** When set, the API answers every transition 503, as a Worker that cannot be reached would. */
+let failTransitions = false;
 const saved: Record<string, string | undefined> = {};
 
 function bindings(): Bindings {
@@ -130,9 +142,11 @@ beforeAll(() => {
   apiServer = Bun.serve({
     port: 0,
     fetch: (req) => {
-      apiWrites.push(
-        ...(req.method === "GET" ? [] : [`${req.method} ${new URL(req.url).pathname}`]),
-      );
+      const path = new URL(req.url).pathname;
+      apiWrites.push(...(req.method === "GET" ? [] : [`${req.method} ${path}`]));
+      if (failTransitions && path.endsWith("/transition")) {
+        return Response.json({ error: "Service Unavailable" }, { status: 503 });
+      }
       return handle(req, bindings());
     },
   });
@@ -355,6 +369,7 @@ async function show(repo: string, spec: string): Promise<string> {
 /** A fresh database, no plan or work directory, and empty stand-in logs. */
 async function reset(): Promise<void> {
   apiWrites.length = 0;
+  failTransitions = false;
   db = freshDb();
   environment = "test";
   gh.reset();
@@ -567,9 +582,10 @@ describe.skipIf(!awsInstalled)("the reviewed plan, before anything is written", 
     }
   });
 
-  test("a moved git-annex branch is plan-stale", async () => {
+  test("a moved git-annex branch is plan-stale, and the refusal leaves no directory behind", async () => {
     seedMirror(XX_A);
     const path = await makePlan(fx);
+    const paths = workPaths(configDir, XX_A, JSON.parse(readFileSync(path, "utf8")).digest);
     const before = (await gitIn(fx.originRepo, ["rev-parse", "refs/heads/git-annex"])).trim();
     await writeAnnexBranchFile(fx.originRepo, "trust.log", "");
     try {
@@ -578,6 +594,44 @@ describe.skipIf(!awsInstalled)("the reviewed plan, before anything is written", 
       await gitIn(fx.originRepo, ["update-ref", "refs/heads/git-annex", before]);
     }
     expect(repullRows()).toEqual([]);
+    expect(existsSync(paths.root)).toBe(false);
+    expect(existsSync(dirname(paths.root))).toBe(false);
+    expect(existsSync(paths.lock)).toBe(false);
+  });
+
+  test("a status this build does not reach is refused before anything", async () => {
+    seedMirror(XX_A);
+    const path = await makePlan(fx);
+    await nothingWritten(async () => {
+      expect((await refusal(execute(fx, path, { until: "copied" }))).code).toBe("until-not-built");
+    });
+    expect(apiWrites).toEqual([]);
+  });
+
+  test("a dataset row that does not say whether it is anonymous is refused as unknown", async () => {
+    seedMirror(XX_A);
+    const path = await makePlan(fx);
+    const root = mkdtempSync(join(tmpdir(), "nemar-repull-anon-"));
+    try {
+      const err = await refusal(
+        readExecutablePlan(path, {
+          catalog: {
+            dataset: { source: "openneuro", source_id: UPSTREAM_ID, concept_doi: CONCEPT_DOI },
+            versions: [{ version: "1.0.0", source_version: TAG_A, source_version_basis: "doi" }],
+          },
+          github: { token: ADMIN_TOKEN, apiBase: gh.url },
+          environment: getApiUrl(),
+          env: execEnv(fx),
+          workRoot: root,
+          collect: { computed: new Map() },
+          openNeuroGraphqlUrl: openNeuro.url,
+        }),
+      );
+      expect(err.code).toBe("anonymity-unknown");
+      expect(readdirSync(root)).toEqual([]);
+    } finally {
+      removeTree(root);
+    }
   });
 });
 
@@ -591,14 +645,22 @@ describe.skipIf(!awsInstalled)("preparing the default delta", () => {
   let first: Awaited<ReturnType<typeof execute>>;
   let paths: ReturnType<typeof workPaths>;
   beforeAll(async () => {
-    fx = await buildRepullFixture({ datasetId: XX_A, s3, crlfSidecarB: true });
+    fx = await buildRepullFixture({
+      datasetId: XX_A,
+      s3,
+      crlfSidecarB: true,
+      symlinkB: true,
+      nestedGitattributesB: true,
+    });
   });
   afterAll(() => fx?.cleanup());
+  let originBefore: string;
 
   beforeEach(async () => {
     await reset();
     seedMirror(XX_A);
     planPath = await makePlan(fx);
+    originBefore = await refsOf(fx.originRepo);
     first = await execute(fx, planPath);
     const digest = JSON.parse(readFileSync(planPath, "utf8")).digest as string;
     paths = workPaths(configDir, XX_A, digest);
@@ -617,9 +679,28 @@ describe.skipIf(!awsInstalled)("preparing the default delta", () => {
     // The plan's base is NEMAR's main, untouched.
     const main = (await gitIn(fx.originRepo, ["rev-parse", "refs/heads/main"])).trim();
     expect(row?.base_sha).toBe(main);
-    // The working directory and the checkpoint are private.
-    expect(statSync(paths.root).mode & 0o777).toBe(0o700);
+    // The working directory and the checkpoint are private, and so is every directory above them
+    // up to repull/ (the config directory itself is the user's).
+    for (const dir of [paths.root, dirname(paths.root), dirname(dirname(paths.root))]) {
+      expect(statSync(dir).mode & 0o777).toBe(0o700);
+    }
+    expect(dirname(dirname(paths.root))).toBe(join(configDir, "repull", XX_A));
+    expect(statSync(join(configDir, "repull")).mode & 0o777).toBe(0o700);
     expect(statSync(paths.bundle).mode & 0o777).toBe(0o600);
+    // What the scrub could not read or prove is recorded, never left out as nothing; the NEMAR-owned
+    // edit is counted.
+    for (const key of [
+      "json_files_unread",
+      "json_files_annexed",
+      "scans_tables_unread",
+      "headers_dates_unproven",
+      "headers_dates_left",
+    ]) {
+      expect(typeof counts[key]).toBe("number");
+    }
+    expect(counts).toMatchObject({ nemar_owned_edits: 1, nemar_owned_edits_left: 0 });
+    // The lock is released.
+    expect(existsSync(paths.lock)).toBe(false);
   });
 
   test("one commit onto the base, with both trailers, and the NEMAR-owned edit", async () => {
@@ -640,8 +721,25 @@ describe.skipIf(!awsInstalled)("preparing the default delta", () => {
       (r: { relation_type: string }) => r.relation_type === "IsIdenticalTo",
     );
     expect(hit.identifier).toBe(`10.18112/openneuro.${UPSTREAM_ID}.v${TAG_B}`);
-    // Nothing was pushed: NEMAR's origin has no release branch and main is where it was.
-    expect(await refsOf(fx.originRepo)).not.toContain("release/");
+    // Nothing was pushed: every ref of NEMAR's origin is where it was.
+    expect(await refsOf(fx.originRepo)).toBe(originBefore);
+  });
+
+  test("the commit changes exactly the plan's paths, the NEMAR-owned edit and nothing else", async () => {
+    const [row] = repullRows();
+    const sha = row?.synth_sha as string;
+    const plan = JSON.parse(readFileSync(planPath, "utf8"));
+    const allowed = new Set<string>([".nemar/metadata.json"]);
+    for (const p of plan.paths as Array<{ path: string; delta: boolean; deleted: boolean }>) {
+      if (p.delta || p.deleted) allowed.add(p.path);
+    }
+    const changed = (
+      await gitIn(paths.repo, ["diff", "--name-only", "--no-renames", row?.base_sha as string, sha])
+    )
+      .split("\n")
+      .filter(Boolean);
+    // This scrub changed nothing, so the ledger and the provenance files are NEMAR's as they were.
+    expect(new Set(changed)).toEqual(allowed);
   });
 
   test("the tree is the plan's targets: the copied keys, the local uploads, the description", async () => {
@@ -680,11 +778,23 @@ describe.skipIf(!awsInstalled)("preparing the default delta", () => {
       crlf?.target.oid as string,
     );
     expect(await show(repo, `${sha}:${PATHS.crlfSidecar}`)).toContain("\r\n");
+    // The script's mode change, the plain symlink and the nested .gitattributes, as upstream has them.
+    expect(
+      (await gitIn(repo, ["ls-tree", sha, "--", PATHS.script])).startsWith("100755 blob"),
+    ).toBe(true);
+    const link = (await gitIn(repo, ["ls-tree", sha, "--", PATHS.symlink])).trim();
+    expect(link.startsWith("120000 blob")).toBe(true);
+    expect(await show(repo, `${sha}:${PATHS.symlink}`)).toBe("run.sh");
+    const attrs = (plan.paths as Array<{ path: string; target: Record<string, string> }>).find(
+      (p) => p.path === PATHS.nestedGitattributes,
+    );
+    expect(attrs?.target.computed).toBe("gitattributes-stripped");
+    expect(await show(repo, `${sha}:${PATHS.nestedGitattributes}`)).toBe("*.tsv text eol=lf\n");
     // The git-held motion recordings were annexed and uploaded from here, registered at nemar-s3.
     const motion = await show(repo, `${sha}:${PATHS.motion}`);
     const key = motion.trim().split("/").pop() as string;
     expect(s3.current("nemar", `${XX_A}/objects/${key}`)).toBeDefined();
-    // Upstream's keys were not copied: 6d copies them, by version.
+    // Upstream's keys were not copied: a later step copies them, by version.
     expect(s3.current("nemar", `${XX_A}/objects/${fx.keys.setB}`)).toBeUndefined();
     expect(s3.log.some((e) => e.op === "UploadPartCopy")).toBe(false);
   });
@@ -699,12 +809,36 @@ describe.skipIf(!awsInstalled)("preparing the default delta", () => {
     expect(JSON.parse(row?.counts as string).scrubbed_recordings).toBe(0);
   });
 
-  test("a rerun of a prepared row leaves it as it is", async () => {
+  test("a rerun of a prepared row leaves it as it is, and uploads nothing again", async () => {
     const before = repullRows();
+    const writes = s3Writes();
+    apiWrites.length = 0;
+    // Directories that exist with a looser mode are made private again.
+    for (const dir of [dirname(paths.root), dirname(dirname(paths.root))]) chmodSync(dir, 0o755);
     const again = await execute(fx, planPath);
+    for (const dir of [dirname(paths.root), dirname(dirname(paths.root))]) {
+      expect(statSync(dir).mode & 0o777).toBe(0o700);
+    }
     expect(again.result.stoppedAt).toBe("prepared");
     expect(again.lines.join("\n")).toContain("its working clone holds its commit");
     expect(repullRows()).toEqual(before);
+    expect(s3Writes()).toBe(writes);
+    // The one write is the record's create, which answers the open row as it is.
+    expect(apiWrites).toEqual(["POST /admin/repulls"]);
+  });
+
+  test("a stale error on a prepared row is cleared by a run that shows its facts hold", async () => {
+    const recorded = repullRows()[0] as Row;
+    db.run("UPDATE upstream_repulls SET synth_tree = ?", ["f".repeat(40)]);
+    removeTree(paths.root);
+    rmSync(paths.bundle, { force: true });
+    expect((await refusal(execute(fx, planPath))).code).toBe("prepare-not-reproducible");
+    expect(repullRows()[0]?.last_error).toContain("prepare-not-reproducible");
+    // The record put right, the run finds its clone at the recorded commit and says so.
+    db.run("UPDATE upstream_repulls SET synth_tree = ?", [recorded.synth_tree]);
+    const again = await execute(fx, planPath);
+    expect(again.lines.join("\n")).toContain("holds its commit");
+    expect(repullRows()[0]?.last_error).toBeNull();
   });
 
   test("a working clone moved off the recorded commit is not taken for it", async () => {
@@ -716,6 +850,7 @@ describe.skipIf(!awsInstalled)("preparing the default delta", () => {
     ]);
     const again = await execute(fx, planPath);
     expect(again.lines.join("\n")).not.toContain("holds its commit");
+    expect(again.lines.join("\n")).toContain("(clone-at-another-commit)");
     expect(again.lines.join("\n")).toContain("restored from the checkpoint");
     expect((await gitIn(paths.repo, ["rev-parse", "HEAD"])).trim()).toBe(
       before[0]?.synth_sha as string,
@@ -726,6 +861,7 @@ describe.skipIf(!awsInstalled)("preparing the default delta", () => {
     const before = repullRows();
     removeTree(paths.root);
     const again = await execute(fx, planPath);
+    expect(again.lines.join("\n")).toContain("(no-working-clone)");
     expect(again.lines.join("\n")).toContain("restored from the checkpoint");
     expect(repullRows()).toEqual(before);
     expect((await gitIn(paths.repo, ["rev-parse", "HEAD"])).trim()).toBe(
@@ -764,6 +900,7 @@ describe.skipIf(!awsInstalled)("preparing the default delta", () => {
     removeTree(paths.root);
     const again = await execute(fx, planPath);
     expect(again.lines.join("\n")).not.toContain("restored from the checkpoint");
+    expect(again.lines.join("\n")).toContain("(commit-not-in-checkpoint)");
     expect(again.lines.join("\n")).toContain("prepared again, to the same commit");
     expect(repullRows()).toEqual(before);
   });
@@ -780,6 +917,105 @@ describe.skipIf(!awsInstalled)("preparing the default delta", () => {
     expect(row?.status).toBe("prepared");
     expect(row?.synth_tree).toBe("f".repeat(40));
     expect(row?.last_error).toContain("prepare-not-reproducible");
+  });
+
+  test("a recorded manifest digest the preparation does not reproduce refuses too", async () => {
+    db.run("UPDATE upstream_repulls SET manifest_digest = ?", [`sha256:${"0".repeat(64)}`]);
+    removeTree(paths.root);
+    rmSync(paths.bundle, { force: true });
+    expect((await refusal(execute(fx, planPath))).code).toBe("prepare-not-reproducible");
+    expect(repullRows()[0]?.status).toBe("prepared");
+  });
+
+  test("a prepared row whose main then moved by .nemar/** only is prepared again onto it", async () => {
+    const before = repullRows()[0] as Row;
+    const main = "refs/heads/main";
+    const original = (await gitIn(fx.originRepo, ["rev-parse", main])).trim();
+    const meta = JSON.parse(await show(fx.originRepo, `${main}:.nemar/metadata.json`));
+    meta.enriched_at = "2026-10-24";
+    await commitOnto(
+      fx.originRepo,
+      main,
+      ".nemar/metadata.json",
+      `${JSON.stringify(meta, null, 2)}\n`,
+    );
+    const moved = (await gitIn(fx.originRepo, ["rev-parse", main])).trim();
+    try {
+      const again = await execute(fx, planPath);
+      expect(again.lines.join("\n")).toContain("prepared again onto the live main");
+      const [row] = repullRows();
+      expect(row?.status).toBe("prepared");
+      expect(row?.base_sha).toBe(moved);
+      expect(row?.synth_sha).not.toBe(before.synth_sha);
+      expect((await gitIn(paths.repo, ["rev-parse", `${row?.synth_sha}^`])).trim()).toBe(moved);
+    } finally {
+      await gitIn(fx.originRepo, ["update-ref", main, original]);
+    }
+  });
+
+  test("the administrator's global git configuration changes nothing that is prepared", async () => {
+    const before = repullRows();
+    const hostile = join(configDir, "hostile-gitconfig");
+    const attributes = join(configDir, "hostile-attributes");
+    writeFileSync(attributes, "* annex.largefiles=anything\n*.json text eol=crlf\n");
+    writeFileSync(
+      hostile,
+      `[annex]\n\taddunlocked = true\n\tbackend = MD5E\n[core]\n\tautocrlf = true\n\tattributesFile = ${attributes}\n[commit]\n\tgpgsign = true\n`,
+    );
+    // The default attributes and ignore files git reads with no global configuration at all.
+    const xdg = join(configDir, "hostile-xdg");
+    mkdirSync(join(xdg, "git"), { recursive: true });
+    writeFileSync(
+      join(xdg, "git", "attributes"),
+      "* annex.largefiles=anything\n*.tsv text eol=crlf\n",
+    );
+    writeFileSync(join(xdg, "git", "ignore"), "*\n");
+    removeTree(paths.root);
+    rmSync(paths.bundle, { force: true });
+    const saved = { global: process.env.GIT_CONFIG_GLOBAL, xdg: process.env.XDG_CONFIG_HOME };
+    process.env.GIT_CONFIG_GLOBAL = hostile;
+    process.env.XDG_CONFIG_HOME = xdg;
+    try {
+      const again = await execute(fx, planPath, {
+        env: { ...execEnv(fx), GIT_CONFIG_GLOBAL: hostile, XDG_CONFIG_HOME: xdg },
+      });
+      expect(again.lines.join("\n")).toContain("prepared again, to the same commit");
+    } finally {
+      for (const [k, v] of [
+        ["GIT_CONFIG_GLOBAL", saved.global],
+        ["XDG_CONFIG_HOME", saved.xdg],
+      ] as const) {
+        if (v === undefined) Reflect.deleteProperty(process.env, k);
+        else process.env[k] = v;
+      }
+    }
+    expect(repullRows()).toEqual(before);
+  });
+
+  test("a second execution of the plan refuses while one runs, and takes over a crashed one's lock", async () => {
+    // A live process holds the lock: this test's own.
+    mkdirSync(paths.lock, { mode: 0o700 });
+    writeFileSync(join(paths.lock, "pid"), `${process.pid}\n`);
+    // What the running one is using: its planner's clones and its working clone.
+    mkdirSync(paths.plan, { recursive: true });
+    writeFileSync(join(paths.plan, "in-use"), "");
+    try {
+      expect((await refusal(execute(fx, planPath))).code).toBe("execution-locked");
+      expect(existsSync(join(paths.plan, "in-use"))).toBe(true);
+      expect((await gitIn(paths.repo, ["rev-parse", "HEAD"])).trim()).toBe(
+        repullRows()[0]?.synth_sha as string,
+      );
+    } finally {
+      rmSync(paths.lock, { recursive: true, force: true });
+      rmSync(paths.plan, { recursive: true, force: true });
+    }
+    // A crashed run's lock: its process is gone.
+    const gone = Bun.spawnSync(["true"]).pid;
+    mkdirSync(paths.lock, { mode: 0o700 });
+    writeFileSync(join(paths.lock, "pid"), `${gone}\n`);
+    const again = await execute(fx, planPath);
+    expect(again.result.stoppedAt).toBe("prepared");
+    expect(existsSync(paths.lock)).toBe(false);
   });
 
   test("with the checkpoint gone too, preparing again gives the same tree and commit", async () => {
@@ -809,11 +1045,37 @@ describe.skipIf(!awsInstalled)("the delta scrub (ADR 0089, ADR 0091) before any 
     await reset();
     seedMirror(XX_B);
     planPath = await makePlan(fx);
+    originBefore = await refsOf(fx.originRepo);
     await execute(fx, planPath);
     row = repullRows()[0] as Row;
     repo = workPaths(configDir, XX_B, row.plan_digest as string).repo;
   });
   afterAll(() => fx?.cleanup());
+  let originBefore: string;
+
+  test("the commit changes the plan's paths, the NEMAR-owned edit, the ledger and the provenance files only", async () => {
+    const sha = row.synth_sha as string;
+    const plan = JSON.parse(readFileSync(planPath, "utf8"));
+    const allowed = new Set<string>([
+      ".nemar/metadata.json",
+      ".nemar/corrections.jsonl",
+      "sourcedata/sourcedata_provenance.json",
+      "sourcedata/README_sourcedata_provenance.md",
+    ]);
+    for (const p of plan.paths as Array<{ path: string; delta: boolean; deleted: boolean }>) {
+      if (p.delta || p.deleted) allowed.add(p.path);
+    }
+    const changed = (
+      await gitIn(repo, ["diff", "--name-only", "--no-renames", row.base_sha as string, sha])
+    )
+      .split("\n")
+      .filter(Boolean);
+    expect(new Set(changed)).toEqual(allowed);
+    // Modes: nothing NEMAR held changed mode; the blanked sidecar kept upstream's.
+    const raw = await gitIn(repo, ["diff", "--raw", "--no-renames", row.base_sha as string, sha]);
+    const blanked = raw.split("\n").find((l) => l.endsWith(PATHS.addedIdentifierJson)) ?? "";
+    expect(blanked).toMatch(/^:000000 100644 /);
+  });
 
   test("the added flagged EDF is re-keyed SHA256E, uploaded, dated 1 January, its upstream key dead", async () => {
     expect(row.status).toBe("prepared");
@@ -897,7 +1159,7 @@ describe.skipIf(!awsInstalled)("the delta scrub (ADR 0089, ADR 0091) before any 
   });
 
   test("nothing was pushed and no upstream key was copied", async () => {
-    expect(await refsOf(fx.originRepo)).not.toContain("release/");
+    expect(await refsOf(fx.originRepo)).toBe(originBefore);
     expect(s3.current("nemar", `${XX_B}/objects/${fx.keys.addedEdf}`)).toBeUndefined();
   });
 
@@ -979,6 +1241,7 @@ describe.skipIf(!awsInstalled)("materializing proves every id", () => {
         originUrl: `file://${fx.originRepo}`,
         baseSha: main,
         token: null,
+        annexCommit: (await gitIn(fx.originRepo, ["rev-parse", "refs/heads/git-annex"])).trim(),
       });
       const scratch = join(root, "scratch");
       mkdirSync(scratch);
@@ -1008,12 +1271,110 @@ describe.skipIf(!awsInstalled)("materializing proves every id", () => {
         originUrl: `file://${fx.originRepo}`,
         baseSha: main,
         token: null,
+        annexCommit: (await gitIn(fx.originRepo, ["rev-parse", "refs/heads/git-annex"])).trim(),
       });
       writeFileSync(join(repo, "stray.txt"), "Not a delta path.\n");
       const err = await refusal(commitMaterialized(repo, main, new Set(["README.md"]), new Date()));
       expect(err.code).toBe("scope-incomplete");
       // In the scope, the same change passes.
       await commitMaterialized(repo, main, new Set(["stray.txt"]), new Date());
+    } finally {
+      removeTree(root);
+    }
+  });
+
+  test("a git-annex branch that moved since the plan refuses the clone", async () => {
+    const root = mkdtempSync(join(tmpdir(), "nemar-repull-materialize-"));
+    try {
+      const main = (await gitIn(fx.originRepo, ["rev-parse", "refs/heads/main"])).trim();
+      const err = await refusal(
+        workClone({
+          dir: join(root, "repo"),
+          originUrl: `file://${fx.originRepo}`,
+          baseSha: main,
+          token: null,
+          annexCommit: "0".repeat(40),
+        }),
+      );
+      expect(err.code).toBe("plan-stale");
+    } finally {
+      removeTree(root);
+    }
+  });
+
+  test("the closing check reads the copy items, the tree and the headers this run read", async () => {
+    // A copy recording the scrub has no source for (its pin taken out of the plan, which a real
+    // plan would refuse): the scrub counts it unread, and only the closing check can catch it.
+    const root = mkdtempSync(join(tmpdir(), "nemar-repull-materialize-"));
+    try {
+      const collect = { computed: new Map<string, Buffer>() };
+      const out = await planRepull({
+        datasetId: fx.datasetId,
+        catalog: {
+          dataset: { source: "openneuro", source_id: UPSTREAM_ID, concept_doi: CONCEPT_DOI },
+          versions: [{ version: "1.0.0", source_version: TAG_A, source_version_basis: "doi" }],
+        },
+        github: { token: ADMIN_TOKEN, apiBase: gh.url },
+        env: fx.env,
+        environment: getApiUrl(),
+        workRoot: root,
+        openNeuroGraphqlUrl: openNeuro.url,
+        keepWorkdir: true,
+        collect,
+      });
+      if (!out.planned || !out.workdir) throw new Error("not planned");
+      const body = JSON.parse(JSON.stringify(out.file.body));
+      for (const item of body.copy.items as Array<{ key: string; pin: unknown }>) {
+        if (item.key === fx.keys.addedEdf) item.pin = null;
+      }
+      const main = (await gitIn(fx.originRepo, ["rev-parse", "refs/heads/main"])).trim();
+      const annex = (await gitIn(fx.originRepo, ["rev-parse", "refs/heads/git-annex"])).trim();
+      const repo = await workClone({
+        dir: join(root, "repo"),
+        originUrl: `file://${fx.originRepo}`,
+        baseSha: main,
+        token: null,
+        annexCommit: annex,
+      });
+      const oursKeys = new Set((await listAnnexedKeys(repo)).values());
+      const scratch = join(root, "scratch");
+      mkdirSync(scratch);
+      const reader = httpUpstreamReader({ baseUrl: s3.url, retryDelayMs: 1 });
+      const mat = await materializeDelta({
+        work: repo,
+        body,
+        upstreamBare: join(out.workdir, "upstream.git"),
+        upstreamEnv: undefined,
+        computed: collect.computed,
+        reader,
+        scratch,
+      });
+      const scope = new Set(mat.deltaPaths);
+      await commitMaterialized(repo, main, scope, new Date("2026-10-24T00:00:00.000Z"));
+      const err = await refusal(
+        scrubDelta({
+          work: repo,
+          datasetId: fx.datasetId,
+          scope,
+          body,
+          oursKeys,
+          annexFromGit: mat.annexFromGit,
+          reader,
+          upload: awsCliUpload({
+            bucket: "nemar",
+            datasetId: fx.datasetId,
+            region: REGION,
+            remoteUuid: fx.nemarUuid,
+            workDir: join(root, "upload"),
+          }),
+          bucket: "nemar",
+          now: new Date("2026-10-24T00:00:00.000Z"),
+          maxBytes: 5 * 1024 ** 3,
+          upstreamBare: join(out.workdir, "upstream.git"),
+        }),
+      );
+      expect(err.code).toBe("header-unreadable");
+      expect(err.message).toContain("did not read");
     } finally {
       removeTree(root);
     }
@@ -1066,6 +1427,149 @@ describe.skipIf(!awsInstalled)("root metadata upstream annexed", () => {
       expect(row?.last_error).toContain("unannex-content-mismatch");
     } finally {
       s3.corruptByte("openneuro.org", object, fx.pins.changesB as string, 0);
+    }
+  });
+});
+
+describe.skipIf(!awsInstalled)("a failure is recorded, or said", () => {
+  let fx: RepullFixture;
+  beforeAll(async () => {
+    fx = await buildRepullFixture({ datasetId: XX_D, s3 });
+    // Upstream no longer serves the pinned version of the added recording; the newer one stays.
+    s3.dropVersion("openneuro.org", `${UPSTREAM_ID}/${PATHS.addedEdf}`, fx.pins.addedEdf as string);
+  });
+  afterAll(() => fx?.cleanup());
+  beforeEach(reset);
+
+  test("a pinned object upstream stopped serving refuses as retryable, and the row says why", async () => {
+    seedMirror(XX_D);
+    const path = await makePlan(fx);
+    const err = await refusal(execute(fx, path));
+    expect(err.code).toBe("header-unreadable");
+    expect(err.retryable).toBe(true);
+    const [row] = repullRows();
+    expect(row?.status).toBe("planned");
+    expect(row?.last_error).toContain("header-unreadable");
+    // It was never read at the path's newer version instead: the path has a current object, so
+    // only a read that names the gone version is answered 404, and every read was.
+    const reads = s3.log.filter((e) => e.bucket === "openneuro.org");
+    expect(reads.length).toBeGreaterThan(0);
+    expect(reads.every((e) => e.status === 404)).toBe(true);
+  });
+
+  test("a record that cannot be written is said, and the refusal is still the step's", async () => {
+    seedMirror(XX_D);
+    const path = await makePlan(fx);
+    await execute(fx, path, { until: "planned" });
+    failTransitions = true;
+    const lines: string[] = [];
+    const err = await refusal(
+      executeRepull({ planPath: path, env: execEnv(fx), out: (l) => lines.push(l) }),
+    );
+    expect(err.code).toBe("header-unreadable");
+    expect(lines.join("\n")).toContain("could not be recorded");
+    expect(repullRows()[0]?.last_error).toBeNull();
+  });
+});
+
+describe.skipIf(!awsInstalled)("the destination prefix", () => {
+  test("a nemar-s3 prefix other than <id>/objects/ refuses before anything is uploaded", async () => {
+    await reset();
+    const fx = await buildRepullFixture({ datasetId: XX_E, s3 });
+    try {
+      const prefix = `${XX_E}/elsewhere/`;
+      await writeAnnexBranchFile(
+        fx.originRepo,
+        "remote.log",
+        `${fx.nemarUuid} bucket=nemar datacenter=us-east-2 encryption=none fileprefix=${prefix} name=nemar-s3 type=S3 timestamp=1790000002s\n`,
+      );
+      mkdirSync(join(fx.bucketBase, prefix), { recursive: true });
+      writeFileSync(join(fx.bucketBase, prefix, "annex-uuid"), fx.nemarUuid);
+      seedMirror(XX_E);
+      const path = await makePlan(fx);
+      expect(JSON.parse(readFileSync(path, "utf8")).copy.destination_prefix).toBe(prefix);
+      const writes = s3Writes();
+      const err = await refusal(execute(fx, path));
+      expect(err.code).toBe("destination-prefix");
+      expect(s3Writes()).toBe(writes);
+      expect(repullRows()[0]?.last_error).toContain("destination-prefix");
+    } finally {
+      fx.cleanup();
+    }
+  });
+});
+
+describe.skipIf(!awsInstalled)("NEMAR-owned edits", () => {
+  beforeEach(reset);
+
+  test("a metadata file that begins with a byte-order mark is edited as the planner read it", async () => {
+    const fx = await buildRepullFixture({ datasetId: XX_F, s3, bomNemarMetadata: true });
+    try {
+      seedMirror(XX_F);
+      const path = await makePlan(fx);
+      const { result } = await execute(fx, path);
+      expect(result.row.status).toBe("prepared");
+      const repo = workPaths(configDir, XX_F, result.row.plan_digest).repo;
+      // Read as bytes: a text decoder would drop the mark it is asked about.
+      const bytes = Bun.spawnSync(
+        ["git", "cat-file", "blob", `${result.row.synth_sha}:.nemar/metadata.json`],
+        { cwd: repo },
+      ).stdout;
+      expect([...bytes.subarray(0, 3)]).toEqual([0xef, 0xbb, 0xbf]);
+      const meta = JSON.parse(Buffer.from(bytes.subarray(3)).toString("utf8"));
+      const hit = meta.related_identifiers.find(
+        (r: { relation_type: string }) => r.relation_type === "IsIdenticalTo",
+      );
+      expect(hit.identifier).toBe(`10.18112/openneuro.${UPSTREAM_ID}.v${TAG_B}`);
+      expect(result.row.counts).toMatchObject({ nemar_owned_edits: 1, nemar_owned_edits_left: 0 });
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  test("an edit the plan lists with another status is left as it is, said and counted", async () => {
+    const fx = await buildRepullFixture({ datasetId: XX_G, s3, brokenNemarMetadata: true });
+    try {
+      seedMirror(XX_G);
+      const path = await makePlan(fx);
+      const { result, lines } = await execute(fx, path);
+      expect(result.row.status).toBe("prepared");
+      expect(lines.join("\n")).toContain("left as they are: 1 (unparseable)");
+      expect(result.row.counts).toMatchObject({ nemar_owned_edits: 0, nemar_owned_edits_left: 1 });
+      const repo = workPaths(configDir, XX_G, result.row.plan_digest).repo;
+      expect(
+        (await gitIn(repo, ["rev-parse", `${result.row.synth_sha}:.nemar/metadata.json`])).trim(),
+      ).toBe(
+        (await gitIn(repo, ["rev-parse", `${result.row.base_sha}:.nemar/metadata.json`])).trim(),
+      );
+    } finally {
+      fx.cleanup();
+    }
+  });
+});
+
+describe.skipIf(!awsInstalled)("a dead recording N.0.0 would name", () => {
+  test("refuses execution as the plan itself refuses it", async () => {
+    await reset();
+    const fx = await buildRepullFixture({
+      datasetId: XX_H,
+      s3,
+      movedScrubbedEdf: true,
+      noContributorEdits: true,
+    });
+    try {
+      seedMirror(XX_H);
+      const path = await makePlan(fx);
+      const plan = JSON.parse(readFileSync(path, "utf8"));
+      expect(plan.refusals.map((r: { code: string }) => r.code)).toContain(
+        "dead-recording-unpinned",
+      );
+      const err = await refusal(execute(fx, path));
+      expect(err.code).toBe("not-executable");
+      expect(err.message).toContain("dead-recording-unpinned");
+      expect(repullRows()).toEqual([]);
+    } finally {
+      fx.cleanup();
     }
   });
 });
