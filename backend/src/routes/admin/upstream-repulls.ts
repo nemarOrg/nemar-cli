@@ -16,6 +16,9 @@
  *   POST /admin/repulls/:id/screen/acknowledge   record a reason on a screen that asks for one
  *   POST /admin/repulls/:id/merge-claim/release  clear a claim that was not sent, was refused, or
  *                                        is stuck (expired: its outcome unknown, long past)
+ *   POST /admin/repulls/:id/merge-claim/check    whether a merge may be sent again under a held
+ *                                        claim: the claim's age, the dataset fences, the screen
+ *                                        for this administrator, the live head (writes nothing)
  *   POST /admin/repulls/:id/merged       record a merge, after reading it on GitHub
  *   POST /admin/repulls/:id/released     record a release, after reading the version row and tag
  *
@@ -54,6 +57,8 @@ import {
   transitionSchema,
 } from "../../services/upstream-repull";
 import {
+  checkHeldClaim,
+  claimCheckSchema,
   mergedSchema,
   recordRepullMerged,
   recordRepullReleased,
@@ -291,6 +296,24 @@ export function registerUpstreamRepullRoutes(admin: AdminRouter): void {
         return c.json({ repull: result.row });
       } catch (err) {
         return c.json({ error: failure("release the claim", err) }, 500);
+      }
+    },
+  );
+
+  admin.post(
+    "/repulls/:id/merge-claim/check",
+    zValidator("json", claimCheckSchema, invalidBody),
+    async (c) => {
+      const id = parseId(c.req.param("id"));
+      if (id === null)
+        return c.json({ error: "the id must be a re-pull id", code: "invalid-id" }, 400);
+      const user = c.get("user");
+      try {
+        const result = await checkHeldClaim(c.env, { id: user.id }, id, c.req.valid("json"));
+        if (isRefusal(result)) return c.json(refusalBody(result), result.status);
+        return c.json({ repull: result.row });
+      } catch (err) {
+        return c.json({ error: failure("check the claim", err) }, 500);
       }
     },
   );

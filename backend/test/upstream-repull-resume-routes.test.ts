@@ -24,6 +24,7 @@
 import type { Database } from "bun:sqlite";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { Hono } from "hono";
+import { parseScreenReport } from "../../shared/identifier-screen-report";
 import { REPULL_STATUSES, type RepullStatus } from "../../shared/repull-state";
 import { adminMiddleware, authMiddleware } from "../src/middleware/auth";
 import { registerUpstreamRepullRoutes } from "../src/routes/admin/upstream-repulls";
@@ -541,5 +542,109 @@ describe("a stuck claim expires", () => {
     expect(rowOf(id).merge_claim_sha).toBe(HEAD);
     const merged = await call(`/repulls/${id}/merged`, { pr: "n0" });
     expect(merged.body).toMatchObject({ merged_outside_tool: false, repull: { status: "merged" } });
+  });
+});
+
+// ----------------------------------------------------------------------------
+// A held claim, checked before a merge is sent under it again
+// ----------------------------------------------------------------------------
+
+describe("a held claim is checked before a merge is sent under it again", () => {
+  const check = (id: number, sha = HEAD) =>
+    call(`/repulls/${id}/merge-claim/check`, { pr: "n0", sha });
+
+  /** A stored verdict of the head, as the callback leaves it, acknowledged by `ackBy` when given. */
+  function screen(repullId: number, status: string, ackBy?: number): void {
+    const report = parseScreenReport({
+      version: 1,
+      scanner: "identifier-scan@abcdef1",
+      head: HEAD,
+      scan: {
+        id: DATASET,
+        version: null,
+        scanned_at: "2026-10-25T12:00:00.000Z",
+        manifest_source: "clone",
+        status,
+        incomplete: false,
+        incomplete_reasons: [],
+        files: { total: 10, edf_bdf: 4, header_read: 4, header_read_failed: 0 },
+      },
+    });
+    db.run(
+      `INSERT INTO upstream_repull_screens (repull_id, pr, sha, status, report, reported_at, ack_by, ack_reason, ack_at)
+       VALUES (?, 'n0', ?, ?, ?, datetime('now'), ?, ?, ?)`,
+      [
+        repullId,
+        HEAD,
+        status,
+        JSON.stringify(report),
+        ackBy ?? null,
+        ackBy ? "Read the report; the header is the device's." : null,
+        ackBy ? "2026-10-25 12:00:00" : null,
+      ],
+    );
+  }
+
+  function held(minutesAgo: number, o: MirrorSeed = {}): number {
+    seedMirror(o);
+    const id = seedRepull("gates_clear");
+    db.run(
+      `UPDATE upstream_repulls SET merge_claimed_at = datetime('now', '-${minutesAgo} minutes'),
+         merge_claim_sha = ? WHERE id = ?`,
+      [HEAD, id],
+    );
+    return id;
+  }
+
+  test("a fresh claim on a mirror that holds every fence, with a clear screen, passes; nothing is written", async () => {
+    const id = held(2);
+    screen(id, "clean");
+    const before = rowOf(id);
+    const res = await check(id);
+    expect(res.status).toBe(200);
+    expect(rowOf(id)).toEqual(before);
+    expect(gh.requests).toContain(`GET /repos/nemarDatasets/${DATASET}/pulls/7`);
+  });
+
+  test("a claim 25 minutes old or more is too old, before anything else is read", async () => {
+    const id = held(26);
+    screen(id, "clean");
+    gh.requests = [];
+    const res = await check(id);
+    expect([res.status, res.body.code]).toEqual([409, "claim-too-old"]);
+    expect(gh.requests).toEqual([]);
+  });
+
+  test("a dataset withdrawn after the claim is refused", async () => {
+    const id = held(2, { withdrawn: true });
+    screen(id, "clean");
+    const res = await check(id);
+    expect([res.status, res.body.code]).toEqual([409, "withdrawn"]);
+  });
+
+  test("another administrator's acknowledgment does not stand in for this one's", async () => {
+    db.run(
+      `INSERT INTO users (username, email, password_hash, status, role, email_verified)
+       VALUES ('otheradmin', 'otheradmin@example.org', 'x', 'approved', 'admin', 1)`,
+    );
+    const other = (db.query("SELECT id FROM users WHERE username = 'otheradmin'").get() as Row)
+      .id as number;
+    const id = held(2);
+    screen(id, "review", other);
+    const res = await check(id);
+    expect([res.status, res.body.code]).toEqual([409, "screen-not-clear"]);
+  });
+
+  test("no claim, another sha and a moved head are refused", async () => {
+    seedMirror();
+    const none = seedRepull("gates_clear");
+    expect((await check(none)).body.code).toBe("no-claim");
+    db.run("DELETE FROM upstream_repulls");
+    db.run("DELETE FROM datasets");
+    const id = held(2);
+    screen(id, "clean");
+    expect((await check(id, OTHER)).body.code).toBe("claim-mismatch");
+    gh.pulls[`${DATASET}#7`] = { head: { sha: OTHER, ref: "release/v2.0.0" } };
+    expect((await check(id)).body.code).toBe("head-moved");
   });
 });

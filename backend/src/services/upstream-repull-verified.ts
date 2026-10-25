@@ -54,13 +54,16 @@ import {
 import {
   githubRead,
   isObject,
+  liveHeadRefusal,
   readRecordedPullRequest,
   unreadable,
 } from "./upstream-repull-github.js";
+import { repullScreenGate } from "./upstream-repull-screen.js";
 import {
   LINEAGE_WRITE_SQL,
   type RepullRefusal,
   commitTransition,
+  datasetFenceRefusal,
   envFenceRefusal,
   getRepull,
   isRefusal,
@@ -76,6 +79,13 @@ export const CLAIM_RELEASE_MIN_AGE_MINUTES = 5;
  * seconds), so GitHub's answer, read again, is the whole truth of whether it merged.
  */
 export const CLAIM_EXPIRE_MIN_AGE_MINUTES = 30;
+
+/**
+ * The oldest a claim may be when a merge is sent under it again, by the Worker's own stamp: below
+ * {@link CLAIM_EXPIRE_MIN_AGE_MINUTES}, with room for the merge itself, so a merge is never sent
+ * under a claim the expiry may already be freeing. An older claim is released through `resume`.
+ */
+export const HELD_CLAIM_MAX_AGE_MINUTES = 25;
 
 // ----------------------------------------------------------------------------
 // SQL
@@ -151,6 +161,8 @@ export const releaseClaimSchema = z
 
 export const mergedSchema = z.object({ pr: z.enum(REPULL_PULL_REQUESTS) }).strict();
 
+export const claimCheckSchema = z.object({ pr: z.enum(REPULL_PULL_REQUESTS), sha }).strict();
+
 export const releasedSchema = z
   .object({
     pr: z.enum(REPULL_PULL_REQUESTS),
@@ -165,12 +177,17 @@ export const releasedSchema = z
 // ----------------------------------------------------------------------------
 
 /**
- * Clear a claim to merge that was never sent, or that GitHub refused, so its unit of the day's cap
- * is free again. Only while the row is still at its gates-clear status with the claim naming
- * `sha`, only once the claim is {@link CLAIM_RELEASE_MIN_AGE_MINUTES} minutes old by the Worker's
- * own stamp, and only when GitHub says the pull request is not merged: a merged one is recorded
- * with `merged`, and a claim whose outcome is unknown is never released. The age and the one read
- * are a guard, not proof that no merge is in flight.
+ * Clear a claim to merge so its unit of the day's cap is free again: one whose merge was never
+ * sent or that GitHub refused (`not_sent`, `refused`), once the claim is
+ * {@link CLAIM_RELEASE_MIN_AGE_MINUTES} minutes old by the Worker's own stamp, or one whose outcome
+ * the caller does not know (`expired`, how `resume` ends a stuck claim), once it is
+ * {@link CLAIM_EXPIRE_MIN_AGE_MINUTES} minutes old. Either way only while the row is still at its
+ * gates-clear status with the claim naming `sha` and no merge recorded (in the statement that
+ * clears it), and only when GitHub says the pull request is not merged: a merged one is recorded
+ * with `merged`. The age and the one read are a guard, not proof that no merge is in flight; the
+ * merge gate never sends a merge under a claim older than
+ * {@link HELD_CLAIM_MAX_AGE_MINUTES} minutes, and holds the record's lock while it sends, which a
+ * resume takes too.
  */
 export async function releaseMergeClaim(
   env: Bindings,
@@ -265,6 +282,88 @@ export async function releaseMergeClaim(
     };
   }
   return { row: after };
+}
+
+// ----------------------------------------------------------------------------
+// A held claim, checked before a merge is sent under it again
+// ----------------------------------------------------------------------------
+
+/** Whether a claim's stamp is young enough to send a merge under it again (`?` id). */
+const claimFreshSql = (claimedAt: string) =>
+  `SELECT CASE WHEN ${claimedAt} > datetime('now', '-${HELD_CLAIM_MAX_AGE_MINUTES} minutes') THEN 1 ELSE 0 END AS fresh
+     FROM upstream_repulls WHERE id = ?`;
+
+/**
+ * Whether a merge may be sent again under a claim already held (ADR 0111, decisions 6 and 7):
+ * the same fences the claim's own statement holds, read again now, because a claim made earlier
+ * says nothing of what changed since. The record at its gates-clear status with the claim naming
+ * `sha` and no merge recorded; the claim younger than {@link HELD_CLAIM_MAX_AGE_MINUTES} minutes
+ * (`claim-too-old` otherwise: release it through resume); the dataset fences (a mirror of its `ds`,
+ * not anonymous, not withdrawn, no import in flight); the identifier screen passing for `sha` for
+ * THIS administrator, so one administrator does not merge under another's acknowledgment (ADR
+ * 0086); and GitHub's live head at `sha`. Writes nothing.
+ */
+export async function checkHeldClaim(
+  env: Bindings,
+  admin: { id: number },
+  id: number,
+  body: z.infer<typeof claimCheckSchema>,
+): Promise<{ row: RepullRow } | RepullRefusal> {
+  const db = env.DB;
+  const row = await getRepull(db, id);
+  if (!row) return { status: 404, code: "not-found", message: `No re-pull #${id}.` };
+  const fence = envFenceRefusal(env, row.dataset_id);
+  if (fence) return fence;
+  const cols = PULL_REQUEST_COLUMNS[body.pr];
+  if (
+    row.status !== cols.gatesClear ||
+    row[cols.claimSha] === null ||
+    row[cols.mergeSha] !== null
+  ) {
+    return {
+      status: 409,
+      code: "no-claim",
+      message: `Re-pull #${id} holds no open claim to merge its ${body.pr} pull request (it is ${row.status}).`,
+      row,
+    };
+  }
+  if (row[cols.claimSha] !== body.sha) {
+    return {
+      status: 409,
+      code: "claim-mismatch",
+      message: `The claim names ${String(row[cols.claimSha]).slice(0, 12)}, not ${body.sha.slice(0, 12)}.`,
+      row,
+    };
+  }
+  const fresh = await db.prepare(claimFreshSql(cols.claimedAt)).bind(id).first<{ fresh: number }>();
+  if (fresh?.fresh !== 1) {
+    return {
+      status: 409,
+      code: "claim-too-old",
+      message: `The claim was made ${HELD_CLAIM_MAX_AGE_MINUTES} or more minutes ago, so no merge is sent under it: nemar admin repull resume reads GitHub and records the merge, or expires the claim once it is ${CLAIM_EXPIRE_MIN_AGE_MINUTES} minutes old.`,
+      row,
+    };
+  }
+  const fenced = await datasetFenceRefusal(db, row);
+  if (fenced) return { ...fenced, row };
+  const gate = await repullScreenGate(db, {
+    datasetId: row.dataset_id,
+    repullId: id,
+    pr: body.pr,
+    sha: body.sha,
+    actorId: admin.id,
+  });
+  if (!gate.ok) {
+    return {
+      status: 409,
+      code: "screen-not-clear",
+      message: `${gate.message} (gate: ${gate.gate})`,
+      row,
+    };
+  }
+  const moved = await liveHeadRefusal(env, row, body.pr, body.sha);
+  if (moved) return moved;
+  return { row };
 }
 
 // ----------------------------------------------------------------------------
