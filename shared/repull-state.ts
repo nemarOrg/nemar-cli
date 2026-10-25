@@ -550,7 +550,7 @@ export function fieldProblem(
 /**
  * A dispatch asks a central workflow run to do one thing: `open` runs a plan to an open pull
  * request (or resumes a row that stalled before it), `finish` walks a merged re-pull to
- * `complete`. Its row is `upstream_repull_dispatches` (migration 0109).
+ * `complete`. Its row is `upstream_repull_dispatches` (migration 0111).
  */
 export const DISPATCH_KINDS = ["open", "finish"] as const;
 export type DispatchKind = (typeof DISPATCH_KINDS)[number];
@@ -884,7 +884,7 @@ export type HoldReason = (typeof REPULL_HOLD_REASONS)[number];
 
 /**
  * The shape of every fixed word the automatic path stores (a dispatch code, a hold reason, the
- * scheduler's outcome): what migration 0109's CHECKs admit, so the database refuses anything a
+ * scheduler's outcome): what migration 0111's CHECKs admit, so the database refuses anything a
  * message or a path could look like even from a writer that skips the service.
  */
 export const FIXED_WORD_RE = /^[a-z0-9-]{1,64}$/;
