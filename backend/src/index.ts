@@ -114,6 +114,7 @@ import {
   cleanUpLiveTestAccounts,
 } from "./services/test-account-sweep";
 import { purgeExpiredTickets } from "./services/ticket-retention";
+import { repullAdvanceLogLine, runRepullAdvanceCron } from "./services/upstream-repull-advance";
 import { sweepUnreportedDispatches } from "./services/upstream-repull-dispatch";
 import {
   repullSchedulerLogLine,
@@ -1114,6 +1115,27 @@ export default {
             .catch((err) =>
               console.error(
                 "[identifier-sweep] weekly report failed:",
+                err instanceof Error ? (err.stack ?? err.message) : err,
+              ),
+            ),
+        );
+        // #1913 (epic #1046 phase 7f, ADR 0111): the automatic re-pull's advance tick. It reads
+        // the open automatic re-pulls, a few a tick in rotation, and records why each waits where
+        // it is. PRODUCTION-ONLY, and deliberately NOT in DEV_CRON_ALLOWLIST: it reads and acts on
+        // pull requests in the shared nemarDatasets org. It also refuses outside exact production
+        // on its own, reads nothing from GitHub while AUTO_REPULL_ENABLED is not "1", never reads
+        // an administrator's re-pull, and sends no mail. One log line, only when it changed
+        // something or something failed.
+        ctx.waitUntil(
+          runRepullAdvanceCron(env)
+            .then((r) => {
+              const log = r ? repullAdvanceLogLine(r) : null;
+              if (log?.level === "error") console.error(log.line);
+              else if (log) console.log(log.line);
+            })
+            .catch((err) =>
+              console.error(
+                "[repull-advance] tick failed:",
                 err instanceof Error ? (err.stack ?? err.message) : err,
               ),
             ),

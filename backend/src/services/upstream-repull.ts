@@ -1256,6 +1256,10 @@ export async function prepareTransition(
   } else if (forward || restated) {
     sets.push("last_error = NULL");
   }
+  // A hold (an automatic row's recorded reason for waiting where it is) is about the status the
+  // row is in, so an edge into another status ends it; a self-edge keeps it until the advance tick
+  // reads the row again (ADR 0111, the Phase 7f amendment).
+  if (!repeats) sets.push("hold_reason = NULL", "hold_since = NULL");
   sets.push("revision = revision + 1");
   sets.push("updated_at = datetime('now')");
   sets.push(`terminal_at = ${isTerminal(t.to) ? "datetime('now')" : "NULL"}`);

@@ -32,13 +32,15 @@ import type { Server } from "bun";
 export interface PullAnswer {
   status?: number;
   number?: number;
+  /** The title, answered only when named (the review's intake reads it). */
+  title?: string;
   state?: string;
   draft?: boolean;
   merged?: unknown;
   merge_commit_sha?: string | null;
   user?: { login: string; id: number; type: string };
   head?: { sha: string; ref: string; repo?: { full_name: string } | null };
-  base?: { ref: string; repo?: { full_name: string } };
+  base?: { ref: string; repo?: { full_name: string; name?: string; owner?: { login: string } } };
   mergeable_state?: string | null;
   /** Keys to leave out of the answer, to stand in for a malformed one. */
   omit?: string[];
@@ -172,6 +174,7 @@ export function startRepullGitHub(o: { defaultHead?: string | null } = {}): Repu
             a.merge_commit_sha === undefined ? STANDIN_MERGE_SHA : a.merge_commit_sha,
           head: a.head ?? { sha: gh.defaultHead, ref: "release/v2.0.0" },
           base: a.base ?? { ref: "main" },
+          ...(a.title === undefined ? {} : { title: a.title }),
           ...(a.user === undefined ? {} : { user: a.user }),
           ...(a.mergeable_state === undefined ? {} : { mergeable_state: a.mergeable_state }),
         };

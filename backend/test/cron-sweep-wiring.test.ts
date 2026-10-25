@@ -139,6 +139,11 @@ const SWEEP_WIRING: Record<
   // from DEV_CRON_ALLOWLIST; it also refuses outside exact production on its own, and acts only
   // while AUTO_REPULL_ENABLED is exactly "1".
   runRepullSchedulerCron: "prod-only",
+  // ADR 0111, the Phase 7f slice: the automatic re-pull's advance tick. It reads and acts on the
+  // automatic re-pulls' pull requests in the shared nemarDatasets org every 30 minutes, so it rides
+  // that tick's production guard and is absent from DEV_CRON_ALLOWLIST; it also refuses outside
+  // exact production on its own, and asks GitHub nothing while AUTO_REPULL_ENABLED is not "1".
+  runRepullAdvanceCron: "tick-prod-only",
   sweepBlockedBidsValidationRequests: "all-envs",
   // #1789: tombstones the live integration tests' accounts. It runs ONLY outside production,
   // from a section of scheduledCleanup (`cleanUpLiveTestAccounts`); the dedicated block at the
