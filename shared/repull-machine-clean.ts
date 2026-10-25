@@ -4,9 +4,11 @@
  *
  * This is the rule and nothing else: a pure function of facts the Worker read at decision time
  * (`backend/src/services/upstream-repull-facts.ts` reads them, from GitHub and from the record). It
- * never reads, never writes and keeps nothing between calls, so a review pass an administrator
- * reset, a screen run again or a head that moved is seen by the next call, and one stage's reading
- * is never carried to the next: the gates and the merge each gather their own facts.
+ * never reads, never writes and keeps nothing between calls, so a screen run again, a review that
+ * changed or a head that moved is seen by the next call, and one stage's reading is never carried
+ * to the next: the gates and the merge each gather their own facts. A pass is never carried between
+ * stages; an administrator's `--redo` resets passes on other pull requests, and none can touch this
+ * class, whose review only the Worker starts.
  *
  * The rules are checked in one fixed order and the first that fails is the answer, as a hold word
  * (`REPULL_HOLD_REASONS`). Unknown is never clean (ADR 0053, ADR 0054): every fact has a value for
@@ -232,7 +234,11 @@ const REVIEW_HOLDS: Readonly<Record<ReviewFact, HoldReason | null>> = {
   unreadable: "review-unreadable",
 };
 
-/** The three plan counts that must each be stated and zero (ADR 0111, decision 6). */
+/**
+ * The three plan counts that must each be stated and zero (ADR 0111, decisions 6 and 7): the
+ * automatic path takes only a plan with no unexplained path, so there is no conflict and no
+ * correction for an N.0.1 to replay.
+ */
 const ZERO_COUNTS = ["unexplained", "conflicts", "corrections"] as const;
 
 const ON_DATASET = /^on\d{6}$/;

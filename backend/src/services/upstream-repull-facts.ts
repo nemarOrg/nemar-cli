@@ -25,8 +25,9 @@
  *    passes here, whoever recorded it, because it needs a person (ADR 0086).
  *  - The review: the `pr_reviews` row of that head, read as ADR 0093's detail view reads it, the
  *    stricter of the stored verdict and the one its stored report re-derives through
- *    `outcomeOfRow`. An administrator's `--redo` can reset a stored pass on the same head, so it is
- *    read again at every stage.
+ *    `outcomeOfRow`. It is read again at every stage, and a pass is never carried between stages;
+ *    an administrator's `--redo` resets passes on other pull requests, and none can touch this
+ *    class, whose review only the Worker starts.
  *
  * UNKNOWN IS NEVER CLEAN. A GitHub answer that is not 200 (404 included), a timeout, a throttle,
  * a shape this does not recognize and a database read that throws each read as `unreadable` (or,

@@ -836,9 +836,9 @@ export const DISPATCH_FINAL_CODES = [
 
 /**
  * Why an automatic re-pull waits where it is (`upstream_repulls.hold_reason`): the first rule of
- * the machine-clean definition that does not hold (`shared/repull-machine-clean.ts`, which says
- * what each word means), or a bound the automatic path reached. A hold is an observation, never a
- * transition.
+ * the machine-clean definition that does not hold (`shared/repull-machine-clean.ts` lists the rules
+ * in the order that yields these words, `MACHINE_CLEAN_HOLDS`), or a bound the automatic path
+ * reached. A hold is an observation, never a transition.
  */
 export const REPULL_HOLD_REASONS = [
   "not-production",

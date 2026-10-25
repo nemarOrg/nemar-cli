@@ -128,7 +128,11 @@ export interface RequiredCheck {
  *  - BIDS: central-flow repos require `Run BIDS Validation`, posted cross-repo by
  *    the NEMAR App, so it is pinned to the App. The four legacy-inline repos still
  *    emit `bids-validation` from github-actions (not the App), so it is unpinned.
- *  - `version-check`: emitted by github-actions in the dataset repo; unpinned.
+ *  - `version-check`: on central-flow repos the shim dispatches the central
+ *    `run-version-check`, and the NEMAR App posts the check (measured on
+ *    `nm000527#1`, 2026-10-25); the rulesets still leave it unpinned, a gap ADR
+ *    0111's Phase 7 amendment names. The automatic re-pull's machine-clean reader
+ *    pins both checks to the App itself (`upstream-repull-facts.ts`).
  */
 export function deriveContexts(repo: string): RequiredCheck[] {
   const bids: RequiredCheck = LEGACY_INLINE_BIDS_REPOS.has(repo)
