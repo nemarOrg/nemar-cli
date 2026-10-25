@@ -1,8 +1,8 @@
 /**
  * No re-pull route or service sends mail (epic #1046 phases 6 and 7, #1912 and #1913; ADR 0111,
- * decision 6 and the Phase 6 amendment), the automatic path's dispatch record and its callback
- * included. The dev database holds real addresses, so the record of a re-pull is read by
- * an administrator with `nemar admin repull status`, and nothing here may reach a person.
+ * decision 6 and the Phase 6 amendment), the automatic path's dispatch record, its callback and
+ * its scheduler included. The dev database holds real addresses, so the record of a re-pull is
+ * read by an administrator with `nemar admin repull status`, and nothing here may reach a person.
  *
  * A source scan on the syntax tree, as `repull-lineage-writer-scan.test.ts` does for the lineage
  * word: the transitive import closure of the service and of the routes may contain no mail module
@@ -26,6 +26,8 @@ const ROOTS = [
   // The automatic path's dispatch record and the callback its runs report to (epic #1046 phase 7).
   `${SRC}/services/upstream-repull-dispatch.ts`,
   `${SRC}/routes/callbacks/repull-state.ts`,
+  // The scheduler that claims and sends those dispatches, and the staleness report it reads.
+  `${SRC}/services/upstream-repull-scheduler.ts`,
 ];
 
 /** Every module under `backend/src` that is a mail module, by name. */
@@ -68,6 +70,10 @@ describe("the re-pull code sends no mail", () => {
       "services/repull-switches.ts",
       "routes/callbacks/repull-state.ts",
       "routes/callbacks/bounded-json.ts",
+      "services/upstream-repull-scheduler.ts",
+      "services/upstream-status.ts",
+      "services/openneuro-snapshots.ts",
+      "services/github-auth.ts",
     ]) {
       expect(closure.files.has(`${SRC}/${f}`)).toBe(true);
     }

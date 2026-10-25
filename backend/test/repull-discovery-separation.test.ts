@@ -27,7 +27,10 @@ const DISCOVERY_FILES = new Set(DISCOVERY_ROOTS);
 /** The modules on the re-pull's side: the record, its routes and dispatches, and the staleness report. */
 const REPULL_SIDE = /\/services\/(upstream-repull[^/]*|upstream-status|openneuro-snapshots)\.ts$/;
 
-const REPULL_ROOTS = [`${SRC}/services/upstream-status.ts`];
+const REPULL_ROOTS = [
+  `${SRC}/services/upstream-status.ts`,
+  `${SRC}/services/upstream-repull-scheduler.ts`,
+];
 
 function discoveryReachesRepull(tree: Tree): string[] {
   const closure = importClosure(tree, DISCOVERY_ROOTS, new Set());
@@ -50,9 +53,10 @@ describe("discovery and the re-pull do not reach each other", () => {
     expect(discoveryReachesRepull(tree)).toEqual([]);
   });
 
-  test("the staleness report loads neither the auto-import nor discovery", () => {
+  test("the staleness report and the scheduler load neither the auto-import nor discovery", () => {
     const tree = createTree();
     const closure = importClosure(tree, REPULL_ROOTS, new Set());
+    expect(closure.files.has(`${SRC}/services/upstream-repull-dispatch.ts`)).toBe(true);
     expect(closure.files.has(`${SRC}/services/openneuro-snapshots.ts`)).toBe(true);
     expect(closure.files.has(`${SRC}/services/openneuro-endpoint.ts`)).toBe(true);
     expect(closure.unanalyzable).toEqual([]);
@@ -68,9 +72,11 @@ describe("discovery and the re-pull do not reach each other", () => {
         "./openneuro-discovery.js",
       ),
     });
-    expect(repullReachesDiscovery(planted, REPULL_ROOTS)).toEqual([
+    const found = repullReachesDiscovery(planted, REPULL_ROOTS);
+    expect(found).toHaveLength(1);
+    expect(found[0]).toEndWith(
       "services/upstream-status.ts -> services/openneuro-snapshots.ts -> services/openneuro-discovery.ts",
-    ]);
+    );
   });
 
   test("it fires when discovery reaches the staleness report", () => {
