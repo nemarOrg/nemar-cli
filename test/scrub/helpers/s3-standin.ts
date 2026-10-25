@@ -42,6 +42,12 @@
  *    ConditionalRequestConflict S3 documents for a conflicting write in flight is not modeled; a
  *    test injects it as a fault.
  *  - GetObjectRetention (404 NoSuchObjectLockConfiguration when a version has none).
+ *  - PutObjectRetention (`PUT /<bucket>/<key>?retention`, the Worker's s3-lock route): needs
+ *    `Content-MD5` or an `x-amz-checksum-*` header and a `<Retention>` body; sets the current (or
+ *    the named) version's mode and date. Shortening a lock, or loosening COMPLIANCE, is 403
+ *    AccessDenied unless it is GOVERNANCE with the bypass header (and `denyBypass` is off), as S3
+ *    documents; extending one is allowed. ASSUMED from the documentation, not measured: what the
+ *    real bucket answers is the canary's and the first production release's to show.
  *  - ListMultipartUploads (one page, by prefix).
  *  - Multipart: CreateMultipartUpload (keeps the lock and encryption headers), UploadPart,
  *    UploadPartCopy (`x-amz-copy-source` with an optional `?versionId=`, a byte range, and
@@ -73,6 +79,7 @@ export type StandinOp =
   | "HeadObject"
   | "GetObject"
   | "GetObjectRetention"
+  | "PutObjectRetention"
   | "PutObject"
   | "CreateMultipartUpload"
   | "UploadPart"
@@ -628,6 +635,43 @@ export function startS3Standin(options: { region?: string } = {}): S3Standin {
         if (v.kmsKeyId) headers["x-amz-server-side-encryption-aws-kms-key-id"] = v.kmsKeyId;
         if (v.cacheControl) headers["Cache-Control"] = v.cacheControl;
         return new Response(null, { status: 200, headers });
+      }
+
+      // ---- PutObjectRetention ----
+      if (req.method === "PUT" && q.has("retention")) {
+        const fault = enter("PutObjectRetention", key);
+        if (fault) return fail("PutObjectRetention", fault);
+        const text = await req.text();
+        const mode = /<Mode>([A-Z]+)<\/Mode>/.exec(text)?.[1];
+        const until = /<RetainUntilDate>([^<]+)<\/RetainUntilDate>/.exec(text)?.[1];
+        const summed =
+          req.headers.has("content-md5") ||
+          [...req.headers.keys()].some((h) => h.toLowerCase().startsWith("x-amz-checksum-"));
+        if (!summed) {
+          record({ op: "PutObjectRetention", key, status: 400, versionId });
+          return s3Error("InvalidRequest", 400, "Content-MD5 or a checksum is required");
+        }
+        if (!mode || !until || Number.isNaN(Date.parse(until))) {
+          record({ op: "PutObjectRetention", key, status: 400, versionId });
+          return s3Error("MalformedXML", 400);
+        }
+        const v = pick(bucket, key, versionId);
+        if (!v || v.deleteMarker) {
+          record({ op: "PutObjectRetention", key, status: 404, versionId });
+          return s3Error("NoSuchKey", 404);
+        }
+        const next = { mode, until: new Date(until) };
+        const bypass = req.headers.get("x-amz-bypass-governance-retention") === "true";
+        const loosens =
+          v.lock !== undefined &&
+          (next.until < v.lock.until || (v.lock.mode === "COMPLIANCE" && mode !== "COMPLIANCE"));
+        if (loosens && !(v.lock?.mode === "GOVERNANCE" && bypass && !denyBypass)) {
+          record({ op: "PutObjectRetention", key, status: 403, versionId, bypass });
+          return s3Error("AccessDenied", 403);
+        }
+        v.lock = next;
+        record({ op: "PutObjectRetention", key, status: 200, versionId, bypass });
+        return new Response(null, { status: 200 });
       }
 
       // ---- GetObjectRetention ----

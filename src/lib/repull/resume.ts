@@ -63,6 +63,7 @@ import { acceptsHead, checkMain, releaseRefOf } from "./execute/pull-request.js"
 import { resynthesize } from "./execute/resynthesize.js";
 import { ExecuteRefused, assertNotAnonymous } from "./execute/verify-plan.js";
 import { acquireLock, privateDir, withIsolatedGit, workPaths } from "./execute/workdir.js";
+import { lockTurn, releaseTurn } from "./release.js";
 import {
   type ResumeContext,
   type ResumeOptions,
@@ -189,9 +190,9 @@ export async function stepOnce(ctx: ResumeContext, row: RepullRow): Promise<Turn
     case "gates_clear":
       return claimTurn(ctx, row);
     case "merged":
+      return releaseTurn(ctx, row);
     case "released":
-      ctx.opts.out(`Re-pull #${row.id} is ${row.status}; recording its release is not built yet.`);
-      return { kind: "done", result: { row, outcome: "waiting", waitingFor: "the release step" } };
+      return lockTurn(ctx, row);
     default:
       throw new ExecuteRefused(
         "not-built",

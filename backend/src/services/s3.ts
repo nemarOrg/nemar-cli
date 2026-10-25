@@ -1329,8 +1329,15 @@ export async function applyObjectLockBatch(
   hasMore: boolean;
   nextContinuationToken?: string;
 }> {
-  const { bucket, region } = options;
+  const { bucket, region, endpointUrl } = options;
   const aws = createS3Client(options);
+  // endpointUrl: the same test-only origin override every other function in this file honors (see
+  // PresignedUrlOptions), unset in every deployment, so a test drives the lock through its real
+  // route against a local stand-in (the re-pull's release locks N.0.0's objects, ADR 0111).
+  const origin = (endpointUrl ?? `https://${bucket}.s3.${region}.amazonaws.com`).replace(
+    /\/+$/,
+    "",
+  );
 
   // Single-page list with max-keys=batchSize. This is the only LIST call
   // per invocation — no full pagination here.
@@ -1340,7 +1347,7 @@ export async function applyObjectLockBatch(
     "max-keys": String(batchSize),
     ...(continuationToken ? { "continuation-token": continuationToken } : {}),
   });
-  const listUrl = `https://${bucket}.s3.${region}.amazonaws.com/?${params.toString()}`;
+  const listUrl = `${origin}/?${params.toString()}`;
   const signedList = await aws.sign(listUrl, { method: "GET" });
   const listRes = await fetch(signedList);
   if (!listRes.ok) {
@@ -1415,7 +1422,7 @@ export async function applyObjectLockBatch(
     keys.map(async (key) => {
       // Encode each path segment individually, preserving "/" separators
       const encodedKey = key.split("/").map(encodeURIComponent).join("/");
-      const url = `https://${bucket}.s3.${region}.amazonaws.com/${encodedKey}?retention`;
+      const url = `${origin}/${encodedKey}?retention`;
       try {
         const signed = await aws.sign(url, {
           method: "PUT",
