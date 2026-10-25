@@ -21,17 +21,34 @@
  *
  * Nothing here approves, merges or comments on a pull request itself; the review's own check and
  * comment are published by the same code that publishes them for a delivery.
+ *
+ * A bot's pull request is not reviewed through the administrator's start either (`bot_author`).
+ * The one bot pull request that is reviewed, the NEMAR App's automatic re-pull pull request, is
+ * started by the Worker itself, from the re-pull record, through
+ * {@link startRepullPullRequestReview} (ADR 0111 narrows ADR 0092's "not bots" for that class).
  */
 
 import type { StartReviewResponse } from "../../../shared/contract/pr-review-admin.js";
 import { sanitizeNote } from "../../../shared/pr-review.js";
+import type { RepullRow } from "../../../shared/repull-state.js";
 import { auditLogStatement } from "../db/audit-log.js";
 import type { Bindings } from "../types/bindings.js";
 import { getDatasetsTokenWithRefresher } from "./github-auth.js";
+import {
+  NEMAR_APP_BOT_LOGIN,
+  NEMAR_APP_BOT_TYPE,
+  NEMAR_APP_BOT_USER_ID,
+} from "./github/branch-protection.js";
 import { GITHUB_API, ORG_NAME, ghHeaders } from "./github/shared.js";
 import { githubFetchWithRetry } from "./github/transport.js";
 import { QueueError, environmentName, ownedHere } from "./pr-review-queue.js";
-import { ExemptCheckNotPublished, handlePullRequestEvent, reviewableDataset } from "./pr-review.js";
+import {
+  ExemptCheckNotPublished,
+  type PrReviewResponse,
+  handlePullRequestEvent,
+  reviewableDataset,
+} from "./pr-review.js";
+import { autoRepullEnabled, isExactProduction } from "./repull-switches.js";
 
 /** A GitHub login's shape; anything else is not echoed back. */
 const LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
@@ -237,4 +254,112 @@ export async function startPullRequestReview(
     }
   }
   return answer;
+}
+
+/** An automatic re-pull record's dataset: only an `on` mirror is re-pulled automatically. */
+const ON_DATASET = /^on\d{6}$/;
+
+/** The answer of a start that started nothing, in the review's own words. */
+const notStarted = (reason: string): PrReviewResponse => ({ ok: true, dispatched: false, reason });
+
+/**
+ * Review the NEMAR App's automatic re-pull pull request: the Worker's own start, for the advance
+ * tick of the automatic path (epic #1046 phase 7, #1913; ADR 0111, decision 7, which needs an
+ * ADR 0107 review that passes before the Worker may merge one).
+ *
+ * The App's pull request is a bot's, which the review's intake skips (ADR 0092: "not bots"). This
+ * is the one way it is admitted, so it is narrow on purpose (ADR 0111 narrows ADR 0092 for this
+ * class only): exact production and the open switch, as every automatic job; an automatic record
+ * of an `on` dataset at `pr_open` with its branch, number and head recorded; and on GitHub, the
+ * recorded pull request, authored by the App (login, numeric id and type), at the recorded head.
+ * The intake then admits it only from the recorded release branch and the dataset's own
+ * repository. Anything else is an answer and starts nothing.
+ *
+ * Nothing about the pull request comes from the caller: the Worker reads it from GitHub, shapes it
+ * as the `pull_request` delivery it would have been, as an administrator's start does, and hands
+ * it to the one gate every delivery goes through, so every other rule of the review applies
+ * unchanged (the reviewable dataset, a block, the per-commit row, the edit cap). It is not an
+ * administrator's start: a commit whose review ended without a verdict is not started again by
+ * it, and a delivery GitHub sends for the App's pull request is still skipped. The App has no
+ * NEMAR account, so it is never exempt.
+ *
+ * GitHub is not asked anything outside exact production, with the switch off, or for a record or
+ * a dataset that cannot be reviewed. A start that dispatched writes an audit row with no user, as
+ * the automatic path's other rows have. Mails nobody.
+ */
+export async function startRepullPullRequestReview(
+  env: Bindings,
+  row: RepullRow,
+): Promise<PrReviewResponse> {
+  if (!isExactProduction(env)) return notStarted("not_production");
+  if (!autoRepullEnabled(env)) return notStarted("auto_repull_off");
+  if (row.origin !== "automatic" || !ON_DATASET.test(row.dataset_id)) {
+    return notStarted("not_automatic");
+  }
+  if (
+    row.status !== "pr_open" ||
+    row.branch === null ||
+    row.pr_number === null ||
+    row.head_sha === null
+  ) {
+    return notStarted("not_pr_open");
+  }
+  if (!ownedHere(env, row.dataset_id)) return notStarted("not_owned_here");
+  if (env.PR_REVIEW_ENABLED !== "1") return notStarted("pr_review_disabled");
+  const reviewable = await reviewableDataset(env.DB, row.dataset_id);
+  if (reviewable !== "reviewable") {
+    return notStarted(reviewable === "unknown" ? "unknown_dataset" : "dataset_not_reviewable");
+  }
+
+  const where = `${row.dataset_id}#${row.pr_number}`;
+  let pull: Record<string, unknown>;
+  try {
+    pull = await readPullRequest(env, row.dataset_id, row.pr_number, "no review was started");
+  } catch (err) {
+    if (!(err instanceof QueueError)) throw err;
+    console.warn(
+      `[pr-review-start] ${where}: the re-pull's pull request was not read (${err.code})`,
+    );
+    return notStarted("github_unreadable");
+  }
+  const user = pull.user as { login?: unknown; id?: unknown; type?: unknown } | null | undefined;
+  if (
+    user?.login !== NEMAR_APP_BOT_LOGIN ||
+    user.id !== NEMAR_APP_BOT_USER_ID ||
+    user.type !== NEMAR_APP_BOT_TYPE
+  ) {
+    return notStarted("not_app_author");
+  }
+  const head = (pull.head as { sha?: unknown } | null | undefined)?.sha;
+  if (head !== row.head_sha) return notStarted("head_moved");
+
+  const base = pull.base as { repo?: unknown } | null | undefined;
+  const result = await handlePullRequestEvent(
+    env,
+    // The shape a `pull_request` delivery has, as the administrator's start builds it.
+    { action: "synchronize", pull_request: pull, repository: base?.repo },
+    { admitRepullBot: { branch: row.branch } },
+  );
+  if (result.dispatched) {
+    try {
+      await auditLogStatement(env.DB, {
+        userId: null,
+        action: "pr_review_started",
+        resourceType: "pr_review",
+        resourceId: where,
+        details: JSON.stringify({
+          head_sha: row.head_sha,
+          reason: result.reason,
+          review_id: result.review_id ?? null,
+          repull_id: row.id,
+          automatic: true,
+        }),
+      }).run();
+    } catch (err) {
+      console.error(
+        `[pr-review-start] ${where}: review ${result.review_id} started, audit row not written (${said(err)})`,
+      );
+    }
+  }
+  return result;
 }
