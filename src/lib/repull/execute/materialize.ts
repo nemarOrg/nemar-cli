@@ -39,7 +39,7 @@ import { dirname, join } from "node:path";
 import { listAnnexedKeys } from "../../git-annex/transfer.js";
 import type { UpstreamReader } from "../../import-scrub.js";
 import type { PlanBody } from "../digest.js";
-import { gitBlobOid, keyMatchesBytes } from "../edits.js";
+import { gitBlobOid, keyMatchesBytes, stripBom } from "../edits.js";
 import { isNemarOwnedPath } from "../overlay.js";
 import { readOnlyGit } from "../read-only.js";
 import { missingBlobs } from "../sources.js";
@@ -65,8 +65,11 @@ export interface MaterializeResult {
    * (`A:<key>`, `G:<mode>:<oid>`, `absent`), and `L:<oid>` for a blob to be annexed from git.
    */
   expected: Map<string, string>;
-  /** NEMAR-owned edits applied, and those the plan listed with another status (left as they are). */
-  nemarOwned: { applied: number; left: number };
+  /**
+   * NEMAR-owned edits applied, and those the plan listed with another status, left as they are
+   * and reported by their status (`absent`, `unparseable`, `no-is-identical-to`, ...).
+   */
+  nemarOwned: { applied: number; left: string[] };
 }
 
 /** A path the plan may write: relative, inside the tree, not git's own, not NEMAR's. */
@@ -426,20 +429,23 @@ export async function materializeDelta(args: {
   }
 
   // 4. The NEMAR-owned edit: `.nemar/metadata.json`'s IsIdenticalTo names the new snapshot.
-  const nemarOwned = { applied: 0, left: 0 };
+  const nemarOwned: MaterializeResult["nemarOwned"] = { applied: 0, left: [] };
   for (const edit of nemarOwnedEdits(body)) {
     if (
       edit.path !== NEMAR_METADATA_PATH ||
       edit.edit !== "is-identical-to" ||
       edit.status !== "ok"
     ) {
-      nemarOwned.left++;
+      nemarOwned.left.push(edit.status === "ok" ? "unknown-edit" : edit.status);
       continue;
     }
     const abs = join(work, NEMAR_METADATA_PATH);
     let meta: { related_identifiers?: Array<{ relation_type?: string; identifier?: unknown }> };
+    // A byte-order mark is read as the planner reads it (stripped), and kept where it was.
+    const raw = readFileSync(abs, "utf8");
+    const bom = raw.charCodeAt(0) === 0xfeff ? String.fromCharCode(0xfeff) : "";
     try {
-      meta = JSON.parse(readFileSync(abs, "utf8"));
+      meta = JSON.parse(stripBom(raw));
     } catch {
       throw refuse("nemar-owned-moved", "NEMAR's .nemar/metadata.json no longer parses.");
     }
@@ -453,7 +459,7 @@ export async function materializeDelta(args: {
       );
     }
     hit.identifier = edit.to;
-    const bytes = Buffer.from(`${JSON.stringify(meta, null, 2)}\n`);
+    const bytes = Buffer.from(`${bom}${JSON.stringify(meta, null, 2)}\n`);
     writeFileSync(abs, bytes);
     const [oid] = await hashObjects(work, [NEMAR_METADATA_PATH]);
     if (oid !== gitBlobOid(bytes)) {
