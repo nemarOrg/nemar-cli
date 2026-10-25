@@ -18,8 +18,8 @@
  *    unit, so two claims racing for the last unit cannot both win; a refused claim writes nothing
  *    (ADR 0099). A dispatch GitHub refused never ran and frees its unit; one whose answer was lost
  *    keeps it, because it may be running.
- *  - One live dispatch per dataset (the partial unique index on the nonce), so two runs never work
- *    on one dataset at once.
+ *  - One live dispatch per dataset (`upstream_repull_dispatches_one_live`: unique per dataset,
+ *    partial on a held nonce), so two runs never work on one dataset at once.
  *  - Single use is the row's nonce, not the HMAC: it is set only while the dispatch is live and
  *    cleared by the edge that ends it, so a token replayed after its run ended verifies nothing.
  *  - A code is a fixed word from DISPATCH_CODES, never a message, a path or a key: the weekly
@@ -45,7 +45,12 @@ import {
 } from "../../../shared/repull-state.js";
 import type { Bindings } from "../types/bindings.js";
 import { signRepullDispatchToken, verifyRepullDispatchToken } from "./github/callback-tokens.js";
-import { autoRepullEnabled, isExactProduction, repullOpenCap } from "./repull-switches.js";
+import {
+  type CapReading,
+  autoRepullEnabled,
+  isExactProduction,
+  repullOpenCap,
+} from "./repull-switches.js";
 import type { RepullRefusal } from "./upstream-repull.js";
 
 /** How long a run has to report before the Worker calls it `unreported`: the job's 330 minutes plus queueing. */
@@ -116,13 +121,17 @@ export const DISPATCH_FINISH_INSERT_SQL = `INSERT INTO upstream_repull_dispatche
    WHERE id = ?1 AND origin = 'automatic' AND status IN ('merged', 'released')`;
 
 /**
- * The audit row of a claim, written only when the claim before it inserted: `?1` the details
- * (dataset, kind, tags, re-pull; never the nonce or the token). `last_insert_rowid()` is the
+ * The audit row of a claim, written only when the claim before it inserted. Its details (dataset,
+ * kind, tags, re-pull; never the nonce or the token) are built here from the row the claim just
+ * inserted, so they are that row's and cannot disagree with it. `last_insert_rowid()` is the
  * claim's id, which nothing in between moves.
  */
 export const AUDIT_DISPATCH_CLAIMED_SQL = `INSERT INTO audit_log (user_id, action, resource_type, resource_id, details)
-  SELECT NULL, 'repull_dispatch', 'upstream_repull_dispatch', CAST(last_insert_rowid() AS TEXT), ?1
-   WHERE changes() > 0`;
+  SELECT NULL, 'repull_dispatch', 'upstream_repull_dispatch', CAST(d.id AS TEXT),
+    json_object('dataset_id', d.dataset_id, 'kind', d.kind, 'from_tag', d.from_tag,
+                'to_tag', d.to_tag, 'repull_id', d.repull_id)
+    FROM upstream_repull_dispatches d
+   WHERE d.id = last_insert_rowid() AND changes() > 0`;
 
 /** GitHub refused the dispatch, so the run never started: `?1` the code, `?2` the id. */
 export const DISPATCH_SEND_FAILED_SQL = `UPDATE upstream_repull_dispatches
@@ -134,8 +143,11 @@ export const DISPATCH_SEND_FAILED_SQL = `UPDATE upstream_repull_dispatches
  * verified and the status it was read in. `?1` id, `?2` nonce, `?3` the status read, `?4` code,
  * `?5` workflow run URL (kept once set), `?6` the re-pull the report names (`opened` only). Every
  * edge but `started` ends the dispatch and clears the nonce, so a replay after it cannot verify.
- * `opened` needs the re-pull to be this dispatch's, automatic and at `pr_open` or later; `finished`
- * needs it `complete`. Both are read in the statement that writes, so they hold when it applies.
+ * `opened` needs the re-pull to be this dispatch's, of its dataset, automatic and at `pr_open` or
+ * later and not closed; `finished` needs it `complete`. Both are read in the statement that
+ * writes, so they hold when it applies. The nonce term is belt and braces behind the service's
+ * own token check: the service binds the nonce it just verified, so only a caller of this
+ * statement (a test does) can bind another, and then nothing applies.
  */
 export const DISPATCH_REPORT_SQL: Readonly<Record<DispatchPhase, string>> = (() => {
   const set = (status: string, clear: boolean) => `UPDATE upstream_repull_dispatches
@@ -196,49 +208,57 @@ export type DispatchClaim = { id: number; token: string };
  * Why nothing was claimed; nothing is written for any of them.
  *  - `off`: not exact production, or (for an `open` claim) the open switch is off;
  *  - `unconfigured`: the Worker has no callback secret, so no token could be signed;
- *  - `cap`: today's units are used, or the cap is 0 (or unreadable, which reads 0);
+ *  - `cap`: today's units are used, or the cap is set to 0;
+ *  - `cap-unreadable`: `REPULL_DAILY_OPEN_CAP` is set to something the reader cannot take, which
+ *    reads 0 but is not a full day: it carries the reader's `source` so the caller can say so;
+ *  - `candidate`: an upstream tag that is not a tag, or two that name one snapshot (external data);
  *  - `live`: a dispatch of the dataset is live;
  *  - `row`: the re-pull to resume or finish is not one this dispatch may continue;
  *  - `open-row`: a first dispatch for a dataset that has an open re-pull.
  */
-export type ClaimRefusal = {
-  refused: "off" | "unconfigured" | "cap" | "live" | "row" | "open-row";
-};
+export type ClaimRefusal =
+  | { refused: "off" | "unconfigured" | "cap" | "candidate" | "live" | "row" | "open-row" }
+  | { refused: "cap-unreadable"; source: CapReading["source"] };
 
 const looksUnique = (err: unknown) => /UNIQUE constraint failed/i.test(String(err));
 
-function claimDetails(d: {
-  kind: "open" | "finish";
-  datasetId: string;
-  fromTag: string;
-  toTag: string;
-  repullId: number | null;
-}): string {
-  return JSON.stringify({
-    dataset_id: d.datasetId,
-    kind: d.kind,
-    from_tag: d.fromTag,
-    to_tag: d.toTag,
-    repull_id: d.repullId,
-  });
-}
-
-/** Read the claimed row back by its nonce, which is random and held by no other row, and sign its token. */
-async function issued(env: Bindings, nonce: string, secret: string): Promise<DispatchClaim> {
-  const row = await env.DB.prepare(DISPATCH_BY_NONCE_SQL).bind(nonce).first<DispatchRow>();
-  if (!row) throw new Error("upstream_repull_dispatches: a claimed dispatch was not readable");
-  const token = await signRepullDispatchToken(
-    { dispatchId: row.id, datasetId: row.dataset_id, nonce },
-    secret,
-  );
-  return { id: row.id, token };
+/**
+ * Read the claimed row back by its nonce, which is random and held by no other row, and sign its
+ * token. The claim has committed by now: if either step throws, the dispatch is ended as
+ * `dispatch-failed` before the error goes on, because a row left `dispatched` would hold one unit
+ * of the cap and the dataset's one live slot for the eight hours until the watchdog, with no run
+ * to report. It is ended by the id the claim's own insert returned, never by a read, since a read
+ * is what may have failed.
+ */
+async function issued(
+  env: Bindings,
+  nonce: string,
+  secret: string,
+  claimId: number | undefined,
+): Promise<DispatchClaim> {
+  try {
+    const row = await env.DB.prepare(DISPATCH_BY_NONCE_SQL).bind(nonce).first<DispatchRow>();
+    if (!row) throw new Error("upstream_repull_dispatches: a claimed dispatch was not readable");
+    const token = await signRepullDispatchToken(
+      { dispatchId: row.id, datasetId: row.dataset_id, nonce },
+      secret,
+    );
+    return { id: row.id, token };
+  } catch (err) {
+    if (claimId !== undefined && claimId >= 1) {
+      await markDispatchSendFailed(env.DB, claimId, "dispatch-failed");
+    }
+    throw err;
+  }
 }
 
 /**
  * Claim a dispatch that opens a re-pull's pull request: a first one, or a resume of an automatic
  * row that stalled before its pull request opened. It counts against `REPULL_DAILY_OPEN_CAP`,
  * which is read here, so no caller can pass a larger one. Exact production and the open switch
- * only. A malformed candidate is a defect in the caller and throws.
+ * only. A malformed dataset id, `ds` or re-pull id is a defect in the caller and throws; an
+ * upstream tag comes from outside, so one that is not a tag, or two that name one snapshot, is the
+ * refusal `candidate`.
  */
 export async function claimOpenDispatch(
   env: Bindings,
@@ -251,16 +271,18 @@ export async function claimOpenDispatch(
   if (
     !/^on\d{6}$/.test(c.datasetId) ||
     !/^ds\d{6}$/.test(c.upstreamDs) ||
-    !isOpenNeuroTag(c.fromTag) ||
-    !isOpenNeuroTag(c.toTag) ||
-    fromTag === toTag ||
     (repullId !== null && !(Number.isSafeInteger(repullId) && repullId >= 1))
   ) {
-    throw new Error("claimOpenDispatch: the candidate is not an on mirror with two distinct tags");
+    throw new Error("claimOpenDispatch: the candidate is not an on mirror");
+  }
+  if (!isOpenNeuroTag(c.fromTag) || !isOpenNeuroTag(c.toTag) || fromTag === toTag) {
+    return { refused: "candidate" };
   }
   const secret = env.PRESCREEN_CALLBACK_SECRET;
   if (!secret) return { refused: "unconfigured" };
-  const cap = repullOpenCap(env).value;
+  const reading = repullOpenCap(env);
+  if (reading.source === "unreadable") return { refused: "cap-unreadable", source: reading.source };
+  const cap = reading.value;
   if (cap === 0) return { refused: "cap" };
 
   const db = env.DB;
@@ -271,9 +293,7 @@ export async function claimOpenDispatch(
       db
         .prepare(DISPATCH_OPEN_CLAIM_SQL)
         .bind(c.datasetId, c.upstreamDs, fromTag, toTag, repullId, nonce, cap),
-      db
-        .prepare(AUDIT_DISPATCH_CLAIMED_SQL)
-        .bind(claimDetails({ kind: "open", datasetId: c.datasetId, fromTag, toTag, repullId })),
+      db.prepare(AUDIT_DISPATCH_CLAIMED_SQL),
     ]);
   } catch (err) {
     if (looksUnique(err)) return { refused: "live" };
@@ -284,7 +304,7 @@ export async function claimOpenDispatch(
     if ((used ?? 0) >= cap) return { refused: "cap" };
     return { refused: repullId === null ? "open-row" : "row" };
   }
-  return issued(env, nonce, secret);
+  return issued(env, nonce, secret, results[0]?.meta?.last_row_id);
 }
 
 /**
@@ -312,15 +332,7 @@ export async function claimFinishDispatch(
   try {
     results = await db.batch([
       db.prepare(DISPATCH_FINISH_INSERT_SQL).bind(row.id, nonce),
-      db.prepare(AUDIT_DISPATCH_CLAIMED_SQL).bind(
-        claimDetails({
-          kind: "finish",
-          datasetId: row.dataset_id,
-          fromTag: row.from_tag,
-          toTag: row.to_tag,
-          repullId: row.id,
-        }),
-      ),
+      db.prepare(AUDIT_DISPATCH_CLAIMED_SQL),
     ]);
   } catch (err) {
     if (looksUnique(err)) return { refused: "live" };
@@ -328,7 +340,7 @@ export async function claimFinishDispatch(
   }
   // The row moved (or is not what the caller read) between the read and the claim.
   if ((results[0]?.meta?.changes ?? 0) === 0) return { refused: "row" };
-  return issued(env, nonce, secret);
+  return issued(env, nonce, secret, results[0]?.meta?.last_row_id);
 }
 
 /**
@@ -352,11 +364,27 @@ export async function markDispatchSendFailed(
 // ----------------------------------------------------------------------------
 
 /**
- * The dispatch an automatic create presents, verified: it exists, is live, its token is the one
- * the Worker signed over its id, dataset and nonce, it is an `open` dispatch, and it names the
- * dataset, the `ds` and both tags of the plan. The caller has already checked exact production and
- * the open switch. Returns the row, wrapped (a dispatch row has a `status` and a `code` of its own,
- * so a bare row would read as a refusal), or the refusal the route answers with.
+ * The one answer to every failure of the dispatch token at the automatic create, as at the report
+ * callback: the dispatch does not exist, has ended (its nonce is gone), or the token is not the
+ * one the Worker signed for it. It names no id and no status, so the door does not say which
+ * dispatches exist or how they ended.
+ */
+export function dispatchTokenRefusal(): RepullRefusal {
+  return {
+    status: 401,
+    code: "dispatch-token",
+    message: "The dispatch token is not the one the Worker signed for a live dispatch.",
+  };
+}
+
+/**
+ * The dispatch an automatic create presents, verified: its token is the one the Worker signed over
+ * a live dispatch's id, dataset and nonce (checked FIRST, and every failure of it is the same
+ * {@link dispatchTokenRefusal}), it is an `open` dispatch, and it names the dataset, the `ds` and
+ * both tags of the plan. The caller has already checked exact production and the open switch. A
+ * Worker with no callback secret answers 503: that is configuration, not an answer about a token.
+ * Returns the row, wrapped (a dispatch row has a `status` and a `code` of its own, so a bare row
+ * would read as a refusal), or the refusal the route answers with.
  */
 export async function verifyAutomaticDispatch(
   env: Bindings,
@@ -369,21 +397,6 @@ export async function verifyAutomaticDispatch(
     toTag: string;
   },
 ): Promise<{ dispatch: DispatchRow } | RepullRefusal> {
-  const row = await env.DB.prepare(DISPATCH_BY_ID_SQL).bind(a.dispatchId).first<DispatchRow>();
-  if (!row) {
-    return {
-      status: 404,
-      code: "dispatch-not-found",
-      message: `No re-pull dispatch #${a.dispatchId}.`,
-    };
-  }
-  if (row.nonce === null) {
-    return {
-      status: 409,
-      code: "dispatch-not-live",
-      message: `Re-pull dispatch #${row.id} is ${row.status}; a run whose dispatch ended writes nothing.`,
-    };
-  }
   const secret = env.PRESCREEN_CALLBACK_SECRET;
   if (!secret) {
     return {
@@ -392,18 +405,14 @@ export async function verifyAutomaticDispatch(
       message: "The Worker has no callback secret, so no dispatch token can be verified.",
     };
   }
+  const row = await env.DB.prepare(DISPATCH_BY_ID_SQL).bind(a.dispatchId).first<DispatchRow>();
+  if (!row || row.nonce === null) return dispatchTokenRefusal();
   const ok = await verifyRepullDispatchToken(
     a.token,
     { dispatchId: row.id, datasetId: row.dataset_id, nonce: row.nonce },
     secret,
   );
-  if (!ok) {
-    return {
-      status: 401,
-      code: "dispatch-token",
-      message: "The dispatch token is not the one the Worker signed for this dispatch.",
-    };
-  }
+  if (!ok) return dispatchTokenRefusal();
   if (
     row.kind !== "open" ||
     row.dataset_id !== a.datasetId ||
@@ -420,18 +429,35 @@ export async function verifyAutomaticDispatch(
   return { dispatch: row };
 }
 
-/** Link a dispatch to the re-pull its run created or continues, once (`?1` re-pull, `?2` dispatch). */
+/**
+ * Link a dispatch to the re-pull its run created or continues, once and only while it is still
+ * live (`?1` re-pull, `?2` dispatch, `?3` the nonce that verified). A dispatch that ended between
+ * the create's check and this write (the watchdog, a report) links nothing: zero rows changed is
+ * a refusal, and the caller answers {@link dispatchTokenRefusal}.
+ */
 export const DISPATCH_LINK_SQL = `UPDATE upstream_repull_dispatches SET repull_id = ?1
-  WHERE id = ?2 AND kind = 'open' AND repull_id IS NULL`;
+  WHERE id = ?2 AND nonce = ?3 AND status IN (${LIVE_LIST}) AND kind = 'open' AND repull_id IS NULL`;
 
 /**
  * The same link, for the batch that inserts the re-pull: the row is found by its key, never by
  * `last_insert_rowid()`, which the audit insert in the same batch moves. `?1` dataset, `?2`
- * to_tag, `?3` attempt, `?4` dispatch.
+ * to_tag, `?3` attempt, `?4` dispatch, `?5` the nonce that verified. It is followed in the batch
+ * by {@link DISPATCH_LINK_GUARD_SQL}.
  */
 export const DISPATCH_LINK_BY_KEY_SQL = `UPDATE upstream_repull_dispatches
   SET repull_id = (SELECT id FROM upstream_repulls WHERE dataset_id = ?1 AND to_tag = ?2 AND attempt = ?3)
-  WHERE id = ?4 AND kind = 'open' AND repull_id IS NULL`;
+  WHERE id = ?4 AND nonce = ?5 AND status IN (${LIVE_LIST}) AND kind = 'open' AND repull_id IS NULL`;
+
+/**
+ * The last statement of the create's batch: when the link before it changed no row (the dispatch
+ * ended after the check), it raises SQLite's integer overflow (`abs` of the smallest integer), the
+ * batch rolls back, and the create writes nothing. `changes()` is the link's count: 0 gives
+ * -9223372036854775808, 1 gives -9223372036854775807, which `abs` takes.
+ */
+export const DISPATCH_LINK_GUARD_SQL = "SELECT abs(-9223372036854775807 - 1 + changes()) AS linked";
+
+/** Whether a batch failed on {@link DISPATCH_LINK_GUARD_SQL}: the dispatch ended before the link. */
+export const looksDispatchEnded = (err: unknown) => /integer overflow/i.test(String(err));
 
 // ----------------------------------------------------------------------------
 // The run's report
@@ -573,5 +599,11 @@ export async function sweepUnreportedDispatches(env: Bindings): Promise<{ marked
     db.prepare(DISPATCH_UNREPORTED_SQL),
     db.prepare(AUDIT_DISPATCHES_UNREPORTED_SQL),
   ]);
-  return { marked: update?.meta?.changes ?? 0 };
+  // An absent count is not zero (ADR 0053): a sweep that cannot say what it marked has not said
+  // that it marked nothing, and the audit row it wrote may hold a count the caller never sees.
+  const marked = update?.meta?.changes;
+  if (typeof marked !== "number") {
+    throw new Error("sweepUnreportedDispatches: the database did not report how many it marked");
+  }
+  return { marked };
 }

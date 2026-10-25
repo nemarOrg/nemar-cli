@@ -43,7 +43,7 @@ export function registerRepullStateCallbackRoutes(webhooks: WebhookRouter): void
 
     const outcome = await storeDispatchReport(c.env, token, read.body);
     if (outcome.status === 200) {
-      // Fixed words only: the dispatch id and phase come from a body the schema accepted.
+      // Values the schema bounded: a dataset id, a dispatch number and a phase word.
       const b = read.body as { dispatch_id: number; dataset_id: string; phase: string };
       console.log(`[repull-state] ${b.dataset_id} dispatch ${b.dispatch_id}: ${b.phase} stored`);
       return c.json({ ok: true, code: outcome.code });

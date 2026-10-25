@@ -24,7 +24,11 @@
 
 import type { Bindings } from "../types/bindings";
 
-/** `REPULL_DAILY_OPEN_CAP` when the binding is absent: re-pull pull requests opened in a UTC day. */
+/**
+ * `REPULL_DAILY_OPEN_CAP` when the binding is absent: dispatches claimed to open a re-pull in a UTC
+ * day. The cap bounds dispatches; pull requests follow only under the timing a later slice pins
+ * (ADR 0111, Phase 7b, "The open cap").
+ */
 export const REPULL_OPEN_CAP_DEFAULT = 2;
 /** `REPULL_DAILY_MERGE_CAP` when the binding is absent: re-pull merges claimed in a UTC day. */
 export const REPULL_MERGE_CAP_DEFAULT = 5;

@@ -41,11 +41,13 @@
  * `dispatch_token` is a dispatched run's, and is the only way a record is written with
  * `origin = 'automatic'`. Before the fences above, in order: exact production
  * (`auto-production-only`), the open switch (`auto-repull-off`), an `on` dataset
- * (`auto-on-only`); then the dispatch (`upstream-repull-dispatch.ts`: it exists, is live, its token
- * is the Worker's, and it names this dataset, `ds` and both tags); then the plan: this planner
- * (`auto-planner-version`), zero unexplained paths, conflicts and corrections, each stated
+ * (`auto-on-only`); then the dispatch (`upstream-repull-dispatch.ts`: its token is the Worker's
+ * over a live dispatch, every failure of it one answer, and it names this dataset, `ds` and both
+ * tags); then the plan: this planner (`auto-planner-version`), zero unexplained paths, conflicts
+ * and corrections, each stated
  * (`auto-not-clean-plan`), and a copy of stated size within the bound (`auto-copy-too-large`). The
- * insert links the dispatch to its record in the same batch.
+ * insert links the dispatch to its record in the same batch, while the dispatch is still live: one
+ * that ended after its check links nothing and the batch rolls back.
  *
  * `lineage_recordable` is an administrator's assertion: the Worker has no evidence of it (it holds
  * neither tree), so it is recorded in the audit row and nothing here verifies it.
@@ -111,7 +113,10 @@ import {
 } from "./repull-switches.js";
 import {
   DISPATCH_LINK_BY_KEY_SQL,
+  DISPATCH_LINK_GUARD_SQL,
   DISPATCH_LINK_SQL,
+  dispatchTokenRefusal,
+  looksDispatchEnded,
   verifyAutomaticDispatch,
 } from "./upstream-repull-dispatch.js";
 import { liveHeadRefusal } from "./upstream-repull-github.js";
@@ -603,13 +608,15 @@ export async function createRepull(
   try {
     return await createChecked(env, admin, body);
   } catch (err) {
-    if (!looksUnique(err)) throw err;
+    if (!looksUnique(err) && !looksDispatchEnded(err)) throw err;
   }
   // A concurrent create won the dataset's one open slot (or the attempt number) between the reads
-  // and the write, and the batch rolled back. Read everything again once: the winner may still be
-  // open (answer from it) or may already have gone terminal (the next attempt is then free, or
-  // the tag is pulled). A second collision is a real fault and raises. An automatic create reads
-  // its dispatch again too: the winner may have linked it.
+  // and the write, and the batch rolled back; or the create's dispatch ended between its check and
+  // its link, and the batch rolled back on the link's guard. Read everything again once: the
+  // winner may still be open (answer from it) or may already have gone terminal (the next attempt
+  // is then free, or the tag is pulled), and an ended dispatch now fails its token check. A second
+  // failure is a real fault and raises. An automatic create reads its dispatch again too: the
+  // winner may have linked it.
   return createChecked(env, admin, body);
 }
 
@@ -739,7 +746,13 @@ async function createOnce(
       (dispatch?.repull_id ?? open.id) === open.id
     ) {
       if (dispatch && dispatch.repull_id === null) {
-        await db.prepare(DISPATCH_LINK_SQL).bind(open.id, dispatch.id).run();
+        const linked = await db
+          .prepare(DISPATCH_LINK_SQL)
+          .bind(open.id, dispatch.id, dispatch.nonce)
+          .run();
+        // The dispatch ended after its check: it links nothing, and the create answers as any
+        // other failure of the token.
+        if ((linked.meta?.changes ?? 0) === 0) return dispatchTokenRefusal();
       }
       return { row, created: false, lineage_rows: 0 };
     }
@@ -839,7 +852,9 @@ async function createOnce(
     statements.push(
       db
         .prepare(DISPATCH_LINK_BY_KEY_SQL)
-        .bind(body.dataset_id, body.to_tag, attempt.next, dispatch.id),
+        .bind(body.dataset_id, body.to_tag, attempt.next, dispatch.id, dispatch.nonce),
+      // A link that changed no row (the dispatch ended after its check) rolls the batch back.
+      db.prepare(DISPATCH_LINK_GUARD_SQL),
     );
   }
 

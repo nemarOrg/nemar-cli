@@ -330,7 +330,7 @@ export interface Bindings {
   // reviewed change, never in the dashboard alone (the next deploy drops a dashboard-only value).
   AUTO_REPULL_ENABLED?: string; // "1" lets the Worker open and advance re-pulls (production only)
   AUTO_REPULL_MERGE_ENABLED?: string; // "1" lets the Worker merge them (needs AUTO_REPULL_ENABLED)
-  // Re-pull pull requests opened in a UTC day. Absent: 2. "0" to "20": that many. Anything else
+  // Re-pull dispatches claimed to open a re-pull in a UTC day. Absent: 2. "0" to "20": that many. Anything else
   // is unreadable and reads 0 (the same rule as REPULL_DAILY_MERGE_CAP).
   REPULL_DAILY_OPEN_CAP?: string;
 

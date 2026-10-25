@@ -586,7 +586,7 @@ export type DispatchPhase = (typeof DISPATCH_PHASES)[number];
  * the weekly report, which is filed on a public-facing repository, so it must never be able to
  * carry a path, a key, a subject label or a message; a word that is not here is refused by the
  * callback, and a run reports `no-code` for a refusal whose word this list does not hold, so a new
- * word is added here deliberately. `repull-dispatch-codes.unit.test.ts` pins that every literal
+ * word is added here deliberately. `test/repull-dispatch-words.unit.test.ts` pins that every literal
  * refusal word of the CLI's plan and execution, of the scrub, and of the Worker's re-pull routes
  * is here.
  */
@@ -599,8 +599,6 @@ export const DISPATCH_CODES = [
   "auto-not-clean-plan",
   "auto-copy-too-large",
   "dispatch-token",
-  "dispatch-not-found",
-  "dispatch-not-live",
   "dispatch-mismatch",
   "dispatch-unconfigured",
   "dispatch-refused",
@@ -765,11 +763,15 @@ export function isDispatchCode(value: unknown): value is DispatchCode {
 }
 
 /**
- * Refusals about the content of `to_tag` itself, which another run at the same tag would meet
- * again: a dataset refused for one of these is not dispatched again for that tag (an administrator
- * may still re-pull it by hand). `auto-not-clean-plan` is the word for a plan with any unexplained
- * path (a conflict or a correction), and `key-without-pin` for a copy key upstream records no
- * pinned version for; the others are the plan's and the Worker's own refusals.
+ * Refusals another run at the same tag would meet again, because they are facts about the tag's
+ * plan or about the dataset, not about the run: a dataset refused for one of these is not
+ * dispatched again for that tag (an administrator may still re-pull it by hand). They are of three
+ * kinds. Plan content: `auto-not-clean-plan` is the word for a plan whose `unexplained`,
+ * `conflicts` and `corrections` counts are not each stated and zero (`automaticPlanRefusal` tests
+ * the three separately), and `key-without-pin` for a copy key upstream records no pinned version
+ * for, and the ledger, dead-key, concept DOI and gitlink words are the plan's own. Size:
+ * `auto-copy-too-large` is a copy whose size is not stated or is over the bound. Dataset:
+ * `anonymous-dataset` and `not-a-mirror`.
  */
 export const DISPATCH_FINAL_CODES = [
   "auto-not-clean-plan",
