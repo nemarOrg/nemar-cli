@@ -348,6 +348,20 @@ describe("the start refuses everything but the App's recorded pull request", () 
       "not_app_author",
     ],
     [
+      "the App's login and id, as a person",
+      () => {
+        pulls[`${DS}#7`] = appPull({ user: { ...APP, type: "User" } });
+      },
+      "not_app_author",
+    ],
+    [
+      "another login with the App's id and type",
+      () => {
+        pulls[`${DS}#7`] = appPull({ user: { ...APP, login: "nemar-publish-bot2[bot]" } });
+      },
+      "not_app_author",
+    ],
+    [
       "a person's pull request at the recorded number",
       () => {
         pulls[`${DS}#7`] = appPull({ user: { login: "contributor", id: 501, type: "User" } });
@@ -413,6 +427,24 @@ describe("the start refuses everything but the App's recorded pull request", () 
       () => db.run("UPDATE upstream_repulls SET origin = 'administrator'"),
       {},
       "not_automatic",
+    ],
+    [
+      "for an automatic record of an `nm` dataset",
+      () => db.run("UPDATE upstream_repulls SET dataset_id = 'nm000600'"),
+      {},
+      "not_automatic",
+    ],
+    [
+      "for an automatic record of a production sandbox `xx` dataset",
+      () => db.run("UPDATE upstream_repulls SET dataset_id = 'xx000123'"),
+      {},
+      "not_automatic",
+    ],
+    [
+      "for a dataset the dev Worker owns",
+      () => db.run("UPDATE upstream_repulls SET dataset_id = 'xx090123'"),
+      {},
+      "not_owned_here",
     ],
     [
       "for a record past `pr_open`",

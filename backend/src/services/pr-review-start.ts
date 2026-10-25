@@ -267,13 +267,24 @@ const notStarted = (reason: string): PrReviewResponse => ({ ok: true, dispatched
  * tick of the automatic path (epic #1046 phase 7, #1913; ADR 0111, decision 7, which needs an
  * ADR 0107 review that passes before the Worker may merge one).
  *
+ * Called by a later slice of the automatic path (the advance tick); nothing calls it yet.
+ *
  * The App's pull request is a bot's, which the review's intake skips (ADR 0092: "not bots"). This
  * is the one way it is admitted, so it is narrow on purpose (ADR 0111 narrows ADR 0092 for this
- * class only): exact production and the open switch, as every automatic job; an automatic record
- * of an `on` dataset at `pr_open` with its branch, number and head recorded; and on GitHub, the
- * recorded pull request, authored by the App (login, numeric id and type), at the recorded head.
+ * class only). Its gates, in order, each with the answer it starts nothing with:
+ *  - exact production (`not_production`) and the open switch (`auto_repull_off`), as every
+ *    automatic job;
+ *  - a dataset this Worker owns (`not_owned_here`); outside the dev Worker's own ids, which are
+ *    never `on` mirrors, that is every dataset;
+ *  - an automatic record of an `on` dataset (`not_automatic`), at `pr_open` with its branch, number
+ *    and head recorded (`not_pr_open`);
+ *  - the review switched on (`pr_review_disabled`) and a dataset the review may read: a live,
+ *    named, published one (`unknown_dataset`, `dataset_not_reviewable`);
+ *  - and on GitHub, the recorded pull request (`github_unreadable` when it cannot be read),
+ *    authored by the App by login, numeric id and type (`not_app_author`), at the recorded head
+ *    (`head_moved`).
  * The intake then admits it only from the recorded release branch and the dataset's own
- * repository. Anything else is an answer and starts nothing.
+ * repository; any other is the intake's `bot_author`.
  *
  * Nothing about the pull request comes from the caller: the Worker reads it from GitHub, shapes it
  * as the `pull_request` delivery it would have been, as an administrator's start does, and hands
@@ -285,7 +296,9 @@ const notStarted = (reason: string): PrReviewResponse => ({ ok: true, dispatched
  *
  * GitHub is not asked anything outside exact production, with the switch off, or for a record or
  * a dataset that cannot be reviewed. A start that dispatched writes an audit row with no user, as
- * the automatic path's other rows have. Mails nobody.
+ * the automatic path's other rows have; a row that could not be written is logged and does not
+ * undo or block the review, so the answer says nothing about it, by design (the review's own row
+ * is the record that matters). Mails nobody.
  */
 export async function startRepullPullRequestReview(
   env: Bindings,
@@ -293,6 +306,7 @@ export async function startRepullPullRequestReview(
 ): Promise<PrReviewResponse> {
   if (!isExactProduction(env)) return notStarted("not_production");
   if (!autoRepullEnabled(env)) return notStarted("auto_repull_off");
+  if (!ownedHere(env, row.dataset_id)) return notStarted("not_owned_here");
   if (row.origin !== "automatic" || !ON_DATASET.test(row.dataset_id)) {
     return notStarted("not_automatic");
   }
@@ -304,7 +318,6 @@ export async function startRepullPullRequestReview(
   ) {
     return notStarted("not_pr_open");
   }
-  if (!ownedHere(env, row.dataset_id)) return notStarted("not_owned_here");
   if (env.PR_REVIEW_ENABLED !== "1") return notStarted("pr_review_disabled");
   const reviewable = await reviewableDataset(env.DB, row.dataset_id);
   if (reviewable !== "reviewable") {
