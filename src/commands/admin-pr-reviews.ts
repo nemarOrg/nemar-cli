@@ -107,6 +107,7 @@ import {
   sendRepullMerge,
 } from "../lib/repull/merge.js";
 import { ageOf, clip, plain } from "../lib/terminal-text.js";
+import { EXIT_WAITING } from "./admin-repull-resume.js";
 
 // Moved to `lib/terminal-text.ts`; re-exported because `test/pr-reviews-render.unit.test.ts` imports
 // them from here.
@@ -2109,6 +2110,11 @@ prReviewsCommand
           console.log(chalk.yellow(`Not merged (${gated.stage}): ${gated.reason}`));
           process.exit(1);
         }
+        if (!gated.recorded) {
+          // Merged on GitHub, not on the record: resume reads GitHub and records it.
+          console.log(chalk.yellow(notRecordedLine(dataset, pr)));
+          process.exit(EXIT_WAITING);
+        }
         console.log(chalk.green(`Merged ${dataset} #${pr} (squash, through the re-pull's gate).`));
         return;
       }
@@ -2551,6 +2557,14 @@ an impatient Enter cannot answer a pull request you have not seen; piped answers
               const gated = await sendRepullMerge(regated.ctx, regated.check, {
                 out: (line) => console.log(chalk.dim(`  ${line}`)),
               });
+              if (gated.merged && !gated.recorded) {
+                // Merged on GitHub, not on the record: a write whose outcome the record does not
+                // hold yet, so the run stops, as for any other.
+                console.log(chalk.yellow(notRecordedLine(e.dataset_id, e.pr_number)));
+                tally.unknown++;
+                stopped = true;
+                break run;
+              }
               if (gated.merged) {
                 console.log(
                   chalk.green(
@@ -2684,6 +2698,11 @@ an impatient Enter cannot answer a pull request you have not seen; piped answers
       if (stopped || tally.failed > 0 || tally.unknown > 0) process.exit(1);
     },
   );
+
+/** A re-pull merge GitHub made and the record does not hold yet: resume records it. */
+function notRecordedLine(dataset: string, pr: number): string {
+  return `Merged ${dataset} #${pr} on GitHub, but the merge is not recorded; run nemar admin repull resume ${dataset}, which records it.`;
+}
 
 /** When there is no safe way to approve from here: where to do it by hand. */
 function manualFallback(dataset: string, pr: number, url: string): void {

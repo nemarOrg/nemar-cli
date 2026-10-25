@@ -126,6 +126,22 @@ describe.skipIf(!awsInstalled)("approve --merge", () => {
     expect(w.row()).toMatchObject({ status: "pr_open", merge_claim_sha: null });
   });
 
+  test("merged on GitHub but not recorded exits 3, never a green Merged, and names resume", async () => {
+    await toGates();
+    w.setApiOverride((req) =>
+      req.method === "POST" && new URL(req.url).pathname.endsWith("/merged")
+        ? Response.json({ error: "unavailable" }, { status: 503 })
+        : null,
+    );
+    const run = await approve(w.row().pr_number as number);
+    expect(run.exitCode, run.all).toBe(3);
+    expect(run.all).toContain("the merge is not recorded");
+    expect(run.all).toContain(`nemar admin repull resume ${w.fx.datasetId}`);
+    expect(run.all).not.toContain("through the re-pull's gate).");
+    expect(merges()).toHaveLength(1);
+    expect(w.row().status).toBe("gates_clear");
+  });
+
   test("a NEMAR API that cannot say whether it is a re-pull's refuses the merge, and approves nothing", async () => {
     await toGates();
     w.setApiOverride((req) =>
@@ -197,10 +213,8 @@ describe.skipIf(!awsInstalled)("approve --merge, what refuses", () => {
 });
 
 describe.skipIf(!awsInstalled)("next", () => {
-  test("y merges a re-pull pull request through its gate", async () => {
-    const head = await toGates();
-    const pr = w.row().pr_number as number;
-    // The queue lists the pull request with both checks green and a passing review of its head.
+  /** The queue lists the pull request with both checks green and a passing review of its head. */
+  function queued(head: string, pr: number): void {
     Object.assign(w.gh.pulls[prKey(w)] as object, { author: "alice" });
     w.gh.searchPages = [
       [
@@ -223,6 +237,28 @@ describe.skipIf(!awsInstalled)("next", () => {
       state: "reported",
       verdict: "pass",
     });
+  }
+
+  test("y on a merge GitHub made and the record does not hold stops the run, counted unknown", async () => {
+    const head = await toGates();
+    queued(head, w.row().pr_number as number);
+    w.setApiOverride((req) =>
+      req.method === "POST" && new URL(req.url).pathname.endsWith("/merged")
+        ? Response.json({ error: "unavailable" }, { status: 503 })
+        : null,
+    );
+    const run = await w.cli(["pr-reviews", "next", "--dataset", w.fx.datasetId], {}, "y\n");
+    expect(run.exitCode, run.all).toBe(1);
+    expect(run.all).toContain("the merge is not recorded");
+    expect(run.all).toContain(`nemar admin repull resume ${w.fx.datasetId}`);
+    expect(run.all).not.toContain("through the re-pull's gate).");
+    expect(merges()).toHaveLength(1);
+    expect(w.row().status).toBe("gates_clear");
+  });
+
+  test("y merges a re-pull pull request through its gate", async () => {
+    const head = await toGates();
+    queued(head, w.row().pr_number as number);
     const run = await w.cli(["pr-reviews", "next", "--dataset", w.fx.datasetId], {}, "y\n");
     expect(run.exitCode, run.all).toBe(0);
     expect(run.all).toContain("through the re-pull's gate");
