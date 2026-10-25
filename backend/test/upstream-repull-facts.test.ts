@@ -22,8 +22,10 @@ import { NEMAR_APP_BOT_LOGIN, NEMAR_APP_BOT_USER_ID, NEMAR_APP_ID } from "../../
 import { type MachineCleanStage, machineClean } from "../../shared/repull-machine-clean";
 import type { RepullStatus } from "../../shared/repull-state";
 import { __resetRateLimitStateForTests } from "../src/services/github/transport";
+import { IMPORT_STATUSES, TERMINAL_IMPORT_STATUSES } from "../src/services/import-recovery";
 import { getRepull } from "../src/services/upstream-repull";
 import {
+  SETTLED_IMPORT_STATUSES,
   gatherMachineCleanFacts,
   readReviewFact,
   readScreenFact,
@@ -246,6 +248,14 @@ function setRuns(name: string, runs: Array<Partial<CheckRunAnswer>>, sha = HEAD)
   ];
 }
 
+/** The dataset's import, at `status`. */
+function importAt(status: string): void {
+  db.run(
+    "INSERT INTO import_jobs (dataset_id, source, source_id, status) VALUES (?, 'openneuro', ?, ?)",
+    [DS, UPSTREAM, status],
+  );
+}
+
 /** Gather the facts of the record as it is now, and ask the rule. */
 async function decide(stage: MachineCleanStage = "gates", over: Partial<Bindings> = {}) {
   const row = await getRepull(realD1(db), repullId);
@@ -334,6 +344,8 @@ describe("each fact, flipped alone at its source, holds with its own word", () =
         ),
       "import-in-flight",
     ],
+    ["an import the retry engine is repairing", () => importAt("incomplete"), "import-in-flight"],
+    ["an import in a status nobody declared", () => importAt("resuming"), "import-in-flight"],
     [
       "the dataset mirrors another ds",
       () => db.run("UPDATE datasets SET source_id = 'ds000001'"),
@@ -618,6 +630,25 @@ describe("each fact, flipped alone at its source, holds with its own word", () =
       expect((await decide()).hold).toBe(word);
     });
   }
+});
+
+describe("an import holds the re-pull until it has settled", () => {
+  test("a settled import does not hold it", async () => {
+    for (const status of SETTLED_IMPORT_STATUSES) {
+      db.run("DELETE FROM import_jobs");
+      importAt(status);
+      expect([status, (await decide()).hold]).toEqual([status, "clean"]);
+    }
+  });
+
+  test("every import status is either settled or holds, and the settled ones are real words", () => {
+    // `import-recovery.ts` mails, so the facts reader keeps its own list; this keeps the two in step.
+    for (const s of SETTLED_IMPORT_STATUSES) expect(IMPORT_STATUSES as string[]).toContain(s);
+    for (const s of TERMINAL_IMPORT_STATUSES)
+      expect([s, SETTLED_IMPORT_STATUSES.has(s)]).toEqual([s, true]);
+    const holding = IMPORT_STATUSES.filter((s) => !SETTLED_IMPORT_STATUSES.has(s));
+    expect(holding.sort()).toEqual(["copying", "finalizing", "incomplete", "preparing"]);
+  });
 });
 
 describe("the switches and the record decide before GitHub is asked", () => {

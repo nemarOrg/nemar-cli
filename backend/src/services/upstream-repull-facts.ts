@@ -63,7 +63,7 @@ import { outcomeOfRow } from "./pr-review.js";
 import { autoRepullEnabled, autoRepullMergeEnabled, isExactProduction } from "./repull-switches.js";
 import { githubRead, isObject } from "./upstream-repull-github.js";
 import { readRepullScreen } from "./upstream-repull-screen.js";
-import { CREATE_FACTS_SQL, type DatasetFacts, IN_FLIGHT_IMPORT } from "./upstream-repull.js";
+import { CREATE_FACTS_SQL, type DatasetFacts } from "./upstream-repull.js";
 
 const posInt = (x: unknown): x is number =>
   typeof x === "number" && Number.isSafeInteger(x) && x > 0;
@@ -217,8 +217,25 @@ export async function readCheckFacts(
 // ----------------------------------------------------------------------------
 
 /**
+ * The import statuses that mean nothing of the import is running or will be taken up again on its
+ * own: it reached `complete`, or it ended (`failed`, `quarantined`, `rolled_back`). The words are
+ * `IMPORT_STATUSES` in `import-recovery.ts`, which this file cannot import (it mails), so a test
+ * pins that every one of them is either here or held. Any other status holds, `incomplete`
+ * included (the retry engine is repairing it), and so does a status the vocabulary does not know:
+ * the record's own fence lists the three states that write, and machine clean asks the opposite
+ * question, whether the import has settled.
+ */
+export const SETTLED_IMPORT_STATUSES: ReadonlySet<string> = new Set([
+  "complete",
+  "failed",
+  "quarantined",
+  "rolled_back",
+]);
+
+/**
  * The dataset row and its import. A row that is not there, or a read that throws, is anonymity
- * unknown (`anonymous` null), which the rule holds as anonymous.
+ * unknown (`anonymous` null), which the rule holds as anonymous. An import that has not settled
+ * ({@link SETTLED_IMPORT_STATUSES}) is in flight.
  */
 export async function readDatasetFact(
   db: D1Database,
@@ -235,7 +252,8 @@ export async function readDatasetFact(
   return {
     anonymous: typeof facts.anonymous === "number" ? facts.anonymous : null,
     withdrawn: facts.withdrawn_at !== null,
-    importInFlight: facts.import_status !== null && IN_FLIGHT_IMPORT.has(facts.import_status),
+    importInFlight:
+      facts.import_status !== null && !SETTLED_IMPORT_STATUSES.has(facts.import_status),
     mirror: facts.source === "openneuro" && facts.source_id === row.upstream_ds,
   };
 }

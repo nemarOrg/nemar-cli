@@ -395,12 +395,7 @@ export function envFenceRefusal(
   };
 }
 
-/** The import states during which no re-pull may move: the import is writing the same repository. */
-export const IN_FLIGHT_IMPORT: ReadonlySet<string> = new Set([
-  "preparing",
-  "copying",
-  "finalizing",
-]);
+const IN_FLIGHT_IMPORT = new Set(["preparing", "copying", "finalizing"]);
 
 /** What {@link CREATE_FACTS_SQL} answers with. */
 export interface DatasetFacts {
