@@ -3,7 +3,7 @@
  * through its real entry points: the claims the scheduler and the advance tick will call
  * (`claimOpenDispatch`, `claimFinishDispatch`, `markDispatchSendFailed`), the callback a run posts
  * to (`POST /webhooks/repull-state`, through the real webhooks router), and the watchdog the
- * `*\/30` tick will call (`sweepUnreportedDispatches`).
+ * production daily cron calls (`sweepUnreportedDispatches`).
  *
  * Real engine only: bun:sqlite behind realD1 with every migration applied. The cap's UTC day is
  * D1's clock, so "yesterday" and "nine hours ago" are seeded as past `dispatched_at` values,

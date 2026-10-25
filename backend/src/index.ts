@@ -114,6 +114,7 @@ import {
   cleanUpLiveTestAccounts,
 } from "./services/test-account-sweep";
 import { purgeExpiredTickets } from "./services/ticket-retention";
+import { sweepUnreportedDispatches } from "./services/upstream-repull-dispatch";
 import { publishZarrCatalog } from "./services/zarr-catalog";
 import { runZarrFidelitySweep } from "./services/zarr-fidelity-sweep";
 import type { Bindings, Variables } from "./types/bindings";
@@ -1187,6 +1188,19 @@ export default {
       // from ENVIRONMENT, so a real 10.82901 DOI on a mirror row resolves to
       // production EZID credentials regardless of which worker is running.
       ctx.waitUntil(reconcileReservedVersionDois(env));
+      // #1913 (epic #1046 phase 7b, ADR 0111): end the automatic re-pull's live dispatches that
+      // said nothing within eight hours as `unreported`, so a dead run does not hold its dataset's
+      // one live slot. PROD-ONLY, and deliberately NOT in DEV_CRON_ALLOWLIST: it writes the
+      // dispatch table, whose rows only the production Worker makes. It reads no switch (turning
+      // them off must not strand a live row) and refuses outside exact production on its own.
+      ctx.waitUntil(
+        sweepUnreportedDispatches(env).catch((err) =>
+          console.error(
+            "[repull-dispatch] watchdog failed:",
+            err instanceof Error ? (err.stack ?? err.message) : err,
+          ),
+        ),
+      );
       // #969 (epic #967 Phase 2): reclassify falsely-complete imports, retry
       // incomplete/failed/quarantined ones, and blocklist + report ones whose
       // OpenNeuro source stays inaccessible. PROD-ONLY: dispatches GitHub work

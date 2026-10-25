@@ -1073,7 +1073,7 @@ The token and the callback.
   A token that leaks (the later slice that sends a dispatch masks it in the step output, and this record asks that of it) lets anyone end a live dispatch as `failed` for up to eight hours; it is denial only, since a report stores fixed words and the record it opens or finishes is checked in the statement that writes.
 - A code is a word from a closed list, never a message, a path or a key, because the weekly report will count codes on a public-facing repository.
   The callback refuses any other word, a run reports `no-code` for a refusal whose word the list does not hold, and a source scan requires every literal refusal word of the plan, the execution, the scrub and the Worker's re-pull routes to be on it.
-- The watchdog ends a live dispatch eight hours after it was sent (the job's bound of 330 minutes, plus queueing) as `unreported`, and writes one audit row when it marked any; a later slice calls it from the production cron.
+- The watchdog ends a live dispatch eight hours after it was sent (the job's bound of 330 minutes, plus queueing) as `unreported`, and writes one audit row when it marked any; the production daily cron calls it, and that wiring lands in this slice rather than in 7c, because the cron declaration rule needs a call site for every sweep export; 7c keeps the scheduling of dispatches.
 
 `origin` automatic only through a Worker-signed dispatch.
 
