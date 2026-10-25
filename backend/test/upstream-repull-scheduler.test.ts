@@ -624,6 +624,23 @@ describe("what keeps a tick from dispatching", () => {
     expect(repullSchedulerLogLine(r).level).toBe("error");
   });
 
+  test("one mirror OpenNeuro could not answer for is passed by and counted, and the rest go on", async () => {
+    manualRunDone();
+    mirror("on099901");
+    mirror("on099902");
+    mirror("on099903");
+    // A null latest beside a non-empty list is a read the report will not turn into a verdict.
+    openneuro.override("ds099901", {
+      id: "ds099901",
+      latestSnapshot: null,
+      snapshots: [{ tag: "0.9.0", created: "2019-01-01T00:00:00.000Z" }],
+    });
+    const r = await tick();
+    expect(r).toMatchObject({ outcome: "ran", unchecked: 1, dispatched: 2 });
+    expect(sentFor()).toEqual(["on099902", "on099903"]);
+    expect(repullSchedulerLogLine(r).level).toBe("error");
+  });
+
   test("no GitHub credential for the probes is blind, and the cursor stops before the first stale mirror", async () => {
     fleet();
     const r = await tick(env({ GITHUB_ADMIN_PAT: undefined }));
@@ -809,6 +826,7 @@ describe("the log line", () => {
       outcome: "ran",
       scanned: 3,
       staleReady: 2,
+      unchecked: 0,
       dispatched: 1,
       sendFailed: 0,
       unconfirmed: 0,
@@ -818,7 +836,7 @@ describe("the log line", () => {
     };
     expect(repullSchedulerLogLine(base)).toEqual({
       level: "info",
-      line: "[repull-scheduler] outcome=ran scanned=3 stale_ready=2 dispatched=1 send_failed=0 unconfirmed=0 deferred=false skipped=recent:1",
+      line: "[repull-scheduler] outcome=ran scanned=3 stale_ready=2 unchecked=0 dispatched=1 send_failed=0 unconfirmed=0 deferred=false skipped=recent:1",
     });
     for (const outcome of [
       "switch-off",
@@ -836,6 +854,9 @@ describe("the log line", () => {
       "unconfigured",
     ] as const) {
       expect(repullSchedulerLogLine({ ...base, outcome }).level).toBe("error");
+    }
+    for (const trouble of [{ sendFailed: 1 }, { unconfirmed: 1 }, { unchecked: 1 }]) {
+      expect(repullSchedulerLogLine({ ...base, ...trouble }).level).toBe("error");
     }
   });
 });

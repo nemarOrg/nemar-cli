@@ -319,6 +319,11 @@ export interface SchedulerTickResult {
   scanned: number;
   /** Of them, the `stale_ready` ones (dispatched or skipped). */
   staleReady: number;
+  /**
+   * Of them, the ones the report could not compare with upstream (`unchecked`): passed by, so one
+   * mirror that always fails cannot hold the cursor, and met again on the next rotation.
+   */
+  unchecked: number;
   /** Dispatches GitHub took. */
   dispatched: number;
   /** Dispatches GitHub refused (a 4xx): ended `dispatch_failed`, their units freed. */
@@ -401,6 +406,7 @@ async function tick(
   const advance = (row: UpstreamStatusRow) => {
     r.scanned++;
     if (row.state === "stale_ready") r.staleReady++;
+    if (row.state === "unchecked") r.unchecked++;
     cursor = row.dataset_id;
     moved.cursor = cursor;
   };
@@ -476,6 +482,7 @@ export async function runRepullSchedulerCron(
     outcome: "error",
     scanned: 0,
     staleReady: 0,
+    unchecked: 0,
     dispatched: 0,
     sendFailed: 0,
     unconfirmed: 0,
@@ -504,7 +511,8 @@ export async function runRepullSchedulerCron(
 
 /**
  * The tick's one log line, and its level: error for an outcome that means the tick could not do
- * its work or was not configured to, and for any dispatch GitHub refused or did not answer.
+ * its work or was not configured to, for any dispatch GitHub refused or did not answer, and for any
+ * mirror the report could not compare.
  * Counts and fixed words only.
  */
 export function repullSchedulerLogLine(r: SchedulerTickResult): {
@@ -518,8 +526,10 @@ export function repullSchedulerLogLine(r: SchedulerTickResult): {
       .join(",") || "none";
   const line =
     `[repull-scheduler] outcome=${r.outcome} scanned=${r.scanned} stale_ready=${r.staleReady} ` +
+    `unchecked=${r.unchecked} ` +
     `dispatched=${r.dispatched} send_failed=${r.sendFailed} unconfirmed=${r.unconfirmed} ` +
     `deferred=${r.deferred} skipped=${skipped}${r.error ? ` error=${JSON.stringify(r.error)}` : ""}`;
-  const trouble = TROUBLE.has(r.outcome) || r.sendFailed > 0 || r.unconfirmed > 0;
+  const trouble =
+    TROUBLE.has(r.outcome) || r.sendFailed > 0 || r.unconfirmed > 0 || r.unchecked > 0;
   return { level: trouble ? "error" : "info", line };
 }
