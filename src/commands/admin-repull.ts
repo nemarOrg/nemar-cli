@@ -12,9 +12,10 @@
  * `nemar-s3`'s prefix with the ambient AWS credentials. Everything after the two API reads and the
  * token goes through the planner's read-only guard (`lib/repull/read-only.ts`).
  *
- * What it writes: nothing to the mirror, S3, D1 or the NEMAR API. It writes a scratch directory,
- * deleted on exit, on SIGINT and on SIGTERM unless `--keep-workdir`, and the plan file, its output,
- * mode 0600 in the administrator's config directory.
+ * What `plan` writes: nothing to the mirror, S3, D1 or the NEMAR API. It writes a scratch
+ * directory, deleted on exit, on SIGINT and on SIGTERM unless `--keep-workdir`, and the plan file,
+ * its output, mode 0600 in the administrator's config directory. `execute` and `canary` do write,
+ * to the places their entries below name.
  *
  *   nemar admin repull execute <plan-file>   the reviewed plan, executed on this machine through
  *                                            its pull request: record, prepare, copy, register,
@@ -33,7 +34,6 @@ import { confirm } from "../lib/confirm.js";
 import { markReportedExit, markUsageExit } from "../lib/debug-log.js";
 import { adminGitHubToken, githubApiBase } from "../lib/pr-review-approve.js";
 import {
-  CANARY_PREFIX_RE,
   canaryArgsProblem,
   canaryCalls,
   parseCanarySource,
@@ -263,9 +263,10 @@ GitHub token (GH_TOKEN, else \`gh auth token\`) and the ambient short-lived AWS 
               every one present at its size;
   pr_open     release/v<N.0.0> pushed and its pull request into main opened.
 
-It never merges: a merge mints a version DOI that cannot be withdrawn, and is made with
-\`nemar admin repull merge\` (or \`nemar admin pr-reviews\`) once the identifier screen and the
-gates pass. --until stops after a status; a later run takes the record up where it stopped.
+It never merges: a merge mints a version DOI that cannot be withdrawn. The re-pull merge path is
+not built yet, so the pull request is merged by an administrator once the identifier screen and
+the gates pass, with a squash message that ends with the pull request body's two trailers.
+--until stops after a status; a later run takes the record up where it stopped.
 
 The working directory, $NEMAR_CONFIG_DIR/repull/<id>/work/<digest8>/ (mode 0700), holds the
 delta's unscrubbed originals in a local commit until the pull request is open; it is removed then
@@ -273,8 +274,8 @@ unless --keep-workdir.
 
 Exit codes:
   0  the requested point was reached (pr_open, or --until).
-  3  stopped, resumable: the record is as it was, with why in its last_error; run again after
-     fixing the cause, or abandon the re-pull.
+  3  stopped, resumable: the record is as it was, with why in its last_error; run execute again
+     after fixing the cause. Resuming past pr_open and abandoning a re-pull are not built yet.
   1  refused before anything was written (the plan, the dataset, a declined confirmation), or
      failed.`;
 
@@ -286,13 +287,33 @@ function parseUntil(value: string): (typeof EXECUTE_STATUSES)[number] {
   return value as (typeof EXECUTE_STATUSES)[number];
 }
 
+/** What a run does, up to and including `until` (what it writes, and where it stops). */
+function confirmActions(s: ExecuteSummary): string {
+  const at = EXECUTE_STATUSES.indexOf(s.until as (typeof EXECUTE_STATUSES)[number]);
+  const parts: string[] = [];
+  if (at >= EXECUTE_STATUSES.indexOf("prepared")) {
+    parts.push("prepare it in a working clone and upload scrubbed recordings to NEMAR's bucket");
+  }
+  if (at >= EXECUTE_STATUSES.indexOf("copied")) {
+    parts.push(`copy up to ${s.copyItems} object(s) from upstream by version`);
+  }
+  if (at >= EXECUTE_STATUSES.indexOf("registered")) {
+    parts.push("register the keys on NEMAR's git-annex branch");
+  }
+  if (at >= EXECUTE_STATUSES.indexOf("pr_open")) {
+    parts.push(`push release/v${s.toVersion} and open its pull request`);
+  }
+  if (parts.length === 0) return `record the re-pull and stop at ${s.until}`;
+  return `${parts.join(", ")}, and stop at ${s.until}`;
+}
+
 /** The question asked before anything is written. */
-function confirmQuestion(s: ExecuteSummary): string {
+export function confirmQuestion(s: ExecuteSummary): string {
   const where =
     s.status === null
       ? `Execute the re-pull of ${s.datasetId}, upstream ${s.fromTag} to ${s.toTag}, as v${s.toVersion}`
       : `Continue the re-pull of ${s.datasetId} (${s.fromTag} to ${s.toTag}, v${s.toVersion}) from ${s.status}`;
-  return `${where}, through ${s.until}: copy up to ${s.copyItems} object(s) from upstream by version, push release/v${s.toVersion} and open its pull request. Execute never merges; the merge will mint ${s.doiCount} version DOI(s), which cannot be withdrawn. Proceed?`;
+  return `${where}: ${confirmActions(s)}. Execute never merges; a merge will mint ${s.doiCount} version DOI(s), which cannot be withdrawn. Proceed?`;
 }
 
 repullCommand
@@ -371,8 +392,9 @@ upstream's bucket, a multipart copy in 5 MiB parts, the copies' sizes and ETag, 
 key, and deletes by version id that leave the prefix empty (list-object-versions). Run it before
 the first production re-pull; only stand-ins have answered these calls otherwise.
 
---prefix must be nm099999/repull-canary-<word>/ or xx09NNNN/repull-canary-<word>/, a scratch
-prefix; it is never a dataset's objects/ or staging/. A dry run (the default) makes no call and
+--prefix must be nm099999/repull-canary-<word>/ or xx<090001 to 099899>/repull-canary-<word>/,
+a scratch prefix; it is never a dataset's objects/ or staging/, nor one of the permanent exemplar
+fleet (xx099900 to xx099999). --bucket must be nemar. A dry run (the default) makes no call and
 prints the calls --execute would make. It never locks and never bypasses a lock. It uses the
 ambient short-lived AWS credentials (ASIA keys), as the copy does.
 
@@ -383,7 +405,7 @@ repullCommand
   .description("Check the re-pull's S3 calls against the real buckets on a scratch prefix")
   .requiredOption(
     "--prefix <prefix>",
-    "nm099999/repull-canary-<word>/ or xx09NNNN/repull-canary-<word>/",
+    "nm099999/repull-canary-<word>/ or xx<090001 to 099899>/repull-canary-<word>/",
   )
   .requiredOption("--source <object>", "A small upstream object: <ds>/<path>@<versionId>")
   .requiredOption(
@@ -410,10 +432,10 @@ repullCommand
       const single = parseCanarySource(options.source);
       const multipart = parseCanarySource(options.multipartSource);
       if (!single || !multipart) {
-        failMessage("--source and --multipart-source take <ds>/<path>@<versionId>.", {
-          json,
-          answered: true,
-        });
+        failMessage(
+          "--source and --multipart-source take <ds>/<path>@<versionId>; a version id may hold only letters, digits, '.', '_' and '-' (the guard refuses any other character).",
+          { json, answered: true },
+        );
         markUsageExit();
         return;
       }
@@ -425,8 +447,8 @@ repullCommand
         region: options.region,
       };
       const problem = canaryArgsProblem(args);
-      if (problem || !CANARY_PREFIX_RE.test(args.prefix)) {
-        failMessage(`Refused: ${problem ?? "the prefix is not a canary prefix"}.`, {
+      if (problem) {
+        failMessage(`Refused: ${problem}.`, {
           json,
           answered: true,
         });

@@ -13,9 +13,14 @@
  * be deleted by version, and the canary says so.
  *
  * The prefix is refused unless it is `nm099999/repull-canary-<word>/` or
- * `xx09NNNN/repull-canary-<word>/`: the standing end-to-end dataset or a dev-ephemeral one, never a
- * dataset's `objects/` or `staging/`. A dry run (the default) makes no call at all and prints the
- * calls it would make. The owner runs it with `--execute` (a real-bucket write).
+ * `xx<090001..099899>/repull-canary-<word>/`: the standing end-to-end dataset or a dev-ephemeral
+ * one, never a dataset's `objects/` or `staging/`, and never the permanent exemplar fleet
+ * (`xx099900` to `xx099999`, ADR 0068). The bucket must be NEMAR's. Both are enforced by
+ * {@link runCanary} itself, so no caller can skip them. A dry run (the default) makes no call at
+ * all and prints the calls it would make. The owner runs it with `--execute` (a real-bucket write).
+ *
+ * Every object the canary writes is deleted by version id on every path, including when a check of
+ * the copy fails; an upload an abort could not close, or one left open, is a failed step.
  */
 
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -34,7 +39,23 @@ import { UPSTREAM_BUCKET } from "../fleet-content-recovery.js";
 import { UPSTREAM_REGION } from "./execute/copy.js";
 import { type AwsGuardContext, RepullWriteRefused, guardedAws } from "./write-guard.js";
 
-export const CANARY_PREFIX_RE = /^(?:nm099999|xx09\d{4})\/repull-canary-[0-9A-Za-z-]{1,64}\/$/;
+/** NEMAR's bucket, the only one the canary writes to. */
+export const NEMAR_BUCKET = "nemar";
+
+const CANARY_PREFIX_RE = /^(nm099999|xx(\d{6}))\/repull-canary-[0-9A-Za-z-]{1,64}\/$/;
+
+/**
+ * Whether `prefix` is a canary scratch prefix: `nm099999/repull-canary-<word>/`, or the same under
+ * a dev-ephemeral id `xx090001` to `xx099899`. The top 100 ids of the `xx` prefix are the
+ * permanent exemplar fleet (ADR 0068) and are refused.
+ */
+export function isCanaryPrefix(prefix: string): boolean {
+  const m = CANARY_PREFIX_RE.exec(prefix);
+  if (!m) return false;
+  if (m[1] === "nm099999") return true;
+  const n = Number(m[2]);
+  return n >= 90_001 && n <= 99_899;
+}
 
 /** The multipart copy's part size: S3's minimum, so an object just over 10 MiB has three parts. */
 export const CANARY_PART_BYTES = 5 * MIB;
@@ -72,8 +93,11 @@ export interface CanaryArgs {
 
 /** Why the arguments are refused, or null when they are acceptable. */
 export function canaryArgsProblem(args: CanaryArgs): string | null {
-  if (!CANARY_PREFIX_RE.test(args.prefix)) {
-    return "--prefix must be nm099999/repull-canary-<word>/ or xx09NNNN/repull-canary-<word>/ (a scratch prefix, ending in /)";
+  if (!isCanaryPrefix(args.prefix)) {
+    return "--prefix must be nm099999/repull-canary-<word>/ or xx<090001 to 099899>/repull-canary-<word>/ (a scratch prefix, ending in /; the exemplar fleet is never one)";
+  }
+  if (args.bucket !== NEMAR_BUCKET) {
+    return `--bucket must be ${NEMAR_BUCKET}, NEMAR's bucket`;
   }
   if (args.single.ds !== args.multipart.ds) {
     return "--source and --multipart-source must name objects of the same dataset";
@@ -111,6 +135,7 @@ export function canaryCalls(args: CanaryArgs): string[] {
     `put-object ${args.bucket}/${k.staging}, then delete-object it by version id`,
     "delete-object of both copies by version id",
     `list-object-versions ${args.bucket}/${args.prefix} (must be empty: no version, no delete marker)`,
+    `list-multipart-uploads ${args.bucket}/${args.prefix} (must be empty: no open upload)`,
   ];
 }
 
@@ -132,6 +157,13 @@ function why(err: unknown): string {
 export async function runCanary(
   args: CanaryArgs & { env: Record<string, string | undefined>; out: (line: string) => void },
 ): Promise<{ ok: boolean; steps: CanaryStep[] }> {
+  // The arguments are checked here too, so no caller can skip it; nothing is called when refused.
+  const problem = canaryArgsProblem(args);
+  if (problem) {
+    const refused = { name: "check the arguments", ok: false, detail: problem };
+    args.out(`FAILED ${refused.name}: ${refused.detail}`);
+    return { ok: false, steps: [refused] };
+  }
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(args.env)) if (v !== undefined) env[k] = v;
   const k = canaryKeys(args.prefix);
@@ -193,27 +225,25 @@ export async function runCanary(
   // 1. The two versions, read at their pins.
   const one = await attempt("head the small source at its version", async () => {
     const h = await head(source, UPSTREAM_BUCKET, args.single.object, args.single.version);
-    check(
-      h.versionId === undefined || h.versionId === args.single.version,
-      "another version answered",
-    );
+    check(h.versionId === args.single.version, "another version, or none, answered");
     return { value: h, detail: `${h.size} bytes, ETag ${h.etag}` };
   });
   const big = await attempt("head the multipart source at its version", async () => {
     const h = await head(source, UPSTREAM_BUCKET, args.multipart.object, args.multipart.version);
-    check(
-      h.versionId === undefined || h.versionId === args.multipart.version,
-      "another version answered",
-    );
+    check(h.versionId === args.multipart.version, "another version, or none, answered");
     check(h.size > CANARY_MULTIPART_MIN, `${h.size} bytes is not over 10 MiB`);
     return { value: h, detail: `${h.size} bytes` };
   });
 
   // 2. The copies, by version.
+  // The versions the copies were written as, recorded as soon as S3 names them and before any
+  // check of the answer, so a copy that fails its check is still deleted by version below.
   let singleVersion: string | undefined;
   let multipartVersion: string | undefined;
+  let singleOk: string | undefined;
+  let multipartOk: string | undefined;
   if (one) {
-    singleVersion = await attempt("copy the small source by version", async () => {
+    singleOk = await attempt("copy the small source by version", async () => {
       const out = await dest.api(
         "copy-object",
         [
@@ -229,6 +259,7 @@ export async function runCanary(
         { slow: true },
       );
       const v = str(out.VersionId);
+      singleVersion = v;
       check(v !== undefined, "the bucket answered no version id (is it versioned?)");
       // S3 names the source version it copied from a versioned bucket; unknown is not the pin.
       const from = str(out.CopySourceVersionId);
@@ -237,7 +268,7 @@ export async function runCanary(
     });
   }
   if (big) {
-    multipartVersion = await attempt("copy the multipart source by version, in parts", async () => {
+    multipartOk = await attempt("copy the multipart source by version, in parts", async () => {
       const created = await dest.api("create-multipart-upload", [
         "--bucket",
         args.bucket,
@@ -294,37 +325,45 @@ export async function runCanary(
           { slow: true },
         );
         const v = str(done.VersionId);
+        multipartVersion = v;
         check(v !== undefined, "the bucket answered no version id (is it versioned?)");
         return { value: v, detail: `${parts.length} parts, version ${v}` };
       } catch (err) {
-        await dest
-          .api("abort-multipart-upload", [
+        try {
+          await dest.api("abort-multipart-upload", [
             "--bucket",
             args.bucket,
             "--key",
             k.multipart,
             "--upload-id",
             uploadId as string,
-          ])
-          .catch(() => undefined);
+          ]);
+        } catch {
+          // The failure is reported with the upload it left open; the final listing shows it too.
+          const e = new Error(
+            `${why(err)}; the abort of upload ${uploadId} failed and it stays open`,
+          );
+          e.name = "CanaryCheck";
+          throw e;
+        }
         throw err;
       }
     });
   }
 
   // 3. The copies are the versions they came from.
-  if (one && singleVersion) {
+  if (one && singleOk) {
     await attempt("head the small copy", async () => {
-      const h = await head(dest, args.bucket, k.single, singleVersion);
+      const h = await head(dest, args.bucket, k.single, singleOk);
       check(h.size === one.size, `${h.size} bytes, not ${one.size}`);
       // A single-part source's ETag is its content's, and a server-side copy keeps it.
       if (!one.etag.includes("-")) check(h.etag === one.etag, `ETag ${h.etag}, not ${one.etag}`);
       return { value: h, detail: `${h.size} bytes, ETag ${h.etag}` };
     });
   }
-  if (big && multipartVersion) {
+  if (big && multipartOk) {
     await attempt("head the multipart copy", async () => {
-      const h = await head(dest, args.bucket, k.multipart, multipartVersion);
+      const h = await head(dest, args.bucket, k.multipart, multipartOk);
       check(h.size === big.size, `${h.size} bytes, not ${big.size}`);
       return { value: h, detail: `${h.size} bytes` };
     });
@@ -394,6 +433,23 @@ export async function runCanary(
       `${versions} version(s) and ${markers} delete marker(s) are left under the prefix`,
     );
     return { value: true, detail: "empty" };
+  });
+
+  // 7. No multipart upload left open under the prefix (an abort that failed leaves one).
+  await attempt("list the prefix's open multipart uploads", async () => {
+    const out = await dest.api("list-multipart-uploads", [
+      "--bucket",
+      args.bucket,
+      "--prefix",
+      args.prefix,
+      "--no-paginate",
+    ]);
+    const open = Array.isArray(out.Uploads) ? out.Uploads.length : 0;
+    check(
+      open === 0 && out.IsTruncated !== true,
+      `${open} multipart upload(s) are left open under the prefix`,
+    );
+    return { value: true, detail: "none open" };
   });
 
   return { ok: steps.every((s) => s.ok) && steps.length > 0, steps };

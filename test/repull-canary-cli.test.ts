@@ -25,6 +25,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn, which } from "bun";
+import { isCanaryPrefix, runCanary } from "../src/lib/repull/canary";
 import { toolOrFail } from "./scrub/helpers/require-tools";
 import { type S3Standin, startS3Standin } from "./scrub/helpers/s3-standin";
 
@@ -141,6 +142,7 @@ describe.skipIf(!awsInstalled)("the S3 canary", () => {
       `DeleteObject nemar/${PREFIX}copy-single`,
       `DeleteObject nemar/${PREFIX}copy-multipart`,
       `ListObjectVersions nemar/${PREFIX}`,
+      `ListMultipartUploads nemar/${PREFIX}`,
     ]);
     expect(s3.log.every((e) => e.status < 300)).toBe(true);
     const heads = s3.log.filter((e) => e.op === "HeadObject" && e.bucket === "openneuro.org");
@@ -185,6 +187,13 @@ describe.skipIf(!awsInstalled)("the S3 canary", () => {
     s3.setIgnoreIfMatch(true);
     const ignored = await canary([...args(), "--execute"]);
     expect(ignored.exitCode, ignored.all).toBe(1);
+    // Right after the failing run, with the stand-in still ignoring versions: nothing is left,
+    // not the copy whose check failed, and not a delete marker.
+    expect(s3.keys("nemar", PREFIX)).toEqual([]);
+    expect(s3.versions("nemar", `${PREFIX}copy-single`)).toEqual([]);
+    expect(s3.versions("nemar", `${PREFIX}copy-multipart`)).toEqual([]);
+    expect(s3.openUploads()).toBe(0);
+    expect(ignored.all).toContain("ok list the prefix's open multipart uploads");
     expect(ignored.all).toContain("FAILED copy the small source by version: copied from version");
     expect(ignored.all).toContain(
       "FAILED copy the multipart source by version, in parts: part 1 copied from version",
@@ -227,5 +236,61 @@ describe.skipIf(!awsInstalled)("the S3 canary", () => {
     expect(run.all).toContain("FAILED delete the small copy by version");
     expect(run.all).toContain("The canary FAILED");
     expect(s3.calls("DeleteObject").some((d) => d.bypass)).toBe(false);
+  });
+
+  test("the permanent exemplar fleet and other buckets are refused before any call", async () => {
+    for (const id of ["xx099900", "xx099907", "xx099999", "xx090000", "xx100000"]) {
+      const run = await canary([...args(`${id}/repull-canary-x/`), "--execute"]);
+      expect(run.exitCode, id).toBe(1);
+      expect(run.all, id).toContain("Refused");
+    }
+    const bucket = await canary([...args(), "--bucket", "nemar-other", "--execute"]);
+    expect(bucket.exitCode, bucket.all).toBe(1);
+    expect(bucket.all).toContain("--bucket must be nemar");
+    expect(s3.log).toEqual([]);
+    // The ends of the dev-ephemeral band are scratch prefixes.
+    for (const id of ["xx090001", "xx099899"]) {
+      const run = await canary(args(`${id}/repull-canary-x/`));
+      expect(run.exitCode, run.all).toBe(0);
+    }
+    expect(isCanaryPrefix("nm099999/repull-canary-x/")).toBe(true);
+    expect(isCanaryPrefix("nm099998/repull-canary-x/")).toBe(false);
+  });
+
+  test("runCanary itself refuses what the command would, so no caller can skip the check", async () => {
+    const out: string[] = [];
+    const source = { ds: "ds004362", object: SMALL, version: versions.small };
+    const bad = await runCanary({
+      prefix: "xx099950/repull-canary-x/",
+      single: source,
+      multipart: { ds: "ds004362", object: BIG, version: versions.big },
+      bucket: "nemar",
+      region: "us-east-2",
+      env: { AWS_ENDPOINT_URL_S3: s3.url },
+      out: (l) => out.push(l),
+    });
+    expect(bad.ok).toBe(false);
+    expect(out.join("\n")).toContain("FAILED check the arguments");
+    const otherBucket = await runCanary({
+      prefix: PREFIX,
+      single: source,
+      multipart: { ds: "ds004362", object: BIG, version: versions.big },
+      bucket: "elsewhere",
+      region: "us-east-2",
+      env: { AWS_ENDPOINT_URL_S3: s3.url },
+      out: () => {},
+    });
+    expect(otherBucket.ok).toBe(false);
+    expect(s3.log).toEqual([]);
+  });
+
+  test("a failed part and a failed abort fail the canary and name the upload left open", async () => {
+    s3.inject("UploadPartCopy", { code: "InternalError", status: 500, after: 1 });
+    s3.inject("AbortMultipartUpload", { code: "InternalError", status: 500 });
+    const run = await canary([...args(), "--execute"]);
+    expect(run.exitCode, run.all).toBe(1);
+    expect(run.all).toMatch(/the abort of upload \S+ failed and it stays open/);
+    expect(run.all).toContain("FAILED list the prefix's open multipart uploads");
+    expect(s3.openUploads()).toBe(1);
   });
 });
