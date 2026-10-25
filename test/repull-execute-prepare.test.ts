@@ -300,10 +300,12 @@ async function execute(
   over: Partial<ExecuteOptions> = {},
 ): Promise<{ result: Awaited<ReturnType<typeof executeRepull>>; lines: string[] }> {
   const lines: string[] = [];
+  // The prepare half: execution's own default goes on to the pull request (repull-execute-cli).
   const result = await executeRepull({
     planPath,
     env: execEnv(fx),
     out: (l) => lines.push(l),
+    until: "prepared",
     ...over,
   });
   return { result, lines };
@@ -600,11 +602,14 @@ describe.skipIf(!awsInstalled)("the reviewed plan, before anything is written", 
     expect(existsSync(paths.lock)).toBe(false);
   });
 
-  test("a status this build does not reach is refused before anything", async () => {
+  test("a status execution does not stop at is refused before anything", async () => {
     seedMirror(XX_A);
     const path = await makePlan(fx);
     await nothingWritten(async () => {
-      expect((await refusal(execute(fx, path, { until: "copied" }))).code).toBe("until-not-built");
+      // Execution never goes past the open pull request.
+      expect((await refusal(execute(fx, path, { until: "gates_clear" }))).code).toBe(
+        "until-not-allowed",
+      );
     });
     expect(apiWrites).toEqual([]);
   });

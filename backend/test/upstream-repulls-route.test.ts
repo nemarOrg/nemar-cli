@@ -1267,6 +1267,45 @@ describe("transition: closing a record", () => {
     expect(ok.body.repull.terminal_at).not.toBeNull();
   });
 
+  test("copied and registered repeat to record why the next step failed, and move on clearing it", async () => {
+    for (const [status, next, fields, dataset] of [
+      ["copied", "registered", {}, "xx090130"],
+      [
+        "registered",
+        "pr_open",
+        { branch: "release/v2.0.0", pr_number: 7, head_sha: SHA },
+        "xx090131",
+      ],
+    ] as const) {
+      const id = seedRow(status, { dataset_id: dataset });
+      // The error is the whole write: none is refused, and so is any column.
+      expect((await move(id, { from: status, to: status })).body.code).toBe("field-missing");
+      expect(
+        (
+          await move(id, {
+            from: status,
+            to: status,
+            fields: { counts: { copied: 1 } },
+            error: "x",
+          })
+        ).body.code,
+      ).toBe("field-not-allowed");
+      const failed = await move(id, {
+        from: status,
+        to: status,
+        error: "[register:held-key-absent] 1 of 2 annexed key(s) have no object",
+      });
+      expect(failed.body.repull).toMatchObject({
+        status,
+        last_error: "[register:held-key-absent] 1 of 2 annexed key(s) have no object",
+      });
+      expect((await move(id, { from: status, to: next, fields })).body.repull).toMatchObject({
+        status: next,
+        last_error: null,
+      });
+    }
+  });
+
   test("a specific error is not overwritten by a generic one, and a specific one replaces it", async () => {
     const id = seedRow("prepared");
     const fields = { synth_tree: SHA, synth_sha: SHA, manifest_digest: DIGEST };
@@ -1608,10 +1647,11 @@ describe("transition: the claim to merge", () => {
     });
     expect([res.status, res.body.code]).toEqual([400, "field-not-allowed"]);
     expect(rowOf(open).merge_claimed_at).toBeNull();
-    // A state with no claim edge at all is not an edge.
+    // A state whose self-edge records only an error takes no claim.
     const copied = seedRow("copied", { dataset_id: "xx090125" });
     const none = await move(copied, { from: "copied", to: "copied", fields: CLAIM });
-    expect([none.status, none.body.code]).toEqual([409, "bad-transition"]);
+    expect([none.status, none.body.code]).toEqual([400, "field-not-allowed"]);
+    expect(rowOf(copied).merge_claimed_at).toBeNull();
   });
 
   test("while it is held the head cannot move and the pull request cannot be closed, but failed is allowed", async () => {

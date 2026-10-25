@@ -48,6 +48,12 @@ export class ExecuteRefused extends Error {
     super(message);
     this.name = "ExecuteRefused";
   }
+
+  /**
+   * Set once the record exists: the refusal left it as it was, with why on it, and a later run can
+   * take it up again (the command's exit 3). Unset, nothing was written (exit 1).
+   */
+  resumable = false;
 }
 
 /** Where the live plan comes from, and what it may read. */
@@ -196,10 +202,38 @@ export function peekPlan(path: string): { datasetId: string; digest: string } {
 }
 
 /**
- * Read the reviewed plan and make it again from live sources; refuse unless the live plan is the
- * reviewed one (or it differs by a `.nemar/**`-only move of `main`) and is executable now.
+ * An anonymous deposit is never re-pulled (ADR 0065): N.0.0 takes upstream's authors and README.
+ * The Worker refuses it too; this stops it before anything is cloned or written. Only a row that
+ * says `anonymous` is exactly 0 is not anonymous: an absent or unreadable field is unknown, never
+ * clean.
  */
-export async function readExecutablePlan(path: string, live: LiveSources): Promise<VerifiedPlan> {
+export function assertNotAnonymous(catalog: CatalogFacts): void {
+  if (!catalog.dataset) {
+    throw new ExecuteRefused(
+      "dataset-missing",
+      "The NEMAR API has no dataset row for the plan's dataset.",
+    );
+  }
+  const anonymous = catalog.dataset.anonymous;
+  if (anonymous !== 0) {
+    throw new ExecuteRefused(
+      anonymous === 1 ? "anonymous-dataset" : "anonymity-unknown",
+      anonymous === 1
+        ? "An anonymous dataset is never re-pulled: the re-pull takes upstream's authors and README, which would undo the blind."
+        : "The dataset row does not say whether it is an anonymous deposit, and an anonymous one is never re-pulled.",
+    );
+  }
+}
+
+/**
+ * The reviewed plan, proved without planning again: its body hashes to its digest, it was made by
+ * this planner, against this API and from the same kind of remotes. What a run past `prepared`
+ * reads, where a live plan would see the re-pull's own registration and branch.
+ */
+export function readReviewedPlan(
+  path: string,
+  live: Pick<LiveSources, "environment" | "env" | "openNeuroGraphqlUrl">,
+): { file: Record<string, unknown>; body: PlanBody } {
   // 1. The file, and the proof that its body is the reviewed one.
   const { file, body } = readReviewed(path);
 
@@ -217,25 +251,16 @@ export async function readExecutablePlan(path: string, live: LiveSources): Promi
       `The plan was made from ${String(file.sources)} and this execution reads ${sources}; a plan made from test bases never executes against the real remotes, nor the reverse.`,
     );
   }
-  // An anonymous deposit is never re-pulled (ADR 0065): N.0.0 takes upstream's authors and README.
-  // The Worker refuses it too; this stops it before anything is cloned.
-  if (!live.catalog.dataset) {
-    throw new ExecuteRefused(
-      "dataset-missing",
-      "The NEMAR API has no dataset row for the plan's dataset.",
-    );
-  }
-  // Only a row that says `anonymous` is exactly 0 is not anonymous: an absent or unreadable field
-  // is unknown, never clean.
-  const anonymous = live.catalog.dataset.anonymous;
-  if (anonymous !== 0) {
-    throw new ExecuteRefused(
-      anonymous === 1 ? "anonymous-dataset" : "anonymity-unknown",
-      anonymous === 1
-        ? "An anonymous dataset is never re-pulled: the re-pull takes upstream's authors and README, which would undo the blind."
-        : "The dataset row does not say whether it is an anonymous deposit, and an anonymous one is never re-pulled.",
-    );
-  }
+  return { file, body };
+}
+
+/**
+ * Read the reviewed plan and make it again from live sources; refuse unless the live plan is the
+ * reviewed one (or it differs by a `.nemar/**`-only move of `main`) and is executable now.
+ */
+export async function readExecutablePlan(path: string, live: LiveSources): Promise<VerifiedPlan> {
+  const { file, body } = readReviewedPlan(path, live);
+  assertNotAnonymous(live.catalog);
 
   // 3. The live plan, with the plan's own options.
   const upstream = objectOf(body.upstream);

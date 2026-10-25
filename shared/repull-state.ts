@@ -73,7 +73,9 @@ export const REPULL_TRANSITIONS: Readonly<Record<RepullStatus, readonly RepullSt
     ["planned", "prepared"],
     ["prepared", "prepared"],
     ["prepared", "copied"],
+    ["copied", "copied"],
     ["copied", "registered"],
+    ["registered", "registered"],
     ["registered", "pr_open"],
     ["pr_open", "pr_open"],
     ["pr_open", "gates_clear"],
@@ -217,7 +219,9 @@ export const TRANSITION_FIELDS: Readonly<Record<RepullStatus, TransitionFields>>
 /**
  * Edges that repeat a state to write something other than the state's own facts. They override
  * {@link TRANSITION_FIELDS} for `from === to` only:
- *  - `planned`: record why a step could not finish (the error is the whole write);
+ *  - `planned`, `copied` and `registered`: record why a step could not finish (the error is the
+ *    whole write): the registration that follows `copied`, the pull request that follows
+ *    `registered`; the edge forward clears it;
  *  - `released`: record the count of locked objects once the lock has been applied;
  *  - `gates_clear` and `patch_gates_clear`: record the claim to merge, before the merge is sent.
  *    The caller names the screened head; the Worker stamps the time with its own clock, because a
@@ -225,6 +229,8 @@ export const TRANSITION_FIELDS: Readonly<Record<RepullStatus, TransitionFields>>
  */
 export const SELF_EDGE_FIELDS: Readonly<Partial<Record<RepullStatus, TransitionFields>>> = {
   planned: { may: NONE, must: NONE, reset: NONE, requiresError: true },
+  copied: { may: NONE, must: NONE, reset: NONE, requiresError: true },
+  registered: { may: NONE, must: NONE, reset: NONE, requiresError: true },
   released: { may: ["counts"], must: ["counts"], reset: NONE },
   gates_clear: {
     may: ["merge_claim_sha"],
@@ -692,6 +698,48 @@ export const DISPATCH_CODES = [
   "unpinned-key",
   "until-not-built",
   "workdir-busy",
+  // Execution past `prepared` (Phase 6d): the copy, the registration, the release branch and its
+  // pull request. A run reports the word of the step that refused, as `[copy:<word>]`,
+  // `[register:<word>]` or `[pr:<word>]` on the record; `copy-failed`, `register-failed`,
+  // `pr-failed` and `s3-failed` are the words of a failure no more specific word names.
+  "branch-foreign",
+  "branch-unreadable",
+  "checkpoint-lost",
+  "copy-failed",
+  "copy-size-mismatch",
+  "copy-source",
+  "copy-unverified",
+  "declined",
+  "held-key-absent",
+  "main-unreadable",
+  "manifest-mismatch",
+  "no-github-token",
+  "origin-unreadable",
+  "pin-absent",
+  "pin-changed",
+  "pin-size-mismatch",
+  "pin-version-mismatch",
+  "pr-create-refused",
+  "pr-create-unknown",
+  "pr-created-unreadable",
+  "pr-failed",
+  "pr-foreign",
+  "pr-title",
+  "pr-unreadable",
+  "push-failed",
+  "push-refused",
+  "register-failed",
+  "registration-failed",
+  "registration-push-failed",
+  "registration-push-refused",
+  "registration-push-rejected",
+  "registration-unproven",
+  "s3-failed",
+  "unreadable",
+  "until-not-allowed",
+  "upstream-tag-moved",
+  "upstream-unreadable",
+  "write-refused",
   // The scrub's refusals (`IMPORT_SCRUB_REFUSALS`), which execution passes on as they are.
   "already-imported-unscrubbed",
   "bound-exceeded",

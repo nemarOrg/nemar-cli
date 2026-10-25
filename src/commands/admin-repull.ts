@@ -12,9 +12,16 @@
  * `nemar-s3`'s prefix with the ambient AWS credentials. Everything after the two API reads and the
  * token goes through the planner's read-only guard (`lib/repull/read-only.ts`).
  *
- * What it writes: nothing to the mirror, S3, D1 or the NEMAR API. It writes a scratch directory,
- * deleted on exit, on SIGINT and on SIGTERM unless `--keep-workdir`, and the plan file, its output,
- * mode 0600 in the administrator's config directory. `nemar admin repull execute` is not built yet.
+ * What `plan` writes: nothing to the mirror, S3, D1 or the NEMAR API. It writes a scratch
+ * directory, deleted on exit, on SIGINT and on SIGTERM unless `--keep-workdir`, and the plan file,
+ * its output, mode 0600 in the administrator's config directory. `execute` and `canary` do write,
+ * to the places their entries below name.
+ *
+ *   nemar admin repull execute <plan-file>   the reviewed plan, executed on this machine through
+ *                                            its pull request: record, prepare, copy, register,
+ *                                            push, open (`lib/repull/execute/`); it never merges
+ *   nemar admin repull canary                the real-bucket check of the copy's S3 calls on a
+ *                                            scratch prefix (`lib/repull/canary.ts`)
  */
 
 import chalk from "chalk";
@@ -23,10 +30,20 @@ import { failMessage, requireSignedIn, say } from "../lib/admin-command.js";
 import { getApiUrl } from "../lib/api/client.js";
 import { ApiError, errorDetail } from "../lib/api/errors.js";
 import { getConfigDir } from "../lib/config.js";
-import { markReportedExit } from "../lib/debug-log.js";
+import { confirm } from "../lib/confirm.js";
+import { markReportedExit, markUsageExit } from "../lib/debug-log.js";
 import { adminGitHubToken, githubApiBase } from "../lib/pr-review-approve.js";
+import {
+  canaryArgsProblem,
+  canaryCalls,
+  parseCanarySource,
+  runCanary,
+} from "../lib/repull/canary.js";
 import { defaultPlanPath, planFileJson, writePlanFile } from "../lib/repull/digest.js";
+import { EXECUTE_STATUSES } from "../lib/repull/execute/advance.js";
 import { readCatalogFacts } from "../lib/repull/execute/catalog.js";
+import { type ExecuteSummary, executeRepull } from "../lib/repull/execute/run.js";
+import { ExecuteRefused } from "../lib/repull/execute/verify-plan.js";
 import { type CatalogFacts, RepullCannotPlan, planRepull } from "../lib/repull/plan.js";
 import { countsMarkdown, preflightLines, summaryLines } from "../lib/repull/render.js";
 import { openNeuroGraphqlUrl as openNeuroUrlFromEnv } from "../lib/repull/sources.js";
@@ -80,7 +97,7 @@ function parseGb(value: string): number {
 }
 
 export const repullCommand = new Command("repull").description(
-  "Plan an upstream re-pull of a mirrored dataset (ADR 0111); read-only",
+  "Plan and execute an upstream re-pull of a mirrored dataset (ADR 0111)",
 );
 
 repullCommand
@@ -224,6 +241,235 @@ repullCommand
       }
       if (!file.executable) {
         process.exitCode = EXIT_NOT_EXECUTABLE;
+        markReportedExit();
+      }
+    },
+  );
+
+/** Exit code of `execute`: stopped resumable, the record left as it was with why on it. */
+export const EXIT_RESUMABLE = 3;
+
+const EXECUTE_HELP = `
+Executes a plan made by \`nemar admin repull plan\` and reviewed, on this machine, with your own
+GitHub token (GH_TOKEN, else \`gh auth token\`) and the ambient short-lived AWS credentials:
+
+  planned     the record (POST /admin/repulls), after the plan is made again from live sources
+              and found to be the reviewed one (its digest), and executable now;
+  prepared    the delta materialized in a working clone, scrubbed (ADR 0089, ADR 0091), and
+              synthesized into one commit; scrubbed recordings uploaded to <id>/objects/;
+  copied      every key the commit names that the plan copies, copied from upstream's bucket at
+              the version upstream pinned (aws s3api copy-object ?versionId=);
+  registered  the keys recorded at nemar-s3 on NEMAR's git-annex branch, after a listing shows
+              every one present at its size;
+  pr_open     release/v<N.0.0> pushed and its pull request into main opened.
+
+It never merges: a merge mints a version DOI that cannot be withdrawn. The re-pull merge path is
+not built yet, so the pull request is merged by an administrator once the identifier screen and
+the gates pass, with a squash message that ends with the pull request body's two trailers.
+--until stops after a status; a later run takes the record up where it stopped.
+
+The working directory, $NEMAR_CONFIG_DIR/repull/<id>/work/<digest8>/ (mode 0700), holds the
+delta's unscrubbed originals in a local commit until the pull request is open; it is removed then
+unless --keep-workdir.
+
+Exit codes:
+  0  the requested point was reached (pr_open, or --until).
+  3  stopped, resumable: the record is as it was, with why in its last_error; run execute again
+     after fixing the cause. Resuming past pr_open and abandoning a re-pull are not built yet.
+  1  refused before anything was written (the plan, the dataset, a declined confirmation), or
+     failed.`;
+
+/** `--until`: one of the statuses execution stops at. */
+function parseUntil(value: string): (typeof EXECUTE_STATUSES)[number] {
+  if (!(EXECUTE_STATUSES as readonly string[]).includes(value)) {
+    throw new InvalidArgumentError(`one of ${EXECUTE_STATUSES.join(", ")} is required.`);
+  }
+  return value as (typeof EXECUTE_STATUSES)[number];
+}
+
+/** What a run does, up to and including `until` (what it writes, and where it stops). */
+function confirmActions(s: ExecuteSummary): string {
+  const at = EXECUTE_STATUSES.indexOf(s.until as (typeof EXECUTE_STATUSES)[number]);
+  const parts: string[] = [];
+  if (at >= EXECUTE_STATUSES.indexOf("prepared")) {
+    parts.push("prepare it in a working clone and upload scrubbed recordings to NEMAR's bucket");
+  }
+  if (at >= EXECUTE_STATUSES.indexOf("copied")) {
+    parts.push(`copy up to ${s.copyItems} object(s) from upstream by version`);
+  }
+  if (at >= EXECUTE_STATUSES.indexOf("registered")) {
+    parts.push("register the keys on NEMAR's git-annex branch");
+  }
+  if (at >= EXECUTE_STATUSES.indexOf("pr_open")) {
+    parts.push(`push release/v${s.toVersion} and open its pull request`);
+  }
+  if (parts.length === 0) return `record the re-pull and stop at ${s.until}`;
+  return `${parts.join(", ")}, and stop at ${s.until}`;
+}
+
+/** The question asked before anything is written. */
+export function confirmQuestion(s: ExecuteSummary): string {
+  const where =
+    s.status === null
+      ? `Execute the re-pull of ${s.datasetId}, upstream ${s.fromTag} to ${s.toTag}, as v${s.toVersion}`
+      : `Continue the re-pull of ${s.datasetId} (${s.fromTag} to ${s.toTag}, v${s.toVersion}) from ${s.status}`;
+  return `${where}: ${confirmActions(s)}. Execute never merges; a merge will mint ${s.doiCount} version DOI(s), which cannot be withdrawn. Proceed?`;
+}
+
+repullCommand
+  .command("execute <planFile>")
+  .description("Execute a reviewed re-pull plan through its pull request (never merges)")
+  .option(
+    "--until <status>",
+    `Stop after this status (${EXECUTE_STATUSES.join(", ")})`,
+    parseUntil,
+    "pr_open" as const,
+  )
+  .option("--keep-workdir", "Keep the working directory after the pull request is open")
+  .option(
+    "--normalize-max-gb <n>",
+    "Bound on bytes this machine downloads and uploads for the scrub, in GB",
+    parseGb,
+  )
+  .option("--max-fetch-gb <n>", "The planner's bound on large blobs fetched, in GB", parseGb, 5)
+  .option("-y, --yes", "Do not ask before writing")
+  .option("--json", "Print the record as JSON")
+  .addHelpText("after", EXECUTE_HELP)
+  .action(
+    async (
+      planFile: string,
+      options: {
+        until: (typeof EXECUTE_STATUSES)[number];
+        keepWorkdir?: boolean;
+        normalizeMaxGb?: number;
+        maxFetchGb: number;
+        yes?: boolean;
+        json?: boolean;
+      },
+    ) => {
+      const json = options.json === true;
+      const out = say(json);
+      if (!requireSignedIn(json)) return;
+      try {
+        const { row, stoppedAt } = await executeRepull({
+          planPath: planFile,
+          until: options.until,
+          keepWorkdir: options.keepWorkdir === true,
+          ...(options.normalizeMaxGb !== undefined
+            ? { normalizeMaxBytes: Math.floor(options.normalizeMaxGb * 1024 ** 3) }
+            : {}),
+          maxFetchBytes: Math.floor(options.maxFetchGb * 1024 ** 3),
+          ...(options.yes
+            ? {}
+            : {
+                confirm: async (summary: ExecuteSummary) =>
+                  (await confirm(confirmQuestion(summary), { yes: false })) === "confirmed",
+              }),
+          out: (line) => out(line),
+        });
+        if (json) {
+          console.log(JSON.stringify({ repull: row, stopped_at: stoppedAt }, null, 2));
+        } else {
+          console.log(
+            `Re-pull #${row.id} of ${row.dataset_id} is ${row.status}${row.pr_number ? `: pull request #${row.pr_number} of ${row.branch}` : ""}.`,
+          );
+        }
+      } catch (err) {
+        if (err instanceof ExecuteRefused) {
+          failMessage(`Refused (${err.code}): ${err.message}`, { json, answered: true });
+          for (const line of err.lines) out(line);
+          if (err.resumable) process.exitCode = EXIT_RESUMABLE;
+          return;
+        }
+        failMessage(`Execution failed: ${errorDetail(err)}`, { json, answered: false });
+      }
+    },
+  );
+
+const CANARY_HELP = `
+Checks, against the real buckets, the S3 calls the copy step makes: a copy by version id from
+upstream's bucket, a multipart copy in 5 MiB parts, the copies' sizes and ETag, a staging-shaped
+key, and deletes by version id that leave the prefix empty (list-object-versions). Run it before
+the first production re-pull; only stand-ins have answered these calls otherwise.
+
+--prefix must be nm099999/repull-canary-<word>/ or xx<090001 to 099899>/repull-canary-<word>/,
+a scratch prefix; it is never a dataset's objects/ or staging/, nor one of the permanent exemplar
+fleet (xx099900 to xx099999). --bucket must be nemar. A dry run (the default) makes no call and
+prints the calls --execute would make. It never locks and never bypasses a lock. It uses the
+ambient short-lived AWS credentials (ASIA keys), as the copy does.
+
+Exit codes: 0 every step passed (or a dry run); 1 a step failed or the arguments were refused.`;
+
+repullCommand
+  .command("canary")
+  .description("Check the re-pull's S3 calls against the real buckets on a scratch prefix")
+  .requiredOption(
+    "--prefix <prefix>",
+    "nm099999/repull-canary-<word>/ or xx<090001 to 099899>/repull-canary-<word>/",
+  )
+  .requiredOption("--source <object>", "A small upstream object: <ds>/<path>@<versionId>")
+  .requiredOption(
+    "--multipart-source <object>",
+    "An upstream object over 10 MiB: <ds>/<path>@<versionId>",
+  )
+  .option("--bucket <bucket>", "NEMAR's bucket", "nemar")
+  .option("--region <region>", "NEMAR's bucket's region", "us-east-2")
+  .option("--execute", "Make the calls (a write to the real bucket)")
+  .option("--json", "Print the steps as JSON")
+  .addHelpText("after", CANARY_HELP)
+  .action(
+    async (options: {
+      prefix: string;
+      source: string;
+      multipartSource: string;
+      bucket: string;
+      region: string;
+      execute?: boolean;
+      json?: boolean;
+    }) => {
+      const json = options.json === true;
+      const out = say(json);
+      const single = parseCanarySource(options.source);
+      const multipart = parseCanarySource(options.multipartSource);
+      if (!single || !multipart) {
+        failMessage(
+          "--source and --multipart-source take <ds>/<path>@<versionId>; a version id may hold only letters, digits, '.', '_' and '-' (the guard refuses any other character).",
+          { json, answered: true },
+        );
+        markUsageExit();
+        return;
+      }
+      const args = {
+        prefix: options.prefix,
+        single,
+        multipart,
+        bucket: options.bucket,
+        region: options.region,
+      };
+      const problem = canaryArgsProblem(args);
+      if (problem) {
+        failMessage(`Refused: ${problem}.`, {
+          json,
+          answered: true,
+        });
+        markUsageExit();
+        return;
+      }
+      if (!options.execute) {
+        if (json) {
+          console.log(JSON.stringify({ dry_run: true, calls: canaryCalls(args) }, null, 2));
+        } else {
+          console.log("Dry run; --execute makes these calls:");
+          for (const call of canaryCalls(args)) console.log(`  ${call}`);
+        }
+        return;
+      }
+      const result = await runCanary({ ...args, env: process.env, out });
+      if (json) console.log(JSON.stringify(result, null, 2));
+      else
+        console.log(result.ok ? "The canary passed." : "The canary FAILED; see the steps above.");
+      if (!result.ok) {
+        process.exitCode = 1;
         markReportedExit();
       }
     },

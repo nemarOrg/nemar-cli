@@ -1,29 +1,36 @@
 /**
- * Execute a reviewed re-pull plan, the prepare half: through the `prepared` state (ADR 0111,
- * decisions 2 and 3; epic #1046 phase 6). It runs on the administrator's machine, with the
- * administrator's own GitHub token and ambient AWS credentials; the Worker records each step and
- * checks what it can read itself.
+ * Execute a reviewed re-pull plan, through the open pull request (ADR 0111, decisions 2, 3 and 8;
+ * epic #1046 phase 6). It runs on the administrator's machine, with the administrator's own GitHub
+ * token and ambient AWS credentials; the Worker records each step and checks what it can read
+ * itself. It never merges.
  *
  *   S0  read the plan file, prove it is the reviewed one, plan again from live sources
- *       (`verify-plan.ts`); no API write, push or upload happens before this passes;
+ *       (`verify-plan.ts`); no API write, push or upload happens before this passes (the scratch
+ *       directory for the planner's clones is a local write);
  *   S1  `POST /admin/repulls`: the record, or the open one for this same plan (`planned`);
  *   S2  a working clone at the base, the delta materialized, scrubbed, uploaded where the scrub
  *       re-keyed or annexed, and synthesized into one commit; the checkpoint saved; then
- *       `planned -> prepared` with the commit, its tree, the copy manifest's digest and counts.
+ *       `planned -> prepared` with the commit, its tree, the copy manifest's digest and counts;
+ *   S3 to S5  the copy, the registration and the pull request (`advance.ts`), to `pr_open`.
  *
- * It copies nothing from upstream, pushes nothing and opens no pull request: those steps follow
- * `prepared` and are built after it. The uploads it makes are those of the import's own scrub and
- * annex policy, to `<id>/objects/` only. Every git and git-annex call it makes, the planner's
- * included, reads neither the administrator's global configuration nor the system's.
+ * A record past `prepared` is not planned again: the registration moved origin's git-annex branch
+ * and the release branch exists, so a live plan would differ by what this execution itself wrote.
+ * Such a run proves the file (`readReviewedPlan`: its digest, planner, API and remotes), and takes
+ * the record for the same digest up where it stopped, from the working clone or its checkpoint.
+ * Every run refuses an anonymous dataset first, from the catalog row, before anything is written.
  *
- * Only a `prepared` row resumes from what is on disk: one whose working clone still holds its
- * commit is left as it is; otherwise the clone is restored from the checkpoint, or prepared again,
- * which must give the same tree, commit and manifest (`prepare-not-reproducible` otherwise: the
- * row stays, its error set, and abandoning it is the way out). A `planned` row is prepared again
- * from scratch, which re-clones, re-scrubs and re-uploads, deterministically. A step that fails
- * records why on the row (`planned -> planned`, or `prepared -> prepared` with the facts it already
- * holds) and refuses; the message names counts, never a path. One execution of a plan runs at a
- * time (a lock beside its working directory).
+ * The uploads preparation makes are those of the import's own scrub and annex policy, to
+ * `<id>/objects/` only. Every git and git-annex call it makes, the planner's included, reads
+ * neither the administrator's global configuration nor the system's.
+ *
+ * Only a `prepared` row resumes preparation from what is on disk: one whose working clone still
+ * holds its commit is left as it is; otherwise the clone is restored from the checkpoint, or
+ * prepared again, which must give the same tree, commit and manifest (`prepare-not-reproducible`
+ * otherwise: the row stays, its error set, and abandoning the record is the way out; no command for it is built yet). A `planned` row is
+ * prepared again from scratch, which re-clones, re-scrubs and re-uploads, deterministically. A step
+ * that fails records why on the row (a self-edge with the facts it already holds) and refuses; the
+ * message names counts, never a path. One execution of a plan runs at a time (a lock beside its
+ * working directory).
  */
 
 import { existsSync, readdirSync, rmdirSync } from "node:fs";
@@ -35,7 +42,7 @@ import {
 import type { RepullRow, RepullStatus } from "../../../../shared/repull-state.js";
 import { getApiUrl } from "../../api/client.js";
 import { ApiError } from "../../api/errors.js";
-import { createRepull, repullErrorCode, transitionRepull } from "../../api/repull.js";
+import { createRepull, listRepulls, repullErrorCode, transitionRepull } from "../../api/repull.js";
 import { getConfigDir } from "../../config.js";
 import { fleetCloneEnv } from "../../fleet-key-registration.js";
 import { listAnnexedKeys } from "../../git-annex/transfer.js";
@@ -52,12 +59,25 @@ import {
   readRemoteLog,
   upstreamUrl,
 } from "../sources.js";
-import { copySection, planCounts, planFacts } from "./body.js";
+import {
+  type AdvanceContext,
+  EXECUTE_STATUSES,
+  advancePrepared,
+  reached,
+  removeWorkdir,
+} from "./advance.js";
+import { copyItems, copySection, planCounts, planFacts } from "./body.js";
 import { readCatalogFacts } from "./catalog.js";
 import { commitMaterialized, materializeDelta } from "./materialize.js";
 import { heldKeys, scrubDelta } from "./scrub-delta.js";
 import { type Entry, readIndex, readTree, rowTime, synthesizeCommit } from "./synthesize.js";
-import { ExecuteRefused, peekPlan, readExecutablePlan } from "./verify-plan.js";
+import {
+  ExecuteRefused,
+  assertNotAnonymous,
+  peekPlan,
+  readExecutablePlan,
+  readReviewedPlan,
+} from "./verify-plan.js";
 import {
   type WorkPaths,
   acquireLock,
@@ -71,11 +91,29 @@ import {
   workPaths,
 } from "./workdir.js";
 
+/** What the administrator confirms before a run writes anything. */
+export interface ExecuteSummary {
+  datasetId: string;
+  fromTag: string;
+  toTag: string;
+  toVersion: string;
+  /** The version DOIs the re-pull's merges mint (N.0.0, and N.0.1 when there are corrections). */
+  doiCount: number;
+  /** The keys the plan copies, an upper bound because the scrub's re-keyed recordings are uploaded instead of copied. */
+  copyItems: number;
+  /** The record's status when the run starts, or null when it creates the record. */
+  status: RepullStatus | null;
+  until: RepullStatus;
+}
+
 export interface ExecuteOptions {
   planPath: string;
-  /** Stop after this status; `prepared` (the default) is the furthest this build reaches. */
+  /** Stop after this status; `pr_open` (the default) is the furthest execution goes. */
   until?: RepullStatus;
-  /** Keep the planner's scratch clones after the run (the working clone is always kept). */
+  /**
+   * Keep the planner's scratch clones after the run, and the working directory after `pr_open`
+   * (it is always kept before, so a stopped run can resume from it).
+   */
   keepWorkdir?: boolean;
   /** The bound on bytes this host downloads and uploads for the scrub and the annex policy. */
   normalizeMaxBytes?: number;
@@ -83,11 +121,18 @@ export interface ExecuteOptions {
   maxFetchBytes?: number;
   /** Test bases and their stand-ins, the token and the API overrides; the process's by default. */
   env?: Env;
+  /**
+   * Asked once, before the run writes anything; false stops it with nothing written
+   * (`declined`). Absent: the run proceeds (the command passes one unless `--yes`).
+   */
+  confirm?: (summary: ExecuteSummary) => Promise<boolean>;
+  /** Tests only: the copy's single-copy bound and part size. */
+  copy?: { singleCopyMax?: number; partBytes?: number };
   out: (line: string) => void;
 }
 
-/** The statuses this build can stop at. */
-const REACHABLE: readonly RepullStatus[] = ["planned", "prepared"];
+/** The statuses a run prepares from: before them the record is made, after them it is advanced. */
+const PREPARING: readonly RepullStatus[] = ["planned", "prepared"];
 
 /**
  * Upstream's object endpoint for the scrub's pinned reads: the real one, or a test's stand-in
@@ -178,19 +223,57 @@ function removeIfEmpty(dir: string): void {
   }
 }
 
-/** Run through `prepared` (or `opts.until`). See the module comment. */
+/** Run through `pr_open` (or `opts.until`); never further. See the module comment. */
 export async function executeRepull(
   opts: ExecuteOptions,
 ): Promise<{ row: RepullRow; stoppedAt: RepullStatus }> {
   const env = opts.env ?? process.env;
-  const until = opts.until ?? "prepared";
-  if (!REACHABLE.includes(until)) {
+  const until = opts.until ?? "pr_open";
+  if (!(EXECUTE_STATUSES as readonly RepullStatus[]).includes(until)) {
     throw new ExecuteRefused(
-      "until-not-built",
-      `This build prepares a re-pull through prepared; it does not reach ${until}.`,
+      "until-not-allowed",
+      `Execution stops at ${EXECUTE_STATUSES.join(", ")}; it never goes past the open pull request.`,
     );
   }
   return withIsolatedGit(() => execute(opts, env, until));
+}
+
+/** The dataset's open record, if any (a GET, before anything is written). */
+async function openRecord(datasetId: string): Promise<RepullRow | null> {
+  try {
+    return (await listRepulls({ dataset: datasetId, open: true, limit: 1 })).repulls[0] ?? null;
+  } catch (err) {
+    if (err instanceof ApiError) throw recordRefused(err);
+    throw err;
+  }
+}
+
+/** Ask the administrator, when the caller gave a way to; refuse (`declined`) on no. */
+async function confirmed(
+  opts: ExecuteOptions,
+  body: PlanBody,
+  status: RepullStatus | null,
+  until: RepullStatus,
+): Promise<void> {
+  if (!opts.confirm) return;
+  const facts = planFacts(body);
+  const ok = await opts.confirm({
+    datasetId: facts.datasetId,
+    fromTag: facts.fromTag,
+    toTag: facts.toTag,
+    toVersion: facts.toVersion,
+    doiCount: planCounts(body).doi_count ?? 1,
+    copyItems: copyItems(body).filter((i) => i.purpose === "copy").length,
+    status,
+    until,
+  });
+  if (!ok) throw new ExecuteRefused("declined", "Not confirmed; nothing was written.");
+}
+
+/** Mark a refusal that left a record behind as resumable (the command's exit 3). */
+function resumable(err: unknown): unknown {
+  if (err instanceof ExecuteRefused) err.resumable = true;
+  return err;
 }
 
 async function execute(
@@ -213,6 +296,50 @@ async function execute(
     const token = await adminGitHubToken(env);
     if (!token.ok) opts.out(`No GitHub token (${token.reason}); release-pr will be unchecked.`);
     const catalog = await readCatalogFacts(datasetId);
+    // Every run, before anything is written: the Worker refuses an anonymous dataset too.
+    assertNotAnonymous(catalog);
+
+    // A record of this plan past `prepared` is taken up where it stopped, without planning again.
+    const open = await openRecord(datasetId);
+    if (open && open.plan_digest === digest && !PREPARING.includes(open.status)) {
+      const { body } = readReviewedPlan(opts.planPath, {
+        environment: getApiUrl(),
+        env,
+        openNeuroGraphqlUrl,
+      });
+      const advance: AdvanceContext = {
+        env,
+        token: token.ok ? token.token : null,
+        datasetId,
+        digest,
+        body,
+        paths,
+        apiBase,
+        keepWorkdir: opts.keepWorkdir === true,
+        out: opts.out,
+        ...(opts.copy ? { copy: opts.copy } : {}),
+      };
+      opts.out(`Found re-pull #${open.id} of ${datasetId}, ${open.status}.`);
+      // The pull request is open: the working clone, which holds the delta's unscrubbed
+      // originals, is of no further use. A run killed before it removed it finds it here.
+      if (reached(open.status, "pr_open")) removeWorkdir(paths, advance.keepWorkdir, opts.out);
+      if (reached(open.status, until)) {
+        if (!(EXECUTE_STATUSES as readonly RepullStatus[]).includes(open.status)) {
+          opts.out(
+            `Re-pull #${open.id} is past the open pull request; execute never merges, and the steps after it are not built yet.`,
+          );
+        }
+        return { row: open, stoppedAt: open.status };
+      }
+      await confirmed(opts, body, open.status, until);
+      try {
+        const row = await advancePrepared(advance, open, until, recorder(opts.out));
+        return { row, stoppedAt: row.status };
+      } catch (err) {
+        throw resumable(err);
+      }
+    }
+
     removeTree(paths.plan);
     privateDir(paths.plan, top);
     const computed = new Map<string, Buffer>();
@@ -249,7 +376,31 @@ async function execute(
       out: opts.out,
     };
     try {
-      return await recordAndPrepare(ctx, verified.rebasedOnto, until);
+      await confirmed(opts, ctx.body, open?.plan_digest === digest ? open.status : null, until);
+      const prepared = await recordAndPrepare(ctx, verified.rebasedOnto, until);
+      if (reached(prepared.row.status, until)) return prepared;
+      try {
+        const row = await advancePrepared(
+          {
+            env,
+            token: ctx.token,
+            datasetId,
+            digest,
+            body: ctx.body,
+            paths,
+            apiBase,
+            keepWorkdir: opts.keepWorkdir === true,
+            out: opts.out,
+            ...(opts.copy ? { copy: opts.copy } : {}),
+          },
+          prepared.row,
+          until,
+          recorder(opts.out),
+        );
+        return { row, stoppedAt: row.status };
+      } catch (err) {
+        throw resumable(err);
+      }
     } finally {
       if (!opts.keepWorkdir) removeQuietly(paths.plan, opts.out);
     }
@@ -303,21 +454,42 @@ async function recordAndPrepare(
       ? `Recorded re-pull #${row.id} of ${ctx.datasetId} (${facts.fromTag} -> ${facts.toTag}), planned.`
       : `Found re-pull #${row.id} of ${ctx.datasetId}, ${row.status}.`,
   );
-  if (until === "planned" || !REACHABLE.includes(row.status)) {
-    if (!REACHABLE.includes(row.status)) {
-      ctx.out(`Re-pull #${row.id} is ${row.status}; this build prepares only, so it stops here.`);
-    }
+  // A record past `prepared` is the caller's to advance; one that has reached `until` stops here.
+  if (until === "planned" || !PREPARING.includes(row.status)) {
     return { row, stoppedAt: row.status };
   }
 
   // S2. Prepared.
-  privateDir(ctx.paths.root, dirname(dirname(ctx.paths.lock)));
-  if (row.status === "planned") {
-    row = await prepareFromPlanned(ctx, row, baseSha);
-  } else {
-    row = await resumePrepared(ctx, row, baseSha);
+  try {
+    privateDir(ctx.paths.root, dirname(dirname(ctx.paths.lock)));
+    if (row.status === "planned") {
+      row = await prepareFromPlanned(ctx, row, baseSha);
+    } else {
+      row = await resumePrepared(ctx, row, baseSha);
+    }
+  } catch (err) {
+    throw resumable(err);
   }
   return { row, stoppedAt: row.status };
+}
+
+/** The record's writes, as the steps past `prepared` make them. */
+function recorder(out: (line: string) => void) {
+  return {
+    transition: (row: RepullRow, to: RepullStatus, fields: Record<string, unknown>) =>
+      transition(row, to, fields),
+    async recordError(row: RepullRow, words: string): Promise<void> {
+      // A `prepared` self-edge carries the stage's facts; `copied` and `registered` carry none.
+      const fields = row.status === "prepared" ? recordedFacts(row) : {};
+      try {
+        await transitionRepull(row.id, { from: row.status, to: row.status, fields, error: words });
+      } catch (recordErr) {
+        out(
+          `The failure could not be recorded on re-pull #${row.id} (${repullErrorCode(recordErr) ?? (recordErr instanceof ApiError ? `HTTP ${recordErr.statusCode}` : describeError(recordErr))}); its record keeps the last error it had.`,
+        );
+      }
+    },
+  };
 }
 
 /** `planned -> prepared`, recording why on the row when the preparation fails. */
@@ -434,7 +606,7 @@ async function resumePrepared(
   ) {
     const err = new ExecuteRefused(
       "prepare-not-reproducible",
-      "Preparing again from the same plan and base gave another tree, commit or copy manifest than the one recorded; abandon this re-pull and plan again.",
+      "Preparing again from the same plan and base gave another tree, commit or copy manifest than the one recorded; this re-pull cannot continue: its record has to be abandoned and the dataset planned again (no command to abandon a record is built yet).",
     );
     await recordError(ctx, row, "prepared", recorded, err);
     throw err;

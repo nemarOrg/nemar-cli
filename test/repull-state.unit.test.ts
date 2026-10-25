@@ -34,7 +34,9 @@ const EDGES: ReadonlyArray<readonly [RepullStatus, RepullStatus]> = [
   ["planned", "prepared"],
   ["prepared", "prepared"],
   ["prepared", "copied"],
+  ["copied", "copied"],
   ["copied", "registered"],
+  ["registered", "registered"],
   ["registered", "pr_open"],
   ["pr_open", "pr_open"],
   ["pr_open", "gates_clear"],
@@ -162,7 +164,7 @@ describe("the columns an edge writes", () => {
 
   test("the edges that repeat a state to write one thing say what they write", () => {
     expect(Object.keys(SELF_EDGE_FIELDS).sort()).toEqual(
-      ["gates_clear", "patch_gates_clear", "planned", "released"].sort(),
+      ["copied", "gates_clear", "patch_gates_clear", "planned", "registered", "released"].sort(),
     );
     for (const [status, spec] of Object.entries(SELF_EDGE_FIELDS)) {
       expect(REPULL_TRANSITIONS[status as RepullStatus]).toContain(status);
@@ -206,9 +208,13 @@ describe("the columns an edge writes", () => {
     }
   });
 
-  test("an edge into failed, and the planned self-edge, must say why", () => {
+  test("an edge into failed, and the planned, copied and registered self-edges, must say why", () => {
     expect(TRANSITION_FIELDS.failed.requiresError).toBe(true);
-    expect(SELF_EDGE_FIELDS.planned?.requiresError).toBe(true);
+    for (const s of ["planned", "copied", "registered"] as const) {
+      expect(SELF_EDGE_FIELDS[s]?.requiresError).toBe(true);
+      // The error is the whole write: no column, so a failure cannot restate a stage's facts.
+      expect(SELF_EDGE_FIELDS[s]?.may).toEqual([]);
+    }
     expect(TRANSITION_FIELDS.abandoned.requiresError).toBeUndefined();
   });
 

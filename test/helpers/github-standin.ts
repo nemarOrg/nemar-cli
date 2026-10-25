@@ -111,6 +111,17 @@ export interface GitHubStandin {
   closeStatus: number | null;
   /** When set, listing a repository's pull requests answers this status instead of the list. */
   pullsListStatus: number | null;
+  /**
+   * What opening a pull request (`POST /repos/nemarDatasets/<id>/pulls`) answers, one entry per
+   * request, in order, before it answers normally: a status instead of the pull request, and with
+   * `applied` the pull request is opened all the same (an answer lost on the way back).
+   */
+  createPullFaults: Array<{ status: number; applied?: boolean }>;
+  /**
+   * The commit a branch of a dataset's repository names, for the pull request GitHub opens on it:
+   * a test reads its bare origin. Null, or unset, is a branch GitHub does not have (422).
+   */
+  resolveHead: ((dataset: string, ref: string) => Promise<string | null>) | null;
   /** The comments recorded, in order: `{ dataset, number, body, token }`. */
   comments: Array<{ dataset: string; number: number; body: string; token: string | null }>;
   /**
@@ -143,6 +154,8 @@ export function startGitHubStandin(): GitHubStandin {
     users: {} as GitHubStandin["users"],
     reviewStatus: null as number | null,
     pullsListStatus: null as number | null,
+    createPullFaults: [] as Array<{ status: number; applied?: boolean }>,
+    resolveHead: null as GitHubStandin["resolveHead"],
     reviewState: null as string | null,
     reviewCommit: null as string | null,
     userStatus: null as number | null,
@@ -250,18 +263,75 @@ export function startGitHubStandin(): GitHubStandin {
           return Response.json({ message: "Server Error" }, { status: state.pullsListStatus });
         }
         const wanted = url.searchParams.get("state") ?? "open";
+        // `head=<owner>:<branch>`, as GitHub filters it.
+        const head = url.searchParams.get("head");
         return Response.json(
           Object.entries(state.pulls)
             .filter(
               ([k, p]) =>
-                k.startsWith(`${list[1]}#`) && (wanted === "all" || (p.state ?? "open") === wanted),
+                k.startsWith(`${list[1]}#`) &&
+                (wanted === "all" || (p.state ?? "open") === wanted) &&
+                (head === null || head === `nemarDatasets:${p.headRef ?? "add-subjects"}`),
             )
             .map(([k, p]) => ({
               number: Number(k.split("#")[1]),
               state: p.state ?? "open",
-              head: { ref: p.headRef ?? "add-subjects", sha: p.sha },
+              head: {
+                ref: p.headRef ?? "add-subjects",
+                sha: p.sha,
+                repo: { full_name: `nemarDatasets/${list[1]}` },
+              },
               base: { ref: p.base ?? "main" },
             })),
+        );
+      }
+      // Opening a pull request: a head branch of the same repository, into `base`.
+      if (req.method === "POST" && list) {
+        const fault = state.createPullFaults.shift();
+        const b = (body ?? {}) as { title?: string; head?: string; base?: string; body?: string };
+        const open = async (): Promise<{ number: number; sha: string } | null> => {
+          const sha =
+            typeof b.head === "string" && state.resolveHead
+              ? await state.resolveHead(list[1] as string, b.head)
+              : null;
+          if (!sha) return null;
+          const taken = Object.keys(state.pulls)
+            .filter((k) => k.startsWith(`${list[1]}#`))
+            .map((k) => Number(k.split("#")[1]));
+          const number = Math.max(0, ...taken) + 1;
+          state.pulls[`${list[1]}#${number}`] = {
+            sha,
+            headRef: b.head as string,
+            base: b.base ?? "main",
+            title: b.title,
+            state: "open",
+          };
+          return { number, sha };
+        };
+        if (fault) {
+          if (fault.applied) await open();
+          return Response.json({ message: "Server Error" }, { status: fault.status });
+        }
+        const made = await open();
+        if (!made) {
+          return Response.json(
+            { message: "Validation Failed", errors: [{ field: "head", code: "invalid" }] },
+            { status: 422 },
+          );
+        }
+        return Response.json(
+          {
+            number: made.number,
+            state: "open",
+            title: b.title,
+            head: {
+              ref: b.head,
+              sha: made.sha,
+              repo: { full_name: `nemarDatasets/${list[1]}` },
+            },
+            base: { ref: b.base ?? "main" },
+          },
+          { status: 201 },
         );
       }
 
@@ -447,6 +517,15 @@ export function startGitHubStandin(): GitHubStandin {
     set pullsListStatus(v) {
       state.pullsListStatus = v;
     },
+    get createPullFaults() {
+      return state.createPullFaults;
+    },
+    get resolveHead() {
+      return state.resolveHead;
+    },
+    set resolveHead(v) {
+      state.resolveHead = v;
+    },
     get unreadableAnswers() {
       return state.unreadableAnswers;
     },
@@ -468,6 +547,7 @@ export function startGitHubStandin(): GitHubStandin {
       state.commentStatus = null;
       state.closeStatus = null;
       state.pullsListStatus = null;
+      state.createPullFaults.length = 0;
       state.comments.length = 0;
       for (const k of Object.keys(state.pulls)) delete state.pulls[k];
       for (const k of Object.keys(state.naming)) delete state.naming[k];

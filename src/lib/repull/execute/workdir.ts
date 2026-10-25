@@ -139,6 +139,8 @@ export async function withIsolatedGit<T>(fn: () => Promise<T>): Promise<T> {
 
 export interface GitResult {
   stdout: string;
+  /** Read for a fixed-word classification only; never repeated in a message, it names paths. */
+  stderr: string;
   exitCode: number;
 }
 
@@ -168,7 +170,7 @@ export async function git(
       `git ${opts.step ?? args[0] ?? ""} failed in the working clone (exit ${r.exitCode}).`,
     );
   }
-  return { stdout: r.stdout, exitCode: r.exitCode };
+  return { stdout: r.stdout, stderr: r.stderr, exitCode: r.exitCode };
 }
 
 /** True when the commit exists in the repository (no fetch). */
@@ -191,8 +193,11 @@ export async function workClone(args: {
   originUrl: string;
   baseSha: string;
   token: string | null;
-  /** The git-annex commit the plan read; the clone refuses one that moved (`plan-stale`). */
-  annexCommit: string;
+  /**
+   * The git-annex commit the plan read; the clone refuses one that moved (`plan-stale`). Null past
+   * `prepared`, where origin's branch has moved by the re-pull's own registration.
+   */
+  annexCommit: string | null;
 }): Promise<string> {
   removeTree(args.dir);
   const env = fleetCloneEnv(args.originUrl, args.token);
@@ -254,7 +259,7 @@ export async function workClone(args: {
       ok: true,
     })
   ).stdout.trim();
-  if (annex !== args.annexCommit) {
+  if (args.annexCommit !== null && annex !== args.annexCommit) {
     throw new ExecuteRefused(
       "plan-stale",
       "NEMAR's git-annex branch moved since the plan was made again: plan again and review the new digest.",
@@ -305,8 +310,13 @@ export type RestoreCause =
 /**
  * Restore a checkpoint into a fresh working clone. Null when the bundle verifies and delivers the
  * recorded commit `synthSha`, the clone is checked out at it with the tree `synthTree` on the
- * parent `baseSha`, and the bundle's git-annex branch is merged; otherwise why not (the caller
- * prepares again).
+ * parent `baseSha`, and the bundle's git-annex branch is merged; otherwise why not. A `prepared`
+ * row's caller then prepares again; past `prepared` it refuses (`checkpoint-lost`), because
+ * preparing again would upload and scrub afresh over a copy that already ran.
+ *
+ * The bundle's prerequisites are the base and origin's git-annex branch as the preparation fetched
+ * it. Past `prepared` origin's branch has moved by the registration, so `annexCommit` is null (the
+ * clone does not refuse the move) and `bundleAnnex`, the commit the bundle needs, is fetched by id.
  */
 export async function restoreCheckpoint(args: {
   dir: string;
@@ -314,7 +324,8 @@ export async function restoreCheckpoint(args: {
   originUrl: string;
   baseSha: string;
   token: string | null;
-  annexCommit: string;
+  annexCommit: string | null;
+  bundleAnnex?: string;
   synthSha: string;
   synthTree: string;
 }): Promise<RestoreCause | null> {
@@ -330,6 +341,13 @@ export async function restoreCheckpoint(args: {
     });
   } catch {
     return "clone-failed";
+  }
+  if (args.bundleAnnex && !(await hasCommit(repo, args.bundleAnnex))) {
+    const env = fleetCloneEnv(args.originUrl, args.token);
+    await git(repo, ["fetch", "--quiet", "--no-tags", "--depth=1", "origin", args.bundleAnnex], {
+      ...(env ? { env } : {}),
+      ok: true,
+    });
   }
   const verified = await git(repo, ["bundle", "verify", "--quiet", args.bundle], { ok: true });
   if (verified.exitCode !== 0) return "checkpoint-unverified";
