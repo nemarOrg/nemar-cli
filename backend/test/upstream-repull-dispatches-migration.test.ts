@@ -8,7 +8,9 @@
  * What is pinned: the words in the file are the words of `shared/repull-state.ts`; every CHECK of
  * the dispatch table refuses its violating row and accepts its valid one; one live dispatch per
  * dataset; the scheduler has exactly one row; the hold columns take a fixed word on an automatic
- * row only, set together; and the dataset cascade removes the dispatches.
+ * row only, set together; the dataset cascade removes the dispatches; and the dispatch service's
+ * own statements (the claim with its cap, the audit row, the report, the watchdog and the link)
+ * run on D1 as they do on SQLite.
  */
 
 import type { Database } from "bun:sqlite";
@@ -23,6 +25,13 @@ import {
   FIXED_WORD_RE,
 } from "../../shared/repull-state";
 import { deleteDatasetCascade } from "../src/services/deletion";
+import {
+  DISPATCH_LINK_BY_KEY_SQL,
+  claimFinishDispatch,
+  claimOpenDispatch,
+  storeDispatchReport,
+  sweepUnreportedDispatches,
+} from "../src/services/upstream-repull-dispatch";
 import type { Bindings } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
 import { MIGRATIONS_DIR, applyMigrations, migrationFiles } from "./helpers/miniflare-d1";
@@ -92,6 +101,7 @@ function sqliteEngine(): Engine {
 
 const ENGINES: Engine[] = [];
 let mf: Miniflare;
+let d1: D1Database;
 
 beforeAll(async () => {
   ENGINES.push(sqliteEngine());
@@ -101,7 +111,7 @@ beforeAll(async () => {
     compatibilityDate: "2024-12-01",
     d1Databases: ["DB"],
   });
-  const d1 = await mf.getD1Database("DB");
+  d1 = await mf.getD1Database("DB");
   await applyMigrations(d1, migrationFiles());
   ENGINES.push({
     name: "Miniflare D1",
@@ -402,5 +412,124 @@ describe("the dataset cascade", () => {
     expect(db.query("SELECT dataset_id FROM upstream_repull_dispatches").all()).toEqual([
       { dataset_id: "on099992" },
     ]);
+  });
+});
+
+describe("the dispatch service's own statements on D1", () => {
+  const SECRET = "dispatch-migration-test-secret";
+
+  test("the claim, its audit row, the link, the report, the finish and the watchdog run on D1", async () => {
+    for (const t of ["upstream_repull_dispatches", "upstream_repulls", "audit_log"]) {
+      await d1.prepare(`DELETE FROM ${t}`).run();
+    }
+    const env = {
+      DB: d1,
+      ENVIRONMENT: "production",
+      AUTO_REPULL_ENABLED: "1",
+      REPULL_DAILY_OPEN_CAP: "1",
+      PRESCREEN_CALLBACK_SECRET: SECRET,
+    } as unknown as Bindings;
+    const candidate = {
+      datasetId: "on099991",
+      upstreamDs: "ds099991",
+      fromTag: "v1.0.0",
+      toTag: "1.0.1",
+    };
+
+    // The claim: INSERT ... SELECT with the day's count and the CASE on the re-pull rows.
+    const claim = await claimOpenDispatch(env, candidate);
+    if (!("id" in claim)) throw new Error(`refused: ${claim.refused}`);
+    // The cap of 1 is used, and a refused claim wrote nothing (another dataset, so not `live`).
+    expect(await claimOpenDispatch(env, { ...candidate, datasetId: "on099992" })).toEqual({
+      refused: "cap",
+    });
+    const rows = (await d1.prepare("SELECT * FROM upstream_repull_dispatches").all()).results;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ kind: "open", from_tag: "1.0.0", status: "dispatched" });
+    const audit = (
+      await d1
+        .prepare(
+          "SELECT action, resource_id, details FROM audit_log WHERE action = 'repull_dispatch'",
+        )
+        .all<{ action: string; resource_id: string; details: string }>()
+    ).results;
+    expect(audit).toEqual([
+      expect.objectContaining({ action: "repull_dispatch", resource_id: String(claim.id) }),
+    ]);
+
+    // The link by key, as the automatic create's batch runs it.
+    const repull = await d1
+      .prepare(
+        "INSERT INTO upstream_repulls (dataset_id, upstream_ds, from_tag, to_tag, attempt, from_version, to_version, plan_digest, planner, origin, actor_user_id, status, base_sha, synth_tree, synth_sha, branch, pr_number, head_sha) VALUES ('on099991', 'ds099991', '1.0.0', '1.0.1', 1, '1.0.0', '2.0.0', ?, 2, 'automatic', 1, 'pr_open', ?, ?, ?, 'release/v2.0.0', 3, ?) RETURNING id",
+      )
+      .bind(
+        `sha256:${"0".repeat(64)}`,
+        "a".repeat(40),
+        "b".repeat(40),
+        "a".repeat(40),
+        "a".repeat(40),
+      )
+      .first<{ id: number }>();
+    const link = await d1
+      .prepare(DISPATCH_LINK_BY_KEY_SQL)
+      .bind("on099991", "1.0.1", 1, claim.id)
+      .run();
+    expect(link.meta.changes).toBe(1);
+
+    // The report: the correlated EXISTS on the re-pull row.
+    const report = (phase: string, extra: Record<string, unknown> = {}) =>
+      storeDispatchReport(env, claim.token, {
+        dispatch_id: claim.id,
+        dataset_id: "on099991",
+        phase,
+        ...extra,
+      });
+    expect(await report("started", { workflow_run_url: RUN_URL })).toEqual({
+      status: 200,
+      code: "stored",
+    });
+    expect(await report("opened", { repull_id: repull?.id })).toEqual({
+      status: 200,
+      code: "stored",
+    });
+    expect(await report("failed", { code: "runner-failed" })).toEqual({
+      status: 401,
+      code: "invalid-token",
+    });
+    expect(
+      await d1
+        .prepare("SELECT status, nonce, workflow_run_url FROM upstream_repull_dispatches")
+        .first(),
+    ).toEqual({ status: "opened", nonce: null, workflow_run_url: RUN_URL });
+
+    // The finish: INSERT ... SELECT from the re-pull row.
+    await d1
+      .prepare("UPDATE upstream_repulls SET status = 'merged', merge_sha = ? WHERE id = ?")
+      .bind("c".repeat(40), repull?.id)
+      .run();
+    const finish = await claimFinishDispatch(env, {
+      id: repull?.id as number,
+      dataset_id: "on099991",
+      origin: "automatic",
+      status: "merged",
+      from_tag: "1.0.0",
+      to_tag: "1.0.1",
+    });
+    expect("id" in finish).toBe(true);
+
+    // The watchdog: datetime('now', '-8 hours'), and its audit row with changes().
+    await d1
+      .prepare(
+        "UPDATE upstream_repull_dispatches SET dispatched_at = datetime('now', '-9 hours') WHERE kind = 'finish'",
+      )
+      .run();
+    expect(await sweepUnreportedDispatches(env)).toEqual({ marked: 1 });
+    expect(await sweepUnreportedDispatches(env)).toEqual({ marked: 0 });
+    const marked = (
+      await d1
+        .prepare("SELECT details FROM audit_log WHERE action = 'repull_dispatch_unreported'")
+        .all<{ details: string }>()
+    ).results;
+    expect(marked.map((r) => JSON.parse(r.details))).toEqual([{ marked: 1, deadline_hours: 8 }]);
   });
 });

@@ -38,6 +38,8 @@ const EXPECTED_ENTRIES: Record<string, number> = {
   "POST /identifier-sweep-result": 1,
   // Re-pull identifier-screen callback (epic #1046 phase 6, ADR 0111; domain-tagged, same secret)
   "POST /identifier-screen-repull-result": 1,
+  // Automatic re-pull run reports (epic #1046 phase 7, ADR 0111; domain-tagged, same secret)
+  "POST /repull-state": 1,
 
   // Dataset pull-request review callback (domain-tagged token, same secret; ADR 0092)
   "POST /pr-review-claim": 1,
@@ -76,7 +78,7 @@ describe("webhooks route inventory", () => {
   });
 
   test("entry total is pinned", () => {
-    expect(webhooks.routes.length).toBe(19);
+    expect(webhooks.routes.length).toBe(20);
   });
 
   // The webhooks router has NO router-level middleware: every route does its

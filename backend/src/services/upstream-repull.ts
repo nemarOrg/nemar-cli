@@ -280,7 +280,7 @@ export type TransitionBody = z.infer<typeof transitionSchema>;
 // ----------------------------------------------------------------------------
 
 export type RepullRefusal = {
-  status: 400 | 403 | 404 | 409 | 429 | 502;
+  status: 400 | 401 | 403 | 404 | 409 | 429 | 502 | 503;
   code: string;
   message: string;
   /** The row a conflict is about, when naming it helps the caller (never a secret). */
