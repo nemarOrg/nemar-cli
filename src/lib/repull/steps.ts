@@ -1,0 +1,122 @@
+/**
+ * What the steps of a re-pull past its open pull request share (ADR 0111; epic #1046 phase 6):
+ * `resume.ts` walks them, `release.ts` holds the release and the lock. The words a step records
+ * on the row begin with its own prefix (`[gates:`, `[release:`, `[lock:`), never `[prepare:`, which
+ * only a preparation clears (the Phase 6c amendment's rule).
+ */
+
+import type { RepullRow } from "../../../shared/repull-state.js";
+import { ApiError } from "../api/errors.js";
+import { repullErrorCode, transitionRepull } from "../api/repull.js";
+import type { OriginScratch } from "./execute/origin.js";
+import { ExecuteRefused } from "./execute/verify-plan.js";
+import type { Env } from "./sources.js";
+
+/** How a resume ended, which the command turns into its exit code. */
+export type ResumeOutcome =
+  /** `gates_clear`: the pull request may be merged now (exit 0). */
+  | "ready"
+  /** It waits for something (the screen, GitHub, a person), with what in `waitingFor` (exit 3). */
+  | "waiting"
+  /** The record ended (`abandoned`: the pull request was closed unmerged) (exit 1). */
+  | "ended"
+  /** The release was recorded and the objects locked; N.0.1 is not built yet (exit 0). */
+  | "released"
+  /** The re-pull is complete (exit 0). */
+  | "complete"
+  /** No open record (exit 1). */
+  | "nothing";
+
+export interface ResumeResult {
+  row: RepullRow | null;
+  outcome: ResumeOutcome;
+  waitingFor?: string;
+}
+
+export interface ResumeOptions {
+  datasetId: string;
+  /** How long to wait for the screen and GitHub's state; 0 reads once. */
+  waitMinutes: number;
+  /** The administrator's reason for a screen verdict that asks for a person (ADR 0086). */
+  acknowledgment?: string;
+  /**
+   * Asked before the release branch is re-synthesized onto a moved `main` and force-pushed with a
+   * lease; false stops with nothing pushed (`declined`). Absent: it proceeds (the command passes
+   * one unless `--yes`).
+   */
+  confirm?: (question: string) => Promise<boolean>;
+  /** The test bases, the token and the API overrides; the process's by default. */
+  env?: Env;
+  out: (line: string) => void;
+  /** Tests only: how long a wait sleeps between reads. */
+  pollMs?: number;
+}
+
+/** What every step of one resume shares. */
+export interface ResumeContext {
+  datasetId: string;
+  token: string;
+  base: string;
+  env: Env;
+  configDir: string;
+  opts: ResumeOptions;
+  /** The scratch repository that reads origin, opened on first use. */
+  origin(): Promise<OriginScratch>;
+  /** Heads this run replaced by a re-synthesis: GitHub may still name one for a moment. */
+  replaced: Set<string>;
+  sleep(ms: number): Promise<void>;
+}
+
+/** One turn of the walk: go on with the row, wait for something, or stop. */
+export type Turn =
+  | { kind: "next"; row: RepullRow }
+  | { kind: "wait"; row: RepullRow; waitingFor: string }
+  | { kind: "done"; result: ResumeResult };
+
+/** `[<step>:<code>] <message>`, the words a step past the open pull request records. */
+export function resumeErrorWords(step: "gates" | "release" | "lock", err: unknown): string {
+  if (err instanceof ExecuteRefused) return `[${step}:${err.code}] ${err.message}`.slice(0, 2000);
+  const why = err instanceof Error ? err.name : "unknown";
+  return `[${step}:${step}-failed] The step failed (${why}).`;
+}
+
+/**
+ * A refusal that leaves the record as it was, resumable (the command's exit 3). Named so the
+ * dispatch-word scan reads its words (`refused("<word>"`).
+ */
+export function refused(code: string, message: string): ExecuteRefused {
+  const err = new ExecuteRefused(code, message);
+  err.resumable = true;
+  return err;
+}
+
+/** An API refusal as the step's own refusal, its word kept. */
+export function apiRefused(err: unknown, what: string): ExecuteRefused {
+  const code =
+    repullErrorCode(err) ?? (err instanceof ApiError ? "record-refused" : "github-failed");
+  const msg = err instanceof Error ? err.message : String(err);
+  return refused(code, `${what}: ${msg}`);
+}
+
+/**
+ * Record why a step failed on a row at `pr_open`, `merged` or `released`, as the self-edge that
+ * carries the stage's stored facts and nothing else; the operator is told when it cannot be
+ * recorded. The failure itself is still what the caller reports.
+ */
+export async function recordStepError(
+  row: RepullRow,
+  words: string,
+  out: (line: string) => void,
+): Promise<void> {
+  const fields =
+    row.status === "pr_open"
+      ? { branch: row.branch, pr_number: row.pr_number, head_sha: row.head_sha }
+      : {};
+  try {
+    await transitionRepull(row.id, { from: row.status, to: row.status, fields, error: words });
+  } catch (err) {
+    out(
+      `The failure could not be recorded on re-pull #${row.id} (${repullErrorCode(err) ?? (err instanceof ApiError ? `HTTP ${err.statusCode}` : "no answer")}); its record keeps the last error it had.`,
+    );
+  }
+}

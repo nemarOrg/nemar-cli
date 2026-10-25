@@ -62,6 +62,8 @@ export interface PullState {
   headAfterFirstRead?: string;
   /** The head branch's name; "add-subjects" unless a test says otherwise. */
   headRef?: string;
+  /** The squash merge's commit, once merged (GitHub's `merge_commit_sha`); null before. */
+  mergeCommitSha?: string;
   /**
    * What every read made with the administrator's own token AFTER ITS FIRST answers instead: a
    * status (a GitHub that stops answering), a head (a push), a mergeable state (a check that turns
@@ -125,6 +127,30 @@ export interface GitHubStandin {
   /** The comments recorded, in order: `{ dataset, number, body, token }`. */
   comments: Array<{ dataset: string; number: number; body: string; token: string | null }>;
   /**
+   * When true, a pull request's head is the commit its branch names NOW (`resolveHead`), on every
+   * read and at the merge, which GitHub refuses (409) when the `sha` it was sent is another: a push
+   * that lands between a reader's read and its merge. Off unless a suite turns it on.
+   */
+  liveHeads: boolean;
+  /**
+   * Makes the merge a merge PUT asks for (`dataset`, `number`, the request body): a squash commit
+   * on the bare origin's `main`, say. Returns the merge commit, or null to answer 405 instead.
+   */
+  onMerge:
+    | ((dataset: string, number: number, body: Record<string, unknown>) => Promise<string | null>)
+    | null;
+  /**
+   * Runs when a merge PUT arrives, before GitHub compares its `sha` with the head: a push that lands
+   * between the merge's last read of the pull request and the merge itself.
+   */
+  beforeMerge: ((dataset: string, number: number) => Promise<void>) | null;
+  /** When true, a merge PUT is applied and then answered 502: the answer lost on the way back. */
+  lostMergeAnswers: boolean;
+  /** The commit a tag names (`GET .../commits/tags/<tag>`, asked as `vnd.github.sha`), or null. */
+  resolveTag: ((dataset: string, tag: string) => Promise<string | null>) | null;
+  /** GitHub's comparison word for `base...head` (`identical`, `ahead`, ...), or null for 404. */
+  compareCommits: ((dataset: string, base: string, head: string) => Promise<string | null>) | null;
+  /**
    * When true, the review POST and the merge PUT are APPLIED and answered 200 with a body that is
    * not JSON: the case where a write happened and its answer cannot be read.
    */
@@ -165,7 +191,18 @@ export function startGitHubStandin(): GitHubStandin {
     closeStatus: null as number | null,
     comments: [] as GitHubStandin["comments"],
     unreadableAnswers: false,
+    liveHeads: false,
+    onMerge: null as GitHubStandin["onMerge"],
+    beforeMerge: null as GitHubStandin["beforeMerge"],
+    lostMergeAnswers: false,
+    resolveTag: null as GitHubStandin["resolveTag"],
+    compareCommits: null as GitHubStandin["compareCommits"],
   };
+  /** The head a pull request has now: its branch's commit when heads are live. */
+  const headOf = async (dataset: string, p: PullState): Promise<string> =>
+    state.liveHeads && state.resolveHead
+      ? ((await state.resolveHead(dataset, p.headRef ?? "add-subjects")) ?? p.sha)
+      : p.sha;
   const reads: Record<string, number> = {};
   const adminReads: Record<string, number> = {};
 
@@ -211,6 +248,29 @@ export function startGitHubStandin(): GitHubStandin {
           : Response.json({ message: "Bad credentials" }, { status: 401 });
       }
 
+      // The re-pull's release reads (a tag's commit, a comparison) when a suite answers them from
+      // its bare origin; ahead of the naming rule's comparison, which would answer otherwise.
+      const tag = url.pathname.match(/^\/repos\/nemarDatasets\/([^/]+)\/commits\/tags\/(.+)$/);
+      if (req.method === "GET" && tag && state.resolveTag) {
+        const sha = await state.resolveTag(tag[1] as string, decodeURIComponent(tag[2] as string));
+        if (!sha) return Response.json({ message: "No commit found" }, { status: 422 });
+        return req.headers.get("accept") === "application/vnd.github.sha"
+          ? new Response(sha, { status: 200 })
+          : Response.json({ sha });
+      }
+      const compare = url.pathname.match(
+        /^\/repos\/nemarDatasets\/([^/]+)\/compare\/([0-9a-f]{40})\.\.\.([0-9a-f]{40})$/,
+      );
+      if (req.method === "GET" && compare && state.compareCommits) {
+        const word = await state.compareCommits(
+          compare[1] as string,
+          compare[2] as string,
+          compare[3] as string,
+        );
+        return word
+          ? Response.json({ status: word })
+          : Response.json({ message: "Not Found" }, { status: 404 });
+      }
       // The question the review's exemption asks once an account has matched (ADR 0107): an
       // administrator on every dataset, whoever is asked. A test that needs another answer says
       // so in the Worker's own suites (backend/test/pr-review-*.test.ts), where the table lives.
@@ -266,23 +326,25 @@ export function startGitHubStandin(): GitHubStandin {
         // `head=<owner>:<branch>`, as GitHub filters it.
         const head = url.searchParams.get("head");
         return Response.json(
-          Object.entries(state.pulls)
-            .filter(
-              ([k, p]) =>
-                k.startsWith(`${list[1]}#`) &&
-                (wanted === "all" || (p.state ?? "open") === wanted) &&
-                (head === null || head === `nemarDatasets:${p.headRef ?? "add-subjects"}`),
-            )
-            .map(([k, p]) => ({
-              number: Number(k.split("#")[1]),
-              state: p.state ?? "open",
-              head: {
-                ref: p.headRef ?? "add-subjects",
-                sha: p.sha,
-                repo: { full_name: `nemarDatasets/${list[1]}` },
-              },
-              base: { ref: p.base ?? "main" },
-            })),
+          await Promise.all(
+            Object.entries(state.pulls)
+              .filter(
+                ([k, p]) =>
+                  k.startsWith(`${list[1]}#`) &&
+                  (wanted === "all" || (p.state ?? "open") === wanted) &&
+                  (head === null || head === `nemarDatasets:${p.headRef ?? "add-subjects"}`),
+              )
+              .map(async ([k, p]) => ({
+                number: Number(k.split("#")[1]),
+                state: p.state ?? "open",
+                head: {
+                  ref: p.headRef ?? "add-subjects",
+                  sha: await headOf(list[1] as string, p),
+                  repo: { full_name: `nemarDatasets/${list[1]}` },
+                },
+                base: { ref: p.base ?? "main" },
+              })),
+          ),
         );
       }
       // Opening a pull request: a head branch of the same repository, into `base`.
@@ -373,10 +435,13 @@ export function startGitHubStandin(): GitHubStandin {
                 owner: { login: "nemarDatasets" },
               },
             },
+            merge_commit_sha: p.mergeCommitSha ?? null,
             head: {
               sha:
                 later?.sha ??
-                (p.headAfterFirstRead && reads[key] > 1 ? p.headAfterFirstRead : p.sha),
+                (p.headAfterFirstRead && reads[key] > 1
+                  ? p.headAfterFirstRead
+                  : await headOf(pull[1] as string, p)),
               ref: p.headRef ?? "add-subjects",
               repo: { full_name: `nemarDatasets/${pull[1]}`, owner: { login: "nemarDatasets" } },
             },
@@ -412,12 +477,35 @@ export function startGitHubStandin(): GitHubStandin {
         }
         if (req.method === "PUT" && pull[3] === "/merge") {
           if (state.unreadableAnswers) return new Response("<html>proxy</html>", { status: 200 });
+          if (state.beforeMerge) await state.beforeMerge(pull[1] as string, Number(pull[2]));
+          const sent = (body as { sha?: unknown } | null)?.sha;
+          if (
+            state.liveHeads &&
+            typeof sent === "string" &&
+            sent !== (await headOf(pull[1] as string, p))
+          ) {
+            // GitHub's answer when the head is not the `sha` the merge was sent with.
+            return Response.json(
+              { message: "Head branch was modified. Review and try the merge again." },
+              { status: 409 },
+            );
+          }
+          let mergeSha = "f".repeat(40);
+          if (state.mergeStatus === 200 && state.onMerge) {
+            const made = await state.onMerge(pull[1] as string, Number(pull[2]), body ?? {});
+            if (made === null) {
+              return Response.json({ message: "Pull Request is not mergeable" }, { status: 405 });
+            }
+            mergeSha = made;
+          }
           if (state.mergeStatus === 200) {
             p.merged = true;
             p.state = "closed";
+            p.mergeCommitSha = mergeSha;
+            if (state.lostMergeAnswers) return new Response("bad gateway", { status: 502 });
           }
           return state.mergeStatus === 200
-            ? Response.json({ merged: true, sha: "f".repeat(40) })
+            ? Response.json({ merged: true, sha: mergeSha })
             : Response.json(
                 { message: "Pull Request is not mergeable" },
                 { status: state.mergeStatus },
@@ -529,6 +617,42 @@ export function startGitHubStandin(): GitHubStandin {
     get unreadableAnswers() {
       return state.unreadableAnswers;
     },
+    get liveHeads() {
+      return state.liveHeads;
+    },
+    set liveHeads(v) {
+      state.liveHeads = v;
+    },
+    get onMerge() {
+      return state.onMerge;
+    },
+    get beforeMerge() {
+      return state.beforeMerge;
+    },
+    set beforeMerge(v) {
+      state.beforeMerge = v;
+    },
+    get lostMergeAnswers() {
+      return state.lostMergeAnswers;
+    },
+    set lostMergeAnswers(v) {
+      state.lostMergeAnswers = v;
+    },
+    set onMerge(v) {
+      state.onMerge = v;
+    },
+    get resolveTag() {
+      return state.resolveTag;
+    },
+    set resolveTag(v) {
+      state.resolveTag = v;
+    },
+    get compareCommits() {
+      return state.compareCommits;
+    },
+    set compareCommits(v) {
+      state.compareCommits = v;
+    },
     set unreadableAnswers(v) {
       state.unreadableAnswers = v;
     },
@@ -544,6 +668,8 @@ export function startGitHubStandin(): GitHubStandin {
       state.userMessage = "Server Error";
       state.mergeStatus = 200;
       state.unreadableAnswers = false;
+      state.beforeMerge = null;
+      state.lostMergeAnswers = false;
       state.commentStatus = null;
       state.closeStatus = null;
       state.pullsListStatus = null;

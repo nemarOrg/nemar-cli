@@ -236,6 +236,11 @@ export interface PullRequestFacts {
   state: "open" | "closed" | "merged";
   draft: boolean;
   baseRef: string;
+  /**
+   * The head branch's name: a `release/*` one may be an upstream re-pull's pull request, which
+   * merges only through the re-pull's gate (ADR 0111).
+   */
+  headRef: string;
   headSha: string;
   authorLogin: string;
   /** GitHub's own mergeability verdict, which already weighs every required check and review. */
@@ -282,7 +287,7 @@ export async function fetchPullRequest(
           : why(res.status, body),
     };
   }
-  const head = body?.head as { sha?: unknown } | undefined;
+  const head = body?.head as { sha?: unknown; ref?: unknown } | undefined;
   const baseInfo = body?.base as { ref?: unknown } | undefined;
   const user = body?.user as { login?: unknown } | undefined;
   if (typeof head?.sha !== "string" || !/^[0-9a-f]{40}$/.test(head.sha)) {
@@ -294,6 +299,7 @@ export async function fetchPullRequest(
       state: body?.merged === true ? "merged" : body?.state === "open" ? "open" : "closed",
       draft: body?.draft === true,
       baseRef: typeof baseInfo?.ref === "string" ? baseInfo.ref : "",
+      headRef: typeof head.ref === "string" ? head.ref : "",
       headSha: head.sha,
       authorLogin: typeof user?.login === "string" ? user.login : "",
       mergeableState: typeof body?.mergeable_state === "string" ? body.mergeable_state : "unknown",
@@ -897,7 +903,17 @@ export async function mergeWhenClean(
   prNumber: number,
   headSha: string,
   method: MergeMethod,
-  options: { base?: string; sleep?: (ms: number) => Promise<void>; tries?: number } = {},
+  options: {
+    base?: string;
+    sleep?: (ms: number) => Promise<void>;
+    tries?: number;
+    /**
+     * The merge commit's title and message, sent as GitHub's `commit_title` and `commit_message`;
+     * GitHub's default otherwise. An upstream re-pull's squash merge writes its own, so its
+     * trailers are the message's last paragraph (ADR 0111, `lib/repull/merge.ts`).
+     */
+    commit?: { title: string; message: string };
+  } = {},
 ): Promise<MergeResult> {
   const base = options.base ?? githubApiBase();
 
@@ -948,7 +964,13 @@ export async function mergeWhenClean(
     res = await fetch(`${base}/repos/${DATASETS_ORG}/${datasetId}/pulls/${prNumber}/merge`, {
       method: "PUT",
       headers: headers(token),
-      body: JSON.stringify({ sha: headSha, merge_method: method }),
+      body: JSON.stringify({
+        sha: headSha,
+        merge_method: method,
+        ...(options.commit
+          ? { commit_title: options.commit.title, commit_message: options.commit.message }
+          : {}),
+      }),
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
   } catch (err) {

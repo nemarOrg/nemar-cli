@@ -20,6 +20,10 @@
  *   nemar admin repull execute <plan-file>   the reviewed plan, executed on this machine through
  *                                            its pull request: record, prepare, copy, register,
  *                                            push, open (`lib/repull/execute/`); it never merges
+ *   nemar admin repull status <id>           what the record says (`lib/repull/status.ts`)
+ *   nemar admin repull resume <id>           past the open pull request: the head, main, the
+ *                                            identifier screen and the gates (`lib/repull/
+ *                                            resume.ts`); it never merges
  *   nemar admin repull canary                the real-bucket check of the copy's S3 calls on a
  *                                            scratch prefix (`lib/repull/canary.ts`)
  */
@@ -47,6 +51,7 @@ import { ExecuteRefused } from "../lib/repull/execute/verify-plan.js";
 import { type CatalogFacts, RepullCannotPlan, planRepull } from "../lib/repull/plan.js";
 import { countsMarkdown, preflightLines, summaryLines } from "../lib/repull/render.js";
 import { openNeuroGraphqlUrl as openNeuroUrlFromEnv } from "../lib/repull/sources.js";
+import { resumeCommand, statusCommand } from "./admin-repull-resume.js";
 
 /** Exit codes: 0 executable, 3 planned but not executable, 1 nothing planned. */
 export const EXIT_NOT_EXECUTABLE = 3;
@@ -474,3 +479,6 @@ repullCommand
       }
     },
   );
+
+repullCommand.addCommand(statusCommand);
+repullCommand.addCommand(resumeCommand);

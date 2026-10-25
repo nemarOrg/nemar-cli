@@ -765,6 +765,18 @@ export const DISPATCH_CODES = [
   "upstream-tag-moved",
   "upstream-unreadable",
   "write-refused",
+  // Past the open pull request (Phase 6f): resume, the re-synthesis onto a moved `main`, the
+  // release and the lock. A run reports them as `[gates:<word>]`, `[release:<word>]` or
+  // `[lock:<word>]` on the record; `github-failed` and `release-failed` are the words of a failure
+  // no more specific word names.
+  "branch-moved",
+  "github-failed",
+  "lock-failed",
+  "lock-incomplete",
+  "not-built",
+  "release-failed",
+  "resume-looped",
+  "use-execute",
   // The scrub's refusals (`IMPORT_SCRUB_REFUSALS`), which execution passes on as they are.
   "already-imported-unscrubbed",
   "bound-exceeded",
