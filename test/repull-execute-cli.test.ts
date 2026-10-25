@@ -44,6 +44,7 @@ import { runCommand } from "../src/lib/git-annex/run-command";
 import { defaultPlanPath, writePlanFile } from "../src/lib/repull/digest";
 import { workPaths } from "../src/lib/repull/execute/workdir";
 import { planRepull } from "../src/lib/repull/plan";
+import { useTestGitIdentity } from "./helpers/git-identity";
 import {
   ADMIN_TOKEN,
   type GitHubStandin,
@@ -613,6 +614,9 @@ describe.skipIf(!awsInstalled)("execute through the pull request", () => {
 
     // git-annex itself reads the registration: a fresh clone finds the copied recording at nemar-s3.
     const clone = join(mkdtempSync(join(tmpdir(), "nemar-repull-whereis-")), "c");
+    // `git annex init` commits to the git-annex branch, so it needs an identity; a CI runner has
+    // none, so the test brings its own through the environment, never a global config.
+    const restoreIdentity = useTestGitIdentity();
     try {
       await runCommand(
         ["git", "clone", "-q", "--branch", "release/v2.0.0", fx.originRepo, clone],
@@ -645,6 +649,7 @@ describe.skipIf(!awsInstalled)("execute through the pull request", () => {
       }
       expect(holders.whereis.map((w) => w.uuid)).toEqual([fx.nemarUuid]);
     } finally {
+      restoreIdentity();
       Bun.spawnSync(["chmod", "-R", "u+w", join(clone, "..")]);
       rmSync(join(clone, ".."), { recursive: true, force: true });
     }
