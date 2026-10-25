@@ -52,6 +52,7 @@ import { PROVENANCE_NOTE_KEY } from "../shared/privacy-correction-text";
 import { getApiUrl } from "../src/lib/api/client";
 import { runCommand } from "../src/lib/git-annex/run-command";
 import { listAnnexedKeys } from "../src/lib/git-annex/transfer";
+import { OPENNEURO_UPSTREAM_MARKER } from "../src/lib/import-markers";
 import { httpUpstreamReader } from "../src/lib/import-scrub";
 import { awsCliUpload } from "../src/lib/normalize-dataset";
 import { defaultPlanPath, readPlanFile, writePlanFile } from "../src/lib/repull/digest";
@@ -629,6 +630,18 @@ describe.skipIf(!awsInstalled)("the reviewed plan, before anything is written", 
       );
       expect(err.code).toBe("anonymity-unknown");
       expect(readdirSync(root)).toEqual([]);
+      const missing = await refusal(
+        readExecutablePlan(path, {
+          catalog: { dataset: null, versions: null },
+          github: { token: ADMIN_TOKEN, apiBase: gh.url },
+          environment: getApiUrl(),
+          env: execEnv(fx),
+          workRoot: root,
+          collect: { computed: new Map() },
+          openNeuroGraphqlUrl: openNeuro.url,
+        }),
+      );
+      expect(missing.code).toBe("dataset-missing");
     } finally {
       removeTree(root);
     }
@@ -841,6 +854,18 @@ describe.skipIf(!awsInstalled)("preparing the default delta", () => {
     expect(repullRows()[0]?.last_error).toBeNull();
   });
 
+  test("an error a later step recorded is not cleared by a preparation that holds", async () => {
+    const later = "[copy:pin-absent] 1 pinned object is absent upstream.";
+    db.run("UPDATE upstream_repulls SET last_error = ?", [later]);
+    const before = repullRows();
+    apiWrites.length = 0;
+    const again = await execute(fx, planPath);
+    expect(again.lines.join("\n")).toContain("holds its commit");
+    expect(repullRows()).toEqual(before);
+    expect(repullRows()[0]?.last_error).toBe(later);
+    expect(apiWrites).toEqual(["POST /admin/repulls"]);
+  });
+
   test("a working clone moved off the recorded commit is not taken for it", async () => {
     const before = repullRows();
     await gitIn(paths.repo, [
@@ -1000,7 +1025,10 @@ describe.skipIf(!awsInstalled)("preparing the default delta", () => {
     mkdirSync(paths.plan, { recursive: true });
     writeFileSync(join(paths.plan, "in-use"), "");
     try {
-      expect((await refusal(execute(fx, planPath))).code).toBe("execution-locked");
+      const locked = await refusal(execute(fx, planPath));
+      expect(locked.code).toBe("execution-locked");
+      expect(locked.message).toContain(paths.lock);
+      expect(locked.message).toContain(`process ${process.pid}`);
       expect(existsSync(join(paths.plan, "in-use"))).toBe(true);
       expect((await gitIn(paths.repo, ["rev-parse", "HEAD"])).trim()).toBe(
         repullRows()[0]?.synth_sha as string,
@@ -1016,6 +1044,24 @@ describe.skipIf(!awsInstalled)("preparing the default delta", () => {
     const again = await execute(fx, planPath);
     expect(again.result.stoppedAt).toBe("prepared");
     expect(existsSync(paths.lock)).toBe(false);
+  });
+
+  test("a lock whose pid cannot be read yet is a live one, never taken over", async () => {
+    // The moment between a lock's creation and its pid being written, which the atomic rename
+    // means no execution of this build leaves, and a lock this build did not write.
+    mkdirSync(paths.lock, { mode: 0o700 });
+    writeFileSync(join(paths.lock, "pid"), "");
+    try {
+      const locked = await refusal(execute(fx, planPath));
+      expect(locked.code).toBe("execution-locked");
+      expect(locked.message).toContain("cannot be read");
+      expect(locked.message).toContain(paths.lock);
+      expect(readFileSync(join(paths.lock, "pid"), "utf8")).toBe("");
+    } finally {
+      rmSync(paths.lock, { recursive: true, force: true });
+    }
+    // No staged or moved-aside lock is left beside it.
+    expect(readdirSync(dirname(paths.lock)).filter((f) => f.includes(".lock."))).toEqual([]);
   });
 
   test("with the checkpoint gone too, preparing again gives the same tree and commit", async () => {
@@ -1441,12 +1487,13 @@ describe.skipIf(!awsInstalled)("a failure is recorded, or said", () => {
   afterAll(() => fx?.cleanup());
   beforeEach(reset);
 
-  test("a pinned object upstream stopped serving refuses as retryable, and the row says why", async () => {
+  test("a pinned object upstream stopped serving refuses with the upstream marker, and the row says why", async () => {
     seedMirror(XX_D);
     const path = await makePlan(fx);
     const err = await refusal(execute(fx, path));
     expect(err.code).toBe("header-unreadable");
-    expect(err.retryable).toBe(true);
+    // The marker the Worker's classifier matches, kept in the message as the scrub wrote it.
+    expect(err.message.startsWith(OPENNEURO_UPSTREAM_MARKER)).toBe(true);
     const [row] = repullRows();
     expect(row?.status).toBe("planned");
     expect(row?.last_error).toContain("header-unreadable");
