@@ -68,6 +68,11 @@ export interface MailErrorBody {
 
 export interface TicketSummary {
   id: number;
+  /**
+   * The ticket's reference: three lowercase words joined by dashes (`amber-falcon-river`) for a
+   * ticket created from 2026-10-25, or ten lowercase base32 characters (`wphdw6vce6`) for an older
+   * one. Never rewritten. Display it as is.
+   */
   ref: string;
   queue_tag: string;
   restricted: boolean;
@@ -154,7 +159,7 @@ export interface TicketDetail {
  * agent that can retry after a lost response SHOULD. The key is unique per ticket and stored
  * before anything is sent: a repeat of a reply that was sent returns the same response without
  * sending; a repeat while the first is still being sent is 409 `reply_in_progress`; a repeat of a
- * reply whose outcome was unknown is 502 `reply_delivery_unknown` again and is never re-sent; a
+ * reply whose outcome was unknown is 409 `reply_delivery_unknown` again and is never re-sent; a
  * reply that certainly sent nothing (`reply_not_sent`) releases its key so the retry can go. Without
  * a key every request sends.
  */
@@ -168,8 +173,13 @@ export interface ReplyResponse {
    * ticket holds no trace of it. Replaying that key then answers 409 `ticket_purged`.
    */
   message_id: number;
-  /** The Message-ID the reply went out under. */
-  header_message_id: string;
+  /**
+   * The Message-ID the mail provider reported for the sent reply, or null. It is set only when the
+   * provider returned a valid RFC 5322 msg-id (the Cloudflare binding does; Resend's opaque id is
+   * not one). The Worker no longer chooses the Message-ID: the provider controls it. Threading of
+   * the requester's answer never depends on this value.
+   */
+  header_message_id: string | null;
   status: TicketStatus;
 }
 

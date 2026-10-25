@@ -576,7 +576,7 @@ export async function sendEmail(
   deliveryEnv?: EmailDeliveryEnv,
   timeoutMs?: number,
   headers?: Record<string, string>,
-): Promise<void> {
+): Promise<SendResult> {
   // Validated first, before the fence or any provider: a rejected header is a caller bug.
   const extraHeaders = validateMailHeaders(headers);
   if (!isEmailDeliveryAllowed(to, deliveryEnv)) {
@@ -592,7 +592,7 @@ export async function sendEmail(
   const resolved = resolveEmailProvider(deliveryEnv);
   if (resolved.provider === "cloudflare") {
     try {
-      await sendViaCloudflare(
+      return await sendViaCloudflare(
         resolved.binding,
         to,
         wrapped.subject,
@@ -602,7 +602,6 @@ export async function sendEmail(
         timeoutMs,
         extraHeaders,
       );
-      return;
     } catch (error) {
       const fallbackOn = (deliveryEnv?.EMAIL_FALLBACK ?? "").trim().toLowerCase() === "resend";
       const code = error instanceof EmailRejectedError ? error.code : undefined;
@@ -614,7 +613,7 @@ export async function sendEmail(
         `[email][cloudflare-fallback] ${code} for ${redactRecipient(to)}, falling back to Resend: ${reason}`,
       );
       try {
-        await sendViaResend(
+        return await sendViaResend(
           to,
           wrapped.subject,
           wrapped.html,
@@ -630,10 +629,9 @@ export async function sendEmail(
         );
         throw resendError;
       }
-      return;
     }
   }
-  await sendViaResend(
+  return sendViaResend(
     to,
     wrapped.subject,
     wrapped.html,
@@ -645,6 +643,26 @@ export async function sendEmail(
   );
 }
 
+/**
+ * What a send reports back. `messageId` is the provider's id for the message ONLY when it is a
+ * valid RFC 5322 msg-id (`<local@domain>`, normalized to carry its brackets); otherwise null. The
+ * Cloudflare binding returns an id; Resend returns an opaque uuid, which is not a Message-ID and so
+ * is null here. Never assume it is set: a caller that stores it for threading must accept null.
+ */
+export interface SendResult {
+  messageId: string | null;
+}
+
+/** `<local@domain>`, or `local@domain` that is wrapped in brackets; anything else is null. */
+export function normalizeMessageId(raw: unknown): string | null {
+  if (typeof raw !== "string") return null;
+  const trimmed = raw.trim();
+  const inner = trimmed.startsWith("<") && trimmed.endsWith(">") ? trimmed.slice(1, -1) : trimmed;
+  return /^[^\s<>@()[\]\\,;:"]+@[^\s<>@()[\]\\,;:"]+$/.test(inner) && inner.length <= 255
+    ? `<${inner}>`
+    : null;
+}
+
 /** A caller's extra mail headers were refused before any provider was called: nothing was sent. */
 export class MailHeaderError extends Error {
   constructor(message: string) {
@@ -653,8 +671,63 @@ export class MailHeaderError extends Error {
   }
 }
 
-/** The only extra headers a caller may set: the threading trio. Names compare case-insensitively. */
-export const ALLOWED_MAIL_HEADERS: readonly string[] = ["Message-ID", "In-Reply-To", "References"];
+/**
+ * The only extra headers a caller may set: the threading pair. Names compare case-insensitively.
+ * `Message-ID` is deliberately absent: the Cloudflare Email Service controls it and refuses the
+ * whole send for it (`E_HEADER_NOT_ALLOWED`); the id a send went out under is read back from
+ * {@link SendResult} instead.
+ */
+export const ALLOWED_MAIL_HEADERS: readonly string[] = ["In-Reply-To", "References"];
+
+/**
+ * The headers the Cloudflare Email Service accepts from a sender
+ * (https://developers.cloudflare.com/email-service/reference/headers/): a fixed allowlist plus any
+ * `X-` header and the `List-` family. Everything else (`Message-ID`, `Date`, `MIME-Version`,
+ * `Content-Type`, ...) is platform-controlled and one such header fails the whole send, and
+ * `From`/`To`/`Cc`/`Bcc`/`Subject`/`Reply-To` belong in the API fields. Compared case-insensitively.
+ */
+const CLOUDFLARE_ALLOWED_HEADERS: ReadonlySet<string> = new Set(
+  [
+    "In-Reply-To",
+    "References",
+    "Thread-Index",
+    "Thread-Topic",
+    "Precedence",
+    "Auto-Submitted",
+    "Content-Language",
+    "Keywords",
+    "Comments",
+    "Importance",
+    "Priority",
+    "Sensitivity",
+    "Organization",
+    "Require-Recipient-Valid-Since",
+    "Expires",
+    "Reply-By",
+    "Archived-At",
+  ].map((h) => h.toLowerCase()),
+);
+
+/** Whether the Cloudflare Email Service accepts `name` as a custom header. */
+export function isCloudflareAllowedHeader(name: string): boolean {
+  const lower = name.toLowerCase();
+  return (
+    CLOUDFLARE_ALLOWED_HEADERS.has(lower) ||
+    /^x-[a-z0-9\-_]+$/.test(lower) ||
+    /^list-[a-z0-9\-]+$/.test(lower)
+  );
+}
+
+/** Throw {@link MailHeaderError} for a header the Cloudflare binding would refuse. */
+export function assertCloudflareHeaders(headers: Record<string, string> | undefined): void {
+  for (const name of Object.keys(headers ?? {})) {
+    if (!isCloudflareAllowedHeader(name)) {
+      throw new MailHeaderError(
+        `mail header "${name.slice(0, 40)}" is not accepted by the Cloudflare Email Service`,
+      );
+    }
+  }
+}
 
 /** The most characters one header value may carry (RFC 5322 line limit, less the name). */
 const MAIL_HEADER_VALUE_MAX = 998;
@@ -696,7 +769,7 @@ async function sendViaResend(
   replyTo?: string,
   timeoutMs?: number,
   headers?: Record<string, string>,
-): Promise<void> {
+): Promise<SendResult> {
   const body: Record<string, unknown> = {
     from: fromEmail,
     to: [to],
@@ -723,6 +796,9 @@ async function sendViaResend(
     }
     throw new Error(message);
   }
+  // Resend answers `{ id }`, its own uuid and not a Message-ID: normalizing it gives null.
+  const answer = (await response.json().catch(() => ({}))) as { id?: unknown };
+  return { messageId: normalizeMessageId(answer?.id) };
 }
 
 async function sendViaCloudflare(
@@ -734,7 +810,9 @@ async function sendViaCloudflare(
   replyTo?: string,
   timeoutMs?: number,
   headers?: Record<string, string>,
-): Promise<void> {
+): Promise<SendResult> {
+  // Before the binding is touched: one platform-controlled header fails the whole send there.
+  assertCloudflareHeaders(headers);
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     const sent = binding.send({
@@ -749,8 +827,7 @@ async function sendViaCloudflare(
       ...(headers ? { headers } : {}),
     });
     if (!timeoutMs) {
-      await sent;
-      return;
+      return { messageId: normalizeMessageId((await sent)?.messageId) };
     }
     // The binding takes no AbortSignal, so the bound is a race. A timeout is a plain Error
     // (the message may have been accepted), like Resend's aborted fetch; the loser's own
@@ -759,7 +836,8 @@ async function sendViaCloudflare(
     const timeout = new Promise<never>((_, reject) => {
       timer = setTimeout(() => reject(new Error(`timed out after ${timeoutMs}ms`)), timeoutMs);
     });
-    await Promise.race([sent, timeout]);
+    const answer = await Promise.race([sent, timeout]);
+    return { messageId: normalizeMessageId(answer?.messageId) };
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
     throw cloudflareSendFailure(

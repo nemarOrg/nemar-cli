@@ -20,8 +20,12 @@ import {
   type EmailDeliveryEnv,
   EmailProviderConfigError,
   EmailRejectedError,
+  MailHeaderError,
   RESEND_FALLBACK_CODES,
+  assertCloudflareHeaders,
   isCertainNonDelivery,
+  isCloudflareAllowedHeader,
+  normalizeMessageId,
   parseMailbox,
   redactAddressIn,
   resolveEmailProvider,
@@ -473,14 +477,82 @@ describe("the gated Resend fallback", () => {
   });
 });
 
+describe("Cloudflare header allowlist and the returned id", () => {
+  const sendWith = (env: EmailDeliveryEnv) =>
+    sendEmail(ALLOWED, "s", "<p>h</p>", "resend-key", FROM, REPLY_TO, true, env);
+
+  test("the allowlist matches the documented set", () => {
+    for (const ok of [
+      "In-Reply-To",
+      "references",
+      "X-Anything_1",
+      "List-Unsubscribe",
+      "Precedence",
+    ]) {
+      expect(isCloudflareAllowedHeader(ok)).toBe(true);
+    }
+    for (const bad of [
+      "Message-ID",
+      "Date",
+      "MIME-Version",
+      "Content-Type",
+      "Reply-To",
+      "X-",
+      "X Bad",
+    ]) {
+      expect(isCloudflareAllowedHeader(bad)).toBe(false);
+    }
+    expect(() => assertCloudflareHeaders({ Date: "x" })).toThrow(MailHeaderError);
+  });
+
+  test("a valid provider id comes back normalized; anything else is null", async () => {
+    expect(normalizeMessageId("<a.b@mail.example>")).toBe("<a.b@mail.example>");
+    expect(normalizeMessageId("a.b@mail.example")).toBe("<a.b@mail.example>");
+    for (const bad of ["", "5b2f1d0e-uuid", "<no-at>", "a b@c.example", "<a@b>c>", undefined, 7]) {
+      expect(normalizeMessageId(bad)).toBeNull();
+    }
+    const { binding } = recordingBinding();
+    expect((await sendWith(stagingEnv(binding))).messageId).toBe("<1.recorded@staging.nemar.test>");
+    const bare = { send: async () => ({ messageId: "bare@mail.example" }) };
+    expect((await sendWith(stagingEnv(bare))).messageId).toBe("<bare@mail.example>");
+    const opaque = { send: async () => ({ messageId: "0192-opaque-id" }) };
+    expect((await sendWith(stagingEnv(opaque))).messageId).toBeNull();
+  });
+
+  test("Resend's opaque id is not a Message-ID", async () => {
+    await withFakeResend(async () => {
+      expect(
+        (await sendWith({ ENVIRONMENT: "development", DEV_EMAIL_ALLOWLIST: "@nemar.test" }))
+          .messageId,
+      ).toBeNull();
+    });
+  });
+
+  test("a platform-controlled header is refused before the binding is called", async () => {
+    const { binding, sent } = recordingBinding();
+    const error = await sendEmail(
+      ALLOWED,
+      "s",
+      "<p>h</p>",
+      "k",
+      FROM,
+      REPLY_TO,
+      true,
+      stagingEnv(binding),
+      undefined,
+      { "Message-ID": "<x@y.example>" },
+    ).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(MailHeaderError);
+    expect(sent.length).toBe(0);
+  });
+});
+
 describe("threading headers on sendEmail", () => {
   const HEADERS = {
-    "message-id": "<out1@staging.nemar.test>",
     "In-Reply-To": "<in1@sender.example>",
     REFERENCES: "<in0@sender.example> <in1@sender.example>",
   };
   const canonical = {
-    "Message-ID": "<out1@staging.nemar.test>",
     "In-Reply-To": "<in1@sender.example>",
     References: "<in0@sender.example> <in1@sender.example>",
   };
@@ -529,6 +601,10 @@ describe("threading headers on sendEmail", () => {
   test("a name outside the allowlist or a value with a line break is refused before any send", async () => {
     const { binding, sent } = recordingBinding();
     await expect(run(stagingEnv(binding), { Bcc: "x@example.org" })).rejects.toThrow("not allowed");
+    // Message-ID is platform-controlled on Cloudflare: refused here, before the binding sees it.
+    await expect(run(stagingEnv(binding), { "Message-ID": "<a@b.example>" })).rejects.toThrow(
+      "not allowed",
+    );
     await expect(
       run(stagingEnv(binding), { "In-Reply-To": "<a@b>\r\nBcc: x@example.org" }),
     ).rejects.toThrow("control character");

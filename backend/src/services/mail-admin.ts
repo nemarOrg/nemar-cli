@@ -32,7 +32,7 @@ import { ticketPlusTag } from "./tickets";
 
 export class MailAdminError extends Error {
   constructor(
-    readonly status: 400 | 403 | 404 | 409 | 422 | 502 | 503,
+    readonly status: 400 | 403 | 404 | 409 | 422,
     readonly code: MailErrorCode,
     message: string,
   ) {
@@ -367,7 +367,8 @@ export function buildReferences(
 
 export interface ReplyOutcome {
   message_id: number;
-  header_message_id: string;
+  /** The provider's Message-ID for the sent reply when it is a valid msg-id, else null. */
+  header_message_id: string | null;
   status: TicketStatus;
 }
 
@@ -389,7 +390,7 @@ async function tryRun(label: string, work: () => Promise<unknown>): Promise<void
  * Send a reply and record it. With an `idempotencyKey` a retry is safe: the key is stored unique
  * per ticket BEFORE anything is sent, a repeat of a sent reply returns its stored outcome without
  * sending, a repeat while the first is still in flight is 409 `reply_in_progress`, and a repeat of
- * a reply whose outcome was unknown is the same 502 again (never a second send). A reply that
+ * a reply whose outcome was unknown is the same 409 again (never a second send). A reply that
  * certainly sent nothing releases its key so the retry can go.
  */
 export async function replyToTicket(
@@ -432,7 +433,7 @@ export async function replyToTicket(
       if (prior?.state === "sent" && prior.outcome)
         return JSON.parse(prior.outcome) as ReplyOutcome;
       if (prior && (prior.state === "unknown" || prior.stale === 1)) {
-        throw new MailAdminError(502, "reply_delivery_unknown", UNKNOWN_MESSAGE);
+        throw new MailAdminError(409, "reply_delivery_unknown", UNKNOWN_MESSAGE);
       }
       throw new MailAdminError(
         409,
@@ -441,7 +442,7 @@ export async function replyToTicket(
       );
     }
   }
-  const setKey = (state: "unknown", headerId: string) =>
+  const setKey = (state: "unknown", headerId: string | null) =>
     idempotencyKey === undefined
       ? Promise.resolve()
       : db
@@ -475,12 +476,11 @@ async function sendAndRecord(
   ticket: TicketRow,
   text: string,
   idempotencyKey: string | undefined,
-  setKey: (state: "unknown", headerId: string) => Promise<unknown>,
+  setKey: (state: "unknown", headerId: string | null) => Promise<unknown>,
 ): Promise<ReplyOutcome> {
   const db = env.DB;
   const domain = supportDomain(env);
   const supportAddress = `support@${domain}`;
-  const headerId = `<${crypto.randomUUID()}@${domain}>`;
 
   const latestIn = await db
     .prepare(
@@ -513,7 +513,10 @@ async function sendAndRecord(
   if (root && MESSAGE_ID.test(root.message_id) && !ids.includes(root.message_id)) {
     ids.unshift(root.message_id);
   }
-  const headers: Record<string, string> = { "Message-ID": headerId };
+  // No Message-ID: the Cloudflare Email Service owns it and refuses the send for one. The id the
+  // provider reports back (when it is a valid msg-id) is stored below as a bonus for threading;
+  // the requester's answer reaches the ticket by the `support+t-<ref>@` reply-to either way.
+  const headers: Record<string, string> = {};
   if (latestIn && MESSAGE_ID.test(latestIn.message_id)) {
     headers["In-Reply-To"] = latestIn.message_id;
   }
@@ -532,8 +535,9 @@ async function sendAndRecord(
   const from = `NEMAR Support <${supportAddress}>`;
   const replyTo = `${supportAddress.replace("@", `+${ticketPlusTag(ticket.ref)}@`)}`;
 
+  let providerId: string | null;
   try {
-    await sendEmail(
+    const sent = await sendEmail(
       ticket.requester_email,
       subject,
       textToHtml(text),
@@ -545,6 +549,7 @@ async function sendAndRecord(
       undefined,
       headers,
     );
+    providerId = sent.messageId;
   } catch (error) {
     const reason = redactAddressIn(
       error instanceof Error ? error.message : String(error),
@@ -553,7 +558,7 @@ async function sendAndRecord(
     if (isCertainNonDelivery(error)) {
       console.warn(`[mail-admin] reply on ticket ${ticket.id} not sent: ${reason}`);
       throw new MailAdminError(
-        502,
+        422,
         "reply_not_sent",
         error instanceof DevEmailFenceError
           ? "Nothing was sent: this environment does not deliver to that recipient."
@@ -564,18 +569,18 @@ async function sendAndRecord(
     }
     // The provider may have accepted it and only the answer was lost. Storing nothing would
     // invite a second send; storing it as sent would claim a delivery nobody saw. So the
-    // attempt is recorded as an event naming the Message-ID, the admin is told it is unknown,
-    // and the requester's own reply (which carries that id) will thread if it did arrive. The
-    // writes are best effort: a failing database must not hide the 502 and its clear text.
+    // attempt is recorded as an event, the admin is told it is unknown, and the requester's own
+    // reply (which comes back through the plus address) will thread if it did arrive. The
+    // writes are best effort: a failing database must not hide the 409 and its clear text.
     console.error(`[mail-admin] reply on ticket ${ticket.id} outcome unknown: ${reason}`);
     await tryRun("recording the unknown reply", () =>
       eventStatement(db, ticket.id, "reply_failed", viewer.id, {
         delivery: "unknown",
-        header_message_id: headerId,
+        header_message_id: null,
       }).run(),
     );
-    await tryRun("marking the reply key unknown", () => setKey("unknown", headerId));
-    throw new MailAdminError(502, "reply_delivery_unknown", UNKNOWN_MESSAGE);
+    await tryRun("marking the reply key unknown", () => setKey("unknown", null));
+    throw new MailAdminError(409, "reply_delivery_unknown", UNKNOWN_MESSAGE);
   }
 
   const nextStatus: TicketStatus = ticket.status === "open" ? "pending" : ticket.status;
@@ -589,7 +594,7 @@ async function sendAndRecord(
       )
       .bind(
         ticket.id,
-        headerId,
+        providerId,
         headers["In-Reply-To"] ?? null,
         headers.References ?? null,
         supportAddress,
@@ -604,7 +609,7 @@ async function sendAndRecord(
         "UPDATE mail_tickets SET last_message_at = datetime('now'), last_activity_at = datetime('now'), updated_at = datetime('now'), status = ? WHERE id = ? AND purged_at IS NULL",
       )
       .bind(nextStatus, ticket.id),
-    liveEventStatement(db, ticket.id, "reply", viewer.id, { message_id: headerId }),
+    liveEventStatement(db, ticket.id, "reply", viewer.id, { message_id: providerId }),
   ];
   if (nextStatus !== ticket.status) {
     statements.push(
@@ -616,49 +621,54 @@ async function sendAndRecord(
     );
   }
   if (idempotencyKey !== undefined) {
-    statements.push(
+    // Right after the insert so last_insert_rowid() is still that row's id. The id is read only
+    // while the ticket is unpurged, which is exactly when the guarded insert wrote.
+    statements.splice(
+      1,
+      0,
       db
         .prepare(
           `UPDATE mail_reply_keys SET state = 'sent', header_message_id = ?1,
               outcome = json_object('message_id',
-                (SELECT id FROM mail_messages WHERE ticket_id = ?2 AND message_id = ?1),
+                (SELECT CASE WHEN EXISTS (SELECT 1 FROM mail_tickets WHERE id = ?2 AND purged_at IS NULL)
+                             THEN last_insert_rowid() END),
                 'header_message_id', ?1, 'status', ?3)
             WHERE ticket_id = ?2 AND idem_key = ?4`,
         )
-        .bind(headerId, ticket.id, nextStatus, idempotencyKey),
+        .bind(providerId, ticket.id, nextStatus, idempotencyKey),
     );
   }
+  let results: D1Result[];
   try {
-    await db.batch(statements);
+    results = await db.batch(statements);
   } catch (error) {
     console.error(
       `[mail-admin] reply on ticket ${ticket.id} was sent but not recorded: ${error instanceof Error ? error.message : String(error)}`,
     );
     // The mail went out, so leave a trace that names it (best effort, like the unknown case),
-    // and make a repeat of the same key answer 502 and not send again.
+    // and make a repeat of the same key answer 409 and not send again.
     await tryRun("recording the unrecorded reply", () =>
       eventStatement(db, ticket.id, "reply_failed", viewer.id, {
         delivery: "sent_unrecorded",
-        header_message_id: headerId,
+        header_message_id: providerId,
       }).run(),
     );
-    await tryRun("marking the reply key unknown", () => setKey("unknown", headerId));
+    await tryRun("marking the reply key unknown", () => setKey("unknown", providerId));
     throw new MailAdminError(
-      502,
+      409,
       "reply_delivery_unknown",
       "The reply was sent but could not be recorded. Do not send it again.",
     );
   }
-  const stored = await db
-    .prepare("SELECT id FROM mail_messages WHERE ticket_id = ? AND message_id = ?")
-    .bind(ticket.id, headerId)
-    .first<{ id: number }>();
-  if (!stored) {
+  // The insert is the first statement; it wrote a row unless the purge won the race.
+  const inserted = results[0]?.meta?.changes ?? 0;
+  const storedId = inserted > 0 ? Number(results[0]?.meta?.last_row_id ?? 0) : 0;
+  if (storedId === 0) {
     // The purge won the race after the mail went out: the guarded statements wrote nothing. The
     // reply was sent, so report success; the ticket holds no trace of it by design.
     console.warn(`[mail-admin] reply on ticket ${ticket.id} was sent after the ticket was purged`);
   }
-  return { message_id: stored?.id ?? 0, header_message_id: headerId, status: nextStatus };
+  return { message_id: storedId, header_message_id: providerId, status: nextStatus };
 }
 
 // ---------------------------------------------------------------------------------------------
