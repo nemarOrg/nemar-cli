@@ -267,7 +267,7 @@ const notStarted = (reason: string): PrReviewResponse => ({ ok: true, dispatched
  * tick of the automatic path (epic #1046 phase 7, #1913; ADR 0111, decision 7, which needs an
  * ADR 0107 review that passes before the Worker may merge one).
  *
- * Called by a later slice of the automatic path (the advance tick); nothing calls it yet.
+ * Called by the advance tick (`upstream-repull-advance.ts`), and by nothing else.
  *
  * The App's pull request is a bot's, which the review's intake skips (ADR 0092: "not bots"). This
  * is the one way it is admitted, so it is narrow on purpose (ADR 0111 narrows ADR 0092 for this

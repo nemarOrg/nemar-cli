@@ -19,7 +19,10 @@
  *  - `GET .../commits/<sha>/check-runs`: the runs in `checkRuns` (`<id>@<sha>`), filtered by the
  *    query's `check_name` and `app_id` as GitHub filters them (unless `checkFiltersIgnored`, a
  *    GitHub that ignored them), or that HTTP status when the entry is a number; none when absent;
- *    `checkTotalCount` makes the list claim more runs than it holds (a page that is not all).
+ *    `checkTotalCount` makes the list claim more runs than it holds (a page that is not all);
+ *  - `POST .../check-runs`, `PATCH .../check-runs/<n>`, `POST .../issues/<n>/comments` and
+ *    `PATCH .../issues/comments/<n>`, the writes the ADR 0107 review publishes its check and its
+ *    comment with: recorded in `writes` and answered with a new id.
  * A pull request entry may also name its `number`, `user`, the head's and base's `repo` and its
  * `mergeable_state`, which are answered only when named. A request whose path holds `slow` is
  * answered `slowMs` late. Error answers on the reads added for the machine-clean facts carry
@@ -78,6 +81,8 @@ export interface RepullGitHub {
   compares: Record<string, string | number>;
   dispatches: Dispatch[];
   dispatchStatus: number;
+  /** The review's check-run and comment writes, as `<METHOD> <path>`. */
+  writes: string[];
   mainRefs: Record<string, string | number>;
   checkRuns: Record<string, CheckRunAnswer[] | number>;
   checkFiltersIgnored: boolean;
@@ -100,6 +105,7 @@ export function startRepullGitHub(o: { defaultHead?: string | null } = {}): Repu
     compares: {},
     dispatches: [],
     dispatchStatus: 204,
+    writes: [],
     mainRefs: {},
     checkRuns: {},
     checkFiltersIgnored: false,
@@ -116,6 +122,7 @@ export function startRepullGitHub(o: { defaultHead?: string | null } = {}): Repu
       gh.compares = {};
       gh.dispatches = [];
       gh.dispatchStatus = 204;
+      gh.writes = [];
       gh.mainRefs = {};
       gh.checkRuns = {};
       gh.checkFiltersIgnored = false;
@@ -152,6 +159,15 @@ export function startRepullGitHub(o: { defaultHead?: string | null } = {}): Repu
         return new Response(gh.dispatchStatus < 300 ? null : '{"message":"refused"}', {
           status: gh.dispatchStatus,
         });
+      }
+      if (
+        (req.method === "POST" || req.method === "PATCH") &&
+        /^\/repos\/nemarDatasets\/[a-z]{2}\d{6}\/(check-runs(\/\d+)?|issues\/(\d+\/comments|comments\/\d+))$/.test(
+          url.pathname,
+        )
+      ) {
+        gh.writes.push(`${req.method} ${url.pathname}`);
+        return json({ id: 9000 + gh.writes.length }, req.method === "POST" ? 201 : 200);
       }
       let m = /^\/repos\/nemarDatasets\/([a-z]{2}\d{6})\/pulls\/(\d+)$/.exec(url.pathname);
       if (m) {
