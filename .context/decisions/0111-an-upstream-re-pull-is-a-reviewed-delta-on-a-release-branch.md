@@ -1201,3 +1201,86 @@ that upstream's bucket answers from `us-east-1`, which the copy assumes;
 whether NEMAR's bucket locks a copy by default retention;
 and how GitHub opens and lists a pull request (the head's repository, the answer to a second one on the same branch).
 git-annex reading the registration's location-log lines is checked locally: a fresh clone's `git annex whereis` finds the copied recording at `nemar-s3` alone (git-annex 10.20261006).
+
+## Amendment 2026-10-25 (#1913): Phase 7c schedules the automatic re-pull
+
+A further slice of the Phase 7 amendment above, built by Phase 7c.
+It builds the scheduled half of decision 6: a daily tick, in production only, that finds the mirrors upstream has moved past and dispatches the central workflow that is to open their re-pull pull requests.
+The workflow, the unattended run and the merge are later slices, and the workflow is not deployed, so nothing here can open a pull request yet; with the open switch off, as it is, the tick dispatches nothing at all.
+Nothing here sends mail, and the source scan that pins the record's import closure now covers the scheduler.
+
+### Candidates come from `stale_ready` alone
+
+- A candidate is a mirror the staleness report (the Phase 4a amendment) calls `stale_ready`, read through the same service its route and the weekly section read, so the three cannot disagree.
+  The pull goes from the recorded tag to the latest tag the report read.
+- No other state is a candidate.
+  `mirror_lag` and `stale_unverified` are stale but cannot be planned yet, `unknown` and `not_examined` have no tag to pull from, and an anomaly is not a verdict.
+- A never-published mirror is `unpublished`, never `stale_ready`, because it has no version row.
+  The import retry already prepares it again at the latest tag in place (decision 10, the retarget ruling), so the automatic re-pull never takes it, and a completed import with no version row is left to an administrator.
+- Withdrawn mirrors, imports in flight and mirrors with an open re-pull never reach `stale_ready`, and each fact is read again per candidate, below.
+
+### What is not dispatched
+
+Each `stale_ready` mirror is checked again in one statement before any claim, and skipped with a fixed word:
+
+- `missing` when its row is gone, and `anonymous` unless it says `anonymous` is exactly 0, because a re-pull would undo the blind (ADR 0065) and unknown is never clean;
+- `unreconciled` when a record of it holds a merge nothing reconciled, by the create's own rule, which the statement imports and never retypes;
+- `open-row` for an open re-pull, and `live` for a live dispatch;
+- `final-refusal` when a run already refused this tag for content (the content refusals the Phase 7b slice names): the automatic path is over for that tag, and an administrator may still re-pull it by hand;
+- `recent` when a re-pull of it was created, or a first dispatch for it sent, in the last 30 days.
+
+Then the create's dataset fences (a mirror of that `ds`, not withdrawn, no import in flight) are read again through the record's own function, and a refusal is skipped under its code.
+The automatic create checks everything once more when the run arrives.
+
+### The 30-day reading
+
+At most one first dispatch, or one re-pull of any origin, per dataset in 30 days.
+Every first dispatch counts except one GitHub refused (`dispatch_failed`), which never ran, and one whose run created a record counts through that record.
+A resume of an existing record is not a first dispatch: a later slice bounds it by its own count, not by the window.
+An administrator's re-pull counts too, which errs toward fewer DOIs.
+
+### The open cap, claimed at dispatch
+
+- Every dispatch goes through the dispatch record's claim (the Phase 7b slice), whose statement counts the day's `open` dispatches and claims the unit at once, so the scheduler cannot pass `REPULL_DAILY_OPEN_CAP`, and two ticks at once cannot either.
+  The day's count is also read once before the scan, only so that a full day costs no OpenNeuro request (`cap-reached`); the claim alone decides a unit.
+- "GitHub refused" means a 4xx, which the Phase 7b slice left to this one: GitHub refuses those before it creates an event, so the dispatch ends `dispatch_failed`, its unit is freed and the next candidate is dispatched.
+  A 5xx, a lost connection and the 10-second timeout are a lost answer, because GitHub's edge can answer a 502, 503 or 504 after it queued the event (the reasoning the approval dispatch records): the dispatch stays `dispatched`, keeps its unit, and the watchdog ends it `unreported` if its run never reports.
+  A 401, 403 or 404 says the credential cannot reach the central repository at all, so the tick stops there, and the next tick starts with that mirror.
+- The tick runs on the production daily cron at 03:00 UTC.
+  The timing that makes a day's dispatches that day's pull requests is pinned by the slice that writes the workflow, as the Phase 7b slice says.
+
+### Production only, and gate G4 in code
+
+- Outside `ENVIRONMENT` exactly `production` the tick returns before it reads, writes or sends anything, whatever the switches say.
+  It is called only from the production-only daily block, `DEV_CRON_ALLOWLIST` is unchanged, and the wiring test now pins every production-only daily job out of the allowlist.
+- In production, with `AUTO_REPULL_ENABLED` not exactly `"1"`, the tick only stamps its row (`switch-off`) and asks OpenNeuro nothing.
+- It dispatches nothing until this database holds a re-pull of an `on` mirror that an administrator ran to `complete`, its tag recorded (`waiting-for-manual-run`): gate G4 of the design record, encoded, so the first re-pulls are the owner's own.
+- The dispatch names the CLI version the run installs, the dispatching Worker's own, and only a release version is sent, so a Worker built from a development version dispatches nothing (`cli-unreleased`).
+- A Worker without the callback secret, which signs the dispatch token, dispatches nothing (`unconfigured`).
+- Every tick in production stamps the scheduler's row with its time and its outcome, one of a closed list of words (`shared/repull-state.ts`), which the observability slice reads.
+
+### The rotation, and what it does not pass by
+
+- A tick reads at most three pages of the report (300 mirrors) from where the last one stopped, and once one reaches the end of the fleet the next starts again at the first mirror, so the fleet is covered in rotation.
+- The GitHub probes that turn a stale row into `stale_ready` are bounded to ten a tick.
+  A stale row the budget did not reach reads `stale_unverified`, so the cursor stops before the first such row and the next tick probes it.
+  Passing it by until the next rotation would starve every stale mirror that sits behind ten ineligible ones, whose probes would be spent first on every pass.
+- A page OpenNeuro could not answer, and a pass with no GitHub credential for the probes, are `blind`: nothing is dispatched from what could not be seen, and the cursor does not move past it.
+  A single mirror the report could not compare (`unchecked`) or whose probe failed is passed by and met again on the next rotation, so one dataset that always fails cannot hold the cursor.
+
+### What the dispatch carries
+
+A `repository_dispatch` of the event `run-upstream-repull` on `nemarDatasets/.github`, whose payload holds the mode, the dataset, its `ds`, both tags, the dispatch's id and token, the CLI version and, for a resume or a finish, the re-pull's id: strings only, nine keys at most, under GitHub's limit of ten.
+Every field is checked before it is sent, and a malformed one stops the send and ends the claim; no error message names a value.
+It carries no callback URL: the run reports to the production API, whose address the workflow states.
+The token is the one secret in it, and the workflow's first step masks it before any step can print it (a later slice, as the Phase 7b slice asks).
+
+### Discovery untouched
+
+Decision 6's id-only discovery is unchanged, and a source scan pins the separation both ways: the auto-import and discovery load no re-pull or staleness module, and the staleness report and the scheduler load neither.
+OpenNeuro's endpoint, which both read, moved to a module that imports nothing, because the report's snapshot reader used to import it from discovery.
+
+### Checked only against stand-ins
+
+OpenNeuro, its GitHub mirror and GitHub's dispatch endpoint are loopback stand-ins in the suites, and the scheduler's statements, one whole tick included, run on bun:sqlite and on Miniflare's D1.
+Only production can show: that GitHub answers the dispatch with 204 and nothing runs until the workflow is deployed; that the installation token reads `OpenNeuroDatasets` raw files (an item under "Not yet verified": if it does not, no mirror is ever `stale_ready` and the scheduler never dispatches); that a 5xx can follow a queued event, which is assumed here in the safe direction; and the share of the daily tick's subrequest allowance a tick spends, about 100 in the worst case.
