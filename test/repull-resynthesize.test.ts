@@ -231,7 +231,8 @@ describe("the recorded commit's message", () => {
   test("one that lacks a trailer is refused, and nothing is pushed", async () => {
     await withIsolatedGit(async () => {
       const w = await build({
-        synthMessage: `Re-pull ds000001 1.0.0 to 1.1.0\n\nCounts only.\n\nUpstream-Snapshot: ds000001@1.1.0\n`,
+        synthMessage:
+          "Re-pull ds000001 1.0.0 to 1.1.0\n\nCounts only.\n\nUpstream-Snapshot: ds000001@1.1.0\n",
       });
       const scratch = await scratchOf();
       try {
