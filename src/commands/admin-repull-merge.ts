@@ -29,26 +29,38 @@ import { EXIT_WAITING, datasetArg } from "./admin-repull-resume.js";
 
 const MERGE_HELP = `
 Merges the dataset's re-pull pull request with your own GitHub login (GH_TOKEN, else \`gh auth
-token\`), once its record is gates_clear (\`nemar admin repull resume <id>\` gets it there). Before
-anything is written it checks that the pull request is open at the screened head, that NEMAR's main
-moved by enrichment only, that the automated review of that head allows it (one that failed, is
-running or cannot be read needs --force), that the identifier screen of that head passes, that
-GitHub reports the pull request clean, and that the squash message carries the re-pull commit's
-two trailers as its last paragraph. Then it asks (one irreversible version DOI; --yes answers),
-claims one unit of today's re-pull merge cap, squash-merges at the screened commit (GitHub refuses
-a head that moved since), and records the merge.
+token\`; it must belong to a person, and when your NEMAR account names a GitHub login it must be
+that one), once its record is gates_clear (\`nemar admin repull resume <id>\` gets it there).
+Before anything is written it checks that the pull request is open, not a draft, into main at the
+screened head, that NEMAR's main moved by enrichment only, that the automated review of that head
+allows it (one that failed, is running or cannot be read needs --force), that the identifier screen
+of that head passes, that GitHub reports the pull request clean, and that the squash message
+carries the re-pull commit's two trailers as its last paragraph. Then it reads the review once
+more and asks (one irreversible version DOI; --yes answers), and, holding the record's lock (no
+resume or execute of it runs meanwhile), claims one unit of today's re-pull merge cap,
+squash-merges at the screened commit (GitHub refuses a head that moved since), and records the
+merge.
 
-A claim already held for the screened head (a merge whose answer was lost) is used again: the merge
-is sent under it, without a second claim.
+A claim already held for the screened head (a merge whose answer was lost) is used again, without
+a second claim, after the Worker reads the dataset, the screen for you and the live head again,
+and only while the claim is younger than 25 minutes; an older one is expired by resume at 30.
+A merge GitHub did not make keeps its claim: run merge again within 25 minutes of the claim to
+send it under the claim once GitHub reports the pull request clean, or, if the head moved, run
+resume, which expires the claim once it is 30 minutes old and then records the new head.
 
 Exit codes:
-  0  merged.
-  3  the merge was claimed and its outcome is unknown, or GitHub did not merge it and the claim is
-     kept for now: run resume (which reads GitHub) or merge again.
+  0  merged and recorded.
+  3  a claim is held and nothing more is known (the merge's outcome is unknown, GitHub did not merge
+     it, or the held claim may not be used now), or GitHub merged it and the merge is not recorded
+     yet: run resume (which reads GitHub and records the merge) or merge again.
   1  refused before anything was written (not ready, the review, the screen, main, GitHub's
      state, the cap, a declined confirmation), or failed.`;
 
-/** The administrator's GitHub credential, a person's and the one linked to their account. */
+/**
+ * The administrator's GitHub credential: a person's (never an App or workflow token), and, when
+ * their NEMAR account names a GitHub login, that login; an account that names none is not checked
+ * (`identityMatches` answers `unlinked`), as `pr-reviews` does, and only a different login refuses.
+ */
 async function adminToken(base: string): Promise<{ token: string; login: string } | string> {
   const token = await adminGitHubToken();
   if (!token.ok) return `No GitHub token: ${token.reason}`;
@@ -132,7 +144,24 @@ export const mergeCommand = new Command("merge")
           reportNotMerged(result, json);
           return;
         }
-        if (json) console.log(JSON.stringify({ repull: result.row, merged: true }, null, 2));
+        if (json) {
+          console.log(
+            JSON.stringify(
+              { repull: result.row, merged: true, recorded: result.recorded },
+              null,
+              2,
+            ),
+          );
+        }
+        if (!result.recorded) {
+          // Merged on GitHub, not on the record: resume reads GitHub and records it.
+          out(
+            `GitHub merged ${datasetId} pull request #${check.prNumber}; the merge is not recorded yet. Run nemar admin repull resume ${datasetId}, which records it.`,
+          );
+          process.exitCode = EXIT_WAITING;
+          markReportedExit();
+          return;
+        }
         out(
           `Merged ${datasetId} pull request #${check.prNumber}${result.mergeSha ? ` as ${result.mergeSha.slice(0, 12)}` : ""}. Once v${check.row.to_version} is tagged, nemar admin repull resume ${datasetId} records the release.`,
         );

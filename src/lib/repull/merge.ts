@@ -19,33 +19,40 @@
  *  8. the squash message, which the gate writes itself, ends with both of the re-pull commit's
  *     trailers as git reads them (`trailers.ts`), so the privacy ledger's fresh-clone proof reads
  *     the merge on `main` as the re-pull's own commit;
- * then the administrator's confirmation (one irreversible DOI), then one unit of the day's merge
- * cap claimed from the Worker, which reads the live head, the screen and the dataset fences again
- * in the statement that claims; then the squash merge at the screened `sha`, so GitHub refuses a
- * head that moved after the gate read it; then the merge recorded through the Worker's verified
- * route, which reads it on GitHub.
+ * then the review read once more and the administrator's confirmation (one irreversible DOI);
+ * then, holding the record's lock (the one `resume` and `execute` take), one unit of the day's
+ * merge cap claimed from the Worker, which reads the live head, the screen and the dataset fences
+ * again in the statement that claims; then the squash merge at the screened `sha`, so GitHub
+ * refuses a head that moved after the gate read it; then the merge recorded through the Worker's
+ * verified route, which reads it on GitHub. The merge commit GitHub wrote is read back at the
+ * release (`release.ts`), because the message sent is not proof of the message committed.
  *
  * A claim already held for the screened head (a merge whose answer was lost, a run that stopped
- * after its claim) is used again: the merge is sent under it, without a second claim, since a pull
- * request merges once. A merge GitHub did not make releases the claim when the Worker allows it;
- * one whose outcome is unknown keeps it, and `resume` reads GitHub and records the merge, or
- * expires the claim once nothing can be in flight.
+ * after its claim) is used again, without a second claim, since a pull request merges once, but
+ * only after the Worker reads again, for it, what the claim's statement read when it was made (the
+ * dataset fences, the screen for this administrator, the live head) and only while it is younger
+ * than 25 minutes, so no merge goes out under a claim `resume` may be expiring. A merge GitHub did
+ * not make keeps its claim (it is seconds old, younger than any release the Worker allows): a merge
+ * sent again within 25 minutes uses it, and `resume` expires it at 30 minutes. One whose outcome is
+ * unknown keeps it too, and `resume` reads GitHub and records the merge.
  */
 
+import { dirname, join } from "node:path";
 import type { RepullRow } from "../../../shared/repull-state.js";
 import { getPrReview } from "../api/admin.js";
 import { ApiError } from "../api/errors.js";
 import {
+  checkRepullMergeClaim,
   getRepull,
   listRepullScreens,
   listRepulls,
   recordRepullMerged,
-  releaseRepullMergeClaim,
   repullErrorCode,
   transitionRepull,
 } from "../api/repull.js";
 import {
   type ApprovalGate,
+  type MergeResult,
   type WriteOutcome,
   approvalGate,
   checkMergeable,
@@ -57,11 +64,17 @@ import { readCatalogFacts } from "./execute/catalog.js";
 import { openOriginScratch } from "./execute/origin.js";
 import { checkMain } from "./execute/pull-request.js";
 import { ExecuteRefused, assertNotAnonymous } from "./execute/verify-plan.js";
-import { withIsolatedGit } from "./execute/workdir.js";
+import { acquireLock, privateDir, withIsolatedGit, workPaths } from "./execute/workdir.js";
 import type { Env } from "./sources.js";
 import { repullTrailerLines, trailersProblem } from "./trailers.js";
 
-/** Where the gate stopped. Every stage before `declined` and `cap` wrote nothing. */
+/**
+ * Where the gate stopped. `checkRepullMerge` writes nothing, whatever its stage. In
+ * `sendRepullMerge`, `review` and `declined` come before the claim and write nothing, and `cap` is
+ * the claim refused, which writes nothing either (ADR 0099). A stop after a claim was made or
+ * reused (`github`, and `not-ready` or `screen` on a held claim's check) leaves the claim held, and
+ * `claimHeld` says so.
+ */
 export type MergeStage =
   | "not-ready"
   | "review"
@@ -168,6 +181,13 @@ export async function prReviewsGate(args: {
   configDir: string;
   force: boolean;
 }): Promise<PrReviewsGate> {
+  if (args.headRef === "") {
+    return {
+      kind: "refused",
+      reason:
+        "GitHub's answer did not name the pull request's head branch, so whether it is an upstream re-pull's cannot be told, and a re-pull's merges only through its gate.",
+    };
+  }
   if (!args.headRef.startsWith("release/")) return { kind: "ordinary" };
   let found: Awaited<ReturnType<typeof repullForPullRequest>>;
   try {
@@ -432,8 +452,8 @@ export async function sendRepullMerge(
     tries?: number;
   },
 ): Promise<MergeOutcome> {
-  const { row, prNumber, head } = check;
-  const review = await reviewGate(ctx.datasetId, prNumber, head);
+  const { row, prNumber } = check;
+  const review = await reviewGate(ctx.datasetId, prNumber, check.head);
   if ("ok" in review) return { merged: false, stage: review.stage, reason: review.reason };
   if (review.kind === "needs_force" && !ctx.force) {
     return { merged: false, stage: "review", reason: review.reason };
@@ -452,7 +472,93 @@ export async function sendRepullMerge(
       };
     }
   }
+  // One run on a record at a time: the merge holds the lock `resume` and `execute` take, from the
+  // claim to the record of the merge, so no resume expires the claim or moves the head while the
+  // merge is out.
+  const paths = workPaths(ctx.configDir, ctx.datasetId, row.plan_digest);
+  privateDir(dirname(paths.lock), join(ctx.configDir, "repull"));
+  let unlock: () => void;
+  try {
+    unlock = acquireLock(paths.lock);
+  } catch (err) {
+    if (!(err instanceof ExecuteRefused)) throw err;
+    return {
+      merged: false,
+      stage: "not-ready",
+      reason: `${err.message} A resume or an execution of re-pull #${row.id} runs now; nothing was claimed or merged.`,
+    };
+  }
+  try {
+    return await sendUnderLock(ctx, check, opts);
+  } finally {
+    unlock();
+  }
+}
 
+/**
+ * The claim's refusal words. No usable answer (no answer at all, which the API client reports as
+ * status 0, or a 5xx a gateway may send after the Worker wrote) may have left a claim, so it says
+ * so and counts as held; a 4xx is the Worker's refusal, which writes nothing.
+ */
+function claimRefused(err: unknown, datasetId: string): Extract<MergeOutcome, { merged: false }> {
+  const code = repullErrorCode(err);
+  if (!(err instanceof ApiError) || err.statusCode === 0 || err.statusCode >= 500) {
+    return {
+      merged: false,
+      stage: "github",
+      claimHeld: true,
+      reason: `The claim to merge got no usable answer (${errorText(err)}), so a claim may be held. Nothing was merged. nemar admin repull resume ${datasetId} reads the record, and expires a claim nothing merged under once it is 30 minutes old.`,
+    };
+  }
+  const reason = `The claim to merge was refused (${code ?? errorText(err)}): ${err.message} Nothing was merged.`;
+  if (code === "merge-cap" || code === "merge-cap-unreadable") {
+    return { merged: false, stage: "cap", reason };
+  }
+  if (code === "screen-not-clear" || code === "screen-changed") {
+    return { merged: false, stage: "screen", reason };
+  }
+  return { merged: false, stage: "not-ready", reason };
+}
+
+/** A held claim that may not be used now: it stays held, and nothing was sent. */
+function heldClaimRefused(
+  err: unknown,
+  datasetId: string,
+): Extract<MergeOutcome, { merged: false }> {
+  const code = repullErrorCode(err);
+  const why = err instanceof Error ? err.message : String(err);
+  const stage: MergeStage =
+    code === "screen-not-clear"
+      ? "screen"
+      : !(err instanceof ApiError) ||
+          err.statusCode === 0 ||
+          err.statusCode >= 500 ||
+          code === "github-unreadable"
+        ? "github"
+        : "not-ready";
+  return {
+    merged: false,
+    stage,
+    claimHeld: true,
+    reason: `The claim to merge already held was not used (${code ?? errorText(err)}): ${why} Nothing was merged. nemar admin repull resume ${datasetId} reads GitHub, records a merge that happened, and expires the claim once it is 30 minutes old.`,
+  };
+}
+
+/** Why a merge the gate sent did not happen, in the gate's own words (no approval is involved). */
+function notMergedWhy(merged: Extract<MergeResult, { ok: false }>): string {
+  if (merged.outcome === "refused") return `GitHub refused the merge: ${merged.reason}`;
+  if (merged.merge) return merged.merge.why;
+  return merged.status === 409
+    ? "The pull request changed after the gate read it (its head moved, or it was closed), so the merge was not sent."
+    : `GitHub could not be read at the last look before the merge (${merged.status === 0 ? "no answer" : `HTTP ${merged.status}`}), so the merge was not sent.`;
+}
+
+async function sendUnderLock(
+  ctx: GateContext,
+  check: RepullMergeCheck,
+  opts: { out: (line: string) => void; tries?: number },
+): Promise<MergeOutcome> {
+  const { row, prNumber, head } = check;
   if (!check.heldClaim) {
     try {
       await transitionRepull(row.id, {
@@ -461,22 +567,17 @@ export async function sendRepullMerge(
         fields: { merge_claim_sha: head },
       });
     } catch (err) {
-      const code = repullErrorCode(err);
-      const reason = `The claim to merge was refused (${code ?? errorText(err)}): ${err instanceof Error ? err.message : String(err)} Nothing was merged.`;
-      if (code === "merge-cap" || code === "merge-cap-unreadable") {
-        return { merged: false, stage: "cap", reason };
-      }
-      if (code === "screen-not-clear" || code === "screen-changed") {
-        return { merged: false, stage: "screen", reason };
-      }
-      return {
-        merged: false,
-        stage: code === "github-unreadable" ? "github" : "not-ready",
-        reason,
-      };
+      return claimRefused(err, ctx.datasetId);
     }
     opts.out(`Claimed one unit of today's re-pull merge cap for ${head.slice(0, 12)}.`);
   } else {
+    // The claim was made earlier: the Worker reads again what its statement held then (the
+    // dataset fences, the screen for THIS administrator, the live head) and the claim's age.
+    try {
+      await checkRepullMergeClaim(row.id, { pr: "n0", sha: head });
+    } catch (err) {
+      return heldClaimRefused(err, ctx.datasetId);
+    }
     opts.out(
       `A claim to merge ${head.slice(0, 12)} is already held; the merge is sent again under it.`,
     );
@@ -513,23 +614,13 @@ export async function sendRepullMerge(
       reason: `${merged.reason} GitHub may have merged it: the claim is kept, and nemar admin repull resume ${ctx.datasetId} reads GitHub and records the merge.`,
     };
   }
-  // GitHub did not merge it (not sent after a last look, or refused): free the unit when allowed.
-  try {
-    await releaseRepullMergeClaim(row.id, { pr: "n0", sha: head, outcome: merged.outcome });
-    return {
-      merged: false,
-      stage: "github",
-      outcome: merged.outcome,
-      claimHeld: false,
-      reason: `${merged.reason} The claim to merge was released.`,
-    };
-  } catch (err) {
-    return {
-      merged: false,
-      stage: "github",
-      outcome: merged.outcome,
-      claimHeld: true,
-      reason: `${merged.reason} The claim to merge is kept for now (${repullErrorCode(err) ?? errorText(err)}): run nemar admin repull merge ${ctx.datasetId} again to send the merge under it, or resume to expire it once it is old enough.`,
-    };
-  }
+  // GitHub did not merge it. The claim stays: it is seconds old, younger than the Worker lets any
+  // caller release, and a merge sent again under it uses no second unit.
+  return {
+    merged: false,
+    stage: "github",
+    outcome: merged.outcome,
+    claimHeld: true,
+    reason: `${notMergedWhy(merged)} The claim to merge is kept: run nemar admin repull merge ${ctx.datasetId} again within 25 minutes of the claim to send the merge under it, once GitHub reports the pull request clean at the same head; if the head moved, nemar admin repull resume ${ctx.datasetId} expires the claim once it is 30 minutes old and then records the new head.`,
+  };
 }

@@ -98,6 +98,16 @@ export interface RepullWorld {
   setApiHook(hook: ((req: Request) => Promise<void>) | null): void;
   /** Answers a request itself, ahead of the real routes: a NEMAR API that is down, say. */
   setApiOverride(override: ((req: Request) => Response | null) | null): void;
+  /**
+   * Replaces the answer to a request the real routes HANDLED: an answer lost on the way back after
+   * the Worker wrote (a gateway's 502, say).
+   */
+  setApiAfter(after: ((req: Request) => Response | null) | null): void;
+  /**
+   * Appended to the message of the squash commit GitHub's merge writes: a host that adds a
+   * paragraph of its own (a `Co-authored-by:` line, say).
+   */
+  setMergeMessageSuffix(suffix: string): void;
   /** The Worker's bindings, which a test may override for the rest of the test. */
   workerEnv: Partial<Bindings>;
   /**
@@ -168,6 +178,8 @@ export async function startRepullWorld(
   const apiWrites: string[] = [];
   let apiHook: ((req: Request) => Promise<void>) | null = null;
   let apiOverride: ((req: Request) => Response | null) | null = null;
+  let apiAfter: ((req: Request) => Response | null) | null = null;
+  let mergeMessageSuffix = "";
   const workerEnv: Partial<Bindings> = {};
   const configDir = mkdtempSync(join(tmpdir(), "nemar-repull-world-"));
 
@@ -212,7 +224,7 @@ export async function startRepullWorld(
         : `* ${(await gitIn(origin, ["log", "-1", "--format=%B", head])).trim().replace(/\n/g, "\n  ")}`;
     const r = await runCommand(["git", "commit-tree", `${head}^{tree}`, "-p", main, "-F", "-"], {
       cwd: origin,
-      stdin: `${title}\n\n${message}\n`,
+      stdin: `${title}\n\n${message}${mergeMessageSuffix}\n`,
       env: {
         GIT_AUTHOR_NAME: "GitHub",
         GIT_AUTHOR_EMAIL: "noreply@github.com",
@@ -248,7 +260,10 @@ export async function startRepullWorld(
       if (url.pathname === "/notices") return Response.json({ notices: [] });
       if (req.method !== "GET") apiWrites.push(`${req.method} ${url.pathname}`);
       if (apiHook) await apiHook(req.clone());
-      return apiOverride?.(req) ?? handle(req, bindings());
+      const overridden = apiOverride?.(req);
+      if (overridden) return overridden;
+      const answered = await handle(req, bindings());
+      return apiAfter?.(req) ?? answered;
     },
   });
   const apiUrl = `http://127.0.0.1:${apiServer.port}`;
@@ -415,6 +430,12 @@ export async function startRepullWorld(
     setApiOverride: (o) => {
       apiOverride = o;
     },
+    setApiAfter: (a) => {
+      apiAfter = a;
+    },
+    setMergeMessageSuffix: (suffix) => {
+      mergeMessageSuffix = suffix;
+    },
     workerEnv,
     cli,
     plan,
@@ -430,6 +451,8 @@ export async function startRepullWorld(
       apiWrites.length = 0;
       apiHook = null;
       apiOverride = null;
+      apiAfter = null;
+      mergeMessageSuffix = "";
       for (const k of Object.keys(workerEnv)) delete (workerEnv as Record<string, unknown>)[k];
       for (const purpose of ["resume", "merge"]) {
         rmSync(join(configDir, "repull", fx.datasetId, purpose), { recursive: true, force: true });

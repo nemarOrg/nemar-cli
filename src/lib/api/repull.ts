@@ -153,6 +153,23 @@ export async function releaseRepullMergeClaim(
   return res.repull;
 }
 
+/**
+ * `POST /admin/repulls/:id/merge-claim/check`: whether a merge may be sent again under a claim
+ * already held: the claim's age, the dataset fences, the screen for this administrator and the
+ * live head, read by the Worker. Writes nothing; a refusal throws with its word.
+ */
+export async function checkRepullMergeClaim(
+  id: number,
+  body: { pr: "n0" | "n1"; sha: string },
+): Promise<RepullRow> {
+  const res = await request<{ repull: RepullRow }>(
+    `/admin/repulls/${id}/merge-claim/check`,
+    { method: "POST", body: JSON.stringify(body) },
+    true,
+  );
+  return res.repull;
+}
+
 /** `POST /admin/repulls/:id/merged`: the Worker reads the merge on GitHub and records it. */
 export async function recordRepullMerged(
   id: number,

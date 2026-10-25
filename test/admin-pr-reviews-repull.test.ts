@@ -141,6 +141,61 @@ describe.skipIf(!awsInstalled)("approve --merge", () => {
   });
 });
 
+describe.skipIf(!awsInstalled)("approve --merge, what refuses", () => {
+  test("a pull request whose head branch GitHub does not name is refused, and approves nothing", async () => {
+    const other = (w.row().pr_number as number) + 20;
+    w.gh.pulls[`${w.fx.datasetId}#${other}`] = {
+      sha: w.row().base_sha,
+      headRef: "",
+      author: "alice",
+    };
+    const run = await approve(other);
+    expect(run.exitCode, run.all).toBe(1);
+    expect(run.all).toContain("did not name the pull request's head branch");
+    expect(reviewPosts()).toEqual([]);
+    expect(merges()).toEqual([]);
+  });
+
+  test("a re-pull's N.0.1 pull request is refused: merging N.0.1 is not built", async () => {
+    await toGates();
+    const n1 = (w.row().pr_number as number) + 30;
+    w.db().run(
+      "UPDATE upstream_repulls SET patch_version = '2.0.1', patch_branch = 'release/v2.0.1', patch_pr_number = ?",
+      [n1],
+    );
+    w.gh.pulls[`${w.fx.datasetId}#${n1}`] = {
+      sha: w.row().head_sha as string,
+      headRef: "release/v2.0.1",
+      author: "alice",
+    };
+    const run = await approve(n1);
+    expect(run.exitCode, run.all).toBe(1);
+    expect(run.all).toContain("N.0.1");
+    expect(reviewPosts()).toEqual([]);
+    expect(merges()).toEqual([]);
+  });
+
+  test("the gate runs again after the confirmation: a head that moved meanwhile approves nothing", async () => {
+    await toGates();
+    const ref = `refs/heads/${w.row().branch}`;
+    let lists = 0;
+    w.setApiHook(async (req) => {
+      const url = new URL(req.url);
+      if (req.method === "GET" && url.pathname === "/admin/repulls") {
+        lists++;
+        // The second look is the one after the confirmation: a push lands just before it.
+        if (lists === 2) await w.commitOnto(ref, "README.md", "Pushed meanwhile.\n");
+      }
+    });
+    const run = await approve(w.row().pr_number as number);
+    expect(run.exitCode, run.all).toBe(1);
+    expect(lists).toBe(2);
+    expect(run.all).toContain("Nothing was approved or merged");
+    expect(reviewPosts()).toEqual([]);
+    expect(merges()).toEqual([]);
+  });
+});
+
 describe.skipIf(!awsInstalled)("next", () => {
   test("y merges a re-pull pull request through its gate", async () => {
     const head = await toGates();

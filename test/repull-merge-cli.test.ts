@@ -263,3 +263,204 @@ describe.skipIf(!awsInstalled)("what GitHub answers after the claim", () => {
     expect(JSON.parse(w.row().counts)).not.toHaveProperty("merged_outside_tool");
   });
 });
+
+const transitions = () => w.apiWrites.filter((x) => x.endsWith("/transition")).length;
+
+describe.skipIf(!awsInstalled)("the gate's own checks, before the claim", () => {
+  test("a draft, and a pull request into another branch, are not ready; nothing is claimed", async () => {
+    await toGates();
+    for (const change of [{ draft: true }, { draft: false, base: "dev" }]) {
+      Object.assign(w.gh.pulls[prKey(w)] as object, change);
+      const before = transitions();
+      const run = await merge();
+      expect([JSON.stringify(change), run.exitCode]).toEqual([JSON.stringify(change), 1]);
+      expect(run.all).toContain("(not-ready)");
+      expect(transitions()).toBe(before);
+    }
+    expect(merges()).toEqual([]);
+  });
+
+  test("a screen that no longer passes is refused at the gate, before any claim is asked for", async () => {
+    await toGates();
+    w.db().run("UPDATE upstream_repull_screens SET status = 'review'");
+    const before = transitions();
+    const run = await merge();
+    expect(run.exitCode, run.all).toBe(1);
+    expect(run.all).toContain("(screen)");
+    expect(transitions()).toBe(before);
+    expect(merges()).toEqual([]);
+  });
+
+  test("an anonymous dataset is refused at the gate, before any claim is asked for", async () => {
+    await toGates();
+    w.db().run("UPDATE datasets SET first_published_at = NULL, anonymous = 1");
+    const before = transitions();
+    const run = await merge();
+    expect(run.exitCode, run.all).toBe(1);
+    expect(run.all).toContain("anonymous");
+    expect(transitions()).toBe(before);
+    expect(merges()).toEqual([]);
+  });
+
+  test("not confirmed: nothing is claimed or merged", async () => {
+    await toGates();
+    // No --yes, and no terminal to answer on.
+    const before = transitions();
+    const run = await w.cli(["repull", "merge", w.fx.datasetId]);
+    expect(run.exitCode, run.all).toBe(1);
+    expect(run.all).toContain("(declined)");
+    expect(transitions()).toBe(before);
+    expect(w.row().merge_claim_sha).toBeNull();
+  });
+
+  test("the review is read again at the merge: a pass reset to running after the gate's read is refused", async () => {
+    const head = await toGates();
+    seedReview(w.db(), {
+      ds: w.fx.datasetId,
+      n: w.row().pr_number as number,
+      sha: head,
+      authorId: 42,
+      login: "alice",
+      state: "reported",
+      verdict: "pass",
+    });
+    // `pr-reviews start --redo` resets the stored pass between the gate's read and the claim.
+    let reads = 0;
+    w.setApiHook(async (req) => {
+      if (req.method === "GET" && new URL(req.url).pathname.startsWith("/admin/pr-reviews/")) {
+        reads++;
+        if (reads === 2) {
+          w.db().run(
+            "UPDATE pr_reviews SET state = 'dispatched', verdict = NULL, report = NULL, decided_at = NULL, created_at = datetime('now')",
+          );
+        }
+      }
+    });
+    const before = transitions();
+    const run = await merge();
+    expect(run.exitCode, run.all).toBe(1);
+    expect(run.all).toContain("(review)");
+    expect(reads).toBe(2);
+    expect(transitions()).toBe(before);
+    expect(merges()).toEqual([]);
+  });
+});
+
+describe.skipIf(!awsInstalled)("a claim already held", () => {
+  /** gates_clear, with a claim on the screened head made `minutesAgo` minutes ago. */
+  async function heldClaim(minutesAgo: number): Promise<string> {
+    const head = await toGates();
+    w.db().run(
+      `UPDATE upstream_repulls SET merge_claimed_at = datetime('now', '-${minutesAgo} minutes'),
+         merge_claim_sha = gates_sha`,
+    );
+    return head;
+  }
+
+  test("is used again after the Worker's check: no second claim, the merge sent and recorded", async () => {
+    const head = await heldClaim(2);
+    const before = transitions();
+    const run = await merge();
+    expect(run.exitCode, run.all).toBe(0);
+    expect(transitions()).toBe(before);
+    expect(w.apiWrites).toContain(`POST /admin/repulls/${w.row().id}/merge-claim/check`);
+    expect(merges()).toHaveLength(1);
+    expect(w.row()).toMatchObject({ status: "merged", merge_claim_sha: head });
+  });
+
+  test("a dataset withdrawn after the claim is refused, and no merge is sent", async () => {
+    await heldClaim(2);
+    w.db().run("UPDATE datasets SET withdrawn_at = datetime('now')");
+    const run = await merge();
+    expect(run.exitCode, run.all).toBe(3);
+    expect(run.all).toContain("withdrawn");
+    expect(merges()).toEqual([]);
+  });
+
+  test("another administrator's acknowledgment is not this one's: refused, no merge sent", async () => {
+    await heldClaim(2);
+    w.db().run(
+      `INSERT INTO users (id, username, email, password_hash, status, role, email_verified)
+       VALUES (7, 'otheradmin', 'otheradmin@example.org', 'x', 'approved', 'admin', 1)`,
+    );
+    w.db().run(
+      `UPDATE upstream_repull_screens SET status = 'review', ack_by = 7,
+         ack_reason = 'Read it; the header names the device.', ack_at = datetime('now')`,
+    );
+    const run = await merge();
+    expect(run.exitCode, run.all).toBe(3);
+    expect(run.all).toContain("screen-not-clear");
+    expect(merges()).toEqual([]);
+  });
+
+  test("one 25 minutes old or more is not used: refused, no merge sent", async () => {
+    await heldClaim(26);
+    const run = await merge();
+    expect(run.exitCode, run.all).toBe(3);
+    expect(run.all).toContain("claim-too-old");
+    expect(merges()).toEqual([]);
+  });
+});
+
+describe.skipIf(!awsInstalled)("while the merge is out", () => {
+  test("a resume of the record cannot run, so it cannot free a claim whose merge landed", async () => {
+    await toGates();
+    let concurrent: Awaited<ReturnType<typeof resume>> | null = null;
+    w.gh.beforeMerge = async () => {
+      w.gh.beforeMerge = null;
+      concurrent = await resume();
+    };
+    const run = await merge();
+    expect(run.exitCode, run.all).toBe(0);
+    const during = concurrent as unknown as { exitCode: number; all: string };
+    expect(during.exitCode, during.all).toBe(1);
+    expect(during.all).toContain("execution-locked");
+    expect(w.row()).toMatchObject({ status: "merged" });
+  });
+
+  test("a claim whose answer is lost may be held: exit 3, and no merge is sent", async () => {
+    await toGates();
+    w.setApiAfter((req) =>
+      req.method === "POST" && new URL(req.url).pathname.endsWith("/transition")
+        ? Response.json({ error: "bad gateway" }, { status: 502 })
+        : null,
+    );
+    const run = await merge();
+    expect(run.exitCode, run.all).toBe(3);
+    expect(run.all).toContain("may be held");
+    expect(w.row().merge_claim_sha).toBe(w.row().gates_sha);
+    expect(merges()).toEqual([]);
+  });
+
+  test("merged on GitHub but not recorded exits 3, and says resume records it", async () => {
+    await toGates();
+    w.setApiOverride((req) =>
+      req.method === "POST" && new URL(req.url).pathname.endsWith("/merged")
+        ? Response.json({ error: "unavailable" }, { status: 503 })
+        : null,
+    );
+    const run = await merge();
+    expect(run.exitCode, run.all).toBe(3);
+    expect(run.all).toContain("not recorded yet");
+    expect(merges()).toHaveLength(1);
+    expect(w.row().status).toBe("gates_clear");
+  });
+
+  test("a merge GitHub did not make keeps its claim, in the gate's own words", async () => {
+    await toGates();
+    // GitHub's state turns to blocked between the gate's read and the merge's last look: when the
+    // claim reaches the API.
+    w.setApiHook(async (req) => {
+      if (req.method === "POST" && new URL(req.url).pathname.endsWith("/transition")) {
+        Object.assign(w.gh.pulls[prKey(w)] as object, { mergeableState: "blocked" });
+      }
+    });
+    const run = await merge();
+    expect(run.exitCode, run.all).toBe(3);
+    expect(run.all).toContain("The claim to merge is kept");
+    expect(run.all).toContain("within 25 minutes of the claim");
+    expect(run.all).not.toMatch(/approv/i);
+    expect(merges()).toEqual([]);
+    expect(w.row().merge_claim_sha).toBe(w.row().gates_sha);
+  });
+});
