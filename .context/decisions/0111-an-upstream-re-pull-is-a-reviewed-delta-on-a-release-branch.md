@@ -659,10 +659,10 @@ It takes only an allowed edge, writes only the columns its target names, and kee
 A branch must be the release branch of the version the row carries.
 `counts` is merged key by key and holds only declared keys with non-negative integers, never a path or a key.
 `last_error` goes through the ADR 0051 rule and is never blank; an edge into `failed`, or the `planned` edge that records why a step could not finish, must say why, and an edge into a different, non-terminal status clears the stored error.
-*Annotated 2026-10-24: the Phase 6c amendment adds that a `prepared` self-edge sent with no error clears it too, because it records the whole stage again.*
+*Annotated 2026-10-24: the Phase 6c amendment adds that a `prepared` self-edge sent with no error clears it too, because it records the whole stage again; execution sends one that way only when the stored error is a preparation's own (its words begin `[prepare:`), so an error a later step recorded is not cleared.*
 
 Four edges repeat a status to write one thing: `planned` (the error), `released` (the count of locked objects) and `gates_clear` and `patch_gates_clear` (the claim to merge).
-*Annotated 2026-10-24: the `prepared` self-edge is allowed as well and Phase 6c uses it, to record a preparation again (onto a moved base, or to clear a stale error) or why it failed; see the Phase 6c amendment.*
+*Annotated 2026-10-24: the `prepared` self-edge is allowed as well and Phase 6c uses it, to record a preparation again (onto a moved base, or to clear a stale error of a preparation's own) or why it failed; see the Phase 6c amendment.*
 The claim is recorded before the merge is sent, names exactly the screened head, and cannot be recorded twice.
 The caller sends the head and nothing else: the Worker stamps the time with its own clock and refuses a request that carries one, because a caller-stated time could be backdated or set ahead and defeat the sweep for stuck claims that Phase 6f writes.
 The time and the head are set together or not at all (a CHECK).
@@ -901,7 +901,9 @@ The working directory is `$NEMAR_CONFIG_DIR/repull/<id>/work/<digest8>/`, mode 0
 It is kept until the pull request is open, which a later slice does.
 Only a `prepared` record resumes from it: from its working clone or from the checkpoint beside it.
 A `planned` record is prepared again from scratch, which clones, scrubs and uploads again, to the same result.
-One execution of a plan runs at a time: a lock beside the working directory, holding the process id, refuses a second (`execution-locked`) rather than let it delete a live run's clones, and a lock whose process is gone is taken over.
+One execution of a plan runs at a time: a lock beside the working directory, holding the process id, refuses a second (`execution-locked`) rather than let it delete a live run's clones.
+The lock is made atomically, its pid written in a private sibling directory that is then renamed onto the lock's path, so no lock is ever seen without its pid; a lock whose pid cannot be read is taken for a live one.
+A lock whose process is gone is moved aside and taken over only when what was moved is still that crashed run's; the refusal names the lock's path and says to remove it when no execution is running (a crashed run whose process id is now another process's).
 
 Every git and git-annex call of an execution, the planner's included, runs with neither the administrator's global configuration nor the system's, and the working clone is made with its own: locked annexed files, no line-ending conversion, no hooks, no attributes or excludes file but the tree's own, and no background gc or maintenance.
 Without that, a setting on the administrator's machine (`annex.addunlocked`, `core.autocrlf`, a global attributes file) changes what is prepared, and a later run on another machine could not reproduce it.
@@ -911,7 +913,7 @@ Without that, a setting on the administrator's machine (`annex.addunlocked`, `co
 The plan file is trusted for its body only.
 It is refused, in this order: when it is not a plan this build reads (`plan-schema`); when another planner made it (`planner-version`), so it is never read under rules it was not made with; and when its body does not hash to the digest it states (`plan-tampered`).
 Then, before anything is cloned: a plan made against another API (`plan-environment`), and a plan made from test bases when execution reads the real remotes, or the reverse (`plan-sources`).
-Then the dataset row must say the dataset is not an anonymous deposit, by an `anonymous` of exactly 0: one is refused (`anonymous-dataset`), as the Worker refuses it at the record, and a row that does not say is refused as unknown (`anonymity-unknown`), since unknown is never clean.
+Then the dataset must have a row (`dataset-missing` otherwise), and the row must say the dataset is not an anonymous deposit, by an `anonymous` of exactly 0: one is refused (`anonymous-dataset`), as the Worker refuses it at the record, and a row that does not say is refused as unknown (`anonymity-unknown`), since unknown is never clean.
 The planner then runs again with the plan's own options, and its live preflight and `executable` decide: the file's two fields are not read at all, so a file that says not executable proceeds when the live plan is, and one that says executable is refused when a release pull request has since opened (`not-executable`).
 
 ### The `.nemar/**` rule, read narrowly (clarification)
@@ -940,7 +942,8 @@ The materialized index is committed locally on the work branch before the scrub,
 That commit is never pushed and is never an ancestor of the synthesized one, but it holds the delta's original, unscrubbed blobs: they stay in the private working clone (mode 0700), are not in the checkpoint and are not pushed, and go when the working directory is removed, when the pull request is open.
 
 The scope is every path written or deleted, the NEMAR-owned edit included, and the provenance files, which the scrub annotates when a header changes: a header change needs its provenance file in the scope, or the scrub refuses (`provenance-out-of-scope`), so the caller always puts both in it.
-The scrub reads each annexed recording at the version the plan pinned, sets dates (it is not a re-import), writes `repull-scrubbed` at the record's creation time under the fixed actor `nemar-repull`, and refuses with its own word for anything it cannot do; a refusal because upstream no longer serves a pinned object is marked retryable.
+The scrub reads each annexed recording at the version the plan pinned, sets dates (it is not a re-import), writes `repull-scrubbed` at the record's creation time under the fixed actor `nemar-repull`, and refuses with its own word for anything it cannot do.
+Its refusal keeps the scrub's message as it is, and when upstream no longer serves a pinned object that message begins with the OpenNeuro-upstream marker (`[openneuro-upstream-inaccessible]`): the marker text is the contract that the failure may pass on a later run, as for an import, and no other field says so.
 Dates are set on the delta's recordings and scans tables only, and a scans table in the scope has every dated row of the file set to 1 January, as the import does: N.0.0 is new, so this is the privacy-safe direction, and the versions already published are not touched.
 
 To retire a key it re-keys, the scrub needs a location log for it, and NEMAR's git-annex branch has never recorded a key upstream added after the import; so before the scrub, the working clone records, for each recording the plan copies and NEMAR's branch does not know, the holders upstream's own git-annex branch records, and nothing else.
@@ -967,7 +970,9 @@ A run that finds its record `prepared` leaves it as it is when the working clone
 Each time it says why the clone or the checkpoint was not used, in fixed words.
 A record found `prepared` whose base moved by `.nemar/**` only is prepared again onto the live `main`, and the self-edge records the new facts.
 A step that fails records why on the record (`planned` to `planned`, or `prepared` to `prepared` with the facts it already holds) and refuses; what it records names counts, never a path, and when the record cannot be written the operator is told.
-When a `prepared` record that holds an error is shown to hold its facts again, the `prepared` self-edge records them with no error, and the Worker clears the stale error: that self-edge records the whole stage again, so the step it repeats succeeded (the Worker's rule for it, `CLEARING_SELF_EDGES` in `shared/repull-state.ts`).
+Every error the preparation records begins `[prepare:<code>]`.
+When a `prepared` record is shown to hold its facts again and its stored error begins so, the `prepared` self-edge records them with no error, and the Worker clears that error: the self-edge records the whole stage again, so the step it repeats succeeded (the Worker's rule for it, `CLEARING_SELF_EDGES` in `shared/repull-state.ts`).
+An error any other step recorded (one written after `prepared`, by the slices that follow) is left as it is.
 The record's `delta_paths` count is the plan's at `planned` (the paths it writes, deletions aside) and, at `prepared`, the paths the preparation wrote, deleted and edited; beside it the record keeps what the scrub could not read or prove (JSON files unread or annexed, scans tables unread, dates unproven or left), so unknown is never recorded as nothing.
 
 ### Checked only against stand-ins
