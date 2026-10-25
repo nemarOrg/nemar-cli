@@ -110,9 +110,10 @@ export const REPULL_UNREPORTED_STREAK = 3;
  */
 export const REPULL_CANDIDATE_HOLD_TICKS = 3;
 /**
- * The re-pulls the design record's gate G4 names, run by hand before anything runs on its own
- * (`on004362`, then `on003645`, or the reverse when upstream's snapshot of one is late). Both must
- * have been run by an administrator to `complete` with their tags before the scheduler dispatches.
+ * The two first re-pulls, which the design record's gate G4 says are run by hand before anything
+ * runs on its own (`on004362` and `on003645`, either first, as upstream's snapshots allow). Both
+ * must have been run by an administrator to `complete` with their tags before the scheduler
+ * dispatches.
  */
 export const REPULL_G4_DATASETS = ["on003645", "on004362"] as const;
 
@@ -183,12 +184,13 @@ export const CANDIDATE_BLOCKERS_SQL = `SELECT
       AND dispatched_at > datetime('now', '-${REPULL_WINDOW_DAYS} days')) AS recent_dispatches`;
 
 /**
- * Gate G4 of the design record, as far as the database can show it: each re-pull it names
- * ({@link REPULL_G4_DATASETS}) was run by an administrator to `complete`, its tag recorded. The
- * scheduler dispatches nothing (`waiting-for-manual-run`) until `n` is the number of datasets
- * named; one of them alone, or any other mirror's re-pull, does not open it. The rest of G4 (the
- * new DOI resolves with `IsDerivedFrom`, the previous version still serves) is read by the owner
- * before turning the switch on, which is the act that opens the path.
+ * The design record's gate G4 (the first two re-pulls are run by hand, the new major's DOI then
+ * resolves with `IsDerivedFrom`, and the previous version still serves), as far as the database
+ * can show it: each of the two re-pulls ({@link REPULL_G4_DATASETS}) was run by an administrator to
+ * `complete`, its tag recorded. The scheduler dispatches nothing (`waiting-for-manual-run`) until
+ * `n` is the number of datasets named; one of them alone, two runs of one, or any other mirror's
+ * re-pull does not open it. The DOI and the previous version are read by the owner before turning
+ * the switch on, which is the act that opens the path.
  */
 export const MANUAL_RUN_PROOF_SQL = `SELECT COUNT(DISTINCT dataset_id) AS n FROM upstream_repulls
   WHERE origin = 'administrator' AND status = 'complete' AND tag_sha IS NOT NULL
