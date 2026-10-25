@@ -168,8 +168,13 @@ export interface ReplyResponse {
    * ticket holds no trace of it. Replaying that key then answers 409 `ticket_purged`.
    */
   message_id: number;
-  /** The Message-ID the reply went out under. */
-  header_message_id: string;
+  /**
+   * The Message-ID the mail provider reported for the sent reply, or null. It is set only when the
+   * provider returned a valid RFC 5322 msg-id (the Cloudflare binding does; Resend's opaque id is
+   * not one). The Worker no longer chooses the Message-ID: the provider controls it. Threading of
+   * the requester's answer never depends on this value.
+   */
+  header_message_id: string | null;
   status: TicketStatus;
 }
 

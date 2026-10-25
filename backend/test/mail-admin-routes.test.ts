@@ -14,7 +14,7 @@ import { handleInboundEmail } from "../src/services/inbound-mail";
 import { buildReferences } from "../src/services/mail-admin";
 import { hashApiKey } from "../src/services/token";
 import type { Bindings, Variables } from "../src/types/bindings";
-import { bindingError, recordingBinding } from "./helpers/cloudflare-email";
+import { bindingError, headerRefusal, recordingBinding } from "./helpers/cloudflare-email";
 import { freshDb, realD1, wrapD1, yieldingD1 } from "./helpers/d1";
 import { withFakeResend } from "./helpers/resend";
 import { eml } from "./helpers/tickets";
@@ -316,7 +316,10 @@ describe("reply", () => {
     expect(sent.subject).toBe("Re: Help with an upload");
     expect(sent.headers?.["In-Reply-To"]).toBe("<second@sender.example>");
     expect(sent.headers?.References).toBe("<first@sender.example> <second@sender.example>");
-    expect(sent.headers?.["Message-ID"]).toMatch(/^<[0-9a-f-]{36}@nemar\.org>$/);
+    // The platform controls Message-ID: the reply never sets it, and every header it does set
+    // passes the Cloudflare allowlist (the recorder refuses the send otherwise).
+    expect(Object.keys(sent.headers ?? {}).map((h) => h.toLowerCase())).not.toContain("message-id");
+    expect(headerRefusal(sent.headers)).toBeUndefined();
     expect(sent.html).toContain("&lt;b&gt;two&lt;/b&gt;");
     expect(sent.html).not.toContain("<b>two");
 
@@ -324,7 +327,8 @@ describe("reply", () => {
       .query("SELECT * FROM mail_messages WHERE ticket_id = ? AND direction = 'out'")
       .get(t) as Record<string, any>;
     expect(out.author_user_id).toBe(ids.agent);
-    expect(out.message_id).toBe(sent.headers?.["Message-ID"]);
+    expect(out.message_id).toBe("<1.recorded@staging.nemar.test>");
+    expect(r.body.header_message_id).toBe("<1.recorded@staging.nemar.test>");
     expect(out.from_addr).toBe("support@nemar.org");
     expect(row(t).status).toBe("pending");
     expect(events(t).map((e) => [e.kind, e.actor_user_id])).toEqual([
@@ -336,8 +340,33 @@ describe("reply", () => {
     const next = await call("admin", "POST", `/tickets/${t}/reply`, { text: "again" });
     expect(next.status).toBe(200);
     expect(binding.sent[1].headers?.References).toBe(
-      `<first@sender.example> <second@sender.example> ${sent.headers?.["Message-ID"]}`,
+      "<first@sender.example> <second@sender.example> <1.recorded@staging.nemar.test>",
     );
+  });
+
+  test("a provider id that is not a Message-ID is stored as NULL, and the plus-tag still threads", async () => {
+    envOverrides = { EMAIL: { send: async () => ({ messageId: "0192-opaque-provider-id" }) } };
+    const t = ticket();
+    const r = await call("admin", "POST", `/tickets/${t}/reply`, { text: "hi" });
+    expect(r.status).toBe(200);
+    expect(r.body.header_message_id).toBeNull();
+    const out = db
+      .query("SELECT message_id FROM mail_messages WHERE ticket_id = ? AND direction = 'out'")
+      .get(t) as { message_id: string | null };
+    expect(out.message_id).toBeNull();
+    expect(r.body.message_id).toBeGreaterThan(0);
+  });
+
+  test("a bare provider id is stored in angle brackets", async () => {
+    const bare = { send: async () => ({ messageId: "bare.id@mail.example" }) };
+    envOverrides = { EMAIL: bare };
+    const t = ticket();
+    const r = await call("admin", "POST", `/tickets/${t}/reply`, { text: "hi" });
+    expect(r.body.header_message_id).toBe("<bare.id@mail.example>");
+    const out = db
+      .query("SELECT message_id FROM mail_messages WHERE ticket_id = ? AND direction = 'out'")
+      .get(t) as { message_id: string };
+    expect(out.message_id).toBe("<bare.id@mail.example>");
   });
 
   test("staging derives its domain from FROM_EMAIL and wraps the subject", async () => {
@@ -392,18 +421,19 @@ describe("reply", () => {
     expect(event.actor_user_id).toBe(ids.admin);
     const detail = JSON.parse(event.detail ?? "{}");
     expect(detail.delivery).toBe("unknown");
-    expect(detail.header_message_id).toBe(binding.sent[0].headers?.["Message-ID"]);
+    expect(detail.header_message_id).toBeNull();
     expect(row(t).status).toBe("open");
   });
 
-  test("Resend carries the headers when it is the provider", async () => {
+  test("Resend sends the reply with no Message-ID header when it is the provider", async () => {
     envOverrides = { EMAIL_PROVIDER: "resend", EMAIL: undefined };
     const t = ticket();
     await withFakeResend(async (calls) => {
       const r = await call("admin", "POST", `/tickets/${t}/reply`, { text: "hi" });
       expect(r.status).toBe(200);
-      const body = calls[0].body as { headers: Record<string, string>; reply_to: string };
-      expect(body.headers["Message-ID"]).toMatch(/@nemar\.org>$/);
+      const body = calls[0].body as { headers?: Record<string, string>; reply_to: string };
+      // A ticket with no inbound Message-ID has nothing to thread by, and no Message-ID is set.
+      expect(body.headers).toBeUndefined();
       expect(body.reply_to).toStartWith("support+t");
     });
   });
@@ -579,7 +609,7 @@ describe("reply idempotency and recording faults", () => {
     expect(event.kind).toBe("reply_failed");
     expect(JSON.parse(event.detail ?? "{}")).toEqual({
       delivery: "sent_unrecorded",
-      header_message_id: binding.sent[0].headers?.["Message-ID"],
+      header_message_id: "<1.recorded@staging.nemar.test>",
     });
     expect((await send("agent", t, "k-7")).status).toBe(502);
     expect(binding.sent.length).toBe(1);
