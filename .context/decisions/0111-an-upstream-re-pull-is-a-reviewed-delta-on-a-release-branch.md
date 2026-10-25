@@ -232,6 +232,7 @@ ADR 0086 exempts `xx` from the identifier screen, so an `xx` re-pull never has a
 - Whether "explained" edits are detected on early rewritten imports (`on003645`, `on004362`); local dry-run plans count the unexplained paths.
 - Whether ADR 0107's review can ever pass a re-pull diff.
   The App is not exempt, so the review runs, and ADR 0109 fails a changed `CHANGES` line and holds a replaced recording, both normal in a re-pull; until a re-pull's review passes, none is machine clean.
+  *Annotated 2026-10-25: corrected by the Phase 7e amendment: the review's intake skipped every bot's pull request, so it did not run; it now runs on the App's automatic re-pull pull request when the Worker starts it, and on no other bot's.*
 - Whether enrichment commits on the release branch move its head after the screen read it.
 - Whether OpenNeuro writes S3 before it pushes to GitHub, and whether the object at a path lags the pinned `versionId`.
 - That upstream's `.log.rmet` records a `versionId` per key, which the design record states and nothing here has checked.
@@ -1308,3 +1309,75 @@ that upstream's bucket answers from `us-east-1`, which the copy assumes;
 whether NEMAR's bucket locks a copy by default retention;
 and how GitHub opens and lists a pull request (the head's repository, the answer to a second one on the same branch).
 git-annex reading the registration's location-log lines is checked locally: a fresh clone's `git annex whereis` finds the copied recording at `nemar-s3` alone (git-annex 10.20261006).
+
+## Amendment 2026-10-25 (#1913): Phase 7e builds machine clean and reviews the App's pull request
+
+A further slice of the Phase 7 amendment above, built by Phase 7e.
+It builds decision 7's definition of machine clean, the readers of the facts it is decided from, and the review of the pull request the automatic path opens.
+Nothing here merges, moves a record, dispatches a run or mails anyone: the slices that advance the gates and send the merge call what this one builds, and a source scan keeps its import closure free of mail.
+One annotation is added to earlier text, on the sentence of "Not yet verified" this slice corrects.
+
+### Machine clean, as built
+
+- The rule is one pure function, `machineClean` in `shared/repull-machine-clean.ts`, of facts read at decision time, and it answers clean or the word of the first rule that does not hold.
+  The gates and the merge each gather their own facts (`gatherMachineCleanFacts` in `backend/src/services/upstream-repull-facts.ts`) and nothing is carried from one stage to the next, because an administrator can reset a stored review pass on the same head.
+- The rules, in their order:
+  exact production and the open switch, and at the merge the merge switch;
+  a record the automatic path made, of an `on` dataset;
+  no N.0.1, and the plan's unexplained, conflict and correction counts each stated and zero;
+  a named dataset (anonymity that cannot be read holds as anonymous), not withdrawn, with no import preparing, copying or finalizing, and still the mirror of the record's `ds`;
+  the recorded pull request, open and unmerged, by its number, from the recorded release branch into `main`, from the dataset's own repository (a fork, a deleted one included, is refused), not a draft, and opened by the App, its login, numeric id and type all matching;
+  its head the recorded head at the gates, and at the merge the screened head, which must also still be the recorded head;
+  `main` exactly the commit the record bases on;
+  BIDS validation and `version-check`;
+  the screen;
+  the review;
+  and GitHub's `clean`, where `unknown`, null and every other state wait.
+- The facts come from GitHub's record of the pull request, `git/ref/heads/main` and the check runs, read with the Worker's own credential; from the record; from the dataset row and its import, read by the statement the create reads; from the screen bound to the record; and from the review row of the head.
+- Unknown is never clean.
+  A GitHub answer that is not 200 (a 404 included), a timeout, a throttle and an answer of another shape read as unreadable, and each holds, as do a missing screen, a missing review and any value outside the declared ones.
+- Outside exact production and with a switch off nothing is read, the database included, and for a record or a dataset the rule already refuses GitHub is not asked: the organization is shared with dev, and the tick's subrequests are shared by every job on it.
+- Three hold words are added, `dataset-not-mirror`, `pr-draft` and `screen-exempt`; the last is an `xx` screen, which decision 7 says is never clear.
+- The daily merge cap is not a fact the rule reads.
+  The claim to merge counts it in the statement that writes the claim (the Phase 6e amendment), so a reading taken earlier could only be stale, and the merge sent with the screened head is the last check.
+
+### The checks are the App's own
+
+- Each check is asked for by name (the names `deriveContexts` gives the dataset), for App 3679074's runs only and the latest of each, and the answer is filtered again by name, App and head, so a GitHub that ignored a filter cannot pass another App's run or one a person posted.
+  Of the App's runs of a name the one with the highest id is read, since a re-run is a new run, and a page that does not hold every run GitHub counts is unreadable.
+- Green is `completed` with `success` and nothing else.
+  `neutral` and `skipped`, which GitHub counts as passing a required check, are not green here, and a commit status, which names no App, is not read.
+- Measured read-only on 2026-10-25 on `nm000527#1`, a central-flow repository: both `Run BIDS Validation` and `version-check` are posted by App 3679074, the shims' own job runs are GitHub Actions' under other names, and GitHub honored `check_name`, `app_id` and `filter=latest`.
+  `deriveContexts` still leaves `version-check` unpinned for the rulesets, which this slice does not change.
+  The four legacy-inline repositories post `bids-validation` as GitHub Actions and so never read green here, which is the safe direction; none of them is a mirror.
+
+### The screen and the review, read strictly
+
+- The screen is read as its own gate reads it, a run past its report deadline included, but `acknowledge` never passes here, whoever recorded the reason, because machine clean needs `clear`.
+  A clear verdict whose stored report does not name the head is unreadable, and no screen of the head is read as one to dispatch.
+- The review is read as ADR 0093's detail view reads it: the stricter of the stored verdict and the one its stored report re-derives, so either can lower it and neither can raise it.
+  A stored report that no longer parses is an error unless the column says `fail`.
+
+### The review of the App's pull request (corrects "Not yet verified")
+
+- "Not yet verified" says the App is not exempt, so the review runs.
+  As the code stood, that was false: the review's intake skipped every bot's pull request (`bot_author`), as ADR 0092 says ("not drafts, not bots"), so no review row could exist for the App's pull request and none could be machine clean.
+- The correction admits exactly one class, the App's automatic re-pull pull request, and only when the Worker itself starts its review from the record (`startRepullPullRequestReview` in `backend/src/services/pr-review-start.ts`).
+  The start needs exact production and the open switch, an automatic record of an `on` dataset at `pr_open`, and GitHub's record of the recorded pull request, authored by the App by login, numeric id and type, at the recorded head.
+  The intake then admits it only from the release branch the record names, in the dataset's own repository.
+- Nothing else about bot authors changes.
+  A delivery GitHub sends for the App's pull request, and an administrator's `nemar admin pr-reviews start` of it, still answer `bot_author`, and every other bot's pull request is skipped as before.
+- The App has no NEMAR account and its login is not a person's login, so it is never exempt, and every other rule of ADR 0107 applies to it unchanged: a reviewable dataset, an administrator's block, the per-commit row and the edit cap.
+  The Worker's start is not an administrator's: it does not start again a commit whose review ended without a verdict, and only a dispatch GitHub never ran is tried again.
+- 2026-10-25: this narrows ADR 0092's "not bots" for one class only, the NEMAR App's automatic re-pull pull request, which is reviewed when the Worker starts its review; for every other pull request ADR 0092 stands as written, and its header says so.
+- Keeping the webhook out has two consequences.
+  An edit of the App's pull request's title or body, which ADR 0107 re-reviews for anyone else, is not taken up, so a stored pass stands across it; a change of its base is still refused by machine clean.
+  And an administrator cannot start the review of the App's pull request again, `--redo` included, so a head whose review ended without a verdict is left to an administrator's merge.
+
+### Checked only against stand-ins
+
+The suites run the real record, screen and review rows, but GitHub is a stand-in, and these are what only the first production runs can check:
+that GitHub names the author of the App's pull request `nemar-publish-bot[bot]`, id 283755542, type `Bot`, as `GET /users` answered;
+that the App's token reads `mergeable_state` as an administrator does;
+that `check-runs` honors its filters on a mirror as it did on `nm000527`;
+and that the review workflow claims and reports on a pull request a bot opened as it does on any other.
