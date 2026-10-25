@@ -1,6 +1,7 @@
 /**
- * No re-pull route or service sends mail (epic #1046 phase 6, #1912; ADR 0111, decision 6 and the
- * Phase 6 amendment). The dev database holds real addresses, so the record of a re-pull is read by
+ * No re-pull route or service sends mail (epic #1046 phases 6 and 7, #1912 and #1913; ADR 0111,
+ * decision 6 and the Phase 6 amendment), the automatic path's dispatch record and its callback
+ * included. The dev database holds real addresses, so the record of a re-pull is read by
  * an administrator with `nemar admin repull status`, and nothing here may reach a person.
  *
  * A source scan on the syntax tree, as `repull-lineage-writer-scan.test.ts` does for the lineage
@@ -22,6 +23,9 @@ const ROOTS = [
   `${SRC}/services/upstream-repull-screen.ts`,
   `${SRC}/services/upstream-repull-verified.ts`,
   `${SRC}/routes/callbacks/identifier-screen-repull.ts`,
+  // The automatic path's dispatch record and the callback its runs report to (epic #1046 phase 7).
+  `${SRC}/services/upstream-repull-dispatch.ts`,
+  `${SRC}/routes/callbacks/repull-state.ts`,
 ];
 
 /** Every module under `backend/src` that is a mail module, by name. */
@@ -59,6 +63,11 @@ describe("the re-pull code sends no mail", () => {
       "routes/callbacks/identifier-screen-repull.ts",
       "services/identifier-screen-stored.ts",
       "services/github/dispatch.ts",
+      "services/upstream-repull-dispatch.ts",
+      "services/github/callback-tokens.ts",
+      "services/repull-switches.ts",
+      "routes/callbacks/repull-state.ts",
+      "routes/callbacks/bounded-json.ts",
     ]) {
       expect(closure.files.has(`${SRC}/${f}`)).toBe(true);
     }
@@ -109,5 +118,14 @@ describe("the re-pull code sends no mail", () => {
       "services/datasetId.ts": `${base.read(`${SRC}/services/datasetId.ts`)}\nexport const x = (env: { RESEND_API_KEY?: string }) => env.RESEND_API_KEY;\n`,
     });
     expect(mailFindings(named).some((f) => f.startsWith("names a sender"))).toBe(true);
+  });
+
+  test("it fires when the automatic path's callback reaches a mail module", () => {
+    const base = createTree();
+    const callback = `${SRC}/routes/callbacks/repull-state.ts`;
+    const planted = createTree({
+      "routes/callbacks/repull-state.ts": `${base.read(callback)}\nexport { sendEmail } from "../../services/email";\n`,
+    });
+    expect(mailFindings(planted).some((f) => f.includes("repull-state.ts"))).toBe(true);
   });
 });

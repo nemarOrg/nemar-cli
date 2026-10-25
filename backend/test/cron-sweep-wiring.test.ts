@@ -128,6 +128,12 @@ const SWEEP_WIRING: Record<
   // production on its own. It deliberately ignores PUBLICATION_REVIEW_ENABLED, so switching
   // the review off does not strand a request whose mail waits on a review already in flight.
   sweepPublicationReviews: "tick-prod-only",
+  // ADR 0111, the Phase 7b slice: the automatic re-pull's dispatch watchdog. It ends a live
+  // dispatch that said nothing in eight hours, so its dataset's one live slot is not held for
+  // good. It is production-only, reads no switch (turning them off must not strand a live row) and
+  // refuses outside exact production on its own; it is absent from DEV_CRON_ALLOWLIST because
+  // only the production Worker makes dispatch rows.
+  sweepUnreportedDispatches: "prod-only",
   sweepBlockedBidsValidationRequests: "all-envs",
   // #1789: tombstones the live integration tests' accounts. It runs ONLY outside production,
   // from a section of scheduledCleanup (`cleanUpLiveTestAccounts`); the dedicated block at the

@@ -32,6 +32,7 @@ const EXPECTED_EXPORTS = [
   "IdentifierScreenDispatchRejected",
   "NEMAR_APP_ID",
   "ORG_NAME",
+  "REPULL_DISPATCH_TOKEN_DOMAIN",
   "REVIEW_RULESET_NAME",
   "VERSION_COMPARE_SNIPPET",
   "__resetRateLimitStateForTests",
@@ -102,6 +103,7 @@ const EXPECTED_EXPORTS = [
   "signIdentifierSweepCallbackToken",
   "signManifestCallbackToken",
   "signPrescreenCallbackToken",
+  "signRepullDispatchToken",
   "syncWorkflowTemplates",
   "tasksFromSubjectSubtree",
   "triggerArchiveGeneration",
@@ -121,6 +123,7 @@ const EXPECTED_EXPORTS = [
   "verifyIdentifierSweepCallbackToken",
   "verifyManifestCallbackToken",
   "verifyPrescreenCallbackToken",
+  "verifyRepullDispatchToken",
 ];
 
 describe("services/github export surface", () => {

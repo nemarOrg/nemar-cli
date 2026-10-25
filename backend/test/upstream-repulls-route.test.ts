@@ -20,7 +20,12 @@
 import type { Database } from "bun:sqlite";
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { Hono } from "hono";
-import { REPULL_STATUSES, type RepullStatus, TERMINAL_STATUSES } from "../../shared/repull-state";
+import {
+  AUTO_MAX_COPY_BYTES,
+  REPULL_STATUSES,
+  type RepullStatus,
+  TERMINAL_STATUSES,
+} from "../../shared/repull-state";
 import { adminMiddleware, authMiddleware } from "../src/middleware/auth";
 import { registerUpstreamRepullRoutes } from "../src/routes/admin/upstream-repulls";
 import { deleteDatasetCascade } from "../src/services/deletion";
@@ -31,6 +36,11 @@ import {
   REPULL_PAGE_MAX,
   transitionRepull,
 } from "../src/services/upstream-repull";
+import {
+  claimFinishDispatch,
+  claimOpenDispatch,
+  storeDispatchReport,
+} from "../src/services/upstream-repull-dispatch";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
 import { type RepullGitHub, startRepullGitHub } from "./helpers/repull-github-standin";
@@ -2024,5 +2034,451 @@ describe("create: the lineage write and the race", () => {
     const res = await callOn(collidesTwice, "POST", "/repulls", plan());
     expect(res.status).toBe(500);
     expect(inserts).toBe(2);
+  });
+});
+
+// ----------------------------------------------------------------------------
+// The automatic create (epic #1046 phase 7, #1913; ADR 0111, decision 6)
+// ----------------------------------------------------------------------------
+
+describe("create: the automatic path", () => {
+  const AUTO = "on099991";
+  const SECRET = "repull-route-dispatch-secret";
+  const ON = { AUTO_REPULL_ENABLED: "1", PRESCREEN_CALLBACK_SECRET: SECRET };
+  const prod = (extra: Record<string, string | undefined> = {}) => ({
+    environment: "production",
+    bindings: { ...ON, ...extra },
+  });
+  const CLEAN = { delta_paths: 3, unexplained: 0, conflicts: 0, corrections: 0, copy_bytes: 4096 };
+
+  async function claim(datasetId = AUTO, over: Record<string, unknown> = {}) {
+    const c = await claimOpenDispatch(env("production", ON), {
+      datasetId,
+      upstreamDs: "ds099999",
+      fromTag: "1.0.0",
+      toTag: "1.0.1",
+      ...over,
+    });
+    if (!("id" in c)) throw new Error(`refused: ${c.refused}`);
+    return c;
+  }
+
+  function autoPlan(c: { id: number; token: string }, over: Record<string, unknown> = {}) {
+    return plan({
+      dataset_id: AUTO,
+      counts: CLEAN,
+      dispatch_id: c.id,
+      dispatch_token: c.token,
+      ...over,
+    });
+  }
+
+  const dispatchOf = (id: number) =>
+    db.query("SELECT * FROM upstream_repull_dispatches WHERE id = ?").get(id) as Row;
+
+  /** {@link callOn} as the production Worker with the automatic path on. */
+  async function callOnProd(d1: D1Database, body: unknown) {
+    const res = await app.request(
+      "/repulls",
+      {
+        method: "POST",
+        headers: { Authorization: `Bearer ${ADMIN_KEY}`, "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+      {
+        DB: d1,
+        ENVIRONMENT: "production",
+        GITHUB_ADMIN_PAT: "ghp_repull_route_test",
+        ...ON,
+      } as unknown as Bindings,
+    );
+    return { status: res.status, body: (await res.json()) as Json };
+  }
+
+  /** Nothing about the record was written: no row, no create audit, the dispatch unlinked. */
+  function nothingRecorded(dispatchId: number) {
+    expect(rows()).toEqual([]);
+    expect(audits("repull_created")).toEqual([]);
+    expect(dispatchOf(dispatchId)).toMatchObject({ repull_id: null, status: "dispatched" });
+  }
+
+  test("a live dispatch's create is automatic, linked to its dispatch, and audited as such", async () => {
+    seedMirror(AUTO);
+    const c = await claim();
+    const res = await call("POST", "/repulls", autoPlan(c), prod());
+    expect(res.status).toBe(201);
+    expect(res.body.repull).toMatchObject({
+      dataset_id: AUTO,
+      origin: "automatic",
+      actor_user_id: adminId,
+      status: "planned",
+      counts: CLEAN,
+      hold_reason: null,
+      hold_since: null,
+    });
+    // The dispatch stays live (the run reports `opened` later), and now names its record.
+    expect(dispatchOf(c.id)).toMatchObject({ repull_id: res.body.repull.id, status: "dispatched" });
+    expect(dispatchOf(c.id).nonce).not.toBeNull();
+    const [audit] = audits("repull_created");
+    expect(JSON.parse(audit?.details as string)).toMatchObject({
+      origin: "automatic",
+      dispatch_id: c.id,
+    });
+    expect(audit?.details).not.toContain(c.token);
+
+    // The same run asking again gets the same record, and nothing more is written.
+    const again = await call("POST", "/repulls", autoPlan(c), prod());
+    expect(again.status).toBe(200);
+    expect(again.body).toMatchObject({ created: false, repull: { id: res.body.repull.id } });
+    expect(audits("repull_created")).toHaveLength(1);
+  });
+
+  test("an administrator's create is still the administrator's, and cannot state an origin", async () => {
+    seedMirror(AUTO);
+    const stated = await call(
+      "POST",
+      "/repulls",
+      plan({ dataset_id: AUTO, origin: "automatic" }),
+      prod(),
+    );
+    expect(stated).toMatchObject({ status: 400, body: { code: "invalid-body" } });
+    const res = await call("POST", "/repulls", plan({ dataset_id: AUTO }), prod());
+    expect(res.status).toBe(201);
+    expect(res.body.repull.origin).toBe("administrator");
+    expect(JSON.parse(audits("repull_created")[0]?.details as string)).toMatchObject({
+      origin: "administrator",
+    });
+  });
+
+  test("dispatch fields come together, in the token's shape", async () => {
+    seedMirror(AUTO);
+    const c = await claim();
+    for (const body of [
+      plan({ dataset_id: AUTO, counts: CLEAN, dispatch_id: c.id }),
+      plan({ dataset_id: AUTO, counts: CLEAN, dispatch_token: c.token }),
+      autoPlan(c, { dispatch_token: c.token.toUpperCase() }),
+      autoPlan(c, { dispatch_token: `${c.token}0` }),
+      autoPlan(c, { dispatch_id: 0 }),
+    ]) {
+      const res = await call("POST", "/repulls", body, prod());
+      expect(res).toMatchObject({ status: 400, body: { code: "invalid-body" } });
+      expect(JSON.stringify(res.body)).not.toContain(c.token);
+    }
+    nothingRecorded(c.id);
+  });
+
+  for (const environment of ["Production", "development", "staging", "test", undefined]) {
+    test(`ENVIRONMENT ${JSON.stringify(environment)} is auto-production-only, before every other check`, async () => {
+      seedMirror(AUTO);
+      const c = await claim();
+      const res = await call("POST", "/repulls", autoPlan(c), {
+        environment,
+        bindings: ON,
+      });
+      expect(res).toMatchObject({ status: 403, body: { code: "auto-production-only" } });
+      nothingRecorded(c.id);
+    });
+  }
+
+  test("the switch turned off stops a run before its first write", async () => {
+    seedMirror(AUTO);
+    const c = await claim();
+    for (const value of [undefined, "true", "0"]) {
+      const res = await call("POST", "/repulls", autoPlan(c), prod({ AUTO_REPULL_ENABLED: value }));
+      expect([value, res.status, res.body.code]).toEqual([value, 409, "auto-repull-off"]);
+    }
+    nothingRecorded(c.id);
+  });
+
+  test("only an on mirror is re-pulled automatically", async () => {
+    seedMirror("xx090123");
+    const c = await claim();
+    const res = await call("POST", "/repulls", autoPlan(c, { dataset_id: "xx090123" }), prod());
+    expect(res).toMatchObject({ status: 403, body: { code: "auto-on-only" } });
+    nothingRecorded(c.id);
+  });
+
+  test("the dispatch must carry the Worker's token over a live dispatch, and name this plan", async () => {
+    seedMirror(AUTO);
+    seedMirror("on099992");
+    const c = await claim();
+    const other = await claim("on099992");
+    const cases: Array<[string, Record<string, unknown>, number, string]> = [
+      ["no such dispatch", autoPlan(c, { dispatch_id: 999_999 }), 401, "dispatch-token"],
+      ["a token of zeros", autoPlan(c, { dispatch_token: "0".repeat(64) }), 401, "dispatch-token"],
+      [
+        "another dispatch's token",
+        autoPlan(c, { dispatch_token: other.token }),
+        401,
+        "dispatch-token",
+      ],
+      [
+        "another dataset's dispatch",
+        autoPlan(other, { dataset_id: AUTO }),
+        409,
+        "dispatch-mismatch",
+      ],
+      ["another to_tag", autoPlan(c, { to_tag: "1.0.2" }), 409, "dispatch-mismatch"],
+      ["another from_tag", autoPlan(c, { from_tag: "0.9.0" }), 409, "dispatch-mismatch"],
+      ["another ds", autoPlan(c, { upstream_ds: "ds099998" }), 409, "dispatch-mismatch"],
+    ];
+    for (const [name, body, status, code] of cases) {
+      const res = await call("POST", "/repulls", body, prod());
+      expect([name, res.status, res.body.code]).toEqual([name, status, code]);
+    }
+    // A tag spelled with a leading v is the same tag.
+    expect((await call("POST", "/repulls", autoPlan(c, { to_tag: "v1.0.1" }), prod())).status).toBe(
+      201,
+    );
+  });
+
+  test("a dispatch that ended writes nothing, and a finish dispatch creates nothing", async () => {
+    seedMirror(AUTO);
+    const c = await claim();
+    expect(
+      await storeDispatchReport(env("production", ON), c.token, {
+        dispatch_id: c.id,
+        dataset_id: AUTO,
+        phase: "refused",
+        code: "auto-not-clean-plan",
+      }),
+    ).toMatchObject({ status: 200 });
+    const ended = await call("POST", "/repulls", autoPlan(c), prod());
+    expect(ended).toMatchObject({ status: 401, body: { code: "dispatch-token" } });
+    expect(rows()).toEqual([]);
+
+    // A finish dispatch, of a merged automatic row of another dataset, is not a create's.
+    seedMirror("on099992");
+    const merged = seedRow("merged", { dataset_id: "on099992", origin: "automatic" });
+    const finish = await claimFinishDispatch(env("production", ON), {
+      id: merged,
+      dataset_id: "on099992",
+      origin: "automatic",
+      status: "merged",
+      from_tag: "1.0.0",
+      to_tag: "1.0.1",
+    });
+    if (!("id" in finish)) throw new Error(`refused: ${finish.refused}`);
+    const res = await call(
+      "POST",
+      "/repulls",
+      autoPlan(finish, { dataset_id: "on099992" }),
+      prod(),
+    );
+    expect(res).toMatchObject({ status: 409, body: { code: "dispatch-mismatch" } });
+    expect(rows().map((r) => r.id)).toEqual([merged]);
+  });
+
+  test("an unknown dispatch, an ended one and a wrong token are one answer, and no answer names a status", async () => {
+    seedMirror(AUTO);
+    const live = await claim();
+    seedMirror("on099992");
+    const ended = await claim("on099992");
+    expect(
+      await storeDispatchReport(env("production", ON), ended.token, {
+        dispatch_id: ended.id,
+        dataset_id: "on099992",
+        phase: "failed",
+        code: "runner-failed",
+      }),
+    ).toMatchObject({ status: 200 });
+    const answers = [
+      await call("POST", "/repulls", autoPlan(live, { dispatch_id: 999_999 }), prod()),
+      await call(
+        "POST",
+        "/repulls",
+        autoPlan(ended, { dataset_id: "on099992", dispatch_token: ended.token }),
+        prod(),
+      ),
+      await call("POST", "/repulls", autoPlan(live, { dispatch_token: "0".repeat(64) }), prod()),
+      await call("POST", "/repulls", autoPlan(live, { dispatch_token: ended.token }), prod()),
+    ];
+    for (const a of answers) expect(a).toEqual(answers[0] as (typeof answers)[number]);
+    expect(answers[0]?.status).toBe(401);
+    expect(answers[0]?.body.code).toBe("dispatch-token");
+    // No status word and no id in the message.
+    expect(JSON.stringify(answers[0]?.body)).not.toMatch(
+      /dispatched|started|failed|unreported|#\d|999999/,
+    );
+    nothingRecorded(live.id);
+  });
+
+  test("a Worker with no callback secret answers 503 at the create, and writes nothing", async () => {
+    seedMirror(AUTO);
+    const c = await claim();
+    for (const secret of [undefined, ""]) {
+      const res = await call(
+        "POST",
+        "/repulls",
+        autoPlan(c),
+        prod({ PRESCREEN_CALLBACK_SECRET: secret }),
+      );
+      expect([secret, res.status, res.body.code]).toEqual([secret, 503, "dispatch-unconfigured"]);
+    }
+    nothingRecorded(c.id);
+  });
+
+  test("a dispatch that ends between the check and the insert creates nothing and links nothing", async () => {
+    seedMirror(AUTO);
+    const c = await claim();
+    const end = () =>
+      db.run(
+        "UPDATE upstream_repull_dispatches SET status = 'unreported', nonce = NULL WHERE id = ?",
+        [c.id],
+      );
+    const res = await callOnProd(interleaved("INSERT INTO upstream_repulls", end), autoPlan(c));
+    expect(res).toMatchObject({ status: 401, body: { code: "dispatch-token" } });
+    // The batch rolled back whole: no record, no create audit, no lineage write, no link.
+    expect(rows()).toEqual([]);
+    expect(audits("repull_created")).toEqual([]);
+    expect(dispatchOf(c.id)).toMatchObject({ repull_id: null, status: "unreported", nonce: null });
+  });
+
+  test("a dispatch that ends before it is linked to a record it found links nothing", async () => {
+    seedMirror(AUTO);
+    const c = await claim();
+    const id = seedRow("planned", {
+      dataset_id: AUTO,
+      origin: "automatic",
+      planner: 2,
+      upstream_ds: "ds099999",
+    });
+    const end = () =>
+      db.run(
+        "UPDATE upstream_repull_dispatches SET status = 'unreported', nonce = NULL WHERE id = ?",
+        [c.id],
+      );
+    const res = await callOnProd(
+      interleaved("UPDATE upstream_repull_dispatches SET repull_id", end),
+      autoPlan(c),
+    );
+    expect(res).toMatchObject({ status: 401, body: { code: "dispatch-token" } });
+    expect(dispatchOf(c.id)).toMatchObject({ repull_id: null, status: "unreported" });
+    expect(rows().map((r) => r.id)).toEqual([id]);
+  });
+
+  test("the plan must be this planner's, with zero unexplained paths, conflicts and corrections stated", async () => {
+    seedMirror(AUTO);
+    const c = await claim();
+    const cases: Array<[string, Record<string, unknown>, string]> = [
+      ["planner 1", { planner: 1 }, "auto-planner-version"],
+      ["planner 3", { planner: 3 }, "auto-planner-version"],
+      ["one unexplained path", { counts: { ...CLEAN, unexplained: 1 } }, "auto-not-clean-plan"],
+      ["one conflict", { counts: { ...CLEAN, conflicts: 1 } }, "auto-not-clean-plan"],
+      ["one correction", { counts: { ...CLEAN, corrections: 1 } }, "auto-not-clean-plan"],
+      [
+        "unexplained left out",
+        { counts: { delta_paths: 3, conflicts: 0, corrections: 0, copy_bytes: 1 } },
+        "auto-not-clean-plan",
+      ],
+      [
+        "corrections left out",
+        { counts: { delta_paths: 3, unexplained: 0, conflicts: 0, copy_bytes: 1 } },
+        "auto-not-clean-plan",
+      ],
+      ["no counts at all", { counts: undefined }, "auto-not-clean-plan"],
+      [
+        "the copy's size left out",
+        { counts: { delta_paths: 3, unexplained: 0, conflicts: 0, corrections: 0 } },
+        "auto-copy-too-large",
+      ],
+      [
+        "one byte over the bound",
+        { counts: { ...CLEAN, copy_bytes: AUTO_MAX_COPY_BYTES + 1 } },
+        "auto-copy-too-large",
+      ],
+    ];
+    for (const [name, over, code] of cases) {
+      // `counts: undefined` is left out of the JSON, so the body carries no counts at all.
+      const res = await call("POST", "/repulls", autoPlan(c, over), prod());
+      expect([name, res.status, res.body.code]).toEqual([name, 409, code]);
+    }
+    nothingRecorded(c.id);
+    // Exactly the bound is taken.
+    const at = await call(
+      "POST",
+      "/repulls",
+      autoPlan(c, { counts: { ...CLEAN, copy_bytes: AUTO_MAX_COPY_BYTES } }),
+      prod(),
+    );
+    expect(at.status).toBe(201);
+  });
+
+  test("an administrator never takes over a dispatched run's record, nor a run an administrator's", async () => {
+    seedMirror(AUTO);
+    const c = await claim();
+    const auto = await call("POST", "/repulls", autoPlan(c), prod());
+    expect(auto.status).toBe(201);
+    const admin = await call("POST", "/repulls", plan({ dataset_id: AUTO, counts: CLEAN }), prod());
+    expect(admin).toMatchObject({
+      status: 409,
+      body: { code: "repull-in-flight", repull: { id: auto.body.repull.id, origin: "automatic" } },
+    });
+
+    db.run("DELETE FROM upstream_repulls");
+    db.run("DELETE FROM upstream_repull_dispatches");
+    const mine = await call("POST", "/repulls", plan({ dataset_id: AUTO, counts: CLEAN }), prod());
+    expect(mine.status).toBe(201);
+    // A first dispatch is not even claimed for a dataset with an open record ...
+    expect(
+      await claimOpenDispatch(env("production", ON), {
+        datasetId: AUTO,
+        upstreamDs: "ds099999",
+        fromTag: "1.0.0",
+        toTag: "1.0.1",
+      }),
+    ).toEqual({ refused: "open-row" });
+    // ... and a dispatch claimed before the administrator's record opened does not take it over.
+    db.run("DELETE FROM upstream_repulls");
+    const early = await claim();
+    expect(
+      (await call("POST", "/repulls", plan({ dataset_id: AUTO, counts: CLEAN }), prod())).status,
+    ).toBe(201);
+    const run = await call("POST", "/repulls", autoPlan(early), prod());
+    expect(run).toMatchObject({ status: 409, body: { code: "repull-in-flight" } });
+    expect(dispatchOf(early.id)).toMatchObject({ repull_id: null });
+  });
+
+  test("a run finds the automatic record its dispatch belongs to, and only that one", async () => {
+    seedMirror(AUTO);
+    // A dispatch claimed before an automatic record of the same plan opened (its own create's
+    // answer was lost): the record is returned, and the dispatch is linked to it.
+    const c = await claim();
+    const id = seedRow("planned", {
+      dataset_id: AUTO,
+      origin: "automatic",
+      planner: 2,
+      upstream_ds: "ds099999",
+    });
+    const found = await call("POST", "/repulls", autoPlan(c), prod());
+    expect(found).toMatchObject({ status: 200, body: { created: false, repull: { id } } });
+    expect(dispatchOf(c.id)).toMatchObject({ repull_id: id });
+
+    // A resume dispatch takes its own record ...
+    db.run("UPDATE upstream_repull_dispatches SET status = 'unreported', nonce = NULL");
+    const resume = await claim(AUTO, { repullId: id });
+    const resumed = await call("POST", "/repulls", autoPlan(resume), prod());
+    expect(resumed).toMatchObject({ status: 200, body: { repull: { id } } });
+    // ... and, once that record has ended, creates no other ...
+    db.run(
+      "UPDATE upstream_repulls SET status = 'failed', terminal_at = datetime('now'), last_error = 'x'",
+    );
+    const gone = await call("POST", "/repulls", autoPlan(resume), prod());
+    expect(gone).toMatchObject({ status: 409, body: { code: "dispatch-mismatch" } });
+    expect(rows()).toHaveLength(1);
+    // ... nor takes over another automatic record of the very same plan that opened since.
+    const next = seedRow("planned", {
+      dataset_id: AUTO,
+      origin: "automatic",
+      planner: 2,
+      upstream_ds: "ds099999",
+      attempt: 2,
+    });
+    const other = await call("POST", "/repulls", autoPlan(resume), prod());
+    expect(other).toMatchObject({
+      status: 409,
+      body: { code: "repull-in-flight", repull: { id: next } },
+    });
+    expect(dispatchOf(resume.id)).toMatchObject({ repull_id: id });
   });
 });
