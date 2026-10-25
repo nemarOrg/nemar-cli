@@ -9,7 +9,8 @@
  * prefix is refused before any call, and that a copy it cannot delete (a lock) fails the canary
  * rather than being bypassed.
  *
- * CI TIER: integration (it starts the binary and the aws CLI).
+ * CI TIER: unit-pure. It starts the binary and the real aws CLI against a loopback S3 stand-in; it
+ * needs no live backend, no database and no network beyond loopback.
  */
 
 import {
