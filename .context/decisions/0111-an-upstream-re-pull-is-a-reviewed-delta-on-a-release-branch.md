@@ -1320,12 +1320,13 @@ One annotation is added to earlier text, on the sentence of "Not yet verified" t
 ### Machine clean, as built
 
 - The rule is one pure function, `machineClean` in `shared/repull-machine-clean.ts`, of facts read at decision time, and it answers clean or the word of the first rule that does not hold.
-  The gates and the merge each gather their own facts (`gatherMachineCleanFacts` in `backend/src/services/upstream-repull-facts.ts`) and nothing is carried from one stage to the next, because an administrator can reset a stored review pass on the same head.
+  The gates and the merge each gather their own facts (`gatherMachineCleanFacts` in `backend/src/services/upstream-repull-facts.ts`) and nothing is carried from one stage to the next.
+  A pass is never carried between stages; an administrator's `--redo` resets passes on other pull requests, and none can touch this class, whose review only the Worker starts (below).
 - The rules, in their order:
   exact production and the open switch, and at the merge the merge switch;
   a record the automatic path made, of an `on` dataset;
   no N.0.1, and the plan's unexplained, conflict and correction counts each stated and zero;
-  a named dataset (anonymity that cannot be read holds as anonymous), not withdrawn, with no import preparing, copying or finalizing, and still the mirror of the record's `ds`;
+  a named dataset (anonymity that cannot be read holds as anonymous), not withdrawn, with no import that has not settled, and still the mirror of the record's `ds`;
   the recorded pull request, open and unmerged, by its number, from the recorded release branch into `main`, from the dataset's own repository (a fork, a deleted one included, is refused), not a draft, and opened by the App, its login, numeric id and type all matching;
   its head the recorded head at the gates, and at the merge the screened head, which must also still be the recorded head;
   `main` exactly the commit the record bases on;
@@ -1337,6 +1338,8 @@ One annotation is added to earlier text, on the sentence of "Not yet verified" t
 - Unknown is never clean.
   A GitHub answer that is not 200 (a 404 included), a timeout, a throttle and an answer of another shape read as unreadable, and each holds, as do a missing screen, a missing review and any value outside the declared ones.
 - Outside exact production and with a switch off nothing is read, the database included, and for a record or a dataset the rule already refuses GitHub is not asked: the organization is shared with dev, and the tick's subrequests are shared by every job on it.
+- An import has settled only at `complete`, `failed`, `quarantined` or `rolled_back`; any other status holds, `incomplete` included (the retry engine is repairing it), and so does a status no list declares.
+  This is stricter than the record's own fence, which refuses an import that is preparing, copying or finalizing and is unchanged: that fence asks whether an import is writing, and machine clean whether it has settled.
 - Three hold words are added, `dataset-not-mirror`, `pr-draft` and `screen-exempt`; the last is an `xx` screen, which decision 7 says is never clear.
 - The daily merge cap is not a fact the rule reads.
   The claim to merge counts it in the statement that writes the claim (the Phase 6e amendment), so a reading taken earlier could only be stale, and the merge sent with the screened head is the last check.
@@ -1363,8 +1366,15 @@ One annotation is added to earlier text, on the sentence of "Not yet verified" t
 - "Not yet verified" says the App is not exempt, so the review runs.
   As the code stood, that was false: the review's intake skipped every bot's pull request (`bot_author`), as ADR 0092 says ("not drafts, not bots"), so no review row could exist for the App's pull request and none could be machine clean.
 - The correction admits exactly one class, the App's automatic re-pull pull request, and only when the Worker itself starts its review from the record (`startRepullPullRequestReview` in `backend/src/services/pr-review-start.ts`).
-  The start needs exact production and the open switch, an automatic record of an `on` dataset at `pr_open`, and GitHub's record of the recorded pull request, authored by the App by login, numeric id and type, at the recorded head.
-  The intake then admits it only from the release branch the record names, in the dataset's own repository.
+  Nothing calls the start yet; the slice that advances the gates will.
+  Its gates, in order, each with the answer it starts nothing with:
+  exact production (`not_production`) and the open switch (`auto_repull_off`);
+  a dataset this Worker owns (`not_owned_here`), which is every dataset outside the dev Worker's own ids, none of which is an `on` mirror;
+  an automatic record of an `on` dataset (`not_automatic`) at `pr_open` with its branch, number and head (`not_pr_open`);
+  the review switched on (`pr_review_disabled`) and a dataset the review may read, live, named and published (`unknown_dataset`, `dataset_not_reviewable`);
+  and GitHub's record of the recorded pull request (`github_unreadable` when it cannot be read), authored by the App by login, numeric id and type (`not_app_author`), at the recorded head (`head_moved`).
+  The intake then admits it only from the release branch the record names, in the dataset's own repository, and any other is the intake's `bot_author`.
+  A start that dispatched writes an audit row with no user; a row that could not be written is logged and does not undo or block the review, so the answer says nothing about it, by design.
 - Nothing else about bot authors changes.
   A delivery GitHub sends for the App's pull request, and an administrator's `nemar admin pr-reviews start` of it, still answer `bot_author`, and every other bot's pull request is skipped as before.
 - The App has no NEMAR account and its login is not a person's login, so it is never exempt, and every other rule of ADR 0107 applies to it unchanged: a reviewable dataset, an administrator's block, the per-commit row and the edit cap.
@@ -1372,7 +1382,9 @@ One annotation is added to earlier text, on the sentence of "Not yet verified" t
 - 2026-10-25: this narrows ADR 0092's "not bots" for one class only, the NEMAR App's automatic re-pull pull request, which is reviewed when the Worker starts its review; for every other pull request ADR 0092 stands as written, and its header says so.
 - Keeping the webhook out has two consequences.
   An edit of the App's pull request's title or body, which ADR 0107 re-reviews for anyone else, is not taken up, so a stored pass stands across it; a change of its base is still refused by machine clean.
-  And an administrator cannot start the review of the App's pull request again, `--redo` included, so a head whose review ended without a verdict is left to an administrator's merge.
+  And nobody can start the review of the App's pull request again on the same head, an administrator's `--redo` included.
+  So once a review of a head has errored, been declined or gone unreported, the re-pull holds at `review-not-pass` until its pull request has a new head, and an administrator's merge is the only other way on.
+- The review queue's detail view names the App's pull request's author `nemar-publish-bot[bot]`, from the stored review and from GitHub when the login and the numeric id both match, where it showed `(unknown)` and a mangled login before; every other login is reduced to a login's characters as before.
 
 ### Checked only against stand-ins
 
