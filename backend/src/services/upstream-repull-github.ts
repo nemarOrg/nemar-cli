@@ -25,6 +25,16 @@ import type { RepullRefusal } from "./upstream-repull.js";
 /** How long one GitHub read may take, so an administrator's request is answered. */
 export const REPULL_GITHUB_READ_TIMEOUT_MS = 10_000;
 
+let readTimeoutMs = REPULL_GITHUB_READ_TIMEOUT_MS;
+
+/**
+ * Tests only: shorten the read's timeout, so a GitHub that never answers is proven to read as
+ * unreadable in milliseconds rather than twice ten seconds. `null` restores the default.
+ */
+export function __setRepullGitHubReadTimeoutForTests(ms: number | null): void {
+  readTimeoutMs = ms ?? REPULL_GITHUB_READ_TIMEOUT_MS;
+}
+
 export type GitHubRead =
   | { ok: true; status: number; body: unknown; text: string | null }
   | { ok: false; refusal: RepullRefusal };
@@ -66,7 +76,7 @@ export async function githubRead(
     const headers = { ...ghHeaders(token), ...(accept ? { Accept: accept } : {}) };
     res = await githubFetchWithRetry(
       `${GITHUB_API()}/repos/${ORG_NAME}/${datasetId}${path}`,
-      { headers, signal: AbortSignal.timeout(REPULL_GITHUB_READ_TIMEOUT_MS) },
+      { headers, signal: AbortSignal.timeout(readTimeoutMs) },
       { kind: "interactive", maxAttempts: 2, refreshTokenOn401: refresh },
     );
   } catch (err) {
