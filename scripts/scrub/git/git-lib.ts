@@ -1375,9 +1375,13 @@ export async function verifyRewrite(opts: VerifyOptions): Promise<VerifyResult> 
   return { ok: failures.length === 0, failures, counts };
 }
 
-/** A re-pull commit's two trailers (ADR 0111, decision 2): the snapshot it pulled and the plan. */
-const UPSTREAM_SNAPSHOT_TRAILER = /^Upstream-Snapshot: ds\d{6}@[0-9A-Za-z][0-9A-Za-z._-]*$/m;
-const REPULL_PLAN_TRAILER = /^Repull-Plan: sha256:[0-9a-f]{64}$/m;
+/**
+ * A re-pull commit's two trailers (ADR 0111, decision 2): the snapshot it pulled and the plan.
+ * Exported so the merge that lands N.0.0 checks the squash message it sends against the very
+ * patterns this proof reads it with (`src/lib/repull/trailers.ts`).
+ */
+export const UPSTREAM_SNAPSHOT_TRAILER = /^Upstream-Snapshot: ds\d{6}@[0-9A-Za-z][0-9A-Za-z._-]*$/m;
+export const REPULL_PLAN_TRAILER = /^Repull-Plan: sha256:[0-9a-f]{64}$/m;
 
 /**
  * Whether a commit that touches the ledger and other files is a scrub's own commit: every line it

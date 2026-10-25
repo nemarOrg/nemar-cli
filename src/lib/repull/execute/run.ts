@@ -326,7 +326,7 @@ async function execute(
       if (reached(open.status, until)) {
         if (!(EXECUTE_STATUSES as readonly RepullStatus[]).includes(open.status)) {
           opts.out(
-            `Re-pull #${open.id} is past the open pull request; execute never merges, and the steps after it are not built yet.`,
+            `Re-pull #${open.id} is past the open pull request; execute never merges. Take it on with: nemar admin repull resume ${datasetId}`,
           );
         }
         return { row: open, stoppedAt: open.status };

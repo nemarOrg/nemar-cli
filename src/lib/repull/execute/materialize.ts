@@ -72,6 +72,40 @@ export interface MaterializeResult {
   nemarOwned: { applied: number; left: string[] };
 }
 
+/**
+ * The NEMAR-owned edit to `.nemar/metadata.json` (ADR 0111, decision 1): its `IsIdenticalTo`
+ * identifier, which must be `from`, becomes `to`; the rest is written back as the planner reads it
+ * (a byte-order mark set aside and kept, two-space JSON and a final newline). `nemar-owned-moved`
+ * when the file does not parse or does not name `from`, with `remedy` the way out the caller has.
+ * Preparation applies it to the base's file, and a re-synthesis onto a moved `main` to that
+ * `main`'s file.
+ */
+export function rewriteIsIdenticalTo(
+  raw: string,
+  from: unknown,
+  to: unknown,
+  remedy: string,
+): string {
+  let meta: { related_identifiers?: Array<{ relation_type?: string; identifier?: unknown }> };
+  const bom = raw.charCodeAt(0) === 0xfeff ? String.fromCharCode(0xfeff) : "";
+  try {
+    meta = JSON.parse(stripBom(raw));
+  } catch {
+    throw refuse("nemar-owned-moved", "NEMAR's .nemar/metadata.json no longer parses.");
+  }
+  const hit = Array.isArray(meta.related_identifiers)
+    ? meta.related_identifiers.find((r) => r?.relation_type === "IsIdenticalTo")
+    : undefined;
+  if (!hit || hit.identifier !== from) {
+    throw refuse(
+      "nemar-owned-moved",
+      `NEMAR's .nemar/metadata.json no longer names what the plan read; ${remedy}.`,
+    );
+  }
+  hit.identifier = to;
+  return `${bom}${JSON.stringify(meta, null, 2)}\n`;
+}
+
 /** A path the plan may write: relative, inside the tree, not git's own, not NEMAR's. */
 export function isWritablePath(path: string): boolean {
   if (path === "" || path.startsWith("/") || /[\0\n\r]/.test(path)) return false;
@@ -440,26 +474,9 @@ export async function materializeDelta(args: {
       continue;
     }
     const abs = join(work, NEMAR_METADATA_PATH);
-    let meta: { related_identifiers?: Array<{ relation_type?: string; identifier?: unknown }> };
-    // A byte-order mark is read as the planner reads it (stripped), and kept where it was.
-    const raw = readFileSync(abs, "utf8");
-    const bom = raw.charCodeAt(0) === 0xfeff ? String.fromCharCode(0xfeff) : "";
-    try {
-      meta = JSON.parse(stripBom(raw));
-    } catch {
-      throw refuse("nemar-owned-moved", "NEMAR's .nemar/metadata.json no longer parses.");
-    }
-    const hit = Array.isArray(meta.related_identifiers)
-      ? meta.related_identifiers.find((r) => r?.relation_type === "IsIdenticalTo")
-      : undefined;
-    if (!hit || hit.identifier !== edit.from) {
-      throw refuse(
-        "nemar-owned-moved",
-        "NEMAR's .nemar/metadata.json no longer names what the plan read; plan again.",
-      );
-    }
-    hit.identifier = edit.to;
-    const bytes = Buffer.from(`${bom}${JSON.stringify(meta, null, 2)}\n`);
+    const bytes = Buffer.from(
+      rewriteIsIdenticalTo(readFileSync(abs, "utf8"), edit.from, edit.to, "plan again"),
+    );
     writeFileSync(abs, bytes);
     const [oid] = await hashObjects(work, [NEMAR_METADATA_PATH]);
     if (oid !== gitBlobOid(bytes)) {

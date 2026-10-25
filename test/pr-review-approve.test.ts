@@ -399,6 +399,8 @@ describe("reading the pull request", () => {
         state: "open",
         draft: false,
         baseRef: "main",
+        // The head branch, which tells a `release/*` pull request (maybe a re-pull's) apart.
+        headRef: "add-subjects",
         headSha: SHA_A,
         authorLogin: "alice",
         mergeableState: "blocked",

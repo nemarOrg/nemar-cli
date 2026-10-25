@@ -11,7 +11,8 @@
  *    (`merged_outside_tool`), and one at a head other than the screened one
  *    (`merged_unscreened_head`), is still recorded, because it happened and a second major would
  *    be a second DOI; each is counted on its own so the record says which. The cap binds NEMAR's
- *    tools only (ADR 0111, Consequences).
+ *    tools only (ADR 0111, Consequences). It is recorded from the open status too, for a pull
+ *    request merged before its gates were (both counts then say so).
  *  - released: the version row exists with a DOI, the tag `v<version>` names the commit the
  *    caller reports, and that commit contains the merge. In the same batch, and only when the
  *    edge applies: the version's lineage when the caller verified the tagged tree (N.0.0 only,
@@ -20,8 +21,11 @@
  *  - a claim is released only when the caller says the merge was not sent or was refused, the
  *    claim is at least five minutes old, and GitHub says the pull request is not merged: an
  *    unknown outcome keeps the claim, so a lost answer is resolved from GitHub and never repeated
- *    blind. That is one read and an age, not proof: a merge that lands between the read and the
- *    release is recorded later, by `merged`, as one no tool held a claim for.
+ *    blind. A caller that does not know what became of the merge (`expired`, how a stuck claim
+ *    ends) needs the claim thirty minutes old, long past any merge a tool can have in flight, and
+ *    the same answer from GitHub. That is one read and an age, not proof: a merge that lands
+ *    between the read and the release is recorded later, by `merged`, as one no tool held a claim
+ *    for.
  *
  * A retried `merged` or `released` that finds its fact already recorded, for the same commit,
  * answers with the stored row (`replayed`), so a caller whose answer was lost can ask again; a
@@ -50,13 +54,16 @@ import {
 import {
   githubRead,
   isObject,
+  liveHeadRefusal,
   readRecordedPullRequest,
   unreadable,
 } from "./upstream-repull-github.js";
+import { repullScreenGate } from "./upstream-repull-screen.js";
 import {
   LINEAGE_WRITE_SQL,
   type RepullRefusal,
   commitTransition,
+  datasetFenceRefusal,
   envFenceRefusal,
   getRepull,
   isRefusal,
@@ -65,6 +72,20 @@ import {
 
 /** How old a claim to merge must be before it may be released: a merge sent just now may still land. */
 export const CLAIM_RELEASE_MIN_AGE_MINUTES = 5;
+
+/**
+ * How old a claim must be before a caller that does not know what became of its merge may expire
+ * it (`expired`): long past any merge a NEMAR tool can have in flight (each request is bounded in
+ * seconds), so GitHub's answer, read again, is the whole truth of whether it merged.
+ */
+export const CLAIM_EXPIRE_MIN_AGE_MINUTES = 30;
+
+/**
+ * The oldest a claim may be when a merge is sent under it again, by the Worker's own stamp: below
+ * {@link CLAIM_EXPIRE_MIN_AGE_MINUTES}, with room for the merge itself, so a merge is never sent
+ * under a claim the expiry may already be freeing. An older claim is released through `resume`.
+ */
+export const HELD_CLAIM_MAX_AGE_MINUTES = 25;
 
 // ----------------------------------------------------------------------------
 // SQL
@@ -100,10 +121,18 @@ export const STAMPS_REARM_SQL = `UPDATE datasets
 export const RELEASED_VERSION_SQL = `SELECT 1 AS minted FROM dataset_versions
   WHERE dataset_id = ? AND version IN (?, 'v' || ?) AND doi IS NOT NULL AND doi <> '' LIMIT 1`;
 
-/** Whether a claim's Worker-stamped time is old enough to release (`?` id). Column from a constant. */
-const claimOldEnoughSql = (claimedAt: string) =>
-  `SELECT CASE WHEN ${claimedAt} <= datetime('now', '-${CLAIM_RELEASE_MIN_AGE_MINUTES} minutes') THEN 1 ELSE 0 END AS old
+/**
+ * Whether a claim's Worker-stamped time is old enough to release (`?` id), `minutes` one of the two
+ * constants above. Column and bound from constants, never a request.
+ */
+const claimOldEnoughSql = (claimedAt: string, minutes: number) =>
+  `SELECT CASE WHEN ${claimedAt} <= datetime('now', '-${minutes} minutes') THEN 1 ELSE 0 END AS old
      FROM upstream_repulls WHERE id = ?`;
+
+/** The age a release needs: a caller that knows what became of its merge, or one that does not. */
+function releaseAgeMinutes(outcome: ReleaseOutcome): number {
+  return outcome === "expired" ? CLAIM_EXPIRE_MIN_AGE_MINUTES : CLAIM_RELEASE_MIN_AGE_MINUTES;
+}
 
 // ----------------------------------------------------------------------------
 // Request bodies
@@ -111,16 +140,28 @@ const claimOldEnoughSql = (claimedAt: string) =>
 
 const sha = z.string().regex(SHA_RE, "must be a 40-character lowercase hex id");
 
+/**
+ * What the caller knows of the merge its claim was for: `not_sent` (it decided not to send it) and
+ * `refused` (GitHub answered that it did not merge), or `expired`, a claim whose outcome the caller
+ * does not know (a lost answer, a run that stopped between the claim and the merge), released
+ * only once it is {@link CLAIM_EXPIRE_MIN_AGE_MINUTES} minutes old, which is how a stuck claim is
+ * expired. `unknown` is not here on purpose: a merge whose answer was just lost may have happened,
+ * and only GitHub, read after the merge could still be in flight, says it did not.
+ */
+export const RELEASE_OUTCOMES = ["not_sent", "refused", "expired"] as const;
+export type ReleaseOutcome = (typeof RELEASE_OUTCOMES)[number];
+
 export const releaseClaimSchema = z
   .object({
     pr: z.enum(REPULL_PULL_REQUESTS),
     sha,
-    // `unknown` is not here on purpose: a merge whose answer was lost may have happened.
-    outcome: z.enum(["not_sent", "refused"]),
+    outcome: z.enum(RELEASE_OUTCOMES),
   })
   .strict();
 
 export const mergedSchema = z.object({ pr: z.enum(REPULL_PULL_REQUESTS) }).strict();
+
+export const claimCheckSchema = z.object({ pr: z.enum(REPULL_PULL_REQUESTS), sha }).strict();
 
 export const releasedSchema = z
   .object({
@@ -136,12 +177,17 @@ export const releasedSchema = z
 // ----------------------------------------------------------------------------
 
 /**
- * Clear a claim to merge that was never sent, or that GitHub refused, so its unit of the day's cap
- * is free again. Only while the row is still at its gates-clear status with the claim naming
- * `sha`, only once the claim is {@link CLAIM_RELEASE_MIN_AGE_MINUTES} minutes old by the Worker's
- * own stamp, and only when GitHub says the pull request is not merged: a merged one is recorded
- * with `merged`, and a claim whose outcome is unknown is never released. The age and the one read
- * are a guard, not proof that no merge is in flight.
+ * Clear a claim to merge so its unit of the day's cap is free again: one whose merge was never
+ * sent or that GitHub refused (`not_sent`, `refused`), once the claim is
+ * {@link CLAIM_RELEASE_MIN_AGE_MINUTES} minutes old by the Worker's own stamp, or one whose outcome
+ * the caller does not know (`expired`, how `resume` ends a stuck claim), once it is
+ * {@link CLAIM_EXPIRE_MIN_AGE_MINUTES} minutes old. Either way only while the row is still at its
+ * gates-clear status with the claim naming `sha` and no merge recorded (in the statement that
+ * clears it), and only when GitHub says the pull request is not merged: a merged one is recorded
+ * with `merged`. The age and the one read are a guard, not proof that no merge is in flight; the
+ * merge gate never sends a merge under a claim older than
+ * {@link HELD_CLAIM_MAX_AGE_MINUTES} minutes, and holds the record's lock while it sends, which a
+ * resume takes too.
  */
 export async function releaseMergeClaim(
   env: Bindings,
@@ -171,12 +217,19 @@ export async function releaseMergeClaim(
       row,
     };
   }
-  const age = await db.prepare(claimOldEnoughSql(cols.claimedAt)).bind(id).first<{ old: number }>();
+  const minutes = releaseAgeMinutes(body.outcome);
+  const age = await db
+    .prepare(claimOldEnoughSql(cols.claimedAt, minutes))
+    .bind(id)
+    .first<{ old: number }>();
   if (age?.old !== 1) {
     return {
       status: 409,
       code: "claim-too-recent",
-      message: `The claim was made less than ${CLAIM_RELEASE_MIN_AGE_MINUTES} minutes ago; a merge sent just now may still land, so it is released only once it is older.`,
+      message:
+        body.outcome === "expired"
+          ? `The claim was made less than ${minutes} minutes ago and what became of its merge is not known, so it expires only once it is older.`
+          : `The claim was made less than ${minutes} minutes ago; a merge sent just now may still land, so it is released only once it is older.`,
       row,
     };
   }
@@ -199,7 +252,7 @@ export async function releaseMergeClaim(
                 revision = revision + 1, updated_at = datetime('now')
           WHERE id = ? AND status = ? AND revision = ? AND ${cols.claimSha} = ?
             AND ${cols.mergeSha} IS NULL
-            AND ${cols.claimedAt} <= datetime('now', '-${CLAIM_RELEASE_MIN_AGE_MINUTES} minutes')`,
+            AND ${cols.claimedAt} <= datetime('now', '-${minutes} minutes')`,
       )
       .bind(id, row.status, row.revision, body.sha),
     db.prepare(AUDIT_IF_PREVIOUS_CHANGED_SQL).bind(
@@ -232,6 +285,88 @@ export async function releaseMergeClaim(
 }
 
 // ----------------------------------------------------------------------------
+// A held claim, checked before a merge is sent under it again
+// ----------------------------------------------------------------------------
+
+/** Whether a claim's stamp is young enough to send a merge under it again (`?` id). */
+const claimFreshSql = (claimedAt: string) =>
+  `SELECT CASE WHEN ${claimedAt} > datetime('now', '-${HELD_CLAIM_MAX_AGE_MINUTES} minutes') THEN 1 ELSE 0 END AS fresh
+     FROM upstream_repulls WHERE id = ?`;
+
+/**
+ * Whether a merge may be sent again under a claim already held (ADR 0111, decisions 6 and 7):
+ * the same fences the claim's own statement holds, read again now, because a claim made earlier
+ * says nothing of what changed since. The record at its gates-clear status with the claim naming
+ * `sha` and no merge recorded; the claim younger than {@link HELD_CLAIM_MAX_AGE_MINUTES} minutes
+ * (`claim-too-old` otherwise: release it through resume); the dataset fences (a mirror of its `ds`,
+ * not anonymous, not withdrawn, no import in flight); the identifier screen passing for `sha` for
+ * THIS administrator, so one administrator does not merge under another's acknowledgment (ADR
+ * 0086); and GitHub's live head at `sha`. Writes nothing.
+ */
+export async function checkHeldClaim(
+  env: Bindings,
+  admin: { id: number },
+  id: number,
+  body: z.infer<typeof claimCheckSchema>,
+): Promise<{ row: RepullRow } | RepullRefusal> {
+  const db = env.DB;
+  const row = await getRepull(db, id);
+  if (!row) return { status: 404, code: "not-found", message: `No re-pull #${id}.` };
+  const fence = envFenceRefusal(env, row.dataset_id);
+  if (fence) return fence;
+  const cols = PULL_REQUEST_COLUMNS[body.pr];
+  if (
+    row.status !== cols.gatesClear ||
+    row[cols.claimSha] === null ||
+    row[cols.mergeSha] !== null
+  ) {
+    return {
+      status: 409,
+      code: "no-claim",
+      message: `Re-pull #${id} holds no open claim to merge its ${body.pr} pull request (it is ${row.status}).`,
+      row,
+    };
+  }
+  if (row[cols.claimSha] !== body.sha) {
+    return {
+      status: 409,
+      code: "claim-mismatch",
+      message: `The claim names ${String(row[cols.claimSha]).slice(0, 12)}, not ${body.sha.slice(0, 12)}.`,
+      row,
+    };
+  }
+  const fresh = await db.prepare(claimFreshSql(cols.claimedAt)).bind(id).first<{ fresh: number }>();
+  if (fresh?.fresh !== 1) {
+    return {
+      status: 409,
+      code: "claim-too-old",
+      message: `The claim was made ${HELD_CLAIM_MAX_AGE_MINUTES} or more minutes ago, so no merge is sent under it: nemar admin repull resume reads GitHub and records the merge, or expires the claim once it is ${CLAIM_EXPIRE_MIN_AGE_MINUTES} minutes old.`,
+      row,
+    };
+  }
+  const fenced = await datasetFenceRefusal(db, row);
+  if (fenced) return { ...fenced, row };
+  const gate = await repullScreenGate(db, {
+    datasetId: row.dataset_id,
+    repullId: id,
+    pr: body.pr,
+    sha: body.sha,
+    actorId: admin.id,
+  });
+  if (!gate.ok) {
+    return {
+      status: 409,
+      code: "screen-not-clear",
+      message: `${gate.message} (gate: ${gate.gate})`,
+      row,
+    };
+  }
+  const moved = await liveHeadRefusal(env, row, body.pr, body.sha);
+  if (moved) return moved;
+  return { row };
+}
+
+// ----------------------------------------------------------------------------
 // Merged
 // ----------------------------------------------------------------------------
 
@@ -245,7 +380,10 @@ export interface MergedResult {
 
 /**
  * Record that the recorded pull request merged, from GitHub's own answer: `gates_clear` to
- * `merged` (or the N.0.1 twin) with GitHub's merge commit.
+ * `merged` (or the N.0.1 twin) with GitHub's merge commit. From `pr_open` too (or
+ * `patch_synthesized`): a pull request merged before its gates were recorded, on GitHub's page or
+ * by any other hand, held no claim and was merged at no screened head, so both counts say so;
+ * without this edge the row would stay open with a minted DOI behind it.
  */
 export async function recordRepullMerged(
   env: Bindings,
@@ -260,11 +398,11 @@ export async function recordRepullMerged(
   if (fence) return fence;
   const cols = PULL_REQUEST_COLUMNS[body.pr];
   const recorded = row[cols.mergeSha];
-  if (row.status !== cols.gatesClear && recorded === null) {
+  if (row.status !== cols.gatesClear && row.status !== cols.open && recorded === null) {
     return {
       status: 409,
       code: "bad-transition",
-      message: `A merge of the ${body.pr} pull request is recorded from ${cols.gatesClear}; re-pull #${id} is ${row.status}.`,
+      message: `A merge of the ${body.pr} pull request is recorded from ${cols.open} or ${cols.gatesClear}; re-pull #${id} is ${row.status}.`,
       row,
     };
   }
@@ -313,7 +451,7 @@ export async function recordRepullMerged(
     admin,
     row,
     {
-      from: cols.gatesClear,
+      from: row.status,
       to: cols.merged,
       fields: {
         [cols.mergeSha]: facts.mergeCommitSha,

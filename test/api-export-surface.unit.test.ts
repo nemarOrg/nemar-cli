@@ -102,8 +102,10 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "withdrawPublishRequest",
   ],
   data: [
+    "OBJECTS_PER_EXPLICIT_LOCK",
     "applyS3Lock",
     "getDatasetFiles",
+    "lockS3Objects",
     "requestDownloadCredentials",
     "requestUploadCredentials",
     "requestUploadUrls",
@@ -213,7 +215,20 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "zarrFidelitySweep",
   ],
   notices: ["NOTICE_LEVELS", "createNotice", "deleteNotice", "getNotices", "listAdminNotices"],
-  repull: ["createRepull", "getRepull", "listRepulls", "repullErrorCode", "transitionRepull"],
+  repull: [
+    "acknowledgeRepullScreen",
+    "checkRepullMergeClaim",
+    "createRepull",
+    "dispatchRepullScreen",
+    "getRepull",
+    "listRepullScreens",
+    "listRepulls",
+    "recordRepullMerged",
+    "recordRepullReleased",
+    "releaseRepullMergeClaim",
+    "repullErrorCode",
+    "transitionRepull",
+  ],
 };
 
 /** Exported only for sibling api/* modules; never part of the CLI surface. */
@@ -321,6 +336,15 @@ const POST_SPLIT_ADDITIONS = [
   "listRepulls", // #1912: GET /admin/repulls
   "transitionRepull", // #1912: POST /admin/repulls/:id/transition
   "repullErrorCode", // #1912: the closed word of a /admin/repulls refusal (rawBody.code)
+  "listRepullScreens", // #1912 phase 6f: GET /admin/repulls/:id/screens
+  "dispatchRepullScreen", // #1912 phase 6f: POST /admin/repulls/:id/screen
+  "acknowledgeRepullScreen", // #1912 phase 6f: POST /admin/repulls/:id/screen/acknowledge
+  "releaseRepullMergeClaim", // #1912 phase 6f: POST /admin/repulls/:id/merge-claim/release
+  "recordRepullMerged", // #1912 phase 6f: POST /admin/repulls/:id/merged
+  "recordRepullReleased", // #1912 phase 6f: POST /admin/repulls/:id/released
+  "checkRepullMergeClaim", // #1912 phase 6f: POST /admin/repulls/:id/merge-claim/check
+  "lockS3Objects", // #1912 phase 6f: POST /admin/datasets/:id/s3-lock with an explicit list
+  "OBJECTS_PER_EXPLICIT_LOCK", // #1912 phase 6f: the explicit lock's batch size
 ];
 
 /** The api.ts monolith's runtime surface, captured at #908 commit 1. */

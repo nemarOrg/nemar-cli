@@ -168,10 +168,13 @@ contributor back, which ADR 0107 settled).
 0093 (`nemar admin pr-reviews` lists the open dataset pull requests with the automated review: a verdict
 belongs to the commit it read, an approval is the administrator's OWN act from their machine with their
 own GitHub login and no Worker code path approves, a failing, running or unreadable review needs
-`--force`, nothing merges without `--merge` or a `y` in `nemar admin pr-reviews next`, both of which
-read GitHub's state before approving and need `clean`, each Worker lists only the datasets it
-owns, and an administrator runs a finished review again only with `start --redo`, which never
-supersedes a running one).
+`--force`, a NEMAR tool merges by three paths only: `pr-reviews approve --merge` and a `y` in
+`nemar admin pr-reviews next`, both of which read GitHub's state before approving and need
+`clean`, and, for an upstream re-pull's pull request only, `nemar admin repull merge`, which
+approves nothing; a re-pull's pull request merges through one gate all three share, which reads
+the record, `main`, the review, the identifier screen and GitHub's `clean`, then claims the daily
+merge cap (ADR 0111), each Worker lists only the datasets it owns, and an administrator runs a
+finished review again only with `start --redo`, which never supersedes a running one).
 0094 (the upload save step skips re-reading annexed content only once recorded annexed bytes reach
 1 GiB, only for files whose size and mtime still match the upload plan, and only while it can clear
 `assume-unchanged` safely; failures to verify or clear the state fail the save),

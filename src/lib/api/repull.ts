@@ -82,6 +82,132 @@ export async function transitionRepull(
   return res.repull;
 }
 
+/** One identifier screen of a re-pull's pull request, as the Worker shows it (counts, fixed words). */
+export interface RepullScreen {
+  pr: "n0" | "n1";
+  sha: string;
+  state: string | null;
+  /** `clear`, `acknowledge`, `blocks`, `wait` or `rerun` (`shared/identifier-screen-report.ts`). */
+  gate: string;
+  headline: string;
+  lines: string[];
+  dispatched_at: string;
+  reported_at: string | null;
+  waiting: boolean;
+  acknowledged_by: number | null;
+  acknowledged_at: string | null;
+}
+
+/** `GET /admin/repulls/:id/screens`: newest first; an `xx` dataset is exempt and has none. */
+export async function listRepullScreens(
+  id: number,
+): Promise<{ exempt: boolean; screens: RepullScreen[] }> {
+  return request<{ exempt: boolean; screens: RepullScreen[] }>(
+    `/admin/repulls/${id}/screens`,
+    {},
+    true,
+  );
+}
+
+/**
+ * `POST /admin/repulls/:id/screen`: dispatch the screen of the recorded head. A screen that already
+ * exists for the commit is the Worker's 409 `screen-exists`, which carries it.
+ */
+export async function dispatchRepullScreen(
+  id: number,
+  target: { pr: "n0" | "n1"; sha: string },
+): Promise<{ exempt: boolean; dispatched: boolean; screen: RepullScreen | null }> {
+  return request<{ exempt: boolean; dispatched: boolean; screen: RepullScreen | null }>(
+    `/admin/repulls/${id}/screen`,
+    { method: "POST", body: JSON.stringify(target) },
+    true,
+  );
+}
+
+/** `POST /admin/repulls/:id/screen/acknowledge`: the administrator's reason (ADR 0086). */
+export async function acknowledgeRepullScreen(
+  id: number,
+  body: { pr: "n0" | "n1"; sha: string; reason: string },
+): Promise<{ screen: RepullScreen }> {
+  return request<{ screen: RepullScreen }>(
+    `/admin/repulls/${id}/screen/acknowledge`,
+    { method: "POST", body: JSON.stringify(body) },
+    true,
+  );
+}
+
+/**
+ * `POST /admin/repulls/:id/merge-claim/release`: free a claim to merge whose merge was not sent,
+ * was refused, or (`expired`) whose outcome is not known and that is long past; the Worker reads
+ * GitHub itself and keeps a claim whose pull request merged.
+ */
+export async function releaseRepullMergeClaim(
+  id: number,
+  body: { pr: "n0" | "n1"; sha: string; outcome: "not_sent" | "refused" | "expired" },
+): Promise<RepullRow> {
+  const res = await request<{ repull: RepullRow }>(
+    `/admin/repulls/${id}/merge-claim/release`,
+    { method: "POST", body: JSON.stringify(body) },
+    true,
+  );
+  return res.repull;
+}
+
+/**
+ * `POST /admin/repulls/:id/merge-claim/check`: whether a merge may be sent again under a claim
+ * already held: the claim's age, the dataset fences, the screen for this administrator and the
+ * live head, read by the Worker. Writes nothing; a refusal throws with its word.
+ */
+export async function checkRepullMergeClaim(
+  id: number,
+  body: { pr: "n0" | "n1"; sha: string },
+): Promise<RepullRow> {
+  const res = await request<{ repull: RepullRow }>(
+    `/admin/repulls/${id}/merge-claim/check`,
+    { method: "POST", body: JSON.stringify(body) },
+    true,
+  );
+  return res.repull;
+}
+
+/** `POST /admin/repulls/:id/merged`: the Worker reads the merge on GitHub and records it. */
+export async function recordRepullMerged(
+  id: number,
+  pr: "n0" | "n1",
+): Promise<{
+  repull: RepullRow;
+  merged_outside_tool: boolean;
+  merged_unscreened_head: boolean;
+  replayed: boolean;
+}> {
+  return request(
+    `/admin/repulls/${id}/merged`,
+    { method: "POST", body: JSON.stringify({ pr }) },
+    true,
+  );
+}
+
+/**
+ * `POST /admin/repulls/:id/released`: the Worker reads the version row and the tag and records
+ * the release; `tree_verified` is the caller's assertion that the tagged tree is the synthesized
+ * one outside NEMAR's paths.
+ */
+export async function recordRepullReleased(
+  id: number,
+  body: { pr: "n0" | "n1"; tag_sha: string; tree_verified: boolean },
+): Promise<{
+  repull: RepullRow;
+  lineage_rows: number | null;
+  stamps_rearmed: number | null;
+  replayed: boolean;
+}> {
+  return request(
+    `/admin/repulls/${id}/released`,
+    { method: "POST", body: JSON.stringify(body) },
+    true,
+  );
+}
+
 /** The closed word of a `/admin/repulls` refusal (`rawBody.code`), or undefined. */
 export function repullErrorCode(err: unknown): string | undefined {
   if (!(err instanceof ApiError)) return undefined;

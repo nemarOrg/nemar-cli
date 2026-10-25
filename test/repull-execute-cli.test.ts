@@ -669,7 +669,7 @@ describe.skipIf(!awsInstalled)("execute through the pull request", () => {
     expect(body).toContain(`Upstream-Snapshot: ${UPSTREAM_ID}@${TAG_B}`);
     expect(body).toContain("Repull-Plan: sha256:");
     expect(body).toContain("never merges");
-    expect(body).toContain("merge path is not built yet");
+    expect(body).toContain(`nemar admin repull merge ${XX}`);
     // The two trailer lines the body tells the merger to end the squash message with are, line
     // for line, the trailers of the commit the pull request carries.
     const fenced = (body.split("```")[1] ?? "").trim().split("\n");

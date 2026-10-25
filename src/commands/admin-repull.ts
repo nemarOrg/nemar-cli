@@ -20,6 +20,12 @@
  *   nemar admin repull execute <plan-file>   the reviewed plan, executed on this machine through
  *                                            its pull request: record, prepare, copy, register,
  *                                            push, open (`lib/repull/execute/`); it never merges
+ *   nemar admin repull status <id>           what the record says (`lib/repull/status.ts`)
+ *   nemar admin repull resume <id>           past the open pull request: the head, main, the
+ *                                            identifier screen and the gates, then after the
+ *                                            merge the release and the lock (`lib/repull/
+ *                                            resume.ts`); it never merges
+ *   nemar admin repull merge <id>            the one merge gate (`lib/repull/merge.ts`)
  *   nemar admin repull canary                the real-bucket check of the copy's S3 calls on a
  *                                            scratch prefix (`lib/repull/canary.ts`)
  */
@@ -47,6 +53,8 @@ import { ExecuteRefused } from "../lib/repull/execute/verify-plan.js";
 import { type CatalogFacts, RepullCannotPlan, planRepull } from "../lib/repull/plan.js";
 import { countsMarkdown, preflightLines, summaryLines } from "../lib/repull/render.js";
 import { openNeuroGraphqlUrl as openNeuroUrlFromEnv } from "../lib/repull/sources.js";
+import { mergeCommand } from "./admin-repull-merge.js";
+import { resumeCommand, statusCommand } from "./admin-repull-resume.js";
 
 /** Exit codes: 0 executable, 3 planned but not executable, 1 nothing planned. */
 export const EXIT_NOT_EXECUTABLE = 3;
@@ -263,10 +271,11 @@ GitHub token (GH_TOKEN, else \`gh auth token\`) and the ambient short-lived AWS 
               every one present at its size;
   pr_open     release/v<N.0.0> pushed and its pull request into main opened.
 
-It never merges: a merge mints a version DOI that cannot be withdrawn. The re-pull merge path is
-not built yet, so the pull request is merged by an administrator once the identifier screen and
-the gates pass, with a squash message that ends with the pull request body's two trailers.
---until stops after a status; a later run takes the record up where it stopped.
+It never merges: a merge mints a version DOI that cannot be withdrawn. Past pr_open,
+\`nemar admin repull resume <id>\` takes the record through the identifier screen and the gates,
+and \`nemar admin repull merge <id>\` squash-merges it with a message that ends with the commit's two
+trailers, under the daily merge cap. --until stops after a status; a later run takes the record
+up where it stopped.
 
 The working directory, $NEMAR_CONFIG_DIR/repull/<id>/work/<digest8>/ (mode 0700), holds the
 delta's unscrubbed originals in a local commit until the pull request is open; it is removed then
@@ -275,7 +284,7 @@ unless --keep-workdir.
 Exit codes:
   0  the requested point was reached (pr_open, or --until).
   3  stopped, resumable: the record is as it was, with why in its last_error; run execute again
-     after fixing the cause. Resuming past pr_open and abandoning a re-pull are not built yet.
+     after fixing the cause (past pr_open, run resume). Abandoning a re-pull is not built yet.
   1  refused before anything was written (the plan, the dataset, a declined confirmation), or
      failed.`;
 
@@ -474,3 +483,7 @@ repullCommand
       }
     },
   );
+
+repullCommand.addCommand(statusCommand);
+repullCommand.addCommand(resumeCommand);
+repullCommand.addCommand(mergeCommand);

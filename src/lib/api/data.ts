@@ -168,3 +168,48 @@ export async function applyS3Lock(
 
   return { locked: totalLocked, failed: allFailed };
 }
+
+/** At most this many objects per call of the explicit lock (the Worker's batch size). */
+export const OBJECTS_PER_EXPLICIT_LOCK = 100;
+
+/**
+ * Lock exactly the named objects of a dataset, `<id>/objects/<key>` each, at their current
+ * versions (`POST /admin/datasets/:id/s3-lock` with `objects`), in batches the Worker takes. An
+ * upstream re-pull's release locks the objects its copy and its uploads wrote this way, and
+ * nothing else under the prefix (ADR 0111, decision 8). A 403 counts as locked only when the
+ * Worker read the object's retention back.
+ */
+export async function lockS3Objects(
+  datasetId: string,
+  keys: readonly string[],
+): Promise<{
+  locked: number;
+  failed: S3LockFailure[];
+  objects: Array<{ key: string; version_id: string | null }>;
+}> {
+  let locked = 0;
+  const failed: S3LockFailure[] = [];
+  const objects: Array<{ key: string; version_id: string | null }> = [];
+  for (let i = 0; i < keys.length; i += OBJECTS_PER_EXPLICIT_LOCK) {
+    const batch = keys.slice(i, i + OBJECTS_PER_EXPLICIT_LOCK);
+    const result = await request<
+      S3LockResponse & { objects?: Array<{ key: string; version_id: string | null }> }
+    >(
+      `/admin/datasets/${datasetId}/s3-lock`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ objects: batch }),
+      },
+      true,
+    );
+    // An answer that does not name each locked object is not a count of them.
+    if (!Array.isArray(result.objects)) {
+      throw new ApiError(500, "The s3-lock route did not name the objects it locked.");
+    }
+    locked += result.objects.length;
+    objects.push(...result.objects);
+    if (result.failed?.length) failed.push(...result.failed);
+  }
+  return { locked, failed, objects };
+}

@@ -1,8 +1,8 @@
 /**
  * What `nemar admin repull` tells an administrator (ADR 0111; epic #1046 phase 6, #1912): the
  * confirmation names only what the run will do up to `--until`, and no help, output or pull request
- * body names a command that does not exist (`repull merge`, `repull resume`, an abandon command are
- * not built; `plan`, `execute` and `canary` are).
+ * body names a command that does not exist (an abandon command is not built; `plan`, `execute`,
+ * `status`, `resume`, `merge` and `canary` are).
  */
 
 import { describe, expect, test } from "bun:test";
@@ -65,20 +65,41 @@ function helpOf(name: string): string {
 }
 
 describe("no text names a command that does not exist", () => {
-  test("the commands that exist are plan, execute and canary", () => {
+  test("the commands that exist are plan, execute, status, resume, merge and canary", () => {
     expect(repullCommand.commands.map((c) => c.name()).sort()).toEqual([
       "canary",
       "execute",
+      "merge",
       "plan",
+      "resume",
+      "status",
     ]);
   });
 
-  test("the execute help says the merge path, resume and abandon are not built", () => {
+  test("the execute help names resume and merge, and says abandon is not built", () => {
     const help = helpOf("execute");
-    expect(help).not.toMatch(/repull merge|repull resume|repull abandon|pr-reviews/);
-    expect(help).toContain("merge path is not built yet");
-    expect(help).toContain("not built yet");
-    expect(help).toContain("squash message that ends with the pull request body's two trailers");
+    expect(help).toContain("nemar admin repull resume <id>");
+    expect(help).toContain("nemar admin repull merge <id>");
+    expect(help).not.toMatch(/repull abandon/);
+    expect(help).toContain("Abandoning a re-pull is not built yet");
+    expect(help).toContain("a message that ends with the commit's two trailers");
+  });
+
+  test("the resume and merge help say what each writes, and that resume never merges", () => {
+    const resume = helpOf("resume");
+    expect(resume).toContain("It never merges");
+    expect(resume).toContain("--acknowledge-identifier-screen");
+    // It takes the record on after the merge too: the release, the lock and the end.
+    expect(resume).toContain("the release and the lock");
+    expect(resume).toContain("records the release");
+    expect(resume).toContain("locks the objects the copy and the uploads wrote");
+    expect(resume).toContain("and no other object under the dataset's prefix");
+    const merge = helpOf("merge");
+    expect(merge).toContain("squash-merges at the screened commit");
+    expect(merge).toContain("today's re-pull merge cap");
+    // A claim GitHub did not merge under is kept, never released after five minutes.
+    expect(merge).toContain("A merge GitHub did not make keeps its claim");
+    expect(merge).not.toMatch(/released after five minutes|five minutes old/);
   });
 
   test("the canary help names the scratch prefix and bucket rules", () => {
@@ -102,14 +123,17 @@ describe("the pull request body", () => {
     counts: { delta_paths: 3 },
   });
 
-  test("says the merge path is not built yet and names no command that does not exist", () => {
-    expect(body).toContain("merge path is not built yet");
-    expect(body).not.toMatch(/repull merge|repull resume|pr-reviews/);
+  test("names the commands that take it on and merge it, and none that does not exist", () => {
+    expect(body).toContain("nemar admin repull resume on004362");
+    expect(body).toContain("nemar admin repull merge on004362");
+    expect(body).toContain("nemar admin pr-reviews");
+    expect(body).not.toMatch(/repull abandon/);
   });
 
   test("states that the squash message must end with both trailers, then gives them", () => {
     expect(body).toContain("The squash commit message must end with both trailers");
     expect(body).toContain("as its last paragraph");
+    expect(body).toContain("the merge path writes that message itself");
     expect(body).toContain("Upstream-Snapshot: ds004362@1.1.0");
     expect(body).toContain(`Repull-Plan: sha256:${"ab".repeat(32)}`);
     expect(body).toContain("Do not merge this from GitHub's page.");
