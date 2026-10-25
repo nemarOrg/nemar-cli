@@ -5,34 +5,53 @@
  * version DOI, and the DOI's callback writes the version row. This waits for both, then records the
  * release through the Worker's verified route, which reads the version row and the tag itself:
  *
- *   merged    wait (bounded) for `refs/tags/v<N.0.0>` on NEMAR's origin and for the version row;
- *             the tagged tree is compared with the recorded synthesized tree outside `.nemar/**`
- *             and `.github/**` (the caller's `tree_verified`, which the Worker records as the
- *             administrator's assertion and which alone upgrades the version's lineage); then
- *             `merged -> released`, in whose batch the Worker re-arms the dataset's sweep stamps;
- *   released  N.0.0's objects locked under the governance lock with the existing s3-lock route
- *             (idempotent: run again, an object already locked stays locked), and only once every
- *             object was locked is the count recorded (`released -> released`). A lock that did
- *             not complete records why and leaves the row `released` without the count, which the
- *             Worker requires before the row goes on; the next run locks again. Then
- *             `released -> complete` when the plan had no corrections (its stated count is 0), or
- *             a stop: N.0.1 is a later slice's.
+ *   merged    the squash commit GitHub wrote on `main` is read back from origin: its message must
+ *             end with both of the re-pull commit's trailers as git reads them (`merge-trailers`
+ *             otherwise, the record left `merged`, loudly), because the privacy ledger's
+ *             fresh-clone proof reads them there; then wait (bounded) for `refs/tags/v<N.0.0>` on
+ *             NEMAR's origin and for the version row; the tagged tree is compared with the
+ *             recorded synthesized tree outside `.nemar/**` and `.github/**` (the caller's
+ *             `tree_verified`, which the Worker records as the administrator's assertion and which
+ *             alone upgrades the version's lineage); then `merged -> released`, in whose batch the
+ *             Worker re-arms the dataset's sweep stamps;
+ *   released  the objects N.0.0's copy and uploads wrote, and only those, locked under the
+ *             governance lock with the existing s3-lock route, named one by one (`objects`), never
+ *             the whole prefix: their keys come from the staging manifest the copy wrote, whose
+ *             digest must be the one recorded at `prepared`. The route counts a 403 as locked only
+ *             when it read the object's retention back. Only once every one of them is locked is
+ *             the count recorded (`released -> released`), and the Worker refuses a count below
+ *             what the record says the copy and uploads wrote. A lock that did not complete records
+ *             why and leaves the row `released` without the count; the next run locks again (an
+ *             object already locked stays locked). Then `released -> complete` when the plan had
+ *             no corrections (its stated count is 0), or a stop: N.0.1 is a later slice's.
  *
  * A tag that names another commit, a version row that does not come within the bound, or a
  * comparison GitHub cannot make leaves the row `merged`, with why recorded; this command never
  * mints, and the existing DOI tooling repairs a mint that failed.
  */
 
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import {
+  AwsCliError,
+  DEFAULT_TIMEOUT_MS,
+  cliCredentialSource,
+  createAwsRunner,
+  failureWord,
+} from "../../../scripts/scrub/s3/s3-lib.js";
 import type { RepullRow } from "../../../shared/repull-state.js";
-import { applyS3Lock } from "../api/data.js";
+import { lockS3Objects } from "../api/data.js";
 import { getVersionHistory } from "../api/datasets.js";
 import { ApiError } from "../api/errors.js";
 import { recordRepullReleased, repullErrorCode, transitionRepull } from "../api/repull.js";
+import { stagingManifestKey } from "./execute/copy.js";
 import { MOVED_REF_FETCH_DEPTH } from "./execute/head.js";
 import { type OriginScratch, fetchInto, originRefs } from "./execute/origin.js";
 import { releaseRefOf } from "./execute/pull-request.js";
 import { ExecuteRefused } from "./execute/verify-plan.js";
 import { git } from "./execute/workdir.js";
+import { nemarRemoteOf } from "./plan.js";
 import {
   type ResumeContext,
   type Turn,
@@ -41,6 +60,7 @@ import {
   refused,
   resumeErrorWords,
 } from "./steps.js";
+import { trailersProblem } from "./trailers.js";
 
 /** The entries of a tree outside NEMAR's own paths, `mode oid path` each, sorted. */
 async function outsideNemar(dir: string, commit: string): Promise<string | null> {
@@ -108,11 +128,52 @@ async function versionRowExists(datasetId: string, version: string): Promise<boo
   return history.versions.some((v) => v.version === version || v.version === `v${version}`);
 }
 
+/**
+ * The squash commit GitHub wrote must end with the re-pull commit's two trailers as git reads
+ * them: the gate checked the message it sent, and this checks the one GitHub committed (a host
+ * that appends a paragraph, a `Co-authored-by:` line of its own, would push them out of the last
+ * paragraph, and the privacy ledger's fresh-clone proof would then fail the dataset). A message
+ * that does not is `merge-trailers`, recorded on the row, which stays `merged`: the version may
+ * already be tagged and minted, and only an administrator can decide what follows. Unread is not
+ * a pass.
+ */
+async function assertMergeTrailers(
+  ctx: ResumeContext,
+  scratch: OriginScratch,
+  row: RepullRow,
+): Promise<void> {
+  const merge = row.merge_sha as string;
+  const fail = async (code: string, message: string) => {
+    const failure = refused(code, message);
+    await recordStepError(row, resumeErrorWords("release", failure), ctx.opts.out);
+    return failure;
+  };
+  if (!(await fetchInto(scratch, merge, 1))) {
+    throw await fail(
+      "merge-unreadable",
+      `The merge commit ${merge.slice(0, 12)} could not be fetched from NEMAR's repository, so its trailers were not read; nothing was recorded past merged.`,
+    );
+  }
+  const raw = await git(scratch.dir, ["cat-file", "commit", merge], { ok: true });
+  const split = raw.stdout.indexOf("\n\n");
+  const problem =
+    raw.exitCode !== 0 || split < 0
+      ? "its message could not be read"
+      : await trailersProblem(raw.stdout.slice(split + 2), row);
+  if (problem) {
+    throw await fail(
+      "merge-trailers",
+      `The merge commit ${merge.slice(0, 12)} on main does not end with the re-pull commit's two trailers (${problem}), so the privacy ledger's fresh-clone proof would not read it as the re-pull's commit. The record stays merged; an administrator decides what follows.`,
+    );
+  }
+}
+
 /** At `merged`: the tag and the version row, waited for, then the release recorded. */
 export async function releaseTurn(ctx: ResumeContext, row: RepullRow): Promise<Turn> {
   const version = row.to_version;
   const tag = `refs/tags/v${version}`;
   const scratch = await ctx.origin();
+  await assertMergeTrailers(ctx, scratch, row);
   let tagSha: string | undefined;
   try {
     tagSha = (await originRefs(scratch, [tag])).get(tag);
@@ -160,41 +221,131 @@ export async function releaseTurn(ctx: ResumeContext, row: RepullRow): Promise<T
   return { kind: "next", row: res.repull };
 }
 
+/**
+ * The keys of the objects N.0.0's copy and uploads wrote: the staging manifest the copy wrote to
+ * `<id>/staging/repull-<to_tag>.json` before its first copy, read with the ambient AWS
+ * credentials from the bucket NEMAR's git-annex branch names, whose digest must be the one the
+ * record holds from `prepared` (`manifest-mismatch`). Its copied keys and its uploaded keys, each
+ * once.
+ */
+async function writtenKeys(ctx: ResumeContext, row: RepullRow): Promise<string[]> {
+  const scratch = await ctx.origin();
+  if (!(await fetchInto(scratch, "refs/heads/git-annex", 1))) {
+    throw refused("origin-unreadable", "NEMAR's git-annex branch could not be fetched.");
+  }
+  const log = await git(
+    scratch.dir,
+    ["cat-file", "blob", "refs/remotes/origin/heads/git-annex:remote.log"],
+    { ok: true },
+  );
+  const remote = nemarRemoteOf(log.exitCode === 0 ? log.stdout : "", ctx.datasetId);
+  const bucket = remote.record?.bucket;
+  if (log.exitCode !== 0 || !remote.uuid || !bucket) {
+    throw refused("no-nemar-s3", "NEMAR's remote.log names no single nemar-s3 bucket.");
+  }
+  const env: Record<string, string> = {};
+  for (const [k, v] of Object.entries(ctx.env)) if (v !== undefined) env[k] = v;
+  const aws = createAwsRunner({
+    region: remote.region,
+    timeoutMs: DEFAULT_TIMEOUT_MS,
+    env,
+    credentials: cliCredentialSource({ commandEnv: env }),
+  });
+  const file = join(scratch.dir, "staging-manifest.json");
+  let read = false;
+  for (const tag of new Set([row.to_tag, `v${row.to_tag}`])) {
+    try {
+      await aws.api("get-object", [
+        "--bucket",
+        bucket,
+        "--key",
+        stagingManifestKey(ctx.datasetId, tag),
+        file,
+      ]);
+      read = true;
+      break;
+    } catch (err) {
+      if (!(err instanceof AwsCliError)) throw err;
+      if (err.code !== "not-found") {
+        throw refused(
+          "staging-unreadable",
+          `The staging manifest of re-pull #${row.id} could not be read (${failureWord(err)}); the ambient AWS credentials read it, as the copy wrote it.`,
+        );
+      }
+    }
+  }
+  if (!read) {
+    throw refused(
+      "staging-unreadable",
+      `The staging manifest of re-pull #${row.id} is not in NEMAR's bucket, so which objects its copy wrote is not known.`,
+    );
+  }
+  const bytes = readFileSync(file);
+  if (`sha256:${createHash("sha256").update(bytes).digest("hex")}` !== row.manifest_digest) {
+    throw refused(
+      "manifest-mismatch",
+      "The staging manifest in NEMAR's bucket is not the copy manifest recorded at prepared.",
+    );
+  }
+  const manifest = JSON.parse(bytes.toString("utf8")) as {
+    items?: Array<{ key?: unknown }>;
+    local?: Array<{ key?: unknown }>;
+  };
+  const keys = [...(manifest.items ?? []), ...(manifest.local ?? [])].map((i) => i.key);
+  if (!keys.every((k): k is string => typeof k === "string")) {
+    throw refused("manifest-mismatch", "The staging manifest names an object without a key.");
+  }
+  return [...new Set(keys)].sort();
+}
+
 /** At `released`: the lock, its count, then `complete` (or a stop: N.0.1 is not built). */
 export async function lockTurn(ctx: ResumeContext, row: RepullRow): Promise<Turn> {
   let current = row;
   if (typeof current.counts.locked !== "number") {
-    let locked: Awaited<ReturnType<typeof applyS3Lock>>;
+    const record = async (code: string, message: string) => {
+      const failure = refused(code, message);
+      await recordStepError(row, resumeErrorWords("lock", failure), ctx.opts.out);
+      return failure;
+    };
+    let keys: string[];
     try {
-      locked = await applyS3Lock(ctx.datasetId);
+      keys = await writtenKeys(ctx, row);
     } catch (err) {
-      const failure = refused(
+      if (err instanceof ExecuteRefused) throw await record(err.code, err.message);
+      throw err;
+    }
+    let locked: Awaited<ReturnType<typeof lockS3Objects>>;
+    try {
+      locked =
+        keys.length > 0
+          ? await lockS3Objects(ctx.datasetId, keys)
+          : { locked: 0, failed: [], objects: [] };
+    } catch (err) {
+      throw await record(
         "lock-failed",
         `The objects of v${row.to_version} could not be locked (${err instanceof ApiError ? `HTTP ${err.statusCode}` : "no answer"}); run resume again.`,
       );
-      await recordStepError(row, resumeErrorWords("lock", failure), ctx.opts.out);
-      throw failure;
     }
-    if (locked.failed.length > 0) {
+    const confirmed = new Set(locked.objects.map((o) => o.key));
+    const missing = keys.filter((k) => !confirmed.has(k)).length;
+    if (locked.failed.length > 0 || missing > 0) {
       // Counts only: the failures name object keys, and a record never holds a key.
-      const failure = refused(
+      throw await record(
         "lock-incomplete",
-        `${locked.failed.length} object(s) of ${ctx.datasetId} were not locked (${locked.locked} were); run resume again, which locks them again.`,
+        `${missing} of the ${keys.length} object(s) N.0.0's copy and uploads wrote were not locked (${keys.length - missing} were); run resume again, which locks them again.`,
       );
-      await recordStepError(row, resumeErrorWords("lock", failure), ctx.opts.out);
-      throw failure;
     }
     try {
       current = await transitionRepull(row.id, {
         from: "released",
         to: "released",
-        fields: { counts: { locked: locked.locked } },
+        fields: { counts: { locked: keys.length } },
       });
     } catch (err) {
       throw apiRefused(err, "The count of locked objects could not be recorded");
     }
     ctx.opts.out(
-      `Locked ${locked.locked} object(s) of ${ctx.datasetId} under the governance lock.`,
+      `Locked the ${keys.length} object(s) N.0.0's copy and uploads wrote under the governance lock.`,
     );
   }
   const corrections = current.counts.corrections;
