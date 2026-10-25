@@ -213,6 +213,7 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "zarrFidelitySweep",
   ],
   notices: ["NOTICE_LEVELS", "createNotice", "deleteNotice", "getNotices", "listAdminNotices"],
+  repull: ["createRepull", "getRepull", "listRepulls", "repullErrorCode", "transitionRepull"],
 };
 
 /** Exported only for sibling api/* modules; never part of the CLI surface. */
@@ -315,6 +316,11 @@ const POST_SPLIT_ADDITIONS = [
   "setMailTicketSummary", // epic #1893 phase 6a: `nemar admin mail summarize`, PUT /admin/mail/tickets/:id/summary
   "replyToMailTicket", // epic #1893 phase 4: `nemar admin mail`, routes in shared/contract/mail-admin.ts
   "setMailTicketStatus", // epic #1893 phase 4: `nemar admin mail`, routes in shared/contract/mail-admin.ts
+  "createRepull", // #1912, epic #1046 phase 6, ADR 0111 decision 3: POST /admin/repulls
+  "getRepull", // #1912: GET /admin/repulls/:id
+  "listRepulls", // #1912: GET /admin/repulls
+  "transitionRepull", // #1912: POST /admin/repulls/:id/transition
+  "repullErrorCode", // #1912: the closed word of a /admin/repulls refusal (rawBody.code)
 ];
 
 /** The api.ts monolith's runtime surface, captured at #908 commit 1. */

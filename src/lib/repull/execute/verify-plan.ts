@@ -182,6 +182,20 @@ function readReviewed(path: string): { file: Record<string, unknown>; body: Plan
 }
 
 /**
+ * The dataset and the digest a plan file names, proved as its body is in {@link readExecutablePlan}
+ * (and so refused the same way), for the caller that needs them before it plans: where the
+ * execution directory is and which catalog row to read.
+ */
+export function peekPlan(path: string): { datasetId: string; digest: string } {
+  const { file, body } = readReviewed(path);
+  const datasetId = str(body.dataset);
+  if (!datasetId || !/^[a-z]{2}\d{6}$/.test(datasetId)) {
+    throw new ExecuteRefused("plan-schema", "The plan names no dataset id.");
+  }
+  return { datasetId, digest: file.digest as string };
+}
+
+/**
  * Read the reviewed plan and make it again from live sources; refuse unless the live plan is the
  * reviewed one (or it differs by a `.nemar/**`-only move of `main`) and is executable now.
  */
