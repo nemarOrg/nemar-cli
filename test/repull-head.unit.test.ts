@@ -23,7 +23,7 @@ import {
   type HeadVerdict,
   enrichmentOnlySince,
 } from "../src/lib/repull/execute/head";
-import { checkMain } from "../src/lib/repull/execute/pull-request";
+import { checkMain, pushRelease } from "../src/lib/repull/execute/pull-request";
 import { ExecuteRefused } from "../src/lib/repull/execute/verify-plan";
 
 const ENV = {
@@ -279,5 +279,33 @@ describe("what the callers say of an unreadable head", () => {
     expect(await checkMain({ work: repo, baseSha: base, env: undefined })).toMatch(
       /^[0-9a-f]{40}$/,
     );
+  });
+
+  test("a release branch judged against a commit the clone lacks is branch-unreadable, and nothing is pushed", async () => {
+    // Origin's release branch holds a commit made elsewhere; the recorded synthesized commit is not
+    // in this clone (a lost or pruned working clone), so the clone cannot tell whose the branch is
+    // and must not call it foreign.
+    const origin = join(root, "origin.git");
+    g(root, "init", "-q", "--bare", "-b", "main", origin);
+    g(repo, "remote", "add", "origin", origin);
+    const elsewhere = join(root, "elsewhere");
+    mkdirSync(elsewhere);
+    g(elsewhere, "init", "-q", "-b", "main");
+    writeFileSync(join(elsewhere, "x.txt"), "x\n");
+    g(elsewhere, "add", "-A");
+    g(elsewhere, "commit", "-q", "-m", "x");
+    const held = g(elsewhere, "rev-parse", "HEAD");
+    const ref = "refs/heads/release/v2.0.0";
+    g(elsewhere, "push", "-q", origin, `${held}:${ref}`);
+    const refused = await pushRelease({
+      work: repo,
+      synthSha: "3".repeat(40),
+      version: "2.0.0",
+      push: { versions: ["2.0.0"] },
+      env: undefined,
+    }).catch((e) => e);
+    expect(refused).toBeInstanceOf(ExecuteRefused);
+    expect((refused as ExecuteRefused).code).toBe("branch-unreadable");
+    expect(g(origin, "rev-parse", ref)).toBe(held);
   });
 });
