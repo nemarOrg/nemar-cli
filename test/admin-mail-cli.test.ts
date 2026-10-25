@@ -450,9 +450,9 @@ describe("mail reply", () => {
     }
   });
 
-  test("502 reply_delivery_unknown says the key will never send and does not advise a retry", async () => {
+  test("409 reply_delivery_unknown says the key will never send and does not advise a retry", async () => {
     const server = startServer({
-      "POST /admin/mail/tickets/42/reply": () => err(502, "reply_delivery_unknown", "Unknown."),
+      "POST /admin/mail/tickets/42/reply": () => err(409, "reply_delivery_unknown", "Unknown."),
     });
     try {
       const r = await runCli(["reply", "42", "--text", "hi", "--yes"], server.url);
@@ -468,9 +468,26 @@ describe("mail reply", () => {
     }
   });
 
+  test("422 reply_not_sent advises a retry under the same key, decided by code and not status", async () => {
+    const server = startServer({
+      "POST /admin/mail/tickets/42/reply": () => err(422, "reply_not_sent", "Nothing was sent."),
+    });
+    try {
+      const r = await runCli(
+        ["reply", "42", "--text", "hi", "--yes", "--idempotency-key", "k-ns"],
+        server.url,
+      );
+      expect(r.exitCode).toBe(1);
+      expect(r.stderr).toContain("Nothing was sent");
+      expect(r.stderr).toContain("Retry with: --idempotency-key k-ns");
+    } finally {
+      server.stop();
+    }
+  });
+
   test("--json reports the failure as {error, code} on stderr, with the key it was sent under", async () => {
     const server = startServer({
-      "POST /admin/mail/tickets/42/reply": () => err(502, "reply_delivery_unknown", "Unknown."),
+      "POST /admin/mail/tickets/42/reply": () => err(409, "reply_delivery_unknown", "Unknown."),
     });
     try {
       const r = await runCli(

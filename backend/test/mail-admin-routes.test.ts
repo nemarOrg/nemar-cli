@@ -14,7 +14,7 @@ import { handleInboundEmail } from "../src/services/inbound-mail";
 import { buildReferences } from "../src/services/mail-admin";
 import { hashApiKey } from "../src/services/token";
 import type { Bindings, Variables } from "../src/types/bindings";
-import { bindingError, recordingBinding } from "./helpers/cloudflare-email";
+import { bindingError, headerRefusal, recordingBinding } from "./helpers/cloudflare-email";
 import { freshDb, realD1, wrapD1, yieldingD1 } from "./helpers/d1";
 import { withFakeResend } from "./helpers/resend";
 import { eml } from "./helpers/tickets";
@@ -311,12 +311,15 @@ describe("reply", () => {
     const sent = binding.sent[0];
     const ref = row(t).ref as string;
     expect(sent.from).toEqual({ email: "support@nemar.org", name: "NEMAR Support" });
-    expect(sent.replyTo).toBe(`support+t${ref}@nemar.org`);
+    expect(sent.replyTo).toBe(`support+t${ref}@nemar.org`); // a legacy ten-character ref
     expect(sent.to).toBe("ada@sender.example");
     expect(sent.subject).toBe("Re: Help with an upload");
     expect(sent.headers?.["In-Reply-To"]).toBe("<second@sender.example>");
     expect(sent.headers?.References).toBe("<first@sender.example> <second@sender.example>");
-    expect(sent.headers?.["Message-ID"]).toMatch(/^<[0-9a-f-]{36}@nemar\.org>$/);
+    // The platform controls Message-ID: the reply never sets it, and every header it does set
+    // passes the Cloudflare allowlist (the recorder refuses the send otherwise).
+    expect(Object.keys(sent.headers ?? {}).map((h) => h.toLowerCase())).not.toContain("message-id");
+    expect(headerRefusal(sent.headers)).toBeUndefined();
     expect(sent.html).toContain("&lt;b&gt;two&lt;/b&gt;");
     expect(sent.html).not.toContain("<b>two");
 
@@ -324,7 +327,8 @@ describe("reply", () => {
       .query("SELECT * FROM mail_messages WHERE ticket_id = ? AND direction = 'out'")
       .get(t) as Record<string, any>;
     expect(out.author_user_id).toBe(ids.agent);
-    expect(out.message_id).toBe(sent.headers?.["Message-ID"]);
+    expect(out.message_id).toBe("<1.recorded@staging.nemar.test>");
+    expect(r.body.header_message_id).toBe("<1.recorded@staging.nemar.test>");
     expect(out.from_addr).toBe("support@nemar.org");
     expect(row(t).status).toBe("pending");
     expect(events(t).map((e) => [e.kind, e.actor_user_id])).toEqual([
@@ -336,8 +340,41 @@ describe("reply", () => {
     const next = await call("admin", "POST", `/tickets/${t}/reply`, { text: "again" });
     expect(next.status).toBe(200);
     expect(binding.sent[1].headers?.References).toBe(
-      `<first@sender.example> <second@sender.example> ${sent.headers?.["Message-ID"]}`,
+      "<first@sender.example> <second@sender.example> <1.recorded@staging.nemar.test>",
     );
+  });
+
+  test("a word-ref ticket replies to support+t-<ref>@, which threads the answer back", async () => {
+    const t = ticket();
+    db.run("UPDATE mail_tickets SET ref = 'amber-falcon-river' WHERE id = ?", [t]);
+    const r = await call("admin", "POST", `/tickets/${t}/reply`, { text: "hi" });
+    expect(r.status).toBe(200);
+    expect(binding.sent[0].replyTo).toBe("support+t-amber-falcon-river@nemar.org");
+  });
+
+  test("a provider id that is not a Message-ID is stored as NULL, and the plus-tag still threads", async () => {
+    envOverrides = { EMAIL: { send: async () => ({ messageId: "0192-opaque-provider-id" }) } };
+    const t = ticket();
+    const r = await call("admin", "POST", `/tickets/${t}/reply`, { text: "hi" });
+    expect(r.status).toBe(200);
+    expect(r.body.header_message_id).toBeNull();
+    const out = db
+      .query("SELECT message_id FROM mail_messages WHERE ticket_id = ? AND direction = 'out'")
+      .get(t) as { message_id: string | null };
+    expect(out.message_id).toBeNull();
+    expect(r.body.message_id).toBeGreaterThan(0);
+  });
+
+  test("a bare provider id is stored in angle brackets", async () => {
+    const bare = { send: async () => ({ messageId: "bare.id@mail.example" }) };
+    envOverrides = { EMAIL: bare };
+    const t = ticket();
+    const r = await call("admin", "POST", `/tickets/${t}/reply`, { text: "hi" });
+    expect(r.body.header_message_id).toBe("<bare.id@mail.example>");
+    const out = db
+      .query("SELECT message_id FROM mail_messages WHERE ticket_id = ? AND direction = 'out'")
+      .get(t) as { message_id: string };
+    expect(out.message_id).toBe("<bare.id@mail.example>");
   });
 
   test("staging derives its domain from FROM_EMAIL and wraps the subject", async () => {
@@ -361,7 +398,7 @@ describe("reply", () => {
     envOverrides = { ENVIRONMENT: "development", DEV_EMAIL_ALLOWLIST: "someone@else.example" };
     const t = ticket();
     const r = await call("admin", "POST", `/tickets/${t}/reply`, { text: "hi" });
-    expect(r.status).toBe(502);
+    expect(r.status).toBe(422);
     expect(r.body.code).toBe("reply_not_sent");
     expect(JSON.stringify(r.body)).not.toContain("ada@sender");
     expect(binding.sent.length).toBe(0);
@@ -374,7 +411,7 @@ describe("reply", () => {
     binding = recordingBinding(() => bindingError("E_RECIPIENT_SUPPRESSED", "suppressed"));
     const t = ticket();
     const r = await call("admin", "POST", `/tickets/${t}/reply`, { text: "hi" });
-    expect(r.status).toBe(502);
+    expect(r.status).toBe(422);
     expect(r.body.code).toBe("reply_not_sent");
     expect(db.query("SELECT COUNT(*) AS n FROM mail_messages").get()).toEqual({ n: 0 });
     expect(events(t)).toEqual([]);
@@ -384,7 +421,7 @@ describe("reply", () => {
     binding = recordingBinding(() => bindingError("E_INTERNAL_SERVER_ERROR", "boom"));
     const t = ticket();
     const r = await call("admin", "POST", `/tickets/${t}/reply`, { text: "hi" });
-    expect(r.status).toBe(502);
+    expect(r.status).toBe(409);
     expect(r.body.code).toBe("reply_delivery_unknown");
     expect(db.query("SELECT COUNT(*) AS n FROM mail_messages").get()).toEqual({ n: 0 });
     const [event] = events(t);
@@ -392,18 +429,19 @@ describe("reply", () => {
     expect(event.actor_user_id).toBe(ids.admin);
     const detail = JSON.parse(event.detail ?? "{}");
     expect(detail.delivery).toBe("unknown");
-    expect(detail.header_message_id).toBe(binding.sent[0].headers?.["Message-ID"]);
+    expect(detail.header_message_id).toBeNull();
     expect(row(t).status).toBe("open");
   });
 
-  test("Resend carries the headers when it is the provider", async () => {
+  test("Resend sends the reply with no Message-ID header when it is the provider", async () => {
     envOverrides = { EMAIL_PROVIDER: "resend", EMAIL: undefined };
     const t = ticket();
     await withFakeResend(async (calls) => {
       const r = await call("admin", "POST", `/tickets/${t}/reply`, { text: "hi" });
       expect(r.status).toBe(200);
-      const body = calls[0].body as { headers: Record<string, string>; reply_to: string };
-      expect(body.headers["Message-ID"]).toMatch(/@nemar\.org>$/);
+      const body = calls[0].body as { headers?: Record<string, string>; reply_to: string };
+      // A ticket with no inbound Message-ID has nothing to thread by, and no Message-ID is set.
+      expect(body.headers).toBeUndefined();
       expect(body.reply_to).toStartWith("support+t");
     });
   });
@@ -463,7 +501,7 @@ describe("long threads", () => {
     const t = ticket();
     inbound(t, `<${"y".repeat(997)}>`);
     const r = await call("admin", "POST", `/tickets/${t}/reply`, { text: "hi" });
-    expect(r.status).toBe(502);
+    expect(r.status).toBe(422);
     expect(r.body.code).toBe("reply_not_sent");
     expect(binding.sent.length).toBe(0);
     expect(events(t)).toEqual([]);
@@ -525,7 +563,7 @@ describe("reply idempotency and recording faults", () => {
       "UPDATE mail_reply_keys SET created_at = datetime('now', '-10 minutes') WHERE idem_key = 'k-2'",
     );
     const stale = await send("agent", t, "k-2");
-    expect([stale.status, stale.body.code]).toEqual([502, "reply_delivery_unknown"]);
+    expect([stale.status, stale.body.code]).toEqual([409, "reply_delivery_unknown"]);
     expect(binding.sent.length).toBe(0);
   });
 
@@ -542,7 +580,7 @@ describe("reply idempotency and recording faults", () => {
     const t = ticket();
     expect((await send("agent", t, "k-4")).body.code).toBe("reply_delivery_unknown");
     const retry = await send("agent", t, "k-4");
-    expect([retry.status, retry.body.code]).toEqual([502, "reply_delivery_unknown"]);
+    expect([retry.status, retry.body.code]).toEqual([409, "reply_delivery_unknown"]);
     expect(binding.sent.length).toBe(1);
 
     let refuse = true;
@@ -554,14 +592,14 @@ describe("reply idempotency and recording faults", () => {
     expect(binding.sent.length).toBe(2);
   });
 
-  test("if the event write fails too, the 502 and its clear text still come back", async () => {
+  test("if the event write fails too, the 409 and its clear text still come back", async () => {
     binding = recordingBinding(() => bindingError("E_INTERNAL_SERVER_ERROR", "boom"));
     db.run(
       "CREATE TRIGGER no_failed_events BEFORE INSERT ON mail_ticket_events WHEN NEW.kind = 'reply_failed' BEGIN SELECT RAISE(ABORT, 'disk'); END",
     );
     const t = ticket();
     const r = await send("agent", t, "k-6");
-    expect([r.status, r.body.code]).toEqual([502, "reply_delivery_unknown"]);
+    expect([r.status, r.body.code]).toEqual([409, "reply_delivery_unknown"]);
     expect(r.body.error).toContain("may or may not have gone out");
     expect(events(t)).toEqual([]);
   });
@@ -572,16 +610,16 @@ describe("reply idempotency and recording faults", () => {
     );
     const t = ticket();
     const r = await send("agent", t, "k-7");
-    expect([r.status, r.body.code]).toEqual([502, "reply_delivery_unknown"]);
+    expect([r.status, r.body.code]).toEqual([409, "reply_delivery_unknown"]);
     expect(r.body.error).toContain("Do not send it again");
     expect(binding.sent.length).toBe(1);
     const [event] = events(t);
     expect(event.kind).toBe("reply_failed");
     expect(JSON.parse(event.detail ?? "{}")).toEqual({
       delivery: "sent_unrecorded",
-      header_message_id: binding.sent[0].headers?.["Message-ID"],
+      header_message_id: "<1.recorded@staging.nemar.test>",
     });
-    expect((await send("agent", t, "k-7")).status).toBe(502);
+    expect((await send("agent", t, "k-7")).status).toBe(409);
     expect(binding.sent.length).toBe(1);
   });
 });
@@ -825,7 +863,7 @@ describe("escalate", () => {
     expect(binding.sent.length).toBe(1);
     expect(binding.sent[0].to).toBe("mail-owner2@example.org");
     expect(binding.sent[0].subject).toBe(
-      "[NEMAR support] Escalated " + row(t).ref + ": Broken <upload>",
+      `[NEMAR support] Escalated ${row(t).ref}: Broken <upload>`,
     );
     expect(binding.sent[0].html).toContain("Broken &lt;upload&gt;");
     expect(binding.sent[0].html).toContain("needs an owner &lt;now&gt;");
@@ -1045,9 +1083,7 @@ describe("review round 1: reprocess, counts, reopen, ids", () => {
     });
     // A trigger stands in for an exclusion present at creation: the new ticket excludes the caller.
     db.run(
-      "CREATE TRIGGER excl AFTER INSERT ON mail_tickets BEGIN UPDATE mail_tickets SET excluded_user_id = " +
-        ids.owner2 +
-        " WHERE id = NEW.id; END",
+      `CREATE TRIGGER excl AFTER INSERT ON mail_tickets BEGIN UPDATE mail_tickets SET excluded_user_id = ${ids.owner2} WHERE id = NEW.id; END`,
     );
     const r = await call("owner2", "POST", "/reprocess", { raw_key: key });
     expect(r.status).toBe(404);
@@ -1140,7 +1176,7 @@ describe("reprocess", () => {
     );
   });
 
-  test("a missing key is 404, a malformed one 400, and no bucket is 503", async () => {
+  test("a missing key is 404, a malformed one 400, and no bucket is 409", async () => {
     const absent = "inbound/raw/2026/10/24/aaaaaaaa-1111-4222-8333-444455556666.eml";
     expect((await call("owner", "POST", "/reprocess", { raw_key: absent })).status).toBe(404);
     expect((await call("owner", "POST", "/reprocess", { raw_key: "../etc/passwd" })).status).toBe(

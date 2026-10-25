@@ -7,7 +7,7 @@
  * already stored short-circuits to `duplicate`, and a concurrent second insert that loses the
  * unique constraint is re-checked and reported as `duplicate` too.
  *
- * Threading finds a candidate ticket by the `+t<ref>` plus tag of the recipient, then by
+ * Threading finds a candidate ticket by the `+t-<ref>` plus tag (legacy `+t<ten base32>` too) of the recipient, then by
  * `In-Reply-To` and `References` matched against stored Message-IDs (the oldest holder of an id
  * wins). Finding a candidate is not permission to append to it. The message is appended only when
  * ALL of these hold; otherwise it opens a new ticket whose `created` event records the
@@ -33,6 +33,7 @@ import {
   isRestrictedQueue,
   resolveAssignee,
 } from "./ticket-assignment";
+import { TICKET_WORDS } from "./ticket-words";
 
 /** The stored body is clamped to this many UTF-8 bytes. */
 export const TEXT_BODY_MAX_BYTES = 64 * 1024;
@@ -80,21 +81,36 @@ export interface IngestResult {
   spam: boolean;
 }
 
-/** A ticket reference as it appears after the `+` of a plus address: `t` and ten base32 characters. */
-const REF_TAG = /^t([a-z2-7]{10})$/;
-const BASE32 = "abcdefghijklmnopqrstuvwxyz234567";
-
-/** A new short random lowercase base32 ticket reference (50 bits). */
-export function newTicketRef(): string {
-  const bytes = crypto.getRandomValues(new Uint8Array(10));
-  let ref = "";
-  for (const b of bytes) ref += BASE32[b & 31];
-  return ref;
+/**
+ * A ticket reference as it appears after the `+` of a plus address: `t-` and three lowercase words
+ * (`t-amber-falcon-river`), or the legacy form, `t` and ten base32 characters. Parsing does not
+ * check the words against the list: the lookup is by exact stored value, and a legacy ticket keeps
+ * its legacy reference for good.
+ */
+const REF_TAG = /^(?:t([a-z2-7]{10})|t-([a-z]{1,16}-[a-z]{1,16}-[a-z]{1,16}))$/;
+/** The legacy stored reference: ten base32 characters, no `t`. */
+const LEGACY_REF = /^[a-z2-7]{10}$/;
+/** Uniform random integer in [0, n) by rejection sampling over 16 bits, so there is no modulo bias. */
+function randomBelow(n: number): number {
+  const limit = Math.floor(0x10000 / n) * n;
+  const buf = new Uint16Array(1);
+  for (;;) {
+    crypto.getRandomValues(buf);
+    if (buf[0] < limit) return buf[0] % n;
+  }
 }
 
-/** The plus-address token that threads a reply to ticket `ref`: `support+t<ref>@domain`. */
+/** A new ticket reference: three words from {@link TICKET_WORDS} joined by `-` (about 31 bits). */
+export function newTicketRef(): string {
+  return [0, 1, 2].map(() => TICKET_WORDS[randomBelow(TICKET_WORDS.length)]).join("-");
+}
+
+/**
+ * The plus-address token that threads a reply to ticket `ref`: `support+t-<ref>@domain`, or
+ * `support+t<ref>@domain` for a legacy reference.
+ */
 export function ticketPlusTag(ref: string): string {
-  return `t${ref}`;
+  return LEGACY_REF.test(ref) ? `t${ref}` : `t-${ref}`;
 }
 
 const domainOf = (address: string): string => address.split("@")[1]?.toLowerCase() ?? "";
@@ -233,10 +249,11 @@ const HEAD_COLUMNS =
 
 async function findByRef(db: D1Database, plus: string): Promise<TicketHead | null> {
   const m = REF_TAG.exec(plus);
-  if (!m) return null;
+  const ref = m?.[1] ?? m?.[2];
+  if (!ref) return null;
   return db
     .prepare(`SELECT ${HEAD_COLUMNS} FROM mail_tickets t WHERE t.ref = ?`)
-    .bind(m[1])
+    .bind(ref)
     .first<TicketHead>();
 }
 
@@ -318,11 +335,12 @@ async function existingByRawKey(db: D1Database, rawKey: string): Promise<IngestR
 export async function ingestInboundMessage(
   db: D1Database,
   input: InboundTicketInput,
+  options: IngestOptions = {},
 ): Promise<IngestResult> {
   const already = await existingByRawKey(db, input.rawKey);
   if (already) return already;
   try {
-    return await ingestNew(db, input);
+    return await ingestNew(db, input, options);
   } catch (error) {
     // A concurrent ingest of the same key won the unique raw_key constraint and this batch
     // rolled back whole; that is a duplicate, not a failure.
@@ -332,7 +350,27 @@ export async function ingestInboundMessage(
   }
 }
 
-async function ingestNew(db: D1Database, input: InboundTicketInput): Promise<IngestResult> {
+/** `newRef` replaces the reference source; a test uses it to force a collision. */
+export interface IngestOptions {
+  newRef?: () => string;
+}
+
+/** Fresh references tried when one collides with an existing ticket's, before giving up. */
+const REF_ATTEMPTS = 5;
+
+/** Whether a failed batch lost the unique index on the ticket reference (and so wrote nothing). */
+function isRefCollision(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    /UNIQUE constraint failed: mail_tickets\.ref|idx_mail_tickets_ref/.test(error.message)
+  );
+}
+
+async function ingestNew(
+  db: D1Database,
+  input: InboundTicketInput,
+  options: IngestOptions,
+): Promise<IngestResult> {
   const parsed = await PostalMime.parse(input.raw);
   const fromAddr = singleLine(
     clampUtf8Bytes(
@@ -534,58 +572,72 @@ async function ingestNew(db: D1Database, input: InboundTicketInput): Promise<Ing
     ? null
     : await resolveAssignee(db, queueTag, { restricted: queueRestricted }, input.receivedAt);
   const status = spam ? "spam" : "open";
-  const ref = newTicketRef();
-
-  const statements: D1PreparedStatement[] = [
-    db
-      .prepare(
-        `INSERT INTO mail_tickets (ref, queue_tag, restricted, status, assignee_user_id,
+  const buildStatements = (ref: string): D1PreparedStatement[] => {
+    const statements: D1PreparedStatement[] = [
+      db
+        .prepare(
+          `INSERT INTO mail_tickets (ref, queue_tag, restricted, status, assignee_user_id,
             requester_email, requester_user_id, subject, created_at, updated_at, last_message_at,
             last_activity_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .bind(
-        ref,
-        queueTag,
-        queueRestricted ? 1 : 0,
-        status,
-        assignee,
-        fromAddr,
-        requesterUserId,
-        subject,
-        created,
-        created,
-        created,
-        created,
-      ),
-    messageInsert("(SELECT id FROM mail_tickets WHERE ref = ?)", [ref]),
-    db
-      .prepare(
-        `INSERT INTO mail_ticket_events (ticket_id, kind, actor_user_id, detail, created_at)
-         VALUES ((SELECT id FROM mail_tickets WHERE ref = ?), 'created', NULL, ?, ?)`,
-      )
-      .bind(ref, JSON.stringify({ queue: queueTag, spam, ...(declined ?? {}) }), created),
-  ];
-  if (assignee !== null) {
-    statements.push(
+        )
+        .bind(
+          ref,
+          queueTag,
+          queueRestricted ? 1 : 0,
+          status,
+          assignee,
+          fromAddr,
+          requesterUserId,
+          subject,
+          created,
+          created,
+          created,
+          created,
+        ),
+      messageInsert("(SELECT id FROM mail_tickets WHERE ref = ?)", [ref]),
       db
         .prepare(
           `INSERT INTO mail_ticket_events (ticket_id, kind, actor_user_id, detail, created_at)
+         VALUES ((SELECT id FROM mail_tickets WHERE ref = ?), 'created', NULL, ?, ?)`,
+        )
+        .bind(ref, JSON.stringify({ queue: queueTag, spam, ...(declined ?? {}) }), created),
+    ];
+    if (assignee !== null) {
+      statements.push(
+        db
+          .prepare(
+            `INSERT INTO mail_ticket_events (ticket_id, kind, actor_user_id, detail, created_at)
            VALUES ((SELECT id FROM mail_tickets WHERE ref = ?), 'assigned', NULL, ?, ?)`,
-        )
-        .bind(ref, JSON.stringify({ to: assignee, reason: "queue" }), created),
-    );
+          )
+          .bind(ref, JSON.stringify({ to: assignee, reason: "queue" }), created),
+      );
+    }
+    for (const tag of tags) {
+      statements.push(
+        db
+          .prepare(
+            "INSERT OR IGNORE INTO mail_ticket_tags (ticket_id, tag) VALUES ((SELECT id FROM mail_tickets WHERE ref = ?), ?)",
+          )
+          .bind(ref, tag),
+      );
+    }
+    return statements;
+  };
+
+  // The reference is about 31 bits, so a collision is rare but possible. The batch is atomic: a
+  // collision on the unique index writes nothing, and the retry rebuilds every statement around a
+  // fresh reference, so no message, event or tag is ever inserted twice.
+  let ref = "";
+  for (let attempt = 1; ; attempt++) {
+    ref = (options.newRef ?? newTicketRef)();
+    try {
+      await db.batch(buildStatements(ref));
+      break;
+    } catch (error) {
+      if (!isRefCollision(error) || attempt >= REF_ATTEMPTS) throw error;
+    }
   }
-  for (const tag of tags) {
-    statements.push(
-      db
-        .prepare(
-          "INSERT OR IGNORE INTO mail_ticket_tags (ticket_id, tag) VALUES ((SELECT id FROM mail_tickets WHERE ref = ?), ?)",
-        )
-        .bind(ref, tag),
-    );
-  }
-  await db.batch(statements);
   const row = await db
     .prepare("SELECT id FROM mail_tickets WHERE ref = ?")
     .bind(ref)

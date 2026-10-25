@@ -306,7 +306,7 @@ export function registerMailRoutes(admin: AdminRouter): void {
       const bucket = c.env.MAIL_INBOUND;
       if (!bucket) {
         throw new MailAdminError(
-          503,
+          409,
           "inbound_not_configured",
           "This Worker has no inbound mail bucket.",
         );

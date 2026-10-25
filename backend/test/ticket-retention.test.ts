@@ -22,7 +22,7 @@ import {
   purgeOneTicket,
   retentionDays,
 } from "../src/services/ticket-retention";
-import { ingestInboundMessage } from "../src/services/tickets";
+import { ingestInboundMessage, ticketPlusTag } from "../src/services/tickets";
 import { hashApiKey } from "../src/services/token";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { recordingBinding } from "./helpers/cloudflare-email";
@@ -525,9 +525,13 @@ describe("inbound mail after a purge", () => {
     await purgeExpiredTickets(env(), new Date("2026-10-24T12:00:00Z"));
     const result = await ingestInboundMessage(realD1(db), {
       rawKey: "inbound/raw/2026/10/24/3c9d8f3e-1111-4222-8333-444455556666.eml",
-      raw: eml({ from: "ada@sender.example", to: `support+t${ref}@nemar.org`, subject: "Again" }),
+      raw: eml({
+        from: "ada@sender.example",
+        to: `support+${ticketPlusTag(ref)}@nemar.org`,
+        subject: "Again",
+      }),
       envelopeFrom: "ada@sender.example",
-      envelopeTo: `support+t${ref}@nemar.org`,
+      envelopeTo: `support+${ticketPlusTag(ref)}@nemar.org`,
       receivedAt: new Date("2026-10-24T12:00:00Z"),
     });
     expect(result.outcome).toBe("created");
@@ -587,9 +591,13 @@ describe("review round 1: failure isolation, activity, races", () => {
     const ref = row(inbound).ref as string;
     await ingestInboundMessage(realD1(db), {
       rawKey: "inbound/raw/2026/10/24/4c9d8f3e-1111-4222-8333-444455556666.eml",
-      raw: eml({ from: "ada@sender.example", to: `support+t${ref}@nemar.org`, subject: "More" }),
+      raw: eml({
+        from: "ada@sender.example",
+        to: `support+${ticketPlusTag(ref)}@nemar.org`,
+        subject: "More",
+      }),
       envelopeFrom: "ada@sender.example",
-      envelopeTo: `support+t${ref}@nemar.org`,
+      envelopeTo: `support+${ticketPlusTag(ref)}@nemar.org`,
       receivedAt: new Date(),
     });
     for (const t of [note, status, assign, escalate, inbound]) {
@@ -721,9 +729,13 @@ describe("review round 1: failure isolation, activity, races", () => {
     const ref = row(t).ref as string;
     const result = await ingestInboundMessage(racing(purgeNow(t)), {
       rawKey: "inbound/raw/2026/10/24/5c9d8f3e-1111-4222-8333-444455556666.eml",
-      raw: eml({ from: "ada@sender.example", to: `support+t${ref}@nemar.org`, subject: "Again" }),
+      raw: eml({
+        from: "ada@sender.example",
+        to: `support+${ticketPlusTag(ref)}@nemar.org`,
+        subject: "Again",
+      }),
       envelopeFrom: "ada@sender.example",
-      envelopeTo: `support+t${ref}@nemar.org`,
+      envelopeTo: `support+${ticketPlusTag(ref)}@nemar.org`,
       receivedAt: new Date("2026-10-24T12:00:00Z"),
     });
     expect(result.outcome).toBe("created");
