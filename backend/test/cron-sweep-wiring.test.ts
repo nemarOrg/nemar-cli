@@ -632,6 +632,57 @@ describe("fetchAndSyncDataPapers is wired into the daily cron (outside the sweep
 });
 
 /**
+ * `purgeExpiredTickets` (epic #1893 phase 6a, ADR 0112) deletes support tickets past
+ * `MAIL_RETENTION_DAYS`, keeping each one's summary. It is not sweep-shaped, so it gets targeted
+ * assertions like `fetchAndSyncDataPapers`. It is allowed on the dev cron because it reads and
+ * writes only the calling env's own mail tables: no mail, no GitHub, no DOI, no R2.
+ */
+describe("purgeExpiredTickets is wired into the daily cron (outside the sweep framework)", () => {
+  const NAME = "purgeExpiredTickets";
+
+  test("is declared in the DEV_CRON_ALLOWLIST named constant in index.ts", () => {
+    const allowlist = /DEV_CRON_ALLOWLIST[^;]*;/s.exec(allCode)?.[0] ?? "";
+    expect(allowlist).toContain(`"${NAME}"`);
+  });
+
+  test("is called at least once in scheduled()", () => {
+    expect(callCount(allCode, NAME)).toBeGreaterThanOrEqual(1);
+  });
+
+  test("is wrapped in ctx.waitUntil", () => {
+    expect(isScheduled(allCode, NAME)).toBe(true);
+  });
+
+  test("is called OUTSIDE the prod-only block, so it also runs on the dev cron", () => {
+    expect(callCount(prodOnlyCode, NAME)).toBe(0);
+    expect(callCount(allCode, NAME)).toBeGreaterThan(callCount(prodOnlyCode, NAME));
+  });
+
+  test("its own ctx.waitUntil call contains its own .catch", () => {
+    const body = waitUntilBody(allCode, `${NAME}(env)`);
+    expect(body).toContain(".catch(");
+  });
+
+  test("the service neither sends mail nor reaches R2, GitHub or the DOI registrar", () => {
+    const src = readFileSync(join(SERVICES_DIR, "ticket-retention.ts"), "utf-8");
+    const code = src
+      .split("\n")
+      .filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l))
+      .join("\n");
+    for (const forbidden of [
+      "sendEmail",
+      "MAIL_INBOUND",
+      "S3_BUCKET",
+      "github",
+      "ezid",
+      "fetch(",
+    ]) {
+      expect(code.toLowerCase()).not.toContain(forbidden.toLowerCase());
+    }
+  });
+});
+
+/**
  * The text inside the `ctx.waitUntil( ... )` call that directly wraps `call`,
  * found by matching parentheses (string and template literals skipped), so an
  * assertion about a chain cannot be satisfied by code that belongs to the next

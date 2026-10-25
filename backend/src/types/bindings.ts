@@ -103,6 +103,10 @@ export interface Bindings {
    *  Service for EMAIL_PROVIDER=cloudflare), otherwise the send is rejected
    *  (caught and logged per-site). */
   FROM_EMAIL?: string;
+  /** Days a support ticket's raw record is kept before the retention purge (epic #1893 phase 6a,
+   *  ADR 0112): 730 in production, 30 on staging. A whole number from 1 to 36500; unset, empty or
+   *  anything else means the purge deletes nothing (services/ticket-retention.ts). */
+  MAIL_RETENTION_DAYS?: string;
   /** Which provider sends mail (epic #1893, ADR 0110): "cloudflare"
    *  (case-insensitive) sends through the EMAIL binding; unset, empty or
    *  "resend" is Resend. Set only in [env.dev] while staging proves the move.
@@ -121,8 +125,9 @@ export interface Bindings {
   EMAIL?: CloudflareSendEmail;
   /** Inbound mail bucket (epic #1893 phase 1): raw messages from Email Routing,
    *  stored at `inbound/raw/YYYY/MM/DD/<uuid>.eml` by services/inbound-mail.ts.
-   *  `nemar-mail-dev` in [env.dev] only; absent elsewhere, and a Worker with no
-   *  bucket rejects the message. */
+   *  `nemar-mail-dev` in [env.dev] and `nemar-mail` in production (inert until
+   *  a routing rule targets the Worker, phase 6); a Worker with no bucket rejects
+   *  the message. */
   MAIL_INBOUND?: R2Bucket;
   /** Announcement outbox queue (epic #1893 phase 2): `nemar-email-outbox` in production,
    *  `nemar-email-outbox-dev` in [env.dev]. Optional: with no binding `nemar admin notify`

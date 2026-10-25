@@ -28,6 +28,7 @@ import {
   sendAdminNotificationEmail,
   sendEmail,
   sendRevocationEmail,
+  validateMailHeaders,
 } from "../src/services/email";
 import { bindingError, recordingBinding } from "./helpers/cloudflare-email";
 import { asSend, withFakeResend } from "./helpers/resend";
@@ -469,5 +470,70 @@ describe("the gated Resend fallback", () => {
       expect(error).toBeInstanceOf(EmailProviderConfigError);
       expect(calls.length).toBe(0);
     });
+  });
+});
+
+describe("threading headers on sendEmail", () => {
+  const HEADERS = {
+    "message-id": "<out1@staging.nemar.test>",
+    "In-Reply-To": "<in1@sender.example>",
+    REFERENCES: "<in0@sender.example> <in1@sender.example>",
+  };
+  const canonical = {
+    "Message-ID": "<out1@staging.nemar.test>",
+    "In-Reply-To": "<in1@sender.example>",
+    References: "<in0@sender.example> <in1@sender.example>",
+  };
+  const run = (env: EmailDeliveryEnv, headers?: Record<string, string>) =>
+    sendEmail(
+      ALLOWED,
+      "s",
+      "<p>h</p>",
+      "resend-key",
+      FROM,
+      REPLY_TO,
+      true,
+      env,
+      undefined,
+      headers,
+    );
+
+  test("the Cloudflare binding receives them under canonical names", async () => {
+    const { binding, sent } = recordingBinding();
+    await run(stagingEnv(binding), HEADERS);
+    expect(sent[0].headers).toEqual(canonical);
+  });
+
+  test("no headers leaves the message without a headers key", async () => {
+    const { binding, sent } = recordingBinding();
+    await run(stagingEnv(binding));
+    expect("headers" in sent[0]).toBe(false);
+  });
+
+  test("Resend receives them in its headers field", async () => {
+    await withFakeResend(async (calls) => {
+      await run({ ENVIRONMENT: "development", DEV_EMAIL_ALLOWLIST: "@nemar.test" }, HEADERS);
+      expect((calls[0].body as { headers: unknown }).headers).toEqual(canonical);
+    });
+  });
+
+  test("the Resend fallback carries them too", async () => {
+    const { binding, sent } = recordingBinding(() => bindingError("E_RATE_LIMIT_EXCEEDED"));
+    await withFakeResend(async (calls) => {
+      await run({ ...stagingEnv(binding), EMAIL_FALLBACK: "resend" }, HEADERS);
+      expect((calls[0].body as { headers: unknown }).headers).toEqual(canonical);
+    });
+    expect(sent[0].headers).toEqual(canonical);
+  });
+
+  test("a name outside the allowlist or a value with a line break is refused before any send", async () => {
+    const { binding, sent } = recordingBinding();
+    await expect(run(stagingEnv(binding), { Bcc: "x@example.org" })).rejects.toThrow("not allowed");
+    await expect(
+      run(stagingEnv(binding), { "In-Reply-To": "<a@b>\r\nBcc: x@example.org" }),
+    ).rejects.toThrow("control character");
+    await expect(run(stagingEnv(binding), { References: "" })).rejects.toThrow("1 to");
+    expect(sent.length).toBe(0);
+    expect(validateMailHeaders({})).toBeUndefined();
   });
 });

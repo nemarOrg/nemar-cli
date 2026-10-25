@@ -5,17 +5,23 @@
  * lands it: the raw message goes to R2 untouched, and one log line says it arrived. No parsing, no
  * D1, no replies; ticketing comes in a later phase.
  *
- * Two fences keep production out of this path. The `MAIL_INBOUND` bucket is bound only in
- * `[env.dev]`, and the routing rules that deliver here exist only for the staging subdomain; a
+ * Two fences keep production out of this path until the cutover. The production `MAIL_INBOUND` bucket
+ * is bound but no production routing rule delivers here (phase 6), and the staging routing rules
+ * exist only for the staging subdomain; a
  * message that reaches a Worker with no bucket is rejected rather than dropped or accepted into
  * nothing, so the sender gets a bounce.
  */
 
-import { redactRecipient } from "./email";
+import { clampUtf8Bytes } from "../lib/utf8";
+import { redactAddressIn, redactRecipient } from "./email";
+import { type TicketNotifyEnv, notifyTicketCreated } from "./ticket-notify";
+import { ingestInboundMessage } from "./tickets";
 
 /** What the handler needs of the Worker's env; structural, like EmailDeliveryEnv. */
-export interface InboundMailEnv {
+export interface InboundMailEnv extends TicketNotifyEnv {
   MAIL_INBOUND?: R2Bucket;
+  /** When bound, a stored message is also turned into a ticket (phase 3). */
+  DB?: D1Database;
 }
 
 /** The SMTP reason a sender sees when this Worker holds no inbound bucket. */
@@ -32,16 +38,6 @@ const METADATA_VALUE_MAX_BYTES = 400;
 export function inboundRawKey(receivedAt: Date, id: string = crypto.randomUUID()): string {
   const iso = receivedAt.toISOString();
   return `inbound/raw/${iso.slice(0, 4)}/${iso.slice(5, 7)}/${iso.slice(8, 10)}/${id}.eml`;
-}
-
-/** `value` cut to at most `maxBytes` UTF-8 bytes, never inside a multibyte character. */
-export function clampUtf8Bytes(value: string, maxBytes: number): string {
-  const bytes = new TextEncoder().encode(value);
-  if (bytes.byteLength <= maxBytes) return value;
-  let end = maxBytes;
-  // A continuation byte (10xxxxxx) means the cut landed inside a character: back up to its start.
-  while (end > 0 && (bytes[end] & 0xc0) === 0x80) end--;
-  return new TextDecoder().decode(bytes.subarray(0, end));
 }
 
 const clamp = (value: string): string => clampUtf8Bytes(value, METADATA_VALUE_MAX_BYTES);
@@ -93,4 +89,30 @@ export async function handleInboundEmail(
   console.log(
     `[inbound-mail] stored ${key} (${raw.byteLength} bytes) from ${redactRecipient(message.from)} to ${redactRecipient(message.to)}`,
   );
+
+  // Everything below is a working copy of the stored message. The raw object is the record, so a
+  // failure here is logged and swallowed: the message is not lost and `reprocessRawKey` rebuilds
+  // the ticket. Throwing would only make Email Routing redeliver a message that is already kept.
+  if (!env.DB) return;
+  try {
+    const result = await ingestInboundMessage(env.DB, {
+      rawKey: key,
+      raw,
+      envelopeFrom: message.from,
+      envelopeTo: message.to,
+      receivedAt,
+    });
+    console.log(
+      `[inbound-mail] ${key} ${result.outcome} ticket ${result.ticketId} (${result.status})`,
+    );
+    // Best effort, and it never throws: a notification failure must not look like an ingest one.
+    if (result.outcome === "created" && !result.spam) {
+      await notifyTicketCreated(env, env.DB, result.ticketId);
+    }
+  } catch (error) {
+    const text = error instanceof Error ? error.message : String(error);
+    console.error(
+      `[inbound-mail] ticketing failed for ${key}, raw message kept: ${redactAddressIn(redactAddressIn(text, message.from), message.to)}`,
+    );
+  }
 }

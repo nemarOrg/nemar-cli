@@ -49,6 +49,7 @@ import { revokeUserIamAccess } from "../../services/iam";
 import { emailFieldSchema, normalizeGithubHandle, normalizeOrcid } from "../../services/identity";
 import { PRIVATE_GRANTS_PURGE_SQL } from "../../services/private-auth";
 import { errorMessage } from "../../services/repo-metadata";
+import { mailReleaseStatements } from "../../services/ticket-assignment";
 import {
   FUZZY_COLUMNS,
   type RankableUser,
@@ -522,6 +523,8 @@ async function finalizeRevocation(
     db
       .prepare(PRIVATE_GRANTS_PURGE_SQL)
       .bind(user.id),
+    // Their support tickets, queue references and away window go in the same batch (phase 3).
+    ...mailReleaseStatements(user.id, "all").map((s) => db.prepare(s.sql).bind(...s.binds)),
   ]);
 
   // Update user status
@@ -1112,6 +1115,12 @@ export function registerUsersRoutes(admin: AdminRouter): void {
               .bind(target.id),
             db.prepare(DOCS_REVOKE_ALL_SQL).bind(target.id),
             db.prepare(DOCS_GRANTS_PURGE_SQL).bind(target.id),
+            // Support tickets and queue references go in the same batch (phase 3). An
+            // owner demoted to admin still works ordinary tickets, so only the restricted
+            // ones are released; any other demotion ends admin standing altogether.
+            ...mailReleaseStatements(target.id, newRole === "admin" ? "restricted" : "all").map(
+              (s) => db.prepare(s.sql).bind(...s.binds),
+            ),
           ]);
           tokensRevoked = result[0]?.meta?.changes ?? 0;
           docsSessionsRevoked = result[1]?.meta?.changes ?? 0;
@@ -1813,6 +1822,8 @@ export function registerUsersRoutes(admin: AdminRouter): void {
     dataset_anonymity: z.boolean().optional(),
     /** Epic #1610 phase 5 (ADR 0088): the identifier sweep's weekly report. */
     identifier_sweep: z.boolean().optional(),
+    /** Epic #1893 phase 3 (ADR 0112): support tickets assigned, unassigned or escalated to you. */
+    support_tickets: z.boolean().optional(),
   });
 
   /**
@@ -1863,6 +1874,7 @@ export function registerUsersRoutes(admin: AdminRouter): void {
       announcements: body.announcements ?? current.announcements,
       dataset_anonymity: body.dataset_anonymity ?? current.dataset_anonymity,
       identifier_sweep: body.identifier_sweep ?? current.identifier_sweep,
+      support_tickets: body.support_tickets ?? current.support_tickets,
     };
 
     await db

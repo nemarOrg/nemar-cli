@@ -307,6 +307,12 @@ export interface EmailPreferences {
    * like every category here, so a stored row from before it existed receives it.
    */
   identifier_sweep: boolean;
+  /**
+   * A support ticket was assigned to the admin, or arrived unassigned in a queue they can work, or
+   * was escalated to them (epic #1893 phase 3, ADR 0112). Its own category so an admin can leave
+   * the ticket stream without losing approval or publication mail. Opted in by default.
+   */
+  support_tickets: boolean;
 }
 
 export type EmailCategory = keyof EmailPreferences;
@@ -317,6 +323,7 @@ export const DEFAULT_EMAIL_PREFERENCES: EmailPreferences = {
   announcements: true,
   dataset_anonymity: true,
   identifier_sweep: true,
+  support_tickets: true,
 };
 
 interface ResendResponse {
@@ -346,6 +353,7 @@ export function parseEmailPreferences(raw: string | null): EmailPreferences {
       // every current admin no anonymity mail at all.
       dataset_anonymity: parsed.dataset_anonymity !== false,
       identifier_sweep: parsed.identifier_sweep !== false,
+      support_tickets: parsed.support_tickets !== false,
     };
   } catch (err) {
     console.error("Corrupt email_preferences JSON, defaulting to all enabled:", raw, err);
@@ -526,6 +534,7 @@ function cloudflareSendFailure(error: unknown, message: string): Error {
 export function isCertainNonDelivery(error: unknown): boolean {
   return (
     error instanceof EmailRejectedError ||
+    error instanceof MailHeaderError ||
     error instanceof DevEmailFenceError ||
     error instanceof EmailProviderConfigError
   );
@@ -566,7 +575,10 @@ export async function sendEmail(
   isDev?: boolean,
   deliveryEnv?: EmailDeliveryEnv,
   timeoutMs?: number,
+  headers?: Record<string, string>,
 ): Promise<void> {
+  // Validated first, before the fence or any provider: a rejected header is a caller bug.
+  const extraHeaders = validateMailHeaders(headers);
   if (!isEmailDeliveryAllowed(to, deliveryEnv)) {
     console.warn(
       `[email] suppressed send to ${redactRecipient(to)} (subject: "${subject}"): ENVIRONMENT=${deliveryEnv?.ENVIRONMENT ?? "unset"} is not production and the recipient is not on DEV_EMAIL_ALLOWLIST`,
@@ -588,6 +600,7 @@ export async function sendEmail(
         fromEmail,
         replyTo,
         timeoutMs,
+        extraHeaders,
       );
       return;
     } catch (error) {
@@ -609,6 +622,7 @@ export async function sendEmail(
           fromEmail,
           replyTo,
           timeoutMs,
+          extraHeaders,
         );
       } catch (resendError) {
         console.error(
@@ -627,7 +641,50 @@ export async function sendEmail(
     fromEmail,
     replyTo,
     timeoutMs,
+    extraHeaders,
   );
+}
+
+/** A caller's extra mail headers were refused before any provider was called: nothing was sent. */
+export class MailHeaderError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "MailHeaderError";
+  }
+}
+
+/** The only extra headers a caller may set: the threading trio. Names compare case-insensitively. */
+export const ALLOWED_MAIL_HEADERS: readonly string[] = ["Message-ID", "In-Reply-To", "References"];
+
+/** The most characters one header value may carry (RFC 5322 line limit, less the name). */
+const MAIL_HEADER_VALUE_MAX = 998;
+
+/**
+ * Check the extra headers of a send against {@link ALLOWED_MAIL_HEADERS} and return them under
+ * their canonical names, or undefined when none. A name outside the list, a value with a control
+ * character (CR or LF would inject a header) or an over-long value throws a plain Error before any
+ * provider is called.
+ */
+export function validateMailHeaders(
+  headers: Record<string, string> | undefined,
+): Record<string, string> | undefined {
+  if (!headers) return undefined;
+  const out: Record<string, string> = {};
+  for (const [name, value] of Object.entries(headers)) {
+    const canonical = ALLOWED_MAIL_HEADERS.find((h) => h.toLowerCase() === name.toLowerCase());
+    if (!canonical) throw new MailHeaderError(`mail header "${name.slice(0, 40)}" is not allowed`);
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: rejecting control characters is the point
+    if (typeof value !== "string" || /[\u0000-\u001f\u007f]/.test(value)) {
+      throw new MailHeaderError(`mail header ${canonical} has a control character in its value`);
+    }
+    if (value.length === 0 || value.length > MAIL_HEADER_VALUE_MAX) {
+      throw new MailHeaderError(
+        `mail header ${canonical} must be 1 to ${MAIL_HEADER_VALUE_MAX} characters`,
+      );
+    }
+    out[canonical] = value;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 async function sendViaResend(
@@ -638,6 +695,7 @@ async function sendViaResend(
   fromEmail: string,
   replyTo?: string,
   timeoutMs?: number,
+  headers?: Record<string, string>,
 ): Promise<void> {
   const body: Record<string, unknown> = {
     from: fromEmail,
@@ -646,6 +704,7 @@ async function sendViaResend(
     html,
   };
   if (replyTo) body.reply_to = replyTo;
+  if (headers) body.headers = headers;
   const response = await fetch(RESEND_API_URL, {
     method: "POST",
     headers: {
@@ -674,6 +733,7 @@ async function sendViaCloudflare(
   fromEmail: string,
   replyTo?: string,
   timeoutMs?: number,
+  headers?: Record<string, string>,
 ): Promise<void> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -686,6 +746,7 @@ async function sendViaCloudflare(
       // spam filters that prefer one.
       text: htmlToText(html),
       ...(replyTo ? { replyTo: parseMailbox(replyTo) } : {}),
+      ...(headers ? { headers } : {}),
     });
     if (!timeoutMs) {
       await sent;
