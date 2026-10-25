@@ -5,7 +5,8 @@
  * itself. It never merges.
  *
  *   S0  read the plan file, prove it is the reviewed one, plan again from live sources
- *       (`verify-plan.ts`); no API write, push or upload happens before this passes;
+ *       (`verify-plan.ts`); no API write, push or upload happens before this passes (the scratch
+ *       directory for the planner's clones is a local write);
  *   S1  `POST /admin/repulls`: the record, or the open one for this same plan (`planned`);
  *   S2  a working clone at the base, the delta materialized, scrubbed, uploaded where the scrub
  *       re-keyed or annexed, and synthesized into one commit; the checkpoint saved; then
@@ -25,7 +26,7 @@
  * Only a `prepared` row resumes preparation from what is on disk: one whose working clone still
  * holds its commit is left as it is; otherwise the clone is restored from the checkpoint, or
  * prepared again, which must give the same tree, commit and manifest (`prepare-not-reproducible`
- * otherwise: the row stays, its error set, and abandoning it is the way out). A `planned` row is
+ * otherwise: the row stays, its error set, and abandoning the record is the way out; no command for it is built yet). A `planned` row is
  * prepared again from scratch, which re-clones, re-scrubs and re-uploads, deterministically. A step
  * that fails records why on the row (a self-edge with the facts it already holds) and refuses; the
  * message names counts, never a path. One execution of a plan runs at a time (a lock beside its
@@ -58,7 +59,13 @@ import {
   readRemoteLog,
   upstreamUrl,
 } from "../sources.js";
-import { type AdvanceContext, EXECUTE_STATUSES, advancePrepared, reached } from "./advance.js";
+import {
+  type AdvanceContext,
+  EXECUTE_STATUSES,
+  advancePrepared,
+  reached,
+  removeWorkdir,
+} from "./advance.js";
 import { copyItems, copySection, planCounts, planFacts } from "./body.js";
 import { readCatalogFacts } from "./catalog.js";
 import { commitMaterialized, materializeDelta } from "./materialize.js";
@@ -313,10 +320,13 @@ async function execute(
         ...(opts.copy ? { copy: opts.copy } : {}),
       };
       opts.out(`Found re-pull #${open.id} of ${datasetId}, ${open.status}.`);
+      // The pull request is open: the working clone, which holds the delta's unscrubbed
+      // originals, is of no further use. A run killed before it removed it finds it here.
+      if (reached(open.status, "pr_open")) removeWorkdir(paths, advance.keepWorkdir, opts.out);
       if (reached(open.status, until)) {
         if (!(EXECUTE_STATUSES as readonly RepullStatus[]).includes(open.status)) {
           opts.out(
-            `Re-pull #${open.id} is past the open pull request; execute never merges: nemar admin repull resume ${datasetId}.`,
+            `Re-pull #${open.id} is past the open pull request; execute never merges, and the steps after it are not built yet.`,
           );
         }
         return { row: open, stoppedAt: open.status };
@@ -596,7 +606,7 @@ async function resumePrepared(
   ) {
     const err = new ExecuteRefused(
       "prepare-not-reproducible",
-      "Preparing again from the same plan and base gave another tree, commit or copy manifest than the one recorded; abandon this re-pull and plan again.",
+      "Preparing again from the same plan and base gave another tree, commit or copy manifest than the one recorded; this re-pull cannot continue: its record has to be abandoned and the dataset planned again (no command to abandon a record is built yet).",
     );
     await recordError(ctx, row, "prepared", recorded, err);
     throw err;

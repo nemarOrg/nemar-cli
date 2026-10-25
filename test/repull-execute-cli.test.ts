@@ -86,6 +86,8 @@ const handle = makeRepullApp();
 const apiWrites: string[] = [];
 /** The bare origin of each dataset, for the GitHub stand-in's branch reads. */
 const origins = new Map<string, string>();
+/** Runs before the API handles a request: a test's way to move the world at an exact point. */
+let apiHook: ((req: Request) => Promise<void>) | null = null;
 
 function bindings(): Bindings {
   return {
@@ -112,10 +114,11 @@ beforeAll(() => {
   (globalThis as { NEMAR_GITHUB_API_URL?: string }).NEMAR_GITHUB_API_URL = gh.url;
   apiServer = Bun.serve({
     port: 0,
-    fetch: (req) => {
+    fetch: async (req) => {
       const url = new URL(req.url);
       if (url.pathname === "/notices") return Response.json({ notices: [] });
       if (req.method !== "GET") apiWrites.push(`${req.method} ${url.pathname}`);
+      if (apiHook) await apiHook(req.clone());
       return handle(req, bindings());
     },
   });
@@ -326,6 +329,7 @@ async function restoreWorld(fx: RepullFixture, w: World): Promise<void> {
   await restoreRefs(fx.upstreamRepo, w.upstream);
   s3.restore(w.s3);
   apiWrites.length = 0;
+  apiHook = null;
   db = freshDb();
   gh.reset();
   Bun.spawnSync(["chmod", "-R", "u+w", join(configDir, "repull")]);
@@ -441,12 +445,95 @@ function digestOf(plan: string): string {
   return JSON.parse(readFileSync(plan, "utf8")).digest as string;
 }
 
+/** Rewrite `remote.log` on the working clone's own git-annex branch (a hostile or stale record). */
+async function rewriteRemoteLog(repo: string, from: string, to: string): Promise<void> {
+  const env = {
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_AUTHOR_NAME: "t",
+    GIT_AUTHOR_EMAIL: "t@t",
+    GIT_COMMITTER_NAME: "t",
+    GIT_COMMITTER_EMAIL: "t@t",
+  };
+  const run = async (args: string[], extra: Record<string, string> = {}, stdin?: string) => {
+    const r = await runCommand(["git", ...args], {
+      cwd: repo,
+      env: { ...env, ...extra },
+      ...(stdin !== undefined ? { stdin } : {}),
+    });
+    if (r.exitCode !== 0) throw new Error(`git ${args.join(" ")}: ${r.stderr}`);
+    return r.stdout.trim();
+  };
+  const log = await run(["show", "refs/heads/git-annex:remote.log"]);
+  if (!log.includes(from)) throw new Error("remote.log does not hold the text to replace");
+  const blob = await run(["hash-object", "-w", "--stdin"], {}, `${log.replace(from, to)}\n`);
+  const index = mkdtempSync(join(tmpdir(), "nemar-repull-remotelog-"));
+  try {
+    const extra = { GIT_INDEX_FILE: join(index, "index") };
+    await run(["read-tree", "refs/heads/git-annex"], extra);
+    await run(["update-index", "--cacheinfo", `100644,${blob},remote.log`], extra);
+    const tree = await run(["write-tree"], extra);
+    const parent = await run(["rev-parse", "refs/heads/git-annex"]);
+    const commit = await run(["commit-tree", tree, "-p", parent, "-m", "hostile remote.log"]);
+    await run(["update-ref", "refs/heads/git-annex", commit]);
+  } finally {
+    rmSync(index, { recursive: true, force: true });
+  }
+}
+
+/** Where a test's race hooks for one plan's working clone live. */
+function raceDir(plan: string): string {
+  return join(configDir, `race-${digestOf(plan).slice(7, 15)}`);
+}
+
+/**
+ * A `pre-push` hook in the working clone that, on the first `times` pushes of the git-annex branch,
+ * moves origin's branch after git has read it and before the push is sent: another writer's commit
+ * landing under the registration. Returns the file counting the pushes it saw.
+ */
+async function installAnnexRace(fx: RepullFixture, plan: string, times: number): Promise<string> {
+  const dir = raceDir(plan);
+  mkdirSync(dir, { recursive: true });
+  const counter = join(dir, "pushes");
+  writeFileSync(counter, "0\n");
+  const script = `#!/bin/sh
+ORIGIN="${fx.originRepo}"
+while read local_ref local_sha remote_ref remote_sha; do
+  [ "$remote_ref" = refs/heads/git-annex ] || exit 0
+done
+n=$(cat "${counter}")
+n=$((n+1))
+echo "$n" > "${counter}"
+if [ "$n" -le ${times} ]; then
+  parent=$(git --git-dir="$ORIGIN" rev-parse refs/heads/git-annex)
+  tree=$(git --git-dir="$ORIGIN" rev-parse "$parent^{tree}")
+  c=$(GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t \\
+      git --git-dir="$ORIGIN" commit-tree "$tree" -p "$parent" -m "another writer $n")
+  git --git-dir="$ORIGIN" update-ref refs/heads/git-annex "$c"
+fi
+exit 0
+`;
+  writeFileSync(join(dir, "pre-push"), script);
+  Bun.spawnSync(["chmod", "755", join(dir, "pre-push")]);
+  const repo = workPaths(configDir, XX_RACE, digestOf(plan)).repo;
+  const r = await runCommand(["git", "config", "core.hooksPath", dir], { cwd: repo });
+  if (r.exitCode !== 0) throw new Error(`git config: ${r.stderr}`);
+  return counter;
+}
+
+async function removeAnnexRace(plan: string): Promise<void> {
+  const repo = workPaths(configDir, XX_RACE, digestOf(plan)).repo;
+  await runCommand(["git", "config", "core.hooksPath", "/dev/null"], { cwd: repo });
+}
+
 function nonGetGitHub(): string[] {
   return gh.seen.filter((x) => x.method !== "GET").map((x) => `${x.method} ${x.path}`);
 }
 
+const XX_RACE = "xx099971";
+
 describe.skipIf(!awsInstalled)("execute through the pull request", () => {
-  const XX = "xx099971";
+  const XX = XX_RACE;
   let fx: RepullFixture;
   let world: World;
   beforeAll(async () => {
@@ -557,6 +644,19 @@ describe.skipIf(!awsInstalled)("execute through the pull request", () => {
     expect(body).toContain(`Upstream-Snapshot: ${UPSTREAM_ID}@${TAG_B}`);
     expect(body).toContain("Repull-Plan: sha256:");
     expect(body).toContain("never merges");
+    expect(body).toContain("merge path is not built yet");
+    // The two trailer lines the body tells the merger to end the squash message with are, line
+    // for line, the trailers of the commit the pull request carries.
+    const fenced = (body.split("```")[1] ?? "").trim().split("\n");
+    const trailers = (
+      await gitIn(fx.originRepo, ["log", "-1", "--format=%(trailers:only,unfold)", synth])
+    )
+      .trim()
+      .split("\n")
+      .filter(Boolean);
+    expect(fenced).toHaveLength(2);
+    expect(fenced).toEqual(trailers);
+    expect(body).toContain("The squash commit message must end with both trailers");
     for (const p of Object.values(PATHS)) expect(body).not.toContain(p);
     for (const k of keys) expect(body).not.toContain(k);
     expect(row?.pr_number).toBe(1);
@@ -620,9 +720,14 @@ describe.skipIf(!awsInstalled)("execute through the pull request", () => {
     const run = await execute(fx, plan);
     expect(run.exitCode, run.all).toBe(0);
     expect(repullRows()[0]).toMatchObject({ status: "pr_open", last_error: null });
-    // The killed run's copy is answered before the next test restores the stand-in.
-    while (s3.holding() > 0) await Bun.sleep(50);
-    await Bun.sleep(1_000);
+    // The killed run's held copy ends on its own (the hold times out, or its client is seen gone);
+    // wait for that observable end, every call the stand-in counted being logged, so it cannot land
+    // after the next test restores the stand-in.
+    const until = Date.now() + 15_000;
+    const settled = () =>
+      s3.holding() === 0 && s3.calls("CopyObject").length === s3.opCount("CopyObject");
+    while (!settled() && Date.now() < until) await Bun.sleep(50);
+    expect(settled()).toBe(true);
   });
 
   test("a pull request GitHub answered 500 for is opened by the next run", async () => {
@@ -773,6 +878,146 @@ describe.skipIf(!awsInstalled)("execute through the pull request", () => {
     const run = await execute(fx, plan);
     expect(run.exitCode, run.all).toBe(3);
     expect(repullRows()[0]?.last_error).toStartWith("[register:upstream-tag-moved]");
+  });
+
+  test("an upstream tag that moves after the plan was checked refuses at the copy, before anything is written to S3", async () => {
+    const plan = await makePlan(fx);
+    // The tag moves just after the record reaches prepared, which is when the copy step begins.
+    apiHook = async (req) => {
+      if (req.method === "POST" && new URL(req.url).pathname.endsWith("/transition")) {
+        if ((await req.text()).includes('"to":"prepared"')) {
+          await gitIn(fx.upstreamRepo, ["tag", "-f", TAG_B, TAG_A]);
+        }
+      }
+    };
+    const run = await execute(fx, plan);
+    expect(run.exitCode, run.all).toBe(3);
+    expect(repullRows()[0]?.status).toBe("prepared");
+    expect(repullRows()[0]?.last_error).toStartWith("[copy:upstream-tag-moved]");
+    expect(s3.calls("CopyObject")).toEqual([]);
+    expect(s3.keys("nemar", `${XX}/staging/`)).toEqual([]);
+  });
+
+  test("an upstream tag that moved before the pull request step refuses there, with no branch pushed and no pull request", async () => {
+    const plan = await makePlan(fx);
+    expect((await execute(fx, plan, ["--until", "registered"])).exitCode).toBe(0);
+    await gitIn(fx.upstreamRepo, ["tag", "-f", TAG_B, TAG_A]);
+    const run = await execute(fx, plan);
+    expect(run.exitCode, run.all).toBe(3);
+    expect(repullRows()[0]?.status).toBe("registered");
+    expect(repullRows()[0]?.last_error).toStartWith("[pr:upstream-tag-moved]");
+    expect(await refsOf(fx.originRepo)).not.toContain("release/");
+    expect(gh.seen.filter((x) => x.method === "POST")).toEqual([]);
+  });
+
+  test("a copy manifest that is not the one recorded at prepared refuses manifest-mismatch before any copy", async () => {
+    const plan = await makePlan(fx);
+    expect((await execute(fx, plan, ["--until", "prepared"])).exitCode).toBe(0);
+    db.run("UPDATE upstream_repulls SET manifest_digest = ?", [`sha256:${"0".repeat(64)}`]);
+    const run = await execute(fx, plan);
+    expect(run.exitCode, run.all).toBe(3);
+    expect(repullRows()[0]?.status).toBe("prepared");
+    expect(repullRows()[0]?.last_error).toStartWith("[copy:manifest-mismatch]");
+    expect(s3.calls("CopyObject")).toEqual([]);
+    expect(s3.keys("nemar", `${XX}/staging/`)).toEqual([]);
+  });
+
+  test("a remote.log that names another prefix than <id>/objects/ cannot move the write boundary", async () => {
+    const plan = await makePlan(fx);
+    expect((await execute(fx, plan, ["--until", "prepared"])).exitCode).toBe(0);
+    const work = workPaths(configDir, XX, digestOf(plan)).repo;
+    await rewriteRemoteLog(work, `fileprefix=${XX}/objects/`, "fileprefix=nm000103/objects/");
+    s3.log.length = 0;
+    const run = await execute(fx, plan);
+    expect(run.exitCode, run.all).toBe(3);
+    expect(repullRows()[0]?.last_error).toStartWith("[copy:destination-prefix]");
+    // Refused before any write, and nothing was ever aimed at the other dataset.
+    expect(s3Writes()).toEqual([]);
+    expect(s3.log.some((e) => e.key.startsWith("nm000103/"))).toBe(false);
+  });
+
+  test("a git-annex branch that moves between the registration's fetch and its push is written again on top, and proved", async () => {
+    const plan = await makePlan(fx);
+    expect((await execute(fx, plan, ["--until", "copied"])).exitCode).toBe(0);
+    const before = (await gitIn(fx.originRepo, ["rev-parse", "refs/heads/git-annex"])).trim();
+    const counter = await installAnnexRace(fx, plan, 1);
+    const run = await execute(fx, plan, ["--until", "registered"]);
+    expect(run.exitCode, run.all).toBe(0);
+    expect(readFileSync(counter, "utf8").trim()).toBe("2");
+    expect(repullRows()[0]).toMatchObject({ status: "registered", last_error: null });
+    // The racing commit is in origin's history, with the registration on top of it.
+    expect(
+      (
+        await gitIn(fx.originRepo, ["rev-list", "--count", `${before}..refs/heads/git-annex`])
+      ).trim(),
+    ).toBe("2");
+    const tree = await annexedKeys(
+      workPaths(configDir, XX, digestOf(plan)).repo,
+      repullRows()[0]?.synth_sha as string,
+    );
+    const keys = [...new Set(tree.values())];
+    const logs = await readLocationLogsAt(fx.originRepo, "refs/heads/git-annex", keys);
+    keys.forEach((_k, i) => expect(presentIn(logs[i] ?? "").has(fx.nemarUuid)).toBe(true));
+  });
+
+  test("a git-annex branch that moves under every registration push stops at the cap, leaves the record copied, and a later run completes", async () => {
+    const plan = await makePlan(fx);
+    expect((await execute(fx, plan, ["--until", "copied"])).exitCode).toBe(0);
+    const counter = await installAnnexRace(fx, plan, 100);
+    const run = await execute(fx, plan, ["--until", "registered"]);
+    expect(run.exitCode, run.all).toBe(3);
+    // Exactly three pushes were tried: the cap.
+    expect(readFileSync(counter, "utf8").trim()).toBe("3");
+    expect(repullRows()[0]?.status).toBe("copied");
+    expect(repullRows()[0]?.last_error).toStartWith("[register:registration-push-rejected]");
+    await removeAnnexRace(plan);
+    const again = await execute(fx, plan, ["--until", "registered"]);
+    expect(again.exitCode, again.all).toBe(0);
+    expect(repullRows()[0]).toMatchObject({ status: "registered", last_error: null });
+  });
+
+  test("a registration origin undoes after accepting it is caught by the proof, not reported as done", async () => {
+    const plan = await makePlan(fx);
+    expect((await execute(fx, plan, ["--until", "copied"])).exitCode).toBe(0);
+    // Origin accepts the push, then puts its git-annex branch back where it was.
+    const hookFile = join(fx.originRepo, "hooks", "post-receive");
+    mkdirSync(join(fx.originRepo, "hooks"), { recursive: true });
+    writeFileSync(
+      hookFile,
+      `#!/bin/sh\nwhile read old new ref; do\n  if [ "$ref" = refs/heads/git-annex ]; then git update-ref refs/heads/git-annex "$old"; fi\ndone\n`,
+    );
+    Bun.spawnSync(["chmod", "755", hookFile]);
+    try {
+      const run = await execute(fx, plan, ["--until", "registered"]);
+      expect(run.exitCode, run.all).toBe(3);
+      expect(repullRows()[0]?.status).toBe("copied");
+      expect(repullRows()[0]?.last_error).toStartWith("[register:registration-unproven]");
+    } finally {
+      rmSync(hookFile, { force: true });
+    }
+    const again = await execute(fx, plan, ["--until", "registered"]);
+    expect(again.exitCode, again.all).toBe(0);
+  });
+
+  test("a run that finds the record already at pr_open removes the working clone a killed run left behind", async () => {
+    const plan = await makePlan(fx);
+    const paths = workPaths(configDir, XX, digestOf(plan));
+    const kept = await execute(fx, plan, ["--keep-workdir"]);
+    expect(kept.exitCode, kept.all).toBe(0);
+    expect(existsSync(paths.repo)).toBe(true);
+    const writes = { api: apiWrites.length, s3: s3Writes().length, gh: nonGetGitHub().length };
+    // The early return at pr_open: nothing is written, and the clone goes.
+    const later = await execute(fx, plan);
+    expect(later.exitCode, later.all).toBe(0);
+    expect(existsSync(paths.root)).toBe(false);
+    expect(apiWrites.length).toBe(writes.api);
+    expect(s3Writes().length).toBe(writes.s3);
+    expect(nonGetGitHub().length).toBe(writes.gh);
+    // Asked to keep it, a run that finds pr_open leaves it where it is.
+    mkdirSync(paths.repo, { recursive: true });
+    const keep = await execute(fx, plan, ["--keep-workdir"]);
+    expect(keep.exitCode, keep.all).toBe(0);
+    expect(existsSync(paths.repo)).toBe(true);
   });
 
   test("a dataset that became anonymous is refused before anything, on a record past prepared too", async () => {

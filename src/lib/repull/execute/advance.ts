@@ -16,8 +16,9 @@
  * the plan read (`upstream-tag-moved`), because the commit's trailers name it. A step that fails
  * records why on the row with the error prefix of its step (`[copy:`, `[register:`, `[pr:`, never
  * `[prepare:`, which only a preparation clears) and refuses; nothing it did is undone, and the next
- * run checks what is already there before it acts. At `pr_open` the working directory, which
- * holds the delta's unscrubbed originals in a local commit, is removed unless `--keep-workdir`.
+ * run checks what is already there before it acts. At `pr_open`, and on any later run that finds
+ * the record there, the working directory, which holds the delta's unscrubbed originals in a local
+ * commit, is removed unless `--keep-workdir`.
  *
  * Every push and S3 call goes through the write guard (`write-guard.ts`). Execution never merges.
  */
@@ -158,14 +159,14 @@ async function assertUpstreamTag(work: string, ctx: AdvanceContext): Promise<voi
   if (commit !== facts.toCommit) {
     throw new ExecuteRefused(
       "upstream-tag-moved",
-      `Upstream's tag ${facts.toTag} names another commit than the one the plan read: OpenNeuro re-created the snapshot. Abandon this re-pull and plan again.`,
+      `Upstream's tag ${facts.toTag} names another commit than the one the plan read: OpenNeuro re-created the snapshot. This re-pull cannot continue: its record has to be abandoned and the dataset planned again (no command to abandon a record is built yet).`,
     );
   }
 }
 
 /**
  * The working clone at the recorded synthesized commit: as preparation left it, or restored from
- * the checkpoint (`checkpoint-lost` when neither holds it; abandoning is the way out).
+ * the checkpoint (`checkpoint-lost` when neither holds it; abandoning the record is the way out, and no command for it is built yet).
  */
 async function holdSynthesized(ctx: AdvanceContext, row: RepullRow): Promise<string> {
   const synthSha = row.synth_sha as string;
@@ -195,7 +196,7 @@ async function holdSynthesized(ctx: AdvanceContext, row: RepullRow): Promise<str
   if (restored !== null) {
     throw new ExecuteRefused(
       "checkpoint-lost",
-      `Re-pull #${row.id}'s working clone and its checkpoint do not hold the recorded commit (${restored}); abandon this re-pull and plan again.`,
+      `Re-pull #${row.id}'s working clone and its checkpoint do not hold the recorded commit (${restored}); this re-pull cannot continue: its record has to be abandoned and the dataset planned again (no command to abandon a record is built yet).`,
     );
   }
   ctx.out(`Re-pull #${row.id}'s working clone was restored from the checkpoint.`);
@@ -264,6 +265,26 @@ function manifestItems(
       origin: "local" as const,
     })),
   ];
+}
+
+/**
+ * Remove the working directory, which holds the delta's unscrubbed originals in a local commit
+ * (never pushed, never in the checkpoint), unless `keep`. Called wherever a run finds the pull
+ * request open: when it opens it, and when a later run finds a record already at `pr_open` or past
+ * it (a run that was killed between the transition and the removal leaves one behind).
+ */
+export function removeWorkdir(paths: WorkPaths, keep: boolean, out: (line: string) => void): void {
+  if (keep) {
+    out(`Working directory kept at ${paths.root}; it holds the delta's unscrubbed originals.`);
+    return;
+  }
+  try {
+    removeTree(paths.root);
+  } catch (err) {
+    out(
+      `The working directory ${paths.root} could not be removed (${err instanceof ExecuteRefused ? err.code : describeError(err)}); remove it by hand: it holds the delta's unscrubbed originals.`,
+    );
+  }
 }
 
 /** Run one step; on failure record why on the row and refuse with the step's code. */
@@ -452,19 +473,7 @@ export async function advancePrepared(
       `${pr.reused ? "Found" : "Opened"} pull request #${pr.number} of release/v${facts.toVersion}; re-pull #${row.id} is pr_open. Execute never merges.`,
     );
     // The working clone holds the delta's unscrubbed originals in a local commit: it goes now.
-    if (!ctx.keepWorkdir) {
-      try {
-        removeTree(ctx.paths.root);
-      } catch (err) {
-        ctx.out(
-          `The working directory ${ctx.paths.root} could not be removed (${err instanceof ExecuteRefused ? err.code : describeError(err)}); remove it by hand: it holds the delta's unscrubbed originals.`,
-        );
-      }
-    } else {
-      ctx.out(
-        `Working directory kept at ${ctx.paths.root}; it holds the delta's unscrubbed originals.`,
-      );
-    }
+    removeWorkdir(ctx.paths, ctx.keepWorkdir, ctx.out);
   }
   return row;
 }
