@@ -37,6 +37,7 @@ import {
   test,
 } from "bun:test";
 import { which } from "bun";
+import { realD1, wrapD1 } from "../backend/test/helpers/d1";
 import { gitIn, refsOf } from "./helpers/repull-fixture";
 import {
   ADMIN_ID,
@@ -215,7 +216,10 @@ describe.skipIf(!awsInstalled)("the head and main", () => {
     });
     expect(pushed).not.toBe(before.synth_sha);
     expect((await gitIn(repo, ["rev-parse", `${pushed}^@`])).trim()).toBe(newMain);
-    // Outside .nemar/ the tree is the recorded one, entry for entry.
+    // Outside .nemar/ the tree is the recorded one, entry for entry: main moved by a `.nemar/` file
+    // only here, so neither `.bidsignore` nor a placeholder `participants.tsv` (the other two shapes
+    // enrichment writes, which a re-synthesis applies to the new tree and never undoes, as
+    // test/repull-resynthesize.test.ts shows) differs.
     const outside = async (rev: string) =>
       (await gitIn(repo, ["ls-tree", "-r", rev]))
         .split("\n")
@@ -244,6 +248,130 @@ describe.skipIf(!awsInstalled)("the head and main", () => {
     );
     // The new head is screened anew.
     expect(screenDispatches().map((d) => d.ref)).toEqual([pushed]);
+  });
+});
+
+describe.skipIf(!awsInstalled)("the head and main, more", () => {
+  /** Main moved by an enrichment commit of `.nemar/metadata.json`. */
+  const enrichMain = async () =>
+    w.commitOnto(
+      "refs/heads/main",
+      ".nemar/metadata.json",
+      await enrichedMetadata(w.fx.originRepo, "refs/heads/main"),
+      "enrichment",
+    );
+
+  test("a pull request that is not the release branch into main is pr-foreign, with why recorded", async () => {
+    Object.assign(w.gh.pulls[prKey(w)] as object, { base: "dev" });
+    const run = await resume();
+    expect(run.exitCode, run.all).toBe(3);
+    expect(w.row().last_error).toStartWith("[gates:pr-foreign]");
+    expect(screenDispatches()).toEqual([]);
+  });
+
+  test("main moved by enrichment while GitHub says clean is not re-synthesized: nothing is pushed", async () => {
+    const releaseRef = `refs/heads/${w.row().branch}`;
+    const before = (await gitIn(w.fx.originRepo, ["rev-parse", releaseRef])).trim();
+    await enrichMain();
+    const run = await resume();
+    expect(run.exitCode, run.all).toBe(3);
+    expect(run.all).not.toContain("again on the new main");
+    expect((await gitIn(w.fx.originRepo, ["rev-parse", releaseRef])).trim()).toBe(before);
+    // It went on to the screen of the head it had.
+    expect(screenDispatches().map((d) => d.ref)).toEqual([before]);
+  });
+
+  test("a re-synthesis that is not confirmed pushes nothing", async () => {
+    const releaseRef = `refs/heads/${w.row().branch}`;
+    const before = (await gitIn(w.fx.originRepo, ["rev-parse", releaseRef])).trim();
+    await enrichMain();
+    Object.assign(w.gh.pulls[prKey(w)] as object, { mergeableState: "dirty" });
+    // No --yes, and no terminal to answer on: the question is not confirmed.
+    const run = await w.cli(["repull", "resume", w.fx.datasetId, "--wait-minutes", "0"]);
+    expect(run.exitCode, run.all).toBe(1);
+    expect(run.all).toContain("declined");
+    expect((await gitIn(w.fx.originRepo, ["rev-parse", releaseRef])).trim()).toBe(before);
+    expect(w.row().synth_sha).toBe(before);
+  });
+
+  test("a re-synthesis pushed and not recorded is recognized and recorded by the next run", async () => {
+    const before = w.row();
+    const newMain = await enrichMain();
+    Object.assign(w.gh.pulls[prKey(w)] as object, { mergeableState: "dirty" });
+    // The record write after the push fails, once: the Worker's read of the row throws.
+    let armed = false;
+    w.setApiHook(async (req) => {
+      if (req.method !== "POST" || !new URL(req.url).pathname.endsWith("/transition")) return;
+      const body = (await req.json()) as { fields?: Record<string, unknown> };
+      if (body.fields?.synth_sha) armed = true;
+    });
+    w.workerEnv.DB = wrapD1(realD1(w.db()), (sql) => {
+      if (armed && sql.startsWith("SELECT * FROM upstream_repulls WHERE id")) {
+        armed = false;
+        throw new Error("D1 is unavailable (test fault)");
+      }
+    });
+    const first = await resume();
+    expect(first.exitCode, first.all).toBe(3);
+    const pushed = (
+      await gitIn(w.fx.originRepo, ["rev-parse", `refs/heads/${before.branch}`])
+    ).trim();
+    expect(pushed).not.toBe(before.synth_sha);
+    // The record still names the old commit: the push landed, the write did not.
+    expect(w.row()).toMatchObject({ synth_sha: before.synth_sha, base_sha: before.base_sha });
+
+    w.setApiHook(null);
+    const second = await resume();
+    expect(second.all).toContain("pushed by an earlier run");
+    expect(second.all).not.toContain("head-foreign");
+    expect(w.row()).toMatchObject({
+      status: "pr_open",
+      synth_sha: pushed,
+      head_sha: pushed,
+      base_sha: newMain,
+    });
+    expect(w.row().last_error ?? "").not.toContain("head-foreign");
+  });
+});
+
+describe.skipIf(!awsInstalled)("at gates_clear", () => {
+  async function toGates(): Promise<string> {
+    const head = w.row().head_sha as string;
+    await resume();
+    await w.reportScreen(head, "clean");
+    expect((await resume()).exitCode).toBe(0);
+    return head;
+  }
+
+  test("a head moved by enrichment goes back to pr_open; one moved by another commit is refused", async () => {
+    await toGates();
+    const ref = `refs/heads/${w.row().branch}`;
+    const enriched = await w.commitOnto(
+      ref,
+      ".nemar/metadata.json",
+      await enrichedMetadata(w.fx.originRepo, ref),
+      "enrichment",
+    );
+    const back = await resume();
+    expect(back.all).toContain("pr_open again");
+    expect(w.row()).toMatchObject({ status: "pr_open", head_sha: enriched, gates_sha: null });
+
+    await w.restore();
+    await toGates();
+    const gates = w.row().gates_sha;
+    await w.commitOnto(ref, "README.md", "Someone else's text.\n");
+    const refused = await resume();
+    expect(refused.exitCode, refused.all).toBe(3);
+    expect(refused.all).toContain("head-foreign");
+    expect(w.row()).toMatchObject({ status: "gates_clear", gates_sha: gates });
+  });
+
+  test("a pull request closed unmerged ends the record abandoned", async () => {
+    await toGates();
+    Object.assign(w.gh.pulls[prKey(w)] as object, { state: "closed" });
+    const run = await resume();
+    expect(run.exitCode, run.all).toBe(1);
+    expect(w.row()).toMatchObject({ status: "abandoned" });
   });
 });
 

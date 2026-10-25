@@ -23,15 +23,18 @@
  *   gates_clear  a held claim to merge is resolved from GitHub: merged is recorded; a claim whose
  *                merge GitHub says did not happen expires once it is old enough (the Worker's own
  *                bound); a head that moved goes back to `pr_open`.
- *   merged       the tag and the version row waited for, the tagged tree compared, the release
- *                recorded through the Worker's verified route (`release.ts`);
- *   released     N.0.0's objects locked and the count recorded, then `complete` when the plan had
- *                no corrections (N.0.1 is a later slice's).
+ *   merged       the merge commit's trailers read back, the tag and the version row waited for,
+ *                the tagged tree compared, the release recorded through the Worker's verified
+ *                route (`release.ts`);
+ *   released     the objects N.0.0's copy and uploads wrote (the staging manifest's, never the
+ *                whole prefix) locked and the count recorded, then `complete` when the plan had no
+ *                corrections (N.0.1 is a later slice's).
  *
  * It waits, up to `waitMinutes`, for the screen and for GitHub's state, reading again on each
  * turn; still waiting at the bound is the command's exit 3, with what it waits for. A step that
- * fails records why on the row (`[gates:<code>]`, never `[prepare:`, which only a preparation
- * clears) and refuses.
+ * fails records why on the row (`[gates:<code>]`, `[release:<code>]`, `[lock:<code>]`, never
+ * `[prepare:`, which only a preparation clears) and refuses. A re-synthesis an earlier run pushed
+ * and could not record is recognized, byte for byte, and recorded (`recognizeResynthesis`).
  */
 
 import { dirname, join } from "node:path";
@@ -60,7 +63,7 @@ import {
 import { readCatalogFacts } from "./execute/catalog.js";
 import { type OriginScratch, openOriginScratch } from "./execute/origin.js";
 import { acceptsHead, checkMain, releaseRefOf } from "./execute/pull-request.js";
-import { resynthesize } from "./execute/resynthesize.js";
+import { recognizeResynthesis, resynthesize } from "./execute/resynthesize.js";
 import { ExecuteRefused, assertNotAnonymous } from "./execute/verify-plan.js";
 import { acquireLock, privateDir, withIsolatedGit, workPaths } from "./execute/workdir.js";
 import { lockTurn, releaseTurn } from "./release.js";
@@ -282,6 +285,31 @@ async function gatesTurn(ctx: ResumeContext, row: RepullRow): Promise<Turn> {
       ref: releaseRefOf(row.to_version),
       env: scratch.env,
     });
+    if (verdict !== "ok") {
+      // A re-synthesis an earlier run pushed and could not record is not a descendant of the
+      // recorded commit (and a fresh scratch repository may not even hold that commit, so the
+      // verdict can read unreadable); it is recognized, byte for byte, and recorded now.
+      const ours = await recognizeResynthesis({ scratch, row, head: live.headSha });
+      if (ours) {
+        const recorded = await move(
+          row,
+          "pr_open",
+          {
+            branch: row.branch,
+            pr_number: row.pr_number,
+            head_sha: live.headSha,
+            synth_sha: ours.synthSha,
+            synth_tree: ours.synthTree,
+            base_sha: ours.baseSha,
+          },
+          "The re-synthesized commit could not be recorded",
+        );
+        ctx.opts.out(
+          `${row.branch} holds this re-pull's commit made again on a moved main (${ours.synthSha.slice(0, 12)}), pushed by an earlier run; re-pull #${row.id} records it.`,
+        );
+        return { kind: "next", row: recorded };
+      }
+    }
     if (verdict !== "ok") {
       const err =
         verdict === "unreadable"
