@@ -1036,13 +1036,28 @@ describe("dead keys", () => {
       expect(row(body, PATHS.copiedSet).target).toEqual({ kind: "annex", key: fx.keys.setA });
       expect(copy.items.map((i) => i.key)).not.toContain(fx.keys.setA);
       expect(copy.items.map((i) => i.key)).not.toContain(fx.keys.flaggedUpstream);
-      expect(refusalCodes(body)).toEqual(["target-names-dead-key"]);
+      expect(refusalCodes(body)).toEqual(["dead-recording-unpinned", "target-names-dead-key"]);
       // The scrubbed recording's old path: upstream moved it, and NEMAR's re-keyed copy goes.
       expect(row(body, PATHS.flaggedEdf)).toMatchObject({
         explained_by_base: "scrubbed-key",
         class: "take-theirs",
         deleted: true,
       });
+      expect(f.executable).toBe(false);
+    } finally {
+      fx.cleanup();
+    }
+  });
+});
+
+describe("a dead recording alone", () => {
+  test("is listed and refuses the plan itself: no upstream version is pinned to scrub it from", async () => {
+    const fx = await buildRepullFixture({ movedScrubbedEdf: true, noContributorEdits: true });
+    try {
+      const f = await plan(fx);
+      const body = f.body as Body;
+      expect(copyOf(body).dead_recordings).toEqual([fx.keys.flaggedUpstream]);
+      expect(refusalCodes(body)).toEqual(["dead-recording-unpinned"]);
       expect(f.executable).toBe(false);
     } finally {
       fx.cleanup();

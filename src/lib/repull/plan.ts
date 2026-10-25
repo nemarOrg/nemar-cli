@@ -455,6 +455,15 @@ export async function planRepull(opts: PlanOptions): Promise<PlanOutcome> {
       }
       wanted.push({ key, purpose });
     }
+    // A dead recording N.0.0 would name must be re-keyed by the scrub from upstream's bytes, and
+    // only a copied key is pinned, so nothing names the upstream version to read it from: the plan
+    // says so itself, rather than leave execution to find it.
+    if (deadRecordings.length > 0) {
+      refusals.push({
+        code: "dead-recording-unpinned",
+        detail: `${deadRecordings.length} recording(s) N.0.0 would name carry a key NEMAR's git-annex branch marks dead, and no upstream version is pinned to scrub them from`,
+      });
+    }
     const pins = upstreamHasAnnex
       ? await readPinsAt(
           upstream.path,

@@ -306,16 +306,6 @@ export async function readExecutablePlan(path: string, live: LiveSources): Promi
         preflightLines(outcome.file.preflight),
       );
     }
-    // A dead recording N.0.0 would name has to be scrubbed again from upstream's bytes, and the
-    // plan pins only the keys it copies, so nothing names where to read this one. Refused before
-    // anything is uploaded, rather than synthesized with a dead key.
-    const dead = (objectOf(outcome.file.body.copy).dead_recordings as unknown[] | undefined) ?? [];
-    if (dead.length > 0) {
-      throw new ExecuteRefused(
-        "dead-recording-unpinned",
-        `${dead.length} recording(s) N.0.0 would name carry a key NEMAR's git-annex branch marks dead, and the plan pins no upstream version to scrub them from.`,
-      );
-    }
     return { file, body, live: outcome.file, rebasedOnto, workdir };
   } catch (err) {
     discard();

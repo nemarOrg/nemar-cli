@@ -27,7 +27,15 @@
  * Every name, date and code in a header below is invented.
  */
 
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { hashDirLower } from "../../scripts/scrub/git/git-lib";
@@ -116,6 +124,10 @@ export const PATHS = {
   addedIdentifierJson: "sub-03/eeg/sub-03_task-rest_acq.json",
   /** With `crlfSidecarB`: a sidecar tag B adds whose blob has CRLF line endings. */
   crlfSidecar: "sub-03/eeg/sub-03_task-rest_coordsystem.json",
+  /** With `symlinkB`: a plain git symlink tag B adds (not an annexed file). */
+  symlink: "code/latest",
+  /** With `nestedGitattributesB`: a `.gitattributes` tag B adds below the root. */
+  nestedGitattributes: "sub-03/.gitattributes",
 } as const;
 
 const UPSTREAM_GITATTRIBUTES = `* annex.backend=SHA256E
@@ -280,10 +292,21 @@ export interface FixtureOptions {
   /** Tag B adds a sidecar with an identifier-keyed value (the scrub blanks it). */
   identifierJsonB?: boolean;
   /**
+   * Tag B moves the recording the import scrubbed (its upstream key dead at NEMAR) and nothing
+   * else dead: the one dead key N.0.0 would name is at a recording path.
+   */
+  movedScrubbedEdf?: boolean;
+  /** NEMAR's `.nemar/metadata.json` begins with a byte-order mark. */
+  bomNemarMetadata?: boolean;
+  /**
    * Tag B adds a sidecar whose committed blob has CRLF line endings, which upstream's own
    * attributes would normalize on a `git add`: N.0.0 must hold the blob as upstream committed it.
    */
   crlfSidecarB?: boolean;
+  /** Tag B adds a git symlink (mode 120000) to `code/run.sh`. */
+  symlinkB?: boolean;
+  /** Tag B adds a nested `.gitattributes` with an `annex.largefiles` rule the annex policy strips. */
+  nestedGitattributesB?: boolean;
 }
 
 /** The ADR 0085 sentence a correction appends to `CHANGES` (`changeLogEntry`). */
@@ -738,6 +761,10 @@ async function build(
   }
   // Value-looking tokens: a parser's message would quote them, and nothing may echo them.
   if (opts.brokenNemarMetadata) write(clone, ".nemar/metadata.json", "{ Jane Doe\n");
+  if (opts.bomNemarMetadata) {
+    const meta = join(clone, ".nemar/metadata.json");
+    write(clone, ".nemar/metadata.json", `\uFEFF${readFileSync(meta, "utf8")}`);
+  }
   if (opts.corruptLedger) {
     const ledger = join(clone, ".nemar/corrections.jsonl");
     write(clone, ".nemar/corrections.jsonl", `${readFileSync(ledger, "utf8")}Jane Doe\n`);
@@ -873,12 +900,15 @@ async function build(
   if (opts.subtypes) {
     changes[PATHS.bothAdded] = `{\n  "TaskName": "rest",\n  "SamplingFrequency": 128\n}\n`;
   }
+  if (opts.nestedGitattributesB) {
+    changes[PATHS.nestedGitattributes] = "*.tsv annex.largefiles=anything text eol=lf\n";
+  }
   if (opts.identifierJsonB) {
     changes[PATHS.addedIdentifierJson] =
       `{\n  "TaskName": "rest",\n  "Acq": {\n    "PatientName": "Zxfixturename Qwfixturelast"\n  }\n}\n`;
   }
   for (const [p, b] of Object.entries(changes)) write(up, p, b);
-  if (opts.deadKeys) {
+  if (opts.deadKeys || opts.movedScrubbedEdf) {
     mkdirSync(join(up, dirname(PATHS.movedEdf)), { recursive: true });
     await run(["git", "mv", PATHS.flaggedEdf, PATHS.movedEdf], up);
   }
@@ -886,6 +916,10 @@ async function build(
   await run(["git", "mv", PATHS.events, PATHS.eventsRenamed], up);
   await run(["git", "annex", "add", "--quiet", "."], up);
   if (!opts.metadataOnlyB) await run(["git", "update-index", "--chmod=+x", PATHS.script], up);
+  if (opts.symlinkB) {
+    symlinkSync("run.sh", join(up, PATHS.symlink));
+    await run(["git", "add", PATHS.symlink], up);
+  }
   if (opts.crlfSidecarB) {
     // Committed as it is, by plumbing: a plain `git add` would turn its line endings into LF under
     // upstream's own `*.json text eol=lf`, so only a writer that stages exact ids keeps this blob.
