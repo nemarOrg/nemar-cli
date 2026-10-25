@@ -1412,7 +1412,7 @@ Seven annotations are added to earlier text, where this slice builds what it sai
 ### Resume never merges
 
 `nemar admin repull resume <id>` runs on the administrator's machine with their own GitHub token, and refuses a dataset whose catalog row does not say `anonymous` is exactly 0 before anything is written, as every run of execution does.
-The working clone is gone by then (it held the delta's unscrubbed originals and is removed at `pr_open`), so resume reads NEMAR's origin through a bare scratch repository of its own, `$NEMAR_CONFIG_DIR/repull/<id>/resume/<digest8>/`, mode 0700 and removed at the end of the run, under the same lock as an execution of the record's plan, so an execute and a resume of one record never both push.
+The working clone is gone by then (it held the delta's unscrubbed originals and is removed at `pr_open`), so resume reads NEMAR's origin through a bare scratch repository of its own, `$NEMAR_CONFIG_DIR/repull/<id>/resume/<digest8>-<pid>/`, mode 0700 and removed at the end of the run (the merge gate keeps its own under `merge/`, so the two never remove each other's), under the same lock as an execution of the record's plan, so an execute and a resume of one record never both push.
 
 At `pr_open` it reads the pull request on GitHub.
 One found merged is recorded through the Worker's verified route, which reads the merge on GitHub itself; the record gains the edge `pr_open -> merged` (and its N.0.1 twin) for that route alone, and such a merge is counted as one no tool held a claim for, at a head that was not screened, which closes the case the Phase 6e amendment left to this slice.
