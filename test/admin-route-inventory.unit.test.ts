@@ -25,6 +25,24 @@ const EXPECTED_ENTRIES: Record<string, number> = {
   // Router-level middleware (authMiddleware + adminMiddleware + cookieOriginGuard, #1603/#1584).
   "ALL /*": 3,
 
+  // Epic #1893 phase 3b (ADR 0112): support tickets. Each is one handler; the owner-only ones
+  // check the role inside it, not in extra middleware.
+  "GET /mail/tickets": 1,
+  "GET /mail/tickets/:id": 1,
+  "POST /mail/tickets/:id/reply": 1,
+  "POST /mail/tickets/:id/note": 1,
+  "POST /mail/tickets/:id/assign": 1,
+  "POST /mail/tickets/:id/status": 1,
+  "POST /mail/tickets/:id/escalate": 1,
+  "GET /mail/queues": 1,
+  "PUT /mail/queues/:tag": 1,
+  "GET /mail/availability": 1,
+  "PUT /mail/availability": 1,
+  "GET /mail/availability/:userId": 1,
+  "PUT /mail/availability/:userId": 1,
+  "POST /mail/reprocess": 1,
+  "PUT /mail/tickets/:id/summary": 1,
+
   // Users / accounts
   "GET /users": 1,
   "GET /users/:username": 1,
@@ -50,6 +68,8 @@ const EXPECTED_ENTRIES: Record<string, number> = {
   "GET /email-preferences": 1,
   "PUT /email-preferences": 2,
   "POST /notify": 2,
+  // Epic #1893 phase 2: progress of a queued announcement (handler only; the router gates).
+  "GET /notify/:id": 1,
   "POST /test-fixtures/seed-web-user": 2,
   // #1255, epic #1250: ORCID name backfill (zValidator + handler).
   "POST /users/backfill-names": 2,
@@ -252,7 +272,7 @@ describe("admin route inventory", () => {
   });
 
   test("entry total is pinned", () => {
-    expect(adminRoutes.routes.length).toBe(173);
+    expect(adminRoutes.routes.length).toBe(189);
   });
 
   // The count pin above can't see a SWAP of the router-level middleware

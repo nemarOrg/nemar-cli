@@ -110,10 +110,12 @@ const MODULE_EXPORTS: Record<string, string[]> = {
   ],
   admin: [
     "addCi",
+    "addMailNote",
     "anonymitySweep",
     "anonymitySweepReset",
     "approveUser",
     "approveUserById",
+    "assignMailTicket",
     "availabilityReport",
     "availabilityReportSweep",
     "availabilityReportSweepReset",
@@ -137,18 +139,23 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "editAdminUser",
     "enforceBulk",
     "enforceDataset",
+    "escalateMailTicket",
     "getAdminUserById",
     "getAdminUserByUsername",
+    "getBroadcastStatus",
     "getCiStatus",
     "getDoiInfo",
     "getEmailPreferences",
     "getFleetDrift",
     "getImportStatus",
+    "getMailAvailability",
+    "getMailTicket",
     "getNeurobagelStatus",
     "getPrReview",
     "getPrReviewAuthor",
     "getSummaryCoverage",
     "getUserDuplicates",
+    "getUsernameById",
     "hedSweep",
     "hedSweepReset",
     "importCoverageSweep",
@@ -156,6 +163,8 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "importIssueTriage",
     "importWeeklySummary",
     "listKeysFor",
+    "listMailQueues",
+    "listMailTickets",
     "listPrReviews",
     "listUsers",
     "neurobagelRegenerate",
@@ -163,11 +172,15 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "publishDataset",
     "publishVersionDoi",
     "publishZarrCatalog",
+    "putMailAvailability",
+    "putMailQueue",
     "recordingStatsSweep",
     "recordingStatsSweepReset",
     "reindexBulk",
     "reindexDataset",
     "remintExemplarDois",
+    "replyToMailTicket",
+    "reprocessMail",
     "resetTestDataset",
     "restoreDataset",
     "retryImport",
@@ -180,6 +193,8 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "rollbackImport",
     "sendBroadcast",
     "setAccountKind",
+    "setMailTicketStatus",
+    "setMailTicketSummary",
     "setPrReviewAuthor",
     "signalDefaultsSweep",
     "signalDefaultsSweepReset",
@@ -239,6 +254,7 @@ const POST_SPLIT_ADDITIONS = [
   "editAdminUser", // ADR 0096: PATCH /admin/users/by-id/:id, `nemar admin users edit`
   "getAdminUserById", // ADR 0096: GET /admin/users/by-id/:id, `nemar admin users show` and `edit`
   "getAdminUserByUsername", // #1284 review, epic #1272 phase 4, ADR 0048: GET /admin/users/:username, read by `nemar admin doctor kinds`
+  "getBroadcastStatus", // epic #1893 phase 2: GET /admin/notify/:id, `nemar admin notify --status`
   "getFacets", // #1149, epic #1144 phase 5b: GET /datasets/facets for shell completion
   "getUserDuplicates", // #1254, ADR 0043: GET /admin/users/duplicates
   "listApiKeys", // #1283, epic #1272 phase 3, ADR 0047: GET /auth/keys
@@ -285,6 +301,20 @@ const POST_SPLIT_ADDITIONS = [
   "reviewErrorCode", // ADR 0102: the closed word of a review route's refusal (rawBody.code, not ApiError.code)
   "isRouteNotFound", // a backend that predates a route answers its not-found body: say so, do not call it a bug
   "hasReleasedVersion", // ADR 0111 decision 10: the import's upstream-moved guard asks GET /datasets/:id/versions
+  "addMailNote", // epic #1893 phase 4: `nemar admin mail`, routes in shared/contract/mail-admin.ts
+  "assignMailTicket", // epic #1893 phase 4: `nemar admin mail`, routes in shared/contract/mail-admin.ts
+  "escalateMailTicket", // epic #1893 phase 4: `nemar admin mail`, routes in shared/contract/mail-admin.ts
+  "getMailAvailability", // epic #1893 phase 4: `nemar admin mail`, routes in shared/contract/mail-admin.ts
+  "getMailTicket", // epic #1893 phase 4: `nemar admin mail`, routes in shared/contract/mail-admin.ts
+  "getUsernameById", // epic #1893 phase 4: `nemar admin mail`, routes in shared/contract/mail-admin.ts
+  "listMailQueues", // epic #1893 phase 4: `nemar admin mail`, routes in shared/contract/mail-admin.ts
+  "listMailTickets", // epic #1893 phase 4: `nemar admin mail`, routes in shared/contract/mail-admin.ts
+  "putMailAvailability", // epic #1893 phase 4: `nemar admin mail`, routes in shared/contract/mail-admin.ts
+  "putMailQueue", // epic #1893 phase 4: `nemar admin mail`, routes in shared/contract/mail-admin.ts
+  "reprocessMail", // epic #1893 phase 4: `nemar admin mail`, routes in shared/contract/mail-admin.ts
+  "setMailTicketSummary", // epic #1893 phase 6a: `nemar admin mail summarize`, PUT /admin/mail/tickets/:id/summary
+  "replyToMailTicket", // epic #1893 phase 4: `nemar admin mail`, routes in shared/contract/mail-admin.ts
+  "setMailTicketStatus", // epic #1893 phase 4: `nemar admin mail`, routes in shared/contract/mail-admin.ts
 ];
 
 /** The api.ts monolith's runtime surface, captured at #908 commit 1. */

@@ -46,6 +46,7 @@ import { runAnonymitySweepCron } from "./services/anonymity-sweep";
 import { archiveRetrySweep } from "./services/archive-retry";
 import { AUTO_IMPORT_CRON, autoImportTick } from "./services/auto-import";
 import { runAvailabilityReportSweepCron } from "./services/availability-report";
+import type { BroadcastOutboxMessage } from "./services/broadcast";
 import { fetchAndSyncCitationCounts } from "./services/citation-counts-sync";
 import { isNemarWebOrigin, isOscOrigin } from "./services/cors-origins";
 import { sweepLogLines } from "./services/cron-sweep-log";
@@ -61,6 +62,12 @@ import {
   sendStalenessAdminReviewEmail,
   sendStalenessWarningEmail,
 } from "./services/email";
+import {
+  handleEmailEventBatch,
+  isEmailEventMessage,
+  pruneEmailDeliveryEvents,
+} from "./services/email-events";
+import { handleOutboxBatch, isBroadcastOutboxMessage } from "./services/email-outbox";
 import { isNonProductionEnv } from "./services/environment";
 import { resolveHostRoute } from "./services/host-routing";
 import { sweepIdentifierScreens } from "./services/identifier-screen";
@@ -106,6 +113,7 @@ import {
   type TestAccountSweepResult,
   cleanUpLiveTestAccounts,
 } from "./services/test-account-sweep";
+import { purgeExpiredTickets } from "./services/ticket-retention";
 import { publishZarrCatalog } from "./services/zarr-catalog";
 import { runZarrFidelitySweep } from "./services/zarr-fidelity-sweep";
 import type { Bindings, Variables } from "./types/bindings";
@@ -423,6 +431,9 @@ export const PROD_SANDBOX_CLEANUP_QUERY =
  * UPDATEs the CALLING env's own D1: no email, no GitHub, no DOI, no bucket.
  * (`fetchAndSyncCitationCounts`, which it mirrors, is also driven outside the
  * guarded block but was never named here; it is not in this list.)
+ * `purgeExpiredTickets` (services/ticket-retention.ts, epic #1893 phase 6a) qualifies because it
+ * only reads and writes the CALLING env's own D1 mail tables: no email, no GitHub, no DOI, no
+ * bucket (it never touches R2), and it deletes nothing without a valid MAIL_RETENTION_DAYS.
  * `backend/test/cron-sweep-wiring.test.ts` pins that every name here is
  * both actually called and called outside the guarded block.
  */
@@ -430,6 +441,7 @@ export const DEV_CRON_ALLOWLIST = [
   "publishZarrCatalog",
   "runZarrFidelitySweep",
   "fetchAndSyncDataPapers",
+  "purgeExpiredTickets",
 ] as const;
 
 async function scheduledCleanup(env: Bindings): Promise<void> {
@@ -871,6 +883,16 @@ async function scheduledCleanup(env: Bindings): Promise<void> {
     testAccountSweep = await cleanUpLiveTestAccounts(env);
   }
 
+  // 7. Retention for the Email Sending bounce and complaint events (ADR 0110): rows older than
+  //    180 days go. D1 only, so it is safe in every environment. A failure is logged and
+  //    leaves the rows for the next run.
+  try {
+    const pruned = await pruneEmailDeliveryEvents(db, now);
+    if (pruned > 0) console.log(`Scheduled cleanup: pruned ${pruned} email delivery event(s)`);
+  } catch (err) {
+    console.error("Scheduled cleanup: email delivery event retention failed:", err);
+  }
+
   // Log summary to audit_log. `deleted`/`failed` cover only sandbox (xx)
   // datasets now; nm datasets are warned, not deleted, by this job.
   const deleted = results.filter((r) => r.success).length;
@@ -899,8 +921,35 @@ async function scheduledCleanup(env: Bindings): Promise<void> {
   );
 }
 
+/**
+ * Queue consumer entry (epic #1893). One Worker consumes several queues, and a batch holds
+ * messages of one queue, so dispatch is per message on its body. A branch is added here for
+ * each kind of message; anything unrecognised is acked and logged, never retried, because a
+ * retry of a message nobody handles only delays its dead-lettering.
+ */
+export async function dispatchQueueBatch(batch: MessageBatch<unknown>, env: Bindings) {
+  const broadcasts: Message<BroadcastOutboxMessage>[] = [];
+  const emailEvents: Message<unknown>[] = [];
+  for (const message of batch.messages) {
+    if (isBroadcastOutboxMessage(message.body)) {
+      broadcasts.push(message as Message<BroadcastOutboxMessage>);
+    } else if (isEmailEventMessage(message.body)) {
+      emailEvents.push(message);
+    } else {
+      // Stable tag: alert on "[queue] unrecognised message".
+      console.warn(`[queue] unrecognised message queue=${batch.queue}; acking`);
+      message.ack();
+    }
+  }
+  if (broadcasts.length > 0) await handleOutboxBatch(broadcasts, env);
+  if (emailEvents.length > 0) await handleEmailEventBatch(emailEvents, env);
+}
+
 export default {
   fetch: app.fetch,
+  async queue(batch: MessageBatch<unknown>, env: Bindings, _ctx: ExecutionContext) {
+    await dispatchQueueBatch(batch, env);
+  },
   // Email Routing delivers inbound mail here (epic #1893, ADR 0110). With no MAIL_INBOUND
   // binding, which is every Worker but staging, the message is rejected.
   async email(message: ForwardableEmailMessage, env: Bindings) {
@@ -1556,6 +1605,19 @@ export default {
             err instanceof Error ? (err.stack ?? err.message) : err,
           ),
         ),
+    );
+    // Epic #1893 phase 6a (ADR 0112): purge support tickets past MAIL_RETENTION_DAYS, keeping
+    // each one's summary. ALLOWED ON THE NON-PROD CRON (see DEV_CRON_ALLOWLIST): it reads and
+    // writes only this env's own mail tables, sends no mail, dispatches nothing and never touches
+    // R2, so it cannot reach a real user, a repository or a production object; staging's shorter
+    // window (30 days) is what the dev [vars] set. A missing or invalid variable deletes nothing.
+    ctx.waitUntil(
+      purgeExpiredTickets(env).catch((err) =>
+        console.error(
+          "[ticket-retention] purge failed:",
+          err instanceof Error ? (err.stack ?? err.message) : err,
+        ),
+      ),
     );
     // #1062 (epic #1181 phase 2): republish the top-level Zarr discovery
     // catalog (zarr-catalog.json), after the sweeps above. ALLOWED ON THE

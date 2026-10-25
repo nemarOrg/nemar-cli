@@ -31,6 +31,27 @@ import {
   duplicateReportSchema,
 } from "../../../shared/contract/index.js";
 import type {
+  AssignRequest,
+  Availability,
+  EscalateRequest,
+  ListQueuesResponse,
+  ListTicketsQuery,
+  ListTicketsResponse,
+  MailQueue,
+  NoteRequest,
+  NoteResponse,
+  PutAvailabilityRequest,
+  PutQueueRequest,
+  ReplyRequest,
+  ReplyResponse,
+  ReprocessResponse,
+  SettableStatus,
+  SummaryRequest,
+  SummaryResponse,
+  TicketActionResponse,
+  TicketDetail,
+} from "../../../shared/contract/mail-admin.js";
+import type {
   NeurobagelRegenerateRequest,
   NeurobagelRunResult,
   NeurobagelStatus,
@@ -297,6 +318,7 @@ export async function setAccountKind(
  *  everything else is untyped here on purpose (`.passthrough()`-shaped).
  *  `getAdminUserById` is the validated, fully typed read of one account. */
 export interface AdminUserDetail {
+  id?: number;
   username: string | null;
   account_kind?: AccountKind;
 }
@@ -305,7 +327,11 @@ export interface AdminUserDetail {
  *  404 for an unknown username, same as every other username-keyed admin
  *  route. */
 export async function getAdminUserByUsername(username: string): Promise<{ user: AdminUserDetail }> {
-  return request<{ user: AdminUserDetail }>(`/admin/users/${username}`, {}, true);
+  return request<{ user: AdminUserDetail }>(
+    `/admin/users/${encodeURIComponent(username)}`,
+    {},
+    true,
+  );
 }
 
 /**
@@ -1524,6 +1550,8 @@ export interface EmailPreferences {
   dataset_anonymity: boolean;
   /** Epic #1610 phase 5 (ADR 0088): the identifier sweep's weekly report. */
   identifier_sweep: boolean;
+  /** Epic #1893 phase 3 (ADR 0112): support tickets assigned, unassigned or escalated to you. */
+  support_tickets: boolean;
 }
 
 /** Preferences plus whose they are (the backend echoes the resolved username). */
@@ -1558,9 +1586,31 @@ export async function updateEmailPreferences(
 
 export interface BroadcastResponse {
   broadcast_id: number;
+  /** `sent`: finished inline. `queued`: handed to the announcement outbox; check progress with
+   *  {@link getBroadcastStatus}. `done`: queued and already complete. Older servers omit it. */
+  status?: "sent" | "queued" | "done";
+  /** Delivered, or queued when `status` is `queued`. */
   recipient_count: number;
   failure_count: number;
   failed_recipients: string[];
+  /** Recipients withheld by a non-production delivery fence. Older servers omit it. */
+  suppressed_count?: number;
+  error?: string;
+}
+
+export interface BroadcastStatusResponse {
+  id: number;
+  status: "sent" | "queued" | "done";
+  subject: string;
+  recipient_group: string;
+  queued_count: number;
+  delivered_count: number;
+  failure_count: number;
+  /** Sends whose outcome the provider never confirmed; not retried, so none is delivered twice. */
+  unknown_count: number;
+  /** Redacted addresses (first letter and domain only). */
+  failed_recipients: string[];
+  sent_at: string;
 }
 
 export interface BroadcastDryRunResponse {
@@ -1590,6 +1640,11 @@ export async function sendBroadcast(data: {
     },
     true,
   );
+}
+
+/** Progress of one announcement (admin only): `GET /admin/notify/:id`. */
+export async function getBroadcastStatus(id: number): Promise<BroadcastStatusResponse> {
+  return request<BroadcastStatusResponse>(`/admin/notify/${id}`, {}, true);
 }
 
 // ============================================================================
@@ -2519,13 +2574,18 @@ export async function getPrReview(
  * Review a pull request that is already open, or start again a commit whose review ended without a
  * verdict. The Worker reads the pull request from GitHub itself; only the dataset and the number are
  * sent. The answer is the review gate's own fixed word (`dispatched`, `duplicate`, ...).
+ *
+ * With `redo`, a commit whose review already has a result is started again too. The Worker echoes
+ * `redo: true` when it honored the flag, and a Worker that predates it ignores the flag and does not.
  */
 export async function startPrReview(
   datasetId: string,
   prNumber: number,
+  options: { redo?: boolean } = {},
 ): Promise<StartReviewResponse> {
+  const query = options.redo ? "?redo=1" : "";
   return request<StartReviewResponse>(
-    `/admin/pr-reviews/${encodeURIComponent(datasetId)}/${prNumber}/start`,
+    `/admin/pr-reviews/${encodeURIComponent(datasetId)}/${prNumber}/start${query}`,
     { method: "POST" },
     true,
   );
@@ -2582,4 +2642,147 @@ export async function waivePrReviewNaming(
     },
     true,
   );
+}
+
+// ============================================================================
+// Support tickets: `nemar admin mail` (epic #1893, phase 4)
+//
+// Wire shapes are in shared/contract/mail-admin.ts. A failure is an `ApiError` whose message is the
+// route's sentence and whose closed word (`MailErrorCode`) is in `rawBody.code`, because `ApiError.code`
+// is the body's `error`, here the sentence.
+// ============================================================================
+
+const post = (body: unknown, headers?: Record<string, string>): RequestInit => ({
+  method: "POST",
+  body: JSON.stringify(body),
+  ...(headers ? { headers } : {}),
+});
+const put = (body: unknown): RequestInit => ({ method: "PUT", body: JSON.stringify(body) });
+
+/** `GET /admin/mail/tickets`: one page of tickets, newest activity first. */
+export async function listMailTickets(query: ListTicketsQuery): Promise<ListTicketsResponse> {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(query)) {
+    if (value !== undefined && value !== "") params.set(key, String(value));
+  }
+  const qs = params.toString();
+  return request<ListTicketsResponse>(`/admin/mail/tickets${qs ? `?${qs}` : ""}`, {}, true);
+}
+
+/** `GET /admin/mail/tickets/:id`. */
+export async function getMailTicket(id: number): Promise<TicketDetail> {
+  return request<TicketDetail>(`/admin/mail/tickets/${id}`, {}, true);
+}
+
+/**
+ * `POST /admin/mail/tickets/:id/reply`. The `Idempotency-Key` is required here: a reply that is
+ * sent twice reaches a person twice, and the key is what makes a retry after a lost answer safe.
+ */
+export async function replyToMailTicket(
+  id: number,
+  text: string,
+  idempotencyKey: string,
+): Promise<ReplyResponse> {
+  const body: ReplyRequest = { text };
+  return request<ReplyResponse>(
+    `/admin/mail/tickets/${id}/reply`,
+    post(body, { "Idempotency-Key": idempotencyKey }),
+    true,
+  );
+}
+
+/**
+ * `POST /admin/mail/tickets/:id/note`. The `Idempotency-Key` makes a retry after a lost answer
+ * store the note once (a repeat returns the stored message id).
+ */
+export async function addMailNote(
+  id: number,
+  text: string,
+  idempotencyKey: string,
+): Promise<NoteResponse> {
+  const body: NoteRequest = { text };
+  return request(
+    `/admin/mail/tickets/${id}/note`,
+    post(body, { "Idempotency-Key": idempotencyKey }),
+    true,
+  );
+}
+
+/** `POST /admin/mail/tickets/:id/assign`; `null` unassigns. */
+export async function assignMailTicket(
+  id: number,
+  userId: number | null,
+): Promise<TicketActionResponse> {
+  const body: AssignRequest = { user_id: userId };
+  return request(`/admin/mail/tickets/${id}/assign`, post(body), true);
+}
+
+/** `POST /admin/mail/tickets/:id/status`. */
+export async function setMailTicketStatus(
+  id: number,
+  status: SettableStatus,
+): Promise<TicketActionResponse> {
+  return request(`/admin/mail/tickets/${id}/status`, post({ status }), true);
+}
+
+/** `PUT /admin/mail/tickets/:id/summary`: the summary kept after the retention purge. */
+export async function setMailTicketSummary(id: number, summary: string): Promise<SummaryResponse> {
+  const body: SummaryRequest = { summary };
+  return request(`/admin/mail/tickets/${id}/summary`, put(body), true);
+}
+
+/** `POST /admin/mail/tickets/:id/escalate`. */
+export async function escalateMailTicket(
+  id: number,
+  reason?: string,
+): Promise<TicketActionResponse> {
+  const body: EscalateRequest = reason ? { reason } : {};
+  return request(`/admin/mail/tickets/${id}/escalate`, post(body), true);
+}
+
+/** `GET /admin/mail/queues`. */
+export async function listMailQueues(): Promise<ListQueuesResponse> {
+  return request<ListQueuesResponse>("/admin/mail/queues", {}, true);
+}
+
+/** `PUT /admin/mail/queues/:tag` (owner): create or change a queue; absent fields keep their value. */
+export async function putMailQueue(
+  tag: string,
+  body: PutQueueRequest,
+): Promise<{ queue: MailQueue }> {
+  return request(`/admin/mail/queues/${encodeURIComponent(tag)}`, put(body), true);
+}
+
+/** `GET /admin/mail/availability[/:userId]`; another person's window is owner-only. */
+export async function getMailAvailability(
+  userId?: number,
+): Promise<{ availability: Availability }> {
+  return request(`/admin/mail/availability${userId === undefined ? "" : `/${userId}`}`, {}, true);
+}
+
+/** `PUT /admin/mail/availability[/:userId]`; every field null clears the window. */
+export async function putMailAvailability(
+  body: PutAvailabilityRequest,
+  userId?: number,
+): Promise<{ availability: Availability }> {
+  return request(
+    `/admin/mail/availability${userId === undefined ? "" : `/${userId}`}`,
+    put(body),
+    true,
+  );
+}
+
+/** `POST /admin/mail/reprocess` (owner): rebuild a ticket from a stored raw message. */
+export async function reprocessMail(rawKey: string): Promise<ReprocessResponse> {
+  return request<ReprocessResponse>("/admin/mail/reprocess", post({ raw_key: rawKey }), true);
+}
+
+/** `GET /admin/users/by-id/:id`, read for its username only (a web or ORCID account has none). */
+export async function getUsernameById(id: number): Promise<string | null> {
+  const res = await request<{ user: { username: string | null } }>(
+    `/admin/users/by-id/${id}`,
+    {},
+    true,
+  );
+  return res.user.username;
 }

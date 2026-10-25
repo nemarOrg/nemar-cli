@@ -1,7 +1,7 @@
 {
   "name": "nemar-api",
   "packageManager": "bun@1.4.3",
-  "version": "0.10.24-dev2",
+  "version": "0.10.24-dev11",
   "private": true,
   "scripts": {
     "dev": "wrangler dev -c wrangler-sccn.toml --env dev",
@@ -20,6 +20,7 @@
     "fzstd": "0.1.1",
     "hono": "^4.11.4",
     "hyparquet": "1.30.0",
+    "postal-mime": "^4.1.4",
     "zod": "^3.23.0",
     "zod4": "npm:zod@^4.2.0"
   },

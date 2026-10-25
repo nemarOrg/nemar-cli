@@ -121,6 +121,9 @@ export interface EmailDeliveryEnv {
   /** `cloudflare` sends through the `EMAIL` binding; unset or `resend` is Resend; anything else is a
    *  configuration error. */
   EMAIL_PROVIDER?: string;
+  /** `resend` lets a Cloudflare send that hit a quota or account refusal go out once through
+   *  Resend instead (see {@link RESEND_FALLBACK_CODES}); unset or anything else never falls back. */
+  EMAIL_FALLBACK?: string;
   /** The Cloudflare Email Service `send_email` binding. */
   EMAIL?: CloudflareSendEmail;
 }
@@ -271,6 +274,11 @@ export function redactAddressIn(message: string, address: string): string {
   return message.replace(new RegExp(literal, "gi"), () => redacted);
 }
 
+/** `text` with every email address in it redacted, for a message whose addresses are not all known. */
+function redactAnyAddress(text: string): string {
+  return text.replace(/[^\s<>"',;]+@[^\s<>"',;]+/g, (match) => redactRecipient(match));
+}
+
 /** A failed send as text for a log line or a stored failure: its message, the recipient redacted. */
 function sendFailureText(error: unknown, address: string): string {
   return redactAddressIn(error instanceof Error ? error.message : String(error), address);
@@ -299,6 +307,12 @@ export interface EmailPreferences {
    * like every category here, so a stored row from before it existed receives it.
    */
   identifier_sweep: boolean;
+  /**
+   * A support ticket was assigned to the admin, or arrived unassigned in a queue they can work, or
+   * was escalated to them (epic #1893 phase 3, ADR 0112). Its own category so an admin can leave
+   * the ticket stream without losing approval or publication mail. Opted in by default.
+   */
+  support_tickets: boolean;
 }
 
 export type EmailCategory = keyof EmailPreferences;
@@ -309,6 +323,7 @@ export const DEFAULT_EMAIL_PREFERENCES: EmailPreferences = {
   announcements: true,
   dataset_anonymity: true,
   identifier_sweep: true,
+  support_tickets: true,
 };
 
 interface ResendResponse {
@@ -338,6 +353,7 @@ export function parseEmailPreferences(raw: string | null): EmailPreferences {
       // every current admin no anonymity mail at all.
       dataset_anonymity: parsed.dataset_anonymity !== false,
       identifier_sweep: parsed.identifier_sweep !== false,
+      support_tickets: parsed.support_tickets !== false,
     };
   } catch (err) {
     console.error("Corrupt email_preferences JSON, defaulting to all enabled:", raw, err);
@@ -453,7 +469,7 @@ export class EmailRejectedError extends Error {
 }
 
 /** Cloudflare send_email codes that say nothing was delivered. `E_HEADER*` is matched by prefix. */
-const CLOUDFLARE_NON_DELIVERY_CODES: ReadonlySet<string> = new Set([
+export const CLOUDFLARE_NON_DELIVERY_CODES: ReadonlySet<string> = new Set([
   "E_VALIDATION_ERROR",
   "E_FIELD_MISSING",
   "E_TOO_MANY_RECIPIENTS",
@@ -470,8 +486,22 @@ const CLOUDFLARE_NON_DELIVERY_CODES: ReadonlySet<string> = new Set([
   "E_DAILY_LIMIT_EXCEEDED",
 ]);
 
+/**
+ * The refusals a Cloudflare send may be retried through Resend for, when EMAIL_FALLBACK=resend:
+ * the quota and account-level ones, where Cloudflare certainly delivered nothing and the message
+ * itself is fine (a subset of the non-delivery codes above, which the tests assert). Every
+ * other code (a suppressed or rejected recipient, a validation error, a failed delivery) would
+ * be refused by Resend too, or would deliver twice.
+ */
+export const RESEND_FALLBACK_CODES: ReadonlySet<string> = new Set([
+  "E_RATE_LIMIT_EXCEEDED",
+  "E_DAILY_LIMIT_EXCEEDED",
+  "E_ACCOUNT_SUSPENDED",
+  "E_SENDER_DOMAIN_NOT_AVAILABLE",
+]);
+
 /** The two Cloudflare codes that mean "slow down", mapped to a 429 like a Resend limit. */
-const CLOUDFLARE_LIMIT_CODES: ReadonlySet<string> = new Set([
+export const CLOUDFLARE_LIMIT_CODES: ReadonlySet<string> = new Set([
   "E_RATE_LIMIT_EXCEEDED",
   "E_DAILY_LIMIT_EXCEEDED",
 ]);
@@ -504,6 +534,7 @@ function cloudflareSendFailure(error: unknown, message: string): Error {
 export function isCertainNonDelivery(error: unknown): boolean {
   return (
     error instanceof EmailRejectedError ||
+    error instanceof MailHeaderError ||
     error instanceof DevEmailFenceError ||
     error instanceof EmailProviderConfigError
   );
@@ -512,6 +543,12 @@ export function isCertainNonDelivery(error: unknown): boolean {
 /**
  * Send email through the provider `deliveryEnv` selects (Resend unless
  * EMAIL_PROVIDER=cloudflare, see {@link resolveEmailProvider}).
+ *
+ * Fallback: a Cloudflare send refused with a code in {@link RESEND_FALLBACK_CODES} is sent once
+ * through Resend when EMAIL_FALLBACK=resend and `resendApiKey` is non-blank; if that send fails
+ * its error propagates, with no further retry. Each attempt is bounded separately by `timeoutMs`,
+ * so a fallback can take up to twice that in wall time. Every other failure rethrows unchanged, and
+ * {@link EmailProviderConfigError} never falls back.
  *
  * `deliveryEnv` (issue #957) is the delivery-level fence: when set and not
  * production, a recipient not on DEV_EMAIL_ALLOWLIST is refused BEFORE any
@@ -525,8 +562,8 @@ export function isCertainNonDelivery(error: unknown): boolean {
  *
  * `timeoutMs`, when given, bounds the provider call (the identifier sweep's weekly
  * report passes one). A refusal throws {@link EmailRejectedError}: the provider
- * refused the message, so nothing was delivered. `resendApiKey` is unused on the
- * Cloudflare path.
+ * refused the message, so nothing was delivered. `resendApiKey` is used on the
+ * Cloudflare path only for the gated fallback above.
  */
 export async function sendEmail(
   to: string,
@@ -538,7 +575,10 @@ export async function sendEmail(
   isDev?: boolean,
   deliveryEnv?: EmailDeliveryEnv,
   timeoutMs?: number,
+  headers?: Record<string, string>,
 ): Promise<void> {
+  // Validated first, before the fence or any provider: a rejected header is a caller bug.
+  const extraHeaders = validateMailHeaders(headers);
   if (!isEmailDeliveryAllowed(to, deliveryEnv)) {
     console.warn(
       `[email] suppressed send to ${redactRecipient(to)} (subject: "${subject}"): ENVIRONMENT=${deliveryEnv?.ENVIRONMENT ?? "unset"} is not production and the recipient is not on DEV_EMAIL_ALLOWLIST`,
@@ -551,16 +591,47 @@ export async function sendEmail(
   const wrapped = applyDevWrap(subject, html, isDev);
   const resolved = resolveEmailProvider(deliveryEnv);
   if (resolved.provider === "cloudflare") {
-    await sendViaCloudflare(
-      resolved.binding,
-      to,
-      wrapped.subject,
-      wrapped.html,
-      fromEmail,
-      replyTo,
-      timeoutMs,
-    );
-    return;
+    try {
+      await sendViaCloudflare(
+        resolved.binding,
+        to,
+        wrapped.subject,
+        wrapped.html,
+        fromEmail,
+        replyTo,
+        timeoutMs,
+        extraHeaders,
+      );
+      return;
+    } catch (error) {
+      const fallbackOn = (deliveryEnv?.EMAIL_FALLBACK ?? "").trim().toLowerCase() === "resend";
+      const code = error instanceof EmailRejectedError ? error.code : undefined;
+      if (!fallbackOn || !resendApiKey.trim() || !code || !RESEND_FALLBACK_CODES.has(code)) {
+        throw error;
+      }
+      const reason = redactAnyAddress(redactAddressIn((error as Error).message, to));
+      console.warn(
+        `[email][cloudflare-fallback] ${code} for ${redactRecipient(to)}, falling back to Resend: ${reason}`,
+      );
+      try {
+        await sendViaResend(
+          to,
+          wrapped.subject,
+          wrapped.html,
+          resendApiKey,
+          fromEmail,
+          replyTo,
+          timeoutMs,
+          extraHeaders,
+        );
+      } catch (resendError) {
+        console.error(
+          `[email][cloudflare-fallback] Resend also failed for ${redactRecipient(to)} after Cloudflare ${code}`,
+        );
+        throw resendError;
+      }
+      return;
+    }
   }
   await sendViaResend(
     to,
@@ -570,7 +641,50 @@ export async function sendEmail(
     fromEmail,
     replyTo,
     timeoutMs,
+    extraHeaders,
   );
+}
+
+/** A caller's extra mail headers were refused before any provider was called: nothing was sent. */
+export class MailHeaderError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "MailHeaderError";
+  }
+}
+
+/** The only extra headers a caller may set: the threading trio. Names compare case-insensitively. */
+export const ALLOWED_MAIL_HEADERS: readonly string[] = ["Message-ID", "In-Reply-To", "References"];
+
+/** The most characters one header value may carry (RFC 5322 line limit, less the name). */
+const MAIL_HEADER_VALUE_MAX = 998;
+
+/**
+ * Check the extra headers of a send against {@link ALLOWED_MAIL_HEADERS} and return them under
+ * their canonical names, or undefined when none. A name outside the list, a value with a control
+ * character (CR or LF would inject a header) or an over-long value throws a plain Error before any
+ * provider is called.
+ */
+export function validateMailHeaders(
+  headers: Record<string, string> | undefined,
+): Record<string, string> | undefined {
+  if (!headers) return undefined;
+  const out: Record<string, string> = {};
+  for (const [name, value] of Object.entries(headers)) {
+    const canonical = ALLOWED_MAIL_HEADERS.find((h) => h.toLowerCase() === name.toLowerCase());
+    if (!canonical) throw new MailHeaderError(`mail header "${name.slice(0, 40)}" is not allowed`);
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: rejecting control characters is the point
+    if (typeof value !== "string" || /[\u0000-\u001f\u007f]/.test(value)) {
+      throw new MailHeaderError(`mail header ${canonical} has a control character in its value`);
+    }
+    if (value.length === 0 || value.length > MAIL_HEADER_VALUE_MAX) {
+      throw new MailHeaderError(
+        `mail header ${canonical} must be 1 to ${MAIL_HEADER_VALUE_MAX} characters`,
+      );
+    }
+    out[canonical] = value;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 async function sendViaResend(
@@ -581,6 +695,7 @@ async function sendViaResend(
   fromEmail: string,
   replyTo?: string,
   timeoutMs?: number,
+  headers?: Record<string, string>,
 ): Promise<void> {
   const body: Record<string, unknown> = {
     from: fromEmail,
@@ -589,6 +704,7 @@ async function sendViaResend(
     html,
   };
   if (replyTo) body.reply_to = replyTo;
+  if (headers) body.headers = headers;
   const response = await fetch(RESEND_API_URL, {
     method: "POST",
     headers: {
@@ -617,6 +733,7 @@ async function sendViaCloudflare(
   fromEmail: string,
   replyTo?: string,
   timeoutMs?: number,
+  headers?: Record<string, string>,
 ): Promise<void> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -629,6 +746,7 @@ async function sendViaCloudflare(
       // spam filters that prefer one.
       text: htmlToText(html),
       ...(replyTo ? { replyTo: parseMailbox(replyTo) } : {}),
+      ...(headers ? { headers } : {}),
     });
     if (!timeoutMs) {
       await sent;
@@ -1702,7 +1820,7 @@ export async function sendIdentifierScreenBlockedEmail(
     );
   } catch (error) {
     // The caller logs this message; the depositor's address is not for a log.
-    if (error instanceof Error) error.message = redactAddressIn(error.message, to);
+    if (error instanceof Error) error.message = redactAddressIn((error as Error).message, to);
     throw error;
   }
 }

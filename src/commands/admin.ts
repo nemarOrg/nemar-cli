@@ -21,6 +21,7 @@
  * - nemar admin notice list/set/clear - System notice management
  * - nemar admin notify              - Send broadcast email to users
  * - nemar admin pr-reviews          - Dataset pull requests awaiting approval, with the automated review
+ * - nemar admin mail               - Support tickets: list/show/reply/note/assign/status/close/escalate/queues/away/reprocess
  */
 
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
@@ -83,6 +84,7 @@ import {
   type AvailabilityReportSweepBatchResponse,
   type BackfillNamesResponse,
   type BackfillUsernamesResponse,
+  type BroadcastStatusResponse,
   type DataIntegritySweepBatchResponse,
   type DatasetTransitionResponse,
   type DoctorFixLiveResponse,
@@ -139,6 +141,7 @@ import {
   enforceDataset,
   getAdminUserById,
   getAdminUserByUsername,
+  getBroadcastStatus,
   getCiStatus,
   getDoiInfo,
   getEmailPreferences,
@@ -240,6 +243,7 @@ import {
   resolveWithdrawTargets,
   stillWithdrawn,
 } from "../lib/withdrawn-datasets.js";
+import { mailCommand } from "./admin-mail.js";
 import { prReviewsCommand } from "./admin-pr-reviews.js";
 import { publishCommand } from "./admin-publish.js";
 import { repullCommand } from "./admin-repull.js";
@@ -8337,6 +8341,7 @@ emailPrefsCommand
         { key: "announcements", label: "Announcement emails" },
         { key: "dataset_anonymity", label: "Anonymity sweep findings" },
         { key: "identifier_sweep", label: "Identifier sweep weekly report" },
+        { key: "support_tickets", label: "Support tickets assigned to you" },
       ];
 
       for (const cat of categories) {
@@ -8361,6 +8366,7 @@ emailPrefsCommand
   .option("--announcements <bool>", "Enable/disable announcement emails")
   .option("--dataset-anonymity <bool>", "Enable/disable anonymity sweep findings")
   .option("--identifier-sweep <bool>", "Enable/disable the identifier sweep weekly report")
+  .option("--support-tickets <bool>", "Enable/disable support ticket notifications")
   .option("--all <bool>", "Enable/disable all notifications")
   .option("--user <username>", "(owner only) update another user's preferences")
   .action(
@@ -8370,6 +8376,7 @@ emailPrefsCommand
       announcements?: string;
       datasetAnonymity?: string;
       identifierSweep?: string;
+      supportTickets?: string;
       all?: string;
       user?: string;
     }) => {
@@ -8398,19 +8405,22 @@ emailPrefsCommand
         updates.announcements = val;
         updates.dataset_anonymity = val;
         updates.identifier_sweep = val;
+        updates.support_tickets = val;
       } else {
         const ua = parseBool(options.userApproval);
         const pr = parseBool(options.publicationRequest);
         const ann = parseBool(options.announcements);
         const anon = parseBool(options.datasetAnonymity);
         const sweep = parseBool(options.identifierSweep);
+        const tickets = parseBool(options.supportTickets);
 
         if (
           ua === undefined &&
           pr === undefined &&
           ann === undefined &&
           anon === undefined &&
-          sweep === undefined
+          sweep === undefined &&
+          tickets === undefined
         ) {
           console.error(chalk.red("No preferences specified."));
           console.log("  --user-approval <bool>        User approval notifications");
@@ -8418,6 +8428,7 @@ emailPrefsCommand
           console.log("  --announcements <bool>         Announcement emails");
           console.log("  --dataset-anonymity <bool>     Anonymity sweep findings");
           console.log("  --identifier-sweep <bool>      Identifier sweep weekly report");
+          console.log("  --support-tickets <bool>       Support ticket notifications");
           console.log("  --all <bool>                   All notifications");
           process.exit(1);
         }
@@ -8427,6 +8438,7 @@ emailPrefsCommand
         if (ann !== undefined) updates.announcements = ann;
         if (anon !== undefined) updates.dataset_anonymity = anon;
         if (sweep !== undefined) updates.identifier_sweep = sweep;
+        if (tickets !== undefined) updates.support_tickets = tickets;
       }
 
       const spinner = ora("Updating email preferences...").start();
@@ -8449,6 +8461,9 @@ emailPrefsCommand
         );
         console.log(
           `  Identifier sweep:      ${result.identifier_sweep ? chalk.green("enabled") : chalk.dim("disabled")}`,
+        );
+        console.log(
+          `  Support tickets:       ${result.support_tickets ? chalk.green("enabled") : chalk.dim("disabled")}`,
         );
       } catch (err) {
         spinner.fail("Failed to update preferences");
@@ -8612,22 +8627,54 @@ adminCommand.addCommand(noticeCommand);
 // Broadcast Notifications
 // ============================================================================
 
+/** The lines `nemar admin notify --status` prints for one announcement. */
+export function formatBroadcastStatus(s: BroadcastStatusResponse): string[] {
+  const lines = [
+    `${chalk.bold(`Announcement ${s.id}`)} ${chalk.cyan(s.status)}`,
+    `  Subject: ${s.subject}`,
+    `  To: ${s.recipient_group}`,
+    `  Sent at: ${s.sent_at}`,
+  ];
+  if (s.status === "sent") {
+    lines.push(`  Delivered: ${s.queued_count > 0 ? s.delivered_count : "n/a (sent inline)"}`);
+    lines.push(`  Failed: ${s.failure_count}`);
+  } else {
+    lines.push(`  Queued: ${s.queued_count}`);
+    lines.push(`  Delivered: ${s.delivered_count}`);
+    lines.push(`  Failed: ${s.failure_count}`);
+    lines.push(
+      `  Unconfirmed: ${s.unknown_count} (not retried; the provider never confirmed them)`,
+    );
+    const pending = s.queued_count - s.delivered_count - s.failure_count - s.unknown_count;
+    if (pending > 0) lines.push(`  Pending: ${pending}`);
+  }
+  if (s.failed_recipients.length > 0) {
+    lines.push("  Failed addresses are shown redacted and may not be unique:");
+    for (const address of s.failed_recipients) lines.push(chalk.red(`  Failed: ${address}`));
+  }
+  return lines;
+}
+
 adminCommand
   .command("notify")
   .description("Send an email to a group or a single user")
   .option("--to <group>", "Recipient group: all, admins, members")
   .option("--user <username>", "Send to a single user by username")
-  .requiredOption("--subject <text>", "Email subject line")
+  .option("--subject <text>", "Email subject line")
   .option("--body <text>", "Email body (markdown)")
   .option("--body-file <path>", "Read email body from file (markdown)")
   .option("--dry-run", "Preview recipients without sending")
+  .option("--status <id>", "Show the progress of a queued announcement by its ID")
+  .option("--json", "Output raw JSON (with --status)")
   .option(YES_OPTION, YES_DESCRIPTION)
   .option(NO_OPTION, NO_DESCRIPTION)
   .action(
     async (options: {
       to?: string;
       user?: string;
-      subject: string;
+      subject?: string;
+      status?: string;
+      json?: boolean;
       body?: string;
       bodyFile?: string;
       dryRun?: boolean;
@@ -8638,6 +8685,33 @@ adminCommand
         console.error(chalk.red("Not authenticated. Run: nemar auth login"));
         process.exit(1);
       }
+
+      if (options.status !== undefined) {
+        const id = Number(options.status);
+        if (!Number.isInteger(id) || id < 1) {
+          console.error(chalk.red(`Invalid announcement ID: ${options.status}`));
+          process.exit(1);
+        }
+        const spinner = options.json ? null : ora("Fetching announcement status...").start();
+        try {
+          const status = await getBroadcastStatus(id);
+          if (options.json) {
+            console.log(JSON.stringify(status, null, 2));
+            return;
+          }
+          spinner?.stop();
+          for (const line of formatBroadcastStatus(status)) console.log(line);
+        } catch (err) {
+          handleCommandError(err, spinner ?? ora(), "Failed to fetch announcement status");
+        }
+        return;
+      }
+
+      if (!options.subject) {
+        console.error(chalk.red("Email subject required. Use --subject."));
+        process.exit(1);
+      }
+      const subject = options.subject;
 
       // Mutual exclusion: exactly one of --to or --user
       if (options.to && options.user) {
@@ -8671,8 +8745,8 @@ adminCommand
 
       const target = options.user ? `user:${options.user}` : (options.to as string);
       const requestPayload = options.user
-        ? { user: options.user, subject: options.subject, body }
-        : { to: options.to as string, subject: options.subject, body };
+        ? { user: options.user, subject, body }
+        : { to: options.to as string, subject, body };
 
       if (options.dryRun) {
         const spinner = ora("Checking recipients...").start();
@@ -8696,7 +8770,7 @@ adminCommand
       // Preview and confirm
       console.log(chalk.bold("Email preview:"));
       console.log(`  To: ${chalk.cyan(target)}`);
-      console.log(`  Subject: ${options.subject}`);
+      console.log(`  Subject: ${subject}`);
       console.log(`  Body: ${body.length > 100 ? `${body.substring(0, 100)}...` : body}`);
       console.log();
 
@@ -8713,7 +8787,15 @@ adminCommand
         const result = await sendBroadcast(requestPayload);
 
         if ("broadcast_id" in result) {
-          if (result.failure_count > 0) {
+          if (result.error === "queue_enqueue_failed") {
+            spinner.warn(
+              `Enqueue failed (ID ${result.broadcast_id}): ${result.recipient_count} queued, ${result.failure_count} not queued; check progress with: nemar admin notify --status ${result.broadcast_id}`,
+            );
+          } else if (result.status === "queued" && result.failure_count === 0) {
+            spinner.succeed(
+              `Queued ${result.recipient_count} announcement(s) (ID ${result.broadcast_id}); check progress with: nemar admin notify --status ${result.broadcast_id}`,
+            );
+          } else if (result.failure_count > 0) {
             spinner.warn(
               `Email send: ${result.recipient_count} delivered, ${result.failure_count} failed`,
             );
@@ -8725,6 +8807,13 @@ adminCommand
               ? `Email sent to ${options.user}`
               : `Broadcast sent to ${result.recipient_count} recipient(s)`;
             spinner.succeed(`${label} (ID: ${result.broadcast_id})`);
+          }
+          if ((result.suppressed_count ?? 0) > 0) {
+            console.log(
+              chalk.yellow(
+                `  ${result.suppressed_count} recipient(s) withheld by the non-production delivery fence`,
+              ),
+            );
           }
         }
       } catch (err) {
@@ -10361,3 +10450,4 @@ neurobagelCommand
 adminCommand.addCommand(neurobagelCommand);
 adminCommand.addCommand(prReviewsCommand);
 adminCommand.addCommand(repullCommand);
+adminCommand.addCommand(mailCommand);
