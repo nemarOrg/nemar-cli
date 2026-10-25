@@ -19,9 +19,11 @@ import {
   MailAdminError,
   addNote,
   assignTicket,
+  countUnreadTickets,
   escalateTicket,
   listTickets,
   loadVisibleTicket,
+  markTicketRead,
   replyToTicket,
   requireVisibleTicket,
   setTicketStatus,
@@ -145,9 +147,19 @@ export function registerMailRoutes(admin: AdminRouter): void {
     }
   });
 
+  admin.get("/mail/unread-count", async (c) => {
+    try {
+      return c.json({ count: await countUnreadTickets(c.env.DB, c.get("user")) });
+    } catch (error) {
+      return fail(c, error);
+    }
+  });
+
   admin.get("/mail/tickets/:id", async (c) => {
     try {
       const ticket = await requireVisibleTicket(c.env.DB, c.get("user"), ticketId(c));
+      // Opening the ticket is reading it. Only after the visibility check, and never fatal.
+      await markTicketRead(c.env.DB, c.get("user"), ticket.id);
       return c.json(await ticketDetail(c.env.DB, ticket));
     } catch (error) {
       return fail(c, error);

@@ -2,7 +2,9 @@
  * The wire shapes of the support-ticket admin routes (epic #1893 phase 3b, ADR 0112):
  *
  *   GET  /admin/mail/tickets                    list, filtered, keyset-paged
- *   GET  /admin/mail/tickets/:id                one ticket: messages, tags, events
+ *   GET  /admin/mail/tickets/:id                one ticket: messages, tags, events (opening it marks it
+ *                                               read for the caller)
+ *   GET  /admin/mail/unread-count               how many tickets have mail the caller has not read
  *   POST /admin/mail/tickets/:id/reply          send a reply to the requester from support@
  *   POST /admin/mail/tickets/:id/note           an internal note
  *   POST /admin/mail/tickets/:id/assign         assign or unassign
@@ -88,6 +90,24 @@ export interface TicketSummary {
   has_summary: boolean;
   /** The retention purge has run on this ticket: its messages are gone and its address and subject are empty. */
   purged: boolean;
+  /**
+   * The caller has not read this ticket: it has an incoming message newer than the last one the
+   * caller saw when opening it, or the caller never opened it and it has any incoming message.
+   * Per admin: another admin opening the ticket changes nothing here. Outgoing replies and notes
+   * never make a ticket unread. Opening it (`GET /admin/mail/tickets/:id`) marks it read. Computed
+   * by the list route; every other response carries false (the detail has just marked it read).
+   */
+  unread: boolean;
+}
+
+/**
+ * `GET /admin/mail/unread-count`: the number behind the Mail badge. Counts the tickets the caller
+ * may see (the visibility of the list, so a restricted queue never counts for a non-owner and a
+ * ticket that excludes the caller never counts) that are not closed or spam and are unread for the
+ * caller.
+ */
+export interface UnreadCountResponse {
+  count: number;
 }
 
 /** Query of the list route. `status` absent hides spam and closed tickets. */

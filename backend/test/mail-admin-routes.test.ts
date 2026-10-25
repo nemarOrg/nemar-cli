@@ -1302,3 +1302,120 @@ describe("cascades", () => {
     expect(row(t).status).toBe("open");
   });
 });
+
+describe("unread tracking (per admin)", () => {
+  const unreadOf = async (who: Who, id: number) => {
+    const list = await call(who, "GET", "/tickets");
+    const t = (list.body.tickets as { id: number; unread: boolean }[]).find((x) => x.id === id);
+    return t?.unread;
+  };
+  const reads = (id: number) =>
+    db
+      .query<{ user_id: number; read_message_id: number }, [number]>(
+        "SELECT user_id, read_message_id FROM mail_ticket_reads WHERE ticket_id = ? ORDER BY user_id",
+      )
+      .all(id);
+  const count = async (who: Who) => (await call(who, "GET", "/unread-count")).body.count;
+
+  test("unread for a new inbound ticket, read after the viewer opens it, unread again on new mail", async () => {
+    const t = ticket();
+    inbound(t, "<u1@x.example>");
+    expect(await unreadOf("admin", t)).toBe(true);
+    expect(await count("admin")).toBe(1);
+
+    const detail = await call("admin", "GET", `/tickets/${t}`);
+    expect(detail.status).toBe(200);
+    expect(await unreadOf("admin", t)).toBe(false);
+    expect(await count("admin")).toBe(0);
+
+    inbound(t, "<u2@x.example>");
+    expect(await unreadOf("admin", t)).toBe(true);
+    expect(await count("admin")).toBe(1);
+  });
+
+  test("another admin who has not opened it still sees it unread", async () => {
+    const t = ticket();
+    inbound(t, "<u3@x.example>");
+    await call("admin", "GET", `/tickets/${t}`);
+    expect(await unreadOf("admin", t)).toBe(false);
+    expect(await unreadOf("agent", t)).toBe(true);
+    expect(await count("agent")).toBe(1);
+    expect(reads(t).map((r) => r.user_id)).toEqual([ids.admin]);
+  });
+
+  test("an outgoing reply or a note never makes a ticket unread", async () => {
+    const t = ticket();
+    inbound(t, "<u4@x.example>");
+    await call("admin", "GET", `/tickets/${t}`);
+    db.run(
+      `INSERT INTO mail_messages (ticket_id, direction, from_addr, to_addr, subject, text_body)
+       VALUES (?, 'out', 'support@nemar.org', 'ada@sender.example', 's', 'reply'),
+              (?, 'note', '', '', 's', 'internal')`,
+      [t, t],
+    );
+    expect(await unreadOf("admin", t)).toBe(false);
+    expect(await count("admin")).toBe(0);
+  });
+
+  test("a ticket with no inbound message is not unread", async () => {
+    const t = ticket();
+    expect(await unreadOf("admin", t)).toBe(false);
+    await call("admin", "GET", `/tickets/${t}`);
+    expect(reads(t)).toEqual([]);
+  });
+
+  test("the count only includes visible, open-ish, unread tickets", async () => {
+    const mk = (o: Parameters<typeof ticket>[0]) => {
+      const t = ticket(o);
+      inbound(t, `<c${t}@x.example>`);
+      return t;
+    };
+    mk({});
+    mk({ status: "pending" });
+    mk({ status: "escalated" });
+    mk({ status: "closed" });
+    mk({ status: "spam" });
+    mk({ queue: "security", restricted: true });
+    mk({ queue: "conduct", restricted: true, excluded: ids.owner2 });
+    mk({ excluded: ids.admin });
+    // admin: three unread non-closed ordinary tickets; the restricted and excluded ones never count.
+    expect(await count("admin")).toBe(3);
+    expect(await count("agent")).toBe(4);
+    // owner: ordinary 3 + 1 excluded-for-admin + security restricted + conduct restricted = 6.
+    expect(await count("owner")).toBe(6);
+    // owner2 is excluded from the conduct ticket only.
+    expect(await count("owner2")).toBe(5);
+    expect((await call("member", "GET", "/unread-count")).status).toBe(403);
+  });
+
+  test("a ticket the viewer cannot see writes no marker", async () => {
+    const t = ticket({ queue: "security", restricted: true });
+    inbound(t, "<h1@x.example>");
+    expect((await call("admin", "GET", `/tickets/${t}`)).status).toBe(404);
+    const x = ticket({ queue: "conduct", restricted: true, excluded: ids.owner2 });
+    inbound(x, "<h2@x.example>");
+    expect((await call("owner2", "GET", `/tickets/${x}`)).status).toBe(404);
+    expect(reads(t)).toEqual([]);
+    expect(reads(x)).toEqual([]);
+    expect(await count("owner2")).toBe(1);
+  });
+
+  test("a failed marker write does not fail the read", async () => {
+    const t = ticket();
+    inbound(t, "<f1@x.example>");
+    db.run("DROP TABLE mail_ticket_reads");
+    const res = await call("admin", "GET", `/tickets/${t}`);
+    expect(res.status).toBe(200);
+    expect(res.body.ticket.id).toBe(t);
+  });
+
+  test("the marker only moves forward", async () => {
+    const t = ticket();
+    inbound(t, "<m1@x.example>");
+    await call("admin", "GET", `/tickets/${t}`);
+    const first = reads(t)[0]?.read_message_id as number;
+    db.run("UPDATE mail_ticket_reads SET read_message_id = ? WHERE ticket_id = ?", [first + 50, t]);
+    await call("admin", "GET", `/tickets/${t}`);
+    expect(reads(t)[0]?.read_message_id).toBe(first + 50);
+  });
+});
