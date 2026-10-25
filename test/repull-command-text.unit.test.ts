@@ -89,9 +89,17 @@ describe("no text names a command that does not exist", () => {
     const resume = helpOf("resume");
     expect(resume).toContain("It never merges");
     expect(resume).toContain("--acknowledge-identifier-screen");
+    // It takes the record on after the merge too: the release, the lock and the end.
+    expect(resume).toContain("the release and the lock");
+    expect(resume).toContain("records the release");
+    expect(resume).toContain("locks the objects the copy and the uploads wrote");
+    expect(resume).toContain("and no other object under the dataset's prefix");
     const merge = helpOf("merge");
     expect(merge).toContain("squash-merges at the screened commit");
     expect(merge).toContain("today's re-pull merge cap");
+    // A claim GitHub did not merge under is kept, never released after five minutes.
+    expect(merge).toContain("A merge GitHub did not make keeps its claim");
+    expect(merge).not.toMatch(/released after five minutes|five minutes old/);
   });
 
   test("the canary help names the scratch prefix and bucket rules", () => {

@@ -22,8 +22,10 @@
  *                                            push, open (`lib/repull/execute/`); it never merges
  *   nemar admin repull status <id>           what the record says (`lib/repull/status.ts`)
  *   nemar admin repull resume <id>           past the open pull request: the head, main, the
- *                                            identifier screen and the gates (`lib/repull/
+ *                                            identifier screen and the gates, then after the
+ *                                            merge the release and the lock (`lib/repull/
  *                                            resume.ts`); it never merges
+ *   nemar admin repull merge <id>            the one merge gate (`lib/repull/merge.ts`)
  *   nemar admin repull canary                the real-bucket check of the copy's S3 calls on a
  *                                            scratch prefix (`lib/repull/canary.ts`)
  */

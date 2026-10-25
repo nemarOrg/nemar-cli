@@ -130,6 +130,7 @@ Everything in this section is designed and not yet built.
   Both are off when absent, and the scheduled path is production-only through the dev cron's allowlist.
 - `REPULL_DAILY_OPEN_CAP` (default 2) bounds the dispatches the automatic path claims to open a re-pull in a day; the pull requests follow only under the timing the Phase 7b amendment ("The open cap") says a later slice pins.
 - `REPULL_DAILY_MERGE_CAP` (default 5) bounds merges: every merge a NEMAR tool makes of a re-pull pull request, the Worker's and the manual ones (`nemar admin repull <id> --merge`, `nemar admin pr-reviews`) alike, first claims one from the backend, and a refused claim merges nothing, because every merge mints an irreversible DOI.
+  *Annotated 2026-10-25: the manual command is built by Phase 6f as `nemar admin repull merge <id>`; no `--merge` flag exists (see the Phase 6f amendment).*
 - The automatic path takes only a plan with zero unexplained paths.
 - Outside production, the re-pull routes refuse every dataset that is not `xx`, because the GitHub organization is shared, and re-pull mail goes through the admin-only fence.
 
@@ -158,7 +159,9 @@ AGENTS.md's summary of ADR 0093 ("nothing merges without `--merge` or a `y`") is
 *Annotated 2026-10-25: updated by Phase 6f, which builds the administrator's merge (see the Phase 6f amendment).*
 
 A re-pull pull request that is not machine clean, or that an administrator opened, is merged by an administrator, through `nemar admin repull <id> --merge` or `nemar admin pr-reviews`, under ADR 0093, with a screen that is `clear` or carries the administrator's recorded acknowledgment (ADR 0086).
+*Annotated 2026-10-25: built by Phase 6f as `nemar admin repull merge <id>` (no `--merge` flag exists) and through `nemar admin pr-reviews`, both through one gate (see the Phase 6f amendment).*
 `nemar admin pr-reviews` will require that screen for a re-pull pull request other than an `xx` one (below), which its `approve --merge` does not check today, and will claim the merge cap before the merge is sent.
+*Annotated 2026-10-25: built by Phase 6f: `approve --merge` and `y` in `next` merge a re-pull pull request only through the re-pull's gate, which reads that screen and claims the cap (see the Phase 6f amendment).*
 
 An `xx` re-pull takes the administrator path only.
 ADR 0086 exempts `xx` from the identifier screen, so an `xx` re-pull never has a `clear` verdict and is never machine clean, and an administrator merges it under that exemption, with no screen.
@@ -170,6 +173,7 @@ ADR 0086 exempts `xx` from the identifier screen, so an `xx` re-pull never has a
   Today `parseS3Url` drops the query string, so the import copy takes whatever object is current at the path.
 - Prior-version objects stay under their governance lock, and the old version's manifest, DOI and data-plane routes are unchanged.
 - An abandoned re-pull leaves locked orphan objects; the plan states their size, and `--abandon` reports them.
+  *Annotated 2026-10-25: as built by Phase 6f, a release locks only the objects its own copy and uploads wrote, so an abandoned attempt's orphans are not locked (see the Phase 6f amendment).*
 
 ### 9. A re-pull is a new version of a published dataset, not a publication
 
@@ -204,6 +208,7 @@ ADR 0086 exempts `xx` from the identifier screen, so an `xx` re-pull never has a
   Every other correction is in the window, including a privacy-minded one the ledger does not record.
 - **Orphan locked objects.**
   An abandoned re-pull leaves copied objects under the governance lock; they cost storage and are reported, not deleted.
+  *Annotated 2026-10-25: not under the lock, as built by Phase 6f: a release locks only what its own copy and uploads wrote, so an abandoned attempt's orphans stay unlocked (see the Phase 6f amendment).*
 - **One synthesized commit instead of upstream's history.**
   NEMAR's log shows one commit per re-pull, named by its trailers, and not upstream's commits; upstream's repository and `CHANGES` remain the record of how the snapshot was made.
 - **Few re-pulls will be merged by the Worker at first.**
@@ -640,9 +645,10 @@ Create refuses (`merge-unreconciled`) when any record of the dataset holds a mer
 `complete` is finished, and so is `patch_declined`, which is reachable only from a released N.0.0 and is refused while the patch claim is held.
 A `failed` row that has a tag sha and no patch claim or patch merge is finished too: N.0.0 is merged and tagged, so nothing is unreconciled, though its tag stays pulled.
 The case Phase 6f still owns is a `failed` row with a claim or a merge sha and no tag sha, or with any patch claim or patch merge: nothing in 6a writes out of it.
+*Annotated 2026-10-25: Phase 6f did not reconcile it: no path it builds writes `failed`, and such a record keeps the dataset blocked until an administrator resolves it by hand; the Phase 6f amendment names it as an open item for the owner.*
 `failed` stays writable on purpose, so a lost merge answer can be reported; it does not free the dataset, because a merge may be on `main` with no row saying so, and a second major would be a second DOI.
 Clearing a claim after GitHub confirms the pull request was not merged, and expiring a stuck open row, are written by Phase 6f (resume and reconcile); Phase 6a has no writer for either, and open rows never expire here.
-*Annotated 2026-10-25: built by the Phase 6f amendment: a stuck claim expires (`expired`) through resume; a `failed` record holding a claim is still not reconciled.*
+*Annotated 2026-10-25: the first half is built by the Phase 6f amendment (a stuck claim on an open record expires, `expired`, through resume); the second is not: a `failed` record holding a claim is still not reconciled, an open item the Phase 6f amendment names.*
 
 ### The fences, as built
 
@@ -676,6 +682,7 @@ Four edges repeat a status to write one thing: `planned` (the error), `released`
 *Annotated 2026-10-24: the Phase 6d amendment adds `copied` and `registered`, which repeat to record the error of the step that follows them, as `planned` does.*
 The claim is recorded before the merge is sent, names exactly the screened head, and cannot be recorded twice.
 The caller sends the head and nothing else: the Worker stamps the time with its own clock and refuses a request that carries one, because a caller-stated time could be backdated or set ahead and defeat the sweep for stuck claims that Phase 6f writes.
+*Annotated 2026-10-25: Phase 6f writes no sweep: a stuck claim expires when resume reads it, through the claim's release with the outcome `expired`, once the Worker's own stamp is 30 minutes old (see the Phase 6f amendment).*
 The time and the head are set together or not at all (a CHECK).
 While it is held, closing the pull request (`abandoned`, `superseded`, `patch_declined`) and moving its head (`pr_open`, `patch_synthesized`) are refused, because the pull request may have merged; `failed` is not.
 
@@ -1224,6 +1231,7 @@ Checked only against stand-ins.
 A further slice of the Phase 6 amendment above, built by Phase 6d.
 It builds the second half of decision 2's execution and decision 8's copy: from `prepared` the record goes to `copied`, `registered` and `pr_open`, where `nemar admin repull execute` stops.
 It never merges: a merge mints a version DOI that cannot be withdrawn, and is the administrator's own act through the merge path a later slice builds.
+*Annotated 2026-10-25: that path is built by Phase 6f, `nemar admin repull merge <id>` and `nemar admin pr-reviews` through one gate (see the Phase 6f amendment).*
 Nothing here adds a route, so nothing here can send mail; five annotations are added to earlier text (two on the record's header, three on sentences of earlier slices) where this one builds, decides or corrects them.
 
 ### The command, and a record past `prepared`
@@ -1253,11 +1261,13 @@ The destination is headed after and must be the size copied.
 A refusal stops new copies, the step refuses once those in flight have finished, and nothing is registered for a partial copy; a rerun skips what landed.
 `prepared -> copied` is written only after a fresh listing shows every key of the manifest, copied or uploaded at preparation, at its declared size (`copy-unverified`).
 The copy does not lock what it copies: decision 8's "locked orphan objects" holds only once a later slice locks a released version's objects.
+*Annotated 2026-10-25: Phase 6f locks, at the release, only the objects that release's own copy and uploads wrote, so an abandoned attempt's orphans are never locked (see the Phase 6f amendment).*
 
 ### The write guard
 
 Every push and every `aws s3api` call after `prepared` passes an allowlist before the process starts (`src/lib/repull/write-guard.ts`).
 A push goes to `origin` only, one refspec at a time, from a commit id, and only to `release/v<N.0.0>` (or `release/v<N.0.1>`) or to `git-annex`, never forced; a release branch may also be deleted, or leased onto a re-synthesized commit, which later slices use.
+*Annotated 2026-10-25: the lease is used by Phase 6f's re-synthesis onto a moved `main`; the deletion is still the abandon slice's.*
 Never `main`, never a tag, never `+`, `--force`, `--mirror` or any option the list does not name.
 An S3 call writes only under `<id>/objects/` or to the one staging key, copies only from upstream's bucket under the dataset's own `ds/` and only at a version id, and names no lock, ACL, metadata directive or governance bypass.
 The one other write is `delete-object` by version id under `<id>/objects/`, which removes a copy S3 reported as made from another version than the pinned one.
@@ -1407,7 +1417,7 @@ A further slice of the Phase 6 amendment above, built by Phase 6f.
 It builds `nemar admin repull status`, `resume` and `merge`, routes `nemar admin pr-reviews`' merges of a re-pull pull request through the same gate, and records the release and the lock: a re-pull now goes from `pr_open` through `released`, and to `complete` when its plan had no corrections.
 N.0.1, abandoning a record and superseding one are a later slice's.
 Nothing here sends mail; the administrator reads a re-pull's state with `nemar admin repull status <id>`, which shows the record, its identifier screens and the command that takes it on.
-Seven annotations are added to earlier text, where this slice builds what it said was a later phase's.
+Seventeen annotations are added to earlier text, where this slice builds, changes or does not build what it said was a later phase's.
 
 ### Resume never merges
 
@@ -1416,9 +1426,9 @@ The working clone is gone by then (it held the delta's unscrubbed originals and 
 
 At `pr_open` it reads the pull request on GitHub.
 One found merged is recorded through the Worker's verified route, which reads the merge on GitHub itself; the record gains the edge `pr_open -> merged` (and its N.0.1 twin) for that route alone, and such a merge is counted as one no tool held a claim for, at a head that was not screened, which closes the case the Phase 6e amendment left to this slice.
-One found closed without a merge ends the record `abandoned` (decision 3).
+One found closed without a merge ends the record `abandoned` (decision 3), at `pr_open` and at `gates_clear` alike.
 A head that moved by the commits enrichment writes is recorded; any other head is `head-foreign`, recorded as the step's error with the recorded head kept, so a foreign commit is never screened or gated.
-On top of a synthesized N.0.0 only the first of the three enrichment shapes can arise (a regular file under `.nemar/`), because the commit's tree already carries the `.nemar/` line in `.bidsignore` and a `participants.tsv`; the other two are accepted by the same function and are covered by its own suite.
+On top of a synthesized N.0.0 only the first of the three enrichment shapes can arise on the release branch (a regular file under `.nemar/`), because the commit's tree already carries the `.nemar/` line in `.bidsignore` and a `participants.tsv`; the other two are accepted by the same function and are covered by its own suite.
 `main` must be the record's base or an enrichment-shaped descendant of it (`main-moved` otherwise).
 
 The identifier screen of the recorded head is dispatched when none exists or it produced no verdict, and waited for.
@@ -1430,56 +1440,76 @@ Every error a step past the open pull request records begins with that step's wo
 
 ### The re-synthesis onto a moved `main`
 
-When `main` moved by enrichment and GitHub reports the pull request `dirty` or `behind`, resume makes the re-pull's commit again on the new `main` and replaces the release branch with the write guard's leased push, asking first unless `--yes`.
-The new commit is the recorded tree outside `.nemar/**`, entry for entry, so the keys it names, their copies and their registration all stand; under `.nemar/**` it is the new `main`'s files, except `.nemar/metadata.json`, which is the new `main`'s with the NEMAR-owned `IsIdenticalTo` edit applied again, and the privacy ledger, which is the recorded commit's (enrichment never writes it).
-The edit is read off the recorded commit itself, which must differ from the base's file by exactly that edit, so resume needs no plan file.
-Its message, identity and dates are the recorded commit's, its trailers are checked as git reads them before anything is pushed, and the record's `base_sha`, `synth_sha`, `synth_tree` and head are written in one `pr_open` self-edge; the screen then runs again for the new head.
+When `main` moved by enrichment and GitHub reports the pull request `dirty` or `behind`, resume makes the re-pull's commit again on the new `main` and replaces the release branch with the write guard's leased push, asking first unless `--yes`; a pull request GitHub reports `clean` is not re-synthesized.
+The new commit has the recorded commit's message, identity and dates, one parent (the new `main`), and the recorded tree with what enrichment did on `main` applied to it as enrichment itself would, never undone.
+Under `.nemar/**` it holds the new `main`'s files, except `.nemar/metadata.json`, which is the new `main`'s with the NEMAR-owned `IsIdenticalTo` edit applied again, and the privacy ledger, which is the recorded commit's (enrichment never writes it).
+When enrichment changed `.bidsignore` on `main`, the new `.bidsignore` is the recorded one with the `.nemar/` line added, so upstream's lines stay and enrichment's line is kept.
+When enrichment added a root `participants.tsv` on `main`, the new tree keeps N.0.0's own when it has one (upstream's, or the standard edit's placeholder of `to_tag`'s subjects), and otherwise holds the placeholder of the new tree's subjects, as enrichment makes it, or none when it has no subject.
+Every other path is the recorded commit's, entry for entry, so the keys it names, their copies and their registration all stand.
+The `IsIdenticalTo` edit is read off the recorded commit itself, which must differ from the base's file by exactly that edit, so resume needs no plan file, and the recorded commit's trailers are checked as git reads them before anything is made.
+
+The new commit is a function of the recorded commit, the base and the new `main`, so it is made the same, byte for byte, every time.
+A run that pushed it and could not record it (the write after the push failed) leaves a release branch whose head does not descend from the recorded commit; the next resume does not call that head foreign: it recognizes it as the commit it would make for that head's own parent, that parent being the base or an enrichment-shaped descendant of it (beneath enrichment commits on the release branch too), and records it.
+The record's `base_sha`, `synth_sha`, `synth_tree` and head are written in one `pr_open` self-edge; the screen then runs again for the new head.
 
 ### The merge gate (decisions 6 and 7, the administrator's path)
 
 Every merge of a re-pull pull request by a NEMAR tool, `nemar admin repull merge <id>` and `nemar admin pr-reviews` (`approve --merge`, `y` in `next`) alike, goes through one gate (`src/lib/repull/merge.ts`).
-Before anything is written it reads, in order: the record at `gates_clear`; the dataset not anonymous; the live pull request open, not a draft, the record's release branch into `main`, at the screened head; `main` the base or moved by enrichment only; the ADR 0107 review of that head, read at the merge and never carried over from an earlier read, since an administrator can reset a stored pass on the same head (`start --redo`), with one that failed, is running or cannot be read needing `--force` as `approve` does; the identifier screen of that head; GitHub's state `clean`; and the squash message.
+Before anything is written it reads, in order: the record at `gates_clear`; the dataset not anonymous; the live pull request open, not a draft, the record's release branch into `main`, at the screened head; `main` the base or moved by enrichment only; the ADR 0107 review of that head, with one that failed, is running or cannot be read needing `--force` as `approve` does; the identifier screen of that head; GitHub's state `clean`; and the squash message.
 The gate writes the squash message itself: the title `Release v<N.0.0> (#<pull request>)` and a body whose last paragraph is the re-pull commit's two trailers, checked with `git interpret-trailers` against the privacy ledger proof's own patterns, so the merge on `main` is read as the re-pull's commit (the Phase 6b amendment's requirement); a message that would not carry both is refused at the gate (`message`).
-Then the administrator confirms (one version DOI that cannot be withdrawn), one unit of the day's merge cap is claimed from the Worker, the squash merge is sent with the screened `sha` (so GitHub refuses a head that moved after the gate's last read, which the Phase 6e amendment relies on), and the merge is recorded through the verified route.
-A claim already held for the screened head is used again, without a second claim, because a pull request merges once.
-A merge GitHub did not make releases its claim when the Worker allows it (five minutes after the claim) and keeps it otherwise; a merge whose answer is lost keeps its claim, and the next resume reads GitHub and records the merge.
-`nemar admin repull merge` checks that the token is a person's and the one the administrator's NEMAR account is linked to, as `pr-reviews` does, and submits no approving review: ADR 0001 requires none, and an administrator cannot approve the pull request they opened through `execute`.
+Then the review is read once more, at the merge and never carried over, since an administrator can reset a stored pass on the same head (`start --redo`), and the administrator confirms (one version DOI that cannot be withdrawn).
+Then, holding the record's lock, the one `resume` and `execute` take, so no resume expires the claim or moves the head while the merge is out, one unit of the day's merge cap is claimed from the Worker, the squash merge is sent with the screened `sha` (so GitHub refuses a head that moved after the gate's last read, which the Phase 6e amendment relies on), and the merge is recorded through the verified route.
+A claim whose answer is lost (no answer, or a 5xx a gateway may send after the Worker wrote) may be held, and the gate says so and exits 3, never "nothing was claimed".
+
+A claim already held for the screened head (a merge whose answer was lost, a run that stopped after its claim) is used again, without a second claim, because a pull request merges once, but only after `POST /admin/repulls/:id/merge-claim/check` passes: the Worker reads again, for that claim, what the claim's statement read when it was made (the dataset a mirror of its `ds`, not anonymous, not withdrawn, no import in flight; the identifier screen passing for this administrator, so one administrator never merges under another's acknowledgment; the live head at the screened `sha`), and the claim younger than 25 minutes by its own stamp, so no merge is sent under a claim resume may be expiring at 30 (`claim-too-old` otherwise).
+That route writes nothing.
+A merge GitHub did not make (not sent at its last look, or refused) keeps its claim: the claim is seconds old, younger than the five minutes the Worker requires before any release, so the gate does not try; a merge sent again within 25 minutes uses it, and resume expires it at 30.
+A merge whose answer is lost keeps its claim too, and the next resume reads GitHub and records the merge; a merge GitHub made that could not be recorded exits 3 and is recorded by resume.
+`nemar admin repull merge` uses a token that must belong to a person (never an App or workflow token), and, when the administrator's NEMAR account names a GitHub login, must be that login; an account that names none is not checked, as `pr-reviews` does, and only a different login refuses.
+It submits no approving review: ADR 0001 requires none, and an administrator cannot approve the pull request they opened through `execute`.
 
 `nemar admin pr-reviews` looks up a pull request whose head branch is `release/*` in the re-pull records.
-A re-pull's runs the gate's checks before the approval is written, so a refusal writes nothing, then the approval as before, then the gate's merge in place of its own; an explicit `--method` other than `squash` is refused before anything is written.
-A NEMAR API that cannot say whether the pull request is a re-pull's refuses its merge ("could not tell"), never merges it unguarded.
+A re-pull's runs the gate's checks before the approval is written, and again after the confirmation, so a refusal writes nothing, then the approval as before, then the gate's merge in place of its own; an explicit `--method` other than `squash` is refused before anything is written, and so is a re-pull's N.0.1 pull request (its merge is not built).
+A NEMAR API that cannot say whether the pull request is a re-pull's refuses its merge ("could not tell"), never merges it unguarded, and so does a GitHub answer that does not name the head branch.
 An ordinary release pull request, one no record names, is merged as before.
-AGENTS.md's summary of ADR 0093 now says so (decision 7 asked the phase that builds the merge to update it).
+AGENTS.md's summary of ADR 0093 now names the three ways a NEMAR tool merges and the one gate a re-pull's pull request goes through (decision 7 asked the phase that builds the merge to update it).
 
-### A stuck claim expires (closes the Phase 6a amendment's open point)
+### A stuck claim expires (closes the Phase 6a amendment's open point for open records)
 
-A claim whose outcome the caller does not know (a lost answer, a run that stopped between its claim and its merge) is released with a third outcome, `expired`, only once the Worker's own stamp says the claim is 30 minutes old, long past any merge a tool can have in flight, and only when GitHub, read by the Worker, says the pull request did not merge.
+A claim whose outcome the caller does not know (a lost answer, a run that stopped between its claim and its merge) is released with a third outcome, `expired`, only once the Worker's own stamp says the claim is 30 minutes old, long past any merge a tool can have in flight, and only when GitHub, read by the Worker, says the pull request did not merge, in a statement that clears the claim only while no merge is recorded.
 `unknown` is still not an outcome a caller may send: only GitHub, read after nothing can be in flight, says a merge did not happen.
 Resume sends `expired` when it finds a claim on a `gates_clear` record; a younger claim is kept, and resume says how to go on.
-A `failed` record holding a claim or a merge with no tag, which only a hand-made transition could leave, is still not reconciled by anything: no path built here writes `failed`, and such a record keeps the dataset blocked, the safe direction.
+
+Left open, for the owner: a `failed` record holding a claim or a merge with no tag, which only a hand-made transition could leave, is not reconciled by anything.
+No path built here writes `failed`, and such a record keeps the dataset blocked (a new re-pull is refused `merge-unreconciled`), the safe direction; until a later slice builds a reconcile for it, an administrator resolves it by hand.
 
 ### The fences on every step past `prepared`
 
-The Worker now reads the dataset fences again (a mirror of that `ds`, not anonymous, not withdrawn, no import in flight) on every edge into a status after `prepared` that keeps the record open: the copy, the registration, the pull request and its head, the gates and the claim (as before, with the screen), and the lock's count.
+The Worker now reads the dataset fences again (a mirror of that `ds`, not anonymous, not withdrawn, no import in flight) on every edge into a status after `prepared` that keeps the record open: the copy, the registration, the pull request and its head, the gates and the claim (as before, with the screen), and the lock's count; and the held-claim check reads them before a claim is used again.
 Not on an edge that ends the record, so giving up stays possible on a dataset that became anonymous or withdrawn; not on a self-edge that writes nothing but why a step failed; and not on a fact a verified route writes from GitHub or the version row, because a merge that happened is recorded whatever the dataset has become since.
 
 ### The release and the lock (decisions 2, 4 and 8)
 
-From `merged`, resume waits for the tag `v<N.0.0>` on NEMAR's origin and for the version row, compares the tagged tree with the recorded synthesized tree outside `.nemar/**` and `.github/**`, and records the release through the Worker's verified route with that comparison as `tree_verified`, which alone upgrades the version's lineage; the Worker re-arms the dataset's four sweep stamps in the same batch.
+From `merged`, resume first reads back the squash commit GitHub wrote on `main`: its message must carry the re-pull commit's two trailers as its last paragraph, as git reads them.
+The gate checked the message it sent; this checks the one committed, because a host that appends a paragraph of its own (a `Co-authored-by:` line, say) would push them out of the last paragraph and the privacy ledger's fresh-clone proof would then fail the dataset.
+A message that does not is `merge-trailers`, recorded, and the record stays `merged`, loudly: the version may already be tagged and minted, and only an administrator decides what follows.
+Then resume waits for the tag `v<N.0.0>` on NEMAR's origin and for the version row, compares the tagged tree with the recorded synthesized tree outside `.nemar/**` and `.github/**`, and records the release through the Worker's verified route with that comparison as `tree_verified`, which alone upgrades the version's lineage; the Worker re-arms the dataset's four sweep stamps in the same batch.
 A tag on another commit leaves the record `merged` with the error recorded, through a new `merged` self-edge that records only an error, as `planned`'s does: still resumable, and never `failed`, which would end a record whose merge minted a DOI.
 Nothing here mints; the existing DOI tooling repairs a mint that failed.
 
-N.0.0's objects are then locked with the existing s3-lock route.
-Read before it was relied on: it locks every object under the dataset's `objects/` prefix (every version's, so an earlier abandoned attempt's orphans too, which makes decision 8's "locked orphan objects" true once a later release has run), in pages, and a run again is idempotent; it reads a 403 on PutObjectRetention as "already locked", which a credential without that permission would also answer.
-The count is recorded only when every object was locked; otherwise the `released` self-edge records why (`lock-incomplete`, counts only, never a key) and the record stays `released` without its count, a resumable state and never a silent release, and the next run locks again.
-The Worker refuses `released -> complete` and `released -> patch_synthesized` while the count is not recorded (`lock-unrecorded`), and a `released` self-edge that records the count clears the error the lock's failure recorded (`CLEARING_SELF_EDGES`).
+Then the objects N.0.0's copy and uploads wrote, and only those, are locked under the governance lock with the existing s3-lock route, named one by one (`objects`, at most 100 per call), never the whole prefix: the earlier versions' objects are their publications' to lock, and an abandoned attempt's orphans are not N.0.0's.
+Their keys come from the staging manifest the copy wrote to `<id>/staging/repull-<to_tag>.json` before its first copy, read with the ambient AWS credentials from the bucket NEMAR's git-annex branch names, whose digest must be the one recorded at `prepared` (`manifest-mismatch` otherwise).
+For each key the route reads the current version and locks that version.
+Read before it was relied on, the route took a 403 on PutObjectRetention for "already locked", which a credential without that permission also answers; it now reads the object's retention back on a 403 and counts it locked only when that is a GOVERNANCE or COMPLIANCE lock at least 50 years ahead (the lock it sets is 100), and the publication path's prefix mode reads it back the same way.
+The count is recorded only when every one of the keys is locked; otherwise the `released` self-edge records why (`lock-incomplete`, counts only, never a key) and the record stays `released` without its count, a resumable state and never a silent release, and the next run locks again.
+The Worker refuses a count below what the record says the copy and uploads wrote (`copied`, `skipped`, `local_uploads`; `lock-incomplete`, and a record that does not say is refused too, since unknown is never zero), refuses `released -> complete` and `released -> patch_synthesized` while the count is not recorded (`lock-unrecorded`), and a `released` self-edge that records the count clears the error the lock's failure recorded (`CLEARING_SELF_EDGES`).
 A record whose plan stated zero corrections then ends `complete`; one with corrections, or that does not state the count, stays `released` until N.0.1 is built.
 
 ### Checked only against stand-ins
 
 The suites drive the real `execute`, `resume`, `merge` and `pr-reviews` commands, the real Worker routes over bun:sqlite and the real `git`; GitHub and S3 are stand-ins, and these are what only the canary and the first production runs can check:
-that GitHub's merge endpoint refuses a head that moved for `sha` (a 409, as the stand-in answers) and writes `commit_title` and `commit_message` as the squash commit's message unchanged;
+that GitHub's merge endpoint refuses a head that moved for `sha` (a 409, as the stand-in answers) and writes `commit_title` and `commit_message` as the squash commit's message unchanged (the release reads the commit back, so a host that changes it is caught, not missed);
 GitHub's `mergeable_state` words for a re-pull pull request, how soon its `head.sha` follows a push, and that a leased forced push to a release branch of a dataset repository is accepted;
 that the dataset workflows tag the squash merge of a re-pull as they tag other merges (already under "Not yet verified");
-and that the real bucket answers PutObjectRetention on a copied object as the stand-in does, including the s3-lock route's reading of a 403.
+and that the real bucket answers HEAD, PutObjectRetention and GetObjectRetention on a copied object's version as the stand-in does, including what it answers a credential without the lock permission.
 The s3-lock route signs PutObjectRetention with an MD5 `Content-MD5`, which workerd's WebCrypto digests and Bun's does not; the suites give Bun's that one algorithm from `node:crypto` while the Worker's routes run in their process.

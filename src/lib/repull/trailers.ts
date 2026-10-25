@@ -29,9 +29,10 @@ export function repullTrailerLines(r: {
 }
 
 /**
- * Why `message` (a whole commit message: subject, body, trailers) does not end with exactly the
- * two expected trailers as git reads them, or null when it does. Each key must appear once, with
- * the expected value, and match the ledger proof's pattern; nothing else is required of the rest.
+ * Why `message` (a whole commit message: subject, body, trailers) does not carry both expected
+ * trailers in its last paragraph as git reads them, or null when it does. Each of the two keys must
+ * appear there once, with the record's value, and match the ledger proof's pattern; other trailers
+ * beside them are allowed, as the proof's patterns allow them, and nothing is required of the rest.
  */
 export async function trailersProblem(
   message: string,

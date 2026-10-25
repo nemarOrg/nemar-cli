@@ -3,9 +3,11 @@
  * epic #1046 phase 6):
  *
  *   nemar admin repull status <id>   what the record says (`lib/repull/status.ts`)
- *   nemar admin repull resume <id>   the head, main, the identifier screen and the gates, and a
- *                                    held claim resolved from GitHub (`lib/repull/resume.ts`);
- *                                    it never merges
+ *   nemar admin repull resume <id>   the head, main, the identifier screen and the gates, a held
+ *                                    claim resolved from GitHub, and after the merge the release,
+ *                                    the lock of what the copy wrote and the end of the record
+ *                                    (`lib/repull/resume.ts`, `lib/repull/release.ts`); it never
+ *                                    merges
  *
  * Registered on `repullCommand` by `admin-repull.ts`. The shared argument parsers and the
  * report of a refusal are exported for the merge command.
@@ -116,19 +118,29 @@ with your own GitHub token (GH_TOKEN, else \`gh auth token\`). It never merges.
                GitHub reports the pull request clean, the gates are recorded: gates_clear.
   gates_clear  a held claim to merge is resolved from GitHub: a merge is recorded, and a claim
                GitHub says did not merge expires once it is 30 minutes old.
+  merged       the merge commit GitHub wrote must end with the re-pull commit's two trailers;
+               then it waits for the tag v<N.0.0> and the version row (its DOI), compares the
+               tagged tree with the re-pull's commit, and records the release (the Worker reads
+               the tag and the version row itself).
+  released     locks the objects the copy and the uploads wrote (and no other object under the
+               dataset's prefix), with the ambient AWS credentials reading the staging manifest
+               that lists them; only once every one is locked is the count recorded, and the
+               record is complete when its plan had no corrections (N.0.1 is not built yet).
 
 A screen that asks for a person is acknowledged with --acknowledge-identifier-screen "<reason>",
 after you read it with \`nemar admin repull status <id>\`; a direct identifier cannot be.
 
 Exit codes:
-  0  ready to merge (gates_clear), or the record went as far as this slice goes.
+  0  ready to merge (gates_clear), released (N.0.1 not built), or complete.
   3  waiting (for the screen, GitHub, a person) after --wait-minutes, or stopped with why
      recorded on the record; run resume again.
   1  refused before anything was written, nothing to resume, or the record ended (abandoned).`;
 
 export const resumeCommand = new Command("resume")
   .argument("<datasetId>")
-  .description("Take an open re-pull on past its pull request: screen, gates (never merges)")
+  .description(
+    "Take an open re-pull on past its pull request: screen, gates, then the release and the lock (never merges)",
+  )
   .option(
     "--wait-minutes <n>",
     "How long to wait for the screen and GitHub (0 reads once)",
