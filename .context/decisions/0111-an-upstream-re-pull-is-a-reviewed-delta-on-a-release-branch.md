@@ -1133,7 +1133,9 @@ What is not dispatched.
   `unreported-streak` when its last three dispatches all ended `unreported`;
   and `recent` when a re-pull of it was created, or a first dispatch for it sent, in the last 30 days.
 - The streak exists because a workflow that answers the dispatch and never runs leaves each one `unreported`, and the mirror would then be sent again on every rotation.
-  Only a later dispatch that reports breaks it, and the scheduler sends that mirror none, so an administrator re-pulls it by hand.
+  Only a later dispatch that reports would break it, and the scheduler sends that mirror none, so nothing clears it: the mirror stays on the administrator's path.
+  An administrator keeps it current by re-pulling it by hand (`nemar admin repull plan`, then `execute`), and a later staleness of it is the administrator's again.
+  While the tick skips a mirror for the streak, its log line is raised to warn, so the skip is seen.
 - Then the create's dataset fences (a mirror of that `ds`, not withdrawn, no import in flight) are read again through the record's own function, and a refusal is skipped under its code.
   The automatic create checks everything once more when the run arrives.
 
