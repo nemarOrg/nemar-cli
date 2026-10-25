@@ -73,7 +73,11 @@ import type { Bindings } from "../types/bindings.js";
 import { isDevOwnedDatasetId, isValidDatasetId } from "./datasetId.js";
 import { isNonProductionEnv } from "./environment.js";
 import { getDatasetsTokenWithRefresher } from "./github-auth.js";
-import { deriveContexts } from "./github/branch-protection.js";
+import {
+  NEMAR_APP_BOT_LOGIN,
+  NEMAR_APP_BOT_USER_ID,
+  deriveContexts,
+} from "./github/branch-protection.js";
 import { GITHUB_API, ORG_NAME, ghHeaders } from "./github/shared.js";
 import { githubFetchWithRetry } from "./github/transport.js";
 import { isReviewExempt } from "./pr-review-exemption.js";
@@ -151,6 +155,30 @@ export function plainRef(input: unknown, max = 60): string {
   if (typeof input !== "string") return "";
   const s = input.normalize("NFKC").replace(/[^A-Za-z0-9._\-/]/g, "?");
   return s.length > max ? `${s.slice(0, max - 1)}…` : s;
+}
+
+/**
+ * A stored author login as it is shown. The NEMAR App's bot keeps its own name,
+ * `nemar-publish-bot[bot]`, brackets included: its automatic re-pull pull request is the one bot's
+ * the review takes (ADR 0111 narrows ADR 0092's "not bots" for that class), the review stores it
+ * under that name, and the label is plain text, where brackets are harmless. Every other login is
+ * reduced as {@link plainRef} reduces it. Only that exact constant passes through, so nothing an
+ * author wrote reaches the label unreduced.
+ */
+export function loginLabel(login: unknown): string {
+  return login === NEMAR_APP_BOT_LOGIN ? NEMAR_APP_BOT_LOGIN : plainRef(login, 39);
+}
+
+/**
+ * GitHub's REST author of a pull request as it is shown: a login of a person's shape as it is, the
+ * NEMAR App's bot by its name when both its login and its numeric id match, and anything else
+ * `(unknown)`.
+ */
+function restAuthorLabel(user: Record<string, unknown> | null): string {
+  if (typeof user?.login === "string" && LOGIN.test(user.login)) return user.login;
+  return user?.login === NEMAR_APP_BOT_LOGIN && user.id === NEMAR_APP_BOT_USER_ID
+    ? NEMAR_APP_BOT_LOGIN
+    : "(unknown)";
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1242,8 +1270,7 @@ export async function fetchLivePullRequest(
         base_ref: plainRef(base?.ref),
         url: pullUrl(datasetId, prNumber),
         title: sanitizeNote(p.title, 120),
-        author_login:
-          typeof user?.login === "string" && LOGIN.test(user.login) ? user.login : "(unknown)",
+        author_login: restAuthorLabel(user),
         author_id:
           typeof user?.id === "number" && Number.isSafeInteger(user.id) && user.id > 0
             ? user.id
@@ -1375,7 +1402,7 @@ export async function readPrReviewDetail(
           head_sha: row.head_sha,
           verdict: own.verdict,
           detail: own.detail,
-          author_login: plainRef(row.author_login, 39),
+          author_login: loginLabel(row.author_login),
           author_id: row.author_id,
           from_fork: row.from_fork === 1,
           created_at: row.created_at,
@@ -1411,7 +1438,7 @@ export async function readPrReviewDetail(
   const authorLogin = row?.author_login ?? livePr?.author_login ?? null;
   const author =
     authorId !== null && authorLogin !== null
-      ? await standingFor(db, plainRef(authorLogin, 39), authorId, row ? "history" : "github")
+      ? await standingFor(db, loginLabel(authorLogin), authorId, row ? "history" : "github")
       : null;
 
   return {

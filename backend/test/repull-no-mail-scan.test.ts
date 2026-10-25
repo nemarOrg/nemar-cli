@@ -28,6 +28,10 @@ const ROOTS = [
   `${SRC}/routes/callbacks/repull-state.ts`,
   // The scheduler that claims and sends those dispatches, and the staleness report it reads.
   `${SRC}/services/upstream-repull-scheduler.ts`,
+  // The facts the machine-clean rule reads: they read the review's rows through `pr-review.ts`.
+  `${SRC}/services/upstream-repull-facts.ts`,
+  // The Worker's start of the review of the App's re-pull pull request (ADR 0111, decision 7).
+  `${SRC}/services/pr-review-start.ts`,
 ];
 
 /** Every module under `backend/src` that is a mail module, by name. */
@@ -74,6 +78,9 @@ describe("the re-pull code sends no mail", () => {
       "services/upstream-status.ts",
       "services/openneuro-snapshots.ts",
       "services/github-auth.ts",
+      "services/upstream-repull-facts.ts",
+      "services/pr-review.ts",
+      "services/pr-review-start.ts",
     ]) {
       expect(closure.files.has(`${SRC}/${f}`)).toBe(true);
     }

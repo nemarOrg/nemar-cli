@@ -397,7 +397,8 @@ export function envFenceRefusal(
 
 const IN_FLIGHT_IMPORT = new Set(["preparing", "copying", "finalizing"]);
 
-interface DatasetFacts {
+/** What {@link CREATE_FACTS_SQL} answers with. */
+export interface DatasetFacts {
   source: string | null;
   source_id: string | null;
   anonymous: number;

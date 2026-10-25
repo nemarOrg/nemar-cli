@@ -7,6 +7,7 @@
 Partially superseded by [ADR 0107](0107-dataset-pull-requests-are-screened-on-content-owners-and-administrators-are-exempt-and-the-review-check-is-required.md) (proposed with epic #1813; phases P1 to P6 are built on the epic branch, so the exemption of owners and administrators, the removal of the caps, the pool and the automatic pause, the two stages and the tooling for the required check all exist, and the required check is not switched on),
 which removes the caps and the tally pause, exempts owners and administrators, makes the review two stages at effort `max`, and makes the check required on reviewable datasets.
 Its "What this supersedes" section lists what it replaces here.
+Narrowed by [ADR 0111](0111-an-upstream-re-pull-is-a-reviewed-delta-on-a-release-branch.md) (its Phase 7e amendment, 2026-10-25) in one aspect, "not bots", for one class only: the NEMAR App's automatic re-pull pull request is reviewed when the Worker starts its review, although a bot opened it; every other bot's pull request is still not reviewed.
 
 Follows ADR 0001 (published datasets are PR-only), ADR 0020 (central workflows, callback), ADR 0053
 and ADR 0086 (unknown is never clear), ADR 0026 (adequacy judgments stay advisory).
