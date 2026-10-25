@@ -887,8 +887,8 @@ export type HoldReason = (typeof REPULL_HOLD_REASONS)[number];
  * order it decides them. Before the scan: the open switch is off (`switch-off`); the open cap is
  * set to something unreadable (`cap-unreadable`) or to 0 (`cap-zero`); the Worker is not a release
  * build, so a run could not install its CLI (`cli-unreleased`); the Worker has no callback secret,
- * so no dispatch token can be signed (`unconfigured`); no re-pull has yet been run by hand to
- * `complete` (`waiting-for-manual-run`); today's units are used (`cap-reached`). After it: the
+ * so no dispatch token can be signed (`unconfigured`); the two first re-pulls have not both been
+ * run by hand to `complete` (`waiting-for-manual-run`); today's units are used (`cap-reached`). After it: the
  * scan ran, whether or not it dispatched anything (`ran`); OpenNeuro, or the GitHub credential the
  * probes need, could not be read, so nothing was dispatched from what it could not see (`blind`);
  * something failed (`error`). A tick outside exact production stores nothing at all.

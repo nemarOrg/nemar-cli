@@ -8,7 +8,9 @@
  * world and record every request: OpenNeuro's GraphQL endpoint (`helpers/openneuro-standin.ts`, in
  * its synthetic mode: every dataset here has the snapshots 0.9.0 then 1.0.0), OpenNeuro's GitHub
  * mirror on the raw content host (`helpers/raw-mirror-standin.ts`), and GitHub's dispatch endpoint.
- * No dataset id here is a real mirror's. The UTC day of the cap is D1's clock, so "yesterday" and
+ * No dataset id here is a real mirror's, except the two the design record's gate G4 names, which
+ * appear only as re-pull records in the in-memory database (nothing is asked about them, here or
+ * anywhere). The UTC day of the cap is D1's clock, so "yesterday" and
  * "ten days ago" are seeded as past timestamps, never by moving a clock. The Resend capture is armed
  * around every test and must stay empty.
  *
@@ -20,7 +22,7 @@
  *    unreconciled one;
  *  - the cap is the dispatch record's: a full day asks OpenNeuro nothing, a refused send frees its
  *    unit, an unanswered one keeps it, and two ticks at once cannot pass it;
- *  - nothing is dispatched before a re-pull was run by hand to `complete`, from a development
+ *  - nothing is dispatched before both of gate G4's re-pulls were run by hand to `complete`, from a development
  *    build, or from what OpenNeuro or the GitHub credential could not show;
  *  - the cursor rotates, wraps, never passes a stale mirror the probes did not reach, and a tick
  *    reads at most three pages.
@@ -35,6 +37,7 @@ import {
   CANDIDATE_BLOCKERS_SQL,
   type CandidateBlockers,
   MANUAL_RUN_PROOF_SQL,
+  REPULL_G4_DATASETS,
   REPULL_SCAN_PAGES,
   REPULL_SCAN_PROBE_BUDGET,
   type SchedulerTickResult,
@@ -238,9 +241,14 @@ function pastDispatch(id: string, daysAgo: number, over: Row = {}): number {
   });
 }
 
-/** Gate G4: an administrator's re-pull of another mirror, run to `complete` with its tag. */
+/** One of gate G4's re-pulls, run by an administrator to `complete` with its tag. */
+function manualRun(id: string, over: Row = {}): void {
+  repull(id, "complete", { origin: "administrator", created_at: "2026-01-01 00:00:00", ...over });
+}
+
+/** Gate G4: both re-pulls the design record names, run by an administrator to `complete`. */
 function manualRunDone(): void {
-  repull("on099800", "complete", { origin: "administrator", created_at: "2026-01-01 00:00:00" });
+  for (const id of REPULL_G4_DATASETS) manualRun(id);
 }
 
 /**
@@ -582,18 +590,55 @@ describe("the open cap is the dispatch record's", () => {
 // ----------------------------------------------------------------------------
 
 describe("what keeps a tick from dispatching", () => {
-  test("no re-pull run by hand to complete: waiting-for-manual-run, and OpenNeuro is not asked", async () => {
+  test("gate G4 names the two first re-pulls", () => {
+    expect([...REPULL_G4_DATASETS]).toEqual(["on003645", "on004362"]);
+  });
+
+  /** The fleet without its G4 rows, and the given ones instead. */
+  const fleetWith = (seed: () => void) => {
     fleet();
-    db.run("DELETE FROM upstream_repulls WHERE dataset_id = 'on099800'");
-    // None of these is the proof: not complete, not the administrator's, not an `on` mirror.
-    repull("on099800", "released", { origin: "administrator" });
-    repull("on099801", "complete", { origin: "automatic", created_at: "2026-01-01 00:00:00" });
-    repull("xx090123", "complete", { origin: "administrator", created_at: "2026-01-01 00:00:00" });
+    db.run("DELETE FROM upstream_repulls WHERE dataset_id IN ('on003645', 'on004362')");
+    seed();
+  };
+  const waits = async () => {
     const r = await tick();
     expect(r.outcome).toBe("waiting-for-manual-run");
     expect(openneuro.log).toEqual([]);
     expect(sent).toEqual([]);
-    expect(db.query(MANUAL_RUN_PROOF_SQL).get()).toEqual({ n: 0 });
+    expect(scheduler().last_outcome).toBe("waiting-for-manual-run");
+  };
+
+  for (const id of REPULL_G4_DATASETS) {
+    test(`one of gate G4's re-pulls alone (${id}) does not open the scheduler`, async () => {
+      fleetWith(() => manualRun(id));
+      await waits();
+      expect(db.query(MANUAL_RUN_PROOF_SQL).get()).toEqual({ n: 1 });
+    });
+  }
+
+  test("both of gate G4's re-pulls together open it", async () => {
+    fleetWith(() => {
+      manualRun("on003645");
+      manualRun("on004362");
+    });
+    expect(db.query(MANUAL_RUN_PROOF_SQL).get()).toEqual({ n: 2 });
+    expect((await tick()).outcome).toBe("ran");
+    expect(sentFor()).toEqual(["on099901", "on099906"]);
+  });
+
+  test("nothing else counts toward G4: another mirror, another origin, an unfinished run, two of one", async () => {
+    fleetWith(() => {
+      manualRun("on003645");
+      // Two complete runs of the same dataset are still one of the two.
+      manualRun("on003645", { to_tag: "1.0.2" });
+      // Any other `on` mirror's completed manual re-pull.
+      manualRun("on099801");
+      // The second named dataset, but automatic, or still released.
+      repull("on004362", "complete", { origin: "automatic", created_at: "2026-01-01 00:00:00" });
+      repull("on004362", "released", { origin: "administrator", to_tag: "1.0.3" });
+    });
+    await waits();
+    expect(db.query(MANUAL_RUN_PROOF_SQL).get()).toEqual({ n: 1 });
   });
 
   test("a development build of the Worker is cli-unreleased", async () => {

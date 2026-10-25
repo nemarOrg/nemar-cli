@@ -16,6 +16,7 @@ import { Miniflare } from "miniflare";
 import {
   CANDIDATE_BLOCKERS_SQL,
   MANUAL_RUN_PROOF_SQL,
+  REPULL_G4_DATASETS,
   SCHEDULER_STAMP_SQL,
   runRepullSchedulerCron,
 } from "../src/services/upstream-repull-scheduler";
@@ -132,6 +133,20 @@ async function owner(): Promise<number> {
   );
 }
 
+/** Gate G4: both re-pulls the design record names, run by an administrator to `complete`. */
+async function g4Done(): Promise<void> {
+  for (const id of REPULL_G4_DATASETS) {
+    await insert(
+      "upstream_repulls",
+      rowAt("complete", {
+        dataset_id: id,
+        upstream_ds: `ds${id.slice(2)}`,
+        origin: "administrator",
+      }),
+    );
+  }
+}
+
 describe("the scheduler's statements on D1", () => {
   test("the blockers, with the create's unreconciled rule nested at ?1, and the proof", async () => {
     await reset();
@@ -182,6 +197,7 @@ describe("the scheduler's statements on D1", () => {
       unreconciled: 0,
     });
 
+    // Gate G4's proof: any other mirror's manual run does not count, and the two named ones do.
     expect(await d1.prepare(MANUAL_RUN_PROOF_SQL).first()).toEqual({ n: 0 });
     await insert(
       "upstream_repulls",
@@ -191,7 +207,9 @@ describe("the scheduler's statements on D1", () => {
         origin: "administrator",
       }),
     );
-    expect(await d1.prepare(MANUAL_RUN_PROOF_SQL).first()).toEqual({ n: 1 });
+    expect(await d1.prepare(MANUAL_RUN_PROOF_SQL).first()).toEqual({ n: 0 });
+    await g4Done();
+    expect(await d1.prepare(MANUAL_RUN_PROOF_SQL).first()).toEqual({ n: 2 });
 
     // The stamp keeps the cursor for a NULL and takes a new one otherwise.
     await d1.prepare(SCHEDULER_STAMP_SQL).bind("on099901", "ran").run();
@@ -206,14 +224,7 @@ describe("the scheduler's statements on D1", () => {
     const uid = await owner();
     for (const id of ["on099901", "on099902", "on099903"]) await mirror(id, uid);
     await d1.prepare("UPDATE datasets SET anonymous = 1 WHERE dataset_id = 'on099902'").run();
-    await insert(
-      "upstream_repulls",
-      rowAt("complete", {
-        dataset_id: "on099800",
-        upstream_ds: "ds099800",
-        origin: "administrator",
-      }),
-    );
+    await g4Done();
     const env = {
       DB: d1,
       ENVIRONMENT: "production",

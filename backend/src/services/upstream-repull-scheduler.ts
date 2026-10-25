@@ -32,9 +32,10 @@
  * PRODUCTION ONLY. Outside `ENVIRONMENT` exactly `production` the tick returns null before it
  * reads or writes anything, and it is called only from the production-only daily block, absent
  * from `DEV_CRON_ALLOWLIST`: the `nemarDatasets` organization is shared with dev. In production it
- * acts only while `AUTO_REPULL_ENABLED` is exactly `"1"`, and dispatches nothing until a re-pull
- * has been run by hand to `complete` with its tag ({@link MANUAL_RUN_PROOF_SQL}), and nothing from
- * a Worker that is not a release build (the run installs the Worker's own version of the CLI).
+ * acts only while `AUTO_REPULL_ENABLED` is exactly `"1"`; it dispatches nothing until both of the
+ * re-pulls the design record's gate G4 names ({@link REPULL_G4_DATASETS}) have been run by an
+ * administrator to `complete` with their tags ({@link MANUAL_RUN_PROOF_SQL}), and nothing from a
+ * Worker that is not a release build (the run installs the Worker's own version of the CLI).
  *
  * THE CURSOR. A tick examines at most {@link REPULL_SCAN_PAGES} pages of the report from where the
  * last one stopped (`upstream_repull_scheduler.scan_after`), so the fleet is covered in rotation,
@@ -87,6 +88,12 @@ export const REPULL_SCAN_PAGES = 3;
 export const REPULL_SCAN_PROBE_BUDGET = 10;
 /** A dataset gets at most one first dispatch, or one re-pull, in this many days. */
 export const REPULL_WINDOW_DAYS = 30;
+/**
+ * The re-pulls the design record's gate G4 names, run by hand before anything runs on its own
+ * (`on004362`, then `on003645`, or the reverse when upstream's snapshot of one is late). Both must
+ * have been run by an administrator to `complete` with their tags before the scheduler dispatches.
+ */
+export const REPULL_G4_DATASETS = ["on003645", "on004362"] as const;
 
 /** GitHub answers these when the credential cannot reach the central repository at all. */
 const SYSTEMIC_REFUSALS: ReadonlySet<number> = new Set([401, 403, 404]);
@@ -146,13 +153,17 @@ export const CANDIDATE_BLOCKERS_SQL = `SELECT
       AND dispatched_at > datetime('now', '-${REPULL_WINDOW_DAYS} days')) AS recent_dispatches`;
 
 /**
- * The proof that the first re-pulls were run by hand (gate G4 of the design record, encoded): a
- * re-pull of an `on` mirror an administrator ran to `complete`, its tag recorded. Until one exists
- * in this database the scheduler dispatches nothing (`waiting-for-manual-run`).
+ * Gate G4 of the design record, as far as the database can show it: each re-pull it names
+ * ({@link REPULL_G4_DATASETS}) was run by an administrator to `complete`, its tag recorded. The
+ * scheduler dispatches nothing (`waiting-for-manual-run`) until `n` is the number of datasets
+ * named; one of them alone, or any other mirror's re-pull, does not open it. The rest of G4 (the
+ * new DOI resolves with `IsDerivedFrom`, the previous version still serves) is read by the owner
+ * before turning the switch on, which is the act that opens the path.
  */
-export const MANUAL_RUN_PROOF_SQL = `SELECT COUNT(*) AS n FROM upstream_repulls
+export const MANUAL_RUN_PROOF_SQL = `SELECT COUNT(DISTINCT dataset_id) AS n FROM upstream_repulls
   WHERE origin = 'administrator' AND status = 'complete' AND tag_sha IS NOT NULL
-    AND dataset_id GLOB 'on[0-9][0-9][0-9][0-9][0-9][0-9]'`;
+    AND dataset_id GLOB 'on[0-9][0-9][0-9][0-9][0-9][0-9]'
+    AND dataset_id IN (${quoted(REPULL_G4_DATASETS)})`;
 
 /** Where the last tick stopped: a dataset id, or '' for the start of the fleet. */
 export const SCHEDULER_CURSOR_SQL = "SELECT scan_after FROM upstream_repull_scheduler WHERE id = 1";
@@ -379,7 +390,7 @@ async function tick(
   const db = env.DB;
   const proof = await db.prepare(MANUAL_RUN_PROOF_SQL).first<{ n: number }>();
   if (typeof proof?.n !== "number") throw new Error("the manual-run proof could not be read");
-  if (proof.n === 0) return "waiting-for-manual-run";
+  if (proof.n < REPULL_G4_DATASETS.length) return "waiting-for-manual-run";
   // Advisory: a day already full costs no OpenNeuro request. The claim alone decides a unit.
   const used = (await db.prepare(OPEN_DISPATCHES_TODAY_SQL).first<{ used: number }>())?.used;
   if (typeof used !== "number") throw new Error("today's open dispatches could not be counted");
