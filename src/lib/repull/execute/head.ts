@@ -1,9 +1,14 @@
 /**
  * Whether a branch moved only by what NEMAR's enrichment writes (ADR 0111, decision 2; epic #1046
  * phase 6). Enrichment runs on every push to `main` and to `release/*` and commits back to the same
- * ref, in exactly three shapes (`run-enrichment.yml`, read): `.nemar/` files, the `.nemar/` line in
- * `.bidsignore`, and a placeholder `participants.tsv` for a tree that has none. A head that moved
- * by those commits and nothing else is still the re-pull's; any other commit is not.
+ * ref, in three shapes: `.nemar/` files and the `.nemar/` line in `.bidsignore` (the enrichment
+ * workflow, `run-enrichment.yml` in `nemarDatasets/.github`, and the backend's `enrich-dataset.ts`
+ * that commits them), and a placeholder `participants.tsv` for a tree that has none (the backend's
+ * `ensureParticipantsTsv`, in `participants-tsv.ts`, whose rule is `shared/standard-edits/
+ * participants.ts`). The workflow's own `.bidsignore` edit is not guaranteed byte-identical to
+ * `withBidsignoreEntry`; a mismatch is read as a foreign commit, which fails safe (the re-pull
+ * stops and an administrator looks). A head that moved by those commits and nothing else is still
+ * the re-pull's; any other commit is not.
  *
  * Every commit from `from` to `to` must be a single-parent commit whose changes are each one of:
  *  - a regular file added or changed under `.nemar/`, other than the privacy ledger
@@ -27,6 +32,9 @@ import { git } from "./workdir.js";
 export type HeadVerdict =
   | { ok: true; head: string; commits: number }
   | { ok: false; code: "head-foreign" | "unreadable"; detail: string };
+
+/** What a caller learns of a head: accepted, someone else's, or not readable from this clone. */
+export type HeadCheck = "ok" | "foreign" | "unreadable";
 
 /** More commits than enrichment ever makes between two of our own writes is not enrichment. */
 export const ENRICHMENT_MAX_COMMITS = 20;

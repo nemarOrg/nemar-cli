@@ -139,6 +139,8 @@ export async function withIsolatedGit<T>(fn: () => Promise<T>): Promise<T> {
 
 export interface GitResult {
   stdout: string;
+  /** Read for a fixed-word classification only; never repeated in a message, it names paths. */
+  stderr: string;
   exitCode: number;
 }
 
@@ -168,7 +170,7 @@ export async function git(
       `git ${opts.step ?? args[0] ?? ""} failed in the working clone (exit ${r.exitCode}).`,
     );
   }
-  return { stdout: r.stdout, exitCode: r.exitCode };
+  return { stdout: r.stdout, stderr: r.stderr, exitCode: r.exitCode };
 }
 
 /** True when the commit exists in the repository (no fetch). */
@@ -308,8 +310,9 @@ export type RestoreCause =
 /**
  * Restore a checkpoint into a fresh working clone. Null when the bundle verifies and delivers the
  * recorded commit `synthSha`, the clone is checked out at it with the tree `synthTree` on the
- * parent `baseSha`, and the bundle's git-annex branch is merged; otherwise why not (the caller
- * prepares again).
+ * parent `baseSha`, and the bundle's git-annex branch is merged; otherwise why not. A `prepared`
+ * row's caller then prepares again; past `prepared` it refuses (`checkpoint-lost`), because
+ * preparing again would upload and scrub afresh over a copy that already ran.
  *
  * The bundle's prerequisites are the base and origin's git-annex branch as the preparation fetched
  * it. Past `prepared` origin's branch has moved by the registration, so `annexCommit` is null (the

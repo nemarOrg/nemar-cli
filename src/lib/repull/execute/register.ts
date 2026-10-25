@@ -36,7 +36,7 @@ import { RECORDING_PATH } from "../../import-scrub.js";
 import type { PlanBody } from "../digest.js";
 import type { PushContext } from "../write-guard.js";
 import { copyItems, planPaths } from "./body.js";
-import { guardedPush } from "./push.js";
+import { guardedPush, pushCauseWords } from "./push.js";
 import type { CopyManifest } from "./synthesize.js";
 import { ExecuteRefused } from "./verify-plan.js";
 import { REPULL_IDENTITY, git } from "./workdir.js";
@@ -288,21 +288,22 @@ export async function registerCopied(args: {
       writes,
       `Re-pull registration of ${args.datasetId}: ${present} key(s) at nemar-s3, ${dead} retired`,
     );
-    const outcome = await guardedPush(
-      work,
-      [`${commit}:refs/heads/git-annex`],
-      args.push,
-      args.env,
-    );
-    if (outcome === "pushed" || outcome === "up-to-date") {
+    const pushed = await guardedPush(work, [`${commit}:refs/heads/git-annex`], args.push, args.env);
+    if (pushed.outcome === "pushed" || pushed.outcome === "up-to-date") {
       registered = present;
       retired = dead;
       break;
     }
-    if (outcome === "failed") {
+    if (pushed.outcome === "remote-rejected") {
+      throw new ExecuteRefused(
+        "registration-push-refused",
+        `NEMAR's repository refused the registration of its git-annex branch (${pushCauseWords(pushed.cause)}); pushing again cannot change it.`,
+      );
+    }
+    if (pushed.outcome === "failed") {
       throw new ExecuteRefused(
         "registration-push-failed",
-        "The registration could not be pushed to NEMAR's git-annex branch.",
+        `The registration could not be pushed to NEMAR's git-annex branch (${pushCauseWords(pushed.cause)}).`,
       );
     }
     if (attempt >= REGISTRATION_TRIES) {

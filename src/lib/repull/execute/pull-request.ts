@@ -15,8 +15,8 @@ import { sanitizeNote } from "../../../../shared/pr-review.js";
 import { DATASETS_ORG } from "../../pr-review-approve.js";
 import { buildReleaseTitle, findSentTitleProblem } from "../../pr-text.js";
 import type { PushContext } from "../write-guard.js";
-import { MOVED_REF_FETCH_DEPTH, enrichmentOnlySince } from "./head.js";
-import { guardedPush } from "./push.js";
+import { type HeadCheck, MOVED_REF_FETCH_DEPTH, enrichmentOnlySince } from "./head.js";
+import { guardedPush, pushCauseWords } from "./push.js";
 import { ExecuteRefused } from "./verify-plan.js";
 import { git } from "./workdir.js";
 
@@ -77,10 +77,12 @@ export async function acceptsHead(args: {
   head: string;
   ref: string;
   env: Record<string, string> | undefined;
-}): Promise<boolean> {
-  if (args.head === args.from) return true;
+}): Promise<HeadCheck> {
+  if (args.head === args.from) return "ok";
   await fetchRef(args.work, args.ref, args.env);
-  return (await enrichmentOnlySince(args.work, args.from, args.head)).ok;
+  const verdict = await enrichmentOnlySince(args.work, args.from, args.head);
+  if (verdict.ok) return "ok";
+  return verdict.code === "unreadable" ? "unreadable" : "foreign";
 }
 
 /**
@@ -95,18 +97,23 @@ export async function checkMain(args: {
   const heads = await remoteHeads(args.work, ["refs/heads/main"], args.env);
   const main = heads.get("refs/heads/main");
   if (!main) throw new ExecuteRefused("origin-unreadable", "NEMAR's main could not be read.");
-  if (
-    !(await acceptsHead({
-      work: args.work,
-      from: args.baseSha,
-      head: main,
-      ref: "refs/heads/main",
-      env: args.env,
-    }))
-  ) {
+  const verdict = await acceptsHead({
+    work: args.work,
+    from: args.baseSha,
+    head: main,
+    ref: "refs/heads/main",
+    env: args.env,
+  });
+  if (verdict === "unreadable") {
+    throw new ExecuteRefused(
+      "main-unreadable",
+      "Whether NEMAR's main moved only by commits enrichment makes could not be read from the working clone; nothing was pushed. Run again; if it persists, this re-pull's record has to be abandoned (no command to abandon a record is built yet).",
+    );
+  }
+  if (verdict !== "ok") {
     throw new ExecuteRefused(
       "main-moved",
-      "NEMAR's main moved since the re-pull was prepared, by a commit enrichment does not make: abandon this re-pull and plan again.",
+      "NEMAR's main moved since the re-pull was prepared, by a commit enrichment does not make: this re-pull cannot continue, and its record has to be abandoned and the dataset planned again (no command to abandon a record is built yet).",
     );
   }
   return main;
@@ -127,36 +134,49 @@ export async function pushRelease(args: {
   for (let attempt = 1; attempt <= 2; attempt++) {
     const existing = (await remoteHeads(args.work, [ref], args.env)).get(ref);
     if (existing) {
-      const ok = await acceptsHead({
+      const verdict = await acceptsHead({
         work: args.work,
         from: args.synthSha,
         head: existing,
         ref,
         env: args.env,
       });
-      if (!ok) {
+      if (verdict === "unreadable") {
+        throw new ExecuteRefused(
+          "branch-unreadable",
+          `Whether release/v${args.version} holds only this re-pull's commit and enrichment's could not be read from the working clone; nothing was pushed.`,
+        );
+      }
+      if (verdict !== "ok") {
         throw new ExecuteRefused(
           "branch-foreign",
-          `release/v${args.version} exists on NEMAR's repository and is not this re-pull's commit: it holds a commit enrichment does not make. Abandon this re-pull, or remove the branch after checking what it holds.`,
+          `release/v${args.version} exists on NEMAR's repository and is not this re-pull's commit: it holds a commit enrichment does not make. Remove the branch after checking what it holds, or abandon this re-pull's record (no command to abandon a record is built yet).`,
         );
       }
       return { head: existing, pushed: false };
     }
-    const outcome = await guardedPush(args.work, [`${args.synthSha}:${ref}`], args.push, args.env);
-    if (outcome === "pushed" || outcome === "up-to-date") {
+    const pushed = await guardedPush(args.work, [`${args.synthSha}:${ref}`], args.push, args.env);
+    if (pushed.outcome === "pushed" || pushed.outcome === "up-to-date") {
       return { head: args.synthSha, pushed: true };
     }
-    if (outcome === "failed") {
+    if (pushed.outcome === "remote-rejected") {
+      // NEMAR's repository refused the branch by its own rule; pushing again cannot change it.
+      throw new ExecuteRefused(
+        "push-refused",
+        `release/v${args.version} was refused by NEMAR's repository (${pushCauseWords(pushed.cause)}); a second push would be refused the same way.`,
+      );
+    }
+    if (pushed.outcome === "failed") {
       throw new ExecuteRefused(
         "push-failed",
-        `release/v${args.version} could not be pushed to NEMAR's repository.`,
+        `release/v${args.version} could not be pushed to NEMAR's repository (${pushCauseWords(pushed.cause)}).`,
       );
     }
     // Rejected: the branch appeared in between. Read it once more and judge it.
   }
   throw new ExecuteRefused(
     "push-failed",
-    `release/v${args.version} was refused twice and does not hold this re-pull's commit.`,
+    `release/v${args.version} was refused twice because the remote moved under the push, and does not hold this re-pull's commit.`,
   );
 }
 
@@ -257,7 +277,12 @@ async function openReleasePull(args: {
   }
   const branch = `release/v${args.version}`;
   const releases = (pulls as ListedPull[]).filter((p) => p.headRef.startsWith("release/"));
-  const ours = releases.filter((p) => p.headRef === branch && (p.headRepo ?? own) === own);
+  // The head repository must be the dataset's own: a fork's branch of the same name is not ours,
+  // and one whose repository GitHub no longer names (a deleted fork) fails closed the same way.
+  const ours = releases.filter(
+    (p) =>
+      p.headRef === branch && p.headRepo !== null && p.headRepo.toLowerCase() === own.toLowerCase(),
+  );
   const others = releases.filter((p) => !ours.includes(p));
   if (others.length > 0 || ours.length > 1) {
     throw new ExecuteRefused(
@@ -279,12 +304,19 @@ export async function openRelease(args: {
   datasetId: string;
   version: string;
   body: string;
-  acceptHead: (sha: string) => Promise<boolean>;
+  acceptHead: (sha: string) => Promise<HeadCheck>;
 }): Promise<{ number: number; head: string; reused: boolean }> {
   const branch = `release/v${args.version}`;
   const found = await openReleasePull(args);
   if (found) {
-    if (found.baseRef !== "main" || !(await args.acceptHead(found.headSha))) {
+    const verdict = found.baseRef === "main" ? await args.acceptHead(found.headSha) : "foreign";
+    if (verdict === "unreadable") {
+      throw new ExecuteRefused(
+        "pr-unreadable",
+        `Whether the open pull request of ${branch} (#${found.number}) is at this re-pull's commit could not be read from the working clone.`,
+      );
+    }
+    if (verdict !== "ok") {
       throw new ExecuteRefused(
         "pr-foreign",
         `The open pull request of ${branch} (#${found.number}) is not into main at this re-pull's commit.`,
@@ -308,6 +340,13 @@ export async function openRelease(args: {
     );
   }
   const created = answer.status === 201 ? listedPull(answer.body) : null;
+  if (answer.status === 201 && !created) {
+    // It was opened; only its answer could not be read. The next run finds it by its head.
+    throw new ExecuteRefused(
+      "pr-created-unreadable",
+      `GitHub opened the pull request of ${branch} (HTTP 201) but its answer could not be read; the next run looks for it before opening one.`,
+    );
+  }
   if (!created) {
     const message =
       typeof answer.body === "object" && answer.body !== null && "message" in answer.body
@@ -318,11 +357,17 @@ export async function openRelease(args: {
       `GitHub refused to open the pull request of ${branch} (HTTP ${answer.status}${message ? `: ${message}` : ""}).`,
     );
   }
-  if (
-    created.headRef !== branch ||
-    created.baseRef !== "main" ||
-    !(await args.acceptHead(created.headSha))
-  ) {
+  const createdVerdict =
+    created.headRef === branch && created.baseRef === "main"
+      ? await args.acceptHead(created.headSha)
+      : "foreign";
+  if (createdVerdict === "unreadable") {
+    throw new ExecuteRefused(
+      "pr-unreadable",
+      `GitHub opened pull request #${created.number}, but whether it is at this re-pull's commit could not be read from the working clone.`,
+    );
+  }
+  if (createdVerdict !== "ok") {
     throw new ExecuteRefused(
       "pr-foreign",
       `GitHub opened pull request #${created.number}, but not of ${branch} into main at this re-pull's commit.`,
@@ -349,7 +394,7 @@ export function releaseBody(args: {
   return [
     `Re-pull of upstream ${args.ds} from snapshot ${args.fromTag} to ${args.toTag}, as v${args.toVersion} of ${args.datasetId} (ADR 0111).`,
     "",
-    `This pull request replays upstream's snapshot ${args.ds}@${args.toTag} onto NEMAR's main as one synthesized commit, scrubbed before anything was copied or committed. Upstream wins every conflict in v${args.toVersion}${args.patchVersion ? `; NEMAR's corrections follow as v${args.patchVersion} once this is merged and tagged` : ""}.`,
+    `This pull request replays upstream's snapshot ${args.ds}@${args.toTag} onto NEMAR's main as one synthesized commit, scrubbed before anything was copied or pushed. Upstream wins every conflict in v${args.toVersion}${args.patchVersion ? `; NEMAR's corrections follow as v${args.patchVersion} once this is merged and tagged` : ""}.`,
     "",
     `- Re-pull record: #${args.repullId}`,
     `- Plan digest: ${args.digest}`,
@@ -358,7 +403,7 @@ export function releaseBody(args: {
     `- Recording headers scrubbed: ${c("scrubbed_recordings")}; acquisition dates set: ${c("dated_recordings")}; JSON files blanked: ${c("scrubbed_json")}`,
     `- Version DOIs the re-pull mints when merged: ${args.doiCount}`,
     "",
-    `\`nemar admin repull execute\` never merges. Merge with \`nemar admin repull merge ${args.datasetId}\` or \`nemar admin pr-reviews\`, once the identifier screen and the gates pass; a merge mints a version DOI that cannot be withdrawn.`,
+    "`nemar admin repull execute` never merges, and the re-pull merge path is not built yet: this pull request is merged by an administrator, once the identifier screen and the gates pass; a merge mints a version DOI that cannot be withdrawn.",
     "",
     "The squash commit message must end with both trailers of the re-pull commit, as its last paragraph:",
     "",
