@@ -35,6 +35,7 @@ import { RECORDING_PATH } from "../import-scrub.js";
 import { DESCRIPTION_PATH, type DescriptionMerge, mergeDescription } from "./description.js";
 import {
   ABSENT,
+  type ComputedBytes,
   type EditName,
   type ExplainContext,
   type Side,
@@ -42,6 +43,7 @@ import {
   annexKeyOfEntry,
   bareDoi,
   baseName,
+  computedTarget,
   explainEdit,
   generatedParticipants,
   gitBlobOid,
@@ -106,6 +108,8 @@ export interface OverlayInput {
    * a badge naming it is an explained edit, and N.0.0's badge is built from it.
    */
   conceptDoi: string | null;
+  /** Records the bytes of every computed target by blob id, for execution (`edits.ts`). */
+  collect?: ComputedBytes;
 }
 
 export interface OverlayResult {
@@ -286,6 +290,7 @@ function targetFamily(
   theirs: Map<string, Side>,
   stub: string,
   conceptDoi: string | null,
+  collect?: ComputedBytes,
 ): Map<string, Target> {
   const imported = importFamily(theirs, stub);
   const sel = selectPublishReadmes([...imported.keys()].map((path) => ({ path })));
@@ -293,15 +298,21 @@ function targetFamily(
   for (const [p, f] of imported) {
     if (p === "README.md" || sel.remove.some((r) => r.path === p)) continue;
     const side = "bytes" in f ? null : f.side;
+    if (!side) {
+      // The import's stub: bytes the planner wrote, which no upstream blob holds.
+      const bytes = (f as { bytes: Buffer }).bytes;
+      const oid = gitBlobOid(bytes);
+      collect?.computed.set(oid, bytes);
+      out.set(p, { kind: "git", mode: "100644", oid });
+      continue;
+    }
     out.set(
       p,
-      side
-        ? side.kind === "annex"
-          ? { kind: "unannex", key: side.key }
-          : side.kind === "git"
-            ? { kind: "git", mode: side.mode, oid: side.oid }
-            : { kind: "absent" }
-        : { kind: "git", mode: "100644", oid: gitBlobOid((f as { bytes: Buffer }).bytes) },
+      side.kind === "annex"
+        ? { kind: "unannex", key: side.key }
+        : side.kind === "git"
+          ? { kind: "git", mode: side.mode, oid: side.oid }
+          : { kind: "absent" },
     );
   }
   const doi = bareDoi(conceptDoi);
@@ -322,12 +333,7 @@ function targetFamily(
     contentSourcePath: sel.contentSource?.path,
   });
   const bytes = plan.commit ? Buffer.from(plan.content) : content;
-  out.set("README.md", {
-    kind: "git",
-    mode: "100644",
-    oid: gitBlobOid(bytes),
-    computed: "readme-badge",
-  });
+  out.set("README.md", computedTarget("100644", bytes, "readme-badge", collect));
   return out;
 }
 
@@ -561,7 +567,7 @@ export async function overlay(input: OverlayInput): Promise<OverlayResult> {
     const explained = eBase !== null || eTheirs !== null;
     const cls = classify(changed, explained);
     const keep = cls === "keep-ours" || (cls === "take-theirs" && eTheirs !== null);
-    const targets = keep ? null : targetFamily(ft, stubTheirs, input.conceptDoi);
+    const targets = keep ? null : targetFamily(ft, stubTheirs, input.conceptDoi, input.collect);
     const keepOurs = keep || (targets !== null && familyEquals(targets, fo));
     const first = (m: Map<string, Side>): Side =>
       m.size > 0 ? ([...m.values()][0] as Side) : ABSENT;
@@ -631,6 +637,7 @@ export async function overlay(input: OverlayInput): Promise<OverlayResult> {
           sentences: changesSentences,
           oursHasBidsignore,
           generatedParticipants: generated ? participants.theirs : null,
+          collect: input.collect,
         });
     const sameAsOurs = target.kind !== "ours" && targetEqualsOurs(target, s.ours);
     const delta = target.kind !== "ours" && target.kind !== "absent" && !sameAsOurs;

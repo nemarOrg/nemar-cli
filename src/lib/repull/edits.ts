@@ -551,10 +551,18 @@ export type Target =
 export function targetOf(
   path: string,
   x: Side,
-  opts: { sentences: string[]; oursHasBidsignore: boolean; generatedParticipants?: Buffer | null },
+  opts: {
+    sentences: string[];
+    oursHasBidsignore: boolean;
+    generatedParticipants?: Buffer | null;
+    /** Where the bytes of every computed target are recorded, by blob id ({@link ComputedBytes}). */
+    collect?: ComputedBytes;
+  },
 ): Target {
   const name = baseName(path);
   const root = isRootPath(path);
+  const computed = (mode: string, content: string | Buffer, edit: EditName) =>
+    computedTarget(mode, content, edit, opts.collect);
   if (x.kind === "absent") {
     if (path === PARTICIPANTS_PATH && opts.generatedParticipants) {
       return computed("100644", opts.generatedParticipants, "participants-generated");
@@ -611,9 +619,29 @@ export function targetOf(
   return { kind: "git", mode: x.mode, oid: x.oid };
 }
 
-function computed(mode: string, content: string | Buffer, edit: EditName): Target {
+/**
+ * Bytes the planner computed, by git blob id: a README with its badge, a stripped
+ * `.gitattributes`, a `.bidsignore` with its line, a `CHANGES` with its ADR 0085 sentences, the
+ * generated `participants.tsv`, the import's README stub. A target names such bytes only by their
+ * id, so execution takes them from here and never rebuilds a standard edit itself: the planner is
+ * the one producer of computed bytes. Filled only when a caller asks (`PlanOptions.collect`); it is
+ * an output beside the plan, never part of it, so the digest does not move.
+ */
+export interface ComputedBytes {
+  computed: Map<string, Buffer>;
+}
+
+/** A git target whose bytes the planner made; they are recorded in `collect` when one is given. */
+export function computedTarget(
+  mode: string,
+  content: string | Buffer,
+  edit: EditName | "readme-badge",
+  collect?: ComputedBytes,
+): Target {
   const bytes = typeof content === "string" ? Buffer.from(content) : content;
-  return { kind: "git", mode, oid: gitBlobOid(bytes), computed: edit };
+  const oid = gitBlobOid(bytes);
+  collect?.computed.set(oid, bytes);
+  return { kind: "git", mode, oid, computed: edit };
 }
 
 /** True when `target` is exactly what `ours` already holds. */

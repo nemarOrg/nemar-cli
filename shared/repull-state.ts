@@ -240,6 +240,17 @@ export const SELF_EDGE_FIELDS: Readonly<Partial<Record<RepullStatus, TransitionF
   },
 };
 
+/**
+ * Self-edges that record the whole stage again, so the step they repeat succeeded: they clear a
+ * stored error when they carry none, as an edge into another non-terminal status does. A
+ * `prepared` row prepared again onto a moved base takes this edge, and so does one found intact,
+ * restored from its checkpoint or prepared again to the same commit, but execution sends it then
+ * only when the stored error is a preparation's own (its words begin `[prepare:`), so an error a
+ * later step recorded is not cleared by a preparation that holds. The other self-edges write one
+ * thing beside the stage and keep the error.
+ */
+export const CLEARING_SELF_EDGES = ["prepared"] as const satisfies readonly RepullStatus[];
+
 /** What the edge `from` to `to` may and must write. */
 export function fieldsFor(from: RepullStatus, to: RepullStatus): TransitionFields {
   return (from === to ? SELF_EDGE_FIELDS[to] : undefined) ?? TRANSITION_FIELDS[to];
@@ -293,6 +304,15 @@ export const REPULL_COUNT_KEYS = [
   "bytes",
   "headers_not_read_nemar_held",
   "headers_not_read_no_source",
+  // What the delta scrub could not read or prove, kept so unknown is never read as zero.
+  "json_files_unread",
+  "json_files_annexed",
+  "scans_tables_unread",
+  "headers_dates_unproven",
+  "headers_dates_left",
+  // NEMAR-owned edits the plan listed and the preparation applied, or left with another status.
+  "nemar_owned_edits",
+  "nemar_owned_edits_left",
   "merged_outside_tool",
   "merged_unscreened_head",
 ] as const;

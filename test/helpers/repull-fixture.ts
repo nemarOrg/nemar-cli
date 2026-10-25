@@ -27,7 +27,15 @@
  * Every name, date and code in a header below is invented.
  */
 
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { hashDirLower } from "../../scripts/scrub/git/git-lib";
@@ -59,6 +67,7 @@ import {
   prepareImportedTreeForCopy,
 } from "../../src/lib/import-scrub";
 import { isLocallyUploaded } from "../../src/lib/s3-server-copy";
+import type { S3Standin } from "../scrub/helpers/s3-standin";
 
 /**
  * Within the API's 0-99999 id cap (AGENTS.md, "Dataset ID bands"), so the real routers accept it.
@@ -111,6 +120,14 @@ export const PATHS = {
   nemarAdded: "code/nemar-notes.txt",
   /** With `gitlink`: a submodule tag B adds. */
   gitlink: "vendor/tool",
+  /** With `identifierJsonB`: a sidecar tag B adds with an identifier-keyed value. */
+  addedIdentifierJson: "sub-03/eeg/sub-03_task-rest_acq.json",
+  /** With `crlfSidecarB`: a sidecar tag B adds whose blob has CRLF line endings. */
+  crlfSidecar: "sub-03/eeg/sub-03_task-rest_coordsystem.json",
+  /** With `symlinkB`: a plain git symlink tag B adds (not an annexed file). */
+  symlink: "code/latest",
+  /** With `nestedGitattributesB`: a `.gitattributes` tag B adds below the root. */
+  nestedGitattributes: "sub-03/.gitattributes",
 } as const;
 
 const UPSTREAM_GITATTRIBUTES = `* annex.backend=SHA256E
@@ -155,6 +172,26 @@ function noise(out: Uint8Array, from: number, seed: number): Uint8Array {
 }
 
 const text = (s: string) => new TextEncoder().encode(s);
+
+/**
+ * Bytes a later upstream snapshot wrote at the same path, of the same size: a recording with the
+ * opposite header (flagged where the pinned one is clean, and the reverse), anything else with its
+ * bytes inverted. A read that drops the pin's version id then gets the wrong verdict or the wrong
+ * hash, never the pinned bytes by accident.
+ */
+function newerBytes(path: string, pinned: Uint8Array): Uint8Array {
+  if (/\.(edf|bdf)$/i.test(path) && pinned.length > EDF_HEADER_BYTES) {
+    const patient = String.fromCharCode(...pinned.subarray(8, 88)).trim();
+    const flagged = patient !== "X X X X";
+    return edfBytes(
+      flagged ? "X X X X" : "Qwfixturelast M 09-SEP-1999 Zxfixturename",
+      pinned.length - EDF_HEADER_BYTES,
+      99,
+      !flagged,
+    );
+  }
+  return pinned.map((b) => 255 - b);
+}
 
 /** A headerless motion recording of about `bytes` bytes, rows from a seeded sequence. */
 function motionTable(bytes: number, seed: number): string {
@@ -236,6 +273,40 @@ export interface FixtureOptions {
    * with one value filled in afterwards. Tag B adds sub-03, so its placeholder differs.
    */
   generatedParticipants?: true | "edited";
+  /**
+   * NEMAR's dataset id; `on099999` by default. An `xx` id maps to `ds099999` through its dataset
+   * row's `source_id`, and is the only kind a re-pull record accepts outside production.
+   */
+  datasetId?: string;
+  /**
+   * OpenNeuro's versioned bucket and NEMAR's bucket, in a real S3 stand-in driven by the real `aws`
+   * CLI: every key upstream's git-annex branch pins is put under `openneuro.org/<ds>/<path>`, and
+   * the pin records the version id the stand-in gave it; then a NEWER version with other bytes is
+   * put at each pinned path (of the same size, a recording with the opposite header), so a read
+   * that drops the version id reads the wrong bytes. NEMAR's prefix gets its `annex-uuid` marker
+   * and the objects of the keys NEMAR's tree names whose bytes the fixture has.
+   */
+  s3?: S3Standin;
+  /** Tag B's added EDF carries an identifying header and a day-level date (the scrub re-keys it). */
+  flaggedAddedEdf?: boolean;
+  /** Tag B adds a sidecar with an identifier-keyed value (the scrub blanks it). */
+  identifierJsonB?: boolean;
+  /**
+   * Tag B moves the recording the import scrubbed (its upstream key dead at NEMAR) and nothing
+   * else dead: the one dead key N.0.0 would name is at a recording path.
+   */
+  movedScrubbedEdf?: boolean;
+  /** NEMAR's `.nemar/metadata.json` begins with a byte-order mark. */
+  bomNemarMetadata?: boolean;
+  /**
+   * Tag B adds a sidecar whose committed blob has CRLF line endings, which upstream's own
+   * attributes would normalize on a `git add`: N.0.0 must hold the blob as upstream committed it.
+   */
+  crlfSidecarB?: boolean;
+  /** Tag B adds a git symlink (mode 120000) to `code/run.sh`. */
+  symlinkB?: boolean;
+  /** Tag B adds a nested `.gitattributes` with an `annex.largefiles` rule the annex policy strips. */
+  nestedGitattributesB?: boolean;
 }
 
 /** The ADR 0085 sentence a correction appends to `CHANGES` (`changeLogEntry`). */
@@ -263,6 +334,10 @@ export interface RepullFixture {
   store: string;
   bucketBase: string;
   nemarUuid: string;
+  /** NEMAR's dataset id (`opts.datasetId`, else `on099999`). */
+  datasetId: string;
+  /** The version ids upstream's git-annex branch pins, by what they pin. */
+  pins: { addedEdf: string | null; setB: string | null; changesB: string | null };
   keys: {
     flaggedUpstream: string;
     flaggedNemar: string;
@@ -482,6 +557,7 @@ async function build(
   baseUrl: string,
   opts: FixtureOptions,
 ): Promise<RepullFixture> {
+  const id = opts.datasetId ?? NEMAR_ID;
   const up = join(root, "upstream-work");
   mkdirSync(up, { recursive: true });
   await run(["git", "init", "-q", "--initial-branch", "main", "."], up);
@@ -557,7 +633,7 @@ async function build(
   // ---- The import of tag A, as prepare runs it ----
   const work = join(root, "import");
   mkdirSync(work, { recursive: true });
-  const clone = join(work, NEMAR_ID);
+  const clone = join(work, id);
   await run(["git", "clone", "-q", up, clone], work);
   await identity(clone, "import clone");
   const store = join(root, "nemar-s3-store");
@@ -590,11 +666,11 @@ async function build(
   const { urlMap } = await getAnnexWhereisAll(clone);
   const prepared = await prepareImportedTreeForCopy({
     datasetPath: clone,
-    nemarId: NEMAR_ID,
+    nemarId: id,
     bucket: "nemar",
     remoteName: "nemar-s3",
     keyUrlMap: urlMap,
-    upstreamItems: buildManifestItems(urlMap, NEMAR_ID).items,
+    upstreamItems: buildManifestItems(urlMap, id).items,
     unannexedData,
     reimport: false,
     skipData: false,
@@ -606,7 +682,7 @@ async function build(
   const desc = JSON.parse(readFileSync(join(clone, PATHS.description), "utf8"));
   const openNeuroDoi = String(desc.DatasetDOI).replace(/^doi:/, "");
   ensureReadmeMd(clone, UPSTREAM_ID, openNeuroDoi);
-  seedMetadata(clone, NEMAR_ID, UPSTREAM_ID, desc, openNeuroDoi);
+  seedMetadata(clone, id, UPSTREAM_ID, desc, openNeuroDoi);
   await run(["git", "-c", "annex.largefiles=nothing", "add", "-A"], clone);
   await run(["git", "commit", "-qm", "Seed NEMAR metadata"], clone);
   // The copy and finalize phases, as far as the git-annex branch sees them: every upstream key
@@ -653,7 +729,7 @@ async function build(
     appendLedger(join(clone, ".nemar/corrections.jsonl"), {
       version: 1,
       at: "2026-10-07T00:00:00.000Z",
-      dataset: NEMAR_ID,
+      dataset: id,
       action: "headers-scrubbed",
       versions: ["v1.0.0"],
       counts: { headers_scrubbed: 1 },
@@ -666,7 +742,7 @@ async function build(
     appendLedger(join(clone, ".nemar/corrections.jsonl"), {
       version: 1,
       at: "2026-10-08T00:00:00.000Z",
-      dataset: NEMAR_ID,
+      dataset: id,
       action: "repull-scrubbed",
       versions: [],
       counts: { headers_scrubbed: 1, json_values_blanked: 1 },
@@ -685,6 +761,10 @@ async function build(
   }
   // Value-looking tokens: a parser's message would quote them, and nothing may echo them.
   if (opts.brokenNemarMetadata) write(clone, ".nemar/metadata.json", "{ Jane Doe\n");
+  if (opts.bomNemarMetadata) {
+    const meta = join(clone, ".nemar/metadata.json");
+    write(clone, ".nemar/metadata.json", `\uFEFF${readFileSync(meta, "utf8")}`);
+  }
   if (opts.corruptLedger) {
     const ledger = join(clone, ".nemar/corrections.jsonl");
     write(clone, ".nemar/corrections.jsonl", `${readFileSync(ledger, "utf8")}Jane Doe\n`);
@@ -765,7 +845,7 @@ async function build(
   await run(["git", "tag", "v1.0.0", rootCommit], clone);
 
   const originBase = join(root, "origins");
-  const originRepo = join(originBase, NEMAR_ID);
+  const originRepo = join(originBase, id);
   await bareOrigin(originRepo);
   await run(["git", "remote", "add", "nemar", originRepo], clone);
   await run(["git", "push", "-q", "nemar", "main", "git-annex", "refs/tags/v1.0.0"], clone);
@@ -774,11 +854,13 @@ async function build(
   await writeAnnexBranchFile(
     originRepo,
     "remote.log",
-    `${nemarUuid} bucket=nemar datacenter=us-east-2 encryption=none fileprefix=${NEMAR_ID}/objects/ name=nemar-s3 type=S3 timestamp=1790000000s\n`,
+    `${nemarUuid} bucket=nemar datacenter=us-east-2 encryption=none fileprefix=${id}/objects/ name=nemar-s3 type=S3 timestamp=1790000000s\n`,
   );
 
   // ---- Tag B, upstream ----
-  const added = edfBytes("X X X X", 4000, 3, false);
+  const added = opts.flaggedAddedEdf
+    ? edfBytes("Qwfixturelast F 03-MAR-1991 Zxfixturename", 4000, 3, true)
+    : edfBytes("X X X X", 4000, 3, false);
   const dataB = opts.metadataOnlyB
     ? {}
     : {
@@ -818,8 +900,15 @@ async function build(
   if (opts.subtypes) {
     changes[PATHS.bothAdded] = `{\n  "TaskName": "rest",\n  "SamplingFrequency": 128\n}\n`;
   }
+  if (opts.nestedGitattributesB) {
+    changes[PATHS.nestedGitattributes] = "*.tsv annex.largefiles=anything text eol=lf\n";
+  }
+  if (opts.identifierJsonB) {
+    changes[PATHS.addedIdentifierJson] =
+      `{\n  "TaskName": "rest",\n  "Acq": {\n    "PatientName": "Zxfixturename Qwfixturelast"\n  }\n}\n`;
+  }
   for (const [p, b] of Object.entries(changes)) write(up, p, b);
-  if (opts.deadKeys) {
+  if (opts.deadKeys || opts.movedScrubbedEdf) {
     mkdirSync(join(up, dirname(PATHS.movedEdf)), { recursive: true });
     await run(["git", "mv", PATHS.flaggedEdf, PATHS.movedEdf], up);
   }
@@ -827,6 +916,22 @@ async function build(
   await run(["git", "mv", PATHS.events, PATHS.eventsRenamed], up);
   await run(["git", "annex", "add", "--quiet", "."], up);
   if (!opts.metadataOnlyB) await run(["git", "update-index", "--chmod=+x", PATHS.script], up);
+  if (opts.symlinkB) {
+    symlinkSync("run.sh", join(up, PATHS.symlink));
+    await run(["git", "add", PATHS.symlink], up);
+  }
+  if (opts.crlfSidecarB) {
+    // Committed as it is, by plumbing: a plain `git add` would turn its line endings into LF under
+    // upstream's own `*.json text eol=lf`, so only a writer that stages exact ids keeps this blob.
+    write(up, PATHS.crlfSidecar, `{\r\n  "TaskName": "rest",\r\n  "Manufacturer": "n/a"\r\n}\r\n`);
+    const oid = (
+      await run(["git", "hash-object", "-w", "--no-filters", PATHS.crlfSidecar], up)
+    ).trim();
+    await run(
+      ["git", "update-index", "--add", "--cacheinfo", `100644,${oid},${PATHS.crlfSidecar}`],
+      up,
+    );
+  }
   if (opts.gitlink) {
     const commit = (await run(["git", "rev-parse", "HEAD"], up)).trim();
     await run(
@@ -855,11 +960,31 @@ async function build(
   const addedKey = upKeysB.get(PATHS.addedEdf) as string;
   const setB = upKeysB.get(PATHS.set) as string;
   const changesB = opts.annexedRootMetadata ? (upKeysB.get(PATHS.changes) as string) : null;
+  // Without a stand-in the version ids are names; with one, they are the ids it gave each put, and
+  // a newer version of other bytes is then put on top, so only a read at the pin gets the key's.
+  const s3 = opts.s3;
+  const versionOf = (path: string, name: string): string => {
+    if (!s3) return name;
+    const bytes = changes[path];
+    const data = typeof bytes === "string" ? text(bytes) : (bytes as Uint8Array);
+    const version = s3.putObject("openneuro.org", `${UPSTREAM_ID}/${path}`, data);
+    s3.putObject("openneuro.org", `${UPSTREAM_ID}/${path}`, newerBytes(path, data));
+    return version;
+  };
+  const pins: RepullFixture["pins"] = { addedEdf: null, setB: null, changesB: null };
   if (!opts.metadataOnlyB) {
-    await pin(PATHS.addedEdf, addedKey, "VERSIONADDED");
-    await pin(PATHS.set, setB, "VERSIONSETB", opts.unpinnedSet ? OTHER_UUID : PUBLIC_UUID);
+    const addedVersion = versionOf(PATHS.addedEdf, "VERSIONADDED");
+    const setVersion = versionOf(PATHS.set, "VERSIONSETB");
+    await pin(PATHS.addedEdf, addedKey, addedVersion);
+    await pin(PATHS.set, setB, setVersion, opts.unpinnedSet ? OTHER_UUID : PUBLIC_UUID);
+    pins.addedEdf = addedVersion;
+    pins.setB = setVersion;
   }
-  if (changesB) await pin(PATHS.changes, changesB, "VERSIONCHANGESB");
+  if (changesB) {
+    const changesVersion = versionOf(PATHS.changes, "VERSIONCHANGESB");
+    await pin(PATHS.changes, changesB, changesVersion);
+    pins.changesB = changesVersion;
+  }
 
   const upstreamBase = join(root, "upstreams");
   const upstreamRepo = join(upstreamBase, UPSTREAM_ID);
@@ -891,12 +1016,34 @@ async function build(
 
   const bucketBase = join(root, "bucket");
   if (opts.marker !== null) {
-    write(bucketBase, `${NEMAR_ID}/objects/annex-uuid`, opts.marker ?? nemarUuid);
+    write(bucketBase, `${id}/objects/annex-uuid`, opts.marker ?? nemarUuid);
   } else {
     mkdirSync(bucketBase, { recursive: true });
   }
 
   const nemarKeys = await listAnnexedKeys(clone);
+  if (s3) {
+    // NEMAR's prefix as the import left it: the marker, and the objects of the keys the tree names
+    // whose bytes the fixture holds (upstream's, by path, or the content the import annexed).
+    if (opts.marker !== null) {
+      s3.putObject("nemar", `${id}/objects/annex-uuid`, text(opts.marker ?? nemarUuid));
+    }
+    const upByKey = new Map([...upKeysA].map(([path, key]) => [key, path]));
+    for (const key of new Set(nemarKeys.values())) {
+      const path = upByKey.get(key);
+      let data: Uint8Array | null = null;
+      if (path !== undefined) {
+        const b = files[path];
+        data = typeof b === "string" ? text(b) : (b ?? null);
+      } else {
+        const located = await runCommand(["git", "annex", "contentlocation", key], { cwd: clone });
+        if (located.exitCode === 0 && located.stdout.trim()) {
+          data = new Uint8Array(readFileSync(join(clone, located.stdout.trim())));
+        }
+      }
+      if (data) s3.putObject("nemar", `${id}/objects/${key}`, data);
+    }
+  }
   Bun.spawnSync(["chmod", "-R", "u+w", work]);
   rmSync(work, { recursive: true, force: true });
   const fixture: RepullFixture = {
@@ -912,6 +1059,8 @@ async function build(
     store,
     bucketBase,
     nemarUuid,
+    datasetId: id,
+    pins,
     keys: {
       flaggedUpstream: upKeysA.get(PATHS.flaggedEdf) as string,
       flaggedNemar: nemarKeys.get(PATHS.flaggedEdf) as string,

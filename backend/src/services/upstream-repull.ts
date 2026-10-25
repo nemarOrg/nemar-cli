@@ -59,6 +59,7 @@ import {
   ACKNOWLEDGMENT_MIN_LENGTH,
 } from "../../../shared/publication-limits.js";
 import {
+  CLEARING_SELF_EDGES,
   DIGEST_RE,
   IMMUTABLE_ONCE_SET,
   MERGE_CLAIM_COLUMNS,
@@ -999,10 +1000,14 @@ export async function prepareTransition(
   // The Worker's own clock, never a request's: see SELF_EDGE_FIELDS.
   for (const key of spec.stamp ?? []) sets.push(`${key} = datetime('now')`);
   const forward = !repeats && !isTerminal(t.to);
+  // A self-edge that records its whole stage again says the step it repeats succeeded, so with no
+  // error of its own it clears the stale one, as a step that moved on does. Any other repeat, or an
+  // edge into a terminal status, keeps it.
+  const restated = repeats && (CLEARING_SELF_EDGES as readonly string[]).includes(t.to);
   if (t.error !== undefined) {
     sets.push("last_error = ?");
     binds.push(resolveImportError(forward ? null : row.last_error, t.error));
-  } else if (forward) {
+  } else if (forward || restated) {
     sets.push("last_error = NULL");
   }
   sets.push("revision = revision + 1");

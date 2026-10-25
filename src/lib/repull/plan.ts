@@ -48,7 +48,14 @@ import {
   type PlanFile,
   planDigest,
 } from "./digest.js";
-import { type Side, type Target, bareDoi, keyDigest, stripBom } from "./edits.js";
+import {
+  type ComputedBytes,
+  type Side,
+  type Target,
+  bareDoi,
+  keyDigest,
+  stripBom,
+} from "./edits.js";
 import { type FromTagSource, bareVersion, resolveFromTag } from "./from-tag.js";
 import { type PathDecision, overlay } from "./overlay.js";
 import {
@@ -99,6 +106,8 @@ export interface CatalogFacts {
     source?: string | null;
     source_id?: string | null;
     concept_doi?: string | null;
+    /** 1 for an anonymous deposit (ADR 0065); execution refuses one, the plan does not read it. */
+    anonymous?: number | null;
   } | null;
   /** `GET /datasets/:id/versions` rows; null when they cannot be read (a route that answers 404). */
   versions: SourceVersionRow[] | null;
@@ -125,6 +134,12 @@ export interface PlanOptions {
   presence?: "location-log" | "bucket-listing";
   /** OpenNeuro's GraphQL endpoint; the real one by default (a test points it at a stand-in). */
   openNeuroGraphqlUrl?: string;
+  /**
+   * Where the bytes of every computed target are recorded by blob id, for execution: the planner
+   * is the one producer of computed bytes, so execution never rebuilds a standard edit. An output
+   * beside the plan, never part of its body, so the digest does not move.
+   */
+  collect?: ComputedBytes;
 }
 
 export type PlanOutcome =
@@ -366,20 +381,16 @@ export async function planRepull(opts: PlanOptions): Promise<PlanOutcome> {
       conceptDoi,
       prepareDeadKeys: readLogs,
       deadAtNemar: (key) => isDead(logs.get(key) ?? ""),
+      collect: opts.collect,
     });
 
     // NEMAR's special remotes, from its git-annex branch.
-    const remoteLog = await readRemoteLog(nemar.path);
-    // Which uuids are nemar-s3 is Phase 3's reading (`uuidsNamedInRemoteLog`, the #1320 import
-    // preflight's): each uuid's latest line decides, so a remote renamed away no longer counts.
-    const nemarUuids = uuidsNamedInRemoteLog(remoteLog, S3_REMOTE_NAME);
-    const nemarUuid = nemarUuids.length === 1 ? (nemarUuids[0] ?? null) : null;
-    const nemarRecord = nemarUuid ? parseRemoteLog(remoteLog).get(nemarUuid) : undefined;
-    const region = nemarRecord
-      ? (datacenterOf(remoteLog, nemarRecord.uuid) ?? "us-east-2")
-      : "us-east-2";
-    // Where nemar-s3's objects live: its own fileprefix, else the convention.
-    const bucketPrefix = nemarRecord?.fileprefix ?? `${id}/objects/`;
+    const remote = nemarRemoteOf(await readRemoteLog(nemar.path), id);
+    const nemarUuids = remote.uuids;
+    const nemarUuid = remote.uuid;
+    const nemarRecord = remote.record;
+    const region = remote.region;
+    const bucketPrefix = remote.prefix;
 
     // The keys N.0.0's delta paths name: copied into the bucket (`annex`), or read from upstream's
     // pinned object and kept in git (`unannex`, root metadata upstream annexed). Both need a pin.
@@ -443,6 +454,15 @@ export async function planRepull(opts: PlanOptions): Promise<PlanOutcome> {
         continue;
       }
       wanted.push({ key, purpose });
+    }
+    // A dead recording N.0.0 would name must be re-keyed by the scrub from upstream's bytes, and
+    // only a copied key is pinned, so nothing names the upstream version to read it from: the plan
+    // says so itself, rather than leave execution to find it.
+    if (deadRecordings.length > 0) {
+      refusals.push({
+        code: "dead-recording-unpinned",
+        detail: `${deadRecordings.length} recording(s) N.0.0 would name carry a key NEMAR's git-annex branch marks dead, and no upstream version is pinned to scrub them from`,
+      });
     }
     const pins = upstreamHasAnnex
       ? await readPinsAt(
@@ -740,6 +760,36 @@ function parseObjectOrNull(bytes: Buffer | null): Record<string, unknown> | null
   } catch {
     return null;
   }
+}
+
+/** What NEMAR's `remote.log` says of `nemar-s3`: the one remote the plan and execution use. */
+export interface NemarRemote {
+  /** Every uuid `remote.log` names `nemar-s3`; exactly one is usable. */
+  uuids: string[];
+  uuid: string | null;
+  record: ReturnType<ReturnType<typeof parseRemoteLog>["get"]>;
+  /** Its `datacenter=`, else `us-east-2`. */
+  region: string;
+  /** Where its objects live: its own `fileprefix`, else `<id>/objects/`. */
+  prefix: string;
+}
+
+/**
+ * `nemar-s3` as `remote.log` names it. Which uuids are `nemar-s3` is Phase 3's reading
+ * (`uuidsNamedInRemoteLog`, the #1320 import preflight's): each uuid's latest line decides, so a
+ * remote renamed away no longer counts. Execution uploads with exactly what the plan read here.
+ */
+export function nemarRemoteOf(remoteLog: string, datasetId: string): NemarRemote {
+  const uuids = uuidsNamedInRemoteLog(remoteLog, S3_REMOTE_NAME);
+  const uuid = uuids.length === 1 ? (uuids[0] ?? null) : null;
+  const record = uuid ? parseRemoteLog(remoteLog).get(uuid) : undefined;
+  return {
+    uuids,
+    uuid,
+    record,
+    region: record ? (datacenterOf(remoteLog, record.uuid) ?? "us-east-2") : "us-east-2",
+    prefix: record?.fileprefix ?? `${datasetId}/objects/`,
+  };
 }
 
 /** `datacenter=` of one remote in `remote.log`, the region git-annex's S3 remote uses. */

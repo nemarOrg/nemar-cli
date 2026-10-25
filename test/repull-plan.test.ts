@@ -310,6 +310,22 @@ describe("a plan from tag A to tag B over an imported mirror", () => {
     expect(rowsOf(body).get("README")?.target ?? { kind: "absent" }).toEqual({ kind: "absent" });
   });
 
+  test("collect records the bytes of every computed target, and the digest does not move", async () => {
+    const collect = { computed: new Map<string, Buffer>() };
+    const again = await plan(fx, { collect });
+    expect(again.digest).toBe(file.digest);
+    const computedTargets = (body.paths as PathRow[]).filter(
+      (p) => p.target.kind === "git" && typeof p.target.computed === "string",
+    );
+    expect(computedTargets.map((p) => p.path)).toContain("README.md");
+    for (const p of computedTargets) {
+      const bytes = collect.computed.get(p.target.oid as string);
+      expect(bytes === undefined ? null : gitBlobOid(bytes)).toBe(p.target.oid as string);
+    }
+    const readme = collect.computed.get(row(body, "README.md").target.oid as string);
+    expect(readme?.toString("utf8")).toBe(`${buildDoiBadge(CONCEPT_DOI)}\n\n${README_B}`);
+  });
+
   test("a ledger with only the import's own line does not refuse a plan with unexplained paths", () => {
     expect(body.ledger).toEqual({ status: "ok", lines: 1, recorded_corrections: 0 });
     expect(counts(body).unexplained).toBe(3);
@@ -1020,13 +1036,28 @@ describe("dead keys", () => {
       expect(row(body, PATHS.copiedSet).target).toEqual({ kind: "annex", key: fx.keys.setA });
       expect(copy.items.map((i) => i.key)).not.toContain(fx.keys.setA);
       expect(copy.items.map((i) => i.key)).not.toContain(fx.keys.flaggedUpstream);
-      expect(refusalCodes(body)).toEqual(["target-names-dead-key"]);
+      expect(refusalCodes(body)).toEqual(["dead-recording-unpinned", "target-names-dead-key"]);
       // The scrubbed recording's old path: upstream moved it, and NEMAR's re-keyed copy goes.
       expect(row(body, PATHS.flaggedEdf)).toMatchObject({
         explained_by_base: "scrubbed-key",
         class: "take-theirs",
         deleted: true,
       });
+      expect(f.executable).toBe(false);
+    } finally {
+      fx.cleanup();
+    }
+  });
+});
+
+describe("a dead recording alone", () => {
+  test("is listed and refuses the plan itself: no upstream version is pinned to scrub it from", async () => {
+    const fx = await buildRepullFixture({ movedScrubbedEdf: true, noContributorEdits: true });
+    try {
+      const f = await plan(fx);
+      const body = f.body as Body;
+      expect(copyOf(body).dead_recordings).toEqual([fx.keys.flaggedUpstream]);
+      expect(refusalCodes(body)).toEqual(["dead-recording-unpinned"]);
       expect(f.executable).toBe(false);
     } finally {
       fx.cleanup();
