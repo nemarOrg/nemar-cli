@@ -10,6 +10,7 @@
  * it is the code that moved and that section is not.
  */
 
+import { NEMAR_APP_ID } from "../../../../shared/nemar-app.js";
 import { PR_REVIEW_CHECK_NAME } from "../../../../shared/pr-review.js";
 import { HttpError } from "../retry";
 import {
@@ -80,25 +81,25 @@ export async function applyTagProtection(repo: string, pat: string): Promise<voi
 }
 
 /**
- * NEMAR GitHub App id (`nemar-publish-bot`). Required status checks are pinned
- * to this integration so only a check-run posted by the App satisfies them
- * (spoof-resistant), and the App is a ruleset bypass actor so its automation
- * (enrichment commit-to-main, version-DOI / pr-merge `v*` tag pushes) is not
- * blocked by the PR rule that gates humans. Epic #713.
- */
-export const NEMAR_APP_ID = 3679074;
-
-/**
- * The GitHub App's bot user, as GitHub names the author of a pull request the App opens
- * (`user.type` is `Bot`). Measured 2026-10-24 with `GET /users/nemar-publish-bot%5Bbot%5D`
- * (id 283755542, type `Bot`) and `GET /apps/nemar-publish-bot` (id 3679074).
+ * NEMAR GitHub App id (`nemar-publish-bot`) and its bot user, as GitHub names the author of a pull
+ * request the App opens, defined once in `shared/nemar-app.ts` (the pure machine-clean rule of the
+ * automatic re-pull reads them, and nothing in `shared/` imports the Worker) and re-exported here,
+ * where the Worker's code reads them from. Required status checks are pinned to the App id so only
+ * a check-run posted by the App satisfies them (spoof-resistant), and the App is a ruleset bypass
+ * actor so its automation (enrichment commit-to-main, version-DOI / pr-merge `v*` tag pushes) is
+ * not blocked by the PR rule that gates humans. Epic #713.
  *
- * Nothing reads these yet. The machine-clean review slice and the Worker-merge slice of the
- * automatic re-pull (ADR 0111, Phase 7) will accept a pull request as the App's only when both the
- * login and the numeric id match, so a user who merely registers a similar name does not pass.
+ * A pull request is the App's only when the author's login, numeric id and type all match
+ * (ADR 0111, decision 7, as its Phase 7 amendment builds it): the review admits exactly the App's
+ * automatic re-pull pull request on those terms (`pr-review.ts`), and the machine-clean rule
+ * requires them (`shared/repull-machine-clean.ts`).
  */
-export const NEMAR_APP_BOT_LOGIN = "nemar-publish-bot[bot]";
-export const NEMAR_APP_BOT_USER_ID = 283755542;
+export {
+  NEMAR_APP_BOT_LOGIN,
+  NEMAR_APP_BOT_TYPE,
+  NEMAR_APP_BOT_USER_ID,
+  NEMAR_APP_ID,
+} from "../../../../shared/nemar-app.js";
 
 /** Ruleset name for dataset-repo branch protection (the idempotent upsert key). */
 export const BRANCH_RULESET_NAME = "NEMAR branch protection";

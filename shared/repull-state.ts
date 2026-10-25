@@ -836,8 +836,9 @@ export const DISPATCH_FINAL_CODES = [
 
 /**
  * Why an automatic re-pull waits where it is (`upstream_repulls.hold_reason`): the first rule of
- * the machine-clean definition that does not hold, or a bound the automatic path reached. A hold
- * is an observation, never a transition.
+ * the machine-clean definition that does not hold (`shared/repull-machine-clean.ts`, which says
+ * what each word means), or a bound the automatic path reached. A hold is an observation, never a
+ * transition.
  */
 export const REPULL_HOLD_REASONS = [
   "not-production",
@@ -848,9 +849,11 @@ export const REPULL_HOLD_REASONS = [
   "dataset-anonymous",
   "dataset-withdrawn",
   "import-in-flight",
+  "dataset-not-mirror",
   "pr-unreadable",
   "pr-closed",
   "pr-mismatch",
+  "pr-draft",
   "pr-not-app",
   "head-moved",
   "main-unreadable",
@@ -868,6 +871,7 @@ export const REPULL_HOLD_REASONS = [
   "screen-rerun",
   "screen-error",
   "screen-unreadable",
+  "screen-exempt",
   "review-absent",
   "review-running",
   "review-not-pass",
