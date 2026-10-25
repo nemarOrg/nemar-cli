@@ -659,8 +659,10 @@ It takes only an allowed edge, writes only the columns its target names, and kee
 A branch must be the release branch of the version the row carries.
 `counts` is merged key by key and holds only declared keys with non-negative integers, never a path or a key.
 `last_error` goes through the ADR 0051 rule and is never blank; an edge into `failed`, or the `planned` edge that records why a step could not finish, must say why, and an edge into a different, non-terminal status clears the stored error.
+*Annotated 2026-10-24: the Phase 6c amendment adds that a `prepared` self-edge sent with no error clears it too, because it records the whole stage again.*
 
 Four edges repeat a status to write one thing: `planned` (the error), `released` (the count of locked objects) and `gates_clear` and `patch_gates_clear` (the claim to merge).
+*Annotated 2026-10-24: the `prepared` self-edge is allowed as well and Phase 6c uses it, to record a preparation again (onto a moved base, or to clear a stale error) or why it failed; see the Phase 6c amendment.*
 The claim is recorded before the merge is sent, names exactly the screened head, and cannot be recorded twice.
 The caller sends the head and nothing else: the Worker stamps the time with its own clock and refuses a request that carries one, because a caller-stated time could be backdated or set ahead and defeat the sweep for stuck claims that Phase 6f writes.
 The time and the head are set together or not at all (a CHECK).
@@ -889,65 +891,84 @@ The verify, tree gate and register steps of an import's finalize are `verifyMani
 A further slice of the Phase 6 amendment above, built by Phase 6c.
 It builds the first half of decision 2's execution: the reviewed plan is proved and made again from live sources, the record is created, and the delta is materialized, scrubbed and synthesized into the one commit, which waits at `prepared`.
 Nothing here copies from upstream, pushes or opens a pull request; those follow `prepared` and are a later slice's.
-The decision text above and the earlier amendments are unchanged.
+The decision text above is unchanged; two sentences of the first Phase 6 slice are annotated where this slice extends them.
 
 ### Execution runs on the administrator's machine
 
 Execution is a library entry the `execute` command will call, run by an administrator with their own GitHub token and the ambient AWS credentials, against the API it is configured for.
-The Worker records each step through the record's routes and adds no route of its own here, so nothing in this slice can send mail.
-The working directory is `$NEMAR_CONFIG_DIR/repull/<id>/work/<digest8>/`, mode 0700, because the clone holds every path of the dataset and a path can be an identifier; it is kept until the pull request is open, so a crash leaves it to resume.
+The Worker records each step through the record's routes; this slice adds no route, so nothing in it can send mail.
+The working directory is `$NEMAR_CONFIG_DIR/repull/<id>/work/<digest8>/`, mode 0700 like every directory above it up to `repull/`, because the clone holds every path of the dataset and a path can be an identifier.
+It is kept until the pull request is open, which a later slice does.
+Only a `prepared` record resumes from it: from its working clone or from the checkpoint beside it.
+A `planned` record is prepared again from scratch, which clones, scrubs and uploads again, to the same result.
+One execution of a plan runs at a time: a lock beside the working directory, holding the process id, refuses a second (`execution-locked`) rather than let it delete a live run's clones, and a lock whose process is gone is taken over.
+
+Every git and git-annex call of an execution, the planner's included, runs with neither the administrator's global configuration nor the system's, and the working clone is made with its own: locked annexed files, no line-ending conversion, no hooks, no attributes or excludes file but the tree's own, and no background gc or maintenance.
+Without that, a setting on the administrator's machine (`annex.addunlocked`, `core.autocrlf`, a global attributes file) changes what is prepared, and a later run on another machine could not reproduce it.
 
 ### The reviewed plan, proved, and its preflight recomputed
 
-The plan file is trusted for its body only, and only once the body's digest is recomputed and equals the one the file states (`plan-tampered` otherwise).
-A plan another planner made is refused before that check (`planner-version`), so it is never read under rules it was not made with; so is a plan made against another API (`plan-environment`), or from test bases when execution reads the real remotes, or the reverse (`plan-sources`).
+The plan file is trusted for its body only.
+It is refused, in this order: when it is not a plan this build reads (`plan-schema`); when another planner made it (`planner-version`), so it is never read under rules it was not made with; and when its body does not hash to the digest it states (`plan-tampered`).
+Then, before anything is cloned: a plan made against another API (`plan-environment`), and a plan made from test bases when execution reads the real remotes, or the reverse (`plan-sources`).
+Then the dataset row must say the dataset is not an anonymous deposit, by an `anonymous` of exactly 0: one is refused (`anonymous-dataset`), as the Worker refuses it at the record, and a row that does not say is refused as unknown (`anonymity-unknown`), since unknown is never clean.
 The planner then runs again with the plan's own options, and its live preflight and `executable` decide: the file's two fields are not read at all, so a file that says not executable proceeds when the live plan is, and one that says executable is refused when a release pull request has since opened (`not-executable`).
-An anonymous dataset is refused by the CLI before anything is cloned (`anonymous-dataset`), as the Worker refuses it at the record.
 
 ### The `.nemar/**` rule, read narrowly (clarification)
 
 Decision 2 lets execution go on when the commits since the plan "touch only `.nemar/**`".
 As built, the live plan may differ from the reviewed one only in `main`'s commit and tree, with the git-annex branch where it was, and every path that differs between the two `main` commits must be under `.nemar/` and must not be the privacy ledger (`.nemar/corrections.jsonl`); execution then bases on the live `main`.
 A ledger line is excluded because a recorded correction changes what the plan refuses: a line appended changes the plan's own ledger facts, and a line edited in place does not, so the path rule is what refuses the second.
-A moved git-annex branch is `plan-stale` whatever `main` did, and so is anything else: plan again and review the new digest.
+A moved `main` with no path that differs is `plan-stale` too, and so is a moved git-annex branch whatever `main` did, and so is anything else: plan again and review the new digest.
+The working clone checks the git-annex branch again when it fetches it, so one that moved after the plan was made again is refused there (`plan-stale`).
 
-### A dead recording the plan would name is refused
+### A dead recording the plan would name refuses the plan
 
 The Phase 5 amendment lists a dead key N.0.0 would name at a recording path as `dead_recordings`, a recording "the scrub will re-key".
-The plan pins only the keys it copies, so nothing names the upstream version to read such a recording from, and execution refuses the plan before anything is uploaded (`dead-recording-unpinned`) rather than synthesize a tree that names a dead key.
+The plan pins only the keys it copies, so nothing names the upstream version to read such a recording from.
+The plan now says so itself, as a refusal (`dead-recording-unpinned`), so a reviewer sees it and execution refuses it as not executable.
 Pinning those keys is the planner's to add.
 
 ### The preparation
 
-The working clone is a fresh, non-partial clone of NEMAR's `main` at depth 2, checked out at the base, with git-annex initialized without enabling any special remote (`--no-autoenable`) and without background gc or maintenance.
+The working clone is a fresh, non-partial clone of NEMAR's `main` at depth 2, checked out at the base, with git-annex initialized without enabling any special remote (`--no-autoenable`).
 Each delta target is written from where the plan says it comes from and staged by its exact id, never through `git add`, so no attribute, filter or line-ending rule can change what is staged: a CRLF blob upstream committed stays the blob N.0.0 holds.
 Upstream's blobs come from the planner's clone of upstream, fetched by id when missing; computed bytes come from the planner itself, which records the bytes of every computed target as it plans (outside the plan's body, so the digest does not move), and execution never rebuilds a standard edit; root metadata upstream annexed is read at its pinned version and must hash to its key (`unannex-content-mismatch`).
+The NEMAR-owned edit rewrites `.nemar/metadata.json`'s `IsIdenticalTo`, reading the file as the planner reads it (a byte-order mark set aside and kept); an edit the plan lists with another status is left as it is, said to the operator and counted on the record.
 
 The materialized index is committed locally on the work branch before the scrub, so the scrub works on committed paths as it does in an import; first, every path that differs from the base must be in the scrub's scope (`scope-incomplete`), the check the scrub makes of its own scope, made here because the scrub would see no change once the index is committed.
-That commit is never pushed and is never an ancestor of the synthesized one.
+That commit is never pushed and is never an ancestor of the synthesized one, but it holds the delta's original, unscrubbed blobs: they stay in the private working clone (mode 0700), are not in the checkpoint and are not pushed, and go when the working directory is removed, when the pull request is open.
 
-The scope is every path written or deleted, the NEMAR-owned edit included, and the provenance files, as the Phase 6b amendment's ruling has the caller do.
-The scrub reads each annexed recording at the version the plan pinned, sets dates (it is not a re-import), writes `repull-scrubbed` at the record's creation time under the fixed actor `nemar-repull`, and refuses with its own word for anything it cannot do.
+The scope is every path written or deleted, the NEMAR-owned edit included, and the provenance files, which the scrub annotates when a header changes: a header change needs its provenance file in the scope, or the scrub refuses (`provenance-out-of-scope`), so the caller always puts both in it.
+The scrub reads each annexed recording at the version the plan pinned, sets dates (it is not a re-import), writes `repull-scrubbed` at the record's creation time under the fixed actor `nemar-repull`, and refuses with its own word for anything it cannot do; a refusal because upstream no longer serves a pinned object is marked retryable.
+Dates are set on the delta's recordings and scans tables only, and a scans table in the scope has every dated row of the file set to 1 January, as the import does: N.0.0 is new, so this is the privacy-safe direction, and the versions already published are not touched.
+
 To retire a key it re-keys, the scrub needs a location log for it, and NEMAR's git-annex branch has never recorded a key upstream added after the import; so before the scrub, the working clone records, for each recording the plan copies and NEMAR's branch does not know, the holders upstream's own git-annex branch records, and nothing else.
 The scrub then retracts them and marks the key dead, which is what lets the next plan explain the scrubbed recording.
-Those records are in the working clone's git-annex branch, which a later slice pushes.
+For a recording the scrub did not re-key, those records stay: upstream's own remote uuids, recorded present, in the working clone's local git-annex branch.
+The slice that pushes that branch must decide, before it pushes, how such foreign holders are handled.
 Git-held data NEMAR's policy annexes, and that the scrub did not take, is annexed and uploaded from this host with the same upload, to `<id>/objects/` only.
 
 ### The synthesized commit
 
 The commit is the prepared index written as a tree and committed with `git commit-tree` onto the base: one parent, the fixed identity `NEMAR re-pull <noreply@nemar.org>`, author and committer dates the record's `created_at`, a body of counts with no path, and decision 2's two trailers as the message's last paragraph.
-Before it is accepted, the tree must be the plan's targets, with the scrub's changes and nothing else: a recording the scrub re-keyed, a git-held data file annexed (each under a key this host uploaded), a JSON blanked, a scans table dated or a provenance file annotated in place; no key the scrub replaced may be named; every named key must be one the plan counted held, one it copies, or one this host uploaded.
+Before it is accepted, the tree must be the plan's targets, modes included, with the scrub's changes and nothing else: a recording the scrub re-keyed, a git-held data file annexed (each under a key this host uploaded, each a symlink), a JSON blanked, a scans table dated or a provenance file annotated in place (each with its mode kept).
+Under `.nemar/**` and `.github/**` every path must be NEMAR's side as it was, except `.nemar/metadata.json`, which must be what the NEMAR-owned edit wrote, and the privacy ledger, which must be the base's text followed by exactly the scrub's one `repull-scrubbed` line when the scrub's counts show a change, and NEMAR's side as it was otherwise; an edited earlier line, a removal or a second line refuses.
+No key the scrub replaced may be named, and every named key must be one the plan counted held, one it copies, or one this host uploaded.
 The copy manifest is the tree's named keys the plan copies, at their pinned versions, and the keys this host uploaded; it must be a subset of the plan's copy keys, every upload must be a local one the tree names, and its digest is recorded.
-After the commit, the original of every git blob the scrub changed must not be reachable from it; one that NEMAR's own history already reaches refuses the commit.
+After the commit, the original of every git blob the scrub changed must not be reachable from it, within what the clone holds (the commit, the base and the base's parent, the clone being two commits deep); one that NEMAR's own history already reaches there refuses the commit.
 Every one of these refusals is `synthesis-mismatch` and names counts only.
 
-### Deterministic re-preparation and the checkpoint
+### Deterministic re-preparation, the checkpoint and the record
 
 Preparing twice from the same plan and base gives the same tree and the same commit, the scrub's downloads, re-keyed uploads and ledger line included, because every date in it is the record's and every identity is fixed.
 After the commit, the work branch and the local git-annex branch are saved as a git bundle, mode 0600, at `$NEMAR_CONFIG_DIR/repull/<id>/<digest8>.bundle`, whose prerequisites are the base and origin's git-annex branch as fetched.
-A run that finds its record `prepared` leaves it as it is when the working clone is at the recorded commit; restores the clone from the checkpoint when it is not, and only when the bundle delivers the recorded commit itself; and otherwise prepares again, which must reproduce the recorded tree, commit and manifest digest (`prepare-not-reproducible`, the record left `prepared` with why; abandoning it is the way out).
+A run that finds its record `prepared` leaves it as it is when the working clone is at the recorded commit; restores the clone from the checkpoint when it is not, and only when the bundle delivers the recorded commit itself; and otherwise prepares again, which must reproduce the recorded tree, commit and copy manifest digest (`prepare-not-reproducible`, the record left `prepared` with why; abandoning it is the way out).
+Each time it says why the clone or the checkpoint was not used, in fixed words.
 A record found `prepared` whose base moved by `.nemar/**` only is prepared again onto the live `main`, and the self-edge records the new facts.
-A step that fails records why on the record (`planned` to `planned`, or `prepared` to `prepared` with the facts it already holds) and refuses; what it records names counts, never a path.
+A step that fails records why on the record (`planned` to `planned`, or `prepared` to `prepared` with the facts it already holds) and refuses; what it records names counts, never a path, and when the record cannot be written the operator is told.
+When a `prepared` record that holds an error is shown to hold its facts again, the `prepared` self-edge records them with no error, and the Worker clears the stale error: that self-edge records the whole stage again, so the step it repeats succeeded (the Worker's rule for it, `CLEARING_SELF_EDGES` in `shared/repull-state.ts`).
+The record's `delta_paths` count is the plan's at `planned` (the paths it writes, deletions aside) and, at `prepared`, the paths the preparation wrote, deleted and edited; beside it the record keeps what the scrub could not read or prove (JSON files unread or annexed, scans tables unread, dates unproven or left), so unknown is never recorded as nothing.
 
 ### Checked only against stand-ins
 
