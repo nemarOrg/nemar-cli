@@ -143,10 +143,19 @@ function recordRefused(err: unknown): ExecuteRefused {
   );
 }
 
-/** A failure's words for `last_error`: an {@link ExecuteRefused}'s message, else its class only. */
-function errorWords(err: unknown): string {
-  if (err instanceof ExecuteRefused) return `[${err.code}] ${err.message}`;
-  return `[prepare-failed] The preparation failed: ${describeError(err)}.`;
+/**
+ * How every error this preparation records on a row begins: `[prepare:<code>]`. A run that finds
+ * the row's facts hold again clears only an error that begins so; one a later step wrote stays.
+ */
+export const PREPARE_ERROR_PREFIX = "[prepare:";
+
+/**
+ * A failure's words for `last_error`: the preparation's prefix with the refusal's code and its
+ * message, else its class only.
+ */
+export function errorWords(err: unknown): string {
+  if (err instanceof ExecuteRefused) return `${PREPARE_ERROR_PREFIX}${err.code}] ${err.message}`;
+  return `${PREPARE_ERROR_PREFIX}prepare-failed] The preparation failed: ${describeError(err)}.`;
 }
 
 /** Remove a directory the run made, telling the operator rather than failing the run when it cannot. */
@@ -349,11 +358,13 @@ function recordedFacts(row: RepullRow): {
 }
 
 /**
- * A `prepared` row whose facts were shown to hold again: when it carries an error from an earlier
- * failed step, the self-edge records its stage again with no error, which clears it.
+ * A `prepared` row whose facts were shown to hold again: when the error it carries is one an
+ * earlier preparation recorded (it begins {@link PREPARE_ERROR_PREFIX}), the self-edge records the
+ * stage again with no error, which the Worker takes as clearing it. An error any other step wrote
+ * is not this run's to clear, and the row is left as it is.
  */
 async function restate(row: RepullRow): Promise<RepullRow> {
-  if (row.last_error === null) return row;
+  if (row.last_error === null || !row.last_error.startsWith(PREPARE_ERROR_PREFIX)) return row;
   return transition(row, "prepared", recordedFacts(row));
 }
 

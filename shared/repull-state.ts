@@ -243,9 +243,11 @@ export const SELF_EDGE_FIELDS: Readonly<Partial<Record<RepullStatus, TransitionF
 /**
  * Self-edges that record the whole stage again, so the step they repeat succeeded: they clear a
  * stored error when they carry none, as an edge into another non-terminal status does. A
- * `prepared` row found intact, restored from its checkpoint, prepared again to the same commit, or
- * prepared again onto a moved base takes this edge. The other self-edges write one thing beside
- * the stage and keep the error.
+ * `prepared` row prepared again onto a moved base takes this edge, and so does one found intact,
+ * restored from its checkpoint or prepared again to the same commit, but execution sends it then
+ * only when the stored error is a preparation's own (its words begin `[prepare:`), so an error a
+ * later step recorded is not cleared by a preparation that holds. The other self-edges write one
+ * thing beside the stage and keep the error.
  */
 export const CLEARING_SELF_EDGES = ["prepared"] as const satisfies readonly RepullStatus[];
 
