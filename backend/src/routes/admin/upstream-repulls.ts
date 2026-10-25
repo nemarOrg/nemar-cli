@@ -4,6 +4,9 @@
  *
  *   POST /admin/repulls                  create the record, or return the open one for the same plan
  *   GET  /admin/repulls                  list (`dataset`, `open`, `after`, `limit` up to 50)
+ *   GET  /admin/repulls/switches         what the Worker reads of the automatic re-pull's
+ *                                        switches and open cap (before `:id`, which would answer
+ *                                        400 for "switches")
  *   GET  /admin/repulls/:id              one record
  *   POST /admin/repulls/:id/transition   move it along one allowed edge (the claim to merge is the
  *                                        gates-clear self-edge: screened head, dataset fences, a
@@ -30,6 +33,7 @@
 
 import { zValidator } from "@hono/zod-validator";
 import { isValidDatasetId } from "../../services/datasetId";
+import { repullSwitchesReport } from "../../services/repull-switches";
 import {
   REPULL_PAGE_DEFAULT,
   REPULL_PAGE_MAX,
@@ -153,6 +157,11 @@ export function registerUpstreamRepullRoutes(admin: AdminRouter): void {
       return c.json({ error: failure("read the re-pulls", err) }, 500);
     }
   });
+
+  // Registered before `/repulls/:id`: Hono matches in registration order, and `:id` would answer
+  // 400 `invalid-id` for "switches". It reads the bindings and writes nothing; the answer holds
+  // booleans and a cap reading, never a binding's raw value or a secret.
+  admin.get("/repulls/switches", (c) => c.json({ switches: repullSwitchesReport(c.env) }));
 
   admin.get("/repulls/:id", async (c) => {
     const id = parseId(c.req.param("id"));

@@ -979,3 +979,52 @@ The record's `delta_paths` count is the plan's at `planned` (the paths it writes
 
 That an anonymous ranged GET of `openneuro.org` at `?versionId=` answers as the stand-in does was measured once, for one object of `ds004362`, while Phase 6 was planned.
 That `aws s3 sync` and `list-objects-v2` answer the uploads as the stand-in does, and that GitHub lists open pull requests as the release-pr check reads them, only the canary and the first production runs can show.
+
+## Amendment 2026-10-24 (#1913): Phase 7 builds the automatic path
+
+Phase 7 builds the scheduled path of decision 6 and the Worker's merge of decision 7, in the slices below, one per pull request.
+Nothing in this phase turns a switch on: the owner does, in a reviewed change, once the first two re-pulls have been run by hand.
+
+### 7a: the switches and the caps are declared, and off
+
+The automatic path has four variables, two switches and two caps, and the Worker's configuration file sets none of them, so it is off.
+
+- A switch is on only as the exact string `"1"`, as `PR_REVIEW_ENABLED` is; `"true"`, `" 1"`, an empty string and an unset binding are all off.
+- A switch is honored only when `ENVIRONMENT` is exactly `production`: no trim, no case fold, and an unset binding is not production.
+  The dev cron's allowlist already keeps the daily jobs out of dev, but `isNonProductionEnv` reads an unknown `ENVIRONMENT` as production, so every automatic job also tests the exact string itself, and decision 6's re-pull fence (an `on` dataset only in production) now reads through the same test.
+- `AUTO_REPULL_MERGE_ENABLED` acts only while `AUTO_REPULL_ENABLED` is also on, so switching the open switch off stops the whole automatic path whatever the merge switch says.
+- `REPULL_DAILY_OPEN_CAP` defaults to 2 and `REPULL_DAILY_MERGE_CAP` to 5 when absent.
+  A cap that is set to anything but one or two digits no larger than 20 (a sign, a decimal, a space, an empty string, 21) reads 0 and is reported as unreadable, so a typo stops the work instead of falling back to a number the owner never chose.
+  Both caps read through one function, so the merge cap of Phase 6e and the open cap cannot drift apart; the merge cap's behavior is unchanged.
+- The four variables are absent from `[vars]` and from `[env.dev.vars]`, a test pins that for every table of the file, and a value set only in the dashboard is dropped by the next deploy, so the owner sets them in the file.
+  The first Worker merges run with `REPULL_DAILY_MERGE_CAP` set to `"1"`.
+- `GET /admin/repulls/switches` reports what the Worker reads (production or not, both switches, and the open cap and the merge cap, each with how it was read) and no binding value.
+  It is read-only, admin-only and sends no mail.
+- The App's bot user is named once, beside the App's id: `nemar-publish-bot[bot]`, user id 283755542, type `Bot`, as `GET /users/nemar-publish-bot%5Bbot%5D` answered on 2026-10-24.
+  A pull request is the App's only when both the login and the id match.
+
+### 7a: what was measured about the rulesets, and what is still the owner's (updates "Not yet verified")
+
+Read-only, 2026-10-24.
+
+- The App (id 3679074) requests `contents`, `pull_requests`, `checks`, `administration`, `actions`, `workflows` and `issues` write, and subscribes to `pull_request` and `push` events only, so it learns no check result by event; the Worker reads checks on a tick.
+- It has never opened a pull request in `nemarDatasets`, so an App merge has not been exercised.
+- Most mirrors have no branch protection at all.
+  `on003645` and `on004362` have no classic protection and no ruleset on `main`.
+  Of 21 more repositories sampled, 16 have nothing; 5 carry the repository ruleset "NEMAR branch protection" (a pull request rule with no required approvals, the required checks `Run BIDS Validation`, pinned to the App, and `version-check`, `non_fast_forward`, `deletion`, and the App and the organization's administrators as bypass actors); `nm000103` has classic protection.
+  So on most mirrors GitHub enforces nothing and `clean` proves no check ran, and on a ruleset repository the App may merge anything, so `clean` is the only thing that keeps an App merge from being a bypass.
+  The Worker therefore reads the two checks itself, by name and pinned to the App, at the head it merges; that reader is a later slice.
+- `mergeable_state` read by an always-bypass administrator: `blocked` where a ruleset's checks were never posted, `clean` on an unprotected repository with both checks green, `unstable` where a non-required check was `action_required`.
+  A bypass-capable reader still saw `blocked`; whether the App's own token reads the same cannot be shown read-only, and the first Worker merge under a cap of 1 is the check.
+- The ADR 0107 review's intake skips every pull request whose author is a bot, as ADR 0092 says ("not drafts, not bots"), so as the code stands no review row can exist for the App's pull request and none can be machine clean.
+  This contradicts the sentence under "Not yet verified" that the App is not exempt from the review; the correction is built with the machine-clean rule, and it narrows ADR 0092 for exactly the App's re-pull pull request.
+
+The split of the ruleset check, which the merge call waits for:
+
+- Read by an administrator with the `neuromechanist` login on 2026-10-24: the `nemarDatasets` installation of App 3679074 has `contents: write`, `pull_requests: write`, `actions: write`, `administration: write`, `checks: write`, `workflows: write` and `issues: write`, with `repository_selection: all`.
+  The App can therefore open a pull request, and the permission half of the check passes.
+- Not read: the organization's rulesets.
+  Listing them needs the `admin:org` scope, which that token does not hold, so whether an organization ruleset targets default branches, and whether the App is a bypass actor of it, is unknown.
+  That half stays an owner step before the Worker's merge is built: `gh auth refresh -h github.com -s admin:org`, then `gh api orgs/nemarDatasets/rulesets --jq '.[] | {id, name, target, enforcement}'`.
+  It passes when no organization ruleset targets default branches, or each one that does has the App as a bypass actor and asks for nothing the Worker does not read.
+  If it fails, the Worker's merge is not built, `AUTO_REPULL_MERGE_ENABLED` has no effect, and an administrator merges each automatic pull request under the cap and the screen.

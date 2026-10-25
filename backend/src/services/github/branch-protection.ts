@@ -88,6 +88,18 @@ export async function applyTagProtection(repo: string, pat: string): Promise<voi
  */
 export const NEMAR_APP_ID = 3679074;
 
+/**
+ * The GitHub App's bot user, as GitHub names the author of a pull request the App opens
+ * (`user.type` is `Bot`). Measured 2026-10-24 with `GET /users/nemar-publish-bot%5Bbot%5D`
+ * (id 283755542, type `Bot`) and `GET /apps/nemar-publish-bot` (id 3679074).
+ *
+ * Nothing reads these yet. The machine-clean review slice and the Worker-merge slice of the
+ * automatic re-pull (ADR 0111, Phase 7) will accept a pull request as the App's only when both the
+ * login and the numeric id match, so a user who merely registers a similar name does not pass.
+ */
+export const NEMAR_APP_BOT_LOGIN = "nemar-publish-bot[bot]";
+export const NEMAR_APP_BOT_USER_ID = 283755542;
+
 /** Ruleset name for dataset-repo branch protection (the idempotent upsert key). */
 export const BRANCH_RULESET_NAME = "NEMAR branch protection";
 

@@ -323,6 +323,17 @@ export interface Bindings {
   // reads 0, so a typo stops merging instead of falling back to the default.
   REPULL_DAILY_MERGE_CAP?: string;
 
+  // The automatic upstream re-pull (ADR 0111; services/repull-switches.ts). Each switch reads as on
+  // only when it is exactly "1" AND ENVIRONMENT is exactly "production"; unset, "true" and anything
+  // else are off. AUTO_REPULL_MERGE_ENABLED acts only while AUTO_REPULL_ENABLED is also on.
+  // Deliberately absent from every vars block in wrangler-sccn.toml: the owner turns them on in a
+  // reviewed change, never in the dashboard alone (the next deploy drops a dashboard-only value).
+  AUTO_REPULL_ENABLED?: string; // "1" lets the Worker open and advance re-pulls (production only)
+  AUTO_REPULL_MERGE_ENABLED?: string; // "1" lets the Worker merge them (needs AUTO_REPULL_ENABLED)
+  // Re-pull pull requests opened in a UTC day. Absent: 2. "0" to "20": that many. Anything else
+  // is unreadable and reads 0 (the same rule as REPULL_DAILY_MERGE_CAP).
+  REPULL_DAILY_OPEN_CAP?: string;
+
   // Import recovery (issue #754). onboard-openneuro.yml POSTs import state to
   // /webhooks/import-state (bearer NEMAR_WEBHOOK_TOKEN). On a terminal failure
   // an unambiguous orphan (private, no DOI, no versions, never completed) is

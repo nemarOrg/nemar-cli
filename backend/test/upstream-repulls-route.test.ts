@@ -89,19 +89,29 @@ beforeEach(async () => {
   await seedUsers();
 });
 
-function env(environment: string | undefined = "test"): Bindings {
-  return {
+/** An `undefined` environment leaves the binding truly unset: the key is absent, not "test". */
+function env(
+  environment: string | undefined,
+  extra: Record<string, string | undefined> = {},
+): Bindings {
+  const bindings: Record<string, string | D1Database | undefined> = {
     DB: realD1(db),
-    ENVIRONMENT: environment,
     GITHUB_ADMIN_PAT: "ghp_repull_route_test",
-  } as unknown as Bindings;
+    ...extra,
+  };
+  if (environment !== undefined) bindings.ENVIRONMENT = environment;
+  return bindings as unknown as Bindings;
 }
 
 async function call(
   method: "GET" | "POST",
   path: string,
   body?: unknown,
-  o: { key?: string | null; environment?: string | undefined } = {},
+  o: {
+    key?: string | null;
+    environment?: string | undefined;
+    bindings?: Record<string, string | undefined>;
+  } = {},
 ) {
   const key = o.key === undefined ? ADMIN_KEY : o.key;
   const headers: Record<string, string> = {};
@@ -111,7 +121,7 @@ async function call(
   const res = await app.request(
     path,
     { method, headers, body: body === undefined ? undefined : JSON.stringify(body) },
-    env(environment),
+    env(environment, o.bindings),
   );
   return { status: res.status, body: (await res.json()) as Json };
 }
@@ -236,6 +246,99 @@ describe("who may call", () => {
   test("a request with no key is refused", async () => {
     expect((await call("GET", "/repulls", undefined, { key: null })).status).toBe(401);
     expect((await call("POST", "/repulls", plan(), { key: null })).status).toBe(401);
+  });
+});
+
+// ----------------------------------------------------------------------------
+// The automatic re-pull's switches (epic #1046 phase 7, #1913)
+// ----------------------------------------------------------------------------
+
+describe("GET /repulls/switches", () => {
+  test("answers before the :id route does, with the four facts and nothing else", async () => {
+    const res = await call("GET", "/repulls/switches");
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      switches: {
+        environment_is_production: false,
+        auto_repull_enabled: false,
+        auto_repull_merge_enabled: false,
+        open_cap: { value: 2, source: "default" },
+        merge_cap: { value: 5, source: "default" },
+      },
+    });
+  });
+
+  test("reads what the bindings say, and only exact production honors a switch", async () => {
+    const on = {
+      AUTO_REPULL_ENABLED: "1",
+      AUTO_REPULL_MERGE_ENABLED: "1",
+      REPULL_DAILY_OPEN_CAP: "3",
+      REPULL_DAILY_MERGE_CAP: "1",
+    };
+    const prod = await call("GET", "/repulls/switches", undefined, {
+      environment: "production",
+      bindings: on,
+    });
+    expect(prod.body.switches).toEqual({
+      environment_is_production: true,
+      auto_repull_enabled: true,
+      auto_repull_merge_enabled: true,
+      open_cap: { value: 3, source: "set" },
+      merge_cap: { value: 1, source: "set" },
+    });
+    for (const environment of ["Production", "development", "staging", undefined]) {
+      const res = await call("GET", "/repulls/switches", undefined, { environment, bindings: on });
+      expect([environment, res.status, res.body.switches]).toEqual([
+        environment,
+        200,
+        {
+          environment_is_production: false,
+          auto_repull_enabled: false,
+          auto_repull_merge_enabled: false,
+          open_cap: { value: 3, source: "set" },
+          merge_cap: { value: 1, source: "set" },
+        },
+      ]);
+    }
+  });
+
+  test("an unreadable cap is reported as unreadable and reads 0, each cap on its own", async () => {
+    const res = await call("GET", "/repulls/switches", undefined, {
+      bindings: { REPULL_DAILY_OPEN_CAP: "two", REPULL_DAILY_MERGE_CAP: "3" },
+    });
+    expect(res.body.switches.open_cap).toEqual({ value: 0, source: "unreadable" });
+    expect(res.body.switches.merge_cap).toEqual({ value: 3, source: "set" });
+    const other = await call("GET", "/repulls/switches", undefined, {
+      bindings: { REPULL_DAILY_MERGE_CAP: "21" },
+    });
+    expect(other.body.switches.open_cap).toEqual({ value: 2, source: "default" });
+    expect(other.body.switches.merge_cap).toEqual({ value: 0, source: "unreadable" });
+  });
+
+  test("a member is refused, a missing key is refused, and the report carries no secret", async () => {
+    expect((await call("GET", "/repulls/switches", undefined, { key: MEMBER_KEY })).status).toBe(
+      403,
+    );
+    expect((await call("GET", "/repulls/switches", undefined, { key: null })).status).toBe(401);
+    const res = await app.request(
+      "/repulls/switches",
+      { headers: { Authorization: `Bearer ${ADMIN_KEY}` } },
+      env("production", {
+        AUTO_REPULL_ENABLED: "1",
+        PRESCREEN_CALLBACK_SECRET: "super-secret-callback-value",
+      }),
+    );
+    const text = await res.text();
+    expect(text).not.toContain("ghp_");
+    expect(text).not.toContain("super-secret-callback-value");
+    expect(text).not.toContain(ADMIN_KEY);
+    expect(rows()).toEqual([]);
+    expect(audits()).toEqual([]);
+  });
+
+  test("an id route still answers a number and refuses a word that is not one", async () => {
+    expect((await call("GET", "/repulls/notanumber")).status).toBe(400);
+    expect((await call("GET", "/repulls/999")).status).toBe(404);
   });
 });
 

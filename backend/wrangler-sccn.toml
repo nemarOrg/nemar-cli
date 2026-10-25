@@ -369,9 +369,19 @@ ZARR_CACHE_BASE_URL = "https://zarr.nemar.org"
 # import-coverage sweep exists -- do not treat this flag as fire-and-forget.
 AUTO_IMPORT_ENABLED = "true"
 # Pacing macro: minutes between auto-imports. 25 -> ~one import every 30 min (the
-# gate sits just under the 30-min cron tick). Tunable live (wrangler deploy or the
-# dashboard) without a code change -- raise it to throttle back if a run misbehaves.
+# gate sits just under the 30-min cron tick). Tunable without a code change: edit this
+# line and deploy (a value set only in the dashboard is dropped by the next deploy) --
+# raise it to throttle back if a run misbehaves.
 AUTO_IMPORT_MIN_INTERVAL_MIN = "25"
+# The automatic upstream re-pull (epic #1046, ADR 0111) has two switches and two caps, and this
+# file sets none of them, so it is off. AUTO_REPULL_ENABLED = "1" lets the Worker open and advance
+# re-pulls; AUTO_REPULL_MERGE_ENABLED = "1" lets it merge them and does nothing unless the first
+# is on too; REPULL_DAILY_OPEN_CAP (absent: 2) and REPULL_DAILY_MERGE_CAP (absent: 5) bound a UTC
+# day. Each switch reads as on only as the exact string "1", and only while ENVIRONMENT is exactly
+# "production". The owner adds them here in a reviewed change, as quoted strings, once the first
+# two re-pulls have been run by hand; the first Worker merges run with REPULL_DAILY_MERGE_CAP = "1".
+# A value set only in the dashboard is dropped by the next deploy, so it is set in this file.
+# repull-switches-flag.test.ts fails a line with any of these four names in any table of this file.
 # Import retry engine + blocklist (epic #967 Phase 2, #969). Recipient for the
 # batched "dataset(s) appear inaccessible" report. Send stays OFF
 # (OPENNEURO_MAINTAINER_EMAIL_ENABLED unset -> dry run: compute + audit-log,
@@ -673,6 +683,10 @@ MANIFEST_VIA_CENTRAL_WORKFLOW = "false"
 # present only for binding consistency.
 AUTO_IMPORT_ENABLED = "false"
 AUTO_IMPORT_MIN_INTERVAL_MIN = "25"
+# AUTO_REPULL_ENABLED, AUTO_REPULL_MERGE_ENABLED, REPULL_DAILY_OPEN_CAP and REPULL_DAILY_MERGE_CAP
+# are deliberately absent:
+# the Worker never acts on them outside ENVIRONMENT = "production", whatever a dev value says,
+# because the nemarDatasets organization is shared with production.
 # Automated publication pre-screen (#666). Enabled on SCCN dev, as a var here: a publish
 # request that passes BIDS readiness dispatches run-prescreen on nemarDatasets/.github, except
 # for a dataset the publication review covers while PUBLICATION_REVIEW_ENABLED is on (below). The
