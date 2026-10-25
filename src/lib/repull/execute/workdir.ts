@@ -19,6 +19,7 @@
  * ({@link ISOLATED_GIT_ENV}), and no message it throws repeats git's stderr, which names files.
  */
 
+import { randomUUID } from "node:crypto";
 import {
   chmodSync,
   existsSync,
@@ -26,6 +27,7 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  renameSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -350,43 +352,70 @@ export async function restoreCheckpoint(args: {
 }
 
 /**
- * Hold the one execution of a plan: a directory created atomically beside the plan's working
- * directory, holding the process id. A second execution of the same plan refuses
- * (`execution-locked`) rather than delete a live run's clones; a lock whose process is gone (a
- * crash) is taken over. Returns the release.
+ * Hold the one execution of a plan: a directory beside the plan's working directory, holding the
+ * process id, made atomically. The pid file is written in a private sibling directory first, and
+ * that directory is renamed onto the lock's path, which fails while a lock is there, so a lock is
+ * never seen without its pid. A second execution of the same plan refuses (`execution-locked`)
+ * rather than delete a live run's clones, and so does a lock whose pid cannot be read. A lock whose
+ * process is gone (a crash) is moved aside atomically, and taken over only when what was moved is
+ * still that crashed run's. Returns the release, which removes only this process's own lock.
  */
 export function acquireLock(path: string): () => void {
-  const pidFile = join(path, "pid");
-  for (let attempt = 0; attempt < 2; attempt++) {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const staged = `${path}.${process.pid}.${randomUUID()}.new`;
+    mkdirSync(staged, { mode: 0o700 });
+    writeFileSync(join(staged, "pid"), `${process.pid}\n`, { mode: 0o600 });
     try {
-      mkdirSync(path, { mode: 0o700 });
-      writeFileSync(pidFile, `${process.pid}\n`, { mode: 0o600 });
-      return () => rmSync(path, { recursive: true, force: true });
+      renameSync(staged, path);
+      return () => {
+        if (lockHolder(path) === process.pid) rmSync(path, { recursive: true, force: true });
+      };
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+      rmSync(staged, { recursive: true, force: true });
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== "ENOTEMPTY" && code !== "EEXIST") throw err;
     }
-    const pid = Number.parseInt(
-      (() => {
-        try {
-          return readFileSync(pidFile, "utf8");
-        } catch {
-          return "";
-        }
-      })(),
-      10,
-    );
-    if (Number.isSafeInteger(pid) && pid > 0 && isAlive(pid)) {
-      throw new ExecuteRefused(
-        "execution-locked",
-        `Another execution of this plan is running (process ${pid}); wait for it to finish.`,
-      );
+    const holder = lockHolder(path);
+    if (holder === undefined) continue; // released in between: try again
+    if (holder === null || isAlive(holder)) throw lockedRefusal(path, holder);
+    // A crashed run's lock: moved aside, and taken over only if it is still that run's.
+    const aside = `${path}.${process.pid}.${randomUUID()}.stale`;
+    try {
+      renameSync(path, aside);
+    } catch {
+      continue; // moved by another execution in between: try again
     }
-    // A crashed run's lock, or one being written right now: removed and tried once more.
-    rmSync(path, { recursive: true, force: true });
+    if (lockHolder(aside) !== holder) {
+      // Another execution took the lock over in between, and this moved its live lock: put back.
+      try {
+        renameSync(aside, path);
+      } catch {
+        // The path is taken again; the moved lock is left for the operator, named below.
+      }
+      throw lockedRefusal(path, lockHolder(path) ?? null);
+    }
+    rmSync(aside, { recursive: true, force: true });
   }
-  throw new ExecuteRefused(
+  throw lockedRefusal(path, lockHolder(path) ?? null);
+}
+
+/** The process id a lock holds; null when it cannot be read, undefined when there is no lock. */
+function lockHolder(path: string): number | null | undefined {
+  if (!existsSync(path)) return undefined;
+  let text: string;
+  try {
+    text = readFileSync(join(path, "pid"), "utf8");
+  } catch {
+    return null;
+  }
+  const pid = Number.parseInt(text, 10);
+  return /^\d+\n?$/.test(text) && Number.isSafeInteger(pid) && pid > 0 ? pid : null;
+}
+
+function lockedRefusal(path: string, holder: number | null): ExecuteRefused {
+  return new ExecuteRefused(
     "execution-locked",
-    "Another execution of this plan holds its lock; wait for it to finish.",
+    `Another execution of this plan holds its lock (${holder === null ? "its process id cannot be read" : `process ${holder}`}): ${path}. Wait for it to finish. If no execution is running (a crashed run whose process id is now another process's), remove that directory and run again.`,
   );
 }
 
