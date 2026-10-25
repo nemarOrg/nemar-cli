@@ -168,7 +168,7 @@ const FLIPS: Record<(typeof MACHINE_CLEAN_HOLDS)[number], (f: MachineCleanFacts)
     f.screen = "unchecked";
   },
   "screen-rerun": (f) => {
-    f.screen = "rerun";
+    f.screen = "absent";
   },
   "screen-error": (f) => {
     f.screen = "error";
@@ -316,7 +316,6 @@ describe("unknown is never clean", () => {
       "acknowledge",
       "blocks",
       "unchecked",
-      "rerun",
       "pending",
       "unreported",
       "error",

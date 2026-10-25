@@ -70,16 +70,15 @@ export interface CheckFact {
 /**
  * The identifier screen of the head, as read from the record (`upstream_repull_screens`):
  * `clear`, `acknowledge`, `blocks` and `unchecked` are verdicts, `pending` a run still out,
- * `unreported` one past its deadline, `error` a run with no verdict, `rerun` a commit that needs
- * screening again, `absent` no screen of that head, `exempt` an `xx` dataset, and `unreadable` a
- * record that could not be read or whose stored verdict does not name the head.
+ * `unreported` one past its deadline, `error` a run with no verdict, `absent` no screen of that
+ * head (so it has to be screened), `exempt` an `xx` dataset, and `unreadable` a record that could
+ * not be read or whose stored verdict does not name the head.
  */
 export type ScreenFact =
   | "clear"
   | "acknowledge"
   | "blocks"
   | "unchecked"
-  | "rerun"
   | "pending"
   | "unreported"
   | "error"
@@ -203,8 +202,8 @@ export const MACHINE_CLEAN_HOLDS = [
 
 /**
  * What each screen fact holds as; `clear` alone is null. A `Record` over the union, so a fact added
- * to {@link ScreenFact} without a word here does not compile. `absent` and `rerun` share a word:
- * both mean the head has to be screened (again).
+ * to {@link ScreenFact} without a word here does not compile. `absent` holds as `screen-rerun`:
+ * the head has to be screened.
  */
 const SCREEN_HOLDS: Readonly<Record<ScreenFact, HoldReason | null>> = {
   clear: null,
@@ -213,7 +212,6 @@ const SCREEN_HOLDS: Readonly<Record<ScreenFact, HoldReason | null>> = {
   acknowledge: "screen-acknowledge",
   blocks: "screen-blocks",
   unchecked: "screen-unchecked",
-  rerun: "screen-rerun",
   absent: "screen-rerun",
   error: "screen-error",
   unreadable: "screen-unreadable",
