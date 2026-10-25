@@ -126,6 +126,7 @@ async function resume(opts: ResumeOptions): Promise<ResumeResult> {
         configDir,
         datasetId: opts.datasetId,
         digest: open.plan_digest,
+        purpose: "resume",
         env,
         token: token.token,
       });
@@ -333,8 +334,8 @@ async function gatesTurn(ctx: ResumeContext, row: RepullRow): Promise<Turn> {
         `GitHub could not say whether #${row.pr_number} can be merged.`,
       );
     }
-    // Moved or closed in between: read it again from the top.
-    return { kind: "next", row };
+    // Moved or closed in between: wait a turn, then read it again from the top.
+    return { kind: "wait", row, waitingFor: `pull request #${row.pr_number} to settle on GitHub` };
   }
   const state = settled.state;
   if (main !== row.base_sha && (state === "dirty" || state === "behind")) {

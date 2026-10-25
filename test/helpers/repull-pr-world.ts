@@ -431,7 +431,9 @@ export async function startRepullWorld(
       apiHook = null;
       apiOverride = null;
       for (const k of Object.keys(workerEnv)) delete (workerEnv as Record<string, unknown>)[k];
-      rmSync(join(configDir, "repull", fx.datasetId, "resume"), { recursive: true, force: true });
+      for (const purpose of ["resume", "merge"]) {
+        rmSync(join(configDir, "repull", fx.datasetId, purpose), { recursive: true, force: true });
+      }
     },
     async reportScreen(sha, status = "clean") {
       const waiting = db

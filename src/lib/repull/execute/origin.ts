@@ -5,8 +5,10 @@
  *
  * The working clone is gone by then (it is removed at `pr_open`, because it held the delta's
  * unscrubbed originals), so these steps fetch only what they judge, into a bare repository of
- * their own: `$NEMAR_CONFIG_DIR/repull/<id>/resume/<digest8>/`, mode 0700 like every directory of
- * an execution, made empty at the start of a run and removed at its end. Its one remote is
+ * their own: `$NEMAR_CONFIG_DIR/repull/<id>/<purpose>/<digest8>-<pid>/` (`resume` or `merge`), mode
+ * 0700 like every directory of an execution, made empty at the start of a run and removed at its
+ * end; the purpose and the process id keep a merge (`nemar admin pr-reviews` too) and a resume of
+ * one record, which may run at once, out of each other's way. Its one remote is
  * `origin`, NEMAR's repository, so `checkMain`, `acceptsHead` and the guarded push read and write
  * it exactly as they do the working clone. Every git call reads neither the administrator's
  * global configuration nor the system's, and carries its credentials in the environment.
@@ -27,8 +29,13 @@ export interface OriginScratch {
 }
 
 /** Where a run's scratch repository lives, under the dataset's own execution directory. */
-export function scratchDir(configDir: string, datasetId: string, digest: string): string {
-  return join(configDir, "repull", datasetId, "resume", digest8(digest));
+export function scratchDir(
+  configDir: string,
+  datasetId: string,
+  digest: string,
+  purpose: "resume" | "merge",
+): string {
+  return join(configDir, "repull", datasetId, purpose, `${digest8(digest)}-${process.pid}`);
 }
 
 /**
@@ -39,10 +46,11 @@ export async function openOriginScratch(args: {
   configDir: string;
   datasetId: string;
   digest: string;
+  purpose: "resume" | "merge";
   env: Env;
   token: string | null;
 }): Promise<OriginScratch> {
-  const dir = scratchDir(args.configDir, args.datasetId, args.digest);
+  const dir = scratchDir(args.configDir, args.datasetId, args.digest, args.purpose);
   removeTree(dir);
   privateDir(dir, join(args.configDir, "repull"));
   const url = originUrl(args.datasetId, args.env);

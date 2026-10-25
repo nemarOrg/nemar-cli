@@ -332,6 +332,7 @@ async function check(
     configDir: ctx.configDir,
     datasetId: id,
     digest: row.plan_digest,
+    purpose: "merge",
     env: ctx.env,
     token: ctx.token,
   });
