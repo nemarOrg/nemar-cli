@@ -22,13 +22,13 @@ import { NEMAR_APP_BOT_LOGIN, NEMAR_APP_BOT_USER_ID, NEMAR_APP_ID } from "../../
 import { type MachineCleanStage, machineClean } from "../../shared/repull-machine-clean";
 import type { RepullStatus } from "../../shared/repull-state";
 import { __resetRateLimitStateForTests } from "../src/services/github/transport";
-import { __setRepullGitHubReadTimeoutForTests } from "../src/services/upstream-repull-github";
 import { getRepull } from "../src/services/upstream-repull";
 import {
   gatherMachineCleanFacts,
   readReviewFact,
   readScreenFact,
 } from "../src/services/upstream-repull-facts";
+import { __setRepullGitHubReadTimeoutForTests } from "../src/services/upstream-repull-github";
 import type { Bindings } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
 import { goodReport, seedReview } from "./helpers/pr-queue-fixtures";
