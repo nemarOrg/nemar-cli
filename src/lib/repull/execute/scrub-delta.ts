@@ -6,14 +6,16 @@
  * NEMAR's bucket, and nothing unscrubbed may enter NEMAR's history. So the scrub runs here, in the
  * working clone, on exactly what the commit will add:
  *  - its scope is the delta paths (every path materialized or deleted, the NEMAR-owned edit
- *    included) and the provenance files, which the scrub annotates when a header changes (the
- *    lead's ruling recorded in the Phase 6b amendment: the caller puts both in the scope);
+ *    included) and the provenance files, which the scrub annotates when a header changes: a header
+ *    change needs its provenance file in the scope, or the scrub refuses
+ *    (`provenance-out-of-scope`), so the caller always puts both files in it;
  *  - each annexed recording's header is read from the version of upstream's object the plan pinned,
  *    which is the version the copy will copy ({@link pinnedSources}); a key NEMAR already holds is
  *    not read again, because its bytes are already in NEMAR's bucket where the identifier screen
  *    reads them;
- *  - dates are set (it is not a re-import), on delta recordings only, so nothing already published
- *    is changed;
+ *  - dates are set (it is not a re-import), on the delta recordings and scans tables only, so
+ *    nothing already published is changed; a scans table in the scope has every dated row of the
+ *    file set, as the import does;
  *  - its ledger line is `repull-scrubbed`, at the row's creation time and under a fixed actor, so
  *    preparing twice writes the same line.
  * Then the git-held data NEMAR's policy annexes, and that the scrub did not take, is annexed and
@@ -21,6 +23,7 @@
  */
 
 import {
+  S3_REMOTE_NAME,
   locationLogs,
   presentIn,
   readLocationLogsAt,
@@ -44,11 +47,16 @@ import { guardedGitRunner } from "../read-only.js";
 import { copyItems, copySection, planPaths } from "./body.js";
 import { ExecuteRefused } from "./verify-plan.js";
 
+/** A scrub refusal as execution's own, its word as the code and whether upstream may serve later. */
+function fromScrub(err: ImportScrubRefused): ExecuteRefused {
+  return new ExecuteRefused(err.code, err.message, [], err.upstreamInaccessible);
+}
+
 /** The ledger line's actor: fixed, so a re-preparation by another administrator writes the same line. */
 export const REPULL_SCRUB_ACTOR = "nemar-repull";
 
 /** The special remote a re-pull registers its uploads against (the one the plan checked). */
-export const NEMAR_REMOTE_NAME = "nemar-s3";
+export const NEMAR_REMOTE_NAME = S3_REMOTE_NAME;
 
 /**
  * The keys the plan counted as held: annexed delta targets it neither copies nor lists as dead
@@ -213,7 +221,7 @@ export async function scrubDelta(args: {
       ledgerAction: "repull-scrubbed",
     });
   } catch (err) {
-    if (err instanceof ImportScrubRefused) throw new ExecuteRefused(err.code, err.message);
+    if (err instanceof ImportScrubRefused) throw fromScrub(err);
     throw err;
   }
 
@@ -256,7 +264,7 @@ export async function scrubDelta(args: {
       scrub.headerReadKeys,
     );
   } catch (err) {
-    if (err instanceof ImportScrubRefused) throw new ExecuteRefused(err.code, err.message);
+    if (err instanceof ImportScrubRefused) throw fromScrub(err);
     throw err;
   }
   return { scrub, uploaded: [...scrub.items, ...normalized.items] };
