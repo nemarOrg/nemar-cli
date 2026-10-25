@@ -108,19 +108,31 @@ const CLONE_CONFIG = [
   "core.excludesFile=/dev/null",
 ] as const;
 
+/** How many {@link withIsolatedGit} calls are running, and what the outermost one found. */
+let isolationDepth = 0;
+let isolationSaved: Array<readonly [string, string | undefined]> = [];
+
 /**
  * Run `fn` with {@link ISOLATED_GIT_ENV} in the process environment, which every git subprocess
- * inherits, the importer's scrub and upload included; the previous values are put back after.
+ * inherits, the importer's scrub and upload included. Calls may overlap (two executions in one
+ * process): the outermost one saves the previous values and only the last to finish puts them
+ * back, so no call can restore the isolated values as if they were the user's.
  */
 export async function withIsolatedGit<T>(fn: () => Promise<T>): Promise<T> {
-  const saved = Object.keys(ISOLATED_GIT_ENV).map((k) => [k, process.env[k]] as const);
-  Object.assign(process.env, ISOLATED_GIT_ENV);
+  if (isolationDepth === 0) {
+    isolationSaved = Object.keys(ISOLATED_GIT_ENV).map((k) => [k, process.env[k]] as const);
+    Object.assign(process.env, ISOLATED_GIT_ENV);
+  }
+  isolationDepth++;
   try {
     return await fn();
   } finally {
-    for (const [k, v] of saved) {
-      if (v === undefined) Reflect.deleteProperty(process.env, k);
-      else process.env[k] = v;
+    isolationDepth--;
+    if (isolationDepth === 0) {
+      for (const [k, v] of isolationSaved) {
+        if (v === undefined) Reflect.deleteProperty(process.env, k);
+        else process.env[k] = v;
+      }
     }
   }
 }
