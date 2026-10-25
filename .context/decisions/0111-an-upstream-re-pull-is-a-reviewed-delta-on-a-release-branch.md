@@ -883,3 +883,73 @@ Decision 10's `[openneuro-upstream-moved]` refusal of a released mirror now name
 ### The finalize gate is three functions
 
 The verify, tree gate and register steps of an import's finalize are `verifyManifestObjects`, `treeGate` and `registerTreeKeys` (`src/lib/import-finalize-gate.ts`), with every message as it was, because the Worker classifies them; the re-pull's register step will call the same three.
+
+## Amendment 2026-10-24 (#1912): Phase 6c prepares a re-pull, through `prepared`
+
+A further slice of the Phase 6 amendment above, built by Phase 6c.
+It builds the first half of decision 2's execution: the reviewed plan is proved and made again from live sources, the record is created, and the delta is materialized, scrubbed and synthesized into the one commit, which waits at `prepared`.
+Nothing here copies from upstream, pushes or opens a pull request; those follow `prepared` and are a later slice's.
+The decision text above and the earlier amendments are unchanged.
+
+### Execution runs on the administrator's machine
+
+Execution is a library entry the `execute` command will call, run by an administrator with their own GitHub token and the ambient AWS credentials, against the API it is configured for.
+The Worker records each step through the record's routes and adds no route of its own here, so nothing in this slice can send mail.
+The working directory is `$NEMAR_CONFIG_DIR/repull/<id>/work/<digest8>/`, mode 0700, because the clone holds every path of the dataset and a path can be an identifier; it is kept until the pull request is open, so a crash leaves it to resume.
+
+### The reviewed plan, proved, and its preflight recomputed
+
+The plan file is trusted for its body only, and only once the body's digest is recomputed and equals the one the file states (`plan-tampered` otherwise).
+A plan another planner made is refused before that check (`planner-version`), so it is never read under rules it was not made with; so is a plan made against another API (`plan-environment`), or from test bases when execution reads the real remotes, or the reverse (`plan-sources`).
+The planner then runs again with the plan's own options, and its live preflight and `executable` decide: the file's two fields are not read at all, so a file that says not executable proceeds when the live plan is, and one that says executable is refused when a release pull request has since opened (`not-executable`).
+An anonymous dataset is refused by the CLI before anything is cloned (`anonymous-dataset`), as the Worker refuses it at the record.
+
+### The `.nemar/**` rule, read narrowly (clarification)
+
+Decision 2 lets execution go on when the commits since the plan "touch only `.nemar/**`".
+As built, the live plan may differ from the reviewed one only in `main`'s commit and tree, with the git-annex branch where it was, and every path that differs between the two `main` commits must be under `.nemar/` and must not be the privacy ledger (`.nemar/corrections.jsonl`); execution then bases on the live `main`.
+A ledger line is excluded because a recorded correction changes what the plan refuses: a line appended changes the plan's own ledger facts, and a line edited in place does not, so the path rule is what refuses the second.
+A moved git-annex branch is `plan-stale` whatever `main` did, and so is anything else: plan again and review the new digest.
+
+### A dead recording the plan would name is refused
+
+The Phase 5 amendment lists a dead key N.0.0 would name at a recording path as `dead_recordings`, a recording "the scrub will re-key".
+The plan pins only the keys it copies, so nothing names the upstream version to read such a recording from, and execution refuses the plan before anything is uploaded (`dead-recording-unpinned`) rather than synthesize a tree that names a dead key.
+Pinning those keys is the planner's to add.
+
+### The preparation
+
+The working clone is a fresh, non-partial clone of NEMAR's `main` at depth 2, checked out at the base, with git-annex initialized without enabling any special remote (`--no-autoenable`) and without background gc or maintenance.
+Each delta target is written from where the plan says it comes from and staged by its exact id, never through `git add`, so no attribute, filter or line-ending rule can change what is staged: a CRLF blob upstream committed stays the blob N.0.0 holds.
+Upstream's blobs come from the planner's clone of upstream, fetched by id when missing; computed bytes come from the planner itself, which records the bytes of every computed target as it plans (outside the plan's body, so the digest does not move), and execution never rebuilds a standard edit; root metadata upstream annexed is read at its pinned version and must hash to its key (`unannex-content-mismatch`).
+
+The materialized index is committed locally on the work branch before the scrub, so the scrub works on committed paths as it does in an import; first, every path that differs from the base must be in the scrub's scope (`scope-incomplete`), the check the scrub makes of its own scope, made here because the scrub would see no change once the index is committed.
+That commit is never pushed and is never an ancestor of the synthesized one.
+
+The scope is every path written or deleted, the NEMAR-owned edit included, and the provenance files, as the Phase 6b amendment's ruling has the caller do.
+The scrub reads each annexed recording at the version the plan pinned, sets dates (it is not a re-import), writes `repull-scrubbed` at the record's creation time under the fixed actor `nemar-repull`, and refuses with its own word for anything it cannot do.
+To retire a key it re-keys, the scrub needs a location log for it, and NEMAR's git-annex branch has never recorded a key upstream added after the import; so before the scrub, the working clone records, for each recording the plan copies and NEMAR's branch does not know, the holders upstream's own git-annex branch records, and nothing else.
+The scrub then retracts them and marks the key dead, which is what lets the next plan explain the scrubbed recording.
+Those records are in the working clone's git-annex branch, which a later slice pushes.
+Git-held data NEMAR's policy annexes, and that the scrub did not take, is annexed and uploaded from this host with the same upload, to `<id>/objects/` only.
+
+### The synthesized commit
+
+The commit is the prepared index written as a tree and committed with `git commit-tree` onto the base: one parent, the fixed identity `NEMAR re-pull <noreply@nemar.org>`, author and committer dates the record's `created_at`, a body of counts with no path, and decision 2's two trailers as the message's last paragraph.
+Before it is accepted, the tree must be the plan's targets, with the scrub's changes and nothing else: a recording the scrub re-keyed, a git-held data file annexed (each under a key this host uploaded), a JSON blanked, a scans table dated or a provenance file annotated in place; no key the scrub replaced may be named; every named key must be one the plan counted held, one it copies, or one this host uploaded.
+The copy manifest is the tree's named keys the plan copies, at their pinned versions, and the keys this host uploaded; it must be a subset of the plan's copy keys, every upload must be a local one the tree names, and its digest is recorded.
+After the commit, the original of every git blob the scrub changed must not be reachable from it; one that NEMAR's own history already reaches refuses the commit.
+Every one of these refusals is `synthesis-mismatch` and names counts only.
+
+### Deterministic re-preparation and the checkpoint
+
+Preparing twice from the same plan and base gives the same tree and the same commit, the scrub's downloads, re-keyed uploads and ledger line included, because every date in it is the record's and every identity is fixed.
+After the commit, the work branch and the local git-annex branch are saved as a git bundle, mode 0600, at `$NEMAR_CONFIG_DIR/repull/<id>/<digest8>.bundle`, whose prerequisites are the base and origin's git-annex branch as fetched.
+A run that finds its record `prepared` leaves it as it is when the working clone is at the recorded commit; restores the clone from the checkpoint when it is not, and only when the bundle delivers the recorded commit itself; and otherwise prepares again, which must reproduce the recorded tree, commit and manifest digest (`prepare-not-reproducible`, the record left `prepared` with why; abandoning it is the way out).
+A record found `prepared` whose base moved by `.nemar/**` only is prepared again onto the live `main`, and the self-edge records the new facts.
+A step that fails records why on the record (`planned` to `planned`, or `prepared` to `prepared` with the facts it already holds) and refuses; what it records names counts, never a path.
+
+### Checked only against stand-ins
+
+That an anonymous ranged GET of `openneuro.org` at `?versionId=` answers as the stand-in does was measured once, for one object of `ds004362`, while Phase 6 was planned.
+That `aws s3 sync` and `list-objects-v2` answer the uploads as the stand-in does, and that GitHub lists open pull requests as the release-pr check reads them, only the canary and the first production runs can show.
