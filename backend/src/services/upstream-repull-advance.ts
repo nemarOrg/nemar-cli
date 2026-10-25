@@ -4,6 +4,8 @@
  * waits where it is.
  *
  * WHAT IT DOES, for each row it examines:
+ *  - a row that stalled before its pull request opened (`planned` to `registered`): dispatch the
+ *    central workflow again to resume it, under the conditions below;
  *  - a row at `pr_open`: read the machine-clean facts of its head at the gates
  *    (`gatherMachineCleanFacts`) and ask the rule (`machineClean`). Clean: write
  *    `pr_open -> gates_clear` with `gates_sha` the head, as the system user, through the record's
@@ -14,6 +16,28 @@
  *    mergeable state and every other word hold. The merge itself is a later slice's.
  *  - a row a live dispatch is working on (its run is still out, settling its head): nothing is read
  *    from GitHub, and the row is not held, because nothing holds it but its own run.
+ *
+ * RESUMING A STALLED ROW. Its run ended without opening the pull request: no dispatch of the
+ * dataset is live, and the row's last dispatch `failed`, went `unreported` or was refused by
+ * GitHub before it ran (`dispatch_failed`), or it has none, so nothing is working on it. Then, in
+ * order:
+ *  - the record and the dataset must pass the machine-clean rule's own rules for them (an
+ *    automatic record with no correction, of a named, not withdrawn, mirror with no import that has
+ *    not settled), read by the rule's own reader; a row that fails one holds with its word;
+ *  - a last run that `refused` holds `resume-refused`: it said in a fixed word why it would not go
+ *    on, and another run would meet the same refusal, so an administrator looks;
+ *  - fewer than {@link AUTOMATIC_RESUMES_MAX} `open` dispatches for the row, the first one that
+ *    created it included and one GitHub refused included, or it holds `resume-exhausted`;
+ *  - the row has not moved for {@link RESUME_QUIET_MINUTES} minutes, and the UTC hour is within
+ *    {@link RESUME_WINDOW_UTC}, so the run opens its pull request on the UTC day whose unit of the
+ *    open cap it claims (the timing the dispatch record's open cap relies on); otherwise it waits;
+ *  - the dispatch record's own claim (`claimOpenDispatch`, naming the row), which counts against
+ *    `REPULL_DAILY_OPEN_CAP` in the statement that claims, so a resume can never pass the cap; a
+ *    full day holds `cap-exhausted` and no later row of the tick claims;
+ *  - the send, as the scheduler sends a first dispatch: GitHub's 4xx ends the claim as
+ *    `dispatch_failed` (its unit freed) and stops the tick's sends, and a lost answer keeps it.
+ * The run continues the row the dispatch names; the automatic create returns that row to it and
+ * never a second one.
  *
  * WHAT THE GATES WAIT FOR, and when the tick starts it. Only once every rule before the screen holds
  * (the switches, the record, the dataset, the recorded pull request opened by the App at the
@@ -51,25 +75,47 @@
  * PRODUCTION ONLY. Outside `ENVIRONMENT` exactly `production` the tick returns null before it reads
  * or writes anything: the `nemarDatasets` organization is shared with dev. It is called only from
  * the 30-minute tick's production block, absent from `DEV_CRON_ALLOWLIST`. In production with
- * `AUTO_REPULL_ENABLED` not exactly `"1"`, GitHub is asked nothing, and every row it examines is
- * held `switch-off`. Each production tick stamps `upstream_repull_scheduler.last_advance_at`.
+ * `AUTO_REPULL_ENABLED` not exactly `"1"`, GitHub is asked nothing, nothing is claimed or sent,
+ * and every row it examines is held `switch-off`, a row a run is still out for included. Each
+ * production tick stamps `upstream_repull_scheduler.last_advance_at`.
+ *
+ * COST on the 30-minute tick, which shares one subrequest allowance with every job on it, measured
+ * over five rows (`upstream-repull-advance.test.ts` pins it): 112 D1 statements and 40 GitHub
+ * requests when each starts its screen and its review, 37 and 20 while each waits on them, 52 and
+ * 25 when each is cleared; a stalled row's resume is eight statements and one dispatch, and the
+ * tick itself two statements (the list of rows, the stamp).
  *
  * NO MAIL. Nothing here imports a mail service (`repull-no-mail-scan.test.ts`).
  */
 
+import pkg from "../../../package.json" with { type: "json" };
+import { normalizeUpstreamTag } from "../../../shared/openneuro-tag.js";
 import {
   MACHINE_CLEAN_HOLDS,
   type MachineCleanFacts,
   type ScreenFact,
   machineClean,
 } from "../../../shared/repull-machine-clean.js";
-import type { HoldReason, RepullRow, RepullStatus } from "../../../shared/repull-state.js";
+import {
+  type DispatchStatus,
+  type HoldReason,
+  NEMAR_VERSION_RE,
+  type RepullRow,
+  type RepullStatus,
+} from "../../../shared/repull-state.js";
 import { AUDIT_IF_PREVIOUS_CHANGED_SQL, auditLogParams } from "../db/audit-log.js";
 import { SYSTEM_USER_ID } from "../lib/constants.js";
 import type { Bindings } from "../types/bindings.js";
-import { errorClassName } from "./github/dispatch.js";
+import { getDatasetsToken } from "./github-auth.js";
+import {
+  UPSTREAM_REPULL_DISPATCH_TIMEOUT_MS,
+  buildUpstreamRepullPayload,
+  errorClassName,
+  triggerUpstreamRepullRun,
+} from "./github/dispatch.js";
 import { startRepullPullRequestReview } from "./pr-review-start.js";
 import { autoRepullEnabled, isExactProduction } from "./repull-switches.js";
+import { claimOpenDispatch, markDispatchSendFailed } from "./upstream-repull-dispatch.js";
 import { gatherMachineCleanFacts } from "./upstream-repull-facts.js";
 import { startRepullScreen } from "./upstream-repull-screen.js";
 import { commitTransition, getRepull, isRefusal, prepareTransition } from "./upstream-repull.js";
@@ -80,8 +126,47 @@ export const ADVANCE_ROWS_PER_TICK = 5;
 /** The tick's cadence, which turns its time into a place in the rotation. */
 export const ADVANCE_TICK_MINUTES = 30;
 
+/** The statuses before the pull request opened: a row the tick finds stalled there is resumed. */
+export const RESUMABLE_STATUSES = [
+  "planned",
+  "prepared",
+  "copied",
+  "registered",
+] as const satisfies readonly RepullStatus[];
+
 /** The statuses the tick examines. */
-export const ADVANCE_STATUSES = ["pr_open"] as const satisfies readonly RepullStatus[];
+export const ADVANCE_STATUSES = [
+  ...RESUMABLE_STATUSES,
+  "pr_open",
+] as const satisfies readonly RepullStatus[];
+
+/**
+ * The `open` dispatches one row may have, at most: the first, which created it, and two resumes.
+ * GitHub refusing one before it ran still counts, so a refusal that repeats cannot dispatch for ever.
+ */
+export const AUTOMATIC_RESUMES_MAX = 3;
+
+/**
+ * The UTC hours a resume is dispatched in, both included. The daily first dispatches go at 03:00
+ * UTC; a run dispatched by 15:59 has its 330 minutes and an hour of queueing before the UTC day
+ * ends, so it opens its pull request on the day whose unit of the open cap it claimed.
+ */
+export const RESUME_WINDOW_UTC = { from: 3, to: 15 } as const;
+
+/** How long a stalled row must not have moved before it is resumed. */
+export const RESUME_QUIET_MINUTES = 60;
+
+/** The last dispatch of a row after which nothing is working on it, and a resume may follow. */
+const RESUME_AFTER: ReadonlySet<DispatchStatus> = new Set([
+  "failed",
+  "unreported",
+  "dispatch_failed",
+]);
+
+/** The rules of machine clean about the switches, the record and the dataset, before any of its pull request. */
+const BEFORE_PULL_REQUEST: ReadonlySet<HoldReason> = new Set(
+  MACHINE_CLEAN_HOLDS.slice(0, MACHINE_CLEAN_HOLDS.indexOf("pr-unreadable")),
+);
 
 /** How many times the tick dispatches the identifier screen of one head, at most. */
 export const AUTOMATIC_SCREENS_MAX = 3;
@@ -115,9 +200,16 @@ export const ADVANCE_ROWS_SQL = `SELECT id FROM upstream_repulls
   WHERE origin = 'automatic' AND status IN (${quoted(ADVANCE_STATUSES)})
   ORDER BY id`;
 
-/** How many dispatches of a dataset are live (`?` the dataset): a run is out for it. */
+/**
+ * A row's dispatches, as one row of facts: `?1` its dataset, `?2` its id. `live` counts the
+ * dataset's live dispatches (a run is out for it); `opens` the row's `open` dispatches, every status
+ * included; `last_status` the status of its latest one, NULL when it has none.
+ */
 export const ROW_DISPATCHES_SQL = `SELECT
-  (SELECT COUNT(*) FROM upstream_repull_dispatches WHERE dataset_id = ?1 AND nonce IS NOT NULL) AS live`;
+  (SELECT COUNT(*) FROM upstream_repull_dispatches WHERE dataset_id = ?1 AND nonce IS NOT NULL) AS live,
+  (SELECT COUNT(*) FROM upstream_repull_dispatches WHERE repull_id = ?2 AND kind = 'open') AS opens,
+  (SELECT status FROM upstream_repull_dispatches WHERE repull_id = ?2 AND kind = 'open'
+    ORDER BY id DESC LIMIT 1) AS last_status`;
 
 /**
  * Record why an automatic row waits: `?1` its id, `?2` the revision the tick read, `?3` the word it
@@ -163,13 +255,22 @@ export const ADVANCE_STAMP_SQL =
 // ----------------------------------------------------------------------------
 
 /**
- * What a tick failed at, as a fixed word, never a message: a screen that could not be dispatched
- * (`dispatch-unconfigured`, `dispatch-failed`, the screen's own words, recorded on its row as an
- * error it is run again from), a row whose step threw, the tick itself, its stamp.
+ * What a tick failed at, as a fixed word, never a message. A dispatch that could not be made: the
+ * Worker has no callback secret (`dispatch-unconfigured`), a screen or a resume that could not be
+ * sent (`dispatch-failed`), GitHub refused a resume (`dispatch-refused`), the Worker is not a release
+ * build (`cli-unreleased`), no GitHub token could be had (`no-github-token`), the open cap is set to
+ * something unreadable (`cap-unreadable`), a recorded tag is not a tag (`to-tag-malformed`); each
+ * is a word of the dispatch record or of the scheduler. Then a row whose step threw, the tick
+ * itself, its stamp.
  */
 export const ADVANCE_FAILURES = [
   "dispatch-unconfigured",
   "dispatch-failed",
+  "dispatch-refused",
+  "cli-unreleased",
+  "no-github-token",
+  "cap-unreadable",
+  "to-tag-malformed",
   "row-failed",
   "tick-failed",
   "stamp-failed",
@@ -187,6 +288,10 @@ export interface AdvanceTickResult {
   reviewsStarted: number;
   /** Rows moved `pr_open -> gates_clear`. */
   gatesCleared: number;
+  /** Stalled rows whose resume GitHub took. */
+  resumed: number;
+  /** Stalled rows whose resume got no answer: the dispatch stays, and keeps its unit of the cap. */
+  unconfirmed: number;
   /** Clean rows whose edge the record refused, by its code (a `DISPATCH_CODES` word). */
   refused: Record<string, number>;
   /** Rows held this tick, by word, whether the word is new or not. */
@@ -200,14 +305,27 @@ export interface AdvanceTickResult {
 }
 
 export interface AdvanceOptions {
-  /** The tick's time: its place in the rotation. Now by default; a test passes a real instant. */
+  /**
+   * The tick's time: its place in the rotation and the hour a resume is weighed in. Now by default;
+   * a test passes a real instant.
+   */
   now?: Date;
+  /** The CLI version a resumed run installs; the Worker's own (`package.json`) by default. */
+  cliVersion?: string;
+  /** How long a resume's dispatch waits for GitHub; the scheduler's by default. */
+  dispatchTimeoutMs?: number;
 }
 
 interface Tick {
   env: Bindings;
   now: Date;
+  cliVersion: string;
+  dispatchTimeoutMs: number;
   r: AdvanceTickResult;
+  /** A claim found the day's open cap used: no later row of this tick claims. */
+  capFull: boolean;
+  /** A send was refused, or could not be made: no later row of this tick sends. */
+  sendStopped: boolean;
 }
 
 /**
@@ -252,11 +370,157 @@ async function observe(t: Tick, row: RepullRow, word: HoldReason | null): Promis
   if ((update?.meta?.changes ?? 0) > 0) t.r.holdsChanged++;
 }
 
+interface RowDispatches {
+  live: number;
+  opens: number;
+  last_status: DispatchStatus | null;
+}
+
+/** The row's dispatches ({@link ROW_DISPATCHES_SQL}); a count that cannot be read throws. */
+async function rowDispatches(db: D1Database, row: RepullRow): Promise<RowDispatches> {
+  const d = await db
+    .prepare(ROW_DISPATCHES_SQL)
+    .bind(row.dataset_id, row.id)
+    .first<RowDispatches>();
+  if (typeof d?.live !== "number" || typeof d.opens !== "number") {
+    throw new Error("the row's dispatches could not be read");
+  }
+  return d;
+}
+
 /** Whether a run is out for the row's dataset (a dispatch holds its nonce). */
 async function dispatchLive(db: D1Database, row: RepullRow): Promise<boolean> {
-  const d = await db.prepare(ROW_DISPATCHES_SQL).bind(row.dataset_id).first<{ live: number }>();
-  if (typeof d?.live !== "number") throw new Error("the row's dispatches could not be read");
-  return d.live > 0;
+  return (await rowDispatches(db, row)).live > 0;
+}
+
+/** Whether the UTC hour of `now` is one a resume is dispatched in. */
+export function inResumeWindow(now: Date): boolean {
+  const hour = now.getUTCHours();
+  return hour >= RESUME_WINDOW_UTC.from && hour <= RESUME_WINDOW_UTC.to;
+}
+
+/** Whether a row last written at `updatedAt` (D1's UTC `datetime`) has not moved for long enough. */
+function quietSince(updatedAt: string, now: Date): boolean {
+  const at = Date.parse(`${updatedAt.replace(" ", "T")}Z`);
+  return Number.isFinite(at) && now.getTime() - at >= RESUME_QUIET_MINUTES * 60_000;
+}
+
+/**
+ * Claim and send the dispatch that resumes `row`; the hold it now has (null: none). Called only
+ * once every condition of the module comment holds but the claim and the send.
+ */
+async function resume(t: Tick, row: RepullRow): Promise<HoldReason | null> {
+  const { env, r } = t;
+  // A run installs the Worker's own CLI, so a development build dispatches nothing.
+  if (!NEMAR_VERSION_RE.test(t.cliVersion)) {
+    r.errors.push("cli-unreleased");
+    t.sendStopped = true;
+    return null;
+  }
+  // The token is had before the claim, so a claim is never made that could not then be sent.
+  let pat: string;
+  try {
+    pat = await getDatasetsToken(env);
+  } catch (err) {
+    r.errors.push("no-github-token");
+    r.errorClass = errorClassName(err);
+    t.sendStopped = true;
+    return null;
+  }
+  const claim = await claimOpenDispatch(env, {
+    datasetId: row.dataset_id,
+    upstreamDs: row.upstream_ds,
+    fromTag: row.from_tag,
+    toTag: row.to_tag,
+    repullId: row.id,
+  });
+  if ("refused" in claim) {
+    switch (claim.refused) {
+      case "off":
+        return "switch-off";
+      case "cap":
+        t.capFull = true;
+        return "cap-exhausted";
+      case "cap-unreadable":
+        t.capFull = true;
+        r.errors.push("cap-unreadable");
+        return "cap-exhausted";
+      case "unconfigured":
+        r.errors.push("dispatch-unconfigured");
+        t.sendStopped = true;
+        return null;
+      case "candidate":
+        r.errors.push("to-tag-malformed");
+        return null;
+      default:
+        // `live`, `row`, `open-row`: a run started for the dataset, or the row moved, meanwhile.
+        r.waiting++;
+        return null;
+    }
+  }
+  let payload: ReturnType<typeof buildUpstreamRepullPayload>;
+  try {
+    payload = buildUpstreamRepullPayload({
+      mode: "open",
+      datasetId: row.dataset_id,
+      upstreamDs: row.upstream_ds,
+      fromTag: normalizeUpstreamTag(row.from_tag),
+      toTag: normalizeUpstreamTag(row.to_tag),
+      dispatchId: claim.id,
+      repullId: row.id,
+      token: claim.token,
+      cliVersion: t.cliVersion,
+    });
+  } catch (err) {
+    // Nothing was sent: the claim must not hold its unit and the live slot until the watchdog.
+    await markDispatchSendFailed(env.DB, claim.id, "dispatch-failed");
+    r.errors.push("dispatch-failed");
+    r.errorClass = errorClassName(err);
+    return null;
+  }
+  const sent = await triggerUpstreamRepullRun(payload, pat, { timeoutMs: t.dispatchTimeoutMs });
+  if (sent === "sent") {
+    r.resumed++;
+    return null;
+  }
+  if (sent === "unknown") {
+    r.unconfirmed++;
+    return null;
+  }
+  await markDispatchSendFailed(env.DB, claim.id, "dispatch-refused");
+  r.errors.push("dispatch-refused");
+  t.sendStopped = true;
+  return null;
+}
+
+/** A row that stalled before its pull request opened: resume it, or say why it waits. */
+async function advanceStalled(t: Tick, row: RepullRow): Promise<void> {
+  const { env, r } = t;
+  if (!autoRepullEnabled(env)) return observe(t, row, "switch-off");
+  const d = await rowDispatches(env.DB, row);
+  // A run is out for the dataset: it is working on this row, or on nothing else.
+  if (d.live > 0) {
+    r.waiting++;
+    return observe(t, row, null);
+  }
+  // The record and the dataset, by the machine-clean rule's own rules and reader. The row has no
+  // pull request, so the rule asks GitHub nothing for it.
+  const verdict = machineClean(await gatherMachineCleanFacts(env, row, "gates"));
+  if (!verdict.clean && BEFORE_PULL_REQUEST.has(verdict.hold)) {
+    return observe(t, row, verdict.hold);
+  }
+  if (d.last_status === "refused") return observe(t, row, "resume-refused");
+  if (d.last_status !== null && !RESUME_AFTER.has(d.last_status)) {
+    r.waiting++;
+    return observe(t, row, null);
+  }
+  if (d.opens >= AUTOMATIC_RESUMES_MAX) return observe(t, row, "resume-exhausted");
+  if (!inResumeWindow(t.now) || !quietSince(row.updated_at, t.now) || t.sendStopped) {
+    r.waiting++;
+    return observe(t, row, null);
+  }
+  if (t.capFull) return observe(t, row, "cap-exhausted");
+  return observe(t, row, await resume(t, row));
 }
 
 /** How many times the screen of `head` was dispatched for re-pull `id`. */
@@ -370,7 +634,8 @@ async function advanceRow(t: Tick, id: number): Promise<void> {
   if (!row || row.origin !== "automatic") return;
   if (!(ADVANCE_STATUSES as readonly string[]).includes(row.status)) return;
   t.r.examined++;
-  await advanceOpenPullRequest(t, row);
+  if (row.status === "pr_open") await advanceOpenPullRequest(t, row);
+  else await advanceStalled(t, row);
 }
 
 /**
@@ -390,13 +655,23 @@ export async function runRepullAdvanceCron(
     screensStarted: 0,
     reviewsStarted: 0,
     gatesCleared: 0,
+    resumed: 0,
+    unconfirmed: 0,
     refused: {},
     held: {},
     holdsChanged: 0,
     errors: [],
     errorClass: null,
   };
-  const t: Tick = { env, now: opts.now ?? new Date(), r };
+  const t: Tick = {
+    env,
+    now: opts.now ?? new Date(),
+    cliVersion: opts.cliVersion ?? pkg.version,
+    dispatchTimeoutMs: opts.dispatchTimeoutMs ?? UPSTREAM_REPULL_DISPATCH_TIMEOUT_MS,
+    r,
+    capFull: false,
+    sendStopped: false,
+  };
   try {
     const { results } = await env.DB.prepare(ADVANCE_ROWS_SQL).all<{ id: number }>();
     for (const id of advanceWindow(
@@ -427,13 +702,14 @@ export async function runRepullAdvanceCron(
 /**
  * The tick's one log line, or null when it changed nothing and nothing failed, so a tick that only
  * found the same rows waiting for the same reasons says nothing. Error level when anything failed.
- * Counts and fixed words only: no dataset id, no message.
+ * A resume whose answer was lost is an error too, as the scheduler's is. Counts and fixed words only:
+ * no dataset id, no message.
  */
 export function repullAdvanceLogLine(
   r: AdvanceTickResult,
 ): { level: "info" | "error"; line: string } | null {
-  const failed = r.errors.length > 0;
-  const acted = r.screensStarted + r.reviewsStarted + r.gatesCleared + r.holdsChanged;
+  const failed = r.errors.length > 0 || r.unconfirmed > 0;
+  const acted = r.screensStarted + r.reviewsStarted + r.gatesCleared + r.resumed + r.holdsChanged;
   if (!failed && acted === 0 && Object.keys(r.refused).length === 0) return null;
   const words = (counts: Record<string, number>) =>
     Object.entries(counts)
@@ -446,11 +722,13 @@ export function repullAdvanceLogLine(
     `screens=${r.screensStarted}`,
     `reviews=${r.reviewsStarted}`,
     `gates_cleared=${r.gatesCleared}`,
+    `resumed=${r.resumed}`,
+    `unconfirmed=${r.unconfirmed}`,
     `holds_changed=${r.holdsChanged}`,
     `held=${words(r.held)}`,
     `refused=${words(r.refused)}`,
   ];
-  if (failed) fields.push(`errors=${r.errors.join(",")}`);
+  if (r.errors.length > 0) fields.push(`errors=${r.errors.join(",")}`);
   if (r.errorClass !== null) fields.push(`error_class=${r.errorClass}`);
   return { level: failed ? "error" : "info", line: `[repull-advance] ${fields.join(" ")}` };
 }

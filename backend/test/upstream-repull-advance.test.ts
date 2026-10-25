@@ -26,8 +26,15 @@ import type { Database } from "bun:sqlite";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { parseScreenReport } from "../../shared/identifier-screen-report";
 import { NEMAR_APP_BOT_LOGIN, NEMAR_APP_BOT_USER_ID, NEMAR_APP_ID } from "../../shared/nemar-app";
-import { DISPATCH_CODES, FIXED_WORD_RE, type RepullStatus } from "../../shared/repull-state";
+import {
+  DISPATCH_CODES,
+  type DispatchRow,
+  FIXED_WORD_RE,
+  REPULL_SCHEDULER_OUTCOMES,
+  type RepullStatus,
+} from "../../shared/repull-state";
 import { SYSTEM_USER_ID } from "../src/lib/constants";
+import { verifyRepullDispatchToken } from "../src/services/github";
 import { __resetRateLimitStateForTests } from "../src/services/github/transport";
 import {
   CREATE_FACTS_SQL,
@@ -39,14 +46,19 @@ import {
   ADVANCE_FAILURES,
   ADVANCE_ROWS_PER_TICK,
   ADVANCE_TICK_MINUTES,
+  AUTOMATIC_RESUMES_MAX,
   AUTOMATIC_SCREENS_MAX,
   type AdvanceTickResult,
   REPULL_HOLD_SQL,
+  RESUME_QUIET_MINUTES,
+  RESUME_WINDOW_UTC,
   REVIEW_RETRY_MINUTES,
   advanceWindow,
+  inResumeWindow,
   repullAdvanceLogLine,
   runRepullAdvanceCron,
 } from "../src/services/upstream-repull-advance";
+import { OPEN_DISPATCHES_TODAY_SQL } from "../src/services/upstream-repull-dispatch";
 import { REVIEW_OF_HEAD_SQL } from "../src/services/upstream-repull-facts";
 import type { Bindings } from "../src/types/bindings";
 import { freshDb, interceptingD1, realD1 } from "./helpers/d1";
@@ -999,7 +1011,7 @@ describe("the log line", () => {
     const r = await tick();
     expect(repullAdvanceLogLine(r)).toEqual({
       level: "info",
-      line: "[repull-advance] examined=1 waiting=0 screens=0 reviews=0 gates_cleared=0 holds_changed=1 held=main-moved:1 refused=none",
+      line: "[repull-advance] examined=1 waiting=0 screens=0 reviews=0 gates_cleared=0 resumed=0 unconfirmed=0 holds_changed=1 held=main-moved:1 refused=none",
     });
     expect(repullAdvanceLogLine(await tick())).toBeNull();
   });
@@ -1019,7 +1031,404 @@ describe("the log line", () => {
     expect(log?.line).not.toContain(DS);
   });
 
-  test("every failure word has the stored shape", () => {
-    for (const w of ADVANCE_FAILURES) expect(w).toMatch(FIXED_WORD_RE);
+  test("every failure word has the stored shape, and is the dispatch record's or the scheduler's", () => {
+    const known = new Set<string>([...DISPATCH_CODES, ...REPULL_SCHEDULER_OUTCOMES]);
+    const own = ["row-failed", "tick-failed", "stamp-failed"];
+    for (const w of ADVANCE_FAILURES) {
+      expect(w).toMatch(FIXED_WORD_RE);
+      expect([w, known.has(w) || own.includes(w)]).toEqual([w, true]);
+    }
+  });
+});
+
+// ----------------------------------------------------------------------------
+// Stalled rows
+// ----------------------------------------------------------------------------
+
+const SECRET = "repull-advance-callback-secret";
+const CLI = "1.2.3";
+
+/** Today at `hour`:`minute` UTC, a real instant. */
+function utcToday(hour: number, minute = 0): Date {
+  const d = new Date();
+  d.setUTCHours(hour, minute, 0, 0);
+  return d;
+}
+
+const d1Time = (d: Date) => d.toISOString().slice(0, 19).replace("T", " ");
+
+/** A mirror with an automatic record of `ds` stalled at `status`, last written `quietMinutes` before `now`. */
+function stalled(
+  status: RepullStatus,
+  now: Date,
+  o: { ds?: string; quietMinutes?: number; over?: Row } = {},
+): number {
+  const ds = o.ds ?? DS;
+  mirror(ds);
+  return seedRow(ds, status, {
+    updated_at: d1Time(new Date(now.getTime() - (o.quietMinutes ?? 120) * 60_000)),
+    ...o.over,
+  });
+}
+
+/** A dispatch of re-pull `id` that ended as `status` (yesterday, so it takes none of today's cap). */
+function endedDispatch(id: number, status: string, ds: string = DS): void {
+  const code =
+    status === "unreported"
+      ? null
+      : status === "dispatch_failed"
+        ? "dispatch-refused"
+        : "copy-failed";
+  const reported =
+    status === "unreported" || status === "dispatch_failed" ? null : "datetime('now', '-1 day')";
+  db.run(
+    `INSERT INTO upstream_repull_dispatches (kind, dataset_id, upstream_ds, from_tag, to_tag,
+                                            repull_id, nonce, status, code, dispatched_at, reported_at)
+     VALUES ('open', ?, ?, '1.0.0', '1.0.1', ?, NULL, ?, ?, datetime('now', '-1 day'),
+             ${reported ?? "NULL"})`,
+    [ds, `ds${ds.slice(2)}`, id, status, code],
+  );
+}
+
+const resumeTick = (
+  now: Date,
+  e: Bindings = env(),
+  opts: { cliVersion?: string; dispatchTimeoutMs?: number } = {},
+) => runRepullAdvanceCron(e, { now, cliVersion: CLI, ...opts }) as Promise<AdvanceTickResult>;
+
+const dispatchesOf = (id: number) =>
+  db
+    .query("SELECT * FROM upstream_repull_dispatches WHERE repull_id = ? ORDER BY id")
+    .all(id) as DispatchRow[];
+
+const usedToday = () => (db.query(OPEN_DISPATCHES_TODAY_SQL).get() as { used: number }).used;
+
+describe("a stalled automatic re-pull is resumed", () => {
+  const TEN = () => utcToday(10);
+
+  test("a copied row whose run failed gets one resume dispatch, which counts against the open cap", async () => {
+    const id = stalled("copied", TEN());
+    endedDispatch(id, "failed");
+    expect(usedToday()).toBe(0);
+
+    const r = await resumeTick(TEN());
+    expect(r).toMatchObject({ examined: 1, resumed: 1, unconfirmed: 0, errors: [] });
+    const sent = dispatched("run-upstream-repull");
+    expect(sent).toHaveLength(1);
+    const claimed = dispatchesOf(id).at(-1) as DispatchRow;
+    expect(claimed).toMatchObject({ kind: "open", status: "dispatched", repull_id: id });
+    expect(claimed.nonce).not.toBeNull();
+    expect(sent[0]).toEqual({
+      mode: "open",
+      dataset_id: DS,
+      upstream_ds: `ds${DS.slice(2)}`,
+      from_tag: "1.0.0",
+      to_tag: "1.0.1",
+      dispatch_id: String(claimed.id),
+      dispatch_token: expect.any(String),
+      cli_version: CLI,
+      repull_id: String(id),
+    });
+    expect(
+      await verifyRepullDispatchToken(
+        String(sent[0]?.dispatch_token),
+        { dispatchId: claimed.id, datasetId: DS, nonce: claimed.nonce as string },
+        SECRET,
+      ),
+    ).toBe(true);
+    // It took one of today's units, as a first dispatch does.
+    expect(usedToday()).toBe(1);
+    expect(rowOf(id)).toMatchObject({ status: "copied", hold_reason: null });
+    // GitHub was asked nothing about the dataset's repository: the row has no pull request.
+    expect(githubRequests().filter((q) => q.includes(`/${DS}/`))).toEqual([]);
+  });
+
+  test("while its run is out the next tick resumes nothing", async () => {
+    const id = stalled("registered", TEN());
+    endedDispatch(id, "failed");
+    await resumeTick(TEN());
+    const r = await resumeTick(new Date(TEN().getTime() + HALF_HOUR));
+    expect(r).toMatchObject({ resumed: 0, waiting: 1 });
+    expect(dispatched("run-upstream-repull")).toHaveLength(1);
+  });
+
+  test("while a run is out for the dataset the row is left to it, whatever else it would say", async () => {
+    const id = stalled("copied", TEN());
+    db.run(
+      `INSERT INTO upstream_repull_dispatches (kind, dataset_id, upstream_ds, from_tag, to_tag,
+                                              repull_id, nonce, status, reported_at)
+       VALUES ('open', ?, ?, '1.0.0', '1.0.1', ?, ?, 'started', datetime('now'))`,
+      [DS, `ds${DS.slice(2)}`, id, "n".repeat(36)],
+    );
+    // The run's own create refuses an anonymous dataset; the tick does not speak for the run.
+    db.run("UPDATE datasets SET first_published_at = NULL, anonymous = 1");
+    const r = await resumeTick(TEN());
+    expect(r).toMatchObject({ resumed: 0, waiting: 1, held: {} });
+    expect(rowOf(id).hold_reason).toBeNull();
+  });
+
+  for (const last of ["failed", "unreported", "dispatch_failed", null] as const) {
+    test(`a planned row whose last dispatch is ${last ?? "none"} is resumed`, async () => {
+      const id = stalled("planned", TEN());
+      if (last !== null) endedDispatch(id, last);
+      expect((await resumeTick(TEN())).resumed).toBe(1);
+    });
+  }
+
+  for (const [hour, minute, resumed] of [
+    [0, 30, false],
+    [2, 59, false],
+    [RESUME_WINDOW_UTC.from, 0, true],
+    [RESUME_WINDOW_UTC.to, 59, true],
+    [16, 0, false],
+    [23, 30, false],
+  ] as const) {
+    test(`at ${hour}:${String(minute).padStart(2, "0")} UTC it is ${resumed ? "" : "not "}resumed`, async () => {
+      const now = utcToday(hour, minute);
+      expect(inResumeWindow(now)).toBe(resumed);
+      const id = stalled("copied", now);
+      endedDispatch(id, "failed");
+      const r = await resumeTick(now);
+      expect(r.resumed).toBe(resumed ? 1 : 0);
+      expect(dispatched("run-upstream-repull")).toHaveLength(resumed ? 1 : 0);
+      if (!resumed) expect(rowOf(id).hold_reason).toBeNull();
+    });
+  }
+
+  test(`a row that moved within ${RESUME_QUIET_MINUTES} minutes waits`, async () => {
+    const id = stalled("copied", TEN(), { quietMinutes: RESUME_QUIET_MINUTES - 1 });
+    endedDispatch(id, "failed");
+    expect(await resumeTick(TEN())).toMatchObject({ resumed: 0, waiting: 1 });
+    expect(gh.dispatches).toEqual([]);
+  });
+
+  test(`the attempt after ${AUTOMATIC_RESUMES_MAX} dispatches holds resume-exhausted`, async () => {
+    const id = stalled("copied", TEN());
+    endedDispatch(id, "failed");
+    endedDispatch(id, "dispatch_failed");
+    expect((await resumeTick(TEN())).resumed).toBe(1);
+    expect(dispatchesOf(id)).toHaveLength(AUTOMATIC_RESUMES_MAX);
+    // That run fails too, and the next tick finds the row's dispatches spent.
+    db.run(
+      "UPDATE upstream_repull_dispatches SET status = 'failed', code = 'copy-failed', nonce = NULL, reported_at = datetime('now') WHERE status = 'dispatched'",
+    );
+    const r = await resumeTick(new Date(TEN().getTime() + HALF_HOUR));
+    expect(r).toMatchObject({ resumed: 0, held: { "resume-exhausted": 1 } });
+    expect(rowOf(id).hold_reason).toBe("resume-exhausted");
+    expect(dispatched("run-upstream-repull")).toHaveLength(1);
+    expect(dispatchesOf(id)).toHaveLength(AUTOMATIC_RESUMES_MAX);
+  });
+
+  test("a run that refused holds resume-refused, and is not sent again", async () => {
+    const id = stalled("prepared", TEN());
+    endedDispatch(id, "refused");
+    const r = await resumeTick(TEN());
+    expect(r).toMatchObject({ resumed: 0, held: { "resume-refused": 1 } });
+    expect(gh.dispatches).toEqual([]);
+  });
+
+  test("a full day of the open cap: no resume, and the row says cap-exhausted", async () => {
+    const id = stalled("copied", TEN());
+    endedDispatch(id, "failed");
+    const other = stalled("copied", TEN(), { ds: "on098802" });
+    endedDispatch(other, "failed", "on098802");
+    // Another dataset's first dispatch of today takes the one unit the cap allows.
+    db.run(
+      `INSERT INTO upstream_repull_dispatches (kind, dataset_id, upstream_ds, from_tag, to_tag, status,
+                                              code, reported_at)
+       VALUES ('open', 'on098803', 'ds098803', '1.0.0', '1.0.1', 'failed', 'copy-failed', datetime('now'))`,
+    );
+    const r = await resumeTick(TEN(), env({ REPULL_DAILY_OPEN_CAP: "1" }));
+    expect(r).toMatchObject({ resumed: 0, held: { "cap-exhausted": 2 } });
+    expect(gh.dispatches).toEqual([]);
+    expect(dispatchesOf(id)).toHaveLength(1);
+    expect(dispatchesOf(other)).toHaveLength(1);
+    expect(usedToday()).toBe(1);
+  });
+
+  for (const [cap, errors] of [
+    ["0", []],
+    ["x", ["cap-unreadable"]],
+  ] as const) {
+    test(`REPULL_DAILY_OPEN_CAP=${cap}: no resume`, async () => {
+      const id = stalled("copied", TEN());
+      endedDispatch(id, "failed");
+      const r = await resumeTick(TEN(), env({ REPULL_DAILY_OPEN_CAP: cap }));
+      expect(r).toMatchObject({ resumed: 0, errors, held: { "cap-exhausted": 1 } });
+      expect(gh.dispatches).toEqual([]);
+    });
+  }
+
+  const fenced: Array<[string, () => void, string]> = [
+    [
+      "the dataset became anonymous",
+      () => db.run("UPDATE datasets SET first_published_at = NULL, anonymous = 1"),
+      "dataset-anonymous",
+    ],
+    [
+      "the dataset was withdrawn",
+      () => db.run("UPDATE datasets SET withdrawn_at = datetime('now')"),
+      "dataset-withdrawn",
+    ],
+    [
+      "an import of it has not settled",
+      () =>
+        db.run(
+          `INSERT INTO import_jobs (dataset_id, source, source_id, status)
+           VALUES (?, 'openneuro', ?, 'copying')`,
+          [DS, `ds${DS.slice(2)}`],
+        ),
+      "import-in-flight",
+    ],
+    [
+      "it is no longer the mirror the record names",
+      () => db.run("UPDATE datasets SET source_id = 'ds000001'"),
+      "dataset-not-mirror",
+    ],
+    [
+      "the plan stated a correction",
+      () =>
+        db.run(
+          `UPDATE upstream_repulls SET counts = '{"unexplained":0,"conflicts":0,"corrections":1}'`,
+        ),
+      "has-corrections",
+    ],
+  ];
+  for (const [name, flip, word] of fenced) {
+    test(`${name}: held ${word}, nothing sent`, async () => {
+      const id = stalled("copied", TEN());
+      endedDispatch(id, "failed");
+      flip();
+      const r = await resumeTick(TEN());
+      expect(r).toMatchObject({ resumed: 0, held: { [word]: 1 } });
+      expect(gh.dispatches).toEqual([]);
+      expect(dispatchesOf(id)).toHaveLength(1);
+      expect(githubRequests()).toEqual([]);
+    });
+  }
+
+  test("GitHub refuses the resume: its dispatch ends dispatch_failed, its unit is freed, and the tick sends no more", async () => {
+    const a = stalled("copied", TEN());
+    endedDispatch(a, "failed");
+    const b = stalled("copied", TEN(), { ds: "on098802" });
+    endedDispatch(b, "failed", "on098802");
+    gh.dispatchStatus = 422;
+    const r = await resumeTick(TEN());
+    expect(r).toMatchObject({ resumed: 0, waiting: 1, errors: ["dispatch-refused"] });
+    expect(dispatchesOf(a).at(-1)).toMatchObject({
+      status: "dispatch_failed",
+      code: "dispatch-refused",
+      nonce: null,
+    });
+    expect(dispatchesOf(b)).toHaveLength(1);
+    expect(usedToday()).toBe(0);
+    expect(gh.requests.filter((q) => q.endsWith("/.github/dispatches"))).toHaveLength(1);
+  });
+
+  test("a resume whose answer was lost keeps its dispatch and its unit, and is an error to log", async () => {
+    const id = stalled("copied", TEN());
+    endedDispatch(id, "failed");
+    gh.slow = "/dispatches";
+    gh.slowMs = 400;
+    const r = await resumeTick(TEN(), env(), { dispatchTimeoutMs: 50 });
+    expect(r).toMatchObject({ resumed: 0, unconfirmed: 1 });
+    expect(dispatchesOf(id).at(-1)).toMatchObject({ status: "dispatched" });
+    expect(usedToday()).toBe(1);
+    expect(repullAdvanceLogLine(r)?.level).toBe("error");
+  });
+
+  test("with the open switch off a stalled row says switch-off, and nothing is claimed or sent", async () => {
+    const id = stalled("copied", TEN());
+    endedDispatch(id, "failed");
+    const r = await resumeTick(TEN(), env({ AUTO_REPULL_ENABLED: undefined }));
+    expect(r).toMatchObject({ resumed: 0, held: { "switch-off": 1 } });
+    expect(dispatchesOf(id)).toHaveLength(1);
+    expect(gh.requests).toEqual([]);
+  });
+
+  test("with the open switch off even a stalled row a run is out for says switch-off", async () => {
+    const id = stalled("copied", TEN());
+    db.run(
+      `INSERT INTO upstream_repull_dispatches (kind, dataset_id, upstream_ds, from_tag, to_tag,
+                                              repull_id, nonce, status)
+       VALUES ('open', ?, ?, '1.0.0', '1.0.1', ?, ?, 'dispatched')`,
+      [DS, `ds${DS.slice(2)}`, id, "n".repeat(36)],
+    );
+    const r = await resumeTick(TEN(), env({ AUTO_REPULL_ENABLED: undefined }));
+    expect(r).toMatchObject({ waiting: 0, held: { "switch-off": 1 } });
+  });
+
+  test("a development build resumes nothing", async () => {
+    const id = stalled("copied", TEN());
+    endedDispatch(id, "failed");
+    const r = await resumeTick(TEN(), env(), { cliVersion: "0.10.21-dev0" });
+    expect(r).toMatchObject({ resumed: 0, errors: ["cli-unreleased"] });
+    expect(dispatchesOf(id)).toHaveLength(1);
+    expect(gh.dispatches).toEqual([]);
+  });
+
+  test("an administrator's stalled row is never resumed", async () => {
+    const id = stalled("copied", TEN(), { over: { origin: "administrator" } });
+    const r = await resumeTick(TEN());
+    expect(r).toMatchObject({ examined: 0, resumed: 0 });
+    expect(rowOf(id).hold_reason).toBeNull();
+    expect(gh.requests).toEqual([]);
+  });
+});
+
+describe("what a tick costs", () => {
+  // The 30-minute tick shares one invocation's subrequest allowance with every job on it, so the
+  // advance tick's own use is counted here from the code as it runs: every D1 statement prepared
+  // (a batch's statements each count) and every request to GitHub. Five rows, the most a tick reads.
+  test("five rows starting their gates, waiting on them, and clearing them", async () => {
+    let statements = 0;
+    const base = realD1(db);
+    const counting = {
+      prepare(sql: string) {
+        statements++;
+        return base.prepare(sql);
+      },
+      batch: (s: never[]) => base.batch(s),
+    } as unknown as D1Database;
+    const measure = async () => {
+      statements = 0;
+      gh.requests = [];
+      await tick(env({}, counting));
+      return { d1: statements, github: githubRequests().length };
+    };
+    const datasets = [1, 2, 3, 4, 5].map((i) => `on0988${String(i).padStart(2, "0")}`);
+    const ids = datasets.map((ds) => openRow(ds));
+
+    // Each row's screen and review are started: the most a tick spends.
+    expect(await measure()).toEqual({ d1: 112, github: 40 });
+    // Each waits on them: the facts are read again, and nothing is written.
+    expect(await measure()).toEqual({ d1: 37, github: 20 });
+    // Each is clean, and the record's own transition reads its live head before it writes.
+    db.run("DELETE FROM pr_reviews");
+    ids.forEach((id, k) => {
+      markScreen(id, "clean", datasets[k]);
+      review("pass", datasets[k]);
+    });
+    expect(await measure()).toEqual({ d1: 52, github: 25 });
+    expect(ids.every((id) => rowOf(id).status === "gates_clear")).toBe(true);
+  });
+
+  test("a stalled row's resume", async () => {
+    let statements = 0;
+    const base = realD1(db);
+    const counting = {
+      prepare(sql: string) {
+        statements++;
+        return base.prepare(sql);
+      },
+      batch: (s: never[]) => base.batch(s),
+    } as unknown as D1Database;
+    const now = utcToday(10);
+    const id = stalled("copied", now);
+    endedDispatch(id, "failed");
+    const r = await resumeTick(now, env({}, counting));
+    expect(r.resumed).toBe(1);
+    // Eight for the row and two for the tick (the list of rows, the stamp); one dispatch.
+    expect({ d1: statements, github: gh.requests.length }).toEqual({ d1: 10, github: 1 });
   });
 });

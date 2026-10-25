@@ -885,7 +885,10 @@ export const DISPATCH_FINAL_CODES = [
  * Why an automatic re-pull waits where it is (`upstream_repulls.hold_reason`): the first rule of
  * the machine-clean definition that does not hold (`shared/repull-machine-clean.ts` lists the rules
  * in the order that yields these words, `MACHINE_CLEAN_HOLDS`), or a bound the automatic path
- * reached. A hold is an observation, never a transition.
+ * reached: `cap-exhausted` (a day's units of a cap are used), `resume-exhausted` (a row that
+ * stalled before its pull request opened was dispatched as often as the automatic path dispatches
+ * one), `resume-refused` (its last run refused, so another would refuse again), and the later
+ * slices' `finish-exhausted` and `merge-refused`. A hold is an observation, never a transition.
  */
 export const REPULL_HOLD_REASONS = [
   "not-production",
@@ -928,6 +931,7 @@ export const REPULL_HOLD_REASONS = [
   "cap-exhausted",
   "claim-held",
   "resume-exhausted",
+  "resume-refused",
   "finish-exhausted",
   "merge-refused",
 ] as const;
