@@ -458,9 +458,20 @@ function upstreamSection(u: UpstreamFleetSummary | null): string[] {
   ];
 }
 
-/** When a tick last ran, or that nothing has stamped it yet (which is not the same as unknown). */
+/** The shape SQLite's `datetime()` writes, which is the only shape of a stamp the report prints. */
+const SQLITE_TIME_RE = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
+
+/**
+ * When a tick last ran, or that nothing has stamped it yet (which is not the same as unknown). The
+ * stamp is a text column that checks nothing about its content, and this report is filed on a
+ * public-facing repository, so a value that is not a time as SQLite writes one is not printed at
+ * all: it is said to be unreadable.
+ */
 function ranText(what: string, at: string | null): string {
-  return at === null ? `${what} has no recorded run` : `${what} last ran ${at} UTC`;
+  if (at === null) return `${what} has no recorded run`;
+  return SQLITE_TIME_RE.test(at)
+    ? `${what} last ran ${at} UTC`
+    : `${what} has a recorded run that could not be read`;
 }
 
 /** A cap as the Worker reads it; an unreadable one is said to read 0, which stops the work. */

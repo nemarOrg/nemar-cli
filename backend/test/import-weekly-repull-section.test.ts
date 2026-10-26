@@ -1030,6 +1030,38 @@ describe("no dataset reaches the public report", () => {
     expect(section).not.toContain("not-a-hold-word");
   });
 
+  test("a scheduler stamp that is not a time is never printed, whatever it says", async () => {
+    // The stamps are text columns that check nothing about their content, so a stored value can be
+    // anything, an id among it.
+    for (const forged of [
+      "on098701",
+      "nm000123",
+      "on098701 2026-10-26 03:00:01",
+      "2026-10-26 03:00:01 on098701",
+      "2026-10-26 03:00:01\non098701",
+      "2026-10-26T03:00:01Z",
+    ]) {
+      stampScheduler({ tick: forged, outcome: "ran", advance: forged });
+      const r = await report(ON);
+      const section = sectionOf(r.body);
+      expect([forged, section.includes(forged)]).toEqual([forged, false]);
+      expect([forged, /\b(nm|on|ds|xx)\d{6}\b/i.test(r.body)]).toEqual([forged, false]);
+      expect(section).toContain(
+        "The scheduler's daily tick has a recorded run that could not be read and concluded `ran`.",
+      );
+      expect(section).toContain("The advance tick has a recorded run that could not be read.");
+      // With a switch on, a daily stamp the report cannot read is a reason of its own.
+      expect(r.facts.repulls?.attention).toEqual([
+        "the automatic re-pull is on, and its scheduler's last run could not be read",
+      ]);
+    }
+    // A stamp in SQLite's form is still printed, so the loop above is not everything unreadable.
+    stampScheduler({ tick: at(-HOUR), outcome: "ran", advance: at(-HOUR / 2) });
+    const section = sectionOf((await report(ON)).body);
+    expect(section).toContain(`The scheduler's daily tick last ran ${at(-HOUR)} UTC and concluded`);
+    expect(section).toContain(`The advance tick last ran ${at(-HOUR / 2)} UTC.`);
+  });
+
   test("the report carries no dataset id even from facts that hold one where a word is, and the rule is the gather's", async () => {
     // The facts the renderer is handed, not the ones the gather makes: an id of each shape sits in
     // every place the report prints a word, beside listed words and one that names anonymity.
