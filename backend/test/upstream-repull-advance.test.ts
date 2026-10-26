@@ -1268,7 +1268,7 @@ describe("the log line", () => {
 
   test("every failure word has the stored shape, and is the dispatch record's or the scheduler's", () => {
     const known = new Set<string>([...DISPATCH_CODES, ...REPULL_SCHEDULER_OUTCOMES]);
-    const own = ["row-failed", "tick-failed", "stamp-failed"];
+    const own = ["time-unreadable", "row-failed", "tick-failed", "stamp-failed"];
     for (const w of ADVANCE_FAILURES) {
       expect(w).toMatch(FIXED_WORD_RE);
       expect([w, known.has(w) || own.includes(w)]).toEqual([w, true]);
@@ -1603,6 +1603,16 @@ describe("a stalled automatic re-pull is resumed", () => {
       expect((await resumeTick(TEN())).resumed).toBe(resumed ? 1 : 0);
     });
   }
+
+  test("a time that does not parse is an error, never a quiet wait", async () => {
+    const id = stalled("copied", TEN(), { over: { updated_at: "not a time" } });
+    endedDispatch(id, "failed");
+    const r = await resumeTick(TEN());
+    expect(r).toMatchObject({ resumed: 0, notDue: 0, errors: ["time-unreadable"] });
+    expect(dispatchesOf(id)).toHaveLength(1);
+    expect(gh.dispatches).toEqual([]);
+    expect(repullAdvanceLogLine(r)?.level).toBe("error");
+  });
 
   test("a run that refused holds resume-refused, and is not sent again", async () => {
     const id = stalled("prepared", TEN());

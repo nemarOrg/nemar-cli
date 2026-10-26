@@ -299,7 +299,8 @@ export const ADVANCE_STAMP_SQL =
  *  - `cap-unreadable`: the open cap is set to something its reader cannot take;
  *  - `to-tag-malformed`: a recorded tag is not a tag;
  *  - `repull-mismatch`: the claim does not find the row the tick read stalled with its tags.
- * Then the tick's own: a row whose step threw, the tick itself (it could not list its rows), its
+ * Then the tick's own: a stalled row's time or its last dispatch's that does not parse
+ * (`time-unreadable`), a row whose step threw, the tick itself (it could not list its rows), its
  * stamp.
  */
 export const ADVANCE_FAILURES = [
@@ -312,6 +313,7 @@ export const ADVANCE_FAILURES = [
   "cap-unreadable",
   "to-tag-malformed",
   "repull-mismatch",
+  "time-unreadable",
   "row-failed",
   "tick-failed",
   "stamp-failed",
@@ -497,14 +499,15 @@ export function inResumeWindow(now: Date): boolean {
 
 /**
  * Whether neither the row nor its latest dispatch has moved for {@link RESUME_QUIET_MINUTES}
- * minutes. Both are D1's UTC `datetime`s. The dispatch is read as well as the row because a run
- * that fails before it writes anything leaves the row's `updated_at` where it was, hours old, and
- * the row would otherwise be resumed on the next tick after every failure.
+ * minutes, or null when either time cannot be read. Both are D1's UTC `datetime`s. The dispatch is
+ * read as well as the row because a run that fails before it writes anything leaves the row's
+ * `updated_at` where it was, hours old, and the row would otherwise be resumed on the next tick
+ * after every failure.
  */
-function quietSince(updatedAt: string, lastDispatchAt: string | null, now: Date): boolean {
+function quietSince(updatedAt: string, lastDispatchAt: string | null, now: Date): boolean | null {
   const at = (stamp: string) => Date.parse(`${stamp.replace(" ", "T")}Z`);
   const moved = [updatedAt, lastDispatchAt].filter((x): x is string => x !== null).map(at);
-  if (moved.some((x) => !Number.isFinite(x))) return false;
+  if (moved.some((x) => !Number.isFinite(x))) return null;
   return now.getTime() - Math.max(...moved) >= RESUME_QUIET_MINUTES * 60_000;
 }
 
@@ -664,7 +667,14 @@ async function advanceStalled(t: Tick, row: RepullRow): Promise<void> {
     return observe(t, row, null);
   }
   if (d.opens >= AUTOMATIC_OPEN_DISPATCHES_MAX) return observe(t, row, "resume-exhausted");
-  if (!inResumeWindow(t.now) || !quietSince(row.updated_at, d.last_at, t.now) || t.sendStopped) {
+  const quiet = quietSince(row.updated_at, d.last_at, t.now);
+  if (quiet === null) {
+    // D1 writes every one of these times itself, so this is a fault to see, not a wait: unknown is
+    // never read as "not yet", which would leave the row unresumed for good with nothing said.
+    r.errors.push("time-unreadable");
+    return observe(t, row, null);
+  }
+  if (!inResumeWindow(t.now) || !quiet || t.sendStopped) {
     r.notDue++;
     return observe(t, row, null);
   }
