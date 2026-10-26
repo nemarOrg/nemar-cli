@@ -34,6 +34,12 @@ import {
   WEEKLY_NEUROBAGEL_CHECKS,
   weeklyAttention,
 } from "../../../shared/contract/weekly-attention.js";
+import type {
+  RepullCapReading,
+  RepullSchedulerRow,
+  RepullWeekFacts,
+  WordCounts,
+} from "../../../shared/repull-observability.js";
 import {
   UPSTREAM_STATES,
   type UpstreamFleetSummary,
@@ -236,6 +242,14 @@ export interface WeeklySummaryFacts {
    */
   upstream: UpstreamFleetSummary | null;
 
+  /**
+   * The upstream re-pulls' week (epic #1046 phase 7, ADR 0111): the switches in force, the
+   * scheduler's last tick, the dispatches and merges counted, and the reasons a person should
+   * look. Counts and fixed words, no dataset named: the report is filed on a public-facing
+   * repository. `null` when the read failed: unknown, not zero, and a failed part is listed.
+   */
+  repulls: RepullWeekFacts | null;
+
   /** Anything that went wrong producing this report. Listed, never swallowed. */
   errors: { stage: string; error: string }[];
 }
@@ -319,6 +333,10 @@ export function buildWeeklySummaryBody(f: WeeklySummaryFacts, nowIso: string): s
     "## Upstream freshness",
     "",
     ...upstreamSection(f.upstream),
+    "",
+    "## Upstream re-pulls",
+    "",
+    ...repullSection(f.repulls),
     "",
     "## Dispatch liveness",
     "",
@@ -438,6 +456,92 @@ function upstreamSection(u: UpstreamFleetSummary | null): string[] {
   ];
 }
 
+/** When a tick last ran, or that nothing has stamped it yet (which is not the same as unknown). */
+function ranText(what: string, at: string | null): string {
+  return at === null ? `${what} has no recorded run` : `${what} last ran ${at} UTC`;
+}
+
+/** A cap as the Worker reads it; an unreadable one is said to read 0, which stops the work. */
+function capText(c: RepullCapReading): string {
+  return c.source === "unreadable"
+    ? "**unreadable**, so it reads 0"
+    : `${count(c.value)} (${c.source === "set" ? "set" : "the default"})`;
+}
+
+/** The scheduler's stamps in a sentence; a row the report could not find is unknown, not "never". */
+function schedulerText(s: RepullSchedulerRow | null): string {
+  if (s === null) {
+    return "The scheduler's row could not be found, so when it last ran is **unknown**, not never.";
+  }
+  const outcome = s.last_outcome === null ? "" : ` and concluded \`${s.last_outcome}\``;
+  return `${ranText("The scheduler's daily tick", s.last_tick_at)}${outcome}. ${ranText("The advance tick", s.last_advance_at)}.`;
+}
+
+/** A table of fixed words and their counts, or nothing when there are none. */
+function wordTable(title: string, words: WordCounts): string[] {
+  const rows = Object.entries(words).sort(([a], [b]) => a.localeCompare(b));
+  if (rows.length === 0) return [];
+  return [
+    "",
+    `${title}:`,
+    "",
+    "| word | count |",
+    "|---|---|",
+    ...rows.map(([word, n]) => `| \`${word}\` | ${count(n)} |`),
+  ];
+}
+
+/**
+ * The upstream re-pulls' section (epic #1046 phase 7, ADR 0111): counts only, rendered through
+ * {@link count}, no dataset named, and present every week whether or not any work was done (ADR
+ * 0054: a quiet week with the switches off is a true zero, and a missing section would read as
+ * "nothing to report"). `null` is unknown, never zero. What raises attention is decided by
+ * `repullAttention` and reaches the headline through the shared rule, not here.
+ */
+function repullSection(r: RepullWeekFacts | null): string[] {
+  // `== null`: an absent field is unknown too, as in the log line, never a render that throws.
+  if (r == null) {
+    return [
+      "The upstream re-pull counts could not be read, so none of their numbers are available. This is **unknown**, not zero.",
+    ];
+  }
+  const on = (v: boolean) => (v ? "**on**" : "off");
+  const s = r.switches;
+  const d = r.dispatches;
+  return [
+    `Open switch (\`AUTO_REPULL_ENABLED\`): ${on(s.auto_repull_enabled)}. Merge switch (\`AUTO_REPULL_MERGE_ENABLED\`): ${on(s.auto_repull_merge_enabled)}.${s.environment_is_production ? "" : " This is not the production Worker, so neither switch is honored."} Daily open cap: ${capText(s.open_cap)}. Daily merge cap: ${capText(s.merge_cap)}.`,
+    "",
+    schedulerText(r.scheduler),
+    "",
+    "| | |",
+    "|---|---|",
+    `| Dispatches sent this week | ${count(d.sent)} |`,
+    `| Opened a pull request | ${count(d.by_status.opened)} |`,
+    `| Finished after a merge | ${count(d.by_status.finished)} |`,
+    `| Refused by the run | ${count(d.by_status.refused)} |`,
+    `| Failed in the run | ${count(d.by_status.failed)} |`,
+    `| Not reported in time | ${count(d.by_status.unreported)} |`,
+    `| Not accepted by GitHub | ${count(d.by_status.dispatch_failed)} |`,
+    `| Still running | ${count(d.by_status.dispatched + d.by_status.started)} |`,
+    `| Open automatic re-pulls now | ${count(r.open_automatic.total)} |`,
+    `| Of those, held | ${count(r.open_automatic.held)} |`,
+    `| Claims to merge held over an hour | ${count(r.held_claims)} |`,
+    `| Re-pulls that ended failed this week | ${count(r.ended_failed)} |`,
+    `| Merged by the Worker | ${count(r.merged.worker)} |`,
+    `| Merged by an administrator | ${count(r.merged.administrator)} |`,
+    `| Merged outside NEMAR's tools | ${count(r.merged.outside_tool)} |`,
+    `| Merged, claim not in the audit log | ${count(r.merged.unattributed)} |`,
+    ...wordTable("Refused by the run, by word", d.by_word.refused),
+    ...wordTable("Failed in the run, by word", d.by_word.failed),
+    ...wordTable("Not accepted by GitHub, by word", d.by_word.dispatch_failed),
+    ...wordTable("Held automatic re-pulls, by word", r.open_automatic.holds),
+    "",
+    "A dispatch is counted in the week it was sent, in the state it has when this report is made. A switch that is off, a re-pull waiting on a gate (the identifier screen, the review, BIDS validation) and a run's refusal are expected and are not an alarm; what asks for attention is a scheduler that stopped while a switch is on, a dispatch nobody answered, a claim to merge held for an hour, a re-pull that ended failed, a bound reached and a cap that cannot be read.",
+    "",
+    "Names and reasons: `nemar admin repull auto`.",
+  ];
+}
+
 /**
  * The Neurobagel section. Counts and verdicts, and each check's own one-sentence reason (which
  * the sweep writes generically, with counts and public upstream tags only). `unchecked` is
@@ -509,6 +613,9 @@ export function weeklySummaryLogLine(f: WeeklySummaryFacts, issue: number | null
     `neurobagel_findings=${count(f.neurobagelFindings)} ` +
     `upstream_stale=${f.upstream === null ? "unknown" : count(f.upstream.counts.stale)} ` +
     `upstream_unchecked=${f.upstream === null ? "unknown" : count(f.upstream.counts.states.unchecked)} ` +
+    `repull_dispatched=${f.repulls == null ? "unknown" : count(f.repulls.dispatches.sent)} ` +
+    `repull_merged_worker=${f.repulls == null ? "unknown" : count(f.repulls.merged.worker)} ` +
+    `repull_unreported=${f.repulls == null ? "unknown" : count(f.repulls.dispatches.by_status.unreported)} ` +
     `issue=${issue === null ? "none" : `#${issue}`} errors=${f.errors.length}`
   );
 }

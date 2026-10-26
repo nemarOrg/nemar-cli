@@ -71,6 +71,7 @@ import {
 } from "./import-weekly-summary.js";
 import { readLedger } from "./neurobagel-plan.js";
 import { VERIFY_ACTIONS, parseHeartbeat } from "./neurobagel-verify.js";
+import { gatherRepullFacts } from "./upstream-repull-weekly.js";
 import { runUpstreamFleetSummary } from "./upstream-status.js";
 
 /** The audit action this job writes, and reads to gate itself. */
@@ -335,6 +336,7 @@ export async function runWeeklyImportSummary(
     neurobagel: null,
     neurobagelFindings: null,
     upstream: null,
+    repulls: null,
     errors: [],
   };
 
@@ -381,6 +383,7 @@ export async function runWeeklyImportSummary(
   await gatherSweepActivity(env, facts, now);
   await gatherNeurobagel(env, facts, now);
   await gatherUpstream(env, facts);
+  await gatherRepulls(env, facts, now);
 
   // Rendered before posting, and returned whether or not the post happens: a dry
   // run's whole value is seeing this.
@@ -447,6 +450,29 @@ async function gatherUpstream(env: Bindings, facts: WeeklySummaryFacts): Promise
   } catch (err) {
     facts.upstream = null;
     facts.errors.push({ stage: "upstream", error: errText(err) });
+  }
+}
+
+/**
+ * The upstream re-pulls' week (epic #1046 phase 7, #1913; ADR 0111): dispatches and merges counted
+ * over the window, the switches the Worker reads, the scheduler's last tick, and the reasons a
+ * person should look (`upstream-repull-weekly.ts` decides them, and the shared attention rule adds
+ * them to the headline). Counts and fixed words, no dataset: the report is filed on a public-facing
+ * repository.
+ *
+ * A read that throws leaves `repulls` null (unknown, never zero) and lists a failed part, which the
+ * headline counts; every other section is intact. There is no dependency seam: the real reads run in
+ * every weekly test, on a real database. It sends nothing and mails no one.
+ */
+async function gatherRepulls(env: Bindings, facts: WeeklySummaryFacts, now: Date): Promise<void> {
+  try {
+    facts.repulls = await gatherRepullFacts(env, {
+      from: new Date(now.getTime() - WINDOW_MS),
+      to: now,
+    });
+  } catch (err) {
+    facts.repulls = null;
+    facts.errors.push({ stage: "repulls", error: errText(err) });
   }
 }
 

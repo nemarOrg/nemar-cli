@@ -9763,6 +9763,37 @@ importWeeklyCommand
         `anomaly=${weeklyCount(u.anomaly)} unknown=${weeklyCount(u.unknown)} unchecked=${weeklyCount(u.unchecked)}`;
       console.log(chalk.cyan(`${line}${partial}`));
     }
+    // Epic #1046 phase 7: the upstream re-pulls' week, as the report counts it. Absent or null is
+    // unknown; the reasons to look arrive below with the rest, from the shared rule.
+    if (f.repulls == null) {
+      console.log(chalk.cyan(`repulls=${chalk.yellow("unknown")}`));
+    } else {
+      const r = f.repulls;
+      const sw = r.switches;
+      const switches = sw.auto_repull_merge_enabled
+        ? "open+merge"
+        : sw.auto_repull_enabled
+          ? "open"
+          : "off";
+      console.log(
+        chalk.cyan(
+          `repulls: switches=${switches} dispatched=${weeklyCount(r.dispatches.sent)} ` +
+            `opened=${weeklyCount(r.dispatches.by_status.opened)} ` +
+            `refused=${weeklyCount(r.dispatches.by_status.refused)} ` +
+            `failed=${weeklyCount(r.dispatches.by_status.failed)} ` +
+            `unreported=${weeklyCount(r.dispatches.by_status.unreported)} ` +
+            `not_accepted=${weeklyCount(r.dispatches.by_status.dispatch_failed)}`,
+        ),
+      );
+      console.log(
+        chalk.cyan(
+          `repulls: open=${weeklyCount(r.open_automatic.total)} held=${weeklyCount(r.open_automatic.held)} ` +
+            `claims_held=${weeklyCount(r.held_claims)} ended_failed=${weeklyCount(r.ended_failed)} ` +
+            `merged_worker=${weeklyCount(r.merged.worker)} merged_admin=${weeklyCount(r.merged.administrator)} ` +
+            `merged_outside=${weeklyCount(r.merged.outside_tool)}`,
+        ),
+      );
+    }
 
     if (f.failuresByCause !== null) {
       const nonZero = Object.entries(f.failuresByCause).filter(([, n]) => n > 0);

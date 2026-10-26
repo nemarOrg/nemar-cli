@@ -73,6 +73,7 @@
 
 import pkg from "../../../package.json" with { type: "json" };
 import { normalizeUpstreamTag } from "../../../shared/openneuro-tag.js";
+import type { RepullSchedulerRow } from "../../../shared/repull-observability.js";
 import {
   DISPATCH_FINAL_CODES,
   type SchedulerOutcome,
@@ -205,6 +206,22 @@ export const MANUAL_RUN_PROOF_SQL = `SELECT COUNT(DISTINCT dataset_id) AS n FROM
 
 /** Where the last tick stopped: a dataset id, or '' for the start of the fleet. */
 export const SCHEDULER_CURSOR_SQL = "SELECT scan_after FROM upstream_repull_scheduler WHERE id = 1";
+
+/**
+ * The row as an administrator and the weekly report read it: when the daily tick and the advance
+ * tick last ran and what the daily tick concluded. Never the cursor, which is a dataset id.
+ */
+export const SCHEDULER_STATUS_SQL =
+  "SELECT last_tick_at, last_outcome, last_advance_at FROM upstream_repull_scheduler WHERE id = 1";
+
+/**
+ * The scheduler's stamps, or null when the row is absent (migration 0111 inserts it, so that is a
+ * fault to see, not a scheduler that never ran: the caller says unknown). A NULL time inside the
+ * row means nothing has stamped it yet.
+ */
+export async function readSchedulerRow(db: D1Database): Promise<RepullSchedulerRow | null> {
+  return (await db.prepare(SCHEDULER_STATUS_SQL).first<RepullSchedulerRow>()) ?? null;
+}
 
 /**
  * Stamp the tick, in one statement: `?1` the new cursor (NULL keeps the stored one, for a tick

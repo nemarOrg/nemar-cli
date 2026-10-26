@@ -19,6 +19,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "bun";
+import { repullWeekFacts, zeroStatuses } from "../backend/test/helpers/repull-week";
 import { countUpstreamStates } from "../shared/upstream-staleness";
 
 const CLI_ENTRY = join(import.meta.dir, "..", "src", "index.ts");
@@ -175,6 +176,17 @@ const HEALTHY = {
       truncated: false,
       errors: [],
     },
+    // Epic #1046 phase 7: a routine week of the automatic re-pull, nothing for a person.
+    repulls: repullWeekFacts({
+      dispatches: {
+        sent: 3,
+        by_kind: { open: 3, finish: 0 },
+        by_status: { ...zeroStatuses(), opened: 2, refused: 1 },
+        by_word: { refused: { gitlink: 1 }, failed: {}, dispatch_failed: {} },
+      },
+      open_automatic: { total: 4, held: 3, holds: { "screen-acknowledge": 3 } },
+      merged: { worker: 1, administrator: 2, outside_tool: 0, unattributed: 0 },
+    }),
     errors: [],
   },
   issue: null,
@@ -258,6 +270,113 @@ describe("nemar admin import-weekly: the report reads correctly", () => {
       const result = await runCli(["admin", "import-weekly"], server.url);
       expect(result.stdout).toContain("upstream=unknown");
       expect(result.stdout).not.toContain("upstream: stale=");
+      expect(result.exitCode).toBe(1);
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("the re-pull lines print the week's counts, and a routine week exits 0", async () => {
+    seedAuthenticatedConfig();
+    const server = startCaptureServer(HEALTHY);
+    try {
+      const result = await runCli(["admin", "import-weekly"], server.url);
+      expect(result.stdout).toContain(
+        "repulls: switches=off dispatched=3 opened=2 refused=1 failed=0 unreported=0 not_accepted=0",
+      );
+      expect(result.stdout).toContain(
+        "repulls: open=4 held=3 claims_held=0 ended_failed=0 merged_worker=1 merged_admin=2 merged_outside=0",
+      );
+      expect(result.exitCode).toBe(0);
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("the switches the Worker reads are named, the merge switch last", async () => {
+    seedAuthenticatedConfig();
+    const sw = HEALTHY.facts.repulls.switches;
+    for (const [switches, word] of [
+      [{ ...sw, auto_repull_enabled: true }, "switches=open "],
+      [
+        { ...sw, auto_repull_enabled: true, auto_repull_merge_enabled: true },
+        "switches=open+merge ",
+      ],
+    ] as const) {
+      const server = startCaptureServer({
+        ...HEALTHY,
+        facts: { ...HEALTHY.facts, repulls: { ...HEALTHY.facts.repulls, switches } },
+      });
+      try {
+        const result = await runCli(["admin", "import-weekly"], server.url);
+        expect(result.stdout).toContain(`repulls: ${word}`);
+      } finally {
+        server.stop();
+      }
+    }
+  });
+
+  test("a read of the re-pulls that threw prints unknown and exits 2, as the backend's errors entry says", async () => {
+    seedAuthenticatedConfig();
+    const server = startCaptureServer({
+      ...HEALTHY,
+      facts: {
+        ...HEALTHY.facts,
+        repulls: null,
+        errors: [{ stage: "repulls", error: "D1_ERROR: the re-pull read failed" }],
+      },
+    });
+    try {
+      const result = await runCli(["admin", "import-weekly"], server.url);
+      expect(result.stdout).toContain("repulls=unknown");
+      expect(result.stdout).not.toContain("repulls: switches=");
+      expect(result.stdout).toContain("upstream re-pull activity could not be determined");
+      expect(result.exitCode).toBe(2);
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("a backend that predates the re-pull field prints unknown and exits 1 (absent is unknown)", async () => {
+    seedAuthenticatedConfig();
+    const { repulls: _omitted, ...withoutKey } = HEALTHY.facts;
+    const server = startCaptureServer({ ...HEALTHY, facts: withoutKey });
+    try {
+      const result = await runCli(["admin", "import-weekly"], server.url);
+      expect(result.stdout).toContain("repulls=unknown");
+      expect(result.stdout).toContain("upstream re-pull activity could not be determined");
+      expect(result.exitCode).toBe(1);
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("the reasons the Worker decided are the command's reasons, and exit 1 with them", async () => {
+    seedAuthenticatedConfig();
+    const reasons = [
+      "1 re-pull dispatch(es) were not reported by their run in time",
+      "1 re-pull(s) ended failed",
+    ];
+    const server = startCaptureServer({
+      ...HEALTHY,
+      facts: {
+        ...HEALTHY.facts,
+        repulls: {
+          ...HEALTHY.facts.repulls,
+          ended_failed: 1,
+          dispatches: {
+            ...HEALTHY.facts.repulls.dispatches,
+            by_status: { ...HEALTHY.facts.repulls.dispatches.by_status, unreported: 1 },
+          },
+          attention: reasons,
+        },
+      },
+    });
+    try {
+      const result = await runCli(["admin", "import-weekly"], server.url);
+      expect(result.stdout).toContain(`Needs attention: ${reasons.join("; ")}.`);
+      expect(result.stdout).toContain("unreported=1");
+      expect(result.stdout).toContain("ended_failed=1");
       expect(result.exitCode).toBe(1);
     } finally {
       server.stop();
