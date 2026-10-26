@@ -297,7 +297,7 @@ export const ROW_DISPATCHES_SQL = `SELECT
  * same, the audit row that follows it is written once per change, and a row that moved meanwhile
  * (any transition bumps its revision) is not written. It touches neither `revision` nor
  * `updated_at`: a hold is an observation, not a transition. Only an automatic row is ever held, as
- * migration 0111's CHECK also says.
+ * migration 0112's CHECK also says.
  */
 export const REPULL_HOLD_SQL = `UPDATE upstream_repulls
   SET hold_reason = ?4,

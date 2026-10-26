@@ -90,7 +90,7 @@ function capText(c: RepullCapReading): string {
 function schedulerLines(s: RepullSchedulerRow | null): string[] {
   if (s === null) {
     return [
-      "  Unknown: the Worker found no scheduler row (migration 0111 inserts it), which is not the same as a scheduler that never ran.",
+      "  Unknown: the Worker found no scheduler row (migration 0112 inserts it), which is not the same as a scheduler that never ran.",
     ];
   }
   const outcome = s.last_outcome === null ? "" : `, concluded ${plain(s.last_outcome)}`;

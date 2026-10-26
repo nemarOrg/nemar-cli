@@ -304,7 +304,7 @@ describe("GET /repulls/switches", () => {
     const res = await call("GET", "/repulls/switches");
     expect(res.status).toBe(500);
     expect(res.body.error).toContain("Failed to read the scheduler");
-    expect(res.body.error).toContain("is migration 0111 applied?");
+    expect(res.body.error).toContain("is migration 0112 applied?");
   });
 
   test("reads what the bindings say, and only exact production honors a switch", async () => {

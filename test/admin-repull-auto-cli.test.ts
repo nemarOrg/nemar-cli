@@ -459,7 +459,7 @@ describe("nemar admin repull auto: it only reads, and prints nothing partial", (
     const r = await runCli([]);
     expect(r.exitCode).toBe(1);
     expect(r.stdout).toContain("Could not read the automatic re-pull");
-    expect(r.stdout).toContain("migration 0111");
+    expect(r.stdout).toContain("migration 0112");
     // The switches were read first and are not printed: a table with a hole would claim a read.
     expect(r.stdout).not.toContain("Switches, as this Worker reads them");
     expect(r.stdout).not.toContain("Open automatic re-pulls");

@@ -2,7 +2,7 @@
  * The upstream re-pulls' week in the weekly import report (epic #1046 phase 7, #1913; ADR 0111's
  * Phase 7h slice; ADR 0053 and ADR 0054), driven through the report's own entry point,
  * `runWeeklyImportSummary`, against real in-memory SQLite carrying every migration. The rows the
- * counts read are seeded the way the tables take them (the CHECKs of migrations 0105 and 0111 are
+ * counts read are seeded the way the tables take them (the CHECKs of migrations 0105 and 0112 are
  * live), and the merges, whose audit rows the counts are read from, are written by the production
  * writers (`transitionRepull`, `recordRepullMerged`), so the keys the SQL reads are the keys those
  * writers leave. Only GitHub, OpenNeuro and the coverage sweep are stood in for.

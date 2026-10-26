@@ -94,7 +94,7 @@ function refusalBody(r: RepullRefusal) {
 
 /**
  * Only a missing table or column suggests the migration is not applied; any other error is not
- * that. `migration` names the one that creates what the read needs: 0105 for the record, 0111 for
+ * that. `migration` names the one that creates what the read needs: 0105 for the record, 0112 for
  * the automatic path's dispatches and scheduler.
  */
 function failure(what: string, err: unknown, migration = "0105") {
@@ -193,7 +193,7 @@ export function registerUpstreamRepullRoutes(admin: AdminRouter): void {
         scheduler: await readSchedulerRow(c.env.DB),
       });
     } catch (err) {
-      return c.json({ error: failure("read the scheduler", err, "0111") }, 500);
+      return c.json({ error: failure("read the scheduler", err, "0112") }, 500);
     }
   });
 
@@ -250,7 +250,7 @@ export function registerUpstreamRepullRoutes(admin: AdminRouter): void {
             : null,
       });
     } catch (err) {
-      return c.json({ error: failure("read the dispatches", err, "0111") }, 500);
+      return c.json({ error: failure("read the dispatches", err, "0112") }, 500);
     }
   });
 

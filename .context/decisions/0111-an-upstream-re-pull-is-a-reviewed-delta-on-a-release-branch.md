@@ -1082,6 +1082,7 @@ The record.
 
 - Migration 0109 adds `upstream_repull_dispatches`, one row per dispatch, keyed by nothing but its id: a dispatch exists before any re-pull row does, a run that refuses before its create leaves none, and one re-pull may have many (a first dispatch, its resumes, its finish).
   *Annotated 2026-10-25: the migration is numbered 0111, not 0109; origin/dev took 0109 and 0110 for the ticket work after this slice was written.*
+  *Annotated 2026-10-26: renumbered 0112; origin/dev took 0111.*
   A dispatch is `open` (run a plan to an open pull request, or resume a row that stalled before it) or `finish` (walk a merged re-pull to `complete`).
 - Its states are `dispatched` and `started` while it is live, then the run's own last word (`opened`, `finished`, `refused`, `failed`) or the Worker's: `dispatch_failed` when GitHub refused the dispatch, so it never ran, and `unreported` when the run said nothing in time.
 - A one-shot nonce is held exactly while the dispatch is live, and the edge that ends it clears it, so a token replayed after its run ended has nothing to verify against.
@@ -2041,6 +2042,7 @@ Three additions are made to earlier text: an annotation on the record's header, 
   It names the dataset, which the weekly report never does, and it is an administrator's read.
 - `GET /admin/repulls/switches` also returns the scheduler's three stamps, never its cursor, which is a dataset id.
   The row absent is null, which is unknown and not "never", and a table that is missing is a 500 that names migration 0111.
+  *Annotated 2026-10-26: the migration is now 0112.*
 - `nemar admin repull auto [--json]` prints the switches and both caps, the scheduler's stamps, the open automatic re-pulls with their hold words and any claim still held, and the 20 newest dispatches.
   It reads every page of open re-pulls (an administrator's is not listed) up to ten pages, and says when the list stopped before its end; it makes only GET requests; and when a read fails it prints the failure and no table, because a table with a hole would claim what was not read.
 
