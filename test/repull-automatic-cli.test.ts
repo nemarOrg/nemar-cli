@@ -27,6 +27,9 @@
  *  - the token on the command line, no App token, a tenth key and a development build are each
  *    refused, and only the first two are reported (the token's report ends the dispatch);
  *  - an administrator's record of the same plan is never taken up by a run;
+ *  - an enrichment-shaped commit on the release branch while the run settles is recorded, and any
+ *    other is `head-foreign`, recorded on the row and reported `failed`; the settle waits for the
+ *    branch to be quiet;
  *  - a finish takes a merged re-pull to `complete` and reports `finished`, and refuses one that has
  *    not merged without touching it.
  *
@@ -61,13 +64,21 @@ import {
   claimOpenDispatch,
 } from "../backend/src/services/upstream-repull-dispatch";
 import type { DispatchRow, RepullRow } from "../shared/repull-state";
+import { getRepull } from "../src/lib/api/repull";
 import { defaultPlanPath, writePlanFile } from "../src/lib/repull/digest";
 import { AUTOMATIC_LINE_RE, RESULT_LINE_RE } from "../src/lib/repull/execute/automatic";
+import { openOriginScratch } from "../src/lib/repull/execute/origin";
+import { settleReleaseHead } from "../src/lib/repull/execute/settle";
 import { planRepull } from "../src/lib/repull/plan";
 import { ADMIN_TOKEN, APP_TOKEN } from "./helpers/github-standin";
 import { type ReleaseCli, releaseCli } from "./helpers/release-cli";
-import { CONCEPT_DOI, PATHS, TAG_A, TAG_B, UPSTREAM_ID } from "./helpers/repull-fixture";
-import { ADMIN_KEY, type RepullWorld, startRepullWorld } from "./helpers/repull-pr-world";
+import { CONCEPT_DOI, PATHS, TAG_A, TAG_B, UPSTREAM_ID, gitIn } from "./helpers/repull-fixture";
+import {
+  ADMIN_KEY,
+  type RepullWorld,
+  enrichedMetadata,
+  startRepullWorld,
+} from "./helpers/repull-pr-world";
 import { toolOrFail } from "./scrub/helpers/require-tools";
 
 setDefaultTimeout(600_000);
@@ -78,6 +89,7 @@ const SOURCE_ENTRY = join(import.meta.dir, "..", "src", "index.ts");
 const CALLBACK_SECRET = "repull-world-callback-secret";
 const RUN_ID = "4242";
 const RUN_URL = `https://github.com/nemarDatasets/.github/actions/runs/${RUN_ID}`;
+const RELEASE_REF = "refs/heads/release/v2.0.0";
 
 let release: ReleaseCli;
 let w: RepullWorld;
@@ -195,6 +207,8 @@ const executeArgs = (c: Claim, plan = join(runner, "plan.json")) => [
   plan,
   "--automatic-dispatch",
   String(c.id),
+  "--settle-minutes",
+  "0",
   "--yes",
 ];
 
@@ -211,6 +225,9 @@ interface RecordRow {
 
 const repullRows = () =>
   w.db().query("SELECT * FROM upstream_repulls ORDER BY id").all() as RecordRow[];
+
+/** The commit the release branch names on the bare origin. */
+const releaseHead = async () => (await gitIn(w.fx.originRepo, ["rev-parse", RELEASE_REF])).trim();
 
 /** What none of a run's output may hold: the fixture's names and every secret the run handles. */
 function forbidden(c: Claim): string[] {
@@ -421,6 +438,129 @@ describe.skipIf(!awsInstalled)("an automatic run opens its pull request", () => 
     expect(dispatchRow(c.id)).toMatchObject({ status: "refused", code: "repull-in-flight" });
     expect(repullRows()).toMatchObject([{ status: "copied", origin: "administrator" }]);
     expect(w.gh.seen.filter((s) => s.token === APP_TOKEN && s.method !== "GET")).toEqual([]);
+  });
+});
+
+describe.skipIf(!awsInstalled)("the release head settles before the run reports", () => {
+  /** Move the release branch the moment the run records its pull request open. */
+  function moveAtPrOpen(path: string, content: (head: string) => Promise<string>): void {
+    let moved = false;
+    w.setApiHook(async (req) => {
+      if (moved || req.method !== "POST" || !/\/admin\/repulls\/\d+\/transition$/.test(req.url))
+        return;
+      const body = (await req.json()) as { from?: string; to?: string };
+      if (body.from !== "registered" || body.to !== "pr_open") return;
+      moved = true;
+      await w.commitOnto(RELEASE_REF, path, await content(RELEASE_REF));
+    });
+  }
+
+  test("an enrichment-shaped commit on the release branch during the settle is recorded", async () => {
+    moveAtPrOpen(".nemar/metadata.json", (ref) => enrichedMetadata(w.fx.originRepo, ref));
+    const c = await claimOpen();
+    writeEvent(c);
+    expect((await auto(planArgs(c))).exitCode).toBe(0);
+    const exec = await auto(executeArgs(c));
+    expect(exec.exitCode, exec.all).toBe(0);
+    expectQuiet(exec, c, "opened");
+    expect(exec.all).toContain("repull-auto: settle reads=1 moves=1 unreadable=0");
+    expect(repullRows()).toMatchObject([
+      { status: "pr_open", head_sha: await releaseHead(), last_error: null },
+    ]);
+    expect(dispatchRow(c.id).status).toBe("opened");
+  });
+
+  test("a commit enrichment does not make is head-foreign: recorded on the row, reported failed", async () => {
+    moveAtPrOpen("README.md", async () => "A README someone else changed.\n");
+    const c = await claimOpen();
+    writeEvent(c);
+    expect((await auto(planArgs(c))).exitCode).toBe(0);
+    const exec = await auto(executeArgs(c));
+    expect(exec.exitCode, exec.all).toBe(1);
+    expectQuiet(exec, c, "failed");
+    const [row] = repullRows();
+    expect(row?.status).toBe("pr_open");
+    expect(row?.last_error).toStartWith("[auto:head-foreign]");
+    expect(row?.head_sha).not.toBe(await releaseHead());
+    expect(dispatchRow(c.id)).toMatchObject({ status: "failed", code: "head-foreign" });
+  });
+
+  test("the settle ends once the branch has been quiet, after a move that lands while it waits", async () => {
+    const { row } = await opened();
+    // The API the library calls in this process: the world's, as the administrator.
+    const saved = { url: process.env.TEST_API_URL, dir: process.env.NEMAR_CONFIG_DIR };
+    process.env.TEST_API_URL = w.apiUrl;
+    process.env.NEMAR_CONFIG_DIR = w.configDir;
+    const digest = JSON.parse(readFileSync(join(runner, "plan.json"), "utf8")).digest as string;
+    const scratch = await openOriginScratch({
+      configDir: w.configDir,
+      datasetId: w.fx.datasetId,
+      digest,
+      purpose: "settle",
+      env: w.fx.env,
+      token: null,
+    });
+    try {
+      const live = (await getRepull(row.id)) as RepullRow;
+      // Quiet from the start: the bound is far, and the settle ends after the quiet period.
+      let started = Date.now();
+      const still = await settleReleaseHead({
+        scratch,
+        row: live,
+        opts: { maxWaitMs: 20_000, quietMs: 600, pollMs: 100 },
+        out: () => {},
+      });
+      let took = Date.now() - started;
+      expect(still).toMatchObject({ outcome: "settled", moves: 0, unreadable: 0 });
+      expect(took).toBeGreaterThanOrEqual(600);
+      expect(took).toBeLessThan(5_000);
+
+      // A move lands 400 ms in: recorded, and the quiet period counts again from it.
+      started = Date.now();
+      let landedAt = 0;
+      const landing = (async () => {
+        await Bun.sleep(400);
+        await w.commitOnto(
+          RELEASE_REF,
+          ".nemar/metadata.json",
+          await enrichedMetadata(w.fx.originRepo, RELEASE_REF, "2026-10-25T01:00:00Z"),
+        );
+        landedAt = Date.now();
+      })();
+      const settled = await settleReleaseHead({
+        scratch,
+        row: live,
+        opts: { maxWaitMs: 20_000, quietMs: 1_000, pollMs: 100 },
+        out: () => {},
+      });
+      await landing;
+      took = Date.now() - started;
+      expect(settled).toMatchObject({ outcome: "settled", moves: 1 });
+      expect(Date.now() - landedAt).toBeGreaterThanOrEqual(900);
+      expect(took).toBeLessThan(10_000);
+      expect(settled.row.head_sha).toBe(await releaseHead());
+
+      // The bound is shorter than the quiet period: it ends at the bound.
+      started = Date.now();
+      await settleReleaseHead({
+        scratch,
+        row: settled.row,
+        opts: { maxWaitMs: 500, quietMs: 60_000, pollMs: 100 },
+        out: () => {},
+      });
+      took = Date.now() - started;
+      expect(took).toBeGreaterThanOrEqual(450);
+      expect(took).toBeLessThan(5_000);
+    } finally {
+      scratch.close();
+      for (const [k, v] of [
+        ["TEST_API_URL", saved.url],
+        ["NEMAR_CONFIG_DIR", saved.dir],
+      ] as const) {
+        if (v === undefined) Reflect.deleteProperty(process.env, k);
+        else process.env[k] = v;
+      }
+    }
   });
 });
 

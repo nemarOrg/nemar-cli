@@ -58,7 +58,7 @@ import { countsMarkdown, preflightLines, summaryLines } from "../lib/repull/rend
 import { openNeuroGraphqlUrl as openNeuroUrlFromEnv } from "../lib/repull/sources.js";
 import { AUTOMATIC_HELP, automaticExecute, automaticPlan } from "./admin-repull-automatic.js";
 import { mergeCommand } from "./admin-repull-merge.js";
-import { resumeCommand, statusCommand } from "./admin-repull-resume.js";
+import { parseMinutes, resumeCommand, statusCommand } from "./admin-repull-resume.js";
 
 /** Exit codes: 0 executable, 3 planned but not executable, 1 nothing planned. */
 export const EXIT_NOT_EXECUTABLE = 3;
@@ -300,7 +300,9 @@ Exit codes:
   1  refused before anything was written (the plan, the dataset, a declined confirmation), or
      failed.
 
-${AUTOMATIC_HELP}`;
+${AUTOMATIC_HELP} With it, execute settles the release head before it reports the
+pull request open: it reads the branch until enrichment has not moved it for five minutes, at most
+--settle-minutes (default 30), recording each move enrichment made and refusing any other.`;
 
 /** `--until`: one of the statuses execution stops at. */
 function parseUntil(value: string): (typeof EXECUTE_STATUSES)[number] {
@@ -358,6 +360,11 @@ repullCommand
   .option("-y, --yes", "Do not ask before writing")
   .option("--json", "Print the record as JSON")
   .option("--automatic-dispatch <id>", "The central workflow's unattended run of a dispatch")
+  .option(
+    "--settle-minutes <n>",
+    "With --automatic-dispatch: how long to settle the release head at most (default 30)",
+    parseMinutes,
+  )
   .addHelpText("after", EXECUTE_HELP)
   .action(
     async (
@@ -370,6 +377,7 @@ repullCommand
         yes?: boolean;
         json?: boolean;
         automaticDispatch?: string;
+        settleMinutes?: number;
       },
     ) => {
       if (options.automaticDispatch !== undefined) {
@@ -378,6 +386,11 @@ repullCommand
       }
       const json = options.json === true;
       const out = say(json);
+      if (options.settleMinutes !== undefined) {
+        failMessage("--settle-minutes is for --automatic-dispatch only.", { json, answered: true });
+        markUsageExit();
+        return;
+      }
       if (!requireSignedIn(json)) return;
       try {
         const { row, stoppedAt } = await executeRepull({

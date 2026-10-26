@@ -13,10 +13,11 @@
  *       `planned -> prepared` with the commit, its tree, the copy manifest's digest and counts;
  *   S3 to S5  the copy, the registration and the pull request (`advance.ts`), to `pr_open`.
  *
- * A dispatched run (`opts.automatic`, the central workflow's; `automatic.ts`) adds two things and
+ * A dispatched run (`opts.automatic`, the central workflow's; `automatic.ts`) adds three things and
  * changes nothing else: before anything is written, the LIVE plan must be one the automatic path
- * takes (`assertAutomaticPlan`); and S1 presents the dispatch, so the Worker records the re-pull
- * as automatic.
+ * takes (`assertAutomaticPlan`); S1 presents the dispatch, so the Worker records the re-pull as
+ * automatic; and at `pr_open`, still holding the lock, the release head is settled (`settle.ts`)
+ * before the run reports it.
  *
  * A record past `prepared` is not planned again: the registration moved origin's git-annex branch
  * and the release branch exists, so a live plan would differ by what this execution itself wrote.
@@ -75,7 +76,9 @@ import { assertAutomaticCounts, assertAutomaticPlan } from "./automatic.js";
 import { copyItems, copySection, planCounts, planFacts } from "./body.js";
 import { readCatalogFacts } from "./catalog.js";
 import { commitMaterialized, materializeDelta } from "./materialize.js";
+import { openOriginScratch } from "./origin.js";
 import { heldKeys, scrubDelta } from "./scrub-delta.js";
+import { type SettleOptions, type Settled, settleReleaseHead } from "./settle.js";
 import { type Entry, readIndex, readTree, rowTime, synthesizeCommit } from "./synthesize.js";
 import {
   ExecuteRefused,
@@ -135,9 +138,9 @@ export interface ExecuteOptions {
   /** Tests only: the copy's single-copy bound and part size. */
   copy?: { singleCopyMax?: number; partBytes?: number };
   /**
-   * A dispatched run (ADR 0111, decision 6): the dispatch the automatic create presents, and the
-   * re-pull a resume dispatch continues (null for a first dispatch). Absent for an administrator's
-   * run.
+   * A dispatched run (ADR 0111, decision 6): the dispatch the automatic create presents, the
+   * re-pull a resume dispatch continues (null for a first dispatch), and how the release head is
+   * settled at `pr_open`. Absent for an administrator's run.
    */
   automatic?: AutomaticExecution;
   out: (line: string) => void;
@@ -148,12 +151,14 @@ export interface AutomaticExecution {
   /** The dispatch token: a secret, sent only in the create's body. */
   token: string;
   repullId: number | null;
+  settle: SettleOptions;
 }
 
-/** Where a run stopped. */
+/** Where a run stopped, and, for a dispatched run at `pr_open`, how its release head settled. */
 export interface ExecuteResult {
   row: RepullRow;
   stoppedAt: RepullStatus;
+  settled?: Settled;
 }
 
 /** The statuses a run prepares from: before them the record is made, after them it is advanced. */
@@ -282,6 +287,36 @@ function assertAutomaticRecord(a: AutomaticExecution, row: RepullRow): void {
   }
 }
 
+/**
+ * A dispatched run at `pr_open`: settle the release head before the run reports it, holding the
+ * run's lock, in a scratch repository of origin's. A failure to read or record is resumable: the
+ * pull request is open, and a later run takes the record up at `pr_open` and settles again.
+ */
+async function settleOpened(
+  opts: ExecuteOptions,
+  env: Env,
+  token: string | null,
+  digest: string,
+  row: RepullRow,
+): Promise<Settled | undefined> {
+  if (!opts.automatic || row.status !== "pr_open") return undefined;
+  const scratch = await openOriginScratch({
+    configDir: getConfigDir(),
+    datasetId: row.dataset_id,
+    digest,
+    purpose: "settle",
+    env,
+    token,
+  });
+  try {
+    return await settleReleaseHead({ scratch, row, opts: opts.automatic.settle, out: opts.out });
+  } catch (err) {
+    throw resumable(err);
+  } finally {
+    scratch.close();
+  }
+}
+
 /** The dataset's open record, if any (a GET, before anything is written). */
 async function openRecord(datasetId: string): Promise<RepullRow | null> {
   try {
@@ -379,15 +414,26 @@ async function execute(
             `Re-pull #${open.id} is past the open pull request; execute never merges. Take it on with: nemar admin repull resume ${datasetId}`,
           );
         }
-        return { row: open, stoppedAt: open.status };
+        const settled = await settleOpened(opts, env, advance.token, digest, open);
+        return {
+          row: settled?.row ?? open,
+          stoppedAt: open.status,
+          ...(settled ? { settled } : {}),
+        };
       }
       await confirmed(opts, body, open.status, until);
+      let row: RepullRow;
       try {
-        const row = await advancePrepared(advance, open, until, recorder(opts.out));
-        return { row, stoppedAt: row.status };
+        row = await advancePrepared(advance, open, until, recorder(opts.out));
       } catch (err) {
         throw resumable(err);
       }
+      const settled = await settleOpened(opts, env, advance.token, digest, row);
+      return {
+        row: settled?.row ?? row,
+        stoppedAt: row.status,
+        ...(settled ? { settled } : {}),
+      };
     }
 
     removeTree(paths.plan);
@@ -432,9 +478,13 @@ async function execute(
     try {
       await confirmed(opts, ctx.body, open?.plan_digest === digest ? open.status : null, until);
       const prepared = await recordAndPrepare(ctx, verified.rebasedOnto, until);
-      if (reached(prepared.row.status, until)) return prepared;
+      if (reached(prepared.row.status, until)) {
+        const settled = await settleOpened(opts, env, ctx.token, digest, prepared.row);
+        return settled ? { ...prepared, row: settled.row, settled } : prepared;
+      }
+      let row: RepullRow;
       try {
-        const row = await advancePrepared(
+        row = await advancePrepared(
           {
             env,
             token: ctx.token,
@@ -451,10 +501,15 @@ async function execute(
           until,
           recorder(opts.out),
         );
-        return { row, stoppedAt: row.status };
       } catch (err) {
         throw resumable(err);
       }
+      const settled = await settleOpened(opts, env, ctx.token, digest, row);
+      return {
+        row: settled?.row ?? row,
+        stoppedAt: row.status,
+        ...(settled ? { settled } : {}),
+      };
     } finally {
       if (!opts.keepWorkdir) removeQuietly(paths.plan, opts.out);
     }

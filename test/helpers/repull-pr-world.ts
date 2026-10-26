@@ -482,7 +482,7 @@ export async function startRepullWorld(
       apiAfter = null;
       mergeMessageSuffix = "";
       for (const k of Object.keys(workerEnv)) delete (workerEnv as Record<string, unknown>)[k];
-      for (const purpose of ["resume", "merge"]) {
+      for (const purpose of ["resume", "merge", "settle"]) {
         rmSync(join(configDir, "repull", fx.datasetId, purpose), { recursive: true, force: true });
       }
     },

@@ -10,13 +10,13 @@
  *            and says only counts.
  *   execute  runs the plan through its pull request exactly as an administrator's run does, with
  *            the dispatch presented at the create and the LIVE plan checked before any write;
- *            reports `opened`.
+ *            settles the release head; reports `opened`.
  *   resume   (a finish) reports `started`; takes up only the automatic re-pull its dispatch names,
  *            and only past its merge; walks it to `complete`; reports `finished`.
  *
  * Each ends with one result line and reports `refused` (nothing written, exit 1, or a plan the
- * path does not take, exit 3) or `failed` (a step after the record exists, exit 3) with a word
- * from the closed list.
+ * path does not take, exit 3) or `failed` (a step after the record exists, exit 3; a head
+ * enrichment did not make, exit 1) with a word from the closed list.
  */
 
 import { readFileSync } from "node:fs";
@@ -47,6 +47,11 @@ import {
 import { planCounts, planFacts } from "../lib/repull/execute/body.js";
 import { readCatalogFacts } from "../lib/repull/execute/catalog.js";
 import { executeRepull } from "../lib/repull/execute/run.js";
+import {
+  SETTLE_DEFAULT_MINUTES,
+  SETTLE_POLL_MS,
+  SETTLE_QUIET_MS,
+} from "../lib/repull/execute/settle.js";
 import { ExecuteRefused, assertNotAnonymous, peekPlan } from "../lib/repull/execute/verify-plan.js";
 import { RepullCannotPlan, planRepull } from "../lib/repull/plan.js";
 import { resumeRepull } from "../lib/repull/resume.js";
@@ -292,6 +297,7 @@ export interface AutomaticExecuteOptions {
   maxFetchGb: number;
   yes?: boolean;
   json?: boolean;
+  settleMinutes?: number;
 }
 
 /** `nemar admin repull execute <plan> --automatic-dispatch <n>`. */
@@ -334,11 +340,21 @@ export function automaticExecute(
           dispatchId: ctx.dispatch.dispatchId,
           token: ctx.dispatch.token,
           repullId: ctx.dispatch.repullId,
+          settle: {
+            maxWaitMs: (options.settleMinutes ?? SETTLE_DEFAULT_MINUTES) * 60_000,
+            quietMs: SETTLE_QUIET_MS,
+            pollMs: pollMs(SETTLE_POLL_MS),
+          },
         },
         out: (line) => ctx.sink.drop(line),
       });
       const row = result.row;
       ctx.sink.emit("execute", { status: row.status, repull: row.id, pr: row.pr_number ?? 0 });
+      if (result.settled) {
+        const s = result.settled;
+        ctx.sink.emit("settle", { reads: s.reads, moves: s.moves, unreadable: s.unreadable });
+        if (s.outcome === "foreign") return { phase: "failed", code: "head-foreign", exit: 1 };
+      }
       return { phase: "opened", repullId: row.id };
     },
   });
