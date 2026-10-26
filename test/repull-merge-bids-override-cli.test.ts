@@ -6,14 +6,15 @@
  * the real API over bun:sqlite, reached through TEST_API_URL; stand-ins for GitHub and S3 only,
  * GitHub's squash merge committing onto the bare origin's `main`). No mocks.
  *
- * The properties, each with a test that fails when its line is changed:
+ * The properties, each with a test of its own:
  *  - with BIDS validation failed, `version-check` passed and GitHub's `unstable`, the merge is
  *    claimed with the reason, sent as a squash at the screened `sha`, recorded, and the reason is
  *    written in its own audit row with the claim;
- *  - `blocked` (a rule requires the check: a merge would be a bypass) and `clean` (no override is
- *    needed) are refused before any request that writes;
- *  - BIDS validation still running, and a failed `version-check`, are refused by the Worker's claim,
- *    which writes nothing;
+ *  - `blocked` (a rule requires the check: a merge would be a bypass), `clean` (no override is
+ *    needed) and a fork's head are refused before any request that writes;
+ *  - a BIDS validation that did not complete with `failure` (running, passed, timed out, cancelled,
+ *    skipped) and a `version-check` that did not complete with `success` (failed, running, skipped,
+ *    cancelled) are refused by the Worker's claim, which writes nothing;
  *  - without the reason the ordinary gate refuses `unstable`; a reason outside the length rule and
  *    a re-pull the automatic path opened are refused before anything is written.
  *
@@ -185,6 +186,24 @@ describe.skipIf(!awsInstalled)("a merge over a failed BIDS validation", () => {
     [
       "version-check failed",
       { versionCheck: ["completed", "failure"] },
+      "bids-override-version-check",
+    ],
+    ["BIDS validation timed out", { bids: ["completed", "timed_out"] }, "bids-override-bids"],
+    ["BIDS validation was cancelled", { bids: ["completed", "cancelled"] }, "bids-override-bids"],
+    ["BIDS validation was skipped", { bids: ["completed", "skipped"] }, "bids-override-bids"],
+    [
+      "version-check still running",
+      { versionCheck: ["in_progress", null] },
+      "bids-override-version-check",
+    ],
+    [
+      "version-check was skipped",
+      { versionCheck: ["completed", "skipped"] },
+      "bids-override-version-check",
+    ],
+    [
+      "version-check was cancelled",
+      { versionCheck: ["completed", "cancelled"] },
       "bids-override-version-check",
     ],
   ] as const) {

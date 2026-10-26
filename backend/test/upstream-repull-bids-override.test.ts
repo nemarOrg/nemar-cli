@@ -7,12 +7,15 @@
  * the pull request and its check runs. The CLI's side, the gate and the merge, is
  * `test/repull-merge-bids-override-cli.test.ts`.
  *
- * The properties, each with a test that fails when its line is changed:
+ * The properties, each with a test of its own:
  *  - the claim is recorded, with its reason in an audit row of its own, only for an administrator's
  *    record whose head GitHub reports `unstable`, BIDS validation completed with `failure` and
- *    `version-check` with `success`, the App's own runs at the claimed head;
- *  - `blocked`, any other state, a validation not failed, a `version-check` not passed, unreadable
- *    checks and an automatic record are each refused, and nothing is written;
+ *    `version-check` with `success`, the App's own runs at the claimed head, from and into the
+ *    dataset's own repository;
+ *  - a fork's head, `blocked`, any other state, a validation that did not complete with `failure`
+ *    (running, passed, timed out, cancelled, skipped, another App's), a `version-check` that did not
+ *    complete with `success` (failed, running, skipped, cancelled), unreadable checks and an
+ *    automatic record are each refused, and nothing is written;
  *  - the claim's own checks are unchanged (the screen, the cap), the override is named only on a
  *    claim, its reason follows the publication path's rule, and a caller that gives no reader of
  *    the facts is refused.
@@ -286,6 +289,42 @@ describe("the claim over a failed BIDS validation", () => {
       () => github({ versionCheck: run("version-check", "completed", "failure") }),
       409,
       "bids-override-version-check",
+    ],
+    [
+      "version-check is still running",
+      () => github({ versionCheck: run("version-check", "in_progress", null) }),
+      409,
+      "bids-override-version-check",
+    ],
+    [
+      "version-check was skipped",
+      () => github({ versionCheck: run("version-check", "completed", "skipped") }),
+      409,
+      "bids-override-version-check",
+    ],
+    [
+      "version-check was cancelled",
+      () => github({ versionCheck: run("version-check", "completed", "cancelled") }),
+      409,
+      "bids-override-version-check",
+    ],
+    [
+      "BIDS validation timed out",
+      () => github({ bids: run("Run BIDS Validation", "completed", "timed_out") }),
+      409,
+      "bids-override-bids",
+    ],
+    [
+      "BIDS validation was cancelled",
+      () => github({ bids: run("Run BIDS Validation", "completed", "cancelled") }),
+      409,
+      "bids-override-bids",
+    ],
+    [
+      "BIDS validation was skipped",
+      () => github({ bids: run("Run BIDS Validation", "completed", "skipped") }),
+      409,
+      "bids-override-bids",
     ],
     [
       "the checks cannot be read",
