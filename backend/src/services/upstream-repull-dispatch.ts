@@ -94,7 +94,9 @@ export const OPEN_DISPATCHES_TODAY_SQL = `SELECT ${OPEN_DISPATCHES_TODAY_EXPR} A
  * re-pull it resumes or NULL, `?6` the nonce, `?7` the cap. The count and the claim are one
  * statement. A first dispatch (`?5` NULL) needs the dataset to have no open re-pull; a resume needs
  * `?5` to be an automatic row of that dataset and those tags that stalled before its pull request
- * opened. A unique-index failure means a dispatch of the dataset is live.
+ * opened. The tags are bound without a leading `v` and the row's are matched in either spelling,
+ * so a row that records `v1.0.0` is the same snapshot's as one that records `1.0.0`. A unique-index
+ * failure means a dispatch of the dataset is live.
  */
 export const DISPATCH_OPEN_CLAIM_SQL = `INSERT INTO upstream_repull_dispatches
   (kind, dataset_id, upstream_ds, from_tag, to_tag, repull_id, nonce, status)
@@ -105,7 +107,8 @@ export const DISPATCH_OPEN_CLAIM_SQL = `INSERT INTO upstream_repull_dispatches
                             WHERE dataset_id = ?1 AND status NOT IN (${TERMINAL_LIST}))
           ELSE EXISTS (SELECT 1 FROM upstream_repulls
                         WHERE id = ?5 AND dataset_id = ?1 AND origin = 'automatic'
-                          AND upstream_ds = ?2 AND from_tag = ?3 AND to_tag = ?4
+                          AND upstream_ds = ?2 AND from_tag IN (?3, 'v' || ?3)
+                          AND to_tag IN (?4, 'v' || ?4)
                           AND status IN (${quoted(RESUMABLE)}))
           END)`;
 

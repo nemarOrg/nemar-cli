@@ -1401,6 +1401,36 @@ describe("a stalled automatic re-pull is resumed", () => {
     expect(gh.dispatches).toEqual([]);
   });
 
+  test("a row that records its tags with a leading v is resumed, and the dispatch names them bare", async () => {
+    const id = stalled("copied", TEN(), { over: { from_tag: "v1.0.0", to_tag: "v1.0.1" } });
+    endedDispatch(id, "failed");
+    const r = await resumeTick(TEN());
+    expect(r).toMatchObject({ resumed: 1, errors: [] });
+    expect(dispatched("run-upstream-repull")[0]).toMatchObject({
+      from_tag: "1.0.0",
+      to_tag: "1.0.1",
+    });
+    expect(dispatchesOf(id).at(-1)).toMatchObject({
+      status: "dispatched",
+      from_tag: "1.0.0",
+      to_tag: "1.0.1",
+    });
+  });
+
+  test("a claim that does not find the row the tick read is an error, not a silent wait", async () => {
+    const id = stalled("copied", TEN());
+    endedDispatch(id, "failed");
+    // The row's tag changes after the tick read it and before the claim's own statement reads it.
+    const moving = interceptingD1(realD1(db), (sql) => {
+      if (sql === CREATE_FACTS_SQL) db.run("UPDATE upstream_repulls SET to_tag = '9.9.9'");
+    });
+    const r = await resumeTick(TEN(), env({}, moving));
+    expect(r).toMatchObject({ resumed: 0, errors: ["repull-mismatch"] });
+    expect(dispatchesOf(id)).toHaveLength(1);
+    expect(gh.dispatches).toEqual([]);
+    expect(repullAdvanceLogLine(r)?.level).toBe("error");
+  });
+
   test("a run that refused holds resume-refused, and is not sent again", async () => {
     const id = stalled("prepared", TEN());
     endedDispatch(id, "refused");

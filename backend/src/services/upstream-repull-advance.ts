@@ -280,7 +280,8 @@ export const ADVANCE_STAMP_SQL =
  * Worker has no callback secret (`dispatch-unconfigured`), a screen or a resume that could not be
  * sent (`dispatch-failed`), GitHub refused a resume (`dispatch-refused`), the Worker is not a release
  * build (`cli-unreleased`), no GitHub token could be had (`no-github-token`), the open cap is set to
- * something unreadable (`cap-unreadable`), a recorded tag is not a tag (`to-tag-malformed`); each
+ * something unreadable (`cap-unreadable`), a recorded tag is not a tag (`to-tag-malformed`), the
+ * claim does not find the row the tick read stalled with its tags (`repull-mismatch`); each
  * is a word of the dispatch record or of the scheduler. Then a row whose step threw, the tick
  * itself, its stamp.
  */
@@ -293,6 +294,7 @@ export const ADVANCE_FAILURES = [
   "no-github-token",
   "cap-unreadable",
   "to-tag-malformed",
+  "repull-mismatch",
   "row-failed",
   "tick-failed",
   "stamp-failed",
@@ -516,9 +518,15 @@ async function resume(t: Tick, row: RepullRow): Promise<HoldReason | null> {
       case "candidate":
         r.errors.push("to-tag-malformed");
         return null;
-      default:
-        // `live`, `row`, `open-row`: a run started for the dataset, or the row moved, meanwhile.
+      case "live":
+        // A run started for the dataset meanwhile: it is working on this row.
         r.waiting++;
+        return null;
+      default:
+        // `row` (and `open-row`, which a resume cannot meet): the claim's own statement does not
+        // find this row stalled with these tags, though the tick just read it so. Said, never
+        // waited on in silence, because it would be met again on every tick.
+        r.errors.push("repull-mismatch");
         return null;
     }
   }
