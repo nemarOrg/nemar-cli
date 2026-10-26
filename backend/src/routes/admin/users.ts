@@ -49,6 +49,7 @@ import { revokeUserIamAccess } from "../../services/iam";
 import { emailFieldSchema, normalizeGithubHandle, normalizeOrcid } from "../../services/identity";
 import { PRIVATE_GRANTS_PURGE_SQL } from "../../services/private-auth";
 import { errorMessage } from "../../services/repo-metadata";
+import { mailReleaseStatements } from "../../services/ticket-assignment";
 import {
   FUZZY_COLUMNS,
   type RankableUser,
@@ -522,6 +523,8 @@ async function finalizeRevocation(
     db
       .prepare(PRIVATE_GRANTS_PURGE_SQL)
       .bind(user.id),
+    // Their support tickets, queue references and away window go in the same batch (phase 3).
+    ...mailReleaseStatements(user.id, "all").map((s) => db.prepare(s.sql).bind(...s.binds)),
   ]);
 
   // Update user status
@@ -1112,6 +1115,12 @@ export function registerUsersRoutes(admin: AdminRouter): void {
               .bind(target.id),
             db.prepare(DOCS_REVOKE_ALL_SQL).bind(target.id),
             db.prepare(DOCS_GRANTS_PURGE_SQL).bind(target.id),
+            // Support tickets and queue references go in the same batch (phase 3). An
+            // owner demoted to admin still works ordinary tickets, so only the restricted
+            // ones are released; any other demotion ends admin standing altogether.
+            ...mailReleaseStatements(target.id, newRole === "admin" ? "restricted" : "all").map(
+              (s) => db.prepare(s.sql).bind(...s.binds),
+            ),
           ]);
           tokensRevoked = result[0]?.meta?.changes ?? 0;
           docsSessionsRevoked = result[1]?.meta?.changes ?? 0;
@@ -1813,6 +1822,8 @@ export function registerUsersRoutes(admin: AdminRouter): void {
     dataset_anonymity: z.boolean().optional(),
     /** Epic #1610 phase 5 (ADR 0088): the identifier sweep's weekly report. */
     identifier_sweep: z.boolean().optional(),
+    /** Epic #1893 phase 3 (ADR 0112): support tickets assigned, unassigned or escalated to you. */
+    support_tickets: z.boolean().optional(),
   });
 
   /**
@@ -1863,6 +1874,7 @@ export function registerUsersRoutes(admin: AdminRouter): void {
       announcements: body.announcements ?? current.announcements,
       dataset_anonymity: body.dataset_anonymity ?? current.dataset_anonymity,
       identifier_sweep: body.identifier_sweep ?? current.identifier_sweep,
+      support_tickets: body.support_tickets ?? current.support_tickets,
     };
 
     await db
@@ -1995,6 +2007,60 @@ export function registerUsersRoutes(admin: AdminRouter): void {
       return c.json({ error: "email_service_unconfigured" }, 500);
     }
     return c.json(result);
+  });
+
+  /**
+   * GET /admin/notify/:id - Progress of one announcement.
+   *
+   * A queued announcement (epic #1893 phase 2) finishes after the POST has answered: the
+   * consumer writes one outcome per message to the audit row. `unknown_count` is sends whose
+   * outcome the provider never confirmed (a timeout, an internal error); they are not retried
+   * because a retry could deliver twice. `failed_recipients` holds the redacted addresses the
+   * row stores, never full ones.
+   */
+  admin.get("/notify/:id", async (c) => {
+    const id = Number(c.req.param("id"));
+    if (!Number.isInteger(id) || id < 1) {
+      return c.json({ error: "Invalid broadcast id" }, 400);
+    }
+    const row = await c.env.DB.prepare(
+      `SELECT id, status, subject, recipient_group, queued_count, delivered_count,
+              failure_count, unknown_count, failed_recipients, sent_at
+         FROM broadcast_emails WHERE id = ?`,
+    )
+      .bind(id)
+      .first<{
+        id: number;
+        status: string;
+        subject: string;
+        recipient_group: string;
+        queued_count: number;
+        delivered_count: number;
+        failure_count: number;
+        unknown_count: number;
+        failed_recipients: string | null;
+        sent_at: string;
+      }>();
+    if (!row) return c.json({ error: "Broadcast not found" }, 404);
+
+    let failed: unknown = [];
+    try {
+      failed = JSON.parse(row.failed_recipients ?? "[]");
+    } catch {
+      failed = [];
+    }
+    return c.json({
+      id: row.id,
+      status: row.status,
+      subject: row.subject,
+      recipient_group: row.recipient_group,
+      queued_count: row.queued_count,
+      delivered_count: row.delivered_count,
+      failure_count: row.failure_count,
+      unknown_count: row.unknown_count,
+      failed_recipients: Array.isArray(failed) ? failed : [],
+      sent_at: row.sent_at,
+    });
   });
 
   // ---------------------------------------------------------------------------

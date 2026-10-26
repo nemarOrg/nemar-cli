@@ -25,6 +25,7 @@ describe("parseEmailPreferences", () => {
       announcements: true,
       dataset_anonymity: true,
       identifier_sweep: true,
+      support_tickets: true,
     });
   });
 
@@ -38,6 +39,7 @@ describe("parseEmailPreferences", () => {
       announcements: true,
       dataset_anonymity: true,
       identifier_sweep: true,
+      support_tickets: true,
     });
   });
 
@@ -56,6 +58,7 @@ describe("parseEmailPreferences", () => {
       announcements: false,
       dataset_anonymity: true,
       identifier_sweep: true,
+      support_tickets: true,
     });
   });
 
@@ -66,6 +69,15 @@ describe("parseEmailPreferences", () => {
     const result = parseEmailPreferences(JSON.stringify({ dataset_anonymity: false }));
     expect(result.dataset_anonymity).toBe(false);
     expect(result.announcements).toBe(true);
+  });
+
+  test("an explicit support_tickets: false is honored, and a row that predates it opts in", () => {
+    expect(parseEmailPreferences(JSON.stringify({ support_tickets: false })).support_tickets).toBe(
+      false,
+    );
+    expect(parseEmailPreferences(JSON.stringify({ identifier_sweep: false })).support_tickets).toBe(
+      true,
+    );
   });
 
   test("an explicit identifier_sweep: false is honored, and a row that predates it opts in", () => {
@@ -87,6 +99,7 @@ describe("parseEmailPreferences", () => {
       announcements: true,
       dataset_anonymity: true,
       identifier_sweep: true,
+      support_tickets: true,
     });
   });
 
@@ -98,6 +111,7 @@ describe("parseEmailPreferences", () => {
       announcements: true,
       dataset_anonymity: true,
       identifier_sweep: true,
+      support_tickets: true,
     });
   });
 
@@ -109,6 +123,7 @@ describe("parseEmailPreferences", () => {
       announcements: true,
       dataset_anonymity: true,
       identifier_sweep: true,
+      support_tickets: true,
     });
   });
 
@@ -120,6 +135,7 @@ describe("parseEmailPreferences", () => {
       announcements: true,
       dataset_anonymity: true,
       identifier_sweep: true,
+      support_tickets: true,
     });
   });
 
@@ -131,6 +147,7 @@ describe("parseEmailPreferences", () => {
       announcements: true,
       dataset_anonymity: true,
       identifier_sweep: true,
+      support_tickets: true,
     });
   });
 
@@ -144,6 +161,7 @@ describe("parseEmailPreferences", () => {
       announcements: true,
       dataset_anonymity: true,
       identifier_sweep: true,
+      support_tickets: true,
     });
   });
 
@@ -157,6 +175,7 @@ describe("parseEmailPreferences", () => {
       announcements: true,
       dataset_anonymity: true,
       identifier_sweep: true,
+      support_tickets: true,
     });
   });
 
@@ -171,6 +190,7 @@ describe("parseEmailPreferences", () => {
       announcements: true,
       dataset_anonymity: true,
       identifier_sweep: true,
+      support_tickets: true,
     });
   });
 });

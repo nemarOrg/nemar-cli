@@ -284,6 +284,10 @@ export const DOCS_GRANTS_PURGE_SQL = "DELETE FROM docs_grants WHERE user_id = ?"
  * key on the account. A new route of that kind calls this too. The three paths
  * that revoke keys and ALSO end the docs credential in their own batch do not
  * need it: a role demotion, `finalizeRevocation` and the tombstone cascade.
+ * Those same three paths also run `mailReleaseStatements`
+ * (`services/ticket-assignment.ts`) in the same batch, which drops the person's support
+ * tickets, away window, read markers and queue references; key revocation alone does not, because the
+ * person is still an admin. A new path that removes an admin needs both sets.
  *
  * The by-id routes also run it when their revoke changed nothing (a
  * concurrent revoke of the same key won the race), because it is idempotent

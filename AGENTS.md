@@ -169,8 +169,9 @@ contributor back, which ADR 0107 settled).
 belongs to the commit it read, an approval is the administrator's OWN act from their machine with their
 own GitHub login and no Worker code path approves, a failing, running or unreadable review needs
 `--force`, nothing merges without `--merge` or a `y` in `nemar admin pr-reviews next`, both of which
-read GitHub's state before approving and need `clean`, and each Worker lists only the datasets it
-owns).
+read GitHub's state before approving and need `clean`, each Worker lists only the datasets it
+owns, and an administrator runs a finished review again only with `start --redo`, which never
+supersedes a running one).
 0094 (the upload save step skips re-reading annexed content only once recorded annexed bytes reach
 1 GiB, only for files whose size and mtime still match the upload plan, and only while it can clear
 `assume-unchanged` safely; failures to verify or clear the state fail the save),
@@ -186,7 +187,23 @@ an unrelocated or unkept removal is then a platform blocker that only lowers, pl
 original authors' content is protected by facts the platform computes: a README or CHANGES line
 altered beyond a minor edit, an author-owned field or a participant value changed fails, a replaced
 recording or an undecidable comparison holds the pull request, and the README is compared with the
-one at the first version tag, else with the merge base; the facts carry only class words and counts).
+one at the first version tag, else with the merge base; the facts carry only class words and counts),
+0110 (mail is sent through the Cloudflare `send_email` binding behind a provider switch; Resend is
+a fallback only on a certain non-delivery limit or availability refusal, never on a timeout or an
+unknown error, so a sign-in code is never sent twice),
+0111 (decision 10 is built in Phase 3 and the read-only plan, `nemar admin repull plan`, in Phase 5; execution is not yet built: an upstream re-pull is one synthesized delta commit on `release/vN.0.0`
+through a pull request, never a bypass or a git merge of upstream history; N.0.0 is a pure mirror where
+upstream wins every conflict, and corrections replay as N.0.1 to `main` once N.0.0 is merged and
+tagged; the scrub runs on delta paths before the copy and the commit, and a privacy-ledger change is
+never reverted; state is `upstream_repulls`, never `import_jobs`; the tag is
+`dataset_versions.source_version`, NULL when unknown and never guessed; discovery stays id-only; the
+Worker merges only a machine-clean re-pull pull request the automatic path opened and approves
+nothing, narrowing ADR 0093's merge for that class only),
+0112 (inbound mail is a support ticket: the raw message is stored first and never lost, one
+visibility predicate decides every ticket read and write (restricted queues are owner-only and a
+conduct ticket can exclude a named account), ticket notifications are production-only with no
+first-admin fallback, and a reply whose outcome is unknown is never recorded as sent and never
+re-sent under its key).
 
 **Account copy and the profile-gap matrix are declared once, in
 [`shared/contract/account-copy.ts`](shared/contract/account-copy.ts) and
@@ -242,7 +259,7 @@ import recovery, cron digests) is production-only by default,
 via `getAdminEmailsForCategory`'s fence in `backend/src/services/email.ts`.
 Set `DEV_ADMIN_NOTIFICATIONS=1` only for a deliberate staging test of admin mail.
 The dev worker's `DEV_EMAIL_ALLOWLIST` is a Worker secret holding exact human addresses, never a domain:
-`@nemar.org` has a catch-all that lands in a real inbox, and `@nemar.test` fixtures get their sign-in codes echoed in the response instead of delivered.
+`@nemar.org` has a catch-all that turns every message into a production support ticket (epic #1893, ADR 0112), and `@nemar.test` fixtures get their sign-in codes echoed in the response instead of delivered.
 
 `users.account_kind` (ADR 0048) is explicit on the seeded fixtures: `test-owner` and `test-admin`
 are `service` (operational, no human signs in to them directly); `test-user`, `test-pending`,

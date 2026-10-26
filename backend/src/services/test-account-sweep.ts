@@ -19,9 +19,16 @@
  *   - `signup_source = 'web'` (the live tests seed web accounts), `account_kind` is not
  *     `service`, `role` is `member`, no legacy IAM user;
  *   - not already tombstoned, and created more than {@link TEST_ACCOUNT_SWEEP_MIN_AGE_DAYS} days ago;
- *   - it owns nothing: no dataset, no collaboration, no publication request, no pending access
- *     request, no open upload-access request and no granted upload access. An account that
- *     asked for or holds anything somebody might still act on is left for a human.
+ *   - it owns nothing somebody might still act on: no dataset, no collaboration, no publication
+ *     request, no pending access request and no granted upload access (`service_access = 0`).
+ *     An OPEN upload-access request (`upload_access_requested_at` set, nothing granted) is
+ *     allowed, and that is a decision: the live suite's "signup with flags" test requests upload
+ *     access on every run, so refusing those left every such account on staging and filled the
+ *     admin portal's awaiting-approval queue with them. A generated address at a reserved
+ *     domain cannot be a person, so nobody reviews its request; leaving it makes the queue
+ *     unusable. The tombstone clears the stamp (`USER_TOMBSTONE_MASK_SQL` nulls
+ *     `upload_access_requested_at`) and stamps `deleted_at`, which the admin listing and its
+ *     awaiting-approval filter exclude by default. A GRANTED request is never swept.
  *
  * WHAT IS RE-CHECKED BEFORE THE WRITE, exactly. The regular expression is re-run in code on the
  * row's own address, and the write itself is conditional: the mask requires the row to still
@@ -67,8 +74,17 @@ import { tombstoneUserCascade } from "../db/user-tombstone.js";
 import type { Bindings } from "../types/bindings.js";
 import { isNonProductionEnv } from "./environment.js";
 
-/** Accounts one run may tombstone. Oldest first; the rest wait for the next daily run. */
-export const TEST_ACCOUNT_SWEEP_BATCH = 100;
+/**
+ * Accounts one run may tombstone. Oldest first; the rest wait for the next daily run.
+ *
+ * Why 300. Each tombstone is ONE `db.batch()` (one D1 round trip, one subrequest, however many
+ * statements it holds; about a dozen), and the candidate reads add at most
+ * `SCAN_CAP / BATCH` = 10 more, so a run costs at most about 310 subrequests. The paid Workers
+ * limit is 1000 per invocation and `scheduledCleanup` spends some on its other sections, so 300
+ * leaves more than twice the sweep's own use in reserve. It clears a 1,200-account backlog in
+ * five daily runs (the previous 100 took thirteen). Raise it only after re-counting that budget.
+ */
+export const TEST_ACCOUNT_SWEEP_BATCH = 300;
 
 /** An account younger than this is left alone, so a run in progress is never cut from under. */
 export const TEST_ACCOUNT_SWEEP_MIN_AGE_DAYS = 7;
@@ -126,8 +142,7 @@ export const TEST_ACCOUNT_SWEEP_CANDIDATES_SQL = `SELECT id, email FROM users
     AND COALESCE(role, 'member') = 'member'
     AND aws_iam_username IS NULL
     AND aws_access_key_id_encrypted IS NULL
-    AND service_access = 0
-    AND upload_access_requested_at IS NULL
+    AND service_access = 0 -- an OPEN upload request (requested_at set) is allowed; a grant is not
     AND created_at < datetime('now', ?)
     AND NOT EXISTS (SELECT 1 FROM datasets d WHERE d.owner_user_id = users.id)
     AND NOT EXISTS (SELECT 1 FROM dataset_collaborators c WHERE c.user_id = users.id)
