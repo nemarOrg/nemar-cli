@@ -62,7 +62,12 @@ import {
   STANDIN_MERGE_SHA,
   startRepullGitHub,
 } from "./helpers/repull-github-standin";
-import { type Row, rowAt } from "./helpers/repull-rows";
+import {
+  type DispatchSeed,
+  type Row,
+  rowAt,
+  seedDispatch as seedDispatchRow,
+} from "./helpers/repull-rows";
 import { repullWeekFacts } from "./helpers/repull-week";
 import { type CapturedEmail, withFakeResend } from "./helpers/resend";
 import { lastWeeklyCronFiring } from "./helpers/weekly-cron-firing";
@@ -194,41 +199,14 @@ function sectionOf(body: string): string {
 const repullProblems = (facts: Parameters<typeof weeklyAttention>[0]): string[] =>
   weeklyAttention(facts).problems.filter((p) => /re-pull/i.test(p));
 
-let nonceSeq = 0;
 let seq = 0;
 /** A fresh `on09xxxx` dataset id, so a seeded row never meets another's unique index. */
 const nextDataset = (): string => `on09${String(++seq).padStart(4, "0")}`;
 
-function seedDispatch(o: {
-  dataset?: string;
-  kind?: "open" | "finish";
-  status: DispatchStatus;
-  code?: string | null;
-  at: string;
-  repullId?: number | null;
-}): string {
+/** A dispatch of a fresh dataset, or the one named, in the state and at the instant named; the dataset. */
+function seedDispatch(o: Omit<DispatchSeed, "dataset"> & { dataset?: string }): string {
   const dataset = o.dataset ?? nextDataset();
-  const live = o.status === "dispatched" || o.status === "started";
-  const reported = !["dispatched", "dispatch_failed", "unreported"].includes(o.status);
-  const kind = o.kind ?? (o.status === "finished" ? "finish" : "open");
-  const repullId =
-    o.repullId !== undefined ? o.repullId : o.status === "opened" || kind === "finish" ? 1 : null;
-  db.query(
-    `INSERT INTO upstream_repull_dispatches
-       (kind, dataset_id, upstream_ds, from_tag, to_tag, repull_id, nonce, status, code,
-        dispatched_at, reported_at)
-     VALUES (?, ?, ?, '1.0.0', '1.0.1', ?, ?, ?, ?, ?, ?)`,
-  ).run(
-    kind,
-    dataset,
-    `ds${dataset.slice(2)}`,
-    repullId,
-    live ? `${"n".repeat(31)}${String(++nonceSeq).padStart(5, "0")}` : null,
-    o.status,
-    o.code ?? null,
-    o.at,
-    reported ? o.at : null,
-  );
+  seedDispatchRow(db, { ...o, dataset });
   return dataset;
 }
 

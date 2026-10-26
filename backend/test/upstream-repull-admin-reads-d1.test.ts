@@ -12,9 +12,11 @@
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { Miniflare } from "miniflare";
+import type { DispatchStatus } from "../../shared/repull-state";
 import { listDispatches } from "../src/services/upstream-repull-dispatch";
 import { readSchedulerRow } from "../src/services/upstream-repull-scheduler";
 import { applyMigrations, migrationFiles } from "./helpers/miniflare-d1";
+import { DISPATCH_INSERT_SQL, dispatchBinds } from "./helpers/repull-rows";
 
 let mf: Miniflare;
 let d1: D1Database;
@@ -34,25 +36,14 @@ afterAll(async () => {
   await mf?.dispose();
 });
 
-async function dispatch(o: { dataset: string; status: string; code?: string }): Promise<number> {
-  const live = o.status === "dispatched" || o.status === "started";
-  const reported = !["dispatched", "dispatch_failed", "unreported"].includes(o.status);
+async function dispatch(o: {
+  dataset: string;
+  status: DispatchStatus;
+  code?: string;
+}): Promise<number> {
   const r = await d1
-    .prepare(
-      `INSERT INTO upstream_repull_dispatches
-         (kind, dataset_id, upstream_ds, from_tag, to_tag, repull_id, nonce, status, code,
-          dispatched_at, reported_at)
-       VALUES ('open', ?, ?, '1.0.0', '1.0.1', ?, ?, ?, ?, '2026-10-20 03:00:00', ?)`,
-    )
-    .bind(
-      o.dataset,
-      `ds${o.dataset.slice(2)}`,
-      o.status === "opened" ? 1 : null,
-      live ? `${"n".repeat(31)}${o.dataset.slice(-1)}` : null,
-      o.status,
-      o.code ?? null,
-      reported ? "2026-10-20 03:00:00" : null,
-    )
+    .prepare(DISPATCH_INSERT_SQL)
+    .bind(...dispatchBinds({ ...o, at: "2026-10-20 03:00:00" }))
     .run();
   return Number(r.meta.last_row_id);
 }

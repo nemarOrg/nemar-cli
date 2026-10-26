@@ -29,6 +29,7 @@ import {
 } from "../src/services/upstream-repull-dispatch";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
+import { NONCE_MARK, seedDispatch } from "./helpers/repull-rows";
 import { type CapturedEmail, withFakeResend } from "./helpers/resend";
 
 const ADMIN_KEY = "rpd-admin-key-0123456789abcdef0123456789abcdef01";
@@ -111,7 +112,6 @@ async function get(path: string, key: string | null = ADMIN_KEY) {
 }
 
 let seq = 0;
-const NONCE = (n: number) => `${"z".repeat(30)}${String(n).padStart(6, "0")}`;
 
 /** A dispatch, in a state the table accepts; live ones hold a nonce, as the claim leaves them. */
 function seed(
@@ -125,38 +125,19 @@ function seed(
 ): number {
   const n = ++seq;
   const status = o.status ?? "refused";
-  const live = status === "dispatched" || status === "started";
-  const reported = !["dispatched", "dispatch_failed", "unreported"].includes(status);
-  const kind = o.kind ?? (status === "finished" ? "finish" : "open");
-  const code =
-    o.code !== undefined
-      ? o.code
-      : ["refused", "failed", "dispatch_failed"].includes(status)
-        ? "gitlink"
-        : null;
-  const at = o.at ?? "2026-10-20 03:00:00";
-  const dataset = o.dataset ?? `on09${String(n).padStart(4, "0")}`;
-  return Number(
-    db
-      .query(
-        `INSERT INTO upstream_repull_dispatches
-           (kind, dataset_id, upstream_ds, from_tag, to_tag, repull_id, nonce, status, code,
-            workflow_run_url, dispatched_at, reported_at)
-         VALUES (?, ?, ?, '1.0.0', '1.0.1', ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
-        kind,
-        dataset,
-        `ds${dataset.slice(2)}`,
-        status === "opened" || kind === "finish" ? 1 : null,
-        live ? NONCE(n) : null,
-        status,
-        code,
-        reported ? `https://github.com/nemarDatasets/.github/actions/runs/${1000 + n}` : null,
-        at,
-        reported ? at : null,
-      ).lastInsertRowid,
-  );
+  return seedDispatch(db, {
+    dataset: o.dataset ?? `on09${String(n).padStart(4, "0")}`,
+    status,
+    kind: o.kind,
+    code:
+      o.code !== undefined
+        ? o.code
+        : ["refused", "failed", "dispatch_failed"].includes(status)
+          ? "gitlink"
+          : null,
+    at: o.at ?? "2026-10-20 03:00:00",
+    runUrl: `https://github.com/nemarDatasets/.github/actions/runs/${1000 + n}`,
+  });
 }
 
 const COLUMNS = [
@@ -214,7 +195,7 @@ describe("GET /repulls/dispatches", () => {
       const res = await get(path);
       expect(res.status).toBe(200);
       expect(res.text).not.toContain("nonce");
-      expect(res.text).not.toContain("zzzzzz");
+      expect(res.text).not.toContain(NONCE_MARK);
     }
     // The statement itself names its columns: a `SELECT *` would ship the nonce beside them.
     expect(DISPATCH_LIST_SQL).not.toMatch(/SELECT\s+\*/);

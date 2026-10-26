@@ -29,7 +29,13 @@ import { hashApiKey } from "../backend/src/services/token";
 import type { Bindings } from "../backend/src/types/bindings";
 import { freshDb, realD1 } from "../backend/test/helpers/d1";
 import { makeRepullApp } from "../backend/test/helpers/repull-app";
-import { type Row, rowAt } from "../backend/test/helpers/repull-rows";
+import {
+  type DispatchSeed,
+  NONCE_MARK,
+  type Row,
+  rowAt,
+  seedDispatch as seedDispatchRow,
+} from "../backend/test/helpers/repull-rows";
 import { AUTO_OPEN_PAGES_MAX } from "../src/lib/repull/auto-view";
 
 /** What `--json` prints, as far as these tests read it. */
@@ -145,39 +151,12 @@ function seedRepull(status: Parameters<typeof rowAt>[0], over: Row = {}): number
   );
 }
 
-let nonceSeq = 0;
-function seedDispatch(o: {
-  dataset: string;
-  status: string;
-  kind?: "open" | "finish";
-  code?: string;
-  repullId?: number | null;
-  at: string;
-}): number {
-  const live = o.status === "dispatched" || o.status === "started";
-  const reported = !["dispatched", "dispatch_failed", "unreported"].includes(o.status);
-  const kind = o.kind ?? (o.status === "finished" ? "finish" : "open");
-  return Number(
-    db
-      .query(
-        `INSERT INTO upstream_repull_dispatches
-           (kind, dataset_id, upstream_ds, from_tag, to_tag, repull_id, nonce, status, code,
-            workflow_run_url, dispatched_at, reported_at)
-         VALUES (?, ?, ?, '1.0.0', '1.0.1', ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
-        kind,
-        o.dataset,
-        `ds${o.dataset.slice(2)}`,
-        o.repullId ?? (o.status === "opened" || kind === "finish" ? 1 : null),
-        live ? `${"s".repeat(30)}${String(++nonceSeq).padStart(6, "0")}` : null,
-        o.status,
-        o.code ?? null,
-        reported ? "https://github.com/nemarDatasets/.github/actions/runs/424242" : null,
-        o.at,
-        reported ? o.at : null,
-      ).lastInsertRowid,
-  );
+/** A dispatch whose run, when it reported, has a log at one address. */
+function seedDispatch(o: Omit<DispatchSeed, "runUrl">): number {
+  return seedDispatchRow(db, {
+    ...o,
+    runUrl: "https://github.com/nemarDatasets/.github/actions/runs/424242",
+  });
 }
 
 /** A busy state: both switches on, a cap unreadable, three open automatic re-pulls and four dispatches. */
@@ -283,7 +262,7 @@ describe("nemar admin repull auto: the text", () => {
     expect(r.stdout).not.toContain("on090005");
     // The scheduler's cursor is a dataset id and the nonce a secret: neither is shown.
     expect(r.stdout).not.toContain("on098765");
-    expect(r.stdout).not.toContain("ssssss");
+    expect(r.stdout).not.toContain(NONCE_MARK);
   });
 
   test("a scheduler row the Worker could not find is unknown, not never recorded", async () => {
@@ -403,7 +382,7 @@ describe("nemar admin repull auto --json", () => {
     expect(out.dispatches_next_after).toBeNull();
     expect(r.stdout).not.toContain("nonce");
     expect(r.stdout).not.toContain("on098765");
-    expect(r.stdout).not.toContain("ssssss");
+    expect(r.stdout).not.toContain(NONCE_MARK);
   });
 
   test("an unknown scheduler is null, not three nulls", async () => {

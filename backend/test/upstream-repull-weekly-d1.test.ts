@@ -13,11 +13,12 @@
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { Miniflare } from "miniflare";
+import type { DispatchStatus } from "../../shared/repull-state";
 import { SYSTEM_USER_ID } from "../src/lib/constants";
 import { gatherRepullFacts, gatherRepullWeek } from "../src/services/upstream-repull-weekly";
 import type { Bindings } from "../src/types/bindings";
 import { applyMigrations, migrationFiles } from "./helpers/miniflare-d1";
-import { type Row, SHA, rowAt } from "./helpers/repull-rows";
+import { DISPATCH_INSERT_SQL, type Row, SHA, dispatchBinds, rowAt } from "./helpers/repull-rows";
 
 let mf: Miniflare;
 let d1: D1Database;
@@ -60,27 +61,23 @@ const at = (ms: number) =>
 
 async function dispatch(o: {
   dataset: string;
-  status: string;
+  status: DispatchStatus;
   code?: string;
-  kind?: string;
+  kind?: "open" | "finish";
   when: string;
 }): Promise<void> {
-  const live = o.status === "dispatched" || o.status === "started";
-  const reported = !["dispatched", "dispatch_failed", "unreported"].includes(o.status);
-  const kind = o.kind ?? "open";
-  await insert("upstream_repull_dispatches", {
-    kind,
-    dataset_id: o.dataset,
-    upstream_ds: `ds${o.dataset.slice(2)}`,
-    from_tag: "1.0.0",
-    to_tag: "1.0.1",
-    repull_id: o.status === "opened" || kind === "finish" ? 1 : null,
-    nonce: live ? `${"n".repeat(31)}${o.dataset.slice(-1)}` : null,
-    status: o.status,
-    code: o.code ?? null,
-    dispatched_at: o.when,
-    reported_at: reported ? o.when : null,
-  });
+  await d1
+    .prepare(DISPATCH_INSERT_SQL)
+    .bind(
+      ...dispatchBinds({
+        dataset: o.dataset,
+        status: o.status,
+        code: o.code,
+        kind: o.kind,
+        at: o.when,
+      }),
+    )
+    .run();
 }
 
 async function audit(
