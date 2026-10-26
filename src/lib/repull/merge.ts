@@ -9,6 +9,7 @@
  *     (its screened head recorded; `resume` gets it there);
  *  2. the dataset is not an anonymous deposit (the catalog row says `anonymous` is exactly 0);
  *  3. GitHub's live pull request is open, not a draft, the record's release branch into `main`,
+ *     from and into the dataset's own repository (a fork, a deleted one included, is refused),
  *     with its head at the screened commit;
  *  4. NEMAR's `main` is the pull request's base (the record's for N.0.0, N.0.1's own for N.0.1),
  *     or moved by enrichment-shaped commits only (`head.ts`), and none of them outside `.nemar/`
@@ -70,6 +71,7 @@ import {
 } from "../api/repull.js";
 import {
   type ApprovalGate,
+  DATASETS_ORG,
   type MergeResult,
   type WriteOutcome,
   approvalGate,
@@ -386,6 +388,14 @@ async function check(
   if (live.value.baseRef !== "main" || live.value.headRef !== branch) {
     return stopAt("not-ready", `Pull request #${prNumber} is not ${branch} into main.`);
   }
+  // From and into the dataset's own repository: a fork's branch of the same name is not the
+  // re-pull's, and one whose repository GitHub no longer names (a deleted fork) fails closed too.
+  if (!isOwnRepo(live.value.headRepo, id) || !isOwnRepo(live.value.baseRepo, id)) {
+    return stopAt(
+      "not-ready",
+      `Pull request #${prNumber} is not from and into ${DATASETS_ORG}/${id} itself (its head is ${live.value.headRepo ?? "a repository GitHub no longer names"}): a fork's pull request is never merged as a re-pull's. Nothing was claimed or merged.`,
+    );
+  }
   if (live.value.headSha !== head) {
     return stopAt(
       "not-ready",
@@ -514,6 +524,15 @@ async function check(
       warnings,
     },
   };
+}
+
+/**
+ * Whether `repo` (GitHub's `owner/name`, or null when it names none) is the dataset's own
+ * repository, compared without case as GitHub compares names (as `execute/pull-request.ts` judges
+ * the release pull request's head).
+ */
+function isOwnRepo(repo: string | null, datasetId: string): boolean {
+  return repo !== null && repo.toLowerCase() === `${DATASETS_ORG}/${datasetId}`.toLowerCase();
 }
 
 /**

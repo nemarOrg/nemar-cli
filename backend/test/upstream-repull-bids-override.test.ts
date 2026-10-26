@@ -172,15 +172,27 @@ const run = (name: string, status: string, conclusion: string | null, app = NEMA
 
 /** GitHub as it is for a pull request whose BIDS validation failed and is not required. */
 function github(
-  o: { state?: string | null; bids?: CheckRunAnswer; versionCheck?: CheckRunAnswer } = {},
+  o: {
+    state?: string | null;
+    bids?: CheckRunAnswer;
+    versionCheck?: CheckRunAnswer;
+    /** The head repository's name, or null for a deleted fork; the dataset's own by default. */
+    headRepo?: string | null;
+    baseRepo?: string;
+  } = {},
 ) {
+  const headRepo = o.headRepo === undefined ? `nemarDatasets/${DS}` : o.headRepo;
   gh.pulls[`${DS}#7`] = {
     state: "open",
     draft: false,
     merged: false,
     user: { login: NEMAR_APP_BOT_LOGIN, id: NEMAR_APP_BOT_USER_ID, type: "Bot" },
-    head: { sha: HEAD, ref: "release/v2.0.0", repo: { full_name: `nemarDatasets/${DS}` } },
-    base: { ref: "main", repo: { full_name: `nemarDatasets/${DS}` } },
+    head: {
+      sha: HEAD,
+      ref: "release/v2.0.0",
+      repo: headRepo === null ? null : { full_name: headRepo },
+    },
+    base: { ref: "main", repo: { full_name: o.baseRepo ?? `nemarDatasets/${DS}` } },
     mergeable_state: o.state === undefined ? "unstable" : o.state,
   };
   gh.checkRuns[`${DS}@${HEAD}`] = [
@@ -225,6 +237,24 @@ describe("the claim over a failed BIDS validation", () => {
   });
 
   const refusals: Array<[string, () => void, number, string, Row?]> = [
+    [
+      "the head is a fork's",
+      () => github({ headRepo: `someone/${DS}` }),
+      409,
+      "pull-request-mismatch",
+    ],
+    [
+      "the head is a deleted fork's",
+      () => github({ headRepo: null }),
+      409,
+      "pull-request-mismatch",
+    ],
+    [
+      "the base is another repository",
+      () => github({ baseRepo: `someone/${DS}` }),
+      409,
+      "pull-request-mismatch",
+    ],
     ["GitHub reports it blocked", () => github({ state: "blocked" }), 409, "bids-override-blocked"],
     [
       "GitHub reports it clean",
@@ -283,8 +313,17 @@ describe("the claim over a failed BIDS validation", () => {
       expect([res.status, res.body.code]).toEqual([status, code]);
       expect(rowOf(id)).toMatchObject({ merge_claim_sha: null, merge_claimed_at: null });
       expect(overrides()).toEqual([]);
+      expect(gh.merges).toEqual([]);
     });
   }
+
+  test("the dataset's own repository named in another case is its own: GitHub's names have no case", async () => {
+    const id = ready();
+    github({ headRepo: `NemarDatasets/${DS.toUpperCase()}`, baseRepo: `NEMARDATASETS/${DS}` });
+    const res = await claim(id);
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(rowOf(id)).toMatchObject({ merge_claim_sha: HEAD });
+  });
 });
 
 describe("the claim's own checks stand, and the override is named only where it is read", () => {

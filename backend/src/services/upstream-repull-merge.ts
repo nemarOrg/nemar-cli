@@ -746,6 +746,8 @@ export async function finishAfterMerge(
  * are the claim's own, unchanged.
  *  - The record is an administrator's: the automatic path never merges over a failed check, and
  *    an automatic record's pull request is merged over one by no one.
+ *  - The pull request is from and into the dataset's own repository (`pull-request-mismatch`
+ *    otherwise): a fork's branch of the same name is not the re-pull's.
  *  - GitHub reports the pull request `unstable`, which is a check that is not required failing:
  *    `blocked` means a rule requires the check, and merging would be a bypass, which a re-pull
  *    never uses; any other state is refused as the ordinary gate refuses it.
@@ -786,6 +788,17 @@ export async function bidsOverrideRefusal(
     checks.versionCheck.status === "unreadable"
   ) {
     return { ...unreadable(`pull request #${number}`, "its state or its checks"), row };
+  }
+  // From and into the dataset's own repository, compared without case as GitHub compares names: a
+  // fork's branch of the same name is not the re-pull's, and a deleted fork names no repository.
+  const own = `${ORG_NAME}/${row.dataset_id}`.toLowerCase();
+  if (fact.headRepo?.toLowerCase() !== own || fact.baseRepo.toLowerCase() !== own) {
+    return {
+      status: 409,
+      code: "pull-request-mismatch",
+      message: `Pull request #${number} is not from and into ${ORG_NAME}/${row.dataset_id} itself: a fork's pull request is never merged as a re-pull's. Nothing was claimed.`,
+      row,
+    };
   }
   if (fact.mergeableState === "blocked") {
     return {

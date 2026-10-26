@@ -242,6 +242,13 @@ export interface PullRequestFacts {
    */
   headRef: string;
   headSha: string;
+  /**
+   * The head repository's and the base repository's `owner/name`, or null when GitHub names none
+   * (a deleted fork leaves the head's null): a re-pull's pull request merges only from and into the
+   * dataset's own repository (`lib/repull/merge.ts`).
+   */
+  headRepo: string | null;
+  baseRepo: string | null;
   authorLogin: string;
   /** GitHub's own mergeability verdict, which already weighs every required check and review. */
   mergeableState: string;
@@ -287,12 +294,15 @@ export async function fetchPullRequest(
           : why(res.status, body),
     };
   }
-  const head = body?.head as { sha?: unknown; ref?: unknown } | undefined;
-  const baseInfo = body?.base as { ref?: unknown } | undefined;
+  type Repo = { full_name?: unknown } | null | undefined;
+  const head = body?.head as { sha?: unknown; ref?: unknown; repo?: Repo } | undefined;
+  const baseInfo = body?.base as { ref?: unknown; repo?: Repo } | undefined;
   const user = body?.user as { login?: unknown } | undefined;
   if (typeof head?.sha !== "string" || !/^[0-9a-f]{40}$/.test(head.sha)) {
     return { ok: false, status: res.status, reason: "GitHub's answer had no head commit." };
   }
+  const repoName = (repo: Repo): string | null =>
+    typeof repo?.full_name === "string" ? repo.full_name : null;
   return {
     ok: true,
     value: {
@@ -301,6 +311,8 @@ export async function fetchPullRequest(
       baseRef: typeof baseInfo?.ref === "string" ? baseInfo.ref : "",
       headRef: typeof head.ref === "string" ? head.ref : "",
       headSha: head.sha,
+      headRepo: repoName(head.repo),
+      baseRepo: repoName(baseInfo?.repo),
       authorLogin: typeof user?.login === "string" ? user.login : "",
       mergeableState: typeof body?.mergeable_state === "string" ? body.mergeable_state : "unknown",
     },

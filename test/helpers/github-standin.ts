@@ -62,8 +62,11 @@ export interface PullState {
   headAfterFirstRead?: string;
   /** The head branch's name; "add-subjects" unless a test says otherwise. */
   headRef?: string;
-  /** The head repository's full name: the dataset's own unless a test says otherwise (a fork's). */
-  headRepo?: string;
+  /**
+   * The head repository's full name: the dataset's own unless a test says otherwise (a fork's), or
+   * null for a deleted fork, whose head GitHub names no repository for.
+   */
+  headRepo?: string | null;
   /** The squash merge's commit, once merged (GitHub's `merge_commit_sha`); null before. */
   mergeCommitSha?: string;
   /**
@@ -388,7 +391,10 @@ export function startGitHubStandin(): GitHubStandin {
                 head: {
                   ref: p.headRef ?? "add-subjects",
                   sha: await headOf(list[1] as string, p),
-                  repo: { full_name: p.headRepo ?? `nemarDatasets/${list[1]}` },
+                  repo:
+                    p.headRepo === null
+                      ? null
+                      : { full_name: p.headRepo ?? `nemarDatasets/${list[1]}` },
                 },
                 base: { ref: p.base ?? "main" },
               })),
@@ -491,10 +497,13 @@ export function startGitHubStandin(): GitHubStandin {
                   ? p.headAfterFirstRead
                   : await headOf(pull[1] as string, p)),
               ref: p.headRef ?? "add-subjects",
-              repo: {
-                full_name: p.headRepo ?? `nemarDatasets/${pull[1]}`,
-                owner: { login: (p.headRepo ?? "nemarDatasets/").split("/")[0] },
-              },
+              repo:
+                p.headRepo === null
+                  ? null
+                  : {
+                      full_name: p.headRepo ?? `nemarDatasets/${pull[1]}`,
+                      owner: { login: (p.headRepo ?? "nemarDatasets/").split("/")[0] },
+                    },
             },
           });
         }

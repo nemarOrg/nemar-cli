@@ -155,6 +155,19 @@ describe.skipIf(!awsInstalled)("a merge over a failed BIDS validation", () => {
     expect(w.row()).toMatchObject({ status: "gates_clear", merge_claim_sha: null });
   });
 
+  test("a fork's head is refused before any request that writes", async () => {
+    const head = await toGates();
+    bidsFailed(head);
+    Object.assign(w.gh.pulls[prKey(w)] as object, { headRepo: `someone/${w.fx.datasetId}` });
+    const writes = w.apiWrites.length;
+    const run = await overrideMerge();
+    expect(run.exitCode, run.all).toBe(1);
+    expect(run.all).toContain("a fork's pull request is never merged");
+    expect(w.apiWrites.length).toBe(writes);
+    expect(merges()).toEqual([]);
+    expect(auditOf("repull_bids_override")).toEqual([]);
+  });
+
   test("clean is refused before any request that writes: the override is not needed", async () => {
     const head = await toGates();
     bidsFailed(head, { state: "clean" });

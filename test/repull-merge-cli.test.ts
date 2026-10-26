@@ -280,6 +280,31 @@ describe.skipIf(!awsInstalled)("the gate's own checks, before the claim", () => 
     expect(merges()).toEqual([]);
   });
 
+  test("a fork's head, and a deleted fork's, are not ready: nothing is claimed or sent", async () => {
+    await toGates();
+    for (const headRepo of [`someone/${w.fx.datasetId}`, null]) {
+      Object.assign(w.gh.pulls[prKey(w)] as object, { headRepo });
+      const before = transitions();
+      const run = await merge();
+      expect([headRepo, run.exitCode]).toEqual([headRepo, 1]);
+      expect(run.all).toContain("(not-ready)");
+      expect(run.all).toContain("a fork's pull request is never merged");
+      expect(transitions()).toBe(before);
+    }
+    expect(merges()).toEqual([]);
+    expect(w.row().merge_claim_sha).toBeNull();
+  });
+
+  test("the dataset's own repository named in another case is its own, and merges", async () => {
+    await toGates();
+    Object.assign(w.gh.pulls[prKey(w)] as object, {
+      headRepo: `NemarDatasets/${w.fx.datasetId.toUpperCase()}`,
+    });
+    const run = await merge();
+    expect(run.exitCode, run.all).toBe(0);
+    expect(w.row().status).toBe("merged");
+  });
+
   test("a screen that no longer passes is refused at the gate, before any claim is asked for", async () => {
     await toGates();
     w.db().run("UPDATE upstream_repull_screens SET status = 'review'");
