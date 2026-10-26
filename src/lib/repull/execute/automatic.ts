@@ -739,6 +739,8 @@ export type ReportAnswer = { stored: true } | { stored: false; code: DispatchCod
 
 export interface ReportOptions {
   fetchImpl?: typeof fetch;
+  /** Tests only: the API's address; the CLI's own (`getApiUrl`) by default. */
+  apiUrl?: string;
   /** Attempts for an answer that was lost or a 5xx; a refusal (4xx) is never tried again. */
   attempts?: number;
   timeoutMs?: number;
@@ -769,13 +771,14 @@ export async function reportDispatch(
   if (phase === "opened") body.repull_id = extra.repullId;
   if (ctx.runUrl) body.workflow_run_url = ctx.runUrl;
   const fetchImpl = opts.fetchImpl ?? fetch;
+  const apiUrl = opts.apiUrl ?? getApiUrl();
   const attempts = Math.max(1, opts.attempts ?? 3);
   let answer: ReportAnswer = { stored: false, code: "report-unanswered" };
   for (let attempt = 1; attempt <= attempts; attempt++) {
     let status: number;
     let word: unknown;
     try {
-      const res = await fetchImpl(`${getApiUrl()}/webhooks/repull-state`, {
+      const res = await fetchImpl(`${apiUrl}/webhooks/repull-state`, {
         method: "POST",
         // The dispatch token goes to the API and nowhere else: a redirect is refused, never followed.
         redirect: "error",

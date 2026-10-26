@@ -26,7 +26,8 @@
  * here a fetch stand-in answers the statuses a callback can answer, for the error paths and the
  * retries (`.rules/testing.md`: HTTP fixtures for error paths and network failures).
  *
- * CI TIER: unit-pure. Pure functions, a temp directory, no server.
+ * CI TIER: unit-pure. Pure functions, a temp directory, and two loopback servers for the
+ * redirect tests; no API, and nothing that sets the CLI's API address.
  */
 
 import { afterAll, describe, expect, test } from "bun:test";
@@ -864,8 +865,6 @@ describe("a redirect is refused, never followed", () => {
 
   test("a report does not follow the API elsewhere, and is not stored", async () => {
     const s = servers(200);
-    const saved = process.env.TEST_API_URL;
-    process.env.TEST_API_URL = s.base;
     try {
       const ctx = {
         dispatch: parseDispatchPayload(sent()),
@@ -874,13 +873,16 @@ describe("a redirect is refused, never followed", () => {
         sink: recordingSink(),
       };
       expect(
-        await reportDispatch(ctx, "failed", { code: "runner-failed" }, { attempts: 1 }),
+        await reportDispatch(
+          ctx,
+          "failed",
+          { code: "runner-failed" },
+          { attempts: 1, apiUrl: s.base },
+        ),
       ).toEqual({ stored: false, code: "report-unanswered" });
       expect(s.reached).toEqual([]);
       expect(ctx.sink.reported).toEqual([]);
     } finally {
-      if (saved === undefined) Reflect.deleteProperty(process.env, "TEST_API_URL");
-      else process.env.TEST_API_URL = saved;
       s.stop();
     }
   });
