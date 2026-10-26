@@ -5,11 +5,13 @@
  * asks for it. Each merge mints a version DOI that cannot be withdrawn, so nothing here merges
  * unless all of these hold, read in this order, and a refusal before the claim writes nothing:
  *
- *  1. the record is `gates_clear` (its screened head recorded; `resume` gets it there);
+ *  1. the record is `gates_clear` for N.0.0's pull request, or `patch_gates_clear` for N.0.1's
+ *     (its screened head recorded; `resume` gets it there);
  *  2. the dataset is not an anonymous deposit (the catalog row says `anonymous` is exactly 0);
  *  3. GitHub's live pull request is open, not a draft, the record's release branch into `main`,
  *     with its head at the screened commit;
- *  4. NEMAR's `main` is the record's base, or moved by enrichment-shaped commits only (`head.ts`);
+ *  4. NEMAR's `main` is the pull request's base (the record's for N.0.0, N.0.1's own for N.0.1),
+ *     or moved by enrichment-shaped commits only (`head.ts`);
  *  5. the automated review (ADR 0107) read for that head, at the time of the merge: one that
  *     failed, is running or cannot be read needs `force`, as `approve` asks;
  *  6. the identifier screen of that head is clear, or carries a recorded acknowledgment (the
@@ -38,7 +40,12 @@
  */
 
 import { dirname, join } from "node:path";
-import type { RepullRow } from "../../../shared/repull-state.js";
+import {
+  PULL_REQUEST_COLUMNS,
+  type RepullPullRequest,
+  type RepullRow,
+  pullRequestOfGatesStatus,
+} from "../../../shared/repull-state.js";
 import { getPrReview } from "../api/admin.js";
 import { ApiError } from "../api/errors.js";
 import {
@@ -65,6 +72,7 @@ import { openOriginScratch } from "./execute/origin.js";
 import { checkMain } from "./execute/pull-request.js";
 import { ExecuteRefused, assertNotAnonymous } from "./execute/verify-plan.js";
 import { acquireLock, privateDir, withIsolatedGit, workPaths } from "./execute/workdir.js";
+import { PATCH_TRAILER } from "./patch.js";
 import type { Env } from "./sources.js";
 import { repullTrailerLines, trailersProblem } from "./trailers.js";
 
@@ -90,6 +98,10 @@ export type GateRefusal = { ok: false; stage: MergeStage; reason: string };
 /** What the gate read, for the merge it allows. */
 export interface RepullMergeCheck {
   row: RepullRow;
+  /** Which of the record's pull requests: N.0.0's or N.0.1's. */
+  pr: RepullPullRequest;
+  /** The version its merge mints. */
+  version: string;
   prNumber: number;
   /** The screened head: the claim names it, and the merge is sent at it. */
   head: string;
@@ -199,12 +211,6 @@ export async function prReviewsGate(args: {
     };
   }
   if (!found) return { kind: "ordinary" };
-  if (found.pr !== "n0") {
-    return {
-      kind: "refused",
-      reason: `This is re-pull #${found.row.id}'s N.0.1 pull request, and merging N.0.1 is not built yet.`,
-    };
-  }
   const ctx: GateContext = {
     datasetId: args.datasetId,
     token: args.token,
@@ -223,19 +229,29 @@ export async function prReviewsGate(args: {
   return { kind: "repull", ctx, check: checked.check };
 }
 
-/** The squash commit the gate sends: its title and a message whose last paragraph is the trailers. */
+/**
+ * The squash commit the gate sends: its title and a message whose last paragraph is the trailers
+ * (N.0.1's with its own `Repull-Patch:` beside them, when the record says how many corrections).
+ */
 export function squashMessage(
   row: RepullRow,
   prNumber: number,
+  pr: RepullPullRequest = "n0",
 ): { title: string; message: string } {
   const [snapshot, plan] = repullTrailerLines(row);
+  const corrections = row.counts.corrections;
   return {
-    title: `Release v${row.to_version} (#${prNumber})`,
+    title: `Release v${row[PULL_REQUEST_COLUMNS[pr].version]} (#${prNumber})`,
     message: [
-      `Re-pull of upstream ${row.upstream_ds} from snapshot ${row.from_tag} to ${row.to_tag} (re-pull #${row.id}), squash-merged through the re-pull's merge gate (ADR 0111).`,
+      pr === "n0"
+        ? `Re-pull of upstream ${row.upstream_ds} from snapshot ${row.from_tag} to ${row.to_tag} (re-pull #${row.id}), squash-merged through the re-pull's merge gate (ADR 0111).`
+        : `NEMAR's corrections of re-pull #${row.id} (upstream ${row.upstream_ds} ${row.from_tag} to ${row.to_tag}), replayed onto v${row.to_version}, squash-merged through the re-pull's merge gate (ADR 0111).`,
       "",
       snapshot,
       plan,
+      ...(pr === "n1" && typeof corrections === "number"
+        ? [`${PATCH_TRAILER}: corrections=${corrections}`]
+        : []),
     ].join("\n"),
   };
 }
@@ -277,7 +293,7 @@ async function reviewGate(
 
 /**
  * Steps 1 to 8 of the module comment, for `row` (or the dataset's open record). Writes nothing.
- * `prNumber`, when given, must be the record's N.0.0 pull request.
+ * `prNumber`, when given, must be one of the record's two pull requests.
  */
 export async function checkRepullMerge(
   ctx: GateContext,
@@ -301,22 +317,33 @@ async function check(
     return stopAt("not-ready", `The re-pull record could not be read (${errorText(err)}).`);
   }
   if (!row) return stopAt("not-ready", `${id} has no open re-pull.`);
-  if (given && row.pr_number !== given.prNumber) {
+  const named: RepullPullRequest | null = given
+    ? row.pr_number === given.prNumber
+      ? "n0"
+      : row.patch_pr_number === given.prNumber
+        ? "n1"
+        : null
+    : pullRequestOfGatesStatus(row.status);
+  if (given && named === null) {
     return stopAt(
       "not-ready",
-      `Pull request #${given.prNumber} is not re-pull #${row.id}'s N.0.0 pull request; N.0.1 is not built yet.`,
+      `Pull request #${given.prNumber} is not one of re-pull #${row.id}'s pull requests.`,
     );
   }
-  if (row.status !== "gates_clear") {
+  const pr: RepullPullRequest = named ?? "n0";
+  const c = PULL_REQUEST_COLUMNS[pr];
+  if (row.status !== c.gatesClear) {
     return stopAt(
       "not-ready",
-      row.status === "pr_open"
+      row.status === "pr_open" || row.status === "patch_synthesized"
         ? `Re-pull #${row.id}'s gates are not recorded: run nemar admin repull resume ${id} (the identifier screen and GitHub's state).`
-        : `Re-pull #${row.id} is ${row.status}, and only a gates_clear record is merged.`,
+        : `Re-pull #${row.id} is ${row.status}; its ${pr === "n0" ? "N.0.0" : "N.0.1"} pull request is merged only from ${c.gatesClear}.`,
     );
   }
-  const prNumber = row.pr_number as number;
-  const head = row.gates_sha as string;
+  const prNumber = row[c.number] as number;
+  const head = row[c.gates] as string;
+  const branch = row[c.branch] as string;
+  const base = (pr === "n0" ? row.base_sha : row.patch_base_sha) as string;
 
   // 2. The dataset, every run: an anonymous deposit is never re-pulled.
   try {
@@ -329,21 +356,20 @@ async function check(
   const live = await fetchPullRequest(ctx.token, id, prNumber, ctx.base);
   if (!live.ok)
     return stopAt("github", `Pull request #${prNumber} could not be read: ${live.reason}`);
-  const pr = live.value;
-  if (pr.state !== "open") {
+  if (live.value.state !== "open") {
     return stopAt(
       "not-ready",
-      `Pull request #${prNumber} is ${pr.state}; run nemar admin repull resume ${id}, which records it.`,
+      `Pull request #${prNumber} is ${live.value.state}; run nemar admin repull resume ${id}, which records it.`,
     );
   }
-  if (pr.draft) return stopAt("not-ready", `Pull request #${prNumber} is a draft.`);
-  if (pr.baseRef !== "main" || pr.headRef !== row.branch) {
-    return stopAt("not-ready", `Pull request #${prNumber} is not ${row.branch} into main.`);
+  if (live.value.draft) return stopAt("not-ready", `Pull request #${prNumber} is a draft.`);
+  if (live.value.baseRef !== "main" || live.value.headRef !== branch) {
+    return stopAt("not-ready", `Pull request #${prNumber} is not ${branch} into main.`);
   }
-  if (pr.headSha !== head) {
+  if (live.value.headSha !== head) {
     return stopAt(
       "not-ready",
-      `Pull request #${prNumber} is at ${pr.headSha.slice(0, 12)}, not the screened ${head.slice(0, 12)}: run nemar admin repull resume ${id}.`,
+      `Pull request #${prNumber} is at ${live.value.headSha.slice(0, 12)}, not the screened ${head.slice(0, 12)}: run nemar admin repull resume ${id}.`,
     );
   }
 
@@ -357,7 +383,7 @@ async function check(
     token: ctx.token,
   });
   try {
-    await checkMain({ work: scratch.dir, baseSha: row.base_sha, env: scratch.env });
+    await checkMain({ work: scratch.dir, baseSha: base, env: scratch.env });
   } catch (err) {
     if (err instanceof ExecuteRefused && err.code === "main-moved") {
       return stopAt("main-moved", `${err.message} Nothing was claimed or merged.`);
@@ -386,7 +412,7 @@ async function check(
     return stopAt("screen", `The identifier screen could not be read (${errorText(err)}).`);
   }
   if (!screens.exempt) {
-    const screen = screens.screens.find((s) => s.pr === "n0" && s.sha === head);
+    const screen = screens.screens.find((s) => s.pr === pr && s.sha === head);
     const passes =
       screen !== undefined &&
       (screen.gate === "clear" ||
@@ -404,13 +430,13 @@ async function check(
     ctx.token,
     id,
     prNumber,
-    { headSha: head, mergeableState: pr.mergeableState },
+    { headSha: head, mergeableState: live.value.mergeableState },
     { base: ctx.base, ...(ctx.sleep ? { sleep: ctx.sleep } : {}) },
   );
   if (!clean.ok) return stopAt("github", `${clean.why} Nothing was claimed or merged.`);
 
   // 8. The squash message, read as git reads it.
-  const squash = squashMessage(row, prNumber);
+  const squash = squashMessage(row, prNumber, pr);
   const problem = await trailersProblem(`${squash.title}\n\n${squash.message}`, row);
   if (problem) {
     return stopAt(
@@ -420,7 +446,16 @@ async function check(
   }
   return {
     ok: true,
-    check: { row, prNumber, head, squash, heldClaim: row.merge_claim_sha === head, warnings },
+    check: {
+      row,
+      pr,
+      version: row[c.version] as string,
+      prNumber,
+      head,
+      squash,
+      heldClaim: row[c.claimSha] === head,
+      warnings,
+    },
   };
 }
 
@@ -433,8 +468,8 @@ function errorText(err: unknown): string {
 }
 
 /** The words of the merge's confirmation: one irreversible DOI. */
-export function doiLine(row: RepullRow): string {
-  return `This merge mints one irreversible version DOI, v${row.to_version}, and takes one unit of today's re-pull merge cap.`;
+export function doiLine(row: RepullRow, pr: RepullPullRequest = "n0"): string {
+  return `This merge mints one irreversible version DOI, v${row[PULL_REQUEST_COLUMNS[pr].version]}, and takes one unit of today's re-pull merge cap.`;
 }
 
 /**
@@ -459,7 +494,7 @@ export async function sendRepullMerge(
     return { merged: false, stage: "review", reason: review.reason };
   }
   if (opts.confirm) {
-    const lines = [doiLine(row), ...check.warnings];
+    const lines = [doiLine(row, check.pr), ...check.warnings];
     if (
       !(await opts.confirm(
         `${lines.join(" ")} Merge pull request #${prNumber} of ${ctx.datasetId}?`,
@@ -558,13 +593,14 @@ async function sendUnderLock(
   check: RepullMergeCheck,
   opts: { out: (line: string) => void; tries?: number },
 ): Promise<MergeOutcome> {
-  const { row, prNumber, head } = check;
+  const { row, prNumber, head, pr } = check;
+  const c = PULL_REQUEST_COLUMNS[pr];
   if (!check.heldClaim) {
     try {
       await transitionRepull(row.id, {
-        from: "gates_clear",
-        to: "gates_clear",
-        fields: { merge_claim_sha: head },
+        from: c.gatesClear,
+        to: c.gatesClear,
+        fields: { [c.claimSha]: head },
       });
     } catch (err) {
       return claimRefused(err, ctx.datasetId);
@@ -574,7 +610,7 @@ async function sendUnderLock(
     // The claim was made earlier: the Worker reads again what its statement held then (the
     // dataset fences, the screen for THIS administrator, the live head) and the claim's age.
     try {
-      await checkRepullMergeClaim(row.id, { pr: "n0", sha: head });
+      await checkRepullMergeClaim(row.id, { pr, sha: head });
     } catch (err) {
       return heldClaimRefused(err, ctx.datasetId);
     }
@@ -591,11 +627,11 @@ async function sendUnderLock(
   });
   if (merged.ok) {
     try {
-      const recorded = await recordRepullMerged(row.id, "n0");
+      const recorded = await recordRepullMerged(row.id, pr);
       return {
         merged: true,
         row: recorded.repull,
-        mergeSha: recorded.repull.merge_sha,
+        mergeSha: recorded.repull[c.mergeSha],
         recorded: true,
       };
     } catch (err) {

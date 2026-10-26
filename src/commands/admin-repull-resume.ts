@@ -5,9 +5,9 @@
  *   nemar admin repull status <id>   what the record says (`lib/repull/status.ts`)
  *   nemar admin repull resume <id>   the head, main, the identifier screen and the gates, a held
  *                                    claim resolved from GitHub, and after the merge the release,
- *                                    the lock of what the copy wrote and the end of the record
- *                                    (`lib/repull/resume.ts`, `lib/repull/release.ts`); it never
- *                                    merges
+ *                                    the lock of what the copy wrote, N.0.1 and the end of the
+ *                                    record (`lib/repull/resume.ts`, `lib/repull/release.ts`,
+ *                                    `lib/repull/patch-turn.ts`); it never merges
  *
  * Registered on `repullCommand` by `admin-repull.ts`. The shared argument parsers and the
  * report of a refusal are exported for the merge command.
@@ -125,20 +125,37 @@ with your own GitHub token (GH_TOKEN, else \`gh auth token\`). It never merges.
                the tag and the version row itself).
   released     locks the objects the copy and the uploads wrote (and no other object under the
                dataset's prefix), with the ambient AWS credentials reading the staging manifest
-               that lists them; only once every one is locked is the count recorded, and the
-               record is complete when its plan had no corrections (N.0.1 is not built yet).
+               that lists them; only once every one is locked is the count recorded. Then:
+               with no correction and no conflict in the plan, the record is complete; with
+               conflicts, it waits for your decision (--take-ours, --keep-upstream); otherwise
+               N.0.1 is made from the reviewed plan (--plan, else the plan's default path):
+               NEMAR's side of each correction, and of each conflict you resolved to it,
+               replayed onto the new main (nothing is scrubbed or copied), release/v<N.0.1>
+               pushed and its pull request opened (asked first unless --yes): patch_synthesized.
+  patch_*      N.0.1's pull request takes the same steps as N.0.0's (the screen, the gates, the
+               release), and the record is complete once v<N.0.1> is released.
 
 A screen that asks for a person is acknowledged with --acknowledge-identifier-screen "<reason>",
 after you read it with \`nemar admin repull status <id>\`; a direct identifier cannot be.
+A conflict is named as the plan names it: a path, or dataset_description.json#<Key> for one key
+of the description. The README family is replayed as a unit.
 
 Exit codes:
-  0  ready to merge (gates_clear), released (N.0.1 not built), or complete.
-  3  waiting (for the screen, GitHub, a person) after --wait-minutes, or stopped with why
-     recorded on the record; run resume again.
-  1  refused before anything was written, nothing to resume, or the record ended (abandoned).
+  0  ready to merge (gates_clear, patch_gates_clear), or complete.
+  3  waiting (for the screen, GitHub, a person, your decision on conflicts) after
+     --wait-minutes, or stopped with why recorded on the record; run resume again.
+  1  refused before anything was written, nothing to resume, or the record ended (abandoned,
+     patch_declined).
 
 ${AUTOMATIC_HELP} With it, resume is a finish: it takes up only the automatic re-pull
 its dispatch names, only once it has merged, and walks it to complete.`;
+
+/** `--take-ours`: repeated, each a conflict the plan lists. */
+function collectTakeOurs(value: string, previous: string[]): string[] {
+  if (value.trim() === "")
+    throw new InvalidArgumentError("a path, or dataset_description.json#<Key>.");
+  return [...previous, value];
+}
 
 export const resumeCommand = new Command("resume")
   .argument("<datasetId>")
@@ -156,7 +173,18 @@ export const resumeCommand = new Command("resume")
     "Your reason for a screen verdict that asks for a person (ADR 0086)",
     parseReason,
   )
-  .option("-y, --yes", "Do not ask before re-synthesizing the release branch")
+  .option(
+    "--plan <file>",
+    "The reviewed plan file N.0.1 is made from (default: the plan's own path)",
+  )
+  .option(
+    "--take-ours <conflict>",
+    "Resolve a conflict the plan lists to NEMAR's side in N.0.1 (repeatable)",
+    collectTakeOurs,
+    [] as string[],
+  )
+  .option("--keep-upstream", "Leave every conflict the plan lists on upstream's side")
+  .option("-y, --yes", "Do not ask before pushing (a re-synthesis, or N.0.1)")
   .option("--json", "Print the record as JSON")
   .option("--automatic-dispatch <id>", "The central workflow's finish of a merged re-pull")
   .addHelpText("after", RESUME_HELP)
@@ -166,6 +194,9 @@ export const resumeCommand = new Command("resume")
       options: {
         waitMinutes: number;
         acknowledgeIdentifierScreen?: string;
+        plan?: string;
+        takeOurs: string[];
+        keepUpstream?: boolean;
         yes?: boolean;
         json?: boolean;
         automaticDispatch?: string;
@@ -187,6 +218,9 @@ export const resumeCommand = new Command("resume")
           ...(options.acknowledgeIdentifierScreen
             ? { acknowledgment: options.acknowledgeIdentifierScreen }
             : {}),
+          ...(options.plan ? { plan: options.plan } : {}),
+          takeOurs: options.takeOurs,
+          keepUpstream: options.keepUpstream === true,
           ...(options.yes
             ? {}
             : {
@@ -215,6 +249,9 @@ export const resumeCommand = new Command("resume")
       switch (result.outcome) {
         case "ready":
           out(`Ready to merge: nemar admin repull merge ${datasetId}`);
+          break;
+        case "released":
+          out(`Re-pull #${row?.id} of ${datasetId} is released.`);
           break;
         case "waiting":
           out(`Waiting for ${result.waitingFor}. Run resume again.`);

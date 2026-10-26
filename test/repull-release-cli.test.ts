@@ -284,15 +284,30 @@ describe.skipIf(!awsInstalled)("the release", () => {
     expect(w.s3.calls("PutObjectRetention")).toEqual([]);
   });
 
-  test("a record with corrections stays released: N.0.1 is not built", async () => {
+  test("a record whose corrections count is not its plan's makes no N.0.1", async () => {
     await merged();
+    // The plan has no correction; a record that says otherwise is not the same plan.
     w.db().run("UPDATE upstream_repulls SET counts = json_set(counts, '$.corrections', 2)");
     await w.tagMain("2.0.0");
     w.insertVersionRow("2.0.0");
     const run = await resume();
-    expect(run.exitCode, run.all).toBe(0);
-    expect(run.all).toContain("not built yet");
+    expect(run.exitCode, run.all).toBe(3);
+    expect(run.all).toContain("patch-plan-mismatch");
     expect(w.row().status).toBe("released");
     expect(JSON.parse(w.row().counts).locked).toBeGreaterThan(0);
+    expect(w.row().last_error).toStartWith("[patch:patch-plan-mismatch]");
+    expect(Object.values(w.gh.pulls).filter((p) => p.headRef === "release/v2.0.1")).toEqual([]);
+  });
+
+  test("a plan with no correction and no conflict opens no second pull request", async () => {
+    await merged();
+    await tagged();
+    const run = await resume();
+    expect(run.exitCode, run.all).toBe(0);
+    expect(w.row().status).toBe("complete");
+    expect(Object.values(w.gh.pulls).filter((p) => p.headRef === "release/v2.0.1")).toEqual([]);
+    expect(
+      (await gitIn(w.fx.originRepo, ["for-each-ref", "refs/heads/release/v2.0.1"])).trim(),
+    ).toBe("");
   });
 });

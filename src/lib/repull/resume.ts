@@ -1,44 +1,55 @@
 /**
  * `nemar admin repull resume <id>`: take an open re-pull up where it stopped, past its open pull
- * request (ADR 0111, decisions 2, 3, 6 and 7; epic #1046 phase 6). It runs on the administrator's
- * machine with their own GitHub token, reads GitHub and NEMAR's origin itself, and records each
- * step through the Worker, which reads again what it can. It never merges: a merge mints a version
- * DOI that cannot be withdrawn, and is `nemar admin repull merge`'s (or `nemar admin pr-reviews`'),
- * through the one gate in `merge.ts`.
+ * request (ADR 0111, decisions 1, 2, 3, 6 and 7; epic #1046 phase 6). It runs on the
+ * administrator's machine with their own GitHub token, reads GitHub and NEMAR's origin itself, and
+ * records each step through the Worker, which reads again what it can. It never merges: a merge
+ * mints a version DOI that cannot be withdrawn, and is `nemar admin repull merge`'s (or
+ * `nemar admin pr-reviews`'), through the one gate in `merge.ts`.
  *
- * From the recorded status, each step checks its own end state before it acts:
+ * From the recorded status, each step checks its own end state before it acts. N.0.0's pull
+ * request (`n0`) and N.0.1's (`n1`) take the same steps, each on its own columns:
  *
- *   pr_open      the pull request read on GitHub: merged is recorded through the Worker's verified
- *                route (a merge outside the tools, never written by hand); closed unmerged ends
- *                the record `abandoned`; a head moved by enrichment (the three shapes
- *                `run-enrichment.yml` writes, `head.ts`) is recorded, and any other head is
- *                `head-foreign`. `main` must be the base or an enrichment-shaped descendant
- *                (`main-moved` otherwise); when it moved and GitHub reports the pull request
- *                `dirty` or `behind`, the commit is made again on the new `main` and pushed with a
- *                lease (`resynthesize.ts`). The identifier screen of the head is dispatched when
- *                none exists or it produced no verdict, and acknowledged when the administrator
- *                gives a reason for a verdict that asks for one. When the screen passes and GitHub
- *                reports `clean`, `pr_open -> gates_clear` (the Worker reads the live head and the
- *                screen again); then it stops: "Ready to merge".
- *   gates_clear  a held claim to merge is resolved from GitHub: merged is recorded; a claim whose
- *                merge GitHub says did not happen expires once it is old enough (the Worker's own
- *                bound); a head that moved goes back to `pr_open`.
- *   merged       the merge commit's trailers read back, the tag and the version row waited for,
- *                the tagged tree compared, the release recorded through the Worker's verified
- *                route (`release.ts`);
- *   released     the objects N.0.0's copy and uploads wrote (the staging manifest's, never the
- *                whole prefix) locked and the count recorded, then `complete` when the plan had no
- *                corrections (N.0.1 is a later slice's).
+ *   pr_open            the pull request read on GitHub: merged is recorded through the Worker's
+ *   patch_synthesized  verified route (a merge outside the tools, never written by hand); closed
+ *                      unmerged ends the record (`abandoned` for N.0.0, `patch_declined` for
+ *                      N.0.1); a head moved by enrichment (the three shapes `run-enrichment.yml`
+ *                      writes, `head.ts`) is recorded, and any other head is `head-foreign`. `main`
+ *                      must be the base (N.0.0's, or N.0.1's) or an enrichment-shaped descendant
+ *                      (`main-moved` otherwise); when it moved and GitHub reports the pull request
+ *                      `dirty` or `behind`, the commit is made again on the new `main` and pushed
+ *                      with a lease (`resynthesize.ts`, `patch.ts`). The identifier screen of the
+ *                      head is dispatched when none exists or it produced no verdict, and
+ *                      acknowledged when the administrator gives a reason for a verdict that asks
+ *                      for one. When the screen passes and GitHub reports `clean`, the gates are
+ *                      recorded (the Worker reads the live head and the screen again); then it
+ *                      stops: "Ready to merge".
+ *   gates_clear        a held claim to merge is resolved from GitHub: merged is recorded; a claim
+ *   patch_gates_clear  whose merge GitHub says did not happen expires once it is old enough (the
+ *                      Worker's own bound); a head that moved goes back to the open status.
+ *   merged             the merge commit's trailers read back, the tag and the version row waited
+ *   patch_merged       for, the tagged tree compared (N.0.0's), the release recorded through the
+ *                      Worker's verified route (`release.ts`);
+ *   released           the objects N.0.0's copy and uploads wrote (the staging manifest's, never
+ *                      the whole prefix) locked and the count recorded; then N.0.1 is made from the
+ *                      reviewed plan (`patch-turn.ts`), or the record completes when the plan had no
+ *                      correction and no conflict an administrator resolved;
+ *   patch_released     `complete`: N.0.1 copied nothing, so there is nothing of its own to lock.
  *
  * It waits, up to `waitMinutes`, for the screen and for GitHub's state, reading again on each
  * turn; still waiting at the bound is the command's exit 3, with what it waits for. A step that
- * fails records why on the row (`[gates:<code>]`, `[release:<code>]`, `[lock:<code>]`, never
- * `[prepare:`, which only a preparation clears) and refuses. A re-synthesis an earlier run pushed
- * and could not record is recognized, byte for byte, and recorded (`recognizeResynthesis`).
+ * fails records why on the row (`[gates:<code>]`, `[release:<code>]`, `[lock:<code>]`,
+ * `[patch:<code>]`, never `[prepare:`, which only a preparation clears) and refuses. A
+ * re-synthesis an earlier run pushed and could not record is recognized, byte for byte, and
+ * recorded.
  */
 
 import { dirname, join } from "node:path";
-import type { RepullRow } from "../../../shared/repull-state.js";
+import {
+  PULL_REQUEST_COLUMNS,
+  type RepullPullRequest,
+  type RepullRow,
+  type RepullStatus,
+} from "../../../shared/repull-state.js";
 import type { ApiError } from "../api/errors.js";
 import {
   type RepullScreen,
@@ -61,11 +72,14 @@ import {
   settleMergeState,
 } from "../pr-review-approve.js";
 import { readCatalogFacts } from "./execute/catalog.js";
-import { type OriginScratch, openOriginScratch } from "./execute/origin.js";
+import { type OriginScratch, fetchInto, openOriginScratch } from "./execute/origin.js";
 import { acceptsHead, checkMain, releaseRefOf } from "./execute/pull-request.js";
+import { guardedPush, pushCauseWords } from "./execute/push.js";
 import { recognizeResynthesis, resynthesize } from "./execute/resynthesize.js";
 import { ExecuteRefused, assertNotAnonymous } from "./execute/verify-plan.js";
 import { acquireLock, privateDir, withIsolatedGit, workPaths } from "./execute/workdir.js";
+import { patchTurn } from "./patch-turn.js";
+import { findPatchCommit, patchResynthesizedCommit, recognizePatchResynthesis } from "./patch.js";
 import { lockTurn, releaseTurn } from "./release.js";
 import {
   type ResumeContext,
@@ -73,6 +87,7 @@ import {
   type ResumeResult,
   type Turn,
   apiRefused,
+  openFacts,
   recordStepError,
   refused,
   resumeErrorWords,
@@ -219,47 +234,93 @@ export async function stepOnce(ctx: ResumeContext, row: RepullRow): Promise<Turn
         `Re-pull #${row.id} is ${row.status}: it is taken up by nemar admin repull execute <plan-file>, with the plan it was made from.`,
       );
     case "pr_open":
-      return gatesTurn(ctx, row);
+      return gatesTurn(ctx, row, "n0");
+    case "patch_synthesized":
+      return gatesTurn(ctx, row, "n1");
     case "gates_clear":
-      return claimTurn(ctx, row);
+      return claimTurn(ctx, row, "n0");
+    case "patch_gates_clear":
+      return claimTurn(ctx, row, "n1");
     case "merged":
-      return releaseTurn(ctx, row);
-    case "released":
-      return lockTurn(ctx, row);
+      return releaseTurn(ctx, row, "n0");
+    case "patch_merged":
+      return releaseTurn(ctx, row, "n1");
+    case "released": {
+      const locked = await lockTurn(ctx, row);
+      return locked.kind === "next" ? patchTurn(ctx, locked.row) : locked;
+    }
+    case "patch_released":
+      return completeTurn(ctx, row);
     default:
       throw new ExecuteRefused(
         "not-built",
-        `Re-pull #${row.id} is ${row.status}: N.0.1 is not built yet.`,
+        `Re-pull #${row.id} is ${row.status}, which resume does not take on.`,
       );
   }
 }
 
+/** The facts of one of the record's pull requests, by its columns. */
+interface Pull {
+  pr: RepullPullRequest;
+  number: number;
+  branch: string;
+  head: string;
+  gates: string | null;
+  claimSha: string | null;
+  claimedAt: string | null;
+  version: string;
+  /** The commit `main` must be, or descend from by enrichment, for the pull request to merge. */
+  base: string;
+  /** What a new head must be, or descend from by enrichment: the re-pull's commit, or N.0.1's head. */
+  anchor: string;
+  /** The status the record ends with when the pull request is found closed unmerged. */
+  closedTo: RepullStatus;
+}
+
+/** One pull request's facts, as the record holds them. */
+export function pullOf(row: RepullRow, pr: RepullPullRequest): Pull {
+  const c = PULL_REQUEST_COLUMNS[pr];
+  return {
+    pr,
+    number: row[c.number] as number,
+    branch: row[c.branch] as string,
+    head: row[c.head] as string,
+    gates: row[c.gates],
+    claimSha: row[c.claimSha],
+    claimedAt: row[c.claimedAt],
+    version: row[c.version] as string,
+    base: (pr === "n0" ? row.base_sha : row.patch_base_sha) as string,
+    anchor: (pr === "n0" ? row.synth_sha : row.patch_head_sha) as string,
+    closedTo: pr === "n0" ? "abandoned" : "patch_declined",
+  };
+}
+
 /** The pull request, read with the administrator's token; unreadable is a resumable refusal. */
-async function readPull(ctx: ResumeContext, row: RepullRow): Promise<PullRequestFacts> {
-  const live = await fetchPullRequest(ctx.token, ctx.datasetId, row.pr_number as number, ctx.base);
+async function readPull(ctx: ResumeContext, p: Pull): Promise<PullRequestFacts> {
+  const live = await fetchPullRequest(ctx.token, ctx.datasetId, p.number, ctx.base);
   if (!live.ok) {
     throw refused(
       "github-unreadable",
-      `Pull request #${row.pr_number} could not be read on GitHub (${live.reason})`,
+      `Pull request #${p.number} could not be read on GitHub (${live.reason})`,
     );
   }
   return live.value;
 }
 
 /** Record GitHub's merge through the Worker's verified route. */
-async function recordMerge(ctx: ResumeContext, row: RepullRow): Promise<Turn> {
+async function recordMerge(ctx: ResumeContext, row: RepullRow, p: Pull): Promise<Turn> {
   let res: Awaited<ReturnType<typeof recordRepullMerged>>;
   try {
-    res = await recordRepullMerged(row.id, "n0");
+    res = await recordRepullMerged(row.id, p.pr);
   } catch (err) {
-    throw apiRefused(err, `The merge of pull request #${row.pr_number} could not be recorded`);
+    throw apiRefused(err, `The merge of pull request #${p.number} could not be recorded`);
   }
   const notes = [
     res.merged_outside_tool ? "no NEMAR tool held a claim for it" : null,
     res.merged_unscreened_head ? "at a head other than the screened one" : null,
   ].filter(Boolean);
   ctx.opts.out(
-    `Pull request #${row.pr_number} is merged; re-pull #${row.id} records it${notes.length > 0 ? ` (${notes.join(", ")})` : ""}.`,
+    `Pull request #${p.number} is merged; re-pull #${row.id} records it${notes.length > 0 ? ` (${notes.join(", ")})` : ""}.`,
   );
   return { kind: "next", row: res.repull };
 }
@@ -278,89 +339,136 @@ async function move(
   }
 }
 
-/** A closed, unmerged pull request ends the record: decision 3's `abandoned`. */
-async function closedUnmerged(ctx: ResumeContext, row: RepullRow): Promise<Turn> {
-  const ended = await move(row, "abandoned", {}, "The record could not be ended");
+/** The open status's self-edge with a new head (and, after a re-synthesis, a new base). */
+function openFields(
+  row: RepullRow,
+  p: Pull,
+  head: string,
+  moved?: { synthSha: string; synthTree: string; baseSha: string },
+): Record<string, unknown> {
+  const fields = { ...openFacts(row) };
+  if (p.pr === "n0") {
+    fields.head_sha = head;
+    if (moved) {
+      fields.synth_sha = moved.synthSha;
+      fields.synth_tree = moved.synthTree;
+      fields.base_sha = moved.baseSha;
+    }
+  } else {
+    fields.patch_head_sha = head;
+    if (moved) fields.patch_base_sha = moved.baseSha;
+  }
+  return fields;
+}
+
+/**
+ * A closed, unmerged pull request ends the record: decision 3's `abandoned` for N.0.0's, and
+ * `patch_declined` for N.0.1's (N.0.0 stays released).
+ */
+async function closedUnmerged(ctx: ResumeContext, row: RepullRow, p: Pull): Promise<Turn> {
+  const ended = await move(row, p.closedTo, {}, "The record could not be ended");
   ctx.opts.out(
-    `Pull request #${row.pr_number} was closed without being merged: re-pull #${row.id} is abandoned. Plan the dataset again to re-pull it.`,
+    p.pr === "n0"
+      ? `Pull request #${p.number} was closed without being merged: re-pull #${row.id} is abandoned. Plan the dataset again to re-pull it.`
+      : `N.0.1's pull request #${p.number} was closed without being merged: re-pull #${row.id} is patch_declined, and v${row.to_version} stays released; its corrections remain corrections in the next plan.`,
   );
   return { kind: "done", result: { row: ended, outcome: "ended" } };
 }
 
-/** At `pr_open`: the head, `main`, the screen and GitHub's state, then the gates. */
-async function gatesTurn(ctx: ResumeContext, row: RepullRow): Promise<Turn> {
-  const live = await readPull(ctx, row);
-  if (live.state === "merged") return recordMerge(ctx, row);
-  if (live.state === "closed") return closedUnmerged(ctx, row);
-  if (live.baseRef !== "main" || live.headRef !== row.branch) {
-    const err = refused(
-      "pr-foreign",
-      `Pull request #${row.pr_number} is not ${row.branch} into main.`,
-    );
+/** Whether `head` descends from `p.anchor` by enrichment only, read in the scratch repository. */
+async function headVerdict(scratch: OriginScratch, p: Pull, head: string) {
+  return acceptsHead({
+    work: scratch.dir,
+    from: p.anchor,
+    head,
+    ref: releaseRefOf(p.version),
+    env: scratch.env,
+  });
+}
+
+/**
+ * A head that is not the anchor's descendant may be a re-synthesis an earlier run pushed and could
+ * not record (a fresh scratch repository may not even hold the anchor, so the verdict can read
+ * unreadable); it is recognized, byte for byte, and returned for the record.
+ */
+async function recognized(
+  scratch: OriginScratch,
+  row: RepullRow,
+  p: Pull,
+  head: string,
+): Promise<{ synthSha: string; synthTree: string; baseSha: string } | null> {
+  if (p.pr === "n0") return recognizeResynthesis({ scratch, row, head });
+  const recorded = await recordedPatchCommit(scratch, row, p);
+  if (!recorded) return null;
+  const found = await recognizePatchResynthesis({ dir: scratch.dir, row, recorded, head });
+  return found ? { synthSha: found.sha, synthTree: "", baseSha: found.baseSha } : null;
+}
+
+/** N.0.1's own commit beneath its recorded head (the head may carry enrichment commits on it). */
+async function recordedPatchCommit(
+  scratch: OriginScratch,
+  row: RepullRow,
+  p: Pull,
+): Promise<string | null> {
+  if (!(await fetchInto(scratch, p.anchor, 22))) return null;
+  await fetchInto(scratch, row.merge_sha as string, 22);
+  return (await findPatchCommit({ dir: scratch.dir, row, head: p.anchor }))?.commit ?? null;
+}
+
+/** At `pr_open` or `patch_synthesized`: the head, `main`, the screen and GitHub's state, then the gates. */
+async function gatesTurn(ctx: ResumeContext, row: RepullRow, pr: RepullPullRequest): Promise<Turn> {
+  const p = pullOf(row, pr);
+  const live = await readPull(ctx, p);
+  if (live.state === "merged") return recordMerge(ctx, row, p);
+  if (live.state === "closed") return closedUnmerged(ctx, row, p);
+  if (live.baseRef !== "main" || live.headRef !== p.branch) {
+    const err = refused("pr-foreign", `Pull request #${p.number} is not ${p.branch} into main.`);
     await recordStepError(row, resumeErrorWords("gates", err), ctx.opts.out);
     throw err;
   }
 
   // The head: the recorded one, or an enrichment-shaped descendant of the re-pull's commit.
-  if (live.headSha !== row.head_sha) {
+  if (live.headSha !== p.head) {
     if (ctx.replaced.has(live.headSha)) {
       return { kind: "wait", row, waitingFor: "GitHub to show the re-synthesized head" };
     }
     const scratch = await ctx.origin();
-    const verdict = await acceptsHead({
-      work: scratch.dir,
-      from: row.synth_sha as string,
-      head: live.headSha,
-      ref: releaseRefOf(row.to_version),
-      env: scratch.env,
-    });
+    const verdict = await headVerdict(scratch, p, live.headSha);
     if (verdict !== "ok") {
-      // A re-synthesis an earlier run pushed and could not record is not a descendant of the
-      // recorded commit (and a fresh scratch repository may not even hold that commit, so the
-      // verdict can read unreadable); it is recognized, byte for byte, and recorded now.
-      const ours = await recognizeResynthesis({ scratch, row, head: live.headSha });
+      const ours = await recognized(scratch, row, p, live.headSha);
       if (ours) {
         const recorded = await move(
           row,
-          "pr_open",
-          {
-            branch: row.branch,
-            pr_number: row.pr_number,
-            head_sha: live.headSha,
-            synth_sha: ours.synthSha,
-            synth_tree: ours.synthTree,
-            base_sha: ours.baseSha,
-          },
+          row.status,
+          openFields(row, p, live.headSha, ours),
           "The re-synthesized commit could not be recorded",
         );
         ctx.opts.out(
-          `${row.branch} holds this re-pull's commit made again on a moved main (${ours.synthSha.slice(0, 12)}), pushed by an earlier run; re-pull #${row.id} records it.`,
+          `${p.branch} holds this re-pull's commit made again on a moved main (${ours.synthSha.slice(0, 12)}), pushed by an earlier run; re-pull #${row.id} records it.`,
         );
         return { kind: "next", row: recorded };
       }
-    }
-    if (verdict !== "ok") {
       const err =
         verdict === "unreadable"
           ? refused(
               "branch-unreadable",
-              `Whether the head of ${row.branch} is this re-pull's commit and enrichment's could not be read.`,
+              `Whether the head of ${p.branch} is this re-pull's commit and enrichment's could not be read.`,
             )
           : refused(
               "head-foreign",
-              `${row.branch} holds a commit enrichment does not make: this re-pull cannot be merged as it is, and its record has to be abandoned (no command to abandon a record is built yet).`,
+              `${p.branch} holds a commit enrichment does not make: this pull request cannot be merged as it is; end the record with nemar admin repull abandon ${ctx.datasetId}.`,
             );
       await recordStepError(row, resumeErrorWords("gates", err), ctx.opts.out);
       throw err;
     }
     const moved = await move(
       row,
-      "pr_open",
-      { branch: row.branch, pr_number: row.pr_number, head_sha: live.headSha },
+      row.status,
+      openFields(row, p, live.headSha),
       "The moved head could not be recorded",
     );
     ctx.opts.out(
-      `${row.branch} moved by enrichment to ${live.headSha.slice(0, 12)}; re-pull #${row.id} records it.`,
+      `${p.branch} moved by enrichment to ${live.headSha.slice(0, 12)}; re-pull #${row.id} records it.`,
     );
     return { kind: "next", row: moved };
   }
@@ -369,7 +477,7 @@ async function gatesTurn(ctx: ResumeContext, row: RepullRow): Promise<Turn> {
   const scratch = await ctx.origin();
   let main: string;
   try {
-    main = await checkMain({ work: scratch.dir, baseSha: row.base_sha, env: scratch.env });
+    main = await checkMain({ work: scratch.dir, baseSha: p.base, env: scratch.env });
   } catch (err) {
     if (err instanceof ExecuteRefused) {
       err.resumable = true;
@@ -380,7 +488,7 @@ async function gatesTurn(ctx: ResumeContext, row: RepullRow): Promise<Turn> {
   const settled = await settleMergeState(
     ctx.token,
     ctx.datasetId,
-    row.pr_number as number,
+    p.number,
     { headSha: live.headSha, mergeableState: live.mergeableState },
     { base: ctx.base, sleep: ctx.sleep },
   );
@@ -388,31 +496,32 @@ async function gatesTurn(ctx: ResumeContext, row: RepullRow): Promise<Turn> {
     if (settled.kind === "unreadable") {
       throw refused(
         "github-unreadable",
-        `GitHub could not say whether #${row.pr_number} can be merged.`,
+        `GitHub could not say whether #${p.number} can be merged.`,
       );
     }
     // Moved or closed in between: wait a turn, then read it again from the top.
-    return { kind: "wait", row, waitingFor: `pull request #${row.pr_number} to settle on GitHub` };
+    return { kind: "wait", row, waitingFor: `pull request #${p.number} to settle on GitHub` };
   }
   const state = settled.state;
-  if (main !== row.base_sha && (state === "dirty" || state === "behind")) {
-    return resynthesizeTurn(ctx, row, main, live.headSha, state);
+  if (main !== p.base && (state === "dirty" || state === "behind")) {
+    return resynthesizeTurn(ctx, row, p, main, live.headSha, state);
   }
 
-  const screen = await screenTurn(ctx, row);
+  const screen = await screenTurn(ctx, row, p);
   const waits: string[] = [];
   if (screen !== null) waits.push(screen);
   if (state !== "clean") {
-    waits.push(`GitHub to report pull request #${row.pr_number} clean (it reports '${state}')`);
+    waits.push(`GitHub to report pull request #${p.number} clean (it reports '${state}')`);
   }
   if (waits.length > 0) return { kind: "wait", row, waitingFor: waits.join(", and ") };
 
+  const c = PULL_REQUEST_COLUMNS[pr];
   let gated: RepullRow;
   try {
     gated = await transitionRepull(row.id, {
-      from: "pr_open",
-      to: "gates_clear",
-      fields: { gates_sha: row.head_sha },
+      from: c.open,
+      to: c.gatesClear,
+      fields: { [c.gates]: p.head },
     });
   } catch (err) {
     const code = repullErrorCode(err);
@@ -424,7 +533,7 @@ async function gatesTurn(ctx: ResumeContext, row: RepullRow): Promise<Turn> {
     throw apiRefused(err, "The gates could not be recorded");
   }
   ctx.opts.out(
-    `The identifier screen and GitHub pass for ${String(row.head_sha).slice(0, 12)}: re-pull #${row.id} is gates_clear.`,
+    `The identifier screen and GitHub pass for ${p.head.slice(0, 12)}: re-pull #${row.id} is ${c.gatesClear}.`,
   );
   return {
     kind: "done",
@@ -437,8 +546,8 @@ async function gatesTurn(ctx: ResumeContext, row: RepullRow): Promise<Turn> {
  * there is none or it produced no verdict (the Worker decides which); acknowledged when it asks for
  * a person and the administrator gave a reason. A direct identifier refuses.
  */
-async function screenTurn(ctx: ResumeContext, row: RepullRow): Promise<string | null> {
-  const head = row.head_sha as string;
+async function screenTurn(ctx: ResumeContext, row: RepullRow, p: Pull): Promise<string | null> {
+  const head = p.head;
   let listed: Awaited<ReturnType<typeof listRepullScreens>>;
   try {
     listed = await listRepullScreens(row.id);
@@ -447,10 +556,10 @@ async function screenTurn(ctx: ResumeContext, row: RepullRow): Promise<string | 
   }
   if (listed.exempt) return null;
   let screen: RepullScreen | null =
-    listed.screens.find((s) => s.pr === "n0" && s.sha === head) ?? null;
+    listed.screens.find((s) => s.pr === p.pr && s.sha === head) ?? null;
   if (screen === null || screen.gate === "rerun") {
     try {
-      const sent = await dispatchRepullScreen(row.id, { pr: "n0", sha: head });
+      const sent = await dispatchRepullScreen(row.id, { pr: p.pr, sha: head });
       if (sent.exempt) return null;
       ctx.opts.out(`Dispatched the identifier screen of ${head.slice(0, 12)}.`);
       screen = sent.screen;
@@ -484,7 +593,7 @@ async function screenTurn(ctx: ResumeContext, row: RepullRow): Promise<string | 
       }
       try {
         await acknowledgeRepullScreen(row.id, {
-          pr: "n0",
+          pr: p.pr,
           sha: head,
           reason: ctx.opts.acknowledgment,
         });
@@ -501,10 +610,54 @@ async function screenTurn(ctx: ResumeContext, row: RepullRow): Promise<string | 
   }
 }
 
+/** N.0.1's commit made again on `main` and pushed with a lease on the live head. */
+async function resynthesizePatch(
+  scratch: OriginScratch,
+  row: RepullRow,
+  p: Pull,
+  main: string,
+  liveHead: string,
+): Promise<{ synthSha: string; synthTree: string }> {
+  const recorded = await recordedPatchCommit(scratch, row, p);
+  if (!recorded) {
+    throw new ExecuteRefused(
+      "origin-unreadable",
+      "N.0.1's commit could not be found beneath its recorded head on NEMAR's repository.",
+    );
+  }
+  const made = await patchResynthesizedCommit({
+    dir: scratch.dir,
+    commit: recorded,
+    newMain: main,
+  });
+  const ref = releaseRefOf(p.version);
+  const pushed = await guardedPush(
+    scratch.dir,
+    [`${made.sha}:${ref}`],
+    { versions: [p.version] },
+    scratch.env,
+    [`--force-with-lease=${ref}:${liveHead}`],
+  );
+  if (pushed.outcome === "rejected") {
+    throw new ExecuteRefused(
+      "branch-moved",
+      `release/v${p.version} moved while it was re-synthesized; nothing was replaced. Run resume again.`,
+    );
+  }
+  if (pushed.outcome === "remote-rejected" || pushed.outcome === "failed") {
+    throw new ExecuteRefused(
+      "push-failed",
+      `The re-synthesized release/v${p.version} could not be pushed (${pushCauseWords(pushed.cause)}).`,
+    );
+  }
+  return { synthSha: made.sha, synthTree: made.tree };
+}
+
 /** `main` moved by enrichment and the pull request cannot merge as it is: make the commit again. */
 async function resynthesizeTurn(
   ctx: ResumeContext,
   row: RepullRow,
+  p: Pull,
   main: string,
   liveHead: string,
   state: string,
@@ -512,7 +665,7 @@ async function resynthesizeTurn(
   if (
     ctx.opts.confirm &&
     !(await ctx.opts.confirm(
-      `NEMAR's main moved by enrichment since re-pull #${row.id} was prepared, and GitHub reports its pull request '${state}'. Make the re-pull's commit again on the new main and push ${row.branch} with a lease (nothing outside .nemar/ changes)?`,
+      `NEMAR's main moved by enrichment since re-pull #${row.id}'s ${p.pr === "n0" ? "commit" : "N.0.1 commit"} was made, and GitHub reports its pull request '${state}'. Make the commit again on the new main and push ${p.branch} with a lease (nothing enrichment wrote is undone)?`,
     ))
   ) {
     throw new ExecuteRefused("declined", "Not confirmed; nothing was pushed.");
@@ -520,7 +673,10 @@ async function resynthesizeTurn(
   const scratch = await ctx.origin();
   let made: { synthSha: string; synthTree: string };
   try {
-    made = await resynthesize({ scratch, row, newMain: main, liveHead });
+    made =
+      p.pr === "n0"
+        ? await resynthesize({ scratch, row, newMain: main, liveHead })
+        : await resynthesizePatch(scratch, row, p, main, liveHead);
   } catch (err) {
     if (err instanceof ExecuteRefused) {
       err.resumable = true;
@@ -531,40 +687,34 @@ async function resynthesizeTurn(
   ctx.replaced.add(liveHead);
   const next = await move(
     row,
-    "pr_open",
-    {
-      branch: row.branch,
-      pr_number: row.pr_number,
-      head_sha: made.synthSha,
-      synth_sha: made.synthSha,
-      synth_tree: made.synthTree,
-      base_sha: main,
-    },
+    row.status,
+    openFields(row, p, made.synthSha, { ...made, baseSha: main }),
     "The re-synthesized commit could not be recorded",
   );
   ctx.opts.out(
-    `Made re-pull #${row.id}'s commit again on the new main (${made.synthSha.slice(0, 12)}) and pushed ${row.branch}; its identifier screen runs again for the new head.`,
+    `Made re-pull #${row.id}'s commit again on the new main (${made.synthSha.slice(0, 12)}) and pushed ${p.branch}; its identifier screen runs again for the new head.`,
   );
   return { kind: "next", row: next };
 }
 
 /**
- * At `gates_clear`. A held claim is resolved from GitHub first: merged is recorded; a merge that
- * did not happen expires the claim once the Worker says it is old enough. Then the pull request as
- * it is: merged, closed, a moved head, or ready.
+ * At `gates_clear` or `patch_gates_clear`. A held claim is resolved from GitHub first: merged is
+ * recorded; a merge that did not happen expires the claim once the Worker says it is old enough.
+ * Then the pull request as it is: merged, closed, a moved head, or ready.
  */
-async function claimTurn(ctx: ResumeContext, row: RepullRow): Promise<Turn> {
-  const live = await readPull(ctx, row);
-  if (live.state === "merged") return recordMerge(ctx, row);
-  if (row.merge_claim_sha !== null) {
+async function claimTurn(ctx: ResumeContext, row: RepullRow, pr: RepullPullRequest): Promise<Turn> {
+  const p = pullOf(row, pr);
+  const live = await readPull(ctx, p);
+  if (live.state === "merged") return recordMerge(ctx, row, p);
+  if (p.claimSha !== null) {
     try {
       const freed = await releaseRepullMergeClaim(row.id, {
-        pr: "n0",
-        sha: row.merge_claim_sha,
+        pr,
+        sha: p.claimSha,
         outcome: "expired",
       });
       ctx.opts.out(
-        `The claim to merge made at ${row.merge_claimed_at} expired: GitHub says pull request #${row.pr_number} did not merge, and its unit of today's merge cap is free.`,
+        `The claim to merge made at ${p.claimedAt} expired: GitHub says pull request #${p.number} did not merge, and its unit of today's merge cap is free.`,
       );
       return { kind: "next", row: freed };
     } catch (err) {
@@ -576,41 +726,49 @@ async function claimTurn(ctx: ResumeContext, row: RepullRow): Promise<Turn> {
           result: {
             row,
             outcome: "waiting",
-            waitingFor: `the claim to merge made at ${row.merge_claimed_at} to be resolved: run nemar admin repull merge ${ctx.datasetId} to send the merge again under it, or resume later to expire it`,
+            waitingFor: `the claim to merge made at ${p.claimedAt} to be resolved: run nemar admin repull merge ${ctx.datasetId} to send the merge again under it, or resume later to expire it`,
           },
         };
       }
       throw apiRefused(err, "The claim to merge could not be resolved");
     }
   }
-  if (live.state === "closed") return closedUnmerged(ctx, row);
-  if (live.headSha !== row.gates_sha) {
+  if (live.state === "closed") return closedUnmerged(ctx, row, p);
+  if (live.headSha !== p.gates) {
     const scratch = await ctx.origin();
-    const verdict = await acceptsHead({
-      work: scratch.dir,
-      from: row.synth_sha as string,
-      head: live.headSha,
-      ref: releaseRefOf(row.to_version),
-      env: scratch.env,
-    });
+    const verdict = await headVerdict(scratch, p, live.headSha);
     if (verdict !== "ok") {
-      // Not recorded: a foreign head is never written as the row's, and `gates_clear` records no
-      // error; the merge gate refuses a head that is not the screened one.
+      // Not recorded: a foreign head is never written as the row's, and a gates-clear status
+      // records no error; the merge gate refuses a head that is not the screened one.
       throw refused(
         verdict === "unreadable" ? "branch-unreadable" : "head-foreign",
-        `${row.branch} moved since its gates were recorded, ${verdict === "unreadable" ? "and whether by enrichment only could not be read" : "by a commit enrichment does not make"}.`,
+        `${p.branch} moved since its gates were recorded, ${verdict === "unreadable" ? "and whether by enrichment only could not be read" : "by a commit enrichment does not make"}.`,
       );
     }
     const back = await move(
       row,
-      "pr_open",
-      { branch: row.branch, pr_number: row.pr_number, head_sha: live.headSha },
+      PULL_REQUEST_COLUMNS[pr].open,
+      openFields({ ...row, status: PULL_REQUEST_COLUMNS[pr].open }, p, live.headSha),
       "The moved head could not be recorded",
     );
     ctx.opts.out(
-      `${row.branch} moved by enrichment since its gates were recorded; re-pull #${row.id} is pr_open again, and its screen runs for the new head.`,
+      `${p.branch} moved by enrichment since its gates were recorded; re-pull #${row.id} is ${PULL_REQUEST_COLUMNS[pr].open} again, and its screen runs for the new head.`,
     );
     return { kind: "next", row: back };
   }
   return { kind: "done", result: { row, outcome: "ready" } };
+}
+
+/** At `patch_released`: N.0.1 copied nothing of its own, so the record is complete. */
+async function completeTurn(ctx: ResumeContext, row: RepullRow): Promise<Turn> {
+  let done: RepullRow;
+  try {
+    done = await transitionRepull(row.id, { from: "patch_released", to: "complete" });
+  } catch (err) {
+    throw apiRefused(err, "The record could not be completed");
+  }
+  ctx.opts.out(
+    `Re-pull #${row.id} of ${ctx.datasetId} is complete: v${row.to_version} and v${row.patch_version} are released.`,
+  );
+  return { kind: "done", result: { row: done, outcome: "complete" } };
 }

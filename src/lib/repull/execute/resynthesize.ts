@@ -49,13 +49,15 @@ const LEDGER_PATH = ".nemar/corrections.jsonl";
 const BIDSIGNORE = ".bidsignore";
 const PARTICIPANTS = "participants.tsv";
 
-interface TreeLine {
+/** One entry of `git ls-tree -r`: what a synthesized tree is built from. */
+export interface TreeLine {
   mode: string;
   oid: string;
   path: string;
 }
 
-async function treeOf(dir: string, commit: string): Promise<TreeLine[]> {
+/** Every entry of `commit`'s tree, recursively. */
+export async function treeOf(dir: string, commit: string): Promise<TreeLine[]> {
   const r = await git(dir, ["ls-tree", "-r", "-z", "--full-tree", commit], {
     code: "synthesis-failed",
     step: "ls-tree",
@@ -68,7 +70,8 @@ async function treeOf(dir: string, commit: string): Promise<TreeLine[]> {
   return out;
 }
 
-async function blobAt(dir: string, commit: string, path: string): Promise<string | null> {
+/** The text of `path` at `commit`, or null when it has none. */
+export async function blobAt(dir: string, commit: string, path: string): Promise<string | null> {
   const r = await git(dir, ["cat-file", "blob", `${commit}:${path}`], { ok: true });
   return r.exitCode === 0 ? r.stdout : null;
 }
@@ -96,7 +99,7 @@ function mismatch(what: string): ExecuteRefused {
 }
 
 /** The commit's author and committer dates, `<epoch> <zone>`, from its header. */
-function datesOf(header: string): { author: string; committer: string } {
+export function datesOf(header: string): { author: string; committer: string } {
   const author = /^author .* (\d+ [+-]\d{4})$/m.exec(header)?.[1];
   const committer = /^committer .* (\d+ [+-]\d{4})$/m.exec(header)?.[1];
   if (!author || !committer) throw mismatch("the commit's dates could not be read");
@@ -109,7 +112,7 @@ function underNemar(path: string): boolean {
 }
 
 /** Write a blob into the scratch repository and return its id. */
-async function hashBlob(dir: string, text: string): Promise<string> {
+export async function hashBlob(dir: string, text: string): Promise<string> {
   return (
     await git(dir, ["hash-object", "-w", "--stdin"], {
       stdin: text,

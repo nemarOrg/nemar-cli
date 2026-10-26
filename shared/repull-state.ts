@@ -819,6 +819,17 @@ export const DISPATCH_CODES = [
   "staging-unreadable",
   "use-execute",
   "claim-too-old",
+  // N.0.1 (Phase 6g): a run reports N.0.1's words as `[patch:<word>]` on the record.
+  "patch-ledger",
+  "patch-plan-mismatch",
+  "plan-not-the-record",
+  "patch-ours-moved",
+  "patch-path-conflict",
+  "patch-description-unreadable",
+  "patch-key-absent",
+  "patch-key-dead",
+  "patch-main-moved",
+  "take-ours-invalid",
   // The scrub's refusals (`IMPORT_SCRUB_REFUSALS`), which execution passes on as they are.
   "already-imported-unscrubbed",
   "bound-exceeded",
