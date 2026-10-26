@@ -111,6 +111,7 @@ function signIn(key: string, account = "autocliuser"): void {
 
 async function runCli(
   args: string[],
+  extra: Record<string, string> = {},
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   const env: Record<string, string | undefined> = {
     ...process.env,
@@ -120,6 +121,7 @@ async function runCli(
     NO_COLOR: "1",
     FORCE_COLOR: undefined,
     CLICOLOR_FORCE: undefined,
+    ...extra,
   };
   const clean: Record<string, string> = {};
   for (const [k, v] of Object.entries(env)) if (v !== undefined) clean[k] = v;
@@ -461,6 +463,52 @@ describe("nemar admin repull auto: it only reads, and prints nothing partial", (
     // The switches were read first and are not printed: a table with a hole would claim a read.
     expect(r.stdout).not.toContain("Switches, as this Worker reads them");
     expect(r.stdout).not.toContain("Open automatic re-pulls");
+  });
+});
+
+// ----------------------------------------------------------------------------
+// No key, no token
+// ----------------------------------------------------------------------------
+
+describe("nemar admin repull auto: it prints no key and no token", () => {
+  // Strings no output has a reason to hold, one per place a secret could come from.
+  const ENV_SECRETS = {
+    NEMAR_API_KEY: "sentinel-env-nemar-api-key-0f1e2d3c",
+    GH_TOKEN: "sentinel-env-gh-token-1a2b3c4d",
+    GITHUB_TOKEN: "sentinel-env-github-token-5e6f7a8b",
+    AWS_SECRET_ACCESS_KEY: "sentinel-env-aws-secret-9c0d1e2f",
+    AWS_SESSION_TOKEN: "sentinel-env-aws-session-3a4b5c6d",
+  };
+  const WORKER_SECRETS = {
+    GITHUB_ADMIN_PAT: "sentinel-worker-pat-7e8f9a0b",
+    RESEND_API_KEY: "sentinel-worker-resend-1c2d3e4f",
+    AWS_SECRET_ACCESS_KEY: "sentinel-worker-aws-5a6b7c8d",
+    MANIFEST_CALLBACK_SECRET: "sentinel-worker-callback-9e0f1a2b",
+    PRESCREEN_CALLBACK_SECRET: "sentinel-worker-prescreen-3c4d5e6f",
+    ENCRYPTION_KEY: "sentinel-worker-encryption-7a8b9c0d",
+  };
+
+  test("with a key stored, tokens in the environment and secrets in the Worker's bindings, neither the text nor the JSON holds one, on either stream", async () => {
+    signIn(ADMIN_KEY);
+    seedBusy();
+    extraEnv = { ...extraEnv, ...WORKER_SECRETS };
+    const secrets = [
+      ADMIN_KEY,
+      ADMIN_KEY.slice(0, 8),
+      ...Object.values(ENV_SECRETS),
+      ...Object.values(WORKER_SECRETS),
+    ];
+    for (const args of [[], ["--json"]]) {
+      const r = await runCli(args, ENV_SECRETS);
+      expect(r.exitCode, r.stdout + r.stderr).toBe(0);
+      // Something was printed, so an absent secret is not an absent output.
+      expect(r.stdout).toContain("on090001");
+      const everything = `${r.stdout}\n${r.stderr}`;
+      for (const secret of secrets) {
+        expect([args, secret, everything.includes(secret)]).toEqual([args, secret, false]);
+      }
+      expect(everything).not.toMatch(/bearer/i);
+    }
   });
 });
 
