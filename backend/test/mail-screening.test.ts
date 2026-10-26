@@ -1146,3 +1146,106 @@ describe("the spam route and unverified senders", () => {
     expect(ticketRow(t).status).toBe("open");
   });
 });
+
+describe("review round 2", () => {
+  const at = (minutes: number) => new Date(Date.UTC(2026, 9, 25, 14, minutes));
+  const NO_DMARC =
+    "mx.cloudflare.net; spf=pass smtp.mailfrom=sender.example; dkim=none; dmarc=none";
+
+  test("two lanes: DMARC-passing and non-passing mail are capped separately", async () => {
+    // Fill the non-passing lane.
+    for (let i = 0; i < 2; i++) {
+      expect((await ingest({ auth: NO_DMARC }, { cap: 2, at: at(i) })).filtered).toBeNull();
+    }
+    expect((await ingest({ auth: NO_DMARC }, { cap: 2, at: at(3) })).filtered).toBe("rate_limited");
+    // The verified lane is untouched by it.
+    expect((await ingest({}, { cap: 2, at: at(4) })).filtered).toBeNull();
+    expect((await ingest({}, { cap: 2, at: at(5) })).filtered).toBeNull();
+    expect((await ingest({}, { cap: 2, at: at(6) })).filtered).toBe("rate_limited");
+    // And a forger (DMARC fail, so spam) is counted in neither.
+    const forged = await ingest({ auth: authFor("x.example", "fail") }, { cap: 2, at: at(7) });
+    expect(forged.status).toBe("spam");
+  });
+
+  test("un-hiding an open unassigned ticket gives it to the queue holder, who alone is told", async () => {
+    db.run("UPDATE mail_queues SET strategy = 'fixed', assignee_user_id = ? WHERE tag = '*'", [
+      ids.admin,
+    ]);
+    await clearBucket();
+    const deliver = (raw: Uint8Array) =>
+      handleInboundEmail(platform(raw, "ada@sender.example"), env() as never);
+    await deliver(
+      eml({ messageId: "<a1@sender.example>", extraHeaders: ["Auto-Submitted: auto-generated"] }),
+    );
+    const id = (db.query("SELECT id FROM mail_tickets").get() as { id: number }).id;
+    expect(ticketRow(id).assignee_user_id).toBeNull();
+    // Someone else could have taken the queue meanwhile: the holder at un-hide time is used.
+    await deliver(eml({ inReplyTo: "<a1@sender.example>" }));
+    expect(ticketRow(id)).toMatchObject({
+      filtered: null,
+      assignee_user_id: ids.admin,
+      status: "open",
+    });
+    const kinds = (
+      db.query("SELECT kind FROM mail_ticket_events WHERE ticket_id = ? ORDER BY id").all(id) as {
+        kind: string;
+      }[]
+    ).map((e) => e.kind);
+    expect(kinds).toEqual(["created", "unfiltered", "assigned"]);
+    expect(binding.sent.map((m) => m.to)).toEqual(["scr-admin@example.org"]);
+    // The second genuine reply neither announces nor assigns again.
+    await deliver(eml({ inReplyTo: "<a1@sender.example>" }));
+    expect(binding.sent.length).toBe(1);
+  });
+
+  test("un-hiding honours restriction and exclusion: an excluded holder is not chosen", async () => {
+    db.run(
+      "UPDATE mail_queues SET strategy = 'fixed', assignee_user_id = ? WHERE tag = 'security'",
+      [ids.owner],
+    );
+    const first = await ingest(
+      { messageId: "<s1@sender.example>", extraHeaders: ["Precedence: bulk"] },
+      { to: "security@nemar.org" },
+    );
+    db.run("UPDATE mail_tickets SET excluded_user_id = ? WHERE id = ?", [
+      ids.owner,
+      first.ticketId,
+    ]);
+    const reply = await ingest({ inReplyTo: "<s1@sender.example>" }, { to: "security@nemar.org" });
+    expect(reply).toMatchObject({ outcome: "threaded", unfiltered: true });
+    expect(ticketRow(first.ticketId)).toMatchObject({ filtered: null, assignee_user_id: null });
+  });
+
+  test("the same status on a filtered ticket writes the unfiltered event and no status event", async () => {
+    const r = await ingest({ extraHeaders: ["Precedence: bulk"] });
+    expect(
+      (await call("admin", "POST", `/tickets/${r.ticketId}/status`, { status: "open" })).status,
+    ).toBe(200);
+    const kinds = (
+      db
+        .query("SELECT kind FROM mail_ticket_events WHERE ticket_id = ? ORDER BY id")
+        .all(r.ticketId) as {
+        kind: string;
+      }[]
+    ).map((e) => e.kind);
+    expect(kinds).toEqual(["created", "unfiltered"]);
+    // A real change still writes both.
+    const other = await ingest({ extraHeaders: ["Precedence: bulk"] });
+    await call("admin", "POST", `/tickets/${other.ticketId}/status`, { status: "pending" });
+    const both = (
+      db
+        .query("SELECT kind FROM mail_ticket_events WHERE ticket_id = ? ORDER BY id")
+        .all(other.ticketId) as {
+        kind: string;
+      }[]
+    ).map((e) => e.kind);
+    expect(both).toEqual(["created", "status", "unfiltered"]);
+  });
+
+  test("the refusal texts say the lists are not exhaustive; gob and nom are public suffixes", () => {
+    for (const d of ["gob.mx", "nom.es", "yahoo.co.uk"]) {
+      const r = normalizeBlock("domain", d);
+      expect("refusal" in r && /not exhaustive/.test(r.refusal)).toBe(true);
+    }
+  });
+});
