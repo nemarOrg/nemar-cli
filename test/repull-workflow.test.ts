@@ -6,7 +6,7 @@
  * The workflow is authored in this repository and deployed by copying it whole into
  * `nemarDatasets/.github`, in a pull request held until the epic ships. The parity check at the
  * bottom compares the two byte for byte. When `NEMAR_REPULL_WORKFLOW_LIVE` names the deployed copy
- * (the `unit-pure` job will, once the deploy lands), a missing file FAILS; without the variable it
+ * (the `unit-pure-shard` job will, once the deploy lands), a missing file FAILS; without the variable it
  * looks for a sibling checkout of `nemarDatasets/.github` and SKIPS VISIBLY when there is none.
  *
  * The step scripts that guard the run are executed here with bash, as the runner executes them:
@@ -37,6 +37,7 @@ import {
   type UpstreamRepullDispatchFields,
   buildUpstreamRepullPayload,
 } from "../backend/src/services/github/dispatch";
+import { RESUME_WINDOW_UTC } from "../backend/src/services/upstream-repull-advance";
 import {
   DISPATCH_DEADLINE_HOURS,
   repullStateSchema,
@@ -44,6 +45,7 @@ import {
 import { isOpenNeuroTag, sameUpstreamTag } from "../shared/openneuro-tag";
 import {
   DISPATCH_CODES,
+  DISPATCH_ID_RE,
   REPULL_DISPATCH_QUEUE_MINUTES,
   REPULL_JOB_TIMEOUT_MINUTES,
   opensTheSameUtcDay,
@@ -260,7 +262,25 @@ describe("what triggers it, and what it may do", () => {
     const uses = job.steps.map((s) => s.uses ?? "").filter(Boolean);
     expect(uses.some((u) => u.includes("upload-artifact"))).toBe(false);
     expect(uses.some((u) => u.startsWith("actions/checkout"))).toBe(false);
-    expect(uses.sort()).toEqual(["actions/create-github-app-token@v1", "oven-sh/setup-bun@v2"]);
+    expect(uses.map((u) => u.split("@")[0]).sort()).toEqual([
+      "actions/create-github-app-token",
+      "oven-sh/setup-bun",
+    ]);
+  });
+
+  test("every action is pinned to a full commit, with the tag it was resolved from, as the review workflows' are", () => {
+    const lines = [...SRC.matchAll(/^\s*(?:-\s+)?uses:\s*(\S+)(?:[ \t]+#[ \t]*(\S+))?[ \t]*$/gm)];
+    expect(lines).toHaveLength(job.steps.filter((s) => s.uses !== undefined).length);
+    for (const m of lines) {
+      expect(m[1], m[1]).toMatch(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+@[0-9a-f]{40}$/);
+      expect(m[2], m[1]).toMatch(/^v\d+(\.\d+){0,2}$/);
+    }
+    // The same commits run-publication-review.yml pins for the same actions.
+    const review = readFileSync(
+      join(REPO_ROOT, ".github", "dataset-workflows", "run-publication-review.yml"),
+      "utf8",
+    );
+    for (const m of lines) expect(review).toContain(`uses: ${m[1]} # ${m[2]}`);
   });
 
   test("the job's bound is the shared one, and a day's dispatches open that day's pull requests", () => {
@@ -280,6 +300,9 @@ describe("what triggers it, and what it may do", () => {
       .find((c) => /^\d+ \d+ \* \* \*$/.test(c));
     expect(daily).toBe("0 3 * * *");
     expect(opensTheSameUtcDay(Number(daily?.split(" ")[1]))).toBe(true);
+    // The stalled-run slice's resumes, the last open dispatches of a day, open the same day too.
+    expect(opensTheSameUtcDay(RESUME_WINDOW_UTC.from)).toBe(true);
+    expect(opensTheSameUtcDay(RESUME_WINDOW_UTC.to)).toBe(true);
   });
 });
 
@@ -446,7 +469,9 @@ describe("the dispatch is checked before anything is installed or minted", () =>
 describe("production only", () => {
   test("the App token is minted for the dispatch's dataset repository alone, to push and open", () => {
     const mint = step("Mint the App token for the dataset's repository");
-    expect(mint.uses).toBe("actions/create-github-app-token@v1");
+    expect(mint.uses).toBe(
+      "actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547",
+    );
     expect(mint.with).toEqual({
       "app-id": "${{ secrets.NEMAR_APP_ID }}",
       "private-key": "${{ secrets.NEMAR_APP_PRIVATE_KEY }}",
@@ -536,10 +561,22 @@ describe("the CLI runs unattended", () => {
     for (const name of [OPEN, FINISH]) {
       const run = step(name).run ?? "";
       expect(run).toContain("aws sts get-session-token");
+      // Its error is never printed: an explicit deny names the IAM user and the account.
+      const sts = run.split("\n").filter((l) => l.includes("aws sts "));
+      expect(sts).toHaveLength(1);
+      for (const l of sts) expect(l).toContain("--output json 2> /dev/null)");
       expect(run).toContain("::add-mask::");
       expect(run).not.toContain("GITHUB_ENV");
       expect(run).toContain("code=runner-credentials");
     }
+  });
+});
+
+describe("one id bound for the Worker, the workflow and the CLI", () => {
+  test("every id pattern the workflow checks is the shared one", () => {
+    const patterns = [...SRC.matchAll(/^\s*id_re='([^']*)'$/gm)].map((m) => m[1]);
+    expect(patterns.length).toBe(2);
+    for (const p of patterns) expect(p).toBe(DISPATCH_ID_RE.source);
   });
 });
 
@@ -580,6 +617,10 @@ describe("the backstop reports a run that did not", () => {
     const seen = sentTo(r);
     expect(seen?.args).toContain("https://api.nemar.org/webhooks/repull-state");
     expect(seen?.args.join(" ")).not.toContain(TOKEN);
+    // curl is told to read its configuration from standard input, which is where the token is.
+    const k = seen?.args.indexOf("-K") ?? -1;
+    expect(k).toBeGreaterThanOrEqual(0);
+    expect(seen?.args[k + 1]).toBe("-");
     expect(seen?.stdin).toBe(`header = "X-Repull-Token: ${TOKEN}"\n`);
     expect(seen?.body).toEqual({
       dispatch_id: 7,
