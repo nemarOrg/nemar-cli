@@ -198,7 +198,7 @@ one at the first version tag, else with the merge base; the facts carry only cla
 0110 (mail is sent through the Cloudflare `send_email` binding behind a provider switch; Resend is
 a fallback only on a certain non-delivery limit or availability refusal, never on a timeout or an
 unknown error, so a sign-in code is never sent twice),
-0111 (decision 10 is built in Phase 3 and the read-only plan, `nemar admin repull plan`, in Phase 5; execution is not yet built: an upstream re-pull is one synthesized delta commit on `release/vN.0.0`
+0111 (decision 10 is built in Phase 3 and the read-only plan, `nemar admin repull plan`, in Phase 5; execution is built, manual in Phases 6b to 6g and automatic in Phase 7 (see its amendments): an upstream re-pull is one synthesized delta commit on `release/vN.0.0`
 through a pull request, never a bypass or a git merge of upstream history; N.0.0 is a pure mirror where
 upstream wins every conflict, and corrections replay as N.0.1 to `main` once N.0.0 is merged and
 tagged; the scrub runs on delta paths before the copy and the commit, and a privacy-ledger change is
