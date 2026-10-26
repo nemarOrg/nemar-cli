@@ -14,13 +14,18 @@
  * is checked only by the first production merge, under a cap of 1. The Resend capture is armed
  * around every test and must stay empty.
  *
- * The properties, each with a test that fails when its line is changed:
+ * The properties, each with a test of its own:
  *  - a machine-clean row is merged once, by squash, at the screened head, with the gate's message,
  *    and only after its claim and its audit row are written; the merge is recorded;
  *  - the merge switch, the cap, the bound and every fact that is not clean (an unknown one
  *    included) each hold before anything is claimed or sent;
  *  - an administrator's row is never merged, and nothing outside exact production is read;
- *  - GitHub's refusal and an answer that was lost each keep the claim, under their own words.
+ *  - GitHub's refusal and an answer that was lost each keep the claim, under their own words;
+ *  - a claim the Worker holds is resolved from GitHub's word on a later tick, and a merge is sent
+ *    again only under that claim, while it is young and the facts read then are clean;
+ *  - a merged record's finish run is dispatched a bounded number of times, in production only;
+ *  - the rows past their gates are read five a tick, in turn, so none waits for ever.
+ * That the Worker merges in one place and approves nothing is `repull-merge-scan.test.ts`.
  */
 
 import type { Database } from "bun:sqlite";
@@ -32,7 +37,11 @@ import type { DispatchRow, RepullStatus } from "../../shared/repull-state";
 import { SYSTEM_USER_ID } from "../src/lib/constants";
 import { verifyRepullDispatchToken } from "../src/services/github/callback-tokens";
 import { __resetRateLimitStateForTests } from "../src/services/github/transport";
-import { MERGE_CLAIMS_TODAY_SQL, getRepull } from "../src/services/upstream-repull";
+import {
+  CREATE_FACTS_SQL,
+  MERGE_CLAIMS_TODAY_SQL,
+  getRepull,
+} from "../src/services/upstream-repull";
 import {
   type AdvanceTickResult,
   repullAdvanceLogLine,
@@ -47,10 +56,11 @@ import {
   WORKER_MERGE_SENT_SQL,
   __setWorkerMergeTimeoutForTests,
   finishAfterMerge,
+  reconcileWorkerClaim,
   workerMergeRepull,
 } from "../src/services/upstream-repull-merge";
 import type { Bindings } from "../src/types/bindings";
-import { freshDb, realD1 } from "./helpers/d1";
+import { freshDb, interceptingD1, realD1 } from "./helpers/d1";
 import { seedReview } from "./helpers/pr-queue-fixtures";
 import {
   type CheckRunAnswer,
@@ -499,6 +509,12 @@ describe("the switches, the cap and the bound hold before anything is claimed or
     expect(usedToday()).toBe(0);
   });
 
+  test("the bounds are the ones ADR 0111 names: three merges a record, three finish dispatches", () => {
+    // The tests above and below count to the constants, so only this pins their values.
+    expect(WORKER_MERGES_MAX).toBe(3);
+    expect(FINISH_DISPATCHES_MAX).toBe(3);
+  });
+
   test("a record whose last merge GitHub refused is not claimed again: merge-refused", async () => {
     const id = ready();
     db.run(
@@ -684,6 +700,27 @@ describe("a fact that is not clean holds before the claim, and nothing is sent",
     ["no review of the head", () => db.run("DELETE FROM pr_reviews"), "review-absent"],
   ];
 
+  test("GitHub unreadable at the claim's own read of the live head: pr-unreadable, nothing claimed", async () => {
+    const id = ready();
+    // GitHub goes down after the facts were read and before the claim reads the live head: the
+    // claim's read of the dataset fences, the second read of the dataset row, comes just before.
+    let reads = 0;
+    const failing = interceptingD1(realD1(db), (sql) => {
+      if (sql === CREATE_FACTS_SQL && ++reads === 2) gh.down = true;
+    });
+    const r = await tick(env({}, failing));
+    expect(reads).toBe(2);
+    expect(r).toMatchObject({
+      mergesSent: 0,
+      held: { "pr-unreadable": 1 },
+      refused: { "github-unreadable": 1 },
+    });
+    expect(rowOf(id)).toMatchObject({ hold_reason: "pr-unreadable", merge_claim_sha: null });
+    expect(gh.merges).toEqual([]);
+    expect(usedToday()).toBe(0);
+    expect(auditsOf(WORKER_MERGE_ACTION, id)).toEqual([]);
+  });
+
   test("the facts are the merge stage's: a screened head that is not the recorded one is head-moved", async () => {
     // Only a record written by hand can be at gates_clear with another head (the gates edge sets the
     // screened head from the recorded one): the merge stage compares both, the gates stage only one.
@@ -749,6 +786,35 @@ describe("the Worker never merges an administrator's re-pull, and acts only in p
       expect(JSON.stringify(db.query("SELECT * FROM upstream_repulls").all())).toBe(before);
     });
   }
+
+  // A held claim is resolved whatever the switches say, so its fences are the only thing between
+  // a development Worker, or an administrator's record, and GitHub. Here GitHub would say merged.
+  for (const environment of ["development", "Production", undefined]) {
+    test(`a held claim, ENVIRONMENT=${JSON.stringify(environment)}: skipped, and nothing is read`, async () => {
+      const id = ready();
+      claimBy(id, SYSTEM_USER_ID);
+      gh.pulls[`${DS}#7`] = appPull(DS, { state: "closed", merged: true });
+      const row = await getRepull(realD1(db), id);
+      const o = await reconcileWorkerClaim(
+        env({ ENVIRONMENT: environment }),
+        row as NonNullable<typeof row>,
+      );
+      expect(o.kind).toBe("skipped");
+      expect(gh.requests).toEqual([]);
+      expect(rowOf(id)).toMatchObject({ status: "gates_clear", merge_claim_sha: HEAD });
+    });
+  }
+
+  test("a held claim on an administrator's record: skipped, and nothing is read", async () => {
+    const id = ready(DS, { origin: "administrator" });
+    claimBy(id, SYSTEM_USER_ID);
+    gh.pulls[`${DS}#7`] = appPull(DS, { state: "closed", merged: true });
+    const row = await getRepull(realD1(db), id);
+    const o = await reconcileWorkerClaim(env(), row as NonNullable<typeof row>);
+    expect(o.kind).toBe("skipped");
+    expect(gh.requests).toEqual([]);
+    expect(rowOf(id)).toMatchObject({ status: "gates_clear", merge_claim_sha: HEAD });
+  });
 });
 
 describe("what GitHub answers the merge", () => {
@@ -988,6 +1054,41 @@ describe("a merge whose answer was lost is resolved from GitHub on a later tick"
     expect(mergeTo()).toHaveLength(1);
   });
 
+  // Each flip makes a fact the merge rests on not clean after a lost answer: the merge is not sent
+  // again, whatever its claim allows, because the facts read now decide.
+  const unclean: Array<[string, (id: number) => void]> = [
+    [
+      "main moved",
+      () => {
+        gh.mainRefs[DS] = OTHER;
+      },
+    ],
+    ["the review now fails", () => review(DS, "fail")],
+    [
+      "BIDS validation now fails",
+      () => {
+        gh.checkRuns[`${DS}@${HEAD}`] = [
+          { ...BIDS_RUN, conclusion: "failure" },
+          { ...VERSION_RUN },
+        ];
+      },
+    ],
+    ["the screen now asks for a person", (id) => markScreen(id, DS, "review")],
+  ];
+  for (const [name, flip] of unclean) {
+    test(`a lost answer is not sent again once ${name}: the claim is kept`, async () => {
+      const id = ready();
+      gh.mergeAnswer = { status: 502 };
+      await tick();
+      gh.mergeAnswer = null;
+      flip(id);
+      const r = await tick();
+      expect(r).toMatchObject({ mergesSent: 0, merged: 0 });
+      expect(mergeTo()).toHaveLength(1);
+      expect(rowOf(id)).toMatchObject({ merge_claim_sha: HEAD, hold_reason: "claim-held" });
+    });
+  }
+
   test("merged at another head: the claim is kept for resume, which records it with its counts", async () => {
     const id = ready();
     gh.mergeAnswer = { status: 502 };
@@ -1036,6 +1137,26 @@ describe("a merge GitHub refused, and a claim nothing was sent under", () => {
       expect(rowOf(id)).toMatchObject({ merge_claim_sha: null, hold_reason: "merge-refused" });
     });
   }
+
+  test("a pull request GitHub cannot read keeps the claim, though the release's own read would succeed", async () => {
+    const id = ready();
+    gh.mergeAnswer = { status: 409 };
+    await tick();
+    gh.mergeAnswer = null;
+    ageClaim(id, 6);
+    // The tick's read of the pull request fails, both of its tries; a read after it, the release's
+    // own, would succeed and release the claim. Unread is never read as "did not merge".
+    gh.pullReadFailures[`${DS}#7`] = 2;
+    const r = await tick();
+    expect(gh.pullReadFailures[`${DS}#7`]).toBe(0);
+    expect(r).toMatchObject({ claimsReleased: 0, mergesSent: 0, errors: [] });
+    expect(rowOf(id)).toMatchObject({ merge_claim_sha: HEAD, hold_reason: "claim-held" });
+    expect(auditsOf("repull_merge_claim_released", id)).toEqual([]);
+    // Read again, GitHub says it did not merge: the claim is released as refused.
+    const next = await tick();
+    expect(next).toMatchObject({ claimsReleased: 1 });
+    expect(rowOf(id)).toMatchObject({ merge_claim_sha: null, hold_reason: "merge-refused" });
+  });
 
   test("closed without a merge after a refusal: released five minutes on, and the row holds pr-closed", async () => {
     const id = ready();
@@ -1221,6 +1342,19 @@ describe("after the merge, the finish run walks the record to complete", () => {
     expect(finishDispatches(id)).toHaveLength(FINISH_DISPATCHES_MAX);
   });
 
+  test(`merged: the same bound, ${FINISH_DISPATCHES_MAX} finish dispatches and then finish-exhausted`, async () => {
+    const id = mergedRow("merged");
+    versionRow(DS, "2.0.0");
+    for (let n = 1; n <= FINISH_DISPATCHES_MAX; n++) {
+      expect((await tick()).finishes).toBe(1);
+      runFailed();
+    }
+    const r = await tick();
+    expect(r).toMatchObject({ finishes: 0, held: { "finish-exhausted": 1 } });
+    expect(rowOf(id)).toMatchObject({ status: "merged", hold_reason: "finish-exhausted" });
+    expect(finishDispatches(id)).toHaveLength(FINISH_DISPATCHES_MAX);
+  });
+
   test("a send GitHub refuses for the dispatch spends an attempt; one turned away for the Worker does not", async () => {
     const id = mergedRow("released");
     gh.dispatchStatus = 422;
@@ -1273,6 +1407,69 @@ describe("after the merge, the finish run walks the record to complete", () => {
       expect(gh.requests).toEqual([]);
     });
   }
+
+  // The dispatch record's own claim refuses these too, so only "not one statement" shows that the
+  // finish's own fences, and not the claim's, turned them away.
+  for (const [name, over, environment] of [
+    ["an administrator's merged record", { origin: "administrator" }, "production"],
+    ["a record outside exact production", {}, "development"],
+  ] as const) {
+    test(`${name}: skipped before a single statement is prepared`, async () => {
+      const id = mergedRow("released", over as Row);
+      const prepared: string[] = [];
+      const base = realD1(db);
+      const counting = {
+        prepare(sql: string) {
+          prepared.push(sql);
+          return base.prepare(sql);
+        },
+        batch: (s: never[]) => base.batch(s),
+      } as unknown as D1Database;
+      const row = await getRepull(base, id);
+      const o = await finishAfterMerge(
+        env({ ENVIRONMENT: environment }, counting),
+        row as NonNullable<typeof row>,
+        { cliVersion: CLI },
+      );
+      expect(o).toEqual({ kind: "skipped" });
+      expect(prepared).toEqual([]);
+    });
+  }
+});
+
+describe("the rows past their gates share one rotation, five a tick", () => {
+  const t0 = new Date(Date.UTC(2026, 9, 26, 8, 0, 0));
+  const at = (halfHours: number) => new Date(t0.getTime() + halfHours * 30 * 60_000);
+  const off = () => env({ AUTO_REPULL_MERGE_ENABLED: undefined });
+
+  test("seven rows at gates_clear are read five a tick, and every one within two ticks", async () => {
+    const ids = [1, 2, 3, 4, 5, 6, 7].map((i) => ready(`on0988${30 + i}`));
+    const a = await runRepullAdvanceCron(off(), { cliVersion: CLI, now: at(0) });
+    expect(a?.examined).toBe(5);
+    const b = await runRepullAdvanceCron(off(), { cliVersion: CLI, now: at(1) });
+    expect(b?.examined).toBe(5);
+    expect(ids.every((id) => rowOf(id).hold_reason === "merge-switch-off")).toBe(true);
+  });
+
+  test("six held rows at gates_clear do not keep a merged row with a higher id from its finish", async () => {
+    const held = [1, 2, 3, 4, 5, 6].map((i) => ready(`on0988${30 + i}`));
+    const ds = "on098840";
+    mirror(ds);
+    const merged = seedRow(ds, "merged", {
+      merge_claim_sha: HEAD,
+      merge_claimed_at: "2026-10-25 03:00:00",
+    });
+    versionRow(ds, "2.0.0");
+    expect(merged).toBeGreaterThan(Math.max(...held));
+    const a = await runRepullAdvanceCron(off(), { cliVersion: CLI, now: at(0) });
+    const b = await runRepullAdvanceCron(off(), { cliVersion: CLI, now: at(1) });
+    expect([a?.examined, b?.examined]).toEqual([5, 5]);
+    // The finish is the merged row's, sent once whichever of the two ticks reached it.
+    expect((a?.finishes ?? 0) + (b?.finishes ?? 0)).toBe(1);
+    expect(finishDispatches(merged)).toHaveLength(1);
+    expect(sentRuns().map((p) => p.dataset_id)).toEqual([ds]);
+    expect(held.every((id) => rowOf(id).hold_reason === "merge-switch-off")).toBe(true);
+  });
 });
 
 describe("what the merge costs a tick", () => {
@@ -1368,5 +1565,22 @@ describe("the merge's audit row is the gate on the send", () => {
     // An administrator's row is never one.
     db.run("UPDATE upstream_repulls SET origin = 'administrator' WHERE id = ?", [id]);
     expect(run({ at: old })).toBe(0);
+  });
+
+  test("a record that moves before the merge's audit row is written: no row, no merge, the claim kept", async () => {
+    const id = ready();
+    // Another writer moves the record between the claim and the merge's audit row.
+    const racing = interceptingD1(realD1(db), (sql) => {
+      if (sql === WORKER_MERGE_SENT_SQL) {
+        db.run("UPDATE upstream_repulls SET revision = revision + 1 WHERE id = ?", [id]);
+      }
+    });
+    const r = await tick(env({}, racing));
+    expect(r).toMatchObject({ mergesSent: 0, merged: 0 });
+    expect(gh.merges).toEqual([]);
+    expect(auditsOf(WORKER_MERGE_ACTION, id)).toEqual([]);
+    // The claim waits for GitHub's word. Its hold names the revision it read, which moved, so the
+    // next tick writes it.
+    expect(rowOf(id)).toMatchObject({ status: "gates_clear", merge_claim_sha: HEAD });
   });
 });

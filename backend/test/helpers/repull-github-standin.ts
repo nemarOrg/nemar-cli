@@ -33,7 +33,9 @@
  * A pull request entry may also name its `number`, `user`, the head's and base's `repo` and its
  * `mergeable_state`, which are answered only when named. A request whose path holds `slow` is
  * answered `slowMs` late. Error answers on the reads added for the machine-clean facts carry
- * `Retry-After: 0`, so a retry does not wait. `down` answers every request 503. Every request is
+ * `Retry-After: 0`, so a retry does not wait. `pullReadFailures` (`<id>#<n>`) answers that many
+ * reads of the pull request 503, with `Retry-After: 0`, before it answers again, so one reader's
+ * read fails while a later reader's succeeds. `down` answers every request 503. Every request is
  * recorded in `requests`, and with its query in `urls`.
  */
 
@@ -115,6 +117,8 @@ export interface RepullGitHub {
   slow: string | null;
   slowMs: number;
   urls: string[];
+  /** How many more reads of a pull request (`<id>#<n>`) answer 503 before it answers again. */
+  pullReadFailures: Record<string, number>;
   down: boolean;
   reset(): void;
   stop(): void;
@@ -140,6 +144,7 @@ export function startRepullGitHub(o: { defaultHead?: string | null } = {}): Repu
     slow: null,
     slowMs: 1_500,
     urls: [],
+    pullReadFailures: {},
     down: false,
     reset() {
       gh.requests = [];
@@ -160,6 +165,7 @@ export function startRepullGitHub(o: { defaultHead?: string | null } = {}): Repu
       gh.slow = null;
       gh.slowMs = 1_500;
       gh.urls = [];
+      gh.pullReadFailures = {};
       gh.down = false;
     },
     stop() {
@@ -242,6 +248,11 @@ export function startRepullGitHub(o: { defaultHead?: string | null } = {}): Repu
       m = /^\/repos\/nemarDatasets\/([a-z]{2}\d{6})\/pulls\/(\d+)$/.exec(url.pathname);
       if (m) {
         const n = Number(m[2]);
+        const failing = gh.pullReadFailures[`${m[1]}#${m[2]}`] ?? 0;
+        if (failing > 0) {
+          gh.pullReadFailures[`${m[1]}#${m[2]}`] = failing - 1;
+          return refuse(503);
+        }
         const a: PullAnswer | undefined =
           gh.pulls[`${m[1]}#${m[2]}`] ??
           (gh.defaultHead
