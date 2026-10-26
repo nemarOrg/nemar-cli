@@ -656,6 +656,20 @@ export const DISPATCH_CODES = [
   "runner-failed",
   "runner-disk",
   "no-code",
+  // The unattended run's own words (Phase 7d): the dispatch the run was handed is not the nine
+  // keys the Worker sends; the CLI is not the release the dispatch names; the dispatch token is on
+  // the command line, where the public log shows it; output that would print what the run reads
+  // is on; an option the automatic mode does not take, or one it needs is missing; a finish that
+  // ended short of `complete`; a report the Worker never answered; the runner could not make the
+  // short-lived AWS session the copy needs.
+  "dispatch-invalid",
+  "auto-cli-version",
+  "auto-token-on-argv",
+  "auto-verbose",
+  "auto-option",
+  "finish-incomplete",
+  "report-unanswered",
+  "runner-credentials",
   // The plan: its preflight checks, its refusals, and why it planned nothing.
   "annex-uuid-mismatch",
   "concept-doi-disagrees",
@@ -1005,6 +1019,27 @@ export const AUTO_MAX_COPY_BYTES = 1024 ** 4;
 
 /** A dispatch token as the Worker signs it: an HMAC-SHA256 digest in lowercase hex. */
 export const DISPATCH_TOKEN_RE = /^[0-9a-f]{64}$/;
+
+/**
+ * The unattended run's job bound, in minutes: the `timeout-minutes` of the central
+ * `run-upstream-repull` workflow, which `test/repull-workflow.test.ts` pins to this.
+ */
+export const REPULL_JOB_TIMEOUT_MINUTES = 330;
+
+/** How long a dispatched run is assumed to wait in GitHub's queue before its job starts. */
+export const REPULL_DISPATCH_QUEUE_MINUTES = 60;
+
+/**
+ * Whether a run dispatched at any minute of the UTC hour `hour` ends, queueing and the whole job
+ * bound included, before that UTC day does. The open cap counts the dispatches of a UTC day
+ * (ADR 0111's Phase 7b amendment, "The open cap"), so it bounds the pull requests opened in a day
+ * only while every dispatch it counts opens its pull request that same day: the daily tick's
+ * hour, and the last hour any open dispatch is claimed, must each pass this.
+ */
+export function opensTheSameUtcDay(hour: number): boolean {
+  if (!Number.isInteger(hour) || hour < 0 || hour > 23) return false;
+  return hour * 60 + 59 + REPULL_DISPATCH_QUEUE_MINUTES + REPULL_JOB_TIMEOUT_MINUTES < 24 * 60;
+}
 
 /** The one place a run's log may be: a run of the central workflow in `nemarDatasets/.github`. */
 export const DISPATCH_RUN_URL_RE =

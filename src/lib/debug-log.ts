@@ -198,7 +198,7 @@ export function redactHeaders(headers: Record<string, string>): Record<string, s
  *  prefix: a `*session*` wildcard would also redact `session_id` and
  *  `expires_at`-style diagnostics that are the reason the log exists. */
 const SENSITIVE_BODY_KEY_RE =
-  /^(api[_-]?key|apikey|password|token|secret|access[_-]?key(_id)?|secret[_-]?access[_-]?key|session|session[_-]?token|authorization|ssh[_-]?key|private[_-]?key|device[_-]?code)$/i;
+  /^(api[_-]?key|apikey|password|token|secret|access[_-]?key(_id)?|secret[_-]?access[_-]?key|session|session[_-]?token|authorization|ssh[_-]?key|private[_-]?key|device[_-]?code|dispatch[_-]?token)$/i;
 
 const EMAIL_RE = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
 

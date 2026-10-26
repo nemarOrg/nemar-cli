@@ -63,7 +63,10 @@ function wordsIn(files: string[], patterns: RegExp[]): Map<string, string> {
   return found;
 }
 
-const cliWords = () => wordsIn(tsFiles(join(ROOT, "src/lib/repull")), CLI_PATTERNS);
+/** The automatic run's own words: the command glue states an outcome as `code: "<word>"`. */
+const AUTOMATIC_COMMANDS = join(ROOT, "src/commands/admin-repull-automatic.ts");
+const cliWords = () =>
+  wordsIn([...tsFiles(join(ROOT, "src/lib/repull")), AUTOMATIC_COMMANDS], CLI_PATTERNS);
 const workerWords = () =>
   wordsIn(
     [
@@ -87,6 +90,9 @@ describe("DISPATCH_CODES holds every word a run can meet", () => {
       "latest-unknown",
       "order-unverified",
       "preflight",
+      // The unattended run's: a refusal in the library and an outcome in the command glue.
+      "auto-token-on-argv",
+      "finish-incomplete",
     ]) {
       expect([w, cli.has(w)]).toEqual([w, true]);
     }

@@ -25,6 +25,12 @@ export interface CreateRepullRequest {
   /** The administrator's assertion that the plan compared the from-version's tree with upstream's. */
   lineage_recordable: boolean;
   counts?: Record<string, number>;
+  /**
+   * A dispatched run's dispatch and its token, both or neither (ADR 0111, decision 6): the one way
+   * the Worker records a re-pull as the automatic path's. The token is a secret.
+   */
+  dispatch_id?: number;
+  dispatch_token?: string;
 }
 
 export interface CreateRepullResponse {

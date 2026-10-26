@@ -110,11 +110,21 @@ export interface RepullWorld {
   setMergeMessageSuffix(suffix: string): void;
   /** The Worker's bindings, which a test may override for the rest of the test. */
   workerEnv: Partial<Bindings>;
+  /** The bindings the Worker's routes run with now (the overrides included). */
+  bindings(): Bindings;
+  /** The NEMAR API's address, as the CLI reaches it (`TEST_API_URL`). */
+  apiUrl: string;
   /**
-   * `bun run src/index.ts admin <args>`, with the world's environment and `extra`, and `input` on
-   * stdin when given (closed otherwise).
+   * `bun run <entry> admin <args>`, with the world's environment and `extra`, and `input` on
+   * stdin when given (closed otherwise). The entry is the world's (`opts.cliEntry`, else this
+   * checkout's `src/index.ts`) unless `entry` names another.
    */
-  cli(args: string[], extra?: Record<string, string | undefined>, input?: string): Promise<Run>;
+  cli(
+    args: string[],
+    extra?: Record<string, string | undefined>,
+    input?: string,
+    entry?: string,
+  ): Promise<Run>;
   /** The re-pull row, as the database holds it. */
   row(): RepullDbRow;
   /** The plan file the world was executed from. */
@@ -166,7 +176,18 @@ function withWorkerdMd5(): () => void {
 }
 
 export async function startRepullWorld(
-  opts: { datasetId?: string; fixture?: FixtureOptions } = {},
+  opts: {
+    datasetId?: string;
+    fixture?: FixtureOptions;
+    /**
+     * Run the administrator's `execute` to `pr_open` before the world is saved (the default);
+     * false saves it with the plan made and nothing recorded, for a suite that opens the pull
+     * request itself (the automatic run's).
+     */
+    execute?: boolean;
+    /** The CLI entry `cli()` runs (a release build's, say); this checkout's `src/index.ts` by default. */
+    cliEntry?: string;
+  } = {},
 ): Promise<RepullWorld> {
   const restoreDigest = withWorkerdMd5();
   const gh = startGitHubStandin();
@@ -349,9 +370,10 @@ export async function startRepullWorld(
     args: string[],
     extra: Record<string, string | undefined> = {},
     input?: string,
+    entry: string = opts.cliEntry ?? CLI_ENTRY,
   ) => {
     const proc = spawn({
-      cmd: ["bun", "run", CLI_ENTRY, "admin", ...args],
+      cmd: ["bun", "run", entry, "admin", ...args],
       cwd: REPO_ROOT,
       env: childEnv(extra),
       stdin: input === undefined ? "ignore" : new Blob([input]),
@@ -389,10 +411,14 @@ export async function startRepullWorld(
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }
-  const run = await cli(["repull", "execute", plan, "--yes"]);
-  const opened = db.query("SELECT status FROM upstream_repulls").get() as { status: string } | null;
-  if (run.exitCode !== 0 || opened?.status !== "pr_open") {
-    throw new Error(`the world did not reach pr_open (exit ${run.exitCode}):\n${run.all}`);
+  if (opts.execute !== false) {
+    const run = await cli(["repull", "execute", plan, "--yes"], {}, undefined, CLI_ENTRY);
+    const opened = db.query("SELECT status FROM upstream_repulls").get() as {
+      status: string;
+    } | null;
+    if (run.exitCode !== 0 || opened?.status !== "pr_open") {
+      throw new Error(`the world did not reach pr_open (exit ${run.exitCode}):\n${run.all}`);
+    }
   }
 
   const saved = {
@@ -437,6 +463,8 @@ export async function startRepullWorld(
       mergeMessageSuffix = suffix;
     },
     workerEnv,
+    bindings,
+    apiUrl,
     cli,
     plan,
     row: () =>

@@ -13,6 +13,11 @@
  *       `planned -> prepared` with the commit, its tree, the copy manifest's digest and counts;
  *   S3 to S5  the copy, the registration and the pull request (`advance.ts`), to `pr_open`.
  *
+ * A dispatched run (`opts.automatic`, the central workflow's; `automatic.ts`) adds two things and
+ * changes nothing else: before anything is written, the LIVE plan must be one the automatic path
+ * takes (`assertAutomaticPlan`); and S1 presents the dispatch, so the Worker records the re-pull
+ * as automatic.
+ *
  * A record past `prepared` is not planned again: the registration moved origin's git-annex branch
  * and the release branch exists, so a live plan would differ by what this execution itself wrote.
  * Such a run proves the file (`readReviewedPlan`: its digest, planner, API and remotes), and takes
@@ -66,6 +71,7 @@ import {
   reached,
   removeWorkdir,
 } from "./advance.js";
+import { assertAutomaticCounts, assertAutomaticPlan } from "./automatic.js";
 import { copyItems, copySection, planCounts, planFacts } from "./body.js";
 import { readCatalogFacts } from "./catalog.js";
 import { commitMaterialized, materializeDelta } from "./materialize.js";
@@ -128,7 +134,26 @@ export interface ExecuteOptions {
   confirm?: (summary: ExecuteSummary) => Promise<boolean>;
   /** Tests only: the copy's single-copy bound and part size. */
   copy?: { singleCopyMax?: number; partBytes?: number };
+  /**
+   * A dispatched run (ADR 0111, decision 6): the dispatch the automatic create presents, and the
+   * re-pull a resume dispatch continues (null for a first dispatch). Absent for an administrator's
+   * run.
+   */
+  automatic?: AutomaticExecution;
   out: (line: string) => void;
+}
+
+export interface AutomaticExecution {
+  dispatchId: number;
+  /** The dispatch token: a secret, sent only in the create's body. */
+  token: string;
+  repullId: number | null;
+}
+
+/** Where a run stopped. */
+export interface ExecuteResult {
+  row: RepullRow;
+  stoppedAt: RepullStatus;
 }
 
 /** The statuses a run prepares from: before them the record is made, after them it is advanced. */
@@ -177,6 +202,7 @@ interface RunContext {
   /** Upstream's object endpoint for pinned reads (a loopback stand-in in tests), else S3's own. */
   objectsBase: string | undefined;
   normalizeMaxBytes: number;
+  automatic: AutomaticExecution | undefined;
   out: (line: string) => void;
 }
 
@@ -224,9 +250,7 @@ function removeIfEmpty(dir: string): void {
 }
 
 /** Run through `pr_open` (or `opts.until`); never further. See the module comment. */
-export async function executeRepull(
-  opts: ExecuteOptions,
-): Promise<{ row: RepullRow; stoppedAt: RepullStatus }> {
+export async function executeRepull(opts: ExecuteOptions): Promise<ExecuteResult> {
   const env = opts.env ?? process.env;
   const until = opts.until ?? "pr_open";
   if (!(EXECUTE_STATUSES as readonly RepullStatus[]).includes(until)) {
@@ -236,6 +260,26 @@ export async function executeRepull(
     );
   }
   return withIsolatedGit(() => execute(opts, env, until));
+}
+
+/**
+ * A dispatched run's record must be the automatic path's own, and the one its dispatch continues
+ * when it names one: an administrator's record of the same plan is never taken up by a run, which
+ * would push and open its pull request as the App.
+ */
+function assertAutomaticRecord(a: AutomaticExecution, row: RepullRow): void {
+  if (row.origin !== "automatic") {
+    throw new ExecuteRefused(
+      "repull-in-flight",
+      `Re-pull #${row.id} of ${row.dataset_id} is an administrator's: a dispatched run never takes it up.`,
+    );
+  }
+  if (a.repullId !== null && row.id !== a.repullId) {
+    throw new ExecuteRefused(
+      "repull-mismatch",
+      `The dispatch continues re-pull #${a.repullId}, and the record found is #${row.id}.`,
+    );
+  }
 }
 
 /** The dataset's open record, if any (a GET, before anything is written). */
@@ -280,7 +324,7 @@ async function execute(
   opts: ExecuteOptions,
   env: Env,
   until: RepullStatus,
-): Promise<{ row: RepullRow; stoppedAt: RepullStatus }> {
+): Promise<ExecuteResult> {
   // S0. The reviewed plan, made again from live sources. No API write, push or upload happens
   // before it passes; a test override that is set and not a loopback address refuses here.
   const { datasetId, digest } = peekPlan(opts.planPath);
@@ -307,6 +351,12 @@ async function execute(
         env,
         openNeuroGraphqlUrl,
       });
+      if (opts.automatic) {
+        assertAutomaticRecord(opts.automatic, open);
+        // No live plan exists past `prepared` (the registration moved the branch the planner
+        // reads): the reviewed body's counts are read instead.
+        assertAutomaticCounts(body);
+      }
       const advance: AdvanceContext = {
         env,
         token: token.ok ? token.token : null,
@@ -355,6 +405,9 @@ async function execute(
         openNeuroGraphqlUrl,
         ...(opts.maxFetchBytes !== undefined ? { maxFetchBytes: opts.maxFetchBytes } : {}),
       });
+      // A dispatched run takes only a plan the automatic path takes, read from the LIVE plan
+      // this run just made, before anything is written.
+      if (opts.automatic) assertAutomaticPlan(verified.live);
     } catch (err) {
       // Refused before anything was prepared: leave no empty directory behind it.
       removeQuietly(paths.plan, opts.out);
@@ -373,6 +426,7 @@ async function execute(
       computed,
       objectsBase,
       normalizeMaxBytes: opts.normalizeMaxBytes ?? NORMALIZE_MAX_BYTES,
+      automatic: opts.automatic,
       out: opts.out,
     };
     try {
@@ -442,13 +496,23 @@ async function recordAndPrepare(
         unexplained: counts.unexplained ?? 0,
         conflicts: counts.conflicts ?? 0,
         corrections: counts.corrections ?? 0,
+        // The automatic create bounds the copy by its stated size (`assertAutomaticPlan` has
+        // proved it known); an administrator's record does not need it.
+        ...(ctx.automatic && counts.copy_bytes !== undefined
+          ? { copy_bytes: counts.copy_bytes }
+          : {}),
       },
+      // A dispatched run presents its dispatch: the one way a record is the automatic path's.
+      ...(ctx.automatic
+        ? { dispatch_id: ctx.automatic.dispatchId, dispatch_token: ctx.automatic.token }
+        : {}),
     });
   } catch (err) {
     if (err instanceof ApiError) throw recordRefused(err);
     throw err;
   }
   let row = created.repull;
+  if (ctx.automatic) assertAutomaticRecord(ctx.automatic, row);
   ctx.out(
     created.created
       ? `Recorded re-pull #${row.id} of ${ctx.datasetId} (${facts.fromTag} -> ${facts.toTag}), planned.`
