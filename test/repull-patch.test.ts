@@ -7,7 +7,7 @@
  * the commit made again on a `main` enrichment moved. The integration of these with the real CLI and
  * Worker is `repull-patch-cli.test.ts`.
  *
- * CI TIER: local git, no server.
+ * CI TIER: unit-pure (local git repositories in a temporary directory; no server, no network).
  */
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";

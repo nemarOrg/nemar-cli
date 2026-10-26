@@ -1,14 +1,15 @@
 /**
  * What `nemar admin repull` tells an administrator (ADR 0111; epic #1046 phase 6, #1912): the
  * confirmation names only what the run will do up to `--until`, and no help, output or pull request
- * body names a command that does not exist (an abandon command is not built; `plan`, `execute`,
- * `status`, `resume`, `merge` and `canary` are).
+ * body names a command that does not exist (`plan`, `execute`, `status`, `resume`, `merge`,
+ * `abandon` and `canary` are; there is no `--abandon` flag).
  */
 
 import { describe, expect, test } from "bun:test";
 import { confirmQuestion, repullCommand } from "../src/commands/admin-repull";
 import { releaseBody } from "../src/lib/repull/execute/pull-request";
 import type { ExecuteSummary } from "../src/lib/repull/execute/run";
+import { patchBody } from "../src/lib/repull/patch-turn";
 
 const SUMMARY: ExecuteSummary = {
   datasetId: "on004362",
@@ -53,6 +54,17 @@ describe("the confirmation depends on --until", () => {
   test("a continued run says where it continues from", () => {
     expect(confirmQuestion({ ...SUMMARY, status: "copied" })).toContain("from copied");
   });
+
+  test("a supersede says first what it ends", () => {
+    const q = confirmQuestion({
+      ...SUMMARY,
+      supersedes: { id: 3, toTag: "1.0.5", status: "pr_open", prNumber: 12 },
+    });
+    expect(q).toStartWith(
+      "First supersede re-pull #3 (to 1.0.5, pr_open): close its pull request #12",
+    );
+    expect(q).toContain("end it superseded");
+  });
 });
 
 function helpOf(name: string): string {
@@ -65,8 +77,9 @@ function helpOf(name: string): string {
 }
 
 describe("no text names a command that does not exist", () => {
-  test("the commands that exist are plan, execute, status, resume, merge and canary", () => {
+  test("the commands that exist are plan, execute, status, resume, merge, abandon and canary", () => {
     expect(repullCommand.commands.map((c) => c.name()).sort()).toEqual([
+      "abandon",
       "canary",
       "execute",
       "merge",
@@ -76,13 +89,23 @@ describe("no text names a command that does not exist", () => {
     ]);
   });
 
-  test("the execute help names resume and merge, and says abandon is not built", () => {
+  test("the execute help names resume, merge, abandon and --supersede", () => {
     const help = helpOf("execute");
     expect(help).toContain("nemar admin repull resume <id>");
     expect(help).toContain("nemar admin repull merge <id>");
-    expect(help).not.toMatch(/repull abandon/);
-    expect(help).toContain("Abandoning a re-pull is not built yet");
+    expect(help).toContain("nemar admin repull abandon <id>");
+    expect(help).toContain("--supersede");
+    expect(help).not.toMatch(/not built/);
     expect(help).toContain("a message that ends with the commit's two trailers");
+  });
+
+  test("the abandon help says what each status ends as, and what it refuses", () => {
+    const help = helpOf("abandon");
+    expect(help).toContain("ends the record abandoned");
+    expect(help).toContain("patch_declined");
+    expect(help).toContain("refused (wait-for-release)");
+    expect(help).toContain("a merged one refuses");
+    expect(help).not.toMatch(/--abandon/);
   });
 
   test("the resume and merge help say what each writes, and that resume never merges", () => {
@@ -94,6 +117,11 @@ describe("no text names a command that does not exist", () => {
     expect(resume).toContain("records the release");
     expect(resume).toContain("locks the objects the copy and the uploads wrote");
     expect(resume).toContain("and no other object under the dataset's prefix");
+    // N.0.1, and the decision on conflicts that comes before it.
+    expect(resume).toContain("--take-ours");
+    expect(resume).toContain("--keep-upstream");
+    expect(resume).toContain("N.0.1 is made from the reviewed plan");
+    expect(resume).not.toMatch(/not built/);
     const merge = helpOf("merge");
     expect(merge).toContain("squash-merges at the screened commit");
     expect(merge).toContain("today's re-pull merge cap");
@@ -141,5 +169,34 @@ describe("the pull request body", () => {
 
   test("names counts and the digest, never a path or a key", () => {
     expect(body).not.toMatch(/SHA256E|sub-\d|\.edf/);
+  });
+});
+
+describe("N.0.1's pull request body", () => {
+  const body = patchBody(
+    {
+      id: 4,
+      dataset_id: "on004362",
+      upstream_ds: "ds004362",
+      from_tag: "1.0.0",
+      to_tag: "1.1.0",
+      to_version: "2.0.0",
+      plan_digest: `sha256:${"ab".repeat(32)}`,
+    } as Parameters<typeof patchBody>[0],
+    {
+      paths: [{ path: "sub-01/x.json", ours: "G:100644:x" }],
+      keys: [],
+      corrections: 1,
+      resolutions: 0,
+    },
+    "2.0.1",
+  );
+
+  test("names the commands that take it on, the trailers, and counts only", () => {
+    expect(body).toContain("nemar admin repull resume on004362");
+    expect(body).toContain("nemar admin repull merge on004362");
+    expect(body).toContain("Repull-Patch: corrections=1");
+    expect(body).toContain("Nothing is scrubbed and nothing is copied");
+    expect(body).not.toMatch(/sub-\d|\.json/);
   });
 });
