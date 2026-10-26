@@ -106,7 +106,11 @@ import {
 } from "./github/dispatch.js";
 import { GITHUB_API, ORG_NAME, ghHeaders } from "./github/shared.js";
 import { autoRepullEnabled, autoRepullMergeEnabled, isExactProduction } from "./repull-switches.js";
-import { claimFinishDispatch, markDispatchSendFailed } from "./upstream-repull-dispatch.js";
+import {
+  REFUSED_FOR_THE_DISPATCH,
+  claimFinishDispatch,
+  markDispatchSendFailed,
+} from "./upstream-repull-dispatch.js";
 import {
   gatherMachineCleanFacts,
   readCheckFacts,
@@ -645,9 +649,6 @@ export const FINISH_DISPATCHES_SQL = `SELECT
   (SELECT COUNT(*) FROM upstream_repull_dispatches WHERE dataset_id = ?1 AND nonce IS NOT NULL) AS live,
   (SELECT COUNT(*) FROM upstream_repull_dispatches WHERE repull_id = ?2 AND kind = 'finish'
     AND NOT (status = 'dispatch_failed' AND code = 'dispatch-deferred')) AS finishes`;
-
-/** GitHub's answers to a send that say the dispatch itself was refused, and so spend an attempt. */
-const REFUSED_FOR_THE_DISPATCH: ReadonlySet<number> = new Set([404, 422]);
 
 /** What the finish of one merged record came to. */
 export type FinishOutcome =

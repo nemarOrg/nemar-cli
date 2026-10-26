@@ -152,7 +152,11 @@ import {
 } from "./github/dispatch.js";
 import { startRepullPullRequestReview } from "./pr-review-start.js";
 import { autoRepullEnabled, isExactProduction } from "./repull-switches.js";
-import { claimOpenDispatch, markDispatchSendFailed } from "./upstream-repull-dispatch.js";
+import {
+  REFUSED_FOR_THE_DISPATCH,
+  claimOpenDispatch,
+  markDispatchSendFailed,
+} from "./upstream-repull-dispatch.js";
 import { gatherMachineCleanFacts } from "./upstream-repull-facts.js";
 import {
   type WorkerMergeOutcome,
@@ -215,9 +219,6 @@ export function advanceKindOf(status: string): AdvanceKind | null {
  * row and which rolls back without it, so an automatic row is never without it.
  */
 export const AUTOMATIC_OPEN_DISPATCHES_MAX = 3;
-
-/** GitHub's answers to a send that say the dispatch itself was refused, and so spend an attempt. */
-const REFUSED_FOR_THE_DISPATCH: ReadonlySet<number> = new Set([404, 422]);
 
 /**
  * The UTC hours a resume is dispatched in, both included. The daily first dispatches go at 03:00
