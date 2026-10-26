@@ -36,6 +36,7 @@ import {
   rowAt,
   seedDispatch as seedDispatchRow,
 } from "../backend/test/helpers/repull-rows";
+import { listRepullDispatches } from "../src/lib/api/repull";
 import { AUTO_OPEN_PAGES_MAX } from "../src/lib/repull/auto-view";
 
 /** What `--json` prints, as far as these tests read it. */
@@ -460,5 +461,81 @@ describe("nemar admin repull auto: it only reads, and prints nothing partial", (
     // The switches were read first and are not printed: a table with a hole would claim a read.
     expect(r.stdout).not.toContain("Switches, as this Worker reads them");
     expect(r.stdout).not.toContain("Open automatic re-pulls");
+  });
+});
+
+// ----------------------------------------------------------------------------
+// The dispatch list's filters, through the client
+// ----------------------------------------------------------------------------
+
+describe("listRepullDispatches: each filter reaches the Worker and narrows its page", () => {
+  const saved = { url: process.env.TEST_API_URL, dir: process.env.NEMAR_CONFIG_DIR };
+  beforeEach(() => {
+    signIn(ADMIN_KEY);
+    process.env.TEST_API_URL = API;
+    process.env.NEMAR_CONFIG_DIR = configDir;
+  });
+  afterEach(() => {
+    // Reflect.deleteProperty, not `= undefined`: Bun would store the STRING "undefined".
+    if (saved.url === undefined) Reflect.deleteProperty(process.env, "TEST_API_URL");
+    else process.env.TEST_API_URL = saved.url;
+    if (saved.dir === undefined) Reflect.deleteProperty(process.env, "NEMAR_CONFIG_DIR");
+    else process.env.NEMAR_CONFIG_DIR = saved.dir;
+  });
+
+  /** Six dispatches over two datasets and three states; `a1` is the oldest and `b3` the newest. */
+  function seedSix() {
+    const at = (s: number) => `2026-10-26 03:00:0${s}`;
+    return {
+      a1: seedDispatch({ dataset: "on090001", status: "opened", repullId: 1, at: at(1) }),
+      b1: seedDispatch({ dataset: "on090002", status: "refused", code: "gitlink", at: at(2) }),
+      a2: seedDispatch({ dataset: "on090001", status: "refused", code: "gitlink", at: at(3) }),
+      b2: seedDispatch({ dataset: "on090002", status: "finished", repullId: 2, at: at(4) }),
+      a3: seedDispatch({ dataset: "on090001", status: "failed", code: "scrub-failed", at: at(5) }),
+      b3: seedDispatch({ dataset: "on090002", status: "refused", code: "gitlink", at: at(6) }),
+    };
+  }
+  const idsOf = (page: { dispatches: Array<{ id: number }> }) => page.dispatches.map((d) => d.id);
+
+  test("with no filter the page is every dispatch, newest first", async () => {
+    const s = seedSix();
+    const page = await listRepullDispatches();
+    expect(idsOf(page)).toEqual([s.b3, s.a3, s.b2, s.a2, s.b1, s.a1]);
+    expect(page.next_after).toBeNull();
+  });
+
+  test("dataset narrows the page to that dataset's dispatches", async () => {
+    const s = seedSix();
+    expect(idsOf(await listRepullDispatches({ dataset: "on090001" }))).toEqual([s.a3, s.a2, s.a1]);
+    expect(idsOf(await listRepullDispatches({ dataset: "on090002" }))).toEqual([s.b3, s.b2, s.b1]);
+  });
+
+  test("status narrows the page to that state", async () => {
+    const s = seedSix();
+    expect(idsOf(await listRepullDispatches({ status: "refused" }))).toEqual([s.b3, s.a2, s.b1]);
+    expect(idsOf(await listRepullDispatches({ status: "finished" }))).toEqual([s.b2]);
+  });
+
+  test("after continues strictly below the id it names", async () => {
+    const s = seedSix();
+    expect(idsOf(await listRepullDispatches({ after: s.b2 }))).toEqual([s.a2, s.b1, s.a1]);
+  });
+
+  test("limit shortens the page, and the cursor it returns continues it", async () => {
+    const s = seedSix();
+    const first = await listRepullDispatches({ limit: 2 });
+    expect(idsOf(first)).toEqual([s.b3, s.a3]);
+    expect(first.next_after).toBe(s.a3);
+    const second = await listRepullDispatches({ limit: 2, after: first.next_after as number });
+    expect(idsOf(second)).toEqual([s.b2, s.a2]);
+  });
+
+  test("the filters together narrow it further", async () => {
+    const s = seedSix();
+    const page = await listRepullDispatches({ dataset: "on090002", status: "refused", limit: 1 });
+    expect(idsOf(page)).toEqual([s.b3]);
+    expect(
+      idsOf(await listRepullDispatches({ dataset: "on090002", status: "refused", after: s.b3 })),
+    ).toEqual([s.b1]);
   });
 });
