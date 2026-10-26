@@ -1067,6 +1067,7 @@ The record.
   One live dispatch per dataset, which also keeps two runs from working on one dataset at once.
 - Only an `on` dataset has dispatches; the table refuses any other id, so an `xx` re-pull, which takes the administrator's path only (decision 7), cannot reach the automatic one even by a writer that skips the service.
 - The same migration adds the scheduler's one row and, on `upstream_repulls`, `hold_reason` and `hold_since`, which a later slice writes: a fixed word and since when, set together, on an automatic row only.
+  *Annotated 2026-10-25: the Phase 7f amendment's advance tick writes them, and the record's own transition clears them on every edge into another status.*
   The record, as Phase 6 said, is deleted with its dataset, and so are its dispatches, those with no re-pull row included.
 
 Production only.
@@ -1161,6 +1162,7 @@ The 30-day reading.
 - At most one first dispatch, or one re-pull of any origin, per dataset in 30 days.
 - Every first dispatch counts except one GitHub refused (`dispatch_failed`), which never ran, and one whose run created a record counts through that record.
 - A resume of an existing record is not a first dispatch: a later slice bounds it by its own count, not by the window.
+  *Annotated 2026-10-25: the Phase 7f amendment's advance tick does: at most three `open` dispatches a record, the one that created it included.*
 - An administrator's re-pull counts too, which errs toward fewer DOIs.
 
 The open cap, claimed at dispatch.
@@ -1522,7 +1524,7 @@ The s3-lock route signs PutObjectRetention with an MD5 `Content-MD5`, which work
 A further slice of the Phase 7 amendment above, built by Phase 7f.
 It builds the tick that takes an open automatic re-pull one step on, or says why it waits: the hold, the edge into `gates_clear`, the screen and the review that edge waits for, and the resume of a run that stalled before its pull request opened.
 Nothing here merges, claims a merge or mails anyone: the merge, the follow-through after it and the observability are later slices, and a source scan keeps this slice's import closure free of mail.
-Three annotations are added to earlier text: on the record's header, on the opening of the Decision section, and on the 7e slice's sentence that nothing calls the review's start yet.
+Five annotations are added to earlier text: on the record's header, on the opening of the Decision section, on the 7b slice's sentence that a later slice writes `hold_reason` and `hold_since`, on the 7c slice's sentence that a later slice bounds a resume by its own count, and on the 7e slice's sentence that nothing calls the review's start yet.
 
 ### The tick
 
@@ -1530,21 +1532,28 @@ Three annotations are added to earlier text: on the record's header, on the open
 - In production with `AUTO_REPULL_ENABLED` not exactly `"1"` it asks GitHub nothing, claims and sends nothing, and records `switch-off` on each row it reads, a row a run is still out for included.
 - It reads only automatic rows: an administrator's row is never read, held or advanced, because the Worker never takes an administrator's re-pull on (decision 7).
 - It reads the rows stalled before their pull request opened (`planned` to `registered`) and the rows at `pr_open`.
-  A row at `gates_clear`, `merged` or `released` waits for the merge slice, and this tick does not read it.
-- At most five rows a tick, in rotation by id from a place the tick's half hour decides, so every row of a stable set is read within as many ticks as it takes five at a time to cover it.
-  The plan read the five least recently updated rows; a hold does not update a row, so the same five rows that wait on an administrator would have been read on every tick and a newer row never, and most automatic pull requests will wait on one, because most mirrors' screens ask for an acknowledgment (Consequences).
-- Each production tick stamps the scheduler's row with when it ran (`last_advance_at`), for the observability slice.
-- It sends no mail; its one log line is written only when it changed something or something failed, in counts and fixed words.
+  A row at `gates_clear`, `merged` or `released` waits for the merge slice, and this tick does not read it; a row that reaches another status between the tick's list and its own read of the row is left alone.
+- At most five rows of each kind a tick, in two rotations by id, so neither kind crowds out the other.
+  The rows at `pr_open` turn every half hour.
+  The stalled rows are read only inside the resume window, the only time one can be resumed, and turn once for each half hour of the window, counted across days, so each is read inside the window within as many window ticks as it takes five at a time to cover them, whatever the number of rows of either kind.
+- Two readings of the first design were changed, each because it would leave rows unread.
+  Reading the five least recently updated rows would read the same five that wait on an administrator on every tick and a newer row never, because a hold does not update a row, and most automatic pull requests will wait on one, since most mirrors' screens ask for an acknowledgment (Consequences).
+  One rotation turned by the half hour of the day would come back to the same rows at the same hours every day (48 ticks of five rows a day is one full turn of 240 rows), so of 240 open rows only 130 would ever be read inside the window, and the rest could never be resumed; a test reads every stalled row inside the window over 60 days for sets of 239, 240, 241 and 480 rows and for mixed sets.
+- Each production tick that could list its rows stamps the scheduler's row with when it ran (`last_advance_at`), for the observability slice; one that could not list them stamps nothing.
+- It sends no mail.
+  Its one log line, in counts and fixed words, is written only when it changed something, a review's start or a clean row's edge was refused, or something failed; a row whose step threw is logged by the record's id and its error's class, never its dataset or a message, and the next row is taken up.
 
 ### A hold is an observation
 
 - A hold is a fixed word and since when, on the row, and only on an automatic row.
   It is the first machine-clean rule that does not hold, or a bound the automatic path reached.
 - It is written only when the word changes, with one audit row (`repull_hold`, by the system user) per change, so a row that waits for the same reason keeps the time it began.
+  Clearing a hold is such a change too.
 - It is written only to the row as the tick read it (its `revision`), so a row that moved meanwhile is not given a reason about what it was.
 - It moves neither `revision` nor `updated_at`: the record's compare-and-set, and the times other slices read, are untouched.
 - An edge into another status clears it, and a self-edge keeps it until the tick reads the row again.
-- A row a run is still out for (a live dispatch of its dataset) is not held, because nothing holds it but its own run, and GitHub is not read for it while the run settles the head it opened.
+- A row a run is still out for (a live dispatch of its dataset) has no hold recorded, because nothing holds it but its own run, and GitHub is not read for it while the run settles the head it opened; a hold it had is cleared, with its audit row.
+- This slice adds three hold words, `resume-refused`, `cap-unreadable` and `gates-refused` (below), and one code to the dispatch record's, `dispatch-deferred`.
 
 ### The gates
 
@@ -1552,32 +1561,44 @@ Three annotations are added to earlier text: on the record's header, on the open
 - Only a clean verdict writes `pr_open -> gates_clear`, with the head as `gates_sha`, as the system user, through the record's own transition on the row as the tick read it.
   The transition reads the dataset fences, the screen bound to the row and GitHub's live head again, and re-asserts the screen's verdict in the statement that writes, so a fact that changed in between refuses the edge and nothing is written.
 - An unknown fact never writes the edge: an unreadable pull request, `main` or check, a mergeable state that is `unknown`, null or anything but `clean`, and every other word hold.
+- A clean row whose edge the transition refuses holds `gates-refused`, and the tick's log line is an error with the refusal's code on every tick it happens: the rule and the record disagree, which should not happen, and is seen when it does.
 
 ### What the gates wait for
 
-- The tick starts the screen and the review of the head only once every rule before the screen holds: the switches, the record, the dataset, the recorded pull request opened by the App at the recorded head, `main` unmoved, and both checks green.
-  So neither a screen run nor a model call is spent on a pull request the Worker would not take on anyway, and a pull request whose BIDS validation failed waits for an administrator, who may dispatch its screen by hand.
+- The tick starts the screen of the head only once every rule before the screen holds: the switches, the record, the dataset, the recorded pull request opened by the App at the recorded head, `main` unmoved, and both checks green.
+  So no screen run is spent on a pull request the Worker would not take on anyway, and a pull request whose BIDS validation failed waits for an administrator, who may dispatch its screen by hand.
 - The identifier screen is dispatched for the head (the 6e slice's start, `ref` the head, `request_id` 0, its callback bound to the row) when the head has no verdict: no screen, a screen that errored or one that never reported.
-  At most three times for one head, counted from the screen's own audit rows, so a workflow that always fails is not run on every tick; an administrator may dispatch it again.
+  At most three times for one head, counted from the screen's own audit rows of that head, so a workflow that always fails is not run on every tick, and a new head has its own three; an administrator may dispatch it again.
   A verdict that asks for a person is not dispatched again here: it never passes machine clean, and the same commit would be asked the same question.
-- The ADR 0107 review is started (the 7e slice's start, the one that admits the App's pull request) when the head has none, or when its dispatch failed, a run GitHub never started, at least an hour before.
-  It is started only while the screen is clear or on its way to a verdict: once the screen blocks, asks for a person or will not be dispatched again, the head can never be machine clean, and its review would be a model call spent for nothing.
+- The ADR 0107 review is started (the 7e slice's start, the one that admits the App's pull request) only once the screen of the head is `clear`, so on a later tick than the screen, when the head has no review, or when its dispatch failed, a run GitHub never started, at least an hour before.
+  A screen still out may yet block or ask for a person, and one that errored, blocks or asks for a person means the head is not machine clean now, so a review then would be a model call spent on a head that may never pass.
+- When the review's own start declines (the review switched off, a dataset it may not read, GitHub unreadable, another author or another head), its reason is counted and logged on every tick it declines, so a row held `review-absent` says why.
 
 ### The resume of a stalled run
 
-- A row stalled before its pull request opened is resumed when no dispatch of its dataset is live and its last dispatch `failed`, went `unreported`, or was refused by GitHub before it ran, or it has none.
-  The plan named the first two; a refused send ran nothing, and a row left with it would otherwise wait for good with nothing said.
+- A row stalled before its pull request opened is resumed when no dispatch of its dataset is live and its latest dispatch, by id, `failed`, went `unreported`, or was refused by GitHub before it ran (`dispatch_failed`), or it has none.
+  The first design named the first two; a refused send ran nothing, and a row left with it would otherwise wait for good with nothing said.
 - Before anything is claimed: the record and the dataset must pass the machine-clean rule's own rules for them, read by its reader (an automatic record with no correction, of a named, not withdrawn mirror with no import that has not settled), or the row holds with that rule's word.
-- A last run that refused holds `resume-refused`, a word this slice adds: the run said why it would not go on, and another would meet the same refusal, so an administrator looks.
-- A row has at most three `open` dispatches, the one that created it and every refused one included, so a refusal that repeats cannot dispatch for ever; past that it holds `resume-exhausted`.
-- It is resumed only once it has not moved for an hour, and only from 03:00 to 15:59 UTC, so a run dispatched at the end of the window has its 330 minutes and an hour of queueing before the UTC day ends and opens its pull request on the day whose unit of the open cap it claimed, the timing the 7b slice's open cap relies on.
-- The claim is the dispatch record's own, naming the row, so the open cap is counted in the statement that claims and a resume can never pass it; a full day holds `cap-exhausted`, and no later row of the tick claims.
+- A latest run that refused holds `resume-refused`: the run said why it would not go on, and another would meet the same refusal, so an administrator looks.
+- A row has at most three `open` dispatches, the one that created it included, so it is resumed twice at most; past that it holds `resume-exhausted`.
+  A run that failed, refused or never reported counts, and so does a send GitHub refused for the dispatch itself (a 404 or a 422, `dispatch-refused`), so a refusal that repeats cannot dispatch for ever.
+  A send GitHub turned away for a reason about the Worker (its credential, its permission, a rate limit: any other 4xx, a new dispatch code, `dispatch-deferred`) does not count, because nothing about the row was tried.
+- The bound relies on the creating dispatch being linked to its record.
+  The automatic create links it in the batch that inserts the record, which rolls back when the link does not apply, so an automatic record is never without it; a record that somehow had none would be resumed up to three times more, which the bound cannot see.
+- It is resumed only once neither the row nor its latest dispatch (its report, or its send when it has none) has moved for an hour: a run that fails before it writes anything leaves the row's `updated_at` hours old, and would otherwise be resumed on the next tick.
+- Only from 03:00 to 15:59 UTC, so a run dispatched at the end of the window has its 330 minutes and an hour of queueing before the UTC day ends and opens its pull request on the day whose unit of the open cap it claimed, the timing the 7b slice's open cap relies on.
+- The claim is the dispatch record's own, naming the row, so the open cap is counted in the statement that claims and a resume can never pass it.
+  The claim matches the record's tags in either spelling (`v1.0.0` and `1.0.0`), as the lineage write does, and one that does not find the row the tick read is the error word `repull-mismatch`, never a silent wait.
+  A full day holds `cap-exhausted`; a cap set to something its reader cannot take holds `cap-unreadable` and is an error, because it is a fault in the configuration and not a full day; after either, no later row of the tick claims.
 - The dispatch is sent as the scheduler sends a first one, in `open` mode with the row's id, from a release build only: GitHub's refusal ends the claim `dispatch_failed`, freeing its unit, and stops the tick's sends, and a lost answer keeps the dispatch and its unit, as the 7c slice reads them.
+  A payload that cannot be built after the claim (every field is checked before it, so this guards drift between the two checks) ends the claim `dispatch-failed`.
+- No GitHub token, no callback secret and a recorded tag that is not a tag each stop the resume before a claim, with their own error words.
 
 ### What a tick costs
 
-Measured over five rows, the most a tick reads: 112 D1 statements and 40 GitHub requests when each starts its screen and its review, 37 and 20 while each waits on them, and 52 and 25 when each is cleared; a resume is eight statements and one dispatch, and the tick itself two statements.
-The plan estimated about 45 in all; the tick that starts five rows' gates costs more than three times that, within the shared allowance of 1,000 but no longer a small part of it, and a test pins each figure.
+Measured over five rows at `pr_open`, the most a tick reads of that kind: 67 D1 statements and 25 GitHub requests when each starts its screen, 37 and 20 while each waits, 82 and 35 when each starts its review, the most, and 52 and 25 when each is cleared; a resume is eight statements and one dispatch, and the tick itself two statements.
+Add one request to mint the App's installation token on a cold isolate when the App's credential is configured; the suites use a personal token, so the figures leave it out.
+The first design estimated about 45 in all; a tick that starts five rows' reviews and resumes five stalled rows costs more than three times that, within the shared allowance of 1,000 but no longer a small part of it, and a test pins each figure.
 
 ### Checked only against stand-ins
 
@@ -1585,4 +1606,5 @@ GitHub is a stand-in in the suites, and the unattended run is not built yet, so 
 that the screen and the review start on the App's pull request as they do on the stand-in;
 that the review's check and comment are published on a pull request the App opened;
 that a resumed run takes up the record its dispatch names (the unattended run's slice);
+that GitHub answers a send it refuses for the Worker's credential or rate with a status other than 404 and 422, which is what keeps such a send from spending a resume;
 and that the tick's real cost on the 30-minute tick is the one measured here.
