@@ -53,9 +53,11 @@ import {
   RESUME_QUIET_MINUTES,
   RESUME_WINDOW_UTC,
   REVIEW_RETRY_MINUTES,
-  advanceWindow,
+  advanceSelection,
   inResumeWindow,
   repullAdvanceLogLine,
+  resumeWindowTurn,
+  rotate,
   runRepullAdvanceCron,
 } from "../src/services/upstream-repull-advance";
 import { OPEN_DISPATCHES_TODAY_SQL } from "../src/services/upstream-repull-dispatch";
@@ -668,20 +670,76 @@ describe("which rows a tick reads", () => {
     expect(ids.every((id) => rowOf(id).hold_reason === "main-moved")).toBe(true);
   });
 
-  test("the rotation covers every row of a stable set, however long any of them waits", () => {
+  test("a rotation covers every row of a stable set in consecutive turns, however long any waits", () => {
     const ids = [3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377];
     for (const n of [1, 5, 6, ids.length]) {
       const set = ids.slice(0, n);
       const start = Math.floor(Date.now() / HALF_HOUR);
       const seen = new Set<number>();
       for (let k = 0; k < Math.ceil(n / ADVANCE_ROWS_PER_TICK); k++) {
-        const window = advanceWindow(set, new Date((start + k) * HALF_HOUR));
-        expect(window.length).toBe(Math.min(n, ADVANCE_ROWS_PER_TICK));
-        for (const id of window) seen.add(id);
+        const turn = rotate(set, start + k);
+        expect(turn.length).toBe(Math.min(n, ADVANCE_ROWS_PER_TICK));
+        for (const id of turn) seen.add(id);
       }
       expect([...seen].sort((a, b) => a - b)).toEqual(set);
     }
   });
+
+  test("inside the resume window its half hours are consecutive turns, across days", () => {
+    const day = utcToday(0).getTime();
+    const turns: Array<number | null> = [];
+    for (let h = 0; h < 96; h++)
+      turns.push(resumeWindowTurn(new Date(day + h * HALF_HOUR + 60_000)));
+    const inside = turns.filter((x): x is number => x !== null);
+    // 03:00 to 15:30 of each of two days: 26 half hours a day, numbered one after another.
+    expect(inside).toHaveLength(52);
+    for (let i = 1; i < inside.length; i++) expect(inside[i]).toBe((inside[i - 1] as number) + 1);
+    expect(turns[5]).toBeNull();
+    expect(turns[6]).not.toBeNull();
+    expect(turns[31]).not.toBeNull();
+    expect(turns[32]).toBeNull();
+  });
+
+  // The cron fires at :00 and :30; a stalled row can be resumed only inside the window, so each
+  // must be read inside it. One rotation turned by the half hour of the day came back to the same
+  // rows at the same hours every day: of 240 rows only 130 were ever read inside the window.
+  for (const [stalledRows, openRows] of [
+    [239, 0],
+    [240, 0],
+    [241, 0],
+    [480, 0],
+    [120, 120],
+    [240, 37],
+  ] as const) {
+    test(`over 60 days every one of ${stalledRows} stalled rows (beside ${openRows} at pr_open) is read inside the window`, () => {
+      // The two kinds interleaved by id, as they would be in the table.
+      const total = stalledRows + openRows;
+      const openAt = new Set(
+        Array.from({ length: openRows }, (_, k) => Math.floor((k * total) / openRows)),
+      );
+      const rows = Array.from({ length: total }, (_, i) => ({
+        id: i + 1,
+        status: openAt.has(i) ? "pr_open" : "copied",
+      }));
+      expect(rows.filter((r) => r.status === "pr_open")).toHaveLength(openRows);
+      const stalledIds = rows.filter((r) => r.status === "copied").map((r) => r.id);
+      const seen = new Set<number>();
+      const start = utcToday(0).getTime();
+      for (let tickAt = 0; tickAt < 60 * 48; tickAt++) {
+        const now = new Date(start + tickAt * HALF_HOUR + 60_000);
+        const picked = advanceSelection(rows, now);
+        expect(picked.filter((id) => !stalledIds.includes(id)).length).toBeLessThanOrEqual(
+          ADVANCE_ROWS_PER_TICK,
+        );
+        if (!inResumeWindow(now)) {
+          expect(picked.filter((id) => stalledIds.includes(id))).toEqual([]);
+          continue;
+        }
+        for (const id of picked) if (stalledIds.includes(id)) seen.add(id);
+      }
+      expect(stalledIds.filter((id) => !seen.has(id))).toEqual([]);
+    });
+  }
 });
 
 // ----------------------------------------------------------------------------

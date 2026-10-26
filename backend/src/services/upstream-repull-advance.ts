@@ -67,10 +67,13 @@
  *
  * WHICH ROWS. Only automatic rows (`origin = 'automatic'`) are read: an administrator's row is
  * never read, held or advanced here, because the Worker never takes an administrator's re-pull on
- * (decision 7). At most {@link ADVANCE_ROWS_PER_TICK} rows a tick, in rotation by id from a place
- * the tick's half hour decides ({@link advanceWindow}), so a row that waits on an administrator for
- * days never keeps a newer row from being read: most automatic pull requests will wait for one,
- * because most mirrors' screens ask for an acknowledgment (ADR 0111, Consequences).
+ * (decision 7). At most {@link ADVANCE_ROWS_PER_TICK} rows of each kind a tick, in two rotations
+ * by id ({@link advanceSelection}): the rows at `pr_open` turn every half hour, and the stalled rows
+ * are read only inside the resume window and turn once per half hour of it, so every stalled row
+ * is read inside the window whatever the number of rows of either kind. A row that waits on an
+ * administrator for days never keeps a newer row from being read: most automatic pull requests
+ * will wait for one, because most mirrors' screens ask for an acknowledgment (ADR 0111,
+ * Consequences).
  *
  * PRODUCTION ONLY. Outside `ENVIRONMENT` exactly `production` the tick returns null before it reads
  * or writes anything: the `nemarDatasets` organization is shared with dev. It is called only from
@@ -120,7 +123,7 @@ import { gatherMachineCleanFacts } from "./upstream-repull-facts.js";
 import { startRepullScreen } from "./upstream-repull-screen.js";
 import { commitTransition, getRepull, isRefusal, prepareTransition } from "./upstream-repull.js";
 
-/** Rows one tick examines at most. */
+/** Rows of each kind (at `pr_open`, stalled before it) one tick examines at most. */
 export const ADVANCE_ROWS_PER_TICK = 5;
 
 /** The tick's cadence, which turns its time into a place in the rotation. */
@@ -192,11 +195,11 @@ const quoted = (words: readonly string[]) => words.map((w) => `'${w}'`).join(", 
 // ----------------------------------------------------------------------------
 
 /**
- * The automatic rows the tick may examine, by id. An administrator's row is never among them. One
- * open row per dataset (migration 0105) and only `on` datasets are automatic, so the list is never
- * longer than the fleet of mirrors.
+ * The automatic rows the tick may examine, by id, with their status, which says which rotation
+ * each is in. An administrator's row is never among them. One open row per dataset (migration
+ * 0105) and only `on` datasets are automatic, so the list is never longer than the fleet of mirrors.
  */
-export const ADVANCE_ROWS_SQL = `SELECT id FROM upstream_repulls
+export const ADVANCE_ROWS_SQL = `SELECT id, status FROM upstream_repulls
   WHERE origin = 'automatic' AND status IN (${quoted(ADVANCE_STATUSES)})
   ORDER BY id`;
 
@@ -329,17 +332,57 @@ interface Tick {
 }
 
 /**
- * The rows of `ids` (sorted) that a tick at `now` examines: all of them when they fit, and
- * otherwise {@link ADVANCE_ROWS_PER_TICK} of them, starting at a place that moves on by that many
- * each half hour and wraps, so every row is examined at least once in every
- * ceil(n / {@link ADVANCE_ROWS_PER_TICK}) ticks of a stable set, however long any of them waits.
+ * The rows of `ids` (sorted) that turn `turn` of a rotation examines: all of them when they fit,
+ * and otherwise {@link ADVANCE_ROWS_PER_TICK} of them, starting at a place that moves on by that
+ * many each turn and wraps, so every row of a stable set is examined at least once in every
+ * ceil(n / {@link ADVANCE_ROWS_PER_TICK}) consecutive turns, however long any of them waits.
  */
-export function advanceWindow(ids: readonly number[], now: Date): number[] {
+export function rotate(ids: readonly number[], turn: number): number[] {
   const n = ids.length;
   if (n <= ADVANCE_ROWS_PER_TICK) return [...ids];
-  const slot = Math.floor(now.getTime() / (ADVANCE_TICK_MINUTES * 60_000));
-  const start = (((slot * ADVANCE_ROWS_PER_TICK) % n) + n) % n;
+  const start = (((turn * ADVANCE_ROWS_PER_TICK) % n) + n) % n;
   return Array.from({ length: ADVANCE_ROWS_PER_TICK }, (_, k) => ids[(start + k) % n] as number);
+}
+
+/** The half hours of a UTC day a resume is dispatched in: 03:00 to 15:30, 26 of them. */
+const WINDOW_FIRST = RESUME_WINDOW_UTC.from * 2;
+const WINDOW_LAST = RESUME_WINDOW_UTC.to * 2 + 1;
+const WINDOW_TURNS_PER_DAY = WINDOW_LAST - WINDOW_FIRST + 1;
+
+/**
+ * Which half hour of the resume windows since the epoch `now` falls in, counting only the half
+ * hours inside {@link RESUME_WINDOW_UTC}, or null outside it. Consecutive ticks inside the window
+ * are consecutive numbers, across days too, so a rotation turned by it covers every stalled row
+ * inside the window; one turned by the half hour of the day would meet the same rows at the same
+ * hours every day (48 ticks a day, five rows each, comes back to the same place in a set of 240)
+ * and some rows would never be read while a resume may be sent.
+ */
+export function resumeWindowTurn(now: Date): number | null {
+  const halfHour = now.getUTCHours() * 2 + (now.getUTCMinutes() >= 30 ? 1 : 0);
+  if (halfHour < WINDOW_FIRST || halfHour > WINDOW_LAST) return null;
+  const day = Math.floor(now.getTime() / 86_400_000);
+  return day * WINDOW_TURNS_PER_DAY + (halfHour - WINDOW_FIRST);
+}
+
+/**
+ * The rows a tick at `now` examines, from the automatic rows listed: two rotations of their own,
+ * so neither kind can crowd out the other. The rows at `pr_open` turn every half hour. The rows
+ * stalled before their pull request opened are read only inside the resume window, the only time
+ * one can be resumed, and turn by {@link resumeWindowTurn}, so each is read inside the window
+ * within ceil(n / {@link ADVANCE_ROWS_PER_TICK}) window ticks, however many rows of either kind
+ * there are.
+ */
+export function advanceSelection(
+  rows: ReadonlyArray<{ id: number; status: string }>,
+  now: Date,
+): number[] {
+  const open = rows.filter((x) => x.status === "pr_open").map((x) => x.id);
+  const stalled = rows
+    .filter((x) => (RESUMABLE_STATUSES as readonly string[]).includes(x.status))
+    .map((x) => x.id);
+  const slot = Math.floor(now.getTime() / (ADVANCE_TICK_MINUTES * 60_000));
+  const turn = resumeWindowTurn(now);
+  return [...rotate(open, slot), ...(turn === null ? [] : rotate(stalled, turn))];
 }
 
 /**
@@ -640,8 +683,8 @@ async function advanceRow(t: Tick, id: number): Promise<void> {
 
 /**
  * The advance tick. Null outside exact production, with nothing read, written or sent. In
- * production it examines at most {@link ADVANCE_ROWS_PER_TICK} automatic rows and stamps the
- * scheduler's row; a failure is a fixed word in the result, never a throw, so the 30-minute tick's
+ * production it examines at most {@link ADVANCE_ROWS_PER_TICK} automatic rows of each kind
+ * ({@link advanceSelection}) and stamps the scheduler's row; a failure is a fixed word in the result, never a throw, so the 30-minute tick's
  * other jobs run on, and one row that fails does not stop the others.
  */
 export async function runRepullAdvanceCron(
@@ -673,11 +716,11 @@ export async function runRepullAdvanceCron(
     sendStopped: false,
   };
   try {
-    const { results } = await env.DB.prepare(ADVANCE_ROWS_SQL).all<{ id: number }>();
-    for (const id of advanceWindow(
-      results.map((x) => x.id),
-      t.now,
-    )) {
+    const { results } = await env.DB.prepare(ADVANCE_ROWS_SQL).all<{
+      id: number;
+      status: string;
+    }>();
+    for (const id of advanceSelection(results, t.now)) {
       try {
         await advanceRow(t, id);
       } catch (err) {
