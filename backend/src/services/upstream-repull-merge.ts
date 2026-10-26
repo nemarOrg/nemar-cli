@@ -28,7 +28,10 @@
  *  6. The claim to merge: the record's own self-edge, as the system user. It reads the dataset
  *     fences, the screen and GitHub's live head again and counts `REPULL_DAILY_MERGE_CAP` in the
  *     statement that claims, so a full day holds `cap-exhausted`, a cap set to something unreadable
- *     `cap-unreadable`, and any other refusal `claim-refused`, which should not happen and is said.
+ *     `cap-unreadable`, and a live head GitHub could not answer `pr-unreadable` (the record's
+ *     `github-unreadable`, a 502). A record that moved while it was read (`stale-status`) is
+ *     `skipped`, for the next tick to read as it is; any other refusal is `claim-refused`, which
+ *     should not happen and is said.
  *  7. The audit row of the merge (`repull_auto_merge`), in one statement that applies only while
  *     the record still holds that claim at the revision the claim left, and only under the bound.
  *     Nothing is sent without it, so the count it keeps never misses a merge that was sent.
