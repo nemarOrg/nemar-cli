@@ -670,6 +670,9 @@ export const DISPATCH_CODES = [
   "finish-incomplete",
   "report-unanswered",
   "runner-credentials",
+  // The API the run would talk to is not production's (an override aimed elsewhere): nothing was
+  // sent there, the token included, so this word reaches the Worker only through the backstop.
+  "auto-api-not-production",
   // The plan: its preflight checks, its refusals, and why it planned nothing.
   "annex-uuid-mismatch",
   "concept-doi-disagrees",
@@ -1019,6 +1022,14 @@ export const AUTO_MAX_COPY_BYTES = 1024 ** 4;
 
 /** A dispatch token as the Worker signs it: an HMAC-SHA256 digest in lowercase hex. */
 export const DISPATCH_TOKEN_RE = /^[0-9a-f]{64}$/;
+
+/**
+ * The largest dispatch or re-pull id a dispatch's payload carries, and its shape as a string: one
+ * bound for the Worker that sends it, the central workflow that checks it and the CLI that reads
+ * it, so none of the three takes an id another refuses. Fifteen digits, inside a safe integer.
+ */
+export const DISPATCH_ID_MAX = 999_999_999_999_999;
+export const DISPATCH_ID_RE = /^[1-9][0-9]{0,14}$/;
 
 /**
  * The unattended run's job bound, in minutes: the `timeout-minutes` of the central

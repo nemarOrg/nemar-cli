@@ -121,6 +121,9 @@ describe("buildUpstreamRepullPayload", () => {
       { toTag: "v1.0.0" },
       { dispatchId: 0 },
       { dispatchId: 1.5 },
+      // Past the one bound the Worker, the workflow and the CLI share (`DISPATCH_ID_MAX`).
+      { dispatchId: 1_000_000_000_000_000 },
+      { repullId: 1_000_000_000_000_000 },
       { repullId: 0 },
       { mode: "finish", repullId: null },
       { token: "AB".repeat(32) },

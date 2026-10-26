@@ -44,6 +44,7 @@ import { isOpenNeuroTag, sameUpstreamTag } from "../../../../shared/openneuro-ta
 import {
   AUTO_MAX_COPY_BYTES,
   CURRENT_PLANNER_VERSION,
+  DISPATCH_ID_RE,
   DISPATCH_TOKEN_RE,
   type DispatchCode,
   type DispatchPhase,
@@ -98,12 +99,9 @@ export interface DispatchPayload {
   cliVersion: string;
 }
 
-const POSITIVE_ID = /^[1-9][0-9]{0,15}$/;
-
+/** A dispatch or re-pull id as the payload carries it, within the one bound all three readers share. */
 function positiveId(s: string): number | null {
-  if (!POSITIVE_ID.test(s)) return null;
-  const n = Number(s);
-  return Number.isSafeInteger(n) ? n : null;
+  return DISPATCH_ID_RE.test(s) ? Number(s) : null;
 }
 
 /** A dispatch that is not what the Worker sends; the message names the key, never a value. */
@@ -175,22 +173,25 @@ const MAX_EVENT_BYTES = 1024 * 1024;
 
 /**
  * The dispatch GitHub delivered to this run: the event file `GITHUB_EVENT_PATH` names, which must
- * be a `run-upstream-repull` repository dispatch, and its `client_payload`.
+ * be a `run-upstream-repull` repository dispatch, and its `client_payload`. No event file at all
+ * is the runner's failure (`runner-failed`), not the dispatch's; one that is there and is not a
+ * dispatch the Worker sends is `dispatch-invalid`.
  */
 export function readDispatchEvent(env: Env): DispatchPayload {
   const path = env.GITHUB_EVENT_PATH;
-  if (!path) {
-    throw new ExecuteRefused(
-      "dispatch-invalid",
-      "GITHUB_EVENT_PATH is not set: the automatic mode runs only inside the run-upstream-repull workflow.",
+  const missing = () =>
+    new ExecuteRefused(
+      "runner-failed",
+      "No dispatch event file: the automatic mode runs only inside the run-upstream-repull workflow.",
     );
-  }
+  if (!path) throw missing();
   let event: unknown;
   try {
     if (statSync(path).size > MAX_EVENT_BYTES) throw invalid("event");
     event = JSON.parse(readFileSync(path, "utf8"));
   } catch (err) {
     if (err instanceof ExecuteRefused) throw err;
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") throw missing();
     throw invalid("event");
   }
   if (event === null || typeof event !== "object" || Array.isArray(event)) throw invalid("event");
@@ -385,6 +386,44 @@ export function automaticContext(option: string, env: Env, sink: AutomaticSink):
   };
 }
 
+/** NEMAR's production API, the one an automatic run reports to and records through. */
+export const PRODUCTION_API = "https://api.nemar.org";
+
+/**
+ * Whether an automatic run may send its dispatch token and its NEMAR key to `url`: the production
+ * API exactly, or a loopback address (the suites' in-process API). A `TEST_API_URL` or a stored
+ * `apiUrl` that names anything else would carry both elsewhere, so the run refuses it before it
+ * sends anything (`auto-api-not-production`), and does not report: the report would go there too.
+ */
+export function isAutomaticApi(url: string): boolean {
+  let u: URL;
+  try {
+    u = new URL(url);
+  } catch {
+    return false;
+  }
+  if (u.username || u.password || u.search || u.hash || (u.pathname !== "/" && u.pathname !== "")) {
+    return false;
+  }
+  if (u.protocol === "https:") return u.host === new URL(PRODUCTION_API).host;
+  return u.protocol === "http:" && ["127.0.0.1", "localhost", "[::1]"].includes(u.hostname);
+}
+
+/**
+ * The dispatch token on the command line, where the public log shows it. Checked before anything
+ * else that may refuse, and reported first, because the report ends the dispatch and so the token.
+ */
+export function tokenOnArgvRefusal(
+  d: DispatchPayload,
+  argv: readonly string[],
+): ExecuteRefused | null {
+  if (!argv.some((a) => a.includes(d.token))) return null;
+  return new ExecuteRefused(
+    "auto-token-on-argv",
+    "The dispatch token is on the command line, where the public log shows it.",
+  );
+}
+
 /** What a command checks the dispatch and its own process against before it acts. */
 export interface AutomaticCheck {
   /** The kind of run the command is: `plan` and `execute` open, `resume` finishes. */
@@ -408,12 +447,8 @@ export interface AutomaticCheck {
  * token.
  */
 export function automaticRefusal(d: DispatchPayload, c: AutomaticCheck): ExecuteRefused | null {
-  if (c.argv.some((a) => a.includes(d.token))) {
-    return new ExecuteRefused(
-      "auto-token-on-argv",
-      "The dispatch token is on the command line, where the public log shows it.",
-    );
-  }
+  const onArgv = tokenOnArgvRefusal(d, c.argv);
+  if (onArgv) return onArgv;
   const own = c.ownVersion ?? cliVersion;
   if ((c.devBuild ?? IS_DEV_BUILD) || !NEMAR_VERSION_RE.test(own) || own !== d.cliVersion) {
     return new ExecuteRefused(

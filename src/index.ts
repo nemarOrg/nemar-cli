@@ -305,6 +305,9 @@ markCommanderExitsRecursively(program);
 
 // Display system notices before command execution
 program.hook("preAction", async () => {
+  // An automatic re-pull run asks for no notice: the request carries the NEMAR key, and the run
+  // checks where its API is before it sends anything there (lib/repull/execute/automatic.ts).
+  if (isAutomaticInvocation(rawArgs)) return;
   await fetchAndDisplayNotices();
 });
 

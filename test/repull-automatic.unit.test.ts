@@ -37,6 +37,7 @@ import {
   AUTO_MAX_COPY_BYTES,
   CURRENT_PLANNER_VERSION,
   DISPATCH_CODES,
+  DISPATCH_ID_MAX,
   opensTheSameUtcDay,
 } from "../shared/repull-state";
 import {
@@ -45,6 +46,7 @@ import {
   type AutomaticSink,
   DISPATCH_EVENT,
   DISPATCH_PAYLOAD_KEYS,
+  PRODUCTION_API,
   RESULT_LINE_RE,
   assertAutomaticCounts,
   assertAutomaticPlan,
@@ -52,11 +54,13 @@ import {
   automaticLine,
   automaticRefusal,
   dispatchCodeOf,
+  isAutomaticApi,
   isAutomaticInvocation,
   parseDispatchPayload,
   readDispatchEvent,
   reportDispatch,
   runUrlOf,
+  tokenOnArgvRefusal,
 } from "../src/lib/repull/execute/automatic";
 import { ExecuteRefused } from "../src/lib/repull/execute/verify-plan";
 
@@ -118,7 +122,7 @@ describe("the dispatch is the nine keys the Worker sends", () => {
       { repullId: 42 },
       { mode: "finish" as const, repullId: 9 },
       { fromTag: "00001", toTag: "v1.2.0" },
-      { dispatchId: Number.MAX_SAFE_INTEGER },
+      { dispatchId: DISPATCH_ID_MAX, repullId: DISPATCH_ID_MAX },
     ]) {
       const f = fields(over);
       expect(parseDispatchPayload(sent(over))).toEqual({
@@ -170,6 +174,9 @@ describe("the dispatch is the nine keys the Worker sends", () => {
       ["dispatch_id", "07"],
       ["dispatch_id", "1.5"],
       ["dispatch_id", "99999999999999999"],
+      // Sixteen digits: past the one bound the Worker, the workflow and the CLI share.
+      ["dispatch_id", "1000000000000000"],
+      ["repull_id", "1000000000000000"],
       ["repull_id", "0"],
       ["repull_id", "-1"],
       ["dispatch_token", TOKEN.toUpperCase()],
@@ -206,8 +213,15 @@ describe("the event is the run-upstream-repull dispatch GitHub delivered", () =>
     expect(readDispatchEvent({ GITHUB_EVENT_PATH: path }).dispatchId).toBe(7);
   });
 
-  test("no event, another event, an unreadable one or one too large is refused", () => {
-    expect(refusalOf(() => readDispatchEvent({})).code).toBe("dispatch-invalid");
+  test("no event file at all is the runner's failure, not the dispatch's", () => {
+    expect(refusalOf(() => readDispatchEvent({})).code).toBe("runner-failed");
+    expect(
+      refusalOf(() => readDispatchEvent({ GITHUB_EVENT_PATH: join(tempDir(), "absent.json") }))
+        .code,
+    ).toBe("runner-failed");
+  });
+
+  test("another event, an unreadable one or one too large is refused", () => {
     for (const event of [
       { action: "run-pr-review", client_payload: sent() },
       { client_payload: sent() },
@@ -220,10 +234,6 @@ describe("the event is the run-upstream-repull dispatch GitHub delivered", () =>
         "dispatch-invalid",
       );
     }
-    expect(
-      refusalOf(() => readDispatchEvent({ GITHUB_EVENT_PATH: join(tempDir(), "absent.json") }))
-        .code,
-    ).toBe("dispatch-invalid");
   });
 
   test("the option must name the event's dispatch", () => {
@@ -249,6 +259,34 @@ describe("the event is the run-upstream-repull dispatch GitHub delivered", () =>
     expect(runUrlOf({ ...run, GITHUB_SERVER_URL: "https://ghe.example.org" })).toBeNull();
     expect(runUrlOf({ ...run, GITHUB_RUN_ID: "12/../3" })).toBeNull();
     expect(runUrlOf({})).toBeNull();
+  });
+
+  test("the API the run talks to is production's or the suites' loopback, and nothing else", () => {
+    for (const url of [
+      "https://api.nemar.org",
+      "https://api.nemar.org/",
+      "http://127.0.0.1:4321",
+      "http://localhost:80",
+      "http://[::1]:9",
+    ]) {
+      expect([url, isAutomaticApi(url)]).toEqual([url, true]);
+    }
+    for (const url of [
+      "https://api.test.nemar.org",
+      "https://nemar-api-dev.workers.dev",
+      "http://api.nemar.org",
+      "https://api.nemar.org:8443",
+      "https://api.nemar.org/nemar",
+      "https://user:pass@api.nemar.org",
+      "https://api.nemar.org.evil.example",
+      "https://127.0.0.1",
+      "http://10.0.0.5",
+      "not a url",
+      "",
+    ]) {
+      expect([url, isAutomaticApi(url)]).toEqual([url, false]);
+    }
+    expect(PRODUCTION_API).toBe("https://api.nemar.org");
   });
 
   test("the option is seen in either spelling", () => {
@@ -293,6 +331,13 @@ describe("what a run checks before it acts", () => {
       expect([over, r?.code]).toEqual([over, code]);
       expect(r?.message).not.toContain(TOKEN);
     }
+  });
+
+  test("the token on the command line is found on its own, before anything that reads a file", () => {
+    expect(tokenOnArgvRefusal(d, ok.argv)).toBeNull();
+    expect(tokenOnArgvRefusal(d, [...ok.argv, `--out=/tmp/${TOKEN}`])?.code).toBe(
+      "auto-token-on-argv",
+    );
   });
 
   test("the token on the command line is refused first, so the report ends the dispatch", () => {

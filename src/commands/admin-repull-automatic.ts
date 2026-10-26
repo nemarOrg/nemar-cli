@@ -21,6 +21,7 @@
 
 import { readFileSync } from "node:fs";
 import { sameUpstreamTag } from "../../shared/openneuro-tag.js";
+import { DISPATCH_ID_RE } from "../../shared/repull-state.js";
 import { getApiUrl } from "../lib/api/client.js";
 import { ApiError } from "../lib/api/errors.js";
 import { getConfigDir, isAuthenticated } from "../lib/config.js";
@@ -41,8 +42,10 @@ import {
   automaticRefusal,
   dispatchCodeOf,
   installAutomaticQuiet,
+  isAutomaticApi,
   optionRefused,
   reportDispatch,
+  tokenOnArgvRefusal,
 } from "../lib/repull/execute/automatic.js";
 import { planCounts, planFacts } from "../lib/repull/execute/body.js";
 import { readCatalogFacts } from "../lib/repull/execute/catalog.js";
@@ -116,7 +119,7 @@ async function runAutomatic(spec: Spec): Promise<void> {
   markReportedExit();
   sink.emit("start", {
     command: spec.command,
-    ...(/^[1-9][0-9]{0,15}$/.test(spec.option) ? { dispatch: spec.option } : {}),
+    ...(DISPATCH_ID_RE.test(spec.option) ? { dispatch: spec.option } : {}),
   });
   let ctx: AutomaticContext;
   try {
@@ -130,8 +133,18 @@ async function runAutomatic(spec: Spec): Promise<void> {
     });
     return;
   }
+  // Where the token and the NEMAR key would go: anything but production (or the suites' loopback
+  // API) is refused before anything is sent, and not reported, since the report would go there too.
+  if (!isAutomaticApi(getApiUrl())) {
+    end(sink, { phase: "failed", code: "auto-api-not-production", exit: 1 });
+    return;
+  }
   let outcome: Outcome;
   try {
+    // The token on the command line first, before anything that reads a file can refuse instead:
+    // its report is what ends the dispatch, and so the token.
+    const onArgv = tokenOnArgvRefusal(ctx.dispatch, process.argv);
+    if (onArgv) throw onArgv;
     const refusal = automaticRefusal(ctx.dispatch, {
       mode: spec.mode,
       datasetId: spec.datasetOf(),
