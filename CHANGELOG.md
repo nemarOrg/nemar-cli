@@ -13,6 +13,30 @@ what merged, and this file says what it meant.
 Newest first. Dates are the tag's publication date, UTC. Backfilled from 0.9.16 onward;
 earlier releases are described only by their generated notes.
 
+## 0.10.25 - 2026-10-26
+
+Production sends its mail through the Cloudflare Email Service, and inbound support mail is screened before it reaches anyone (epic #1893).
+This release has one migration, 0111: two `ADD COLUMN`s with safe defaults (`mail_tickets.filtered`, `mail_queues.notify`), a new `mail_blocklist` table, an index on `mail_messages (from_addr, created_at)`, and a rebuild of the leaf table `mail_ticket_events` to allow the `unfiltered` event kind, in the same shape as 0107's rebuild.
+It sets no new Worker secret.
+The production Worker configuration sets `EMAIL_PROVIDER` to `cloudflare`, `EMAIL_FALLBACK` to `resend` and `MAIL_SENDER_HOURLY_CAP` to `20`.
+
+### Changed
+
+- **Production mail goes out through the Cloudflare binding (ADR 0110, #1966).**
+  Sign-in codes, account mail and ticket replies are sent from `noreply@` and `support@nemar.org` by Cloudflare.
+  A refusal for a quota or account-level reason is retried once through Resend; any other refusal is final, so a sign-in code is never sent twice.
+
+### Added
+
+- **Inbound mail is screened (ADR 0113, #1968).**
+  A blocked sender, by address or by domain, is refused at delivery and never stored; a domain block is refused for our own domains, public suffixes and large shared mail providers, and a failed blocklist lookup accepts the mail.
+  Bulk mail, mailing lists, automatic replies and bounces are filed as filtered tickets: stored and listed on request, never assigned and never announced, until a person works the ticket or the requester writes back.
+  More than `MAIL_SENDER_HOURLY_CAP` messages an hour from one address are filed the same way, counted separately for mail that passed DMARC and mail that did not, so forged mail cannot silence a real sender.
+  A queue can be made quiet, which stops its new-ticket notices; escalation notices still go out.
+- **`nemar admin mail spam <id>` and `nemar admin mail blocklist`.**
+  Marking a ticket as spam can block its sender, but only when the sender passed DMARC; an address block for an unverified sender needs `--force`, and a domain block for one is refused.
+  `nemar admin mail queues set <tag> --notify <bool>` and the `--filtered` list option are new.
+
 ## 0.10.24 - 2026-10-26
 
 NEMAR mail moves onto the Cloudflare Email Service in code, and the platform gains support tickets and `nemar admin mail`; production keeps sending through Resend (epic #1893).

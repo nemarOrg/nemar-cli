@@ -109,6 +109,7 @@ const MODULE_EXPORTS: Record<string, string[]> = {
   ],
   admin: [
     "addCi",
+    "addMailBlock",
     "addMailNote",
     "anonymitySweep",
     "anonymitySweepReset",
@@ -162,10 +163,12 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "importIssueTriage",
     "importWeeklySummary",
     "listKeysFor",
+    "listMailBlocklist",
     "listMailQueues",
     "listMailTickets",
     "listPrReviews",
     "listUsers",
+    "markMailTicketSpam",
     "neurobagelRegenerate",
     "neurobagelVerify",
     "publishDataset",
@@ -178,6 +181,7 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "reindexBulk",
     "reindexDataset",
     "remintExemplarDois",
+    "removeMailBlock",
     "replyToMailTicket",
     "reprocessMail",
     "resetTestDataset",
@@ -309,6 +313,10 @@ const POST_SPLIT_ADDITIONS = [
   "setMailTicketSummary", // epic #1893 phase 6a: `nemar admin mail summarize`, PUT /admin/mail/tickets/:id/summary
   "replyToMailTicket", // epic #1893 phase 4: `nemar admin mail`, routes in shared/contract/mail-admin.ts
   "setMailTicketStatus", // epic #1893 phase 4: `nemar admin mail`, routes in shared/contract/mail-admin.ts
+  "markMailTicketSpam", // ADR 0113: `nemar admin mail spam`, POST /admin/mail/tickets/:id/spam
+  "listMailBlocklist", // ADR 0113: `nemar admin mail blocklist`, GET /admin/mail/blocklist
+  "addMailBlock", // ADR 0113: `nemar admin mail blocklist add`, POST /admin/mail/blocklist
+  "removeMailBlock", // ADR 0113: `nemar admin mail blocklist remove`, DELETE /admin/mail/blocklist/:id
 ];
 
 /** The api.ts monolith's runtime surface, captured at #908 commit 1. */

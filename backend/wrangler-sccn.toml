@@ -207,9 +207,8 @@ binding = "NEUROBAGEL"
 bucket_name = "nemar-neurobagel"
 
 # Outbound mail (epic #1893, ADR 0110). The Cloudflare Email Service binding.
-# Production has the binding but does NOT set EMAIL_PROVIDER, so it still sends
-# through Resend; a later config change flips it, after the Cloudflare sending
-# limit increase and a staging soak.
+# Production sends through it (EMAIL_PROVIDER="cloudflare" below), with Resend as
+# the fallback for quota and account-level refusals only (EMAIL_FALLBACK="resend").
 [[send_email]]
 name = "EMAIL"
 allowed_sender_addresses = ["noreply@nemar.org", "support@nemar.org"]
@@ -259,6 +258,9 @@ PR_REVIEW_ENABLED = "1"
 # before the daily purge keeps only its summary. Two years in production; staging uses 30 days,
 # matching its raw-mail bucket's lifecycle rule. A missing or invalid value deletes nothing.
 MAIL_RETENTION_DAYS = "730"
+# Inbound screening (ADR 0113): messages one sender address may send per hour before the rest are
+# filed quietly (stored and threaded, but not assigned or announced). Unset or invalid means 20.
+MAIL_SENDER_HOURLY_CAP = "20"
 # PR_REVIEW_AUTO_REQUIRE is deliberately not set in this file. Unset, publishing, a visibility
 # change and the enforce routes put the review ruleset on no repository (they still take it off a
 # repository whose dataset is not reviewed). The owner adds it here, in a reviewed change, when the
@@ -312,6 +314,13 @@ SANDBOX_ID_CEILING = "89999"
 # (epic #1893 phase 6, ADR 0112).
 FROM_EMAIL = "NEMAR Archive <noreply@nemar.org>"
 REPLY_TO = "support@nemar.org"
+# Production sends through the Cloudflare Email Service binding (EMAIL, above), after
+# staging sent through it from 2026-10-23 (epic #1893 phase 2, ADR 0110). A Cloudflare
+# refusal for a quota or account-level reason (RESEND_FALLBACK_CODES in
+# services/email.ts) is retried once through Resend; any other refusal is final, so a
+# sign-in code is never sent twice. RESEND_API_KEY stays set until the fallback retires.
+EMAIL_PROVIDER = "cloudflare"
+EMAIL_FALLBACK = "resend"
 # DEV_EMAIL_ALLOWLIST (issue #957) is not set here: the delivery fence in
 # services/email.ts / services/broadcast.ts only engages outside
 # ENVIRONMENT="production", so production sends are never restricted by it.
@@ -576,6 +585,8 @@ invocation_logs = true
 ENVIRONMENT = "development"
 # Support-ticket retention (ADR 0112): 30 days on staging, matching its raw-mail bucket's lifecycle.
 MAIL_RETENTION_DAYS = "30"
+# Inbound screening (ADR 0113): the same hourly cap per sender address as production.
+MAIL_SENDER_HOURLY_CAP = "20"
 # Claude Platform on AWS (same values as prod [vars]; env vars do not inherit).
 # ANTHROPIC_API_KEY must be set as a dev-env secret separately:
 #   wrangler secret put ANTHROPIC_API_KEY --env dev -c backend/wrangler-sccn.toml
