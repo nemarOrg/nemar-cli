@@ -14,7 +14,8 @@
  * printed only when it is on the closed list it belongs to and does not name anonymity: a code,
  * a hold word or an outcome that is anything else is counted under `other`. The database checks
  * only the SHAPE of a word, and a dataset id has that shape, so the list is what keeps one from
- * reaching a public report.
+ * reaching a public report. The rule is `publicWord` in `shared/repull-observability.ts`, applied
+ * here where the counts are made and again by the report's renderer where they are written.
  *
  * UNKNOWN IS NEVER ZERO (ADR 0054). Every count here is a number from a read that succeeded. A read
  * that fails throws, the caller leaves the report's re-pull facts null and lists a failed part, and
@@ -29,7 +30,9 @@
  * over {@link HELD_CLAIM_ATTENTION_HOURS} hour; a re-pull that ended `failed`; a re-pull that used
  * all its resumes or finish runs; a cap set to something unreadable. A switch that is off, a hold
  * waiting on a gate (the screen, the review, BIDS validation, `not-clean`) and a run's refusal are
- * the expected state of a path that is working, and an alarm that never clears gets muted.
+ * the expected state of a path that is working, and an alarm that never clears gets muted. Every
+ * other hold (a refused merge, claim or gate, the merge bound) is counted in the table of holds
+ * and does not ask.
  *
  * WHEN A DISPATCH IS COUNTED. In the week it was SENT, in the state it has when the report is made.
  * One still running then is counted as running, and is not counted again in the next week's report
@@ -46,16 +49,13 @@ import type {
   RepullWeekFacts,
   WordCounts,
 } from "../../../shared/repull-observability.js";
-import { OTHER_WORD } from "../../../shared/repull-observability.js";
+import { publicWord } from "../../../shared/repull-observability.js";
 import {
   DISPATCH_KINDS,
   DISPATCH_STATUSES,
   type DispatchKind,
   type DispatchStatus,
-  REPULL_HOLD_REASONS,
-  REPULL_SCHEDULER_OUTCOMES,
   TERMINAL_STATUSES,
-  isDispatchCode,
 } from "../../../shared/repull-state.js";
 import { SYSTEM_USER_ID } from "../lib/constants.js";
 import type { Bindings } from "../types/bindings.js";
@@ -199,20 +199,6 @@ const isKind = (v: unknown): v is DispatchKind =>
   typeof v === "string" && (DISPATCH_KINDS as readonly string[]).includes(v);
 const isStatus = (v: unknown): v is DispatchStatus =>
   typeof v === "string" && (DISPATCH_STATUSES as readonly string[]).includes(v);
-const isHoldWord = (v: string): boolean => (REPULL_HOLD_REASONS as readonly string[]).includes(v);
-const isOutcomeWord = (v: string): boolean =>
-  (REPULL_SCHEDULER_OUTCOMES as readonly string[]).includes(v);
-
-/** A word that names anonymity is never printed in a public report, whatever list it is on. */
-const WITHHELD_WORD = /anonym/i;
-
-/**
- * The word the report may print for a stored one: itself when it is on `known` and does not name
- * anonymity, `other` otherwise (an unlisted word, or an absent one).
- */
-function reportable(word: string | null, known: (w: string) => boolean): string {
-  return word !== null && known(word) && !WITHHELD_WORD.test(word) ? word : OTHER_WORD;
-}
 
 function addWord(into: WordCounts, word: string, n: number): void {
   into[word] = (into[word] ?? 0) + n;
@@ -282,7 +268,7 @@ export async function gatherRepullWeek(
     by_status[g.status] += n;
     sent += n;
     if (g.status === "refused" || g.status === "failed" || g.status === "dispatch_failed") {
-      addWord(by_word[g.status], reportable(g.code, isDispatchCode), n);
+      addWord(by_word[g.status], publicWord(g.code, "code"), n);
     }
   }
 
@@ -294,7 +280,7 @@ export async function gatherRepullWeek(
     total += n;
     if (g.hold_reason !== null) {
       held += n;
-      addWord(holdWords, reportable(g.hold_reason, isHoldWord), n);
+      addWord(holdWords, publicWord(g.hold_reason, "hold"), n);
     }
   }
 
@@ -408,7 +394,7 @@ export async function gatherRepullFacts(
   const scheduler =
     stored === null || stored.last_outcome === null
       ? stored
-      : { ...stored, last_outcome: reportable(stored.last_outcome, isOutcomeWord) };
+      : { ...stored, last_outcome: publicWord(stored.last_outcome, "outcome") };
   const switches = repullSwitchesReport(env);
   return { ...week, switches, scheduler, attention: repullAttention(week, switches, scheduler) };
 }

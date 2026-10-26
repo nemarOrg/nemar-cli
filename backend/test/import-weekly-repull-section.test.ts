@@ -68,7 +68,7 @@ import {
   rowAt,
   seedDispatch as seedDispatchRow,
 } from "./helpers/repull-rows";
-import { repullWeekFacts } from "./helpers/repull-week";
+import { repullWeekFacts, zeroStatuses } from "./helpers/repull-week";
 import { type CapturedEmail, withFakeResend } from "./helpers/resend";
 import { lastWeeklyCronFiring } from "./helpers/weekly-cron-firing";
 
@@ -939,22 +939,59 @@ describe("no dataset reaches the public report", () => {
     expect(section).not.toContain("not-a-hold-word");
   });
 
-  test("the section and the headline carry no dataset id, whatever the week", async () => {
-    for (const repulls of [
-      repullWeekFacts(),
-      repullWeekFacts({
-        attention: ["1 re-pull(s) ended failed"],
-        ended_failed: 1,
-        open_automatic: { total: 1, held: 1, holds: { "screen-acknowledge": 1 } },
-      }),
-      null,
-    ]) {
-      const r = await report();
-      const facts = { ...r.facts, repulls };
-      const body = buildWeeklySummaryBody(facts, "x");
-      expect(sectionOf(body)).not.toMatch(/\b(nm|on|ds|xx)\d{6}\b/);
-      expect(weeklyHeadline(facts).line).not.toMatch(/\b(nm|on|ds|xx)\d{6}\b/);
-    }
+  test("the report carries no dataset id even from facts that hold one where a word is, and the rule is the gather's", async () => {
+    // The facts the renderer is handed, not the ones the gather makes: an id of each shape sits in
+    // every place the report prints a word, beside listed words and one that names anonymity.
+    const shapes = ["nm000123", "on098701", "xx099901", "ds004362", "NM000123"];
+    const repulls = repullWeekFacts({
+      dispatches: {
+        sent: 9,
+        by_kind: { open: 9, finish: 0 },
+        by_status: { ...zeroStatuses(), refused: 4, failed: 2, dispatch_failed: 3 },
+        by_word: {
+          refused: { nm000123: 1, on098701: 1, gitlink: 2 },
+          failed: { xx099901: 2 },
+          dispatch_failed: { ds004362: 1, NM000123: 1, "dispatch-refused": 1 },
+        },
+      },
+      open_automatic: {
+        total: 7,
+        held: 7,
+        holds: { on098701: 2, "screen-acknowledge": 4, "dataset-anonymous": 1 },
+      },
+      scheduler: {
+        last_tick_at: "2026-09-09 03:00:01",
+        last_outcome: "nm000123",
+        last_advance_at: null,
+      },
+    });
+    const facts = { ...(await report()).facts, repulls };
+    const body = buildWeeklySummaryBody(facts, "x");
+    const section = sectionOf(body);
+    const rows = (title: string): string[] =>
+      section
+        .split(`${title}:\n\n| word | count |\n|---|---|\n`)[1]
+        ?.split("\n\n")[0]
+        ?.split("\n") ?? [];
+    // Listed words are printed as they are; everything else is counted, and added, under `other`.
+    expect(rows("Refused by the run, by word")).toEqual(["| `gitlink` | 2 |", "| `other` | 2 |"]);
+    expect(rows("Failed in the run, by word")).toEqual(["| `other` | 2 |"]);
+    expect(rows("Not accepted by GitHub, by word")).toEqual([
+      "| `dispatch-refused` | 1 |",
+      "| `other` | 2 |",
+    ]);
+    expect(rows("Held automatic re-pulls, by word")).toEqual([
+      "| `other` | 3 |",
+      "| `screen-acknowledge` | 4 |",
+    ]);
+    expect(section).toContain("and concluded `other`.");
+    // And nowhere in the body, the headline or the log line is an id, or a word about anonymity.
+    const everything = [body, weeklyHeadline(facts).line, weeklySummaryLogLine(facts, 12)].join(
+      "\n",
+    );
+    for (const id of shapes) expect(everything.toLowerCase()).not.toContain(id.toLowerCase());
+    expect(everything).not.toMatch(/\b(nm|on|ds|xx)\d{6}\b/i);
+    expect(section).not.toMatch(/anonym/i);
   });
 });
 

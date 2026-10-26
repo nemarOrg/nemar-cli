@@ -2007,6 +2007,7 @@ Three additions are made to earlier text: an annotation on the record's header, 
   So an automatic re-pull an administrator merged is the administrator's, and N.0.1's merges count as well as N.0.0's.
 - The report is filed on a public-facing repository, so it names no dataset.
   A word is printed only when it is on the closed list it belongs to (the dispatch codes, the hold words, the scheduler's outcomes) and does not name anonymity; any other is counted under `other`, because the tables check only the shape of a word and a dataset id has that shape.
+  One function (`publicWord`) decides it, and it runs twice, where the counts are made and again where the report is written, so a fact that holds an identifier where a word should be does not reach the repository by either road.
 - The reads are one batch of five statements and one read of the scheduler's row, so the Monday tick spends two D1 calls on them and no GitHub request.
   A read that fails leaves the section's facts null and lists a failed part; the section says unknown and the headline asks for attention, never a zero (ADR 0054).
   A batch that comes back with more or fewer answers than statements, with an answer that did not succeed, or with one that holds no rows, is a read that failed in the same way: a partial week is unknown, never the counts that did arrive.

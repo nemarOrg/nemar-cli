@@ -34,11 +34,13 @@ import {
   WEEKLY_NEUROBAGEL_CHECKS,
   weeklyAttention,
 } from "../../../shared/contract/weekly-attention.js";
-import type {
-  RepullCapReading,
-  RepullSchedulerRow,
-  RepullWeekFacts,
-  WordCounts,
+import {
+  type RepullCapReading,
+  type RepullSchedulerRow,
+  type RepullWeekFacts,
+  type WordCounts,
+  type WordList,
+  publicWord,
 } from "../../../shared/repull-observability.js";
 import {
   UPSTREAM_STATES,
@@ -473,13 +475,25 @@ function schedulerText(s: RepullSchedulerRow | null): string {
   if (s === null) {
     return "The scheduler's row could not be found, so when it last ran is **unknown**, not never.";
   }
-  const outcome = s.last_outcome === null ? "" : ` and concluded \`${s.last_outcome}\``;
+  // The outcome is a word like any other: printed only from its closed list (`publicWord`).
+  const outcome =
+    s.last_outcome === null ? "" : ` and concluded \`${publicWord(s.last_outcome, "outcome")}\``;
   return `${ranText("The scheduler's daily tick", s.last_tick_at)}${outcome}. ${ranText("The advance tick", s.last_advance_at)}.`;
 }
 
-/** A table of fixed words and their counts, or nothing when there are none. */
-function wordTable(title: string, words: WordCounts): string[] {
-  const rows = Object.entries(words).sort(([a], [b]) => a.localeCompare(b));
+/**
+ * A table of fixed words and their counts, or nothing when there are none. Every word goes through
+ * {@link publicWord} for the list it belongs to and the counts of the words that come to the same
+ * one are added, because the report is filed on a public-facing repository: a fact that holds a
+ * dataset id where a word should be prints as `other`, whoever made the fact.
+ */
+function wordTable(title: string, words: WordCounts, list: WordList): string[] {
+  const printable: WordCounts = {};
+  for (const [word, n] of Object.entries(words)) {
+    const printed = publicWord(word, list);
+    printable[printed] = (printable[printed] ?? 0) + n;
+  }
+  const rows = Object.entries(printable).sort(([a], [b]) => a.localeCompare(b));
   if (rows.length === 0) return [];
   return [
     "",
@@ -531,10 +545,10 @@ function repullSection(r: RepullWeekFacts | null): string[] {
     `| Merged by an administrator | ${count(r.merged.administrator)} |`,
     `| Merged outside NEMAR's tools | ${count(r.merged.outside_tool)} |`,
     `| Merged, claim not in the audit log | ${count(r.merged.unattributed)} |`,
-    ...wordTable("Refused by the run, by word", d.by_word.refused),
-    ...wordTable("Failed in the run, by word", d.by_word.failed),
-    ...wordTable("Not accepted by GitHub, by word", d.by_word.dispatch_failed),
-    ...wordTable("Held automatic re-pulls, by word", r.open_automatic.holds),
+    ...wordTable("Refused by the run, by word", d.by_word.refused, "code"),
+    ...wordTable("Failed in the run, by word", d.by_word.failed, "code"),
+    ...wordTable("Not accepted by GitHub, by word", d.by_word.dispatch_failed, "code"),
+    ...wordTable("Held automatic re-pulls, by word", r.open_automatic.holds, "hold"),
     "",
     "A dispatch is counted in the week it was sent, in the state it has when this report is made. A switch that is off, a re-pull waiting on a gate (the identifier screen, the review, BIDS validation) and a run's refusal are expected and are not an alarm. What asks for attention is a scheduler that stopped while a switch is on, a dispatch nobody answered, a claim to merge held for an hour, a re-pull that ended failed, a re-pull that used all its resumes or all its finish runs, and a cap that cannot be read; every other hold is counted in its table and does not ask.",
     "",

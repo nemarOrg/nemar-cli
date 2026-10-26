@@ -1,16 +1,23 @@
 /**
  * What the automatic re-pull shows about itself (epic #1046 phase 7, #1913; ADR 0111, the Phase 7h
  * slice): the switches an administrator reads, the scheduler's row, a dispatch as the admin list
- * shows it, and the week of re-pull activity the weekly import report counts. Types and one word,
- * so the Worker, the CLI and the tests read one declaration of what crosses the wire; nothing here
- * runs.
+ * shows it, and the week of re-pull activity the weekly import report counts. Types, one word and
+ * the one rule for printing a stored word ({@link publicWord}), so the Worker, the CLI and the
+ * tests read one declaration of what crosses the wire.
  *
  * Counts and fixed words, never a dataset. The weekly facts are rendered into a report filed on a
  * public-facing repository, so they hold no identifier, and a word that is not on a closed list
  * (or that names anonymity) is counted under {@link OTHER_WORD} instead of being printed.
  */
 
-import type { DispatchKind, DispatchRow, DispatchStatus } from "./repull-state.js";
+import {
+  type DispatchKind,
+  type DispatchRow,
+  type DispatchStatus,
+  REPULL_HOLD_REASONS,
+  REPULL_SCHEDULER_OUTCOMES,
+  isDispatchCode,
+} from "./repull-state.js";
 
 /** A cap as the Worker reads it: how, and what it comes to. `unreadable` reads 0. */
 export interface RepullCapReading {
@@ -49,6 +56,32 @@ export type WordCounts = Record<string, number>;
 
 /** Where a word the report must not print goes: not on its closed list, or one that names anonymity. */
 export const OTHER_WORD = "other";
+
+/** The closed lists a stored word belongs to: a dispatch's code, a hold's reason, a scheduler outcome. */
+export type WordList = "code" | "hold" | "outcome";
+
+/** A word that names anonymity is never printed in a public report, whatever list it is on. */
+const WITHHELD_WORD = /anonym/i;
+
+const WORD_LISTS: Record<WordList, (word: string) => boolean> = {
+  code: isDispatchCode,
+  hold: (word) => (REPULL_HOLD_REASONS as readonly string[]).includes(word),
+  outcome: (word) => (REPULL_SCHEDULER_OUTCOMES as readonly string[]).includes(word),
+};
+
+/**
+ * The word a public report may print for a stored one: itself when it is on `list` and does not
+ * name anonymity, {@link OTHER_WORD} otherwise (an unlisted word, a dataset id, an absent one).
+ * The database checks only the SHAPE of a word and a dataset id has that shape, so the list is what
+ * keeps one out of a report filed on a public-facing repository. The counts are made with this
+ * rule and the report is written with it again, one function, so a fact that holds an identifier
+ * where a word should be does not reach the repository by either road.
+ */
+export function publicWord(word: string | null | undefined, list: WordList): string {
+  return typeof word === "string" && WORD_LISTS[list](word) && !WITHHELD_WORD.test(word)
+    ? word
+    : OTHER_WORD;
+}
 
 /**
  * The automatic re-pull's week as counted from the database (the weekly report's section, before
