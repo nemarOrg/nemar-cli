@@ -1266,6 +1266,28 @@ describe("a merge GitHub refused, and a claim nothing was sent under", () => {
     expect(mergeTo()).toHaveLength(1);
   });
 
+  test("a held claim whose pull request GitHub reports merged from a fork is never recorded as merged", async () => {
+    const id = ready();
+    gh.mergeAnswer = { status: 502 };
+    await tick();
+    gh.mergeAnswer = null;
+    // Merged at the claimed head and branch, but from a fork: not the re-pull's merge, so the
+    // record keeps its claim for an administrator rather than recording someone else's merge.
+    gh.pulls[`${DS}#7`] = appPull(DS, {
+      state: "closed",
+      merged: true,
+      head: { sha: HEAD, ref: "release/v2.0.0", repo: { full_name: `someone/${DS}` } },
+    });
+    const r = await tick();
+    expect(r).toMatchObject({ merged: 0, claimsReleased: 0, mergesSent: 0, errors: [] });
+    expect(rowOf(id)).toMatchObject({
+      status: "gates_clear",
+      merge_sha: null,
+      merge_claim_sha: HEAD,
+      hold_reason: "claim-held",
+    });
+  });
+
   test("closed without a merge after a refusal: released five minutes on, and the row holds pr-closed", async () => {
     const id = ready();
     gh.mergeAnswer = { status: 409 };
