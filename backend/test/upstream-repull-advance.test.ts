@@ -1496,15 +1496,20 @@ describe("a stalled automatic re-pull is resumed", () => {
     expect(usedToday()).toBe(1);
   });
 
-  for (const [cap, errors] of [
-    ["0", []],
-    ["x", ["cap-unreadable"]],
+  for (const [cap, errors, word] of [
+    ["0", [], "cap-exhausted"],
+    ["x", ["cap-unreadable"], "cap-unreadable"],
+    ["21", ["cap-unreadable"], "cap-unreadable"],
   ] as const) {
-    test(`REPULL_DAILY_OPEN_CAP=${cap}: no resume`, async () => {
+    test(`REPULL_DAILY_OPEN_CAP=${cap}: no resume, and both stalled rows say ${word}`, async () => {
       const id = stalled("copied", TEN());
       endedDispatch(id, "failed");
+      const other = stalled("copied", TEN(), { ds: "on098802" });
+      endedDispatch(other, "failed", "on098802");
       const r = await resumeTick(TEN(), env({ REPULL_DAILY_OPEN_CAP: cap }));
-      expect(r).toMatchObject({ resumed: 0, errors, held: { "cap-exhausted": 1 } });
+      expect(r).toMatchObject({ resumed: 0, errors, held: { [word]: 2 } });
+      expect(rowOf(id).hold_reason).toBe(word);
+      expect(rowOf(other).hold_reason).toBe(word);
       expect(gh.dispatches).toEqual([]);
     });
   }

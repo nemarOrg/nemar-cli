@@ -37,7 +37,8 @@
  *    open cap it claims (the timing the dispatch record's open cap relies on); otherwise it waits;
  *  - the dispatch record's own claim (`claimOpenDispatch`, naming the row), which counts against
  *    `REPULL_DAILY_OPEN_CAP` in the statement that claims, so a resume can never pass the cap; a
- *    full day holds `cap-exhausted` and no later row of the tick claims;
+ *    full day holds `cap-exhausted`, a cap set to something unreadable holds `cap-unreadable` (and
+ *    is an error), and no later row of the tick claims;
  *  - the send, as the scheduler sends a first dispatch: GitHub's 4xx ends the claim as
  *    `dispatch_failed` (its unit freed, its code `dispatch-refused` or `dispatch-deferred`) and
  *    stops the tick's sends, and a lost answer keeps the dispatch and its unit.
@@ -352,8 +353,11 @@ interface Tick {
   cliVersion: string;
   dispatchTimeoutMs: number;
   r: AdvanceTickResult;
-  /** A claim found the day's open cap used: no later row of this tick claims. */
-  capFull: boolean;
+  /**
+   * A claim found the day's open cap used (`cap-exhausted`) or set to something unreadable
+   * (`cap-unreadable`): no later row of this tick claims, and each holds this word.
+   */
+  capHold: HoldReason | null;
   /** A send was refused, or could not be made: no later row of this tick sends. */
   sendStopped: boolean;
 }
@@ -517,12 +521,13 @@ async function resume(t: Tick, row: RepullRow): Promise<HoldReason | null> {
       case "off":
         return "switch-off";
       case "cap":
-        t.capFull = true;
-        return "cap-exhausted";
+        t.capHold = "cap-exhausted";
+        return t.capHold;
       case "cap-unreadable":
-        t.capFull = true;
+        // A fault in the configuration, not a full day: said as such, on the row and in the log.
+        t.capHold = "cap-unreadable";
         r.errors.push("cap-unreadable");
-        return "cap-exhausted";
+        return t.capHold;
       case "unconfigured":
         r.errors.push("dispatch-unconfigured");
         t.sendStopped = true;
@@ -642,7 +647,7 @@ async function advanceStalled(t: Tick, row: RepullRow): Promise<void> {
     r.waiting++;
     return observe(t, row, null);
   }
-  if (t.capFull) return observe(t, row, "cap-exhausted");
+  if (t.capHold !== null) return observe(t, row, t.capHold);
   return observe(t, row, await resume(t, row));
 }
 
@@ -795,7 +800,7 @@ export async function runRepullAdvanceCron(
     cliVersion: opts.cliVersion ?? pkg.version,
     dispatchTimeoutMs: opts.dispatchTimeoutMs ?? UPSTREAM_REPULL_DISPATCH_TIMEOUT_MS,
     r,
-    capFull: false,
+    capHold: null,
     sendStopped: false,
   };
   try {
