@@ -526,10 +526,20 @@ describe("production only", () => {
     }
   });
 
-  test("the CLI signs in with the key in its environment, on no command line, and prints nothing", () => {
+  test("the CLI signs in with the key in its environment, on no command line, and prints nothing", async () => {
     const login = step("Sign in the nemar CLI");
     expect(login.env).toEqual({ NEMAR_API_KEY: "${{ secrets.NEMAR_ADMIN_API_KEY }}" });
-    expect(login.run).toBe("nemar auth login --yes > /dev/null");
+    expect(login.run).toBe("nemar auth login --yes > /dev/null 2>&1");
+    // What the login says, on either stream and whether it signed in or not, reaches no log.
+    for (const exit of [0, 1]) {
+      const r = await runStep("Sign in the nemar CLI", {
+        fakes: {
+          nemar: `echo "Signed in as someone@example.org"; echo "key nm_live_x" >&2; exit ${exit}`,
+        },
+      });
+      expect([exit, r.status === 0]).toEqual([exit, exit === 0]);
+      expect(r.stdout + r.stderr).toBe("");
+    }
   });
 });
 

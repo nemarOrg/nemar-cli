@@ -228,11 +228,11 @@ jobs:
             exit 1
           fi
 
-      # The login's own output names the account; it is not printed.
+      # The login's own output names the account, on either stream; none of it is printed.
       - name: Sign in the nemar CLI
         env:
           NEMAR_API_KEY: ${{ secrets.NEMAR_ADMIN_API_KEY }}
-        run: nemar auth login --yes > /dev/null
+        run: nemar auth login --yes > /dev/null 2>&1
 
       # The copy takes short-lived credentials only (an ASIA key with a session token), as it does
       # on an administrator's machine: the import's pair is exchanged for a six-hour session inside
