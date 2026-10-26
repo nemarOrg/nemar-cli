@@ -86,6 +86,11 @@ export interface IngestResult {
    * `filtered`; for `threaded` it is why this message sent no notice and changed nothing.
    */
   filtered: FilterReason | null;
+  /**
+   * An unfiltered message threaded into a ticket that was filtered until now, so the ticket is
+   * visible again and worth an admin notice (ADR 0113).
+   */
+  unfiltered?: boolean;
 }
 
 /**
@@ -249,10 +254,11 @@ interface TicketHead {
   assignee_user_id: number | null;
   requester_email: string;
   purged_at: string | null;
+  filtered: FilterReason | null;
 }
 
 const HEAD_COLUMNS =
-  "t.id, t.status, t.restricted, t.queue_tag, t.excluded_user_id, t.assignee_user_id, t.requester_email, t.purged_at";
+  "t.id, t.status, t.restricted, t.queue_tag, t.excluded_user_id, t.assignee_user_id, t.requester_email, t.purged_at, t.filtered";
 
 async function findByRef(db: D1Database, plus: string): Promise<TicketHead | null> {
   const m = REF_TAG.exec(plus);
@@ -410,7 +416,8 @@ async function ingestNew(
     const recent = await db
       .prepare(
         `SELECT COUNT(*) AS n FROM mail_messages
-          WHERE from_addr = ? AND direction = 'in' AND created_at > ? AND created_at <= ?`,
+          WHERE from_addr = ? AND direction = 'in' AND dmarc = 'pass'
+            AND created_at > ? AND created_at <= ?`,
       )
       .bind(
         fromAddr,
@@ -528,6 +535,23 @@ async function ingestNew(
         )
         .bind(created, created, created, target.id),
     ];
+    // A genuine message (it passed the classifier, the cap and the participant check above)
+    // makes a filtered ticket visible again, and the event keeps why it had been hidden.
+    const unfiltering = filtered === null && target.filtered !== null;
+    if (unfiltering) {
+      statements.push(
+        db
+          .prepare(
+            "UPDATE mail_tickets SET filtered = NULL WHERE id = ? AND filtered IS NOT NULL AND purged_at IS NULL",
+          )
+          .bind(target.id),
+        db
+          .prepare(
+            "INSERT INTO mail_ticket_events (ticket_id, kind, actor_user_id, detail, created_at) SELECT ?, 'unfiltered', NULL, ?, ? WHERE changes() > 0",
+          )
+          .bind(target.id, JSON.stringify({ from: target.filtered, reason: "reply" }), created),
+      );
+    }
     for (const tag of tags) {
       statements.push(
         db
@@ -601,6 +625,7 @@ async function ingestNew(
         assigneeUserId: assignee,
         spam: false,
         filtered,
+        unfiltered: unfiltering,
       };
     }
     // The purge claimed the ticket after it was loaded: every gated statement wrote nothing, so

@@ -74,13 +74,11 @@ async function findEntry(
     .first<BlocklistEntry>();
 }
 
-/** Add one entry, or return the one already there. */
-export async function addBlock(
-  db: D1Database,
+/** The normalized block for a request, or the refusal as a typed error. */
+function validateBlock(
   env: { FROM_EMAIL?: string },
-  viewer: Viewer,
   req: AddBlockRequest,
-): Promise<{ entry: BlocklistEntry; created: boolean }> {
+): { kind: BlockKind; value: string } {
   const norm = normalizeBlock(req.kind, req.value, ownDomains(env));
   if ("refusal" in norm) {
     throw new MailAdminError(
@@ -89,10 +87,22 @@ export async function addBlock(
       norm.refusal,
     );
   }
+  return norm;
+}
+
+const INSERT_BLOCK =
+  "INSERT OR IGNORE INTO mail_blocklist (kind, value, reason, created_by) VALUES (?, ?, ?, ?)";
+
+/** Add one entry, or return the one already there. */
+export async function addBlock(
+  db: D1Database,
+  env: { FROM_EMAIL?: string },
+  viewer: Viewer,
+  req: AddBlockRequest,
+): Promise<{ entry: BlocklistEntry; created: boolean }> {
+  const norm = validateBlock(env, req);
   const result = await db
-    .prepare(
-      "INSERT OR IGNORE INTO mail_blocklist (kind, value, reason, created_by) VALUES (?, ?, ?, ?)",
-    )
+    .prepare(INSERT_BLOCK)
     .bind(norm.kind, norm.value, cleanReason(req.reason), viewer.id)
     .run();
   const entry = await findEntry(db, norm.kind, norm.value);
@@ -113,9 +123,31 @@ export async function removeBlock(db: D1Database, id: number): Promise<Blocklist
 }
 
 /**
+ * Whether the ticket's first inbound message was verified: DMARC passed. Anything else (a DMARC
+ * failure, no DMARC, no inbound message at all) is unverified, because the From address of such a
+ * message may be forged and blocking it would block whoever was impersonated. This is stricter
+ * than the spam test, which also accepts an aligned SPF or DKIM pass that the message row does
+ * not record.
+ */
+async function senderVerified(db: D1Database, ticketId: number): Promise<boolean> {
+  const row = await db
+    .prepare(
+      "SELECT dmarc FROM mail_messages WHERE ticket_id = ? AND direction = 'in' ORDER BY id LIMIT 1",
+    )
+    .bind(ticketId)
+    .first<{ dmarc: string }>();
+  return row?.dmarc === "pass";
+}
+
+/**
  * Mark a ticket spam, unassign it, and block its requester as `block` says. The block is derived
  * from the ticket's requester address and validated BEFORE anything changes, so a refused block
- * leaves the ticket as it was. The ticket goes through the same visibility check as every route.
+ * leaves the ticket as it was; the block insert and the ticket update share one batch, and the
+ * insert is gated on the ticket not being purged, so a ticket purged in between leaves no block.
+ * The ticket goes through the same visibility check as every route.
+ *
+ * Blocking acts on the From address, which an unverified message can forge: a domain block is
+ * refused for such a sender, and an address block needs `force`.
  */
 export async function markTicketSpam(
   db: D1Database,
@@ -124,12 +156,22 @@ export async function markTicketSpam(
   ticketId: number,
   choice: SpamBlockChoice,
   reason: string | undefined,
+  force = false,
 ): Promise<SpamResponse> {
   const ticket = await requireVisibleTicket(db, viewer, ticketId);
   assertNotPurged(ticket);
 
-  let block: BlocklistEntry | null = null;
+  let wanted: { kind: BlockKind; value: string } | null = null;
   if (choice !== "none") {
+    // Defence in depth: the visibility predicate already hides a restricted ticket from a
+    // non-owner, and a block made from one would reveal what the ticket was about.
+    if (ticket.restricted === 1 && viewer.role !== "owner") {
+      throw new MailAdminError(
+        403,
+        "forbidden",
+        "Only an owner can block a sender from a restricted ticket.",
+      );
+    }
     const address = ticket.requester_email.trim().toLowerCase();
     const value = choice === "address" ? address : domainOf(address);
     if (value === "") {
@@ -139,21 +181,42 @@ export async function markTicketSpam(
         "This ticket has no requester address to block.",
       );
     }
-    block = (await addBlock(db, env, viewer, { kind: choice, value, reason })).entry;
+    wanted = validateBlock(env, { kind: choice, value });
+    if (!(await senderVerified(db, ticket.id)) && (choice === "domain" || !force)) {
+      throw new MailAdminError(
+        422,
+        "block_sender_unverified",
+        choice === "domain"
+          ? "The sender was not verified (DMARC did not pass), so its address may be forged: a domain block is refused. Block the address with force if you are sure."
+          : "The sender was not verified (DMARC did not pass), so its address may be forged. Repeat with force to block the address anyway.",
+      );
+    }
   }
 
-  const statements: D1PreparedStatement[] = [
+  const statements: D1PreparedStatement[] = [];
+  if (wanted) {
+    statements.push(
+      db
+        .prepare(
+          `INSERT OR IGNORE INTO mail_blocklist (kind, value, reason, created_by)
+           SELECT ?1, ?2, ?3, ?4
+            WHERE EXISTS (SELECT 1 FROM mail_tickets WHERE id = ?5 AND purged_at IS NULL)`,
+        )
+        .bind(wanted.kind, wanted.value, cleanReason(reason), viewer.id, ticket.id),
+    );
+  }
+  statements.push(
     db
       .prepare(
-        "UPDATE mail_tickets SET status = 'spam', assignee_user_id = NULL, updated_at = datetime('now'), last_activity_at = datetime('now') WHERE id = ? AND purged_at IS NULL",
+        "UPDATE mail_tickets SET status = 'spam', assignee_user_id = NULL, filtered = NULL, updated_at = datetime('now'), last_activity_at = datetime('now') WHERE id = ? AND purged_at IS NULL",
       )
       .bind(ticket.id),
     liveEventStatement(db, ticket.id, "status", viewer.id, {
       from: ticket.status,
       to: "spam",
-      block: block ? { kind: block.kind, id: block.id } : null,
+      block: wanted ? { kind: wanted.kind, value: wanted.value } : null,
     }),
-  ];
+  );
   if (ticket.assignee_user_id !== null) {
     statements.push(
       liveEventStatement(db, ticket.id, "unassigned", viewer.id, {
@@ -164,6 +227,7 @@ export async function markTicketSpam(
     );
   }
   const results = await db.batch(statements);
-  if ((results[0]?.meta?.changes ?? 0) === 0) throwPurged();
+  if ((results[wanted ? 1 : 0]?.meta?.changes ?? 0) === 0) throwPurged();
+  const block = wanted ? await findEntry(db, wanted.kind, wanted.value) : null;
   return { ticket: await reload(db, ticket.id), block };
 }

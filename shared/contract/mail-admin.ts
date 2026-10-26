@@ -86,6 +86,7 @@ export type MailErrorCode =
   | "ticket_purged"
   | "inbound_not_configured"
   | "block_not_allowed"
+  | "block_sender_unverified"
   | "internal";
 
 export interface MailErrorBody {
@@ -124,8 +125,11 @@ export interface TicketSummary {
    */
   unread: boolean;
   /**
-   * Why the ticket was filed quietly, else null. Set when the ticket is created and never cleared
-   * by the Worker. A filtered ticket stays `open` but is not assigned and nobody was told of it.
+   * Why the ticket was filed quietly, else null. Set when the ticket is created. A filtered ticket
+   * stays `open` but is not assigned and nobody was told of it. It is cleared (with an
+   * `unfiltered` event naming the previous reason) when a person replies, adds a note, assigns,
+   * sets a status or escalates, when a genuine (unfiltered) message from a participant threads
+   * into it, and when it is marked spam. Setting a summary does not clear it.
    */
   filtered: FilterReason | null;
 }
@@ -141,8 +145,9 @@ export interface UnreadCountResponse {
 }
 
 /**
- * Query of the list route. `status` absent hides spam and closed tickets, and `filtered` absent
- * hides filtered ones (except with `summary=missing`, which lists every closed ticket).
+ * Query of the list route. `status` absent hides spam and closed tickets. `filtered` absent hides
+ * filtered ones, but only in the default view: giving `status`, `assignee` or `q`, or
+ * `summary=missing` (which lists every closed ticket), shows them.
  */
 export interface ListTicketsQuery {
   status?: TicketStatus;
@@ -276,13 +281,21 @@ export interface StatusRequest {
 /**
  * `POST /admin/mail/tickets/:id/spam`: sets the status to `spam`, unassigns, records an event with
  * the caller, and blocks the requester's address (`address`) or its domain (`domain`) unless
- * `block` is `none`. Same visibility as every other ticket route (404 when hidden), 409
+ * `block` is `none`; a block from a restricted ticket needs an owner (403 `forbidden`). Same visibility as every other ticket route (404 when hidden), 409
  * `ticket_purged` on a purged ticket, 422 `block_not_allowed` when the address or domain cannot be
- * blocked (ours, or a shared mailbox provider's domain). Re-blocking a value returns the stored entry.
+ * blocked (ours, a shared mailbox provider's, or a public suffix), 422 `block_sender_unverified`
+ * when the sender's first message did not pass DMARC (see `force`). The block and the status
+ * change are one transaction. Re-blocking a value returns the stored entry.
  */
 export interface SpamRequest {
   block: SpamBlockChoice;
   reason?: string;
+  /**
+   * Block the address of a sender that was not verified (DMARC did not pass), whose From address
+   * may be forged. Without it that is 422 `block_sender_unverified`; a domain block of such a
+   * sender is refused even with it.
+   */
+  force?: boolean;
 }
 export interface SpamResponse {
   ticket: TicketSummary;

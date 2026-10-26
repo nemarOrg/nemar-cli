@@ -224,10 +224,20 @@ export async function listTickets(
   } else if (f.summary !== "missing") {
     where.push("t.status NOT IN ('spam', 'closed')");
   }
-  // Filtered tickets (ADR 0113) are hidden unless asked for, as spam is. The summary queue lists
+  // Filtered tickets (ADR 0113) are hidden by default, as spam is, so the default view is the
+  // work. Asking for something specific (a status, an assignee, a search) is not the default view:
+  // a person who searches for a sender must find the filtered ticket too. The summary queue lists
   // every closed ticket, filtered or not, because the retention purge treats them alike.
   if (f.filtered === "only") where.push("t.filtered IS NOT NULL");
-  else if (f.filtered === undefined && f.summary !== "missing") where.push("t.filtered IS NULL");
+  else if (
+    f.filtered === undefined &&
+    f.summary !== "missing" &&
+    f.status === undefined &&
+    f.assignee === undefined &&
+    !f.q
+  ) {
+    where.push("t.filtered IS NULL");
+  }
   if (f.queue) {
     where.push("t.queue_tag = ?");
     binds.push(f.queue);
@@ -362,6 +372,32 @@ export function liveEventStatement(
         }`,
     )
     .bind(ticketId, kind, actor, JSON.stringify(detail));
+}
+
+/**
+ * The event that records a human taking a filtered ticket (ADR 0113): none when it is not
+ * filtered. The UPDATE next to it sets `filtered = NULL`, so a ticket someone has answered, taken,
+ * moved or escalated is no longer hidden from the default list. The previous reason is kept here.
+ */
+export function unfilteredEvents(
+  db: D1Database,
+  ticket: { id: number; filtered: FilterReason | null },
+  viewer: Viewer,
+  reason: string,
+  afterChange = false,
+): D1PreparedStatement[] {
+  return ticket.filtered === null
+    ? []
+    : [
+        liveEventStatement(
+          db,
+          ticket.id,
+          "unfiltered",
+          viewer.id,
+          { from: ticket.filtered, reason },
+          afterChange,
+        ),
+      ];
 }
 
 export async function reload(db: D1Database, id: number): Promise<TicketSummary> {
@@ -681,10 +717,11 @@ async function sendAndRecord(
       ),
     db
       .prepare(
-        "UPDATE mail_tickets SET last_message_at = datetime('now'), last_activity_at = datetime('now'), updated_at = datetime('now'), status = ? WHERE id = ? AND purged_at IS NULL",
+        "UPDATE mail_tickets SET last_message_at = datetime('now'), last_activity_at = datetime('now'), updated_at = datetime('now'), status = ?, filtered = NULL WHERE id = ? AND purged_at IS NULL",
       )
       .bind(nextStatus, ticket.id),
     liveEventStatement(db, ticket.id, "reply", viewer.id, { message_id: providerId }),
+    ...unfilteredEvents(db, ticket, viewer, "reply"),
   ];
   if (nextStatus !== ticket.status) {
     statements.push(
@@ -818,12 +855,13 @@ export async function addNote(
   statements.push(
     db
       .prepare(
-        `UPDATE mail_tickets SET updated_at = datetime('now'), last_activity_at = datetime('now') WHERE id = ? AND purged_at IS NULL${
+        `UPDATE mail_tickets SET updated_at = datetime('now'), last_activity_at = datetime('now'), filtered = NULL WHERE id = ? AND purged_at IS NULL${
           gate ? " AND changes() > 0" : ""
         }`,
       )
       .bind(ticket.id),
     liveEventStatement(db, ticket.id, "note", viewer.id, null, gate),
+    ...unfilteredEvents(db, ticket, viewer, "note", gate),
   );
   const results = await db.batch(statements);
   if ((results[0]?.meta?.changes ?? 0) === 0) {
@@ -874,11 +912,15 @@ export async function assignTicket(
       );
     }
   }
-  if (userId === ticket.assignee_user_id) return toSummary(ticket);
+  if (userId === ticket.assignee_user_id && (userId === null || ticket.filtered === null)) {
+    return toSummary(ticket);
+  }
   const results = await db.batch([
     db
       .prepare(
-        "UPDATE mail_tickets SET assignee_user_id = ?, updated_at = datetime('now'), last_activity_at = datetime('now') WHERE id = ? AND purged_at IS NULL",
+        `UPDATE mail_tickets SET assignee_user_id = ?, updated_at = datetime('now'), last_activity_at = datetime('now')${
+          userId === null ? "" : ", filtered = NULL"
+        } WHERE id = ? AND purged_at IS NULL`,
       )
       .bind(userId, ticket.id),
     liveEventStatement(db, ticket.id, userId === null ? "unassigned" : "assigned", viewer.id, {
@@ -886,6 +928,7 @@ export async function assignTicket(
       to: userId,
       reason: "manual",
     }),
+    ...(userId === null ? [] : unfilteredEvents(db, ticket, viewer, "assign")),
   ]);
   if ((results[0]?.meta?.changes ?? 0) === 0) throwPurged();
   return reload(db, ticket.id);
@@ -899,7 +942,7 @@ export async function setTicketStatus(
 ): Promise<TicketSummary> {
   const ticket = await requireVisibleTicket(db, viewer, ticketId);
   assertNotPurged(ticket);
-  if (ticket.status === status) return toSummary(ticket);
+  if (ticket.status === status && ticket.filtered === null) return toSummary(ticket);
   if (
     (ticket.status === "closed" || ticket.status === "spam") &&
     (status === "open" || status === "pending")
@@ -922,10 +965,11 @@ export async function setTicketStatus(
   const results = await db.batch([
     db
       .prepare(
-        "UPDATE mail_tickets SET status = ?, updated_at = datetime('now'), last_activity_at = datetime('now') WHERE id = ? AND purged_at IS NULL",
+        "UPDATE mail_tickets SET status = ?, updated_at = datetime('now'), last_activity_at = datetime('now'), filtered = NULL WHERE id = ? AND purged_at IS NULL",
       )
       .bind(status, ticket.id),
     liveEventStatement(db, ticket.id, "status", viewer.id, { from: ticket.status, to: status }),
+    ...unfilteredEvents(db, ticket, viewer, "status"),
   ]);
   if ((results[0]?.meta?.changes ?? 0) === 0) throwPurged();
   return reload(db, ticket.id);
@@ -978,7 +1022,7 @@ export async function escalateTicket(
   const results = await db.batch([
     db
       .prepare(
-        "UPDATE mail_tickets SET status = 'escalated', assignee_user_id = ?, updated_at = datetime('now'), last_activity_at = datetime('now') WHERE id = ? AND purged_at IS NULL",
+        "UPDATE mail_tickets SET status = 'escalated', assignee_user_id = ?, updated_at = datetime('now'), last_activity_at = datetime('now'), filtered = NULL WHERE id = ? AND purged_at IS NULL",
       )
       .bind(ownerId, ticket.id),
     liveEventStatement(db, ticket.id, "escalated", viewer.id, { to: ownerId, reason }),
@@ -987,6 +1031,7 @@ export async function escalateTicket(
       to: ownerId,
       reason: "escalation",
     }),
+    ...unfilteredEvents(db, ticket, viewer, "escalate"),
   ]);
   if ((results[0]?.meta?.changes ?? 0) === 0) throwPurged();
   return { ticket: await reload(db, ticket.id), ownerId };

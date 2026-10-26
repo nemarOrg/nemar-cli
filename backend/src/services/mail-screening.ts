@@ -55,8 +55,9 @@ const BOT_LOCAL_PARTS: ReadonlySet<string> = new Set(["mailer-daemon", "postmast
  * - bounce: an empty or `<>` envelope sender, a `mailer-daemon` or `postmaster` local part on
  *   either sender address, or a `multipart/report` content type (a delivery status notification);
  * - auto_reply: `Auto-Submitted` present and not `no`, `X-Autoreply` or `X-Autorespond` present,
- *   or `X-Auto-Response-Suppress` naming `All`, `OOF` or `AutoReply`;
- * - bulk: `Precedence` of bulk, list or junk (`auto_reply` too, counted as an automatic reply),
+ *   or `Precedence: auto_reply`. `X-Auto-Response-Suppress` is NOT read: help desks and ticketing
+ *   systems set it on genuine messages to stop OTHERS auto-replying to them;
+ * - bulk: `Precedence` of bulk, list or junk,
  *   or a `List-Id` or `List-Unsubscribe` header.
  *
  * A sender controls every one of these headers, so this only files mail more quietly; it never
@@ -83,15 +84,11 @@ export function classifyAutomatedMail(
 
   const autoSubmitted = headerValues(headers, "auto-submitted");
   const precedence = headerValues(headers, "precedence").map((v) => v.toLowerCase());
-  const suppress = headerValues(headers, "x-auto-response-suppress").flatMap((v) =>
-    v.toLowerCase().split(/[\s,]+/),
-  );
   if (
     autoSubmitted.some((v) => v.toLowerCase() !== "no") ||
     headerValues(headers, "x-autoreply").length > 0 ||
     headerValues(headers, "x-autorespond").length > 0 ||
-    precedence.includes("auto_reply") ||
-    suppress.some((v) => v === "all" || v === "oof" || v === "autoreply")
+    precedence.includes("auto_reply")
   ) {
     return "auto_reply";
   }
@@ -167,8 +164,51 @@ const SHARED_PROVIDERS: ReadonlySet<string> = new Set([
   "aol.com",
   "qq.com",
   "163.com",
+  "126.com",
+  "web.de",
+  "mail.ru",
+  "naver.com",
+  "zoho.com",
+  "fastmail.com",
+  "pm.me",
+  "msn.com",
+  "ymail.com",
 ]);
-const GMX = /^gmx\.[a-z]{2,}(\.[a-z]{2,})?$/;
+/** Providers that run one service under many country domains (`yahoo.co.uk`, `outlook.fr`). */
+const PROVIDER_FAMILIES = /^(?:gmx|yahoo|hotmail|outlook|live|yandex)\.[a-z]{2,3}(?:\.[a-z]{2})?$/;
+
+/**
+ * Domains under which unrelated parties register their own names, so blocking one blocks everybody
+ * beneath it: second-level labels that ccTLDs reserve (`co.uk`, `ac.jp`, `edu.au`, `com.br`), and
+ * hosting suffixes. A bare TLD is refused by the shape rule (a domain needs two labels).
+ */
+const SECOND_LEVEL_LABELS: ReadonlySet<string> = new Set([
+  "ac",
+  "co",
+  "com",
+  "edu",
+  "gov",
+  "org",
+  "net",
+  "ne",
+  "or",
+  "go",
+  "mil",
+]);
+const HOSTING_SUFFIXES: ReadonlySet<string> = new Set([
+  "github.io",
+  "pages.dev",
+  "workers.dev",
+  "herokuapp.com",
+  "vercel.app",
+  "netlify.app",
+]);
+
+function isPublicSuffix(domain: string): boolean {
+  if (HOSTING_SUFFIXES.has(domain)) return true;
+  const labels = domain.split(".");
+  return labels.length === 2 && SECOND_LEVEL_LABELS.has(labels[0]) && /^[a-z]{2}$/.test(labels[1]);
+}
 
 function isOwnDomain(domain: string, extra: readonly string[]): boolean {
   return [OWN_DOMAIN, ...extra].some(
@@ -177,7 +217,7 @@ function isOwnDomain(domain: string, extra: readonly string[]): boolean {
 }
 
 function isSharedProvider(domain: string): boolean {
-  return domainChain(domain).some((d) => SHARED_PROVIDERS.has(d) || GMX.test(d));
+  return domainChain(domain).some((d) => SHARED_PROVIDERS.has(d) || PROVIDER_FAMILIES.test(d));
 }
 
 const LABEL = "[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?";
@@ -210,6 +250,13 @@ export function normalizeBlock(
     }
     if (isOwnDomain(value, ownDomains)) {
       return { refusal: "Our own domain and its subdomains cannot be blocked.", malformed: false };
+    }
+    if (isPublicSuffix(value)) {
+      return {
+        refusal:
+          "That is a public suffix (like co.uk or edu.au): blocking it would block every organisation under it.",
+        malformed: false,
+      };
     }
     if (isSharedProvider(value)) {
       return {

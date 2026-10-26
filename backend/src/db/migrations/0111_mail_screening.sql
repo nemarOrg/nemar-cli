@@ -12,6 +12,12 @@
 -- mail_queues.notify: 0 makes a queue quiet, so a new ticket in it announces nothing. Existing
 -- queues keep announcing (default 1).
 --
+-- mail_ticket_events: the kind list gains 'unfiltered' (a person, or a genuine reply, took a
+-- filtered ticket out of hiding). A CHECK cannot be altered, so the table is rebuilt exactly as
+-- 0107 did it: it is a leaf (nothing references it), its rows and ids are copied verbatim, and
+-- its index is recreated. The AUTOINCREMENT sequence restarts from the highest copied id, which
+-- is harmless: event ids only order events within a ticket and nothing stores one elsewhere.
+--
 -- idx_mail_messages_from_created serves the per-sender hourly count of inbound messages.
 --
 -- FUTURE REBUILDS OF mail_tickets (see 0110): a rebuild must carry the filtered column over.
@@ -33,3 +39,20 @@ ALTER TABLE mail_queues ADD COLUMN notify INTEGER NOT NULL DEFAULT 1 CHECK (noti
 
 CREATE INDEX IF NOT EXISTS idx_mail_messages_from_created
   ON mail_messages (from_addr, created_at);
+
+CREATE TABLE mail_ticket_events_new (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ticket_id INTEGER NOT NULL REFERENCES mail_tickets (id) ON DELETE CASCADE,
+  kind TEXT NOT NULL
+    CHECK (kind IN ('created', 'assigned', 'unassigned', 'escalated', 'status', 'reopened',
+                    'restricted', 'excluded', 'reply', 'reply_failed', 'note', 'summary',
+                    'purged', 'unfiltered')),
+  actor_user_id INTEGER,
+  detail TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+INSERT INTO mail_ticket_events_new (id, ticket_id, kind, actor_user_id, detail, created_at)
+  SELECT id, ticket_id, kind, actor_user_id, detail, created_at FROM mail_ticket_events;
+DROP TABLE mail_ticket_events;
+ALTER TABLE mail_ticket_events_new RENAME TO mail_ticket_events;
+CREATE INDEX IF NOT EXISTS idx_mail_ticket_events_ticket ON mail_ticket_events (ticket_id, id);

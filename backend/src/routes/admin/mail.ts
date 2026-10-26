@@ -55,7 +55,11 @@ const statusSchema = z.object({ status: z.enum(SETTABLE_STATUSES) }).strict();
 const escalateSchema = z.object({ reason: z.string().trim().max(500).optional() }).strict();
 const summarySchema = z.object({ summary: z.string().trim().min(1).max(SUMMARY_MAX) }).strict();
 const spamSchema = z
-  .object({ block: z.enum(SPAM_BLOCK_CHOICES), reason: z.string().max(500).optional() })
+  .object({
+    block: z.enum(SPAM_BLOCK_CHOICES),
+    reason: z.string().max(500).optional(),
+    force: z.boolean().optional(),
+  })
   .strict();
 const addBlockSchema = z
   .object({
@@ -273,8 +277,10 @@ export function registerMailRoutes(admin: AdminRouter): void {
     try {
       const n = ticketId(c);
       await requireVisibleTicket(c.env.DB, c.get("user"), n);
-      const { block, reason } = await parseBody(c, spamSchema);
-      return c.json(await markTicketSpam(c.env.DB, c.env, c.get("user"), n, block, reason));
+      const { block, reason, force } = await parseBody(c, spamSchema);
+      return c.json(
+        await markTicketSpam(c.env.DB, c.env, c.get("user"), n, block, reason, force === true),
+      );
     } catch (error) {
       return fail(c, error);
     }

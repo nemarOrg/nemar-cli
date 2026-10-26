@@ -135,7 +135,12 @@ export async function handleInboundEmail(
       `[inbound-mail] ${key} ${result.outcome} ticket ${result.ticketId} (${result.status})`,
     );
     // Best effort, and it never throws: a notification failure must not look like an ingest one.
-    if (result.outcome === "created" && !result.spam && result.filtered === null) {
+    // A message that makes a hidden (filtered) ticket visible is announced like a new ticket: until
+    // now nobody was told of it (ADR 0113).
+    if (
+      (result.outcome === "created" && !result.spam && result.filtered === null) ||
+      (result.outcome === "threaded" && result.unfiltered === true)
+    ) {
       await notifyTicketCreated(env, env.DB, result.ticketId);
     }
   } catch (error) {
