@@ -1834,7 +1834,7 @@ The orphans are the staging manifest's keys that NEMAR's bucket holds at their d
 Nothing is deleted, the staging manifest included, and nothing is locked (the Phase 6f slice locks only a released version's own objects).
 When they cannot be counted (a record ended before the copy wrote its manifest, which then lists nothing preparation uploaded, or no AWS credentials), nothing is recorded for them and the command says why: unknown is never zero.
 The record's working directory, which holds the delta's unscrubbed originals, and its checkpoint are removed.
-Abandon ends a record on a dataset that became anonymous or withdrawn, since the Worker exempts an edge that ends a record from the dataset fences, and it ends an automatic record as it ends an administrator's, which is how the Phase 7b slice says an administrator takes one over; no dispatch is touched, because the unattended run is not built.
+Abandon ends a record on a dataset that became anonymous or withdrawn, since the Worker exempts an edge that ends a record from the dataset fences, and it ends an automatic record as it ends an administrator's, which is how the Phase 7b slice says an administrator takes one over; it touches no dispatch and no workflow run, and ends the record only (what an unattended run still in flight does with an ended record is the Phase 7d slice's).
 A refusal before anything was written exits 1; one after a close or a deletion exits 3, resumable: abandon runs again.
 
 ### Supersede, as built
