@@ -22,6 +22,9 @@
  *    (`reconcileWorkerClaim`): a merge GitHub made is recorded, a merge whose answer was lost is
  *    sent again only under the same claim and only while that claim is young, and a claim whose
  *    merge GitHub refused, or under which nothing was sent, is released;
+ *  - a row at `merged` or `released`: the central workflow's finish run (`finishAfterMerge`), which
+ *    records the release, the lineage and the lock and completes the record, dispatched once the
+ *    merge's version DOI is recorded, at most three times, and then held `finish-exhausted`;
  *  - a row a live dispatch is working on (its run is still out, settling its head): nothing is read
  *    from GitHub, and no hold is recorded for it, because nothing holds it but its own run; a hold
  *    it had is cleared, which is a write, with its audit row.
@@ -100,20 +103,24 @@
  * or writes anything: the `nemarDatasets` organization is shared with dev. It is called only from
  * the 30-minute tick's production block, absent from `DEV_CRON_ALLOWLIST`. In production with
  * `AUTO_REPULL_ENABLED` not exactly `"1"`, GitHub is asked nothing, nothing is claimed or sent,
- * and every row it examines is held `switch-off`, a row a run is still out for included, but for a
- * row that holds a claim to merge: GitHub is asked what became of that merge whatever the switches
- * say, because a merge that happened minted a DOI, and nothing is sent while they are off. With the
- * open switch on and `AUTO_REPULL_MERGE_ENABLED` not exactly `"1"`, a row at `gates_clear` with
- * no claim is held `merge-switch-off`, and nothing is read for it. Each production tick that could
- * list its rows stamps `upstream_repull_scheduler.last_advance_at`.
+ * and every row it examines is held `switch-off`, a row a run is still out for included, but for the
+ * rows a merge minted a DOI for, or may have: a row that holds a claim to merge, whose merge GitHub
+ * is asked about, and a row that merged, whose finish run is dispatched, whatever the switches say,
+ * so turning them off never strands a minted DOI's lineage, lock and `complete`; nothing is merged
+ * while they are off. With the open switch on and `AUTO_REPULL_MERGE_ENABLED` not exactly `"1"`, a
+ * row at `gates_clear` with no claim is held `merge-switch-off`, and nothing is read for it. Each
+ * production tick that could list its rows stamps `upstream_repull_scheduler.last_advance_at`.
  *
  * COST on the 30-minute tick, which shares one subrequest allowance with every job on it, measured
  * over five rows at `pr_open` (`upstream-repull-advance.test.ts` pins it): 67 D1 statements and 25
  * GitHub requests when each starts its screen, 37 and 20 while each waits, 82 and 35 when each
  * starts its review (the most), 52 and 25 when each is cleared; a stalled row's resume is eight
  * statements and one dispatch, and the tick itself two statements (the list of rows, the stamp).
- * Plus one request to mint the App's installation token on a cold isolate, when the App's
- * credential is configured: the suites use a personal token, so the figures leave it out.
+ * Past the gates (`upstream-repull-worker-merge.test.ts` pins it), a row that waits at the merge is
+ * seven statements and four requests, one merged sixteen and seven, and a finish dispatched eight
+ * and one, so five merges on one tick are 82 and 35. Plus one request to mint the App's
+ * installation token on a cold isolate, when the App's credential is configured: the suites use a
+ * personal token, so the figures leave it out.
  *
  * NO MAIL. Nothing here imports a mail service (`repull-no-mail-scan.test.ts`).
  */
@@ -149,6 +156,7 @@ import { claimOpenDispatch, markDispatchSendFailed } from "./upstream-repull-dis
 import { gatherMachineCleanFacts } from "./upstream-repull-facts.js";
 import {
   type WorkerMergeOutcome,
+  finishAfterMerge,
   reconcileWorkerClaim,
   workerMergeRepull,
 } from "./upstream-repull-merge.js";
@@ -171,9 +179,14 @@ export const RESUMABLE_STATUSES = [
 
 /**
  * The statuses past the gates: a row at `gates_clear` is merged by the Worker when it is machine
- * clean (`upstream-repull-merge.ts`).
+ * clean, and one at `merged` or `released` is walked to `complete` by the finish run
+ * (`upstream-repull-merge.ts`).
  */
-export const PAST_GATES_STATUSES = ["gates_clear"] as const satisfies readonly RepullStatus[];
+export const PAST_GATES_STATUSES = [
+  "gates_clear",
+  "merged",
+  "released",
+] as const satisfies readonly RepullStatus[];
 
 /** The statuses the tick examines. */
 export const ADVANCE_STATUSES = [
@@ -388,6 +401,10 @@ export interface AdvanceTickResult {
   mergeUnknown: number;
   /** Claims the Worker held and released, GitHub having said their merge did not happen. */
   claimsReleased: number;
+  /** Finish runs GitHub took, for rows that merged. */
+  finishes: number;
+  /** Finish runs whose dispatch got no answer: each stays live, and may still run. */
+  finishUnconfirmed: number;
   /**
    * Clean rows whose edge into `gates_clear`, or whose claim to merge, the record refused, by its
    * code (a `DISPATCH_CODES` word).
@@ -856,12 +873,58 @@ function tallyMerge(t: Tick, o: WorkerMergeOutcome): void {
 }
 
 /**
+ * A row that merged (`merged`, `released`): the finish run that walks it to `complete`
+ * (`finishAfterMerge`), whatever the switches say, and `finish-exhausted` once it was dispatched as
+ * often as the automatic path dispatches one. A send GitHub refused, or one that could not be made,
+ * stops the tick's sends, as a resume's does.
+ */
+async function finish(t: Tick, row: RepullRow): Promise<void> {
+  const { r } = t;
+  if (t.sendStopped) {
+    r.notDue++;
+    return;
+  }
+  const o = await finishAfterMerge(t.env, row, {
+    cliVersion: t.cliVersion,
+    timeoutMs: t.dispatchTimeoutMs,
+  });
+  switch (o.kind) {
+    case "skipped":
+      return;
+    case "exhausted":
+      return observe(t, row, "finish-exhausted");
+    case "live":
+      r.running++;
+      break;
+    case "waiting":
+      r.notDue++;
+      break;
+    case "dispatched":
+      r.finishes++;
+      break;
+    case "unconfirmed":
+      r.finishUnconfirmed++;
+      break;
+    case "refused":
+      r.errors.push(o.code);
+      t.sendStopped = true;
+      break;
+    case "failed":
+      r.errors.push(o.error);
+      t.sendStopped = true;
+      break;
+  }
+  return observe(t, row, null);
+}
+
+/**
  * A row past its gates. At `gates_clear` with no claim held, the Worker's merge
  * (`workerMergeRepull`), which reads the switches, the machine-clean facts at the merge stage and
  * the day's cap itself; with a claim held, GitHub says what became of its merge
  * (`reconcileWorkerClaim`), whatever the switches say.
  */
 async function advancePastGates(t: Tick, row: RepullRow): Promise<void> {
+  if (row.status !== "gates_clear") return finish(t, row);
   const o =
     row.merge_claim_sha !== null
       ? await reconcileWorkerClaim(t.env, row)
@@ -910,6 +973,8 @@ export async function runRepullAdvanceCron(
     merged: 0,
     mergeUnknown: 0,
     claimsReleased: 0,
+    finishes: 0,
+    finishUnconfirmed: 0,
     refused: {},
     held: {},
     holdsChanged: 0,
@@ -973,6 +1038,7 @@ export function repullAdvanceLogLine(
     r.errors.length > 0 ||
     r.unconfirmed > 0 ||
     r.mergeUnknown > 0 ||
+    r.finishUnconfirmed > 0 ||
     Object.keys(r.refused).length > 0;
   const acted =
     r.screensStarted +
@@ -982,6 +1048,7 @@ export function repullAdvanceLogLine(
     r.mergesSent +
     r.merged +
     r.claimsReleased +
+    r.finishes +
     r.holdsChanged;
   const declined = Object.keys(r.refused).length + Object.keys(r.reviewRefused).length;
   if (!failed && acted === 0 && declined === 0) return null;
@@ -1004,6 +1071,8 @@ export function repullAdvanceLogLine(
     `merged=${r.merged}`,
     `merge_unknown=${r.mergeUnknown}`,
     `claims_released=${r.claimsReleased}`,
+    `finishes=${r.finishes}`,
+    `finish_unconfirmed=${r.finishUnconfirmed}`,
     `holds_changed=${r.holdsChanged}`,
     `held=${words(r.held)}`,
     `refused=${words(r.refused)}`,

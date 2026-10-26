@@ -68,22 +68,41 @@
  *    `not_sent` as above, `expired` at 30 minutes for an answer that was lost), and the record holds
  *    `pr-closed` for an administrator.
  *
+ * AFTER THE MERGE (`finishAfterMerge`): an automatic record at `merged` or `released` is walked to
+ * `complete` by the central workflow's finish run (`nemar admin repull resume`, the trigger mode
+ * `finish`), which reads the merge commit's trailers back, records the release and the lineage,
+ * locks the objects the copy wrote and completes the record. The finish is dispatched at `merged`
+ * once the version row of N.0.0 has its DOI (in either spelling of the version), and at `released`
+ * at once, through the dispatch record's own claim (`claimFinishDispatch`, one live dispatch per
+ * dataset, outside the open cap), at most {@link FINISH_DISPATCHES_MAX} times for a record; past
+ * that the record holds `finish-exhausted` for an administrator's `resume`. It runs whatever the
+ * switches say, in exact production only: turning them off must not strand a minted DOI's lineage,
+ * lock and `complete`.
+ *
  * PRODUCTION ONLY, and no mail: nothing here imports a mail service (`repull-no-mail-scan.test.ts`).
  */
 
+import { normalizeUpstreamTag } from "../../../shared/openneuro-tag.js";
 import { machineClean } from "../../../shared/repull-machine-clean.js";
 import { repullSquashMessage, trailerValuesProblem } from "../../../shared/repull-squash.js";
-import type { HoldReason, RepullRow } from "../../../shared/repull-state.js";
+import { type HoldReason, NEMAR_VERSION_RE, type RepullRow } from "../../../shared/repull-state.js";
 import { AUDIT_LOG_INSERT_SQL, auditLogParams } from "../db/audit-log.js";
 import { SYSTEM_USER_ID } from "../lib/constants.js";
 import type { Bindings } from "../types/bindings.js";
 import { getDatasetsToken } from "./github-auth.js";
+import {
+  UPSTREAM_REPULL_DISPATCH_TIMEOUT_MS,
+  buildUpstreamRepullPayload,
+  triggerUpstreamRepullRun,
+} from "./github/dispatch.js";
 import { GITHUB_API, ORG_NAME, ghHeaders } from "./github/shared.js";
 import { autoRepullEnabled, autoRepullMergeEnabled, isExactProduction } from "./repull-switches.js";
+import { claimFinishDispatch, markDispatchSendFailed } from "./upstream-repull-dispatch.js";
 import { gatherMachineCleanFacts } from "./upstream-repull-facts.js";
 import { readRecordedPullRequest } from "./upstream-repull-github.js";
 import {
   HELD_CLAIM_MAX_AGE_MINUTES,
+  RELEASED_VERSION_SQL,
   recordRepullMerged,
   releaseMergeClaim,
 } from "./upstream-repull-verified.js";
@@ -575,4 +594,131 @@ export async function reconcileWorkerClaim(
   // A merge that may have happened keeps its claim: GitHub's word, or an administrator's `resume`
   // at 30 minutes, ends it.
   return held(row, "claim-held");
+}
+
+// ----------------------------------------------------------------------------
+// After the merge: the finish run
+// ----------------------------------------------------------------------------
+
+/** The `finish` dispatches one record may have, at most. */
+export const FINISH_DISPATCHES_MAX = 3;
+
+/**
+ * A record's finish dispatches, as one row: `?1` its dataset, `?2` its id. `live` counts the
+ * dataset's live dispatches (a run is out for it); `finishes` the record's `finish` dispatches that
+ * spend an attempt, every one but a send GitHub turned away for the Worker's credential, permission
+ * or rate (`dispatch-deferred`), since nothing about the record was tried then.
+ */
+export const FINISH_DISPATCHES_SQL = `SELECT
+  (SELECT COUNT(*) FROM upstream_repull_dispatches WHERE dataset_id = ?1 AND nonce IS NOT NULL) AS live,
+  (SELECT COUNT(*) FROM upstream_repull_dispatches WHERE repull_id = ?2 AND kind = 'finish'
+    AND NOT (status = 'dispatch_failed' AND code = 'dispatch-deferred')) AS finishes`;
+
+/** GitHub's answers to a send that say the dispatch itself was refused, and so spend an attempt. */
+const REFUSED_FOR_THE_DISPATCH: ReadonlySet<number> = new Set([404, 422]);
+
+/** What the finish of one merged record came to. */
+export type FinishOutcome =
+  /** GitHub took the dispatch. */
+  | { kind: "dispatched" }
+  /** Its answer was lost: the dispatch stays live, and its run may still report. */
+  | { kind: "unconfirmed" }
+  /** Merged, and the version is not minted yet: the finish waits for its DOI. */
+  | { kind: "waiting" }
+  /** A run is out for the dataset (its finish, or another): nothing is claimed. */
+  | { kind: "live" }
+  /** The record had its finish dispatched as often as the automatic path dispatches one. */
+  | { kind: "exhausted" }
+  /** GitHub refused the send (a 4xx): the claim is ended `dispatch_failed` with this code. */
+  | { kind: "refused"; code: "dispatch-refused" | "dispatch-deferred" }
+  /** Nothing could be sent, for a reason about the Worker: a fixed word. */
+  | {
+      kind: "failed";
+      error: "cli-unreleased" | "no-github-token" | "dispatch-unconfigured" | "dispatch-failed";
+    }
+  /** Not a record the Worker finishes, or one that moved meanwhile: nothing was written. */
+  | { kind: "skipped" };
+
+/**
+ * Dispatch the finish run of an automatic record that merged (see the module comment). Exact
+ * production only; the switches are not read. `cliVersion` is the CLI the run installs, the
+ * dispatching Worker's own, and only a release is sent.
+ */
+export async function finishAfterMerge(
+  env: Bindings,
+  row: RepullRow,
+  opts: { cliVersion: string; timeoutMs?: number },
+): Promise<FinishOutcome> {
+  if (
+    !isExactProduction(env) ||
+    row.origin !== "automatic" ||
+    (row.status !== "merged" && row.status !== "released")
+  ) {
+    return { kind: "skipped" };
+  }
+  const db = env.DB;
+  const d = await db
+    .prepare(FINISH_DISPATCHES_SQL)
+    .bind(row.dataset_id, row.id)
+    .first<{ live: number; finishes: number }>();
+  if (typeof d?.live !== "number" || typeof d.finishes !== "number") {
+    throw new Error("the record's finish dispatches could not be counted");
+  }
+  if (d.live > 0) return { kind: "live" };
+  if (d.finishes >= FINISH_DISPATCHES_MAX) return { kind: "exhausted" };
+  if (row.status === "merged") {
+    // The finish waits for the tag and the version row anyway; it is dispatched once the DOI the
+    // merge minted is recorded, so its run does not spend its wait on a mint still in flight.
+    const minted = await db
+      .prepare(RELEASED_VERSION_SQL)
+      .bind(row.dataset_id, row.to_version, row.to_version)
+      .first<{ minted: number }>();
+    if (!minted) return { kind: "waiting" };
+  }
+  // A run installs the Worker's own CLI, so a development build dispatches nothing.
+  if (!NEMAR_VERSION_RE.test(opts.cliVersion)) return { kind: "failed", error: "cli-unreleased" };
+  // The token is had before the claim, so a claim is never made that could not then be sent.
+  let pat: string;
+  try {
+    pat = await getDatasetsToken(env);
+  } catch {
+    return { kind: "failed", error: "no-github-token" };
+  }
+  const claim = await claimFinishDispatch(env, row);
+  if ("refused" in claim) {
+    if (claim.refused === "live") return { kind: "live" };
+    if (claim.refused === "unconfigured") {
+      return { kind: "failed", error: "dispatch-unconfigured" };
+    }
+    // The record moved (or is not what was read) between the read and the claim.
+    return { kind: "skipped" };
+  }
+  let payload: ReturnType<typeof buildUpstreamRepullPayload>;
+  try {
+    payload = buildUpstreamRepullPayload({
+      mode: "finish",
+      datasetId: row.dataset_id,
+      upstreamDs: row.upstream_ds,
+      fromTag: normalizeUpstreamTag(row.from_tag),
+      toTag: normalizeUpstreamTag(row.to_tag),
+      dispatchId: claim.id,
+      repullId: row.id,
+      token: claim.token,
+      cliVersion: opts.cliVersion,
+    });
+  } catch {
+    // Nothing was sent: the claim must not hold the dataset's live slot until the watchdog.
+    await markDispatchSendFailed(db, claim.id, "dispatch-failed");
+    return { kind: "failed", error: "dispatch-failed" };
+  }
+  const sent = await triggerUpstreamRepullRun(payload, pat, {
+    timeoutMs: opts.timeoutMs ?? UPSTREAM_REPULL_DISPATCH_TIMEOUT_MS,
+  });
+  if (sent === "sent") return { kind: "dispatched" };
+  if (sent === "unknown") return { kind: "unconfirmed" };
+  const code = REFUSED_FOR_THE_DISPATCH.has(sent.refused)
+    ? "dispatch-refused"
+    : "dispatch-deferred";
+  await markDispatchSendFailed(db, claim.id, code);
+  return { kind: "refused", code };
 }

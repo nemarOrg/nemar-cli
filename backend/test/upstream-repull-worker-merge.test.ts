@@ -28,8 +28,9 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } fr
 import { parseScreenReport } from "../../shared/identifier-screen-report";
 import { NEMAR_APP_BOT_LOGIN, NEMAR_APP_BOT_USER_ID, NEMAR_APP_ID } from "../../shared/nemar-app";
 import { repullSquashMessage, repullTrailerLines } from "../../shared/repull-squash";
-import type { RepullStatus } from "../../shared/repull-state";
+import type { DispatchRow, RepullStatus } from "../../shared/repull-state";
 import { SYSTEM_USER_ID } from "../src/lib/constants";
+import { verifyRepullDispatchToken } from "../src/services/github/callback-tokens";
 import { __resetRateLimitStateForTests } from "../src/services/github/transport";
 import { MERGE_CLAIMS_TODAY_SQL, getRepull } from "../src/services/upstream-repull";
 import {
@@ -37,11 +38,14 @@ import {
   runRepullAdvanceCron,
 } from "../src/services/upstream-repull-advance";
 import {
+  FINISH_DISPATCHES_MAX,
+  FINISH_DISPATCHES_SQL,
   WORKER_MERGES_MAX,
   WORKER_MERGE_ACTION,
   WORKER_MERGE_ANSWER_ACTION,
   WORKER_MERGE_SENT_SQL,
   __setWorkerMergeTimeoutForTests,
+  finishAfterMerge,
   workerMergeRepull,
 } from "../src/services/upstream-repull-merge";
 import type { Bindings } from "../src/types/bindings";
@@ -385,13 +389,16 @@ describe("a machine-clean automatic re-pull is merged by the Worker", () => {
     );
   });
 
-  test("a merge the second tick finds recorded is not sent again", async () => {
-    ready();
+  test("a merge the second tick finds recorded is not sent again: the row waits for its finish", async () => {
+    const id = ready();
     await tick();
     gh.requests = [];
     const again = await tick();
-    expect(again).toMatchObject({ examined: 0, mergesSent: 0 });
+    // The merged row is the finish's now, which waits for the version's DOI and asks GitHub nothing.
+    expect(again).toMatchObject({ examined: 1, mergesSent: 0, merged: 0, finishes: 0, notDue: 1 });
+    expect(datasetRequests()).toEqual([]);
     expect(mergeTo()).toHaveLength(1);
+    expect(rowOf(id)).toMatchObject({ status: "merged", hold_reason: null });
   });
 });
 
@@ -1061,6 +1068,176 @@ describe("a merge GitHub refused, and a claim nothing was sent under", () => {
   });
 });
 
+// ----------------------------------------------------------------------------
+// After the merge: the finish run
+// ----------------------------------------------------------------------------
+
+const SECRET = "repull-worker-merge-callback-secret";
+
+/** The version row the version DOI's callback writes, with its DOI (an empty one is none). */
+function versionRow(ds: string, version: string, doi = `10.82901/nemar.${ds}.v2`) {
+  db.run(
+    `INSERT INTO dataset_versions (dataset_id, version, doi, provider, created_at)
+     VALUES (?, ?, ?, 'ezid', datetime('now'))`,
+    [ds, version, doi],
+  );
+}
+
+/** A mirror with an automatic record of `ds` that merged, at `status`: the record's id. */
+function mergedRow(status: "merged" | "released", over: Row = {}): number {
+  mirror(DS);
+  return seedRow(DS, status, {
+    merge_claim_sha: HEAD,
+    merge_claimed_at: "2026-10-25 03:00:00",
+    ...over,
+  });
+}
+
+const finishDispatches = (id: number) =>
+  db
+    .query(
+      "SELECT * FROM upstream_repull_dispatches WHERE repull_id = ? AND kind = 'finish' ORDER BY id",
+    )
+    .all(id) as DispatchRow[];
+
+const sentRuns = () =>
+  (
+    gh.dispatches as unknown as Array<{
+      event_type: string;
+      client_payload: Record<string, unknown>;
+    }>
+  )
+    .filter((d) => d.event_type === "run-upstream-repull")
+    .map((d) => d.client_payload);
+
+/** End the live dispatch of the dataset as its run would, `failed`. */
+function runFailed(): void {
+  db.run(
+    `UPDATE upstream_repull_dispatches SET status = 'failed', code = 'finish-incomplete', nonce = NULL,
+       reported_at = datetime('now') WHERE nonce IS NOT NULL`,
+  );
+}
+
+describe("after the merge, the finish run walks the record to complete", () => {
+  test("merged and minted: one finish dispatch, sent with both switches off, not repeated while live", async () => {
+    const id = mergedRow("merged");
+    versionRow(DS, "2.0.0");
+    const off = env({ AUTO_REPULL_ENABLED: undefined, AUTO_REPULL_MERGE_ENABLED: undefined });
+    const r = await tick(off);
+    expect(r).toMatchObject({ examined: 1, finishes: 1, errors: [] });
+    const [claim] = finishDispatches(id);
+    expect(claim).toMatchObject({
+      kind: "finish",
+      status: "dispatched",
+      repull_id: id,
+      dataset_id: DS,
+    });
+    expect(sentRuns()).toEqual([
+      {
+        mode: "finish",
+        dataset_id: DS,
+        upstream_ds: `ds${DS.slice(2)}`,
+        from_tag: "1.0.0",
+        to_tag: "1.0.1",
+        dispatch_id: String(claim?.id),
+        dispatch_token: expect.any(String),
+        cli_version: CLI,
+        repull_id: String(id),
+      },
+    ]);
+    expect(
+      await verifyRepullDispatchToken(
+        String(sentRuns()[0]?.dispatch_token),
+        { dispatchId: claim?.id as number, datasetId: DS, nonce: claim?.nonce as string },
+        SECRET,
+      ),
+    ).toBe(true);
+    // A finish takes no unit of the open cap: its merge already minted the DOI the cap bounds.
+    const again = await tick(off);
+    expect(again).toMatchObject({ finishes: 0, running: 1 });
+    expect(sentRuns()).toHaveLength(1);
+    expect(datasetRequests()).toEqual([]);
+  });
+
+  test("the version is N.0.0 in either spelling, and only with its DOI", async () => {
+    const id = mergedRow("merged");
+    expect((await tick()).finishes).toBe(0);
+    versionRow(DS, "v2.0.0", "");
+    expect(await tick()).toMatchObject({ finishes: 0, notDue: 1 });
+    db.run("UPDATE dataset_versions SET doi = ? WHERE dataset_id = ?", [
+      `10.82901/nemar.${DS}.v2`,
+      DS,
+    ]);
+    expect((await tick()).finishes).toBe(1);
+    expect(finishDispatches(id)).toHaveLength(1);
+  });
+
+  test(`released: dispatched again while fewer than ${FINISH_DISPATCHES_MAX} ran, then finish-exhausted`, async () => {
+    const id = mergedRow("released");
+    for (let n = 1; n <= FINISH_DISPATCHES_MAX; n++) {
+      expect((await tick()).finishes).toBe(1);
+      runFailed();
+    }
+    const r = await tick();
+    expect(r).toMatchObject({ finishes: 0, held: { "finish-exhausted": 1 } });
+    expect(rowOf(id)).toMatchObject({ status: "released", hold_reason: "finish-exhausted" });
+    expect(finishDispatches(id)).toHaveLength(FINISH_DISPATCHES_MAX);
+  });
+
+  test("a send GitHub refuses for the dispatch spends an attempt; one turned away for the Worker does not", async () => {
+    const id = mergedRow("released");
+    gh.dispatchStatus = 422;
+    expect((await tick()).errors).toEqual(["dispatch-refused"]);
+    gh.dispatchStatus = 403;
+    expect((await tick()).errors).toEqual(["dispatch-deferred"]);
+    expect(finishDispatches(id).map((d) => [d.status, d.code])).toEqual([
+      ["dispatch_failed", "dispatch-refused"],
+      ["dispatch_failed", "dispatch-deferred"],
+    ]);
+    expect((db.query(FINISH_DISPATCHES_SQL).get(DS, id) as { finishes: number }).finishes).toBe(1);
+  });
+
+  test("a development build dispatches nothing", async () => {
+    const id = mergedRow("released");
+    const r = (await runRepullAdvanceCron(env(), {
+      cliVersion: "0.10.26-dev3",
+    })) as AdvanceTickResult;
+    expect(r.errors).toEqual(["cli-unreleased"]);
+    expect(finishDispatches(id)).toEqual([]);
+    expect(gh.dispatches).toEqual([]);
+  });
+
+  test("an administrator's merged record is never finished by the Worker", async () => {
+    const id = mergedRow("released", { origin: "administrator" });
+    const r = await tick();
+    expect(r.examined).toBe(0);
+    expect(finishDispatches(id)).toEqual([]);
+    const row = await getRepull(realD1(db), id);
+    expect(
+      await finishAfterMerge(env(), row as NonNullable<typeof row>, { cliVersion: CLI }),
+    ).toEqual({
+      kind: "skipped",
+    });
+  });
+
+  for (const environment of ["development", "Production", undefined]) {
+    test(`ENVIRONMENT=${JSON.stringify(environment)}: no finish`, async () => {
+      const id = mergedRow("released");
+      const row = await getRepull(realD1(db), id);
+      const o = await finishAfterMerge(
+        env({ ENVIRONMENT: environment }),
+        row as NonNullable<typeof row>,
+        {
+          cliVersion: CLI,
+        },
+      );
+      expect(o).toEqual({ kind: "skipped" });
+      expect(finishDispatches(id)).toEqual([]);
+      expect(gh.requests).toEqual([]);
+    });
+  }
+});
+
 describe("what the merge costs a tick", () => {
   // The 30-minute tick shares one invocation's subrequest allowance with every job on it: every D1
   // statement prepared (a batch's statements each count) and every request to GitHub, over five
@@ -1090,16 +1267,23 @@ describe("what the merge costs a tick", () => {
     db.run("DELETE FROM pr_reviews");
     for (const ds of datasets) review(ds);
     const merging = await measure();
+    expect(ids.every((id) => rowOf(id).status === "merged")).toBe(true);
+    // Each version is minted, and each finish run is dispatched.
+    for (const ds of datasets) versionRow(ds, "2.0.0");
+    const finishing = await measure();
     // Per row: seven statements and four requests to wait (the record, the merges, the dataset,
     // the screen, the review, the hold and its audit row; the pull request, `main`, two checks);
     // sixteen and seven to merge (the same five reads and four requests, the claim's five
     // statements and its read of the live head, the merge's audit row, the merge, its answer, and
-    // the verified route's four statements and its read of the merge). Two for the tick.
-    expect({ waiting, merging }).toEqual({
+    // the verified route's four statements and its read of the merge); eight and one to dispatch a
+    // finish (the record, its dispatches, the version, the claim's two and its read-back, the hold
+    // and its audit row; the dispatch). Two for the tick.
+    expect({ waiting, merging, finishing }).toEqual({
       waiting: { d1: 37, github: 20 },
       merging: { d1: 82, github: 35 },
+      finishing: { d1: 42, github: 5 },
     });
-    expect(ids.every((id) => rowOf(id).status === "merged")).toBe(true);
+    expect(ids.every((id) => finishDispatches(id).length === 1)).toBe(true);
   });
 });
 
