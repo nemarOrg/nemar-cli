@@ -42,7 +42,7 @@ import { which } from "bun";
 import { hashDirLower } from "../scripts/scrub/git/git-lib";
 import { ensureParticipantsTsv } from "../shared/standard-edits/participants";
 import { PATHS, gitIn, writeAnnexBranchFile } from "./helpers/repull-fixture";
-import { type RepullWorld, startRepullWorld } from "./helpers/repull-pr-world";
+import { type RepullWorld, type WorldPoint, startRepullWorld } from "./helpers/repull-pr-world";
 import { toolOrFail } from "./scrub/helpers/require-tools";
 
 setDefaultTimeout(600_000);
@@ -73,6 +73,8 @@ async function releasedAndLocked(w: RepullWorld): Promise<void> {
 
 describe.skipIf(!awsInstalled)("several conflicts and an annexed correction", () => {
   let w: RepullWorld;
+  /** N.0.0 released and locked, reached once by the real CLI: where every case below starts. */
+  let locked: WorldPoint;
   beforeAll(async () => {
     w = await startRepullWorld({
       fixture: {
@@ -82,6 +84,8 @@ describe.skipIf(!awsInstalled)("several conflicts and an annexed correction", ()
         annexedCorrection: true,
       },
     });
+    await releasedAndLocked(w);
+    locked = await w.save();
   });
   afterAll(() => w?.stop());
   beforeEach(async () => {
@@ -106,7 +110,7 @@ describe.skipIf(!awsInstalled)("several conflicts and an annexed correction", ()
   });
 
   test("naming one conflict of five waits until the rest are named or left upstream's", async () => {
-    await releasedAndLocked(w);
+    await w.restore(locked);
     const partial = await resume(w, ["--take-ours", PATHS.channels]);
     expect(partial.exitCode, partial.all).toBe(3);
     expect(partial.all).toContain("4 conflict(s) the plan lists that no --take-ours names");
@@ -127,7 +131,7 @@ describe.skipIf(!awsInstalled)("several conflicts and an annexed correction", ()
   });
 
   test("the annexed correction is NEMAR's own entry again, byte for byte", async () => {
-    await releasedAndLocked(w);
+    await w.restore(locked);
     const run = await resume(w, ["--keep-upstream"]);
     expect(run.exitCode, run.all).toBe(3);
     const row = w.row();
@@ -139,7 +143,7 @@ describe.skipIf(!awsInstalled)("several conflicts and an annexed correction", ()
   });
 
   test("an annexed key not in NEMAR's bucket at its declared size refuses: patch-key-absent", async () => {
-    await releasedAndLocked(w);
+    await w.restore(locked);
     w.s3.putObject("nemar", `${w.fx.datasetId}/objects/${correctedKey()}`, new Uint8Array(3));
     const run = await resume(w, ["--keep-upstream"]);
     expect(run.exitCode, run.all).toBe(3);
@@ -150,7 +154,7 @@ describe.skipIf(!awsInstalled)("several conflicts and an annexed correction", ()
   });
 
   test("an annexed key dead on NEMAR's git-annex branch refuses: patch-key-dead", async () => {
-    await releasedAndLocked(w);
+    await w.restore(locked);
     const key = correctedKey();
     await writeAnnexBranchFile(
       w.fx.originRepo,
@@ -187,13 +191,30 @@ describe.skipIf(!awsInstalled)("a conflict and no correction", () => {
 
 describe.skipIf(!awsInstalled)("enrichment between the gates and the merge", () => {
   let w: RepullWorld;
+  /**
+   * N.0.0 at `gates_clear` (`n0Gated`), and N.0.1 at `patch_gates_clear` after N.0.0's merge, tag
+   * and release (`n1Gated`), each reached once by the real CLI and asserted there.
+   */
+  let n0Gated: WorldPoint;
+  let n1Gated: WorldPoint;
   beforeAll(async () => {
     w = await startRepullWorld({ fixture: { generatedParticipants: "none" } });
+    expect((await resume(w)).exitCode).toBe(3);
+    await gate("head_sha");
+    expect(w.row().status).toBe("gates_clear");
+    n0Gated = await w.save();
+    expect((await merge()).exitCode).toBe(0);
+    await w.tagMain("2.0.0");
+    w.insertVersionRow("2.0.0");
+    // No conflict: the release, the lock and N.0.1 in one run, which waits for N.0.1's screen.
+    const made = await resume(w);
+    expect(made.exitCode, made.all).toBe(3);
+    expect(w.row().status).toBe("patch_synthesized");
+    await gate("patch_head_sha");
+    expect(w.row().status).toBe("patch_gates_clear");
+    n1Gated = await w.save();
   });
   afterAll(() => w?.stop());
-  beforeEach(async () => {
-    await w.restore();
-  });
 
   const merge = () => w.cli(["repull", "merge", w.fx.datasetId, "--yes"]);
   const mainHead = async () =>
@@ -218,9 +239,7 @@ describe.skipIf(!awsInstalled)("enrichment between the gates and the merge", () 
   }
 
   test("N.0.0: the merge refuses before any claim, and resume makes the commit again", async () => {
-    expect((await resume(w)).exitCode).toBe(3);
-    await gate("head_sha");
-    expect(w.row().status).toBe("gates_clear");
+    await w.restore(n0Gated);
     const before = w.row();
     const moved = await enrichParticipants();
 
@@ -242,17 +261,7 @@ describe.skipIf(!awsInstalled)("enrichment between the gates and the merge", () 
   });
 
   test("N.0.1: the merge refuses before any claim, and the made-again N.0.1 is released", async () => {
-    expect((await resume(w)).exitCode).toBe(3);
-    await gate("head_sha");
-    expect((await merge()).exitCode).toBe(0);
-    await w.tagMain("2.0.0");
-    w.insertVersionRow("2.0.0");
-    // No conflict: the release, the lock and N.0.1 in one run, which waits for N.0.1's screen.
-    const made = await resume(w);
-    expect(made.exitCode, made.all).toBe(3);
-    expect(w.row().status).toBe("patch_synthesized");
-    await gate("patch_head_sha");
-    expect(w.row().status).toBe("patch_gates_clear");
+    await w.restore(n1Gated);
     const before = w.row();
     const moved = await enrichParticipants();
     const n1 = before.patch_pr_number as number;

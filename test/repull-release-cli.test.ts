@@ -42,7 +42,7 @@ import {
 } from "bun:test";
 import { which } from "bun";
 import { TAG_B, gitIn } from "./helpers/repull-fixture";
-import { type RepullWorld, startRepullWorld } from "./helpers/repull-pr-world";
+import { type RepullWorld, type WorldPoint, startRepullWorld } from "./helpers/repull-pr-world";
 import { toolOrFail } from "./scrub/helpers/require-tools";
 
 setDefaultTimeout(600_000);
@@ -50,9 +50,14 @@ setDefaultTimeout(600_000);
 const awsInstalled = toolOrFail("aws", which("aws") !== null);
 
 let w: RepullWorld;
+/** The record merged by the real gate, reached once (`driveMerged`): where most cases start. */
+let mergedPoint: WorldPoint;
 
 beforeAll(async () => {
-  if (awsInstalled) w = await startRepullWorld({ fixture: { noContributorEdits: true } });
+  if (!awsInstalled) return;
+  w = await startRepullWorld({ fixture: { noContributorEdits: true } });
+  await driveMerged();
+  mergedPoint = await w.save();
 });
 afterAll(() => w?.stop());
 beforeEach(async () => {
@@ -70,7 +75,7 @@ const STAMPS = {
 };
 
 /** The record merged by the real gate, its sweep stamps set as the sweeps left them. */
-async function merged(): Promise<void> {
+async function driveMerged(): Promise<void> {
   const head = w.row().head_sha as string;
   expect((await resume()).exitCode).toBe(3);
   await w.reportScreen(head, "clean");
@@ -80,6 +85,9 @@ async function merged(): Promise<void> {
   expect(w.row().status).toBe("merged");
   w.db().run("UPDATE datasets SET sweep_stamps = ?", [JSON.stringify(STAMPS)]);
 }
+
+/** The same, from the point `driveMerged` reached once. */
+const merged = () => w.restore(mergedPoint);
 
 const objectsOf = () => w.s3.keys("nemar", `${w.fx.datasetId}/objects/`);
 
@@ -274,7 +282,7 @@ describe.skipIf(!awsInstalled)("the release", () => {
   test("a merge commit whose trailers are not its last paragraph is refused at release: it stays merged", async () => {
     // A host that appends a paragraph of its own to the squash commit's message.
     w.setMergeMessageSuffix("\n\nCo-authored-by: enrichment-bot <bot@nemar.org>");
-    await merged();
+    await driveMerged();
     await tagged();
     const run = await resume();
     expect(run.exitCode, run.all).toBe(3);

@@ -54,7 +54,12 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { which } from "bun";
 import { planDigest, readPlanFile } from "../src/lib/repull/digest";
 import { PATHS, gitIn } from "./helpers/repull-fixture";
-import { type RepullWorld, enrichedMetadata, startRepullWorld } from "./helpers/repull-pr-world";
+import {
+  type RepullWorld,
+  type WorldPoint,
+  enrichedMetadata,
+  startRepullWorld,
+} from "./helpers/repull-pr-world";
 import { toolOrFail } from "./scrub/helpers/require-tools";
 
 setDefaultTimeout(600_000);
@@ -62,9 +67,43 @@ setDefaultTimeout(600_000);
 const awsInstalled = toolOrFail("aws", which("aws") !== null);
 
 let w: RepullWorld;
+/**
+ * The points the cases start from, each reached once, in `beforeAll`, by the same real CLI runs a
+ * case would otherwise repeat (and asserted there): N.0.0 merged, tagged v2.0.0 and its version
+ * row written (`released`); then released and locked, waiting for a decision on its conflict
+ * (`locked`); then N.0.1 made with `--keep-upstream` (`opened`, `patch_synthesized`); then its
+ * screen passed and its gates recorded (`gated`, `patch_gates_clear`).
+ */
+let released: WorldPoint;
+let locked: WorldPoint;
+let opened: WorldPoint;
+let gated: WorldPoint;
 
 beforeAll(async () => {
-  if (awsInstalled) w = await startRepullWorld();
+  if (!awsInstalled) return;
+  w = await startRepullWorld();
+  const head = w.row().head_sha as string;
+  expect((await resume()).exitCode).toBe(3);
+  await w.reportScreen(head, "clean");
+  expect((await resume()).exitCode).toBe(0);
+  const merged = await w.cli(["repull", "merge", w.fx.datasetId, "--yes"]);
+  expect(merged.exitCode, merged.all).toBe(0);
+  await w.tagMain("2.0.0");
+  w.insertVersionRow("2.0.0");
+  released = await w.save();
+  const waiting = await resume();
+  expect(waiting.exitCode, waiting.all).toBe(3);
+  expect(w.row().status).toBe("released");
+  locked = await w.save();
+  const made = await resume(["--keep-upstream"]);
+  expect(made.exitCode, made.all).toBe(3);
+  expect(w.row().status).toBe("patch_synthesized");
+  opened = await w.save();
+  await w.reportScreen(w.row().patch_head_sha as string, "clean");
+  const ready = await resume();
+  expect(ready.exitCode, ready.all).toBe(0);
+  expect(w.row().status).toBe("patch_gates_clear");
+  gated = await w.save();
 });
 afterAll(() => w?.stop());
 beforeEach(async () => {
@@ -82,33 +121,13 @@ const S3_WRITES = ["PutObject", "CopyObject", "UploadPartCopy", "CreateMultipart
 const s3Writes = () => S3_WRITES.flatMap((op) => w.s3.calls(op));
 
 /** N.0.0 merged by the real gate, tagged v2.0.0 and its version row written: the record merged. */
-async function releasedN0(): Promise<void> {
-  const head = w.row().head_sha as string;
-  expect((await resume()).exitCode).toBe(3);
-  await w.reportScreen(head, "clean");
-  expect((await resume()).exitCode).toBe(0);
-  const merged = await w.cli(["repull", "merge", w.fx.datasetId, "--yes"]);
-  expect(merged.exitCode, merged.all).toBe(0);
-  await w.tagMain("2.0.0");
-  w.insertVersionRow("2.0.0");
-}
-
-/** N.0.1 made with `extra` (by default `--keep-upstream`): the record at `patch_synthesized`. */
-async function patchOpen(extra: string[] = ["--keep-upstream"]): Promise<void> {
-  await releasedN0();
-  const run = await resume(extra);
-  expect(run.exitCode, run.all).toBe(3);
-  expect(w.row().status).toBe("patch_synthesized");
-}
-
+const releasedN0 = () => w.restore(released);
+/** Released and locked: the record waits at `released` for a decision on its conflict. */
+const lockedN0 = () => w.restore(locked);
+/** N.0.1 made with `--keep-upstream`: the record at `patch_synthesized`. */
+const patchOpen = () => w.restore(opened);
 /** N.0.1's screen passed and its gates recorded: `patch_gates_clear`. */
-async function patchGates(): Promise<void> {
-  await patchOpen();
-  await w.reportScreen(w.row().patch_head_sha as string, "clean");
-  const run = await resume();
-  expect(run.exitCode, run.all).toBe(0);
-  expect(w.row().status).toBe("patch_gates_clear");
-}
+const patchGates = () => w.restore(gated);
 
 /** N.0.1's pull request as the GitHub stand-in holds it. */
 const patchPull = () => w.gh.pulls[`${w.fx.datasetId}#${w.row().patch_pr_number}`];
@@ -251,10 +270,9 @@ describe.skipIf(!awsInstalled)("N.0.1", () => {
   });
 
   test("a --take-ours that names no conflict refuses before anything is written", async () => {
-    await releasedN0();
-    const writes = () => w.apiWrites.filter((x) => x.endsWith("/transition")).length;
     // The lock is recorded by a first run; the refusal comes on the second.
-    expect((await resume()).exitCode).toBe(3);
+    await lockedN0();
+    const writes = () => w.apiWrites.filter((x) => x.endsWith("/transition")).length;
     const before = writes();
     for (const name of [PATHS.sidecar, "no/such/path.json", "dataset_description.json#Name"]) {
       const run = await resume(["--take-ours", name]);
@@ -267,11 +285,8 @@ describe.skipIf(!awsInstalled)("N.0.1", () => {
   });
 
   test("pr-reviews approve --merge squash-merges N.0.1's pull request through the same gate, as N.0.1", async () => {
-    await releasedN0();
-    expect((await resume(["--keep-upstream"])).exitCode).toBe(3);
+    await patchGates();
     const patch = w.row().patch_head_sha as string;
-    await w.reportScreen(patch, "clean");
-    expect((await resume()).exitCode).toBe(0);
     const pr = w.row().patch_pr_number as number;
     const run = await w.cli([
       "pr-reviews",
@@ -312,15 +327,12 @@ describe.skipIf(!awsInstalled)("N.0.1", () => {
   });
 
   test("abandon after the release declines N.0.1; with its pull request open, it is closed and its branch deleted", async () => {
-    await releasedN0();
-    expect((await resume()).exitCode).toBe(3);
+    await lockedN0();
     const declined = await w.cli(["repull", "abandon", w.fx.datasetId, "--yes"]);
     expect(declined.exitCode, declined.all).toBe(0);
     expect(w.row()).toMatchObject({ status: "patch_declined", tag_sha: expect.any(String) });
 
-    await w.restore();
-    await releasedN0();
-    expect((await resume(["--keep-upstream"])).exitCode).toBe(3);
+    await patchOpen();
     const pr = w.row().patch_pr_number as number;
     const run = await w.cli(["repull", "abandon", w.fx.datasetId, "--yes"]);
     expect(run.exitCode, run.all).toBe(0);
@@ -331,8 +343,7 @@ describe.skipIf(!awsInstalled)("N.0.1", () => {
     expect(await hasRef("refs/tags/v2.0.0")).toBe(true);
   });
   test("a plan file that is not the record's refuses before anything is written: plan-not-the-record", async () => {
-    await releasedN0();
-    expect((await resume()).exitCode).toBe(3);
+    await lockedN0();
     // Another reviewed plan: the record's, with its path list in another order, so another digest.
     const { file, body } = readPlanFile(readFileSync(w.plan, "utf8"));
     body.paths = [...(body.paths as unknown[])].reverse() as typeof body.paths;
@@ -520,8 +531,7 @@ describe.skipIf(!awsInstalled)("N.0.1", () => {
   });
 
   test("abandon at released keeps a release/v2.0.1 and its pull request that are not this re-pull's", async () => {
-    await releasedN0();
-    expect((await resume()).exitCode).toBe(3);
+    await lockedN0();
     await gitIn(w.fx.originRepo, ["update-ref", "refs/heads/release/v2.0.1", await mainHead()]);
     const foreign = await w.commitOnto("refs/heads/release/v2.0.1", "code/other.txt", "Alice's.\n");
     const n = (w.row().pr_number as number) + 5;
@@ -541,8 +551,7 @@ describe.skipIf(!awsInstalled)("N.0.1", () => {
   });
 
   test("abandon keeps a release/v2.0.1 it cannot judge: kept-unreadable", async () => {
-    await releasedN0();
-    expect((await resume()).exitCode).toBe(3);
+    await lockedN0();
     await gitIn(w.fx.originRepo, ["update-ref", "refs/heads/release/v2.0.1", await mainHead()]);
     // The record names a merge commit origin does not hold, so N.0.1's commit cannot be read.
     w.db().run(`UPDATE upstream_repulls SET merge_sha = '${"f".repeat(40)}'`);

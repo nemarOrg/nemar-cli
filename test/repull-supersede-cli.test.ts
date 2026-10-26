@@ -47,7 +47,12 @@ import { which } from "bun";
 import { runCommand } from "../src/lib/git-annex/run-command";
 import { defaultPlanPath } from "../src/lib/repull/digest";
 import { TAG_A, TAG_B, UPSTREAM_SNAPSHOTS, gitIn } from "./helpers/repull-fixture";
-import { type RepullWorld, prKey, startRepullWorld } from "./helpers/repull-pr-world";
+import {
+  type RepullWorld,
+  type WorldPoint,
+  prKey,
+  startRepullWorld,
+} from "./helpers/repull-pr-world";
 import { toolOrFail } from "./scrub/helpers/require-tools";
 
 setDefaultTimeout(600_000);
@@ -58,9 +63,19 @@ const TAG_C = "1.2.0";
 let w: RepullWorld;
 /** What a test changed outside what restore() puts back, undone after it. */
 const undo: Array<() => void> = [];
+/**
+ * Tag C made and planned once, by the real `plan` (which writes nothing but its file): the point
+ * and the plan file the cases that need no other tag C start from (`atTagC`).
+ */
+let tagCPoint: WorldPoint;
+let tagCPlan: string;
 
 beforeAll(async () => {
-  if (awsInstalled) w = await startRepullWorld();
+  if (!awsInstalled) return;
+  w = await startRepullWorld();
+  await makeTagC();
+  tagCPlan = await planC();
+  tagCPoint = await w.save();
 });
 afterAll(() => w?.stop());
 afterEach(() => {
@@ -143,6 +158,17 @@ async function makeTagC(content = "A third snapshot.\n", extra: Entry[] = []): P
   }
 }
 
+/** Tag C made and planned (the default content), from the point `beforeAll` reached once. */
+async function atTagC(): Promise<string> {
+  await w.restore(tagCPoint);
+  w.openNeuro.snapshots = [
+    ...UPSTREAM_SNAPSHOTS.map((s) => ({ ...s })),
+    { tag: TAG_C, created: "2026-09-01T00:00:00.000Z" },
+  ];
+  w.openNeuro.latest = TAG_C;
+  return tagCPlan;
+}
+
 /** Plan tag C as `nemar admin repull plan` does; with tag B's pull request open it is not executable. */
 async function planC(): Promise<string> {
   const run = await w.cli(["repull", "plan", w.fx.datasetId, "--json"]);
@@ -155,8 +181,7 @@ async function planC(): Promise<string> {
 
 describe.skipIf(!awsInstalled)("execute --supersede", () => {
   test("without the flag a newer tag's plan refuses repull-in-flight and changes nothing", async () => {
-    await makeTagC();
-    const plan = await planC();
+    const plan = await atTagC();
     const run = await w.cli(["repull", "execute", plan, "--yes"]);
     expect(run.exitCode, run.all).toBe(1);
     expect(run.all).toContain("repull-in-flight");
@@ -168,8 +193,7 @@ describe.skipIf(!awsInstalled)("execute --supersede", () => {
 
   test("closes tag B's pull request, deletes its branch, ends it superseded, and records tag C", async () => {
     const pr = w.row().pr_number as number;
-    await makeTagC();
-    const plan = await planC();
+    const plan = await atTagC();
     const run = await w.cli([
       "repull",
       "execute",
@@ -189,8 +213,7 @@ describe.skipIf(!awsInstalled)("execute --supersede", () => {
   });
 
   test("a plan that went stale supersedes nothing: the plan is proved before tag B's record is touched", async () => {
-    await makeTagC();
-    const plan = await planC();
+    const plan = await atTagC();
     // OpenNeuro re-creates tag C on another commit after the plan was reviewed.
     await gitIn(w.fx.upstreamRepo, ["update-ref", "-d", `refs/tags/${TAG_C}`]);
     await makeTagC("The snapshot made again.\n");
@@ -203,8 +226,7 @@ describe.skipIf(!awsInstalled)("execute --supersede", () => {
   });
 
   test("another release pull request beside tag B's keeps the plan not executable: nothing is superseded", async () => {
-    await makeTagC();
-    const plan = await planC();
+    const plan = await atTagC();
     // An ordinary release pull request of the dataset's own, as `nemar dataset release` opens one.
     await gitIn(w.fx.originRepo, ["update-ref", "refs/heads/release/v1.0.1", w.row().base_sha]);
     w.gh.pulls[`${w.fx.datasetId}#${(w.row().pr_number as number) + 10}`] = {
@@ -220,8 +242,7 @@ describe.skipIf(!awsInstalled)("execute --supersede", () => {
   });
 
   test("an automatic record is never superseded", async () => {
-    await makeTagC();
-    const plan = await planC();
+    const plan = await atTagC();
     w.db().run("UPDATE upstream_repulls SET origin = 'automatic'");
     const run = await w.cli(["repull", "execute", plan, "--supersede", "--yes"]);
     expect(run.exitCode, run.all).toBe(1);
@@ -242,8 +263,7 @@ describe.skipIf(!awsInstalled)("execute --supersede", () => {
   const supersede = (plan: string) => w.cli(["repull", "execute", plan, "--supersede", "--yes"]);
 
   test("another release branch, with no pull request, keeps the plan not executable", async () => {
-    await makeTagC();
-    const plan = await planC();
+    const plan = await atTagC();
     await gitIn(w.fx.originRepo, ["update-ref", "refs/heads/release/v1.0.1", w.row().base_sha]);
     const run = await supersede(plan);
     await untouched(run, "not-executable");
@@ -258,8 +278,7 @@ describe.skipIf(!awsInstalled)("execute --supersede", () => {
 
   test("with no pull request recorded, the one open pull request of tag B's branch is its own", async () => {
     const pr = w.row().pr_number as number;
-    await makeTagC();
-    const plan = await planC();
+    const plan = await atTagC();
     registeredWithoutPull();
     const run = await w.cli([
       "repull",
@@ -278,8 +297,7 @@ describe.skipIf(!awsInstalled)("execute --supersede", () => {
   });
 
   test("with no pull request recorded, a fork's pull request of tag B's branch name is not its own", async () => {
-    await makeTagC();
-    const plan = await planC();
+    const plan = await atTagC();
     const fork = (w.row().pr_number as number) + 10;
     registeredWithoutPull();
     w.gh.pulls[`${w.fx.datasetId}#${fork}`] = {
@@ -297,8 +315,7 @@ describe.skipIf(!awsInstalled)("execute --supersede", () => {
   });
 
   test("with no pull request recorded, two open pull requests of tag B's branch are not judged", async () => {
-    await makeTagC();
-    const plan = await planC();
+    const plan = await atTagC();
     const second = (w.row().pr_number as number) + 10;
     registeredWithoutPull();
     w.gh.pulls[`${w.fx.datasetId}#${second}`] = {
@@ -313,8 +330,7 @@ describe.skipIf(!awsInstalled)("execute --supersede", () => {
   });
 
   test("another release pull request, whose branch is gone, keeps the plan not executable", async () => {
-    await makeTagC();
-    const plan = await planC();
+    const plan = await atTagC();
     const other = (w.row().pr_number as number) + 10;
     w.gh.pulls[`${w.fx.datasetId}#${other}`] = {
       sha: w.row().base_sha,
@@ -327,8 +343,7 @@ describe.skipIf(!awsInstalled)("execute --supersede", () => {
   });
 
   test("a second pull request of tag B's branch keeps the plan not executable", async () => {
-    await makeTagC();
-    const plan = await planC();
+    const plan = await atTagC();
     const other = (w.row().pr_number as number) + 10;
     w.gh.pulls[`${w.fx.datasetId}#${other}`] = {
       sha: w.row().head_sha as string,
@@ -341,8 +356,7 @@ describe.skipIf(!awsInstalled)("execute --supersede", () => {
   });
 
   test("a list of 100 open pull requests is not read whole: nothing is superseded", async () => {
-    await makeTagC();
-    const plan = await planC();
+    const plan = await atTagC();
     // Tag B's own and 99 more: one page of exactly 100.
     const first = (w.row().pr_number as number) + 1;
     for (let n = first; n < first + 99; n++) {
@@ -398,8 +412,7 @@ describe.skipIf(!awsInstalled)("execute --supersede", () => {
   }
 
   test("a record of the same tag is not superseded (supersede-same-tag)", async () => {
-    await makeTagC();
-    const plan = await planC();
+    const plan = await atTagC();
     w.db().run("UPDATE upstream_repulls SET to_tag = ?", [TAG_C]);
     const run = await supersede(plan);
     expect(run.exitCode, run.all).toBe(1);
@@ -409,8 +422,7 @@ describe.skipIf(!awsInstalled)("execute --supersede", () => {
   });
 
   test("a record pulled from another from_tag is not superseded (supersede-from-tag)", async () => {
-    await makeTagC();
-    const plan = await planC();
+    const plan = await atTagC();
     w.db().run("UPDATE upstream_repulls SET from_tag = '00001'");
     const run = await supersede(plan);
     expect(run.exitCode, run.all).toBe(1);
@@ -420,8 +432,7 @@ describe.skipIf(!awsInstalled)("execute --supersede", () => {
   });
 
   test("a record past its merge is released, never superseded (supersede-too-late)", async () => {
-    await makeTagC();
-    const plan = await planC();
+    const plan = await atTagC();
     w.db().run(
       "UPDATE upstream_repulls SET status = 'merged', gates_sha = COALESCE(gates_sha, head_sha), merge_sha = base_sha",
     );
@@ -433,8 +444,7 @@ describe.skipIf(!awsInstalled)("execute --supersede", () => {
   });
 
   test("a held merge claim refuses before anything is planned or written (merge-claim-held)", async () => {
-    await makeTagC();
-    const plan = await planC();
+    const plan = await atTagC();
     w.db().run(
       "UPDATE upstream_repulls SET merge_claimed_at = '2026-10-25T00:00:00.000Z', merge_claim_sha = head_sha",
     );
@@ -447,8 +457,7 @@ describe.skipIf(!awsInstalled)("execute --supersede", () => {
   });
 
   test("a record that pushed no branch yet, beside a release branch, keeps the plan not executable", async () => {
-    await makeTagC();
-    const plan = await planC();
+    const plan = await atTagC();
     // At `copied` the record has pushed nothing, so release/v2.0.0 is not its own.
     w.db().run("UPDATE upstream_repulls SET status = 'copied'");
     const run = await supersede(plan);
@@ -460,8 +469,7 @@ describe.skipIf(!awsInstalled)("execute --supersede", () => {
   });
 
   test("tag B's branch carrying a commit that is not the record's refuses before anything is closed", async () => {
-    await makeTagC();
-    const plan = await planC();
+    const plan = await atTagC();
     await w.commitOnto("refs/heads/release/v2.0.0", "code/foreign.txt", "Not the record's.\n");
     const run = await supersede(plan);
     await untouched(run, "branch-foreign");
