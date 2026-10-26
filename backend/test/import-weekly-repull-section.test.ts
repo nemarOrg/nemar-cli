@@ -1278,6 +1278,38 @@ describe("what is not a reason, with nothing to do", () => {
     expect(r.facts.repulls?.attention).toEqual([]);
   });
 
+  // The holds that name a fault the automatic path saw in itself or in what it sent. They are
+  // counted in the table of holds, and the open re-pull shows in `nemar admin repull auto`, but
+  // they ask for nothing: the only holds that ask are the two bounds, tested with the other reasons.
+  for (const [word, status] of [
+    ["merge-refused", "gates_clear"],
+    ["gates-refused", "pr_open"],
+    ["claim-refused", "gates_clear"],
+  ] as const) {
+    test(`${word}, a fault the path saw, is counted and asks for nothing with both switches on`, async () => {
+      stampFresh();
+      seedAutomatic(status, word);
+      const r = await report({ ...ON, AUTO_REPULL_MERGE_ENABLED: "1" });
+      expect(r.facts.repulls?.open_automatic.holds).toEqual({ [word]: 1 });
+      expect(r.facts.repulls?.attention).toEqual([]);
+      expect(repullProblems(r.facts)).toEqual([]);
+    });
+  }
+
+  test("no hold word but the two bounds asks, whatever family it is in", async () => {
+    stampFresh();
+    const words = REPULL_HOLD_REASONS.filter(
+      (w) => w !== "resume-exhausted" && w !== "finish-exhausted",
+    );
+    // Every word of the closed list but the two: the gates, the faults, the caps, the claim and the merge.
+    expect(words).toHaveLength(REPULL_HOLD_REASONS.length - 2);
+    for (const word of words) seedAutomatic("pr_open", word);
+    const r = await report({ ...ON, AUTO_REPULL_MERGE_ENABLED: "1" });
+    expect(r.facts.repulls?.open_automatic.held).toBe(words.length);
+    expect(r.facts.repulls?.attention).toEqual([]);
+    expect(repullProblems(r.facts)).toEqual([]);
+  });
+
   test("a switch on, a fresh scheduler and a routine week: nothing for a person", async () => {
     stampFresh();
     seedDispatch({ status: "opened", at: at(-DAY), repullId: 3 });
