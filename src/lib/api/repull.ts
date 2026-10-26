@@ -78,7 +78,14 @@ export async function listRepulls(
  */
 export async function transitionRepull(
   id: number,
-  t: { from: RepullStatus; to: RepullStatus; fields?: Record<string, unknown>; error?: string },
+  t: {
+    from: RepullStatus;
+    to: RepullStatus;
+    fields?: Record<string, unknown>;
+    error?: string;
+    /** On a claim to merge only: an administrator's merge over a failed BIDS validation. */
+    override?: { kind: "bids-failure"; reason: string };
+  },
 ): Promise<RepullRow> {
   const res = await request<{ repull: RepullRow }>(
     `/admin/repulls/${id}/transition`,

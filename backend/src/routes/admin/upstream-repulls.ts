@@ -10,7 +10,9 @@
  *   GET  /admin/repulls/:id              one record
  *   POST /admin/repulls/:id/transition   move it along one allowed edge (the claim to merge is the
  *                                        gates-clear self-edge: screened head, dataset fences, a
- *                                        unit of REPULL_DAILY_MERGE_CAP)
+ *                                        unit of REPULL_DAILY_MERGE_CAP; an administrator's claim
+ *                                        may name a merge over a failed BIDS validation, whose
+ *                                        facts it reads at the claimed head)
  *   GET  /admin/repulls/:id/screens      its identifier screens, newest first
  *   POST /admin/repulls/:id/screen       dispatch the screen of a pull request's recorded head
  *   POST /admin/repulls/:id/screen/acknowledge   record a reason on a screen that asks for one
@@ -56,6 +58,7 @@ import {
   transitionRepull,
   transitionSchema,
 } from "../../services/upstream-repull";
+import { bidsOverrideRefusal } from "../../services/upstream-repull-merge";
 import {
   checkHeldClaim,
   claimCheckSchema,
@@ -192,7 +195,11 @@ export function registerUpstreamRepullRoutes(admin: AdminRouter): void {
         return c.json({ error: "the id must be a re-pull id", code: "invalid-id" }, 400);
       const user = c.get("user");
       try {
-        const result = await transitionRepull(c.env, { id: user.id }, id, c.req.valid("json"));
+        // A claim to merge that names a merge over a failed BIDS validation has its facts read
+        // here, at the claimed head; no other caller of the transition passes the reader.
+        const result = await transitionRepull(c.env, { id: user.id }, id, c.req.valid("json"), {
+          verifyBidsOverride: bidsOverrideRefusal,
+        });
         if (isRefusal(result)) return c.json(refusalBody(result), result.status);
         return c.json({ repull: result.row });
       } catch (err) {

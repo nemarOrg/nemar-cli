@@ -913,6 +913,13 @@ export async function mergeWhenClean(
      * trailers are the message's last paragraph (ADR 0111, `lib/repull/merge.ts`).
      */
     commit?: { title: string; message: string };
+    /**
+     * The one state the merge is sent on: `clean`, the default and every other caller's, or
+     * `unstable`, for an administrator's merge of an upstream re-pull over a failed BIDS
+     * validation (ADR 0111, the Phase 7g amendment), whose claim the Worker checked was made for
+     * exactly that. `blocked` is never one: a merge then would be a bypass.
+     */
+    state?: "clean" | "unstable";
   } = {},
 ): Promise<MergeResult> {
   const base = options.base ?? githubApiBase();
@@ -948,7 +955,17 @@ export async function mergeWhenClean(
       reason: `Not merged: ${read.reason} The approval stands.`,
     };
   }
-  const check = mergeCheckOf(read.state);
+  const check =
+    options.state === "unstable"
+      ? read.state === "unstable"
+        ? ({ ok: true } as const)
+        : ({
+            ok: false,
+            why: `GitHub reports this pull request as '${stateWord(read.state)}', not 'unstable', so a merge over a failed BIDS validation would not be attempted.`,
+            card: `not unstable (GitHub: ${stateWord(read.state)})`,
+            advice: "none",
+          } as const)
+      : mergeCheckOf(read.state);
   if (!check.ok) {
     return {
       ok: false,

@@ -31,6 +31,14 @@
  * verified route, which reads it on GitHub. The merge commit GitHub wrote is read back at the
  * release (`release.ts`), because the message sent is not proof of the message committed.
  *
+ * A merge over a failed BIDS validation (`bidsFailureReason`, the administrator's own reason; ADR
+ * 0111, the Phase 7g amendment) is for a record an administrator opened. Step 7 then needs GitHub's
+ * `unstable` instead of `clean` and refuses `blocked`, where a rule requires the check and the
+ * merge would be a bypass, which a re-pull never uses; the claim carries the reason, and the Worker
+ * records it only after reading, at the claimed head, BIDS validation completed with `failure`,
+ * `version-check` with `success` and the state `unstable`; a claim already held is not used for
+ * it; and the merge is sent only while GitHub still says `unstable`.
+ *
  * A claim already held for the screened head (a merge whose answer was lost, a run that stopped
  * after its claim) is used again, without a second claim, since a pull request merges once, but
  * only after the Worker reads again, for it, what the claim's statement read when it was made (the
@@ -67,8 +75,10 @@ import {
   approvalGate,
   checkMergeable,
   fetchPullRequest,
+  mergeCheckOf,
   mergeWhenClean,
   reviewForApproval,
+  settleMergeState,
 } from "../pr-review-approve.js";
 import { readCatalogFacts } from "./execute/catalog.js";
 import { changedOutsideNemar } from "./execute/head.js";
@@ -94,6 +104,7 @@ export type MergeStage =
   | "main-moved"
   | "merge-main-moved"
   | "github"
+  | "bids"
   | "message"
   | "declined"
   | "cap";
@@ -139,6 +150,14 @@ export interface GateContext {
   configDir: string;
   /** Merge although the automated review failed, is running or could not be read. */
   force: boolean;
+  /**
+   * The administrator's reason for a merge over a failed BIDS validation (ADR 0111, the Phase 7g
+   * amendment; `nemar admin repull merge --bids-failure-reason`), for a record an administrator
+   * opened, only while GitHub reports the pull request `unstable` and never `blocked`. The claim
+   * carries it, and the Worker checks, at the claimed head, that BIDS validation failed,
+   * `version-check` passed and the state is `unstable` before it records the claim and the reason.
+   */
+  bidsFailureReason?: string;
   /** Tests only: how GitHub's lazily computed state is waited for. */
   sleep?: (ms: number) => Promise<void>;
 }
@@ -336,6 +355,15 @@ async function check(
   const head = row[c.gates] as string;
   const branch = row[c.branch] as string;
   const base = (pr === "n0" ? row.base_sha : row.patch_base_sha) as string;
+  // A merge over a failed BIDS validation is an administrator's, for a re-pull an administrator
+  // opened: the automatic path never merges over a failed check, and its pull request is not
+  // merged over one by anyone.
+  if (ctx.bidsFailureReason !== undefined && row.origin !== "administrator") {
+    return stopAt(
+      "bids",
+      `Re-pull #${row.id} was opened by the automatic path, and its pull request is not merged over a failed BIDS validation; nothing was claimed or merged. Merge it once BIDS validation passes, or abandon it (nemar admin repull abandon ${id}) and re-pull it by hand.`,
+    );
+  }
 
   // 2. The dataset, every run: an anonymous deposit is never re-pulled.
   try {
@@ -438,15 +466,20 @@ async function check(
     }
   }
 
-  // 7. GitHub's own state.
-  const clean = await checkMergeable(
-    ctx.token,
-    id,
-    prNumber,
-    { headSha: head, mergeableState: live.value.mergeableState },
-    { base: ctx.base, ...(ctx.sleep ? { sleep: ctx.sleep } : {}) },
-  );
-  if (!clean.ok) return stopAt("github", `${clean.why} Nothing was claimed or merged.`);
+  // 7. GitHub's own state: `clean`, or, for a merge over a failed BIDS validation, `unstable`.
+  if (ctx.bidsFailureReason !== undefined) {
+    const refused = await unstableOnly(ctx, prNumber, head, live.value.mergeableState);
+    if (refused) return refused;
+  } else {
+    const clean = await checkMergeable(
+      ctx.token,
+      id,
+      prNumber,
+      { headSha: head, mergeableState: live.value.mergeableState },
+      { base: ctx.base, ...(ctx.sleep ? { sleep: ctx.sleep } : {}) },
+    );
+    if (!clean.ok) return stopAt("github", `${clean.why} Nothing was claimed or merged.`);
+  }
 
   // 8. The squash message, read as git reads it. N.0.1's carries the count of corrections, which
   // the record must state: unknown is never a count.
@@ -481,6 +514,60 @@ async function check(
       warnings,
     },
   };
+}
+
+/**
+ * Step 7 for a merge over a failed BIDS validation: GitHub's state, asked again while it is
+ * `unknown`, must be `unstable`, which is a check that is not required failing. `blocked` is a rule
+ * that requires the check, where merging would be a bypass, which a re-pull never uses; `clean` is
+ * no failing check, so the override is not needed; every other state is refused as the ordinary
+ * gate refuses it. Null when the merge may go on to the claim.
+ */
+async function unstableOnly(
+  ctx: GateContext,
+  prNumber: number,
+  head: string,
+  seen: string,
+): Promise<GateRefusal | null> {
+  const read = await settleMergeState(
+    ctx.token,
+    ctx.datasetId,
+    prNumber,
+    { headSha: head, mergeableState: seen },
+    { base: ctx.base, ...(ctx.sleep ? { sleep: ctx.sleep } : {}) },
+  );
+  if (!read.ok) {
+    if (read.kind === "unreadable") {
+      return stopAt(
+        "github",
+        `Pull request #${prNumber} could not be read: ${read.reason} Nothing was claimed or merged.`,
+      );
+    }
+    return stopAt(
+      "not-ready",
+      read.kind === "moved"
+        ? `Pull request #${prNumber} changed since it was read; run the merge again. Nothing was claimed or merged.`
+        : `Pull request #${prNumber} is no longer open; nothing was claimed or merged.`,
+    );
+  }
+  if (read.state === "unstable") return null;
+  if (read.state === "blocked") {
+    return stopAt(
+      "bids",
+      "GitHub reports the pull request blocked: this dataset's rules require BIDS validation, and merging would be a bypass, which a re-pull never uses. Nothing was claimed or merged.",
+    );
+  }
+  if (read.state === "clean") {
+    return stopAt(
+      "bids",
+      "GitHub reports the pull request clean, so no check fails: merge it without --bids-failure-reason. Nothing was claimed or merged.",
+    );
+  }
+  const check = mergeCheckOf(read.state);
+  return stopAt(
+    "github",
+    `${check.ok ? "GitHub's state is not unstable." : check.why} Nothing was claimed or merged.`,
+  );
 }
 
 function errorText(err: unknown): string {
@@ -576,6 +663,7 @@ function claimRefused(err: unknown, datasetId: string): Extract<MergeOutcome, { 
   if (code === "screen-not-clear" || code === "screen-changed") {
     return { merged: false, stage: "screen", reason };
   }
+  if (code?.startsWith("bids-override-")) return { merged: false, stage: "bids", reason };
   return { merged: false, stage: "not-ready", reason };
 }
 
@@ -619,17 +707,32 @@ async function sendUnderLock(
 ): Promise<MergeOutcome> {
   const { row, prNumber, head, pr } = check;
   const c = PULL_REQUEST_COLUMNS[pr];
+  const reason = ctx.bidsFailureReason;
+  if (reason !== undefined && check.heldClaim) {
+    // The reason is recorded with the claim it is made for, so a merge over a failed BIDS
+    // validation makes its own claim and never sends under one made without it.
+    return {
+      merged: false,
+      stage: "bids",
+      claimHeld: true,
+      reason: `A claim to merge ${head.slice(0, 12)} is already held, and a merge over a failed BIDS validation is sent only under a claim of its own, which records its reason. Nothing was merged. nemar admin repull resume ${ctx.datasetId} records a merge that happened, or expires the claim once it is 30 minutes old; then run this again.`,
+    };
+  }
   if (!check.heldClaim) {
     try {
       await transitionRepull(row.id, {
         from: c.gatesClear,
         to: c.gatesClear,
         fields: { [c.claimSha]: head },
+        ...(reason !== undefined ? { override: { kind: "bids-failure" as const, reason } } : {}),
       });
     } catch (err) {
       return claimRefused(err, ctx.datasetId);
     }
     opts.out(`Claimed one unit of today's re-pull merge cap for ${head.slice(0, 12)}.`);
+    if (reason !== undefined) {
+      opts.out("Recorded with the claim: the merge is over a failed BIDS validation, and why.");
+    }
   } else {
     // The claim was made earlier: the Worker reads again what its statement held then (the
     // dataset fences, the screen for THIS administrator, the live head) and the claim's age.
@@ -646,6 +749,8 @@ async function sendUnderLock(
   const merged = await mergeWhenClean(ctx.token, ctx.datasetId, prNumber, head, "squash", {
     base: ctx.base,
     commit: check.squash,
+    // Over a failed BIDS validation the merge is sent only while GitHub still says `unstable`.
+    ...(reason !== undefined ? { state: "unstable" as const } : {}),
     ...(ctx.sleep ? { sleep: ctx.sleep } : {}),
     ...(opts.tries !== undefined ? { tries: opts.tries } : {}),
   });

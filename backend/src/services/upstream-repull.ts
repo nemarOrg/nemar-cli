@@ -38,6 +38,16 @@
  * anonymous nor withdrawn, so those are atomic with it, while the mirror and import fences and
  * the live head are read first. A refusal writes nothing (ADR 0099).
  *
+ * THE MERGE OVER A FAILED BIDS VALIDATION (ADR 0111, the Phase 7g amendment). A claim to merge
+ * may name `override: { kind: "bids-failure", reason }`, an administrator's own. The reader the
+ * caller gives (`verifyBidsOverride`; the transition route gives `bidsOverrideRefusal`) must find,
+ * at the claimed head, a record an administrator opened, BIDS validation completed with `failure`,
+ * `version-check` completed with `success`, and GitHub's `unstable`, never `blocked` (a rule that
+ * requires the check, where a merge would be a bypass). The claim's own checks are unchanged (the
+ * screen passing for that administrator, the fences, the cap, the live head), and the reason is
+ * written in an audit row of its own in the claim's batch. A claim that names it with no reader
+ * is refused (`bids-override-unverified`), so nothing takes it unchecked.
+ *
  * THE AUTOMATIC CREATE (ADR 0111, decision 6). A create that carries `dispatch_id` and
  * `dispatch_token` is a dispatched run's, and is the only way a record is written with
  * `origin = 'automatic'`. Before the fences above, in order: exact production
@@ -314,6 +324,30 @@ export const createRepullSchema = z
 
 export type CreateRepullBody = z.infer<typeof createRepullSchema>;
 
+/**
+ * An administrator's merge of a re-pull pull request over a failed BIDS validation (ADR 0111, the
+ * Phase 7g amendment), named on the claim to merge with the administrator's reason, the publication
+ * path's text rule (ADR 0086). The claim checks the facts it rests on itself.
+ */
+export const bidsFailureOverrideSchema = z
+  .object({
+    kind: z.literal("bids-failure"),
+    reason: z
+      .string()
+      .trim()
+      .min(
+        ACKNOWLEDGMENT_MIN_LENGTH,
+        `The reason needs at least ${ACKNOWLEDGMENT_MIN_LENGTH} characters`,
+      )
+      .max(
+        ACKNOWLEDGMENT_MAX_LENGTH,
+        `The reason is limited to ${ACKNOWLEDGMENT_MAX_LENGTH} characters`,
+      ),
+  })
+  .strict();
+
+export type BidsFailureOverride = z.infer<typeof bidsFailureOverrideSchema>;
+
 export const transitionSchema = z
   .object({
     from: z.enum(REPULL_STATUSES),
@@ -321,6 +355,8 @@ export const transitionSchema = z
     fields: z.record(z.string(), z.unknown()).default({}),
     // Never blank: `last_error` must not hold an empty string (ADR 0051 compares against it).
     error: z.string().trim().min(1).max(2000).optional(),
+    // Only on a claim to merge: see `bidsFailureOverrideSchema`.
+    override: bidsFailureOverrideSchema.optional(),
   })
   .strict();
 
@@ -944,6 +980,28 @@ export interface TransitionOptions {
   verified?: boolean;
   /** What the audit row records beside the edge: what the caller read, never a path or a key. */
   auditDetails?: Record<string, unknown>;
+  /**
+   * The reader of the facts a merge over a failed BIDS validation rests on, at the claimed head
+   * (`bidsOverrideRefusal` in `upstream-repull-merge.ts`, which the transition route passes): null
+   * when they hold, else the refusal. A claim that names the override is refused when no reader is
+   * given, so nothing can take it unchecked.
+   */
+  verifyBidsOverride?: (
+    env: Bindings,
+    row: RepullRow,
+    pr: RepullPullRequest,
+    sha: string,
+  ) => Promise<RepullRefusal | null>;
+}
+
+/** The edge a request asks for. */
+export interface TransitionRequest {
+  from: RepullStatus;
+  to: RepullStatus;
+  fields?: Record<string, unknown>;
+  error?: string;
+  /** A claim to merge over a failed BIDS validation, with the administrator's reason. */
+  override?: BidsFailureOverride;
 }
 
 /** A transition checked and built, not yet run. */
@@ -951,6 +1009,12 @@ export interface PreparedTransition {
   row: RepullRow;
   update: D1PreparedStatement;
   audit: D1PreparedStatement;
+  /**
+   * Statements that run after the audit row, each written only when the one before it wrote a row
+   * (`AUDIT_IF_PREVIOUS_CHANGED_SQL`), so only when the edge applied: the audit row of a merge over
+   * a failed BIDS validation, with its reason.
+   */
+  after?: D1PreparedStatement[];
   /**
    * Why the update matched nothing when the row itself had not moved: one of the conditions it
    * carries beyond the compare-and-set (the screen's verdict, the day's merge cap) failed.
@@ -1012,11 +1076,12 @@ export async function transitionRepull(
   env: Bindings,
   admin: { id: number },
   id: number,
-  t: { from: RepullStatus; to: RepullStatus; fields?: Record<string, unknown>; error?: string },
+  t: TransitionRequest,
+  opts: Pick<TransitionOptions, "verifyBidsOverride"> = {},
 ): Promise<{ row: RepullRow } | RepullRefusal> {
   const row = await getRepull(env.DB, id);
   if (!row) return { status: 404, code: "not-found", message: `No re-pull #${id}.` };
-  const prepared = await prepareTransition(env, admin, row, t);
+  const prepared = await prepareTransition(env, admin, row, t, opts);
   if (isRefusal(prepared)) return prepared;
   const done = await commitTransition(env.DB, prepared);
   return isRefusal(done) ? done : { row: done.row };
@@ -1030,7 +1095,7 @@ export async function prepareTransition(
   env: Bindings,
   admin: { id: number },
   row: RepullRow,
-  t: { from: RepullStatus; to: RepullStatus; fields?: Record<string, unknown>; error?: string },
+  t: TransitionRequest,
   opts: TransitionOptions = {},
 ): Promise<PreparedTransition | RepullRefusal> {
   const db = env.DB;
@@ -1081,6 +1146,13 @@ export async function prepareTransition(
       code: "merge-claim-held",
       message: `A merge is already claimed for re-pull #${id}.`,
       row,
+    };
+  }
+  if (t.override !== undefined && !claim) {
+    return {
+      status: 400,
+      code: "field-not-allowed",
+      message: "A merge over a failed BIDS validation is named only on a claim to merge.",
     };
   }
 
@@ -1222,6 +1294,26 @@ export async function prepareTransition(
       return fenced ? { ...fenced, row } : screenChanged(row);
     };
   }
+  // A merge over a failed BIDS validation: the facts it rests on, at the claimed head, read by the
+  // reader the caller gives, and refused when it gives none (ADR 0111, the Phase 7g amendment).
+  if (claim && claimPr && t.override !== undefined) {
+    if (!opts.verifyBidsOverride) {
+      return {
+        status: 409,
+        code: "bids-override-unverified",
+        message:
+          "A merge over a failed BIDS validation was asked for where nothing reads the facts it rests on; nothing was claimed.",
+        row,
+      };
+    }
+    const refused = await opts.verifyBidsOverride(
+      env,
+      row,
+      claimPr,
+      fields[claim.claimSha] as string,
+    );
+    if (refused) return { ...refused, row };
+  }
   if (screenedPr !== null) {
     // GitHub's head, not the caller's: read last, so every refusal that needs no network comes first.
     const cols = PULL_REQUEST_COLUMNS[screenedPr];
@@ -1280,10 +1372,35 @@ export async function prepareTransition(
         to: t.to,
         fields: Object.keys(fields),
         ...opts.auditDetails,
+        ...(t.override !== undefined ? { bids_override: true } : {}),
       }),
     }),
   );
-  return { row, update, audit, guardRefusal };
+  // The reason of a merge over a failed BIDS validation, written only when the claim is: its own
+  // statement follows the edge's audit row, which is written only when the edge applied.
+  const after =
+    t.override !== undefined && claim && claimPr
+      ? [
+          db.prepare(AUDIT_IF_PREVIOUS_CHANGED_SQL).bind(
+            ...auditLogParams({
+              userId: admin.id,
+              action: "repull_bids_override",
+              resourceType: "upstream_repull",
+              resourceId: String(id),
+              details: JSON.stringify({
+                dataset_id: row.dataset_id,
+                pr: claimPr,
+                sha: fields[claim.claimSha],
+                reason: t.override.reason,
+                bids_validation: "failure",
+                version_check: "success",
+                mergeable_state: "unstable",
+              }),
+            }),
+          ),
+        ]
+      : undefined;
+  return { row, update, audit, guardRefusal, ...(after ? { after } : {}) };
 }
 
 /**
@@ -1297,7 +1414,12 @@ export async function commitTransition(
   before: D1PreparedStatement[] = [],
 ): Promise<{ row: RepullRow; results: D1Result[] } | RepullRefusal> {
   const { row } = prepared;
-  const results = await db.batch([...before, prepared.update, prepared.audit]);
+  const results = await db.batch([
+    ...before,
+    prepared.update,
+    prepared.audit,
+    ...(prepared.after ?? []),
+  ]);
   const after = await getRepull(db, row.id);
   if (!after) {
     // Deleting a dataset deletes its records without touching the revision, so the row can be

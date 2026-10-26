@@ -836,6 +836,18 @@ export const DISPATCH_CODES = [
   "patch-main-moved",
   "patch-tree-mismatch",
   "merge-main-moved",
+  // An administrator's merge over a failed BIDS validation (Phase 7g), refused at the claim: the
+  // record is the automatic path's, which no one merges over a failed check; GitHub reports the
+  // pull request `blocked` (a rule requires the check, so merging would be a bypass) or anything
+  // but `unstable`; BIDS validation did not complete with `failure`, or `version-check` did not
+  // complete with `success`, at the claimed head; or the claim named it where nothing reads those
+  // facts.
+  "bids-override-automatic",
+  "bids-override-blocked",
+  "bids-override-not-unstable",
+  "bids-override-bids",
+  "bids-override-version-check",
+  "bids-override-unverified",
   "foreign-pull-request-merged",
   "take-ours-invalid",
   "wait-for-release",

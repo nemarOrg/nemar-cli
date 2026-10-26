@@ -158,6 +158,15 @@ export interface GitHubStandin {
   /** GitHub's comparison word for `base...head` (`identical`, `ahead`, ...), or null for 404. */
   compareCommits: ((dataset: string, base: string, head: string) => Promise<string | null>) | null;
   /**
+   * The check runs of a commit (`GET .../commits/<sha>/check-runs`), keyed `<dataset>@<sha>`,
+   * filtered by the query's `check_name` and `app_id` as GitHub filters them: the Worker reads BIDS
+   * validation and `version-check` this way. None when a commit has no entry.
+   */
+  checkRuns: Record<
+    string,
+    Array<{ id: number; name: string; status: string; conclusion: string | null; app_id: number }>
+  >;
+  /**
    * When true, the review POST and the merge PUT are APPLIED and answered 200 with a body that is
    * not JSON: the case where a write happened and its answer cannot be read.
    */
@@ -210,6 +219,7 @@ export function startGitHubStandin(): GitHubStandin {
     lostMergeAnswers: false,
     resolveTag: null as GitHubStandin["resolveTag"],
     compareCommits: null as GitHubStandin["compareCommits"],
+    checkRuns: {} as GitHubStandin["checkRuns"],
     expiredTokens: new Set<string>(),
   };
   /** The head a pull request has now: its branch's commit when heads are live. */
@@ -287,6 +297,27 @@ export function startGitHubStandin(): GitHubStandin {
         return word
           ? Response.json({ status: word })
           : Response.json({ message: "Not Found" }, { status: 404 });
+      }
+      const runs = url.pathname.match(
+        /^\/repos\/nemarDatasets\/([^/]+)\/commits\/([0-9a-f]{40})\/check-runs$/,
+      );
+      if (req.method === "GET" && runs) {
+        const name = url.searchParams.get("check_name");
+        const app = url.searchParams.get("app_id");
+        const kept = (state.checkRuns[`${runs[1]}@${runs[2]}`] ?? []).filter(
+          (r) => (name === null || r.name === name) && (app === null || String(r.app_id) === app),
+        );
+        return Response.json({
+          total_count: kept.length,
+          check_runs: kept.map((r) => ({
+            id: r.id,
+            name: r.name,
+            status: r.status,
+            conclusion: r.conclusion,
+            head_sha: runs[2],
+            app: { id: r.app_id },
+          })),
+        });
       }
       // The question the review's exemption asks once an account has matched (ADR 0107): an
       // administrator on every dataset, whoever is asked. A test that needs another answer says
@@ -686,6 +717,9 @@ export function startGitHubStandin(): GitHubStandin {
     get expiredTokens() {
       return state.expiredTokens;
     },
+    get checkRuns() {
+      return state.checkRuns;
+    },
     reset() {
       state.seen.length = 0;
       state.searchPages = [];
@@ -708,6 +742,7 @@ export function startGitHubStandin(): GitHubStandin {
       state.comments.length = 0;
       state.expiredTokens.clear();
       for (const k of Object.keys(state.pulls)) delete state.pulls[k];
+      for (const k of Object.keys(state.checkRuns)) delete state.checkRuns[k];
       for (const k of Object.keys(state.naming)) delete state.naming[k];
       for (const k of Object.keys(state.users)) delete state.users[k];
       for (const k of Object.keys(reads)) delete reads[k];
