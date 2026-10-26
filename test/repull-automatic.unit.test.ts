@@ -34,10 +34,13 @@ import {
 } from "../backend/src/services/github/dispatch";
 import { repullStateSchema } from "../backend/src/services/upstream-repull-dispatch";
 import {
+  AUTO_COPY_BUDGET_SECONDS,
+  AUTO_COPY_BYTES_PER_SECOND,
   AUTO_MAX_COPY_BYTES,
   CURRENT_PLANNER_VERSION,
   DISPATCH_CODES,
   DISPATCH_ID_MAX,
+  automaticCopySeconds,
   opensTheSameUtcDay,
 } from "../shared/repull-state";
 import {
@@ -48,11 +51,13 @@ import {
   DISPATCH_PAYLOAD_KEYS,
   PRODUCTION_API,
   RESULT_LINE_RE,
+  appTokenRefused,
   assertAutomaticCounts,
   assertAutomaticPlan,
   automaticContext,
   automaticLine,
   automaticRefusal,
+  copyBudgetSeconds,
   dispatchCodeOf,
   isAutomaticApi,
   isAutomaticInvocation,
@@ -472,16 +477,68 @@ describe("the plan the automatic path takes", () => {
     corrections: 0,
     copy_bytes: 4096,
     copy_bytes_unknown: 0,
+    copy_items: 3,
+    local_uploads: 1,
+    local_bytes: 512,
+    local_bytes_unknown: 0,
   };
+  const budgetBytes = AUTO_COPY_BUDGET_SECONDS * AUTO_COPY_BYTES_PER_SECOND;
+  const none = { copy_items: 0, local_uploads: 0, local_bytes: 0 };
 
-  test("an executable clean plan of known size is taken", () => {
+  test("an executable clean plan of known size, inside the time budget, is taken", () => {
     expect(() => assertAutomaticPlan({ executable: true, body: body(clean) })).not.toThrow();
-    expect(() =>
-      assertAutomaticPlan({
-        executable: true,
-        body: body({ ...clean, copy_bytes: AUTO_MAX_COPY_BYTES }),
-      }),
-    ).not.toThrow();
+    // At the budget exactly, by bytes and by objects.
+    for (const c of [
+      { ...clean, ...none, copy_bytes: budgetBytes },
+      { ...clean, ...none, copy_bytes: 0, copy_items: AUTO_COPY_BUDGET_SECONDS },
+    ]) {
+      expect(() => assertAutomaticPlan({ executable: true, body: body(c) })).not.toThrow();
+    }
+    expect(automaticCopySeconds({ bytes: budgetBytes, objects: 0 })).toBe(AUTO_COPY_BUDGET_SECONDS);
+  });
+
+  test("a copy the estimate puts past the App token's hour is refused, the uploads included", () => {
+    for (const c of [
+      { ...clean, ...none, copy_bytes: budgetBytes + 1 },
+      { ...clean, ...none, copy_bytes: 0, copy_items: AUTO_COPY_BUDGET_SECONDS + 1 },
+      { ...clean, ...none, copy_bytes: 0, local_bytes: budgetBytes + 1 },
+      { ...clean, ...none, copy_bytes: 0, local_uploads: AUTO_COPY_BUDGET_SECONDS + 1 },
+      // A count left out, or a size of an upload not known, is never zero.
+      { ...clean, copy_items: undefined },
+      { ...clean, local_bytes: undefined },
+      { ...clean, local_uploads: undefined },
+      { ...clean, local_bytes_unknown: 1 },
+      { ...clean, local_bytes_unknown: undefined },
+    ]) {
+      expect([
+        c,
+        refusalOf(() => assertAutomaticPlan({ executable: true, body: body(c) })).code,
+      ]).toEqual([c, "auto-copy-too-long"]);
+    }
+    // The budget is twenty minutes of the token's hour, and the size bound is still checked first.
+    expect(AUTO_COPY_BUDGET_SECONDS).toBe(20 * 60);
+    expect(
+      refusalOf(() =>
+        assertAutomaticPlan({
+          executable: true,
+          body: body({ ...clean, copy_bytes: AUTO_MAX_COPY_BYTES + 1 }),
+        }),
+      ).code,
+    ).toBe("auto-copy-too-large");
+  });
+
+  test("the budget can be shortened for a suite, never lengthened", () => {
+    expect(copyBudgetSeconds({})).toBe(AUTO_COPY_BUDGET_SECONDS);
+    expect(copyBudgetSeconds({ NEMAR_REPULL_COPY_BUDGET_SECONDS: "1" })).toBe(1);
+    expect(copyBudgetSeconds({ NEMAR_REPULL_COPY_BUDGET_SECONDS: "999999" })).toBe(
+      AUTO_COPY_BUDGET_SECONDS,
+    );
+    expect(copyBudgetSeconds({ NEMAR_REPULL_COPY_BUDGET_SECONDS: "-5" })).toBe(
+      AUTO_COPY_BUDGET_SECONDS,
+    );
+    expect(copyBudgetSeconds({ NEMAR_REPULL_COPY_BUDGET_SECONDS: "1e9" })).toBe(
+      AUTO_COPY_BUDGET_SECONDS,
+    );
   });
 
   test("each way a plan is not one the path takes refuses with its word", () => {
@@ -523,6 +580,39 @@ describe("the plan the automatic path takes", () => {
     expect(refusalOf(() => assertAutomaticCounts(body({ ...clean, corrections: 2 }))).code).toBe(
       "auto-not-clean-plan",
     );
+  });
+});
+
+describe("a run whose App token GitHub no longer takes", () => {
+  function github(answer: number | "network") {
+    const seen: Array<{ url: string; auth: string | null }> = [];
+    const fetchImpl = (async (url: string | URL, init?: RequestInit) => {
+      seen.push({ url: String(url), auth: new Headers(init?.headers).get("authorization") });
+      if (answer === "network") throw new TypeError("fetch failed");
+      return Response.json({ message: "x" }, { status: answer });
+    }) as typeof fetch;
+    return { seen, fetchImpl };
+  }
+
+  test("a 401 for the dataset's repository is an expired token", async () => {
+    const g = github(401);
+    expect(await appTokenRefused("on099999", { GH_TOKEN: "ghs_old" }, g.fetchImpl)).toBe(true);
+    expect(g.seen).toEqual([
+      { url: "https://api.github.com/repos/nemarDatasets/on099999", auth: "Bearer ghs_old" },
+    ]);
+  });
+
+  test("any other answer, none, or no token is not taken as expiry", async () => {
+    for (const answer of [200, 403, 404, 500, "network"] as const) {
+      const g = github(answer);
+      expect([answer, await appTokenRefused("on099999", { GH_TOKEN: "t" }, g.fetchImpl)]).toEqual([
+        answer,
+        false,
+      ]);
+    }
+    const none = github(401);
+    expect(await appTokenRefused("on099999", {}, none.fetchImpl)).toBe(false);
+    expect(none.seen).toEqual([]);
   });
 });
 

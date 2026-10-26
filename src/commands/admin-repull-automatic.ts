@@ -37,6 +37,7 @@ import {
   type AutomaticContext,
   type AutomaticSink,
   type LineValue,
+  appTokenRefused,
   assertAutomaticPlan,
   automaticContext,
   automaticRefusal,
@@ -166,6 +167,14 @@ async function runAutomatic(spec: Spec): Promise<void> {
     outcome = await spec.body(ctx);
   } catch (err) {
     outcome = outcomeOf(err);
+  }
+  // A run that outlived its App token fails at its next push or pull-request call, with that step's
+  // word: when GitHub no longer takes the token, the report says why, whatever the step called it.
+  if (
+    (outcome.phase === "refused" || outcome.phase === "failed") &&
+    (await appTokenRefused(ctx.dispatch.datasetId, process.env))
+  ) {
+    outcome = { phase: "failed", code: "token-expired", exit: outcome.exit };
   }
   if (outcome.phase !== "planned") {
     const answer = await reportDispatch(

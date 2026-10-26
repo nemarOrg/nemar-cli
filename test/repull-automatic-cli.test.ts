@@ -50,7 +50,7 @@ import {
   setDefaultTimeout,
   test,
 } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { which } from "bun";
@@ -438,6 +438,53 @@ describe.skipIf(!awsInstalled)("an automatic run opens its pull request", () => 
     expect(dispatchRow(c.id)).toMatchObject({ status: "refused", code: "repull-in-flight" });
     expect(repullRows()).toMatchObject([{ status: "copied", origin: "administrator" }]);
     expect(w.gh.seen.filter((s) => s.token === APP_TOKEN && s.method !== "GET")).toEqual([]);
+  });
+
+  test("a copy the estimate puts past the App token's hour is refused at plan time", async () => {
+    const c = await claimOpen();
+    writeEvent(c);
+    // The fixture's copy is small; the budget is shortened, which may only ever refuse more.
+    const plan = await auto(planArgs(c), { NEMAR_REPULL_COPY_BUDGET_SECONDS: "1" });
+    expect(plan.exitCode, plan.all).toBe(3);
+    expectQuiet(plan, c, "refused");
+    expect(dispatchRow(c.id)).toMatchObject({ status: "refused", code: "auto-copy-too-long" });
+    expect(repullRows()).toEqual([]);
+    expect(ghWrites()).toEqual([]);
+    expect(s3Writes()).toEqual([]);
+  });
+
+  test("a run that outlived its App token is reported token-expired, whatever its step called it", async () => {
+    // From the copy on, the token is past its hour: GitHub answers it 401, and the registration's
+    // push to the origin is turned away as an expired token's would be.
+    const hook = join(w.fx.originRepo, "hooks", "pre-receive");
+    let armed = false;
+    w.setApiHook(async (req) => {
+      if (armed || req.method !== "POST" || !/\/admin\/repulls\/\d+\/transition$/.test(req.url))
+        return;
+      const body = (await req.json()) as { from?: string; to?: string };
+      if (body.from !== "prepared" || body.to !== "copied") return;
+      armed = true;
+      writeFileSync(hook, "#!/bin/sh\necho 'Invalid username or token.' >&2\nexit 1\n");
+      chmodSync(hook, 0o755);
+      w.gh.expiredTokens.add(APP_TOKEN);
+    });
+    try {
+      const c = await claimOpen();
+      writeEvent(c);
+      expect((await auto(planArgs(c))).exitCode).toBe(0);
+      const exec = await auto(executeArgs(c));
+      expect(armed).toBe(true);
+      expect(exec.exitCode, exec.all).toBe(3);
+      expectQuiet(exec, c, "failed");
+      expect(exec.all).toContain("code=token-expired");
+      expect(dispatchRow(c.id)).toMatchObject({ status: "failed", code: "token-expired" });
+      // The record stays where the step left it, with the step's own error on it.
+      const [row] = repullRows();
+      expect(row?.status).toBe("copied");
+      expect(row?.last_error).toStartWith("[register:");
+    } finally {
+      rmSync(hook, { force: true });
+    }
   });
 });
 

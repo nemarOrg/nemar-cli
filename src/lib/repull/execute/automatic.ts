@@ -42,6 +42,7 @@ import { readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { isOpenNeuroTag, sameUpstreamTag } from "../../../../shared/openneuro-tag.js";
 import {
+  AUTO_COPY_BUDGET_SECONDS,
   AUTO_MAX_COPY_BYTES,
   CURRENT_PLANNER_VERSION,
   DISPATCH_ID_RE,
@@ -49,10 +50,12 @@ import {
   type DispatchCode,
   type DispatchPhase,
   NEMAR_VERSION_RE,
+  automaticCopySeconds,
   isDispatchCode,
 } from "../../../../shared/repull-state.js";
 import { IS_DEV_BUILD, getApiUrl } from "../../api/client.js";
 import { isDebugEnabled } from "../../debug-log.js";
+import { githubApiBase } from "../../pr-review-approve.js";
 import { isVerbose } from "../../verbose.js";
 import { version as cliVersion } from "../../version.js";
 import type { PlanBody } from "../digest.js";
@@ -541,6 +544,72 @@ export function assertAutomaticCounts(body: PlanBody): void {
       "auto-copy-too-large",
       `An automatic re-pull takes only a plan whose copy size is known and at most ${AUTO_MAX_COPY_BYTES} bytes.`,
     );
+  }
+  // The copy runs inside the App token's hour: what it and the uploads of the preparation would take,
+  // by the estimate, must fit the budget. A count left out is unknown, never zero.
+  const objects = counts.copy_items;
+  const localBytes = counts.local_bytes;
+  const localObjects = counts.local_uploads;
+  const budget = copyBudgetSeconds();
+  if (
+    objects === undefined ||
+    localBytes === undefined ||
+    localObjects === undefined ||
+    counts.local_bytes_unknown !== 0 ||
+    automaticCopySeconds({ bytes: bytes + localBytes, objects: objects + localObjects }) > budget
+  ) {
+    throw new ExecuteRefused(
+      "auto-copy-too-long",
+      `An automatic re-pull takes only a plan whose copy, by its known size and count, fits ${Math.floor(budget / 60)} minutes: the App token that pushes it lasts an hour.`,
+    );
+  }
+}
+
+/**
+ * The copy's time budget: {@link AUTO_COPY_BUDGET_SECONDS}, or less when
+ * `NEMAR_REPULL_COPY_BUDGET_SECONDS` names fewer (the suites shorten it to reach the refusal with a
+ * small fixture). A value that would lengthen it, or that is not a whole number, is ignored, so the
+ * override can only refuse more.
+ */
+export function copyBudgetSeconds(env: Env = process.env): number {
+  const raw = env.NEMAR_REPULL_COPY_BUDGET_SECONDS?.trim() ?? "";
+  const n = /^\d{1,9}$/.test(raw) ? Number(raw) : Number.NaN;
+  return Number.isFinite(n) && n < AUTO_COPY_BUDGET_SECONDS ? n : AUTO_COPY_BUDGET_SECONDS;
+}
+
+/**
+ * Whether GitHub no longer takes the App token the run was given: `GET /repos/nemarDatasets/<id>`
+ * with it answers 401. Asked only after a run failed or refused, because an installation token lasts
+ * an hour and a run that outlives it fails at its next push or pull-request call with whatever word
+ * that step has for it; the run then reports `token-expired`, which only a new run's token can carry
+ * on from. Any other answer, or none, is not taken as expiry.
+ */
+export async function appTokenRefused(
+  datasetId: string,
+  env: Env,
+  fetchImpl: typeof fetch = fetch,
+): Promise<boolean> {
+  const token = env.GH_TOKEN?.trim();
+  if (!token) return false;
+  let base: string;
+  try {
+    base = githubApiBase(env);
+  } catch {
+    return false;
+  }
+  try {
+    const res = await fetchImpl(`${base}/repos/nemarDatasets/${datasetId}`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/vnd.github+json",
+        "User-Agent": "nemar-cli",
+      },
+      signal: AbortSignal.timeout(10_000),
+    });
+    await res.body?.cancel().catch(() => undefined);
+    return res.status === 401;
+  } catch {
+    return false;
   }
 }
 

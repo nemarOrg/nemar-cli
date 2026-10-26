@@ -670,6 +670,10 @@ export const DISPATCH_CODES = [
   "finish-incomplete",
   "report-unanswered",
   "runner-credentials",
+  // The copy would outlast the App token's hour (`automaticCopySeconds` over the budget); and a run
+  // that failed while GitHub no longer took its App token, which only a new run's token can carry on.
+  "auto-copy-too-long",
+  "token-expired",
   // The API the run would talk to is not production's (an override aimed elsewhere): nothing was
   // sent there, the token included, so this word reaches the Worker only through the backstop.
   "auto-api-not-production",
@@ -892,6 +896,7 @@ export function isDispatchCode(value: unknown): value is DispatchCode {
 export const DISPATCH_FINAL_CODES = [
   "auto-not-clean-plan",
   "auto-copy-too-large",
+  "auto-copy-too-long",
   "ledger-correction-unexplained",
   "key-without-pin",
   "dead-recording-unpinned",
@@ -1022,6 +1027,37 @@ export const AUTO_MAX_COPY_BYTES = 1024 ** 4;
 
 /** A dispatch token as the Worker signs it: an HMAC-SHA256 digest in lowercase hex. */
 export const DISPATCH_TOKEN_RE = /^[0-9a-f]{64}$/;
+
+/**
+ * The automatic copy's time budget, in seconds (ADR 0111, the Phase 7d amendment). The central
+ * workflow mints the App token before it installs anything, and an installation token lasts one
+ * hour; the copy runs inside that hour, after the install, the plan and the preparation and before
+ * the registration, the push and the pull request, which need the token. Twenty minutes is the
+ * copy's share of the hour, the other steps' forty minutes being an allowance no measurement here
+ * bounds. A plan whose copy {@link automaticCopySeconds} puts past it is refused before the copy
+ * starts (`auto-copy-too-long`), at the plan and again from the live plan at execute, as a copy
+ * over {@link AUTO_MAX_COPY_BYTES} is; a run that fails with the token expired anyway says so
+ * (`token-expired`).
+ */
+export const AUTO_COPY_BUDGET_SECONDS = 20 * 60;
+
+/**
+ * The bytes a second the estimate takes: 30 MiB/s, the server-side CopyObject rate ADR 0064 records
+ * as measured into NEMAR's bucket, for the whole copy, with no credit for the eight copies in flight.
+ */
+export const AUTO_COPY_BYTES_PER_SECOND = 30 * 1024 ** 2;
+
+/**
+ * The seconds an object adds whatever its size: the copy makes three `aws` calls an object, and one
+ * call measured about 0.29 s of process start and request against a local stand-in on 2026-10-25
+ * (a real S3 call adds its network time), so a second an object, with no credit for concurrency.
+ */
+export const AUTO_COPY_SECONDS_PER_OBJECT = 1;
+
+/** How long the estimate says a copy of `bytes` in `objects` objects takes, in seconds. */
+export function automaticCopySeconds(c: { bytes: number; objects: number }): number {
+  return c.bytes / AUTO_COPY_BYTES_PER_SECOND + c.objects * AUTO_COPY_SECONDS_PER_OBJECT;
+}
 
 /**
  * The largest dispatch or re-pull id a dispatch's payload carries, and its shape as a string: one
