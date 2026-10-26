@@ -637,6 +637,10 @@ export const DISPATCH_CODES = [
   "dispatch-unconfigured",
   "dispatch-refused",
   "dispatch-failed",
+  // GitHub turned a resume's send away for a reason about the Worker rather than the dispatch (its
+  // credential, its permission, a rate limit): nothing ran, and it spends none of the row's
+  // dispatches.
+  "dispatch-deferred",
   // The Worker's answers to a run's report, which the run may pass on when it then fails.
   "invalid-token",
   "already-started",
@@ -885,7 +889,15 @@ export const DISPATCH_FINAL_CODES = [
  * Why an automatic re-pull waits where it is (`upstream_repulls.hold_reason`): the first rule of
  * the machine-clean definition that does not hold (`shared/repull-machine-clean.ts` lists the rules
  * in the order that yields these words, `MACHINE_CLEAN_HOLDS`), or a bound the automatic path
- * reached. A hold is an observation, never a transition.
+ * reached: `cap-exhausted` (a day's units of a cap are used), `cap-unreadable` (a cap is set to
+ * something its reader cannot take, so it reads 0: a fault in the configuration, not a full day),
+ * `resume-exhausted` (a row that
+ * stalled before its pull request opened was dispatched as often as the automatic path dispatches
+ * one), `resume-refused` (its last run refused, so another would refuse again), and the later
+ * slices' `finish-exhausted` and `merge-refused`; and `gates-refused`, a row machine clean found
+ * clean whose edge into `gates_clear` the record's own transition refused (the refusal's code is in
+ * the advance tick's log), which should not happen and is seen when it does. A hold is an
+ * observation, never a transition.
  */
 export const REPULL_HOLD_REASONS = [
   "not-production",
@@ -925,9 +937,12 @@ export const REPULL_HOLD_REASONS = [
   "review-exempt",
   "review-unreadable",
   "not-clean",
+  "gates-refused",
   "cap-exhausted",
+  "cap-unreadable",
   "claim-held",
   "resume-exhausted",
+  "resume-refused",
   "finish-exhausted",
   "merge-refused",
 ] as const;

@@ -43,6 +43,7 @@ import {
 import { deleteDatasetCascade } from "../src/services/deletion";
 import { reconcileReservedVersionDois } from "../src/services/doi-reconcile";
 import { blockedCandidateQuery } from "../src/services/publication-sweep";
+import { runRepullAdvanceCron } from "../src/services/upstream-repull-advance";
 import { sweepUnreportedDispatches } from "../src/services/upstream-repull-dispatch";
 import { runRepullSchedulerCron } from "../src/services/upstream-repull-scheduler";
 import type { Bindings } from "../src/types/bindings";
@@ -407,8 +408,9 @@ describe("the dev cleanup cron never selects a reserved fixture (#1440)", () => 
 });
 
 describe("the automatic re-pull's cron jobs refuse outside exact production (#1913)", () => {
-  // The scheduler dispatches against the shared nemarDatasets org and the watchdog writes the
-  // dispatch table, which only the production Worker fills. Both test `ENVIRONMENT` for the exact
+  // The scheduler dispatches against the shared nemarDatasets org, the advance tick reads and acts
+  // on pull requests there, and the watchdog writes the dispatch table, which only the production
+  // Worker fills. Each tests `ENVIRONMENT` for the exact
   // string `production`, the REVERSE of isNonProductionEnv's fail-closed reading: here the danger
   // is acting, so an unset or misspelled binding must leave them off (ADR 0111, the Phase 7a
   // slice). A D1 that throws on first use proves nothing was read or written.
@@ -437,7 +439,7 @@ describe("the automatic re-pull's cron jobs refuse outside exact production (#19
     "Production",
     " production",
   ]) {
-    test(`ENVIRONMENT=${JSON.stringify(environment)}: both return null with D1 untouched`, async () => {
+    test(`ENVIRONMENT=${JSON.stringify(environment)}: each returns null with D1 untouched`, async () => {
       const p = untouched();
       const e = {
         ENVIRONMENT: environment,
@@ -448,19 +450,25 @@ describe("the automatic re-pull's cron jobs refuse outside exact production (#19
       } as unknown as Bindings;
       expect(await runRepullSchedulerCron(e, { cliVersion: "1.2.3" })).toBeNull();
       expect(await sweepUnreportedDispatches(e)).toBeNull();
+      expect(await runRepullAdvanceCron(e)).toBeNull();
       expect(p.touched()).toBe(false);
     });
   }
 
-  test("in production both reach D1, so the probe above is not vacuous", async () => {
+  test("in production each reaches D1, so the probe above is not vacuous", async () => {
     const db = realD1(freshDb());
     const e = { ENVIRONMENT: "production", DB: db } as unknown as Bindings;
     // The open switch is off: the scheduler only stamps its row.
     expect((await runRepullSchedulerCron(e, { cliVersion: "1.2.3" }))?.outcome).toBe("switch-off");
     expect(await sweepUnreportedDispatches(e)).toEqual({ marked: 0 });
+    // The advance tick finds no automatic re-pull and stamps that it ran.
+    expect((await runRepullAdvanceCron(e))?.examined).toBe(0);
     const p = untouched();
     const reached = { ENVIRONMENT: "production", DB: p.db } as unknown as Bindings;
     await runRepullSchedulerCron(reached, { cliVersion: "1.2.3" });
     expect(p.touched()).toBe(true);
+    const q = untouched();
+    await runRepullAdvanceCron({ ENVIRONMENT: "production", DB: q.db } as unknown as Bindings);
+    expect(q.touched()).toBe(true);
   });
 });
