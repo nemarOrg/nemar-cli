@@ -1604,6 +1604,27 @@ describe("a stalled automatic re-pull is resumed", () => {
     });
   }
 
+  test("a send GitHub refused, which has no report, is timed from when it was sent", async () => {
+    const id = stalled("copied", TEN());
+    endedDispatch(id, "failed");
+    gh.dispatchStatus = 422;
+    const r = await resumeTick(TEN());
+    expect(r.errors).toEqual(["dispatch-refused"]);
+    const refused = dispatchesOf(id).at(-1) as DispatchRow;
+    expect(refused).toMatchObject({ status: "dispatch_failed", reported_at: null });
+    // It was sent at 10:00; GitHub's refusal is never a report, so its send is all that says when.
+    db.run("UPDATE upstream_repull_dispatches SET dispatched_at = ? WHERE id = ?", [
+      d1Time(TEN()),
+      refused.id,
+    ]);
+    gh.dispatchStatus = 204;
+    const sends = () => gh.requests.filter((q) => q.endsWith("/.github/dispatches")).length;
+    expect(sends()).toBe(1);
+    const next = await resumeTick(new Date(TEN().getTime() + HALF_HOUR));
+    expect(next).toMatchObject({ resumed: 0, notDue: 1 });
+    expect(sends()).toBe(1);
+  });
+
   test("a time that does not parse is an error, never a quiet wait", async () => {
     const id = stalled("copied", TEN(), { over: { updated_at: "not a time" } });
     endedDispatch(id, "failed");
