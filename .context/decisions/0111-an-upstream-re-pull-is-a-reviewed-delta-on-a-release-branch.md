@@ -15,6 +15,7 @@ Decisions 4 and 10 are built, as their dated amendments below record, and so are
 *Annotated 2026-10-25: and by the Phase 7 amendment's 7c slice (#1913): decision 6's scheduled path is built, in production only, and does nothing while its switch is off.*
 *Annotated 2026-10-25: and by the Phase 6f amendment (#1912): resume, the administrator's merge through one gate, the release and the lock are built through `released`.*
 *Annotated 2026-10-25: and by the Phase 7f amendment (#1913): the advance tick holds, gates and resumes the automatic re-pulls, in production only, and while its switch is off only records that it is off; decision 7's merge is still not built.*
+*Annotated 2026-10-25: and by the Phase 7d amendment (#1913): the unattended run that opens an automatic re-pull's pull request and finishes a merged one is built, in a central workflow deployed only with the epic release.*
 
 ## Context
 
@@ -36,6 +37,7 @@ Everything in this section is designed and not yet built.
 *Annotated 2026-10-25: and by the Phase 7 amendment's 7c slice: the scheduled path of decision 6 is built, and does nothing while `AUTO_REPULL_ENABLED` is off.*
 *Annotated 2026-10-25: and by the Phase 6f amendment: resume, the administrator's merge, the release and the lock are built through `released`.*
 *Annotated 2026-10-25: and by the Phase 7f amendment: the automatic path's gates edge and its resume of a stalled run are built; the Worker's merge is not.*
+*Annotated 2026-10-25: and by the Phase 7d amendment: the unattended run of decision 6's scheduled path is built, to the open pull request and from a merge to `complete`.*
 
 **An upstream re-pull replays the delta between two pinned upstream tags onto NEMAR's `main` as one synthesized commit on `release/vN.0.0`, landed through a pull request; N.0.0 is a pure mirror of the upstream snapshot, and NEMAR's corrections follow as N.0.1.**
 
@@ -244,6 +246,7 @@ ADR 0086 exempts `xx` from the identifier screen, so an `xx` re-pull never has a
   The App is not exempt, so the review runs, and ADR 0109 fails a changed `CHANGES` line and holds a replaced recording, both normal in a re-pull; until a re-pull's review passes, none is machine clean.
   *Annotated 2026-10-25: corrected by the Phase 7e amendment: the review's intake skipped every bot's pull request, so it did not run; it now runs on the App's automatic re-pull pull request when the Worker starts it, and on no other bot's.*
 - Whether enrichment commits on the release branch move its head after the screen read it.
+  *Annotated 2026-10-25: the Phase 7d amendment's settle records enrichment's moves of an automatic run's release head before the run reports it, and a later move holds the pull request; how soon enrichment commits is seen only in production.*
 - Whether OpenNeuro writes S3 before it pushes to GitHub, and whether the object at a path lags the pinned `versionId`.
 - That upstream's `.log.rmet` records a `versionId` per key, which the design record states and nothing here has checked.
 - That the dataset workflows tag the squash merge of a re-pull pull request as they tag other merges to `main`.
@@ -1177,6 +1180,7 @@ The open cap, claimed at dispatch.
 - The claim reads the switch, the secret and the cap again when it claims, so one that changed while a tick ran ends the tick with the claim's own word (`switch-off`, `unconfigured`, `cap-unreadable`, or `cap-reached` when the day filled), before that mirror.
 - The tick runs on the production daily cron at 03:00 UTC.
   The timing that makes a day's dispatches that day's pull requests is pinned by the slice that writes the workflow, as the 7b slice says.
+  *Annotated 2026-10-25: pinned by the Phase 7d amendment's test, for the daily tick and for the stalled-run slice's resume window.*
 
 Production only, and gate G4 in code.
 
@@ -1618,35 +1622,55 @@ It builds the run a dispatch starts: the central workflow that opens an automati
 Nothing here merges; the Worker's merge is a later slice's.
 The workflow is authored in this repository and not deployed: its copy in `nemarDatasets/.github` is a pull request of its own, held until the epic ships, so until then GitHub takes the Worker's dispatches and nothing runs, and the watchdog ends each one `unreported`.
 Nothing here sends mail or adds a route.
+Four annotations are added to earlier text, on the record's header, on the Decision section's, on the 7c slice's timing sentence and on the "Not yet verified" item about enrichment.
 
 ### Where the run executes
 
 - The run is the one job of `run-upstream-repull.yml` in `nemarDatasets/.github`, started by the Worker's repository dispatch and by no other event, as the import's own workflow is started.
-- In open mode it runs `nemar admin repull plan` and then `nemar admin repull execute`, through the execution an administrator's run takes (the record, the preparation, the copy, the registration, the release branch and the pull request), never a second path; in finish mode it runs `nemar admin repull resume`, through the release and the lock to `complete`.
+- In open mode it runs `nemar admin repull plan` and then `nemar admin repull execute`, through the execution an administrator's run takes (the record, the preparation, the copy, the registration, the release branch and the pull request), never a second path.
+  In finish mode it runs `nemar admin repull resume`, through the release and the lock to `complete`, waiting at most 30 minutes (`--wait-minutes 30`) for the tag and the version row, which the finish dispatch is claimed after anyway; still waiting at that bound is `failed finish-incomplete`, resumable.
   It never merges.
 - The release branch is pushed, and the pull request opened, with an App token the job mints for the dispatch's dataset repository alone, with write on its contents and its pull requests and nothing else, so the App is the pull request's author.
+  Every action the job uses is pinned to a full commit, the commits the publication review's workflow pins.
 - Each run is its own concurrency group, never one taken from the payload: GitHub replaces the pending run of a group, so a group named by the dataset would let a forged event replace a dispatched run before it started, the reason ADR 0092's review workflow gives for its own.
   The Worker's one live dispatch per dataset keeps two runs off one dataset.
-- The job's bound is 330 minutes, shared with the CLI as one constant.
+  The plan named a group per dataset; this departs from it, in the safer direction.
+- The job's bound is 330 minutes, `REPULL_JOB_TIMEOUT_MINUTES` in `shared/repull-state.ts`, which the workflow's test pins `timeout-minutes` to; nothing in the CLI or the Worker reads it.
   An hour of queueing and that bound end inside the watchdog's eight hours, and a dispatch claimed at the daily tick, at 03:00 UTC, ends before the UTC day it was counted in does, which is the timing the Phase 7b slice asked a later slice to pin: the open cap then bounds the pull requests opened in a day.
-  The slice that resumes stalled runs claims open dispatches later in the day, and the same check (`opensTheSameUtcDay` in `shared/repull-state.ts`) bounds its last hour.
+  The plan put the check of the last resume hour in this slice's test as well; the stalled-run slice, merged first, owns that hour (`RESUME_WINDOW_UTC`, 03:00 to 15:59 UTC), and this slice's test now checks it with the same function (`opensTheSameUtcDay`).
+
+### The App token's hour
+
+- An installation token lasts an hour, and the job mints it before it installs anything, so no code installed later runs before the App's private key is used.
+  The copy runs inside that hour, after the install, the plan and the preparation and before the registration, the push and the pull request, which need the token.
+- So the automatic path refuses a plan whose copy would take more than 20 minutes (`auto-copy-too-long`), at the plan and again from the live plan at execute, before the copy starts, as it refuses a copy over 1 TiB; it is one of the words that end the automatic path for a tag, and an administrator may still re-pull such a dataset by hand.
+  The estimate is the copy's bytes and the preparation's uploads at 30 MiB/s, the server-side CopyObject rate ADR 0064 records as measured into NEMAR's bucket, with no credit for the eight copies in flight, plus a second an object, three `aws` calls an object having measured about 0.29 s each against a local stand-in; a count the plan does not state is unknown and refuses.
+  The other forty minutes of the hour are an allowance for the install, the two plans, the preparation and the push, which no measurement here bounds.
+  The Worker does not check this bound: it does not receive the object count.
+- A run that fails while GitHub answers its App token 401 is reported `token-expired`, whatever its step called the failure, so a run that outlived its token is never reported as a refusal it did not make; the record keeps the step's own error.
+  A later dispatch's run, with a token of its own, can take it up only as the next section allows.
 
 ### The log is public
 
-- In automatic mode the CLI prints only lines of the form `repull-auto: <event> <key>=<value>`, whose values are counts and fixed words, and ends with one result line, `repull-auto: result phase=<phase>`, with `code=<word>` when the run refused or failed.
-  Every other write of the process is swallowed from the moment the entry point sees the option: the libraries' progress lines, their warnings, a notice, a usage error and the exit hint.
+- In automatic mode the CLI prints only lines of the form `repull-auto: <event> <key>=<value>`, and ends with one result line, `repull-auto: result phase=<phase>`, with `code=<word>` when the run refused or failed.
+  What keeps a value out of the log is that every value is chosen by the code, a count, a status or a word from a closed list, never taken from the dataset, the plan, a message or the environment; the grammar only refuses what could not be one of those.
+- Every other write of the process is swallowed from the moment the entry point sees the option: the libraries' progress lines, their warnings, a usage error and the exit hint; the notices request, which would carry the NEMAR key, is not made.
+  An uncaught exception or an unhandled rejection, which the runtime would print with its message and a source excerpt, ends the run instead, failed, with the fixed result line.
   Subprocesses print nothing: every git, git-annex and aws child runs with its output piped, which reaches the console only under `--verbose`, and the automatic mode refuses `--verbose` and `--debug` (`auto-verbose`).
 - The plan file and the work clones never leave the runner: no artifact is uploaded, `--json`, `--counts` and `--keep-workdir` are refused, and no path, key, file name or subject label is printed.
-- The CLI's sign-in prints nothing, and takes the key from its environment, not its command line.
+- The CLI's sign-in prints nothing and takes the key from its environment, not its command line, and the AWS session's request sends its error nowhere, because an explicit deny names the IAM user and the account.
 - What a run did in detail is the record's, which administrators read: the re-pull's `last_error` and the dispatch's code.
 
 ### The dispatch and its token
 
-- The run reads its dispatch from the event GitHub delivered, and both the workflow and the CLI take exactly the nine keys the Worker's builder writes, `repull_id` absent on a first dispatch, each a string of the shape the Worker checks before it sends one.
-  A tenth key, a missing one, or a value of another type or shape is `dispatch-invalid`, and nothing in such a payload is trusted to name the dispatch, so it is not reported.
+- The run reads its dispatch from the event GitHub delivered, and both the workflow and the CLI take exactly the nine keys the Worker's builder writes, `repull_id` absent on a first dispatch, each a string of the shape the Worker checks before it sends one; a dispatch or re-pull id is at most fifteen digits for all three (`DISPATCH_ID_MAX`).
+  A tenth key, a missing one, or a value of another type or shape is `dispatch-invalid`: the workflow refuses it before anything is installed, and the CLI reports nothing for it, since nothing in such a payload can be trusted to name the dispatch.
+  The workflow's last step reports `failed dispatch-invalid` when the dispatch id, the dataset and the token at least have their shapes, and the Worker stores that report only for a token it signed over a live dispatch, so only the dispatch's own run can end it so.
+  No event file at all is the runner's failure (`runner-failed`), not the dispatch's.
 - The token is masked by the job's first step, which reads it from the event file and has no environment of its own; each of its lines is masked, so no line of a crafted value becomes a workflow command.
   It is in no environment variable at any level and in no argument: the CLI and the last step read it from the event file.
-- A token found on the command line refuses the run (`auto-token-on-argv`), and that refusal is reported first, which ends the dispatch and with it the token, since a token in a `run:` line is in the public log.
+- A token found on the command line refuses the run (`auto-token-on-argv`), checked before anything that reads a file can refuse instead, and that refusal is reported first, which ends the dispatch and with it the token, since a token in a `run:` line is in the public log.
+- The token and the NEMAR key go to the production API only: a `TEST_API_URL` or a stored `apiUrl` that names anything but production (or a loopback address, for the suites) refuses the run before anything is sent (`auto-api-not-production`), and the CLI does not report it, since the report would go there too; the workflow's last step reports it to the production API.
 - No `run:` script interpolates an expression; the payload reaches the shell through the job's environment only, after the second step checked it.
 
 ### Production only
@@ -1657,34 +1681,38 @@ Nothing here sends mail or adds a route.
 
 ### The plan the automatic path takes, checked by the run
 
-- `plan` refuses a plan that is not executable, with the plan's first refusal, `key-without-pin`, or the word of the first check that is not ok, and one the automatic path does not take, with the create's own words (`auto-planner-version`, `auto-not-clean-plan`, `auto-copy-too-large`); both exit 3 and nothing is written.
+- `plan` writes the plan file, which stays on the runner, and then refuses a plan that is not executable, with the plan's first refusal, `key-without-pin`, or the word of the first check that is not ok, and one the automatic path does not take, with the create's own words (`auto-planner-version`, `auto-not-clean-plan`, `auto-copy-too-large`) or `auto-copy-too-long`; both exit 3, and no record is written.
   It plans from a listing of the bucket, never the location log, because the log can claim content the bucket never received.
-- `execute` checks the LIVE plan it makes before anything is written, never the file's own fields: executable, this planner, `unexplained`, `conflicts` and `corrections` each stated and zero, and a copy whose size is known for every key and at most 1 TiB; it states that size at the automatic create, which bounds it again.
-- A record that a run takes up past `prepared` must be the automatic path's own, and the dispatch's when the dispatch names one: an administrator's record of the same plan is never taken up (`repull-in-flight`), since the run would push and open its pull request as the App.
+- `execute` checks the LIVE plan it makes before anything is written, never the file's own fields: executable, this planner, `unexplained`, `conflicts` and `corrections` each stated and zero, a copy whose size is known for every key and at most 1 TiB, and one inside the token's hour; it states that size at the automatic create, which bounds it again.
+- A record that a run takes up past `prepared` must be the automatic path's own, and the dispatch's when the dispatch names one: an administrator's record of the same plan is never taken up (`repull-in-flight`), since the run would push and open its pull request as the App, and a create that answered with such a record, or with another than the dispatch's, is refused the same way (`repull-in-flight`, `repull-mismatch`).
   No live plan can be made past the registration, so its counts are read from the reviewed body.
+- `plan` and `execute` refuse a dispatch for another kind of run, another dataset or other tags than the command or the plan file names (`dispatch-mismatch`), before the Worker is asked.
 
 ### The settle rule (on "Whether enrichment commits on the release branch move its head")
 
-- Before the run reports its pull request open, it reads the release branch with git until enrichment has not moved it for five minutes, at most `--settle-minutes` (the workflow passes 30), holding the execution's lock.
+- Before the run reports its pull request open, it reads the release branch with git, holding the execution's lock, until successful reads have seen the recorded head unchanged for five minutes, or `--settle-minutes` passes (the workflow passes 30).
 - Each move is judged by the head rule execution and resume use, the synthesized commit or an enrichment-shaped descendant of it, and recorded as the `pr_open` self-edge resume writes.
 - A move enrichment does not make is `head-foreign`: recorded on the row as the automatic path's error (`[auto:head-foreign]`), the row left at `pr_open`, and the run reported `failed`.
-- A read that cannot be made is counted and tried again, never taken as a move; a head that moves after the run reported holds the pull request for an administrator's `resume`, because the Worker never accepts a head it did not see recorded.
+- A read that cannot be made is counted and tried again, never taken as a move, and never taken as quiet: the branch is settled only when a read succeeded in the last five minutes before the settle ended.
+  Otherwise the run records `[auto:head-unreadable]` on the row, with the last read's cause in fixed words, and reports `failed head-unreadable`, resumable at `pr_open`.
+- A head that moves after the run reported holds the pull request for an administrator's `resume`, because the Worker never accepts a head it did not see recorded.
 
 ### The reports, and the backstop
 
-- The run's first command (`plan`, or `resume` for a finish) reports `started`; a rerun of the same run that finds it started goes on.
-- Its last report is `opened` with the record, `finished`, `refused` (nothing was written, or a plan the path does not take) or `failed` (a step after the record exists, a foreign head, a finish that ended short of `complete`, or a success the Worker did not store), with a word from the closed list, `no-code` for any other.
+- The run's first command (`plan`, or `resume` for a finish) reports `started`; a rerun of the same run that finds it started (`already-started`) goes on.
+- Its last report is `opened` with the record, `finished`, `refused` (nothing was written, or a plan the path does not take) or `failed` (a step after the record exists, a foreign or unreadable head, a finish that ended short of `complete`, an expired token, or a success the Worker did not store), with a word from the closed list, `no-code` for any other.
   A terminal report the Worker stored leaves a marker on the runner.
-- The job's last step runs always, and when there is no marker it reports the phase and the word of the run's last result line, `failed runner-failed` when there is none, to the production API's literal address, with the token on curl's standard input; a dispatch it cannot name is not reported, and nothing it does fails the job.
-- The new words are the run's own: `dispatch-invalid`, `auto-cli-version`, `auto-token-on-argv`, `auto-verbose`, `auto-option`, `finish-incomplete`, `report-unanswered` and `runner-credentials`.
+- The job's last step runs always, and when there is no marker it reports the phase and the word of the run's last result line, `failed runner-failed` when there is none, to the production API's literal address, with the token in curl's configuration on its standard input; a dispatch it cannot name is not reported, and nothing it does fails the job.
+- The new words are the run's own: `dispatch-invalid`, `auto-cli-version`, `auto-token-on-argv`, `auto-verbose`, `auto-option`, `finish-incomplete`, `report-unanswered`, `runner-credentials`, `auto-copy-too-long`, `token-expired`, `head-unreadable` and `auto-api-not-production`.
 
 ### A limit the slice that resumes stalled runs inherits
 
 - A run's plan file and checkpoint do not outlive its runner, so a resume dispatch plans again, and that plan is the record's only while nothing it reads has moved.
-  Once a copy has written objects, the bucket listing reads their keys as held, and once the registration has pushed, NEMAR's git-annex branch has moved, so the new plan has another digest, the create answers `repull-in-flight`, and the record waits for an administrator.
-  The slice that resumes stalled runs bounds its resumes to records that can take them.
+  Once a copy has written objects, the bucket listing reads their keys as held, and once the registration has pushed, NEMAR's git-annex branch has moved, so the new plan has another digest and the create answers `repull-in-flight`.
+  The stalled-run slice resumes records from `planned` to `registered`, so a resume of a `copied` or `registered` record refuses; its rule then holds the row `resume-refused`, and an administrator takes it on, the safe direction.
 
 ### Checked only against stand-ins
 
 - The suites run the real CLI from this checkout with a release version, the real record, dispatch and callback over bun:sqlite, the real `git`, `git-annex` and `aws` against stand-ins of GitHub and S3, and the workflow's own guard scripts under bash.
-- Only the first production runs can show: that GitHub answers the dispatch with 204 and runs this workflow; that the runner masks the token and the AWS session as the workflow asks; that the App token GitHub mints for one repository pushes the release branch and opens the pull request; that `GetSessionToken` takes the import's pair and its session copies as the import's own keys do; that Ubuntu's git-annex reads what the planner reads; how soon enrichment commits after a push; and that the plan's anonymous clones of `OpenNeuroDatasets` hold up from a runner, since the App token is never sent there.
+  An expired token is a stand-in that answers it 401 while a hook turns the registration's push away; the settle's timing runs on an injected clock.
+- Only the first production runs can show: that GitHub answers the dispatch with 204 and runs this workflow; that the runner masks the token and the AWS session as the workflow asks; that the App token GitHub mints for one repository pushes the release branch and opens the pull request, and how GitHub refuses one past its hour; how long a real copy takes against the estimate; that `GetSessionToken` takes the import's pair and its session copies as the import's own keys do; that Ubuntu's git-annex reads what the planner reads; how soon enrichment commits after a push; and that the plan's anonymous clones of `OpenNeuroDatasets` hold up from a runner, since the App token is never sent there.

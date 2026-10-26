@@ -4,10 +4,10 @@
  * the Phase 7d amendment). The rules are `lib/repull/execute/automatic.ts`'s; this is where the three
  * commands apply them.
  *
- *   plan     reports `started`; plans from live sources with a bucket listing; refuses a plan that
- *            is not executable or that the automatic path does not take (`refused`, exit 3), or
- *            that could not be made (exit 1); writes the plan file, which never leaves the runner,
- *            and says only counts.
+ *   plan     reports `started`; plans from live sources with a bucket listing; writes the plan
+ *            file, which never leaves the runner, and says only counts; then refuses a plan that is
+ *            not executable or that the automatic path does not take (`refused`, exit 3, no record
+ *            written), or reports one that could not be made (exit 1).
  *   execute  runs the plan through its pull request exactly as an administrator's run does, with
  *            the dispatch presented at the create and the LIVE plan checked before any write;
  *            settles the release head; reports `opened`.
@@ -15,8 +15,9 @@
  *            and only past its merge; walks it to `complete`; reports `finished`.
  *
  * Each ends with one result line and reports `refused` (nothing written, exit 1, or a plan the
- * path does not take, exit 3) or `failed` (a step after the record exists, exit 3; a head
- * enrichment did not make, exit 1) with a word from the closed list.
+ * path does not take, exit 3) or `failed` (a step after the record exists, or a release branch the
+ * settle could not read, exit 3; a head enrichment did not make, exit 1) with a word from the closed
+ * list, `token-expired` when GitHub no longer takes the App token, whatever the step called it.
  */
 
 import { readFileSync } from "node:fs";

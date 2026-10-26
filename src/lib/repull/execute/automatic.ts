@@ -10,22 +10,30 @@
  * THE DISPATCH. The run reads the dispatch from the event GitHub delivered (`GITHUB_EVENT_PATH`),
  * the `client_payload` the Worker built with `buildUpstreamRepullPayload`: exactly its nine keys,
  * `repull_id` absent on a first dispatch, each a string of the shape the Worker sends. Anything
- * else (a tenth key, a key missing, a value of another shape) is `dispatch-invalid`, and nothing
- * is reported, because nothing in such a payload can be trusted to name the dispatch. The token
+ * else (a tenth key, a key missing, a value of another shape) is `dispatch-invalid`, and the CLI
+ * reports nothing, because nothing in such a payload can be trusted to name the dispatch. The
+ * workflow refuses it first, and its backstop reports `failed dispatch-invalid` when the dispatch
+ * id, the dataset and the token at least have their shapes; the Worker stores that report only for
+ * a token it signed over a live dispatch, so only the dispatch's own run can end it so. The token
  * is read from the event file and nowhere else: it is in no environment variable and no argument,
  * and one found on the command line ends the dispatch (`auto-token-on-argv`), since a token in a
  * `run:` line is in the public log and lets anyone end a live dispatch as failed.
  *
  * PRODUCTION ONLY. The CLI must be a release (`X.Y.Z`, not a development build) and the very
  * version the dispatch names (`auto-cli-version`); the Worker that signed the dispatch refuses an
- * automatic create outside exact production on its own. `GH_TOKEN` must be set: it is the App
- * token the workflow minted for this dataset's repository alone (`auto-no-app-token`).
+ * automatic create outside exact production on its own. The API the run talks to must be the
+ * production one, or a loopback one for the suites (`auto-api-not-production`, refused before
+ * anything is sent and not reported, since the report would go there). `GH_TOKEN` must be set: it
+ * is the App token the workflow minted for this dataset's repository alone (`auto-no-app-token`),
+ * which lasts an hour, so a copy that would outlast it is refused (`auto-copy-too-long`) and a run
+ * that failed with it expired says so (`token-expired`).
  *
  * THE LOG IS PUBLIC. A path can itself be an identifier, and a key or a file name can carry one,
  * so in automatic mode nothing reaches standard output or standard error but this module's own
  * lines, `repull-auto: <event> <key>=<value> ...`, whose values are counts and fixed words
  * ({@link AUTOMATIC_LINE_RE}). Every other write of the process, the libraries' progress lines,
- * their warnings and any error, is swallowed and counted ({@link installAutomaticQuiet}).
+ * their warnings, any error, and the runtime's own report of a crash, is swallowed and counted
+ * ({@link installAutomaticQuiet}).
  * Subprocesses print nothing either: every git, git-annex and aws child runs with its output
  * piped (`git-annex/run-command.ts`), and it reaches the console only under `--verbose`, which the
  * automatic mode refuses (`auto-verbose`) together with `--debug`. The run's last line is its
@@ -208,9 +216,12 @@ export function readDispatchEvent(env: Env): DispatchPayload {
 // ----------------------------------------------------------------------------
 
 /**
- * Every line an automatic run prints: `repull-auto: <event>` and `<key>=<value>` pairs whose
- * values are counts and fixed words (lowercase letters, digits, `.`, `_`, `-`). No path, key, file
- * name, subject label, message or token can have this shape and the meaning of one.
+ * Every line an automatic run prints: `repull-auto: <event>` and `<key>=<value>` pairs of lowercase
+ * letters, digits, `.`, `_` and `-`. The grammar is not what keeps a value out of the log: a
+ * subject label (`sub-01`), a file name (`readme.md`) or a token in hex has this shape. What keeps
+ * them out is that every value is chosen by this code, a count, a status or a word from a closed
+ * list, and never taken from the dataset, the plan, a message or the environment; the grammar only
+ * refuses what could not be one of those (a slash, a space, an uppercase letter).
  */
 export const AUTOMATIC_LINE_RE =
   /^repull-auto: [a-z][a-z0-9-]{0,31}(?: [a-z][a-z0-9_]{0,31}=[a-z0-9_.-]{1,64})*$/;
