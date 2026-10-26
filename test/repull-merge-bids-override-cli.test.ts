@@ -12,9 +12,9 @@
  *    written in its own audit row with the claim;
  *  - `blocked` (a rule requires the check: a merge would be a bypass), `clean` (no override is
  *    needed) and a fork's head are refused before any request that writes;
- *  - a BIDS validation that did not complete with `failure` (running, passed, timed out, cancelled,
+ *  - a BIDS validation that did not complete with `failure` (running, passed, timed out, canceled,
  *    skipped) and a `version-check` that did not complete with `success` (failed, running, skipped,
- *    cancelled) are refused by the Worker's claim, which writes nothing;
+ *    canceled) are refused by the Worker's claim, which writes nothing;
  *  - without the reason the ordinary gate refuses `unstable`; a reason outside the length rule and
  *    a re-pull the automatic path opened are refused before anything is written.
  *
@@ -189,7 +189,7 @@ describe.skipIf(!awsInstalled)("a merge over a failed BIDS validation", () => {
       "bids-override-version-check",
     ],
     ["BIDS validation timed out", { bids: ["completed", "timed_out"] }, "bids-override-bids"],
-    ["BIDS validation was cancelled", { bids: ["completed", "cancelled"] }, "bids-override-bids"],
+    ["BIDS validation was canceled", { bids: ["completed", "cancelled"] }, "bids-override-bids"],
     ["BIDS validation was skipped", { bids: ["completed", "skipped"] }, "bids-override-bids"],
     [
       "version-check still running",
@@ -202,7 +202,7 @@ describe.skipIf(!awsInstalled)("a merge over a failed BIDS validation", () => {
       "bids-override-version-check",
     ],
     [
-      "version-check was cancelled",
+      "version-check was canceled",
       { versionCheck: ["completed", "cancelled"] },
       "bids-override-version-check",
     ],

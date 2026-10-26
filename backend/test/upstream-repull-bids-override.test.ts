@@ -13,8 +13,8 @@
  *    `version-check` with `success`, the App's own runs at the claimed head, from and into the
  *    dataset's own repository;
  *  - a fork's head, `blocked`, any other state, a validation that did not complete with `failure`
- *    (running, passed, timed out, cancelled, skipped, another App's), a `version-check` that did not
- *    complete with `success` (failed, running, skipped, cancelled), unreadable checks and an
+ *    (running, passed, timed out, canceled, skipped, another App's), a `version-check` that did not
+ *    complete with `success` (failed, running, skipped, canceled), unreadable checks and an
  *    automatic record are each refused, and nothing is written;
  *  - the claim's own checks are unchanged (the screen, the cap), the override is named only on a
  *    claim, its reason follows the publication path's rule, and a caller that gives no reader of
@@ -303,7 +303,7 @@ describe("the claim over a failed BIDS validation", () => {
       "bids-override-version-check",
     ],
     [
-      "version-check was cancelled",
+      "version-check was canceled",
       () => github({ versionCheck: run("version-check", "completed", "cancelled") }),
       409,
       "bids-override-version-check",
@@ -315,7 +315,7 @@ describe("the claim over a failed BIDS validation", () => {
       "bids-override-bids",
     ],
     [
-      "BIDS validation was cancelled",
+      "BIDS validation was canceled",
       () => github({ bids: run("Run BIDS Validation", "completed", "cancelled") }),
       409,
       "bids-override-bids",
