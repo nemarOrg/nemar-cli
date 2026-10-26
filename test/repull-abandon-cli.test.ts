@@ -8,6 +8,7 @@
  *  - before the merge, the pull request is closed, the release branch deleted, the orphans equal
  *    what the copy and the uploads wrote (objects and bytes, nothing deleted from the bucket), the
  *    record ends `abandoned`, and a new attempt at the tag is then allowed;
+ *  - a release branch whose head is not the re-pull's commit or enrichment's is kept, and said;
  *  - a pull request GitHub merged while the record is still `pr_open` is never abandoned: nothing
  *    is closed or deleted and the record stays open, for resume to record the merge;
  *  - between the merge and the release abandon is refused (`wait-for-release`);
@@ -102,6 +103,15 @@ describe.skipIf(!awsInstalled)("abandon", () => {
     const again = await w.cli(["repull", "execute", file, "--until", "planned", "--yes"]);
     expect(again.exitCode, again.all).toBe(0);
     expect(w.row()).toMatchObject({ status: "planned", attempt: 2, to_tag: TAG_B });
+  });
+
+  test("a release branch holding a commit that is not the re-pull's is kept, and said", async () => {
+    await w.commitOnto("refs/heads/release/v2.0.0", "README.md", "Someone else's change.\n");
+    const run = await abandon();
+    expect(run.exitCode, run.all).toBe(0);
+    expect(w.row().status).toBe("abandoned");
+    expect(run.all).toContain("The release branch was kept");
+    expect(await hasRef("refs/heads/release/v2.0.0")).toBe(true);
   });
 
   test("a pull request GitHub merged while the record is pr_open is never abandoned", async () => {

@@ -11,6 +11,8 @@
  *    and the tag C record is created, from the same `from_tag`;
  *  - the tag C plan is proved and made again from live sources BEFORE tag B's record is touched: a
  *    plan that went stale supersedes nothing;
+ *  - only the record's own release branch and pull request are tolerated in the new plan's
+ *    preflight: another release pull request keeps it not executable;
  *  - an automatic record is never superseded.
  *
  * What only the first production runs can check: that a second release pull request of the same
@@ -173,6 +175,23 @@ describe.skipIf(!awsInstalled)("execute --supersede", () => {
     expect(rows()).toEqual([expect.objectContaining({ status: "pr_open", to_tag: TAG_B })]);
     expect(w.gh.seen.filter((s) => s.method === "PATCH")).toEqual([]);
     expect(await hasRef("refs/heads/release/v2.0.0")).toBe(true);
+  });
+
+  test("another release pull request beside tag B's keeps the plan not executable: nothing is superseded", async () => {
+    await makeTagC();
+    const plan = await planC();
+    // An ordinary release pull request of the dataset's own, as `nemar dataset release` opens one.
+    await gitIn(w.fx.originRepo, ["update-ref", "refs/heads/release/v1.0.1", w.row().base_sha]);
+    w.gh.pulls[`${w.fx.datasetId}#${(w.row().pr_number as number) + 10}`] = {
+      sha: w.row().base_sha,
+      headRef: "release/v1.0.1",
+      author: "alice",
+    };
+    const run = await w.cli(["repull", "execute", plan, "--supersede", "--yes"]);
+    expect(run.exitCode, run.all).toBe(1);
+    expect(run.all).toContain("not-executable");
+    expect(rows()).toEqual([expect.objectContaining({ status: "pr_open", to_tag: TAG_B })]);
+    expect(w.gh.seen.filter((s) => s.method === "PATCH")).toEqual([]);
   });
 
   test("an automatic record is never superseded", async () => {
