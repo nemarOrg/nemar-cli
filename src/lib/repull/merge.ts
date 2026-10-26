@@ -11,7 +11,9 @@
  *  3. GitHub's live pull request is open, not a draft, the record's release branch into `main`,
  *     with its head at the screened commit;
  *  4. NEMAR's `main` is the pull request's base (the record's for N.0.0, N.0.1's own for N.0.1),
- *     or moved by enrichment-shaped commits only (`head.ts`);
+ *     or moved by enrichment-shaped commits only (`head.ts`), and none of them outside `.nemar/`
+ *     and `.github/` (`merge-main-moved`: the squash would tag a tree the gates did not clear;
+ *     resume makes the commit again on the new `main`);
  *  5. the automated review (ADR 0107) read for that head, at the time of the merge: one that
  *     failed, is running or cannot be read needs `force`, as `approve` asks;
  *  6. the identifier screen of that head is clear, or carries a recorded acknowledgment (the
@@ -68,6 +70,7 @@ import {
   reviewForApproval,
 } from "../pr-review-approve.js";
 import { readCatalogFacts } from "./execute/catalog.js";
+import { changedOutsideNemar } from "./execute/head.js";
 import { openOriginScratch } from "./execute/origin.js";
 import { checkMain } from "./execute/pull-request.js";
 import { ExecuteRefused, assertNotAnonymous } from "./execute/verify-plan.js";
@@ -88,6 +91,7 @@ export type MergeStage =
   | "review"
   | "screen"
   | "main-moved"
+  | "merge-main-moved"
   | "github"
   | "message"
   | "declined"
@@ -383,7 +387,28 @@ async function check(
     token: ctx.token,
   });
   try {
-    await checkMain({ work: scratch.dir, baseSha: base, env: scratch.env });
+    const main = await checkMain({ work: scratch.dir, baseSha: base, env: scratch.env });
+    // Enrichment may move `main` after the gates, on a path outside NEMAR's own (a `.bidsignore`
+    // line, a placeholder `participants.tsv`). The squash would then tag main's tree with the pull
+    // request's changes, which outside `.nemar/` and `.github/` is no longer the screened head, and
+    // the release would refuse it after the DOI is minted. With no such path changed since the
+    // base, main's tree plus the pull request's changes is the screened head there, so this one
+    // reading decides both.
+    if (main !== base) {
+      const moved = await changedOutsideNemar(scratch.dir, base, main);
+      if (moved === null) {
+        return stopAt(
+          "github",
+          "Whether NEMAR's main moved outside .nemar/ and .github/ since the gates could not be read; nothing was claimed or merged.",
+        );
+      }
+      if (moved.length > 0) {
+        return stopAt(
+          "merge-main-moved",
+          `NEMAR's main moved by enrichment since the gates, on ${moved.length} path(s) outside .nemar/ and .github/, so the squash would tag a tree the gates did not clear; nothing was claimed or merged. Run nemar admin repull resume ${id}: it makes the commit again on the new main, whose screen and gates run again.`,
+        );
+      }
+    }
   } catch (err) {
     if (err instanceof ExecuteRefused && err.code === "main-moved") {
       return stopAt("main-moved", `${err.message} Nothing was claimed or merged.`);

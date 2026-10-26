@@ -113,16 +113,21 @@ with your own GitHub token (GH_TOKEN, else \`gh auth token\`). It never merges.
                GitHub), one closed unmerged ends the record abandoned; a head moved by
                enrichment is recorded, any other is refused (head-foreign). NEMAR's main must be
                the base or have moved by enrichment only; when it moved and GitHub reports the
-               pull request dirty or behind, the commit is made again on the new main and pushed
-               with a lease (asked first unless --yes). Then the identifier screen of the head is
+               pull request dirty or behind, or enrichment changed a path outside .nemar/ and
+               .github/, the commit is made again on the new main and pushed with a lease (asked
+               first unless --yes). Then the identifier screen of the head is
                dispatched (when none exists or it produced no verdict), and once it passes and
                GitHub reports the pull request clean, the gates are recorded: gates_clear.
   gates_clear  a held claim to merge is resolved from GitHub: a merge is recorded, and a claim
-               GitHub says did not merge expires once it is 30 minutes old.
+               GitHub says did not merge expires once it is 30 minutes old. A main enrichment
+               moved outside .nemar/ and .github/ since the gates (the merge refuses it,
+               merge-main-moved) takes the record back to pr_open, where the commit is made again.
   merged       the merge commit GitHub wrote must end with the re-pull commit's two trailers;
                then it waits for the tag v<N.0.0> and the version row (its DOI), compares the
                tagged tree with the re-pull's commit, and records the release (the Worker reads
-               the tag and the version row itself).
+               the tag and the version row itself). N.0.1's tagged tree must be its gated head
+               outside .nemar/ and .github/ (patch-tree-mismatch otherwise): read the difference,
+               then --accept-tag-tree "<reason>" records the release.
   released     locks the objects the copy and the uploads wrote (and no other object under the
                dataset's prefix), with the ambient AWS credentials reading the staging manifest
                that lists them; only once every one is locked is the count recorded. Then:
@@ -186,6 +191,11 @@ export const resumeCommand = new Command("resume")
     [] as string[],
   )
   .option("--keep-upstream", "Leave every conflict the plan lists on upstream's side")
+  .option(
+    "--accept-tag-tree <reason>",
+    "Your reason for recording N.0.1's release when its tag's tree is not its gated head (patch-tree-mismatch)",
+    parseReason,
+  )
   .option("-y, --yes", "Do not ask before pushing (a re-synthesis, or N.0.1)")
   .option("--json", "Print the record as JSON")
   .option("--automatic-dispatch <id>", "The central workflow's finish of a merged re-pull")
@@ -199,6 +209,7 @@ export const resumeCommand = new Command("resume")
         plan?: string;
         takeOurs: string[];
         keepUpstream?: boolean;
+        acceptTagTree?: string;
         yes?: boolean;
         json?: boolean;
         automaticDispatch?: string;
@@ -223,6 +234,7 @@ export const resumeCommand = new Command("resume")
           ...(options.plan ? { plan: options.plan } : {}),
           takeOurs: options.takeOurs,
           keepUpstream: options.keepUpstream === true,
+          ...(options.acceptTagTree ? { acceptTagTree: options.acceptTagTree } : {}),
           ...(options.yes
             ? {}
             : {

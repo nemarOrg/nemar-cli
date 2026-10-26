@@ -57,6 +57,12 @@ export interface ResumeOptions {
   /** Every conflict the plan lists stays on upstream's side (`--keep-upstream`). */
   keepUpstream?: boolean;
   /**
+   * The administrator's reason for recording N.0.1's release although its tag's tree is not its
+   * gated head outside `.nemar/` and `.github/` (`--accept-tag-tree`): the one way past
+   * `patch-tree-mismatch`, after reading the difference. Unread trees are never accepted.
+   */
+  acceptTagTree?: string;
+  /**
    * Asked before the release branch is re-synthesized onto a moved `main` and force-pushed with a
    * lease; false stops with nothing pushed (`declined`). Absent: it proceeds (the command passes
    * one unless `--yes`).

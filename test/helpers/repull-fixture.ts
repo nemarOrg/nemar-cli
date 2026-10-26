@@ -275,9 +275,11 @@ export interface FixtureOptions {
   /**
    * Upstream ships no `participants.tsv` at either tag, and NEMAR's holds the enrichment's
    * placeholder for its own tree (`ensureParticipantsTsv`), or with `"edited"` that placeholder
-   * with one value filled in afterwards. Tag B adds sub-03, so its placeholder differs.
+   * with one value filled in afterwards. Tag B adds sub-03, so its placeholder differs. With
+   * `"none"` NEMAR's tree has none either (the enrichment has not run), so enrichment may add its
+   * placeholder to `main` later.
    */
-  generatedParticipants?: true | "edited";
+  generatedParticipants?: true | "edited" | "none";
   /**
    * NEMAR's dataset id; `on099999` by default. An `xx` id maps to `ds099999` through its dataset
    * row's `source_id`, and is the only kind a re-pull record accepts outside production.
@@ -781,7 +783,7 @@ async function build(
       `{\n  "TaskName": "rest",\n  "SamplingFrequency": 256,\n  "PowerLineFrequency": 60\n}\n`,
     );
   }
-  if (opts.generatedParticipants) {
+  if (opts.generatedParticipants === true || opts.generatedParticipants === "edited") {
     // The enrichment's commit, from the tree as it stands (GitHub's listing names files and their
     // directories; the subjects are the same either way).
     const listed = (await run(["git", "ls-files"], clone)).split("\n").filter(Boolean);

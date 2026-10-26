@@ -835,6 +835,7 @@ export const DISPATCH_CODES = [
   "patch-key-dead",
   "patch-main-moved",
   "patch-tree-mismatch",
+  "merge-main-moved",
   "take-ours-invalid",
   "wait-for-release",
   "supersede-automatic",

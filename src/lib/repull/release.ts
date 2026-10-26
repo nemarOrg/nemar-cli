@@ -145,8 +145,12 @@ export async function taggedTreeVerified(
 /**
  * N.0.1's tagged tree must be the head its gates cleared, outside `.nemar/**` and `.github/**`:
  * N.0.1 records no lineage, so this is the one check that what was tagged is what was screened and
- * gated. A tree that differs (`patch-tree-mismatch`) or that cannot be read (`origin-unreadable`)
- * is recorded on the row, which stays `patch_merged`: unread is not a pass.
+ * gated. The merge gate refuses a `main` that enrichment moved outside those paths since the gates
+ * (`merge-main-moved`), so a tree that still differs means `main` moved in the seconds between that
+ * check and GitHub's merge, or the tag names other content. It is recorded on the row, which stays
+ * `patch_merged` (`patch-tree-mismatch`), until the administrator reads the difference and runs
+ * resume with `--accept-tag-tree "<reason>"`, which records the release. A tree that cannot be read
+ * (`origin-unreadable`) is recorded the same way and never accepted: unread is not a pass.
  */
 async function assertPatchTagTree(
   ctx: ResumeContext,
@@ -156,11 +160,18 @@ async function assertPatchTagTree(
 ): Promise<void> {
   const verdict = await tagTreeVersus(scratch, row, tagSha, "n1");
   if (verdict === "same") return;
+  const gated = (row.patch_gates_sha as string).slice(0, 12);
+  if (verdict === "differs" && ctx.opts.acceptTagTree) {
+    ctx.opts.out(
+      `The tag v${row.patch_version} is not N.0.1's gated head ${gated} outside .nemar/ and .github/; its release is recorded on your reason: ${ctx.opts.acceptTagTree}`,
+    );
+    return;
+  }
   const failure =
     verdict === "differs"
       ? refused(
           "patch-tree-mismatch",
-          `The tag v${row.patch_version} on NEMAR's main is not N.0.1's gated head outside .nemar/ and .github/, so its release is not recorded. The record stays ${row.status}; an administrator decides what follows.`,
+          `The tag v${row.patch_version} on NEMAR's main is not N.0.1's gated head outside .nemar/ and .github/, so its release is not recorded and the record stays ${row.status}. Read the difference (git diff ${gated} v${row.patch_version} -- . ':!.nemar' ':!.github'), then record the release with nemar admin repull resume ${row.dataset_id} --accept-tag-tree "<reason>".`,
         )
       : refused(
           "origin-unreadable",

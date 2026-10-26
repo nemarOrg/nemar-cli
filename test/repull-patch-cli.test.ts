@@ -30,7 +30,8 @@
  *    a lease, and a run that pushed it and could not record it is recognized by the next;
  *  - N.0.1's pull request closed without a merge ends the record `patch_declined`;
  *  - N.0.1's merge commit read back without its trailers stays `patch_merged` (`merge-trailers`);
- *    so does a tag whose tree is not N.0.1's gated head (`patch-tree-mismatch`);
+ *    so does a tag whose tree is not N.0.1's gated head (`patch-tree-mismatch`), until resume is
+ *    given the administrator's reason (`--accept-tag-tree`);
  *  - a record that does not state its corrections is not merged as N.0.1 (stage `message`).
  *
  * What only the canary and the first production runs can check: that GitHub opens and squash-merges
@@ -470,8 +471,19 @@ describe.skipIf(!awsInstalled)("N.0.1", () => {
     const run = await resume();
     expect(run.exitCode, run.all).toBe(3);
     expect(run.all).toContain("patch-tree-mismatch");
+    expect(run.all).toContain("--accept-tag-tree");
     expect(w.row()).toMatchObject({ status: "patch_merged", patch_tag_sha: null });
     expect(String(w.row().last_error)).toContain("patch-tree-mismatch");
+    // Resume again refuses again; with the administrator's reason the release is recorded.
+    expect((await resume()).exitCode).toBe(3);
+    const accepted = await resume([
+      "--accept-tag-tree",
+      "code/after.txt was pushed to main by hand and holds no identifier",
+    ]);
+    expect(accepted.exitCode, accepted.all).toBe(0);
+    expect(accepted.all).toContain("its release is recorded on your reason");
+    expect(w.row()).toMatchObject({ status: "complete", last_error: null });
+    expect(w.row().patch_tag_sha).not.toBeNull();
   });
 
   test("a record that does not state its corrections is not merged as N.0.1: stage message", async () => {

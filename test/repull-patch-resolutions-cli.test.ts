@@ -6,7 +6,9 @@
  *  - every conflict and correction subtype, a README NEMAR edited, and a clean recording NEMAR
  *    replaced with its own annexed content (a correction whose identity is `A:<key>`):
  *    five conflicts and three corrections;
- *  - a README NEMAR edited and nothing else: conflicts (the README family) and no correction.
+ *  - a README NEMAR edited and nothing else: conflicts (the README family) and no correction;
+ *  - no `participants.tsv` on either side, so enrichment can add its placeholder to `main` after a
+ *    pull request's gates.
  *
  * The real CLI and the real Worker routes over bun:sqlite, reached through TEST_API_URL in the
  * child's environment; GitHub and S3 are stand-ins. No mocks.
@@ -18,7 +20,10 @@
  *  - the annexed correction is replayed as NEMAR's own entry, byte for byte, and only when its key
  *    is in NEMAR's bucket at its declared size (`patch-key-absent`) and not dead on NEMAR's
  *    git-annex branch (`patch-key-dead`);
- *  - with no correction, `--keep-upstream` completes the record without an N.0.1.
+ *  - with no correction, `--keep-upstream` completes the record without an N.0.1;
+ *  - enrichment that writes outside `.nemar/` and `.github/` on `main` after the gates makes the
+ *    merge refuse before any claim (`merge-main-moved`), for N.0.0 and N.0.1 alike, and resume
+ *    then makes the commit again on the new main, which is screened, gated, merged and released.
  *
  * CI TIER: integration, like the other CLI suites that start the binary against a local server.
  */
@@ -35,6 +40,7 @@ import {
 import { readFileSync } from "node:fs";
 import { which } from "bun";
 import { hashDirLower } from "../scripts/scrub/git/git-lib";
+import { ensureParticipantsTsv } from "../shared/standard-edits/participants";
 import { PATHS, gitIn, writeAnnexBranchFile } from "./helpers/repull-fixture";
 import { type RepullWorld, startRepullWorld } from "./helpers/repull-pr-world";
 import { toolOrFail } from "./scrub/helpers/require-tools";
@@ -176,5 +182,98 @@ describe.skipIf(!awsInstalled)("a conflict and no correction", () => {
     expect(run.all).toContain("every conflict stays on upstream's side");
     expect(w.row()).toMatchObject({ status: "complete", patch_version: null });
     expect(await hasRef(w, "refs/heads/release/v2.0.1")).toBe(false);
+  });
+});
+
+describe.skipIf(!awsInstalled)("enrichment between the gates and the merge", () => {
+  let w: RepullWorld;
+  beforeAll(async () => {
+    w = await startRepullWorld({ fixture: { generatedParticipants: "none" } });
+  });
+  afterAll(() => w?.stop());
+  beforeEach(async () => {
+    await w.restore();
+  });
+
+  const merge = () => w.cli(["repull", "merge", w.fx.datasetId, "--yes"]);
+  const mainHead = async () =>
+    (await gitIn(w.fx.originRepo, ["rev-parse", "refs/heads/main"])).trim();
+  const merges = () => w.gh.seen.filter((x) => x.method === "PUT" && x.path.endsWith("/merge"));
+  /** What enrichment does to a tree with subjects and no file of its own: its placeholder. */
+  async function enrichParticipants(): Promise<string> {
+    const listed = (
+      await gitIn(w.fx.originRepo, ["ls-tree", "-r", "--name-only", "refs/heads/main"])
+    )
+      .split("\n")
+      .filter(Boolean);
+    const placeholder = ensureParticipantsTsv(listed.map((path) => ({ path }))).contentToCommit;
+    if (placeholder === null) throw new Error("main already has a participants.tsv");
+    return w.commitOnto("refs/heads/main", "participants.tsv", placeholder, "Add participants.tsv");
+  }
+  /** The screen of the record's current head of `column`, reported clean, then the gates. */
+  async function gate(column: "head_sha" | "patch_head_sha"): Promise<void> {
+    await w.reportScreen(w.row()[column] as string, "clean");
+    const run = await resume(w);
+    expect(run.exitCode, run.all).toBe(0);
+  }
+
+  test("N.0.0: the merge refuses before any claim, and resume makes the commit again", async () => {
+    expect((await resume(w)).exitCode).toBe(3);
+    await gate("head_sha");
+    expect(w.row().status).toBe("gates_clear");
+    const before = w.row();
+    const moved = await enrichParticipants();
+
+    const refused = await merge();
+    expect(refused.exitCode, refused.all).not.toBe(0);
+    expect(refused.all).toContain("merge-main-moved");
+    expect(merges()).toEqual([]);
+    expect(w.row()).toMatchObject({ status: "gates_clear", merge_claim_sha: null });
+
+    const again = await resume(w);
+    expect(again.exitCode, again.all).toBe(3);
+    expect(w.row()).toMatchObject({ status: "pr_open", base_sha: moved });
+    expect(w.row().head_sha).not.toBe(before.head_sha);
+    await gate("head_sha");
+    const merged = await merge();
+    expect(merged.exitCode, merged.all).toBe(0);
+    expect(w.row().status).toBe("merged");
+    expect(await mainHead()).toBe(w.row().merge_sha);
+  });
+
+  test("N.0.1: the merge refuses before any claim, and the made-again N.0.1 is released", async () => {
+    expect((await resume(w)).exitCode).toBe(3);
+    await gate("head_sha");
+    expect((await merge()).exitCode).toBe(0);
+    await w.tagMain("2.0.0");
+    w.insertVersionRow("2.0.0");
+    // No conflict: the release, the lock and N.0.1 in one run, which waits for N.0.1's screen.
+    const made = await resume(w);
+    expect(made.exitCode, made.all).toBe(3);
+    expect(w.row().status).toBe("patch_synthesized");
+    await gate("patch_head_sha");
+    expect(w.row().status).toBe("patch_gates_clear");
+    const before = w.row();
+    const moved = await enrichParticipants();
+    const n1 = before.patch_pr_number as number;
+    const n1Merges = () => merges().filter((x) => x.path.endsWith(`/pulls/${n1}/merge`));
+
+    const refused = await merge();
+    expect(refused.exitCode, refused.all).not.toBe(0);
+    expect(refused.all).toContain("merge-main-moved");
+    expect(n1Merges()).toEqual([]);
+    expect(w.row()).toMatchObject({ status: "patch_gates_clear", patch_merge_claim_sha: null });
+
+    const again = await resume(w);
+    expect(again.exitCode, again.all).toBe(3);
+    expect(w.row()).toMatchObject({ status: "patch_synthesized", patch_base_sha: moved });
+    expect(w.row().patch_head_sha).not.toBe(before.patch_head_sha);
+    await gate("patch_head_sha");
+    expect((await merge()).exitCode).toBe(0);
+    await w.tagMain("2.0.1");
+    w.insertVersionRow("2.0.1");
+    const done = await resume(w);
+    expect(done.exitCode, done.all).toBe(0);
+    expect(w.row()).toMatchObject({ status: "complete", last_error: null });
   });
 });

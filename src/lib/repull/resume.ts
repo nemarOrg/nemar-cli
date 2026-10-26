@@ -16,8 +16,9 @@
  *                      writes, `head.ts`) is recorded, and any other head is `head-foreign`. `main`
  *                      must be the base (N.0.0's, or N.0.1's) or an enrichment-shaped descendant
  *                      (`main-moved` otherwise); when it moved and GitHub reports the pull request
- *                      `dirty` or `behind`, the commit is made again on the new `main` and pushed
- *                      with a lease (`resynthesize.ts`, `patch.ts`). The identifier screen of the
+ *                      `dirty` or `behind`, or enrichment changed a path outside `.nemar/` and
+ *                      `.github/`, the commit is made again on the new `main` and pushed with a
+ *                      lease (`resynthesize.ts`, `patch.ts`). The identifier screen of the
  *                      head is dispatched when none exists or it produced no verdict, and
  *                      acknowledged when the administrator gives a reason for a verdict that asks
  *                      for one. When the screen passes and GitHub reports `clean`, the gates are
@@ -25,9 +26,12 @@
  *                      stops: "Ready to merge".
  *   gates_clear        a held claim to merge is resolved from GitHub: merged is recorded; a claim
  *   patch_gates_clear  whose merge GitHub says did not happen expires once it is old enough (the
- *                      Worker's own bound); a head that moved goes back to the open status.
+ *                      Worker's own bound); a head that moved, or a `main` enrichment moved
+ *                      outside `.nemar/` and `.github/` (which the merge gate refuses), goes back
+ *                      to the open status.
  *   merged             the merge commit's trailers read back, the tag and the version row waited
- *   patch_merged       for, the tagged tree compared (N.0.0's), the release recorded through the
+ *   patch_merged       for, the tagged tree compared (N.0.0's for lineage; N.0.1's must be its
+ *                      gated head, or `--accept-tag-tree` given), the release recorded through the
  *                      Worker's verified route (`release.ts`);
  *   released           the objects N.0.0's copy and uploads wrote (the staging manifest's, never
  *                      the whole prefix) locked and the count recorded; then N.0.1 is made from the
@@ -72,7 +76,7 @@ import {
   settleMergeState,
 } from "../pr-review-approve.js";
 import { readCatalogFacts } from "./execute/catalog.js";
-import { MOVED_REF_FETCH_DEPTH } from "./execute/head.js";
+import { MOVED_REF_FETCH_DEPTH, changedOutsideNemar } from "./execute/head.js";
 import { type OriginScratch, fetchInto, openOriginScratch } from "./execute/origin.js";
 import { acceptsHead, checkMain, releaseRefOf } from "./execute/pull-request.js";
 import { guardedPush, pushCauseWords } from "./execute/push.js";
@@ -510,8 +514,27 @@ async function gatesTurn(ctx: ResumeContext, row: RepullRow, pr: RepullPullReque
     return { kind: "wait", row, waitingFor: `pull request #${p.number} to settle on GitHub` };
   }
   const state = settled.state;
-  if (main !== p.base && (state === "dirty" || state === "behind")) {
-    return resynthesizeTurn(ctx, row, p, main, live.headSha, state);
+  // Enrichment on a path outside NEMAR's own makes the commit again even when GitHub can merge it
+  // as it is: the merge gate refuses such a main (merge-main-moved), because the squash would tag a
+  // tree the screen did not read.
+  const outside = main === p.base ? [] : await changedOutsideNemar(scratch.dir, p.base, main);
+  if (outside === null) {
+    throw refused(
+      "main-unreadable",
+      "Whether NEMAR's main moved outside .nemar/ and .github/ could not be read; run resume again.",
+    );
+  }
+  if (main !== p.base && (state === "dirty" || state === "behind" || outside.length > 0)) {
+    return resynthesizeTurn(
+      ctx,
+      row,
+      p,
+      main,
+      live.headSha,
+      outside.length > 0
+        ? `enrichment changed ${outside.length} path(s) outside .nemar/ and .github/ on it`
+        : `GitHub reports its pull request '${state}'`,
+    );
   }
 
   const screen = await screenTurn(ctx, row, p);
@@ -667,12 +690,12 @@ async function resynthesizeTurn(
   p: Pull,
   main: string,
   liveHead: string,
-  state: string,
+  why: string,
 ): Promise<Turn> {
   if (
     ctx.opts.confirm &&
     !(await ctx.opts.confirm(
-      `NEMAR's main moved by enrichment since re-pull #${row.id}'s ${p.pr === "n0" ? "commit" : "N.0.1 commit"} was made, and GitHub reports its pull request '${state}'. Make the commit again on the new main and push ${p.branch} with a lease (nothing enrichment wrote is undone)?`,
+      `NEMAR's main moved by enrichment since re-pull #${row.id}'s ${p.pr === "n0" ? "commit" : "N.0.1 commit"} was made, and ${why}. Make the commit again on the new main and push ${p.branch} with a lease (nothing enrichment wrote is undone)?`,
     ))
   ) {
     throw new ExecuteRefused("declined", "Not confirmed; nothing was pushed.");
@@ -760,6 +783,37 @@ async function claimTurn(ctx: ResumeContext, row: RepullRow, pr: RepullPullReque
     );
     ctx.opts.out(
       `${p.branch} moved by enrichment since its gates were recorded; re-pull #${row.id} is ${PULL_REQUEST_COLUMNS[pr].open} again, and its screen runs for the new head.`,
+    );
+    return { kind: "next", row: back };
+  }
+  // `main` moved by enrichment outside NEMAR's own paths since the gates: the merge gate refuses it
+  // (merge-main-moved), so the record goes back to its open status, where the commit is made again
+  // on the new main and screened and gated again.
+  const scratch = await ctx.origin();
+  let main: string;
+  try {
+    main = await checkMain({ work: scratch.dir, baseSha: p.base, env: scratch.env });
+  } catch (err) {
+    if (err instanceof ExecuteRefused) err.resumable = true;
+    throw err;
+  }
+  const outside = main === p.base ? [] : await changedOutsideNemar(scratch.dir, p.base, main);
+  if (outside === null) {
+    throw refused(
+      "main-unreadable",
+      "Whether NEMAR's main moved outside .nemar/ and .github/ since the gates could not be read; run resume again.",
+    );
+  }
+  if (outside.length > 0) {
+    const open = PULL_REQUEST_COLUMNS[pr].open;
+    const back = await move(
+      row,
+      open,
+      openFields({ ...row, status: open }, p, live.headSha),
+      "The return to the open pull request could not be recorded",
+    );
+    ctx.opts.out(
+      `NEMAR's main moved by enrichment since the gates, on ${outside.length} path(s) outside .nemar/ and .github/: re-pull #${row.id} is ${open} again, and its commit is made again on the new main.`,
     );
     return { kind: "next", row: back };
   }
