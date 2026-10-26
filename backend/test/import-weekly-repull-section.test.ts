@@ -7,18 +7,19 @@
  * writers (`transitionRepull`, `recordRepullMerged`), so the keys the SQL reads are the keys those
  * writers leave. Only GitHub, OpenNeuro and the coverage sweep are stood in for.
  *
- * The properties, each with a test that fails when its line is changed:
+ * The properties, each with a test of its own:
  *  - the section arrives every week, in a week with no re-pull work and the switches off too (ADR
  *    0054), and says the switches are off;
  *  - every count is read from the table that holds it, in the window it belongs to: dispatches by
  *    kind, state and word; open automatic re-pulls and their holds by word; claims to merge held
  *    over an hour; re-pulls that ended failed; merges by who held the claim;
- *  - the report names no dataset: a dataset id, even one stored where a word is, never reaches the
- *    body or the log line, and a word that names anonymity is counted under `other`;
- *  - a read that fails leaves the facts null, lists a failed part, and the section says unknown (ADR
- *    0054), never zero;
+ *  - the report names no dataset: a dataset id, even one stored where a word is or one the facts
+ *    hold there, never reaches the body or the log line, and a word that names anonymity is counted
+ *    under `other`;
+ *  - a read that fails, or a batch that comes back partial, leaves the facts null, lists a failed
+ *    part, and the section says unknown (ADR 0054), never zero;
  *  - attention follows ADR 0053 exactly: each reason alone, none for a switch that is off, a hold
- *    waiting on a gate or a run's refusal, and the thresholds exactly where they are stated;
+ *    other than the two bounds or a run's refusal, and the thresholds exactly where they are stated;
  *  - the headline, the log line and `nemar admin import-weekly`'s rule are one function.
  * Mail is pinned by `repull-no-mail-scan.test.ts`; the Resend capture below stays empty.
  */

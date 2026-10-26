@@ -1,10 +1,10 @@
 /**
  * `GET /admin/repulls/dispatches` (epic #1046 phase 7, #1913; ADR 0111, the Phase 7h slice): the
- * automatic path's dispatches, newest first, for an administrator. Modelled on
+ * automatic path's dispatches, newest first, for an administrator. Modeled on
  * `upstream-repulls-route.test.ts`: real SQLite behind `realD1` carrying every migration, the real
  * auth and admin middleware with seeded tokens, the real route and service.
  *
- * The properties, each with a test that fails when its line is changed:
+ * The properties, each with a test of its own:
  *  - the route answers before `/repulls/:id` would take its path for an id;
  *  - it is a keyset page, newest first: a cursor continues strictly below the id it names, so a
  *    walk of the pages meets every dispatch once, and the page is at most 50 rows whatever is asked,

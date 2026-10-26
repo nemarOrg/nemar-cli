@@ -5,7 +5,7 @@
  * loopback port and reached through TEST_API_URL. Nothing is canned: what the command prints is what
  * `GET /admin/repulls/switches`, `/admin/repulls/dispatches` and `/admin/repulls?open=1` answer.
  *
- * The properties, each with a test that fails when its line is changed:
+ * The properties, each with a test of its own:
  *  - it shows the switches and both caps as the Worker reads them, an unreadable cap as unreadable,
  *    the scheduler's stamps without its cursor, the open AUTOMATIC re-pulls with the word each is
  *    held for, and the recent dispatches, by dataset and id (an administrator's read);
