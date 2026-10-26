@@ -177,15 +177,18 @@ const HEALTHY = {
       errors: [],
     },
     // Epic #1046 phase 7: a routine week of the automatic re-pull, nothing for a person.
+    // Every count a routine week can hold is non-zero and different from the others, so a line that
+    // printed one under another's label would show; the four that ask (unreported, not accepted,
+    // claims held, ended failed) are the zeros.
     repulls: repullWeekFacts({
       dispatches: {
-        sent: 3,
-        by_kind: { open: 3, finish: 0 },
-        by_status: { ...zeroStatuses(), opened: 2, refused: 1 },
-        by_word: { refused: { gitlink: 1 }, failed: {}, dispatch_failed: {} },
+        sent: 6,
+        by_kind: { open: 6, finish: 0 },
+        by_status: { ...zeroStatuses(), opened: 3, refused: 2, failed: 1 },
+        by_word: { refused: { gitlink: 2 }, failed: { "upload-failed": 1 }, dispatch_failed: {} },
       },
-      open_automatic: { total: 4, held: 3, holds: { "screen-acknowledge": 3 } },
-      merged: { worker: 1, administrator: 2, outside_tool: 0, unattributed: 0 },
+      open_automatic: { total: 5, held: 4, holds: { "screen-acknowledge": 4 } },
+      merged: { worker: 7, administrator: 8, outside_tool: 9, unattributed: 10 },
     }),
     errors: [],
   },
@@ -282,12 +285,65 @@ describe("nemar admin import-weekly: the report reads correctly", () => {
     try {
       const result = await runCli(["admin", "import-weekly"], server.url);
       expect(result.stdout).toContain(
-        "repulls: switches=off dispatched=3 opened=2 refused=1 failed=0 unreported=0 not_accepted=0",
+        "repulls: switches=off dispatched=6 opened=3 refused=2 failed=1 unreported=0 not_accepted=0",
       );
       expect(result.stdout).toContain(
-        "repulls: open=4 held=3 claims_held=0 ended_failed=0 merged_worker=1 merged_admin=2 merged_outside=0",
+        "repulls: open=5 held=4 claims_held=0 ended_failed=0 merged_worker=7 merged_admin=8 merged_outside=9 merged_unattributed=10",
       );
       expect(result.exitCode).toBe(0);
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("a busy week prints each of its fourteen counts under its own label, and exits 1 with the Worker's reasons", async () => {
+    seedAuthenticatedConfig();
+    // Fourteen different numbers, one for each count the two lines print, so a label moved to
+    // another's count is a different line. The reasons are the phrases the Worker's rule gives
+    // these counts, in its order.
+    const reasons = [
+      "2 re-pull dispatch(es) were not reported by their run in time",
+      "1 re-pull dispatch(es) were not accepted by GitHub",
+      "7 re-pull merge claim(s) have been held for over 1 hour",
+      "8 re-pull(s) ended failed",
+    ];
+    const server = startCaptureServer({
+      ...HEALTHY,
+      facts: {
+        ...HEALTHY.facts,
+        repulls: repullWeekFacts({
+          dispatches: {
+            sent: 21,
+            by_kind: { open: 15, finish: 6 },
+            by_status: {
+              ...zeroStatuses(),
+              opened: 5,
+              refused: 4,
+              failed: 3,
+              unreported: 2,
+              dispatch_failed: 1,
+              finished: 6,
+            },
+            by_word: { refused: { gitlink: 4 }, failed: {}, dispatch_failed: {} },
+          },
+          open_automatic: { total: 12, held: 9, holds: { "screen-acknowledge": 9 } },
+          held_claims: 7,
+          ended_failed: 8,
+          merged: { worker: 10, administrator: 11, outside_tool: 13, unattributed: 14 },
+          attention: reasons,
+        }),
+      },
+    });
+    try {
+      const result = await runCli(["admin", "import-weekly"], server.url);
+      expect(result.stdout).toContain(
+        "repulls: switches=off dispatched=21 opened=5 refused=4 failed=3 unreported=2 not_accepted=1",
+      );
+      expect(result.stdout).toContain(
+        "repulls: open=12 held=9 claims_held=7 ended_failed=8 merged_worker=10 merged_admin=11 merged_outside=13 merged_unattributed=14",
+      );
+      expect(result.stdout).toContain(`Needs attention: ${reasons.join("; ")}.`);
+      expect(result.exitCode).toBe(1);
     } finally {
       server.stop();
     }

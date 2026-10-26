@@ -9790,7 +9790,8 @@ importWeeklyCommand
           `repulls: open=${weeklyCount(r.open_automatic.total)} held=${weeklyCount(r.open_automatic.held)} ` +
             `claims_held=${weeklyCount(r.held_claims)} ended_failed=${weeklyCount(r.ended_failed)} ` +
             `merged_worker=${weeklyCount(r.merged.worker)} merged_admin=${weeklyCount(r.merged.administrator)} ` +
-            `merged_outside=${weeklyCount(r.merged.outside_tool)}`,
+            `merged_outside=${weeklyCount(r.merged.outside_tool)} ` +
+            `merged_unattributed=${weeklyCount(r.merged.unattributed)}`,
         ),
       );
     }
