@@ -413,10 +413,15 @@ async function ingestNew(
     ? null
     : classifyAutomatedMail(parsed.headers, input.envelopeFrom, fromAddr);
   if (!spam && filtered === null && options.senderHourlyCap !== undefined && fromAddr !== "") {
+    // Two lanes (ADR 0113): a message is counted against mail of its own kind from the address.
+    // DMARC-passing mail is capped against DMARC-passing mail, anything else (not spam, so it
+    // passed an aligned check without DMARC) against the rest. A forger, whose mail fails DMARC,
+    // can only fill the second lane and never touches the first.
+    const lane = auth.dmarc === "pass" ? "=" : "<>";
     const recent = await db
       .prepare(
         `SELECT COUNT(*) AS n FROM mail_messages
-          WHERE from_addr = ? AND direction = 'in' AND dmarc = 'pass'
+          WHERE from_addr = ? AND direction = 'in' AND dmarc ${lane} 'pass'
             AND created_at > ? AND created_at <= ?`,
       )
       .bind(
@@ -537,20 +542,46 @@ async function ingestNew(
     ];
     // A genuine message (it passed the classifier, the cap and the participant check above)
     // makes a filtered ticket visible again, and the event keeps why it had been hidden.
+    // An open ticket nobody holds goes to its queue's holder, as a new ticket would; the UPDATE
+    // does it in the same statement, so only the reply that actually un-hides assigns.
     const unfiltering = filtered === null && target.filtered !== null;
+    let unfilterIndex = -1;
+    let unfilterAssignee: number | null = null;
     if (unfiltering) {
+      if (target.status === "open" && target.assignee_user_id === null) {
+        unfilterAssignee = await resolveAssignee(
+          db,
+          target.queue_tag,
+          { excludedUserId: target.excluded_user_id, restricted: target.restricted === 1 },
+          input.receivedAt,
+        );
+      }
+      unfilterIndex = statements.length;
       statements.push(
         db
           .prepare(
-            "UPDATE mail_tickets SET filtered = NULL WHERE id = ? AND filtered IS NOT NULL AND purged_at IS NULL",
+            "UPDATE mail_tickets SET filtered = NULL, assignee_user_id = COALESCE(assignee_user_id, CASE WHEN status = 'open' THEN ? END) WHERE id = ? AND filtered IS NOT NULL AND purged_at IS NULL",
           )
-          .bind(target.id),
+          .bind(unfilterAssignee, target.id),
         db
           .prepare(
             "INSERT INTO mail_ticket_events (ticket_id, kind, actor_user_id, detail, created_at) SELECT ?, 'unfiltered', NULL, ?, ? WHERE changes() > 0",
           )
           .bind(target.id, JSON.stringify({ from: target.filtered, reason: "reply" }), created),
       );
+      if (unfilterAssignee !== null) {
+        statements.push(
+          db
+            .prepare(
+              "INSERT INTO mail_ticket_events (ticket_id, kind, actor_user_id, detail, created_at) SELECT ?, 'assigned', NULL, ?, ? WHERE changes() > 0",
+            )
+            .bind(
+              target.id,
+              JSON.stringify({ to: unfilterAssignee, reason: "unfiltered" }),
+              created,
+            ),
+        );
+      }
     }
     for (const tag of tags) {
       statements.push(
@@ -563,7 +594,7 @@ async function ingestNew(
       );
     }
     let status = target.status;
-    let assignee = target.assignee_user_id;
+    let assignee = target.assignee_user_id ?? (unfiltering ? unfilterAssignee : null);
     // A reply to a closed ticket reopens it, and one to a pending ticket (waiting on the
     // requester) puts it back with the team. Escalated tickets keep their status. The holder
     // is kept only if still eligible for THIS ticket (restricted, excluded, role, status);
@@ -617,6 +648,9 @@ async function ingestNew(
       status = "open";
     }
     const results = await db.batch(statements);
+    // Announced only by the reply whose UPDATE really cleared the mark: of two concurrent
+    // genuine replies, one wins it.
+    const unfilteredNow = unfilterIndex >= 0 && (results[unfilterIndex]?.meta?.changes ?? 0) > 0;
     if ((results[0]?.meta?.changes ?? 0) > 0) {
       return {
         outcome: "threaded",
@@ -625,7 +659,7 @@ async function ingestNew(
         assigneeUserId: assignee,
         spam: false,
         filtered,
-        unfiltered: unfiltering,
+        unfiltered: unfilteredNow,
       };
     }
     // The purge claimed the ticket after it was loaded: every gated statement wrote nothing, so

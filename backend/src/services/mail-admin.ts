@@ -968,7 +968,15 @@ export async function setTicketStatus(
         "UPDATE mail_tickets SET status = ?, updated_at = datetime('now'), last_activity_at = datetime('now'), filtered = NULL WHERE id = ? AND purged_at IS NULL",
       )
       .bind(status, ticket.id),
-    liveEventStatement(db, ticket.id, "status", viewer.id, { from: ticket.status, to: status }),
+    // The same status on a filtered ticket only un-hides it: no no-op `status` event.
+    ...(ticket.status === status
+      ? []
+      : [
+          liveEventStatement(db, ticket.id, "status", viewer.id, {
+            from: ticket.status,
+            to: status,
+          }),
+        ]),
     ...unfilteredEvents(db, ticket, viewer, "status"),
   ]);
   if ((results[0]?.meta?.changes ?? 0) === 0) throwPurged();

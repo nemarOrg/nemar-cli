@@ -180,7 +180,8 @@ const PROVIDER_FAMILIES = /^(?:gmx|yahoo|hotmail|outlook|live|yandex)\.[a-z]{2,3
 /**
  * Domains under which unrelated parties register their own names, so blocking one blocks everybody
  * beneath it: second-level labels that ccTLDs reserve (`co.uk`, `ac.jp`, `edu.au`, `com.br`), and
- * hosting suffixes. A bare TLD is refused by the shape rule (a domain needs two labels).
+ * hosting suffixes. The list is best effort and not exhaustive (there is no public suffix list in
+ * the Worker); an administrator should still think before blocking a domain. A bare TLD is refused by the shape rule (a domain needs two labels).
  */
 const SECOND_LEVEL_LABELS: ReadonlySet<string> = new Set([
   "ac",
@@ -194,6 +195,8 @@ const SECOND_LEVEL_LABELS: ReadonlySet<string> = new Set([
   "or",
   "go",
   "mil",
+  "gob",
+  "nom",
 ]);
 const HOSTING_SUFFIXES: ReadonlySet<string> = new Set([
   "github.io",
@@ -254,14 +257,14 @@ export function normalizeBlock(
     if (isPublicSuffix(value)) {
       return {
         refusal:
-          "That is a public suffix (like co.uk or edu.au): blocking it would block every organisation under it.",
+          "That looks like a public suffix (like co.uk or edu.au): blocking it would block every organisation under it. The check is a best-effort list, not exhaustive, so think before blocking any domain.",
         malformed: false,
       };
     }
     if (isSharedProvider(value)) {
       return {
         refusal:
-          "That domain is a shared mailbox provider: block the address, not the whole provider.",
+          "That domain is a shared mailbox provider: block the address, not the whole provider. The provider list is best effort, not exhaustive, so think before blocking any domain.",
         malformed: false,
       };
     }

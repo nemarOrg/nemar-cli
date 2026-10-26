@@ -38,13 +38,16 @@ Every one of these headers is chosen by the sender, so filing is a convenience a
 Spam still wins: a spam ticket carries no `filtered` mark.
 A person taking the ticket clears the mark and records an `unfiltered` event with who and why: replying, adding a note, assigning it to someone, setting a status or escalating it (setting a summary does not).
 So does a genuine message, one that passes the classifier and the cap and comes from someone on the ticket, threading into it; that message is announced like a new ticket, because until then nobody was told.
+When a genuine message un-hides an open ticket that nobody holds, the ticket goes to its queue's holder under the rules of a new ticket (restriction and exclusion honoured), and the notice goes to that person; only the message whose update really cleared the mark announces.
 The default list hides filtered tickets only in the default view: asking for a status, an assignee or a search shows them.
 
 **3. A cap per sender address per hour.**
 `MAIL_SENDER_HOURLY_CAP` (default 20 when unset or invalid) is the number of inbound messages one lowercased From address may send in the previous hour.
 At or above it, a message is stored and threaded as usual and filed as `rate_limited`, like the filtered mail above.
 The cap is per address, not per domain, so one noisy sender does not silence a whole institution.
-Only messages whose DMARC passed are counted, because the From address of any other message can be forged, and forged mail must not be able to push the real sender over the cap.
+There are two lanes under the same limit: a message whose DMARC passed is counted against the DMARC-passing mail from that address, and any other message that is not spam (it passed an aligned SPF or DKIM check without DMARC) against that address's other mail.
+A forger, whose mail fails DMARC and so is spam, cannot fill either lane; only the second lane can be shared with someone who is not the address's owner.
+The trade is that a sender without DMARC shares one lane with every non-passing message that survives the spam test, which is a small set and is capped at the same number.
 A reprocess of an old message applies no cap, because today's traffic says nothing about it.
 
 **4. Quiet queues.**

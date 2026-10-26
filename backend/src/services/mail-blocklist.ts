@@ -129,6 +129,10 @@ export async function removeBlock(db: D1Database, id: number): Promise<Blocklist
  * than the spam test, which also accepts an aligned SPF or DKIM pass that the message row does
  * not record.
  */
+// Coupling: the block is derived from `requester_email`, which is the From address of the FIRST
+// inbound message (ingest sets it from that message and nothing rewrites it), so that message's
+// DMARC result is the one that vouches for the address being blocked. If requester_email ever
+// changes after creation, this must check the message that supplied the new address.
 async function senderVerified(db: D1Database, ticketId: number): Promise<boolean> {
   const row = await db
     .prepare(
