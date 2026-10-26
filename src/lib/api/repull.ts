@@ -8,7 +8,12 @@
  * `ApiError.code` (which is the body's `error`, the sentence, under this convention).
  */
 
-import type { RepullRow, RepullStatus } from "../../../shared/repull-state.js";
+import type {
+  DispatchView,
+  RepullSchedulerRow,
+  RepullSwitchesReport,
+} from "../../../shared/repull-observability.js";
+import type { DispatchStatus, RepullRow, RepullStatus } from "../../../shared/repull-state.js";
 import { request } from "./client.js";
 import { ApiError } from "./errors.js";
 
@@ -67,6 +72,42 @@ export async function listRepulls(
   const query = params.toString() ? `?${params.toString()}` : "";
   return request<{ repulls: RepullRow[]; next_after: number | null }>(
     `/admin/repulls${query}`,
+    {},
+    true,
+  );
+}
+
+/**
+ * `GET /admin/repulls/switches`: what the Worker reads of the automatic re-pull's switches and both
+ * caps, and the scheduler's stamps (null when its row is absent: unknown, not "never"). Holds no
+ * secret and no binding value.
+ */
+export async function getRepullSwitches(): Promise<{
+  switches: RepullSwitchesReport;
+  scheduler: RepullSchedulerRow | null;
+}> {
+  return request<{ switches: RepullSwitchesReport; scheduler: RepullSchedulerRow | null }>(
+    "/admin/repulls/switches",
+    {},
+    true,
+  );
+}
+
+/**
+ * `GET /admin/repulls/dispatches`: the automatic path's dispatches, newest first, a keyset page of
+ * at most 50 (`next_after` continues it). Names the dataset, so it is an administrator's read.
+ */
+export async function listRepullDispatches(
+  q: { dataset?: string; status?: DispatchStatus; after?: number; limit?: number } = {},
+): Promise<{ dispatches: DispatchView[]; next_after: number | null }> {
+  const params = new URLSearchParams();
+  if (q.dataset) params.set("dataset", q.dataset);
+  if (q.status) params.set("status", q.status);
+  if (q.after !== undefined) params.set("after", String(q.after));
+  if (q.limit !== undefined) params.set("limit", String(q.limit));
+  const query = params.toString() ? `?${params.toString()}` : "";
+  return request<{ dispatches: DispatchView[]; next_after: number | null }>(
+    `/admin/repulls/dispatches${query}`,
     {},
     true,
   );

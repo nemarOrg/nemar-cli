@@ -31,6 +31,9 @@
  *                                            (`lib/repull/abandon.ts`)
  *   nemar admin repull canary                the real-bucket check of the copy's S3 calls on a
  *                                            scratch prefix (`lib/repull/canary.ts`)
+ *   nemar admin repull auto                  the automatic re-pull as the Worker reads it: switches,
+ *                                            caps, the scheduler, the open automatic re-pulls and the
+ *                                            recent dispatches; read-only (`lib/repull/auto-view.ts`)
  *
  * `plan`, `execute` and `resume` also take `--automatic-dispatch <id>`: the unattended run of one
  * dispatch in the central `run-upstream-repull` workflow (`admin-repull-automatic.ts`).
@@ -60,6 +63,7 @@ import { type CatalogFacts, RepullCannotPlan, planRepull } from "../lib/repull/p
 import { countsMarkdown, preflightLines, summaryLines } from "../lib/repull/render.js";
 import { openNeuroGraphqlUrl as openNeuroUrlFromEnv } from "../lib/repull/sources.js";
 import { abandonCommand } from "./admin-repull-abandon.js";
+import { autoCommand } from "./admin-repull-auto.js";
 import { AUTOMATIC_HELP, automaticExecute, automaticPlan } from "./admin-repull-automatic.js";
 import { mergeCommand } from "./admin-repull-merge.js";
 import { parseMinutes, resumeCommand, statusCommand } from "./admin-repull-resume.js";
@@ -541,3 +545,4 @@ repullCommand.addCommand(statusCommand);
 repullCommand.addCommand(resumeCommand);
 repullCommand.addCommand(mergeCommand);
 repullCommand.addCommand(abandonCommand);
+repullCommand.addCommand(autoCommand);
