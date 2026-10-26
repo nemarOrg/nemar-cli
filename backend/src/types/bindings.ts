@@ -107,6 +107,9 @@ export interface Bindings {
    *  ADR 0112): 730 in production, 30 on staging. A whole number from 1 to 36500; unset, empty or
    *  anything else means the purge deletes nothing (services/ticket-retention.ts). */
   MAIL_RETENTION_DAYS?: string;
+  /** Inbound messages one sender address may send per hour before further ones are filed quietly
+   *  as `rate_limited` (ADR 0113). A whole number from 1 to 100000; unset or invalid means 20. */
+  MAIL_SENDER_HOURLY_CAP?: string;
   /** Which provider sends mail (epic #1893, ADR 0110): "cloudflare"
    *  (case-insensitive) sends through the EMAIL binding; unset, empty or
    *  "resend" is Resend. Set only in [env.dev] while staging proves the move.

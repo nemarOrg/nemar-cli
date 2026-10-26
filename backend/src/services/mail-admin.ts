@@ -8,6 +8,8 @@
  */
 
 import type {
+  FilterReason,
+  FilteredListMode,
   MailErrorCode,
   SettableStatus,
   TicketEvent,
@@ -65,6 +67,7 @@ export interface TicketRow {
   summary_author_user_id: number | null;
   summarized_at: string | null;
   purged_at: string | null;
+  filtered: FilterReason | null;
 }
 
 /** `TicketRow` plus the `unread` column the list query adds (0 or 1). */
@@ -87,6 +90,7 @@ export function toSummary(row: TicketListRow): TicketSummary {
     has_summary: row.summary !== null,
     purged: row.purged_at !== null,
     unread: row.unread === 1,
+    filtered: row.filtered ?? null,
   };
 }
 
@@ -107,7 +111,7 @@ function unreadSql(alias: string, viewerId: number): { sql: string; binds: unkno
 
 /**
  * Tickets the viewer may see (the same predicate as the list), that are not closed or spam, and
- * that have mail the viewer has not read: the Mail badge.
+ * that have mail the viewer has not read: the Mail badge. Filtered tickets (ADR 0113) never count.
  */
 export async function countUnreadTickets(db: D1Database, viewer: Viewer): Promise<number> {
   const vis = ticketVisibleTo(viewer, "t");
@@ -115,7 +119,8 @@ export async function countUnreadTickets(db: D1Database, viewer: Viewer): Promis
   const row = await db
     .prepare(
       `SELECT COUNT(*) AS n FROM mail_tickets t
-        WHERE ${vis.sql} AND t.status NOT IN ('closed', 'spam') AND ${unread.sql}`,
+        WHERE ${vis.sql} AND t.status NOT IN ('closed', 'spam') AND t.filtered IS NULL
+          AND ${unread.sql}`,
     )
     .bind(...vis.binds, ...unread.binds)
     .first<{ n: number }>();
@@ -151,12 +156,12 @@ export async function markTicketRead(
 }
 
 /** A purged ticket is read-only: its raw record is gone, so nothing may be added to it. */
-function assertNotPurged(ticket: TicketRow): void {
+export function assertNotPurged(ticket: TicketRow): void {
   if (ticket.purged_at !== null) throwPurged();
 }
 
 /** A write was refused by its `purged_at IS NULL` gate: the purge claimed the ticket first. */
-function throwPurged(): never {
+export function throwPurged(): never {
   throw new MailAdminError(
     409,
     "ticket_purged",
@@ -195,6 +200,7 @@ export interface ListFilters {
   assignee?: string;
   q?: string;
   summary?: "missing";
+  filtered?: FilteredListMode;
   cursor?: string;
   limit: number;
 }
@@ -217,6 +223,20 @@ export async function listTickets(
     binds.push(f.status);
   } else if (f.summary !== "missing") {
     where.push("t.status NOT IN ('spam', 'closed')");
+  }
+  // Filtered tickets (ADR 0113) are hidden by default, as spam is, so the default view is the
+  // work. Asking for something specific (a status, an assignee, a search) is not the default view:
+  // a person who searches for a sender must find the filtered ticket too. The summary queue lists
+  // every closed ticket, filtered or not, because the retention purge treats them alike.
+  if (f.filtered === "only") where.push("t.filtered IS NOT NULL");
+  else if (
+    f.filtered === undefined &&
+    f.summary !== "missing" &&
+    f.status === undefined &&
+    f.assignee === undefined &&
+    !f.q
+  ) {
+    where.push("t.filtered IS NULL");
   }
   if (f.queue) {
     where.push("t.queue_tag = ?");
@@ -334,7 +354,7 @@ function eventStatement(
 }
 
 /** An event row that is written only while the ticket is not purged (a purge may race a reply). */
-function liveEventStatement(
+export function liveEventStatement(
   db: D1Database,
   ticketId: number,
   kind: string,
@@ -354,7 +374,33 @@ function liveEventStatement(
     .bind(ticketId, kind, actor, JSON.stringify(detail));
 }
 
-async function reload(db: D1Database, id: number): Promise<TicketSummary> {
+/**
+ * The event that records a human taking a filtered ticket (ADR 0113): none when it is not
+ * filtered. The UPDATE next to it sets `filtered = NULL`, so a ticket someone has answered, taken,
+ * moved or escalated is no longer hidden from the default list. The previous reason is kept here.
+ */
+export function unfilteredEvents(
+  db: D1Database,
+  ticket: { id: number; filtered: FilterReason | null },
+  viewer: Viewer,
+  reason: string,
+  afterChange = false,
+): D1PreparedStatement[] {
+  return ticket.filtered === null
+    ? []
+    : [
+        liveEventStatement(
+          db,
+          ticket.id,
+          "unfiltered",
+          viewer.id,
+          { from: ticket.filtered, reason },
+          afterChange,
+        ),
+      ];
+}
+
+export async function reload(db: D1Database, id: number): Promise<TicketSummary> {
   const row = await db
     .prepare("SELECT * FROM mail_tickets WHERE id = ?")
     .bind(id)
@@ -671,10 +717,11 @@ async function sendAndRecord(
       ),
     db
       .prepare(
-        "UPDATE mail_tickets SET last_message_at = datetime('now'), last_activity_at = datetime('now'), updated_at = datetime('now'), status = ? WHERE id = ? AND purged_at IS NULL",
+        "UPDATE mail_tickets SET last_message_at = datetime('now'), last_activity_at = datetime('now'), updated_at = datetime('now'), status = ?, filtered = NULL WHERE id = ? AND purged_at IS NULL",
       )
       .bind(nextStatus, ticket.id),
     liveEventStatement(db, ticket.id, "reply", viewer.id, { message_id: providerId }),
+    ...unfilteredEvents(db, ticket, viewer, "reply"),
   ];
   if (nextStatus !== ticket.status) {
     statements.push(
@@ -808,12 +855,13 @@ export async function addNote(
   statements.push(
     db
       .prepare(
-        `UPDATE mail_tickets SET updated_at = datetime('now'), last_activity_at = datetime('now') WHERE id = ? AND purged_at IS NULL${
+        `UPDATE mail_tickets SET updated_at = datetime('now'), last_activity_at = datetime('now'), filtered = NULL WHERE id = ? AND purged_at IS NULL${
           gate ? " AND changes() > 0" : ""
         }`,
       )
       .bind(ticket.id),
     liveEventStatement(db, ticket.id, "note", viewer.id, null, gate),
+    ...unfilteredEvents(db, ticket, viewer, "note", gate),
   );
   const results = await db.batch(statements);
   if ((results[0]?.meta?.changes ?? 0) === 0) {
@@ -864,11 +912,15 @@ export async function assignTicket(
       );
     }
   }
-  if (userId === ticket.assignee_user_id) return toSummary(ticket);
+  if (userId === ticket.assignee_user_id && (userId === null || ticket.filtered === null)) {
+    return toSummary(ticket);
+  }
   const results = await db.batch([
     db
       .prepare(
-        "UPDATE mail_tickets SET assignee_user_id = ?, updated_at = datetime('now'), last_activity_at = datetime('now') WHERE id = ? AND purged_at IS NULL",
+        `UPDATE mail_tickets SET assignee_user_id = ?, updated_at = datetime('now'), last_activity_at = datetime('now')${
+          userId === null ? "" : ", filtered = NULL"
+        } WHERE id = ? AND purged_at IS NULL`,
       )
       .bind(userId, ticket.id),
     liveEventStatement(db, ticket.id, userId === null ? "unassigned" : "assigned", viewer.id, {
@@ -876,6 +928,7 @@ export async function assignTicket(
       to: userId,
       reason: "manual",
     }),
+    ...(userId === null ? [] : unfilteredEvents(db, ticket, viewer, "assign")),
   ]);
   if ((results[0]?.meta?.changes ?? 0) === 0) throwPurged();
   return reload(db, ticket.id);
@@ -889,7 +942,7 @@ export async function setTicketStatus(
 ): Promise<TicketSummary> {
   const ticket = await requireVisibleTicket(db, viewer, ticketId);
   assertNotPurged(ticket);
-  if (ticket.status === status) return toSummary(ticket);
+  if (ticket.status === status && ticket.filtered === null) return toSummary(ticket);
   if (
     (ticket.status === "closed" || ticket.status === "spam") &&
     (status === "open" || status === "pending")
@@ -912,10 +965,19 @@ export async function setTicketStatus(
   const results = await db.batch([
     db
       .prepare(
-        "UPDATE mail_tickets SET status = ?, updated_at = datetime('now'), last_activity_at = datetime('now') WHERE id = ? AND purged_at IS NULL",
+        "UPDATE mail_tickets SET status = ?, updated_at = datetime('now'), last_activity_at = datetime('now'), filtered = NULL WHERE id = ? AND purged_at IS NULL",
       )
       .bind(status, ticket.id),
-    liveEventStatement(db, ticket.id, "status", viewer.id, { from: ticket.status, to: status }),
+    // The same status on a filtered ticket only un-hides it: no no-op `status` event.
+    ...(ticket.status === status
+      ? []
+      : [
+          liveEventStatement(db, ticket.id, "status", viewer.id, {
+            from: ticket.status,
+            to: status,
+          }),
+        ]),
+    ...unfilteredEvents(db, ticket, viewer, "status"),
   ]);
   if ((results[0]?.meta?.changes ?? 0) === 0) throwPurged();
   return reload(db, ticket.id);
@@ -968,7 +1030,7 @@ export async function escalateTicket(
   const results = await db.batch([
     db
       .prepare(
-        "UPDATE mail_tickets SET status = 'escalated', assignee_user_id = ?, updated_at = datetime('now'), last_activity_at = datetime('now') WHERE id = ? AND purged_at IS NULL",
+        "UPDATE mail_tickets SET status = 'escalated', assignee_user_id = ?, updated_at = datetime('now'), last_activity_at = datetime('now'), filtered = NULL WHERE id = ? AND purged_at IS NULL",
       )
       .bind(ownerId, ticket.id),
     liveEventStatement(db, ticket.id, "escalated", viewer.id, { to: ownerId, reason }),
@@ -977,6 +1039,7 @@ export async function escalateTicket(
       to: ownerId,
       reason: "escalation",
     }),
+    ...unfilteredEvents(db, ticket, viewer, "escalate"),
   ]);
   if ((results[0]?.meta?.changes ?? 0) === 0) throwPurged();
   return { ticket: await reload(db, ticket.id), ownerId };
