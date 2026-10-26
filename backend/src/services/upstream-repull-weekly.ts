@@ -226,7 +226,7 @@ interface MergeSums {
 
 /**
  * Count the week. Throws when any read fails, when the batch of reads comes back with a different
- * number of answers than statements or with one that did not succeed or holds no rows array, or
+ * number of answers than statements or with one that did not succeed or has no rows array, or
  * when a read returns something that is not a count: the caller leaves the report's re-pull facts
  * null and lists a failed part, so a failed read is unknown and never a zero.
  */

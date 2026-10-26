@@ -1252,6 +1252,21 @@ describe("a batch that comes back partial is unknown, never zero", () => {
       "statement 3 of the re-pull week's batch did not succeed",
     ],
     [
+      "the claims count came back with an empty rows array",
+      answer(2, { results: [] }),
+      "a re-pull aggregate returned no row",
+    ],
+    [
+      "the merges count came back with an empty rows array",
+      answer(3, { results: [] }),
+      "a re-pull aggregate returned no row",
+    ],
+    [
+      "the failed count came back with an empty rows array",
+      answer(4, { results: [] }),
+      "a re-pull aggregate returned no row",
+    ],
+    [
       "the batch came back one answer short",
       (all) => all.slice(0, 4),
       "answered 4 of 5 statements",

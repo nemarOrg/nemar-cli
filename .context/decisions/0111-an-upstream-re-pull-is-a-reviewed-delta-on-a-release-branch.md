@@ -2011,7 +2011,8 @@ Three additions are made to earlier text: an annotation on the record's header, 
   The scheduler's two stamps are text columns that check nothing about their content, so the report prints one only in the form SQLite writes a time, and says any other value could not be read.
 - The reads are one batch of five statements and one read of the scheduler's row, so the Monday tick spends two D1 calls on them and no GitHub request.
   A read that fails leaves the section's facts null and lists a failed part; the section says unknown and the headline asks for attention, never a zero (ADR 0054).
-  A batch that comes back with more or fewer answers than statements, with an answer that did not succeed, or with one that holds no rows, is a read that failed in the same way: a partial week is unknown, never the counts that did arrive.
+  A batch that comes back with more or fewer answers than statements, with an answer that did not succeed, or with one that has no rows array, is a read that failed in the same way: a partial week is unknown, never the counts that did arrive.
+  An answer whose rows array is empty is not missing: on a grouped read (the dispatches, the holds) it is a true zero, and on a count, which always returns one row, it is a read that failed.
 
 ### What asks for attention (ADR 0053)
 
