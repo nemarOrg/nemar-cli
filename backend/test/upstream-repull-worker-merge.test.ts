@@ -1344,6 +1344,7 @@ describe("the merge's audit row is the gate on the send", () => {
           o.at ?? at,
           o.young ?? 0,
           o.max ?? WORKER_MERGES_MAX,
+          String(id),
         ).changes;
     expect(run({ rev: revision + 1 })).toBe(0);
     expect(run({ sha: OTHER })).toBe(0);

@@ -158,41 +158,47 @@ export const WORKER_MERGE_ANSWER_ACTION = "repull_auto_merge_answer";
 // SQL. Exported so a test runs the statement the merge runs, never a copy.
 // ----------------------------------------------------------------------------
 
+/**
+ * The Worker's merge audit rows of one record, `param` a parameter bound to the record's id AS TEXT
+ * (`String(id)`), as `resource_id` is written: a number bound as such could arrive as REAL, whose
+ * text is `5.0`, so no statement here casts a bound number to compare it with `resource_id`.
+ */
 const MERGES_OF = (param: string) => `FROM audit_log
      WHERE action = '${WORKER_MERGE_ACTION}' AND resource_type = 'upstream_repull'
-       AND resource_id = CAST(${param} AS TEXT)`;
+       AND resource_id = ${param}`;
 
 /**
- * The record of one merge the Worker is about to send: `?1` the system user, `?2` the re-pull,
- * `?3` the details, `?4` the revision the claim left, `?5` the claimed head, `?6` the claim's
- * Worker-stamped time, `?7` 1 when the claim must still be younger than
- * {@link HELD_CLAIM_MAX_AGE_MINUTES} minutes (a merge sent again under a claim made earlier), `?8`
- * {@link WORKER_MERGES_MAX}. It applies only while the record is automatic, at `gates_clear`, at that
+ * The record of one merge the Worker is about to send: `?1` the system user, `?2` the re-pull's id
+ * (an integer, for the record), `?3` the details, `?4` the revision the claim left, `?5` the
+ * claimed head, `?6` the claim's Worker-stamped time, `?7` 1 when the claim must still be younger
+ * than {@link HELD_CLAIM_MAX_AGE_MINUTES} minutes (a merge sent again under a claim made earlier),
+ * `?8` {@link WORKER_MERGES_MAX}, `?9` the re-pull's id as text (`String(id)`), for the audit
+ * rows' `resource_id`. It applies only while the record is automatic, at `gates_clear`, at that
  * revision, holding exactly that claim and no merge, and while fewer than the bound were sent for
  * it, so the count and the send are decided in one statement, and a merge is never sent under a
  * claim the administrator's `resume` may be expiring (it expires one at 30 minutes).
  */
 export const WORKER_MERGE_SENT_SQL = `INSERT INTO audit_log (user_id, action, resource_type, resource_id, details)
-  SELECT ?1, '${WORKER_MERGE_ACTION}', 'upstream_repull', CAST(?2 AS TEXT), ?3
+  SELECT ?1, '${WORKER_MERGE_ACTION}', 'upstream_repull', ?9, ?3
    WHERE EXISTS (SELECT 1 FROM upstream_repulls
                   WHERE id = ?2 AND revision = ?4 AND origin = 'automatic' AND status = 'gates_clear'
                     AND merge_claim_sha = ?5 AND merge_claimed_at = ?6 AND merge_sha IS NULL
                     AND (?7 = 0 OR merge_claimed_at > datetime('now', '-${HELD_CLAIM_MAX_AGE_MINUTES} minutes')))
-     AND (SELECT COUNT(*) ${MERGES_OF("?2")}) < ?8`;
+     AND (SELECT COUNT(*) ${MERGES_OF("?9")}) < ?8`;
 
 /**
- * The merges the Worker sent for one record (`?1`), as one row: how many (`sent`), the claim the
- * latest was sent under (`last_claimed_at`, its Worker-stamped time) and what GitHub answered it
- * (`last_outcome`, `merged`, `refused` or `unknown`, or NULL when no answer was recorded, which is
- * read as unknown). The answer is matched to the latest merge by its attempt number, so an earlier
- * merge's answer is never read as the latest one's.
+ * The merges the Worker sent for one record (`?1`, its id as text, `String(id)`), as one row: how
+ * many (`sent`), the claim the latest was sent under (`last_claimed_at`, its Worker-stamped time)
+ * and what GitHub answered it (`last_outcome`, `merged`, `refused` or `unknown`, or NULL when no
+ * answer was recorded, which is read as unknown). The answer is matched to the latest merge by its
+ * attempt number, so an earlier merge's answer is never read as the latest one's.
  */
 export const WORKER_MERGES_SQL = `SELECT
   (SELECT COUNT(*) ${MERGES_OF("?1")}) AS sent,
   (SELECT json_extract(details, '$.claimed_at') ${MERGES_OF("?1")} ORDER BY id DESC LIMIT 1) AS last_claimed_at,
   (SELECT json_extract(a.details, '$.outcome') FROM audit_log a
      WHERE a.action = '${WORKER_MERGE_ANSWER_ACTION}' AND a.resource_type = 'upstream_repull'
-       AND a.resource_id = CAST(?1 AS TEXT)
+       AND a.resource_id = ?1
        AND json_extract(a.details, '$.attempt') = (SELECT COUNT(*) ${MERGES_OF("?1")})
      ORDER BY a.id DESC LIMIT 1) AS last_outcome`;
 
@@ -203,13 +209,14 @@ export interface WorkerMerges {
 }
 
 /**
- * Who made the claim a record holds (`?1` the re-pull): the user of the latest claim edge in its
- * audit rows (the gates-clear self-edge), which the claim's own batch writes. The system user is
- * the Worker; any other is an administrator's `nemar admin repull merge`.
+ * Who made the claim a record holds (`?1` the re-pull's id as text, `String(id)`): the user of the
+ * latest claim edge in its audit rows (the gates-clear self-edge), which the claim's own batch
+ * writes. The system user is the Worker; any other is an administrator's
+ * `nemar admin repull merge`.
  */
 export const CLAIM_OWNER_SQL = `SELECT user_id FROM audit_log
   WHERE action = 'repull_transition' AND resource_type = 'upstream_repull'
-    AND resource_id = CAST(?1 AS TEXT)
+    AND resource_id = ?1
     AND json_extract(details, '$.from') = 'gates_clear' AND json_extract(details, '$.to') = 'gates_clear'
   ORDER BY id DESC LIMIT 1`;
 
@@ -222,7 +229,7 @@ export const CLAIM_YOUNG_SQL = `SELECT CASE WHEN merge_claimed_at > datetime('no
 
 /** The merges the Worker sent for `id`; a count that cannot be read throws (unknown is not zero). */
 export async function workerMerges(db: D1Database, id: number): Promise<WorkerMerges> {
-  const m = await db.prepare(WORKER_MERGES_SQL).bind(id).first<WorkerMerges>();
+  const m = await db.prepare(WORKER_MERGES_SQL).bind(String(id)).first<WorkerMerges>();
   if (typeof m?.sent !== "number") throw new Error("the Worker's merges could not be counted");
   return m;
 }
@@ -386,6 +393,7 @@ export async function sendUnderClaim(
       claimedAt,
       opts.young ? 1 : 0,
       WORKER_MERGES_MAX,
+      String(row.id),
     )
     .run();
   // The record moved, the claim aged past the bound for sending under it, or the bound is reached:
@@ -576,7 +584,10 @@ export async function reconcileWorkerClaim(
 
   // Not merged. An administrator's claim is theirs to resolve: the Worker neither sends under it
   // nor releases it.
-  const owner = await db.prepare(CLAIM_OWNER_SQL).bind(row.id).first<{ user_id: number | null }>();
+  const owner = await db
+    .prepare(CLAIM_OWNER_SQL)
+    .bind(String(row.id))
+    .first<{ user_id: number | null }>();
   if (owner?.user_id !== SYSTEM_USER_ID) return held(row, "claim-held");
 
   const merges = await workerMerges(db, row.id);

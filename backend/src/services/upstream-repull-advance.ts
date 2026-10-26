@@ -305,13 +305,14 @@ export const REPULL_HOLD_SQL = `UPDATE upstream_repulls
     AND hold_reason IS ?3 AND ?4 IS NOT ?3`;
 
 /**
- * How many times the identifier screen of one head of N.0.0 was dispatched: `?1` the re-pull,
- * `?2` the head. Counted from the audit row the screen's own claim writes with each dispatch
- * (`repull_screen_dispatched`), an administrator's included.
+ * How many times the identifier screen of one head of N.0.0 was dispatched: `?1` the re-pull's id
+ * as text (`String(id)`, as `resource_id` is written), `?2` the head. Counted from the audit row
+ * the screen's own claim writes with each dispatch (`repull_screen_dispatched`), an
+ * administrator's included.
  */
 export const SCREEN_DISPATCHES_SQL = `SELECT COUNT(*) AS n FROM audit_log
   WHERE action = 'repull_screen_dispatched' AND resource_type = 'upstream_repull'
-    AND resource_id = CAST(?1 AS TEXT) AND json_extract(details, '$.pr') = 'n0'
+    AND resource_id = ?1 AND json_extract(details, '$.pr') = 'n0'
     AND json_extract(details, '$.sha') = ?2`;
 
 /**
@@ -748,7 +749,8 @@ async function advanceStalled(t: Tick, row: RepullRow): Promise<void> {
 
 /** How many times the screen of `head` was dispatched for re-pull `id`. */
 async function screenDispatches(db: D1Database, id: number, head: string): Promise<number> {
-  const n = (await db.prepare(SCREEN_DISPATCHES_SQL).bind(id, head).first<{ n: number }>())?.n;
+  const n = (await db.prepare(SCREEN_DISPATCHES_SQL).bind(String(id), head).first<{ n: number }>())
+    ?.n;
   if (typeof n !== "number") throw new Error("the screen's dispatches could not be counted");
   return n;
 }
