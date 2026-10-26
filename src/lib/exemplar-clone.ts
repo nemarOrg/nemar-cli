@@ -35,8 +35,8 @@ import {
   type S3Credentials,
   configureS3Remote,
   markInheritedOpenNeuroRemotesIgnored,
+  uuidsNamedInRemoteLog,
 } from "./git-annex/s3-remote.js";
-import { uuidsNamedInRemoteLog } from "./git-annex/s3-remote.js";
 import { batchSetKeysPresent, getRemoteUuid } from "./git-annex/transfer.js";
 import { waitForBidsValidationRun } from "./import-openneuro.js";
 import {
@@ -76,6 +76,8 @@ export function mirrorProblem(sourceId: string, mirror: string): string | null {
 
 /** The remote a re-pull reads, which a mirror fixture's dev-bucket remote is named. */
 const REPULL_REMOTE = "nemar-s3";
+/** An ordinary exemplar's dev-bucket remote. */
+const DEV_REMOTE = "nemar-s3-dev";
 /** What the inherited production remote of a mirror fixture is renamed to, out of the way. */
 export const INHERITED_REMOTE = "nemar-s3-source";
 
@@ -102,9 +104,19 @@ export async function renameInheritedRemote(
     if (r.exitCode !== 0)
       throw new Error(`Failed to rename the git remote ${from}: ${r.stderr.trim()}`);
   }
+  // The git-annex branch's `remote.log`: none on the branch is no special remote, and a branch
+  // that cannot be read is an error, never "nothing names it".
   const remoteLog = async () => {
+    const listed = await runCommand(["git", "ls-tree", "git-annex", "--", "remote.log"], { cwd });
+    if (listed.exitCode !== 0) {
+      throw new Error(`The git-annex branch could not be read: ${listed.stderr.trim()}`);
+    }
+    if (listed.stdout.trim() === "") return "";
     const r = await runCommand(["git", "cat-file", "blob", "git-annex:remote.log"], { cwd });
-    return r.exitCode === 0 ? r.stdout : "";
+    if (r.exitCode !== 0) {
+      throw new Error(`The git-annex branch's remote.log could not be read: ${r.stderr.trim()}`);
+    }
+    return r.stdout;
   };
   for (const uuid of uuidsNamedInRemoteLog(await remoteLog(), from)) {
     const r = await runCommand(["git", "annex", "renameremote", uuid, to], { cwd });
@@ -116,6 +128,34 @@ export async function renameInheritedRemote(
   if (uuidsNamedInRemoteLog(await remoteLog(), from).length > 0 || left.stdout.trim() !== "") {
     throw new Error(`${from} is still named after the rename; nothing was configured.`);
   }
+}
+
+/**
+ * Steps 5 and 6 of prepare. The clone inherited the source's PRODUCTION `nemar-s3` remote
+ * (bucket=nemar): it is marked annex-ignore, so it is never selected as an upload target, and the
+ * dev-bucket remote is configured by `configure` (the dev bucket's S3 remote; a test passes a
+ * directory remote). An ordinary exemplar's is `nemar-s3-dev`; a mirror fixture's takes the name
+ * `nemar-s3`, the one remote a re-pull reads, so the inherited one is first renamed out of its way
+ * (`nemar-s3-source`) and that is the one ignored. Returns the dev remote's name and uuid.
+ */
+export async function prepareDevRemote(
+  datasetPath: string,
+  opts: {
+    mirror: boolean;
+    configure: (name: string) => Promise<{ success: boolean; error?: string }>;
+    onWarn?: (remote: string, error: string) => void;
+  },
+): Promise<{ devRemote: string; uuid: string }> {
+  const devRemote = opts.mirror ? REPULL_REMOTE : DEV_REMOTE;
+  if (opts.mirror) await renameInheritedRemote(datasetPath, REPULL_REMOTE, INHERITED_REMOTE);
+  await markInheritedOpenNeuroRemotesIgnored(datasetPath, opts.onWarn, [
+    opts.mirror ? INHERITED_REMOTE : REPULL_REMOTE,
+  ]);
+  const configured = await opts.configure(devRemote);
+  if (!configured.success) throw new Error(`Failed to configure ${devRemote}: ${configured.error}`);
+  const uuid = await getRemoteUuid(datasetPath, devRemote);
+  if (!uuid) throw new Error(`Failed to get ${devRemote} remote UUID`);
+  return { devRemote, uuid };
 }
 
 // ---------------------------------------------------------------------------
@@ -428,7 +468,10 @@ export interface PrepareExemplarResult {
   datasetPath: string;
   xxId: string;
   sourceId: string;
-  /** uuid of the freshly configured dev-bucket remote. */
+  /**
+   * uuid of the freshly configured dev-bucket remote, `devRemote` (which a mirror fixture names
+   * `nemar-s3`; the field keeps the name it had before mirror fixtures).
+   */
   nemarS3DevUuid: string;
   /**
    * The dev-bucket remote's name: `nemar-s3-dev`, or `nemar-s3` for a mirror fixture (`--mirror`),
@@ -473,7 +516,6 @@ export async function prepareExemplar(
   const mirror = options.mirror;
   const problem = mirror === undefined ? null : mirrorProblem(sourceId, mirror);
   if (problem) throw new Error(problem);
-  const devRemote = mirror === undefined ? "nemar-s3-dev" : REPULL_REMOTE;
 
   const workDir = options.workDir || mkdtempSync(join(tmpdir(), `nemar-exemplar-${xxId}-`));
   const datasetPath = join(workDir, xxId);
@@ -566,46 +608,32 @@ export async function prepareExemplar(
     }
   }
 
-  // Step 5: The clone inherited the source's PRODUCTION nemar-s3 remote
-  // (bucket=nemar). Disable it so it's never selected as an upload target —
-  // this tool writes exclusively to the dev bucket configured next. A mirror
-  // fixture's dev remote takes the name `nemar-s3` (the one a re-pull reads),
-  // so the inherited one is renamed out of its way first.
-  if (mirror !== undefined) {
-    await renameInheritedRemote(datasetPath, REPULL_REMOTE, INHERITED_REMOTE);
-  }
-  await markInheritedOpenNeuroRemotesIgnored(
-    datasetPath,
-    (remote, err) => {
-      console.log(
-        chalk.yellow(
-          `  Warning: could not mark ${remote} as annex-ignore (${err}). ` +
-            `Run 'git config remote.${remote}.annex-ignore true' manually.`,
+  // Steps 5 and 6: the inherited production remote out of the way, and the dev-bucket remote.
+  const s3Spinner = ora("Configuring the dev-bucket remote...").start();
+  let dev: { devRemote: string; uuid: string };
+  try {
+    dev = await prepareDevRemote(datasetPath, {
+      mirror: mirror !== undefined,
+      onWarn: (remote, err) => {
+        console.log(
+          chalk.yellow(
+            `  Warning: could not mark ${remote} as annex-ignore (${err}). ` +
+              `Run 'git config remote.${remote}.annex-ignore true' manually.`,
+          ),
+        );
+      },
+      configure: (name) =>
+        configureS3Remote(
+          datasetPath,
+          { name, bucket: DEST_BUCKET, prefix: `${xxId}/objects`, region: S3_REGION },
+          resolveS3Credentials(),
         ),
-      );
-    },
-    [mirror === undefined ? "nemar-s3" : INHERITED_REMOTE],
-  );
-
-  // Step 6: Configure a fresh dev-bucket S3 remote scoped to this exemplar.
-  const s3Spinner = ora(`Configuring ${devRemote} remote...`).start();
-  const s3Creds = resolveS3Credentials();
-  const s3Result = await configureS3Remote(
-    datasetPath,
-    { name: devRemote, bucket: DEST_BUCKET, prefix: `${xxId}/objects`, region: S3_REGION },
-    s3Creds,
-  );
-  if (!s3Result.success) {
-    const msg = `Failed to configure ${devRemote}: ${s3Result.error}`;
-    s3Spinner.fail(msg);
-    throw new Error(msg);
+    });
+  } catch (err) {
+    s3Spinner.fail(err instanceof Error ? err.message : String(err));
+    throw err;
   }
-  const nemarS3DevUuid = await getRemoteUuid(datasetPath, devRemote);
-  if (!nemarS3DevUuid) {
-    const msg = `Failed to get ${devRemote} remote UUID`;
-    s3Spinner.fail(msg);
-    throw new Error(msg);
-  }
+  const { devRemote, uuid: nemarS3DevUuid } = dev;
   s3Spinner.succeed(`Configured ${devRemote} remote`);
 
   // Step 7: Reconfigure origin to the new exemplar repo and push.
@@ -734,9 +762,9 @@ export async function finalizeExemplar(
     // resolves to the uuid prepare recorded before registering keys against
     // it (mirrors import-openneuro.ts's finalize re-clone guard, adapted for
     // the fact this tool never re-clones — datasetPath is shared in-memory).
-    const currentUuid = await getRemoteUuid(datasetPath, prep.devRemote ?? "nemar-s3-dev");
+    const currentUuid = await getRemoteUuid(datasetPath, prep.devRemote ?? DEV_REMOTE);
     if (currentUuid !== nemarS3DevUuid) {
-      const msg = `${prep.devRemote ?? "nemar-s3-dev"} uuid drifted (prepare=${nemarS3DevUuid} now=${currentUuid}). Aborting before registering keys against the wrong remote.`;
+      const msg = `${prep.devRemote ?? DEV_REMOTE} uuid drifted (prepare=${nemarS3DevUuid} now=${currentUuid}). Aborting before registering keys against the wrong remote.`;
       console.error(chalk.red(msg));
       throw new Error(msg);
     }
