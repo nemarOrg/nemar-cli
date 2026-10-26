@@ -2039,7 +2039,7 @@ Three additions are made to earlier text: an annotation on the record's header, 
 - `GET /admin/repulls/switches` also returns the scheduler's three stamps, never its cursor, which is a dataset id.
   The row absent is null, which is unknown and not "never", and a table that is missing is a 500 that names migration 0111.
 - `nemar admin repull auto [--json]` prints the switches and both caps, the scheduler's stamps, the open automatic re-pulls with their hold words and any claim still held, and the 20 newest dispatches.
-  It reads every page of open re-pulls (an administrator's is not listed) up to ten pages, and says when the list stopped before its end; it makes only GET requests; and it prints nothing when a read fails, because a table with a hole would claim what was not read.
+  It reads every page of open re-pulls (an administrator's is not listed) up to ten pages, and says when the list stopped before its end; it makes only GET requests; and when a read fails it prints the failure and no table, because a table with a hole would claim what was not read.
 
 ### The kill switch, as the runbook states it
 

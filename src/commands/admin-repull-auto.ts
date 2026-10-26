@@ -33,8 +33,8 @@ repository never does. --json prints the same facts.
 
 Exit codes:
   0  read.
-  1  the Worker refused (you are not an administrator) or a read failed. Nothing is printed then,
-     because a partial table would claim what was not read.`;
+  1  the Worker refused (you are not an administrator) or a read failed. Only the failure is
+     printed then, never a table, because a partial table would claim what was not read.`;
 
 export const autoCommand = new Command("auto")
   .description(

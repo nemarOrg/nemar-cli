@@ -106,7 +106,10 @@ describe("no text names a command that does not exist", () => {
     expect(help).toContain("AUTO_REPULL_ENABLED and AUTO_REPULL_MERGE_ENABLED");
     expect(help).toContain("--json prints the same facts");
     expect(help).toContain("nemar admin repull status <id>");
-    expect(help).toContain("Nothing is printed then");
+    // The failure line is printed (the command's tests pin that), so "nothing" would be untrue.
+    expect(help).toContain("Only the failure is");
+    expect(help).toContain("printed then, never a table");
+    expect(help).not.toContain("Nothing is printed");
     expect(help).not.toMatch(/--abandon/);
   });
 
