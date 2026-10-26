@@ -133,7 +133,7 @@ export async function patchTurn(ctx: ResumeContext, row: RepullRow): Promise<Tur
       result: {
         row,
         outcome: "waiting",
-        waitingFor: `an administrator's decision on the ${conflicts} conflict(s) the plan lists, before N.0.1 is made: resolve one to NEMAR's side with --take-ours <path> (or --take-ours dataset_description.json#<Key>), or leave every one on upstream's side with --keep-upstream (the plan file lists them: nemar admin repull plan ${ctx.datasetId} --json, or the reviewed file itself)`,
+        waitingFor: `an administrator's decision on the ${conflicts} conflict(s) the plan lists, before N.0.1 is made: resolve one to NEMAR's side with --take-ours <path> (or --take-ours dataset_description.json#<Key>), or leave every one on upstream's side with --keep-upstream (the reviewed plan file names them, under conflicts and description.keys)`,
       },
     };
   }

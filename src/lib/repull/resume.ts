@@ -163,6 +163,11 @@ async function resume(opts: ResumeOptions): Promise<ResumeResult> {
     replaced: new Set(),
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
   };
+  if (((opts.takeOurs?.length ?? 0) > 0 || opts.keepUpstream) && open.status.startsWith("patch_")) {
+    opts.out(
+      `Re-pull #${open.id} is ${open.status}: N.0.1 is already made, so --take-ours and --keep-upstream change nothing now.`,
+    );
+  }
   try {
     return await walk(ctx, open);
   } finally {

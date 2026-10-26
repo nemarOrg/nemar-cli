@@ -18,7 +18,7 @@
  *  - with `--take-ours participants.tsv`, the conflict is replayed as NEMAR had it;
  *  - a `--take-ours` that names no conflict refuses before anything is written;
  *  - abandon after the release declines N.0.1 (`patch_declined`), closing its pull request and
- *    deleting its branch when they exist.
+ *    deleting its branch when they exist, and never while N.0.0's lock is not recorded.
  *
  * What only the canary and the first production runs can check: that GitHub opens and squash-merges
  * a second release pull request on the same repository as the stand-in does, and that the dataset
@@ -236,6 +236,19 @@ describe.skipIf(!awsInstalled)("N.0.1", () => {
       /\n\nUpstream-Snapshot: ds099999@1\.1\.0\nRepull-Plan: sha256:[0-9a-f]{64}\nRepull-Patch: corrections=2$/,
     );
     expect(w.row()).toMatchObject({ status: "patch_merged", patch_merge_claim_sha: patch });
+  });
+
+  test("abandon does not decline N.0.1 while N.0.0's lock is not recorded", async () => {
+    await releasedN0();
+    w.s3.inject("PutObjectRetention", { code: "InternalError", status: 500, times: 1 });
+    const locked = await resume();
+    expect(locked.exitCode, locked.all).toBe(3);
+    expect(w.row().status).toBe("released");
+    expect(JSON.parse(w.row().counts)).not.toHaveProperty("locked");
+    const run = await w.cli(["repull", "abandon", w.fx.datasetId, "--yes"]);
+    expect(run.exitCode, run.all).toBe(1);
+    expect(run.all).toContain("lock-unrecorded");
+    expect(w.row().status).toBe("released");
   });
 
   test("abandon after the release declines N.0.1; with its pull request open, it is closed and its branch deleted", async () => {

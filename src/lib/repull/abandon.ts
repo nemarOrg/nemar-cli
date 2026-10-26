@@ -15,7 +15,9 @@
  *   after N.0.0's release   (`released`, `patch_synthesized`, `patch_gates_clear`): only N.0.1's
  *                           pull request and branch are closed and deleted, when they exist, and
  *                           the record ends `patch_declined`; N.0.0 stays released, and its
- *                           corrections remain corrections in the next plan.
+ *                           corrections remain corrections in the next plan. A `released` record
+ *                           whose lock is not recorded is refused (`lock-unrecorded`): resume
+ *                           locks N.0.0's objects first, and declining N.0.1 never skips that.
  *   once N.0.1 merged       (`patch_merged`, `patch_released`): refused (`wait-for-release`).
  *
  * A merged record is never ended this way: before anything is closed, every pull request of the
@@ -494,6 +496,13 @@ async function declinePatch(
   row: RepullRow,
   confirm?: Confirm,
 ): Promise<{ row: RepullRow; report: EndReport }> {
+  // Declining N.0.1 never skips N.0.0's lock: its objects are a released version's.
+  if (row.status === "released" && typeof row.counts.locked !== "number") {
+    throw stop(
+      "lock-unrecorded",
+      `Re-pull #${row.id} records no count of locked objects: run nemar admin repull resume ${ctx.datasetId}, which locks what N.0.0's copy and uploads wrote, then abandon again to decline N.0.1.`,
+    );
+  }
   const plan = await surveyN1(ctx, row);
   const what = [
     plan.close.length > 0
