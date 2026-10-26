@@ -1220,7 +1220,9 @@ jobs:
   # required, and nightly-tests.yml provides scheduled hard coverage + issue.
   integration-dev:
     runs-on: ubuntu-latest
-    # p95 11.5 min (42 green runs to 2026-10-13), so twice that.
+    # The tests took about 16 min before Phases 6g and 7d (2026-10-25) and project to about
+    # 30 min on current runners with their re-pull world suites (the 6g and 7d runs of
+    # 2026-10-26). The cap is 35 min, a margin over that, the owner's choice.
     timeout-minutes: 35
     needs: changes
     if: needs.changes.outputs.cli == 'true' || needs.changes.outputs.tests == 'true' || needs.changes.outputs.backend == 'true' || needs.changes.outputs.shared == 'true'
