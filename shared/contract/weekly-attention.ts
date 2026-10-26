@@ -85,8 +85,9 @@ export interface WeeklyAttentionFacts {
    * absent when the consumer predates it, which is also unknown. `attention` holds the phrases the
    * Worker decided, one per reason a person should look, and only a person's work raises one: a
    * scheduler that stopped while a switch is on, a dispatch nobody answered, a claim to merge held
-   * for an hour, a re-pull that ended failed, a bound reached, a cap that cannot be read. A switch
-   * that is off, a hold waiting on a gate and a run's refusal raise none (ADR 0053).
+   * for an hour, a re-pull that ended failed, a re-pull that used all its resumes or all its
+   * finish runs, a cap that cannot be read. A switch that is off, every other hold (a gate waited
+   * on, a fault the path saw) and a run's refusal raise none (ADR 0053).
    */
   repulls?: { attention: readonly string[] } | null;
   errors: { stage: string; error: string }[];

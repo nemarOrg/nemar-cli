@@ -1310,6 +1310,14 @@ describe("what is not a reason, with nothing to do", () => {
     expect(repullProblems(r.facts)).toEqual([]);
   });
 
+  test("the section says what asks in the rule's own terms: the two bounds by name, and no other hold", async () => {
+    const section = sectionOf((await report()).body);
+    expect(section).toContain("a re-pull that used all its resumes or all its finish runs");
+    expect(section).toContain("every other hold is counted in its table and does not ask");
+    // A bound reached is not one reason: the merge bound is a bound too, and does not ask.
+    expect(section).not.toContain("a bound reached");
+  });
+
   test("a switch on, a fresh scheduler and a routine week: nothing for a person", async () => {
     stampFresh();
     seedDispatch({ status: "opened", at: at(-DAY), repullId: 3 });

@@ -536,7 +536,7 @@ function repullSection(r: RepullWeekFacts | null): string[] {
     ...wordTable("Not accepted by GitHub, by word", d.by_word.dispatch_failed),
     ...wordTable("Held automatic re-pulls, by word", r.open_automatic.holds),
     "",
-    "A dispatch is counted in the week it was sent, in the state it has when this report is made. A switch that is off, a re-pull waiting on a gate (the identifier screen, the review, BIDS validation) and a run's refusal are expected and are not an alarm; what asks for attention is a scheduler that stopped while a switch is on, a dispatch nobody answered, a claim to merge held for an hour, a re-pull that ended failed, a bound reached and a cap that cannot be read.",
+    "A dispatch is counted in the week it was sent, in the state it has when this report is made. A switch that is off, a re-pull waiting on a gate (the identifier screen, the review, BIDS validation) and a run's refusal are expected and are not an alarm. What asks for attention is a scheduler that stopped while a switch is on, a dispatch nobody answered, a claim to merge held for an hour, a re-pull that ended failed, a re-pull that used all its resumes or all its finish runs, and a cap that cannot be read; every other hold is counted in its table and does not ask.",
     "",
     "Names and reasons: `nemar admin repull auto`.",
   ];

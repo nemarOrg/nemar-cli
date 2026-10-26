@@ -2023,7 +2023,7 @@ Three additions are made to earlier text: an annotation on the record's header, 
 - The scheduler's age is read against the report's own instant.
   A scheduler silent for exactly 26 hours is not yet a reason, and neither is a claim exactly an hour old; one second more is.
   Only the first reason depends on a switch.
-  A cap that cannot be read is a fault seen, not silence, and a dispatch, a claim, a failed re-pull or a bound reached are there to be looked at, so each asks whatever the switches say.
+  A cap that cannot be read is a fault seen, not silence, and a dispatch, a claim, a failed re-pull or a resume or finish bound reached are there to be looked at, so each asks whatever the switches say.
 - Nothing else asks: not a switch that is off, which is a path with nothing to do, not a hold waiting on a gate (the identifier screen, the review, BIDS validation and its checks, `not-clean`), which is the expected state of a path that works and would be an alarm that never clears, not a hold that names a fault the path saw (`gates-refused`, `claim-refused`, `merge-refused` and every other hold word but the two bounds above), which the table of holds counts and `nemar admin repull auto` lists, and not a run's refusal.
   A dispatch that ended `failed` is counted and shown by word, and is not a reason by itself: a re-pull stalled before its pull request opened is resumed within its bound and reaching the bound is the reason, and one that failed after it opened waits, held, for an administrator's `resume`, which the table of holds shows.
 - One rule decides the week.
