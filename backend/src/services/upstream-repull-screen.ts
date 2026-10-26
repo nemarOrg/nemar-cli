@@ -475,7 +475,8 @@ export type RepullScreenGate =
  * not name `sha` is `unverified`. An `xx` dataset is exempt.
  *
  * A passing answer carries a guard for the write that relies on it: the screen still holds the
- * verdict (and the acknowledgment) the gate read when the write applies.
+ * verdict (and the acknowledgment) the gate read when the write applies. `read` is the screen row
+ * of `pr` and `sha` as the caller read it moments ago; it is read here when not given.
  */
 export async function repullScreenGate(
   db: D1Database,
@@ -486,10 +487,12 @@ export async function repullScreenGate(
     sha: string;
     actorId: number;
   },
+  read?: RepullScreenRow | null,
 ): Promise<RepullScreenGate> {
   if (isScreenExempt(args.datasetId)) return { ok: true, exempt: true };
   const short = args.sha.slice(0, 12);
-  const row = await readRepullScreen(db, args.repullId, args.pr, args.sha);
+  const row =
+    read !== undefined ? read : await readRepullScreen(db, args.repullId, args.pr, args.sha);
   if (!row) {
     return {
       ok: false,

@@ -1594,6 +1594,7 @@ Five annotations are added to earlier text: on the record's header, on the openi
 - A row at `pr_open` is read at the gates by the 7e slice's reader and decided by its rule, at the recorded head.
 - Only a clean verdict writes `pr_open -> gates_clear`, with the head as `gates_sha`, as the system user, through the record's own transition on the row as the tick read it.
   The transition reads the dataset fences, the screen bound to the row and GitHub's live head again, and re-asserts the screen's verdict in the statement that writes, so a fact that changed in between refuses the edge and nothing is written.
+  *Annotated 2026-10-26: the transition now checks the dataset fences, the screen and the pull request on the tick's own reads of them; the statement still re-asserts the screen, so a screen that changed in between refuses the edge (`screen-changed`). The Worker's claim does the same, its statement still holding the cap and the dataset's anonymity and withdrawal.*
 - An unknown fact never writes the edge: an unreadable pull request, `main` or check, a mergeable state that is `unknown`, null or anything but `clean`, and every other word hold.
 - A clean row whose edge the transition refuses holds `gates-refused`, and the tick's log line is an error with the refusal's code on every tick it happens: the rule and the record disagree, which should not happen, and is seen when it does.
 
@@ -1918,6 +1919,7 @@ Eleven annotations are added to earlier text, where this slice builds what it sa
   machine clean holds on facts read now at the merge stage, never the gates' reading, and an unknown fact is never clean;
   its trailers are values the squash message can carry (`merge-message`);
   and the record's own claim, made as the system user, takes a unit of `REPULL_DAILY_MERGE_CAP` in the statement that claims (`cap-exhausted`, `cap-unreadable`, and `pr-unreadable` when GitHub could not answer for the live head; a record that moved while it was read is skipped, for the next tick to read as it is; any other refusal of a clean record is `claim-refused`, which should not happen and is logged at error level).
+  *Annotated 2026-10-26: the claim no longer reads GitHub; it checks the pull request the tick read (see the gates annotation of the Phase 7f slice).*
 - Machine clean's `main` rule is the commit the record bases on, exactly, so any move of `main` holds `main-moved`: the administrator's gate refuses only a move outside `.nemar/` and `.github/` (`merge-main-moved`), and the Worker refuses more.
 - From Phase 7g every merge gate and the claim refuse a pull request whose head or base repository is not `nemarDatasets/<dataset_id>` (compared without case, a deleted fork's head included), whoever merges; the earlier lists of what the gates and the claim read do not repeat it.
 - Then one audit row of the merge (`repull_auto_merge`) is written, in a statement that applies only while the record holds that claim at the revision the claim left and the bound allows, so a merge is never sent without its row and the count never misses one.

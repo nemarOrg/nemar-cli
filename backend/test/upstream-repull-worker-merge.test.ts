@@ -38,15 +38,16 @@ import { SYSTEM_USER_ID } from "../src/lib/constants";
 import { verifyRepullDispatchToken } from "../src/services/github/callback-tokens";
 import { __resetRateLimitStateForTests } from "../src/services/github/transport";
 import {
-  CREATE_FACTS_SQL,
   MERGE_CLAIMS_TODAY_SQL,
   getRepull,
+  prepareTransition,
 } from "../src/services/upstream-repull";
 import {
   type AdvanceTickResult,
   repullAdvanceLogLine,
   runRepullAdvanceCron,
 } from "../src/services/upstream-repull-advance";
+import { REVIEW_OF_HEAD_SQL, readMachineCleanFacts } from "../src/services/upstream-repull-facts";
 import {
   CLAIM_OWNER_SQL,
   FINISH_DISPATCHES_MAX,
@@ -573,63 +574,56 @@ describe("a fact that is not clean holds before the claim, and nothing is sent",
     expect(auditsOf(WORKER_MERGE_ACTION, id)).toEqual([]);
   });
 
-  test("GitHub unreadable at the claim's own read of the live head: pr-unreadable, nothing claimed", async () => {
+  test("the claim stands on the tick's read: GitHub gone after it, the claim is made and the merge's answer is unknown", async () => {
     const id = ready();
-    // GitHub goes down after the facts were read and before the claim reads the live head: the
-    // claim's read of the dataset fences, the second read of the dataset row, comes just before.
-    let reads = 0;
+    // GitHub goes down after the facts' last read; the claim reads nothing of GitHub again.
     const failing = interceptingD1(realD1(db), (sql) => {
-      if (sql === CREATE_FACTS_SQL && ++reads === 2) gh.down = true;
+      if (sql === REVIEW_OF_HEAD_SQL) gh.down = true;
     });
     const r = await tick(env({}, failing));
-    expect(reads).toBe(2);
-    expect(r).toMatchObject({
-      mergesSent: 0,
-      held: { "pr-unreadable": 1 },
-      refused: { "github-unreadable": 1 },
-    });
-    expect(rowOf(id)).toMatchObject({ hold_reason: "pr-unreadable", merge_claim_sha: null });
-    expect(gh.merges).toEqual([]);
-    expect(usedToday()).toBe(0);
-    expect(auditsOf(WORKER_MERGE_ACTION, id)).toEqual([]);
+    expect(r).toMatchObject({ mergesSent: 1, mergeUnknown: 1, held: { "claim-held": 1 } });
+    expect(gh.requests.filter((q) => q === `GET /repos/nemarDatasets/${DS}/pulls/7`)).toHaveLength(
+      1,
+    );
+    expect(rowOf(id)).toMatchObject({ hold_reason: "claim-held", merge_claim_sha: HEAD });
+    expect(usedToday()).toBe(1);
+    expect(auditsOf(WORKER_MERGE_ACTION, id)).toHaveLength(1);
   });
 
-  test("a fork's head after the facts were read: the claim's own read refuses it, and nothing is sent", async () => {
+  test("the claim checks the pull request it is given: a fork's is refused, and nothing is claimed", async () => {
     const id = ready();
-    // The pull request turns into a fork's, at the same branch and head, between the facts and the
-    // claim: the claim is the one statement every merge passes, so it reads the repository itself.
-    let reads = 0;
-    const forking = interceptingD1(realD1(db), (sql) => {
-      if (sql === CREATE_FACTS_SQL && ++reads === 2) {
-        gh.pulls[`${DS}#7`] = appPull(DS, {
-          head: { sha: HEAD, ref: "release/v2.0.0", repo: { full_name: `someone/${DS}` } },
-        });
-      }
+    gh.pulls[`${DS}#7`] = appPull(DS, {
+      head: { sha: HEAD, ref: "release/v2.0.0", repo: { full_name: `someone/${DS}` } },
     });
-    const r = await tick(env({}, forking));
-    expect(reads).toBe(2);
-    expect(r).toMatchObject({
-      mergesSent: 0,
-      held: { "claim-refused": 1 },
-      refused: { "head-moved": 1 },
-    });
-    expect(rowOf(id)).toMatchObject({ hold_reason: "claim-refused", merge_claim_sha: null });
-    expect(gh.merges).toEqual([]);
+    const row = await getRepull(realD1(db), id);
+    if (!row) throw new Error("no record");
+    const { reads } = await readMachineCleanFacts(env(), row, "merge");
+    expect(reads?.pullRequest.headRepo).toBe(`someone/${DS}`);
+    gh.requests = [];
+    const claimed = await prepareTransition(
+      env(),
+      { id: SYSTEM_USER_ID },
+      row,
+      { from: "gates_clear", to: "gates_clear", fields: { merge_claim_sha: HEAD } },
+      { reads: reads ?? undefined },
+    );
+    expect(claimed).toMatchObject({ status: 409, code: "head-moved" });
+    expect(gh.requests).toEqual([]);
+    expect(rowOf(id)).toMatchObject({ merge_claim_sha: null });
     expect(usedToday()).toBe(0);
-    expect(auditsOf(WORKER_MERGE_ACTION, id)).toEqual([]);
   });
 
   test("a record that moves between the facts and the claim is skipped, not claim-refused, and the next tick merges it", async () => {
     const id = ready();
-    // Another writer moves the record after the claim's read of the dataset and before it commits.
-    let reads = 0;
+    // Another writer moves the record after the tick read it and before the claim commits.
+    let moved = 0;
     const racing = interceptingD1(realD1(db), (sql) => {
-      if (sql === CREATE_FACTS_SQL && ++reads === 2) {
+      if (sql === REVIEW_OF_HEAD_SQL && ++moved === 1) {
         db.run("UPDATE upstream_repulls SET revision = revision + 1 WHERE id = ?", [id]);
       }
     });
     const r = await tick(env({}, racing));
-    expect(reads).toBe(2);
+    expect(moved).toBe(1);
     expect(r.mergesSent).toBe(0);
     // Exact: `toMatchObject` with `{}` matches any object.
     expect(r.held).toEqual({});
@@ -1481,14 +1475,14 @@ describe("what the merge costs a tick", () => {
     const finishing = await measure();
     // Per row: seven statements and four requests to wait (the record, the merges, the dataset,
     // the screen, the review, the hold and its audit row; the pull request, `main`, two checks);
-    // sixteen and seven to merge (the same five reads and four requests, the claim's five
-    // statements and its read of the live head, the merge's audit row, the merge, its answer, and
-    // the verified route's four statements and its read of the merge); eight and one to dispatch a
-    // finish (the record, its dispatches, the version, the claim's two and its read-back, the hold
-    // and its audit row; the dispatch). Two for the tick.
+    // fourteen and six to merge (the same five reads and four requests, the claim's three
+    // statements on those reads, the merge's audit row, the merge, its answer, and the verified
+    // route's four statements and its read of the merge); eight and one to dispatch a finish (the
+    // record, its dispatches, the version, the claim's two and its read-back, the hold and its
+    // audit row; the dispatch). Two for the tick.
     expect({ waiting, merging, finishing }).toEqual({
       waiting: { d1: 37, github: 20 },
-      merging: { d1: 82, github: 35 },
+      merging: { d1: 72, github: 30 },
       finishing: { d1: 42, github: 5 },
     });
     expect(ids.every((id) => finishDispatches(id).length === 1)).toBe(true);

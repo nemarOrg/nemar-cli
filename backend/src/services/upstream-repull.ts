@@ -131,9 +131,10 @@ import {
   looksDispatchEnded,
   verifyAutomaticDispatch,
 } from "./upstream-repull-dispatch.js";
-import { liveHeadRefusal } from "./upstream-repull-github.js";
+import { type PullRequestFacts, liveHeadRefusal } from "./upstream-repull-github.js";
 import {
   type RepullScreenGate,
+  type RepullScreenRow,
   type RepullScreenStart,
   type RepullScreenView,
   type SqlGuard,
@@ -526,12 +527,19 @@ export function lockExpected(row: Pick<RepullRow, "counts">): number | null {
   return (n as number[]).reduce((a, b) => a + b, 0);
 }
 
-/** The dataset fences, read fresh, for a step toward a merge. */
+/**
+ * The dataset fences, for a step toward a merge: on `read`, the row as the caller read it moments
+ * ago, else read fresh.
+ */
 export async function datasetFenceRefusal(
   db: D1Database,
   row: Pick<RepullRow, "dataset_id" | "upstream_ds">,
+  read?: DatasetFacts | null,
 ): Promise<RepullRefusal | null> {
-  const facts = await db.prepare(CREATE_FACTS_SQL).bind(row.dataset_id).first<DatasetFacts>();
+  const facts =
+    read !== undefined
+      ? read
+      : await db.prepare(CREATE_FACTS_SQL).bind(row.dataset_id).first<DatasetFacts>();
   if (!facts) return { status: 404, code: "not-found", message: `No dataset ${row.dataset_id}.` };
   return datasetFactsRefusal(facts, row.dataset_id, row.upstream_ds);
 }
@@ -959,6 +967,22 @@ export interface TransitionOptions {
     pr: RepullPullRequest,
     sha: string,
   ) => Promise<RepullRefusal | null>;
+  /**
+   * What the advance tick read for its clean verdict on the edge's pull request and head, so the
+   * edge into the gates or the claim does not read it again. The statement still re-asserts the
+   * screen and, for a claim, the cap and the dataset's anonymity and withdrawal.
+   */
+  reads?: TransitionReads;
+}
+
+/** See {@link TransitionOptions.reads}. */
+export interface TransitionReads {
+  /** `CREATE_FACTS_SQL`'s row, null for none. */
+  dataset: DatasetFacts | null;
+  /** The screen row of the edge's pull request and head, null for none. */
+  screen: RepullScreenRow | null;
+  /** GitHub's pull request, as `pullRequestFacts` parsed it. */
+  pullRequest: PullRequestFacts;
 }
 
 /** The edge a request asks for. */
@@ -1031,8 +1055,8 @@ function screenChanged(row: RepullRow): RepullRefusal {
  *    claims racing for the last unit cannot both win (ADR 0111, decision 6; ADR 0099). The
  *    screen's verdict, the cap and the dataset being neither anonymous nor withdrawn are in the
  *    claim's own statement; the mirror and import fences are a read before it.
- * Both read the live pull request on GitHub first (`liveHeadRefusal`): the caller's word for the
- * head is not taken.
+ * Both read the live pull request on GitHub first (`liveHeadRefusal`), or take the advance tick's
+ * read of it (`reads`): the caller's word for the head is not taken.
  *
  * `last_error` goes through {@link resolveImportError} (ADR 0051): a specific message is never
  * overwritten by a generic one, and a blank one is refused. An edge into a different, non-terminal
@@ -1235,15 +1259,13 @@ export async function prepareTransition(
         message: `${cols.gates} must be the recorded head, ${cols.head}: the screen is read on the commit the row names.`,
       };
     }
-    const fenced = await datasetFenceRefusal(db, row);
+    const fenced = await datasetFenceRefusal(db, row, opts.reads?.dataset);
     if (fenced) return { ...fenced, row };
-    const gate = await repullScreenGate(db, {
-      datasetId: row.dataset_id,
-      repullId: id,
-      pr: screenedPr,
-      sha,
-      actorId: admin.id,
-    });
+    const gate = await repullScreenGate(
+      db,
+      { datasetId: row.dataset_id, repullId: id, pr: screenedPr, sha, actorId: admin.id },
+      opts.reads?.screen,
+    );
     if (!gate.ok) return screenRefusal(gate, row);
     if (!gate.exempt) guards.push(gate.guard);
     guardRefusal = async () => screenChanged(row);
@@ -1285,7 +1307,7 @@ export async function prepareTransition(
     // GitHub's head, not the caller's: read last, so every refusal that needs no network comes first.
     const cols = PULL_REQUEST_COLUMNS[screenedPr];
     const sha = (gatedPr ? fields[cols.gates] : fields[cols.claimSha]) as string;
-    const moved = await liveHeadRefusal(env, row, screenedPr, sha);
+    const moved = await liveHeadRefusal(env, row, screenedPr, sha, opts.reads?.pullRequest);
     if (moved) return moved;
   }
 
