@@ -84,9 +84,9 @@ export interface WeeklyAttentionFacts {
    * The upstream re-pulls' week (epic #1046 phase 7, ADR 0111): null when it could not be read,
    * absent when the consumer predates it, which is also unknown. `attention` holds the phrases the
    * Worker decided, one per reason a person should look, and only a person's work raises one: a
-   * scheduler that stopped while a switch is on, a dispatch nobody answered, a claim to merge held
-   * for an hour, a re-pull that ended failed, a re-pull that used all its resumes or all its
-   * finish runs, a cap that cannot be read. A switch that is off, every other hold (a gate waited
+   * scheduler that stopped while a switch is on, a dispatch nobody answered or that GitHub did
+   * not accept, a claim to merge held for an hour, a re-pull that ended failed, a re-pull that used
+   * all its resumes or all its finish runs, a cap that cannot be read. A switch that is off, every other hold (a gate waited
    * on, a fault the path saw) and a run's refusal raise none (ADR 0053).
    */
   repulls?: { attention: readonly string[] } | null;

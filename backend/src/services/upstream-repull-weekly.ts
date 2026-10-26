@@ -26,13 +26,13 @@
  * ATTENTION FOLLOWS ADR 0053: silence is evidence of a problem only when there was work to do.
  * {@link repullAttention} raises a reason for exactly these, and for nothing else: a switch is on
  * and the daily scheduler has not stamped its row for {@link SCHEDULER_STALE_HOURS}; a dispatch
- * nobody answered (`unreported`) or GitHub refused (`dispatch_failed`); a claim to merge held for
- * over {@link HELD_CLAIM_ATTENTION_HOURS} hour; a re-pull that ended `failed`; a re-pull that used
- * all its resumes or finish runs; a cap set to something unreadable. A switch that is off, a hold
- * waiting on a gate (the screen, the review, BIDS validation, `not-clean`) and a run's refusal are
- * the expected state of a path that is working, and an alarm that never clears gets muted. Every
- * other hold (a refused merge, claim or gate, the merge bound) is counted in the table of holds
- * and does not ask.
+ * nobody answered (`unreported`) or that GitHub did not accept (`dispatch_failed`); a claim to
+ * merge held for over {@link HELD_CLAIM_ATTENTION_HOURS} hour; a re-pull that ended `failed`; a
+ * re-pull that used all its resumes or finish runs; a cap set to something unreadable. A switch
+ * that is off, a hold waiting on a gate (the screen, the review, BIDS validation, `not-clean`) and
+ * a run's refusal are the expected state of a path that is working, and an alarm that never
+ * clears gets muted. Every other hold (a refused merge, claim or gate, the merge bound) is counted
+ * in the table of holds and does not ask.
  *
  * WHEN A DISPATCH IS COUNTED. In the week it was SENT, in the state it has when the report is made.
  * One still running then is counted as running, and is not counted again in the next week's report

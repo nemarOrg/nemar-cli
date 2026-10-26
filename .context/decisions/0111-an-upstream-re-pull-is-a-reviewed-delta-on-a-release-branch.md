@@ -2017,7 +2017,7 @@ Three additions are made to earlier text: an annotation on the record's header, 
 
 - A week asks for attention for exactly these, each as a fixed phrase with a count:
   a switch is on and the scheduler's daily tick has not stamped its row for 26 hours (or ever, or the row cannot be read);
-  a dispatch nobody answered (`unreported`) or that GitHub refused (`dispatch_failed`);
+  a dispatch nobody answered (`unreported`) or that GitHub did not accept (`dispatch_failed`);
   a claim to merge held, unresolved, for over an hour;
   a re-pull that ended `failed`;
   a re-pull that used all its resumes (`resume-exhausted`) or all its finish runs (`finish-exhausted`);

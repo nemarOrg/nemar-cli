@@ -1302,28 +1302,34 @@ describe("each reason asks for attention alone", () => {
     env?: Record<string, string | undefined>;
     seed: () => void;
     phrase: string;
+    /** What the section's own account of what asks says of this reason. */
+    footer: string;
   }> = [
     {
       name: "a switch on and a scheduler that never recorded a run",
       env: ON,
       seed: () => stampScheduler({}),
       phrase: "the automatic re-pull is on, and its scheduler has never recorded a run",
+      footer: "a scheduler that stopped while a switch is on",
     },
     {
       name: "a switch on and a scheduler silent for over 26 hours",
       env: ON,
       seed: () => stampScheduler({ tick: at(-(26 * HOUR + 1000)), outcome: "ran" }),
       phrase: "the automatic re-pull is on, and its scheduler has not run for over 26 hours",
+      footer: "a scheduler that stopped while a switch is on",
     },
     {
       name: "a dispatch nobody answered",
       seed: () => seedDispatch({ status: "unreported", at: WEEK }),
       phrase: "1 re-pull dispatch(es) were not reported by their run in time",
+      footer: "a dispatch nobody answered",
     },
     {
-      name: "a dispatch GitHub refused",
+      name: "a dispatch GitHub did not accept",
       seed: () => seedDispatch({ status: "dispatch_failed", code: "dispatch-refused", at: WEEK }),
       phrase: "1 re-pull dispatch(es) were not accepted by GitHub",
+      footer: "or that GitHub did not accept",
     },
     {
       name: "a claim to merge held over an hour",
@@ -1334,6 +1340,7 @@ describe("each reason asks for attention alone", () => {
         });
       },
       phrase: "1 re-pull merge claim(s) have been held for over 1 hour",
+      footer: "a claim to merge held for an hour",
     },
     {
       name: "a re-pull that ended failed",
@@ -1341,6 +1348,7 @@ describe("each reason asks for attention alone", () => {
         seedAutomatic("failed", null, { terminal_at: WEEK });
       },
       phrase: "1 re-pull(s) ended failed",
+      footer: "a re-pull that ended failed",
     },
     {
       name: "a re-pull that used all its resumes",
@@ -1348,6 +1356,7 @@ describe("each reason asks for attention alone", () => {
         seedAutomatic("copied", "resume-exhausted");
       },
       phrase: "1 re-pull(s) have used all their resumes (resume-exhausted)",
+      footer: "a re-pull that used all its resumes or all its finish runs",
     },
     {
       name: "a merged re-pull that used all its finish runs",
@@ -1355,18 +1364,21 @@ describe("each reason asks for attention alone", () => {
         seedAutomatic("merged", "finish-exhausted");
       },
       phrase: "1 merged re-pull(s) have used all their finish runs (finish-exhausted)",
+      footer: "a re-pull that used all its resumes or all its finish runs",
     },
     {
       name: "an open cap set to something unreadable",
       env: { REPULL_DAILY_OPEN_CAP: "two" },
       seed: () => {},
       phrase: "the re-pull open cap is set to something unreadable, so it reads 0",
+      footer: "a cap that cannot be read",
     },
     {
       name: "a merge cap set to something unreadable",
       env: { REPULL_DAILY_MERGE_CAP: "21" },
       seed: () => {},
       phrase: "the re-pull merge cap is set to something unreadable, so it reads 0",
+      footer: "a cap that cannot be read",
     },
   ];
 
@@ -1379,6 +1391,8 @@ describe("each reason asks for attention alone", () => {
       expect(repullProblems(r.facts)).toEqual([c.phrase]);
       expect(r.body).toContain("Needs attention");
       expect(r.body).toContain(c.phrase);
+      // And the section's footer, which says what asks, names this reason as the rule does.
+      expect(sectionOf(r.body)).toContain(c.footer);
     });
   }
 
