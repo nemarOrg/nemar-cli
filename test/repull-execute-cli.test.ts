@@ -12,7 +12,7 @@
  * `Bun.serve()` stand-in, which opens a pull request on a branch it reads from the bare origin.
  * No mocks.
  *
- * What only the canary (`nemar admin repull canary`) and the first production runs can check,
+ * What only the canary (`scripts/repull-canary.ts`) and the first production runs can check,
  * because only stand-ins answer here: that real S3 answers a signed cross-account CopyObject of a
  * public versioned object with `?versionId=` as the stand-in does, that a multipart copy over
  * 5 GiB and the CLI's retries behave as they do here, how GitHub opens, lists and answers for a

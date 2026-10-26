@@ -1340,6 +1340,7 @@ The checkpoint is kept for the slices that follow.
 ### The canary
 
 `nemar admin repull canary --prefix <p> --source <ds>/<path>@<versionId> --multipart-source <ds>/<path>@<versionId>` is the real-bucket check of what the copy believes, for the owner to run before the first production re-pull.
+*Annotated 2026-10-26: moved out of the shipped CLI to `bun run scripts/repull-canary.ts`, with the same arguments, fences, dry-run default and `--execute`.*
 The prefix must be `nm099999/repull-canary-<word>/` or `xx<090001 to 099899>/repull-canary-<word>/`, never a dataset's `objects/` or `staging/` and never the permanent exemplar fleet (`xx099900` to `xx099999`, ADR 0068), the bucket must be NEMAR's, and the two objects must belong to one dataset; the run itself checks all of it, so no caller can skip it.
 A dry run, the default, makes no call and prints the calls.
 With `--execute` it heads both sources at their versions, copies the small one with one `copy-object` and the other, over 10 MiB, in 5 MiB parts with `upload-part-copy`, through the same write guard; it requires S3 to name the pinned version as the one it copied, for the copy and for every part, compares the copies' sizes, and the small copy's ETag with its source's when the source is a single-part object.

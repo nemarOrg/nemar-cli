@@ -60,7 +60,7 @@
  *    MD5 of those bytes (a single-part object), and the source's version id echoed in
  *    `x-amz-copy-source-version-id`. ASSUMED, not measured: that real S3 answers a signed
  *    cross-account copy of a public versioned object this way, which only the re-pull canary
- *    (`nemar admin repull canary`) checks against the real buckets.
+ *    (`scripts/repull-canary.ts`) checks against the real buckets.
  *
  * Every request is logged by operation so a test asserts on what the real CLI sent. Faults and
  * hooks are injected explicitly by the test that needs them. Test-only helpers that S3 has no
