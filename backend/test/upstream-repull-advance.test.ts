@@ -261,13 +261,18 @@ function openRow(ds: string = DS, over: Row = {}): number {
 }
 
 /** The screen of HEAD of re-pull `id`, stored as its callback leaves it. */
-function markScreen(id: number, status: string, ds: string = DS): void {
+function markScreen(
+  id: number,
+  status: string,
+  ds: string = DS,
+  o: { dispatchedMinutesAgo?: number } = {},
+): void {
   db.run("DELETE FROM upstream_repull_screens WHERE repull_id = ?", [id]);
   if (status === "pending") {
     db.run(
-      `INSERT INTO upstream_repull_screens (repull_id, pr, sha, status, nonce)
-       VALUES (?, 'n0', ?, 'pending', 'nonce-advance-test')`,
-      [id, HEAD],
+      `INSERT INTO upstream_repull_screens (repull_id, pr, sha, status, nonce, dispatched_at)
+       VALUES (?, 'n0', ?, 'pending', 'nonce-advance-test', datetime('now', ?))`,
+      [id, HEAD, `-${o.dispatchedMinutesAgo ?? 0} minutes`],
     );
     return;
   }
@@ -531,9 +536,11 @@ describe("a hold is the first rule that does not hold", () => {
   }
 
   test("a hold is an observation: it moves neither the revision nor updated_at", async () => {
-    const id = openRow();
+    // An old time, so a hold that stamped updated_at would show; the resume's quiet time reads it.
+    const id = openRow(DS, { updated_at: "2026-01-01 00:00:00" });
     moveMain();
     const before = rowOf(id);
+    expect(before.updated_at).toBe("2026-01-01 00:00:00");
     await tick();
     const after = rowOf(id);
     expect(after.hold_reason).toBe("main-moved");
@@ -642,6 +649,24 @@ describe("an edge into another status ends the hold; a self-edge keeps it", () =
 // ----------------------------------------------------------------------------
 
 describe("which rows a tick reads", () => {
+  test("a row that moved on between the list and its own read is left alone", async () => {
+    const id = openRow();
+    // The list reads the row at pr_open; it reaches gates_clear before the tick reads it by id.
+    const moving = interceptingD1(realD1(db), (sql, binds) => {
+      if (sql === REPULL_BY_ID_SQL && binds[0] === id) {
+        db.run(
+          "UPDATE upstream_repulls SET status = 'gates_clear', gates_sha = head_sha, revision = revision + 1 WHERE id = ?",
+          [id],
+        );
+      }
+    });
+    const r = await tick(env({}, moving));
+    expect(r).toMatchObject({ examined: 0, held: {}, holdsChanged: 0, errors: [] });
+    expect(rowOf(id)).toMatchObject({ status: "gates_clear", hold_reason: null });
+    expect(githubRequests()).toEqual([]);
+    expect(holdAudits(id)).toEqual([]);
+  });
+
   test("an administrator's row is never read, and takes no place in the rotation", async () => {
     const admins: number[] = [];
     for (let i = 2; i <= ADVANCE_ROWS_PER_TICK + 1; i++) {
@@ -988,21 +1013,46 @@ describe("the gates of an automatic pull request", () => {
     });
   }
 
-  test(`the screen of one head is dispatched ${AUTOMATIC_SCREENS_MAX} times at most`, async () => {
+  test("the screen of one head is dispatched 3 times at most", async () => {
     const id = openRow();
     review("pass");
-    for (let n = 1; n <= AUTOMATIC_SCREENS_MAX; n++) {
+    for (let n = 1; n <= 3; n++) {
       markScreen(id, "error");
       const r = await tick();
       expect([n, r.screensStarted]).toEqual([n, 1]);
       expect(rowOf(id).hold_reason).toBe("screen-pending");
     }
-    expect(auditsOf("repull_screen_dispatched", id)).toHaveLength(AUTOMATIC_SCREENS_MAX);
+    expect(auditsOf("repull_screen_dispatched", id)).toHaveLength(3);
     markScreen(id, "error");
     const r = await tick();
     expect(r.screensStarted).toBe(0);
     expect(rowOf(id).hold_reason).toBe("screen-error");
-    expect(dispatched("run-identifier-screen")).toHaveLength(AUTOMATIC_SCREENS_MAX);
+    expect(dispatched("run-identifier-screen")).toHaveLength(3);
+  });
+
+  test("a screen that never reported is dispatched again", async () => {
+    const id = openRow();
+    // Out longer than the report deadline: it reads as unreported, never as still running.
+    markScreen(id, "pending", DS, { dispatchedMinutesAgo: 120 });
+    const r = await tick();
+    expect(r.screensStarted).toBe(1);
+    expect(dispatched("run-identifier-screen")).toHaveLength(1);
+    expect(rowOf(id).hold_reason).toBe("screen-pending");
+  });
+
+  test("the bound is per head: three dispatches of an earlier head leave the new head its own", async () => {
+    const id = openRow();
+    for (let n = 0; n < 3; n++) {
+      db.run(
+        `INSERT INTO audit_log (user_id, action, resource_type, resource_id, details)
+         VALUES (?, 'repull_screen_dispatched', 'upstream_repull', ?, ?)`,
+        [SYSTEM_USER_ID, String(id), JSON.stringify({ dataset_id: DS, pr: "n0", sha: OTHER })],
+      );
+    }
+    markScreen(id, "error");
+    const r = await tick();
+    expect(r.screensStarted).toBe(1);
+    expect(dispatched("run-identifier-screen")[0]).toMatchObject({ ref: HEAD });
   });
 
   test("a screen that asks for a person is not run again, and the review is not started", async () => {
@@ -1024,7 +1074,7 @@ describe("the gates of an automatic pull request", () => {
     expect(reviews()).toEqual([]);
   });
 
-  test(`a review whose dispatch failed is asked for again after ${REVIEW_RETRY_MINUTES} minutes, not before`, async () => {
+  test("a review whose dispatch failed is asked for again after 60 minutes, not before", async () => {
     const id = openRow();
     markScreen(id, "clean");
     const failedAt = (minutesAgo: number) => {
@@ -1043,10 +1093,10 @@ describe("the gates of an automatic pull request", () => {
           .replace("T", " "),
       });
     };
-    failedAt(REVIEW_RETRY_MINUTES - 5);
+    failedAt(55);
     expect((await tick()).reviewsStarted).toBe(0);
     expect(rowOf(id).hold_reason).toBe("review-not-pass");
-    failedAt(REVIEW_RETRY_MINUTES + 5);
+    failedAt(65);
     expect((await tick()).reviewsStarted).toBe(1);
     expect(rowOf(id).hold_reason).toBe("review-running");
     expect(dispatched("run-pr-review")).toHaveLength(1);
@@ -1118,6 +1168,17 @@ describe("the gates of an automatic pull request", () => {
 // ----------------------------------------------------------------------------
 // What the tick says
 // ----------------------------------------------------------------------------
+
+describe("the bounds, as the record says them", () => {
+  test("are the numbers ADR 0111's Phase 7f amendment states", () => {
+    expect(ADVANCE_ROWS_PER_TICK).toBe(5);
+    expect(AUTOMATIC_SCREENS_MAX).toBe(3);
+    expect(REVIEW_RETRY_MINUTES).toBe(60);
+    expect(AUTOMATIC_OPEN_DISPATCHES_MAX).toBe(3);
+    expect(RESUME_QUIET_MINUTES).toBe(60);
+    expect(RESUME_WINDOW_UTC).toEqual({ from: 3, to: 15 });
+  });
+});
 
 describe("a failure", () => {
   test("of one row is named by its id, and the next row is still taken up", async () => {
@@ -1354,8 +1415,8 @@ describe("a stalled automatic re-pull is resumed", () => {
   for (const [hour, minute, resumed] of [
     [0, 30, false],
     [2, 59, false],
-    [RESUME_WINDOW_UTC.from, 0, true],
-    [RESUME_WINDOW_UTC.to, 59, true],
+    [3, 0, true],
+    [15, 59, true],
     [16, 0, false],
     [23, 30, false],
   ] as const) {
@@ -1371,19 +1432,19 @@ describe("a stalled automatic re-pull is resumed", () => {
     });
   }
 
-  test(`a row that moved within ${RESUME_QUIET_MINUTES} minutes waits`, async () => {
-    const id = stalled("copied", TEN(), { quietMinutes: RESUME_QUIET_MINUTES - 1 });
+  test("a row that moved within 60 minutes waits", async () => {
+    const id = stalled("copied", TEN(), { quietMinutes: 59 });
     endedDispatch(id, "failed");
     expect(await resumeTick(TEN())).toMatchObject({ resumed: 0, notDue: 1 });
     expect(gh.dispatches).toEqual([]);
   });
 
-  test(`the attempt after ${AUTOMATIC_OPEN_DISPATCHES_MAX} dispatches holds resume-exhausted`, async () => {
+  test("the attempt after 3 dispatches holds resume-exhausted: the creating one and two resumes", async () => {
     const id = stalled("copied", TEN());
     endedDispatch(id, "failed");
     endedDispatch(id, "dispatch_failed");
     expect((await resumeTick(TEN())).resumed).toBe(1);
-    expect(dispatchesOf(id)).toHaveLength(AUTOMATIC_OPEN_DISPATCHES_MAX);
+    expect(dispatchesOf(id)).toHaveLength(3);
     // That run fails too, and the next tick finds the row's dispatches spent.
     db.run(
       "UPDATE upstream_repull_dispatches SET status = 'failed', code = 'copy-failed', nonce = NULL, reported_at = datetime('now') WHERE status = 'dispatched'",
@@ -1392,7 +1453,7 @@ describe("a stalled automatic re-pull is resumed", () => {
     expect(r).toMatchObject({ resumed: 0, held: { "resume-exhausted": 1 } });
     expect(rowOf(id).hold_reason).toBe("resume-exhausted");
     expect(dispatched("run-upstream-repull")).toHaveLength(1);
-    expect(dispatchesOf(id)).toHaveLength(AUTOMATIC_OPEN_DISPATCHES_MAX);
+    expect(dispatchesOf(id)).toHaveLength(3);
   });
 
   const opensOf = (id: number) =>
@@ -1680,6 +1741,33 @@ describe("a stalled automatic re-pull is resumed", () => {
     );
     const r = await resumeTick(TEN(), env({ AUTO_REPULL_ENABLED: undefined }));
     expect(r).toMatchObject({ running: 0, held: { "switch-off": 1 } });
+  });
+
+  test("no GitHub token: nothing is claimed, and the tick says no-github-token", async () => {
+    const id = stalled("copied", TEN());
+    endedDispatch(id, "failed");
+    const r = await resumeTick(TEN(), env({ GITHUB_ADMIN_PAT: undefined }));
+    expect(r).toMatchObject({ resumed: 0, errors: ["no-github-token"] });
+    expect(dispatchesOf(id)).toHaveLength(1);
+    expect(gh.requests).toEqual([]);
+  });
+
+  test("no callback secret: nothing is claimed, and the tick says dispatch-unconfigured", async () => {
+    const id = stalled("copied", TEN());
+    endedDispatch(id, "failed");
+    const r = await resumeTick(TEN(), env({ PRESCREEN_CALLBACK_SECRET: undefined }));
+    expect(r).toMatchObject({ resumed: 0, errors: ["dispatch-unconfigured"] });
+    expect(dispatchesOf(id)).toHaveLength(1);
+    expect(gh.dispatches).toEqual([]);
+  });
+
+  test("a recorded tag that is not a tag: nothing is claimed, and the tick says to-tag-malformed", async () => {
+    const id = stalled("copied", TEN(), { over: { to_tag: "not a tag" } });
+    endedDispatch(id, "failed");
+    const r = await resumeTick(TEN());
+    expect(r).toMatchObject({ resumed: 0, errors: ["to-tag-malformed"] });
+    expect(dispatchesOf(id)).toHaveLength(1);
+    expect(gh.dispatches).toEqual([]);
   });
 
   test("a development build resumes nothing", async () => {
