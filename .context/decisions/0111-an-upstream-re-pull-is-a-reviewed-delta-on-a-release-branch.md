@@ -17,6 +17,7 @@ Decisions 4 and 10 are built, as their dated amendments below record, and so are
 *Annotated 2026-10-25: and by the Phase 7f amendment (#1913): the advance tick holds, gates and resumes the automatic re-pulls, in production only, and while its switch is off only records that it is off; decision 7's merge is still not built.*
 *Annotated 2026-10-25: and by the Phase 7d amendment (#1913): the unattended run that opens an automatic re-pull's pull request and finishes a merged one is built, in a central workflow deployed only with the epic release.*
 *Annotated 2026-10-25: and by the Phase 6g amendment (#1912): N.0.1, abandoning a record, superseding one, the manual-major refusal and a mirror rehearsal fixture are built, which completes Phase 6's manual execution.*
+*Annotated 2026-10-26: and by the Phase 7g amendment (#1913): decision 7's merge is built: the Worker merges a machine-clean automatic re-pull pull request and finishes it after its merge, and an administrator may merge a re-pull they opened over a failed BIDS validation, never over a rule that requires it.*
 
 ## Context
 
@@ -40,6 +41,7 @@ Everything in this section is designed and not yet built.
 *Annotated 2026-10-25: and by the Phase 7f amendment: the automatic path's gates edge and its resume of a stalled run are built; the Worker's merge is not.*
 *Annotated 2026-10-25: and by the Phase 7d amendment: the unattended run of decision 6's scheduled path is built, to the open pull request and from a merge to `complete`.*
 *Annotated 2026-10-25: and by the Phase 6g amendment: N.0.1, abandon, supersede and the manual-major refusal are built.*
+*Annotated 2026-10-26: and by the Phase 7g amendment: decision 7's merge is built, with its follow-through to `complete` and an administrator's merge over a failed BIDS validation.*
 
 **An upstream re-pull replays the delta between two pinned upstream tags onto NEMAR's `main` as one synthesized commit on `release/vN.0.0`, landed through a pull request; N.0.0 is a pure mirror of the upstream snapshot, and NEMAR's corrections follow as N.0.1.**
 
@@ -142,6 +144,7 @@ Everything in this section is designed and not yet built.
 - `REPULL_DAILY_OPEN_CAP` (default 2) bounds the dispatches the automatic path claims to open a re-pull in a day; the pull requests follow only under the timing the Phase 7b amendment ("The open cap") says a later slice pins.
 - `REPULL_DAILY_MERGE_CAP` (default 5) bounds merges: every merge a NEMAR tool makes of a re-pull pull request, the Worker's and the manual ones (`nemar admin repull <id> --merge`, `nemar admin pr-reviews`) alike, first claims one from the backend, and a refused claim merges nothing, because every merge mints an irreversible DOI.
   *Annotated 2026-10-25: the manual command is built by Phase 6f as `nemar admin repull merge <id>`; no `--merge` flag exists (see the Phase 6f amendment).*
+  *Annotated 2026-10-26: and the Worker's merge claims its unit through the same statement (the Phase 7g amendment).*
 - The automatic path takes only a plan with zero unexplained paths.
 - Outside production, the re-pull routes refuse every dataset that is not `xx`, because the GitHub organization is shared, and re-pull mail goes through the admin-only fence.
 
@@ -160,6 +163,7 @@ A re-pull pull request is machine clean when all of these hold:
 The merge is sent with the screened SHA, so GitHub refuses a branch that moved, and only when GitHub reports the pull request `clean`: the NEMAR App is a bypass actor (ADR 0001, ADR 0107), and `clean` is what keeps "never a bypass" true for a merge the App makes.
 The Worker submits no approving review on this class either, since ADR 0001 requires none; the record is the merge, the `upstream_repulls` row and the plan digest.
 The Worker's merge call is not built until the ruleset check under "Not yet verified" is done.
+*Annotated 2026-10-26: the check was run by the owner on 2026-10-26 and passed, and the merge call is built by the Phase 7g amendment.*
 
 **What this narrows in ADR 0093, for re-pull pull requests only.**
 ADR 0107 already partially supersedes ADR 0093; this record narrows one more aspect of it, the merge, and only for this class.
@@ -168,6 +172,7 @@ What changes, for a re-pull pull request the automatic path opened, is that a me
 For every other pull request the Worker neither approves nor merges.
 AGENTS.md's summary of ADR 0093 ("nothing merges without `--merge` or a `y`") is updated by the phase that builds the merge.
 *Annotated 2026-10-25: updated by Phase 6f, which builds the administrator's merge (see the Phase 6f amendment).*
+*Annotated 2026-10-26: and by Phase 7g, which names the Worker's merge of this one class (see the Phase 7g amendment).*
 
 A re-pull pull request that is not machine clean, or that an administrator opened, is merged by an administrator, through `nemar admin repull <id> --merge` or `nemar admin pr-reviews`, under ADR 0093, with a screen that is `clear` or carries the administrator's recorded acknowledgment (ADR 0086).
 *Annotated 2026-10-25: built by Phase 6f as `nemar admin repull merge <id>` (no `--merge` flag exists) and through `nemar admin pr-reviews`, both through one gate (see the Phase 6f amendment).*
@@ -247,6 +252,7 @@ ADR 0086 exempts `xx` from the identifier screen, so an `xx` re-pull never has a
 ## Not yet verified
 
 - Whether the rulesets let the GitHub App merge without a human review, and without using its bypass; the merge call is not built until this is checked.
+  *Annotated 2026-10-26: checked by the owner on 2026-10-26 for what can be read, and passed: the installation's permissions allow it and no organization ruleset applies (the Phase 7g amendment); the App token's own reading of `mergeable_state` and GitHub's merge of its squash are seen only by the first production merge.*
 - Where `source_version` is inserted under the central manifest flow.
 - Whether "explained" edits are detected on early rewritten imports (`on003645`, `on004362`); local dry-run plans count the unexplained paths.
 - Whether ADR 0107's review can ever pass a re-pull diff.
@@ -257,6 +263,7 @@ ADR 0086 exempts `xx` from the identifier screen, so an `xx` re-pull never has a
 - Whether OpenNeuro writes S3 before it pushes to GitHub, and whether the object at a path lags the pinned `versionId`.
 - That upstream's `.log.rmet` records a `versionId` per key, which the design record states and nothing here has checked.
 - That the dataset workflows tag the squash merge of a re-pull pull request as they tag other merges to `main`.
+  *Annotated 2026-10-26: still not seen for a squash the App makes: the first production merge of the Phase 7g amendment, under a cap of 1, is the check.*
 - Whether the NEMAR installation token is accepted for another organization's public raw files (`OpenNeuroDatasets`), which the staleness report's mirror probe uses; if it is not, every probe reads `stale_unverified` with the reason and the first production run shows it.
 - That the central `run-identifier-screen` workflow posts a re-pull screen's report to its own callback path (`/webhooks/identifier-screen-repull-result`); the workflow accepts any plain https `callback_url` (read), and no run has used this one yet (added by the Phase 6e amendment).
 - GitHub's answers to the reads the re-pull's release and merge make (`commits/tags/<tag>` asked for `application/vnd.github.sha`, `compare/<merge>...<tag>` and its status words, a squash-merged pull request's `head` and `merge_commit_sha`); only stand-ins have answered them (added by the Phase 6e amendment).
@@ -1061,6 +1068,7 @@ The split of the ruleset check, which the merge call waits for:
   That half stays an owner step before the Worker's merge is built: `gh auth refresh -h github.com -s admin:org`, then `gh api orgs/nemarDatasets/rulesets --jq '.[] | {id, name, target, enforcement}'`.
   It passes when no organization ruleset targets default branches, or each one that does has the App as a bypass actor and asks for nothing the Worker does not read.
   If it fails, the Worker's merge is not built, `AUTO_REPULL_MERGE_ENABLED` has no effect, and an administrator merges each automatic pull request under the cap and the screen.
+  *Annotated 2026-10-26: the owner ran it on 2026-10-26 and it passed (the Phase 7g amendment), so the Worker's merge is built.*
 
 ### 7b, 2026-10-25: the dispatch record, and an automatic record only through it
 
@@ -1542,15 +1550,18 @@ The s3-lock route signs PutObjectRetention with an MD5 `Content-MD5`, which work
 A further slice of the Phase 7 amendment above, built by Phase 7f.
 It builds the tick that takes an open automatic re-pull one step on, or says why it waits: the hold, the edge into `gates_clear`, the screen and the review that edge waits for, and the resume of a run that stalled before its pull request opened.
 Nothing here merges, claims a merge or mails anyone: the merge, the follow-through after it and the observability are later slices, and a source scan keeps this slice's import closure free of mail.
+*Annotated 2026-10-26: the merge and the follow-through after it are built by the Phase 7g amendment.*
 Five annotations are added to earlier text: on the record's header, on the opening of the Decision section, on the 7b slice's sentence that a later slice writes `hold_reason` and `hold_since`, on the 7c slice's sentence that a later slice bounds a resume by its own count, and on the 7e slice's sentence that nothing calls the review's start yet.
 
 ### The tick
 
 - It runs on the 30-minute production tick, inside that tick's production guard and absent from `DEV_CRON_ALLOWLIST`, and returns before it reads or writes anything unless `ENVIRONMENT` is exactly `production`, because the `nemarDatasets` organization is shared with dev.
 - In production with `AUTO_REPULL_ENABLED` not exactly `"1"` it asks GitHub nothing, claims and sends nothing, and records `switch-off` on each row it reads, a row a run is still out for included.
+  *Annotated 2026-10-26: but for the rows a merge minted a DOI for, or may have, which the Phase 7g amendment takes on whatever the switches say: a held claim is resolved from GitHub and a merged re-pull finished; nothing is merged while a switch is off.*
 - It reads only automatic rows: an administrator's row is never read, held or advanced, because the Worker never takes an administrator's re-pull on (decision 7).
 - It reads the rows stalled before their pull request opened (`planned` to `registered`) and the rows at `pr_open`.
   A row at `gates_clear`, `merged` or `released` waits for the merge slice, and this tick does not read it; a row that reaches another status between the tick's list and its own read of the row is left alone.
+  *Annotated 2026-10-26: the Phase 7g amendment's merge and finish read those rows, in a third rotation; a row that reaches another kind between the list and its own read is still left alone.*
 - At most five rows of each kind a tick, in two rotations by id, so neither kind crowds out the other.
   The rows at `pr_open` turn every half hour.
   The stalled rows are read only inside the resume window, the only time one can be resumed, and turn once for each half hour of the window, counted across days, so each is read inside the window within as many window ticks as it takes five at a time to cover them, whatever the number of rows of either kind.
@@ -1877,3 +1888,93 @@ that GitHub opens a second release pull request on a repository whose first one 
 that it lists a branch's pull requests by its `head` filter, closes one and deletes a branch as the stand-in does, and reports a merged pull request's state when it is read by number after a close;
 that the dataset workflows tag `v<N.0.1>` and mint its DOI as they do any patch release;
 and that the real bucket lists the keys N.0.1 replays as the stand-in does.
+
+## Amendment 2026-10-26 (#1913): Phase 7g merges a machine-clean automatic re-pull, finishes it, and merges over a BIDS failure
+
+A further slice of the Phase 7 amendment above, built by Phase 7g.
+It builds decision 7's merge: the Worker's merge of a machine-clean automatic re-pull pull request, what follows a merge whose answer was lost or refused, the finish run that walks a merged re-pull to `complete`, and an administrator's merge of a re-pull they opened over a failed BIDS validation.
+Nothing here sends mail, adds a migration or a route, or approves a pull request; the claim to merge gains one field, and a source scan keeps the merge's import closure free of mail.
+Eleven annotations are added to earlier text, where this slice builds what it said was later, and where the ruleset check it waited for was run; ADR 0093's header now names the narrowing, and its amendment of 2026-10-23 is annotated as built.
+
+### The ruleset check, as the owner ran it (on "Not yet verified")
+
+- The owner ran the ruleset check on 2026-10-26, with an organization owner's token, and it passed.
+- The `nemarDatasets` installation of App 3679074 (installation 131475246) has `contents` and `pull_requests` at write, and `actions`, `administration`, `checks`, `issues` and `workflows` at write too, with `repository_selection: all`.
+- `GET orgs/nemarDatasets/rulesets` returned an empty list, so no organization ruleset applies to any dataset repository.
+- What it cannot show stays unverified until the first production merge, which runs with `REPULL_DAILY_MERGE_CAP` set to `"1"`: whether the App's own token reads `mergeable_state` as an administrator does, that GitHub merges the App's squash at the `sha` it is sent with the message it is sent, and that the dataset workflows tag that squash and mint its DOI as they tag any merge to `main`.
+
+### The Worker's merge, as built
+
+- The advance tick reads the automatic records past their gates in a third rotation of its own, five a tick, turned every half hour, so neither the open pull requests nor the stalled runs crowd them out, and a record is taken on by the kind its list read it in.
+  A record cleared at its gates on one tick is merged on a later one, from facts read then.
+- A record at `gates_clear` holding no claim to merge is merged only when, in this order:
+  both switches are exactly `"1"`, in exact production (`switch-off`, `merge-switch-off`, before anything is read);
+  fewer than three merges were ever sent for it (`merge-exhausted`), and the last one it was sent was not refused (`merge-refused`: another would be refused too, so an administrator looks);
+  machine clean holds on facts read now at the merge stage, never the gates' reading, and an unknown fact is never clean;
+  its trailers are values the squash message can carry (`merge-message`);
+  and the record's own claim, made as the system user, takes a unit of `REPULL_DAILY_MERGE_CAP` in the statement that claims (`cap-exhausted`, `cap-unreadable`; any other refusal of a clean record is `claim-refused`, which should not happen and is logged at error level).
+- Machine clean's `main` rule is the commit the record bases on, exactly, so any move of `main` holds `main-moved`: the administrator's gate refuses only a move outside `.nemar/` and `.github/` (`merge-main-moved`), and the Worker refuses more.
+- Then one audit row of the merge (`repull_auto_merge`) is written, in a statement that applies only while the record holds that claim at the revision the claim left and the bound allows, so a merge is never sent without its row and the count never misses one.
+- Then one squash merge, `PUT .../pulls/<n>/merge`, with the screened head as `sha`, `merge_method` `squash`, the Worker's own GitHub credential, and the message the administrator's gate writes, its title `Release v<N.0.0> (#<n>)` and its last paragraph the re-pull commit's two trailers.
+  The message is built once, in `shared/repull-squash.ts`, for the gate and the Worker alike; the Worker cannot run `git interpret-trailers`, so it checks the two values against the privacy ledger proof's own patterns, and a test proves git reads the message it builds as the trailers.
+- The merge is sent once, never retried blind.
+  `merged: true` is recorded through the verified route, which reads GitHub again and stores GitHub's merge commit.
+  A 4xx is GitHub's refusal, so nothing merged: the claim is kept (the record releases a claim only once it is five minutes old) and the record holds `merge-refused`.
+  A 5xx, no answer, a timeout, and a 2xx that does not say `merged: true` may have merged: the claim is kept and the record holds `claim-held`.
+  GitHub's answer is kept in an audit row of its own (`repull_auto_merge_answer`).
+- The Worker submits no review, here or anywhere: ADR 0001 requires none, and ADR 0093's sentences that an approval is the administrator's own and that no Worker code path approves stand as written.
+- An administrator's record is never merged by the Worker, outside exact production nothing is read, and nothing is ever merged while a switch is off.
+
+### A claim the Worker holds, on a later tick
+
+- A record at `gates_clear` that holds a claim is resolved from GitHub, whatever the switches say, because a merge that happened minted a DOI and must not be stranded; only a merge sent needs the switches.
+- Merged at the claimed head, the merge is recorded through the verified route; merged at another head, the record holds `claim-held` for an administrator's `resume`, which records it with its counts.
+- A claim is the Worker's when its own claim edge, as the system user, made it; an administrator's claim on an automatic record is theirs, and the Worker neither sends under it nor releases it.
+- Not merged, and the last merge sent under the claim was refused: the claim is released through the record's own writer (`refused`, which needs the claim five minutes old and reads GitHub again), so its unit of the day's cap is free, and the record holds `merge-refused`.
+- Not merged, and the merge's answer was lost, or none was sent under the claim: it is sent again under the same claim, and never a second one, only while the pull request is open at the claimed head, both switches are on, the bound allows, machine clean holds on facts read now, and the claim is younger than 25 minutes, the bound every merge sent again under a held claim obeys, so no merge goes out under a claim `resume` may be expiring at 30.
+  On the 30-minute tick a claim is older than that by the next tick, so in production a lost answer whose merge GitHub says did not happen waits, held `claim-held`, for an administrator's `resume`, which expires the claim; a claim under which nothing was sent is released (`not_sent`) and the record is taken on again from its facts.
+- Closed and not merged, the claim is released by the age its answer allows (`refused` or `not_sent` at five minutes, `expired` at 30 for an answer that was lost), and the record holds `pr-closed` for an administrator.
+
+### The finish run
+
+- An automatic record at `merged` or `released` is walked to `complete` by the central workflow's finish run (`nemar admin repull resume`, trigger mode `finish`), which reads the merge commit's trailers back, records the release and the lineage, locks the objects the copy wrote and completes the record.
+- It is dispatched at `merged` once the version row of N.0.0 has its DOI, in either spelling of the version, and at `released` at once, through the dispatch record's own claim: one live dispatch per dataset, outside the open cap, because the merge already minted the DOI the cap bounds.
+- At most three finish dispatches a record, a send GitHub refused for the dispatch itself (404, 422) included and one it turned away for the Worker's credential, permission or rate not, then `finish-exhausted` for an administrator's `resume`.
+- It reads no switch, in exact production only: turning the switches off never strands a minted DOI's lineage, lock and `complete`.
+  A Worker built from a development version dispatches nothing.
+
+### An administrator's merge over a failed BIDS validation
+
+- `nemar admin repull merge <id> --bids-failure-reason "<text>"` merges a re-pull pull request over a failed BIDS validation, with the reason recorded, under the publication path's text rule (10 to 500 characters).
+- It is an administrator's act alone, for a re-pull an administrator opened: the automatic path never merges over a failed check, and its pull request is merged over one by no one, through any NEMAR tool; an administrator merges it once BIDS validation passes, or abandons it and re-pulls by hand.
+- It is taken only while GitHub reports the pull request `unstable`, which is a check that is not required failing.
+  `blocked` means a rule requires the check, so a merge would be a bypass, which a re-pull never uses: it is refused before anything is written, and so is `clean`, which needs no override.
+- Every other check of the gate is unchanged: the record, the dataset, the pull request at the screened head, `main`, the review (one that failed, is running or cannot be read still needs `--force`), the identifier screen for that administrator and the squash message.
+- The claim carries the override, and the Worker reads, at the claimed head, that BIDS validation, the App's own run, completed with `failure`, that `version-check` completed with `success`, and that GitHub reports `unstable`, then records the claim and writes the reason in an audit row of its own (`repull_bids_override`) in the claim's batch, which applies only when the claim does.
+  A claim that names the override where nothing reads those facts is refused (`bids-override-unverified`), so nothing takes it unchecked.
+- A claim already held is never used for it, since the reason belongs to the claim it is made for, and the merge is sent only while GitHub still says `unstable`.
+
+### The kill switch, as it now stands
+
+- `AUTO_REPULL_ENABLED` removed stops new dispatches, gate work, resumes and merges at the next tick, and refuses a run's automatic create.
+- A held claim is still resolved from GitHub and a merged re-pull still finished, whatever the switches say.
+- `REPULL_DAILY_MERGE_CAP = "0"` stops every merge, the Worker's and the administrators', without touching the switches.
+
+### Words
+
+- Hold words added: `merge-exhausted`, `merge-message` and `claim-refused`; `claim-held`, `merge-refused` and `finish-exhausted`, which earlier slices declared, are written now.
+- Refusal words added, for the claim over a failed BIDS validation: `bids-override-automatic`, `bids-override-blocked`, `bids-override-not-unstable`, `bids-override-bids`, `bids-override-version-check` and `bids-override-unverified`.
+
+### What a tick costs
+
+Measured over five rows, the most a tick reads past the gates, and pinned by a test: a row that waits at the merge costs seven D1 statements and four GitHub requests, one that is merged sixteen and seven, and a finish dispatched eight and one; the tick itself two statements.
+Five merges on one tick are 82 statements and 35 requests, within the 30-minute tick's shared allowance of 1,000.
+
+### Checked only against stand-ins
+
+The suites run the real record, its claim and its cap, the machine-clean facts and rule, the verified routes, the real `nemar admin repull merge` with the real `git`, `git-annex` and `aws`; GitHub and S3 are stand-ins, and these are what only the first production runs can check:
+the App token's reading of `mergeable_state`;
+that GitHub merges the App's squash at `sha` with the title and message it is sent, and refuses a head that moved;
+that an App's squash merge fires the dataset workflows that tag it and mint its DOI;
+that the finish run, once its workflow is deployed with the epic release, records the release and the lock from a runner;
+and that an unprotected mirror whose BIDS validation failed reads `unstable`, and not `blocked`, for an administrator's merge over it.
