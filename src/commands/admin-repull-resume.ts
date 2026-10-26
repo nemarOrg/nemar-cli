@@ -127,7 +127,8 @@ with your own GitHub token (GH_TOKEN, else \`gh auth token\`). It never merges.
                dataset's prefix), with the ambient AWS credentials reading the staging manifest
                that lists them; only once every one is locked is the count recorded. Then:
                with no correction and no conflict in the plan, the record is complete; with
-               conflicts, it waits for your decision (--take-ours, --keep-upstream); otherwise
+               conflicts, it waits for your decision (--take-ours, --keep-upstream: a conflict
+               you do not name stays on upstream's side only with --keep-upstream); otherwise
                N.0.1 is made from the reviewed plan (--plan, else the plan's default path):
                NEMAR's side of each correction, and of each conflict you resolved to it,
                replayed onto the new main (nothing is scrubbed or copied), release/v<N.0.1>
@@ -141,7 +142,8 @@ A conflict is named as the plan names it: a path, or dataset_description.json#<K
 of the description. The README family is replayed as a unit.
 
 Exit codes:
-  0  ready to merge (gates_clear, patch_gates_clear), or complete.
+  0  ready to merge (gates_clear, patch_gates_clear), complete, or released with a record that
+     does not say how many corrections and conflicts its plan has (it is not completed).
   3  waiting (for the screen, GitHub, a person, your decision on conflicts) after
      --wait-minutes, or stopped with why recorded on the record; run resume again.
   1  refused before anything was written, nothing to resume, or the record ended (abandoned,

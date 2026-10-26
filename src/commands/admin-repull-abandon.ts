@@ -18,9 +18,10 @@ resolves it from GitHub).
 
   before the merge   (planned to gates_clear) closes N.0.0's pull request and deletes its release
                      branch, when they exist and are this re-pull's, reports the objects its copy
-                     and uploads wrote that no tree on main names (they stay in NEMAR's bucket,
-                     unlocked; nothing is deleted, and the staging manifest that lists them is
-                     kept), and ends the record abandoned. A new attempt at the tag is then allowed.
+                     and uploads wrote that main's current tree does not name (they stay in
+                     NEMAR's bucket, unlocked; nothing is deleted, and the staging manifest that
+                     lists them is kept), and ends the record abandoned. A new attempt at the tag
+                     is then allowed.
   merged             refused (wait-for-release): run resume, which records the release, the
                      lineage, the sweep stamps and the lock; then abandon declines N.0.1.
   after the release  (released, patch_synthesized, patch_gates_clear) closes only N.0.1's pull
@@ -35,7 +36,8 @@ directory and checkpoint. Abandon works on a dataset that became anonymous or wi
 Exit codes:
   0  the record is ended.
   1  refused (nothing was closed, deleted or recorded), or nothing to end.
-  3  refused after something was closed or deleted (its why says which); run abandon again.`;
+  3  refused after something was closed or deleted (its why says which); resumable: run abandon
+     again.`;
 
 function report(result: AbandonResult, datasetId: string, out: (line: string) => void): void {
   const { row, report: r } = result;
