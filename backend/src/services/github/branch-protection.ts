@@ -80,7 +80,7 @@ export async function applyTagProtection(repo: string, pat: string): Promise<voi
 }
 
 /**
- * NEMAR GitHub App id (`nemar-publish-bot`). Required status checks are pinned
+ * NEMAR GitHub App id (`nemar-bot`). Required status checks are pinned
  * to this integration so only a check-run posted by the App satisfies them
  * (spoof-resistant), and the App is a ruleset bypass actor so its automation
  * (enrichment commit-to-main, version-DOI / pr-merge `v*` tag pushes) is not
