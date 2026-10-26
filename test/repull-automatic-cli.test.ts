@@ -24,8 +24,11 @@
  *    of the fixture's paths, keys, file names, subject labels or secrets;
  *  - a plan with a correction is refused before anything is written, by `plan` and, from its
  *    live plan, by `execute`, and so is a record taken up past `prepared` whose plan has one;
- *  - a copy the estimate puts past the App token's hour is refused at plan time, and a run that
- *    outlived its token is reported `token-expired`;
+ *  - a copy the estimate puts past the App token's hour is refused at plan time; a run whose
+ *    token has too little of its usable hour left is refused at the plan, at the execute before
+ *    its record, and before a push, without writing what it could not finish; a run that outlived
+ *    its token is reported `token-expired`;
+ *  - the quiet line says how long the token was held and how long each step took, in seconds;
  *  - the token on the command line (checked before the plan file is read), no App token, a
  *    development build, a finish dispatch fed to `plan`, another dataset and other tags are each
  *    refused and reported (the token's report ends the dispatch); a tenth key, no event file, an
@@ -37,6 +40,7 @@
  *  - an enrichment-shaped commit on the release branch while the run settles is recorded, and any
  *    other is `head-foreign`, recorded on the row and reported `failed`; the settle waits for the
  *    branch to be quiet by what was read, and a branch that cannot be read is `head-unreadable`;
+ *    the token's hour ends the settle, which is then `head-unreadable`;
  *  - a finish takes a merged re-pull to `complete` and reports `finished` (again, after it
  *    completed), and refuses one that has not merged, another record or an administrator's,
  *    without touching it.
@@ -196,11 +200,18 @@ function auto(args: string[], extra: Record<string, string | undefined> = {}, en
       GITHUB_SERVER_URL: "https://github.com",
       GH_TOKEN: APP_TOKEN,
       NEMAR_REPULL_POLL_MS: "100",
+      // The workflow notes the mint just before it, as `date +%s`.
+      NEMAR_REPULL_TOKEN_SINCE: mintedAgo(0),
       ...extra,
     },
     undefined,
     entry,
   );
+}
+
+/** The mint's time as the workflow notes it, `minutes` before now. */
+function mintedAgo(minutes: number): string {
+  return String(Math.floor(Date.now() / 1000) - minutes * 60);
 }
 
 const planArgs = (c: Claim, extra: string[] = []) => [
@@ -536,6 +547,10 @@ describe.skipIf(!awsInstalled)("an automatic run opens its pull request", () => 
     expect(plan.exitCode, plan.all).toBe(0);
     expectQuiet(plan, c, "planned");
     expect(plan.all).toContain("repull-auto: report phase=started answer=stored");
+    // How long the token was held when the command started, and each step, in seconds.
+    expect(plan.all).toMatch(
+      /^repull-auto: quiet suppressed=\d+ token_age_s=\d+ plan_s=\d+ run_s=\d+$/m,
+    );
     expect(dispatchRow(c.id).status).toBe("started");
     // The plan never left the runner, and nothing was written but the report.
     expect(readFileSync(join(runner, "plan.json"), "utf8")).toContain('"dataset": "on099999"');
@@ -546,6 +561,9 @@ describe.skipIf(!awsInstalled)("an automatic run opens its pull request", () => 
     const exec = await auto(executeArgs(c));
     expect(exec.exitCode, exec.all).toBe(0);
     expectQuiet(exec, c, "opened");
+    expect(exec.all).toMatch(
+      /^repull-auto: quiet suppressed=\d+ token_age_s=\d+ replan_s=\d+ clone_s=\d+ prepare_s=\d+ copy_s=\d+ register_s=\d+ pr_s=\d+ settle_s=\d+ run_s=\d+$/m,
+    );
     const [row] = repullRows();
     expect(row).toMatchObject({ status: "pr_open", origin: "automatic" });
     const d = dispatchRow(c.id);
@@ -680,6 +698,88 @@ describe.skipIf(!awsInstalled)("an automatic run opens its pull request", () => 
     expect(s3Writes()).toEqual([]);
   });
 
+  test("a run with too little of the token's hour left is refused at the plan, nothing written", async () => {
+    const c = await claimOpen();
+    writeEvent(c);
+    const plan = await auto(planArgs(c), { NEMAR_REPULL_TOKEN_SINCE: mintedAgo(56) });
+    expect(plan.exitCode, plan.all).toBe(1);
+    expectQuiet(plan, c, "refused");
+    expect(dispatchRow(c.id)).toMatchObject({ status: "refused", code: "auto-token-hour" });
+    expect(repullRows()).toEqual([]);
+    expect(ghWrites()).toEqual([]);
+    expect(s3Writes()).toEqual([]);
+  });
+
+  test("a run that cannot tell when its token was minted is refused before it reads anything", async () => {
+    const c = await claimOpen();
+    writeEvent(c);
+    const plan = await auto(planArgs(c), { NEMAR_REPULL_TOKEN_SINCE: "" });
+    expect(plan.exitCode, plan.all).toBe(1);
+    expectQuiet(plan, c, "refused");
+    expect(dispatchRow(c.id)).toMatchObject({ status: "refused", code: "auto-token-clock" });
+    expect(w.apiWrites).toEqual(["POST /webhooks/repull-state"]);
+  });
+
+  test("an execute with too little of the token's hour left is refused before its record", async () => {
+    const c = await claimOpen();
+    writeEvent(c);
+    expect((await auto(planArgs(c))).exitCode).toBe(0);
+    const exec = await auto(executeArgs(c), { NEMAR_REPULL_TOKEN_SINCE: mintedAgo(50) });
+    expect(exec.exitCode, exec.all).toBe(1);
+    expectQuiet(exec, c, "refused");
+    expect(dispatchRow(c.id)).toMatchObject({ status: "refused", code: "auto-token-hour" });
+    expect(w.apiWrites).not.toContain("POST /admin/repulls");
+    expect(repullRows()).toEqual([]);
+    expect(ghWrites()).toEqual([]);
+    expect(s3Writes()).toEqual([]);
+  });
+
+  /**
+   * An automatic record an administrator took through `until`, and a resume dispatch of it run
+   * with the token's hour nearly gone: the next push is refused before it starts.
+   */
+  async function lateResume(until: "copied" | "registered", step: string): Promise<void> {
+    const { path } = await libraryPlan();
+    const admin = await w.cli(
+      ["repull", "execute", path, "--until", until, "--yes"],
+      {},
+      undefined,
+      SOURCE_ENTRY,
+    );
+    expect(admin.exitCode, admin.all).toBe(0);
+    w.db().run("UPDATE upstream_repulls SET origin = 'automatic'");
+    const [row] = repullRows();
+    const c = await claimOpenDispatch(w.bindings(), {
+      datasetId: w.fx.datasetId,
+      upstreamDs: UPSTREAM_ID,
+      fromTag: TAG_A,
+      toTag: TAG_B,
+      repullId: row?.id ?? 0,
+    });
+    if (!("id" in c)) throw new Error(`nothing was claimed: ${JSON.stringify(c)}`);
+    writeEvent(c, { repullId: row?.id ?? 0 });
+    const head = (await gitIn(w.fx.originRepo, ["rev-parse", "refs/heads/git-annex"])).trim();
+    w.gh.seen.length = 0;
+    const exec = await auto(executeArgs(c, path), { NEMAR_REPULL_TOKEN_SINCE: mintedAgo(50) });
+    expect(exec.exitCode, exec.all).toBe(3);
+    expectQuiet(exec, c, "failed");
+    expect(dispatchRow(c.id)).toMatchObject({ status: "failed", code: "auto-token-hour" });
+    const [after] = repullRows();
+    expect(after?.status).toBe(until);
+    expect(after?.last_error).toStartWith(`[${step}:auto-token-hour]`);
+    // Nothing was pushed: origin's git-annex branch did not move, and GitHub saw no write.
+    expect((await gitIn(w.fx.originRepo, ["rev-parse", "refs/heads/git-annex"])).trim()).toBe(head);
+    expect(ghWrites()).toEqual([]);
+  }
+
+  test("a resume with too little of the token's hour left is refused before the registration's push", async () => {
+    await lateResume("copied", "register");
+  });
+
+  test("a resume with too little of the token's hour left is refused before the pull request", async () => {
+    await lateResume("registered", "pr");
+  });
+
   test("a run that outlived its App token is reported token-expired, whatever its step called it", async () => {
     // From the copy on, the token is past its hour: GitHub answers it 401, and the registration's
     // push to the origin is turned away as an expired token's would be.
@@ -772,6 +872,7 @@ describe.skipIf(!awsInstalled)("the release head settles before the run reports"
         row: RepullRow,
         opts: SettleOptions,
         onTick?: (t: number) => Promise<void>,
+        deadlineAfterMs?: number,
       ) => Promise<{ result: Settled; took: number }>;
     }) => Promise<void>,
     scratchEnv: Record<string, string> = w.fx.env,
@@ -794,7 +895,7 @@ describe.skipIf(!awsInstalled)("the release head settles before the run reports"
       await fn({
         live,
         scratch,
-        async settle(r, opts, onTick) {
+        async settle(r, opts, onTick, deadlineAfterMs) {
           let t = 1_000_000;
           const start = t;
           const result = await settleReleaseHead({
@@ -802,6 +903,7 @@ describe.skipIf(!awsInstalled)("the release head settles before the run reports"
             row: r,
             opts,
             out: () => {},
+            ...(deadlineAfterMs === undefined ? {} : { deadlineMs: start + deadlineAfterMs }),
             now: () => t,
             sleep: async (ms) => {
               t += ms;
@@ -893,9 +995,56 @@ describe.skipIf(!awsInstalled)("the release head settles before the run reports"
         expect(row?.last_error).toStartWith("[auto:head-unreadable]");
         expect(row?.last_error).toContain("(origin-unreadable)");
         expect(row?.last_error).not.toContain("abandon a record is built");
+        // No later run settles it: the record says who does.
+        expect(row?.last_error).not.toContain("later run");
+        expect(row?.last_error).toContain("an administrator's resume settles it");
       },
       { ...w.fx.env, NEMAR_REPULL_ORIGIN_BASE: join(runner, "no-such-origins") },
     );
+  });
+
+  test("the token's hour ends a settle before the branch is quiet: head-unreadable, never past it", async () => {
+    await withSettle(async ({ live, settle }) => {
+      const { result, took } = await settle(
+        live,
+        { maxWaitMs: 30 * 60_000, quietMs: QUIET, pollMs: POLL },
+        undefined,
+        2 * 60_000,
+      );
+      expect(result).toMatchObject({ outcome: "unreadable", cause: "token-hour", unreadable: 0 });
+      expect(took).toBe(2 * 60_000);
+      expect(result.reads).toBe((2 * 60_000) / POLL + 1);
+      const [row] = repullRows();
+      expect(row?.status).toBe("pr_open");
+      expect(row?.last_error).toStartWith("[auto:head-unreadable]");
+      expect(row?.last_error).toContain("(token-hour)");
+    });
+  });
+
+  test("a token whose hour is over reads nothing, and a later end leaves the settle as it was", async () => {
+    await withSettle(async ({ live, settle }) => {
+      const opts = { maxWaitMs: 30 * 60_000, quietMs: QUIET, pollMs: POLL };
+      const over = await settle(live, opts, undefined, 0);
+      expect(over.result).toMatchObject({ outcome: "unreadable", cause: "token-hour", reads: 0 });
+      expect(over.took).toBe(0);
+      const later = await settle(live, opts, undefined, 10 * 60_000);
+      expect(later.result).toMatchObject({ outcome: "settled", cause: null });
+      expect(later.took).toBe(QUIET);
+    });
+  });
+
+  test("through the CLI, the settle of a run past the token's hour reads nothing", async () => {
+    // A run that takes up a record already at `pr_open` goes straight to the settle, so the
+    // settle's own end at the token's hour is all that stands between it and an expired token.
+    const { row } = await opened();
+    const c = await dispatchFor("open", row.id);
+    writeEvent(c, { repullId: row.id });
+    const exec = await auto(executeArgs(c), { NEMAR_REPULL_TOKEN_SINCE: mintedAgo(56) });
+    expect(exec.exitCode, exec.all).toBe(3);
+    expectQuiet(exec, c, "failed");
+    expect(exec.all).toContain("repull-auto: settle reads=0 moves=0 unreadable=0");
+    expect(dispatchRow(c.id)).toMatchObject({ status: "failed", code: "head-unreadable" });
+    expect(repullRows()[0]?.last_error).toContain("(token-hour)");
   });
 
   test("reads that stop succeeding for a whole quiet period do not settle the branch", async () => {

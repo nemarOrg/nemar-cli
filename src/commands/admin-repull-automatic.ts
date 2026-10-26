@@ -18,6 +18,10 @@
  * path does not take, exit 3) or `failed` (a step after the record exists, or a release branch the
  * settle could not read, exit 3; a head enrichment did not make, exit 1) with a word from the closed
  * list, `token-expired` when GitHub no longer takes the App token, whatever the step called it.
+ * Every command keeps inside the App token's usable hour, from when the workflow
+ * noted its mint (`NEMAR_REPULL_TOKEN_SINCE`): the plan, and the execute before its record, the copy
+ * and each push, refuse `auto-token-hour` when what is left would not fit. The quiet line says how
+ * long the token was held when the command started and how long each step took, in seconds.
  */
 
 import { readFileSync } from "node:fs";
@@ -46,12 +50,15 @@ import {
   installAutomaticQuiet,
   isAutomaticApi,
   optionRefused,
+  planCopySeconds,
   reportDispatch,
+  tokenHourRefusal,
   tokenOnArgvRefusal,
+  tokenSinceOf,
 } from "../lib/repull/execute/automatic.js";
 import { planCounts, planFacts } from "../lib/repull/execute/body.js";
 import { readCatalogFacts } from "../lib/repull/execute/catalog.js";
-import { executeRepull } from "../lib/repull/execute/run.js";
+import { type MeasuredStep, executeRepull } from "../lib/repull/execute/run.js";
 import {
   SETTLE_DEFAULT_MINUTES,
   SETTLE_POLL_MS,
@@ -102,9 +109,26 @@ interface Spec {
   body(ctx: AutomaticContext): Promise<Outcome>;
 }
 
+/** Whole seconds since `startedMs`. */
+const secondsSince = (startedMs: number) =>
+  Math.max(0, Math.round((Date.now() - startedMs) / 1000));
+
+/**
+ * When the App token was minted, as the workflow noted it. `automaticRefusal` has refused a run
+ * without it (`auto-token-clock`) before any command's body runs, so this only restates that.
+ */
+function tokenSince(): number {
+  const since = tokenSinceOf(process.env, Date.now());
+  if (since === null) {
+    throw new ExecuteRefused("auto-token-clock", "When the App token was minted is not known.");
+  }
+  return since;
+}
+
 /** The result line and the exit code; the last thing a run prints. */
-function end(sink: AutomaticSink, outcome: Outcome): void {
-  sink.emit("quiet", { suppressed: sink.dropped() });
+function end(sink: AutomaticSink, outcome: Outcome, startedMs: number): void {
+  sink.time("run", secondsSince(startedMs));
+  sink.emit("quiet", sink.quietFields());
   if (outcome.phase === "refused" || outcome.phase === "failed") {
     sink.emit("result", { phase: outcome.phase, code: dispatchCodeOf(outcome.code) });
     process.exitCode = outcome.exit;
@@ -117,28 +141,37 @@ function end(sink: AutomaticSink, outcome: Outcome): void {
 
 /** One automatic run of a command; see the module comment. */
 async function runAutomatic(spec: Spec): Promise<void> {
+  const startedMs = Date.now();
   const sink = installAutomaticQuiet();
   markReportedExit();
   sink.emit("start", {
     command: spec.command,
     ...(DISPATCH_ID_RE.test(spec.option) ? { dispatch: spec.option } : {}),
   });
+  // How long the App token was held when this command started: the install and the sign-in for
+  // the first command, and the plan as well for the execute.
+  const since = tokenSinceOf(process.env, startedMs);
+  if (since !== null) sink.time("token_age", Math.max(0, Math.round(startedMs / 1000 - since)));
   let ctx: AutomaticContext;
   try {
     ctx = automaticContext(spec.option, process.env, sink);
   } catch (err) {
     // Nothing names the dispatch, so nothing is reported.
-    end(sink, {
-      phase: "failed",
-      code: err instanceof ExecuteRefused ? err.code : "runner-failed",
-      exit: 1,
-    });
+    end(
+      sink,
+      {
+        phase: "failed",
+        code: err instanceof ExecuteRefused ? err.code : "runner-failed",
+        exit: 1,
+      },
+      startedMs,
+    );
     return;
   }
   // Where the token and the NEMAR key would go: anything but production (or the suites' loopback
   // API) is refused before anything is sent, and not reported, since the report would go there too.
   if (!isAutomaticApi(getApiUrl())) {
-    end(sink, { phase: "failed", code: "auto-api-not-production", exit: 1 });
+    end(sink, { phase: "failed", code: "auto-api-not-production", exit: 1 }, startedMs);
     return;
   }
   let outcome: Outcome;
@@ -161,7 +194,7 @@ async function runAutomatic(spec: Spec): Promise<void> {
       const started = await reportDispatch(ctx, "started");
       // A rerun of the same run finds its dispatch started already, and goes on.
       if (!started.stored && started.code !== "already-started") {
-        end(sink, { phase: "failed", code: started.code, exit: 1 });
+        end(sink, { phase: "failed", code: started.code, exit: 1 }, startedMs);
         return;
       }
     }
@@ -193,7 +226,7 @@ async function runAutomatic(spec: Spec): Promise<void> {
       outcome = { phase: "failed", code: answer.code, exit: 1 };
     }
   }
-  end(sink, outcome);
+  end(sink, outcome, startedMs);
 }
 
 /** The catalog row and its versions, as the plan reads them; an API failure is a refusal. */
@@ -261,9 +294,11 @@ export function automaticPlan(
       if (!sameUpstreamTag(options.toTag, ctx.dispatch.toTag)) {
         throw new ExecuteRefused("dispatch-mismatch", "--to-tag is not the dispatch's tag.");
       }
+      const since = tokenSince();
       const catalog = await catalogOf(datasetId);
       assertNotAnonymous(catalog);
       let planned: Awaited<ReturnType<typeof planRepull>>;
+      const planStarted = Date.now();
       try {
         planned = await planRepull({
           datasetId,
@@ -281,6 +316,8 @@ export function automaticPlan(
         if (err instanceof RepullCannotPlan)
           return { phase: "failed", code: "not-planned", exit: 1 };
         throw err;
+      } finally {
+        ctx.sink.time("plan", secondsSince(planStarted));
       }
       if (!planned.planned) return { phase: "refused", code: planned.reason, exit: 1 };
       const file = planned.file;
@@ -308,6 +345,10 @@ export function automaticPlan(
         if (err instanceof ExecuteRefused) return { phase: "refused", code: err.code, exit: 3 };
         throw err;
       }
+      // What is left of the App token's hour must hold the copy, the pushes and the settle; the
+      // execute checks again, before its record and before each of them.
+      const late = tokenHourRefusal(since, Date.now(), planCopySeconds(file.body));
+      if (late) return { phase: "refused", code: late.code, exit: 1 };
       return { phase: "planned" };
     },
   });
@@ -368,6 +409,8 @@ export function automaticExecute(
             quietMs: SETTLE_QUIET_MS,
             pollMs: pollMs(SETTLE_POLL_MS),
           },
+          tokenSince: tokenSince(),
+          measured: (step: MeasuredStep, seconds: number) => ctx.sink.time(step, seconds),
         },
         out: (line) => ctx.sink.drop(line),
       });
@@ -377,8 +420,9 @@ export function automaticExecute(
         const s = result.settled;
         ctx.sink.emit("settle", { reads: s.reads, moves: s.moves, unreadable: s.unreadable });
         if (s.outcome === "foreign") return { phase: "failed", code: "head-foreign", exit: 1 };
-        // Nothing was read in the last quiet period: the pull request is open, and a later run
-        // takes the record up at `pr_open` and settles it again.
+        // Nothing was read in the last quiet period, or the token's hour ended the settle first:
+        // the pull request stays open and the gates read its head. No automatic run settles it
+        // again; an administrator's resume is the only way to.
         if (s.outcome === "unreadable")
           return { phase: "failed", code: "head-unreadable", exit: 3 };
       }

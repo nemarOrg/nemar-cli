@@ -14,7 +14,10 @@
  *    unexplained paths, conflicts and corrections, each stated, and a copy of known size within the
  *    bound;
  *  - a report carries the body the Worker's callback schema takes, the token only in its header,
- *    a code from the closed list, and the marker only for a terminal report the Worker stored.
+ *    a code from the closed list, and the marker only for a terminal report the Worker stored;
+ *  - the App token's hour: the copy's budget leaves the settle's share and the other steps', a run
+ *    that cannot tell when its token was minted is refused, and a step whose work would pass the
+ *    usable hour is refused before it starts, on an injected clock.
  *
  * The happy path of a report reaches the REAL callback in `test/repull-automatic-cli.test.ts`;
  * here a fetch stand-in answers the statuses a callback can answer, for the error paths and the
@@ -34,9 +37,13 @@ import {
 } from "../backend/src/services/github/dispatch";
 import { repullStateSchema } from "../backend/src/services/upstream-repull-dispatch";
 import {
+  APP_TOKEN_USABLE_SECONDS,
+  AUTO_AFTER_COPY_SECONDS,
   AUTO_COPY_BUDGET_SECONDS,
   AUTO_COPY_BYTES_PER_SECOND,
   AUTO_MAX_COPY_BYTES,
+  AUTO_OTHER_STEPS_SECONDS,
+  AUTO_SETTLE_RESERVE_SECONDS,
   CURRENT_PLANNER_VERSION,
   DISPATCH_CODES,
   DISPATCH_ID_MAX,
@@ -51,6 +58,7 @@ import {
   DISPATCH_PAYLOAD_KEYS,
   PRODUCTION_API,
   RESULT_LINE_RE,
+  TOKEN_SINCE_ENV,
   appTokenRefused,
   assertAutomaticCounts,
   assertAutomaticPlan,
@@ -62,11 +70,17 @@ import {
   isAutomaticApi,
   isAutomaticInvocation,
   parseDispatchPayload,
+  planCopySeconds,
   readDispatchEvent,
   reportDispatch,
   runUrlOf,
+  tokenHourLeftMs,
+  tokenHourRefusal,
   tokenOnArgvRefusal,
+  tokenSinceOf,
 } from "../src/lib/repull/execute/automatic";
+import { automaticHooks } from "../src/lib/repull/execute/run";
+import { SETTLE_QUIET_MS } from "../src/lib/repull/execute/settle";
 import { ExecuteRefused } from "../src/lib/repull/execute/verify-plan";
 
 const TOKEN = "c0ffee".repeat(11).slice(0, 64);
@@ -305,14 +319,17 @@ describe("the event is the run-upstream-repull dispatch GitHub delivered", () =>
 
 describe("what a run checks before it acts", () => {
   const d = parseDispatchPayload(sent());
+  const NOW_MS = 1_790_000_000_000;
+  const MINTED = String(NOW_MS / 1000 - 120);
   const ok = {
     mode: "open" as const,
     datasetId: "on099999",
     argv: ["bun", "index.ts", "admin", "repull", "plan", "on099999", "--automatic-dispatch", "7"],
-    env: { GH_TOKEN: "ghs_app" },
+    env: { GH_TOKEN: "ghs_app", [TOKEN_SINCE_ENV]: MINTED } as Record<string, string>,
     ownVersion: "0.10.24",
     devBuild: false,
     verbose: false,
+    nowMs: NOW_MS,
   };
 
   test("a run that may act is not refused", () => {
@@ -330,6 +347,14 @@ describe("what a run checks before it acts", () => {
       [{ datasetId: "on004362" }, "dispatch-mismatch"],
       [{ env: {} }, "auto-no-app-token"],
       [{ env: { GH_TOKEN: "   " } }, "auto-no-app-token"],
+      // When the App token was minted is not known, or not a time this clock can trust.
+      [{ env: { GH_TOKEN: "ghs_app" } }, "auto-token-clock"],
+      [{ env: { GH_TOKEN: "ghs_app", [TOKEN_SINCE_ENV]: "" } }, "auto-token-clock"],
+      [{ env: { GH_TOKEN: "ghs_app", [TOKEN_SINCE_ENV]: "soon" } }, "auto-token-clock"],
+      [
+        { env: { GH_TOKEN: "ghs_app", [TOKEN_SINCE_ENV]: String(NOW_MS / 1000 + 301) } },
+        "auto-token-clock",
+      ],
     ];
     for (const [over, code] of cases) {
       const r = automaticRefusal(d, { ...ok, ...over });
@@ -438,6 +463,7 @@ describe("a crash prints only the fixed lines", () => {
     expect(refused.stderr).toBe("");
     expect(refused.lines.at(-1)).toBe("repull-auto: result phase=refused code=auto-not-clean-plan");
   });
+
 });
 
 describe("the output grammar", () => {
@@ -583,6 +609,135 @@ describe("the plan the automatic path takes", () => {
   });
 });
 
+describe("the App token's hour", () => {
+  const S = 1_790_000_000;
+  const at = (secondsAfterMint: number) => (S + secondsAfterMint) * 1000;
+  /** What must be left before a step that has `work` seconds of its own to do. */
+  const need = (work: number) => work + AUTO_AFTER_COPY_SECONDS + AUTO_SETTLE_RESERVE_SECONDS;
+
+  test("the copy's budget is what the usable hour leaves once the settle and the other steps are kept", () => {
+    expect(AUTO_COPY_BUDGET_SECONDS + AUTO_SETTLE_RESERVE_SECONDS + AUTO_OTHER_STEPS_SECONDS).toBe(
+      APP_TOKEN_USABLE_SECONDS,
+    );
+    expect(APP_TOKEN_USABLE_SECONDS).toBeLessThan(60 * 60);
+    // The settle's share holds its quiet window and a minute of reads.
+    expect(AUTO_SETTLE_RESERVE_SECONDS).toBeGreaterThanOrEqual(SETTLE_QUIET_MS / 1000 + 60);
+    expect(AUTO_AFTER_COPY_SECONDS).toBeLessThanOrEqual(AUTO_OTHER_STEPS_SECONDS);
+  });
+
+  test("a plan that would fit the hour only if the settle had no share is refused", () => {
+    const counts = {
+      unexplained: 0,
+      conflicts: 0,
+      corrections: 0,
+      copy_bytes_unknown: 0,
+      copy_items: 0,
+      local_uploads: 0,
+      local_bytes: 0,
+      local_bytes_unknown: 0,
+    };
+    const plan = (seconds: number) =>
+      ({
+        executable: true,
+        body: {
+          planner: CURRENT_PLANNER_VERSION,
+          counts: { ...counts, copy_bytes: seconds * AUTO_COPY_BYTES_PER_SECOND },
+        },
+      }) as never;
+    // The copy, the other steps and the settle together fit the usable hour exactly.
+    expect(() => assertAutomaticPlan(plan(AUTO_COPY_BUDGET_SECONDS))).not.toThrow();
+    // Inside the hour were the settle not kept back, and refused because it is.
+    for (const s of [
+      AUTO_COPY_BUDGET_SECONDS + 1,
+      AUTO_COPY_BUDGET_SECONDS + AUTO_SETTLE_RESERVE_SECONDS,
+    ]) {
+      expect([s, refusalOf(() => assertAutomaticPlan(plan(s))).code]).toEqual([
+        s,
+        "auto-copy-too-long",
+      ]);
+    }
+  });
+
+  test("when the token was minted is read as whole epoch seconds, never from the future", () => {
+    const now = at(0);
+    expect(tokenSinceOf({ [TOKEN_SINCE_ENV]: String(S) }, now)).toBe(S);
+    expect(tokenSinceOf({ [TOKEN_SINCE_ENV]: ` ${S}\n` }, now)).toBe(S);
+    // Up to five minutes of a clock running ahead of this one, and no more.
+    expect(tokenSinceOf({ [TOKEN_SINCE_ENV]: String(S + 300) }, now)).toBe(S + 300);
+    for (const raw of [
+      undefined,
+      "",
+      "0",
+      "017",
+      "1.5",
+      "-5",
+      "1e9",
+      "1234567890123",
+      `${S + 301}`,
+    ]) {
+      expect([raw, tokenSinceOf({ [TOKEN_SINCE_ENV]: raw }, now)]).toEqual([raw, null]);
+    }
+  });
+
+  test("a step is refused once its work and what follows it would pass the usable hour", () => {
+    expect(tokenHourLeftMs(S, at(0))).toBe(APP_TOKEN_USABLE_SECONDS * 1000);
+    expect(tokenHourLeftMs(S, at(APP_TOKEN_USABLE_SECONDS + 1))).toBe(-1000);
+    for (const work of [0, 90, 600]) {
+      const last = APP_TOKEN_USABLE_SECONDS - need(work);
+      expect([work, tokenHourRefusal(S, at(last), work)]).toEqual([work, null]);
+      const late = tokenHourRefusal(S, at(last) + 1, work);
+      expect([work, late?.code]).toEqual([work, "auto-token-hour"]);
+      expect(late?.resumable).not.toBe(true);
+    }
+    // Fifty-six minutes in, nothing is started, whatever its size.
+    expect(tokenHourRefusal(S, at(56 * 60), 0)?.code).toBe("auto-token-hour");
+  });
+
+  test("the copy's own estimate is the plan's copy, by its bytes and its objects", () => {
+    const body = {
+      counts: { copy_bytes: 90 * AUTO_COPY_BYTES_PER_SECOND, copy_items: 4 },
+    } as never;
+    expect(planCopySeconds(body)).toBe(
+      automaticCopySeconds({ bytes: 90 * AUTO_COPY_BYTES_PER_SECOND, objects: 4 }),
+    );
+    expect(planCopySeconds(body)).toBeGreaterThanOrEqual(90);
+  });
+
+  test("a dispatched run checks the hour before each step, the copy with its estimate, and times each", () => {
+    const copySeconds = 600;
+    const body = {
+      counts: { copy_bytes: copySeconds * AUTO_COPY_BYTES_PER_SECOND, copy_items: 0 },
+    } as never;
+    const estimate = planCopySeconds(body);
+    let t = at(APP_TOKEN_USABLE_SECONDS - need(0));
+    const timed: Array<[string, number]> = [];
+    const hooks = automaticHooks(
+      {
+        dispatchId: 7,
+        token: TOKEN,
+        repullId: null,
+        settle: { maxWaitMs: 0, quietMs: 0, pollMs: 0 },
+        tokenSince: S,
+        now: () => t,
+        measured: (step, seconds) => timed.push([step, seconds]),
+      },
+      body,
+    );
+    // A push with nothing of its own to do still fits; the copy, with its estimate, does not.
+    expect(() => hooks.beforeStep?.("register")).not.toThrow();
+    expect(() => hooks.beforeStep?.("pr")).not.toThrow();
+    expect(refusalOf(() => hooks.beforeStep?.("copy")).code).toBe("auto-token-hour");
+    t = at(APP_TOKEN_USABLE_SECONDS - need(estimate));
+    expect(() => hooks.beforeStep?.("copy")).not.toThrow();
+    t += 1;
+    expect(refusalOf(() => hooks.beforeStep?.("copy")).code).toBe("auto-token-hour");
+    hooks.timed?.("copy", 61_400);
+    expect(timed).toEqual([["copy", 61]]);
+    // An administrator's run has no hooks.
+    expect(automaticHooks(undefined, body)).toEqual({});
+  });
+});
+
 describe("a run whose App token GitHub no longer takes", () => {
   function github(answer: number | "network") {
     const seen: Array<{ url: string; auth: string | null }> = [];
@@ -636,6 +791,8 @@ describe("the words a run reports", () => {
       "head-foreign",
       "finish-not-merged",
       "auto-no-app-token",
+      "auto-token-hour",
+      "auto-token-clock",
     ]) {
       expect((DISPATCH_CODES as readonly string[]).includes(w)).toBe(true);
     }
@@ -653,6 +810,7 @@ describe("the words a run reports", () => {
 
 function recordingSink(): AutomaticSink & { lines: string[] } {
   const lines: string[] = [];
+  const times: Record<string, number> = {};
   let dropped = 0;
   return {
     lines,
@@ -661,6 +819,10 @@ function recordingSink(): AutomaticSink & { lines: string[] } {
       dropped++;
     },
     dropped: () => dropped,
+    time: (key, seconds) => {
+      times[`${key}_s`] = seconds;
+    },
+    quietFields: () => ({ suppressed: dropped, ...times }),
   };
 }
 
@@ -690,7 +852,9 @@ describe("a report", () => {
     return { seen, fetchImpl };
   }
 
-  function ctxOf(marker: string | null): AutomaticContext & { sink: { lines: string[] } } {
+  function ctxOf(
+    marker: string | null,
+  ): AutomaticContext & { sink: ReturnType<typeof recordingSink> } {
     return {
       dispatch: parseDispatchPayload(sent()),
       runUrl: "https://github.com/nemarDatasets/.github/actions/runs/99",

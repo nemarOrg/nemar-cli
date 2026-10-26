@@ -45,10 +45,12 @@
 # refuses an automatic record outside production on its own.
 #
 # THE APP TOKEN LASTS AN HOUR. It is minted before anything is installed, so no code installed
-# later runs before the App's private key is used, and the push and the pull request must come
-# within its hour: the CLI refuses a plan whose copy would take more than twenty minutes by its
-# estimate (auto-copy-too-long), and reports a run that failed with the token expired as
-# token-expired. A run past the hour is taken up by a later dispatch's run, with a token of its own.
+# later runs before the App's private key is used, and the step before the mint notes the time
+# (NEMAR_REPULL_TOKEN_SINCE), from which the CLI keeps everything it does with the token inside
+# fifty-five minutes: it refuses a plan whose copy would take more than twenty minutes by its
+# estimate (auto-copy-too-long), refuses before its record, the copy and each push when what is
+# left would not fit (auto-token-hour), and ends the settle of the release head at the end of
+# those minutes. A run that failed with the token expired anyway is reported token-expired.
 #
 # Required secrets on nemarDatasets/.github, each already used by another workflow there:
 #   NEMAR_APP_ID, NEMAR_APP_PRIVATE_KEY      the per-repository App token (contents and pull
@@ -182,6 +184,10 @@ jobs:
             echo "::error::Under 10 GB free on the runner"
             exit 1
           fi
+
+      # Just before the mint, so the hour the CLI counts starts no later than the token's own.
+      - name: Note when the App token is minted
+        run: echo "NEMAR_REPULL_TOKEN_SINCE=$(date +%s)" >> "$GITHUB_ENV"
 
       - name: Mint the App token for the dataset's repository
         id: app-token

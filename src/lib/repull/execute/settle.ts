@@ -7,7 +7,8 @@
  * never accepts a moved head on its own: machine clean needs the recorded head, and a head it has
  * not seen recorded holds the pull request. So before an automatic run reports its pull request
  * open, it watches the branch with git (`ls-remote`, no REST quota) until it has not moved for
- * `quietMs`, by what successful reads saw, or `maxWaitMs` has passed. Each move is judged by the one head rule execution and
+ * `quietMs`, by what successful reads saw, or `maxWaitMs` has passed, and never past the end of
+ * the App token's usable hour (`deadlineMs`). Each move is judged by the one head rule execution and
  * resume use (`acceptsHead`: the synthesized commit, or an enrichment-shaped descendant of it) and
  * recorded as the `pr_open -> pr_open` self-edge resume writes; a move enrichment does not make is
  * `head-foreign`, recorded on the row as the automatic path's error (`[auto:head-foreign]`), and the
@@ -15,8 +16,10 @@
  * a move, and never settled: the branch is settled only when a read succeeded in the last quiet
  * period before the settle ended, and otherwise the outcome is `unreadable`, recorded on the row
  * (`[auto:head-unreadable]`, with the last read's cause in fixed words) and reported as
- * `head-unreadable`, which a later run can take up at `pr_open`. Any later move holds the pull
- * request for an administrator's `resume`.
+ * `head-unreadable`. A settle the token's hour cut short before the branch was seen quiet is
+ * `unreadable` too (cause `token-hour`), never a token error. The pull request stays open and the
+ * gates read its head; no automatic run takes a `pr_open` record up again, so an administrator's
+ * `resume` is the only way to settle it again, and any later move holds the pull request for it.
  *
  * Settling writes nothing to GitHub; the scratch repository is the caller's.
  */
@@ -66,6 +69,11 @@ export async function settleReleaseHead(args: {
   out: (line: string) => void;
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
+  /**
+   * When, on the same clock as `now`, the App token's usable hour ends: the settle reads nothing
+   * after it, and a settle it cuts short before the branch was seen quiet is `unreadable`.
+   */
+  deadlineMs?: number;
 }): Promise<Settled> {
   const now = args.now ?? Date.now;
   const sleep = args.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
@@ -78,6 +86,17 @@ export async function settleReleaseHead(args: {
   }
   const ref = releaseRefOf(row.to_version);
   const started = now();
+  const leftMs =
+    args.deadlineMs === undefined ? Number.POSITIVE_INFINITY : args.deadlineMs - started;
+  const maxWaitMs = Math.min(args.opts.maxWaitMs, leftMs);
+  const cut = leftMs < args.opts.maxWaitMs;
+  const unread = async (cause: string, reads: number, moves: number, unreadable: number) => {
+    const message = `${row.branch} could not be read while the run settled it (${cause}); the pull request stays open, and an administrator's resume settles it.`;
+    await recordStepError(row, `${AUTOMATIC_ERROR_PREFIX}head-unreadable] ${message}`, args.out);
+    return { outcome: "unreadable" as const, row, reads, moves, unreadable, cause };
+  };
+  // The token's hour is over: nothing is read with it.
+  if (leftMs <= 0) return unread("token-hour", 0, 0, 0);
   /**
    * Since when successful reads have seen the branch where the row records it: the first read
    * that found it, then each move recorded. The branch is quiet only over what was read.
@@ -89,6 +108,7 @@ export async function settleReleaseHead(args: {
   let reads = 0;
   let moves = 0;
   let unreadable = 0;
+  let quiet = false;
   for (;;) {
     reads++;
     let head: string | null = null;
@@ -128,17 +148,16 @@ export async function settleReleaseHead(args: {
       }
     }
     const t = now();
-    const quiet =
-      quietFrom !== null && lastGood !== null && lastGood - quietFrom >= args.opts.quietMs;
-    if (quiet || t - started >= args.opts.maxWaitMs) break;
-    await sleep(Math.max(0, Math.min(args.opts.pollMs, args.opts.maxWaitMs - (t - started))));
+    quiet = quietFrom !== null && lastGood !== null && lastGood - quietFrom >= args.opts.quietMs;
+    if (quiet || t - started >= maxWaitMs) break;
+    await sleep(Math.max(0, Math.min(args.opts.pollMs, maxWaitMs - (t - started))));
   }
   // Settled only on what was read: a read must have succeeded in the last quiet period.
   if (lastGood === null || lastGood < now() - args.opts.quietMs) {
-    const message = `${row.branch} could not be read while the run settled it (${cause ?? "unknown"}): the pull request is open at the recorded head, and a later run settles it again.`;
-    await recordStepError(row, `${AUTOMATIC_ERROR_PREFIX}head-unreadable] ${message}`, args.out);
-    return { outcome: "unreadable", row, reads, moves, unreadable, cause };
+    return unread(cause ?? "unknown", reads, moves, unreadable);
   }
+  // The token's hour ended the settle before the branch was seen quiet: not settled.
+  if (cut && !quiet) return unread("token-hour", reads, moves, unreadable);
   return { outcome: "settled", row, reads, moves, unreadable, cause };
 }
 

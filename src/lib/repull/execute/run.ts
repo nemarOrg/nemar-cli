@@ -13,11 +13,13 @@
  *       `planned -> prepared` with the commit, its tree, the copy manifest's digest and counts;
  *   S3 to S5  the copy, the registration and the pull request (`advance.ts`), to `pr_open`.
  *
- * A dispatched run (`opts.automatic`, the central workflow's; `automatic.ts`) adds three things and
+ * A dispatched run (`opts.automatic`, the central workflow's; `automatic.ts`) adds four things and
  * changes nothing else: before anything is written, the LIVE plan must be one the automatic path
- * takes (`assertAutomaticPlan`); S1 presents the dispatch, so the Worker records the re-pull as
- * automatic; and at `pr_open`, still holding the lock, the release head is settled (`settle.ts`)
- * before the run reports it.
+ * takes (`assertAutomaticPlan`) and fit what is left of the App token's hour; S1 presents the
+ * dispatch, so the Worker records the re-pull as automatic; the copy, the registration and the pull
+ * request each check the token's hour again before they start (`tokenHourRefusal`); and at
+ * `pr_open`, still holding the lock, the release head is settled (`settle.ts`), inside that hour,
+ * before the run reports it. It also times its steps, for the run's quiet line.
  *
  * A record past `prepared` is not planned again: the registration moved origin's git-annex branch
  * and the release branch exists, so a live plan would differ by what this execution itself wrote.
@@ -45,7 +47,11 @@ import {
   PROVENANCE_PATH,
   PROVENANCE_README_PATH,
 } from "../../../../shared/privacy-correction-text.js";
-import type { RepullRow, RepullStatus } from "../../../../shared/repull-state.js";
+import {
+  APP_TOKEN_USABLE_SECONDS,
+  type RepullRow,
+  type RepullStatus,
+} from "../../../../shared/repull-state.js";
 import { getApiUrl } from "../../api/client.js";
 import { ApiError } from "../../api/errors.js";
 import { createRepull, listRepulls, repullErrorCode, transitionRepull } from "../../api/repull.js";
@@ -68,11 +74,17 @@ import {
 import {
   type AdvanceContext,
   EXECUTE_STATUSES,
+  type StepName,
   advancePrepared,
   reached,
   removeWorkdir,
 } from "./advance.js";
-import { assertAutomaticCounts, assertAutomaticPlan } from "./automatic.js";
+import {
+  assertAutomaticCounts,
+  assertAutomaticPlan,
+  planCopySeconds,
+  tokenHourRefusal,
+} from "./automatic.js";
 import { copyItems, copySection, planCounts, planFacts } from "./body.js";
 import { readCatalogFacts } from "./catalog.js";
 import { commitMaterialized, materializeDelta } from "./materialize.js";
@@ -152,7 +164,19 @@ export interface AutomaticExecution {
   token: string;
   repullId: number | null;
   settle: SettleOptions;
+  /**
+   * When the App token was minted, in epoch seconds (`tokenSinceOf`): the copy, each push and the
+   * settle are kept inside its usable hour.
+   */
+  tokenSince: number;
+  /** The clock the token's hour is read on, in milliseconds; `Date.now` by default. */
+  now?: () => number;
+  /** Where the run's step durations go, in whole seconds, whether the step held or not. */
+  measured?: (step: MeasuredStep, seconds: number) => void;
 }
+
+/** The steps a dispatched run times. */
+export type MeasuredStep = StepName | "replan" | "clone" | "prepare" | "settle";
 
 /** Where a run stopped, and, for a dispatched run at `pr_open`, how its release head settled. */
 export interface ExecuteResult {
@@ -289,8 +313,9 @@ function assertAutomaticRecord(a: AutomaticExecution, row: RepullRow): void {
 
 /**
  * A dispatched run at `pr_open`: settle the release head before the run reports it, holding the
- * run's lock, in a scratch repository of origin's. A failure to read or record is resumable: the
- * pull request is open, and a later run takes the record up at `pr_open` and settles again.
+ * run's lock, in a scratch repository of origin's, and never past the App token's usable hour. A
+ * failure to read or record leaves the pull request open, as the gates find it: no later run
+ * settles it again, and only an administrator's resume takes the record up.
  */
 async function settleOpened(
   opts: ExecuteOptions,
@@ -308,8 +333,18 @@ async function settleOpened(
     env,
     token,
   });
+  const a = opts.automatic;
   try {
-    return await settleReleaseHead({ scratch, row, opts: opts.automatic.settle, out: opts.out });
+    return await measuredStep(a, "settle", () =>
+      settleReleaseHead({
+        scratch,
+        row,
+        opts: a.settle,
+        out: opts.out,
+        deadlineMs: (a.tokenSince + APP_TOKEN_USABLE_SECONDS) * 1000,
+        ...(a.now ? { now: a.now } : {}),
+      }),
+    );
   } catch (err) {
     throw resumable(err);
   } finally {
@@ -347,6 +382,42 @@ async function confirmed(
     until,
   });
   if (!ok) throw new ExecuteRefused("declined", "Not confirmed; nothing was written.");
+}
+
+/** Time `fn` for a dispatched run, in whole seconds, whether it held or not; nothing otherwise. */
+async function measuredStep<T>(
+  a: AutomaticExecution | undefined,
+  step: MeasuredStep,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const measured = a?.measured;
+  if (!measured) return fn();
+  const started = Date.now();
+  try {
+    return await fn();
+  } finally {
+    measured(step, Math.round((Date.now() - started) / 1000));
+  }
+}
+
+/**
+ * What a dispatched run gives the steps past `prepared`: the App token's hour checked before each
+ * (the copy with its own estimate), and each one timed. Nothing for an administrator's run.
+ */
+export function automaticHooks(
+  a: AutomaticExecution | undefined,
+  body: PlanBody,
+): Pick<AdvanceContext, "beforeStep" | "timed"> {
+  if (!a) return {};
+  const now = a.now ?? Date.now;
+  return {
+    beforeStep(step) {
+      const work = step === "copy" ? planCopySeconds(body) : 0;
+      const refused = tokenHourRefusal(a.tokenSince, now(), work);
+      if (refused) throw refused;
+    },
+    timed: (step, ms) => a.measured?.(step, Math.round(ms / 1000)),
+  };
 }
 
 /** Mark a refusal that left a record behind as resumable (the command's exit 3). */
@@ -403,6 +474,7 @@ async function execute(
         keepWorkdir: opts.keepWorkdir === true,
         out: opts.out,
         ...(opts.copy ? { copy: opts.copy } : {}),
+        ...automaticHooks(opts.automatic, body),
       };
       opts.out(`Found re-pull #${open.id} of ${datasetId}, ${open.status}.`);
       // The pull request is open: the working clone, which holds the delta's unscrubbed
@@ -441,19 +513,31 @@ async function execute(
     const computed = new Map<string, Buffer>();
     let verified: Awaited<ReturnType<typeof readExecutablePlan>>;
     try {
-      verified = await readExecutablePlan(opts.planPath, {
-        catalog,
-        github: { token: token.ok ? token.token : null, apiBase },
-        environment: getApiUrl(),
-        env,
-        workRoot: paths.plan,
-        collect: { computed },
-        openNeuroGraphqlUrl,
-        ...(opts.maxFetchBytes !== undefined ? { maxFetchBytes: opts.maxFetchBytes } : {}),
-      });
+      verified = await measuredStep(opts.automatic, "replan", () =>
+        readExecutablePlan(opts.planPath, {
+          catalog,
+          github: { token: token.ok ? token.token : null, apiBase },
+          environment: getApiUrl(),
+          env,
+          workRoot: paths.plan,
+          collect: { computed },
+          openNeuroGraphqlUrl,
+          ...(opts.maxFetchBytes !== undefined ? { maxFetchBytes: opts.maxFetchBytes } : {}),
+        }),
+      );
       // A dispatched run takes only a plan the automatic path takes, read from the LIVE plan
-      // this run just made, before anything is written.
-      if (opts.automatic) assertAutomaticPlan(verified.live);
+      // this run just made, and only while what is left of the App token's hour holds its copy,
+      // the pushes and the settle: both before anything is written.
+      const a = opts.automatic;
+      if (a) {
+        assertAutomaticPlan(verified.live);
+        const late = tokenHourRefusal(
+          a.tokenSince,
+          (a.now ?? Date.now)(),
+          planCopySeconds(verified.live.body),
+        );
+        if (late) throw late;
+      }
     } catch (err) {
       // Refused before anything was prepared: leave no empty directory behind it.
       removeQuietly(paths.plan, opts.out);
@@ -496,6 +580,7 @@ async function execute(
             keepWorkdir: opts.keepWorkdir === true,
             out: opts.out,
             ...(opts.copy ? { copy: opts.copy } : {}),
+            ...automaticHooks(opts.automatic, ctx.body),
           },
           prepared.row,
           until,
@@ -581,11 +666,12 @@ async function recordAndPrepare(
   // S2. Prepared.
   try {
     privateDir(ctx.paths.root, dirname(dirname(ctx.paths.lock)));
-    if (row.status === "planned") {
-      row = await prepareFromPlanned(ctx, row, baseSha);
-    } else {
-      row = await resumePrepared(ctx, row, baseSha);
-    }
+    const from = row;
+    row = await measuredStep(ctx.automatic, "prepare", () =>
+      from.status === "planned"
+        ? prepareFromPlanned(ctx, from, baseSha)
+        : resumePrepared(ctx, from, baseSha),
+    );
   } catch (err) {
     throw resumable(err);
   }
@@ -808,13 +894,15 @@ async function recordError(
 async function prepareOnce(ctx: RunContext, row: RepullRow, baseSha: string): Promise<Prepared> {
   const { body, datasetId, paths } = ctx;
   const facts = planFacts(body);
-  const repo = await workClone({
-    dir: paths.repo,
-    originUrl: originUrl(datasetId, ctx.env),
-    baseSha,
-    token: ctx.token,
-    annexCommit: facts.annexCommit,
-  });
+  const repo = await measuredStep(ctx.automatic, "clone", () =>
+    workClone({
+      dir: paths.repo,
+      originUrl: originUrl(datasetId, ctx.env),
+      baseSha,
+      token: ctx.token,
+      annexCommit: facts.annexCommit,
+    }),
+  );
 
   // NEMAR's bucket and the uuid uploads register against: what remote.log names, as the plan read.
   const remote = nemarRemoteOf(await readRemoteLog(repo), datasetId);

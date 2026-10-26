@@ -674,6 +674,11 @@ export const DISPATCH_CODES = [
   // that failed while GitHub no longer took its App token, which only a new run's token can carry on.
   "auto-copy-too-long",
   "token-expired",
+  // The time already spent since the App token was minted, and what is left to do, would pass the
+  // usable hour: refused before the copy or a push rather than failed half way; or the run cannot
+  // tell when its token was minted.
+  "auto-token-hour",
+  "auto-token-clock",
   // The release branch could not be read in the settle's last quiet period, so the run cannot say
   // its head settled.
   "head-unreadable",
@@ -1032,17 +1037,46 @@ export const AUTO_MAX_COPY_BYTES = 1024 ** 4;
 export const DISPATCH_TOKEN_RE = /^[0-9a-f]{64}$/;
 
 /**
- * The automatic copy's time budget, in seconds (ADR 0111, the Phase 7d amendment). The central
- * workflow mints the App token before it installs anything, and an installation token lasts one
- * hour; the copy runs inside that hour, after the install, the plan and the preparation and before
- * the registration, the push and the pull request, which need the token. Twenty minutes is the
- * copy's share of the hour, the other steps' forty minutes being an allowance no measurement here
- * bounds. A plan whose copy {@link automaticCopySeconds} puts past it is refused before the copy
- * starts (`auto-copy-too-long`), at the plan and again from the live plan at execute, as a copy
- * over {@link AUTO_MAX_COPY_BYTES} is; a run that fails with the token expired anyway says so
+ * The App token's hour (ADR 0111, the Phase 7d amendment). The central workflow mints the token
+ * before it installs anything, an installation token lasts one hour, and everything an automatic
+ * run does with it, the registration, the push, the pull request and the settle of its head, must
+ * end inside that hour. The run plans for fifty-five minutes of it, measured from when the
+ * workflow noted the mint (`NEMAR_REPULL_TOKEN_SINCE`), and keeps five back for the clocks and the
+ * last calls.
+ */
+export const APP_TOKEN_USABLE_SECONDS = 55 * 60;
+
+/**
+ * The settle's share of the hour: its five-minute quiet window and a minute for its reads. The
+ * settle is cut at the end of the usable hour, whatever `--settle-minutes` asks.
+ */
+export const AUTO_SETTLE_RESERVE_SECONDS = 6 * 60;
+
+/**
+ * What follows the copy and needs the token, before the settle: the registration, the push of the
+ * release branch and the pull request. An allowance, not a measurement.
+ */
+export const AUTO_AFTER_COPY_SECONDS = 5 * 60;
+
+/**
+ * Everything else from the mint to the push, not the copy: the install, the two plans, the
+ * preparation and the steps after the copy ({@link AUTO_AFTER_COPY_SECONDS} among them). An
+ * allowance no measurement here bounds; each run logs how long its steps took, so the first
+ * production runs can check it.
+ */
+export const AUTO_OTHER_STEPS_SECONDS = 29 * 60;
+
+/**
+ * The automatic copy's time budget, in seconds: what the usable hour leaves once the settle's
+ * share and the other steps' allowance are kept back, twenty minutes. A plan whose copy
+ * {@link automaticCopySeconds} puts past it is refused before the copy starts
+ * (`auto-copy-too-long`), at the plan and again from the live plan at execute, as a copy over
+ * {@link AUTO_MAX_COPY_BYTES} is. Before the copy and before each push the run also checks the time
+ * already spent (`auto-token-hour`), and a run that fails with the token expired anyway says so
  * (`token-expired`).
  */
-export const AUTO_COPY_BUDGET_SECONDS = 20 * 60;
+export const AUTO_COPY_BUDGET_SECONDS =
+  APP_TOKEN_USABLE_SECONDS - AUTO_SETTLE_RESERVE_SECONDS - AUTO_OTHER_STEPS_SECONDS;
 
 /**
  * The bytes a second the estimate takes: 30 MiB/s, the server-side CopyObject rate ADR 0064 records

@@ -97,6 +97,7 @@ const step = (name: string): Step => {
 const MASK = "Mask the dispatch token";
 const VALIDATE = "Validate the dispatch";
 const INSTALL = "Install the nemar CLI the dispatch names";
+const CLOCK = "Note when the App token is minted";
 const OPEN = "Plan and open the re-pull pull request";
 const FINISH = "Finish a merged re-pull";
 const BACKSTOP = "Report a run that did not report";
@@ -371,9 +372,25 @@ describe("the dispatch is checked before anything is installed or minted", () =>
   test("mask, then validate, then the disk, before the App token is minted or the CLI installed", () => {
     const names = job.steps.map((s) => s.name);
     expect(names.slice(0, 3)).toEqual([MASK, VALIDATE, "Check the runner's free disk"]);
-    expect(names.indexOf("Mint the App token for the dataset's repository")).toBe(3);
-    expect(names.indexOf(INSTALL)).toBeGreaterThan(3);
+    // The time is noted just before the mint, so the hour the CLI counts starts no later.
+    expect(names.indexOf(CLOCK)).toBe(3);
+    expect(names.indexOf("Mint the App token for the dataset's repository")).toBe(4);
+    expect(names.indexOf(INSTALL)).toBeGreaterThan(4);
     expect(names.at(-1)).toBe(BACKSTOP);
+  });
+
+  test("the time the App token is minted reaches every later step, as whole epoch seconds", async () => {
+    expect(step(CLOCK).env).toBeUndefined();
+    const before = Math.floor(Date.now() / 1000);
+    const r = await runStep(CLOCK);
+    const after = Math.floor(Date.now() / 1000);
+    expect(r.status).toBe(0);
+    expect(r.stdout + r.stderr).toBe("");
+    const m = /^NEMAR_REPULL_TOKEN_SINCE=(\d+)\n$/.exec(r.envFile);
+    expect(m).not.toBeNull();
+    const since = Number(m?.[1]);
+    expect(since).toBeGreaterThanOrEqual(before);
+    expect(since).toBeLessThanOrEqual(after);
   });
 
   test("the keys it takes are the nine the Worker's builder writes, repull_id the one that may be absent", () => {

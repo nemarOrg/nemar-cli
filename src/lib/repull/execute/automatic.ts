@@ -50,8 +50,11 @@ import { readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { isOpenNeuroTag, sameUpstreamTag } from "../../../../shared/openneuro-tag.js";
 import {
+  APP_TOKEN_USABLE_SECONDS,
+  AUTO_AFTER_COPY_SECONDS,
   AUTO_COPY_BUDGET_SECONDS,
   AUTO_MAX_COPY_BYTES,
+  AUTO_SETTLE_RESERVE_SECONDS,
   CURRENT_PLANNER_VERSION,
   DISPATCH_ID_RE,
   DISPATCH_TOKEN_RE,
@@ -239,6 +242,10 @@ export interface AutomaticSink {
   drop(line: string): void;
   /** How many writes the run's other output made, every one of them swallowed. */
   dropped(): number;
+  /** How long a step of the run took, in whole seconds, for the quiet line (`<key>_s`). */
+  time(key: string, seconds: number): void;
+  /** The quiet line's fields: how many writes were swallowed, then each step's seconds. */
+  quietFields(): Record<string, LineValue>;
 }
 
 const EVENT_RE = /^[a-z][a-z0-9-]{0,31}$/;
@@ -305,8 +312,14 @@ export function installAutomaticQuiet(): AutomaticSink {
   process.stderr.write = swallow as typeof process.stderr.write;
   /** The phase of the last result line printed, or null before one. */
   let ended: string | null = null;
+  const times = new Map<string, number>();
+  const quietFields = (): Record<string, LineValue> => {
+    const fields: Record<string, LineValue> = { suppressed: dropped };
+    for (const [key, seconds] of times) fields[`${key}_s`] = seconds;
+    return fields;
+  };
   const failedLine = () => {
-    realWrite(`${automaticLine("quiet", { suppressed: dropped })}\n`);
+    realWrite(`${automaticLine("quiet", quietFields())}\n`);
     realWrite(`${automaticLine("result", { phase: "failed", code: "runner-failed" })}\n`);
     ended = "failed";
   };
@@ -319,6 +332,10 @@ export function installAutomaticQuiet(): AutomaticSink {
       dropped++;
     },
     dropped: () => dropped,
+    time(key, seconds) {
+      times.set(key, seconds);
+    },
+    quietFields,
   };
   // A run that exits before it says how it ended (a usage error, a crash) still ends with a result
   // line, so the workflow's backstop and the person reading the log see it failed.
@@ -451,6 +468,8 @@ export interface AutomaticCheck {
   devBuild?: boolean;
   /** Whether output that prints what the run reads is on; `--verbose` and `--debug` by default. */
   verbose?: boolean;
+  /** The clock, in milliseconds; `Date.now()` by default. */
+  nowMs?: number;
 }
 
 /**
@@ -491,7 +510,58 @@ export function automaticRefusal(d: DispatchPayload, c: AutomaticCheck): Execute
       "GH_TOKEN is not set: an automatic run pushes and opens its pull request with the App token minted for this dataset.",
     );
   }
+  if (tokenSinceOf(c.env, c.nowMs ?? Date.now()) === null) {
+    return new ExecuteRefused(
+      "auto-token-clock",
+      `${TOKEN_SINCE_ENV} does not say when the App token was minted, so the run cannot keep its pushes inside the token's hour.`,
+    );
+  }
   return null;
+}
+
+/** Where the workflow notes, in epoch seconds, the moment it mints the App token. */
+export const TOKEN_SINCE_ENV = "NEMAR_REPULL_TOKEN_SINCE";
+
+/**
+ * When the App token was minted, in epoch seconds, from {@link TOKEN_SINCE_ENV}; null when it is not
+ * a whole number of seconds or lies more than five minutes ahead of this clock (a clock the run
+ * cannot trust keeps nothing inside the hour).
+ */
+export function tokenSinceOf(env: Env, nowMs: number): number | null {
+  const raw = env[TOKEN_SINCE_ENV]?.trim() ?? "";
+  if (!/^[1-9][0-9]{0,11}$/.test(raw)) return null;
+  const since = Number(raw);
+  return since * 1000 <= nowMs + 5 * 60_000 ? since : null;
+}
+
+/** How much of the App token's usable hour is left at `nowMs`, in milliseconds (negative past it). */
+export function tokenHourLeftMs(sinceSeconds: number, nowMs: number): number {
+  return (sinceSeconds + APP_TOKEN_USABLE_SECONDS) * 1000 - nowMs;
+}
+
+/**
+ * Refuse a step whose work, with what must follow it before the settle ends, would pass the App
+ * token's usable hour (`auto-token-hour`): checked before the copy and before each push, so a run
+ * that cannot finish inside the hour stops before it writes what it could not complete, never half
+ * way through a push. `workSeconds` is the step's own estimate (the copy's, or none).
+ */
+export function tokenHourRefusal(
+  sinceSeconds: number,
+  nowMs: number,
+  workSeconds: number,
+): ExecuteRefused | null {
+  const needMs = (workSeconds + AUTO_AFTER_COPY_SECONDS + AUTO_SETTLE_RESERVE_SECONDS) * 1000;
+  if (tokenHourLeftMs(sinceSeconds, nowMs) >= needMs) return null;
+  return new ExecuteRefused(
+    "auto-token-hour",
+    "What is left to do would pass the App token's usable hour, so the run stops before this step; the record, if there is one, stays where it stopped.",
+  );
+}
+
+/** The copy's own estimate, from the plan's counts: its bytes and objects (the uploads are done). */
+export function planCopySeconds(body: PlanBody): number {
+  const counts = planCounts(body);
+  return automaticCopySeconds({ bytes: counts.copy_bytes ?? 0, objects: counts.copy_items ?? 0 });
 }
 
 /** An option the automatic mode does not take, or one it needs that is missing. */

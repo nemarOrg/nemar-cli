@@ -89,7 +89,18 @@ export interface AdvanceContext {
   out: (line: string) => void;
   /** Tests only: the copy's single-copy bound and part size. */
   copy?: { singleCopyMax?: number; partBytes?: number };
+  /**
+   * A dispatched run's check at the start of the copy, the registration and the pull request
+   * (`automatic.ts`, `tokenHourRefusal`): it throws to refuse the step, which is recorded as the
+   * step's error like any other. Absent for an administrator's run.
+   */
+  beforeStep?: (step: StepName) => void;
+  /** Where a dispatched run's step durations go, in milliseconds, whether the step held or not. */
+  timed?: (step: StepName, ms: number) => void;
 }
+
+/** The steps past `prepared`. */
+export type StepName = "copy" | "register" | "pr";
 
 /** How the steps write the record: one allowed edge, or why a step failed (a self-edge). */
 export interface Recorder {
@@ -108,7 +119,7 @@ export function stepErrorWords(step: "copy" | "register" | "pr", err: unknown): 
 }
 
 /** A failure as the step's refusal (its code kept), for the caller to report. */
-function asRefusal(step: "copy" | "register" | "pr", err: unknown): ExecuteRefused {
+function asRefusal(step: StepName, err: unknown): ExecuteRefused {
   if (err instanceof ExecuteRefused) return err;
   const words = stepErrorWords(step, err);
   const code = /^\[[a-z]+:([a-z0-9-]+)\]/.exec(words)?.[1] ?? `${step}-failed`;
@@ -287,18 +298,26 @@ export function removeWorkdir(paths: WorkPaths, keep: boolean, out: (line: strin
   }
 }
 
-/** Run one step; on failure record why on the row and refuse with the step's code. */
+/**
+ * Run one step; on failure record why on the row and refuse with the step's code. Given hooks,
+ * the step is checked by them first and timed, whether it held or not.
+ */
 async function step<T>(
-  name: "copy" | "register" | "pr",
+  name: StepName,
   row: RepullRow,
   rec: Recorder,
+  hooks: Pick<AdvanceContext, "beforeStep" | "timed"> | null,
   fn: () => Promise<T>,
 ): Promise<T> {
+  const started = Date.now();
   try {
+    hooks?.beforeStep?.(name);
     return await fn();
   } catch (err) {
     await rec.recordError(row, stepErrorWords(name, err).slice(0, 2000));
     throw asRefusal(name, err);
+  } finally {
+    hooks?.timed?.(name, Date.now() - started);
   }
 }
 
@@ -322,6 +341,7 @@ export async function advancePrepared(
     row.status === "prepared" ? "copy" : row.status === "copied" ? "register" : "pr",
     row,
     rec,
+    null,
     async () => {
       const work = await holdSynthesized(ctx, row);
       const remote = await nemarRemote(work, ctx.datasetId);
@@ -340,7 +360,7 @@ export async function advancePrepared(
 
   // S3: the copy.
   if (row.status === "prepared") {
-    const result = await step("copy", row, rec, async () => {
+    const result = await step("copy", row, rec, ctx, async () => {
       await assertUpstreamTag(work, ctx);
       if (manifest.items.some((i) => i.bucket !== UPSTREAM_BUCKET)) {
         throw new ExecuteRefused(
@@ -389,7 +409,7 @@ export async function advancePrepared(
 
   // S4: the registration, before anything a clone reads names the keys.
   if (row.status === "copied") {
-    const reg = await step("register", row, rec, async () => {
+    const reg = await step("register", row, rec, ctx, async () => {
       if (!ctx.token) {
         throw new ExecuteRefused(
           "no-github-token",
@@ -422,7 +442,7 @@ export async function advancePrepared(
   if (row.status === "registered") {
     const synthSha = row.synth_sha as string;
     const ref = releaseRefOf(facts.toVersion);
-    const pr = await step("pr", row, rec, async () => {
+    const pr = await step("pr", row, rec, ctx, async () => {
       const token = ctx.token;
       if (!token) {
         throw new ExecuteRefused(
