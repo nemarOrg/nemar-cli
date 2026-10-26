@@ -317,6 +317,79 @@ describe("what a run checks before it acts", () => {
   });
 });
 
+describe("a crash prints only the fixed lines", () => {
+  const AUTOMATIC_MODULE = join(
+    import.meta.dir,
+    "..",
+    "src",
+    "lib",
+    "repull",
+    "execute",
+    "automatic.ts",
+  );
+  /** What a crash's report would name, were it printed: a path, a key and a subject. */
+  const SECRET_TEXT = "/home/runner/work/sub-01/sub-01_task-rest_eeg.edf SHA256E-s1--deadbeef.edf";
+
+  async function crash(how: string, before = "") {
+    const dir = tempDir();
+    const script = join(dir, "crash.ts");
+    writeFileSync(
+      script,
+      [
+        `import { installAutomaticQuiet } from ${JSON.stringify(AUTOMATIC_MODULE)};`,
+        "const sink = installAutomaticQuiet();",
+        'sink.emit("start", { command: "plan" });',
+        before,
+        how,
+        // Kept alive long enough for the timer or the rejection to land.
+        "setTimeout(() => {}, 2000);",
+      ].join("\n"),
+    );
+    const proc = Bun.spawn(["bun", "run", script], { cwd: dir, stdout: "pipe", stderr: "pipe" });
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    return { stdout, stderr, exitCode, lines: stdout.split("\n").filter(Boolean) };
+  }
+
+  test("a timer that throws ends the run failed, with nothing but the fixed lines", async () => {
+    const r = await crash(
+      `setTimeout(() => { throw new Error(${JSON.stringify(SECRET_TEXT)}); }, 10);`,
+    );
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toBe("");
+    for (const line of r.lines) expect(line).toMatch(AUTOMATIC_LINE_RE);
+    expect(r.lines.at(-1)).toBe("repull-auto: result phase=failed code=runner-failed");
+    expect(r.stdout).not.toContain("sub-01");
+  });
+
+  test("an unhandled rejection ends the run failed, with nothing but the fixed lines", async () => {
+    const r = await crash(`Promise.reject(new Error(${JSON.stringify(SECRET_TEXT)}));`);
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toBe("");
+    for (const line of r.lines) expect(line).toMatch(AUTOMATIC_LINE_RE);
+    expect(r.lines.at(-1)).toBe("repull-auto: result phase=failed code=runner-failed");
+    expect(r.stdout).not.toContain("sub-01");
+  });
+
+  test("a crash after the run said it succeeded says it failed; one after a refusal keeps its word", async () => {
+    const after = await crash(
+      `setTimeout(() => { throw new Error(${JSON.stringify(SECRET_TEXT)}); }, 10);`,
+      'sink.emit("result", { phase: "planned" });',
+    );
+    expect(after.lines.at(-1)).toBe("repull-auto: result phase=failed code=runner-failed");
+    const refused = await crash(
+      `setTimeout(() => { throw new Error(${JSON.stringify(SECRET_TEXT)}); }, 10);`,
+      'sink.emit("result", { phase: "refused", code: "auto-not-clean-plan" });',
+    );
+    expect(refused.exitCode).toBe(1);
+    expect(refused.stderr).toBe("");
+    expect(refused.lines.at(-1)).toBe("repull-auto: result phase=refused code=auto-not-clean-plan");
+  });
+});
+
 describe("the output grammar", () => {
   test("a line of counts and fixed words is printed as it is", () => {
     const line = automaticLine("plan", { executable: true, delta_paths: 12, status: "pr_open" });

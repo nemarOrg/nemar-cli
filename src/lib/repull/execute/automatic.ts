@@ -254,8 +254,9 @@ export function automaticLine(event: string, fields: Readonly<Record<string, Lin
 let installed: AutomaticSink | null = null;
 
 /**
- * Swallow everything the process would print, from here on, but the sink's own lines: `console.*`
- * and both standard streams' `write`. Installed once per process, before the command runs (the
+ * Swallow everything the process would print, from here on, but the sink's own lines: `console.*`,
+ * both standard streams' `write`, and the runtime's own report of an uncaught exception or an
+ * unhandled rejection, which ends the run failed instead. Installed once per process, before the command runs (the
  * entry point does it as soon as it sees {@link AUTOMATIC_FLAG}, so a notice, a warning or a usage
  * error is swallowed too), and never undone: the process is one unattended run.
  */
@@ -287,10 +288,16 @@ export function installAutomaticQuiet(): AutomaticSink {
   }
   process.stdout.write = swallow;
   process.stderr.write = swallow as typeof process.stderr.write;
-  let ended = false;
+  /** The phase of the last result line printed, or null before one. */
+  let ended: string | null = null;
+  const failedLine = () => {
+    realWrite(`${automaticLine("quiet", { suppressed: dropped })}\n`);
+    realWrite(`${automaticLine("result", { phase: "failed", code: "runner-failed" })}\n`);
+    ended = "failed";
+  };
   installed = {
     emit(event, fields) {
-      if (event === "result") ended = true;
+      if (event === "result") ended = String(fields?.phase ?? "failed");
       realWrite(`${automaticLine(event, fields)}\n`);
     },
     drop() {
@@ -301,10 +308,21 @@ export function installAutomaticQuiet(): AutomaticSink {
   // A run that exits before it says how it ended (a usage error, a crash) still ends with a result
   // line, so the workflow's backstop and the person reading the log see it failed.
   process.on("exit", () => {
-    if (ended) return;
-    realWrite(`${automaticLine("quiet", { suppressed: dropped })}\n`);
-    realWrite(`${automaticLine("result", { phase: "failed", code: "runner-failed" })}\n`);
+    if (ended === null) failedLine();
   });
+  // Bun prints an uncaught exception and an unhandled rejection itself, natively, with the message
+  // and a source excerpt, which can name a path or a key; a handler of the process's own takes that
+  // over. The run ends, failed, with its fixed line and nothing else: a run that had said it
+  // succeeded says now that it failed, and one that had already said why it failed keeps its word.
+  const crashed = () => {
+    dropped++;
+    if (ended === null || ended === "planned" || ended === "opened" || ended === "finished") {
+      failedLine();
+    }
+    process.exit(1);
+  };
+  process.on("uncaughtException", crashed);
+  process.on("unhandledRejection", crashed);
   return installed;
 }
 
