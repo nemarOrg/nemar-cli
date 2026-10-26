@@ -269,6 +269,39 @@ describe.skipIf(!awsInstalled)("the head and main, more", () => {
     expect(screenDispatches()).toEqual([]);
   });
 
+  test("a fork's pull request at pr_open is pr-foreign at its first read, and says it is a fork's", async () => {
+    const head = w.row().head_sha as string;
+    expect((await resume()).exitCode).toBe(3);
+    await w.reportScreen(head, "clean");
+    // The screen passed, so only the repository stands between this turn and the gates edge, which
+    // the Worker would refuse as a moved head on every turn without naming the fork.
+    Object.assign(w.gh.pulls[prKey(w)] as object, { headRepo: `someone/${w.fx.datasetId}` });
+    const [ds, n] = prKey(w).split("#");
+    const reads = () =>
+      w.gh.seen.filter(
+        (s) => s.method === "GET" && s.path === `/repos/nemarDatasets/${ds}/pulls/${n}`,
+      ).length;
+    const before = reads();
+    const run = await resume();
+    expect(run.exitCode, run.all).toBe(3);
+    expect(reads() - before).toBeLessThanOrEqual(2);
+    expect(w.row().last_error).toStartWith("[gates:pr-foreign]");
+    expect(w.row().last_error).toContain(`its head is someone/${w.fx.datasetId}`);
+    expect(w.row()).toMatchObject({ status: "pr_open", gates_sha: null });
+  });
+
+  test("the dataset's own repository spelled in another case is its own, and the gates are recorded", async () => {
+    Object.assign(w.gh.pulls[prKey(w)] as object, {
+      headRepo: `NemarDatasets/${w.fx.datasetId.toUpperCase()}`,
+    });
+    const head = w.row().head_sha as string;
+    expect((await resume()).exitCode).toBe(3);
+    await w.reportScreen(head, "clean");
+    const ready = await resume();
+    expect(ready.exitCode, ready.all).toBe(0);
+    expect(w.row()).toMatchObject({ status: "gates_clear", gates_sha: head, last_error: null });
+  });
+
   test("main moved by enrichment while GitHub says clean is not re-synthesized: nothing is pushed", async () => {
     const releaseRef = `refs/heads/${w.row().branch}`;
     const before = (await gitIn(w.fx.originRepo, ["rev-parse", releaseRef])).trim();
