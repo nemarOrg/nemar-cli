@@ -33,7 +33,7 @@ export function refuseMirrorMajor(args: {
   const current = parseVersion(args.current);
   const next = parseVersion(args.next);
   if (!current || !next) {
-    return `${args.datasetId} is a mirror, and its version ${JSON.stringify(args.current)} -> ${JSON.stringify(args.next)} cannot be read as two releases, so whether it is a major (an upstream re-pull, ADR 0111) is not known; it is not released by hand.`;
+    return `${args.datasetId} is a mirror, and its version ${JSON.stringify(args.current)} -> ${JSON.stringify(args.next)} cannot be read as two releases, so whether it is a major (an upstream re-pull, ADR 0111) is not known; it is not released by hand. A version is of the form X.Y.Z (three numbers, such as 1.2.0, with no prerelease): give one with --version X.Y.Z, or correct the dataset's Version to that form first.`;
   }
   if (next.major <= current.major) return null;
   return `A major version of a mirror means an upstream re-pull (ADR 0006, ADR 0111): ${args.datasetId} ${args.current} -> ${args.next} is not released by hand. Plan one with: nemar admin repull plan ${args.datasetId}`;

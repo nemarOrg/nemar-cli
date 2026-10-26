@@ -49,6 +49,10 @@ describe("refuseMirrorMajor", () => {
       ["1.0.0", ""],
     ]) {
       expect(ask("on004362", null, current as string, next as string)).toContain("cannot be read");
+      // The remedy: the form a version must have.
+      expect(ask("on004362", null, current as string, next as string)).toContain(
+        "A version is of the form X.Y.Z",
+      );
       expect(ask("xx090123", "openneuro", current as string, next as string)).toContain(
         "cannot be read",
       );
