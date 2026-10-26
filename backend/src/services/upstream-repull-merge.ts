@@ -61,18 +61,18 @@
  *  - Not merged, and the last merge sent under this claim was refused: the claim is released
  *    through the record's own writer (`refused`, which needs the claim five minutes old and reads
  *    GitHub again), so its unit of the day's cap is free, and the record holds `merge-refused`.
- *  - Not merged, and the merge was sent and its answer was lost, or none was sent under the claim:
- *    while the pull request is open at the claimed head, the claim is younger than
- *    {@link HELD_CLAIM_MAX_AGE_MINUTES} minutes (so no merge goes out under a claim the
- *    administrator's `resume` may be expiring at 30), both switches are on, the bound allows, and
- *    the machine-clean facts read now are clean, the merge is sent again under the SAME claim: a
- *    second claim is never made for a merge that may have happened. Otherwise a claim under which
- *    nothing was sent is released (`not_sent`, five minutes old), and one whose answer was lost is
- *    kept (`claim-held`): only an administrator's `resume`, which expires it at 30 minutes, or
- *    GitHub's own word that it merged, ends it.
+ *  - Not merged, and the merge was sent and its answer was lost or did not say what became of it,
+ *    or none was sent under the claim: while the pull request is open at the claimed head, the
+ *    claim is younger than {@link HELD_CLAIM_MAX_AGE_MINUTES} minutes (so no merge goes out under a
+ *    claim the administrator's `resume` may be expiring at 30), both switches are on, the bound
+ *    allows, and the machine-clean facts read now are clean, the merge is sent again under the SAME
+ *    claim: a second claim is never made for a merge that may have happened. Otherwise a claim
+ *    under which nothing was sent is released (`not_sent`, five minutes old), and one whose answer
+ *    was lost or did not say what became of it is kept (`claim-held`): only an administrator's
+ *    `resume`, which expires it at 30 minutes, or GitHub's own word that it merged, ends it.
  *  - Closed and not merged: the claim is released through the record's writer (`refused` or
- *    `not_sent` as above, `expired` at 30 minutes for an answer that was lost), and the record holds
- *    `pr-closed` for an administrator.
+ *    `not_sent` as above, `expired` at 30 minutes for an answer that was lost or did not say what
+ *    became of it), and the record holds `pr-closed` for an administrator.
  *
  * AFTER THE MERGE (`finishAfterMerge`): an automatic record at `merged` or `released` is walked to
  * `complete` by the central workflow's finish run (`nemar admin repull resume`, the trigger mode
@@ -623,7 +623,8 @@ export async function reconcileWorkerClaim(
     return { kind: "released", row: freed.row, hold: "merge-refused", sent: false };
   }
 
-  // A merge whose answer was lost, or none sent: again under the same claim, while it may be.
+  // A merge whose answer was lost or did not say what became of it, or none sent: again under the
+  // same claim, while it may be.
   const again = await sendAgainUnderClaim(env, row, merges);
   if (again !== null) return again;
   if (answer === "not-sent") {
