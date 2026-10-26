@@ -289,6 +289,9 @@ const auditsOf = (action: string, id: number) =>
 
 const usedToday = () => (db.query(MERGE_CLAIMS_TODAY_SQL).get() as { used: number }).used;
 
+/** Every hold word the tick ever wrote on `id`, in order. */
+const holdsOf = (id: number) => auditsOf("repull_hold", id).map((a) => a.details.to);
+
 const datasetRequests = (ds: string = DS) => gh.requests.filter((r) => r.includes(`/${ds}/`));
 
 const mergeTo = (ds: string = DS) =>
@@ -765,6 +768,33 @@ describe("what GitHub answers the merge", () => {
     });
   }
 
+  // Only 405, 409 and 422 refuse the merge itself; these speak of the credential or the rate.
+  for (const status of [401, 403, 429]) {
+    test(`${status}: unknown, not a refusal; the claim is kept and the row holds claim-held`, async () => {
+      const id = ready();
+      gh.mergeAnswer = { status };
+      const r = await tick();
+      expect(r).toMatchObject({ mergesSent: 1, merged: 0, mergeUnknown: 1 });
+      expect(rowOf(id)).toMatchObject({
+        status: "gates_clear",
+        merge_claim_sha: HEAD,
+        merge_sha: null,
+        hold_reason: "claim-held",
+      });
+      expect(auditsOf(WORKER_MERGE_ANSWER_ACTION, id).map((a) => a.details)).toEqual([
+        expect.objectContaining({ outcome: "unknown", status }),
+      ]);
+      // Five minutes on, the claim is not released as refused: GitHub never said it refused.
+      ageClaim(id, 6);
+      gh.mergeAnswer = null;
+      gh.pulls[`${DS}#7`] = appPull(DS, { mergeable_state: "blocked" });
+      await tick();
+      expect(rowOf(id)).toMatchObject({ merge_claim_sha: HEAD, hold_reason: "claim-held" });
+      expect(auditsOf("repull_merge_claim_released", id)).toEqual([]);
+      expect(holdsOf(id)).not.toContain("merge-refused");
+    });
+  }
+
   test("a head that moved between the facts and the merge: GitHub refuses the sha, and nothing merges", async () => {
     const id = ready();
     gh.beforeMerge = () => {
@@ -972,33 +1002,35 @@ describe("a merge whose answer was lost is resolved from GitHub on a later tick"
 });
 
 describe("a merge GitHub refused, and a claim nothing was sent under", () => {
-  test("405: five minutes on the claim is released and the row holds merge-refused; it is not claimed again", async () => {
-    const id = ready();
-    gh.mergeAnswer = { status: 405 };
-    await tick();
-    gh.mergeAnswer = null;
-    // Too soon: the record releases a claim only once it is five minutes old.
-    await tick();
-    expect(rowOf(id)).toMatchObject({ merge_claim_sha: HEAD, hold_reason: "merge-refused" });
-    ageClaim(id, 6);
-    const r = await tick();
-    expect(r).toMatchObject({ claimsReleased: 1, mergesSent: 0 });
-    expect(rowOf(id)).toMatchObject({
-      status: "gates_clear",
-      merge_claim_sha: null,
-      merge_claimed_at: null,
-      hold_reason: "merge-refused",
+  for (const status of [405, 409, 422]) {
+    test(`${status}: five minutes on the claim is released as refused, merge-refused, and not claimed again`, async () => {
+      const id = ready();
+      gh.mergeAnswer = { status };
+      await tick();
+      gh.mergeAnswer = null;
+      // Too soon: the record releases a claim only once it is five minutes old.
+      await tick();
+      expect(rowOf(id)).toMatchObject({ merge_claim_sha: HEAD, hold_reason: "merge-refused" });
+      ageClaim(id, 6);
+      const r = await tick();
+      expect(r).toMatchObject({ claimsReleased: 1, mergesSent: 0 });
+      expect(rowOf(id)).toMatchObject({
+        status: "gates_clear",
+        merge_claim_sha: null,
+        merge_claimed_at: null,
+        hold_reason: "merge-refused",
+      });
+      expect(auditsOf("repull_merge_claim_released", id).map((a) => a.details.outcome)).toEqual([
+        "refused",
+      ]);
+      // The unit of the day's cap is free, and no later tick claims the record again.
+      expect(usedToday()).toBe(0);
+      await tick();
+      expect(claimsOf(id)).toHaveLength(1);
+      expect(mergeTo()).toHaveLength(1);
+      expect(rowOf(id)).toMatchObject({ merge_claim_sha: null, hold_reason: "merge-refused" });
     });
-    expect(auditsOf("repull_merge_claim_released", id).map((a) => a.details.outcome)).toEqual([
-      "refused",
-    ]);
-    // The unit of the day's cap is free, and no later tick claims the record again.
-    expect(usedToday()).toBe(0);
-    await tick();
-    expect(claimsOf(id)).toHaveLength(1);
-    expect(mergeTo()).toHaveLength(1);
-    expect(rowOf(id)).toMatchObject({ merge_claim_sha: null, hold_reason: "merge-refused" });
-  });
+  }
 
   test("closed without a merge after a refusal: released five minutes on, and the row holds pr-closed", async () => {
     const id = ready();

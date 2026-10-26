@@ -39,10 +39,13 @@
  * Then GitHub's answer, recorded in its own audit row (`repull_auto_merge_answer`):
  *  - `merged: true`: the merge is recorded through the verified route (`recordRepullMerged`), which
  *    reads GitHub again and stores GitHub's merge commit;
- *  - a 4xx: GitHub refused it, so it did not merge. The claim is kept, because the record releases
- *    a claim only once it is five minutes old, and the record holds `merge-refused`;
- *  - a 5xx, no answer, a timeout, or a 2xx that does not say `merged: true`: the merge may have
- *    happened. The claim is kept, the record holds `claim-held`, and nothing is sent again blind.
+ *  - 405, 409 or 422 ({@link MERGE_REFUSED_STATUSES}): GitHub refused it, so it did not merge. The
+ *    claim is kept, because the record releases a claim only once it is five minutes old, and the
+ *    record holds `merge-refused`;
+ *  - every other answer that is not a 2xx saying `merged: true` (a 401, a 403 or a 429, any other
+ *    status, a 5xx, no answer, a timeout, a 2xx that does not say it merged): what became of the
+ *    merge is not known. The claim is kept, the record holds `claim-held`, and nothing is sent again
+ *    blind.
  *
  * A CLAIM THE WORKER HOLDS (`reconcileWorkerClaim`), on a later tick: GitHub, read again, says what
  * became of the merge, whatever the switches say, because a merge that happened minted a DOI and
@@ -138,6 +141,14 @@ let mergeTimeoutMs = WORKER_MERGE_TIMEOUT_MS;
 export function __setWorkerMergeTimeoutForTests(ms: number | null): void {
   mergeTimeoutMs = ms ?? WORKER_MERGE_TIMEOUT_MS;
 }
+
+/**
+ * GitHub's answers to a merge that say it refused the merge itself, so nothing merged: 405 (not
+ * mergeable), 409 (the head is not the `sha` sent) and 422 (the request was not valid). Every other
+ * answer that is not a 2xx saying `merged: true` is unknown, a 401, a 403 and a 429 among them: they
+ * speak of the credential or the rate, not of the merge, and the claim is kept for GitHub's word.
+ */
+export const MERGE_REFUSED_STATUSES: ReadonlySet<number> = new Set([405, 409, 422]);
 
 /** The audit action written before each merge the Worker sends, and the one its answer goes in. */
 export const WORKER_MERGE_ACTION = "repull_auto_merge";
@@ -299,7 +310,7 @@ async function sendSquashMerge(
       ? { outcome: "merged", status: res.status }
       : { outcome: "unknown", status: res.status };
   }
-  if (res.status >= 400 && res.status < 500) return { outcome: "refused", status: res.status };
+  if (MERGE_REFUSED_STATUSES.has(res.status)) return { outcome: "refused", status: res.status };
   return { outcome: "unknown", status: res.status };
 }
 
