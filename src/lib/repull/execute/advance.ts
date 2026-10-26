@@ -170,14 +170,14 @@ async function assertUpstreamTag(work: string, ctx: AdvanceContext): Promise<voi
   if (commit !== facts.toCommit) {
     throw new ExecuteRefused(
       "upstream-tag-moved",
-      `Upstream's tag ${facts.toTag} names another commit than the one the plan read: OpenNeuro re-created the snapshot. This re-pull cannot continue: its record has to be abandoned and the dataset planned again (no command to abandon a record is built yet).`,
+      `Upstream's tag ${facts.toTag} names another commit than the one the plan read: OpenNeuro re-created the snapshot. This re-pull cannot continue: its record has to be ended (nemar admin repull abandon <id>) and the dataset planned again.`,
     );
   }
 }
 
 /**
  * The working clone at the recorded synthesized commit: as preparation left it, or restored from
- * the checkpoint (`checkpoint-lost` when neither holds it; abandoning the record is the way out, and no command for it is built yet).
+ * the checkpoint (`checkpoint-lost` when neither holds it; `nemar admin repull abandon` is the way out).
  */
 async function holdSynthesized(ctx: AdvanceContext, row: RepullRow): Promise<string> {
   const synthSha = row.synth_sha as string;
@@ -207,7 +207,7 @@ async function holdSynthesized(ctx: AdvanceContext, row: RepullRow): Promise<str
   if (restored !== null) {
     throw new ExecuteRefused(
       "checkpoint-lost",
-      `Re-pull #${row.id}'s working clone and its checkpoint do not hold the recorded commit (${restored}); this re-pull cannot continue: its record has to be abandoned and the dataset planned again (no command to abandon a record is built yet).`,
+      `Re-pull #${row.id}'s working clone and its checkpoint do not hold the recorded commit (${restored}); this re-pull cannot continue: its record has to be ended (nemar admin repull abandon <id>) and the dataset planned again.`,
     );
   }
   ctx.out(`Re-pull #${row.id}'s working clone was restored from the checkpoint.`);

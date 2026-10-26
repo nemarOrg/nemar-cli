@@ -21,6 +21,14 @@
  * `pr_open`, still holding the lock, the release head is settled (`settle.ts`), inside that hour,
  * before the run reports it. It also times its steps, for the run's quiet line.
  *
+ * An open record of another plan refuses (`repull-in-flight`), unless `supersede` is asked: then,
+ * when that record is the administrator's, for another tag pulled from the same `from_tag`, and
+ * before its merge, the new plan is proved and made again from live sources first (the old
+ * record's own release branch and pull request are the one thing its preflight may find), then
+ * the old record's pull request is closed, its branch deleted and it ends `superseded`
+ * (`abandon.ts`), and only then is the new record made (decision 3). An automatic record is taken
+ * over by abandoning it, never by a supersede (the Phase 7b slice of ADR 0111).
+ *
  * A record past `prepared` is not planned again: the registration moved origin's git-annex branch
  * and the release branch exists, so a live plan would differ by what this execution itself wrote.
  * Such a run proves the file (`readReviewedPlan`: its digest, planner, API and remotes), and takes
@@ -34,7 +42,7 @@
  * Only a `prepared` row resumes preparation from what is on disk: one whose working clone still
  * holds its commit is left as it is; otherwise the clone is restored from the checkpoint, or
  * prepared again, which must give the same tree, commit and manifest (`prepare-not-reproducible`
- * otherwise: the row stays, its error set, and abandoning the record is the way out; no command for it is built yet). A `planned` row is
+ * otherwise: the row stays, its error set, and `nemar admin repull abandon` is the way out). A `planned` row is
  * prepared again from scratch, which re-clones, re-scrubs and re-uploads, deterministically. A step
  * that fails records why on the row (a self-edge with the facts it already holds) and refuses; the
  * message names counts, never a path. One execution of a plan runs at a time (a lock beside its
@@ -43,6 +51,7 @@
 
 import { existsSync, readdirSync, rmdirSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { sameUpstreamTag } from "../../../../shared/openneuro-tag.js";
 import {
   PROVENANCE_PATH,
   PROVENANCE_README_PATH,
@@ -61,11 +70,13 @@ import { listAnnexedKeys } from "../../git-annex/transfer.js";
 import { NORMALIZE_MAX_BYTES } from "../../import-normalize.js";
 import { describeError, httpUpstreamReader } from "../../import-scrub.js";
 import { awsCliUpload } from "../../normalize-dataset.js";
-import { adminGitHubToken, githubApiBase } from "../../pr-review-approve.js";
+import { DATASETS_ORG, adminGitHubToken, githubApiBase } from "../../pr-review-approve.js";
+import { BEFORE_MERGE, endBeforeMerge } from "../abandon.js";
 import type { PlanBody } from "../digest.js";
 import { nemarRemoteOf } from "../plan.js";
 import {
   type Env,
+  lsRemote,
   openNeuroGraphqlUrl as openNeuroUrlFromEnv,
   originUrl,
   readRemoteLog,
@@ -88,7 +99,7 @@ import {
 import { copyItems, copySection, planCounts, planFacts } from "./body.js";
 import { readCatalogFacts } from "./catalog.js";
 import { commitMaterialized, materializeDelta } from "./materialize.js";
-import { openOriginScratch } from "./origin.js";
+import { type OriginScratch, openOriginScratch } from "./origin.js";
 import { heldKeys, scrubDelta } from "./scrub-delta.js";
 import { type SettleOptions, type Settled, settleReleaseHead } from "./settle.js";
 import { type Entry, readIndex, readTree, rowTime, synthesizeCommit } from "./synthesize.js";
@@ -125,6 +136,8 @@ export interface ExecuteSummary {
   /** The record's status when the run starts, or null when it creates the record. */
   status: RepullStatus | null;
   until: RepullStatus;
+  /** The open record this run supersedes first, when `--supersede` asked for one. */
+  supersedes?: { id: number; toTag: string; status: RepullStatus; prNumber: number | null };
 }
 
 export interface ExecuteOptions {
@@ -155,6 +168,11 @@ export interface ExecuteOptions {
    * settled at `pr_open`. Absent for an administrator's run.
    */
   automatic?: AutomaticExecution;
+  /**
+   * End the dataset's open record of another plan as `superseded` before this one is recorded:
+   * only the administrator's, for another tag from the same `from_tag`, before its merge.
+   */
+  supersede?: boolean;
   out: (line: string) => void;
 }
 
@@ -368,10 +386,21 @@ async function confirmed(
   body: PlanBody,
   status: RepullStatus | null,
   until: RepullStatus,
+  supersedes?: RepullRow,
 ): Promise<void> {
   if (!opts.confirm) return;
   const facts = planFacts(body);
   const ok = await opts.confirm({
+    ...(supersedes
+      ? {
+          supersedes: {
+            id: supersedes.id,
+            toTag: supersedes.to_tag,
+            status: supersedes.status,
+            prNumber: supersedes.pr_number,
+          },
+        }
+      : {}),
     datasetId: facts.datasetId,
     fromTag: facts.fromTag,
     toTag: facts.toTag,
@@ -451,6 +480,24 @@ async function execute(
 
     // A record of this plan past `prepared` is taken up where it stopped, without planning again.
     const open = await openRecord(datasetId);
+    const superseding =
+      open && open.plan_digest !== digest
+        ? supersedable(
+            open,
+            opts,
+            datasetId,
+            readReviewedPlan(opts.planPath, {
+              environment: getApiUrl(),
+              env,
+              openNeuroGraphqlUrl,
+            }).body,
+          )
+        : null;
+    if (open && open.plan_digest === digest && opts.supersede) {
+      opts.out(
+        `Re-pull #${open.id} is this plan's own record; --supersede has nothing to supersede.`,
+      );
+    }
     if (open && open.plan_digest === digest && !PREPARING.includes(open.status)) {
       const { body } = readReviewedPlan(opts.planPath, {
         environment: getApiUrl(),
@@ -523,6 +570,17 @@ async function execute(
           collect: { computed },
           openNeuroGraphqlUrl,
           ...(opts.maxFetchBytes !== undefined ? { maxFetchBytes: opts.maxFetchBytes } : {}),
+          ...(superseding
+            ? {
+                ownRelease: () =>
+                  onlyOwnRelease(superseding, {
+                    datasetId,
+                    token: token.ok ? token.token : null,
+                    apiBase,
+                    env,
+                  }),
+              }
+            : {}),
         }),
       );
       // A dispatched run takes only a plan the automatic path takes, read from the LIVE plan
@@ -560,7 +618,23 @@ async function execute(
       out: opts.out,
     };
     try {
-      await confirmed(opts, ctx.body, open?.plan_digest === digest ? open.status : null, until);
+      await confirmed(
+        opts,
+        ctx.body,
+        open?.plan_digest === digest ? open.status : null,
+        until,
+        superseding ?? undefined,
+      );
+      if (superseding) {
+        await supersedeOpen(superseding, {
+          datasetId,
+          token: token.ok ? token.token : null,
+          apiBase,
+          env,
+          configDir,
+          out: opts.out,
+        });
+      }
       const prepared = await recordAndPrepare(ctx, verified.rebasedOnto, until);
       if (reached(prepared.row.status, until)) {
         const settled = await settleOpened(opts, env, ctx.token, digest, prepared.row);
@@ -600,6 +674,165 @@ async function execute(
     }
   } finally {
     release();
+  }
+}
+
+/**
+ * The open record `open` of another plan, when this run may supersede it; refuses otherwise. A run
+ * without `--supersede` refuses (`repull-in-flight`) before anything is planned. With it, the record
+ * must be the administrator's (an automatic one is taken over by abandoning it), for another tag
+ * than this plan's, pulled from the same `from_tag` (decision 3: the plan is made again from it),
+ * and before its merge.
+ */
+function supersedable(
+  open: RepullRow,
+  opts: ExecuteOptions,
+  datasetId: string,
+  body: PlanBody,
+): RepullRow {
+  if (!opts.supersede) {
+    throw new ExecuteRefused(
+      "repull-in-flight",
+      `Re-pull #${open.id} of ${datasetId} (${open.from_tag} to ${open.to_tag}) is ${open.status}, and a dataset has one open re-pull at a time: pass --supersede to end it and execute this plan (a newer tag, before its merge), or end it with nemar admin repull abandon ${datasetId}.`,
+    );
+  }
+  const facts = planFacts(body);
+  if (open.origin !== "administrator") {
+    throw new ExecuteRefused(
+      "supersede-automatic",
+      `Re-pull #${open.id} was opened by the automatic path; an administrator takes one over by ending it (nemar admin repull abandon ${datasetId}) and executing again, never by a supersede.`,
+    );
+  }
+  if (sameUpstreamTag(open.to_tag, facts.toTag)) {
+    throw new ExecuteRefused(
+      "supersede-same-tag",
+      `Re-pull #${open.id} pulls ${open.to_tag} too: a supersede is for a newer tag. End it with nemar admin repull abandon ${datasetId}, then execute this plan.`,
+    );
+  }
+  if (!sameUpstreamTag(open.from_tag, facts.fromTag)) {
+    throw new ExecuteRefused(
+      "supersede-from-tag",
+      `Re-pull #${open.id} pulls from ${open.from_tag} and this plan from ${facts.fromTag}; a superseding plan is made again from the same from_tag.`,
+    );
+  }
+  if (!BEFORE_MERGE.includes(open.status)) {
+    throw new ExecuteRefused(
+      "supersede-too-late",
+      `Re-pull #${open.id} is ${open.status}: past its merge it is released (nemar admin repull resume ${datasetId}), never superseded.`,
+    );
+  }
+  return open;
+}
+
+interface SupersedeContext {
+  datasetId: string;
+  token: string | null;
+  apiBase: string;
+  env: Env;
+  configDir?: string;
+  out?: (line: string) => void;
+}
+
+/**
+ * Whether the release branches and the open release pull requests of the dataset are the
+ * superseded record's own and nothing else: its `release/v<N.0.0>` at most, and its recorded pull
+ * request (or, at `registered`, one of that branch). Read with the administrator's token; any
+ * answer that is not whole is no.
+ */
+async function onlyOwnRelease(old: RepullRow, ctx: SupersedeContext): Promise<boolean> {
+  if (!ctx.token) return false;
+  const branch = `release/v${old.to_version}`;
+  let branches: Map<string, string>;
+  try {
+    branches = await lsRemote(
+      originUrl(ctx.datasetId, ctx.env),
+      ["refs/heads/release/*"],
+      fleetCloneEnv(originUrl(ctx.datasetId, ctx.env), ctx.token),
+    );
+  } catch {
+    return false;
+  }
+  if ([...branches.keys()].some((r) => r !== `refs/heads/${branch}`)) return false;
+  let pulls: unknown;
+  try {
+    const res = await fetch(
+      `${ctx.apiBase}/repos/${DATASETS_ORG}/${ctx.datasetId}/pulls?state=open&per_page=100`,
+      {
+        headers: {
+          Authorization: `Bearer ${ctx.token}`,
+          Accept: "application/vnd.github+json",
+          "User-Agent": "nemar-cli repull",
+        },
+        signal: AbortSignal.timeout(20_000),
+      },
+    );
+    pulls = res.ok ? await res.json().catch(() => null) : null;
+  } catch {
+    return false;
+  }
+  if (!Array.isArray(pulls) || pulls.length >= 100) return false;
+  return pulls.every((p) => {
+    const ref = (p as { head?: { ref?: unknown } }).head?.ref;
+    const n = (p as { number?: unknown }).number;
+    if (typeof ref !== "string") return false;
+    if (!ref.startsWith("release/")) return true;
+    return ref === branch && (old.pr_number === null || n === old.pr_number);
+  });
+}
+
+/**
+ * End the superseded record (`abandon.ts`'s before-merge path, as `superseded`), holding its own
+ * lock, so no resume or execution of it pushes meanwhile. Its branch must go: the new record's
+ * N.0.0 is the same version, on the same branch name, so one that is kept refuses here, before
+ * anything is closed.
+ */
+async function supersedeOpen(old: RepullRow, ctx: SupersedeContext): Promise<void> {
+  const configDir = ctx.configDir ?? getConfigDir();
+  const out = ctx.out ?? (() => {});
+  if (!ctx.token) {
+    throw new ExecuteRefused(
+      "no-github-token",
+      "No GitHub token: the superseded record's pull request is closed with the administrator's own (GH_TOKEN, or gh auth login).",
+    );
+  }
+  const token = ctx.token;
+  const oldPaths = workPaths(configDir, ctx.datasetId, old.plan_digest);
+  privateDir(dirname(oldPaths.lock), join(configDir, "repull"));
+  const unlock = acquireLock(oldPaths.lock);
+  let scratch: OriginScratch | null = null;
+  try {
+    const ended = await endBeforeMerge(
+      {
+        datasetId: ctx.datasetId,
+        token,
+        base: ctx.apiBase,
+        env: ctx.env,
+        configDir,
+        out,
+        origin: async () => {
+          scratch ??= await openOriginScratch({
+            configDir,
+            datasetId: ctx.datasetId,
+            digest: old.plan_digest,
+            purpose: "resume",
+            env: ctx.env,
+            token,
+          });
+          return scratch;
+        },
+      },
+      old,
+      "superseded",
+      undefined,
+      { branchMustGo: true },
+    );
+    const o = ended.report.orphans;
+    out(
+      `Re-pull #${old.id} (${old.from_tag} to ${old.to_tag}) is superseded${o ? `; ${o.objects} object(s), ${o.bytes} byte(s), its copy and uploads wrote stay in NEMAR's bucket, not deleted` : `; what its copy and uploads wrote stays in NEMAR's bucket (not counted: ${ended.report.orphansUnknown})`}.`,
+    );
+  } finally {
+    (scratch as OriginScratch | null)?.close();
+    unlock();
   }
 }
 
@@ -811,7 +1044,7 @@ async function resumePrepared(
   ) {
     const err = new ExecuteRefused(
       "prepare-not-reproducible",
-      "Preparing again from the same plan and base gave another tree, commit or copy manifest than the one recorded; this re-pull cannot continue: its record has to be abandoned and the dataset planned again (no command to abandon a record is built yet).",
+      `Preparing again from the same plan and base gave another tree, commit or copy manifest than the one recorded; this re-pull cannot continue: end its record with nemar admin repull abandon ${ctx.datasetId} and plan the dataset again.`,
     );
     await recordError(ctx, row, "prepared", recorded, err);
     throw err;

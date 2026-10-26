@@ -107,13 +107,13 @@ export async function checkMain(args: {
   if (verdict === "unreadable") {
     throw new ExecuteRefused(
       "main-unreadable",
-      "Whether NEMAR's main moved only by commits enrichment makes could not be read from the working clone; nothing was pushed. Run again; if it persists, this re-pull's record has to be abandoned (no command to abandon a record is built yet).",
+      "Whether NEMAR's main moved only by commits enrichment makes could not be read from the working clone; nothing was pushed. Run again; if it persists, this re-pull's record has to be ended (nemar admin repull abandon <id>).",
     );
   }
   if (verdict !== "ok") {
     throw new ExecuteRefused(
       "main-moved",
-      "NEMAR's main moved since the re-pull was prepared, by a commit enrichment does not make: this re-pull cannot continue, and its record has to be abandoned and the dataset planned again (no command to abandon a record is built yet).",
+      "NEMAR's main moved since the re-pull was prepared, by a commit enrichment does not make: this re-pull cannot continue, and its record has to be ended (nemar admin repull abandon <id>) and the dataset planned again.",
     );
   }
   return main;
@@ -150,7 +150,7 @@ export async function pushRelease(args: {
       if (verdict !== "ok") {
         throw new ExecuteRefused(
           "branch-foreign",
-          `release/v${args.version} exists on NEMAR's repository and is not this re-pull's commit: it holds a commit enrichment does not make. Remove the branch after checking what it holds, or abandon this re-pull's record (no command to abandon a record is built yet).`,
+          `release/v${args.version} exists on NEMAR's repository and is not this re-pull's commit: it holds a commit enrichment does not make. Remove the branch after checking what it holds, or end this re-pull's record (nemar admin repull abandon <id>).`,
         );
       }
       return { head: existing, pushed: false };

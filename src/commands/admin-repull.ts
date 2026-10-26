@@ -26,6 +26,9 @@
  *                                            merge the release and the lock (`lib/repull/
  *                                            resume.ts`); it never merges
  *   nemar admin repull merge <id>            the one merge gate (`lib/repull/merge.ts`)
+ *   nemar admin repull abandon <id>          end an open record by hand: before N.0.0 merges
+ *                                            `abandoned`, after its release `patch_declined`
+ *                                            (`lib/repull/abandon.ts`)
  *   nemar admin repull canary                the real-bucket check of the copy's S3 calls on a
  *                                            scratch prefix (`lib/repull/canary.ts`)
  *
@@ -57,6 +60,7 @@ import { type CatalogFacts, RepullCannotPlan, planRepull } from "../lib/repull/p
 import { countsMarkdown, preflightLines, summaryLines } from "../lib/repull/render.js";
 import { openNeuroGraphqlUrl as openNeuroUrlFromEnv } from "../lib/repull/sources.js";
 import { AUTOMATIC_HELP, automaticExecute, automaticPlan } from "./admin-repull-automatic.js";
+import { abandonCommand } from "./admin-repull-abandon.js";
 import { mergeCommand } from "./admin-repull-merge.js";
 import { parseMinutes, resumeCommand, statusCommand } from "./admin-repull-resume.js";
 
@@ -283,6 +287,12 @@ GitHub token (GH_TOKEN, else \`gh auth token\`) and the ambient short-lived AWS 
               every one present at its size;
   pr_open     release/v<N.0.0> pushed and its pull request into main opened.
 
+A dataset has one open re-pull at a time. When it has one of another plan, execute refuses
+(repull-in-flight) unless --supersede: then, when that record is yours (not the automatic path's),
+for another tag pulled from the same from_tag, and before its merge, this plan is proved and made
+again from live sources first, and only then is the old record's pull request closed, its
+release branch deleted and the record ended superseded, before this one is recorded.
+
 It never merges: a merge mints a version DOI that cannot be withdrawn. Past pr_open,
 \`nemar admin repull resume <id>\` takes the record through the identifier screen and the gates,
 and \`nemar admin repull merge <id>\` squash-merges it with a message that ends with the commit's two
@@ -296,7 +306,8 @@ unless --keep-workdir.
 Exit codes:
   0  the requested point was reached (pr_open, or --until).
   3  stopped, resumable: the record is as it was, with why in its last_error; run execute again
-     after fixing the cause (past pr_open, run resume). Abandoning a re-pull is not built yet.
+     after fixing the cause (past pr_open, run resume), or end the record with
+     \`nemar admin repull abandon <id>\`.
   1  refused before anything was written (the plan, the dataset, a declined confirmation), or
      failed.
 
@@ -338,7 +349,10 @@ export function confirmQuestion(s: ExecuteSummary): string {
     s.status === null
       ? `Execute the re-pull of ${s.datasetId}, upstream ${s.fromTag} to ${s.toTag}, as v${s.toVersion}`
       : `Continue the re-pull of ${s.datasetId} (${s.fromTag} to ${s.toTag}, v${s.toVersion}) from ${s.status}`;
-  return `${where}: ${confirmActions(s)}. Execute never merges; a merge will mint ${s.doiCount} version DOI(s), which cannot be withdrawn. Proceed?`;
+  const first = s.supersedes
+    ? `First supersede re-pull #${s.supersedes.id} (to ${s.supersedes.toTag}, ${s.supersedes.status}): close its pull request${s.supersedes.prNumber ? ` #${s.supersedes.prNumber}` : ""}, delete its release branch, and end it superseded; what its copy wrote stays in the bucket. Then: `
+    : "";
+  return `${first}${where}: ${confirmActions(s)}. Execute never merges; a merge will mint ${s.doiCount} version DOI(s), which cannot be withdrawn. Proceed?`;
 }
 
 repullCommand
@@ -357,6 +371,10 @@ repullCommand
     parseGb,
   )
   .option("--max-fetch-gb <n>", "The planner's bound on large blobs fetched, in GB", parseGb, 5)
+  .option(
+    "--supersede",
+    "End the dataset's open re-pull of an older tag (yours, before its merge) as superseded first",
+  )
   .option("-y, --yes", "Do not ask before writing")
   .option("--json", "Print the record as JSON")
   .option("--automatic-dispatch <id>", "The central workflow's unattended run of a dispatch")
@@ -374,6 +392,7 @@ repullCommand
         keepWorkdir?: boolean;
         normalizeMaxGb?: number;
         maxFetchGb: number;
+        supersede?: boolean;
         yes?: boolean;
         json?: boolean;
         automaticDispatch?: string;
@@ -396,6 +415,7 @@ repullCommand
         const { row, stoppedAt } = await executeRepull({
           planPath: planFile,
           until: options.until,
+          supersede: options.supersede === true,
           keepWorkdir: options.keepWorkdir === true,
           ...(options.normalizeMaxGb !== undefined
             ? { normalizeMaxBytes: Math.floor(options.normalizeMaxGb * 1024 ** 3) }
@@ -520,3 +540,4 @@ repullCommand
 repullCommand.addCommand(statusCommand);
 repullCommand.addCommand(resumeCommand);
 repullCommand.addCommand(mergeCommand);
+repullCommand.addCommand(abandonCommand);

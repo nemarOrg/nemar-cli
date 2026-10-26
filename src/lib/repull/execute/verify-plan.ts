@@ -69,6 +69,12 @@ export interface LiveSources {
   openNeuroGraphqlUrl?: string;
   /** The planner's fetch bound; the plan's own default when absent. */
   maxFetchBytes?: number;
+  /**
+   * Only for `execute --supersede`: whether a refused `release-pr` check is the superseded record's
+   * own release branch and pull request, and nothing else's. Asked only when that check is the one
+   * thing that keeps the live plan from being executable; anything else still refuses.
+   */
+  ownRelease?: () => Promise<boolean>;
 }
 
 export interface VerifiedPlan {
@@ -329,7 +335,7 @@ export async function readExecutablePlan(path: string, live: LiveSources): Promi
     }
 
     // 5. Executable now, by the live answers; the file's preflight and `executable` are not read.
-    if (!outcome.file.executable) {
+    if (!outcome.file.executable && !(await ownReleaseOnly(outcome.file, live))) {
       const refusals = (outcome.file.body.refusals as Array<{ code?: unknown }> | undefined) ?? [];
       const unpinned = (objectOf(outcome.file.body.copy).unpinned as unknown[] | undefined) ?? [];
       throw new ExecuteRefused(
@@ -347,6 +353,29 @@ export async function readExecutablePlan(path: string, live: LiveSources): Promi
     discard();
     throw err;
   }
+}
+
+/**
+ * Whether the one thing that keeps the live plan from being executable is a `release-pr` check
+ * refused for a release branch or pull request that the caller's own read shows to be the
+ * superseded record's (`ownRelease`), with every other check `ok`, no plan refusal and no unpinned
+ * key. Without `ownRelease` it is never so.
+ */
+async function ownReleaseOnly(live: PlanFile, sources: LiveSources): Promise<boolean> {
+  if (!sources.ownRelease) return false;
+  const failing = live.preflight.filter((c) => c.status !== "ok");
+  const refusals = (live.body.refusals as unknown[] | undefined) ?? [];
+  const unpinned = (objectOf(live.body.copy).unpinned as unknown[] | undefined) ?? [];
+  if (refusals.length > 0 || unpinned.length > 0 || failing.length !== 1) return false;
+  const only = failing[0];
+  if (
+    only?.name !== "release-pr" ||
+    only.status !== "refused" ||
+    (only.code !== "release-branch-exists" && only.code !== "release-pr-open")
+  ) {
+    return false;
+  }
+  return sources.ownRelease();
 }
 
 function stale(): ExecuteRefused {
