@@ -1093,6 +1093,42 @@ export const CURRENT_PLANNER_VERSION = 2;
  */
 export const AUTO_MAX_COPY_BYTES = 1024 ** 4;
 
+/**
+ * Why the automatic path does not take a plan (ADR 0111, decision 6), or null: another planner's,
+ * `unexplained`, `conflicts` or `corrections` not stated as 0 (a count left out is not 0), or a copy
+ * size not stated or over {@link AUTO_MAX_COPY_BYTES}. The Worker asks it at the automatic create,
+ * the CLI of the live plan, before the checks only a run can make.
+ */
+export function automaticPlanRefusal(
+  planner: unknown,
+  counts: Readonly<Record<string, unknown>>,
+): {
+  code: "auto-planner-version" | "auto-not-clean-plan" | "auto-copy-too-large";
+  message: string;
+} | null {
+  if (planner !== CURRENT_PLANNER_VERSION) {
+    return {
+      code: "auto-planner-version",
+      message: `An automatic re-pull takes only a plan of planner ${CURRENT_PLANNER_VERSION}.`,
+    };
+  }
+  if (["unexplained", "conflicts", "corrections"].some((k) => counts[k] !== 0)) {
+    return {
+      code: "auto-not-clean-plan",
+      message:
+        "An automatic re-pull takes only a plan that states zero unexplained paths, zero conflicts and zero corrections.",
+    };
+  }
+  const bytes = counts.copy_bytes;
+  if (typeof bytes !== "number" || bytes > AUTO_MAX_COPY_BYTES) {
+    return {
+      code: "auto-copy-too-large",
+      message: `An automatic re-pull takes only a plan whose copy size is stated and at most ${AUTO_MAX_COPY_BYTES} bytes.`,
+    };
+  }
+  return null;
+}
+
 /** A dispatch token as the Worker signs it: an HMAC-SHA256 digest in lowercase hex. */
 export const DISPATCH_TOKEN_RE = /^[0-9a-f]{64}$/;
 

@@ -53,15 +53,14 @@ import {
   APP_TOKEN_USABLE_SECONDS,
   AUTO_AFTER_COPY_SECONDS,
   AUTO_COPY_BUDGET_SECONDS,
-  AUTO_MAX_COPY_BYTES,
   AUTO_SETTLE_RESERVE_SECONDS,
-  CURRENT_PLANNER_VERSION,
   DISPATCH_ID_RE,
   DISPATCH_TOKEN_RE,
   type DispatchCode,
   type DispatchPhase,
   NEMAR_VERSION_RE,
   automaticCopySeconds,
+  automaticPlanRefusal,
   isDispatchCode,
 } from "../../../../shared/repull-state.js";
 import { IS_DEV_BUILD, getApiUrl } from "../../api/client.js";
@@ -615,13 +614,8 @@ export interface LivePlan {
 }
 
 /**
- * Refuse a plan the automatic path does not take (ADR 0111, decision 6: "the automatic path takes
- * only a plan with zero unexplained paths"), from the LIVE plan this run made and never from a
- * file's own fields: executable; made by the planner the automatic create takes
- * (`auto-planner-version`); `unexplained`, `conflicts` and `corrections` each stated and zero, a
- * count left out being unknown and never zero (`auto-not-clean-plan`); and a copy whose size is
- * known, every key of it, and at most {@link AUTO_MAX_COPY_BYTES} (`auto-copy-too-large`). The
- * Worker checks the same counts at the automatic create, from what the plan states.
+ * Refuse a plan the automatic path does not take, from the LIVE plan this run made and never from a
+ * file's own fields: executable, then {@link assertAutomaticCounts}.
  */
 export function assertAutomaticPlan(live: LivePlan): void {
   if (!live.executable) {
@@ -631,38 +625,31 @@ export function assertAutomaticPlan(live: LivePlan): void {
 }
 
 /**
- * The counts {@link assertAutomaticPlan} reads, of a plan body. On its own only where no live plan
+ * The counts {@link assertAutomaticPlan} reads, of a plan body: the shared rule the Worker also
+ * asks at the automatic create (`automaticPlanRefusal`), then what only a run can check, that every
+ * key's size is known and the copy fits the App token's hour. On its own only where no live plan
  * can be made: a record past `prepared` that a run takes up, whose registration moved the git-annex
  * branch the planner reads (the record itself was made by an automatic create, which checked them).
  */
 export function assertAutomaticCounts(body: PlanBody): void {
-  if (body.planner !== CURRENT_PLANNER_VERSION) {
-    throw new ExecuteRefused(
-      "auto-planner-version",
-      `An automatic re-pull takes only a plan of planner ${CURRENT_PLANNER_VERSION}.`,
-    );
-  }
   const counts = planCounts(body);
-  if (["unexplained", "conflicts", "corrections"].some((k) => counts[k] !== 0)) {
-    throw new ExecuteRefused(
-      "auto-not-clean-plan",
-      "An automatic re-pull takes only a plan with zero unexplained paths, zero conflicts and zero corrections.",
-    );
-  }
-  const bytes = counts.copy_bytes;
-  if (counts.copy_bytes_unknown !== 0 || bytes === undefined || bytes > AUTO_MAX_COPY_BYTES) {
+  const refused = automaticPlanRefusal(body.planner, counts);
+  if (refused) throw new ExecuteRefused(refused.code, refused.message);
+  if (counts.copy_bytes_unknown !== 0) {
     throw new ExecuteRefused(
       "auto-copy-too-large",
-      `An automatic re-pull takes only a plan whose copy size is known and at most ${AUTO_MAX_COPY_BYTES} bytes.`,
+      "An automatic re-pull takes only a plan whose copy size is known for every key.",
     );
   }
   // The copy runs inside the App token's hour: what it and the uploads of the preparation would take,
   // by the estimate, must fit the budget. A count left out is unknown, never zero.
+  const bytes = counts.copy_bytes;
   const objects = counts.copy_items;
   const localBytes = counts.local_bytes;
   const localObjects = counts.local_uploads;
   const budget = copyBudgetSeconds();
   if (
+    bytes === undefined ||
     objects === undefined ||
     localBytes === undefined ||
     localObjects === undefined ||

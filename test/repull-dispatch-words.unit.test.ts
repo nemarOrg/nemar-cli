@@ -98,7 +98,7 @@ describe("DISPATCH_CODES holds every word a run can meet", () => {
       expect([w, cli.has(w)]).toEqual([w, true]);
     }
     const worker = workerWords();
-    for (const w of ["repull-in-flight", "auto-not-clean-plan", "dispatch-mismatch", "merge-cap"]) {
+    for (const w of ["repull-in-flight", "auto-repull-off", "dispatch-mismatch", "merge-cap"]) {
       expect([w, worker.has(w)]).toEqual([w, true]);
     }
   });

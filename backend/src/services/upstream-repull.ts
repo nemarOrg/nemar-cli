@@ -84,9 +84,7 @@ import {
 } from "../../../shared/publication-limits.js";
 import type { RepullCapReading } from "../../../shared/repull-observability.js";
 import {
-  AUTO_MAX_COPY_BYTES,
   CLEARING_SELF_EDGES,
-  CURRENT_PLANNER_VERSION,
   DIGEST_RE,
   DISPATCH_TOKEN_RE,
   type DispatchRow,
@@ -105,6 +103,7 @@ import {
   TERMINAL_STATUSES,
   VERIFIED_ONLY_STATUSES,
   WORKER_COUNT_KEYS,
+  automaticPlanRefusal,
   canTransition,
   fieldProblem,
   fieldsFor,
@@ -733,40 +732,6 @@ function automaticEnvRefusal(env: Bindings, body: CreateRepullBody): RepullRefus
   return null;
 }
 
-/**
- * What an automatic create's plan must be (ADR 0111, decision 6, "the automatic path takes only a
- * plan with zero unexplained paths"): made by this planner, with `unexplained`, `conflicts` and
- * `corrections` each stated and 0 (a count left out is not 0), and a copy whose size is stated and
- * within {@link AUTO_MAX_COPY_BYTES}. The administrator's path has none of these bounds.
- */
-function automaticPlanRefusal(body: CreateRepullBody): RepullRefusal | null {
-  if (body.planner !== CURRENT_PLANNER_VERSION) {
-    return {
-      status: 409,
-      code: "auto-planner-version",
-      message: `An automatic re-pull takes only a plan of planner ${CURRENT_PLANNER_VERSION}.`,
-    };
-  }
-  const counts = body.counts as Record<string, number | undefined>;
-  if (["unexplained", "conflicts", "corrections"].some((k) => counts[k] !== 0)) {
-    return {
-      status: 409,
-      code: "auto-not-clean-plan",
-      message:
-        "An automatic re-pull takes only a plan that states zero unexplained paths, zero conflicts and zero corrections.",
-    };
-  }
-  const bytes = counts.copy_bytes;
-  if (bytes === undefined || bytes > AUTO_MAX_COPY_BYTES) {
-    return {
-      status: 409,
-      code: "auto-copy-too-large",
-      message: `An automatic re-pull takes only a plan whose copy size is stated and at most ${AUTO_MAX_COPY_BYTES} bytes.`,
-    };
-  }
-  return null;
-}
-
 /** The dispatch checks (an automatic create only), then {@link createOnce}. */
 async function createChecked(
   env: Bindings,
@@ -785,8 +750,8 @@ async function createChecked(
     toTag: body.to_tag,
   });
   if (isRefusal(verified)) return verified;
-  const plan = automaticPlanRefusal(body);
-  if (plan) return plan;
+  const plan = automaticPlanRefusal(body.planner, body.counts);
+  if (plan) return { status: 409, ...plan };
   return createOnce(env, admin, body, verified.dispatch);
 }
 
