@@ -259,6 +259,9 @@ PR_REVIEW_ENABLED = "1"
 # before the daily purge keeps only its summary. Two years in production; staging uses 30 days,
 # matching its raw-mail bucket's lifecycle rule. A missing or invalid value deletes nothing.
 MAIL_RETENTION_DAYS = "730"
+# Inbound screening (ADR 0113): messages one sender address may send per hour before the rest are
+# filed quietly (stored and threaded, but not assigned or announced). Unset or invalid means 20.
+MAIL_SENDER_HOURLY_CAP = "20"
 # PR_REVIEW_AUTO_REQUIRE is deliberately not set in this file. Unset, publishing, a visibility
 # change and the enforce routes put the review ruleset on no repository (they still take it off a
 # repository whose dataset is not reviewed). The owner adds it here, in a reviewed change, when the
@@ -576,6 +579,8 @@ invocation_logs = true
 ENVIRONMENT = "development"
 # Support-ticket retention (ADR 0112): 30 days on staging, matching its raw-mail bucket's lifecycle.
 MAIL_RETENTION_DAYS = "30"
+# Inbound screening (ADR 0113): the same hourly cap per sender address as production.
+MAIL_SENDER_HOURLY_CAP = "20"
 # Claude Platform on AWS (same values as prod [vars]; env vars do not inherit).
 # ANTHROPIC_API_KEY must be set as a dev-env secret separately:
 #   wrangler secret put ANTHROPIC_API_KEY --env dev -c backend/wrangler-sccn.toml

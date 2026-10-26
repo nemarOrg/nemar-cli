@@ -11,8 +11,11 @@
 import type { Context } from "hono";
 import { z } from "zod";
 import {
+  BLOCK_KINDS,
+  FILTERED_LIST_MODES,
   QUEUE_STRATEGIES,
   SETTABLE_STATUSES,
+  SPAM_BLOCK_CHOICES,
   TICKET_STATUSES,
 } from "../../../../shared/contract/mail-admin";
 import {
@@ -30,6 +33,12 @@ import {
   setTicketSummary,
   ticketDetail,
 } from "../../services/mail-admin";
+import {
+  addBlock,
+  listBlocklist,
+  markTicketSpam,
+  removeBlock,
+} from "../../services/mail-blocklist";
 import { getAvailability, listQueues, putAvailability, putQueue } from "../../services/mail-queues";
 import { notifyTicketCreated, notifyTicketEscalated } from "../../services/ticket-notify";
 import { reprocessRawKey } from "../../services/tickets";
@@ -45,6 +54,20 @@ const assignSchema = z.object({ user_id: id.nullable() }).strict();
 const statusSchema = z.object({ status: z.enum(SETTABLE_STATUSES) }).strict();
 const escalateSchema = z.object({ reason: z.string().trim().max(500).optional() }).strict();
 const summarySchema = z.object({ summary: z.string().trim().min(1).max(SUMMARY_MAX) }).strict();
+const spamSchema = z
+  .object({ block: z.enum(SPAM_BLOCK_CHOICES), reason: z.string().max(500).optional() })
+  .strict();
+const addBlockSchema = z
+  .object({
+    kind: z.enum(BLOCK_KINDS),
+    value: z.string().min(1).max(320),
+    reason: z.string().max(500).optional(),
+  })
+  .strict();
+const blocklistListSchema = z.object({
+  cursor: z.string().max(20).optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+});
 const queueSchema = z
   .object({
     restricted: z.boolean().optional(),
@@ -53,6 +76,7 @@ const queueSchema = z
     backup_user_id: id.nullable().optional(),
     rr_members: z.array(id).max(50).optional(),
     escalation_user_id: id.nullable().optional(),
+    notify: z.boolean().optional(),
   })
   .strict();
 const availabilitySchema = z
@@ -74,6 +98,7 @@ const listSchema = z.object({
   assignee: z.string().max(20).optional(),
   q: z.string().max(100).optional(),
   summary: z.enum(["missing"]).optional(),
+  filtered: z.enum(FILTERED_LIST_MODES).optional(),
   cursor: z.string().max(60).optional(),
   limit: z.coerce.number().int().min(1).max(100).default(25),
 });
@@ -239,6 +264,47 @@ export function registerMailRoutes(admin: AdminRouter): void {
       // Best effort and it never throws: the escalation stands whether or not the mail goes.
       await notifyTicketEscalated(c.env, c.env.DB, n, ownerId, reason);
       return c.json({ ticket });
+    } catch (error) {
+      return fail(c, error);
+    }
+  });
+
+  admin.post("/mail/tickets/:id/spam", async (c) => {
+    try {
+      const n = ticketId(c);
+      await requireVisibleTicket(c.env.DB, c.get("user"), n);
+      const { block, reason } = await parseBody(c, spamSchema);
+      return c.json(await markTicketSpam(c.env.DB, c.env, c.get("user"), n, block, reason));
+    } catch (error) {
+      return fail(c, error);
+    }
+  });
+
+  admin.get("/mail/blocklist", async (c) => {
+    try {
+      const parsed = blocklistListSchema.safeParse(c.req.query());
+      if (!parsed.success) throw new MailAdminError(400, "bad_request", "Invalid filter.");
+      return c.json(await listBlocklist(c.env.DB, parsed.data));
+    } catch (error) {
+      return fail(c, error);
+    }
+  });
+
+  admin.post("/mail/blocklist", async (c) => {
+    try {
+      const req = await parseBody(c, addBlockSchema);
+      return c.json(await addBlock(c.env.DB, c.env, c.get("user"), req));
+    } catch (error) {
+      return fail(c, error);
+    }
+  });
+
+  admin.delete("/mail/blocklist/:id", async (c) => {
+    try {
+      const raw = c.req.param("id") ?? "";
+      const n = /^\d{1,12}$/.test(raw) ? Number(raw) : 0;
+      if (n <= 0) throw new MailAdminError(404, "not_found", "No such blocklist entry.");
+      return c.json({ removed: await removeBlock(c.env.DB, n) });
     } catch (error) {
       return fail(c, error);
     }

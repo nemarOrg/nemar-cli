@@ -8,6 +8,8 @@
  */
 
 import type {
+  FilterReason,
+  FilteredListMode,
   MailErrorCode,
   SettableStatus,
   TicketEvent,
@@ -65,6 +67,7 @@ export interface TicketRow {
   summary_author_user_id: number | null;
   summarized_at: string | null;
   purged_at: string | null;
+  filtered: FilterReason | null;
 }
 
 /** `TicketRow` plus the `unread` column the list query adds (0 or 1). */
@@ -87,6 +90,7 @@ export function toSummary(row: TicketListRow): TicketSummary {
     has_summary: row.summary !== null,
     purged: row.purged_at !== null,
     unread: row.unread === 1,
+    filtered: row.filtered ?? null,
   };
 }
 
@@ -107,7 +111,7 @@ function unreadSql(alias: string, viewerId: number): { sql: string; binds: unkno
 
 /**
  * Tickets the viewer may see (the same predicate as the list), that are not closed or spam, and
- * that have mail the viewer has not read: the Mail badge.
+ * that have mail the viewer has not read: the Mail badge. Filtered tickets (ADR 0113) never count.
  */
 export async function countUnreadTickets(db: D1Database, viewer: Viewer): Promise<number> {
   const vis = ticketVisibleTo(viewer, "t");
@@ -115,7 +119,8 @@ export async function countUnreadTickets(db: D1Database, viewer: Viewer): Promis
   const row = await db
     .prepare(
       `SELECT COUNT(*) AS n FROM mail_tickets t
-        WHERE ${vis.sql} AND t.status NOT IN ('closed', 'spam') AND ${unread.sql}`,
+        WHERE ${vis.sql} AND t.status NOT IN ('closed', 'spam') AND t.filtered IS NULL
+          AND ${unread.sql}`,
     )
     .bind(...vis.binds, ...unread.binds)
     .first<{ n: number }>();
@@ -151,12 +156,12 @@ export async function markTicketRead(
 }
 
 /** A purged ticket is read-only: its raw record is gone, so nothing may be added to it. */
-function assertNotPurged(ticket: TicketRow): void {
+export function assertNotPurged(ticket: TicketRow): void {
   if (ticket.purged_at !== null) throwPurged();
 }
 
 /** A write was refused by its `purged_at IS NULL` gate: the purge claimed the ticket first. */
-function throwPurged(): never {
+export function throwPurged(): never {
   throw new MailAdminError(
     409,
     "ticket_purged",
@@ -195,6 +200,7 @@ export interface ListFilters {
   assignee?: string;
   q?: string;
   summary?: "missing";
+  filtered?: FilteredListMode;
   cursor?: string;
   limit: number;
 }
@@ -218,6 +224,10 @@ export async function listTickets(
   } else if (f.summary !== "missing") {
     where.push("t.status NOT IN ('spam', 'closed')");
   }
+  // Filtered tickets (ADR 0113) are hidden unless asked for, as spam is. The summary queue lists
+  // every closed ticket, filtered or not, because the retention purge treats them alike.
+  if (f.filtered === "only") where.push("t.filtered IS NOT NULL");
+  else if (f.filtered === undefined && f.summary !== "missing") where.push("t.filtered IS NULL");
   if (f.queue) {
     where.push("t.queue_tag = ?");
     binds.push(f.queue);
@@ -334,7 +344,7 @@ function eventStatement(
 }
 
 /** An event row that is written only while the ticket is not purged (a purge may race a reply). */
-function liveEventStatement(
+export function liveEventStatement(
   db: D1Database,
   ticketId: number,
   kind: string,
@@ -354,7 +364,7 @@ function liveEventStatement(
     .bind(ticketId, kind, actor, JSON.stringify(detail));
 }
 
-async function reload(db: D1Database, id: number): Promise<TicketSummary> {
+export async function reload(db: D1Database, id: number): Promise<TicketSummary> {
   const row = await db
     .prepare("SELECT * FROM mail_tickets WHERE id = ?")
     .bind(id)

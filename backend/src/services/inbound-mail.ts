@@ -14,6 +14,7 @@
 
 import { clampUtf8Bytes } from "../lib/utf8";
 import { redactAddressIn, redactRecipient } from "./email";
+import { addressesIn, findBlock, senderHourlyCap } from "./mail-screening";
 import { type TicketNotifyEnv, notifyTicketCreated } from "./ticket-notify";
 import { ingestInboundMessage } from "./tickets";
 
@@ -22,6 +23,9 @@ export interface InboundMailEnv extends TicketNotifyEnv {
   MAIL_INBOUND?: R2Bucket;
   /** When bound, a stored message is also turned into a ticket (phase 3). */
   DB?: D1Database;
+  /** Inbound messages one sender address may send per hour before the rest are filed quietly
+   *  (ADR 0113). A whole number; unset or anything else means 20. */
+  MAIL_SENDER_HOURLY_CAP?: string;
 }
 
 /** The SMTP reason a sender sees when this Worker holds no inbound bucket. */
@@ -61,6 +65,27 @@ export async function handleInboundEmail(
     return;
   }
 
+  // A blocked sender is refused here, before anything is stored: the sender sees a rejection and
+  // there is no raw object, no ticket and nothing to purge later (ADR 0113). The lookup fails
+  // OPEN: real mail is never lost to a database hiccup.
+  if (env.DB) {
+    try {
+      const addresses = [...addressesIn(message.from), ...addressesIn(message.headers.get("from"))];
+      const block = await findBlock(env.DB, addresses);
+      if (block) {
+        message.setReject(INBOUND_REJECT_REASON);
+        console.warn(
+          `[inbound-mail] refused a message from ${redactRecipient(message.from)} to ${redactRecipient(message.to)}: blocked ${block.kind}`,
+        );
+        return;
+      }
+    } catch (error) {
+      console.error(
+        `[inbound-mail] blocklist lookup failed, storing the message: ${redactAddressIn(redactAddressIn(error instanceof Error ? error.message : String(error), message.from), message.to)}`,
+      );
+    }
+  }
+
   // `raw` is a single-use stream: read it once, whole. It is buffered rather than streamed to R2
   // because a failed put with metadata is retried without it, which needs the bytes again; the
   // platform caps a message at 25 MiB, which a Worker holds without strain.
@@ -95,18 +120,22 @@ export async function handleInboundEmail(
   // the ticket. Throwing would only make Email Routing redeliver a message that is already kept.
   if (!env.DB) return;
   try {
-    const result = await ingestInboundMessage(env.DB, {
-      rawKey: key,
-      raw,
-      envelopeFrom: message.from,
-      envelopeTo: message.to,
-      receivedAt,
-    });
+    const result = await ingestInboundMessage(
+      env.DB,
+      {
+        rawKey: key,
+        raw,
+        envelopeFrom: message.from,
+        envelopeTo: message.to,
+        receivedAt,
+      },
+      { senderHourlyCap: senderHourlyCap(env.MAIL_SENDER_HOURLY_CAP) },
+    );
     console.log(
       `[inbound-mail] ${key} ${result.outcome} ticket ${result.ticketId} (${result.status})`,
     );
     // Best effort, and it never throws: a notification failure must not look like an ingest one.
-    if (result.outcome === "created" && !result.spam) {
+    if (result.outcome === "created" && !result.spam && result.filtered === null) {
       await notifyTicketCreated(env, env.DB, result.ticketId);
     }
   } catch (error) {
