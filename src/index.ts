@@ -52,6 +52,7 @@ import {
 } from "./lib/debug-log.js";
 import { printMaintenanceBanner } from "./lib/maintenance-banner.js";
 import { fetchAndDisplayNotices } from "./lib/notices.js";
+import { installAutomaticQuiet, isAutomaticInvocation } from "./lib/repull/execute/automatic.js";
 import { initUpdateCheck, printUpdateBanner } from "./lib/update-check.js";
 import { version } from "./lib/version.js";
 
@@ -94,6 +95,10 @@ function findCompletionArgsStart(argv: string[]): number | null {
 // hook below (fetchAndDisplayNotices) or from `initUpdateCheck()`, both of
 // which run before Commander dispatches to any command action.
 const rawArgs = process.argv.slice(2);
+// An automatic re-pull run's log is public: from here on, nothing it prints but its own fixed
+// lines reaches either stream, not a notice, a warning, a usage error or the exit hint
+// (lib/repull/execute/automatic.ts).
+if (isAutomaticInvocation(rawArgs)) installAutomaticQuiet();
 if (shouldEnableDebug(rawArgs)) {
   enableDebug();
 }
@@ -300,6 +305,9 @@ markCommanderExitsRecursively(program);
 
 // Display system notices before command execution
 program.hook("preAction", async () => {
+  // An automatic re-pull run asks for no notice: the request carries the NEMAR key, and the run
+  // checks where its API is before it sends anything there (lib/repull/execute/automatic.ts).
+  if (isAutomaticInvocation(rawArgs)) return;
   await fetchAndDisplayNotices();
 });
 

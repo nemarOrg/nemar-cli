@@ -28,6 +28,9 @@
  *   nemar admin repull merge <id>            the one merge gate (`lib/repull/merge.ts`)
  *   nemar admin repull canary                the real-bucket check of the copy's S3 calls on a
  *                                            scratch prefix (`lib/repull/canary.ts`)
+ *
+ * `plan`, `execute` and `resume` also take `--automatic-dispatch <id>`: the unattended run of one
+ * dispatch in the central `run-upstream-repull` workflow (`admin-repull-automatic.ts`).
  */
 
 import chalk from "chalk";
@@ -53,8 +56,9 @@ import { ExecuteRefused } from "../lib/repull/execute/verify-plan.js";
 import { type CatalogFacts, RepullCannotPlan, planRepull } from "../lib/repull/plan.js";
 import { countsMarkdown, preflightLines, summaryLines } from "../lib/repull/render.js";
 import { openNeuroGraphqlUrl as openNeuroUrlFromEnv } from "../lib/repull/sources.js";
+import { AUTOMATIC_HELP, automaticExecute, automaticPlan } from "./admin-repull-automatic.js";
 import { mergeCommand } from "./admin-repull-merge.js";
-import { resumeCommand, statusCommand } from "./admin-repull-resume.js";
+import { parseMinutes, resumeCommand, statusCommand } from "./admin-repull-resume.js";
 
 /** Exit codes: 0 executable, 3 planned but not executable, 1 nothing planned. */
 export const EXIT_NOT_EXECUTABLE = 3;
@@ -93,7 +97,9 @@ Exit codes:
      replays NEMAR's corrections.
   1  nothing was planned: a usage error, a dataset that is not an OpenNeuro mirror, a from-tag or
      to-tag refusal (unknown, disagrees, malformed, latest-unknown, to-tag-unrecordable,
-     mirror-lag, nothing-to-pull), a dataset never released, or a remote that could not be read.`;
+     mirror-lag, nothing-to-pull), a dataset never released, or a remote that could not be read.
+
+${AUTOMATIC_HELP}`;
 
 /** `--max-fetch-gb`: a non-negative number of GB. */
 function parseGb(value: string): number {
@@ -125,6 +131,7 @@ repullCommand
     "--bucket-listing",
     "Read what NEMAR holds from a listing of the bucket (ambient AWS credentials), not the location log",
   )
+  .option("--automatic-dispatch <id>", "The central workflow's unattended run of a dispatch")
   .addHelpText("after", PLAN_HELP)
   .action(
     async (
@@ -138,8 +145,13 @@ repullCommand
         keepWorkdir?: boolean;
         maxFetchGb: number;
         bucketListing?: boolean;
+        automaticDispatch?: string;
       },
     ) => {
+      if (options.automaticDispatch !== undefined) {
+        await automaticPlan(options.automaticDispatch, datasetId, options);
+        return;
+      }
       const json = options.json === true;
       const out = say(json);
       if (!requireSignedIn(json)) return;
@@ -286,7 +298,11 @@ Exit codes:
   3  stopped, resumable: the record is as it was, with why in its last_error; run execute again
      after fixing the cause (past pr_open, run resume). Abandoning a re-pull is not built yet.
   1  refused before anything was written (the plan, the dataset, a declined confirmation), or
-     failed.`;
+     failed.
+
+${AUTOMATIC_HELP} With it, execute settles the release head before it reports the
+pull request open: it reads the branch until enrichment has not moved it for five minutes, at most
+--settle-minutes (default 30), recording each move enrichment made and refusing any other.`;
 
 /** `--until`: one of the statuses execution stops at. */
 function parseUntil(value: string): (typeof EXECUTE_STATUSES)[number] {
@@ -343,6 +359,12 @@ repullCommand
   .option("--max-fetch-gb <n>", "The planner's bound on large blobs fetched, in GB", parseGb, 5)
   .option("-y, --yes", "Do not ask before writing")
   .option("--json", "Print the record as JSON")
+  .option("--automatic-dispatch <id>", "The central workflow's unattended run of a dispatch")
+  .option(
+    "--settle-minutes <n>",
+    "With --automatic-dispatch: how long to settle the release head at most (default 30)",
+    parseMinutes,
+  )
   .addHelpText("after", EXECUTE_HELP)
   .action(
     async (
@@ -354,10 +376,21 @@ repullCommand
         maxFetchGb: number;
         yes?: boolean;
         json?: boolean;
+        automaticDispatch?: string;
+        settleMinutes?: number;
       },
     ) => {
+      if (options.automaticDispatch !== undefined) {
+        await automaticExecute(options.automaticDispatch, planFile, options);
+        return;
+      }
       const json = options.json === true;
       const out = say(json);
+      if (options.settleMinutes !== undefined) {
+        failMessage("--settle-minutes is for --automatic-dispatch only.", { json, answered: true });
+        markUsageExit();
+        return;
+      }
       if (!requireSignedIn(json)) return;
       try {
         const { row, stoppedAt } = await executeRepull({

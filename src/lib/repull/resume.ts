@@ -109,8 +109,18 @@ async function resume(opts: ResumeOptions): Promise<ResumeResult> {
   const open = await openRecord(opts.datasetId);
   if (!open) {
     const latest = (await listRepulls({ dataset: opts.datasetId, limit: 1 })).repulls[0] ?? null;
-    return { row: latest, outcome: "nothing" };
+    // A finish whose re-pull already completed (an earlier attempt that could not report) is
+    // complete, and says so; any other record is not the finish's to take up.
+    const finish = opts.automaticFinish;
+    if (finish && !(latest?.id === finish.repullId && latest.status === "complete")) {
+      throw new ExecuteRefused(
+        "finish-not-merged",
+        `Re-pull #${finish.repullId} is not open: a finish takes up only a merged re-pull.`,
+      );
+    }
+    return { row: latest, outcome: finish ? "complete" : "nothing" };
   }
+  if (opts.automaticFinish) assertFinishable(open, opts.automaticFinish.repullId);
   const configDir = getConfigDir();
   const paths = workPaths(configDir, opts.datasetId, open.plan_digest);
   privateDir(dirname(paths.lock), join(configDir, "repull"));
@@ -143,6 +153,25 @@ async function resume(opts: ResumeOptions): Promise<ResumeResult> {
   } finally {
     (scratch as OriginScratch | null)?.close();
     release();
+  }
+}
+
+/**
+ * A dispatched finish takes up the automatic re-pull its dispatch names and nothing else, and only
+ * past its merge: from `merged` or `released` the walk only releases, locks and completes.
+ */
+function assertFinishable(open: RepullRow, repullId: number): void {
+  if (open.id !== repullId || open.origin !== "automatic") {
+    throw new ExecuteRefused(
+      "repull-mismatch",
+      `The dataset's open re-pull is #${open.id} (origin ${open.origin}); the finish takes up only #${repullId}, an automatic re-pull.`,
+    );
+  }
+  if (open.status !== "merged" && open.status !== "released") {
+    throw new ExecuteRefused(
+      "finish-not-merged",
+      `Re-pull #${open.id} is ${open.status}: a finish takes up only a merged re-pull.`,
+    );
   }
 }
 

@@ -8,6 +8,7 @@
  */
 
 import { isOpenNeuroTag, sameUpstreamTag } from "../../../../shared/openneuro-tag";
+import { DISPATCH_ID_MAX } from "../../../../shared/repull-state";
 import { GITHUB_API, VALIDATOR_VERSION } from "./shared";
 
 /**
@@ -403,10 +404,9 @@ export function buildUpstreamRepullPayload(p: UpstreamRepullDispatchFields): {
   if (!isOpenNeuroTag(p.fromTag)) bad("the from tag");
   if (!isOpenNeuroTag(p.toTag)) bad("the to tag");
   if (sameUpstreamTag(p.fromTag, p.toTag)) bad("the tag pair");
-  if (!(Number.isSafeInteger(p.dispatchId) && p.dispatchId >= 1)) bad("the dispatch id");
-  if (p.repullId !== null && !(Number.isSafeInteger(p.repullId) && p.repullId >= 1)) {
-    bad("the re-pull id");
-  }
+  const id = (n: number) => Number.isSafeInteger(n) && n >= 1 && n <= DISPATCH_ID_MAX;
+  if (!id(p.dispatchId)) bad("the dispatch id");
+  if (p.repullId !== null && !id(p.repullId)) bad("the re-pull id");
   if (p.mode === "finish" && p.repullId === null) bad("the re-pull id of a finish");
   if (typeof p.token !== "string" || !DISPATCH_TOKEN_SHAPE.test(p.token)) bad("the dispatch token");
   if (!RELEASE_VERSION.test(p.cliVersion)) bad("the CLI version");

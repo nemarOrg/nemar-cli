@@ -656,6 +656,35 @@ export const DISPATCH_CODES = [
   "runner-failed",
   "runner-disk",
   "no-code",
+  // The unattended run's own words (Phase 7d): the dispatch the run was handed is not the nine
+  // keys the Worker sends; the CLI is not the release the dispatch names; the dispatch token is on
+  // the command line, where the public log shows it; output that would print what the run reads
+  // is on; an option the automatic mode does not take, or one it needs is missing; a finish that
+  // ended short of `complete`; a report the Worker never answered; the runner could not make the
+  // short-lived AWS session the copy needs.
+  "dispatch-invalid",
+  "auto-cli-version",
+  "auto-token-on-argv",
+  "auto-verbose",
+  "auto-option",
+  "finish-incomplete",
+  "report-unanswered",
+  "runner-credentials",
+  // The copy would outlast the App token's hour (`automaticCopySeconds` over the budget); and a run
+  // that failed while GitHub no longer took its App token, which only a new run's token can carry on.
+  "auto-copy-too-long",
+  "token-expired",
+  // The time already spent since the App token was minted, and what is left to do, would pass the
+  // usable hour: refused before the copy or a push rather than failed half way; or the run cannot
+  // tell when its token was minted.
+  "auto-token-hour",
+  "auto-token-clock",
+  // The release branch could not be read in the settle's last quiet period, so the run cannot say
+  // its head settled.
+  "head-unreadable",
+  // The API the run would talk to is not production's (an override aimed elsewhere): nothing was
+  // sent there, the token included, so this word reaches the Worker only through the backstop.
+  "auto-api-not-production",
   // The plan: its preflight checks, its refusals, and why it planned nothing.
   "annex-uuid-mismatch",
   "concept-doi-disagrees",
@@ -863,18 +892,25 @@ export function isDispatchCode(value: unknown): value is DispatchCode {
 
 /**
  * Refusals another run at the same tag would meet again, because they are facts about the tag's
- * plan or about the dataset, not about the run: a dataset refused for one of these is not
- * dispatched again for that tag (an administrator may still re-pull it by hand). They are of three
- * kinds. Plan content: `auto-not-clean-plan` is the word for a plan whose `unexplained`,
- * `conflicts` and `corrections` counts are not each stated and zero (`automaticPlanRefusal` tests
- * the three separately), and `key-without-pin` for a copy key upstream records no pinned version
- * for, and the ledger, dead-key, concept DOI and gitlink words are the plan's own. Size:
- * `auto-copy-too-large` is a copy whose size is not stated or is over the bound. Dataset:
- * `anonymous-dataset` and `not-a-mirror`.
+ * plan or about the dataset, or about a run that left a record no later run can take up: a
+ * dataset refused for one of these is not dispatched again for that tag (an administrator may
+ * still re-pull it by hand). They are of four kinds. Plan content: `auto-not-clean-plan` is the
+ * word for a plan whose `unexplained`, `conflicts` and `corrections` counts are not each stated
+ * and zero (`automaticPlanRefusal` tests the three separately), and `key-without-pin` for a copy
+ * key upstream records no pinned version for, and the ledger, dead-key, concept DOI and gitlink
+ * words are the plan's own. Size: `auto-copy-too-large` is a copy whose size is not stated or is
+ * over the bound. Dataset: `anonymous-dataset` and `not-a-mirror`. Run: `token-expired` as a run
+ * reports it `refused`, once GitHub stopped taking the App token after the run wrote its record
+ * (the registration and the pull request use the token, after the copy): a later run would plan
+ * again over what the copy wrote and meet a record it cannot take up, so an administrator takes
+ * the record on (a token refused at the preparation's clone, before the copy, is taken the same
+ * way, the safe direction). A token refused before anything was written is reported `failed`,
+ * which this list does not hold.
  */
 export const DISPATCH_FINAL_CODES = [
   "auto-not-clean-plan",
   "auto-copy-too-large",
+  "auto-copy-too-long",
   "ledger-correction-unexplained",
   "key-without-pin",
   "dead-recording-unpinned",
@@ -883,6 +919,7 @@ export const DISPATCH_FINAL_CODES = [
   "gitlink",
   "anonymous-dataset",
   "not-a-mirror",
+  "token-expired",
 ] as const satisfies readonly DispatchCode[];
 
 /**
@@ -1005,6 +1042,95 @@ export const AUTO_MAX_COPY_BYTES = 1024 ** 4;
 
 /** A dispatch token as the Worker signs it: an HMAC-SHA256 digest in lowercase hex. */
 export const DISPATCH_TOKEN_RE = /^[0-9a-f]{64}$/;
+
+/**
+ * The App token's hour (ADR 0111, the Phase 7d amendment). The central workflow mints the token
+ * before it installs anything, an installation token lasts one hour, and everything an automatic
+ * run does with it, the registration, the push, the pull request and the settle of its head, must
+ * end inside that hour. The run plans for fifty-five minutes of it, measured from when the
+ * workflow noted the mint (`NEMAR_REPULL_TOKEN_SINCE`), and keeps five back for the clocks and the
+ * last calls.
+ */
+export const APP_TOKEN_USABLE_SECONDS = 55 * 60;
+
+/**
+ * The settle's share of the hour: its five-minute quiet window and a minute for its reads. The
+ * settle is cut at the end of the usable hour, whatever `--settle-minutes` asks.
+ */
+export const AUTO_SETTLE_RESERVE_SECONDS = 6 * 60;
+
+/**
+ * What follows the copy and needs the token, before the settle: the registration, the push of the
+ * release branch and the pull request. An allowance, not a measurement.
+ */
+export const AUTO_AFTER_COPY_SECONDS = 5 * 60;
+
+/**
+ * Everything else from the mint to the push, not the copy: the install, the two plans, the
+ * preparation and the steps after the copy ({@link AUTO_AFTER_COPY_SECONDS} among them). An
+ * allowance no measurement here bounds; each run logs how long its steps took, so the first
+ * production runs can check it.
+ */
+export const AUTO_OTHER_STEPS_SECONDS = 29 * 60;
+
+/**
+ * The automatic copy's time budget, in seconds: what the usable hour leaves once the settle's
+ * share and the other steps' allowance are kept back, twenty minutes. A plan whose copy
+ * {@link automaticCopySeconds} puts past it is refused before the copy starts
+ * (`auto-copy-too-long`), at the plan and again from the live plan at execute, as a copy over
+ * {@link AUTO_MAX_COPY_BYTES} is. Before the copy and before each push the run also checks the time
+ * already spent (`auto-token-hour`), and a run that fails with the token expired anyway says so
+ * (`token-expired`).
+ */
+export const AUTO_COPY_BUDGET_SECONDS =
+  APP_TOKEN_USABLE_SECONDS - AUTO_SETTLE_RESERVE_SECONDS - AUTO_OTHER_STEPS_SECONDS;
+
+/**
+ * The bytes a second the estimate takes: 30 MiB/s, the server-side CopyObject rate ADR 0064 records
+ * as measured into NEMAR's bucket, for the whole copy, with no credit for the eight copies in flight.
+ */
+export const AUTO_COPY_BYTES_PER_SECOND = 30 * 1024 ** 2;
+
+/**
+ * The seconds an object adds whatever its size: the copy makes three `aws` calls an object, and one
+ * call measured about 0.29 s of process start and request against a local stand-in on 2026-10-25
+ * (a real S3 call adds its network time), so a second an object, with no credit for concurrency.
+ */
+export const AUTO_COPY_SECONDS_PER_OBJECT = 1;
+
+/** How long the estimate says a copy of `bytes` in `objects` objects takes, in seconds. */
+export function automaticCopySeconds(c: { bytes: number; objects: number }): number {
+  return c.bytes / AUTO_COPY_BYTES_PER_SECOND + c.objects * AUTO_COPY_SECONDS_PER_OBJECT;
+}
+
+/**
+ * The largest dispatch or re-pull id a dispatch's payload carries, and its shape as a string: one
+ * bound for the Worker that sends it, the central workflow that checks it and the CLI that reads
+ * it, so none of the three takes an id another refuses. Fifteen digits, inside a safe integer.
+ */
+export const DISPATCH_ID_MAX = 999_999_999_999_999;
+export const DISPATCH_ID_RE = /^[1-9][0-9]{0,14}$/;
+
+/**
+ * The unattended run's job bound, in minutes: the `timeout-minutes` of the central
+ * `run-upstream-repull` workflow, which `test/repull-workflow.test.ts` pins to this.
+ */
+export const REPULL_JOB_TIMEOUT_MINUTES = 330;
+
+/** How long a dispatched run is assumed to wait in GitHub's queue before its job starts. */
+export const REPULL_DISPATCH_QUEUE_MINUTES = 60;
+
+/**
+ * Whether a run dispatched at any minute of the UTC hour `hour` ends, queueing and the whole job
+ * bound included, before that UTC day does. The open cap counts the dispatches of a UTC day
+ * (ADR 0111's Phase 7b amendment, "The open cap"), so it bounds the pull requests opened in a day
+ * only while every dispatch it counts opens its pull request that same day: the daily tick's
+ * hour, and the last hour any open dispatch is claimed, must each pass this.
+ */
+export function opensTheSameUtcDay(hour: number): boolean {
+  if (!Number.isInteger(hour) || hour < 0 || hour > 23) return false;
+  return hour * 60 + 59 + REPULL_DISPATCH_QUEUE_MINUTES + REPULL_JOB_TIMEOUT_MINUTES < 24 * 60;
+}
 
 /** The one place a run's log may be: a run of the central workflow in `nemarDatasets/.github`. */
 export const DISPATCH_RUN_URL_RE =

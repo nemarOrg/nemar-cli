@@ -155,6 +155,11 @@ export interface GitHubStandin {
    * not JSON: the case where a write happened and its answer cannot be read.
    */
   unreadableAnswers: boolean;
+  /**
+   * Tokens GitHub no longer takes: every request that carries one is answered 401, as an
+   * installation token past its hour is. Empty unless a test adds one.
+   */
+  expiredTokens: Set<string>;
   reset(): void;
   stop(): void;
 }
@@ -197,6 +202,7 @@ export function startGitHubStandin(): GitHubStandin {
     lostMergeAnswers: false,
     resolveTag: null as GitHubStandin["resolveTag"],
     compareCommits: null as GitHubStandin["compareCommits"],
+    expiredTokens: new Set<string>(),
   };
   /** The head a pull request has now: its branch's commit when heads are live. */
   const headOf = async (dataset: string, p: PullState): Promise<string> =>
@@ -213,6 +219,9 @@ export function startGitHubStandin(): GitHubStandin {
       const token = (req.headers.get("authorization") ?? "").replace(/^Bearer /, "") || null;
       const body = req.method === "GET" ? null : ((await req.json().catch(() => null)) as never);
       state.seen.push({ method: req.method, path: url.pathname, token, body });
+      if (token !== null && state.expiredTokens.has(token)) {
+        return Response.json({ message: "Bad credentials" }, { status: 401 });
+      }
 
       if (req.method === "POST" && url.pathname === "/graphql") {
         const after = (body as { variables?: { after?: string | null } } | null)?.variables?.after;
@@ -656,6 +665,9 @@ export function startGitHubStandin(): GitHubStandin {
     set unreadableAnswers(v) {
       state.unreadableAnswers = v;
     },
+    get expiredTokens() {
+      return state.expiredTokens;
+    },
     reset() {
       state.seen.length = 0;
       state.searchPages = [];
@@ -675,6 +687,7 @@ export function startGitHubStandin(): GitHubStandin {
       state.pullsListStatus = null;
       state.createPullFaults.length = 0;
       state.comments.length = 0;
+      state.expiredTokens.clear();
       for (const k of Object.keys(state.pulls)) delete state.pulls[k];
       for (const k of Object.keys(state.naming)) delete state.naming[k];
       for (const k of Object.keys(state.users)) delete state.users[k];

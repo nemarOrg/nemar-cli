@@ -26,6 +26,7 @@ import { markReportedExit, markUsageExit } from "../lib/debug-log.js";
 import { ExecuteRefused } from "../lib/repull/execute/verify-plan.js";
 import { type ResumeResult, resumeRepull } from "../lib/repull/resume.js";
 import { olderLine, statusLines } from "../lib/repull/status.js";
+import { AUTOMATIC_HELP, automaticFinish } from "./admin-repull-automatic.js";
 
 /** Exit code of a step that stopped resumable or waits: run it again. */
 export const EXIT_WAITING = 3;
@@ -134,7 +135,10 @@ Exit codes:
   0  ready to merge (gates_clear), released (N.0.1 not built), or complete.
   3  waiting (for the screen, GitHub, a person) after --wait-minutes, or stopped with why
      recorded on the record; run resume again.
-  1  refused before anything was written, nothing to resume, or the record ended (abandoned).`;
+  1  refused before anything was written, nothing to resume, or the record ended (abandoned).
+
+${AUTOMATIC_HELP} With it, resume is a finish: it takes up only the automatic re-pull
+its dispatch names, only once it has merged, and walks it to complete.`;
 
 export const resumeCommand = new Command("resume")
   .argument("<datasetId>")
@@ -154,6 +158,7 @@ export const resumeCommand = new Command("resume")
   )
   .option("-y, --yes", "Do not ask before re-synthesizing the release branch")
   .option("--json", "Print the record as JSON")
+  .option("--automatic-dispatch <id>", "The central workflow's finish of a merged re-pull")
   .addHelpText("after", RESUME_HELP)
   .action(
     async (
@@ -163,8 +168,13 @@ export const resumeCommand = new Command("resume")
         acknowledgeIdentifierScreen?: string;
         yes?: boolean;
         json?: boolean;
+        automaticDispatch?: string;
       },
     ) => {
+      if (options.automaticDispatch !== undefined) {
+        await automaticFinish(options.automaticDispatch, datasetId, options);
+        return;
+      }
       const json = options.json === true;
       const out = say(json);
       if (!requireSignedIn(json)) return;

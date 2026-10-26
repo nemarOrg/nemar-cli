@@ -50,6 +50,12 @@ export interface ResumeOptions {
   out: (line: string) => void;
   /** Tests only: how long a wait sleeps between reads. */
   pollMs?: number;
+  /**
+   * A dispatched finish (ADR 0111, decision 6): it takes up only the automatic re-pull its
+   * dispatch names, and only once that re-pull has merged (`merged` or `released`), so a finish
+   * never screens, gates or re-synthesizes anything. Absent for an administrator's run.
+   */
+  automaticFinish?: { repullId: number };
 }
 
 /** What every step of one resume shares. */
