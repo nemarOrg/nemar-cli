@@ -49,7 +49,7 @@ export function isTerminal(status: RepullStatus): boolean {
 }
 
 /** The states that may still end `abandoned` or `superseded`: before N.0.0 is merged. */
-const BEFORE_MERGE: readonly RepullStatus[] = [
+export const BEFORE_MERGE: readonly RepullStatus[] = [
   "planned",
   "prepared",
   "copied",
@@ -59,7 +59,11 @@ const BEFORE_MERGE: readonly RepullStatus[] = [
 ];
 
 /** The states that may end `patch_declined`: N.0.0 released, N.0.1 not yet merged. */
-const PATCH_OPEN: readonly RepullStatus[] = ["released", "patch_synthesized", "patch_gates_clear"];
+export const PATCH_OPEN: readonly RepullStatus[] = [
+  "released",
+  "patch_synthesized",
+  "patch_gates_clear",
+];
 
 const NON_TERMINAL: readonly RepullStatus[] = REPULL_STATUSES.filter((s) => !isTerminal(s));
 

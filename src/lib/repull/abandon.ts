@@ -1,14 +1,15 @@
 /**
- * Ending an open re-pull by hand (ADR 0111, decision 3; epic #1046 phase 6): `nemar admin repull
+ * Ending an open re-pull by hand (ADR 0111: an abandon before N.0.0 merges closes its pull request
+ * and deletes its branch, after it declines N.0.1; epic #1046 phase 6): `nemar admin repull
  * abandon <id>`, and the supersede `nemar admin repull execute --supersede` makes of an open record
  * before it creates the newer one.
  *
  *   before N.0.0 merges     (`planned` to `gates_clear`): its pull request is closed and its
  *                           release branch deleted, when they exist and are this re-pull's; the
- *                           objects its copy and uploads wrote that no tree on `main` names are
- *                           reported, in objects and bytes, and never deleted (the staging manifest
- *                           that lists them is kept); the record ends `abandoned` (or
- *                           `superseded`). A new attempt at the tag is then allowed.
+ *                           objects its copy and uploads wrote that `main`'s current tree does not
+ *                           name are reported, in objects and bytes, and never deleted (the
+ *                           staging manifest that lists them is kept); the record ends `abandoned`
+ *                           (or `superseded`). A new attempt at the tag is then allowed.
  *   between merge and release (`merged`): refused (`wait-for-release`). N.0.0's merge minted a DOI,
  *                           so its release (the tag, lineage, the sweep stamps and the lock) is
  *                           recorded first, by `resume`; abandoning it here would skip them.
@@ -20,28 +21,40 @@
  *                           locks N.0.0's objects first, and declining N.0.1 never skips that.
  *   once N.0.1 merged       (`patch_merged`, `patch_released`): refused (`wait-for-release`).
  *
- * A merged record is never ended this way: before anything is closed, every pull request of the
- * release branch is read on GitHub, and one that merged refuses (`pull-request-merged`; `resume`
- * records it). So does a claim to merge that is held (`merge-claim-held`; `resume` resolves it from
- * GitHub), which the Worker refuses as well. Nothing is closed or deleted before the record is
- * known to be endable, and a pull request found merged after its close is not ended either.
+ * A merged record is never ended this way, for N.0.0's pull request and N.0.1's alike: before
+ * anything is closed, every pull request GitHub lists of the release branch, and the recorded one
+ * read by its number whatever the list says, is read on GitHub, and one that merged refuses
+ * (`pull-request-merged`; `resume` records it). So does a claim to merge that is held
+ * (`merge-claim-held`; `resume` resolves it from GitHub), which the Worker refuses as well. Nothing
+ * is closed or deleted before the record is known to be endable, and a pull request found merged
+ * after its close is not ended either.
  *
- * Only the release branch of this re-pull is deleted, through the write guard, and only when its
- * head is the record's commit or an enrichment-shaped descendant of it (for N.0.1, the head of a
- * branch that holds this record's N.0.1 commit); any other head is left and said. The working
+ * Only the release branch of this re-pull is deleted, through the write guard and leased on the
+ * head that was judged to be the re-pull's, so a push that lands after the judgment is never
+ * deleted unseen; it is judged the re-pull's when its head is the record's commit or an
+ * enrichment-shaped descendant of it (for N.0.1, when it holds this record's N.0.1 commit beneath
+ * enrichment). Any other head, or one that cannot be read, is left and said. The working
  * directory, which holds the delta's unscrubbed originals, and the checkpoint are removed. Giving
  * up stays possible on a dataset that became anonymous or withdrawn: the Worker does not hold an
  * edge that ends a record to the dataset fences. Nothing here mails anyone.
+ *
+ * Refusals follow one convention: `stop` before anything is written (the command's exit 1), and
+ * `refused` (resumable, exit 3: run abandon again) once a step may have closed or deleted
+ * something.
  */
 
 import { dirname, join } from "node:path";
 import { isKeyPresentAtDeclaredSize } from "../../../shared/annex-key.js";
-import type { RepullRow, RepullStatus } from "../../../shared/repull-state.js";
+import {
+  BEFORE_MERGE,
+  PATCH_OPEN,
+  type RepullRow,
+  type RepullStatus,
+} from "../../../shared/repull-state.js";
 import { ApiError } from "../api/errors.js";
 import { listRepulls, repullErrorCode, transitionRepull } from "../api/repull.js";
 import { getConfigDir } from "../config.js";
 import {
-  DATASETS_ORG,
   adminGitHubToken,
   closePullRequest,
   fetchPullRequest,
@@ -64,36 +77,24 @@ import {
   workPaths,
 } from "./execute/workdir.js";
 import { findPatchCommit } from "./patch.js";
+import { listPulls, pullListWhy } from "./pulls.js";
 import { nemarBucket, stagingKeys } from "./release.js";
 import { readBlobs } from "./sources.js";
 import type { Env } from "./sources.js";
 import { refused } from "./steps.js";
 
-/**
- * A refusal before anything was closed, deleted or recorded (the command's exit 1). One after a
- * close or a deletion is `refused`'s, resumable (exit 3): run abandon again.
- */
+/** A refusal before anything was closed, deleted or recorded (the command's exit 1). */
 function stop(code: string, message: string): ExecuteRefused {
   return new ExecuteRefused(code, message);
 }
 
-/** The statuses before N.0.0 merges: the record ends `abandoned` (or `superseded`). */
-export const BEFORE_MERGE: readonly RepullStatus[] = [
-  "planned",
-  "prepared",
-  "copied",
-  "registered",
-  "pr_open",
-  "gates_clear",
-];
-
-/** The statuses after N.0.0's release and before N.0.1 merges: the record ends `patch_declined`. */
-const PATCH_OPEN: readonly RepullStatus[] = ["released", "patch_synthesized", "patch_gates_clear"];
-
 /** The statuses at which this re-pull may have pushed its N.0.0 release branch. */
-const BRANCH_PUSHED: readonly RepullStatus[] = ["registered", "pr_open", "gates_clear"];
+export const BRANCH_PUSHED: readonly RepullStatus[] = ["registered", "pr_open", "gates_clear"];
 
-/** Objects an ended attempt wrote that nothing names: reported, never deleted (decision 8). */
+/**
+ * Objects an ended attempt wrote that `main`'s current tree does not name: reported, never deleted
+ * (ADR 0111: nothing of a version's objects is deleted, and an abandon reports the orphans).
+ */
 export interface Orphans {
   objects: number;
   bytes: number;
@@ -129,42 +130,33 @@ interface BranchPull {
 }
 
 /**
- * Every pull request GitHub holds of `branch` in the dataset's own repository, each read by number
- * (the list does not say whether one merged). Unreadable refuses: whether one merged must be known.
+ * Every pull request GitHub lists of `branch` in the dataset's own repository, and the `recorded`
+ * one whatever the list says (a pull request the head filter misses is still the record's), each
+ * read by its number, since the list does not say whether one merged. Unreadable refuses: whether
+ * one merged must be known.
  */
-async function pullsOfBranch(ctx: EndContext, branch: string): Promise<BranchPull[]> {
-  const url = `${ctx.base}/repos/${DATASETS_ORG}/${ctx.datasetId}/pulls?state=all&head=${encodeURIComponent(`${DATASETS_ORG}:${branch}`)}&per_page=100`;
-  let listed: unknown;
-  try {
-    const res = await fetch(url, {
-      headers: {
-        Authorization: `Bearer ${ctx.token}`,
-        Accept: "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-        "User-Agent": "nemar-cli repull",
-      },
-      signal: AbortSignal.timeout(20_000),
-    });
-    listed = res.ok ? await res.json().catch(() => null) : null;
-  } catch {
-    listed = null;
-  }
-  if (!Array.isArray(listed) || listed.length >= 100) {
+async function pullsOfBranch(
+  ctx: EndContext,
+  branch: string,
+  recorded: number | null,
+): Promise<BranchPull[]> {
+  const listed = await listPulls({
+    token: ctx.token,
+    base: ctx.base,
+    datasetId: ctx.datasetId,
+    state: "all",
+    head: branch,
+  });
+  if (!listed.ok) {
     throw stop(
       "github-unreadable",
-      `GitHub's pull requests of ${branch} could not be read whole, so whether one merged is not known; nothing was closed.`,
+      `GitHub's pull requests of ${branch} could not be read whole (${pullListWhy(listed)}), so whether one merged is not known; nothing was closed.`,
     );
   }
+  const numbers = new Set(listed.pulls.filter((p) => p.headRef === branch).map((p) => p.number));
+  if (recorded !== null) numbers.add(recorded);
   const out: BranchPull[] = [];
-  for (const raw of listed) {
-    const n = (raw as { number?: unknown }).number;
-    const ref = (raw as { head?: { ref?: unknown } }).head?.ref;
-    if (typeof n !== "number" || !Number.isSafeInteger(n) || n <= 0 || ref !== branch) {
-      throw stop(
-        "github-unreadable",
-        `GitHub's list of the pull requests of ${branch} was unreadable.`,
-      );
-    }
+  for (const n of [...numbers].sort((a, b) => a - b)) {
     const read = await fetchPullRequest(ctx.token, ctx.datasetId, n, ctx.base);
     if (!read.ok) {
       throw stop(
@@ -218,10 +210,10 @@ async function annexKeysOfTree(dir: string, commit: string): Promise<Set<string>
 }
 
 /**
- * The objects N.0.0's copy and uploads wrote (the staging manifest's keys) that NEMAR's bucket holds
- * and no tree on `main` names, in objects and bytes. Null, with why, when they cannot be read: a
- * record ended before the copy wrote its manifest has no list of what preparation uploaded, and
- * without the ambient AWS credentials nothing can be listed.
+ * The objects N.0.0's copy and uploads wrote (the staging manifest's keys) that NEMAR's bucket
+ * holds and `main`'s current tree does not name, in objects and bytes. Null, with why, when they
+ * cannot be read: a record ended before the copy wrote its manifest has no list of what
+ * preparation uploaded, and without the ambient AWS credentials nothing can be listed.
  */
 async function orphansOf(
   ctx: EndContext,
@@ -264,15 +256,25 @@ async function orphansOf(
   }
 }
 
-/** Delete `release/v<version>` through the write guard. */
-async function deleteBranch(scratch: OriginScratch, version: string): Promise<void> {
+/**
+ * Delete `release/v<version>` through the write guard, leased on `head`, the head judged to be this
+ * re-pull's: a branch that moved since is not deleted (`branch-moved`).
+ */
+async function deleteBranch(scratch: OriginScratch, version: string, head: string): Promise<void> {
   const ref = releaseRefOf(version);
   const pushed = await guardedPush(
     scratch.dir,
     ["--delete", ref],
     { versions: [version] },
     scratch.env,
+    [`--force-with-lease=${ref}:${head}`],
   );
+  if (pushed.outcome === "rejected") {
+    throw refused(
+      "branch-moved",
+      `release/v${version} moved since it was judged this re-pull's, so it was not deleted and the record was not ended. Run abandon again.`,
+    );
+  }
   if (pushed.outcome !== "pushed" && pushed.outcome !== "up-to-date") {
     throw refused(
       "push-failed",
@@ -292,9 +294,10 @@ interface EndPlan {
 }
 
 /**
- * N.0.0's pull request and branch, judged (before anything is written): a merged pull request of
- * the branch refuses; an open one is this re-pull's when the record names it, or, at `registered`,
- * when its head is the record's commit or an enrichment-shaped descendant.
+ * N.0.0's pull request and branch, judged (before anything is written), at the statuses at which
+ * this re-pull may have pushed its branch (`registered`, `pr_open`, `gates_clear`): a merged pull
+ * request of the branch refuses; an open one is this re-pull's when the record names it, or when its
+ * head is the record's commit or an enrichment-shaped descendant of it.
  */
 async function surveyN0(ctx: EndContext, row: RepullRow): Promise<EndPlan> {
   const version = row.to_version;
@@ -318,7 +321,7 @@ async function surveyN0(ctx: EndContext, row: RepullRow): Promise<EndPlan> {
         ref: releaseRefOf(version),
         env: scratch.env,
       })) === "ok");
-  for (const p of await pullsOfBranch(ctx, branch)) {
+  for (const p of await pullsOfBranch(ctx, branch, row.pr_number)) {
     if (p.state === "merged") throw mergedRefusal(ctx, p.number);
     if (p.state === "open" && (p.number === row.pr_number || (await ours(p.headSha)))) {
       plan.close.push(p.number);
@@ -358,7 +361,11 @@ async function acceptsHeadOrUnreadable(
   });
 }
 
-/** N.0.1's pull request and branch, judged as {@link surveyN0} judges N.0.0's. */
+/**
+ * N.0.1's pull request and branch, judged as {@link surveyN0} judges N.0.0's: a held claim and a
+ * merged pull request refuse with the same words; the branch is this record's when it holds this
+ * record's N.0.1 commit beneath enrichment, and kept (`kept-unreadable`) when that cannot be read.
+ */
 async function surveyN1(ctx: EndContext, row: RepullRow): Promise<EndPlan> {
   const version = row.patch_version ?? `${row.to_version.split(".")[0]}.0.1`;
   if (row.patch_merge_claim_sha !== null) {
@@ -371,26 +378,36 @@ async function surveyN1(ctx: EndContext, row: RepullRow): Promise<EndPlan> {
   const ref = releaseRefOf(version);
   const scratch = await ctx.origin();
   const head = (await originRefs(scratch, [ref])).get(ref);
-  // The branch is this record's when it holds this record's N.0.1 commit beneath enrichment.
-  let ours = false;
+  let verdict: "ok" | "foreign" | "unreadable" | null = null;
   if (head) {
-    ours =
-      head === row.patch_head_sha ||
-      ((await fetchInto(scratch, ref, MOVED_REF_FETCH_DEPTH)) &&
-        (await fetchInto(scratch, row.merge_sha as string, MOVED_REF_FETCH_DEPTH)) &&
-        (await findPatchCommit({ dir: scratch.dir, row, head })) !== null);
+    if (head === row.patch_head_sha) {
+      verdict = "ok";
+    } else if (
+      !(await fetchInto(scratch, ref, MOVED_REF_FETCH_DEPTH)) ||
+      !(await fetchInto(scratch, row.merge_sha as string, MOVED_REF_FETCH_DEPTH))
+    ) {
+      verdict = "unreadable";
+    } else {
+      verdict = (await findPatchCommit({ dir: scratch.dir, row, head })) ? "ok" : "foreign";
+    }
   }
   const plan: EndPlan = {
     version,
     close: [],
-    deleteHead: head && ours ? head : null,
-    branch: head ? (ours ? "deleted" : "kept-foreign") : "absent",
+    deleteHead: head && verdict === "ok" ? head : null,
+    branch:
+      verdict === null
+        ? "absent"
+        : verdict === "ok"
+          ? "deleted"
+          : verdict === "unreadable"
+            ? "kept-unreadable"
+            : "kept-foreign",
   };
-  for (const p of await pullsOfBranch(ctx, branch)) {
+  for (const p of await pullsOfBranch(ctx, branch, row.patch_pr_number)) {
     if (p.state === "merged") throw mergedRefusal(ctx, p.number);
-    if (p.state === "open" && (p.number === row.patch_pr_number || (ours && p.headSha === head))) {
-      plan.close.push(p.number);
-    }
+    const ours = p.number === row.patch_pr_number || (verdict === "ok" && p.headSha === head);
+    if (p.state === "open" && ours) plan.close.push(p.number);
   }
   return plan;
 }
@@ -417,7 +434,7 @@ async function act(
     ctx.out(`Closed pull request #${n}.`);
   }
   if (plan.deleteHead !== null) {
-    await deleteBranch(await ctx.origin(), plan.version);
+    await deleteBranch(await ctx.origin(), plan.version, plan.deleteHead);
     ctx.out(`Deleted release/v${plan.version}.`);
   }
   try {
@@ -458,7 +475,7 @@ export async function endBeforeMerge(
   const plan = await surveyN0(ctx, row);
   if (opts.branchMustGo && (plan.branch === "kept-foreign" || plan.branch === "kept-unreadable")) {
     // The record that follows pushes the same branch name; one that cannot go would stop it later.
-    throw new ExecuteRefused(
+    throw stop(
       "branch-foreign",
       `release/v${plan.version} ${plan.branch === "kept-foreign" ? `holds a commit that is not re-pull #${row.id}'s or enrichment's` : "could not be read"}, so it is not deleted, and the new record would push the same branch: nothing was closed or recorded. Check what the branch holds and remove it, then execute again.`,
     );
@@ -475,7 +492,7 @@ export async function endBeforeMerge(
     ? `${orphans.objects} object(s), ${orphans.bytes} byte(s), that its copy and uploads wrote stay in NEMAR's bucket, unlocked, and are not deleted`
     : `what its copy and uploads wrote stays in NEMAR's bucket, not deleted (not counted: ${why})`;
   if (confirm && !(await confirm(`${what.join(", ")}? The ${kept}.`))) {
-    throw new ExecuteRefused("declined", "Not confirmed; nothing was closed, deleted or recorded.");
+    throw stop("declined", "Not confirmed; nothing was closed, deleted or recorded.");
   }
   const ended = await act(ctx, row, plan, to, orphans);
   removeWorkdirs(ctx, row);
@@ -517,7 +534,7 @@ async function declinePatch(
       `${what.join(", ")}? v${row.to_version} stays released; its corrections remain corrections in the next plan.`,
     ))
   ) {
-    throw new ExecuteRefused("declined", "Not confirmed; nothing was closed, deleted or recorded.");
+    throw stop("declined", "Not confirmed; nothing was closed, deleted or recorded.");
   }
   const ended = await act(ctx, row, plan, "patch_declined", null);
   removeWorkdirs(ctx, row);
@@ -561,7 +578,7 @@ async function abandon(opts: AbandonOptions): Promise<AbandonResult> {
   const base = githubApiBase(env);
   const token = await adminGitHubToken(env);
   if (!token.ok) {
-    throw new ExecuteRefused(
+    throw stop(
       "no-github-token",
       `No GitHub token (${token.reason}): abandon reads and closes the pull request with the administrator's own (GH_TOKEN, or gh auth login).`,
     );
@@ -585,7 +602,7 @@ async function abandon(opts: AbandonOptions): Promise<AbandonResult> {
     open.status === "patch_merged" ||
     open.status === "patch_released"
   ) {
-    throw new ExecuteRefused(
+    throw stop(
       "wait-for-release",
       `Re-pull #${open.id} is ${open.status}: its merge minted a DOI, so its release is recorded first (nemar admin repull resume ${opts.datasetId}); a merged pull request is never abandoned.${open.status === "merged" ? " Once N.0.0 is released, abandon declines N.0.1." : ""}`,
     );
@@ -624,7 +641,7 @@ async function abandon(opts: AbandonOptions): Promise<AbandonResult> {
       const ended = await declinePatch(ctx, open, opts.confirm);
       return { row: ended.row, outcome: "patch_declined", report: ended.report };
     }
-    throw new ExecuteRefused(
+    throw stop(
       "bad-transition",
       `Re-pull #${open.id} is ${open.status}, which abandon does not end.`,
     );

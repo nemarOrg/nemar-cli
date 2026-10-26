@@ -34,7 +34,14 @@ describe("pushes", () => {
       ["push", "origin", `${SHA}:refs/heads/release/v2.0.0`],
       ["push", "--porcelain", "origin", `${SHA}:refs/heads/release/v2.0.1`],
       ["push", "--quiet", "--porcelain", "origin", `${SHA}:refs/heads/git-annex`],
-      ["push", "--porcelain", "origin", "--delete", "refs/heads/release/v2.0.0"],
+      [
+        "push",
+        "--porcelain",
+        `--force-with-lease=refs/heads/release/v2.0.0:${OTHER}`,
+        "origin",
+        "--delete",
+        "refs/heads/release/v2.0.0",
+      ],
       [
         "push",
         "--porcelain",
@@ -67,6 +74,21 @@ describe("pushes", () => {
     expect(refusedPush(["push", "origin", "--delete", "refs/heads/git-annex"])).toBe(
       "delete-not-a-release-branch",
     );
+  });
+
+  test("a release branch is deleted only under a lease on that same branch", () => {
+    expect(refusedPush(["push", "origin", "--delete", "refs/heads/release/v2.0.0"])).toBe(
+      "delete-without-lease",
+    );
+    expect(
+      refusedPush([
+        "push",
+        `--force-with-lease=refs/heads/release/v2.0.1:${OTHER}`,
+        "origin",
+        "--delete",
+        "refs/heads/release/v2.0.0",
+      ]),
+    ).toBe("delete-without-lease");
   });
 
   test("a forced push, a + refspec, a mirror and every unlisted option are refused", () => {

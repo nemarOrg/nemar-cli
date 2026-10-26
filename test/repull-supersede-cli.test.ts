@@ -5,15 +5,21 @@
  * real API over bun:sqlite through TEST_API_URL in the child's environment; stand-ins for GitHub,
  * OpenNeuro and S3 only. No mocks.
  *
- * The properties, each with a test that fails when its line is changed:
+ * The properties, each with a test:
  *  - without the flag, a plan for tag C refuses `repull-in-flight` and changes nothing;
  *  - with it, tag B's pull request is closed, its branch deleted and its record ends `superseded`,
  *    and the tag C record is created, from the same `from_tag`;
  *  - the tag C plan is proved and made again from live sources BEFORE tag B's record is touched: a
  *    plan that went stale supersedes nothing;
  *  - only the record's own release branch and pull request are tolerated in the new plan's
- *    preflight: another release pull request keeps it not executable;
- *  - an automatic record is never superseded.
+ *    preflight, judged from what that check read: another release branch, another release pull
+ *    request, or a list of pull requests not read whole keeps it not executable, and a record
+ *    that has pushed nothing yet owns no release branch;
+ *  - a tag C plan that is not executable for anything else (a submodule, an unpinned key, a second
+ *    failing check) is refused with only tag B's own branch and pull request present;
+ *  - an automatic record, a record of the same tag or of another `from_tag`, a record past its merge
+ *    and a record whose merge claim is held are never superseded, and nothing is written;
+ *  - a tag B branch carrying a commit that is not the record's refuses before anything is closed.
  *
  * What only the first production runs can check: that a second release pull request of the same
  * branch name opens on GitHub after the first was closed and its branch deleted, as the stand-in
@@ -24,6 +30,7 @@
 
 import {
   afterAll,
+  afterEach,
   beforeAll,
   beforeEach,
   describe,
@@ -31,7 +38,7 @@ import {
   setDefaultTimeout,
   test,
 } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { which } from "bun";
@@ -47,11 +54,16 @@ const awsInstalled = toolOrFail("aws", which("aws") !== null);
 const TAG_C = "1.2.0";
 
 let w: RepullWorld;
+/** What a test changed outside what restore() puts back, undone after it. */
+const undo: Array<() => void> = [];
 
 beforeAll(async () => {
   if (awsInstalled) w = await startRepullWorld();
 });
 afterAll(() => w?.stop());
+afterEach(() => {
+  for (const f of undo.splice(0)) f();
+});
 beforeEach(async () => {
   if (!awsInstalled) return;
   await w.restore();
@@ -61,6 +73,7 @@ beforeEach(async () => {
 
 const hasRef = async (ref: string) =>
   (await gitIn(w.fx.originRepo, ["for-each-ref", "--format=%(refname)", ref])).trim() !== "";
+const patches = () => w.gh.seen.filter((s) => s.method === "PATCH");
 const rows = () =>
   w
     .db()
@@ -73,8 +86,14 @@ const rows = () =>
     attempt: number;
   }>;
 
-/** Upstream makes tag C on top of tag B (one file more), and OpenNeuro names it its latest. */
-async function makeTagC(content = "A third snapshot.\n"): Promise<string> {
+/** One more tree entry tag C carries: a mode, a path and the entry's object or content. */
+type Entry = { mode: string; path: string } & ({ content: string } | { sha: string });
+
+/**
+ * Upstream makes tag C on top of tag B (one file more, and `extra` entries), and OpenNeuro names it
+ * its latest.
+ */
+async function makeTagC(content = "A third snapshot.\n", extra: Entry[] = []): Promise<string> {
   const repo = w.fx.upstreamRepo;
   const dir = mkdtempSync(join(tmpdir(), "nemar-repull-tag-c-"));
   const env = {
@@ -97,6 +116,10 @@ async function makeTagC(content = "A third snapshot.\n"): Promise<string> {
     await run(["read-tree", `refs/tags/${TAG_B}^{commit}`]);
     const blob = await run(["hash-object", "-w", "--stdin"], content);
     await run(["update-index", "--add", "--cacheinfo", `100644,${blob},code/notes-c.txt`]);
+    for (const e of extra) {
+      const sha = "sha" in e ? e.sha : await run(["hash-object", "-w", "--stdin"], e.content);
+      await run(["update-index", "--add", "--cacheinfo", `${e.mode},${sha},${e.path}`]);
+    }
     const tree = await run(["write-tree"]);
     const commit = await run([
       "commit-tree",
@@ -203,5 +226,180 @@ describe.skipIf(!awsInstalled)("execute --supersede", () => {
     expect(run.all).toContain("supersede-automatic");
     expect(rows()).toEqual([expect.objectContaining({ status: "pr_open", to_tag: TAG_B })]);
     expect(await hasRef("refs/heads/release/v2.0.0")).toBe(true);
+  });
+  /** Refused before anything was written: tag B's record, pull request and branch as they were. */
+  async function untouched(run: { exitCode: number; all: string }, code: string): Promise<void> {
+    expect(run.exitCode, run.all).toBe(1);
+    expect(run.all).toContain(code);
+    expect(rows()).toEqual([expect.objectContaining({ status: "pr_open", to_tag: TAG_B })]);
+    expect(patches()).toEqual([]);
+    expect(w.gh.pulls[prKey(w)]?.state ?? "open").toBe("open");
+    expect(await hasRef("refs/heads/release/v2.0.0")).toBe(true);
+  }
+
+  const supersede = (plan: string) => w.cli(["repull", "execute", plan, "--supersede", "--yes"]);
+
+  test("another release branch, with no pull request, keeps the plan not executable", async () => {
+    await makeTagC();
+    const plan = await planC();
+    await gitIn(w.fx.originRepo, ["update-ref", "refs/heads/release/v1.0.1", w.row().base_sha]);
+    const run = await supersede(plan);
+    await untouched(run, "not-executable");
+    expect(run.all).toContain("release branch(es) other than re-pull");
+  });
+
+  test("another release pull request, whose branch is gone, keeps the plan not executable", async () => {
+    await makeTagC();
+    const plan = await planC();
+    const other = (w.row().pr_number as number) + 10;
+    w.gh.pulls[`${w.fx.datasetId}#${other}`] = {
+      sha: w.row().base_sha,
+      headRef: "release/v1.0.1",
+      author: "alice",
+    };
+    const run = await supersede(plan);
+    await untouched(run, "not-executable");
+    expect(run.all).toContain(`another release pull request is open (#${other})`);
+  });
+
+  test("a second pull request of tag B's branch keeps the plan not executable", async () => {
+    await makeTagC();
+    const plan = await planC();
+    const other = (w.row().pr_number as number) + 10;
+    w.gh.pulls[`${w.fx.datasetId}#${other}`] = {
+      sha: w.row().head_sha as string,
+      headRef: "release/v2.0.0",
+      author: "alice",
+    };
+    const run = await supersede(plan);
+    await untouched(run, "not-executable");
+    expect(run.all).toContain(`another release pull request is open (#${other})`);
+  });
+
+  test("a list of 100 open pull requests is not read whole: nothing is superseded", async () => {
+    await makeTagC();
+    const plan = await planC();
+    // Tag B's own and 99 more: one page of exactly 100.
+    const first = (w.row().pr_number as number) + 1;
+    for (let n = first; n < first + 99; n++) {
+      w.gh.pulls[`${w.fx.datasetId}#${n}`] = { sha: w.row().base_sha, headRef: `topic-${n}` };
+    }
+    const run = await supersede(plan);
+    await untouched(run, "not-executable");
+    expect(run.all).toContain("100 or more");
+  });
+
+  const tagCVariants: Array<[string, () => Promise<void>]> = [
+    [
+      "a submodule (a plan refusal)",
+      async () => {
+        await makeTagC(undefined, [
+          { mode: "160000", path: "code/vendored", sha: w.row().base_sha as string },
+        ]);
+      },
+    ],
+    [
+      "an annexed file no upstream version is pinned to (an unpinned key)",
+      async () => {
+        const key = `SHA256E-s5--${"ab".repeat(32)}.bin`;
+        await makeTagC(undefined, [
+          {
+            mode: "120000",
+            path: "code/extra.bin",
+            content: `../.git/annex/objects/Xx/Yy/${key}/${key}`,
+          },
+        ]);
+      },
+    ],
+    [
+      "a bucket marker that is not NEMAR's nemar-s3 UUID (a second failing check)",
+      async () => {
+        await makeTagC();
+        // The plan reads the marker from the world's bucket directory, which restore() leaves.
+        const marker = join(w.fx.bucketBase, `${w.fx.datasetId}/objects/annex-uuid`);
+        const was = readFileSync(marker, "utf8");
+        writeFileSync(marker, "11111111-2222-3333-4444-555555555555");
+        undo.push(() => writeFileSync(marker, was));
+      },
+    ],
+  ];
+  for (const [what, make] of tagCVariants) {
+    test(`a tag C plan with ${what} is refused with only tag B's own release present`, async () => {
+      await make();
+      const plan = await planC();
+      const run = await supersede(plan);
+      await untouched(run, "not-executable");
+      expect(run.all).toContain("Not superseded: the plan is not executable for more than");
+    });
+  }
+
+  test("a record of the same tag is not superseded (supersede-same-tag)", async () => {
+    await makeTagC();
+    const plan = await planC();
+    w.db().run("UPDATE upstream_repulls SET to_tag = ?", [TAG_C]);
+    const run = await supersede(plan);
+    expect(run.exitCode, run.all).toBe(1);
+    expect(run.all).toContain("supersede-same-tag");
+    expect(patches()).toEqual([]);
+    expect(await hasRef("refs/heads/release/v2.0.0")).toBe(true);
+  });
+
+  test("a record pulled from another from_tag is not superseded (supersede-from-tag)", async () => {
+    await makeTagC();
+    const plan = await planC();
+    w.db().run("UPDATE upstream_repulls SET from_tag = '00001'");
+    const run = await supersede(plan);
+    expect(run.exitCode, run.all).toBe(1);
+    expect(run.all).toContain("supersede-from-tag");
+    expect(patches()).toEqual([]);
+    expect(await hasRef("refs/heads/release/v2.0.0")).toBe(true);
+  });
+
+  test("a record past its merge is released, never superseded (supersede-too-late)", async () => {
+    await makeTagC();
+    const plan = await planC();
+    w.db().run(
+      "UPDATE upstream_repulls SET status = 'merged', gates_sha = COALESCE(gates_sha, head_sha), merge_sha = base_sha",
+    );
+    const run = await supersede(plan);
+    expect(run.exitCode, run.all).toBe(1);
+    expect(run.all).toContain("supersede-too-late");
+    expect(rows()).toEqual([expect.objectContaining({ status: "merged", to_tag: TAG_B })]);
+    expect(patches()).toEqual([]);
+  });
+
+  test("a held merge claim refuses before anything is planned or written (merge-claim-held)", async () => {
+    await makeTagC();
+    const plan = await planC();
+    w.db().run(
+      "UPDATE upstream_repulls SET merge_claimed_at = '2026-10-25T00:00:00.000Z', merge_claim_sha = head_sha",
+    );
+    const lists = () => w.gh.seen.filter((x) => x.method === "GET" && x.path.endsWith("/pulls"));
+    const before = lists().length;
+    const run = await supersede(plan);
+    await untouched(run, "merge-claim-held");
+    // Refused before the plan was made again: its release-pr check never read the list.
+    expect(lists().length).toBe(before);
+  });
+
+  test("a record that pushed no branch yet, beside a release branch, keeps the plan not executable", async () => {
+    await makeTagC();
+    const plan = await planC();
+    // At `copied` the record has pushed nothing, so release/v2.0.0 is not its own.
+    w.db().run("UPDATE upstream_repulls SET status = 'copied'");
+    const run = await supersede(plan);
+    expect(run.exitCode, run.all).toBe(1);
+    expect(run.all).toContain("not-executable");
+    expect(run.all).toContain("is copied and pushed no branch");
+    expect(patches()).toEqual([]);
+    expect(await hasRef("refs/heads/release/v2.0.0")).toBe(true);
+  });
+
+  test("tag B's branch carrying a commit that is not the record's refuses before anything is closed", async () => {
+    await makeTagC();
+    const plan = await planC();
+    await w.commitOnto("refs/heads/release/v2.0.0", "code/foreign.txt", "Not the record's.\n");
+    const run = await supersede(plan);
+    await untouched(run, "branch-foreign");
   });
 });

@@ -26,7 +26,8 @@
  * before its merge, the new plan is proved and made again from live sources first (the old
  * record's own release branch and pull request are the one thing its preflight may find), then
  * the old record's pull request is closed, its branch deleted and it ends `superseded`
- * (`abandon.ts`), and only then is the new record made (decision 3). An automatic record is taken
+ * (`abandon.ts`), and only then is the new record made (ADR 0111: a newer tag supersedes an open
+ * re-pull before its merge, and the plan is made again). An automatic record is taken
  * over by abandoning it, never by a supersede (the Phase 7b slice of ADR 0111).
  *
  * A record past `prepared` is not planned again: the registration moved origin's git-annex branch
@@ -58,6 +59,7 @@ import {
 } from "../../../../shared/privacy-correction-text.js";
 import {
   APP_TOKEN_USABLE_SECONDS,
+  BEFORE_MERGE,
   type RepullRow,
   type RepullStatus,
 } from "../../../../shared/repull-state.js";
@@ -70,13 +72,13 @@ import { listAnnexedKeys } from "../../git-annex/transfer.js";
 import { NORMALIZE_MAX_BYTES } from "../../import-normalize.js";
 import { describeError, httpUpstreamReader } from "../../import-scrub.js";
 import { awsCliUpload } from "../../normalize-dataset.js";
-import { DATASETS_ORG, adminGitHubToken, githubApiBase } from "../../pr-review-approve.js";
-import { BEFORE_MERGE, endBeforeMerge } from "../abandon.js";
+import { adminGitHubToken, githubApiBase } from "../../pr-review-approve.js";
+import { BRANCH_PUSHED, endBeforeMerge } from "../abandon.js";
 import type { PlanBody } from "../digest.js";
 import { nemarRemoteOf } from "../plan.js";
+import type { ReleaseFacts } from "../preflight.js";
 import {
   type Env,
-  lsRemote,
   openNeuroGraphqlUrl as openNeuroUrlFromEnv,
   originUrl,
   readRemoteLog,
@@ -570,17 +572,7 @@ async function execute(
           collect: { computed },
           openNeuroGraphqlUrl,
           ...(opts.maxFetchBytes !== undefined ? { maxFetchBytes: opts.maxFetchBytes } : {}),
-          ...(superseding
-            ? {
-                ownRelease: () =>
-                  onlyOwnRelease(superseding, {
-                    datasetId,
-                    token: token.ok ? token.token : null,
-                    apiBase,
-                    env,
-                  }),
-              }
-            : {}),
+          ...(superseding ? { ownRelease: (facts) => onlyOwnRelease(superseding, facts) } : {}),
         }),
       );
       // A dispatched run takes only a plan the automatic path takes, read from the LIVE plan
@@ -681,8 +673,9 @@ async function execute(
  * The open record `open` of another plan, when this run may supersede it; refuses otherwise. A run
  * without `--supersede` refuses (`repull-in-flight`) before anything is planned. With it, the record
  * must be the administrator's (an automatic one is taken over by abandoning it), for another tag
- * than this plan's, pulled from the same `from_tag` (decision 3: the plan is made again from it),
- * and before its merge.
+ * than this plan's, pulled from the same `from_tag` (ADR 0111: a superseding plan is made again
+ * from it), before its merge, and holding no claim to merge. Each refusal comes before anything is
+ * planned or written, so the command exits 1.
  */
 function supersedable(
   open: RepullRow,
@@ -721,6 +714,12 @@ function supersedable(
       `Re-pull #${open.id} is ${open.status}: past its merge it is released (nemar admin repull resume ${datasetId}), never superseded.`,
     );
   }
+  if (open.merge_claim_sha !== null) {
+    throw new ExecuteRefused(
+      "merge-claim-held",
+      `A claim to merge re-pull #${open.id}'s pull request is held, so it may have merged: run nemar admin repull resume ${datasetId}, which reads GitHub and records the merge or expires the claim.`,
+    );
+  }
   return open;
 }
 
@@ -734,50 +733,46 @@ interface SupersedeContext {
 }
 
 /**
- * Whether the release branches and the open release pull requests of the dataset are the
- * superseded record's own and nothing else: its `release/v<N.0.0>` at most, and its recorded pull
- * request (or, at `registered`, one of that branch). Read with the administrator's token; any
- * answer that is not whole is no.
+ * Whether the release branches and the open release pull requests the new plan's preflight read are
+ * the superseded record's own and nothing else, judged from what that check read (nothing is read
+ * twice): at a status at which the old record may have pushed its branch (`registered`, `pr_open`,
+ * `gates_clear`), its `release/v<N.0.0>` at most and its recorded pull request (at `registered`, one
+ * of that branch); at an earlier status the old record pushed nothing, so any release branch or
+ * release pull request is someone else's. A list that was not read whole is no.
  */
-async function onlyOwnRelease(old: RepullRow, ctx: SupersedeContext): Promise<boolean> {
-  if (!ctx.token) return false;
+export function onlyOwnRelease(
+  old: RepullRow,
+  facts: ReleaseFacts,
+): { ok: true } | { ok: false; why: string } {
   const branch = `release/v${old.to_version}`;
-  let branches: Map<string, string>;
-  try {
-    branches = await lsRemote(
-      originUrl(ctx.datasetId, ctx.env),
-      ["refs/heads/release/*"],
-      fleetCloneEnv(originUrl(ctx.datasetId, ctx.env), ctx.token),
-    );
-  } catch {
-    return false;
+  const pushed = BRANCH_PUSHED.includes(old.status);
+  const others = facts.branches.filter((b) => !(pushed && b === `refs/heads/${branch}`));
+  if (others.length > 0) {
+    return {
+      ok: false,
+      why: pushed
+        ? `${others.length} release branch(es) other than re-pull #${old.id}'s own exist`
+        : `re-pull #${old.id} is ${old.status} and pushed no branch, yet ${others.length} release branch(es) exist`,
+    };
   }
-  if ([...branches.keys()].some((r) => r !== `refs/heads/${branch}`)) return false;
-  let pulls: unknown;
-  try {
-    const res = await fetch(
-      `${ctx.apiBase}/repos/${DATASETS_ORG}/${ctx.datasetId}/pulls?state=open&per_page=100`,
-      {
-        headers: {
-          Authorization: `Bearer ${ctx.token}`,
-          Accept: "application/vnd.github+json",
-          "User-Agent": "nemar-cli repull",
-        },
-        signal: AbortSignal.timeout(20_000),
-      },
-    );
-    pulls = res.ok ? await res.json().catch(() => null) : null;
-  } catch {
-    return false;
+  if (facts.pulls === null) {
+    return {
+      ok: false,
+      why: `the open pull requests were not read whole (${facts.pullsUnread ?? "unread"})`,
+    };
   }
-  if (!Array.isArray(pulls) || pulls.length >= 100) return false;
-  return pulls.every((p) => {
-    const ref = (p as { head?: { ref?: unknown } }).head?.ref;
-    const n = (p as { number?: unknown }).number;
-    if (typeof ref !== "string") return false;
-    if (!ref.startsWith("release/")) return true;
-    return ref === branch && (old.pr_number === null || n === old.pr_number);
-  });
+  const foreign = facts.pulls.filter(
+    (p) =>
+      p.headRef.startsWith("release/") &&
+      !(pushed && p.headRef === branch && (old.pr_number === null || p.number === old.pr_number)),
+  );
+  if (foreign.length > 0) {
+    return {
+      ok: false,
+      why: `another release pull request is open (#${foreign[0]?.number})`,
+    };
+  }
+  return { ok: true };
 }
 
 /**

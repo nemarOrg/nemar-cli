@@ -14,6 +14,7 @@
 import { sanitizeNote } from "../../../../shared/pr-review.js";
 import { DATASETS_ORG } from "../../pr-review-approve.js";
 import { buildReleaseTitle, findSentTitleProblem } from "../../pr-text.js";
+import { type ListedPull, listPulls, listedPull, pullListWhy } from "../pulls.js";
 import type { PushContext } from "../write-guard.js";
 import { type HeadCheck, MOVED_REF_FETCH_DEPTH, enrichmentOnlySince } from "./head.js";
 import { guardedPush, pushCauseWords } from "./push.js";
@@ -190,42 +191,6 @@ function headers(token: string): Record<string, string> {
   };
 }
 
-interface ListedPull {
-  number: number;
-  state: string;
-  headRef: string;
-  headSha: string;
-  headRepo: string | null;
-  baseRef: string;
-}
-
-function listedPull(raw: unknown): ListedPull | null {
-  if (typeof raw !== "object" || raw === null) return null;
-  const r = raw as Record<string, unknown>;
-  const head = (r.head ?? {}) as Record<string, unknown>;
-  const base = (r.base ?? {}) as Record<string, unknown>;
-  const repo = (head.repo ?? null) as Record<string, unknown> | null;
-  if (
-    typeof r.number !== "number" ||
-    !Number.isSafeInteger(r.number) ||
-    r.number <= 0 ||
-    typeof head.ref !== "string" ||
-    typeof head.sha !== "string" ||
-    !/^[0-9a-f]{40}$/.test(head.sha) ||
-    typeof base.ref !== "string"
-  ) {
-    return null;
-  }
-  return {
-    number: r.number,
-    state: typeof r.state === "string" ? r.state : "",
-    headRef: head.ref,
-    headSha: head.sha,
-    headRepo: repo && typeof repo.full_name === "string" ? repo.full_name : null,
-    baseRef: base.ref,
-  };
-}
-
 async function githubCall(
   url: string,
   init: { method: string; token: string; body?: unknown },
@@ -255,28 +220,21 @@ async function openReleasePull(args: {
   version: string;
 }): Promise<ListedPull | null> {
   const own = `${DATASETS_ORG}/${args.datasetId}`;
-  const answer = await githubCall(`${args.base}/repos/${own}/pulls?state=open&per_page=100`, {
-    method: "GET",
+  const listed = await listPulls({
     token: args.token,
+    base: args.base,
+    datasetId: args.datasetId,
+    state: "open",
   });
-  if (!answer || answer.status !== 200 || !Array.isArray(answer.body)) {
+  if (!listed.ok) {
     throw new ExecuteRefused(
       "github-unreadable",
-      `GitHub's open pull requests of ${own} could not be read${answer ? ` (HTTP ${answer.status})` : ""}.`,
+      `GitHub's open pull requests of ${own} could not be read whole (${pullListWhy(listed)}).`,
     );
   }
-  if (answer.body.length >= 100) {
-    throw new ExecuteRefused(
-      "github-unreadable",
-      "100 or more pull requests are open, so whether a release pull request is among them cannot be read from one page.",
-    );
-  }
-  const pulls = answer.body.map(listedPull);
-  if (pulls.some((p) => p === null)) {
-    throw new ExecuteRefused("github-unreadable", "GitHub's list of pull requests was unreadable.");
-  }
+  const pulls = listed.pulls;
   const branch = `release/v${args.version}`;
-  const releases = (pulls as ListedPull[]).filter((p) => p.headRef.startsWith("release/"));
+  const releases = pulls.filter((p) => p.headRef.startsWith("release/"));
   // The head repository must be the dataset's own: a fork's branch of the same name is not ours,
   // and one whose repository GitHub no longer names (a deleted fork) fails closed the same way.
   const ours = releases.filter(
