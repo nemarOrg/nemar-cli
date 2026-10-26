@@ -8,7 +8,7 @@
  * over directory remotes.
  */
 
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import {
   chmodSync,
   existsSync,
@@ -43,6 +43,7 @@ import {
 import { runCommand } from "../src/lib/git-annex/run-command";
 import { uuidsNamedInRemoteLog } from "../src/lib/git-annex/s3-remote";
 import type { CopyItem } from "../src/lib/s3-server-copy";
+import { useTestGitIdentity } from "./helpers/git-identity";
 
 describe("scrubDatasetDescription", () => {
   test("prefixes Name with [TEST COPY] and drops DatasetDOI", () => {
@@ -480,6 +481,14 @@ exit 0
 });
 
 describe("a mirror rehearsal fixture (--mirror, ADR 0111)", () => {
+  // git-annex commits to its branch (init, initremote, renameremote): the identity comes from the
+  // environment, never from the runner's git config, which a CI host does not have.
+  let restoreIdentity: () => void = () => {};
+  beforeAll(() => {
+    restoreIdentity = useTestGitIdentity();
+  });
+  afterAll(() => restoreIdentity());
+
   test("names the ds its on source mirrors, and nothing else", () => {
     expect(mirrorProblem("on004362", "ds004362")).toBeNull();
     expect(mirrorProblem("on004362", "ds003645")).toContain("on003645");
@@ -650,7 +659,7 @@ describe("a mirror rehearsal fixture (--mirror, ADR 0111)", () => {
       mkdirSync(plain);
       await runCommand(["git", "init", "-q"], { cwd: plain });
       await expect(renameInheritedRemote(plain, "nemar-s3", INHERITED_REMOTE)).rejects.toThrow(
-        "git-annex branch could not be read",
+        "git-annex branch could not be read (run git annex init in the clone first)",
       );
     });
   }, 60_000);
@@ -659,8 +668,9 @@ describe("a mirror rehearsal fixture (--mirror, ADR 0111)", () => {
     await withRoot(async (root) => {
       const repo = join(root, "annexed");
       mkdirSync(repo);
-      await runCommand(["git", "init", "-q"], { cwd: repo });
-      await runCommand(["git", "annex", "init", "-q", "repo"], { cwd: repo });
+      expect((await runCommand(["git", "init", "-q"], { cwd: repo })).exitCode).toBe(0);
+      const init = await runCommand(["git", "annex", "init", "-q", "repo"], { cwd: repo });
+      expect(init.exitCode, init.stderr).toBe(0);
       await renameInheritedRemote(repo, "nemar-s3", INHERITED_REMOTE);
     });
   }, 60_000);

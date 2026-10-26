@@ -109,7 +109,9 @@ export async function renameInheritedRemote(
   const remoteLog = async () => {
     const listed = await runCommand(["git", "ls-tree", "git-annex", "--", "remote.log"], { cwd });
     if (listed.exitCode !== 0) {
-      throw new Error(`The git-annex branch could not be read: ${listed.stderr.trim()}`);
+      throw new Error(
+        `The git-annex branch could not be read (run git annex init in the clone first): ${listed.stderr.trim()}`,
+      );
     }
     if (listed.stdout.trim() === "") return "";
     const r = await runCommand(["git", "cat-file", "blob", "git-annex:remote.log"], { cwd });
