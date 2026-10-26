@@ -619,7 +619,8 @@ describe("a hold is the first rule that does not hold", () => {
       [DS, `ds${DS.slice(2)}`, id, "n".repeat(36)],
     );
     const r = await tick();
-    expect(r).toMatchObject({ examined: 1, running: 1, held: {}, holdsChanged: 1 });
+    expect(r).toMatchObject({ examined: 1, running: 1, holdsChanged: 1 });
+    expect(r.held).toEqual({});
     expect(githubRequests()).toEqual([]);
     expect(rowOf(id)).toMatchObject({ hold_reason: null, hold_since: null });
     expect(JSON.parse(String(holdAudits(id)[0]?.details))).toMatchObject({
@@ -667,7 +668,8 @@ describe("which rows a tick reads", () => {
       }
     });
     const r = await tick(env({}, moving));
-    expect(r).toMatchObject({ examined: 0, held: {}, holdsChanged: 0, errors: [] });
+    expect(r).toMatchObject({ examined: 0, holdsChanged: 0, errors: [] });
+    expect(r.held).toEqual({});
     expect(rowOf(id)).toMatchObject({ status: "gates_clear", hold_reason: null });
     expect(githubRequests()).toEqual([]);
     expect(holdAudits(id)).toEqual([]);
@@ -862,7 +864,8 @@ describe("the gates of an automatic pull request", () => {
       );
     }
     const r = await tick();
-    expect(r).toMatchObject({ screensStarted: 0, reviewsStarted: 0, reviewRefused: {} });
+    expect(r).toMatchObject({ screensStarted: 0, reviewsStarted: 0 });
+    expect(r.reviewRefused).toEqual({});
     expect(rowOf(id).hold_reason).toBe("screen-error");
     expect(gh.dispatches).toEqual([]);
     expect(reviews()).toEqual([]);
@@ -892,7 +895,8 @@ describe("the gates of an automatic pull request", () => {
     gh.dispatches = [];
 
     const r = await tick();
-    expect(r).toMatchObject({ gatesCleared: 1, screensStarted: 0, reviewsStarted: 0, refused: {} });
+    expect(r).toMatchObject({ gatesCleared: 1, screensStarted: 0, reviewsStarted: 0 });
+    expect(r.refused).toEqual({});
     expect(rowOf(id)).toMatchObject({
       status: "gates_clear",
       gates_sha: HEAD,
@@ -1421,7 +1425,8 @@ describe("a stalled automatic re-pull is resumed", () => {
     // The run's own create refuses an anonymous dataset; the tick does not speak for the run.
     db.run("UPDATE datasets SET first_published_at = NULL, anonymous = 1");
     const r = await resumeTick(TEN());
-    expect(r).toMatchObject({ resumed: 0, running: 1, held: {} });
+    expect(r).toMatchObject({ resumed: 0, running: 1 });
+    expect(r.held).toEqual({});
     expect(rowOf(id).hold_reason).toBeNull();
   });
 

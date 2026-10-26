@@ -537,23 +537,30 @@ describe("the gates and the claim read the live pull request", () => {
 
   test("a fork's head, a deleted fork's, or a base in another repository refuses both, and nothing is claimed or sent", async () => {
     const own = (ds: string) => ({ full_name: `nemarDatasets/${ds}` });
-    const cases: Array<[string, (ds: string) => PullAnswer]> = [
+    // Each answer, and the words the refusal names it by.
+    const cases: Array<[string, (ds: string) => PullAnswer, (ds: string) => string]> = [
       [
         "a fork's head",
         (ds) => ({
           head: { sha: HEAD, ref: "release/v2.0.0", repo: { full_name: `someone/${ds}` } },
         }),
+        (ds) => `its head is someone/${ds}, its base nemarDatasets/${ds}`,
       ],
-      ["a deleted fork's head", () => ({ head: { sha: HEAD, ref: "release/v2.0.0", repo: null } })],
+      [
+        "a deleted fork's head",
+        () => ({ head: { sha: HEAD, ref: "release/v2.0.0", repo: null } }),
+        (ds) => `its head is a repository GitHub no longer names, its base nemarDatasets/${ds}`,
+      ],
       [
         "a base in another repository",
         (ds) => ({
           head: { sha: HEAD, ref: "release/v2.0.0", repo: own(ds) },
           base: { ref: "main", repo: { full_name: `someone/${ds}` } },
         }),
+        (ds) => `its head is nemarDatasets/${ds}, its base someone/${ds}`,
       ],
     ];
-    for (const [what, answer] of cases) {
+    for (const [what, answer, words] of cases) {
       db.run("DELETE FROM upstream_repull_screens");
       db.run("DELETE FROM upstream_repulls");
       db.run("DELETE FROM datasets");
@@ -574,12 +581,13 @@ describe("the gates and the claim read the live pull request", () => {
         "head-moved",
       ]);
       expect(c.body.error).toContain("is not from and into nemarDatasets/on099999 itself");
+      expect(c.body.error).toContain(words("on099999"));
       expect(c.body.error).toContain("a fork's pull request is never the re-pull's");
+      expect(g.body.error).toContain(words("on099998"));
       expect(rowOf(claiming)).toMatchObject({ merge_claim_sha: null, merge_claimed_at: null });
       expect(rowOf(opening).status).toBe("pr_open");
-      // No edge was written, and nothing asked GitHub to merge.
+      // No edge was written.
       expect(db.query("SELECT COUNT(*) AS n FROM audit_log").get()).toEqual({ n: 0 });
-      expect(gh.merges).toEqual([]);
     }
   });
 

@@ -335,8 +335,10 @@ describe("a machine-clean automatic re-pull is merged by the Worker", () => {
       merged: 1,
       mergeUnknown: 0,
       mergeRefused: 0,
-      refused: {},
     });
+    // Exact: `toMatchObject` with `{}` matches any object.
+    expect(r.refused).toEqual({});
+    expect(r.held).toEqual({});
 
     // The claim and the merge's own audit row were written before the merge arrived.
     expect(atMerge as unknown).toEqual({ claim: HEAD, claimedAt: expect.any(String), audits: 1 });

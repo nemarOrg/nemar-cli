@@ -352,7 +352,10 @@ describe("the claim over a failed BIDS validation", () => {
       expect([res.status, res.body.code]).toEqual([status, code]);
       expect(rowOf(id)).toMatchObject({ merge_claim_sha: null, merge_claimed_at: null });
       expect(overrides()).toEqual([]);
-      expect(gh.merges).toEqual([]);
+      // The route never merges; what it must not write is the claim's own edge.
+      expect(
+        db.query("SELECT COUNT(*) AS n FROM audit_log WHERE action = 'repull_transition'").get(),
+      ).toEqual({ n: 0 });
     });
   }
 
