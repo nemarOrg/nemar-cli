@@ -43,7 +43,7 @@ import type { WebhookRouter } from "./shared.js";
 
 // ─── GitHub App webhook receiver ────────────────────────────────────────────
 //
-// The nemar-publish-bot App is configured to deliver `push` events from every
+// The nemar-bot App is configured to deliver `push` events from every
 // dataset repo under `nemarDatasets` to this endpoint. We decode the event,
 // filter it down to enrichment-relevant pushes, and dispatch the central
 // `run-enrichment` workflow on `nemarDatasets/.github`.
@@ -57,7 +57,7 @@ import type { WebhookRouter } from "./shared.js";
  *
  *  Includes only sources that *feed* enrichment (README + BIDS description).
  *  Crucially excludes `.nemar/metadata.json` — that file IS the enrichment
- *  output, written by `nemar-publish-bot` on every successful run. Listing
+ *  output, written by the `nemar-bot` App on every successful run. Listing
  *  it here turned every enrichment commit into a fresh trigger and Haiku's
  *  non-deterministic prose ensured the file always looked "changed" to the
  *  push filter, so the pipeline self-fired forever (#643, observed on
