@@ -402,6 +402,11 @@ export interface AdvanceTickResult {
   merged: number;
   /** Merges sent whose answer did not say what became of them: each claim is kept. */
   mergeUnknown: number;
+  /**
+   * Merges GitHub refused (405, 409 or 422): nothing merged, the claim is kept and the row holds
+   * `merge-refused` for an administrator, so each is logged at error level.
+   */
+  mergeRefused: number;
   /** Claims the Worker held and released, GitHub having said their merge did not happen. */
   claimsReleased: number;
   /** Finish runs GitHub took, for rows that merged. */
@@ -865,6 +870,7 @@ function tallyMerge(t: Tick, o: WorkerMergeOutcome): void {
   if (o.sent) r.mergesSent++;
   if (o.kind === "merged") r.merged++;
   if (o.kind === "unknown") r.mergeUnknown++;
+  if (o.kind === "refused") r.mergeRefused++;
   if (o.kind === "released") r.claimsReleased++;
   if (o.hold === "cap-unreadable") {
     // A fault in the configuration, not a full day: said as such, on the row and in the log.
@@ -976,6 +982,7 @@ export async function runRepullAdvanceCron(
     mergesSent: 0,
     merged: 0,
     mergeUnknown: 0,
+    mergeRefused: 0,
     claimsReleased: 0,
     finishes: 0,
     finishUnconfirmed: 0,
@@ -1030,9 +1037,9 @@ export async function runRepullAdvanceCron(
 
 /**
  * The tick's one log line, or null when it changed nothing and nothing failed, so a tick that only
- * found the same rows waiting for the same reasons says nothing. Error level when anything failed or
- * a clean row's edge was refused.
- * A resume whose answer was lost is an error too, as the scheduler's is. Counts and fixed words only:
+ * found the same rows waiting for the same reasons says nothing. Error level when anything failed,
+ * the record refused a clean row's edge or claim, or GitHub refused a merge; a resume, a merge or a
+ * finish whose answer was lost is an error too, as the scheduler's is. Counts and fixed words only:
  * no dataset id, no message.
  */
 export function repullAdvanceLogLine(
@@ -1042,6 +1049,7 @@ export function repullAdvanceLogLine(
     r.errors.length > 0 ||
     r.unconfirmed > 0 ||
     r.mergeUnknown > 0 ||
+    r.mergeRefused > 0 ||
     r.finishUnconfirmed > 0 ||
     Object.keys(r.refused).length > 0;
   const acted =
@@ -1074,6 +1082,7 @@ export function repullAdvanceLogLine(
     `merges=${r.mergesSent}`,
     `merged=${r.merged}`,
     `merge_unknown=${r.mergeUnknown}`,
+    `merge_refused=${r.mergeRefused}`,
     `claims_released=${r.claimsReleased}`,
     `finishes=${r.finishes}`,
     `finish_unconfirmed=${r.finishUnconfirmed}`,

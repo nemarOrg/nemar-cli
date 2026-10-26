@@ -35,6 +35,7 @@ import { __resetRateLimitStateForTests } from "../src/services/github/transport"
 import { MERGE_CLAIMS_TODAY_SQL, getRepull } from "../src/services/upstream-repull";
 import {
   type AdvanceTickResult,
+  repullAdvanceLogLine,
   runRepullAdvanceCron,
 } from "../src/services/upstream-repull-advance";
 import {
@@ -321,6 +322,7 @@ describe("a machine-clean automatic re-pull is merged by the Worker", () => {
       mergesSent: 1,
       merged: 1,
       mergeUnknown: 0,
+      mergeRefused: 0,
       refused: {},
     });
 
@@ -755,13 +757,16 @@ describe("what GitHub answers the merge", () => {
       const id = ready();
       gh.mergeAnswer = { status };
       const r = await tick();
-      expect(r).toMatchObject({ mergesSent: 1, merged: 0, mergeUnknown: 0 });
+      expect(r).toMatchObject({ mergesSent: 1, merged: 0, mergeUnknown: 0, mergeRefused: 1 });
       expect(rowOf(id)).toMatchObject({
         status: "gates_clear",
         merge_claim_sha: HEAD,
         merge_sha: null,
         hold_reason: "merge-refused",
       });
+      // Counted and logged at error level: a refusal is for an administrator to read.
+      expect(repullAdvanceLogLine(r)?.level).toBe("error");
+      expect(repullAdvanceLogLine(r)?.line).toContain(" merge_refused=1 ");
       expect(auditsOf(WORKER_MERGE_ANSWER_ACTION, id).map((a) => a.details.outcome)).toEqual([
         "refused",
       ]);
@@ -774,7 +779,7 @@ describe("what GitHub answers the merge", () => {
       const id = ready();
       gh.mergeAnswer = { status };
       const r = await tick();
-      expect(r).toMatchObject({ mergesSent: 1, merged: 0, mergeUnknown: 1 });
+      expect(r).toMatchObject({ mergesSent: 1, merged: 0, mergeUnknown: 1, mergeRefused: 0 });
       expect(rowOf(id)).toMatchObject({
         status: "gates_clear",
         merge_claim_sha: HEAD,
