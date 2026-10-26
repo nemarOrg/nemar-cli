@@ -710,6 +710,8 @@ export async function appTokenRefused(
   }
   try {
     const res = await fetchImpl(`${base}/repos/nemarDatasets/${datasetId}`, {
+      // The token goes to GitHub's API and nowhere else: a redirect is refused, never followed.
+      redirect: "error",
       headers: {
         Authorization: `Bearer ${token}`,
         Accept: "application/vnd.github+json",
@@ -775,6 +777,8 @@ export async function reportDispatch(
     try {
       const res = await fetchImpl(`${getApiUrl()}/webhooks/repull-state`, {
         method: "POST",
+        // The dispatch token goes to the API and nowhere else: a redirect is refused, never followed.
+        redirect: "error",
         headers: { "Content-Type": "application/json", "X-Repull-Token": ctx.dispatch.token },
         body: JSON.stringify(body),
         signal: AbortSignal.timeout(opts.timeoutMs ?? REPORT_TIMEOUT_MS),

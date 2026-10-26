@@ -14,7 +14,8 @@
  *    unexplained paths, conflicts and corrections, each stated, and a copy of known size within the
  *    bound;
  *  - a report carries the body the Worker's callback schema takes, the token only in its header,
- *    a code from the closed list, and the marker only for a terminal report the Worker stored;
+ *    a code from the closed list, and the marker only for a terminal report the Worker stored; it
+ *    and the token probe refuse a redirect rather than follow it;
  *  - the App token's hour: the copy's budget leaves the settle's share and the other steps', a run
  *    that cannot tell when its token was minted is refused, and a step whose work would pass the
  *    usable hour is refused before it starts, on an injected clock;
@@ -48,6 +49,7 @@ import {
   AUTO_SETTLE_RESERVE_SECONDS,
   CURRENT_PLANNER_VERSION,
   DISPATCH_CODES,
+  DISPATCH_FINAL_CODES,
   DISPATCH_ID_MAX,
   automaticCopySeconds,
   opensTheSameUtcDay,
@@ -819,6 +821,71 @@ describe("a run whose App token GitHub no longer takes", () => {
   });
 });
 
+describe("a redirect is refused, never followed", () => {
+  /** A loopback server that records what reaches it, and one that sends everything there. */
+  function servers(answer: number) {
+    const reached: string[] = [];
+    const target = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch(req) {
+        reached.push(new URL(req.url).pathname);
+        return Response.json({}, { status: answer });
+      },
+    });
+    const redirector = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch(req) {
+        const to = `http://127.0.0.1:${target.port}${new URL(req.url).pathname}`;
+        return new Response(null, { status: 307, headers: { Location: to } });
+      },
+    });
+    return {
+      reached,
+      base: `http://127.0.0.1:${redirector.port}`,
+      stop() {
+        target.stop(true);
+        redirector.stop(true);
+      },
+    };
+  }
+
+  test("the token probe does not follow GitHub's answer elsewhere, nor take it as expiry", async () => {
+    const s = servers(401);
+    try {
+      const env = { GH_TOKEN: "ghs_app", NEMAR_GITHUB_API_URL: s.base };
+      expect(await appTokenRefused("on099999", env)).toBe(false);
+      expect(s.reached).toEqual([]);
+    } finally {
+      s.stop();
+    }
+  });
+
+  test("a report does not follow the API elsewhere, and is not stored", async () => {
+    const s = servers(200);
+    const saved = process.env.TEST_API_URL;
+    process.env.TEST_API_URL = s.base;
+    try {
+      const ctx = {
+        dispatch: parseDispatchPayload(sent()),
+        runUrl: null,
+        marker: null,
+        sink: recordingSink(),
+      };
+      expect(
+        await reportDispatch(ctx, "failed", { code: "runner-failed" }, { attempts: 1 }),
+      ).toEqual({ stored: false, code: "report-unanswered" });
+      expect(s.reached).toEqual([]);
+      expect(ctx.sink.reported).toEqual([]);
+    } finally {
+      if (saved === undefined) Reflect.deleteProperty(process.env, "TEST_API_URL");
+      else process.env.TEST_API_URL = saved;
+      s.stop();
+    }
+  });
+});
+
 describe("the words a run reports", () => {
   test("a listed word is reported as it is, any other as no-code", () => {
     expect(dispatchCodeOf("auto-not-clean-plan")).toBe("auto-not-clean-plan");
@@ -843,6 +910,14 @@ describe("the words a run reports", () => {
       "auto-token-clock",
     ]) {
       expect((DISPATCH_CODES as readonly string[]).includes(w)).toBe(true);
+    }
+  });
+
+  test("token-expired is final for the tag; the token hour's own words are not", () => {
+    const final = DISPATCH_FINAL_CODES as readonly string[];
+    expect(final.includes("token-expired")).toBe(true);
+    for (const w of ["auto-token-hour", "auto-token-clock", "head-unreadable"]) {
+      expect([w, final.includes(w)]).toEqual([w, false]);
     }
   });
 

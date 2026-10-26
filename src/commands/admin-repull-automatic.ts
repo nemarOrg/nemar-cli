@@ -17,8 +17,9 @@
  * Each ends with one result line and reports `refused` (nothing written, exit 1, or a plan the
  * path does not take, exit 3) or `failed` (a step after the record exists, or a release branch the
  * settle could not read, exit 3; a head enrichment did not make, exit 1) with a word from the closed
- * list, `token-expired` when GitHub no longer takes the App token, whatever the step called it.
- * Every command keeps inside the App token's usable hour, from when the workflow
+ * list, `token-expired` when GitHub no longer takes the App token, whatever the step called it:
+ * `refused` once an open run wrote its record, which ends the automatic path for that tag, and
+ * `failed` before. Every command keeps inside the App token's usable hour, from when the workflow
  * noted its mint (`NEMAR_REPULL_TOKEN_SINCE`): the plan, and the execute before its record, the copy
  * and each push, refuse `auto-token-hour` when what is left would not fit. The quiet line says how
  * long the token was held when the command started and how long each step took, in seconds.
@@ -108,6 +109,20 @@ interface Spec {
   reportsStart: boolean;
   body(ctx: AutomaticContext): Promise<Outcome>;
 }
+
+/**
+ * Words the token probe never replaces with `token-expired`: the token on the command line, whose
+ * report is what kills the token, so it goes first and as itself; the token hour's own refusals,
+ * which say already why the run stopped; and a settle's outcome, a fact about a pull request that is
+ * open whatever the token's state.
+ */
+const NOT_PROBED: ReadonlySet<string> = new Set([
+  "auto-token-on-argv",
+  "auto-token-hour",
+  "auto-token-clock",
+  "head-unreadable",
+  "head-foreign",
+]);
 
 /** Whole seconds since `startedMs`. */
 const secondsSince = (startedMs: number) =>
@@ -204,11 +219,22 @@ async function runAutomatic(spec: Spec): Promise<void> {
   }
   // A run that outlived its App token fails at its next push or pull-request call, with that step's
   // word: when GitHub no longer takes the token, the report says why, whatever the step called it.
+  // Once an open run left its record (a resumable failure), the word is a refusal, final for the
+  // tag, and an administrator takes the record on: an aged token is met at the registration or the
+  // pull request, after the copy, where no later run can take the record up, and one refused at
+  // the preparation's clone ends the path the same way, the safe direction. Before the record, a
+  // later run's token may yet be taken.
   if (
     (outcome.phase === "refused" || outcome.phase === "failed") &&
+    !NOT_PROBED.has(outcome.code) &&
     (await appTokenRefused(ctx.dispatch.datasetId, process.env))
   ) {
-    outcome = { phase: "failed", code: "token-expired", exit: outcome.exit };
+    const recordLeft = spec.mode === "open" && outcome.phase === "failed" && outcome.exit === 3;
+    outcome = {
+      phase: recordLeft ? "refused" : "failed",
+      code: "token-expired",
+      exit: outcome.exit,
+    };
   }
   if (outcome.phase !== "planned") {
     const answer = await reportDispatch(

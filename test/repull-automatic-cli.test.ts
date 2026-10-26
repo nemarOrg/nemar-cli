@@ -27,7 +27,8 @@
  *  - a copy the estimate puts past the App token's hour is refused at plan time; a run whose
  *    token has too little of its usable hour left is refused at the plan, at the execute before
  *    its record, and before a push, without writing what it could not finish; a run that outlived
- *    its token is reported `token-expired`;
+ *    its token is reported `token-expired`, refused and final for the tag once its record exists;
+ *  - the token on the command line is reported as itself, with no probe of the token first;
  *  - the quiet line says how long the token was held and how long each step took, in seconds;
  *  - the token on the command line (checked before the plan file is read), no App token, a
  *    development build, a finish dispatch fed to `plan`, another dataset and other tags are each
@@ -39,8 +40,8 @@
  *    answers with an administrator's or another record is refused;
  *  - an enrichment-shaped commit on the release branch while the run settles is recorded, and any
  *    other is `head-foreign`, recorded on the row and reported `failed`; the settle waits for the
- *    branch to be quiet by what was read, and a branch that cannot be read is `head-unreadable`;
- *    the token's hour ends the settle, which is then `head-unreadable`;
+ *    branch to be quiet by what was read, and a branch that cannot be read is `head-unreadable`,
+ *    whatever the token's state; the token's hour ends the settle, which is then `head-unreadable`;
  *  - a finish takes a merged re-pull to `complete` and reports `finished` (again, after it
  *    completed), and refuses one that has not merged, another record or an administrator's,
  *    without touching it.
@@ -77,6 +78,7 @@ import {
   claimFinishDispatch,
   claimOpenDispatch,
 } from "../backend/src/services/upstream-repull-dispatch";
+import { readCandidateBlockers } from "../backend/src/services/upstream-repull-scheduler";
 import type { DispatchRow, RepullRow } from "../shared/repull-state";
 import { getRepull } from "../src/lib/api/repull";
 import { type PlanFile, defaultPlanPath, writePlanFile } from "../src/lib/repull/digest";
@@ -617,6 +619,8 @@ describe.skipIf(!awsInstalled)("an automatic run opens its pull request", () => 
   });
 
   test("the token on the command line is refused, and the report ends the dispatch so it is dead", async () => {
+    // The token is reported as itself, even with the App token past its hour: no probe comes first.
+    w.gh.expiredTokens.add(APP_TOKEN);
     const c = await claimOpen();
     writeEvent(c);
     const plan = await auto([
@@ -632,6 +636,9 @@ describe.skipIf(!awsInstalled)("an automatic run opens its pull request", () => 
       nonce: null,
     });
     expect(w.apiWrites).toEqual(["POST /webhooks/repull-state"]);
+    expect(w.gh.seen.filter((s) => s.path === `/repos/nemarDatasets/${w.fx.datasetId}`)).toEqual(
+      [],
+    );
   });
 
   test("a run with no App token is refused", async () => {
@@ -802,11 +809,20 @@ describe.skipIf(!awsInstalled)("an automatic run opens its pull request", () => 
       const exec = await auto(executeArgs(c));
       expect(armed).toBe(true);
       expect(exec.exitCode, exec.all).toBe(3);
-      expectQuiet(exec, c, "failed");
+      // Past its record, a run whose token GitHub stopped taking is a refusal: no later run can
+      // take the record up, so the scheduler sends none for the tag again.
+      expectQuiet(exec, c, "refused");
       expect(exec.all).toContain("code=token-expired");
-      expect(dispatchRow(c.id)).toMatchObject({ status: "failed", code: "token-expired" });
-      // The record stays where the step left it, with the step's own error on it.
       const [row] = repullRows();
+      expect(dispatchRow(c.id)).toMatchObject({
+        status: "refused",
+        code: "token-expired",
+        repull_id: row?.id,
+      });
+      expect(await readCandidateBlockers(w.bindings().DB, w.fx.datasetId, TAG_B)).toMatchObject({
+        final_refusals: 1,
+      });
+      // The record stays where the step left it, with the step's own error on it.
       expect(row?.status).toBe("copied");
       expect(row?.last_error).toStartWith("[register:");
     } finally {
@@ -1075,6 +1091,8 @@ describe.skipIf(!awsInstalled)("the release head settles before the run reports"
       if (body.from !== "registered" || body.to !== "pr_open") return;
       away = true;
       renameSync(w.fx.originRepo, moved);
+      // The App token is past its hour too: the settle's outcome is reported, not the token's.
+      w.gh.expiredTokens.add(APP_TOKEN);
     });
     try {
       const c = await claimOpen();

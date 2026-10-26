@@ -50,7 +50,8 @@
 # fifty-five minutes: it refuses a plan whose copy would take more than twenty minutes by its
 # estimate (auto-copy-too-long), refuses before its record, the copy and each push when what is
 # left would not fit (auto-token-hour), and ends the settle of the release head at the end of
-# those minutes. A run that failed with the token expired anyway is reported token-expired.
+# those minutes. A run that failed with the token expired anyway is reported token-expired; once
+# it wrote its record, an administrator takes the record on.
 #
 # Required secrets on nemarDatasets/.github, each already used by another workflow there:
 #   NEMAR_APP_ID, NEMAR_APP_PRIVATE_KEY      the per-repository App token (contents and pull

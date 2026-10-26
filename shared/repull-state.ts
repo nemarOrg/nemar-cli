@@ -892,14 +892,20 @@ export function isDispatchCode(value: unknown): value is DispatchCode {
 
 /**
  * Refusals another run at the same tag would meet again, because they are facts about the tag's
- * plan or about the dataset, not about the run: a dataset refused for one of these is not
- * dispatched again for that tag (an administrator may still re-pull it by hand). They are of three
- * kinds. Plan content: `auto-not-clean-plan` is the word for a plan whose `unexplained`,
- * `conflicts` and `corrections` counts are not each stated and zero (`automaticPlanRefusal` tests
- * the three separately), and `key-without-pin` for a copy key upstream records no pinned version
- * for, and the ledger, dead-key, concept DOI and gitlink words are the plan's own. Size:
- * `auto-copy-too-large` is a copy whose size is not stated or is over the bound. Dataset:
- * `anonymous-dataset` and `not-a-mirror`.
+ * plan or about the dataset, or about a run that left a record no later run can take up: a
+ * dataset refused for one of these is not dispatched again for that tag (an administrator may
+ * still re-pull it by hand). They are of four kinds. Plan content: `auto-not-clean-plan` is the
+ * word for a plan whose `unexplained`, `conflicts` and `corrections` counts are not each stated
+ * and zero (`automaticPlanRefusal` tests the three separately), and `key-without-pin` for a copy
+ * key upstream records no pinned version for, and the ledger, dead-key, concept DOI and gitlink
+ * words are the plan's own. Size: `auto-copy-too-large` is a copy whose size is not stated or is
+ * over the bound. Dataset: `anonymous-dataset` and `not-a-mirror`. Run: `token-expired` as a run
+ * reports it `refused`, once GitHub stopped taking the App token after the run wrote its record
+ * (the registration and the pull request use the token, after the copy): a later run would plan
+ * again over what the copy wrote and meet a record it cannot take up, so an administrator takes
+ * the record on (a token refused at the preparation's clone, before the copy, is taken the same
+ * way, the safe direction). A token refused before anything was written is reported `failed`,
+ * which this list does not hold.
  */
 export const DISPATCH_FINAL_CODES = [
   "auto-not-clean-plan",
@@ -913,6 +919,7 @@ export const DISPATCH_FINAL_CODES = [
   "gitlink",
   "anonymous-dataset",
   "not-a-mirror",
+  "token-expired",
 ] as const satisfies readonly DispatchCode[];
 
 /**
