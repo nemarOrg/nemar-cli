@@ -674,6 +674,9 @@ export const DISPATCH_CODES = [
   // that failed while GitHub no longer took its App token, which only a new run's token can carry on.
   "auto-copy-too-long",
   "token-expired",
+  // The release branch could not be read in the settle's last quiet period, so the run cannot say
+  // its head settled.
+  "head-unreadable",
   // The API the run would talk to is not production's (an override aimed elsewhere): nothing was
   // sent there, the token included, so this word reaches the Worker only through the backstop.
   "auto-api-not-production",

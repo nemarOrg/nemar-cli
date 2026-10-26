@@ -50,7 +50,7 @@ import {
   setDefaultTimeout,
   test,
 } from "bun:test";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { which } from "bun";
@@ -67,8 +67,12 @@ import type { DispatchRow, RepullRow } from "../shared/repull-state";
 import { getRepull } from "../src/lib/api/repull";
 import { defaultPlanPath, writePlanFile } from "../src/lib/repull/digest";
 import { AUTOMATIC_LINE_RE, RESULT_LINE_RE } from "../src/lib/repull/execute/automatic";
-import { openOriginScratch } from "../src/lib/repull/execute/origin";
-import { settleReleaseHead } from "../src/lib/repull/execute/settle";
+import { type OriginScratch, openOriginScratch } from "../src/lib/repull/execute/origin";
+import {
+  type SettleOptions,
+  type Settled,
+  settleReleaseHead,
+} from "../src/lib/repull/execute/settle";
 import { planRepull } from "../src/lib/repull/plan";
 import { ADMIN_TOKEN, APP_TOKEN } from "./helpers/github-standin";
 import { type ReleaseCli, releaseCli } from "./helpers/release-cli";
@@ -532,9 +536,24 @@ describe.skipIf(!awsInstalled)("the release head settles before the run reports"
     expect(dispatchRow(c.id)).toMatchObject({ status: "failed", code: "head-foreign" });
   });
 
-  test("the settle ends once the branch has been quiet, after a move that lands while it waits", async () => {
+  /**
+   * The library's settle on the world's record, in this process, against the world's API as the
+   * administrator, on a virtual clock: `sleep` advances it, and `onTick` may move the branch at a
+   * virtual instant, so nothing here waits on the machine's clock.
+   */
+  async function withSettle(
+    fn: (s: {
+      live: RepullRow;
+      scratch: OriginScratch;
+      settle: (
+        row: RepullRow,
+        opts: SettleOptions,
+        onTick?: (t: number) => Promise<void>,
+      ) => Promise<{ result: Settled; took: number }>;
+    }) => Promise<void>,
+    scratchEnv: Record<string, string> = w.fx.env,
+  ): Promise<void> {
     const { row } = await opened();
-    // The API the library calls in this process: the world's, as the administrator.
     const saved = { url: process.env.TEST_API_URL, dir: process.env.NEMAR_CONFIG_DIR };
     process.env.TEST_API_URL = w.apiUrl;
     process.env.NEMAR_CONFIG_DIR = w.configDir;
@@ -544,60 +563,31 @@ describe.skipIf(!awsInstalled)("the release head settles before the run reports"
       datasetId: w.fx.datasetId,
       digest,
       purpose: "settle",
-      env: w.fx.env,
+      env: scratchEnv,
       token: null,
     });
     try {
       const live = (await getRepull(row.id)) as RepullRow;
-      // Quiet from the start: the bound is far, and the settle ends after the quiet period.
-      let started = Date.now();
-      const still = await settleReleaseHead({
+      await fn({
+        live,
         scratch,
-        row: live,
-        opts: { maxWaitMs: 20_000, quietMs: 600, pollMs: 100 },
-        out: () => {},
+        async settle(r, opts, onTick) {
+          let t = 1_000_000;
+          const start = t;
+          const result = await settleReleaseHead({
+            scratch,
+            row: r,
+            opts,
+            out: () => {},
+            now: () => t,
+            sleep: async (ms) => {
+              t += ms;
+              await onTick?.(t - start);
+            },
+          });
+          return { result, took: t - start };
+        },
       });
-      let took = Date.now() - started;
-      expect(still).toMatchObject({ outcome: "settled", moves: 0, unreadable: 0 });
-      expect(took).toBeGreaterThanOrEqual(600);
-      expect(took).toBeLessThan(5_000);
-
-      // A move lands 400 ms in: recorded, and the quiet period counts again from it.
-      started = Date.now();
-      let landedAt = 0;
-      const landing = (async () => {
-        await Bun.sleep(400);
-        await w.commitOnto(
-          RELEASE_REF,
-          ".nemar/metadata.json",
-          await enrichedMetadata(w.fx.originRepo, RELEASE_REF, "2026-10-25T01:00:00Z"),
-        );
-        landedAt = Date.now();
-      })();
-      const settled = await settleReleaseHead({
-        scratch,
-        row: live,
-        opts: { maxWaitMs: 20_000, quietMs: 1_000, pollMs: 100 },
-        out: () => {},
-      });
-      await landing;
-      took = Date.now() - started;
-      expect(settled).toMatchObject({ outcome: "settled", moves: 1 });
-      expect(Date.now() - landedAt).toBeGreaterThanOrEqual(900);
-      expect(took).toBeLessThan(10_000);
-      expect(settled.row.head_sha).toBe(await releaseHead());
-
-      // The bound is shorter than the quiet period: it ends at the bound.
-      started = Date.now();
-      await settleReleaseHead({
-        scratch,
-        row: settled.row,
-        opts: { maxWaitMs: 500, quietMs: 60_000, pollMs: 100 },
-        out: () => {},
-      });
-      took = Date.now() - started;
-      expect(took).toBeGreaterThanOrEqual(450);
-      expect(took).toBeLessThan(5_000);
     } finally {
       scratch.close();
       for (const [k, v] of [
@@ -607,6 +597,125 @@ describe.skipIf(!awsInstalled)("the release head settles before the run reports"
         if (v === undefined) Reflect.deleteProperty(process.env, k);
         else process.env[k] = v;
       }
+    }
+  }
+
+  const QUIET = 5 * 60_000;
+  const POLL = 15_000;
+
+  test("a branch quiet from the start settles after the quiet period, on the virtual clock", async () => {
+    await withSettle(async ({ live, settle }) => {
+      const { result, took } = await settle(live, {
+        maxWaitMs: 30 * 60_000,
+        quietMs: QUIET,
+        pollMs: POLL,
+      });
+      expect(result).toMatchObject({ outcome: "settled", moves: 0, unreadable: 0, cause: null });
+      expect(took).toBe(QUIET);
+      expect(result.reads).toBe(QUIET / POLL + 1);
+    });
+  });
+
+  test("a move that lands while it waits is recorded, and the quiet period counts again from it", async () => {
+    await withSettle(async ({ live, settle }) => {
+      let landedAt = -1;
+      const { result, took } = await settle(
+        live,
+        { maxWaitMs: 30 * 60_000, quietMs: QUIET, pollMs: POLL },
+        async (elapsed) => {
+          if (landedAt >= 0 || elapsed < 2 * 60_000) return;
+          landedAt = elapsed;
+          await w.commitOnto(
+            RELEASE_REF,
+            ".nemar/metadata.json",
+            await enrichedMetadata(w.fx.originRepo, RELEASE_REF, "2026-10-25T01:00:00Z"),
+          );
+        },
+      );
+      expect(result).toMatchObject({ outcome: "settled", moves: 1, unreadable: 0 });
+      expect(landedAt).toBe(2 * 60_000);
+      expect(took).toBe(landedAt + QUIET);
+      expect(result.row.head_sha).toBe(await releaseHead());
+      expect(repullRows()[0]?.head_sha).toBe(await releaseHead());
+    });
+  });
+
+  test("a bound shorter than the quiet period ends the settle at the bound", async () => {
+    await withSettle(async ({ live, settle }) => {
+      const { result, took } = await settle(live, {
+        maxWaitMs: 60_000,
+        quietMs: QUIET,
+        pollMs: POLL,
+      });
+      expect(result.outcome).toBe("settled");
+      expect(took).toBe(60_000);
+    });
+  });
+
+  test("a branch that cannot be read is never settled: head-unreadable, recorded with its cause", async () => {
+    await withSettle(
+      async ({ live, settle }) => {
+        const { result, took } = await settle(live, {
+          maxWaitMs: 10 * 60_000,
+          quietMs: QUIET,
+          pollMs: POLL,
+        });
+        expect(result).toMatchObject({ outcome: "unreadable", moves: 0 });
+        expect(result.unreadable).toBe(result.reads);
+        expect(result.cause).toBe("origin-unreadable");
+        expect(took).toBe(10 * 60_000);
+        const [row] = repullRows();
+        expect(row?.status).toBe("pr_open");
+        expect(row?.head_sha).toBe(live.head_sha);
+        expect(row?.last_error).toStartWith("[auto:head-unreadable]");
+        expect(row?.last_error).toContain("(origin-unreadable)");
+        expect(row?.last_error).not.toContain("abandon a record is built");
+      },
+      { ...w.fx.env, NEMAR_REPULL_ORIGIN_BASE: join(runner, "no-such-origins") },
+    );
+  });
+
+  test("reads that stop succeeding for a whole quiet period do not settle the branch", async () => {
+    await withSettle(async ({ live, settle, scratch }) => {
+      let broken = false;
+      const { result } = await settle(
+        live,
+        { maxWaitMs: 10 * 60_000, quietMs: QUIET, pollMs: POLL },
+        async (elapsed) => {
+          // From the second read on, origin's address is one that cannot be read.
+          if (broken || elapsed < POLL) return;
+          broken = true;
+          await Bun.$`git -C ${scratch.dir} remote set-url origin ${join(runner, "gone")}`.quiet();
+        },
+      );
+      expect(result.outcome).toBe("unreadable");
+      expect(result.reads).toBeGreaterThan(result.unreadable);
+    });
+  });
+
+  test("through the CLI, a release branch that cannot be read is reported head-unreadable, not opened", async () => {
+    const moved = `${w.fx.originRepo}.away`;
+    let away = false;
+    w.setApiHook(async (req) => {
+      if (away || req.method !== "POST" || !/\/admin\/repulls\/\d+\/transition$/.test(req.url))
+        return;
+      const body = (await req.json()) as { from?: string; to?: string };
+      if (body.from !== "registered" || body.to !== "pr_open") return;
+      away = true;
+      renameSync(w.fx.originRepo, moved);
+    });
+    try {
+      const c = await claimOpen();
+      writeEvent(c);
+      expect((await auto(planArgs(c))).exitCode).toBe(0);
+      const exec = await auto(executeArgs(c));
+      expect(away).toBe(true);
+      expect(exec.exitCode, exec.all).toBe(3);
+      expectQuiet(exec, c, "failed");
+      expect(dispatchRow(c.id)).toMatchObject({ status: "failed", code: "head-unreadable" });
+      expect(repullRows()[0]?.last_error).toStartWith("[auto:head-unreadable]");
+    } finally {
+      if (away) renameSync(moved, w.fx.originRepo);
     }
   });
 });

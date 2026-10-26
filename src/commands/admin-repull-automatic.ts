@@ -376,6 +376,10 @@ export function automaticExecute(
         const s = result.settled;
         ctx.sink.emit("settle", { reads: s.reads, moves: s.moves, unreadable: s.unreadable });
         if (s.outcome === "foreign") return { phase: "failed", code: "head-foreign", exit: 1 };
+        // Nothing was read in the last quiet period: the pull request is open, and a later run
+        // takes the record up at `pr_open` and settles it again.
+        if (s.outcome === "unreadable")
+          return { phase: "failed", code: "head-unreadable", exit: 3 };
       }
       return { phase: "opened", repullId: row.id };
     },

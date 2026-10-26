@@ -7,12 +7,16 @@
  * never accepts a moved head on its own: machine clean needs the recorded head, and a head it has
  * not seen recorded holds the pull request. So before an automatic run reports its pull request
  * open, it watches the branch with git (`ls-remote`, no REST quota) until it has not moved for
- * `quietMs` or `maxWaitMs` has passed. Each move is judged by the one head rule execution and
+ * `quietMs`, by what successful reads saw, or `maxWaitMs` has passed. Each move is judged by the one head rule execution and
  * resume use (`acceptsHead`: the synthesized commit, or an enrichment-shaped descendant of it) and
  * recorded as the `pr_open -> pr_open` self-edge resume writes; a move enrichment does not make is
  * `head-foreign`, recorded on the row as the automatic path's error (`[auto:head-foreign]`), and the
  * row is left at `pr_open`. A read that cannot be made is counted and tried again; unknown is never
- * a move. Any later move holds the pull request for an administrator's `resume`.
+ * a move, and never settled: the branch is settled only when a read succeeded in the last quiet
+ * period before the settle ended, and otherwise the outcome is `unreadable`, recorded on the row
+ * (`[auto:head-unreadable]`, with the last read's cause in fixed words) and reported as
+ * `head-unreadable`, which a later run can take up at `pr_open`. Any later move holds the pull
+ * request for an administrator's `resume`.
  *
  * Settling writes nothing to GitHub; the scratch repository is the caller's.
  */
@@ -40,12 +44,18 @@ export interface SettleOptions {
 }
 
 export interface Settled {
-  /** `settled`: the head the row records is the branch's, or the bound passed; `foreign`: refused. */
-  outcome: "settled" | "foreign";
+  /**
+   * `settled`: a read in the last quiet period found the head the row records (or recorded the one
+   * enrichment moved it to), and the branch was quiet or the bound passed; `foreign`: a head
+   * enrichment did not make; `unreadable`: no read succeeded in the last quiet period.
+   */
+  outcome: "settled" | "foreign" | "unreadable";
   row: RepullRow;
   reads: number;
   moves: number;
   unreadable: number;
+  /** Why the last read that failed failed, in fixed words; null when none did. */
+  cause: string | null;
 }
 
 /** Watch the release branch of a `pr_open` row until it settles; see the module comment. */
@@ -68,7 +78,14 @@ export async function settleReleaseHead(args: {
   }
   const ref = releaseRefOf(row.to_version);
   const started = now();
-  let lastMove = started;
+  /**
+   * Since when successful reads have seen the branch where the row records it: the first read
+   * that found it, then each move recorded. The branch is quiet only over what was read.
+   */
+  let quietFrom: number | null = null;
+  /** When a read last found the recorded head (or recorded a move), or null before one did. */
+  let lastGood: number | null = null;
+  let cause: string | null = null;
   let reads = 0;
   let moves = 0;
   let unreadable = 0;
@@ -77,12 +94,16 @@ export async function settleReleaseHead(args: {
     let head: string | null = null;
     try {
       head = (await originRefs(args.scratch, [ref])).get(ref) ?? null;
-    } catch {
-      head = null;
+      if (head === null) cause = "branch-absent";
+    } catch (err) {
+      cause = causeOf(err);
     }
     if (head === null) {
       unreadable++;
-    } else if (head !== row.head_sha) {
+    } else if (head === row.head_sha) {
+      lastGood = now();
+      quietFrom ??= lastGood;
+    } else {
       const verdict = await acceptsHead({
         work: args.scratch.dir,
         from: row.synth_sha as string,
@@ -91,24 +112,41 @@ export async function settleReleaseHead(args: {
         env: args.scratch.env,
       });
       if (verdict === "foreign") {
-        const message = `${row.branch} moved by a commit enrichment does not make while the run settled it: the pull request is left open at the recorded head, and its record has to be abandoned (no command to abandon a record is built yet).`;
+        const message = `${row.branch} moved by a commit enrichment does not make while the run settled it: the pull request is left open at the recorded head, and the record is to be abandoned.`;
         await recordStepError(row, `${AUTOMATIC_ERROR_PREFIX}head-foreign] ${message}`, args.out);
-        return { outcome: "foreign", row, reads, moves, unreadable };
+        return { outcome: "foreign", row, reads, moves, unreadable, cause };
       }
       if (verdict === "unreadable") {
         unreadable++;
+        cause = "branch-unreadable";
       } else {
         row = await recordMove(row, head);
         moves++;
-        lastMove = now();
+        lastGood = now();
+        quietFrom = lastGood;
         args.out(`${row.branch} moved by enrichment; re-pull #${row.id} records the new head.`);
       }
     }
     const t = now();
-    if (t - lastMove >= args.opts.quietMs || t - started >= args.opts.maxWaitMs) break;
+    const quiet =
+      quietFrom !== null && lastGood !== null && lastGood - quietFrom >= args.opts.quietMs;
+    if (quiet || t - started >= args.opts.maxWaitMs) break;
     await sleep(Math.max(0, Math.min(args.opts.pollMs, args.opts.maxWaitMs - (t - started))));
   }
-  return { outcome: "settled", row, reads, moves, unreadable };
+  // Settled only on what was read: a read must have succeeded in the last quiet period.
+  if (lastGood === null || lastGood < now() - args.opts.quietMs) {
+    const message = `${row.branch} could not be read while the run settled it (${cause ?? "unknown"}): the pull request is open at the recorded head, and a later run settles it again.`;
+    await recordStepError(row, `${AUTOMATIC_ERROR_PREFIX}head-unreadable] ${message}`, args.out);
+    return { outcome: "unreadable", row, reads, moves, unreadable, cause };
+  }
+  return { outcome: "settled", row, reads, moves, unreadable, cause };
+}
+
+/** A failed read's cause in fixed words: a refusal's code, or the error's class. */
+function causeOf(err: unknown): string {
+  if (err instanceof ExecuteRefused) return err.code;
+  const name = err instanceof Error ? err.name : "";
+  return /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(name) ? name : "error";
 }
 
 /** The head moved by enrichment: the `pr_open` self-edge resume records for it. */
