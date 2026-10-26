@@ -20,7 +20,7 @@ This release has eight migrations, 0100, 0101, 0102, 0103, 0107, 0108, 0109 and 
 It sets no new Worker secret.
 The production Worker configuration adds a `send_email` binding restricted to `noreply@` and `support@nemar.org`, a `MAIL_INBOUND` R2 bucket binding, the `EMAIL_OUTBOX` queue producer, consumers for the outbox and events queues with a dead-letter queue each, and the variable `MAIL_RETENTION_DAYS` (`730`); it does not set `EMAIL_PROVIDER`, and `REPLY_TO` changes to `support@nemar.org`.
 The queues, the bucket and the sending onboarding of the domain have to exist before the deploy, or it fails on a missing resource; they were created and checked before this release.
-One workflow changes: `onboard-openneuro.yml` gains an optional input, and it is deployed by copying it into `nemarDatasets/.github` (ADR 0020), so the copy there has to be merged first (the parity test compares the two byte for byte).
+One workflow changes: `onboard-openneuro.yml` gains an optional input, and it is deployed by copying it into `nemarDatasets/.github` (ADR 0020), and the copy there already matches this one byte for byte, which the parity test checks.
 The dataset CI shims change in the backend template and reach a dataset repository only when that repository's workflows are next synced.
 
 ### Added
@@ -55,7 +55,7 @@ The dataset CI shims change in the backend template and reach a dataset reposito
 - **`nemar admin mail` works tickets from the command line (Phase 4, #1940).**
   Subcommands are `list`, `show`, `reply`, `note`, `assign`, `status`, `close`, `escalate`, `queues` (list and set), `away` (show, set, clear), `reprocess` and `summarize`; `--json` is available on each, with the API body on stdout and `{error, code}` on stderr.
   `reply` and `note` always send an `Idempotency-Key`, print it before sending, and after a lost or uncertain send say to retry with it; a reply with no terminal and no `--yes` is refused and sends nothing.
-  Exit codes are 0 for success, 1 for an API or network error, 2 for a usage error or a refused confirmation, and 3 for a ticket that is not found or not visible.
+  Exit codes are 0 for success, 1 for an API or network error, 2 for a usage error or a refused confirmation, 3 for a ticket that is not found or not visible, and 4 for an action the caller is not permitted to take.
   Users may be named as `me`, `none`, an id or a username.
   Ticket text comes from outside, so human output escapes every control and bidirectional character except newlines and tabs; `--json` stays verbatim.
 - **Unread tickets are tracked per administrator.**
