@@ -14,7 +14,9 @@
  *  - only the record's own release branch and pull request are tolerated in the new plan's
  *    preflight, judged from what that check read: another release branch, another release pull
  *    request, or a list of pull requests not read whole keeps it not executable, and a record
- *    that has pushed nothing yet owns no release branch;
+ *    that has pushed nothing yet owns no release branch; with no pull request recorded, exactly
+ *    one open pull request of its branch from the dataset's own repository is its own, and a
+ *    fork's is never;
  *  - a tag C plan that is not executable for anything else (a submodule, an unpinned key, a second
  *    failing check) is refused with only tag B's own branch and pull request present;
  *  - an automatic record, a record of the same tag or of another `from_tag`, a record past its merge
@@ -246,6 +248,68 @@ describe.skipIf(!awsInstalled)("execute --supersede", () => {
     const run = await supersede(plan);
     await untouched(run, "not-executable");
     expect(run.all).toContain("release branch(es) other than re-pull");
+    // The branch is named, so the administrator knows which to delete.
+    expect(run.all).toContain("(release/v1.0.1)");
+  });
+
+  /** Tag B's record as a run left it that pushed its branch and opened its pull request, unrecorded. */
+  const registeredWithoutPull = () =>
+    w.db().run("UPDATE upstream_repulls SET status = 'registered', pr_number = NULL");
+
+  test("with no pull request recorded, the one open pull request of tag B's branch is its own", async () => {
+    const pr = w.row().pr_number as number;
+    await makeTagC();
+    const plan = await planC();
+    registeredWithoutPull();
+    const run = await w.cli([
+      "repull",
+      "execute",
+      plan,
+      "--supersede",
+      "--until",
+      "planned",
+      "--yes",
+    ]);
+    expect(run.exitCode, run.all).toBe(0);
+    const [b, c] = rows();
+    expect(b).toMatchObject({ status: "superseded", to_tag: TAG_B });
+    expect(c).toMatchObject({ status: "planned", to_tag: TAG_C });
+    expect(w.gh.pulls[`${w.fx.datasetId}#${pr}`]?.state).toBe("closed");
+  });
+
+  test("with no pull request recorded, a fork's pull request of tag B's branch name is not its own", async () => {
+    await makeTagC();
+    const plan = await planC();
+    const fork = (w.row().pr_number as number) + 10;
+    registeredWithoutPull();
+    w.gh.pulls[`${w.fx.datasetId}#${fork}`] = {
+      sha: w.row().head_sha as string,
+      headRef: "release/v2.0.0",
+      headRepo: "alice/on099999-fork",
+      author: "alice",
+    };
+    const run = await supersede(plan);
+    expect(run.exitCode, run.all).toBe(1);
+    expect(run.all).toContain("not-executable");
+    expect(run.all).toContain(`another release pull request is open (#${fork})`);
+    expect(patches()).toEqual([]);
+    expect(await hasRef("refs/heads/release/v2.0.0")).toBe(true);
+  });
+
+  test("with no pull request recorded, two open pull requests of tag B's branch are not judged", async () => {
+    await makeTagC();
+    const plan = await planC();
+    const second = (w.row().pr_number as number) + 10;
+    registeredWithoutPull();
+    w.gh.pulls[`${w.fx.datasetId}#${second}`] = {
+      sha: w.row().head_sha as string,
+      headRef: "release/v2.0.0",
+    };
+    const run = await supersede(plan);
+    expect(run.exitCode, run.all).toBe(1);
+    expect(run.all).toContain("not-executable");
+    expect(run.all).toContain("so which is its own is not known");
+    expect(patches()).toEqual([]);
   });
 
   test("another release pull request, whose branch is gone, keeps the plan not executable", async () => {

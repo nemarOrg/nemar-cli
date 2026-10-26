@@ -169,6 +169,36 @@ async function pullsOfBranch(
   return out;
 }
 
+/**
+ * A merged pull request of the release branch that is provably not the record's own (the record
+ * names another number): a release of that version merged outside the re-pull. Resume records only
+ * the record's own merge, so this says so instead of sending the administrator there; nothing is
+ * ended over it, because whether the record's work reached `main` that way is not known.
+ */
+function foreignMergedRefusal(
+  ctx: EndContext,
+  n: number,
+  branch: string,
+  recorded: number,
+): ExecuteRefused {
+  return stop(
+    "foreign-pull-request-merged",
+    `GitHub says pull request #${n} of ${branch} merged, and it is not this re-pull's (it recorded #${recorded}): that version was released outside the re-pull, which resume does not record. Nothing was closed or ended; read the dataset's history on GitHub (nemarDatasets/${ctx.datasetId}) to see what merged before this record is ended.`,
+  );
+}
+
+/** A merged pull request of the branch: the record's own unless it provably names another. */
+function mergedPullRefusal(
+  ctx: EndContext,
+  n: number,
+  branch: string,
+  recorded: number | null,
+): ExecuteRefused {
+  return recorded !== null && n !== recorded
+    ? foreignMergedRefusal(ctx, n, branch, recorded)
+    : mergedRefusal(ctx, n);
+}
+
 function mergedRefusal(ctx: EndContext, n: number, afterWrite = false): ExecuteRefused {
   return (afterWrite ? refused : stop)(
     "pull-request-merged",
@@ -322,7 +352,7 @@ async function surveyN0(ctx: EndContext, row: RepullRow): Promise<EndPlan> {
         env: scratch.env,
       })) === "ok");
   for (const p of await pullsOfBranch(ctx, branch, row.pr_number)) {
-    if (p.state === "merged") throw mergedRefusal(ctx, p.number);
+    if (p.state === "merged") throw mergedPullRefusal(ctx, p.number, branch, row.pr_number);
     if (p.state === "open" && (p.number === row.pr_number || (await ours(p.headSha)))) {
       plan.close.push(p.number);
     }
@@ -405,7 +435,9 @@ async function surveyN1(ctx: EndContext, row: RepullRow): Promise<EndPlan> {
             : "kept-foreign",
   };
   for (const p of await pullsOfBranch(ctx, branch, row.patch_pr_number)) {
-    if (p.state === "merged") throw mergedRefusal(ctx, p.number);
+    if (p.state === "merged") {
+      throw mergedPullRefusal(ctx, p.number, branch, row.patch_pr_number);
+    }
     const ours = p.number === row.patch_pr_number || (verdict === "ok" && p.headSha === head);
     if (p.state === "open" && ours) plan.close.push(p.number);
   }

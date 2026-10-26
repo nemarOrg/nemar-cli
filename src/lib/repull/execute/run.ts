@@ -79,6 +79,7 @@ import { nemarRemoteOf } from "../plan.js";
 import type { ReleaseFacts } from "../preflight.js";
 import {
   type Env,
+  NEMAR_ORG,
   openNeuroGraphqlUrl as openNeuroUrlFromEnv,
   originUrl,
   readRemoteLog,
@@ -736,9 +737,11 @@ interface SupersedeContext {
  * Whether the release branches and the open release pull requests the new plan's preflight read are
  * the superseded record's own and nothing else, judged from what that check read (nothing is read
  * twice): at a status at which the old record may have pushed its branch (`registered`, `pr_open`,
- * `gates_clear`), its `release/v<N.0.0>` at most and its recorded pull request (at `registered`, one
- * of that branch); at an earlier status the old record pushed nothing, so any release branch or
- * release pull request is someone else's. A list that was not read whole is no.
+ * `gates_clear`), its `release/v<N.0.0>` at most and its recorded pull request; with no pull request
+ * recorded (`registered`, before the open was recorded), exactly one open pull request of that
+ * branch from the dataset's own repository, never a fork's. At an earlier status the old record
+ * pushed nothing, so any release branch or release pull request is someone else's. A list that was
+ * not read whole is no. A refusal names the branches, so the administrator knows which to remove.
  */
 export function onlyOwnRelease(
   old: RepullRow,
@@ -748,11 +751,12 @@ export function onlyOwnRelease(
   const pushed = BRANCH_PUSHED.includes(old.status);
   const others = facts.branches.filter((b) => !(pushed && b === `refs/heads/${branch}`));
   if (others.length > 0) {
+    const named = others.map((b) => b.replace(/^refs\/heads\//, "")).join(", ");
     return {
       ok: false,
       why: pushed
-        ? `${others.length} release branch(es) other than re-pull #${old.id}'s own exist`
-        : `re-pull #${old.id} is ${old.status} and pushed no branch, yet ${others.length} release branch(es) exist`,
+        ? `release branch(es) other than re-pull #${old.id}'s own exist (${named}); delete them by hand if they are stale`
+        : `re-pull #${old.id} is ${old.status} and pushed no branch, yet release branch(es) exist (${named})`,
     };
   }
   if (facts.pulls === null) {
@@ -761,15 +765,26 @@ export function onlyOwnRelease(
       why: `the open pull requests were not read whole (${facts.pullsUnread ?? "unread"})`,
     };
   }
-  const foreign = facts.pulls.filter(
+  const own = `${NEMAR_ORG}/${old.dataset_id}`;
+  const release = facts.pulls.filter((p) => p.headRef.startsWith("release/"));
+  const ours = release.filter(
     (p) =>
-      p.headRef.startsWith("release/") &&
-      !(pushed && p.headRef === branch && (old.pr_number === null || p.number === old.pr_number)),
+      pushed &&
+      p.headRef === branch &&
+      p.headRepo === own &&
+      (old.pr_number === null || p.number === old.pr_number),
   );
+  const foreign = release.filter((p) => !ours.includes(p));
   if (foreign.length > 0) {
     return {
       ok: false,
       why: `another release pull request is open (#${foreign[0]?.number})`,
+    };
+  }
+  if (ours.length > 1) {
+    return {
+      ok: false,
+      why: `re-pull #${old.id} recorded no pull request, and ${ours.length} are open of ${branch} (#${ours.map((p) => p.number).join(", #")}), so which is its own is not known`,
     };
   }
   return { ok: true };

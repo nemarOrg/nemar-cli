@@ -836,6 +836,7 @@ export const DISPATCH_CODES = [
   "patch-main-moved",
   "patch-tree-mismatch",
   "merge-main-moved",
+  "foreign-pull-request-merged",
   "take-ours-invalid",
   "wait-for-release",
   "supersede-automatic",

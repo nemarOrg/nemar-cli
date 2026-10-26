@@ -14,6 +14,8 @@
  *  - between the merge and the release abandon is refused (`wait-for-release`);
  *  - a held claim to merge is refused (`merge-claim-held`);
  *  - the recorded pull request is read by its number even when the list by head misses it;
+ *  - a merged pull request of the branch that is not the record's is named as such, not sent to
+ *    resume, and nothing is ended;
  *  - a merge found after the close stops the record from being ended;
  *  - a branch that moved after it was judged the re-pull's is not deleted (the delete is leased);
  *  - a page of 100 or more pull requests is not read as whole, and nothing is closed;
@@ -155,6 +157,25 @@ describe.skipIf(!awsInstalled)("abandon", () => {
     expect(run.exitCode, run.all).toBe(1);
     expect(run.all).toContain("pull-request-merged");
     expect(w.row().status).toBe("pr_open");
+    expect(await hasRef("refs/heads/release/v2.0.0")).toBe(true);
+  });
+
+  test("a merged pull request of the branch that is not the record's says so, and nothing is ended", async () => {
+    const other = (w.row().pr_number as number) + 10;
+    w.gh.pulls[`${w.fx.datasetId}#${other}`] = {
+      sha: w.row().base_sha,
+      headRef: "release/v2.0.0",
+      state: "closed",
+      merged: true,
+      author: "alice",
+    };
+    const run = await abandon();
+    expect(run.exitCode, run.all).toBe(1);
+    expect(run.all).toContain("foreign-pull-request-merged");
+    expect(run.all).toContain(`it recorded #${w.row().pr_number}`);
+    expect(run.all).not.toContain("records the merge");
+    expect(w.row().status).toBe("pr_open");
+    expect(w.gh.seen.filter((s) => s.method === "PATCH")).toEqual([]);
     expect(await hasRef("refs/heads/release/v2.0.0")).toBe(true);
   });
 
