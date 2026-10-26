@@ -393,7 +393,7 @@ async function check(
   if (!isOwnRepo(live.value.headRepo, id) || !isOwnRepo(live.value.baseRepo, id)) {
     return stopAt(
       "not-ready",
-      `Pull request #${prNumber} is not from and into ${DATASETS_ORG}/${id} itself (its head is ${live.value.headRepo ?? "a repository GitHub no longer names"}): a fork's pull request is never merged as a re-pull's. Nothing was claimed or merged.`,
+      `Pull request #${prNumber} is not from and into ${DATASETS_ORG}/${id} itself (its head is ${live.value.headRepo ?? "a repository GitHub no longer names"}, its base ${live.value.baseRepo ?? "a repository GitHub no longer names"}): a fork's pull request is never merged as a re-pull's. Nothing was claimed or merged.`,
     );
   }
   if (live.value.headSha !== head) {
