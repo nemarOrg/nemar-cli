@@ -960,6 +960,21 @@ describe("read", () => {
     expect((await call("GET", "/repulls?dataset=xx090122&open=true")).body.repulls).toHaveLength(1);
   });
 
+  test("origin filters the list, and any other origin is refused", async () => {
+    seedRow("planned", { dataset_id: "xx090121", origin: "automatic" });
+    seedRow("planned", { dataset_id: "xx090122" });
+    seedRow("complete", { dataset_id: "xx090123", origin: "automatic" });
+    const ids = async (q: string) =>
+      (await call("GET", `/repulls?${q}`)).body.repulls.map((r: Row) => r.id);
+    expect(await ids("origin=automatic")).toEqual([3, 1]);
+    expect(await ids("origin=administrator")).toEqual([2]);
+    expect(await ids("origin=automatic&open=1")).toEqual([1]);
+    for (const bad of ["Automatic", "auto", "", "automatic,administrator"]) {
+      const res = await call("GET", `/repulls?origin=${encodeURIComponent(bad)}`);
+      expect([bad, res.status, res.body.code]).toEqual([bad, 400, "invalid-query"]);
+    }
+  });
+
   test("a bad query is 400, and a limit past 50 is refused rather than clamped", async () => {
     for (const q of ["limit=0", "limit=51", "limit=x", "open=maybe", "after=x", "dataset=bad"]) {
       expect([q, (await call("GET", `/repulls?${q}`)).status]).toEqual([q, 400]);

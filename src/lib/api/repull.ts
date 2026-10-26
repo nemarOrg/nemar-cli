@@ -13,7 +13,12 @@ import type {
   RepullSchedulerRow,
   RepullSwitchesReport,
 } from "../../../shared/repull-observability.js";
-import type { DispatchStatus, RepullRow, RepullStatus } from "../../../shared/repull-state.js";
+import type {
+  DispatchStatus,
+  RepullOrigin,
+  RepullRow,
+  RepullStatus,
+} from "../../../shared/repull-state.js";
 import { request } from "./client.js";
 import { ApiError } from "./errors.js";
 
@@ -62,11 +67,18 @@ export async function getRepull(id: number): Promise<RepullRow> {
 
 /** `GET /admin/repulls`: newest first, a page of at most 50 (`next_after` continues it). */
 export async function listRepulls(
-  q: { dataset?: string; open?: boolean; after?: number; limit?: number } = {},
+  q: {
+    dataset?: string;
+    open?: boolean;
+    origin?: RepullOrigin;
+    after?: number;
+    limit?: number;
+  } = {},
 ): Promise<{ repulls: RepullRow[]; next_after: number | null }> {
   const params = new URLSearchParams();
   if (q.dataset) params.set("dataset", q.dataset);
   if (q.open) params.set("open", "1");
+  if (q.origin) params.set("origin", q.origin);
   if (q.after !== undefined) params.set("after", String(q.after));
   if (q.limit !== undefined) params.set("limit", String(q.limit));
   const query = params.toString() ? `?${params.toString()}` : "";

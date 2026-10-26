@@ -448,6 +448,10 @@ export function patchVersionOf(toVersion: string): string | null {
   return `${major}.0.1`;
 }
 
+/** Who opened a re-pull: the automatic path or an administrator (migration 0105's CHECK). */
+export const REPULL_ORIGINS = ["automatic", "administrator"] as const;
+export type RepullOrigin = (typeof REPULL_ORIGINS)[number];
+
 /** The row as the API speaks it: every column, `counts` parsed. */
 export interface RepullRow {
   id: number;
@@ -461,7 +465,7 @@ export interface RepullRow {
   patch_version: string | null;
   plan_digest: string;
   planner: number;
-  origin: "automatic" | "administrator";
+  origin: RepullOrigin;
   actor_user_id: number;
   status: RepullStatus;
   base_sha: string;

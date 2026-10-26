@@ -97,6 +97,7 @@ import {
   PULL_REQUEST_COLUMNS,
   REPULL_PULL_REQUESTS,
   REPULL_STATUSES,
+  type RepullOrigin,
   type RepullPullRequest,
   type RepullRow,
   type RepullStatus,
@@ -158,13 +159,14 @@ export const REPULL_OPEN_FOR_DATASET_SQL = `SELECT * FROM upstream_repulls WHERE
 
 /**
  * Keyset on `id DESC`. `?1` dataset or NULL, `?2` 1 for open rows only, `?3` the last id seen or
- * NULL, `?4` the page size. Never an `IN (...)` list: D1 binds at most 100 parameters.
+ * NULL, `?4` origin or NULL, `?5` the page size.
  */
 export const REPULL_LIST_SQL = `SELECT * FROM upstream_repulls
   WHERE (?1 IS NULL OR dataset_id = ?1)
     AND (?2 = 0 OR status NOT IN (${TERMINAL_LIST}))
     AND (?3 IS NULL OR id < ?3)
-  ORDER BY id DESC LIMIT ?4`;
+    AND (?4 IS NULL OR origin = ?4)
+  ORDER BY id DESC LIMIT ?5`;
 
 /**
  * The next attempt number for a tag, and how many earlier attempts forbid another: any that did
@@ -404,12 +406,12 @@ export async function getRepull(db: D1Database, id: number): Promise<RepullRow |
 
 export async function listRepulls(
   db: D1Database,
-  q: { dataset?: string; open?: boolean; after?: number; limit?: number },
+  q: { dataset?: string; open?: boolean; after?: number; origin?: RepullOrigin; limit?: number },
 ): Promise<RepullRow[]> {
   const limit = Math.min(Math.max(q.limit ?? REPULL_PAGE_DEFAULT, 1), REPULL_PAGE_MAX);
   const { results } = await db
     .prepare(REPULL_LIST_SQL)
-    .bind(q.dataset ?? null, q.open ? 1 : 0, q.after ?? null, limit)
+    .bind(q.dataset ?? null, q.open ? 1 : 0, q.after ?? null, q.origin ?? null, limit)
     .all<RawRow>();
   return results.map(parseRow);
 }
