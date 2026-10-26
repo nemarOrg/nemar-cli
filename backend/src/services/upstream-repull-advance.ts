@@ -727,7 +727,9 @@ async function startGateWork(
  * `pr_open -> gates_clear` for a row the rule found clean, through the record's own transition and
  * on the row as the tick read it (its revision), as the system user. The transition reads the
  * dataset fences, the screen bound to the row and GitHub's live head again, and re-asserts the
- * screen's verdict in the statement that writes; a refusal writes nothing and is counted.
+ * screen's verdict in the statement that writes. A refusal writes no edge: the rule and the record
+ * disagree, which should not happen, so it is counted by its code, logged at error level and held
+ * `gates-refused`, unless the row moved meanwhile (then the hold is not written either).
  */
 async function clearGates(t: Tick, row: RepullRow, head: string): Promise<void> {
   const { env, r } = t;
@@ -741,7 +743,7 @@ async function clearGates(t: Tick, row: RepullRow, head: string): Promise<void> 
   const done = isRefusal(prepared) ? prepared : await commitTransition(env.DB, prepared);
   if (isRefusal(done)) {
     r.refused[done.code] = (r.refused[done.code] ?? 0) + 1;
-    return;
+    return observe(t, row, "gates-refused");
   }
   r.gatesCleared++;
 }
@@ -848,14 +850,15 @@ export async function runRepullAdvanceCron(
 
 /**
  * The tick's one log line, or null when it changed nothing and nothing failed, so a tick that only
- * found the same rows waiting for the same reasons says nothing. Error level when anything failed.
+ * found the same rows waiting for the same reasons says nothing. Error level when anything failed or
+ * a clean row's edge was refused.
  * A resume whose answer was lost is an error too, as the scheduler's is. Counts and fixed words only:
  * no dataset id, no message.
  */
 export function repullAdvanceLogLine(
   r: AdvanceTickResult,
 ): { level: "info" | "error"; line: string } | null {
-  const failed = r.errors.length > 0 || r.unconfirmed > 0;
+  const failed = r.errors.length > 0 || r.unconfirmed > 0 || Object.keys(r.refused).length > 0;
   const acted = r.screensStarted + r.reviewsStarted + r.gatesCleared + r.resumed + r.holdsChanged;
   const declined = Object.keys(r.refused).length + Object.keys(r.reviewRefused).length;
   if (!failed && acted === 0 && declined === 0) return null;

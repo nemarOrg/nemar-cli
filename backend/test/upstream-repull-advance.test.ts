@@ -1086,9 +1086,22 @@ describe("the gates of an automatic pull request", () => {
     });
     const r = await tick(env({}, withdrawing));
     expect(r).toMatchObject({ gatesCleared: 0, refused: { withdrawn: 1 } });
-    expect(rowOf(id)).toMatchObject({ status: "pr_open", gates_sha: null });
+    expect(rowOf(id)).toMatchObject({
+      status: "pr_open",
+      gates_sha: null,
+      hold_reason: "gates-refused",
+    });
     expect(auditsOf("repull_transition", id)).toEqual([]);
     expect(DISPATCH_CODES as readonly string[]).toContain("withdrawn");
+    expect(repullAdvanceLogLine(r)).toMatchObject({ level: "error" });
+    expect(repullAdvanceLogLine(r)?.line).toContain("refused=withdrawn:1");
+    // Refused again on the next tick: the hold stands, and the log says so again.
+    db.run("UPDATE datasets SET withdrawn_at = NULL");
+    reads = 0;
+    const again = await tick(env({}, withdrawing));
+    expect(again).toMatchObject({ holdsChanged: 0, refused: { withdrawn: 1 } });
+    expect(holdAudits(id)).toHaveLength(1);
+    expect(repullAdvanceLogLine(again)?.level).toBe("error");
   });
 
   test("a screen the Worker cannot dispatch is an error the next tick dispatches again", async () => {

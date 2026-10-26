@@ -894,7 +894,10 @@ export const DISPATCH_FINAL_CODES = [
  * `resume-exhausted` (a row that
  * stalled before its pull request opened was dispatched as often as the automatic path dispatches
  * one), `resume-refused` (its last run refused, so another would refuse again), and the later
- * slices' `finish-exhausted` and `merge-refused`. A hold is an observation, never a transition.
+ * slices' `finish-exhausted` and `merge-refused`; and `gates-refused`, a row machine clean found
+ * clean whose edge into `gates_clear` the record's own transition refused (the refusal's code is in
+ * the advance tick's log), which should not happen and is seen when it does. A hold is an
+ * observation, never a transition.
  */
 export const REPULL_HOLD_REASONS = [
   "not-production",
@@ -934,6 +937,7 @@ export const REPULL_HOLD_REASONS = [
   "review-exempt",
   "review-unreadable",
   "not-clean",
+  "gates-refused",
   "cap-exhausted",
   "cap-unreadable",
   "claim-held",
