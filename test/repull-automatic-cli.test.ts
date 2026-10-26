@@ -35,7 +35,8 @@
  *    refused and reported (the token's report ends the dispatch); a tenth key, no event file, an
  *    unknown option and an API that is not production's are refused and NOT reported by the CLI,
  *    which ends with the failed result line (the workflow's backstop may report a shape-valid one);
- *  - a rerun finds its dispatch started and goes on;
+ *  - a rerun finds its dispatch started and goes on, and a resume of a record left at `prepared`
+ *    before its copy plans to the record's digest and opens its pull request;
  *  - an administrator's record of the same plan is never taken up by a run, and a create that
  *    answers with an administrator's or another record is refused;
  *  - an enrichment-shaped commit on the release branch while the run settles is recorded, and any
@@ -599,6 +600,45 @@ describe.skipIf(!awsInstalled)("an automatic run opens its pull request", () => 
     expect(w.apiWrites).toEqual(["POST /webhooks/repull-state", "POST /webhooks/repull-state"]);
     expect(ghWrites()).toEqual([]);
     expect(s3Writes()).toEqual([]);
+  });
+
+  test("a resume of a record left at prepared, before its copy, plans to its digest and opens", async () => {
+    const c = await claimOpen();
+    writeEvent(c);
+    expect((await auto(planArgs(c))).exitCode).toBe(0);
+    const first = JSON.parse(readFileSync(join(runner, "plan.json"), "utf8")).digest as string;
+    // The run stopped after the preparation, its uploads in the bucket and nothing copied.
+    const admin = await w.cli(
+      ["repull", "execute", join(runner, "plan.json"), "--until", "prepared", "--yes"],
+      {},
+      undefined,
+      SOURCE_ENTRY,
+    );
+    expect(admin.exitCode, admin.all).toBe(0);
+    expect(s3Writes().length).toBeGreaterThan(0);
+    w.db().run("UPDATE upstream_repulls SET origin = 'automatic'");
+    w.db().run(
+      "UPDATE upstream_repull_dispatches SET status = 'failed', code = 'runner-failed', nonce = NULL WHERE id = ?",
+      [c.id],
+    );
+    const [row] = repullRows();
+    expect(row?.status).toBe("prepared");
+    const resume = await claimOpenDispatch(w.bindings(), {
+      datasetId: w.fx.datasetId,
+      upstreamDs: UPSTREAM_ID,
+      fromTag: TAG_A,
+      toTag: TAG_B,
+      repullId: row?.id ?? 0,
+    });
+    if (!("id" in resume)) throw new Error(`nothing was claimed: ${JSON.stringify(resume)}`);
+    writeEvent(resume, { repullId: row?.id ?? 0 });
+    expect((await auto(planArgs(resume))).exitCode).toBe(0);
+    expect(JSON.parse(readFileSync(join(runner, "plan.json"), "utf8")).digest).toBe(first);
+    const exec = await auto(executeArgs(resume));
+    expect(exec.exitCode, exec.all).toBe(0);
+    expectQuiet(exec, resume, "opened");
+    expect(repullRows()).toMatchObject([{ id: row?.id, status: "pr_open" }]);
+    expect(dispatchRow(resume.id)).toMatchObject({ status: "opened", repull_id: row?.id });
   });
 
   test("execute refuses a plan with a correction from its live plan, before the record", async () => {

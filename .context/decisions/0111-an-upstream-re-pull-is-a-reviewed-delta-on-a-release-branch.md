@@ -1642,23 +1642,39 @@ Four annotations are added to earlier text, on the record's header, on the Decis
 ### The App token's hour
 
 - An installation token lasts an hour, and the job mints it before it installs anything, so no code installed later runs before the App's private key is used.
-  The copy runs inside that hour, after the install, the plan and the preparation and before the registration, the push and the pull request, which need the token.
+  The step just before the mint notes the time, in epoch seconds (`NEMAR_REPULL_TOKEN_SINCE`), so the hour the run counts starts no later than the token's own.
+  Everything the run does with the token, the registration, the push, the pull request and the settle of the release head, ends inside the first 55 minutes of it (`APP_TOKEN_USABLE_SECONDS`); the last five are kept for the clocks and the last calls.
+  A run that cannot read that time, or reads one more than five minutes ahead of its own clock, refuses before it reads anything (`auto-token-clock`).
+- The 55 minutes are shared out ahead of time.
+  The settle keeps six, its five-minute quiet window and a minute of reads (`AUTO_SETTLE_RESERVE_SECONDS`).
+  The install, the two plans, the preparation, the registration, the push and the pull request keep 29, an allowance no measurement here bounds (`AUTO_OTHER_STEPS_SECONDS`), five of them after the copy (`AUTO_AFTER_COPY_SECONDS`).
+  The copy has the 20 that are left (`AUTO_COPY_BUDGET_SECONDS`, derived from the others, never set on its own).
+  An earlier version of this slice gave the copy 20 minutes and the other steps the remaining 40 of a full hour, and left the settle out of it; the settle now has its share inside the hour.
 - So the automatic path refuses a plan whose copy would take more than 20 minutes (`auto-copy-too-long`), at the plan and again from the live plan at execute, before the copy starts, as it refuses a copy over 1 TiB; it is one of the words that end the automatic path for a tag, and an administrator may still re-pull such a dataset by hand.
   The estimate is the copy's bytes and the preparation's uploads at 30 MiB/s, the server-side CopyObject rate ADR 0064 records as measured into NEMAR's bucket, with no credit for the eight copies in flight, plus a second an object, three `aws` calls an object having measured about 0.29 s each against a local stand-in; a count the plan does not state is unknown and refuses.
-  The other forty minutes of the hour are an allowance for the install, the two plans, the preparation and the push, which no measurement here bounds.
   The Worker does not check this bound: it does not receive the object count.
+- The time already spent is checked as well, on the run's clock against the noted mint: the plan, the execute before its record, and each of the copy, the registration and the pull request at its start refuse (`auto-token-hour`) when what is left of the 55 minutes is less than the step's own estimate (the copy's, or none) with the five minutes after the copy and the settle's six.
+  A refusal before the record writes nothing; one at a step leaves the record where it stopped, with `[<step>:auto-token-hour]` on it, before that step wrote anything, so no push is begun that the hour could not finish.
+  It is not one of the words that end the automatic path for a tag: a slow install is a fact about the run, not about the tag.
+- The settle ends at the end of the 55 minutes, whatever `--settle-minutes` asks, and reads nothing once they are over; a settle that they end before the branch was seen quiet is `head-unreadable`, with the cause `token-hour`, never a token error.
 - A run that fails while GitHub answers its App token 401 is reported `token-expired`, whatever its step called the failure, so a run that outlived its token is never reported as a refusal it did not make; the record keeps the step's own error.
-  A later dispatch's run, with a token of its own, can take it up only as the next section allows.
+  GitHub is not asked when the run's word says why already: the token on the command line (whose report must go first), the token hour's own two words, and a settle's outcome (`head-unreadable`, `head-foreign`), a fact about a pull request that is open whatever the token's state.
+- Once an open run wrote its record, `token-expired` is reported `refused`, and it is one of the words that end the automatic path for the tag (`DISPATCH_FINAL_CODES`): the registration and the pull request are the steps that use the token, both after the copy, and a later run would plan again over what the copy wrote and meet a record it cannot take up (the last section but one), so an administrator takes the record on.
+  A token GitHub refuses earlier, at the preparation's clone of origin, which an aged token cannot be, ends the path the same way, the safe direction.
+  Before the record exists it is reported `failed`, which ends nothing: a later dispatch's token may yet be taken.
+  An earlier version of this slice reported it `failed` throughout and said a later dispatch's run could take the record up; past the copy none can.
+- Each command's quiet line says, in whole seconds, how long the token had been held when the command started (`token_age_s`: the install and the sign-in for `plan`, and the plan as well for `execute`), how long each step took (`plan_s`; `replan_s`, `clone_s`, `prepare_s`, `copy_s`, `register_s`, `pr_s` and `settle_s`) and the command itself (`run_s`), so the first production runs can check the allowance against what the steps took.
 
 ### The log is public
 
 - In automatic mode the CLI prints only lines of the form `repull-auto: <event> <key>=<value>`, and ends with one result line, `repull-auto: result phase=<phase>`, with `code=<word>` when the run refused or failed.
   What keeps a value out of the log is that every value is chosen by the code, a count, a status or a word from a closed list, never taken from the dataset, the plan, a message or the environment; the grammar only refuses what could not be one of those.
 - Every other write of the process is swallowed from the moment the entry point sees the option: the libraries' progress lines, their warnings, a usage error and the exit hint; the notices request, which would carry the NEMAR key, is not made.
-  An uncaught exception or an unhandled rejection, which the runtime would print with its message and a source excerpt, ends the run instead, failed, with the fixed result line.
+  An uncaught exception or an unhandled rejection, which the runtime would print with its message and a source excerpt, ends the run instead, with the fixed lines, and exits 1 whatever happens while it writes them.
+  The run ends `failed`, unless the Worker had already stored a terminal report: then the last lines say the report stands (`repull-auto: report-stands phase=<phase>`) and repeat what was stored, which is what the dispatch's record holds and what the backstop, finding the marker, leaves alone.
   Subprocesses print nothing: every git, git-annex and aws child runs with its output piped, which reaches the console only under `--verbose`, and the automatic mode refuses `--verbose` and `--debug` (`auto-verbose`).
 - The plan file and the work clones never leave the runner: no artifact is uploaded, `--json`, `--counts` and `--keep-workdir` are refused, and no path, key, file name or subject label is printed.
-- The CLI's sign-in prints nothing and takes the key from its environment, not its command line, and the AWS session's request sends its error nowhere, because an explicit deny names the IAM user and the account.
+- The CLI's sign-in prints nothing, on either stream, and takes the key from its environment, not its command line, and the AWS session's request sends its error nowhere, because an explicit deny names the IAM user and the account.
 - What a run did in detail is the record's, which administrators read: the re-pull's `last_error` and the dispatch's code.
 
 ### The dispatch and its token
@@ -1672,6 +1688,7 @@ Four annotations are added to earlier text, on the record's header, on the Decis
 - A token found on the command line refuses the run (`auto-token-on-argv`), checked before anything that reads a file can refuse instead, and that refusal is reported first, which ends the dispatch and with it the token, since a token in a `run:` line is in the public log.
 - The token and the NEMAR key go to the production API only: a `TEST_API_URL` or a stored `apiUrl` that names anything but production (or a loopback address, for the suites) refuses the run before anything is sent (`auto-api-not-production`), and the CLI does not report it, since the report would go there too; the workflow's last step reports it to the production API.
 - No `run:` script interpolates an expression; the payload reaches the shell through the job's environment only, after the second step checked it.
+- The CLI's report and its probe of the App token refuse a redirect rather than follow it, so neither token is sent wherever an answer points; a report so answered is unanswered, and a probe so answered is not taken as expiry.
 
 ### Production only
 
@@ -1690,29 +1707,35 @@ Four annotations are added to earlier text, on the record's header, on the Decis
 
 ### The settle rule (on "Whether enrichment commits on the release branch move its head")
 
-- Before the run reports its pull request open, it reads the release branch with git, holding the execution's lock, until successful reads have seen the recorded head unchanged for five minutes, or `--settle-minutes` passes (the workflow passes 30).
+- Before the run reports its pull request open, it reads the release branch with git, holding the execution's lock, until successful reads have seen the recorded head unchanged for five minutes, or `--settle-minutes` passes (the workflow passes 30), and never past the App token's 55 minutes (above).
 - Each move is judged by the head rule execution and resume use, the synthesized commit or an enrichment-shaped descendant of it, and recorded as the `pr_open` self-edge resume writes.
 - A move enrichment does not make is `head-foreign`: recorded on the row as the automatic path's error (`[auto:head-foreign]`), the row left at `pr_open`, and the run reported `failed`.
 - A read that cannot be made is counted and tried again, never taken as a move, and never taken as quiet: the branch is settled only when a read succeeded in the last five minutes before the settle ended.
-  Otherwise the run records `[auto:head-unreadable]` on the row, with the last read's cause in fixed words, and reports `failed head-unreadable`, resumable at `pr_open`.
+  Otherwise, and when the token's hour ended the settle before the branch was seen quiet, the run records `[auto:head-unreadable]` on the row, with the cause in fixed words, and reports `failed head-unreadable`.
+  The pull request stays open, and the gates read its head; no automatic run takes a `pr_open` record up again, so an administrator's `resume` is the only way to settle it again.
+  An earlier version of this slice said a later run would take such a record up at `pr_open` and settle it; none does.
 - A head that moves after the run reported holds the pull request for an administrator's `resume`, because the Worker never accepts a head it did not see recorded.
 
 ### The reports, and the backstop
 
 - The run's first command (`plan`, or `resume` for a finish) reports `started`; a rerun of the same run that finds it started (`already-started`) goes on.
-- Its last report is `opened` with the record, `finished`, `refused` (nothing was written, or a plan the path does not take) or `failed` (a step after the record exists, a foreign or unreadable head, a finish that ended short of `complete`, an expired token, or a success the Worker did not store), with a word from the closed list, `no-code` for any other.
+- Its last report is `opened` with the record, `finished`, `refused` (nothing was written, a plan the path does not take, or a token GitHub stopped taking after the record was written) or `failed` (a step after the record exists, a foreign or unreadable head, a finish that ended short of `complete`, a token GitHub stopped taking before the record, or a success the Worker did not store), with a word from the closed list, `no-code` for any other.
   A terminal report the Worker stored leaves a marker on the runner.
 - The job's last step runs always, and when there is no marker it reports the phase and the word of the run's last result line, `failed runner-failed` when there is none, to the production API's literal address, with the token in curl's configuration on its standard input; a dispatch it cannot name is not reported, and nothing it does fails the job.
-- The new words are the run's own: `dispatch-invalid`, `auto-cli-version`, `auto-token-on-argv`, `auto-verbose`, `auto-option`, `finish-incomplete`, `report-unanswered`, `runner-credentials`, `auto-copy-too-long`, `token-expired`, `head-unreadable` and `auto-api-not-production`.
+- The new words are the run's own: `dispatch-invalid`, `auto-cli-version`, `auto-token-on-argv`, `auto-verbose`, `auto-option`, `finish-incomplete`, `report-unanswered`, `runner-credentials`, `auto-copy-too-long`, `token-expired`, `auto-token-hour`, `auto-token-clock`, `head-unreadable` and `auto-api-not-production`.
 
 ### A limit the slice that resumes stalled runs inherits
 
 - A run's plan file and checkpoint do not outlive its runner, so a resume dispatch plans again, and that plan is the record's only while nothing it reads has moved.
   Once a copy has written objects, the bucket listing reads their keys as held, and once the registration has pushed, NEMAR's git-annex branch has moved, so the new plan has another digest and the create answers `repull-in-flight`.
-  The stalled-run slice resumes records from `planned` to `registered`, so a resume of a `copied` or `registered` record refuses; its rule then holds the row `resume-refused`, and an administrator takes it on, the safe direction.
+- The stalled-run slice dispatches a resume for a record anywhere from `planned` to `registered`, and the replanned digest decides which of them a resume can take on.
+  It still works from `planned`, and from `prepared` while no object has been copied: the preparation's own uploads do not change the plan, which the suites measured with a bucket listing that held them, the resume taking the record on to `pr_open`.
+  A record a run left at `prepared` with `[copy:auto-token-hour]` is such a one.
+  From `prepared` once the copy has begun, and from `copied` and `registered`, the replanned digest differs, the create answers `repull-in-flight`, which the run reports `refused`, and the stalled-run rule then holds the row `resume-refused` for an administrator, the safe direction.
+  An earlier version of this section said the stalled-run slice resumes records from `planned` to `registered`, which reads as if each of them resumes; only the first two do.
 
 ### Checked only against stand-ins
 
 - The suites run the real CLI from this checkout with a release version, the real record, dispatch and callback over bun:sqlite, the real `git`, `git-annex` and `aws` against stand-ins of GitHub and S3, and the workflow's own guard scripts under bash.
-  An expired token is a stand-in that answers it 401 while a hook turns the registration's push away; the settle's timing runs on an injected clock.
+  An expired token is a stand-in that answers it 401 while a hook turns the registration's push away; the token's hour is a mint time noted minutes in the past; the settle's timing, and its end at the token's hour, run on an injected clock.
 - Only the first production runs can show: that GitHub answers the dispatch with 204 and runs this workflow; that the runner masks the token and the AWS session as the workflow asks; that the App token GitHub mints for one repository pushes the release branch and opens the pull request, and how GitHub refuses one past its hour; how long a real copy takes against the estimate; that `GetSessionToken` takes the import's pair and its session copies as the import's own keys do; that Ubuntu's git-annex reads what the planner reads; how soon enrichment commits after a push; and that the plan's anonymous clones of `OpenNeuroDatasets` hold up from a runner, since the App token is never sent there.
