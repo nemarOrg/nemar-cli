@@ -18,6 +18,7 @@ Decisions 4 and 10 are built, as their dated amendments below record, and so are
 *Annotated 2026-10-25: and by the Phase 7d amendment (#1913): the unattended run that opens an automatic re-pull's pull request and finishes a merged one is built, in a central workflow deployed only with the epic release.*
 *Annotated 2026-10-25: and by the Phase 6g amendment (#1912): N.0.1, abandoning a record, superseding one, the manual-major refusal and a mirror rehearsal fixture are built, which completes Phase 6's manual execution.*
 *Annotated 2026-10-26: and by the Phase 7g amendment (#1913): decision 7's merge is built: the Worker merges a machine-clean automatic re-pull pull request and finishes it after its merge, and an administrator may merge a re-pull they opened over a failed BIDS validation, never over a rule that requires it.*
+*Annotated 2026-10-26: and by the Phase 7h amendment (#1913): the automatic path is observable (the weekly report's re-pull section, the administrator's list of dispatches and `nemar admin repull auto`), which completes the slices of Phase 7; the owner's switches, gates G4 and G5 and the held workflow pair remain.*
 
 ## Context
 
@@ -42,6 +43,7 @@ Everything in this section is designed and not yet built.
 *Annotated 2026-10-25: and by the Phase 7d amendment: the unattended run of decision 6's scheduled path is built, to the open pull request and from a merge to `complete`.*
 *Annotated 2026-10-25: and by the Phase 6g amendment: N.0.1, abandon, supersede and the manual-major refusal are built.*
 *Annotated 2026-10-26: and by the Phase 7g amendment: decision 7's merge is built, with its follow-through to `complete` and an administrator's merge over a failed BIDS validation.*
+*Annotated 2026-10-26: and by the Phase 7h amendment: what the automatic path did is counted every week and listed for an administrator, and nothing about what it does changes.*
 
 **An upstream re-pull replays the delta between two pinned upstream tags onto NEMAR's `main` as one synthesized commit on `release/vN.0.0`, landed through a pull request; N.0.0 is a pure mirror of the upstream snapshot, and NEMAR's corrections follow as N.0.1.**
 
@@ -267,6 +269,7 @@ ADR 0086 exempts `xx` from the identifier screen, so an `xx` re-pull never has a
 - Whether the NEMAR installation token is accepted for another organization's public raw files (`OpenNeuroDatasets`), which the staleness report's mirror probe uses; if it is not, every probe reads `stale_unverified` with the reason and the first production run shows it.
 - That the central `run-identifier-screen` workflow posts a re-pull screen's report to its own callback path (`/webhooks/identifier-screen-repull-result`); the workflow accepts any plain https `callback_url` (read), and no run has used this one yet (added by the Phase 6e amendment).
 - GitHub's answers to the reads the re-pull's release and merge make (`commits/tags/<tag>` asked for `application/vnd.github.sha`, `compare/<merge>...<tag>` and its status words, a squash-merged pull request's `head` and `merge_commit_sha`); only stand-ins have answered them (added by the Phase 6e amendment).
+- What the weekly report's re-pull section reads on production data: the week's counts, the attribution of a merge to the user of its claim in the audit log, and the first week a switch is on (added by the Phase 7h amendment).
 
 ## Receipts
 
@@ -1978,3 +1981,83 @@ that GitHub merges the App's squash at `sha` with the title and message it is se
 that an App's squash merge fires the dataset workflows that tag it and mint its DOI;
 that the finish run, once its workflow is deployed with the epic release, records the release and the lock from a runner;
 and that an unprotected mirror whose BIDS validation failed reads `unstable`, and not `blocked`, for an administrator's merge over it.
+
+## Amendment 2026-10-26 (#1913): Phase 7h observes the automatic path, and the slices of Phase 7 are complete
+
+The last slice of the Phase 7 amendment above, built by Phase 7h.
+It builds what the owner reads while the automatic path runs: the weekly report's section, the administrator's list of dispatches, and `nemar admin repull auto`.
+Nothing here adds a migration, a cron trigger or a route that writes, and nothing sends mail: the new service is a root of the source scan that pins the record's import closure.
+Three additions are made to earlier text: an annotation on the record's header, one on the opening of the Decision section, and a new last item under "Not yet verified".
+
+### The weekly report's section
+
+- The Monday report gains `## Upstream re-pulls`, after the upstream freshness section.
+  It arrives every week (ADR 0054), in a week with nothing to do and the switches off too, where its zeros are true zeros and it says the switches are off.
+- It shows the switches and both caps as the Worker reads them, with a cap set to something unreadable said to read 0, the scheduler's last daily tick and what it concluded, and the advance tick's last run.
+  "Never recorded" means nothing has stamped the row; a row the report could not find is unknown, and the section says so.
+- It counts, over the seven days the report covers, the dispatches sent (by kind, by state and, for the three states that carry one, by word), the merges recorded (below) and the re-pulls that ended `failed`.
+  It states, as of the moment the report is made, the open automatic re-pulls with the word each is held for, and the claims to merge still held.
+- A dispatch is counted in the week it was sent, in the state it has when the report is made.
+  One still running then is counted as running and is not counted again if it later goes unreported; the re-pull it was for is then stalled, and the bound on its resumes is what the report sees next.
+- A merge is the edge into `merged` or `patch_merged` from another status.
+  The release's step errors write an edge from `merged` to itself (and the same for N.0.1) whenever a tag or a version row is not there yet, and that is not a merge, so an edge that ends where it began is not counted.
+- A merge is attributed by its claim, not by the row's origin or by who recorded it: to the user of the latest claim edge in the audit log before that edge, the claim of the pull request that merged (N.0.0's merge takes a `gates_clear` claim edge, N.0.1's a `patch_gates_clear` one, never the other's).
+  The system user is the Worker, any other user is an administrator's tool, and a merge whose own audit row says no claim was held (`merged_outside_tool`) is a merge outside NEMAR's tools.
+  A claim the audit log does not hold is counted apart, never as the Worker's, so the four counts add up to the merges.
+  So an automatic re-pull an administrator merged is the administrator's, and N.0.1's merges count as well as N.0.0's.
+- The report is filed on a public-facing repository, so it names no dataset.
+  A word is printed only when it is on the closed list it belongs to (the dispatch codes, the hold words, the scheduler's outcomes) and does not name anonymity; any other is counted under `other`, because the tables check only the shape of a word and a dataset id has that shape.
+  One function (`publicWord`) decides it, and it runs twice, where the counts are made and again where the report is written, so a fact that holds an identifier where a word should be does not reach the repository by either road.
+  The scheduler's two stamps are text columns that check nothing about their content, so the report prints one only in the form SQLite writes a time, and says any other value could not be read.
+- The reads are one batch of five statements and one read of the scheduler's row, so the Monday tick spends two D1 calls on them and no GitHub request.
+  A read that fails leaves the section's facts null and lists a failed part; the section says unknown and the headline asks for attention, never a zero (ADR 0054).
+  A batch that comes back with more or fewer answers than statements, with an answer that did not succeed, or with one that has no rows array, is a read that failed in the same way: a partial week is unknown, never the counts that did arrive.
+  An answer whose rows array is empty is not missing: on a grouped read (the dispatches, the holds) it is a true zero, and on a count, which always returns one row, it is a read that failed.
+
+### What asks for attention (ADR 0053)
+
+- A week asks for attention for exactly these, each as a fixed phrase with a count:
+  a switch is on and the scheduler's daily tick has not stamped its row for 26 hours (or ever, or the row cannot be read);
+  a dispatch nobody answered (`unreported`) or that GitHub did not accept (`dispatch_failed`);
+  a claim to merge held, unresolved, for over an hour;
+  a re-pull that ended `failed`;
+  a re-pull that used all its resumes (`resume-exhausted`) or all its finish runs (`finish-exhausted`);
+  and a cap set to something unreadable.
+- The scheduler's age is read against the report's own instant.
+  A scheduler silent for exactly 26 hours is not yet a reason, and neither is a claim exactly an hour old; one second more is.
+  Only the first reason depends on a switch.
+  A cap that cannot be read is a fault seen, not silence, and a dispatch, a claim, a failed re-pull or a resume or finish bound reached are there to be looked at, so each asks whatever the switches say.
+- Nothing else asks: not a switch that is off, which is a path with nothing to do, not a hold waiting on a gate (the identifier screen, the review, BIDS validation and its checks, `not-clean`), which is the expected state of a path that works and would be an alarm that never clears, not a hold that names a fault the path saw (`gates-refused`, `claim-refused`, `merge-refused` and every other hold word but the two bounds above), which the table of holds counts and `nemar admin repull auto` lists, and not a run's refusal.
+  A dispatch that ended `failed` is counted and shown by word, and is not a reason by itself: a re-pull stalled before its pull request opened is resumed within its bound and reaching the bound is the reason, and one that failed after it opened waits, held, for an administrator's `resume`, which the table of holds shows.
+- One rule decides the week.
+  The Worker decides the phrases, the facts carry them, and the shared attention rule adds them to the headline and to `nemar admin import-weekly`'s exit code, so the issue and the command cannot disagree.
+  The field absent, from an older backend, is unknown and a reason of its own, and the command exits 1; the field null with a failed part is exit 2, as the freshness pass is.
+
+### The administrator's list and command
+
+- `GET /admin/repulls/dispatches?dataset=&status=&after=&limit=` lists the dispatches newest first, as a keyset page: `after` continues strictly below an id, a page is 25 rows by default and 50 at most (more is refused at the route and clamped in the service), and a cursor is returned only when the page is full.
+  It is registered before `/repulls/:id`, which would answer 400 for "dispatches".
+  It names its columns and never selects the row, because a live dispatch's nonce is the secret its run's token is checked against and leaves the Worker nowhere.
+  It names the dataset, which the weekly report never does, and it is an administrator's read.
+- `GET /admin/repulls/switches` also returns the scheduler's three stamps, never its cursor, which is a dataset id.
+  The row absent is null, which is unknown and not "never", and a table that is missing is a 500 that names migration 0111.
+- `nemar admin repull auto [--json]` prints the switches and both caps, the scheduler's stamps, the open automatic re-pulls with their hold words and any claim still held, and the 20 newest dispatches.
+  It reads every page of open re-pulls (an administrator's is not listed) up to ten pages, and says when the list stopped before its end; it makes only GET requests; and when a read fails it prints the failure and no table, because a table with a hole would claim what was not read.
+
+### The kill switch, as the runbook states it
+
+- `AUTO_REPULL_ENABLED` removed from `[vars]` in `backend/wrangler-sccn.toml`, in a reviewed change that is deployed (a value set only in the dashboard is dropped by the next deploy), stops new dispatches, gate work, resumes and merges at the next tick, and refuses an in-flight run's create (`auto-repull-off`).
+- A run already past its create continues to `pr_open`: stopping it half way would only strand orphan objects.
+- The watchdog continues, and so does the finish of a re-pull that already merged, because a minted DOI's lineage, lock and `complete` must not be stranded; a claim to merge the Worker holds is still resolved from GitHub.
+- `REPULL_DAILY_OPEN_CAP = "0"` and `REPULL_DAILY_MERGE_CAP = "0"` stop opening and merging without touching the switches; a cap set to something unreadable reads 0, so a typo stops the work too.
+  The merge cap stops every merge, the Worker's and the administrators' alike.
+- `AUTO_REPULL_MERGE_ENABLED` removed stops the Worker's merges alone: the re-pulls still reach their gates and hold `merge-switch-off`.
+- `nemar admin repull auto` shows what the Worker reads of all of this, and the next Monday's report states it.
+
+### Checked only against stand-ins
+
+The suites run the report's own entry point on real SQLite with every migration, the audit rows its merge counts read are written by the production writers, and the same statements run on Miniflare's D1; GitHub, OpenNeuro and the coverage sweep are stand-ins, and the report reads no GitHub.
+What only production can show is how the counts read on real data, that every merge's claim is in the audit log as the attribution assumes, and the first week a switch is on.
+
+With it, the slices of Phase 7 are complete: the automatic path is built, off by default, counted every week, listed for an administrator and stopped by removing one switch.
+What remains is the owner's act and the epic's release, not another slice: the held workflow pair merged with the epic release, gate G4's two manual re-pulls, and the switches, which the owner turns on in a reviewed change once those are done.

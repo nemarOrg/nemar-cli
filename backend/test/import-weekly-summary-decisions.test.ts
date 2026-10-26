@@ -39,6 +39,7 @@ import {
   weeklyHeadline,
   weeklySummaryLogLine,
 } from "../src/services/import-weekly-summary";
+import { repullWeekFacts } from "./helpers/repull-week";
 
 /** A Neurobagel week in which all four checks ran and were healthy on all seven days. */
 function neurobagelWeek(over: Partial<NeurobagelWeekly> = {}): NeurobagelWeekly {
@@ -125,6 +126,7 @@ function facts(over: Partial<WeeklySummaryFacts> = {}): WeeklySummaryFacts {
     neurobagel: neurobagelWeek(),
     neurobagelFindings: 0,
     upstream: upstreamPass(),
+    repulls: repullWeekFacts(),
     errors: [],
     ...over,
   };
@@ -881,7 +883,8 @@ describe("the Neurobagel section", () => {
 describe("the upstream freshness section (epic #1046 phase 4b)", () => {
   const section = (f: WeeklySummaryFacts) => {
     const body = buildWeeklySummaryBody(f, "x");
-    return body.slice(body.indexOf("## Upstream freshness"), body.indexOf("## Dispatch liveness"));
+    // Up to the next section, which is the re-pulls' (epic #1046 phase 7), not the dispatch one.
+    return body.slice(body.indexOf("## Upstream freshness"), body.indexOf("## Upstream re-pulls"));
   };
 
   test("renders every state, zeros as 0, after Coverage", () => {

@@ -68,6 +68,7 @@ import type {
 } from "../../../shared/contract/pr-review-admin.js";
 import type { BackfillNameOutcome } from "../../../shared/contract/publication.js";
 import type { NeurobagelWeekly } from "../../../shared/contract/weekly-attention.js";
+import type { RepullWeekFacts } from "../../../shared/repull-observability.js";
 import type {
   UpstreamFleetSummary,
   UpstreamStatusPage,
@@ -2268,6 +2269,10 @@ export interface WeeklySummaryResponse {
     /** The upstream freshness pass as counts; null when it did not run or failed, and absent
      *  from an older backend, which is also unknown. Never rendered as zero. */
     upstream?: UpstreamFleetSummary | null;
+    /** The upstream re-pulls' week (switches, scheduler, dispatches, merges, why to look) as counts
+     *  and fixed words; null when it could not be read, and absent from an older backend, which is
+     *  also unknown. Never rendered as zero. */
+    repulls?: RepullWeekFacts | null;
     errors: { stage: string; error: string }[];
   } | null;
   issue: { number: number | null; action: "created" | "would-create" | "already-filed" } | null;

@@ -2,9 +2,16 @@
  * A row of `upstream_repulls` that satisfies every stage invariant of migration 0105 for a given
  * status, for the suites that seed the table directly (the migration test and the route test).
  * The production code never builds a row like this: it moves one along its edges.
+ *
+ * Also the one dispatch seeder of the suites that read `upstream_repull_dispatches` (migration
+ * 0111): a row that satisfies every CHECK for its state, written through bun:sqlite by
+ * {@link seedDispatch} or through any driver by {@link DISPATCH_INSERT_SQL} and
+ * {@link dispatchBinds}. The production code makes these rows by claiming and reporting.
  */
 
+import type { Database } from "bun:sqlite";
 import {
+  type DispatchStatus,
   REPULL_STATUSES,
   type RepullStatus,
   TERMINAL_STATUSES,
@@ -62,4 +69,65 @@ export function rowAt(status: RepullStatus, over: Row = {}): Row {
   if (status === "patch_merged" || status === "patch_released") row.patch_merge_sha = SHA;
   if (status === "patch_released") row.patch_tag_sha = SHA;
   return { ...row, ...over };
+}
+
+// ----------------------------------------------------------------------------
+// Dispatches
+// ----------------------------------------------------------------------------
+
+/**
+ * What every live dispatch's one-shot nonce begins with. A suite that proves a nonce leaves no
+ * answer asserts the answer does not hold this, whatever number follows it.
+ */
+export const NONCE_MARK = "zzzz-nonce-sentinel-zzzz-";
+
+export interface DispatchSeed {
+  /** The dataset: an `on` id, which is all the table takes. */
+  dataset: string;
+  status: DispatchStatus;
+  /** `finish` for a `finished` dispatch and `open` for the rest, unless named. */
+  kind?: "open" | "finish";
+  /** The word a refused, failed or not-sent dispatch carries (the table requires one). */
+  code?: string | null;
+  /** `dispatched_at`, and `reported_at` for a state that was reported. */
+  at: string;
+  /** 1 for an `opened` or a `finish` dispatch, which the table requires, and none for the rest. */
+  repullId?: number | null;
+  /** The run's log, for a state that was reported. */
+  runUrl?: string | null;
+}
+
+export const DISPATCH_INSERT_SQL = `INSERT INTO upstream_repull_dispatches
+  (kind, dataset_id, upstream_ds, from_tag, to_tag, repull_id, nonce, status, code,
+   workflow_run_url, dispatched_at, reported_at)
+  VALUES (?, ?, ?, '1.0.0', '1.0.1', ?, ?, ?, ?, ?, ?, ?)`;
+
+let nonceSeq = 0;
+
+/** The values of {@link DISPATCH_INSERT_SQL} for a seed, a live state holding a fresh nonce. */
+export function dispatchBinds(o: DispatchSeed): unknown[] {
+  const live = o.status === "dispatched" || o.status === "started";
+  const reported = !["dispatched", "dispatch_failed", "unreported"].includes(o.status);
+  const kind = o.kind ?? (o.status === "finished" ? "finish" : "open");
+  const repullId =
+    o.repullId !== undefined ? o.repullId : o.status === "opened" || kind === "finish" ? 1 : null;
+  return [
+    kind,
+    o.dataset,
+    `ds${o.dataset.slice(2)}`,
+    repullId,
+    live ? `${NONCE_MARK}${String(++nonceSeq).padStart(8, "0")}` : null,
+    o.status,
+    o.code ?? null,
+    reported ? (o.runUrl ?? null) : null,
+    o.at,
+    reported ? o.at : null,
+  ];
+}
+
+/** A dispatch in bun:sqlite; its id. */
+export function seedDispatch(db: Database, o: DispatchSeed): number {
+  return Number(
+    db.query(DISPATCH_INSERT_SQL).run(...(dispatchBinds(o) as never[])).lastInsertRowid,
+  );
 }

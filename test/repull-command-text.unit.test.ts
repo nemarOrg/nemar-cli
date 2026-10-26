@@ -2,7 +2,7 @@
  * What `nemar admin repull` tells an administrator (ADR 0111; epic #1046 phase 6, #1912): the
  * confirmation names only what the run will do up to `--until`, and no help, output or pull request
  * body names a command that does not exist (`plan`, `execute`, `status`, `resume`, `merge`,
- * `abandon` and `canary` are; there is no `--abandon` flag).
+ * `abandon`, `canary` and `auto` are; there is no `--abandon` flag).
  */
 
 import { describe, expect, test } from "bun:test";
@@ -77,9 +77,10 @@ function helpOf(name: string): string {
 }
 
 describe("no text names a command that does not exist", () => {
-  test("the commands that exist are plan, execute, status, resume, merge, abandon and canary", () => {
+  test("the commands that exist are plan, execute, status, resume, merge, abandon, canary and auto", () => {
     expect(repullCommand.commands.map((c) => c.name()).sort()).toEqual([
       "abandon",
+      "auto",
       "canary",
       "execute",
       "merge",
@@ -97,6 +98,19 @@ describe("no text names a command that does not exist", () => {
     expect(help).toContain("--supersede");
     expect(help).not.toMatch(/not built/);
     expect(help).toContain("a message that ends with the commit's two trailers");
+  });
+
+  test("the auto help says what it shows and that it changes nothing, and names no flag that does not exist", () => {
+    const help = helpOf("auto");
+    expect(help).toContain("It changes nothing.");
+    expect(help).toContain("AUTO_REPULL_ENABLED and AUTO_REPULL_MERGE_ENABLED");
+    expect(help).toContain("--json prints the same facts");
+    expect(help).toContain("nemar admin repull status <id>");
+    // The failure line is printed (the command's tests pin that), so "nothing" would be untrue.
+    expect(help).toContain("Only the failure is");
+    expect(help).toContain("printed then, never a table");
+    expect(help).not.toContain("Nothing is printed");
+    expect(help).not.toMatch(/--abandon/);
   });
 
   test("the abandon help says what each status ends as, and what it refuses", () => {

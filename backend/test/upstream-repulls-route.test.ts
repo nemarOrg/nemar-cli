@@ -264,7 +264,7 @@ describe("who may call", () => {
 // ----------------------------------------------------------------------------
 
 describe("GET /repulls/switches", () => {
-  test("answers before the :id route does, with the four facts and nothing else", async () => {
+  test("answers before the :id route does, with the switches, both caps and the scheduler's stamps, and nothing else", async () => {
     const res = await call("GET", "/repulls/switches");
     expect(res.status).toBe(200);
     expect(res.body).toEqual({
@@ -275,7 +275,36 @@ describe("GET /repulls/switches", () => {
         open_cap: { value: 2, source: "default" },
         merge_cap: { value: 5, source: "default" },
       },
+      // The row the migration inserted: nothing has stamped it yet.
+      scheduler: { last_tick_at: null, last_outcome: null, last_advance_at: null },
     });
+  });
+
+  test("carries the scheduler's three stamps, never its cursor (a dataset id)", async () => {
+    db.run(
+      `UPDATE upstream_repull_scheduler
+          SET scan_after = 'on098765', last_tick_at = '2026-10-26 03:00:01',
+              last_outcome = 'ran', last_advance_at = '2026-10-26 12:30:02'`,
+    );
+    const res = await call("GET", "/repulls/switches");
+    expect(res.body.scheduler).toEqual({
+      last_tick_at: "2026-10-26 03:00:01",
+      last_outcome: "ran",
+      last_advance_at: "2026-10-26 12:30:02",
+    });
+    const text = JSON.stringify(res.body);
+    expect(text).not.toContain("on098765");
+    expect(text).not.toContain("scan_after");
+  });
+
+  test("a scheduler row that is not there is null (unknown), and a table that is not there is a 500", async () => {
+    db.run("DELETE FROM upstream_repull_scheduler");
+    expect((await call("GET", "/repulls/switches")).body.scheduler).toBeNull();
+    db.run("DROP TABLE upstream_repull_scheduler");
+    const res = await call("GET", "/repulls/switches");
+    expect(res.status).toBe(500);
+    expect(res.body.error).toContain("Failed to read the scheduler");
+    expect(res.body.error).toContain("is migration 0111 applied?");
   });
 
   test("reads what the bindings say, and only exact production honors a switch", async () => {

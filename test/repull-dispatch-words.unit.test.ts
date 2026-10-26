@@ -19,6 +19,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { OTHER_WORD, type WordList, publicWord } from "../shared/repull-observability";
 import {
   AUTOMATIC_ERROR_PREFIX,
   CURRENT_PLANNER_VERSION,
@@ -137,5 +138,60 @@ describe("the automatic path and the CLI agree", () => {
     // A `prepared` self-edge clears only an error that begins with the preparation's prefix.
     expect(AUTOMATIC_ERROR_PREFIX.startsWith(PREPARE_ERROR_PREFIX)).toBe(false);
     expect(PREPARE_ERROR_PREFIX.startsWith(AUTOMATIC_ERROR_PREFIX)).toBe(false);
+  });
+});
+
+describe("publicWord: the words a report on a public repository may print", () => {
+  const LISTS: Array<[WordList, readonly string[]]> = [
+    ["code", DISPATCH_CODES],
+    ["hold", REPULL_HOLD_REASONS],
+    ["outcome", REPULL_SCHEDULER_OUTCOMES],
+  ];
+
+  test("every listed word prints as itself, but one that names anonymity, which is `other`", () => {
+    const withheld: string[] = [];
+    for (const [list, words] of LISTS) {
+      for (const word of words) {
+        const expected = /anonym/i.test(word) ? OTHER_WORD : word;
+        if (expected === OTHER_WORD) withheld.push(`${list}:${word}`);
+        expect([list, word, publicWord(word, list)]).toEqual([list, word, expected]);
+      }
+    }
+    // The anonymity rule has words to act on, so an empty set is not a pass.
+    expect(withheld).toContain("hold:dataset-anonymous");
+    expect(withheld).toContain("code:anonymous-dataset");
+  });
+
+  test("a word printed from the wrong list is `other`: a list admits its own words only", () => {
+    expect(publicWord("screen-acknowledge", "code")).toBe(OTHER_WORD);
+    expect(publicWord("gitlink", "hold")).toBe(OTHER_WORD);
+    expect(publicWord("gitlink", "outcome")).toBe(OTHER_WORD);
+    expect(publicWord("ran", "hold")).toBe(OTHER_WORD);
+    expect(publicWord("ran", "outcome")).toBe("ran");
+  });
+
+  test("a dataset id of any shape, an absent word and a made-up word are `other`", () => {
+    for (const [list] of LISTS) {
+      for (const word of [
+        "nm000123",
+        "on098701",
+        "xx099901",
+        "ds004362",
+        "NM000123",
+        "made-up",
+        "",
+      ]) {
+        expect([list, word, publicWord(word, list)]).toEqual([list, word, OTHER_WORD]);
+      }
+      expect(publicWord(null, list)).toBe(OTHER_WORD);
+      expect(publicWord(undefined, list)).toBe(OTHER_WORD);
+    }
+  });
+
+  test("a digit does not withhold a word: the list does, so the four codes that hold one print", () => {
+    for (const word of ["nemar-s3-ambiguous", "no-nemar-s3", "no-nemar-s3-remote", "s3-failed"]) {
+      expect(word).toMatch(/\d/);
+      expect(publicWord(word, "code")).toBe(word);
+    }
   });
 });

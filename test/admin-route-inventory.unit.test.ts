@@ -203,6 +203,9 @@ const EXPECTED_ENTRIES: Record<string, number> = {
   // The automatic re-pull's switches (epic #1046 phase 7, #1913): a handler alone, registered
   // BEFORE `GET /repulls/:id`, which would otherwise answer 400 for "switches".
   "GET /repulls/switches": 1,
+  // The automatic path's dispatches (epic #1046 phase 7h): a handler alone, before `:id` for the
+  // same reason.
+  "GET /repulls/dispatches": 1,
   "GET /repulls/:id": 1,
   "POST /repulls/:id/transition": 2,
   // The re-pull's screen and its verified facts (epic #1046 phase 6, #1912; ADR 0111): every write
@@ -286,8 +289,19 @@ describe("admin route inventory", () => {
     expect(switches).toBeLessThan(byId);
   });
 
+  // The same for `GET /repulls/dispatches`: both patterns match it, the router takes the first
+  // handler in registration order, and `:id` would answer 400 `invalid-id` for "dispatches".
+  test("GET /repulls/dispatches is registered before GET /repulls/:id", () => {
+    const paths = adminRoutes.routes.map((r) => `${r.method} ${r.path}`);
+    const dispatches = paths.indexOf("GET /repulls/dispatches");
+    const byId = paths.indexOf("GET /repulls/:id");
+    expect(dispatches).toBeGreaterThanOrEqual(0);
+    expect(byId).toBeGreaterThanOrEqual(0);
+    expect(dispatches).toBeLessThan(byId);
+  });
+
   test("entry total is pinned", () => {
-    expect(adminRoutes.routes.length).toBe(192);
+    expect(adminRoutes.routes.length).toBe(193);
   });
 
   // The count pin above can't see a SWAP of the router-level middleware

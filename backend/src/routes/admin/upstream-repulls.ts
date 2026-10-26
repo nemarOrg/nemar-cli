@@ -5,8 +5,11 @@
  *   POST /admin/repulls                  create the record, or return the open one for the same plan
  *   GET  /admin/repulls                  list (`dataset`, `open`, `after`, `limit` up to 50)
  *   GET  /admin/repulls/switches         what the Worker reads of the automatic re-pull's
- *                                        switches and open cap (before `:id`, which would answer
- *                                        400 for "switches")
+ *                                        switches and both caps, and the scheduler's stamps
+ *                                        (before `:id`, which would answer 400 for "switches")
+ *   GET  /admin/repulls/dispatches       the automatic path's dispatches, newest first (`dataset`,
+ *                                        `status`, `after`, `limit` up to 50; before `:id`, as
+ *                                        above)
  *   GET  /admin/repulls/:id              one record
  *   POST /admin/repulls/:id/transition   move it along one allowed edge (the claim to merge is the
  *                                        gates-clear self-edge: screened head, dataset fences, a
@@ -39,6 +42,7 @@
  */
 
 import { zValidator } from "@hono/zod-validator";
+import { DISPATCH_STATUSES, type DispatchStatus } from "../../../../shared/repull-state";
 import { isValidDatasetId } from "../../services/datasetId";
 import { repullSwitchesReport } from "../../services/repull-switches";
 import {
@@ -58,7 +62,13 @@ import {
   transitionRepull,
   transitionSchema,
 } from "../../services/upstream-repull";
+import {
+  DISPATCH_PAGE_DEFAULT,
+  DISPATCH_PAGE_MAX,
+  listDispatches,
+} from "../../services/upstream-repull-dispatch";
 import { bidsOverrideRefusal } from "../../services/upstream-repull-merge";
+import { readSchedulerRow } from "../../services/upstream-repull-scheduler";
 import {
   checkHeldClaim,
   claimCheckSchema,
@@ -82,11 +92,15 @@ function refusalBody(r: RepullRefusal) {
   };
 }
 
-/** Only a missing table or column suggests the migration is not applied; any other error is not that. */
-function failure(what: string, err: unknown) {
+/**
+ * Only a missing table or column suggests the migration is not applied; any other error is not
+ * that. `migration` names the one that creates what the read needs: 0105 for the record, 0111 for
+ * the automatic path's dispatches and scheduler.
+ */
+function failure(what: string, err: unknown, migration = "0105") {
   const msg = err instanceof Error ? err.message : String(err);
   console.error(`[upstream-repulls] ${what} failed:`, msg);
-  const hint = /no such (table|column)/i.test(msg) ? " (is migration 0105 applied?)" : "";
+  const hint = /no such (table|column)/i.test(msg) ? ` (is migration ${migration} applied?)` : "";
   return `Failed to ${what}${hint}: ${msg}`;
 }
 
@@ -169,9 +183,76 @@ export function registerUpstreamRepullRoutes(admin: AdminRouter): void {
   });
 
   // Registered before `/repulls/:id`: Hono matches in registration order, and `:id` would answer
-  // 400 `invalid-id` for "switches". It reads the bindings and writes nothing; the answer holds
-  // booleans and a cap reading, never a binding's raw value or a secret.
-  admin.get("/repulls/switches", (c) => c.json({ switches: repullSwitchesReport(c.env) }));
+  // 400 `invalid-id` for "switches". It reads the bindings and the scheduler's one row and writes
+  // nothing; the answer holds booleans, a cap reading and three stamps, never a binding's raw value,
+  // a secret, or the scheduler's cursor (a dataset id).
+  admin.get("/repulls/switches", async (c) => {
+    try {
+      return c.json({
+        switches: repullSwitchesReport(c.env),
+        scheduler: await readSchedulerRow(c.env.DB),
+      });
+    } catch (err) {
+      return c.json({ error: failure("read the scheduler", err, "0111") }, 500);
+    }
+  });
+
+  // The automatic path's dispatches, newest first, for an administrator: this route names the
+  // dataset, which the weekly report never does. Also before `/repulls/:id`, for the same reason.
+  // A keyset page: `after` is the id the page continues below, and `next_after` is set only when
+  // the page is full. The nonce of a live dispatch is never selected (see `DISPATCH_LIST_SQL`).
+  admin.get("/repulls/dispatches", async (c) => {
+    const dataset = c.req.query("dataset");
+    if (dataset !== undefined && !isValidDatasetId(dataset)) {
+      return c.json({ error: "`dataset` must be a dataset id", code: "invalid-query" }, 400);
+    }
+    const status = c.req.query("status");
+    if (status !== undefined && !(DISPATCH_STATUSES as readonly string[]).includes(status)) {
+      return c.json(
+        {
+          error: `\`status\` must be one of ${DISPATCH_STATUSES.join(", ")}`,
+          code: "invalid-query",
+        },
+        400,
+      );
+    }
+    const afterRaw = c.req.query("after");
+    const after = afterRaw === undefined ? undefined : parseId(afterRaw);
+    if (after === null) {
+      return c.json({ error: "`after` must be a dispatch id", code: "invalid-query" }, 400);
+    }
+    const limitRaw = c.req.query("limit");
+    const limit = limitRaw === undefined ? undefined : Number(limitRaw);
+    if (
+      limit !== undefined &&
+      !(Number.isInteger(limit) && limit >= 1 && limit <= DISPATCH_PAGE_MAX)
+    ) {
+      return c.json(
+        {
+          error: `\`limit\` must be an integer from 1 to ${DISPATCH_PAGE_MAX}`,
+          code: "invalid-query",
+        },
+        400,
+      );
+    }
+    try {
+      const dispatches = await listDispatches(c.env.DB, {
+        dataset,
+        status: status as DispatchStatus | undefined,
+        after,
+        limit,
+      });
+      return c.json({
+        dispatches,
+        next_after:
+          dispatches.length === (limit ?? DISPATCH_PAGE_DEFAULT)
+            ? (dispatches.at(-1)?.id ?? null)
+            : null,
+      });
+    } catch (err) {
+      return c.json({ error: failure("read the dispatches", err, "0111") }, 500);
+    }
+  });
 
   admin.get("/repulls/:id", async (c) => {
     const id = parseId(c.req.param("id"));

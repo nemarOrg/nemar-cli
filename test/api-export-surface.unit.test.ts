@@ -221,6 +221,8 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "createRepull",
     "dispatchRepullScreen",
     "getRepull",
+    "getRepullSwitches",
+    "listRepullDispatches",
     "listRepullScreens",
     "listRepulls",
     "recordRepullMerged",
@@ -343,6 +345,8 @@ const POST_SPLIT_ADDITIONS = [
   "recordRepullMerged", // #1912 phase 6f: POST /admin/repulls/:id/merged
   "recordRepullReleased", // #1912 phase 6f: POST /admin/repulls/:id/released
   "checkRepullMergeClaim", // #1912 phase 6f: POST /admin/repulls/:id/merge-claim/check
+  "getRepullSwitches", // #1913 phase 7h: GET /admin/repulls/switches
+  "listRepullDispatches", // #1913 phase 7h: GET /admin/repulls/dispatches
   "lockS3Objects", // #1912 phase 6f: POST /admin/datasets/:id/s3-lock with an explicit list
   "OBJECTS_PER_EXPLICIT_LOCK", // #1912 phase 6f: the explicit lock's batch size
 ];

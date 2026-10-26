@@ -22,6 +22,10 @@
  * them in a reviewed change (`repull-switches-flag.test.ts` pins that).
  */
 
+import type {
+  RepullCapReading,
+  RepullSwitchesReport,
+} from "../../../shared/repull-observability.js";
 import type { Bindings } from "../types/bindings";
 
 /**
@@ -34,12 +38,6 @@ export const REPULL_OPEN_CAP_DEFAULT = 2;
 export const REPULL_MERGE_CAP_DEFAULT = 5;
 /** The largest cap a binding may set; a larger value is unreadable, not clamped. */
 export const REPULL_CAP_MAX = 20;
-
-export interface CapReading {
-  value: number;
-  /** `default` when absent, `set` when read, `unreadable` when set to anything else. */
-  source: "default" | "set" | "unreadable";
-}
 
 /** Exactly `production`: no trim, no case fold, and unset is not production. */
 export function isExactProduction(env: Pick<Bindings, "ENVIRONMENT">): boolean {
@@ -66,7 +64,7 @@ export function autoRepullMergeEnabled(
  * space, an empty string, a larger number) is unreadable and reads 0. This is the one definition of
  * the rule; the merge cap and the open cap both read through it.
  */
-export function readCap(raw: string | undefined, fallback: number): CapReading {
+export function readCap(raw: string | undefined, fallback: number): RepullCapReading {
   if (raw === undefined) return { value: fallback, source: "default" };
   if (/^\d{1,2}$/.test(raw)) {
     const value = Number(raw);
@@ -75,21 +73,12 @@ export function readCap(raw: string | undefined, fallback: number): CapReading {
   return { value: 0, source: "unreadable" };
 }
 
-export function repullOpenCap(env: Pick<Bindings, "REPULL_DAILY_OPEN_CAP">): CapReading {
+export function repullOpenCap(env: Pick<Bindings, "REPULL_DAILY_OPEN_CAP">): RepullCapReading {
   return readCap(env.REPULL_DAILY_OPEN_CAP, REPULL_OPEN_CAP_DEFAULT);
 }
 
-export function repullMergeCap(env: Pick<Bindings, "REPULL_DAILY_MERGE_CAP">): CapReading {
+export function repullMergeCap(env: Pick<Bindings, "REPULL_DAILY_MERGE_CAP">): RepullCapReading {
   return readCap(env.REPULL_DAILY_MERGE_CAP, REPULL_MERGE_CAP_DEFAULT);
-}
-
-/** What the Worker reads, as the admin route reports it. It holds no secret and no binding value. */
-export interface RepullSwitchesReport {
-  environment_is_production: boolean;
-  auto_repull_enabled: boolean;
-  auto_repull_merge_enabled: boolean;
-  open_cap: CapReading;
-  merge_cap: CapReading;
 }
 
 export function repullSwitchesReport(
