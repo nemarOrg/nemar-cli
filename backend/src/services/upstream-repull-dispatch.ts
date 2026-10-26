@@ -30,6 +30,7 @@
 
 import { z } from "zod";
 import { isOpenNeuroTag, normalizeUpstreamTag } from "../../../shared/openneuro-tag.js";
+import type { DispatchView } from "../../../shared/repull-observability.js";
 import {
   DISPATCH_CODES,
   DISPATCH_LIVE,
@@ -38,6 +39,7 @@ import {
   type DispatchCode,
   type DispatchPhase,
   type DispatchRow,
+  type DispatchStatus,
   REPULL_STATUSES,
   type RepullRow,
   TERMINAL_STATUSES,
@@ -76,6 +78,42 @@ const OPENED_OR_LATER = REPULL_STATUSES.filter(
 export const DISPATCH_BY_ID_SQL = "SELECT * FROM upstream_repull_dispatches WHERE id = ?";
 
 const DISPATCH_BY_NONCE_SQL = "SELECT * FROM upstream_repull_dispatches WHERE nonce = ?";
+
+/** The page size of the admin list of dispatches, and the most a caller may ask for. */
+export const DISPATCH_PAGE_DEFAULT = 25;
+export const DISPATCH_PAGE_MAX = 50;
+
+/**
+ * The admin list of dispatches, newest first, a keyset page. `?1` the dataset or NULL, `?2` the
+ * state or NULL, `?3` the id the page continues below or NULL, `?4` the page size. Every column
+ * is named, never `SELECT *`: the row's one-shot nonce is the secret a live run's token is checked
+ * against and leaves the Worker nowhere, so a column added to the table later reaches this list
+ * only when someone adds it here.
+ */
+export const DISPATCH_LIST_SQL = `SELECT id, kind, dataset_id, upstream_ds, from_tag, to_tag, repull_id,
+    status, code, workflow_run_url, dispatched_at, reported_at
+  FROM upstream_repull_dispatches
+  WHERE (?1 IS NULL OR dataset_id = ?1)
+    AND (?2 IS NULL OR status = ?2)
+    AND (?3 IS NULL OR id < ?3)
+  ORDER BY id DESC LIMIT ?4`;
+
+/**
+ * A page of dispatches, newest first, for an administrator (the route shows dataset ids; the
+ * weekly report never does). `after` continues below that id. The page is clamped to
+ * {@link DISPATCH_PAGE_MAX} here as well as at the route, so no caller gets more.
+ */
+export async function listDispatches(
+  db: D1Database,
+  q: { dataset?: string; status?: DispatchStatus; after?: number; limit?: number },
+): Promise<DispatchView[]> {
+  const limit = Math.min(Math.max(q.limit ?? DISPATCH_PAGE_DEFAULT, 1), DISPATCH_PAGE_MAX);
+  const { results } = await db
+    .prepare(DISPATCH_LIST_SQL)
+    .bind(q.dataset ?? null, q.status ?? null, q.after ?? null, limit)
+    .all<DispatchView>();
+  return results;
+}
 
 /**
  * Today's units of the open cap: every `open` dispatch of the UTC day on D1's clock, first
