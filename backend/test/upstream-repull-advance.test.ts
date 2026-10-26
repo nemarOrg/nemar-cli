@@ -747,10 +747,10 @@ describe("which rows a tick reads", () => {
 // ----------------------------------------------------------------------------
 
 describe("the gates of an automatic pull request", () => {
-  test("with no screen and no review, the screen is dispatched for the head and the review started", async () => {
+  test("with no screen, the screen is dispatched for the head; the review waits for it to clear", async () => {
     const id = openRow();
     const r = await tick();
-    expect(r).toMatchObject({ screensStarted: 1, reviewsStarted: 1, gatesCleared: 0 });
+    expect(r).toMatchObject({ screensStarted: 1, reviewsStarted: 0, gatesCleared: 0 });
 
     // The screen: the publication screen's workflow, at the head, request 0, with the re-pull's
     // own callback.
@@ -768,8 +768,21 @@ describe("the gates of an automatic pull request", () => {
     expect(auditsOf("repull_screen_dispatched", id)).toEqual([
       expect.objectContaining({ user_id: SYSTEM_USER_ID }),
     ]);
+    // No model call while the screen may still block or ask for a person.
+    expect(dispatched("run-pr-review")).toEqual([]);
+    expect(reviews()).toEqual([]);
+    expect(rowOf(id)).toMatchObject({ status: "pr_open", hold_reason: "screen-pending" });
 
-    // The review: the App's pull request, admitted by the Worker's own start, at the head.
+    // The next tick, with the screen still out, starts nothing again.
+    const waiting = await tick();
+    expect(waiting).toMatchObject({ screensStarted: 0, reviewsStarted: 0 });
+    expect(gh.dispatches).toHaveLength(1);
+
+    // Once the screen is clear, the review is started: the App's pull request, admitted by the
+    // Worker's own start, at the head.
+    markScreen(id, "clean");
+    const cleared = await tick();
+    expect(cleared).toMatchObject({ screensStarted: 0, reviewsStarted: 1 });
     expect(dispatched("run-pr-review")).toEqual([
       expect.objectContaining({ dataset_id: DS, pr_number: 7, head_sha: HEAD }),
     ]);
@@ -782,16 +795,40 @@ describe("the gates of an automatic pull request", () => {
         state: "dispatched",
       }),
     ]);
+    expect(rowOf(id).hold_reason).toBe("review-running");
+    expect((await tick()).reviewsStarted).toBe(0);
+    expect(dispatched("run-pr-review")).toHaveLength(1);
+  });
 
-    // It waits for the screen now on its way, and the next tick starts neither again.
-    expect(rowOf(id)).toMatchObject({ status: "pr_open", hold_reason: "screen-pending" });
-    const again = await tick();
-    expect(again).toMatchObject({
-      screensStarted: 0,
-      reviewsStarted: 0,
-      held: { "screen-pending": 1 },
-    });
-    expect(gh.dispatches).toHaveLength(2);
+  test("a screen in error the tick will not run again: the review is not started", async () => {
+    const id = openRow();
+    markScreen(id, "error");
+    for (let n = 0; n < 3; n++) {
+      db.run(
+        `INSERT INTO audit_log (user_id, action, resource_type, resource_id, details)
+         VALUES (?, 'repull_screen_dispatched', 'upstream_repull', ?, ?)`,
+        [SYSTEM_USER_ID, String(id), JSON.stringify({ dataset_id: DS, pr: "n0", sha: HEAD })],
+      );
+    }
+    const r = await tick();
+    expect(r).toMatchObject({ screensStarted: 0, reviewsStarted: 0, reviewRefused: {} });
+    expect(rowOf(id).hold_reason).toBe("screen-error");
+    expect(gh.dispatches).toEqual([]);
+    expect(reviews()).toEqual([]);
+  });
+
+  test("a review the review's own start declines is counted by its reason, and logged", async () => {
+    const id = openRow();
+    markScreen(id, "clean");
+    const r = await tick(env({ PR_REVIEW_ENABLED: undefined }));
+    expect(r).toMatchObject({ reviewsStarted: 0, reviewRefused: { pr_review_disabled: 1 } });
+    expect(rowOf(id).hold_reason).toBe("review-absent");
+    expect(gh.dispatches).toEqual([]);
+    expect(repullAdvanceLogLine(r)?.line).toContain("review_refused=pr_review_disabled:1");
+    // It says so on every tick it declines, not only when the hold first changed.
+    const again = await tick(env({ PR_REVIEW_ENABLED: undefined }));
+    expect(again.holdsChanged).toBe(0);
+    expect(repullAdvanceLogLine(again)?.line).toContain("review_refused=pr_review_disabled:1");
   });
 
   test("the next tick with screen clear, review pass, both checks green, clean and main unmoved: gates_clear", async () => {
@@ -1069,7 +1106,7 @@ describe("the log line", () => {
     const r = await tick();
     expect(repullAdvanceLogLine(r)).toEqual({
       level: "info",
-      line: "[repull-advance] examined=1 waiting=0 screens=0 reviews=0 gates_cleared=0 resumed=0 unconfirmed=0 holds_changed=1 held=main-moved:1 refused=none",
+      line: "[repull-advance] examined=1 waiting=0 screens=0 reviews=0 review_refused=none gates_cleared=0 resumed=0 unconfirmed=0 holds_changed=1 held=main-moved:1 refused=none",
     });
     expect(repullAdvanceLogLine(await tick())).toBeNull();
   });
@@ -1438,7 +1475,7 @@ describe("what a tick costs", () => {
   // The 30-minute tick shares one invocation's subrequest allowance with every job on it, so the
   // advance tick's own use is counted here from the code as it runs: every D1 statement prepared
   // (a batch's statements each count) and every request to GitHub. Five rows, the most a tick reads.
-  test("five rows starting their gates, waiting on them, and clearing them", async () => {
+  test("five rows starting their screens, waiting on them, starting their reviews, and clearing", async () => {
     let statements = 0;
     const base = realD1(db);
     const counting = {
@@ -1457,17 +1494,24 @@ describe("what a tick costs", () => {
     const datasets = [1, 2, 3, 4, 5].map((i) => `on0988${String(i).padStart(2, "0")}`);
     const ids = datasets.map((ds) => openRow(ds));
 
-    // Each row's screen and review are started: the most a tick spends.
-    expect(await measure()).toEqual({ d1: 112, github: 40 });
-    // Each waits on them: the facts are read again, and nothing is written.
-    expect(await measure()).toEqual({ d1: 37, github: 20 });
+    const seen: Array<{ d1: number; github: number }> = [];
+    // Each row's screen is started.
+    seen.push(await measure());
+    // Each waits on it: the facts are read again, and nothing is written.
+    seen.push(await measure());
+    // Each screen is clear, and each row's review is started: the most a tick spends.
+    ids.forEach((id, k) => markScreen(id, "clean", datasets[k]));
+    seen.push(await measure());
     // Each is clean, and the record's own transition reads its live head before it writes.
     db.run("DELETE FROM pr_reviews");
-    ids.forEach((id, k) => {
-      markScreen(id, "clean", datasets[k]);
-      review("pass", datasets[k]);
-    });
-    expect(await measure()).toEqual({ d1: 52, github: 25 });
+    datasets.forEach((ds) => review("pass", ds));
+    seen.push(await measure());
+    expect(seen).toEqual([
+      { d1: 67, github: 25 },
+      { d1: 37, github: 20 },
+      { d1: 82, github: 35 },
+      { d1: 52, github: 25 },
+    ]);
     expect(ids.every((id) => rowOf(id).status === "gates_clear")).toBe(true);
   });
 

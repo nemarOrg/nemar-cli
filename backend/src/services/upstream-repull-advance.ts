@@ -51,9 +51,13 @@
  *    passes machine clean, and the same commit would be asked the same question;
  *  - the ADR 0107 review of the head (`startRepullPullRequestReview`, the one start that admits the
  *    App's pull request), when the head has none, or its dispatch failed (GitHub never ran it) at
- *    least {@link REVIEW_RETRY_MINUTES} minutes ago, and only while the screen is clear or on its
- *    way to a verdict: a screen that blocks, asks for a person or will not be run again means this
- *    head can never be machine clean, and its review would be a model call spent for nothing.
+ *    least {@link REVIEW_RETRY_MINUTES} minutes ago, and only once the screen of the head is
+ *    `clear`, so on a later tick than the screen: a screen still out may yet block or ask for a
+ *    person, and one that errored, blocks or asks for a person means this head is not machine clean
+ *    now, so a review would be a model call spent on a head that may never pass. When the review's
+ *    own start declines (the review switched off, a dataset it may not read, GitHub unreadable,
+ *    another author or head), its reason is counted and logged, so a row held `review-absent` says
+ *    why.
  *
  * HOLDS. A hold is an observation, never a transition: a fixed word (`REPULL_HOLD_REASONS`) and
  * since when, on the row (`hold_reason`, `hold_since`). Writing one does not move the row, does not
@@ -83,10 +87,10 @@
  * production tick stamps `upstream_repull_scheduler.last_advance_at`.
  *
  * COST on the 30-minute tick, which shares one subrequest allowance with every job on it, measured
- * over five rows (`upstream-repull-advance.test.ts` pins it): 112 D1 statements and 40 GitHub
- * requests when each starts its screen and its review, 37 and 20 while each waits on them, 52 and
- * 25 when each is cleared; a stalled row's resume is eight statements and one dispatch, and the
- * tick itself two statements (the list of rows, the stamp).
+ * over five rows at `pr_open` (`upstream-repull-advance.test.ts` pins it): 67 D1 statements and 25
+ * GitHub requests when each starts its screen, 37 and 20 while each waits, 82 and 35 when each
+ * starts its review (the most), 52 and 25 when each is cleared; a stalled row's resume is eight
+ * statements and one dispatch, and the tick itself two statements (the list of rows, the stamp).
  *
  * NO MAIL. Nothing here imports a mail service (`repull-no-mail-scan.test.ts`).
  */
@@ -289,6 +293,8 @@ export interface AdvanceTickResult {
   screensStarted: number;
   /** ADR 0107 reviews dispatched. */
   reviewsStarted: number;
+  /** Reviews the review's own start declined to dispatch, by its reason (`pr_review_disabled`, ...). */
+  reviewRefused: Record<string, number>;
   /** Rows moved `pr_open -> gates_clear`. */
   gatesCleared: number;
   /** Stalled rows whose resume GitHub took. */
@@ -613,15 +619,17 @@ async function startGateWork(
     }
   }
   let review = facts.review;
-  const screenMayClear = screen === "clear" || screen === "pending";
+  // Only behind a clear screen: one still out, errored, blocking or asking for a person is not.
   if (
-    screenMayClear &&
+    facts.screen === "clear" &&
     (review === "absent" || (review === "error" && (await reviewRetryable(env.DB, row, head))))
   ) {
     const started = await startRepullPullRequestReview(env, row);
     if (started.dispatched) {
       r.reviewsStarted++;
       review = "running";
+    } else {
+      r.reviewRefused[started.reason] = (r.reviewRefused[started.reason] ?? 0) + 1;
     }
   }
   return { ...facts, screen, review };
@@ -697,6 +705,7 @@ export async function runRepullAdvanceCron(
     waiting: 0,
     screensStarted: 0,
     reviewsStarted: 0,
+    reviewRefused: {},
     gatesCleared: 0,
     resumed: 0,
     unconfirmed: 0,
@@ -753,7 +762,8 @@ export function repullAdvanceLogLine(
 ): { level: "info" | "error"; line: string } | null {
   const failed = r.errors.length > 0 || r.unconfirmed > 0;
   const acted = r.screensStarted + r.reviewsStarted + r.gatesCleared + r.resumed + r.holdsChanged;
-  if (!failed && acted === 0 && Object.keys(r.refused).length === 0) return null;
+  const declined = Object.keys(r.refused).length + Object.keys(r.reviewRefused).length;
+  if (!failed && acted === 0 && declined === 0) return null;
   const words = (counts: Record<string, number>) =>
     Object.entries(counts)
       .sort(([a], [b]) => a.localeCompare(b))
@@ -764,6 +774,7 @@ export function repullAdvanceLogLine(
     `waiting=${r.waiting}`,
     `screens=${r.screensStarted}`,
     `reviews=${r.reviewsStarted}`,
+    `review_refused=${words(r.reviewRefused)}`,
     `gates_cleared=${r.gatesCleared}`,
     `resumed=${r.resumed}`,
     `unconfirmed=${r.unconfirmed}`,
