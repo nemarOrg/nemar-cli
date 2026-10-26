@@ -795,10 +795,13 @@ describe("merges are counted by who held the claim, from the audit rows the writ
 
   test("a claim the audit log does not hold is unattributed, never the Worker's", async () => {
     await merged({ claimant: SYSTEM_USER_ID });
+    // The claim edge is lost but an edge INTO gates_clear (the Worker's, here the claim edge
+    // rewritten as one that entered from pr_open) is kept, and that is not a claim.
     db.run(
-      `DELETE FROM audit_log WHERE action = 'repull_transition'
-         AND json_extract(details, '$.from') = 'gates_clear'
-         AND json_extract(details, '$.to') = 'gates_clear'`,
+      `UPDATE audit_log SET details = json_set(details, '$.from', 'pr_open')
+        WHERE action = 'repull_transition'
+          AND json_extract(details, '$.from') = 'gates_clear'
+          AND json_extract(details, '$.to') = 'gates_clear'`,
     );
     expect(await counts()).toEqual({
       worker: 0,
@@ -870,6 +873,50 @@ describe("merges are counted by who held the claim, from the audit rows the writ
     const merges = (await report({}, soon())).facts.repulls?.merged;
     expect(merges).toEqual({ worker: 0, administrator: 1, outside_tool: 0, unattributed: 0 });
   });
+
+  for (const [who, claimant] of [
+    ["the Worker's", SYSTEM_USER_ID],
+    ["an administrator's", ADMIN],
+  ] as const) {
+    test(`a merge by hand after ${who} released claim is one merge outside NEMAR's tools, not also the claimant's`, async () => {
+      const rec = ready("gates_clear");
+      await claim(rec, claimant, "n0");
+      ageClaim(rec);
+      const released = await releaseMergeClaim(envFor(cap), { id: ADMIN }, rec.id, {
+        pr: "n0",
+        sha: HEAD,
+        outcome: "not_sent",
+      });
+      expect(released, JSON.stringify(released)).toHaveProperty("row");
+      await record(rec, "n0", ADMIN);
+      // The premise: the log holds the claimant's claim edge, and the merge was recorded as outside
+      // the tools, so the same merge could be counted under two heads.
+      const claimants = db
+        .query<{ user_id: number | null }, [string]>(
+          `SELECT user_id FROM audit_log
+            WHERE action = 'repull_transition' AND resource_id = ?
+              AND json_extract(details, '$.from') = 'gates_clear'
+              AND json_extract(details, '$.to') = 'gates_clear'`,
+        )
+        .all(String(rec.id));
+      expect(claimants.map((c) => c.user_id)).toEqual([claimant]);
+      expect(mergedEdges(rec.id)).toEqual(["gates_clear > merged"]);
+      const outside = db
+        .query<{ v: number }, [string]>(
+          `SELECT json_extract(details, '$.merged_outside_tool') AS v FROM audit_log
+            WHERE action = 'repull_transition' AND resource_id = ?
+              AND json_extract(details, '$.to') = 'merged'`,
+        )
+        .get(String(rec.id));
+      expect(outside?.v).toBe(1);
+      expect(await counts()).toEqual({
+        worker: 0,
+        administrator: 0,
+        outside_tool: 1,
+        unattributed: 0,
+      });
+    });
+  }
 });
 
 // ----------------------------------------------------------------------------
