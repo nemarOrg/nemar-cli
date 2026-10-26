@@ -14,7 +14,11 @@
  *    what the gates are waiting for (below), then record the first rule that does not hold as the
  *    row's hold. Only a clean verdict writes `gates_clear`: an unknown fact, a `not-clean`
  *    mergeable state and every other word hold, and a clean row whose edge the transition refuses
- *    holds `gates-refused`. The merge itself is a later slice's.
+ *    holds `gates-refused`. A row cleared on one tick is merged on a later one, from its own facts;
+ *  - a row at `gates_clear` that holds no claim to merge: the Worker's merge (`workerMergeRepull`,
+ *    `upstream-repull-merge.ts`), which reads both switches, the bound on its merges, the
+ *    machine-clean facts at the merge stage and the day's merge cap itself, and says why it did not
+ *    merge as the row's hold. One that holds a claim waits on GitHub (`claim-held`);
  *  - a row a live dispatch is working on (its run is still out, settling its head): nothing is read
  *    from GitHub, and no hold is recorded for it, because nothing holds it but its own run; a hold
  *    it had is cleared, which is a write, with its audit row.
@@ -80,20 +84,24 @@
  *
  * WHICH ROWS. Only automatic rows (`origin = 'automatic'`) are read: an administrator's row is
  * never read, held or advanced here, because the Worker never takes an administrator's re-pull on
- * (decision 7). At most {@link ADVANCE_ROWS_PER_TICK} rows of each kind a tick, in two rotations
- * by id ({@link advanceSelection}): the rows at `pr_open` turn every half hour, and the stalled rows
- * are read only inside the resume window and turn once per half hour of it, so every stalled row
- * is read inside the window whatever the number of rows of either kind. A row that waits on an
- * administrator for days never keeps a newer row from being read: most automatic pull requests
- * will wait for one, because most mirrors' screens ask for an acknowledgment (ADR 0111,
- * Consequences).
+ * (decision 7). At most {@link ADVANCE_ROWS_PER_TICK} rows of each kind a tick, in three rotations
+ * by id ({@link advanceSelection}): the rows at `pr_open` and the rows past their gates each turn
+ * every half hour, and the stalled rows are read only inside the resume window and turn once per
+ * half hour of it, so every stalled row is read inside the window whatever the number of rows of
+ * any kind. A row that waits on an administrator for days never keeps a newer row from being read:
+ * most automatic pull requests will wait for one, because most mirrors' screens ask for an
+ * acknowledgment (ADR 0111, Consequences). A row is taken on by the kind the list read it in: one
+ * that reached another kind between the list and its own read is left for the next tick.
  *
  * PRODUCTION ONLY. Outside `ENVIRONMENT` exactly `production` the tick returns null before it reads
  * or writes anything: the `nemarDatasets` organization is shared with dev. It is called only from
  * the 30-minute tick's production block, absent from `DEV_CRON_ALLOWLIST`. In production with
  * `AUTO_REPULL_ENABLED` not exactly `"1"`, GitHub is asked nothing, nothing is claimed or sent,
- * and every row it examines is held `switch-off`, a row a run is still out for included. Each
- * production tick that could list its rows stamps `upstream_repull_scheduler.last_advance_at`.
+ * and every row it examines is held `switch-off`, a row a run is still out for included, but for a
+ * row that already holds a claim to merge, which says `claim-held`. With the open switch on and
+ * `AUTO_REPULL_MERGE_ENABLED` not exactly `"1"`, a row at `gates_clear` is held
+ * `merge-switch-off`, and nothing is read for it. Each production tick that could list its rows
+ * stamps `upstream_repull_scheduler.last_advance_at`.
  *
  * COST on the 30-minute tick, which shares one subrequest allowance with every job on it, measured
  * over five rows at `pr_open` (`upstream-repull-advance.test.ts` pins it): 67 D1 statements and 25
@@ -135,6 +143,7 @@ import { startRepullPullRequestReview } from "./pr-review-start.js";
 import { autoRepullEnabled, isExactProduction } from "./repull-switches.js";
 import { claimOpenDispatch, markDispatchSendFailed } from "./upstream-repull-dispatch.js";
 import { gatherMachineCleanFacts } from "./upstream-repull-facts.js";
+import { type WorkerMergeOutcome, workerMergeRepull } from "./upstream-repull-merge.js";
 import { startRepullScreen } from "./upstream-repull-screen.js";
 import { commitTransition, getRepull, isRefusal, prepareTransition } from "./upstream-repull.js";
 
@@ -152,11 +161,28 @@ export const RESUMABLE_STATUSES = [
   "registered",
 ] as const satisfies readonly RepullStatus[];
 
+/**
+ * The statuses past the gates: a row at `gates_clear` is merged by the Worker when it is machine
+ * clean (`upstream-repull-merge.ts`).
+ */
+export const PAST_GATES_STATUSES = ["gates_clear"] as const satisfies readonly RepullStatus[];
+
 /** The statuses the tick examines. */
 export const ADVANCE_STATUSES = [
   ...RESUMABLE_STATUSES,
   "pr_open",
+  ...PAST_GATES_STATUSES,
 ] as const satisfies readonly RepullStatus[];
+
+/** Which of the tick's rotations a status is in, or null for one the tick does not examine. */
+export type AdvanceKind = "open" | "stalled" | "past-gates";
+
+export function advanceKindOf(status: string): AdvanceKind | null {
+  if (status === "pr_open") return "open";
+  if ((RESUMABLE_STATUSES as readonly string[]).includes(status)) return "stalled";
+  if ((PAST_GATES_STATUSES as readonly string[]).includes(status)) return "past-gates";
+  return null;
+}
 
 /**
  * The `open` dispatches one row may have, at most. The first, which created the row, is one of
@@ -346,7 +372,16 @@ export interface AdvanceTickResult {
   resumed: number;
   /** Stalled rows whose resume got no answer: the dispatch stays, and keeps its unit of the cap. */
   unconfirmed: number;
-  /** Clean rows whose edge the record refused, by its code (a `DISPATCH_CODES` word). */
+  /** Merges the Worker sent to GitHub. */
+  mergesSent: number;
+  /** Rows recorded `merged` by the Worker. */
+  merged: number;
+  /** Merges sent whose answer did not say what became of them: each claim is kept. */
+  mergeUnknown: number;
+  /**
+   * Clean rows whose edge into `gates_clear`, or whose claim to merge, the record refused, by its
+   * code (a `DISPATCH_CODES` word).
+   */
   refused: Record<string, number>;
   /** Rows held this tick, by word, whether the word is new or not. */
   held: Record<string, number>;
@@ -419,24 +454,26 @@ export function resumeWindowTurn(now: Date): number | null {
 }
 
 /**
- * The rows a tick at `now` examines, from the automatic rows listed: two rotations of their own,
- * so neither kind can crowd out the other. The rows at `pr_open` turn every half hour. The rows
- * stalled before their pull request opened are read only inside the resume window, the only time
- * one can be resumed, and turn by {@link resumeWindowTurn}, so each is read inside the window
- * within ceil(n / {@link ADVANCE_ROWS_PER_TICK}) window ticks, however many rows of either kind
- * there are.
+ * The rows a tick at `now` examines, from the automatic rows listed: three rotations of their own,
+ * so no kind can crowd out another. The rows at `pr_open`, and the rows past their gates, each turn
+ * every half hour. The rows stalled before their pull request opened are read only inside the
+ * resume window, the only time one can be resumed, and turn by {@link resumeWindowTurn}, so each
+ * is read inside the window within ceil(n / {@link ADVANCE_ROWS_PER_TICK}) window ticks, however
+ * many rows of any kind there are.
  */
 export function advanceSelection(
   rows: ReadonlyArray<{ id: number; status: string }>,
   now: Date,
 ): number[] {
-  const open = rows.filter((x) => x.status === "pr_open").map((x) => x.id);
-  const stalled = rows
-    .filter((x) => (RESUMABLE_STATUSES as readonly string[]).includes(x.status))
-    .map((x) => x.id);
+  const of = (kind: AdvanceKind) =>
+    rows.filter((x) => advanceKindOf(x.status) === kind).map((x) => x.id);
   const slot = Math.floor(now.getTime() / (ADVANCE_TICK_MINUTES * 60_000));
   const turn = resumeWindowTurn(now);
-  return [...rotate(open, slot), ...(turn === null ? [] : rotate(stalled, turn))];
+  return [
+    ...rotate(of("open"), slot),
+    ...(turn === null ? [] : rotate(of("stalled"), turn)),
+    ...rotate(of("past-gates"), slot),
+  ];
 }
 
 /**
@@ -791,14 +828,47 @@ async function advanceOpenPullRequest(t: Tick, row: RepullRow): Promise<void> {
   return observe(t, row, verdict.clean ? null : verdict.hold);
 }
 
-async function advanceRow(t: Tick, id: number): Promise<void> {
+/** Count what the Worker's merge came to. */
+function tallyMerge(t: Tick, o: WorkerMergeOutcome): void {
+  const { r } = t;
+  if (o.sent) r.mergesSent++;
+  if (o.kind === "merged") r.merged++;
+  if (o.kind === "unknown") r.mergeUnknown++;
+  if (o.hold === "cap-unreadable") {
+    // A fault in the configuration, not a full day: said as such, on the row and in the log.
+    r.errors.push("cap-unreadable");
+  } else if (o.code !== undefined && o.hold !== "cap-exhausted") {
+    // The record refused a clean row's claim, or the record of a merge GitHub made: the rule and
+    // the record disagree, which is counted by the record's word and logged at error level.
+    r.refused[o.code] = (r.refused[o.code] ?? 0) + 1;
+  }
+}
+
+/**
+ * A row past its gates. At `gates_clear` with no claim held, the Worker's merge
+ * (`workerMergeRepull`), which reads the switches, the machine-clean facts at the merge stage and
+ * the day's cap itself; with a claim held, the record waits on GitHub (`claim-held`).
+ */
+async function advancePastGates(t: Tick, row: RepullRow): Promise<void> {
+  if (row.merge_claim_sha !== null) return observe(t, row, "claim-held");
+  const o = await workerMergeRepull(t.env, row);
+  tallyMerge(t, o);
+  // A merge recorded is an edge into another status, which ended the hold already.
+  if (o.kind === "skipped" || o.kind === "merged") return;
+  return observe(t, o.row, o.hold);
+}
+
+async function advanceRow(t: Tick, id: number, listed: string): Promise<void> {
   const row = await getRepull(t.env.DB, id);
-  // Read again by id: a row that ended, moved on or is an administrator's since the list is left.
+  // Read again by id: a row that ended, moved to another kind or is an administrator's since the
+  // list is left, for the next tick to read as it is.
   if (!row || row.origin !== "automatic") return;
-  if (!(ADVANCE_STATUSES as readonly string[]).includes(row.status)) return;
+  const kind = advanceKindOf(row.status);
+  if (kind === null || kind !== advanceKindOf(listed)) return;
   t.r.examined++;
-  if (row.status === "pr_open") await advanceOpenPullRequest(t, row);
-  else await advanceStalled(t, row);
+  if (kind === "open") await advanceOpenPullRequest(t, row);
+  else if (kind === "stalled") await advanceStalled(t, row);
+  else await advancePastGates(t, row);
 }
 
 /**
@@ -822,6 +892,9 @@ export async function runRepullAdvanceCron(
     gatesCleared: 0,
     resumed: 0,
     unconfirmed: 0,
+    mergesSent: 0,
+    merged: 0,
+    mergeUnknown: 0,
     refused: {},
     held: {},
     holdsChanged: 0,
@@ -842,9 +915,10 @@ export async function runRepullAdvanceCron(
       id: number;
       status: string;
     }>();
+    const listed = new Map(results.map((x) => [x.id, x.status]));
     for (const id of advanceSelection(results, t.now)) {
       try {
-        await advanceRow(t, id);
+        await advanceRow(t, id, listed.get(id) ?? "");
       } catch (err) {
         // The row by its id (an operator reads the record with it), never its dataset, and the
         // error by its class, never its message; the next row is taken up.
@@ -880,8 +954,19 @@ export async function runRepullAdvanceCron(
 export function repullAdvanceLogLine(
   r: AdvanceTickResult,
 ): { level: "info" | "error"; line: string } | null {
-  const failed = r.errors.length > 0 || r.unconfirmed > 0 || Object.keys(r.refused).length > 0;
-  const acted = r.screensStarted + r.reviewsStarted + r.gatesCleared + r.resumed + r.holdsChanged;
+  const failed =
+    r.errors.length > 0 ||
+    r.unconfirmed > 0 ||
+    r.mergeUnknown > 0 ||
+    Object.keys(r.refused).length > 0;
+  const acted =
+    r.screensStarted +
+    r.reviewsStarted +
+    r.gatesCleared +
+    r.resumed +
+    r.mergesSent +
+    r.merged +
+    r.holdsChanged;
   const declined = Object.keys(r.refused).length + Object.keys(r.reviewRefused).length;
   if (!failed && acted === 0 && declined === 0) return null;
   const words = (counts: Record<string, number>) =>
@@ -899,6 +984,9 @@ export function repullAdvanceLogLine(
     `gates_cleared=${r.gatesCleared}`,
     `resumed=${r.resumed}`,
     `unconfirmed=${r.unconfirmed}`,
+    `merges=${r.mergesSent}`,
+    `merged=${r.merged}`,
+    `merge_unknown=${r.mergeUnknown}`,
     `holds_changed=${r.holdsChanged}`,
     `held=${words(r.held)}`,
     `refused=${words(r.refused)}`,

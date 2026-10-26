@@ -959,6 +959,16 @@ export const DISPATCH_FINAL_CODES = [
  * clean whose edge into `gates_clear` the record's own transition refused (the refusal's code is in
  * the advance tick's log), which should not happen and is seen when it does. A hold is an
  * observation, never a transition.
+ *
+ * The Worker's merge (Phase 7g) uses `claim-held` (a claim to merge is held and GitHub has not
+ * said the merge happened: an answer that was lost, a merge sent and not yet seen, a claim an
+ * administrator holds) and `merge-refused` (GitHub refused the Worker's merge, so another would be
+ * refused too and an administrator looks), and adds `merge-exhausted` (the Worker sent the merge of
+ * this record as often as the automatic path sends one), `merge-message` (the record's trailers are
+ * not values the squash message can carry, so the release could not read the merge as the
+ * re-pull's) and `claim-refused`, a row machine clean found clean whose claim to merge the record
+ * refused for a reason other than the day's cap, which, like `gates-refused`, should not happen and
+ * is seen when it does.
  */
 export const REPULL_HOLD_REASONS = [
   "not-production",
@@ -1006,6 +1016,9 @@ export const REPULL_HOLD_REASONS = [
   "resume-refused",
   "finish-exhausted",
   "merge-refused",
+  "merge-exhausted",
+  "merge-message",
+  "claim-refused",
 ] as const;
 export type HoldReason = (typeof REPULL_HOLD_REASONS)[number];
 

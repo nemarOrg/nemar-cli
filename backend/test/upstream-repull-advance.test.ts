@@ -896,9 +896,11 @@ describe("the gates of an automatic pull request", () => {
     });
     // The record's own transition read GitHub's live head before it wrote.
     expect(githubRequests().filter((q) => q.endsWith(`/${DS}/pulls/7`)).length).toBeGreaterThan(1);
-    // A gates_clear row is no longer the tick's: nothing more is read or written for it.
+    // A gates_clear row now waits for the Worker's merge, which the merge switch, off here, keeps
+    // from reading anything (upstream-repull-worker-merge.test.ts has the rest).
     gh.requests = [];
-    expect((await tick()).examined).toBe(0);
+    const next = await tick();
+    expect(next).toMatchObject({ examined: 1, held: { "merge-switch-off": 1 }, mergesSent: 0 });
     expect(githubRequests()).toEqual([]);
   });
 
@@ -1246,7 +1248,7 @@ describe("the log line", () => {
     const r = await tick();
     expect(repullAdvanceLogLine(r)).toEqual({
       level: "info",
-      line: "[repull-advance] examined=1 running=0 not_due=0 screens=0 reviews=0 review_refused=none gates_cleared=0 resumed=0 unconfirmed=0 holds_changed=1 held=main-moved:1 refused=none",
+      line: "[repull-advance] examined=1 running=0 not_due=0 screens=0 reviews=0 review_refused=none gates_cleared=0 resumed=0 unconfirmed=0 merges=0 merged=0 merge_unknown=0 holds_changed=1 held=main-moved:1 refused=none",
     });
     expect(repullAdvanceLogLine(await tick())).toBeNull();
   });

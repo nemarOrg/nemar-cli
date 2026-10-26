@@ -42,6 +42,7 @@
  */
 
 import { dirname, join } from "node:path";
+import { repullSquashMessage } from "../../../shared/repull-squash.js";
 import {
   PULL_REQUEST_COLUMNS,
   type RepullPullRequest,
@@ -77,7 +78,7 @@ import { ExecuteRefused, assertNotAnonymous } from "./execute/verify-plan.js";
 import { acquireLock, privateDir, withIsolatedGit, workPaths } from "./execute/workdir.js";
 import { PATCH_TRAILER } from "./patch.js";
 import type { Env } from "./sources.js";
-import { repullTrailerLines, trailersProblem } from "./trailers.js";
+import { trailersProblem } from "./trailers.js";
 
 /**
  * Where the gate stopped. `checkRepullMerge` writes nothing, whatever its stage. In
@@ -236,28 +237,15 @@ export async function prReviewsGate(args: {
 /**
  * The squash commit the gate sends: its title and a message whose last paragraph is the trailers
  * (N.0.1's with its own `Repull-Patch:` beside them, when the record says how many corrections).
+ * Built in `shared/repull-squash.ts`, which the Worker's merge of an automatic re-pull builds its
+ * message with too.
  */
 export function squashMessage(
   row: RepullRow,
   prNumber: number,
   pr: RepullPullRequest = "n0",
 ): { title: string; message: string } {
-  const [snapshot, plan] = repullTrailerLines(row);
-  const corrections = pr === "n1" ? row.counts?.corrections : undefined;
-  return {
-    title: `Release v${row[PULL_REQUEST_COLUMNS[pr].version]} (#${prNumber})`,
-    message: [
-      pr === "n0"
-        ? `Re-pull of upstream ${row.upstream_ds} from snapshot ${row.from_tag} to ${row.to_tag} (re-pull #${row.id}), squash-merged through the re-pull's merge gate (ADR 0111).`
-        : `NEMAR's corrections of re-pull #${row.id} (upstream ${row.upstream_ds} ${row.from_tag} to ${row.to_tag}), replayed onto v${row.to_version}, squash-merged through the re-pull's merge gate (ADR 0111).`,
-      "",
-      snapshot,
-      plan,
-      ...(pr === "n1" && typeof corrections === "number"
-        ? [`${PATCH_TRAILER}: corrections=${corrections}`]
-        : []),
-    ].join("\n"),
-  };
+  return repullSquashMessage(row, prNumber, pr, "gate");
 }
 
 /** The automated review of `head`, read now, as `approve` gates on it (ADR 0093, ADR 0107). */

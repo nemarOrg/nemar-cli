@@ -34,6 +34,8 @@ const ROOTS = [
   `${SRC}/services/pr-review-start.ts`,
   // The advance tick that holds, gates and resumes the automatic re-pulls.
   `${SRC}/services/upstream-repull-advance.ts`,
+  // The Worker's merge of an automatic re-pull, the one Worker path that merges a pull request.
+  `${SRC}/services/upstream-repull-merge.ts`,
 ];
 
 /** Every module under `backend/src` that is a mail module, by name. */
@@ -84,6 +86,7 @@ describe("the re-pull code sends no mail", () => {
       "services/pr-review.ts",
       "services/pr-review-start.ts",
       "services/upstream-repull-advance.ts",
+      "services/upstream-repull-merge.ts",
     ]) {
       expect(closure.files.has(`${SRC}/${f}`)).toBe(true);
     }

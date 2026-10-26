@@ -22,7 +22,14 @@
  *    `checkTotalCount` makes the list claim more runs than it holds (a page that is not all);
  *  - `POST .../check-runs`, `PATCH .../check-runs/<n>`, `POST .../issues/<n>/comments` and
  *    `PATCH .../issues/comments/<n>`, the writes the ADR 0107 review publishes its check and its
- *    comment with: recorded in `writes` and answered with a new id.
+ *    comment with: recorded in `writes` and answered with a new id;
+ *  - `PUT .../pulls/<n>/merge`, the Worker's merge of an automatic re-pull: recorded in `merges`
+ *    (its body and the token it carried), with `beforeMerge` run first (a test reads the database
+ *    there, at the moment the merge arrives). As GitHub does, it answers 409 when the `sha` it was
+ *    sent is not the pull request's head, and otherwise merges the entry of `pulls` (merged,
+ *    closed, `STANDIN_MERGE_SHA` its merge commit) and answers `{ merged: true }`; `mergeAnswer`
+ *    answers another status instead (with `applied`, the merge is made all the same: an answer
+ *    lost after GitHub merged), or a 200 whose body does not say it merged.
  * A pull request entry may also name its `number`, `user`, the head's and base's `repo` and its
  * `mergeable_state`, which are answered only when named. A request whose path holds `slow` is
  * answered `slowMs` late. Error answers on the reads added for the machine-clean facts carry
@@ -73,9 +80,26 @@ export interface CheckRunAnswer {
   head_sha?: string;
 }
 
+/** One merge the stand-in was asked to make. */
+export interface MergeAsked {
+  path: string;
+  body: Record<string, unknown>;
+  token: string | null;
+}
+
 export interface RepullGitHub {
   requests: string[];
   pulls: Record<string, PullAnswer>;
+  /** The merges asked for, in order. */
+  merges: MergeAsked[];
+  /** Run when a merge arrives, before it is answered. */
+  beforeMerge: ((asked: MergeAsked) => void | Promise<void>) | null;
+  /**
+   * What a merge is answered instead of GitHub's own: a status (`applied` makes the merge all the
+   * same, as a gateway's answer lost after GitHub merged), or `not-merged`, a 200 whose body does
+   * not say `merged: true`. Null: merged when the `sha` is the head, 409 otherwise.
+   */
+  mergeAnswer: { status: number; applied?: boolean } | "not-merged" | null;
   defaultHead: string | null;
   tags: Record<string, string>;
   compares: Record<string, string | number>;
@@ -100,6 +124,9 @@ export function startRepullGitHub(o: { defaultHead?: string | null } = {}): Repu
   const gh: RepullGitHub = {
     requests: [],
     pulls: {},
+    merges: [],
+    beforeMerge: null,
+    mergeAnswer: null,
     defaultHead: o.defaultHead ?? null,
     tags: {},
     compares: {},
@@ -117,6 +144,9 @@ export function startRepullGitHub(o: { defaultHead?: string | null } = {}): Repu
     reset() {
       gh.requests = [];
       gh.pulls = {};
+      gh.merges = [];
+      gh.beforeMerge = null;
+      gh.mergeAnswer = null;
       gh.defaultHead = o.defaultHead ?? null;
       gh.tags = {};
       gh.compares = {};
@@ -169,7 +199,47 @@ export function startRepullGitHub(o: { defaultHead?: string | null } = {}): Repu
         gh.writes.push(`${req.method} ${url.pathname}`);
         return json({ id: 9000 + gh.writes.length }, req.method === "POST" ? 201 : 200);
       }
-      let m = /^\/repos\/nemarDatasets\/([a-z]{2}\d{6})\/pulls\/(\d+)$/.exec(url.pathname);
+      let m = /^\/repos\/nemarDatasets\/([a-z]{2}\d{6})\/pulls\/(\d+)\/merge$/.exec(url.pathname);
+      if (m && req.method === "PUT") {
+        const asked: MergeAsked = {
+          path: url.pathname,
+          body: ((await req.json().catch(() => null)) ?? {}) as Record<string, unknown>,
+          token: (req.headers.get("authorization") ?? "").replace(/^Bearer /, "") || null,
+        };
+        gh.merges.push(asked);
+        if (gh.beforeMerge) await gh.beforeMerge(asked);
+        const key = `${m[1]}#${m[2]}`;
+        const pull = gh.pulls[key];
+        const merge = () => {
+          if (pull) {
+            pull.merged = true;
+            pull.state = "closed";
+            pull.merge_commit_sha = STANDIN_MERGE_SHA;
+          }
+        };
+        const answer = gh.mergeAnswer;
+        if (answer === "not-merged") return json({ message: "Accepted" });
+        if (answer !== null) {
+          if (answer.applied) merge();
+          return json({ message: "no" }, answer.status);
+        }
+        if (!pull || pull.state === "closed" || pull.merged === true) {
+          return json({ message: "Pull Request is not mergeable" }, 405);
+        }
+        if (asked.body.sha !== (pull.head?.sha ?? gh.defaultHead)) {
+          return json(
+            { message: "Head branch was modified. Review and try the merge again." },
+            409,
+          );
+        }
+        merge();
+        return json({
+          sha: STANDIN_MERGE_SHA,
+          merged: true,
+          message: "Pull Request successfully merged",
+        });
+      }
+      m = /^\/repos\/nemarDatasets\/([a-z]{2}\d{6})\/pulls\/(\d+)$/.exec(url.pathname);
       if (m) {
         const n = Number(m[2]);
         const a: PullAnswer | undefined =
