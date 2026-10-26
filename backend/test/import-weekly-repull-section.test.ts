@@ -1408,20 +1408,33 @@ describe("what is not a reason, with nothing to do", () => {
 // ----------------------------------------------------------------------------
 
 describe("the headline, the log line and the command's exit code are one function", () => {
-  test("the headline asks exactly when the shared rule does, for every week of the re-pulls", async () => {
+  test("the Worker's reasons reach the headline word for word and in its order, and a week that could not be read is a reason", async () => {
     const base = (await report()).facts;
-    for (const repulls of [
-      repullWeekFacts(),
-      repullWeekFacts({ attention: ["1 re-pull(s) ended failed"] }),
-      null,
-    ]) {
-      const f = { ...base, repulls };
-      expect(weeklyHeadline(f).attention).toBe(weeklyAttention(f).attention);
-      for (const p of repulls?.attention ?? []) expect(weeklyHeadline(f).line).toContain(p);
+    const reasons = [
+      "1 re-pull(s) ended failed",
+      "2 re-pull dispatch(es) were not reported by their run in time",
+    ];
+    // A quiet week adds no re-pull reason to the headline.
+    const quiet = { ...base, repulls: repullWeekFacts() };
+    expect(repullProblems(quiet)).toEqual([]);
+    expect(weeklyHeadline(quiet).line).not.toMatch(/re-pull/i);
+    // The Worker's reasons are the headline's, as it wrote them, in the order it gave them.
+    const asked = { ...base, repulls: repullWeekFacts({ attention: reasons }) };
+    expect(repullProblems(asked)).toEqual(reasons);
+    expect(weeklyHeadline(asked).attention).toBe(true);
+    expect(weeklyHeadline(asked).line).toContain("**Needs attention:**");
+    expect(weeklyHeadline(asked).line).toContain(reasons.join("; "));
+    // A week that could not be read, null or absent from a backend that predates the field, asks.
+    for (const repulls of [null, undefined]) {
+      const unknown = { ...base, repulls };
+      expect(repullProblems(unknown)).toEqual([
+        "upstream re-pull activity could not be determined",
+      ]);
+      expect(weeklyHeadline(unknown).attention).toBe(true);
+      expect(weeklyHeadline(unknown).line).toContain(
+        "upstream re-pull activity could not be determined",
+      );
     }
-    expect(weeklyAttention({ ...base, repulls: undefined }).problems).toContain(
-      "upstream re-pull activity could not be determined",
-    );
   });
 
   test("the log line carries the three counts", async () => {
@@ -1440,12 +1453,36 @@ describe("the headline, the log line and the command's exit code are one functio
 // ----------------------------------------------------------------------------
 
 describe("the statements the report reads", () => {
-  test("none of them selects a dataset id", () => {
-    for (const [name, sql] of Object.entries(REPULL_WEEK_SQL)) {
-      expect([name, /dataset_id\s*(,|\s+FROM|\))/.test(sql.split("FROM")[0] ?? "")]).toEqual([
-        name,
-        false,
-      ]);
+  test("each statement returns the columns the gather reads and no other, whatever a column is called", async () => {
+    // A row of every kind the statements read, so each has something to return. A dataset id
+    // selected under any name, `dataset_id AS d` among them, would be a column the gather does not
+    // read, and a pattern in the SQL text would not see it.
+    seedDispatch({ status: "refused", code: "gitlink", at: at(-DAY) });
+    seedAutomatic("pr_open", "screen-acknowledge");
+    seedAutomatic("gates_clear", null, { merge_claimed_at: at(-3 * HOUR), merge_claim_sha: HEAD });
+    seedAutomatic("failed", null, { terminal_at: at(-DAY) });
+    const week = [at(-7 * DAY), at(0)];
+    const binds: Record<keyof typeof REPULL_WEEK_SQL, string[]> = {
+      dispatches: week,
+      holds: [],
+      claims: [at(-HOUR)],
+      merges: week,
+      failed: week,
+    };
+    const columns: Record<keyof typeof REPULL_WEEK_SQL, string[]> = {
+      dispatches: ["code", "kind", "n", "status"],
+      holds: ["hold_reason", "n"],
+      claims: ["n"],
+      merges: ["administrator", "outside_tool", "unattributed", "worker"],
+      failed: ["n"],
+    };
+    for (const name of Object.keys(REPULL_WEEK_SQL) as Array<keyof typeof REPULL_WEEK_SQL>) {
+      const rows = db.query(REPULL_WEEK_SQL[name]).all(...(binds[name] as never[])) as Array<
+        Record<string, unknown>
+      >;
+      expect([name, rows.length > 0]).toEqual([name, true]);
+      for (const row of rows)
+        expect([name, Object.keys(row).sort()]).toEqual([name, columns[name]]);
     }
   });
 
