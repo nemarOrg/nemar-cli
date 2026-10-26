@@ -30,7 +30,7 @@
 
 import { z } from "zod";
 import { isOpenNeuroTag, normalizeUpstreamTag } from "../../../shared/openneuro-tag.js";
-import type { DispatchView } from "../../../shared/repull-observability.js";
+import type { DispatchView, RepullCapReading } from "../../../shared/repull-observability.js";
 import {
   DISPATCH_CODES,
   DISPATCH_LIVE,
@@ -47,12 +47,7 @@ import {
 } from "../../../shared/repull-state.js";
 import type { Bindings } from "../types/bindings.js";
 import { signRepullDispatchToken, verifyRepullDispatchToken } from "./github/callback-tokens.js";
-import {
-  type CapReading,
-  autoRepullEnabled,
-  isExactProduction,
-  repullOpenCap,
-} from "./repull-switches.js";
+import { autoRepullEnabled, isExactProduction, repullOpenCap } from "./repull-switches.js";
 import type { RepullRefusal } from "./upstream-repull.js";
 
 /** How long a run has to report before the Worker calls it `unreported`: the job's 330 minutes plus queueing. */
@@ -267,7 +262,7 @@ export type DispatchClaim = { id: number; token: string };
  */
 export type ClaimRefusal =
   | { refused: "off" | "unconfigured" | "cap" | "candidate" | "live" | "row" | "open-row" }
-  | { refused: "cap-unreadable"; source: CapReading["source"] };
+  | { refused: "cap-unreadable"; source: RepullCapReading["source"] };
 
 const looksUnique = (err: unknown) => /UNIQUE constraint failed/i.test(String(err));
 

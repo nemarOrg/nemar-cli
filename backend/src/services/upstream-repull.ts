@@ -82,6 +82,7 @@ import {
   ACKNOWLEDGMENT_MAX_LENGTH,
   ACKNOWLEDGMENT_MIN_LENGTH,
 } from "../../../shared/publication-limits.js";
+import type { RepullCapReading } from "../../../shared/repull-observability.js";
 import {
   AUTO_MAX_COPY_BYTES,
   CLEARING_SELF_EDGES,
@@ -117,7 +118,6 @@ import { isValidDatasetId } from "./datasetId.js";
 import { isScreenExempt, readStoredReport } from "./identifier-screen-stored.js";
 import { resolveImportError } from "./import-error.js";
 import {
-  type CapReading,
   REPULL_CAP_MAX,
   autoRepullEnabled,
   isExactProduction,
@@ -539,7 +539,7 @@ export async function datasetFenceRefusal(
 // The daily merge cap (ADR 0111, decision 6)
 // ----------------------------------------------------------------------------
 
-export interface MergeCapState extends CapReading {
+export interface MergeCapState extends RepullCapReading {
   /** Claims made today (UTC), N.0.0's and N.0.1's together. */
   used: number;
 }
@@ -571,7 +571,7 @@ export async function mergeClaimsToday(db: D1Database): Promise<number> {
   return (await db.prepare(MERGE_CLAIMS_TODAY_SQL).first<{ used: number }>())?.used ?? 0;
 }
 
-function mergeCapRefusal(cap: CapReading, used: number): RepullRefusal {
+function mergeCapRefusal(cap: RepullCapReading, used: number): RepullRefusal {
   const merge_cap: MergeCapState = { ...cap, used };
   if (cap.source === "unreadable") {
     // Attention, not a quiet zero: the owner set the binding and it does not read.
