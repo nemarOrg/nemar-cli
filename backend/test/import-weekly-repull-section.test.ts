@@ -308,6 +308,18 @@ describe("the section arrives every week", () => {
     expect(staging).toContain("Open switch (`AUTO_REPULL_ENABLED`): off.");
     expect(staging).toContain("This is not the production Worker, so neither switch is honored.");
   });
+
+  test("an unreadable cap is said to be unreadable and to read 0, never given a number it was not set to", async () => {
+    stampFresh();
+    const section = sectionOf(
+      (await report({ REPULL_DAILY_OPEN_CAP: "two", REPULL_DAILY_MERGE_CAP: "21" })).body,
+    );
+    expect(section).toContain("Daily open cap: **unreadable**, so it reads 0.");
+    expect(section).toContain("Daily merge cap: **unreadable**, so it reads 0.");
+    // Not "0 (the default)": the default is 2 and 5, and an unset binding is the only way to get it.
+    expect(section).not.toContain("(the default)");
+    expect(section).not.toContain("(set)");
+  });
 });
 
 // ----------------------------------------------------------------------------
@@ -450,6 +462,18 @@ describe("a claim to merge held over an hour is counted", () => {
       merge_claimed_at: at(-HOUR - 1000),
       merge_claim_sha: HEAD,
     });
+    expect((await report()).facts.repulls?.held_claims).toBe(1);
+  });
+
+  test("N.0.1's claim is held to the same bound: exactly an hour is not older, a second more is", async () => {
+    const claim = (ago: number) => ({
+      origin: "administrator",
+      patch_merge_claimed_at: at(-ago),
+      patch_merge_claim_sha: HEAD,
+    });
+    seedRepull("patch_gates_clear", claim(HOUR));
+    expect((await report()).facts.repulls?.held_claims).toBe(0);
+    seedRepull("patch_gates_clear", claim(HOUR + 1000));
     expect((await report()).facts.repulls?.held_claims).toBe(1);
   });
 });
@@ -1016,6 +1040,19 @@ describe("a read that fails is unknown, never zero", () => {
       expect(line).toContain("repull_unreported=unknown");
     });
   }
+
+  test("an absent re-pull field is unknown in the body and in the log line, and nothing throws", async () => {
+    // What an older backend sends: no `repulls` key at all, which is not null and not zero.
+    const base = (await report()).facts;
+    const { repulls: _omitted, ...withoutKey } = base;
+    const facts = withoutKey as unknown as typeof base;
+    expect(sectionOf(buildWeeklySummaryBody(facts, "x"))).toContain("**unknown**, not zero");
+    const line = weeklySummaryLogLine(facts, 12);
+    for (const key of ["repull_dispatched", "repull_merged_worker", "repull_unreported"]) {
+      expect(line).toContain(`${key}=unknown`);
+    }
+    expect(repullProblems(facts)).toEqual(["upstream re-pull activity could not be determined"]);
+  });
 
   test("the scheduler's row missing is unknown, not never, and a switch on asks for attention", async () => {
     db.run("DELETE FROM upstream_repull_scheduler");
