@@ -447,6 +447,15 @@ describe("each fact, flipped alone at its source, holds with its own word", () =
       "pr-unreadable",
     ],
     [
+      "its head is not a commit id",
+      () => {
+        gh.pulls[`${DS}#7`] = appPull({
+          head: { sha: "main", ref: "release/v2.0.0", repo: { full_name: `nemarDatasets/${DS}` } },
+        });
+      },
+      "pr-unreadable",
+    ],
+    [
       "GitHub answers for another number",
       () => {
         gh.pulls[`${DS}#7`] = appPull({ number: 8 });
