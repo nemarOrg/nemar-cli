@@ -111,6 +111,10 @@ export interface PullRequestFacts {
   headSha: string;
   headRef: string;
   baseRef: string;
+  /** The head's repository, `owner/name`, or null for a deleted fork's: GitHub names none. */
+  headRepo: string | null;
+  /** The base's repository, `owner/name`. */
+  baseRepo: string;
 }
 
 export const isObject = (x: unknown): x is Record<string, unknown> =>
@@ -126,6 +130,17 @@ export function pullRequestFacts(body: unknown): PullRequestFacts | null {
   if (typeof state !== "string" || typeof merged !== "boolean") return null;
   if (typeof headSha !== "string" || !SHA_RE.test(headSha)) return null;
   if (typeof headRef !== "string" || typeof baseRef !== "string") return null;
+  // GitHub names both repositories, a deleted fork's head as null; any other shape is not its own.
+  const headRepoField = body.head.repo;
+  const baseRepoField = body.base.repo;
+  const headRepo =
+    headRepoField === null
+      ? null
+      : isObject(headRepoField) && typeof headRepoField.full_name === "string"
+        ? headRepoField.full_name
+        : undefined;
+  if (headRepo === undefined) return null;
+  if (!isObject(baseRepoField) || typeof baseRepoField.full_name !== "string") return null;
   return {
     state,
     draft: body.draft === true,
@@ -135,10 +150,17 @@ export function pullRequestFacts(body: unknown): PullRequestFacts | null {
     headSha,
     headRef,
     baseRef,
+    headRepo,
+    baseRepo: baseRepoField.full_name,
   };
 }
 
-/** The recorded pull request, read from GitHub, and checked to be the one the row names. */
+/**
+ * The recorded pull request, read from GitHub, and checked to be the one the row names: the
+ * recorded branch into `main`, from and into the dataset's own repository. A fork's branch of the
+ * recorded name, a deleted fork's included, is not it (`pull-request-mismatch`), so every path that
+ * trusts the record's pull request, the claim to merge first, refuses a fork whoever asks.
+ */
 export async function readRecordedPullRequest(
   env: Bindings,
   row: RepullRow,
@@ -172,14 +194,28 @@ export async function readRecordedPullRequest(
       },
     };
   }
+  // Compared without case, as GitHub compares names and as the merge gate and the override do.
+  const own = `${ORG_NAME}/${row.dataset_id}`.toLowerCase();
+  if (facts.headRepo?.toLowerCase() !== own || facts.baseRepo.toLowerCase() !== own) {
+    return {
+      ok: false,
+      refusal: {
+        status: 409,
+        code: "pull-request-mismatch",
+        message: `Pull request #${number} is not from and into ${ORG_NAME}/${row.dataset_id} itself (its head is ${facts.headRepo ?? "a repository GitHub no longer names"}, its base ${facts.baseRepo}): a fork's pull request is never the re-pull's.`,
+        row,
+      },
+    };
+  }
   return { ok: true, facts };
 }
 
 /**
  * The live pull request, before its gates are recorded and before a claim to merge: GitHub, not
  * the caller, says the head. It must be open, not a draft, not merged, aimed at `main` from the
- * recorded release branch, with its head at `sha`. An unread GitHub refuses (502); a draft is
- * `pr-draft` (409), so it takes no unit of the cap; every other mismatch is `head-moved` (409).
+ * recorded release branch of the dataset's own repository, with its head at `sha`. An unread
+ * GitHub refuses (502); a draft is `pr-draft` (409), so it takes no unit of the cap; every other
+ * mismatch, a fork's head or base included, is `head-moved` (409), its message saying which.
  * Nothing is recorded either way. The read is followed by the UPDATE and then the caller's merge,
  * so it holds only if that merge passes the same `sha` to GitHub, which refuses a moved head.
  */

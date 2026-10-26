@@ -533,6 +533,67 @@ describe("the gates and the claim read the live pull request", () => {
     ).toBe(0);
   });
 
+  test("a fork's head, a deleted fork's, or a base in another repository refuses both, and nothing is claimed or sent", async () => {
+    const own = (ds: string) => ({ full_name: `nemarDatasets/${ds}` });
+    const cases: Array<[string, (ds: string) => PullAnswer]> = [
+      [
+        "a fork's head",
+        (ds) => ({
+          head: { sha: HEAD, ref: "release/v2.0.0", repo: { full_name: `someone/${ds}` } },
+        }),
+      ],
+      ["a deleted fork's head", () => ({ head: { sha: HEAD, ref: "release/v2.0.0", repo: null } })],
+      [
+        "a base in another repository",
+        (ds) => ({
+          head: { sha: HEAD, ref: "release/v2.0.0", repo: own(ds) },
+          base: { ref: "main", repo: { full_name: `someone/${ds}` } },
+        }),
+      ],
+    ];
+    for (const [what, answer] of cases) {
+      db.run("DELETE FROM upstream_repull_screens");
+      db.run("DELETE FROM upstream_repulls");
+      db.run("DELETE FROM datasets");
+      db.run("DELETE FROM audit_log");
+      const claiming = ready("on099999");
+      seedMirror("on099998");
+      const opening = seedRepull("pr_open", { dataset_id: "on099998" });
+      markScreen(opening, "clean");
+      // The branch is the recorded one at the screened head: only the repository is not.
+      gh.pulls = { "on099999#7": answer("on099999"), "on099998#7": answer("on099998") };
+      const c = await claim(claiming);
+      const g = await gates(opening);
+      expect([what, c.status, c.body.code, g.status, g.body.code]).toEqual([
+        what,
+        409,
+        "head-moved",
+        409,
+        "head-moved",
+      ]);
+      expect(c.body.error).toContain("is not from and into nemarDatasets/on099999 itself");
+      expect(c.body.error).toContain("a fork's pull request is never the re-pull's");
+      expect(rowOf(claiming)).toMatchObject({ merge_claim_sha: null, merge_claimed_at: null });
+      expect(rowOf(opening).status).toBe("pr_open");
+      // No edge was written, and nothing asked GitHub to merge.
+      expect(db.query("SELECT COUNT(*) AS n FROM audit_log").get()).toEqual({ n: 0 });
+      expect(gh.merges).toEqual([]);
+    }
+  });
+
+  test("the dataset's own repository named in another case is its own, and is claimed", async () => {
+    const id = ready("on099999");
+    gh.pulls = {
+      "on099999#7": {
+        head: { sha: HEAD, ref: "release/v2.0.0", repo: { full_name: "NemarDatasets/ON099999" } },
+        base: { ref: "main", repo: { full_name: "NEMARDATASETS/on099999" } },
+      },
+    };
+    const res = await claim(id);
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(rowOf(id).merge_claim_sha).toBe(HEAD);
+  });
+
   test("a GitHub that cannot be read refuses with 502, and the transport's retry time is passed on", async () => {
     const id = ready("on099999");
     gh.down = true;

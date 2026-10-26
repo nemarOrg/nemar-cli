@@ -721,6 +721,31 @@ describe("a fact that is not clean holds before the claim, and nothing is sent",
     expect(auditsOf(WORKER_MERGE_ACTION, id)).toEqual([]);
   });
 
+  test("a fork's head after the facts were read: the claim's own read refuses it, and nothing is sent", async () => {
+    const id = ready();
+    // The pull request turns into a fork's, at the same branch and head, between the facts and the
+    // claim: the claim is the one statement every merge passes, so it reads the repository itself.
+    let reads = 0;
+    const forking = interceptingD1(realD1(db), (sql) => {
+      if (sql === CREATE_FACTS_SQL && ++reads === 2) {
+        gh.pulls[`${DS}#7`] = appPull(DS, {
+          head: { sha: HEAD, ref: "release/v2.0.0", repo: { full_name: `someone/${DS}` } },
+        });
+      }
+    });
+    const r = await tick(env({}, forking));
+    expect(reads).toBe(2);
+    expect(r).toMatchObject({
+      mergesSent: 0,
+      held: { "claim-refused": 1 },
+      refused: { "head-moved": 1 },
+    });
+    expect(rowOf(id)).toMatchObject({ hold_reason: "claim-refused", merge_claim_sha: null });
+    expect(gh.merges).toEqual([]);
+    expect(usedToday()).toBe(0);
+    expect(auditsOf(WORKER_MERGE_ACTION, id)).toEqual([]);
+  });
+
   test("the facts are the merge stage's: a screened head that is not the recorded one is head-moved", async () => {
     // Only a record written by hand can be at gates_clear with another head (the gates edge sets the
     // screened head from the recorded one): the merge stage compares both, the gates stage only one.
@@ -1156,6 +1181,27 @@ describe("a merge GitHub refused, and a claim nothing was sent under", () => {
     const next = await tick();
     expect(next).toMatchObject({ claimsReleased: 1 });
     expect(rowOf(id)).toMatchObject({ merge_claim_sha: null, hold_reason: "merge-refused" });
+  });
+
+  test("a held claim whose pull request GitHub now reports from a fork is kept, never released or recorded", async () => {
+    const id = ready();
+    gh.mergeAnswer = { status: 409 };
+    await tick();
+    gh.mergeAnswer = null;
+    ageClaim(id, 6);
+    // Released if read as the record's own pull request: a fork's is not, so the record holds.
+    gh.pulls[`${DS}#7`] = appPull(DS, {
+      head: { sha: HEAD, ref: "release/v2.0.0", repo: { full_name: `someone/${DS}` } },
+    });
+    const r = await tick();
+    expect(r).toMatchObject({ claimsReleased: 0, mergesSent: 0, merged: 0, errors: [] });
+    expect(rowOf(id)).toMatchObject({
+      status: "gates_clear",
+      merge_claim_sha: HEAD,
+      hold_reason: "claim-held",
+    });
+    expect(auditsOf("repull_merge_claim_released", id)).toEqual([]);
+    expect(mergeTo()).toHaveLength(1);
   });
 
   test("closed without a merge after a refusal: released five minutes on, and the row holds pr-closed", async () => {

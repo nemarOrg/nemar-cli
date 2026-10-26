@@ -30,13 +30,14 @@
  *    closed, `STANDIN_MERGE_SHA` its merge commit) and answers `{ merged: true }`; `mergeAnswer`
  *    answers another status instead (with `applied`, the merge is made all the same: an answer
  *    lost after GitHub merged), or a 200 whose body does not say it merged.
- * A pull request entry may also name its `number`, `user`, the head's and base's `repo` and its
- * `mergeable_state`, which are answered only when named. A request whose path holds `slow` is
- * answered `slowMs` late. Error answers on the reads added for the machine-clean facts carry
- * `Retry-After: 0`, so a retry does not wait. `pullReadFailures` (`<id>#<n>`) answers that many
- * reads of the pull request 503, with `Retry-After: 0`, before it answers again, so one reader's
- * read fails while a later reader's succeeds. `down` answers every request 503. Every request is
- * recorded in `requests`, and with its query in `urls`.
+ * A pull request entry may also name its `number`, `user` and `mergeable_state`, which are answered
+ * only when named, and the head's and base's `repo`, which are the dataset's own when not named, as
+ * GitHub always names both (`null` stands for a deleted fork's head). A request whose path holds
+ * `slow` is answered `slowMs` late. Error answers on the reads added for the machine-clean facts
+ * carry `Retry-After: 0`, so a retry does not wait. `pullReadFailures` (`<id>#<n>`) answers that
+ * many reads of the pull request 503, with `Retry-After: 0`, before it answers again, so one
+ * reader's read fails while a later reader's succeeds. `down` answers every request 503. Every
+ * request is recorded in `requests`, and with its query in `urls`.
  */
 
 import type { Server } from "bun";
@@ -262,6 +263,11 @@ export function startRepullGitHub(o: { defaultHead?: string | null } = {}): Repu
             : undefined);
         if (!a) return json({ message: "Not Found" }, 404);
         if (a.status && a.status !== 200) return json({ message: "no" }, a.status);
+        // GitHub names both repositories, a deleted fork's head as null: the dataset's own unless
+        // the entry names another.
+        const own = { full_name: `nemarDatasets/${m[1]}` };
+        const head = a.head ?? { sha: gh.defaultHead, ref: "release/v2.0.0" };
+        const base = a.base ?? { ref: "main" };
         const body: Record<string, unknown> = {
           number: a.number ?? n,
           state: a.state ?? (a.merged === true ? "closed" : "open"),
@@ -269,8 +275,8 @@ export function startRepullGitHub(o: { defaultHead?: string | null } = {}): Repu
           merged: a.merged ?? false,
           merge_commit_sha:
             a.merge_commit_sha === undefined ? STANDIN_MERGE_SHA : a.merge_commit_sha,
-          head: a.head ?? { sha: gh.defaultHead, ref: "release/v2.0.0" },
-          base: a.base ?? { ref: "main" },
+          head: "repo" in head ? head : { ...head, repo: own },
+          base: "repo" in base ? base : { ...base, repo: own },
           ...(a.title === undefined ? {} : { title: a.title }),
           ...(a.user === undefined ? {} : { user: a.user }),
           ...(a.mergeable_state === undefined ? {} : { mergeable_state: a.mergeable_state }),
