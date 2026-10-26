@@ -9,6 +9,7 @@
  * caller says what it means. Reads only; nothing here writes to GitHub or mails anyone.
  */
 
+import { isOwnDatasetRepo } from "../../../shared/nemar-app.js";
 import {
   PULL_REQUEST_COLUMNS,
   type RepullPullRequest,
@@ -194,9 +195,10 @@ export async function readRecordedPullRequest(
       },
     };
   }
-  // Compared without case, as GitHub compares names and as the merge gate and the override do.
-  const own = `${ORG_NAME}/${row.dataset_id}`.toLowerCase();
-  if (facts.headRepo?.toLowerCase() !== own || facts.baseRepo.toLowerCase() !== own) {
+  if (
+    !isOwnDatasetRepo(facts.headRepo, row.dataset_id) ||
+    !isOwnDatasetRepo(facts.baseRepo, row.dataset_id)
+  ) {
     return {
       ok: false,
       refusal: {

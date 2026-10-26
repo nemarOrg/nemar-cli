@@ -51,6 +51,7 @@
  */
 
 import { dirname, join } from "node:path";
+import { isOwnDatasetRepo } from "../../../shared/nemar-app.js";
 import { repullSquashMessage } from "../../../shared/repull-squash.js";
 import {
   PULL_REQUEST_COLUMNS,
@@ -390,7 +391,7 @@ async function check(
   }
   // From and into the dataset's own repository: a fork's branch of the same name is not the
   // re-pull's, and one whose repository GitHub no longer names (a deleted fork) fails closed too.
-  if (!isOwnRepo(live.value.headRepo, id) || !isOwnRepo(live.value.baseRepo, id)) {
+  if (!isOwnDatasetRepo(live.value.headRepo, id) || !isOwnDatasetRepo(live.value.baseRepo, id)) {
     return stopAt(
       "not-ready",
       `Pull request #${prNumber} is not from and into ${DATASETS_ORG}/${id} itself (its head is ${live.value.headRepo ?? "a repository GitHub no longer names"}, its base ${live.value.baseRepo ?? "a repository GitHub no longer names"}): a fork's pull request is never merged as a re-pull's. Nothing was claimed or merged.`,
@@ -524,15 +525,6 @@ async function check(
       warnings,
     },
   };
-}
-
-/**
- * Whether `repo` (GitHub's `owner/name`, or null when it names none) is the dataset's own
- * repository, compared without case as GitHub compares names (as `execute/pull-request.ts` judges
- * the release pull request's head).
- */
-function isOwnRepo(repo: string | null, datasetId: string): boolean {
-  return repo !== null && repo.toLowerCase() === `${DATASETS_ORG}/${datasetId}`.toLowerCase();
 }
 
 /**

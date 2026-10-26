@@ -17,6 +17,7 @@ import {
   NEMAR_APP_BOT_LOGIN,
   NEMAR_APP_BOT_TYPE,
   NEMAR_APP_BOT_USER_ID,
+  isOwnDatasetRepo,
 } from "../shared/nemar-app";
 import {
   type CheckFact,
@@ -472,6 +473,26 @@ describe("the pull request is the recorded one, opened by the App", () => {
         pr(f).headRepo = `NemarDatasets/${DS.toUpperCase()}`;
       }),
     ).toBe("clean");
+  });
+
+  test("the own-repository rule is exact, without case, and a missing repository is never own", () => {
+    // The one predicate the rule, the merge gates, the claim and the CLI's turns share.
+    expect(isOwnDatasetRepo(`nemarDatasets/${DS}`, DS)).toBe(true);
+    expect(isOwnDatasetRepo(`NEMARDATASETS/${DS.toUpperCase()}`, DS)).toBe(true);
+    for (const repo of [
+      `nemarDatasets/${DS}x`,
+      `nemarDatasets/${DS}-fork`,
+      `xnemarDatasets/${DS}`,
+      `nemarDatasets/${DS.slice(0, -1)}`,
+      `someone/${DS}`,
+      `nemarDatasets/${DS}/`,
+      DS,
+      "",
+      null,
+      undefined,
+    ]) {
+      expect([repo, isOwnDatasetRepo(repo, DS)]).toEqual([repo, false]);
+    }
   });
 
   test("the App is its login AND its numeric id AND its type", () => {

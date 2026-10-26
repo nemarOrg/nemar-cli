@@ -88,6 +88,7 @@
  * PRODUCTION ONLY, and no mail: nothing here imports a mail service (`repull-no-mail-scan.test.ts`).
  */
 
+import { isOwnDatasetRepo } from "../../../shared/nemar-app.js";
 import { normalizeUpstreamTag } from "../../../shared/openneuro-tag.js";
 import { machineClean } from "../../../shared/repull-machine-clean.js";
 import { repullSquashMessage, trailerValuesProblem } from "../../../shared/repull-squash.js";
@@ -815,10 +816,12 @@ export async function bidsOverrideRefusal(
   ) {
     return { ...unreadable(`pull request #${number}`, "its state or its checks"), row };
   }
-  // From and into the dataset's own repository, compared without case as GitHub compares names: a
-  // fork's branch of the same name is not the re-pull's, and a deleted fork names no repository.
-  const own = `${ORG_NAME}/${row.dataset_id}`.toLowerCase();
-  if (fact.headRepo?.toLowerCase() !== own || fact.baseRepo.toLowerCase() !== own) {
+  // From and into the dataset's own repository: a fork's branch of the same name is not the
+  // re-pull's, and a deleted fork names no repository.
+  if (
+    !isOwnDatasetRepo(fact.headRepo, row.dataset_id) ||
+    !isOwnDatasetRepo(fact.baseRepo, row.dataset_id)
+  ) {
     return {
       status: 409,
       code: "pull-request-mismatch",

@@ -11,6 +11,7 @@
  * answer was lost finds it again; any other open release pull request refuses (`release-pr-open`).
  */
 
+import { isOwnDatasetRepo } from "../../../../shared/nemar-app.js";
 import { sanitizeNote } from "../../../../shared/pr-review.js";
 import { DATASETS_ORG } from "../../pr-review-approve.js";
 import { buildReleaseTitle, findSentTitleProblem } from "../../pr-text.js";
@@ -238,8 +239,7 @@ async function openReleasePull(args: {
   // The head repository must be the dataset's own: a fork's branch of the same name is not ours,
   // and one whose repository GitHub no longer names (a deleted fork) fails closed the same way.
   const ours = releases.filter(
-    (p) =>
-      p.headRef === branch && p.headRepo !== null && p.headRepo.toLowerCase() === own.toLowerCase(),
+    (p) => p.headRef === branch && isOwnDatasetRepo(p.headRepo, args.datasetId),
   );
   const others = releases.filter((p) => !ours.includes(p));
   if (others.length > 0 || ours.length > 1) {
