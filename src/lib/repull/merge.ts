@@ -239,7 +239,7 @@ export function squashMessage(
   pr: RepullPullRequest = "n0",
 ): { title: string; message: string } {
   const [snapshot, plan] = repullTrailerLines(row);
-  const corrections = row.counts.corrections;
+  const corrections = pr === "n1" ? row.counts?.corrections : undefined;
   return {
     title: `Release v${row[PULL_REQUEST_COLUMNS[pr].version]} (#${prNumber})`,
     message: [
