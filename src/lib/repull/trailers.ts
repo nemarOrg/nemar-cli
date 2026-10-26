@@ -16,17 +16,16 @@ import {
   REPULL_PLAN_TRAILER,
   UPSTREAM_SNAPSHOT_TRAILER,
 } from "../../../scripts/scrub/git/git-lib.js";
+import { repullTrailerLines } from "../../../shared/repull-squash.js";
 import { runCommand } from "../git-annex/run-command.js";
 import { ISOLATED_GIT_ENV } from "./execute/workdir.js";
 
-/** The two lines, exactly as the re-pull commit and its squash merge carry them. */
-export function repullTrailerLines(r: {
-  upstream_ds: string;
-  to_tag: string;
-  plan_digest: string;
-}): [string, string] {
-  return [`Upstream-Snapshot: ${r.upstream_ds}@${r.to_tag}`, `Repull-Plan: ${r.plan_digest}`];
-}
+// The two lines: one formatter, `repullTrailerLines` in `shared/repull-squash.ts`, which builds the
+// squash message the administrator's gate and the Worker's merge both send, the check below, and
+// the N.0.1 patch commit (`patchMessage`). Three sites still write the same lines by hand: the
+// re-pull commit's own message (`execute/synthesize.ts`) and the N.0.0 and N.0.1 pull request
+// bodies (`execute/pull-request.ts`, `patch-turn.ts`).
+export { repullTrailerLines };
 
 /**
  * Why `message` (a whole commit message: subject, body, trailers) does not carry both expected

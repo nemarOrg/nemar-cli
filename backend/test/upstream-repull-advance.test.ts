@@ -61,6 +61,7 @@ import {
   RESUME_WINDOW_UTC,
   REVIEW_RETRY_MINUTES,
   ROW_DISPATCHES_SQL,
+  SCREEN_DISPATCHES_SQL,
   advanceSelection,
   inResumeWindow,
   repullAdvanceLogLine,
@@ -618,7 +619,8 @@ describe("a hold is the first rule that does not hold", () => {
       [DS, `ds${DS.slice(2)}`, id, "n".repeat(36)],
     );
     const r = await tick();
-    expect(r).toMatchObject({ examined: 1, running: 1, held: {}, holdsChanged: 1 });
+    expect(r).toMatchObject({ examined: 1, running: 1, holdsChanged: 1 });
+    expect(r.held).toEqual({});
     expect(githubRequests()).toEqual([]);
     expect(rowOf(id)).toMatchObject({ hold_reason: null, hold_since: null });
     expect(JSON.parse(String(holdAudits(id)[0]?.details))).toMatchObject({
@@ -666,7 +668,8 @@ describe("which rows a tick reads", () => {
       }
     });
     const r = await tick(env({}, moving));
-    expect(r).toMatchObject({ examined: 0, held: {}, holdsChanged: 0, errors: [] });
+    expect(r).toMatchObject({ examined: 0, holdsChanged: 0, errors: [] });
+    expect(r.held).toEqual({});
     expect(rowOf(id)).toMatchObject({ status: "gates_clear", hold_reason: null });
     expect(githubRequests()).toEqual([]);
     expect(holdAudits(id)).toEqual([]);
@@ -784,6 +787,19 @@ describe("which rows a tick reads", () => {
 // ----------------------------------------------------------------------------
 
 describe("the gates of an automatic pull request", () => {
+  test("the screen's dispatch count binds the re-pull's id as text", async () => {
+    // D1 can deliver a bound number as REAL, which would match no `resource_id`; SQLite under Bun
+    // coerces it, so only the bind's type shows it.
+    const id = openRow();
+    markScreen(id, "error");
+    const bound: unknown[] = [];
+    const watching = interceptingD1(realD1(db), (sql, binds) => {
+      if (sql === SCREEN_DISPATCHES_SQL) bound.push(binds[0]);
+    });
+    await tick(env({}, watching));
+    expect(bound).toEqual([String(id)]);
+  });
+
   test("with no screen, the screen is dispatched for the head; the review waits for it to clear", async () => {
     const id = openRow();
     const r = await tick();
@@ -848,7 +864,8 @@ describe("the gates of an automatic pull request", () => {
       );
     }
     const r = await tick();
-    expect(r).toMatchObject({ screensStarted: 0, reviewsStarted: 0, reviewRefused: {} });
+    expect(r).toMatchObject({ screensStarted: 0, reviewsStarted: 0 });
+    expect(r.reviewRefused).toEqual({});
     expect(rowOf(id).hold_reason).toBe("screen-error");
     expect(gh.dispatches).toEqual([]);
     expect(reviews()).toEqual([]);
@@ -878,7 +895,8 @@ describe("the gates of an automatic pull request", () => {
     gh.dispatches = [];
 
     const r = await tick();
-    expect(r).toMatchObject({ gatesCleared: 1, screensStarted: 0, reviewsStarted: 0, refused: {} });
+    expect(r).toMatchObject({ gatesCleared: 1, screensStarted: 0, reviewsStarted: 0 });
+    expect(r.refused).toEqual({});
     expect(rowOf(id)).toMatchObject({
       status: "gates_clear",
       gates_sha: HEAD,
@@ -896,9 +914,11 @@ describe("the gates of an automatic pull request", () => {
     });
     // The record's own transition read GitHub's live head before it wrote.
     expect(githubRequests().filter((q) => q.endsWith(`/${DS}/pulls/7`)).length).toBeGreaterThan(1);
-    // A gates_clear row is no longer the tick's: nothing more is read or written for it.
+    // A gates_clear row now waits for the Worker's merge, which the merge switch, off here, keeps
+    // from reading anything (upstream-repull-worker-merge.test.ts has the rest).
     gh.requests = [];
-    expect((await tick()).examined).toBe(0);
+    const next = await tick();
+    expect(next).toMatchObject({ examined: 1, held: { "merge-switch-off": 1 }, mergesSent: 0 });
     expect(githubRequests()).toEqual([]);
   });
 
@@ -1246,7 +1266,7 @@ describe("the log line", () => {
     const r = await tick();
     expect(repullAdvanceLogLine(r)).toEqual({
       level: "info",
-      line: "[repull-advance] examined=1 running=0 not_due=0 screens=0 reviews=0 review_refused=none gates_cleared=0 resumed=0 unconfirmed=0 holds_changed=1 held=main-moved:1 refused=none",
+      line: "[repull-advance] examined=1 running=0 not_due=0 screens=0 reviews=0 review_refused=none gates_cleared=0 resumed=0 unconfirmed=0 merges=0 merged=0 merge_unknown=0 merge_refused=0 claims_released=0 finishes=0 finish_unconfirmed=0 holds_changed=1 held=main-moved:1 refused=none",
     });
     expect(repullAdvanceLogLine(await tick())).toBeNull();
   });
@@ -1405,7 +1425,8 @@ describe("a stalled automatic re-pull is resumed", () => {
     // The run's own create refuses an anonymous dataset; the tick does not speak for the run.
     db.run("UPDATE datasets SET first_published_at = NULL, anonymous = 1");
     const r = await resumeTick(TEN());
-    expect(r).toMatchObject({ resumed: 0, running: 1, held: {} });
+    expect(r).toMatchObject({ resumed: 0, running: 1 });
+    expect(r.held).toEqual({});
     expect(rowOf(id).hold_reason).toBeNull();
   });
 

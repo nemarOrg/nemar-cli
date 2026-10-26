@@ -11,6 +11,8 @@
  *    paragraph is both of the re-pull commit's trailers as git reads them, and is recorded;
  *  - a cap that is used up sends no merge; a `main` moved by a commit enrichment does not make, a
  *    state that is not `clean`, and a review that is still running are refused before the claim;
+ *  - a pull request whose head or base repository is not `nemarDatasets/<dataset_id>` (a fork's, a
+ *    deleted fork's, another base) is refused before the claim, the name compared without case;
  *  - a squash message without both trailers as its last paragraph is refused at the gate;
  *  - a head that moves between the gate's last read and the merge is refused by GitHub, because
  *    the merge carries the screened `sha`, and the claim is then kept, not repeated;
@@ -278,6 +280,45 @@ describe.skipIf(!awsInstalled)("the gate's own checks, before the claim", () => 
       expect(transitions()).toBe(before);
     }
     expect(merges()).toEqual([]);
+  });
+
+  test("a fork's head, and a deleted fork's, are not ready: nothing is claimed or sent", async () => {
+    await toGates();
+    for (const headRepo of [`someone/${w.fx.datasetId}`, null]) {
+      Object.assign(w.gh.pulls[prKey(w)] as object, { headRepo });
+      const before = transitions();
+      const run = await merge();
+      expect([headRepo, run.exitCode]).toEqual([headRepo, 1]);
+      expect(run.all).toContain("(not-ready)");
+      expect(run.all).toContain("a fork's pull request is never merged");
+      expect(transitions()).toBe(before);
+    }
+    expect(merges()).toEqual([]);
+    expect(w.row().merge_claim_sha).toBeNull();
+  });
+
+  test("a pull request into another repository is not ready: nothing is claimed or sent", async () => {
+    await toGates();
+    Object.assign(w.gh.pulls[prKey(w)] as object, { baseRepo: `someone/${w.fx.datasetId}` });
+    const before = transitions();
+    const run = await merge();
+    expect(run.exitCode, run.all).toBe(1);
+    expect(run.all).toContain("(not-ready)");
+    expect(run.all).toContain(`its base someone/${w.fx.datasetId}`);
+    expect(run.all).toContain("a fork's pull request is never merged");
+    expect(transitions()).toBe(before);
+    expect(merges()).toEqual([]);
+    expect(w.row().merge_claim_sha).toBeNull();
+  });
+
+  test("the dataset's own repository named in another case is its own, and merges", async () => {
+    await toGates();
+    Object.assign(w.gh.pulls[prKey(w)] as object, {
+      headRepo: `NemarDatasets/${w.fx.datasetId.toUpperCase()}`,
+    });
+    const run = await merge();
+    expect(run.exitCode, run.all).toBe(0);
+    expect(w.row().status).toBe("merged");
   });
 
   test("a screen that no longer passes is refused at the gate, before any claim is asked for", async () => {

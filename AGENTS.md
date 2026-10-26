@@ -168,13 +168,18 @@ contributor back, which ADR 0107 settled).
 0093 (`nemar admin pr-reviews` lists the open dataset pull requests with the automated review: a verdict
 belongs to the commit it read, an approval is the administrator's OWN act from their machine with their
 own GitHub login and no Worker code path approves, a failing, running or unreadable review needs
-`--force`, a NEMAR tool merges by three paths only: `pr-reviews approve --merge` and a `y` in
+`--force`, an administrator merges by three paths only: `pr-reviews approve --merge` and a `y` in
 `nemar admin pr-reviews next`, both of which read GitHub's state before approving and need
 `clean`, and, for an upstream re-pull's pull request only, `nemar admin repull merge`, which
 approves nothing; a re-pull's pull request merges through one gate all three share, which reads
-the record, `main`, the review, the identifier screen and GitHub's `clean`, then claims the daily
-merge cap (ADR 0111), each Worker lists only the datasets it owns, and an administrator runs a
-finished review again only with `start --redo`, which never supersedes a running one).
+the record, the pull request from and into `nemarDatasets/<dataset_id>` itself (never a fork's),
+`main`, the review, the identifier screen and GitHub's `clean` (or, with
+`--bids-failure-reason` on a re-pull an administrator opened, `unstable` over a failed BIDS
+validation, never `blocked`), then claims the daily merge cap; ADR 0111 narrows the merge for one
+class, a machine-clean automatic re-pull pull request, which the Worker merges when
+`AUTO_REPULL_MERGE_ENABLED` is on and approves nothing; each Worker lists only the datasets it
+owns, and an administrator runs a finished review again only with `start --redo`, which never
+supersedes a running one).
 0094 (the upload save step skips re-reading annexed content only once recorded annexed bytes reach
 1 GiB, only for files whose size and mtime still match the upload plan, and only while it can clear
 `assume-unchanged` safely; failures to verify or clear the state fail the save),
@@ -194,7 +199,7 @@ one at the first version tag, else with the merge base; the facts carry only cla
 0110 (mail is sent through the Cloudflare `send_email` binding behind a provider switch; Resend is
 a fallback only on a certain non-delivery limit or availability refusal, never on a timeout or an
 unknown error, so a sign-in code is never sent twice),
-0111 (decision 10 is built in Phase 3 and the read-only plan, `nemar admin repull plan`, in Phase 5; execution is not yet built: an upstream re-pull is one synthesized delta commit on `release/vN.0.0`
+0111 (decision 10 is built in Phase 3 and the read-only plan, `nemar admin repull plan`, in Phase 5; execution is built, manual in Phases 6b to 6g and automatic in Phase 7 (see its amendments): an upstream re-pull is one synthesized delta commit on `release/vN.0.0`
 through a pull request, never a bypass or a git merge of upstream history; N.0.0 is a pure mirror where
 upstream wins every conflict, and corrections replay as N.0.1 to `main` once N.0.0 is merged and
 tagged; the scrub runs on delta paths before the copy and the commit, and a privacy-ledger change is

@@ -17,7 +17,9 @@
  *    nothing; a claim landing between the read and the write takes the last unit; an unreadable
  *    cap reads 0;
  *  - the gates and the claim need GitHub's live head to be the sha they name, on an open pull
- *    request; the claim's statement also holds the screen, the cap and two dataset fences;
+ *    request from and into `nemarDatasets/<dataset_id>` (a fork's head or base is refused, the
+ *    name compared without case); the claim's statement also holds the screen, the cap and two
+ *    dataset fences;
  *  - a claim is released only after five minutes, only when GitHub says the pull request did not
  *    merge, and never for an unknown outcome;
  *  - `merged` is written from GitHub's answer; a merge with no claim held and one at a head other
@@ -533,6 +535,109 @@ describe("the gates and the claim read the live pull request", () => {
     ).toBe(0);
   });
 
+  test("a fork's head, a deleted fork's, or a base in another repository refuses both, and nothing is claimed or sent", async () => {
+    const own = (ds: string) => ({ full_name: `nemarDatasets/${ds}` });
+    // Each answer, and the words the refusal names it by.
+    const cases: Array<[string, (ds: string) => PullAnswer, (ds: string) => string]> = [
+      [
+        "a fork's head",
+        (ds) => ({
+          head: { sha: HEAD, ref: "release/v2.0.0", repo: { full_name: `someone/${ds}` } },
+        }),
+        (ds) => `its head is someone/${ds}, its base nemarDatasets/${ds}`,
+      ],
+      [
+        "a deleted fork's head",
+        () => ({ head: { sha: HEAD, ref: "release/v2.0.0", repo: null } }),
+        (ds) => `its head is a repository GitHub no longer names, its base nemarDatasets/${ds}`,
+      ],
+      [
+        "a base in another repository",
+        (ds) => ({
+          head: { sha: HEAD, ref: "release/v2.0.0", repo: own(ds) },
+          base: { ref: "main", repo: { full_name: `someone/${ds}` } },
+        }),
+        (ds) => `its head is nemarDatasets/${ds}, its base someone/${ds}`,
+      ],
+    ];
+    for (const [what, answer, words] of cases) {
+      db.run("DELETE FROM upstream_repull_screens");
+      db.run("DELETE FROM upstream_repulls");
+      db.run("DELETE FROM datasets");
+      db.run("DELETE FROM audit_log");
+      const claiming = ready("on099999");
+      seedMirror("on099998");
+      const opening = seedRepull("pr_open", { dataset_id: "on099998" });
+      markScreen(opening, "clean");
+      // The branch is the recorded one at the screened head: only the repository is not.
+      gh.pulls = { "on099999#7": answer("on099999"), "on099998#7": answer("on099998") };
+      const c = await claim(claiming);
+      const g = await gates(opening);
+      expect([what, c.status, c.body.code, g.status, g.body.code]).toEqual([
+        what,
+        409,
+        "head-moved",
+        409,
+        "head-moved",
+      ]);
+      expect(c.body.error).toContain("is not from and into nemarDatasets/on099999 itself");
+      expect(c.body.error).toContain(words("on099999"));
+      expect(c.body.error).toContain("a fork's pull request is never the re-pull's");
+      expect(g.body.error).toContain(words("on099998"));
+      expect(rowOf(claiming)).toMatchObject({ merge_claim_sha: null, merge_claimed_at: null });
+      expect(rowOf(opening).status).toBe("pr_open");
+      // No edge was written.
+      expect(db.query("SELECT COUNT(*) AS n FROM audit_log").get()).toEqual({ n: 0 });
+    }
+  });
+
+  // GitHub always names both repositories; an answer that does not, or not as a name, is not read
+  // as the record's pull request.
+  const unreadableRepositories: Array<[string, PullAnswer]> = [
+    ["no head repository", { head: { sha: HEAD, ref: "release/v2.0.0", repo: undefined } }],
+    [
+      "a head repository with no name",
+      { head: { sha: HEAD, ref: "release/v2.0.0", repo: {} as never } },
+    ],
+    ["no base repository", { base: { ref: "main", repo: undefined } }],
+    [
+      "a base repository named by a number",
+      { base: { ref: "main", repo: { full_name: 5 as never } } },
+    ],
+  ];
+  for (const [what, answer] of unreadableRepositories) {
+    test(`${what}: unreadable, 502 for the claim and the gates, and nothing is claimed`, async () => {
+      const claiming = ready("on099999");
+      seedMirror("on099998");
+      const opening = seedRepull("pr_open", { dataset_id: "on099998" });
+      markScreen(opening, "clean");
+      gh.pulls = { "on099999#7": answer, "on099998#7": answer };
+      const c = await claim(claiming);
+      const g = await gates(opening);
+      expect([c.status, c.body.code, g.status, g.body.code]).toEqual([
+        502,
+        "github-unreadable",
+        502,
+        "github-unreadable",
+      ]);
+      expect(rowOf(claiming)).toMatchObject({ merge_claim_sha: null, merge_claimed_at: null });
+      expect(rowOf(opening).status).toBe("pr_open");
+    });
+  }
+
+  test("the dataset's own repository named in another case is its own, and is claimed", async () => {
+    const id = ready("on099999");
+    gh.pulls = {
+      "on099999#7": {
+        head: { sha: HEAD, ref: "release/v2.0.0", repo: { full_name: "NemarDatasets/ON099999" } },
+        base: { ref: "main", repo: { full_name: "NEMARDATASETS/on099999" } },
+      },
+    };
+    const res = await claim(id);
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(rowOf(id).merge_claim_sha).toBe(HEAD);
+  });
+
   test("a GitHub that cannot be read refuses with 502, and the transport's retry time is passed on", async () => {
     const id = ready("on099999");
     gh.down = true;
@@ -727,6 +832,21 @@ describe("recording the merge", () => {
       [{ merged: true, merge_commit_sha: null }, "github-unreadable"],
       [{ merged: "true" }, "github-unreadable"],
       [{ merged: true, omit: ["merged"] }, "github-unreadable"],
+      // GitHub always names both repositories; an answer that does not, or not as a name, is not
+      // read as the record's pull request.
+      [
+        { merged: true, head: { sha: HEAD, ref: "release/v2.0.0", repo: undefined } },
+        "github-unreadable",
+      ],
+      [
+        { merged: true, head: { sha: HEAD, ref: "release/v2.0.0", repo: {} as never } },
+        "github-unreadable",
+      ],
+      [{ merged: true, base: { ref: "main", repo: undefined } }, "github-unreadable"],
+      [
+        { merged: true, base: { ref: "main", repo: { full_name: 5 as never } } },
+        "github-unreadable",
+      ],
       [{ status: 404 }, "pull-request-missing"],
       [{ merged: true, base: { ref: "dev" } }, "pull-request-mismatch"],
     ] as const) {

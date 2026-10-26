@@ -11,6 +11,13 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import { REPULL_PLAN_TRAILER, UPSTREAM_SNAPSHOT_TRAILER } from "../scripts/scrub/git/git-lib";
+import {
+  PLAN_TRAILER_VALUE_RE,
+  SNAPSHOT_TRAILER_VALUE_RE,
+  repullSquashMessage,
+  trailerValuesProblem,
+} from "../shared/repull-squash";
 import type { RepullRow } from "../shared/repull-state";
 import { squashMessage } from "../src/lib/repull/merge";
 import { repullTrailerLines, trailersProblem } from "../src/lib/repull/trailers";
@@ -67,5 +74,55 @@ describe("the trailers, as git reads them", () => {
     expect(await trailersProblem(`Title\n\nBody.\n\n${s}\n${p}`, odd)).toMatch(
       /not the re-pull's own/,
     );
+  });
+});
+
+describe("the Worker's squash message (ADR 0111, the Phase 7g amendment)", () => {
+  const row = (over: Partial<typeof ROW> = {}) =>
+    ({ ...ROW, ...over, id: 3, to_version: "2.0.0", from_tag: "1.0.0" }) as unknown as RepullRow;
+
+  test("the Worker checks the values with the ledger proof's own patterns, not copies of them", () => {
+    // The proof's patterns are the trailer key, one space, and these values, as one line.
+    expect(UPSTREAM_SNAPSHOT_TRAILER.source).toBe(
+      `^Upstream-Snapshot: ${SNAPSHOT_TRAILER_VALUE_RE.source.slice(1)}`,
+    );
+    expect(REPULL_PLAN_TRAILER.source).toBe(
+      `^Repull-Plan: ${PLAN_TRAILER_VALUE_RE.source.slice(1)}`,
+    );
+  });
+
+  test("the message the Worker sends is read by git as the two trailers, as the gate's is", async () => {
+    for (const tag of ["1.0.1", "00002", "2.1.0-rc1", "v1.0.1", "A.b_c-9"]) {
+      const r = row({ to_tag: tag });
+      const m = repullSquashMessage(r, 12, "n0", "worker");
+      expect(m.title).toBe("Release v2.0.0 (#12)");
+      expect(trailerValuesProblem(r)).toBeNull();
+      expect([tag, await trailersProblem(`${m.title}\n\n${m.message}`, r)]).toEqual([tag, null]);
+    }
+  });
+
+  test("a value git would not read as the proof reads it, the Worker refuses before anything", async () => {
+    for (const over of [
+      { to_tag: "1.0.1 (final)" },
+      { to_tag: "-1.0.1" },
+      { upstream_ds: "ds04362" },
+      { plan_digest: "sha256:abc" },
+    ]) {
+      const r = row(over);
+      const m = repullSquashMessage(r, 12, "n0", "worker");
+      expect([over, trailerValuesProblem(r) !== null]).toEqual([over, true]);
+      expect([over, await trailersProblem(`${m.title}\n\n${m.message}`, r)]).not.toEqual([
+        over,
+        null,
+      ]);
+    }
+  });
+
+  test("only the first paragraph says who merged it", () => {
+    const gate = repullSquashMessage(row(), 12, "n0", "gate");
+    const worker = repullSquashMessage(row(), 12, "n0", "worker");
+    expect(worker.title).toBe(gate.title);
+    expect(worker.message.split("\n\n").slice(1)).toEqual(gate.message.split("\n\n").slice(1));
+    expect(gate.message).toBe(squashMessage(row(), 12).message);
   });
 });

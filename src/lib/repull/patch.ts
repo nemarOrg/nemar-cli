@@ -37,6 +37,7 @@ import {
   type CanonicalJsonValue,
   canonicalJson,
 } from "../../../shared/neurobagel/canonical-json.js";
+import { REPULL_PATCH_TRAILER } from "../../../shared/repull-squash.js";
 import { type RepullRow, patchVersionOf } from "../../../shared/repull-state.js";
 import { DESCRIPTION_PATH } from "./description.js";
 import type { PlanBody } from "./digest.js";
@@ -48,8 +49,8 @@ import { ExecuteRefused } from "./execute/verify-plan.js";
 import { REPULL_IDENTITY, git } from "./execute/workdir.js";
 import { repullTrailerLines, trailersProblem } from "./trailers.js";
 
-/** The trailer N.0.1's commit carries beside the re-pull's two. */
-export const PATCH_TRAILER = "Repull-Patch";
+/** The trailer N.0.1's commit carries beside the re-pull's two (one definition, in `shared/`). */
+export const PATCH_TRAILER = REPULL_PATCH_TRAILER;
 
 /** `--take-ours` names a description key as `dataset_description.json#<Key>`. */
 const KEY_SEPARATOR = "#";

@@ -402,6 +402,9 @@ describe("reading the pull request", () => {
         // The head branch, which tells a `release/*` pull request (maybe a re-pull's) apart.
         headRef: "add-subjects",
         headSha: SHA_A,
+        // The two repositories, which a re-pull's merge requires be the dataset's own.
+        headRepo: "nemarDatasets/nm000201",
+        baseRepo: "nemarDatasets/nm000201",
         authorLogin: "alice",
         mergeableState: "blocked",
       },

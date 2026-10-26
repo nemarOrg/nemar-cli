@@ -7,6 +7,10 @@
  */
 
 import { Command } from "commander";
+import {
+  ACKNOWLEDGMENT_MAX_LENGTH,
+  ACKNOWLEDGMENT_MIN_LENGTH,
+} from "../../shared/publication-limits.js";
 import { failMessage, requireSignedIn, say } from "../lib/admin-command.js";
 import { getCurrentUser } from "../lib/api/auth.js";
 import { ApiError, errorDetail } from "../lib/api/errors.js";
@@ -32,7 +36,8 @@ Merges the dataset's re-pull pull request with your own GitHub login (GH_TOKEN, 
 token\`; it must belong to a person, and when your NEMAR account names a GitHub login it must be
 that one), once its record is gates_clear (\`nemar admin repull resume <id>\` gets it there).
 Before anything is written it checks that the pull request is open, not a draft, into main at the
-screened head, that NEMAR's main moved by enrichment only, that the automated review of that head
+screened head, from and into nemarDatasets/<dataset> itself (never a fork's, the name compared
+without case), that NEMAR's main moved by enrichment only, that the automated review of that head
 allows it (one that failed, is running or cannot be read needs --force), that the identifier screen
 of that head passes, that GitHub reports the pull request clean, and that the squash message
 carries the re-pull commit's two trailers as its last paragraph. Then it reads the review once
@@ -44,6 +49,15 @@ merge.
 A claim already held for the screened head (a merge whose answer was lost) is used again, without
 a second claim, after the Worker reads the dataset, the screen for you and the live head again,
 and only while the claim is younger than 25 minutes; an older one is expired by resume at 30.
+
+--bids-failure-reason "<text>" (10 to 500 characters) merges a re-pull you opened over a failed
+BIDS validation, with your reason recorded beside the claim. It is taken only while GitHub reports
+the pull request unstable, a check that is not required failing; blocked, where this dataset's
+rules require BIDS validation and a merge would be a bypass, is refused before anything is
+written, and so is clean, which needs no override. The Worker then reads, at the screened head,
+that BIDS validation completed with failure and version-check with success before it records the
+claim; every other check of the gate (the review, the screen, main, the message) is unchanged. It
+never applies to a re-pull the automatic path opened, and never uses a claim already held.
 A merge GitHub did not make keeps its claim: run merge again within 25 minutes of the claim to
 send it under the claim once GitHub reports the pull request clean, or, if the head moved, run
 resume, which expires the claim once it is 30 minutes old and then records the new head.
@@ -91,15 +105,33 @@ export const mergeCommand = new Command("merge")
   .argument("<datasetId>")
   .description("Squash-merge a re-pull's pull request through its gate (mints one version DOI)")
   .option("--force", "Merge although the automated review failed, is running or could not be read")
+  .option(
+    "--bids-failure-reason <text>",
+    "Merge a re-pull you opened over a failed BIDS validation (unstable only), recording why",
+  )
   .option("-y, --yes", "Do not ask before merging")
   .option("--json", "Print the record as JSON")
   .addHelpText("after", MERGE_HELP)
   .action(
-    async (datasetId: string, options: { force?: boolean; yes?: boolean; json?: boolean }) => {
+    async (
+      datasetId: string,
+      options: { force?: boolean; yes?: boolean; json?: boolean; bidsFailureReason?: string },
+    ) => {
       const json = options.json === true;
       const out = say(json);
       if (!requireSignedIn(json)) return;
       if (!datasetArg(datasetId, json)) return;
+      const reason = options.bidsFailureReason?.trim();
+      if (
+        reason !== undefined &&
+        (reason.length < ACKNOWLEDGMENT_MIN_LENGTH || reason.length > ACKNOWLEDGMENT_MAX_LENGTH)
+      ) {
+        failMessage(
+          `--bids-failure-reason takes ${ACKNOWLEDGMENT_MIN_LENGTH} to ${ACKNOWLEDGMENT_MAX_LENGTH} characters, the rule a reason for an identifier screen takes.`,
+          { json, answered: true },
+        );
+        return;
+      }
       let base: string;
       try {
         base = githubApiBase();
@@ -119,6 +151,7 @@ export const mergeCommand = new Command("merge")
         env: process.env,
         configDir: getConfigDir(),
         force: options.force === true,
+        ...(reason !== undefined ? { bidsFailureReason: reason } : {}),
       };
       try {
         const checked = await checkRepullMerge(ctx);
@@ -128,7 +161,7 @@ export const mergeCommand = new Command("merge")
         }
         const { check } = checked;
         out(
-          `Merge ${datasetId} pull request #${check.prNumber} (re-pull #${check.row.id}, v${check.row.to_version}) at ${check.head.slice(0, 12)} as @${who.login}, by squash.`,
+          `Merge ${datasetId} pull request #${check.prNumber} (re-pull #${check.row.id}, v${check.row.to_version}) at ${check.head.slice(0, 12)} as @${who.login}, by squash${reason !== undefined ? ", over a failed BIDS validation" : ""}.`,
         );
         for (const w of check.warnings) out(`  ${w}`);
         const result = await sendRepullMerge(ctx, check, {

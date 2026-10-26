@@ -48,6 +48,7 @@
  */
 
 import { dirname, join } from "node:path";
+import { NEMAR_DATASETS_ORG, isOwnDatasetRepo } from "../../../shared/nemar-app.js";
 import {
   PULL_REQUEST_COLUMNS,
   type RepullPullRequest,
@@ -434,6 +435,20 @@ async function gatesTurn(ctx: ResumeContext, row: RepullRow, pr: RepullPullReque
   if (live.state === "closed") return closedUnmerged(ctx, row, p);
   if (live.baseRef !== "main" || live.headRef !== p.branch) {
     const err = refused("pr-foreign", `Pull request #${p.number} is not ${p.branch} into main.`);
+    await recordStepError(row, resumeErrorWords("gates", err), ctx.opts.out);
+    throw err;
+  }
+  // From and into the dataset's own repository, at the first read: a fork's branch of the recorded
+  // name is not the re-pull's, and the Worker's gates would refuse it on every turn without
+  // saying a fork is why.
+  if (
+    !isOwnDatasetRepo(live.headRepo, row.dataset_id) ||
+    !isOwnDatasetRepo(live.baseRepo, row.dataset_id)
+  ) {
+    const err = refused(
+      "pr-foreign",
+      `Pull request #${p.number} is not from and into ${NEMAR_DATASETS_ORG}/${row.dataset_id} itself (its head is ${live.headRepo ?? "a repository GitHub no longer names"}, its base ${live.baseRepo ?? "a repository GitHub no longer names"}): a fork's pull request is never merged as a re-pull's.`,
+    );
     await recordStepError(row, resumeErrorWords("gates", err), ctx.opts.out);
     throw err;
   }

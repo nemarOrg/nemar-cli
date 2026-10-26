@@ -36,3 +36,17 @@ export const NEMAR_APP_BOT_TYPE = "Bot";
  * repositories with the dataset's.
  */
 export const NEMAR_DATASETS_ORG = "nemarDatasets";
+
+/**
+ * Whether `repo`, GitHub's `owner/name` (or null where GitHub names none, as for a deleted fork's
+ * head), is the dataset's own repository: exactly `nemarDatasets/<datasetId>`, compared without
+ * case as GitHub compares names. The one rule for a re-pull pull request's head and base, which
+ * the machine-clean rule, every merge gate, the claim to merge and the CLI's turns all apply: a
+ * fork's branch of the recorded name is not the re-pull's.
+ */
+export function isOwnDatasetRepo(repo: string | null | undefined, datasetId: string): boolean {
+  return (
+    typeof repo === "string" &&
+    repo.toLowerCase() === `${NEMAR_DATASETS_ORG}/${datasetId}`.toLowerCase()
+  );
+}

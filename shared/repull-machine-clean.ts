@@ -50,7 +50,7 @@ import {
   NEMAR_APP_BOT_LOGIN,
   NEMAR_APP_BOT_TYPE,
   NEMAR_APP_BOT_USER_ID,
-  NEMAR_DATASETS_ORG,
+  isOwnDatasetRepo,
 } from "./nemar-app.js";
 import type { HoldReason, RepullRow } from "./repull-state.js";
 
@@ -243,8 +243,6 @@ const ZERO_COUNTS = ["unexplained", "conflicts", "corrections"] as const;
 
 const ON_DATASET = /^on\d{6}$/;
 
-const sameRepo = (a: string | null, b: string) => a !== null && a.toLowerCase() === b.toLowerCase();
-
 /**
  * A word from a lookup, or the fail-safe when the value is not one the type allows (a caller that
  * cast its way past the type): unknown is never clean.
@@ -296,13 +294,12 @@ export function machineClean(f: MachineCleanFacts): MachineCleanVerdict {
   if (f.pr === "unreadable") return hold("pr-unreadable");
   const pr = f.pr;
   if (pr.state !== "open" || pr.merged !== false) return hold("pr-closed");
-  const repo = `${NEMAR_DATASETS_ORG}/${row.dataset_id}`;
   if (
     pr.number !== row.pr_number ||
     pr.headRef !== row.branch ||
     pr.baseRef !== "main" ||
-    !sameRepo(pr.baseRepo, repo) ||
-    !sameRepo(pr.headRepo, repo)
+    !isOwnDatasetRepo(pr.baseRepo, row.dataset_id) ||
+    !isOwnDatasetRepo(pr.headRepo, row.dataset_id)
   ) {
     return hold("pr-mismatch");
   }

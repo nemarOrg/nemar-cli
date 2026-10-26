@@ -7,6 +7,7 @@
 Partially superseded by [ADR 0107](0107-dataset-pull-requests-are-screened-on-content-owners-and-administrators-are-exempt-and-the-review-check-is-required.md) (proposed with epic #1813; phases P1 to P6 are built on the epic branch, so the `exempt` verdict, the changes to `allow`, `start --all` and the list's volume line, and the review ruleset exist, and the required check is not switched on):
 `allow` only clears an administrator's block, `start --all` no longer stops on a daily pool, the queue gains the verdict `exempt` and a volume line, and the review will join the required checks where its ruleset exists.
 Its "What this supersedes" section lists what it replaces here.
+Narrowed by [ADR 0111](0111-an-upstream-re-pull-is-a-reviewed-delta-on-a-release-branch.md) (its Phase 7g amendment, 2026-10-26) in one aspect, the merge, for one class only: a machine-clean re-pull pull request the automatic path opened, which the Worker merges while `AUTO_REPULL_MERGE_ENABLED` is on, approving nothing; the approval sentences stand as written, and every other pull request is approved and merged as this record says.
 
 Follows ADR 0092 (the review this command lists and acts on), ADR 0001 (published datasets are
 PR-only), ADR 0054 and ADR 0086 (unknown is never zero, and never clear).
@@ -282,6 +283,7 @@ when both required checks pass: that stays the maintainer's decision, tracked in
 ## Amendment 2026-10-23 (#1046): narrowed by ADR 0111 for re-pull pull requests
 
 Designed in [ADR 0111](0111-an-upstream-re-pull-is-a-reviewed-delta-on-a-release-branch.md) (decision 7) and not yet built: nothing in this command or in the Worker behaves differently today.
+*Annotated 2026-10-26: built: this command merges a re-pull pull request only through the re-pull's gate, which reads that screen and claims the cap (ADR 0111, its Phase 6f amendment), and the Worker merges a machine-clean automatic re-pull pull request (its Phase 7g amendment).*
 ADR 0107 already partially supersedes this record, and ADR 0111 narrows one more aspect of it, the merge, for one class of pull request: an upstream re-pull on `release/vN.0.0` that the automatic path opened and `upstream_repulls` records.
 The approval sentences stand as written, "its approval is made by the administrator, from their machine, with their own GitHub login" and "No Worker code path approves", because the Worker will submit no review.
 What will change for that class is that a merge no longer always follows an administrator's approval and `--merge` or `y`.

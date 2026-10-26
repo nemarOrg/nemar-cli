@@ -365,6 +365,14 @@ export async function claimFinishDispatch(
 }
 
 /**
+ * GitHub's answers to a send that say the dispatch itself was refused, for its payload or its
+ * target (404, 422), and so spend an attempt: `dispatch-refused`. Every other refusal (the Worker's
+ * credential, permission or rate) is `dispatch-deferred` and spends none. The one set the open
+ * resume and the finish of a merged record both read.
+ */
+export const REFUSED_FOR_THE_DISPATCH: ReadonlySet<number> = new Set([404, 422]);
+
+/**
  * End a dispatch that was claimed and never sent, so its run never started: the unit of the cap
  * is freed and the dataset's live slot released. Three callers, each for a dispatch nothing ran:
  * the scheduler when GitHub refused the send (a 4xx, `dispatch-refused`); `issued()` here when the
