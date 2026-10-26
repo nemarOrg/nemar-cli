@@ -5195,6 +5195,10 @@ exemplarCommand
   .option("--fleet-file <path>", "Path to the fleet JSON (default: scripts/exemplar-fleet.json)")
   .option("--publish", "Request and approve publication after data lands (mints a sandbox DOI)")
   .option("--include-derived", "Also copy zarr/, archives/, and records.json derived artifacts")
+  .option(
+    "--mirror <ds>",
+    "A mirror rehearsal fixture of this OpenNeuro dataset (from its on mirror): the row says source openneuro, so an upstream re-pull can be rehearsed on staging",
+  )
   .action(
     async (
       xxId: string | undefined,
@@ -5204,6 +5208,7 @@ exemplarCommand
         fleetFile?: string;
         publish?: boolean;
         includeDerived?: boolean;
+        mirror?: string;
       },
     ) => {
       if (!requireAuth()) return;
@@ -5213,8 +5218,8 @@ exemplarCommand
       const cloneOpts = { publish: options.publish, includeDerived: options.includeDerived };
 
       if (options.all) {
-        if (xxId || options.source) {
-          console.error(chalk.red("--all cannot be combined with an xx-id or --source"));
+        if (xxId || options.source || options.mirror) {
+          console.error(chalk.red("--all cannot be combined with an xx-id, --source or --mirror"));
           process.exit(1);
         }
         let entries: Awaited<ReturnType<typeof loadExemplarFleet>>;
@@ -5285,12 +5290,21 @@ exemplarCommand
         console.error(chalk.red(`Invalid source id "${sourceId}". Expected an nm/on dataset id.`));
         process.exit(1);
       }
+      if (options.mirror !== undefined) {
+        const { mirrorProblem } = await import("../lib/exemplar-clone.js");
+        const problem = mirrorProblem(sourceId, options.mirror);
+        if (problem) {
+          console.error(chalk.red(problem));
+          process.exit(1);
+        }
+      }
 
       try {
         await cloneExemplar({
           xxId,
           sourceId,
           ...cloneOpts,
+          ...(options.mirror !== undefined ? { mirror: options.mirror } : {}),
         });
       } catch (error) {
         console.error(chalk.red(`\nExemplar clone failed: ${errorDetail(error)}`));

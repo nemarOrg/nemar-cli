@@ -13,7 +13,7 @@ import type { Database } from "bun:sqlite";
 import { beforeEach, describe, expect, test } from "bun:test";
 import { Hono } from "hono";
 import { adminRoutes } from "../src/routes/admin";
-import { EXEMPLAR_ID_RE } from "../src/routes/admin/exemplar";
+import { EXEMPLAR_ID_RE, exemplarSource } from "../src/routes/admin/exemplar";
 import { hashApiKey } from "../src/services/token";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
@@ -147,6 +147,73 @@ describe("POST /admin/datasets/exemplar", () => {
       "development",
     );
     expect(res.status).toBe(400);
+  });
+});
+
+describe("a mirror rehearsal fixture (mirror, ADR 0111)", () => {
+  const mirrorBody = { dataset_id: EXEMPLAR, source_id: "on004362", mirror: "ds004362" };
+  const rows = () => db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM datasets").get()?.n;
+
+  test("records what a re-pull reads: source openneuro and the ds the on source mirrors", () => {
+    expect(exemplarSource({ source_id: "on004362", mirror: "ds004362" })).toEqual({
+      source: "openneuro",
+      source_id: "ds004362",
+    });
+    // An ordinary exemplar is unchanged.
+    expect(exemplarSource({ source_id: "nm000132" })).toEqual({
+      source: "nemar-exemplar",
+      source_id: "nm000132",
+    });
+  });
+
+  test("a pair that is not an on dataset and the ds it mirrors is refused", () => {
+    for (const pair of [
+      { source_id: "on004362", mirror: "ds003645" },
+      { source_id: "nm000132", mirror: "ds000132" },
+      { source_id: "on004362", mirror: "on004362" },
+    ]) {
+      expect([pair, exemplarSource(pair)]).toEqual([pair, null]);
+    }
+  });
+
+  test("403 in production, mirror or not, before anything is created", async () => {
+    for (const environment of ["production", ""]) {
+      const res = await post("/admin/datasets/exemplar", mirrorBody, environment);
+      expect(res.status).toBe(403);
+    }
+    expect(rows()).toBe(0);
+  });
+
+  test("an anonymous mirror fixture is refused as every anonymous exemplar is", async () => {
+    const res = await post(
+      "/admin/datasets/exemplar",
+      { ...mirrorBody, anonymous: true },
+      "development",
+    );
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ error: "exemplar_anonymous_retired" });
+    expect(rows()).toBe(0);
+  });
+
+  test("a mismatched pair is refused before any GitHub call or row", async () => {
+    const res = await post(
+      "/admin/datasets/exemplar",
+      { ...mirrorBody, mirror: "ds003645" },
+      "development",
+    );
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ error: "exemplar_mirror_mismatch" });
+    expect(rows()).toBe(0);
+  });
+
+  test("a mirror that is not an OpenNeuro id is refused by the schema", async () => {
+    const res = await post(
+      "/admin/datasets/exemplar",
+      { ...mirrorBody, mirror: "004362" },
+      "development",
+    );
+    expect(res.status).toBe(400);
+    expect(rows()).toBe(0);
   });
 });
 

@@ -831,6 +831,11 @@ export async function createExemplar(opts: {
    * `nm` id.
    */
   anonymous?: true;
+  /**
+   * A mirror rehearsal fixture (ADR 0111): the OpenNeuro `ds` the `on` source mirrors; the row then
+   * records `source = 'openneuro'` and that `ds`, as a re-pull reads it.
+   */
+  mirror?: string;
 }): Promise<CreateExemplarResponse> {
   return request<CreateExemplarResponse>(
     "/admin/datasets/exemplar",

@@ -13,6 +13,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  rmSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -23,16 +24,21 @@ import { join } from "node:path";
 import { isPlaceholderAuthor } from "../backend/src/services/submission-minimums";
 import {
   type ExemplarFleetEntry,
+  INHERITED_REMOTE,
   type PrepareExemplarResult,
   copyExemplarData,
   findMissingCopiedKeys,
   isAnnexContentKey,
+  mirrorProblem,
   parseExemplarFleet,
   planSubPrefixCopy,
+  renameInheritedRemote,
   rewriteArchiveKeyPrefix,
   rewriteObjectKeyPrefix,
   scrubDatasetDescription,
 } from "../src/lib/exemplar-clone";
+import { runCommand } from "../src/lib/git-annex/run-command";
+import { uuidsNamedInRemoteLog } from "../src/lib/git-annex/s3-remote";
 import type { CopyItem } from "../src/lib/s3-server-copy";
 
 describe("scrubDatasetDescription", () => {
@@ -468,4 +474,109 @@ exit 0
     expect(cpCalls[0]).toContain(`s3://nemar-dev/${xxId}/archives/${xxId}_v1.0.0.zip`);
     expect(cpCalls[0]).not.toContain(`${xxId}/archives/${sourceId}_v1.0.0.zip`);
   });
+});
+
+describe("a mirror rehearsal fixture (--mirror, ADR 0111)", () => {
+  test("names the ds its on source mirrors, and nothing else", () => {
+    expect(mirrorProblem("on004362", "ds004362")).toBeNull();
+    expect(mirrorProblem("on004362", "ds003645")).toContain("on003645");
+    expect(mirrorProblem("nm000132", "ds000132")).toContain("on000132");
+    expect(mirrorProblem("on004362", "004362")).toContain("OpenNeuro dataset id");
+  });
+
+  /** A repository with a `nemar-s3` directory special remote that clones enable (autoenable). */
+  async function inheritedClone(root: string): Promise<{ clone: string; oldUuid: string }> {
+    const run = async (cwd: string, args: string[]) => {
+      const r = await runCommand(args, {
+        cwd,
+        env: {
+          GIT_AUTHOR_NAME: "t",
+          GIT_AUTHOR_EMAIL: "t@t",
+          GIT_COMMITTER_NAME: "t",
+          GIT_COMMITTER_EMAIL: "t@t",
+        },
+      });
+      if (r.exitCode !== 0) throw new Error(`${args.join(" ")}: ${r.stderr}`);
+      return r.stdout.trim();
+    };
+    const source = join(root, "source");
+    const store = join(root, "production-store");
+    mkdirSync(source);
+    mkdirSync(store);
+    await run(source, ["git", "init", "-q", "--initial-branch", "main"]);
+    await run(source, ["git", "annex", "init", "-q", "source"]);
+    await run(source, [
+      "git",
+      "annex",
+      "initremote",
+      "nemar-s3",
+      "type=directory",
+      `directory=${store}`,
+      "encryption=none",
+      "autoenable=true",
+    ]);
+    writeFileSync(join(source, "README.md"), "x\n");
+    await run(source, ["git", "add", "README.md"]);
+    await run(source, ["git", "commit", "-qm", "init"]);
+    const oldUuid = await run(source, ["git", "config", "remote.nemar-s3.annex-uuid"]);
+    const clone = join(root, "clone");
+    await run(root, ["git", "clone", "-q", source, clone]);
+    await run(clone, ["git", "annex", "init", "-q", "clone"]);
+    // What autoenable does for an S3 remote on init; a directory remote keeps its path out of
+    // remote.log, so it is enabled with it here.
+    await run(clone, ["git", "annex", "enableremote", "nemar-s3", `directory=${store}`]);
+    return { clone, oldUuid };
+  }
+
+  test("the inherited nemar-s3 is renamed out of the way, so the fixture's own remote takes the name", async () => {
+    const root = mkdtempSync(join(tmpdir(), "nemar-exemplar-mirror-"));
+    try {
+      const { clone, oldUuid } = await inheritedClone(root);
+      // The clone enabled the production remote under its name.
+      expect(
+        (
+          await runCommand(["git", "config", "remote.nemar-s3.annex-uuid"], { cwd: clone })
+        ).stdout.trim(),
+      ).toBe(oldUuid);
+      await renameInheritedRemote(clone, "nemar-s3", INHERITED_REMOTE);
+      const dev = join(root, "dev-store");
+      mkdirSync(dev);
+      const init = await runCommand(
+        [
+          "git",
+          "annex",
+          "initremote",
+          "nemar-s3",
+          "type=directory",
+          `directory=${dev}`,
+          "encryption=none",
+        ],
+        { cwd: clone },
+      );
+      expect(init.exitCode, init.stderr).toBe(0);
+      const log = (
+        await runCommand(["git", "cat-file", "blob", "git-annex:remote.log"], { cwd: clone })
+      ).stdout;
+      const named = uuidsNamedInRemoteLog(log, "nemar-s3");
+      // Exactly one nemar-s3, the fixture's own, which a re-pull reads.
+      expect(named).toHaveLength(1);
+      expect(named[0]).not.toBe(oldUuid);
+      expect(uuidsNamedInRemoteLog(log, INHERITED_REMOTE)).toEqual([oldUuid]);
+      expect(
+        (
+          await runCommand(["git", "config", `remote.${INHERITED_REMOTE}.annex-uuid`], {
+            cwd: clone,
+          })
+        ).stdout.trim(),
+      ).toBe(oldUuid);
+      expect(
+        (
+          await runCommand(["git", "config", "remote.nemar-s3.annex-uuid"], { cwd: clone })
+        ).stdout.trim(),
+      ).toBe(named[0] as string);
+    } finally {
+      Bun.spawnSync(["chmod", "-R", "u+w", root]);
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 60_000);
 });

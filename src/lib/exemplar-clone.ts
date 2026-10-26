@@ -9,6 +9,15 @@
  * NEMAR-owned S3/GitHub repo (not OpenNeuro), and this tool is always a
  * single in-process run (`cloneExemplar`) rather than the sharded
  * multi-job CI shape import-openneuro.ts also supports.
+ *
+ * `--mirror <ds>` makes a mirror rehearsal fixture (ADR 0111's Phase 6 amendment): an `xx` copy of
+ * an `on` mirror whose row says `source = 'openneuro'` and `source_id = <ds>`, so an upstream
+ * re-pull can be rehearsed on staging, where only an `xx` dataset is re-pulled. The copy's own
+ * dev-bucket remote then takes the name `nemar-s3`, the one remote a re-pull reads, and the
+ * inherited production remote is renamed out of its way (`nemar-s3-source`, ignored), so the
+ * re-pull reads and writes the exemplar's own prefix and never the source's. Every other refusal
+ * stands: the route is staging-only, an anonymous exemplar is refused, and an `xx` publishes only
+ * through the exemplar exception.
  */
 
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
@@ -27,6 +36,7 @@ import {
   configureS3Remote,
   markInheritedOpenNeuroRemotesIgnored,
 } from "./git-annex/s3-remote.js";
+import { uuidsNamedInRemoteLog } from "./git-annex/s3-remote.js";
 import { batchSetKeysPresent, getRemoteUuid } from "./git-annex/transfer.js";
 import { waitForBidsValidationRun } from "./import-openneuro.js";
 import {
@@ -50,6 +60,63 @@ const COPY_CONCURRENCY = 16;
 export const EXEMPLAR_ID_RE = /^xx0999\d{2}$/;
 /** Source dataset id an exemplar is cloned from, mirrors backend `SOURCE_ID_RE`. */
 export const EXEMPLAR_SOURCE_ID_RE = /^(nm|on)\d{6}$/;
+
+/**
+ * Why `mirror` is not the `ds` the `on` source mirrors (`on004362` mirrors `ds004362`), or null
+ * when it is; the route refuses the same pair (`exemplar_mirror_mismatch`).
+ */
+export function mirrorProblem(sourceId: string, mirror: string): string | null {
+  if (!/^ds\d{6}$/.test(mirror))
+    return `--mirror takes an OpenNeuro dataset id (ds004362), not "${mirror}"`;
+  if (sourceId !== `on${mirror.slice(2)}`) {
+    return `--mirror ${mirror} is cloned from on${mirror.slice(2)}, the NEMAR mirror of it, not ${sourceId}`;
+  }
+  return null;
+}
+
+/** The remote a re-pull reads, which a mirror fixture's dev-bucket remote is named. */
+const REPULL_REMOTE = "nemar-s3";
+/** What the inherited production remote of a mirror fixture is renamed to, out of the way. */
+export const INHERITED_REMOTE = "nemar-s3-source";
+
+/**
+ * Rename a special remote the clone inherited, in the clone's git config (when the clone enabled
+ * it) and in the git-annex branch's `remote.log` (every uuid that names it), so a new remote can
+ * take its name. Refuses when, afterwards, anything still names it: a new remote of that name would
+ * otherwise enable the old one, the production one, with the new remote's parameters.
+ */
+export async function renameInheritedRemote(
+  datasetPath: string,
+  from: string,
+  to: string,
+): Promise<void> {
+  const cwd = datasetPath;
+  const configured = await runCommand(["git", "config", "--get", `remote.${from}.annex-uuid`], {
+    cwd,
+  });
+  if (configured.exitCode === 0 && configured.stdout.trim()) {
+    const r = await runCommand(
+      ["git", "config", "--rename-section", `remote.${from}`, `remote.${to}`],
+      { cwd },
+    );
+    if (r.exitCode !== 0)
+      throw new Error(`Failed to rename the git remote ${from}: ${r.stderr.trim()}`);
+  }
+  const remoteLog = async () => {
+    const r = await runCommand(["git", "cat-file", "blob", "git-annex:remote.log"], { cwd });
+    return r.exitCode === 0 ? r.stdout : "";
+  };
+  for (const uuid of uuidsNamedInRemoteLog(await remoteLog(), from)) {
+    const r = await runCommand(["git", "annex", "renameremote", uuid, to], { cwd });
+    if (r.exitCode !== 0) {
+      throw new Error(`Failed to rename the special remote ${from} (${uuid}): ${r.stderr.trim()}`);
+    }
+  }
+  const left = await runCommand(["git", "config", "--get", `remote.${from}.annex-uuid`], { cwd });
+  if (uuidsNamedInRemoteLog(await remoteLog(), from).length > 0 || left.stdout.trim() !== "") {
+    throw new Error(`${from} is still named after the rename; nothing was configured.`);
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Pure helpers
@@ -361,8 +428,13 @@ export interface PrepareExemplarResult {
   datasetPath: string;
   xxId: string;
   sourceId: string;
-  /** uuid of the freshly configured `nemar-s3-dev` remote. */
+  /** uuid of the freshly configured dev-bucket remote. */
   nemarS3DevUuid: string;
+  /**
+   * The dev-bucket remote's name: `nemar-s3-dev`, or `nemar-s3` for a mirror fixture (`--mirror`),
+   * whose re-pull reads that one remote. Absent is `nemar-s3-dev`.
+   */
+  devRemote?: string;
 }
 
 export interface CopyExemplarResult {
@@ -377,6 +449,8 @@ interface ExemplarPrepareOptions {
   workDir?: string;
   name?: string;
   description?: string;
+  /** A mirror rehearsal fixture of this OpenNeuro `ds` (see the module comment). */
+  mirror?: string;
 }
 
 /**
@@ -396,6 +470,10 @@ export async function prepareExemplar(
   if (!EXEMPLAR_SOURCE_ID_RE.test(sourceId)) {
     throw new Error(`Invalid source id "${sourceId}". Expected an nm/on dataset id.`);
   }
+  const mirror = options.mirror;
+  const problem = mirror === undefined ? null : mirrorProblem(sourceId, mirror);
+  if (problem) throw new Error(problem);
+  const devRemote = mirror === undefined ? "nemar-s3-dev" : REPULL_REMOTE;
 
   const workDir = options.workDir || mkdtempSync(join(tmpdir(), `nemar-exemplar-${xxId}-`));
   const datasetPath = join(workDir, xxId);
@@ -460,6 +538,7 @@ export async function prepareExemplar(
       source_id: sourceId,
       name: displayName,
       description: options.description,
+      ...(mirror !== undefined ? { mirror } : {}),
     });
     createSpinner.succeed(`Created ${result.dataset_id} (${result.github_repo})`);
   } catch (error) {
@@ -489,7 +568,12 @@ export async function prepareExemplar(
 
   // Step 5: The clone inherited the source's PRODUCTION nemar-s3 remote
   // (bucket=nemar). Disable it so it's never selected as an upload target —
-  // this tool writes exclusively to the dev bucket configured next.
+  // this tool writes exclusively to the dev bucket configured next. A mirror
+  // fixture's dev remote takes the name `nemar-s3` (the one a re-pull reads),
+  // so the inherited one is renamed out of its way first.
+  if (mirror !== undefined) {
+    await renameInheritedRemote(datasetPath, REPULL_REMOTE, INHERITED_REMOTE);
+  }
   await markInheritedOpenNeuroRemotesIgnored(
     datasetPath,
     (remote, err) => {
@@ -500,29 +584,29 @@ export async function prepareExemplar(
         ),
       );
     },
-    ["nemar-s3"],
+    [mirror === undefined ? "nemar-s3" : INHERITED_REMOTE],
   );
 
   // Step 6: Configure a fresh dev-bucket S3 remote scoped to this exemplar.
-  const s3Spinner = ora("Configuring nemar-s3-dev remote...").start();
+  const s3Spinner = ora(`Configuring ${devRemote} remote...`).start();
   const s3Creds = resolveS3Credentials();
   const s3Result = await configureS3Remote(
     datasetPath,
-    { name: "nemar-s3-dev", bucket: DEST_BUCKET, prefix: `${xxId}/objects`, region: S3_REGION },
+    { name: devRemote, bucket: DEST_BUCKET, prefix: `${xxId}/objects`, region: S3_REGION },
     s3Creds,
   );
   if (!s3Result.success) {
-    const msg = `Failed to configure nemar-s3-dev: ${s3Result.error}`;
+    const msg = `Failed to configure ${devRemote}: ${s3Result.error}`;
     s3Spinner.fail(msg);
     throw new Error(msg);
   }
-  const nemarS3DevUuid = await getRemoteUuid(datasetPath, "nemar-s3-dev");
+  const nemarS3DevUuid = await getRemoteUuid(datasetPath, devRemote);
   if (!nemarS3DevUuid) {
-    const msg = "Failed to get nemar-s3-dev remote UUID";
+    const msg = `Failed to get ${devRemote} remote UUID`;
     s3Spinner.fail(msg);
     throw new Error(msg);
   }
-  s3Spinner.succeed("Configured nemar-s3-dev remote");
+  s3Spinner.succeed(`Configured ${devRemote} remote`);
 
   // Step 7: Reconfigure origin to the new exemplar repo and push.
   const remoteSpinner = ora("Configuring NEMAR remote...").start();
@@ -558,7 +642,7 @@ export async function prepareExemplar(
   pushSpinner.succeed(`Pushed to ${NEMAR_DATASETS_ORG}`);
 
   console.log(chalk.green(`[prepare] done: ${xxId}`));
-  return { datasetPath, xxId, sourceId, nemarS3DevUuid };
+  return { datasetPath, xxId, sourceId, nemarS3DevUuid, devRemote };
 }
 
 /**
@@ -650,9 +734,9 @@ export async function finalizeExemplar(
     // resolves to the uuid prepare recorded before registering keys against
     // it (mirrors import-openneuro.ts's finalize re-clone guard, adapted for
     // the fact this tool never re-clones — datasetPath is shared in-memory).
-    const currentUuid = await getRemoteUuid(datasetPath, "nemar-s3-dev");
+    const currentUuid = await getRemoteUuid(datasetPath, prep.devRemote ?? "nemar-s3-dev");
     if (currentUuid !== nemarS3DevUuid) {
-      const msg = `nemar-s3-dev uuid drifted (prepare=${nemarS3DevUuid} now=${currentUuid}). Aborting before registering keys against the wrong remote.`;
+      const msg = `${prep.devRemote ?? "nemar-s3-dev"} uuid drifted (prepare=${nemarS3DevUuid} now=${currentUuid}). Aborting before registering keys against the wrong remote.`;
       console.error(chalk.red(msg));
       throw new Error(msg);
     }
@@ -818,11 +902,14 @@ export async function cloneExemplar(opts: {
   workDir?: string;
   name?: string;
   description?: string;
+  /** A mirror rehearsal fixture of this OpenNeuro `ds` (see the module comment). */
+  mirror?: string;
 }): Promise<void> {
   const prep = await prepareExemplar(opts.xxId, opts.sourceId, {
     workDir: opts.workDir,
     name: opts.name,
     description: opts.description,
+    ...(opts.mirror !== undefined ? { mirror: opts.mirror } : {}),
   });
   const copyResult = await copyExemplarData(prep, { includeDerived: opts.includeDerived });
   await finalizeExemplar(prep, copyResult, { publish: opts.publish });
