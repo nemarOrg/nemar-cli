@@ -129,8 +129,14 @@ export interface RepullWorld {
   row(): RepullDbRow;
   /** The plan file the world was executed from. */
   plan: string;
-  /** Put the world back as it was at `pr_open`. */
-  restore(): Promise<void>;
+  /**
+   * Put the world back as it was at `pr_open`, or at a point `save()` took: a suite whose cases all
+   * start further on (N.0.0 merged, say) reaches that point once and starts each case there,
+   * instead of driving every case through the same CLI runs again.
+   */
+  restore(to?: WorldPoint): Promise<void>;
+  /** The world as it is now, for `restore(point)`: the refs, the bucket, the database, the pulls. */
+  save(): Promise<WorldPoint>;
   /**
    * Store the identifier screen's report of `sha` as the workflow's callback would, through the
    * Worker's own store (`storeRepullScreenResult`), on the screen that waits for it.
@@ -143,6 +149,19 @@ export interface RepullWorld {
   /** What the version DOI's callback writes: the version row, with a DOI and its upstream tag. */
   insertVersionRow(version: string): void;
   stop(): void;
+}
+
+/**
+ * What `restore` puts back: origin's and upstream's refs, NEMAR's bucket, the database and the
+ * GitHub stand-in's pull requests. The rest of the stand-in, the hooks and the overrides are reset
+ * to how the world starts, and the record's resume, merge and settle directories are removed.
+ */
+export interface WorldPoint {
+  origin: string;
+  upstream: string;
+  s3: Snapshot;
+  db: Uint8Array;
+  pulls: string;
 }
 
 /** The pull request the world opened, as the GitHub stand-in keys it. */
@@ -421,13 +440,14 @@ export async function startRepullWorld(
     }
   }
 
-  const saved = {
+  const point = async (): Promise<WorldPoint> => ({
     origin: await refsOf(fx.originRepo),
     upstream: await refsOf(fx.upstreamRepo),
     s3: s3.snapshot() as Snapshot,
     db: db.serialize(),
     pulls: JSON.stringify(gh.pulls),
-  };
+  });
+  const saved = await point();
   const restoreRefs = async (repo: string, refs: string) => {
     const want = new Map(
       refs
@@ -469,13 +489,14 @@ export async function startRepullWorld(
     plan,
     row: () =>
       db.query("SELECT * FROM upstream_repulls ORDER BY id DESC LIMIT 1").get() as RepullDbRow,
-    async restore() {
-      await restoreRefs(fx.originRepo, saved.origin);
-      await restoreRefs(fx.upstreamRepo, saved.upstream);
-      s3.restore(saved.s3);
-      db = Database.deserialize(saved.db);
+    save: point,
+    async restore(to = saved) {
+      await restoreRefs(fx.originRepo, to.origin);
+      await restoreRefs(fx.upstreamRepo, to.upstream);
+      s3.restore(to.s3);
+      db = Database.deserialize(to.db);
       gh.reset();
-      Object.assign(gh.pulls, JSON.parse(saved.pulls));
+      Object.assign(gh.pulls, JSON.parse(to.pulls));
       apiWrites.length = 0;
       apiHook = null;
       apiOverride = null;

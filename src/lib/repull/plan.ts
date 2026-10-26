@@ -60,6 +60,7 @@ import { type FromTagSource, bareVersion, resolveFromTag } from "./from-tag.js";
 import { type PathDecision, overlay } from "./overlay.js";
 import {
   type Check,
+  type ReleaseFacts,
   annexUuidCheck,
   releasePrCheck,
   sourceCheck,
@@ -144,7 +145,13 @@ export interface PlanOptions {
 
 export type PlanOutcome =
   | { planned: false; preflight: Check[]; reason: string; workdir: string | null }
-  | { planned: true; file: PlanFile; workdir: string | null };
+  | {
+      planned: true;
+      file: PlanFile;
+      workdir: string | null;
+      /** What the release-pr check read, outside the plan file (a supersede judges it again). */
+      release: ReleaseFacts;
+    };
 
 /**
  * Remove the scratch directory on SIGINT and SIGTERM as on a normal return. The handler is
@@ -543,6 +550,13 @@ export async function planRepull(opts: PlanOptions): Promise<PlanOutcome> {
     }
 
     // Preflight checks that read the remotes once more.
+    const releasePr = await releasePrCheck({
+      datasetId: id,
+      nextVersion: versions.next,
+      branches,
+      token: opts.github.token,
+      apiBase: opts.github.apiBase,
+    });
     const marker = nemarRecord?.bucket
       ? await readAnnexUuidMarker({
           bucket: nemarRecord.bucket,
@@ -556,13 +570,7 @@ export async function planRepull(opts: PlanOptions): Promise<PlanOutcome> {
       from.check,
       to.check,
       versions.check,
-      await releasePrCheck({
-        datasetId: id,
-        nextVersion: versions.next,
-        branches,
-        token: opts.github.token,
-        apiBase: opts.github.apiBase,
-      }),
+      releasePr.check,
       annexUuidCheck({ remoteUuids: nemarUuids, marker }),
     ];
 
@@ -727,7 +735,7 @@ export async function planRepull(opts: PlanOptions): Promise<PlanOutcome> {
       executable,
       body,
     };
-    return { planned: true, file, workdir: keep ? workdir : null };
+    return { planned: true, file, workdir: keep ? workdir : null, release: releasePr.facts };
   } finally {
     release();
   }

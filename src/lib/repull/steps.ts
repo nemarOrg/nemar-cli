@@ -1,8 +1,8 @@
 /**
  * What the steps of a re-pull past its open pull request share (ADR 0111; epic #1046 phase 6):
- * `resume.ts` walks them, `release.ts` holds the release and the lock. The words a step records
- * on the row begin with its own prefix (`[gates:`, `[release:`, `[lock:`), never `[prepare:`, which
- * only a preparation clears (the Phase 6c amendment's rule).
+ * `resume.ts` walks them, `release.ts` holds the release and the lock, `patch-turn.ts` makes N.0.1.
+ * The words a step records on the row begin with its own prefix (`[gates:`, `[release:`, `[lock:`,
+ * `[patch:`), never `[prepare:`, which only a preparation clears (the Phase 6c amendment's rule).
  */
 
 import type { RepullRow } from "../../../shared/repull-state.js";
@@ -20,7 +20,12 @@ export type ResumeOutcome =
   | "waiting"
   /** The record ended (`abandoned`: the pull request was closed unmerged) (exit 1). */
   | "ended"
-  /** The release was recorded and the objects locked; N.0.1 is not built yet (exit 0). */
+  /**
+   * The release was recorded and the objects locked, and the record stays at `released` because it
+   * does not say how many corrections and conflicts its plan has, so it is not completed (exit 0;
+   * unknown is never zero). A wait for an administrator's decision on the plan's conflicts is
+   * `waiting`.
+   */
   | "released"
   /** The re-pull is complete (exit 0). */
   | "complete"
@@ -39,6 +44,24 @@ export interface ResumeOptions {
   waitMinutes: number;
   /** The administrator's reason for a screen verdict that asks for a person (ADR 0086). */
   acknowledgment?: string;
+  /**
+   * The reviewed plan file, which N.0.1 is made from; the plan's default path
+   * (`$NEMAR_CONFIG_DIR/repull/<id>/<to>.<digest8>.json`) when absent.
+   */
+  plan?: string;
+  /**
+   * Conflicts resolved to NEMAR's side in N.0.1 (`--take-ours`): a path the plan lists as a
+   * conflict, or `dataset_description.json#<Key>`.
+   */
+  takeOurs?: string[];
+  /** Every conflict the plan lists stays on upstream's side (`--keep-upstream`). */
+  keepUpstream?: boolean;
+  /**
+   * The administrator's reason for recording N.0.1's release although its tag's tree is not its
+   * gated head outside `.nemar/` and `.github/` (`--accept-tag-tree`): the one way past
+   * `patch-tree-mismatch`, after reading the difference. Unread trees are never accepted.
+   */
+  acceptTagTree?: string;
   /**
    * Asked before the release branch is re-synthesized onto a moved `main` and force-pushed with a
    * lease; false stops with nothing pushed (`declined`). Absent: it proceeds (the command passes
@@ -80,7 +103,10 @@ export type Turn =
   | { kind: "done"; result: ResumeResult };
 
 /** `[<step>:<code>] <message>`, the words a step past the open pull request records. */
-export function resumeErrorWords(step: "gates" | "release" | "lock", err: unknown): string {
+export function resumeErrorWords(
+  step: "gates" | "release" | "lock" | "patch",
+  err: unknown,
+): string {
   if (err instanceof ExecuteRefused) return `[${step}:${err.code}] ${err.message}`.slice(0, 2000);
   const why = err instanceof Error ? err.name : "unknown";
   return `[${step}:${step}-failed] The step failed (${why}).`;
@@ -105,19 +131,37 @@ export function apiRefused(err: unknown, what: string): ExecuteRefused {
 }
 
 /**
- * Record why a step failed on a row at `pr_open`, `merged` or `released`, as the self-edge that
- * carries the stage's stored facts and nothing else; the operator is told when it cannot be
- * recorded. The failure itself is still what the caller reports.
+ * The facts a self-edge of an open pull request's status sends again: an edge into `pr_open` or
+ * `patch_synthesized` names its pull request whole, so an edge that records only why a step failed
+ * carries the row's own values (which the Worker reads as writing nothing but the error).
+ */
+export function openFacts(row: RepullRow): Record<string, unknown> {
+  if (row.status === "pr_open") {
+    return { branch: row.branch, pr_number: row.pr_number, head_sha: row.head_sha };
+  }
+  if (row.status === "patch_synthesized") {
+    return {
+      patch_version: row.patch_version,
+      patch_branch: row.patch_branch,
+      patch_pr_number: row.patch_pr_number,
+      patch_head_sha: row.patch_head_sha,
+      patch_base_sha: row.patch_base_sha,
+    };
+  }
+  return {};
+}
+
+/**
+ * Record why a step failed on a row at `pr_open`, `patch_synthesized`, `merged`, `patch_merged` or
+ * `released`, as the self-edge that carries the stage's stored facts and nothing else; the
+ * operator is told when it cannot be recorded. The failure itself is still what the caller reports.
  */
 export async function recordStepError(
   row: RepullRow,
   words: string,
   out: (line: string) => void,
 ): Promise<void> {
-  const fields =
-    row.status === "pr_open"
-      ? { branch: row.branch, pr_number: row.pr_number, head_sha: row.head_sha }
-      : {};
+  const fields = openFacts(row);
   try {
     await transitionRepull(row.id, { from: row.status, to: row.status, fields, error: words });
   } catch (err) {

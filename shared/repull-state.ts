@@ -49,7 +49,7 @@ export function isTerminal(status: RepullStatus): boolean {
 }
 
 /** The states that may still end `abandoned` or `superseded`: before N.0.0 is merged. */
-const BEFORE_MERGE: readonly RepullStatus[] = [
+export const BEFORE_MERGE: readonly RepullStatus[] = [
   "planned",
   "prepared",
   "copied",
@@ -59,7 +59,11 @@ const BEFORE_MERGE: readonly RepullStatus[] = [
 ];
 
 /** The states that may end `patch_declined`: N.0.0 released, N.0.1 not yet merged. */
-const PATCH_OPEN: readonly RepullStatus[] = ["released", "patch_synthesized", "patch_gates_clear"];
+export const PATCH_OPEN: readonly RepullStatus[] = [
+  "released",
+  "patch_synthesized",
+  "patch_gates_clear",
+];
 
 const NON_TERMINAL: readonly RepullStatus[] = REPULL_STATUSES.filter((s) => !isTerminal(s));
 
@@ -819,6 +823,26 @@ export const DISPATCH_CODES = [
   "staging-unreadable",
   "use-execute",
   "claim-too-old",
+  // N.0.1, abandoning and superseding a record (Phase 6g): a run reports N.0.1's words as
+  // `[patch:<word>]` on the record; abandon and supersede record nothing but their end.
+  "patch-ledger",
+  "patch-plan-mismatch",
+  "plan-not-the-record",
+  "patch-ours-moved",
+  "patch-path-conflict",
+  "patch-description-unreadable",
+  "patch-key-absent",
+  "patch-key-dead",
+  "patch-main-moved",
+  "patch-tree-mismatch",
+  "merge-main-moved",
+  "foreign-pull-request-merged",
+  "take-ours-invalid",
+  "wait-for-release",
+  "supersede-automatic",
+  "supersede-same-tag",
+  "supersede-from-tag",
+  "supersede-too-late",
   // The scrub's refusals (`IMPORT_SCRUB_REFUSALS`), which execution passes on as they are.
   "already-imported-unscrubbed",
   "bound-exceeded",

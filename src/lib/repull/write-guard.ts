@@ -9,7 +9,9 @@
  *  - `<sha>:refs/heads/release/v<V>` for a version `V` of this re-pull (a fast-forward or a new
  *    branch, never forced);
  *  - `<sha>:refs/heads/git-annex` (the registration commit, a fast-forward of origin's branch);
- *  - `--delete refs/heads/release/v<V>` (abandoning a re-pull's own branch);
+ *  - `--force-with-lease=refs/heads/release/v<V>:<sha> --delete refs/heads/release/v<V>`
+ *    (abandoning a re-pull's own branch, leased on the head judged to be the re-pull's, so a push
+ *    that lands after that judgment is never deleted unseen; a deletion without a lease is refused);
  *  - `--force-with-lease=refs/heads/release/v<V>:<sha> <sha>:refs/heads/release/v<V>` (a release
  *    branch re-synthesized onto a moved `main`, leased on the head the record names).
  * Never `main`, never a tag, never a `+` refspec, `--force`, `--mirror`, `--all`, `--tags`, another
@@ -87,7 +89,8 @@ export function assertRepullPush(args: readonly string[], ctx: PushContext): voi
   if (after.length !== 1) throw new RepullWriteRefused("one-refspec-only");
   const spec = after[0] as string;
   if (deleting) {
-    if (lease || !branches.has(spec)) throw new RepullWriteRefused("delete-not-a-release-branch");
+    if (!branches.has(spec)) throw new RepullWriteRefused("delete-not-a-release-branch");
+    if (!lease || lease.ref !== spec) throw new RepullWriteRefused("delete-without-lease");
     return;
   }
   const colon = spec.indexOf(":");

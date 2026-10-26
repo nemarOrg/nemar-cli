@@ -62,6 +62,8 @@ export interface PullState {
   headAfterFirstRead?: string;
   /** The head branch's name; "add-subjects" unless a test says otherwise. */
   headRef?: string;
+  /** The head repository's full name: the dataset's own unless a test says otherwise (a fork's). */
+  headRepo?: string;
   /** The squash merge's commit, once merged (GitHub's `merge_commit_sha`); null before. */
   mergeCommitSha?: string;
   /**
@@ -144,6 +146,11 @@ export interface GitHubStandin {
    * between the merge's last read of the pull request and the merge itself.
    */
   beforeMerge: ((dataset: string, number: number) => Promise<void>) | null;
+  /**
+   * Runs when a close (PATCH) arrives, before the pull request is closed: a push or a merge that
+   * lands between a reader's look and the close.
+   */
+  beforeClose: ((dataset: string, number: number) => Promise<void>) | null;
   /** When true, a merge PUT is applied and then answered 502: the answer lost on the way back. */
   lostMergeAnswers: boolean;
   /** The commit a tag names (`GET .../commits/tags/<tag>`, asked as `vnd.github.sha`), or null. */
@@ -199,6 +206,7 @@ export function startGitHubStandin(): GitHubStandin {
     liveHeads: false,
     onMerge: null as GitHubStandin["onMerge"],
     beforeMerge: null as GitHubStandin["beforeMerge"],
+    beforeClose: null as GitHubStandin["beforeClose"],
     lostMergeAnswers: false,
     resolveTag: null as GitHubStandin["resolveTag"],
     compareCommits: null as GitHubStandin["compareCommits"],
@@ -349,7 +357,7 @@ export function startGitHubStandin(): GitHubStandin {
                 head: {
                   ref: p.headRef ?? "add-subjects",
                   sha: await headOf(list[1] as string, p),
-                  repo: { full_name: `nemarDatasets/${list[1]}` },
+                  repo: { full_name: p.headRepo ?? `nemarDatasets/${list[1]}` },
                 },
                 base: { ref: p.base ?? "main" },
               })),
@@ -452,11 +460,15 @@ export function startGitHubStandin(): GitHubStandin {
                   ? p.headAfterFirstRead
                   : await headOf(pull[1] as string, p)),
               ref: p.headRef ?? "add-subjects",
-              repo: { full_name: `nemarDatasets/${pull[1]}`, owner: { login: "nemarDatasets" } },
+              repo: {
+                full_name: p.headRepo ?? `nemarDatasets/${pull[1]}`,
+                owner: { login: (p.headRepo ?? "nemarDatasets/").split("/")[0] },
+              },
             },
           });
         }
         if (req.method === "PATCH" && !pull[3]) {
+          if (state.beforeClose) await state.beforeClose(pull[1] as string, Number(pull[2]));
           if (state.closeStatus !== null) {
             return Response.json({ message: "Validation Failed" }, { status: state.closeStatus });
           }
@@ -641,6 +653,12 @@ export function startGitHubStandin(): GitHubStandin {
     set beforeMerge(v) {
       state.beforeMerge = v;
     },
+    get beforeClose() {
+      return state.beforeClose;
+    },
+    set beforeClose(v) {
+      state.beforeClose = v;
+    },
     get lostMergeAnswers() {
       return state.lostMergeAnswers;
     },
@@ -681,6 +699,7 @@ export function startGitHubStandin(): GitHubStandin {
       state.mergeStatus = 200;
       state.unreadableAnswers = false;
       state.beforeMerge = null;
+      state.beforeClose = null;
       state.lostMergeAnswers = false;
       state.commentStatus = null;
       state.closeStatus = null;

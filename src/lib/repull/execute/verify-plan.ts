@@ -33,6 +33,7 @@ import {
 } from "../digest.js";
 import type { ComputedBytes } from "../edits.js";
 import { type CatalogFacts, RepullCannotPlan, planRepull } from "../plan.js";
+import type { ReleaseFacts } from "../preflight.js";
 import { readOnlyGit } from "../read-only.js";
 import { preflightLines } from "../render.js";
 import { type Env, listTree, originUrl, planSources, remoteEnv } from "../sources.js";
@@ -69,6 +70,13 @@ export interface LiveSources {
   openNeuroGraphqlUrl?: string;
   /** The planner's fetch bound; the plan's own default when absent. */
   maxFetchBytes?: number;
+  /**
+   * Only for `execute --supersede`: whether a refused `release-pr` check is the superseded record's
+   * own release branch and pull request, and nothing else's, judged from what that check read (no
+   * second read). Asked only when that check is the one thing that keeps the live plan from being
+   * executable; anything else still refuses.
+   */
+  ownRelease?: (facts: ReleaseFacts) => { ok: true } | { ok: false; why: string };
 }
 
 export interface VerifiedPlan {
@@ -329,7 +337,10 @@ export async function readExecutablePlan(path: string, live: LiveSources): Promi
     }
 
     // 5. Executable now, by the live answers; the file's preflight and `executable` are not read.
-    if (!outcome.file.executable) {
+    const tolerated = outcome.file.executable
+      ? null
+      : ownReleaseOnly(outcome.file, outcome.release, live);
+    if (!outcome.file.executable && tolerated?.ok !== true) {
       const refusals = (outcome.file.body.refusals as Array<{ code?: unknown }> | undefined) ?? [];
       const unpinned = (objectOf(outcome.file.body.copy).unpinned as unknown[] | undefined) ?? [];
       throw new ExecuteRefused(
@@ -339,7 +350,10 @@ export async function readExecutablePlan(path: string, live: LiveSources): Promi
           ...refusals.map((r) => String(r.code)),
           ...(unpinned.length > 0 ? [`${unpinned.length} unpinned key(s)`] : []),
         ].join(", ")}.`,
-        preflightLines(outcome.file.preflight),
+        [
+          ...preflightLines(outcome.file.preflight),
+          ...(tolerated && !tolerated.ok ? [`Not superseded: ${tolerated.why}.`] : []),
+        ],
       );
     }
     return { file, body, live: outcome.file, rebasedOnto, workdir };
@@ -347,6 +361,38 @@ export async function readExecutablePlan(path: string, live: LiveSources): Promi
     discard();
     throw err;
   }
+}
+
+/**
+ * Whether the one thing that keeps the live plan from being executable is a `release-pr` refusal
+ * (its two refusal words, which no other check uses) for a release branch or pull request that the
+ * superseded record owns (`ownRelease`, judged from what the check read), with every other check
+ * `ok`, no plan refusal and no unpinned key. Without `ownRelease` it is never so; when it is not, why
+ * is said beside the live preflight.
+ */
+function ownReleaseOnly(
+  live: PlanFile,
+  facts: ReleaseFacts,
+  sources: LiveSources,
+): { ok: true } | { ok: false; why: string } | null {
+  if (!sources.ownRelease) return null;
+  const failing = live.preflight.filter((c) => c.status !== "ok");
+  const refusals = (live.body.refusals as unknown[] | undefined) ?? [];
+  const unpinned = (objectOf(live.body.copy).unpinned as unknown[] | undefined) ?? [];
+  if (refusals.length > 0 || unpinned.length > 0 || failing.length !== 1) {
+    return {
+      ok: false,
+      why: "the plan is not executable for more than the superseded record's own release",
+    };
+  }
+  const code = failing[0]?.code;
+  if (code !== "release-branch-exists" && code !== "release-pr-open") {
+    return {
+      ok: false,
+      why: "the plan is not executable for another reason than a release branch or pull request",
+    };
+  }
+  return sources.ownRelease(facts);
 }
 
 function stale(): ExecuteRefused {

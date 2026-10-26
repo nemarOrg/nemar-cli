@@ -172,7 +172,7 @@ describe.skipIf(!awsInstalled)("approve --merge, what refuses", () => {
     expect(merges()).toEqual([]);
   });
 
-  test("a re-pull's N.0.1 pull request is refused: merging N.0.1 is not built", async () => {
+  test("a re-pull's N.0.1 pull request merges only through its gate: one whose gates are not clear approves nothing", async () => {
     await toGates();
     const n1 = (w.row().pr_number as number) + 30;
     w.db().run(
@@ -186,7 +186,7 @@ describe.skipIf(!awsInstalled)("approve --merge, what refuses", () => {
     };
     const run = await approve(n1);
     expect(run.exitCode, run.all).toBe(1);
-    expect(run.all).toContain("N.0.1");
+    expect(run.all).toContain("N.0.1 pull request is merged only from patch_gates_clear");
     expect(reviewPosts()).toEqual([]);
     expect(merges()).toEqual([]);
   });

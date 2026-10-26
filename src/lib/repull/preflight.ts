@@ -19,8 +19,9 @@ import {
 } from "../../../shared/upstream-staleness.js";
 import { bumpVersion, parseVersion } from "../semver.js";
 import { bareVersion } from "./from-tag.js";
+import { type ListedPull, listPulls, pullListWhy } from "./pulls.js";
 import { readOnlyFetch } from "./read-only.js";
-import { type MarkerRead, NEMAR_ORG } from "./sources.js";
+import type { MarkerRead } from "./sources.js";
 
 export type CheckStatus = "ok" | "refused" | "unchecked";
 
@@ -319,9 +320,23 @@ export function versionCheck(args: {
 // ---------------------------------------------------------------------------------------
 
 /**
- * No release pull request may be open (ADR 0111, decision 2): one REST call for the open pull
- * requests, refusing any whose head is `release/*`, and the `release/vN.0.0` branch from the
- * `ls-remote` already made. Without a token, or on any error, the REST half is `unchecked`.
+ * What the release-pr check read, for a caller that must judge it again (a supersede tolerates the
+ * superseded record's own release branch and pull request, and reads nothing twice): the release
+ * branches `ls-remote` listed, and the open pull requests, or null when they were not read whole.
+ */
+export interface ReleaseFacts {
+  branches: string[];
+  pulls: ListedPull[] | null;
+  /** Why `pulls` is null. */
+  pullsUnread?: string;
+}
+
+/**
+ * No release pull request may be open (ADR 0111: N.0.1's pull request opens only after N.0.0's has
+ * merged, so the two are never open together): one REST call for the open pull requests, refusing
+ * any whose head is `release/*`, and the `release/vN.0.0` branch from the `ls-remote` already made.
+ * Without a token, or on any error, the REST half is `unchecked`. The list is read even when the
+ * branch exists, so what was read is there for a supersede to judge.
  */
 export async function releasePrCheck(args: {
   datasetId: string;
@@ -329,87 +344,87 @@ export async function releasePrCheck(args: {
   branches: string[];
   token: string | null;
   apiBase: string;
-}): Promise<Check> {
+}): Promise<{ check: Check; facts: ReleaseFacts }> {
   const branch = args.nextVersion ? `refs/heads/release/v${args.nextVersion}` : null;
+  const branches = args.branches.filter((b) => b.startsWith("refs/heads/release/"));
+  const listed = args.token
+    ? await listPulls({
+        token: args.token,
+        base: args.apiBase,
+        datasetId: args.datasetId,
+        state: "open",
+        fetcher: readOnlyFetch,
+        userAgent: "nemar-cli-repull-plan",
+      })
+    : null;
+  const facts: ReleaseFacts = {
+    branches,
+    pulls: listed?.ok ? listed.pulls : null,
+    ...(listed?.ok ? {} : { pullsUnread: listed ? pullListWhy(listed) : "no GitHub token" }),
+  };
+  const done = (check: Check) => ({ check, facts });
   if (branch && args.branches.includes(branch)) {
-    return {
+    return done({
       name: "release-pr",
       status: "refused",
       code: "release-branch-exists",
       detail: `${branch.slice("refs/heads/".length)} exists`,
-    };
+    });
   }
-  if (!args.token) {
-    return { name: "release-pr", status: "unchecked", code: "no-token", detail: "no GitHub token" };
-  }
-  let res: Response;
-  try {
-    res = await readOnlyFetch(
-      `${args.apiBase}/repos/${NEMAR_ORG}/${args.datasetId}/pulls?state=open&per_page=100`,
-      {
-        headers: {
-          Authorization: `Bearer ${args.token}`,
-          Accept: "application/vnd.github+json",
-          "User-Agent": "nemar-cli-repull-plan",
-        },
-        signal: AbortSignal.timeout(20_000),
-      },
-    );
-  } catch (err) {
-    return {
+  if (!listed) {
+    return done({
       name: "release-pr",
       status: "unchecked",
-      code: "github-unreachable",
-      detail: err instanceof Error ? err.name : "fetch failed",
-    };
+      code: "no-token",
+      detail: "no GitHub token",
+    });
   }
-  if (!res.ok) {
-    return {
-      name: "release-pr",
-      status: "unchecked",
-      code: "github-error",
-      detail: `HTTP ${res.status}`,
-    };
+  if (!listed.ok) {
+    switch (listed.kind) {
+      case "unreachable":
+        return done({
+          name: "release-pr",
+          status: "unchecked",
+          code: "github-unreachable",
+          detail: listed.detail,
+        });
+      case "status":
+        return done({
+          name: "release-pr",
+          status: "unchecked",
+          code: "github-error",
+          detail: `HTTP ${listed.status}`,
+        });
+      case "too-many":
+        return done({
+          name: "release-pr",
+          status: "unchecked",
+          code: "too-many-open",
+          detail: "100 or more open",
+        });
+      default:
+        return done({
+          name: "release-pr",
+          status: "unchecked",
+          code: "github-error",
+          detail: "unreadable answer",
+        });
+    }
   }
-  let pulls: Array<{ number?: number; head?: { ref?: string } }>;
-  try {
-    pulls = (await res.json()) as typeof pulls;
-  } catch {
-    return {
-      name: "release-pr",
-      status: "unchecked",
-      code: "github-error",
-      detail: "unreadable answer",
-    };
-  }
-  if (!Array.isArray(pulls)) {
-    return {
-      name: "release-pr",
-      status: "unchecked",
-      code: "github-error",
-      detail: "unreadable answer",
-    };
-  }
-  if (pulls.length >= 100) {
-    return {
-      name: "release-pr",
-      status: "unchecked",
-      code: "too-many-open",
-      detail: "100 or more open",
-    };
-  }
-  const release = pulls.filter(
-    (p) => typeof p.head?.ref === "string" && p.head.ref.startsWith("release/"),
-  );
+  const release = listed.pulls.filter((p) => p.headRef.startsWith("release/"));
   if (release.length > 0) {
-    return {
+    return done({
       name: "release-pr",
       status: "refused",
       code: "release-pr-open",
-      detail: release.map((p) => `#${p.number} (${p.head?.ref})`).join(", "),
-    };
+      detail: release.map((p) => `#${p.number} (${p.headRef})`).join(", "),
+    });
   }
-  return { name: "release-pr", status: "ok", detail: `${pulls.length} open, none a release` };
+  return done({
+    name: "release-pr",
+    status: "ok",
+    detail: `${listed.pulls.length} open, none a release`,
+  });
 }
 
 // ---------------------------------------------------------------------------------------

@@ -2026,7 +2026,9 @@ prReviewsCommand
       if (gate.kind === "confirm") console.log(chalk.yellow(`  ${gate.warning}`));
       if (gate.kind === "needs_force") console.log(chalk.yellow("  Approving anyway (--force)."));
       if (options.merge && repull) {
-        console.log(`  Then:     squash-merge through the re-pull's gate. ${doiLine(repull.row)}`);
+        console.log(
+          `  Then:     squash-merge through the re-pull's gate. ${doiLine(repull.row, repull.pr)}`,
+        );
         for (const w of repull.warnings) console.log(chalk.yellow(`            ${w}`));
       } else if (options.merge) {
         console.log(`  Then:     merge (${method}) if GitHub reports it clean`);
@@ -2424,7 +2426,7 @@ an impatient Enter cannot answer a pull request you have not seen; piped answers
         if (!merge.ok) console.log(chalk.yellow(`  Merge:    ${merge.card}`));
         if (repullGated.kind === "repull") {
           console.log(
-            `  Re-pull:  #${repullGated.check.row.id}; y squash-merges it through the re-pull's gate. ${doiLine(repullGated.check.row)}`,
+            `  Re-pull:  #${repullGated.check.row.id}; y squash-merges it through the re-pull's gate. ${doiLine(repullGated.check.row, repullGated.check.pr)}`,
           );
         }
         if (a.contributorNote) console.log(chalk.yellow(`  ${plain(a.contributorNote)}`));

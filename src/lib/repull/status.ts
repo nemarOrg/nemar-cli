@@ -28,10 +28,22 @@ export function nextCommand(row: RepullRow): string | null {
         ? `nemar admin repull merge ${id}  (sends the merge again under the held claim), or resume ${id} once the claim is old enough to expire`
         : `nemar admin repull merge ${id}  (mints one version DOI, v${row.to_version})`;
     case "merged":
+      return `nemar admin repull resume ${id}  (the release, the lock, then N.0.1 or the end)`;
     case "released":
-      return `nemar admin repull resume ${id}  (the release, the lock and the end)`;
+      return typeof row.counts.conflicts === "number" && row.counts.conflicts > 0
+        ? `nemar admin repull resume ${id} --take-ours <path> or --keep-upstream  (the lock, then N.0.1 or the end; the plan's ${row.counts.conflicts} conflict(s) wait for your decision), or nemar admin repull abandon ${id}  (declines N.0.1)`
+        : `nemar admin repull resume ${id}  (the lock, then N.0.1 or the end)`;
+    case "patch_synthesized":
+      return `nemar admin repull resume ${id}  (N.0.1's identifier screen and gates)`;
+    case "patch_gates_clear":
+      return row.patch_merge_claim_sha
+        ? `nemar admin repull merge ${id}  (sends N.0.1's merge again under the held claim), or resume ${id} once the claim is old enough to expire`
+        : `nemar admin repull merge ${id}  (mints one version DOI, v${row.patch_version})`;
+    case "patch_merged":
+    case "patch_released":
+      return `nemar admin repull resume ${id}  (N.0.1's release and the end)`;
     default:
-      return isTerminal(row.status) ? null : "N.0.1 is not built yet";
+      return isTerminal(row.status) ? null : `nemar admin repull resume ${id}`;
   }
 }
 
@@ -52,6 +64,19 @@ export function statusLines(row: RepullRow, screens: RepullScreen[] | null): str
   }
   if (row.merge_sha) lines.push(`  Merge: ${short(row.merge_sha)}`);
   if (row.tag_sha) lines.push(`  Tag v${row.to_version}: ${short(row.tag_sha)}`);
+  if (row.patch_pr_number !== null) {
+    lines.push(
+      `  N.0.1 pull request: #${row.patch_pr_number} of ${row.patch_branch}, head ${short(row.patch_head_sha)}, base ${short(row.patch_base_sha)}`,
+    );
+  }
+  if (row.patch_gates_sha) lines.push(`  N.0.1 gates clear at: ${short(row.patch_gates_sha)}`);
+  if (row.patch_merge_claim_sha) {
+    lines.push(
+      `  N.0.1 claim to merge: ${short(row.patch_merge_claim_sha)}, made ${row.patch_merge_claimed_at} UTC`,
+    );
+  }
+  if (row.patch_merge_sha) lines.push(`  N.0.1 merge: ${short(row.patch_merge_sha)}`);
+  if (row.patch_tag_sha) lines.push(`  Tag v${row.patch_version}: ${short(row.patch_tag_sha)}`);
   if (row.status === "released") {
     lines.push(
       typeof row.counts.locked === "number"

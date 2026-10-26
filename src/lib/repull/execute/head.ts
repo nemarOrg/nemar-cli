@@ -78,6 +78,24 @@ async function changesOf(work: string, parent: string, commit: string): Promise<
   return out;
 }
 
+/**
+ * The paths outside NEMAR's own (`.nemar/**`, `.github/**`) that `to`'s tree changes from `from`'s,
+ * read in the working clone, which must hold both; null when the trees cannot be compared. Outside
+ * those paths a squash of a pull request based on `from` is the pull request's head only when this
+ * is empty (ADR 0111: what is tagged is what was screened).
+ */
+export async function changedOutsideNemar(
+  work: string,
+  from: string,
+  to: string,
+): Promise<string[] | null> {
+  const changes = await changesOf(work, from, to);
+  if (changes === null) return null;
+  return changes
+    .map((c) => c.path)
+    .filter((p) => !p.startsWith(".nemar/") && !p.startsWith(".github/"));
+}
+
 async function blob(work: string, oid: string): Promise<string | null> {
   const r = await git(work, ["cat-file", "blob", oid], { ok: true });
   return r.exitCode === 0 ? r.stdout : null;
