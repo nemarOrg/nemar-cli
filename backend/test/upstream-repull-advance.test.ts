@@ -1171,8 +1171,11 @@ function stalled(
   });
 }
 
-/** A dispatch of re-pull `id` that ended as `status` (yesterday, so it takes none of today's cap). */
-function endedDispatch(id: number, status: string, ds: string = DS): void {
+/**
+ * A dispatch of re-pull `id` that ended as `status`, sent yesterday so it takes none of today's
+ * cap; `reportedAt` (a D1 time) is when it reported, yesterday by default.
+ */
+function endedDispatch(id: number, status: string, ds: string = DS, reportedAt?: string): void {
   const code =
     status === "unreported"
       ? null
@@ -1180,7 +1183,11 @@ function endedDispatch(id: number, status: string, ds: string = DS): void {
         ? "dispatch-refused"
         : "copy-failed";
   const reported =
-    status === "unreported" || status === "dispatch_failed" ? null : "datetime('now', '-1 day')";
+    status === "unreported" || status === "dispatch_failed"
+      ? null
+      : reportedAt === undefined
+        ? "datetime('now', '-1 day')"
+        : `'${reportedAt}'`;
   db.run(
     `INSERT INTO upstream_repull_dispatches (kind, dataset_id, upstream_ds, from_tag, to_tag,
                                             repull_id, nonce, status, code, dispatched_at, reported_at)
@@ -1430,6 +1437,37 @@ describe("a stalled automatic re-pull is resumed", () => {
     expect(gh.dispatches).toEqual([]);
     expect(repullAdvanceLogLine(r)?.level).toBe("error");
   });
+
+  test("two ticks in a row do not resume a row whose run failed between them", async () => {
+    const id = stalled("copied", TEN());
+    endedDispatch(id, "failed");
+    expect((await resumeTick(TEN())).resumed).toBe(1);
+    // The resumed run fails five minutes in, writing nothing to the row: its updated_at is still
+    // two hours old, and only the dispatch says when the row last moved.
+    db.run(
+      `UPDATE upstream_repull_dispatches SET status = 'failed', code = 'copy-failed', nonce = NULL,
+         reported_at = ? WHERE status = 'dispatched'`,
+      [d1Time(new Date(TEN().getTime() + 5 * 60_000))],
+    );
+    const next = await resumeTick(new Date(TEN().getTime() + HALF_HOUR));
+    expect(next).toMatchObject({ resumed: 0, waiting: 1 });
+    expect(dispatched("run-upstream-repull")).toHaveLength(1);
+    // An hour after that failure it is resumed again.
+    const later = await resumeTick(new Date(TEN().getTime() + 65 * 60_000));
+    expect(later.resumed).toBe(1);
+    expect(dispatched("run-upstream-repull")).toHaveLength(2);
+  });
+
+  for (const [minutes, resumed] of [
+    [59, false],
+    [60, true],
+  ] as const) {
+    test(`a run that reported ${minutes} minutes ago is ${resumed ? "" : "not "}resumed`, async () => {
+      const id = stalled("copied", TEN());
+      endedDispatch(id, "failed", DS, d1Time(new Date(TEN().getTime() - minutes * 60_000)));
+      expect((await resumeTick(TEN())).resumed).toBe(resumed ? 1 : 0);
+    });
+  }
 
   test("a run that refused holds resume-refused, and is not sent again", async () => {
     const id = stalled("prepared", TEN());

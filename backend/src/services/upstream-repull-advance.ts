@@ -31,7 +31,8 @@
  *    a run that failed or never reported counts, and so does a send GitHub refused for its payload
  *    or its target (404, 422); a send GitHub turned away for the Worker's credential, permission
  *    or rate (any other 4xx, `dispatch-deferred`) does not, since nothing about the row was tried;
- *  - the row has not moved for {@link RESUME_QUIET_MINUTES} minutes, and the UTC hour is within
+ *  - neither the row nor its latest dispatch (its report, or its send) has moved for
+ *    {@link RESUME_QUIET_MINUTES} minutes, and the UTC hour is within
  *    {@link RESUME_WINDOW_UTC}, so the run opens its pull request on the UTC day whose unit of the
  *    open cap it claims (the timing the dispatch record's open cap relies on); otherwise it waits;
  *  - the dispatch record's own claim (`claimOpenDispatch`, naming the row), which counts against
@@ -223,14 +224,17 @@ export const ADVANCE_ROWS_SQL = `SELECT id, status FROM upstream_repulls
  * A row's dispatches, as one row of facts: `?1` its dataset, `?2` its id. `live` counts the
  * dataset's live dispatches (a run is out for it); `opens` the row's `open` dispatches that spend an
  * attempt, every one but a send GitHub turned away for the Worker (`dispatch-deferred`);
- * `last_status` the status of its latest one, by id, NULL when it has none.
+ * `last_status` the status of its latest one, by id, and `last_at` when that one last moved (its
+ * report, or its send when it has none), each NULL when it has none.
  */
 export const ROW_DISPATCHES_SQL = `SELECT
   (SELECT COUNT(*) FROM upstream_repull_dispatches WHERE dataset_id = ?1 AND nonce IS NOT NULL) AS live,
   (SELECT COUNT(*) FROM upstream_repull_dispatches WHERE repull_id = ?2 AND kind = 'open'
     AND NOT (status = 'dispatch_failed' AND code = 'dispatch-deferred')) AS opens,
   (SELECT status FROM upstream_repull_dispatches WHERE repull_id = ?2 AND kind = 'open'
-    ORDER BY id DESC LIMIT 1) AS last_status`;
+    ORDER BY id DESC LIMIT 1) AS last_status,
+  (SELECT COALESCE(reported_at, dispatched_at) FROM upstream_repull_dispatches
+    WHERE repull_id = ?2 AND kind = 'open' ORDER BY id DESC LIMIT 1) AS last_at`;
 
 /**
  * Record why an automatic row waits: `?1` its id, `?2` the revision the tick read, `?3` the word it
@@ -440,6 +444,7 @@ interface RowDispatches {
   live: number;
   opens: number;
   last_status: DispatchStatus | null;
+  last_at: string | null;
 }
 
 /** The row's dispatches ({@link ROW_DISPATCHES_SQL}); a count that cannot be read throws. */
@@ -465,10 +470,17 @@ export function inResumeWindow(now: Date): boolean {
   return hour >= RESUME_WINDOW_UTC.from && hour <= RESUME_WINDOW_UTC.to;
 }
 
-/** Whether a row last written at `updatedAt` (D1's UTC `datetime`) has not moved for long enough. */
-function quietSince(updatedAt: string, now: Date): boolean {
-  const at = Date.parse(`${updatedAt.replace(" ", "T")}Z`);
-  return Number.isFinite(at) && now.getTime() - at >= RESUME_QUIET_MINUTES * 60_000;
+/**
+ * Whether neither the row nor its latest dispatch has moved for {@link RESUME_QUIET_MINUTES}
+ * minutes. Both are D1's UTC `datetime`s. The dispatch is read as well as the row because a run
+ * that fails before it writes anything leaves the row's `updated_at` where it was, hours old, and
+ * the row would otherwise be resumed on the next tick after every failure.
+ */
+function quietSince(updatedAt: string, lastDispatchAt: string | null, now: Date): boolean {
+  const at = (stamp: string) => Date.parse(`${stamp.replace(" ", "T")}Z`);
+  const moved = [updatedAt, lastDispatchAt].filter((x): x is string => x !== null).map(at);
+  if (moved.some((x) => !Number.isFinite(x))) return false;
+  return now.getTime() - Math.max(...moved) >= RESUME_QUIET_MINUTES * 60_000;
 }
 
 /**
@@ -626,7 +638,7 @@ async function advanceStalled(t: Tick, row: RepullRow): Promise<void> {
     return observe(t, row, null);
   }
   if (d.opens >= AUTOMATIC_OPEN_DISPATCHES_MAX) return observe(t, row, "resume-exhausted");
-  if (!inResumeWindow(t.now) || !quietSince(row.updated_at, t.now) || t.sendStopped) {
+  if (!inResumeWindow(t.now) || !quietSince(row.updated_at, d.last_at, t.now) || t.sendStopped) {
     r.waiting++;
     return observe(t, row, null);
   }
