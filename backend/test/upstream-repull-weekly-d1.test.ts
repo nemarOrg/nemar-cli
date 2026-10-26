@@ -147,12 +147,15 @@ describe("the week's statements on D1", () => {
     await audit(11, SYSTEM_USER_ID, "gates_clear", "merged", at(-2 * DAY + 60_000), {
       merged_outside_tool: false,
     });
+    // The release step's error on a merged record is an edge from merged to itself: not a merge.
+    await audit(11, 7, "merged", "merged", at(-2 * DAY + 120_000));
     await audit(12, 7, "gates_clear", "gates_clear", at(-DAY));
     await audit(12, 7, "gates_clear", "merged", at(-DAY + 60_000), { merged_outside_tool: false });
     await audit(13, 7, "patch_gates_clear", "patch_gates_clear", at(-DAY));
     await audit(13, 7, "patch_gates_clear", "patch_merged", at(-DAY + 60_000), {
       merged_outside_tool: false,
     });
+    await audit(13, 7, "patch_merged", "patch_merged", at(-DAY + 120_000));
     await audit(14, 7, "pr_open", "merged", at(-DAY), { merged_outside_tool: true });
     await audit(15, 7, "gates_clear", "merged", at(-DAY), { merged_outside_tool: false });
     // A merge before the window is an earlier week's.
