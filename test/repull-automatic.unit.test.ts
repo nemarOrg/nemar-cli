@@ -17,7 +17,9 @@
  *    a code from the closed list, and the marker only for a terminal report the Worker stored;
  *  - the App token's hour: the copy's budget leaves the settle's share and the other steps', a run
  *    that cannot tell when its token was minted is refused, and a step whose work would pass the
- *    usable hour is refused before it starts, on an injected clock.
+ *    usable hour is refused before it starts, on an injected clock;
+ *  - a crash after the Worker stored a terminal report ends with what it stored, and exits 1
+ *    whatever happens while it writes its last lines.
  *
  * The happy path of a report reaches the REAL callback in `test/repull-automatic-cli.test.ts`;
  * here a fetch stand-in answers the statuses a callback can answer, for the error paths and the
@@ -405,13 +407,14 @@ describe("a crash prints only the fixed lines", () => {
   /** What a crash's report would name, were it printed: a path, a key and a subject. */
   const SECRET_TEXT = "/home/runner/work/sub-01/sub-01_task-rest_eeg.edf SHA256E-s1--deadbeef.edf";
 
-  async function crash(how: string, before = "") {
+  async function crash(how: string, before = "", preamble = "") {
     const dir = tempDir();
     const script = join(dir, "crash.ts");
     writeFileSync(
       script,
       [
         `import { installAutomaticQuiet } from ${JSON.stringify(AUTOMATIC_MODULE)};`,
+        preamble,
         "const sink = installAutomaticQuiet();",
         'sink.emit("start", { command: "plan" });',
         before,
@@ -464,6 +467,51 @@ describe("a crash prints only the fixed lines", () => {
     expect(refused.lines.at(-1)).toBe("repull-auto: result phase=refused code=auto-not-clean-plan");
   });
 
+  const THROW = `setTimeout(() => { throw new Error(${JSON.stringify(SECRET_TEXT)}); }, 10);`;
+
+  test("a crash after the Worker stored a terminal report ends with what it stored", async () => {
+    // Stored, then the crash before the result line: the line says what the Worker holds.
+    const opened = await crash(THROW, 'sink.time("copy", 7); sink.stored("opened");');
+    expect(opened.exitCode).toBe(1);
+    expect(opened.stderr).toBe("");
+    for (const line of opened.lines) expect(line).toMatch(AUTOMATIC_LINE_RE);
+    expect(opened.lines.slice(-3)).toEqual([
+      "repull-auto: quiet suppressed=1 copy_s=7",
+      "repull-auto: report-stands phase=opened",
+      "repull-auto: result phase=opened",
+    ]);
+    const failed = await crash(THROW, 'sink.stored("failed", "head-unreadable");');
+    expect(failed.lines.at(-1)).toBe("repull-auto: result phase=failed code=head-unreadable");
+    // Stored and said: the crash adds nothing, and the run's word stands.
+    const said = await crash(
+      THROW,
+      'sink.stored("opened"); sink.emit("result", { phase: "opened" });',
+    );
+    expect(said.exitCode).toBe(1);
+    expect(said.lines.at(-1)).toBe("repull-auto: result phase=opened");
+    expect(said.lines.filter((l) => l.startsWith("repull-auto: result"))).toHaveLength(1);
+    // A run that exits without its result line after a stored report ends with that report too.
+    const exited = await crash("process.exit(0);", 'sink.stored("finished");');
+    expect(exited.lines.at(-1)).toBe("repull-auto: result phase=finished");
+  });
+
+  test("a crash whose last lines cannot be written still exits 1, and prints nothing of its own", async () => {
+    const broken = await crash(
+      THROW,
+      "broken = true;",
+      [
+        "let broken = false;",
+        "const real = process.stdout.write.bind(process.stdout);",
+        "process.stdout.write = ((...a: unknown[]) => {",
+        '  if (broken) throw new Error("the log is gone");',
+        "  return (real as (...b: unknown[]) => boolean)(...a);",
+        "}) as typeof process.stdout.write;",
+      ].join("\n"),
+    );
+    expect(broken.exitCode).toBe(1);
+    expect(broken.stderr).toBe("");
+    expect(broken.stdout).not.toContain("sub-01");
+  });
 });
 
 describe("the output grammar", () => {
@@ -808,17 +856,23 @@ describe("the words a run reports", () => {
   });
 });
 
-function recordingSink(): AutomaticSink & { lines: string[] } {
+function recordingSink(): AutomaticSink & {
+  lines: string[];
+  reported: Array<[string, string | undefined]>;
+} {
   const lines: string[] = [];
+  const reported: Array<[string, string | undefined]> = [];
   const times: Record<string, number> = {};
   let dropped = 0;
   return {
     lines,
+    reported,
     emit: (event, f) => lines.push(automaticLine(event, f)),
     drop: () => {
       dropped++;
     },
     dropped: () => dropped,
+    stored: (phase, code) => reported.push([phase, code]),
     time: (key, seconds) => {
       times[`${key}_s`] = seconds;
     },
@@ -884,6 +938,8 @@ describe("a report", () => {
     });
     expect(readFileSync(marker, "utf8")).toBe("refused\n");
     expect(ctx.sink.lines).toEqual(["repull-auto: report phase=refused answer=stored"]);
+    // The sink holds what the Worker stored, for a crash's last line.
+    expect(ctx.sink.reported).toEqual([["refused", "auto-not-clean-plan"]]);
   });
 
   test("each phase's body is one the Worker's callback takes", async () => {
@@ -902,14 +958,18 @@ describe("a report", () => {
 
   test("a started report, or one the Worker refused, leaves no marker", async () => {
     const marker = join(tempDir(), "repull-reported");
-    await reportDispatch(ctxOf(marker), "started", {}, { fetchImpl: stand([]).fetchImpl });
+    const started = ctxOf(marker);
+    await reportDispatch(started, "started", {}, { fetchImpl: stand([]).fetchImpl });
     expect(existsSync(marker)).toBe(false);
+    expect(started.sink.reported).toEqual([]);
     const { fetchImpl } = stand([{ status: 401, code: "invalid-token" }]);
-    expect(await reportDispatch(ctxOf(marker), "opened", { repullId: 1 }, { fetchImpl })).toEqual({
+    const opened = ctxOf(marker);
+    expect(await reportDispatch(opened, "opened", { repullId: 1 }, { fetchImpl })).toEqual({
       stored: false,
       code: "invalid-token",
     });
     expect(existsSync(marker)).toBe(false);
+    expect(opened.sink.reported).toEqual([]);
   });
 
   test("a refusal is not tried again; a lost answer and a 5xx are, and then say so", async () => {

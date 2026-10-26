@@ -242,6 +242,11 @@ export interface AutomaticSink {
   drop(line: string): void;
   /** How many writes the run's other output made, every one of them swallowed. */
   dropped(): number;
+  /**
+   * A terminal report the Worker stored. From then on the run's last result line says what was
+   * stored, even when the run crashes after it: the Worker's record of the dispatch stands.
+   */
+  stored(phase: DispatchPhase, code?: string): void;
   /** How long a step of the run took, in whole seconds, for the quiet line (`<key>_s`). */
   time(key: string, seconds: number): void;
   /** The quiet line's fields: how many writes were swallowed, then each step's seconds. */
@@ -312,16 +317,31 @@ export function installAutomaticQuiet(): AutomaticSink {
   process.stderr.write = swallow as typeof process.stderr.write;
   /** The phase of the last result line printed, or null before one. */
   let ended: string | null = null;
+  /** The terminal report the Worker stored, or null before one. */
+  let reported: { phase: DispatchPhase; code: string | undefined } | null = null;
   const times = new Map<string, number>();
   const quietFields = (): Record<string, LineValue> => {
     const fields: Record<string, LineValue> = { suppressed: dropped };
     for (const [key, seconds] of times) fields[`${key}_s`] = seconds;
     return fields;
   };
-  const failedLine = () => {
+  /**
+   * The last lines of a run that did not say how it ended: what the Worker stored, when it stored
+   * a terminal report (it holds that outcome, and the backstop will not report another), else
+   * `failed` with `runner-failed`. Marked ended before the first write, so a log that cannot
+   * be written is not tried again on the way out.
+   */
+  const closingLines = () => {
+    const stood = reported;
+    ended = stood ? stood.phase : "failed";
     realWrite(`${automaticLine("quiet", quietFields())}\n`);
+    if (stood) {
+      realWrite(`${automaticLine("report-stands", { phase: stood.phase })}\n`);
+      const { phase, code } = stood;
+      realWrite(`${automaticLine("result", code === undefined ? { phase } : { phase, code })}\n`);
+      return;
+    }
     realWrite(`${automaticLine("result", { phase: "failed", code: "runner-failed" })}\n`);
-    ended = "failed";
   };
   installed = {
     emit(event, fields) {
@@ -332,26 +352,36 @@ export function installAutomaticQuiet(): AutomaticSink {
       dropped++;
     },
     dropped: () => dropped,
+    stored(phase, code) {
+      reported = { phase, code: phase === "refused" || phase === "failed" ? code : undefined };
+    },
     time(key, seconds) {
       times.set(key, seconds);
     },
     quietFields,
   };
   // A run that exits before it says how it ended (a usage error, a crash) still ends with a result
-  // line, so the workflow's backstop and the person reading the log see it failed.
+  // line, so the workflow's backstop and the person reading the log see how it ended.
   process.on("exit", () => {
-    if (ended === null) failedLine();
+    if (ended === null) closingLines();
   });
   // Bun prints an uncaught exception and an unhandled rejection itself, natively, with the message
   // and a source excerpt, which can name a path or a key; a handler of the process's own takes that
-  // over. The run ends, failed, with its fixed line and nothing else: a run that had said it
-  // succeeded says now that it failed, and one that had already said why it failed keeps its word.
+  // over. The run ends, with its fixed lines and nothing else, and exits 1 whatever happens while
+  // it writes them. Once the Worker stored a terminal report, the last line says what it stored;
+  // before that, a run that had said it succeeded says now that it failed, and one that had
+  // already said why it failed keeps its word.
   const crashed = () => {
-    dropped++;
-    if (ended === null || ended === "planned" || ended === "opened" || ended === "finished") {
-      failedLine();
+    try {
+      dropped++;
+      const last = ended;
+      const says = reported
+        ? last !== reported.phase
+        : last === null || last === "planned" || last === "opened" || last === "finished";
+      if (says) closingLines();
+    } finally {
+      process.exit(1);
     }
-    process.exit(1);
   };
   process.on("uncaughtException", crashed);
   process.on("unhandledRejection", crashed);
@@ -771,6 +801,7 @@ export async function reportDispatch(
     phase,
     answer: answer.stored ? "stored" : answer.code,
   });
+  if (answer.stored && TERMINAL.includes(phase)) ctx.sink.stored(phase, body.code as string);
   if (answer.stored && TERMINAL.includes(phase) && ctx.marker) {
     try {
       writeFileSync(ctx.marker, `${phase}\n`, { mode: 0o600 });
