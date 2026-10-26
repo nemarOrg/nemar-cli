@@ -171,6 +171,30 @@ function rowsOf<T>(result: D1Result | undefined): T[] {
   return result.results as T[];
 }
 
+/**
+ * Send the week's statements as one batch and return their answers, or throw. A batch that comes
+ * back with a different number of answers than statements, or with an answer that did not
+ * succeed, is a read that did not happen, and counts taken from the answers that did arrive would
+ * be a partial week: unknown, never zero (ADR 0054).
+ */
+async function checkedBatch(
+  db: D1Database,
+  statements: D1PreparedStatement[],
+): Promise<D1Result[]> {
+  const answers = await db.batch(statements);
+  if (answers?.length !== statements.length) {
+    throw new Error(
+      `the re-pull week's batch answered ${answers?.length ?? 0} of ${statements.length} statements`,
+    );
+  }
+  for (const [i, answer] of answers.entries()) {
+    if (answer?.success !== true) {
+      throw new Error(`statement ${i + 1} of the re-pull week's batch did not succeed`);
+    }
+  }
+  return answers;
+}
+
 const isKind = (v: unknown): v is DispatchKind =>
   typeof v === "string" && (DISPATCH_KINDS as readonly string[]).includes(v);
 const isStatus = (v: unknown): v is DispatchStatus =>
@@ -212,9 +236,10 @@ interface MergeSums {
 }
 
 /**
- * Count the week. Throws when any read fails or returns something that is not a count: the caller
- * leaves the report's re-pull facts null and lists a failed part, so a failed read is unknown and
- * never a zero.
+ * Count the week. Throws when any read fails, when the batch of reads comes back with a different
+ * number of answers than statements or with one that did not succeed or holds no rows array, or
+ * when a read returns something that is not a count: the caller leaves the report's re-pull facts
+ * null and lists a failed part, so a failed read is unknown and never a zero.
  */
 export async function gatherRepullWeek(
   env: Pick<Bindings, "DB">,
@@ -226,7 +251,7 @@ export async function gatherRepullWeek(
   const claimCutoff = toSqliteUtc(
     new Date(window.to.getTime() - HELD_CLAIM_ATTENTION_HOURS * HOUR_MS),
   );
-  const [dispatches, holds, claims, merges, failed] = await db.batch([
+  const [dispatches, holds, claims, merges, failed] = await checkedBatch(db, [
     db.prepare(REPULL_WEEK_SQL.dispatches).bind(from, to),
     db.prepare(REPULL_WEEK_SQL.holds),
     db.prepare(REPULL_WEEK_SQL.claims).bind(claimCutoff),

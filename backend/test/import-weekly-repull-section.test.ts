@@ -938,51 +938,84 @@ describe("no dataset reaches the public report", () => {
 // Unknown is never zero (ADR 0054)
 // ----------------------------------------------------------------------------
 
-/** A D1 whose statements that name `needle` throw when prepared, as a failing read would. */
-function failingOn(d1: D1Database, needle: string): D1Database {
+/**
+ * A D1 whose statements that name `needle` fail as a failing read does: at the `prepare` step, the
+ * statement refused before it is sent, or at the `batch` step, the batch that holds it refused when
+ * it is sent. The report's five reads go in one batch, so the second is the step they take.
+ */
+function failingOn(
+  d1: D1Database,
+  needle: string,
+  step: "prepare" | "batch" = "prepare",
+): D1Database {
+  const named = new WeakSet<object>();
   return {
     ...d1,
     prepare(sql: string) {
-      if (sql.includes(needle)) throw new Error("D1_ERROR: the re-pull read failed");
-      return d1.prepare(sql);
+      if (step === "prepare" && sql.includes(needle)) {
+        throw new Error("D1_ERROR: the re-pull read failed");
+      }
+      const statement = d1.prepare(sql);
+      if (sql.includes(needle)) named.add(statement);
+      return statement;
     },
-    batch: d1.batch.bind(d1),
+    async batch(statements: D1PreparedStatement[]) {
+      if (step === "batch" && statements.some((s) => named.has(s))) {
+        throw new Error("D1_ERROR: the re-pull batch failed");
+      }
+      return d1.batch(statements);
+    },
+  } as unknown as D1Database;
+}
+
+/** A D1 whose batch answers are altered after the database ran them, as a partial answer would be. */
+function alteringBatch(d1: D1Database, alter: (answers: D1Result[]) => D1Result[]): D1Database {
+  return {
+    ...d1,
+    prepare: d1.prepare.bind(d1),
+    batch: async (statements: D1PreparedStatement[]) => alter(await d1.batch(statements)),
   } as unknown as D1Database;
 }
 
 describe("a read that fails is unknown, never zero", () => {
-  test("a throw leaves the facts null, lists a failed part, and the section says unknown", async () => {
-    db.run(
-      "INSERT INTO import_jobs (dataset_id, source, source_id, stage, status) VALUES ('on098800', 'openneuro', 'ds098800', 'prepare', 'failed')",
-    );
-    const r = await report({}, NOW, failingOn(realD1(db), "upstream_repull_dispatches"));
-    expect(r.facts.repulls).toBeNull();
-    const failed = r.facts.errors.filter((e) => e.stage === "repulls");
-    expect(failed).toHaveLength(1);
-    expect(failed[0]?.error).toContain("the re-pull read failed");
-    const section = sectionOf(r.body);
-    expect(section).toContain("could not be read");
-    expect(section).toContain("**unknown**, not zero");
-    // Not one count of the section is a number, and no switch is claimed to be off.
-    expect(section).not.toMatch(/\| \d+ \|/);
-    expect(section).not.toContain("off");
-    expect(r.body).toContain("## Parts of this report that failed");
-    expect(r.body).toContain("- `repulls`: ");
-    // The headline asks: a report that cannot see is not one that found nothing.
-    expect(repullProblems(r.facts)).toEqual(["upstream re-pull activity could not be determined"]);
-    expect(r.body).toContain("Needs attention");
-    // Every other section is intact.
-    expect(r.facts.openFailureTotal).toBe(1);
-    expect(r.facts.upstream).not.toBeNull();
-  });
+  for (const step of ["prepare", "batch"] as const) {
+    test(`a throw at the ${step} step leaves the facts null, lists a failed part, and the section says unknown`, async () => {
+      db.run(
+        "INSERT INTO import_jobs (dataset_id, source, source_id, stage, status) VALUES ('on098800', 'openneuro', 'ds098800', 'prepare', 'failed')",
+      );
+      const r = await report({}, NOW, failingOn(realD1(db), "upstream_repull_dispatches", step));
+      expect(r.facts.repulls).toBeNull();
+      const failed = r.facts.errors.filter((e) => e.stage === "repulls");
+      expect(failed).toHaveLength(1);
+      expect(failed[0]?.error).toContain(
+        step === "prepare" ? "the re-pull read failed" : "the re-pull batch failed",
+      );
+      const section = sectionOf(r.body);
+      expect(section).toContain("could not be read");
+      expect(section).toContain("**unknown**, not zero");
+      // Not one count of the section is a number, and no switch is claimed to be off.
+      expect(section).not.toMatch(/\| \d+ \|/);
+      expect(section).not.toContain("off");
+      expect(r.body).toContain("## Parts of this report that failed");
+      expect(r.body).toContain("- `repulls`: ");
+      // The headline asks: a report that cannot see is not one that found nothing.
+      expect(repullProblems(r.facts)).toEqual([
+        "upstream re-pull activity could not be determined",
+      ]);
+      expect(r.body).toContain("Needs attention");
+      // Every other section is intact.
+      expect(r.facts.openFailureTotal).toBe(1);
+      expect(r.facts.upstream).not.toBeNull();
+    });
 
-  test("the log line says unknown for each of its re-pull counts", async () => {
-    const r = await report({}, NOW, failingOn(realD1(db), "upstream_repull_dispatches"));
-    const line = weeklySummaryLogLine(r.facts, 12);
-    expect(line).toContain("repull_dispatched=unknown");
-    expect(line).toContain("repull_merged_worker=unknown");
-    expect(line).toContain("repull_unreported=unknown");
-  });
+    test(`the log line says unknown for each of its re-pull counts after a throw at the ${step} step`, async () => {
+      const r = await report({}, NOW, failingOn(realD1(db), "upstream_repull_dispatches", step));
+      const line = weeklySummaryLogLine(r.facts, 12);
+      expect(line).toContain("repull_dispatched=unknown");
+      expect(line).toContain("repull_merged_worker=unknown");
+      expect(line).toContain("repull_unreported=unknown");
+    });
+  }
 
   test("the scheduler's row missing is unknown, not never, and a switch on asks for attention", async () => {
     db.run("DELETE FROM upstream_repull_scheduler");
@@ -995,6 +1028,70 @@ describe("a read that fails is unknown, never zero", () => {
       "the automatic re-pull is on, and its scheduler's last run could not be read",
     ]);
   });
+});
+
+describe("a batch that comes back partial is unknown, never zero", () => {
+  const answer = (i: number, change: Partial<D1Result>) => (all: D1Result[]) =>
+    all.map((x, k) => (k === i ? ({ ...x, ...change } as unknown as D1Result) : x));
+  const cases: Array<[string, (answers: D1Result[]) => D1Result[], string]> = [
+    [
+      "the dispatches came back without a rows array",
+      answer(0, { results: undefined }),
+      "D1 returned null results",
+    ],
+    [
+      "the holds came back without a rows array",
+      answer(1, { results: undefined }),
+      "D1 returned null results",
+    ],
+    [
+      "a statement answered that it did not succeed, rows and all",
+      answer(3, { success: false }),
+      "statement 4 of the re-pull week's batch did not succeed",
+    ],
+    [
+      "a statement answered without saying whether it succeeded",
+      answer(2, { success: undefined }),
+      "statement 3 of the re-pull week's batch did not succeed",
+    ],
+    [
+      "the batch came back one answer short",
+      (all) => all.slice(0, 4),
+      "answered 4 of 5 statements",
+    ],
+    [
+      "the batch came back one answer too many",
+      (all) => [...all, all[0] as D1Result],
+      "answered 6 of 5 statements",
+    ],
+  ];
+
+  test("a batch that comes back whole is read, so the cases below fail for the alteration alone", async () => {
+    seedDispatch({ status: "refused", code: "gitlink", at: at(-DAY) });
+    const r = await report(
+      {},
+      NOW,
+      alteringBatch(realD1(db), (all) => all),
+    );
+    expect(r.facts.repulls?.dispatches.sent).toBe(1);
+    expect(r.facts.repulls?.dispatches.by_word.refused).toEqual({ gitlink: 1 });
+    expect(r.facts.errors.filter((e) => e.stage === "repulls")).toEqual([]);
+  });
+
+  for (const [name, alter, message] of cases) {
+    test(name, async () => {
+      seedDispatch({ status: "refused", code: "gitlink", at: at(-DAY) });
+      const r = await report({}, NOW, alteringBatch(realD1(db), alter));
+      expect(r.facts.repulls).toBeNull();
+      const failed = r.facts.errors.filter((e) => e.stage === "repulls");
+      expect(failed).toHaveLength(1);
+      expect(failed[0]?.error).toContain(message);
+      expect(sectionOf(r.body)).toContain("**unknown**, not zero");
+      expect(repullProblems(r.facts)).toEqual([
+        "upstream re-pull activity could not be determined",
+      ]);
+    });
+  }
 });
 
 // ----------------------------------------------------------------------------
