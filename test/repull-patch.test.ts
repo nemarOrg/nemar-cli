@@ -114,6 +114,7 @@ const sel = (over: Partial<PatchSelection> = {}): PatchSelection => ({
   keys: [],
   corrections: 2,
   resolutions: 0,
+  unresolved: 0,
   ...over,
 });
 
@@ -292,17 +293,20 @@ describe("N.0.1's commit", () => {
   });
 
   test("a path NEMAR did not have is deleted; `absent` where the base holds the path refuses", async () => {
+    // N.0.0 itself added the file: its merge is the parent.
     const parent = await commit(
       {
         "participants.tsv": ["100644", "x\n"],
         "added.txt": ["100644", "upstream added this\n"],
         "dataset_description.json": ["100644", DESC_N0],
       },
-      merge,
+      base,
+      "Release v2.0.0 (#1)",
+      "1790000500 +0000",
     );
     const made = await patchCommit({
       scratch,
-      row: row(),
+      row: row({ merge_sha: parent }),
       selection: sel({ paths: [{ path: "added.txt", ours: "absent" }] }),
       parent,
     });
@@ -313,7 +317,7 @@ describe("N.0.1's commit", () => {
       await refusalOf(
         patchCommit({
           scratch,
-          row: row(),
+          row: row({ merge_sha: parent }),
           selection: sel({ paths: [{ path: "participants.tsv", ours: "absent" }] }),
           parent,
         }),
@@ -321,11 +325,111 @@ describe("N.0.1's commit", () => {
     ).toBe("patch-ours-moved");
   });
 
+  test("a replayed path enrichment wrote after the merge refuses: patch-main-moved", async () => {
+    const files: Record<string, [string, string]> = {
+      "sub-01/eeg/x.edf": ["120000", symlinkTo(OTHER_KEY)],
+      "participants.tsv": ["100644", "participant_id\nsub-01\nsub-02\n"],
+      "dataset_description.json": ["100644", DESC_N0],
+    };
+    const pBase = await commit({ ...files, ".bidsignore": ["100644", "extra/\n"] }, null);
+    const pMerge = await commit(
+      { ...files, ".bidsignore": ["100644", "upstream/\n"] },
+      pBase,
+      "Release v2.0.0 (#1)",
+      "1790000500 +0000",
+    );
+    // Enrichment adds NEMAR's line to the .bidsignore N.0.1 replays.
+    const enriched = await commit(
+      { ...files, ".bidsignore": ["100644", "upstream/\n.nemar/\n"] },
+      pMerge,
+      "enrichment",
+    );
+    const ours = await git(dir, ["rev-parse", `${pBase}:.bidsignore`]);
+    const make = (parent: string) =>
+      patchCommit({
+        scratch,
+        row: row({ base_sha: pBase, merge_sha: pMerge }),
+        selection: sel({ paths: [{ path: ".bidsignore", ours: `G:100644:${ours}` }] }),
+        parent,
+      });
+    expect(await refusalOf(make(enriched))).toBe("patch-main-moved");
+    // On the merge itself, and on enrichment that left the path alone, it is made.
+    expect(await refusalOf(make(pMerge))).toBe("none");
+    const elsewhere = await commit(
+      {
+        ...files,
+        ".bidsignore": ["100644", "upstream/\n"],
+        ".nemar/metadata.json": ["100644", "{}\n"],
+      },
+      pMerge,
+      "enrichment",
+    );
+    expect(await refusalOf(make(elsewhere))).toBe("none");
+  });
+
+  test("a privacy ledger on main that records a correction, or does not parse, refuses: patch-ledger", async () => {
+    const entry = (action: string) =>
+      JSON.stringify({
+        version: 1,
+        at: "2026-10-01T00:00:00.000Z",
+        dataset: "xx090123",
+        action,
+        versions: action === "repull-scrubbed" ? [] : ["v1.0.0"],
+        counts: { headers: 1 },
+        scanner: "identifier-scan@abcdef1",
+        verification: "scanner-clean",
+        actor: "yahya",
+      });
+    const files: Record<string, [string, string]> = {
+      "sub-01/eeg/x.edf": ["120000", symlinkTo(OTHER_KEY)],
+      "participants.tsv": ["100644", "participant_id\nsub-01\nsub-02\n"],
+      "dataset_description.json": ["100644", DESC_N0],
+    };
+    const withLedger = (text: string) =>
+      commit({ ...files, ".nemar/corrections.jsonl": ["100644", text] }, merge, "enrichment");
+    /** The refusal's code and message, or "none". */
+    const make = async (text: string) => {
+      try {
+        await patchCommit({
+          scratch,
+          row: row(),
+          selection: sel(),
+          parent: await withLedger(text),
+        });
+      } catch (err) {
+        if (err instanceof ExecuteRefused) return `${err.code}: ${err.message}`;
+        throw err;
+      }
+      return "none";
+    };
+    expect(await make(`${entry("repull-scrubbed")}\n`)).toBe("none");
+    expect(await make(`${entry("repull-scrubbed")}\n${entry("headers-scrubbed")}\n`)).toContain(
+      "patch-ledger: The privacy ledger on NEMAR's main records 1 correction(s)",
+    );
+    expect(await make("{not json\n")).toContain(
+      "patch-ledger: The privacy ledger on NEMAR's main does not parse",
+    );
+  });
+
+  test("a description value or key N.0.1 cannot write refuses: patch-description-unreadable", async () => {
+    for (const keys of [
+      [{ key: "Extra", ours: "not json" }],
+      [{ key: "__proto__", ours: '{"polluted": true}' }],
+    ]) {
+      expect([
+        keys[0]?.key,
+        await refusalOf(
+          patchCommit({ scratch, row: row(), selection: sel({ keys }), parent: merge }),
+        ),
+      ]).toEqual([keys[0]?.key, "patch-description-unreadable"]);
+    }
+  });
+
   test("an entry the base no longer holds as the plan read it refuses: patch-ours-moved", async () => {
     for (const ours of [
-      "G:100644:" + "0".repeat(40),
+      `G:100644:${"0".repeat(40)}`,
       `A:${OTHER_KEY}`,
-      "G:100755:" + "1".repeat(40),
+      `G:100755:${"1".repeat(40)}`,
     ]) {
       const code = await refusalOf(
         patchCommit({

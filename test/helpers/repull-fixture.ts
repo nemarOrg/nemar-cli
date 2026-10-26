@@ -249,6 +249,11 @@ export interface FixtureOptions {
   privacyEdits?: boolean;
   /** NEMAR replaces the scrubbed recording with content of another size; upstream's key stays dead. */
   wrongSizeScrubbedKey?: boolean;
+  /**
+   * NEMAR replaced a clean recording with content of its own, annexed and recorded at nemar-s3 as
+   * an upload is (a correction whose identity is `A:<key>`; upstream's recording is unchanged).
+   */
+  annexedCorrection?: boolean;
   /** NEMAR's location log already records tag B's `.set` key at nemar-s3. */
   heldSetB?: boolean;
   /** Upstream annexes `README` and `CHANGES`; the import un-annexes root metadata (#768). */
@@ -801,6 +806,12 @@ async function build(
   if (opts.readmeEdit) {
     write(clone, "README.md", `${readFileSync(join(clone, "README.md"), "utf8")}A NEMAR note.\n`);
   }
+  if (opts.annexedCorrection) {
+    write(clone, PATHS.cleanEdf, edfBytes("X X X X", 4100, 7, false));
+    await run(["git", "annex", "add", "--quiet", PATHS.cleanEdf], clone);
+    const key = (await run(["git", "annex", "lookupkey", PATHS.cleanEdf], clone)).trim();
+    await run(["git", "annex", "setpresentkey", key, nemarUuid, "1"], clone);
+  }
   if (opts.subtypes) {
     // upstream-deleted/nemar-changed, nemar-deleted/upstream-changed, both-added (tag B adds the
     // same path), nemar-added, nemar-deleted.
@@ -1042,6 +1053,11 @@ async function build(
         }
       }
       if (data) s3.putObject("nemar", `${id}/objects/${key}`, data);
+    }
+    if (opts.annexedCorrection) {
+      // The import copied upstream's recording before NEMAR replaced it, and it stays in the bucket.
+      const key = upKeysA.get(PATHS.cleanEdf) as string;
+      s3.putObject("nemar", `${id}/objects/${key}`, files[PATHS.cleanEdf] as Uint8Array);
     }
   }
   Bun.spawnSync(["chmod", "-R", "u+w", work]);

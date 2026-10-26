@@ -7,7 +7,7 @@
  * step of the re-pull itself is the real CLI and the real Worker routes over bun:sqlite, reached
  * through TEST_API_URL in the child's environment. GitHub and S3 are stand-ins. No mocks.
  *
- * The properties, each with a test that fails when its line is changed:
+ * The properties, each with a test:
  *  - after the release and the lock, a plan with conflicts waits for an administrator's decision,
  *    and nothing is pushed;
  *  - with `--keep-upstream`, N.0.1 replays the sidecar byte for byte and the description key, says
@@ -18,7 +18,20 @@
  *  - with `--take-ours participants.tsv`, the conflict is replayed as NEMAR had it;
  *  - a `--take-ours` that names no conflict refuses before anything is written;
  *  - abandon after the release declines N.0.1 (`patch_declined`), closing its pull request and
- *    deleting its branch when they exist, and never while N.0.0's lock is not recorded.
+ *    deleting its branch when they exist, and never while N.0.0's lock is not recorded; a release
+ *    branch or pull request of N.0.1's version that is not this re-pull's is neither closed nor
+ *    deleted, a branch that cannot be judged is kept, a branch that moved after it was judged is
+ *    not deleted (the delete is leased), and a merged N.0.1 pull request or a held claim refuses;
+ *  - a plan file that is not the record's refuses (`plan-not-the-record`) and writes nothing;
+ *  - a run that pushed N.0.1 and could not record it is taken up by the next run with the same
+ *    resolutions, and refused (`branch-foreign`) with other ones;
+ *  - N.0.1 is made on `main` as enrichment left it, not on the N.0.0 merge;
+ *  - a `main` moved by enrichment with N.0.1's pull request `dirty` makes N.0.1 again, pushed with
+ *    a lease, and a run that pushed it and could not record it is recognized by the next;
+ *  - N.0.1's pull request closed without a merge ends the record `patch_declined`;
+ *  - N.0.1's merge commit read back without its trailers stays `patch_merged` (`merge-trailers`);
+ *    so does a tag whose tree is not N.0.1's gated head (`patch-tree-mismatch`);
+ *  - a record that does not state its corrections is not merged as N.0.1 (stage `message`).
  *
  * What only the canary and the first production runs can check: that GitHub opens and squash-merges
  * a second release pull request on the same repository as the stand-in does, and that the dataset
@@ -36,9 +49,11 @@ import {
   setDefaultTimeout,
   test,
 } from "bun:test";
+import { readFileSync, writeFileSync } from "node:fs";
 import { which } from "bun";
+import { planDigest, readPlanFile } from "../src/lib/repull/digest";
 import { PATHS, gitIn } from "./helpers/repull-fixture";
-import { type RepullWorld, startRepullWorld } from "./helpers/repull-pr-world";
+import { type RepullWorld, enrichedMetadata, startRepullWorld } from "./helpers/repull-pr-world";
 import { toolOrFail } from "./scrub/helpers/require-tools";
 
 setDefaultTimeout(600_000);
@@ -76,6 +91,50 @@ async function releasedN0(): Promise<void> {
   await w.tagMain("2.0.0");
   w.insertVersionRow("2.0.0");
 }
+
+/** N.0.1 made with `extra` (by default `--keep-upstream`): the record at `patch_synthesized`. */
+async function patchOpen(extra: string[] = ["--keep-upstream"]): Promise<void> {
+  await releasedN0();
+  const run = await resume(extra);
+  expect(run.exitCode, run.all).toBe(3);
+  expect(w.row().status).toBe("patch_synthesized");
+}
+
+/** N.0.1's screen passed and its gates recorded: `patch_gates_clear`. */
+async function patchGates(): Promise<void> {
+  await patchOpen();
+  await w.reportScreen(w.row().patch_head_sha as string, "clean");
+  const run = await resume();
+  expect(run.exitCode, run.all).toBe(0);
+  expect(w.row().status).toBe("patch_gates_clear");
+}
+
+/** N.0.1's pull request as the GitHub stand-in holds it. */
+const patchPull = () => w.gh.pulls[`${w.fx.datasetId}#${w.row().patch_pr_number}`];
+const mainHead = async () =>
+  (await gitIn(w.fx.originRepo, ["rev-parse", "refs/heads/main"])).trim();
+/** Enrichment on `main`: `.nemar/metadata.json` stamped again. Returns the new head. */
+const enrichMain = async () =>
+  w.commitOnto(
+    "refs/heads/main",
+    ".nemar/metadata.json",
+    await enrichedMetadata(w.fx.originRepo, "refs/heads/main"),
+    "Update NEMAR metadata",
+  );
+/** The next transition to `to` answers 503 after the Worker did not handle it: nothing recorded. */
+function failNextTransition(match: (body: Record<string, unknown>) => boolean): void {
+  let armed = false;
+  w.setApiHook(async (req) => {
+    if (req.method !== "POST" || !new URL(req.url).pathname.endsWith("/transition")) return;
+    if (match((await req.json()) as Record<string, unknown>)) armed = true;
+  });
+  w.setApiOverride((req) => {
+    if (!armed || req.method !== "POST") return null;
+    armed = false;
+    return Response.json({ error: "unavailable" }, { status: 503 });
+  });
+}
+const abandon = () => w.cli(["repull", "abandon", w.fx.datasetId, "--yes"]);
 
 describe.skipIf(!awsInstalled)("N.0.1", () => {
   test("after the release, conflicts wait for a decision and nothing is pushed", async () => {
@@ -269,5 +328,230 @@ describe.skipIf(!awsInstalled)("N.0.1", () => {
     expect(await hasRef("refs/heads/release/v2.0.1")).toBe(false);
     // N.0.0 stays released: its tag is where it was.
     expect(await hasRef("refs/tags/v2.0.0")).toBe(true);
+  });
+  test("a plan file that is not the record's refuses before anything is written: plan-not-the-record", async () => {
+    await releasedN0();
+    expect((await resume()).exitCode).toBe(3);
+    // Another reviewed plan: the record's, with its path list in another order, so another digest.
+    const { file, body } = readPlanFile(readFileSync(w.plan, "utf8"));
+    body.paths = [...(body.paths as unknown[])].reverse() as typeof body.paths;
+    const other = `${w.plan}.other.json`;
+    writeFileSync(
+      other,
+      `${JSON.stringify({ ...file, ...body, digest: planDigest(body) }, null, 2)}\n`,
+    );
+    const writes = () => w.apiWrites.filter((x) => x.endsWith("/transition")).length;
+    const before = writes();
+    const run = await resume(["--keep-upstream", "--plan", other]);
+    expect(run.exitCode, run.all).toBe(1);
+    expect(run.all).toContain("plan-not-the-record");
+    expect(writes()).toBe(before);
+    expect(w.row()).toMatchObject({ status: "released", last_error: null });
+    expect(await hasRef("refs/heads/release/v2.0.1")).toBe(false);
+  });
+
+  test("a run that pushed N.0.1 and could not record it: other resolutions refuse, the same ones are taken up", async () => {
+    await releasedN0();
+    failNextTransition((b) => b.to === "patch_synthesized");
+    const first = await resume(["--keep-upstream"]);
+    expect(first.exitCode, first.all).toBe(3);
+    expect(w.row().status).toBe("released");
+    const pushed = (
+      await gitIn(w.fx.originRepo, ["rev-parse", "refs/heads/release/v2.0.1"])
+    ).trim();
+    w.setApiHook(null);
+    w.setApiOverride(null);
+
+    const other = await resume(["--take-ours", PATHS.participants]);
+    expect(other.exitCode, other.all).toBe(3);
+    expect(other.all).toContain("branch-foreign");
+    expect(w.row().status).toBe("released");
+
+    const same = await resume(["--keep-upstream"]);
+    expect(same.exitCode, same.all).toBe(3);
+    expect(same.all).toContain("already this re-pull's N.0.1 commit");
+    expect(w.row()).toMatchObject({ status: "patch_synthesized", patch_head_sha: pushed });
+  });
+
+  test("N.0.1 is made on main as enrichment left it, not on the N.0.0 merge", async () => {
+    await releasedN0();
+    const merge = w.row().merge_sha as string;
+    const enriched = await enrichMain();
+    expect(enriched).not.toBe(merge);
+    const run = await resume(["--keep-upstream"]);
+    expect(run.exitCode, run.all).toBe(3);
+    const row = w.row();
+    expect(row.patch_base_sha).toBe(enriched);
+    expect((await gitIn(w.fx.originRepo, ["rev-parse", `${row.patch_head_sha}^`])).trim()).toBe(
+      enriched,
+    );
+  });
+
+  test("main moved by enrichment and N.0.1's pull request dirty: N.0.1 is made again and pushed with a lease", async () => {
+    await patchOpen();
+    const before = w.row();
+    const moved = await enrichMain();
+    Object.assign(patchPull() as object, { mergeableState: "dirty" });
+    const run = await resume();
+    expect(run.exitCode, run.all).toBe(3);
+    expect(run.all).toContain("again on the new main");
+    const head = (await gitIn(w.fx.originRepo, ["rev-parse", "refs/heads/release/v2.0.1"])).trim();
+    expect(head).not.toBe(before.patch_head_sha);
+    expect((await gitIn(w.fx.originRepo, ["rev-parse", `${head}^`])).trim()).toBe(moved);
+    expect(w.row()).toMatchObject({
+      status: "patch_synthesized",
+      patch_head_sha: head,
+      patch_base_sha: moved,
+    });
+    // The same replay, on the new main.
+    expect(await oid(head, PATHS.sidecar)).toBe(
+      await oid(before.patch_head_sha as string, PATHS.sidecar),
+    );
+  });
+
+  test("a re-synthesis of N.0.1 pushed and not recorded is recognized by the next run", async () => {
+    await patchOpen();
+    const before = w.row();
+    const moved = await enrichMain();
+    Object.assign(patchPull() as object, { mergeableState: "dirty" });
+    failNextTransition(
+      (b) => (b.fields as Record<string, unknown> | undefined)?.patch_base_sha === moved,
+    );
+    const first = await resume();
+    expect(first.exitCode, first.all).toBe(3);
+    const pushed = (
+      await gitIn(w.fx.originRepo, ["rev-parse", "refs/heads/release/v2.0.1"])
+    ).trim();
+    expect(pushed).not.toBe(before.patch_head_sha);
+    expect(w.row()).toMatchObject({ patch_head_sha: before.patch_head_sha });
+    w.setApiHook(null);
+    w.setApiOverride(null);
+    const second = await resume();
+    expect(second.all).toContain("pushed by an earlier run");
+    expect(w.row()).toMatchObject({
+      status: "patch_synthesized",
+      patch_head_sha: pushed,
+      patch_base_sha: moved,
+    });
+  });
+
+  test("N.0.1's pull request closed without a merge ends the record patch_declined", async () => {
+    await patchOpen();
+    Object.assign(patchPull() as object, { state: "closed" });
+    const run = await resume();
+    expect(run.exitCode, run.all).toBe(1);
+    expect(run.all).toContain("patch_declined");
+    expect(w.row().status).toBe("patch_declined");
+    expect(await hasRef("refs/tags/v2.0.0")).toBe(true);
+  });
+
+  test("N.0.1's merge commit without its trailers last stays patch_merged: merge-trailers", async () => {
+    await patchGates();
+    w.setMergeMessageSuffix("\n\nCo-authored-by: someone <someone@example.org>");
+    const merged = await w.cli(["repull", "merge", w.fx.datasetId, "--yes"]);
+    expect(merged.exitCode, merged.all).toBe(0);
+    await w.tagMain("2.0.1");
+    w.insertVersionRow("2.0.1");
+    const run = await resume();
+    expect(run.exitCode, run.all).toBe(3);
+    expect(run.all).toContain("merge-trailers");
+    expect(w.row().status).toBe("patch_merged");
+    expect(String(w.row().last_error)).toContain("merge-trailers");
+  });
+
+  test("a tag whose tree is not N.0.1's gated head stays patch_merged: patch-tree-mismatch", async () => {
+    await patchGates();
+    const merged = await w.cli(["repull", "merge", w.fx.datasetId, "--yes"]);
+    expect(merged.exitCode, merged.all).toBe(0);
+    // Something that is not enrichment lands on main before the tag.
+    await w.commitOnto("refs/heads/main", "code/after.txt", "Not N.0.1's.\n");
+    await w.tagMain("2.0.1");
+    w.insertVersionRow("2.0.1");
+    const run = await resume();
+    expect(run.exitCode, run.all).toBe(3);
+    expect(run.all).toContain("patch-tree-mismatch");
+    expect(w.row()).toMatchObject({ status: "patch_merged", patch_tag_sha: null });
+    expect(String(w.row().last_error)).toContain("patch-tree-mismatch");
+  });
+
+  test("a record that does not state its corrections is not merged as N.0.1: stage message", async () => {
+    await patchGates();
+    w.db().run("UPDATE upstream_repulls SET counts = json_set(counts, '$.corrections', 'two')");
+    const run = await w.cli(["repull", "merge", w.fx.datasetId, "--yes"]);
+    expect(run.exitCode, run.all).not.toBe(0);
+    expect(run.all).toContain("does not state how many corrections N.0.1 replays");
+    const n1 = w.row().patch_pr_number as number;
+    expect(
+      w.gh.seen.filter((x) => x.method === "PUT" && x.path.endsWith(`/pulls/${n1}/merge`)),
+    ).toEqual([]);
+    expect(w.row().status).toBe("patch_gates_clear");
+  });
+
+  test("abandon refuses a merged N.0.1 pull request, and a held claim to merge it", async () => {
+    await patchGates();
+    Object.assign(patchPull() as object, { merged: true, state: "closed" });
+    const merged = await abandon();
+    expect(merged.exitCode, merged.all).toBe(1);
+    expect(merged.all).toContain("pull-request-merged");
+    expect(w.row().status).toBe("patch_gates_clear");
+
+    Object.assign(patchPull() as object, { merged: false, state: "open" });
+    w.db().run(
+      "UPDATE upstream_repulls SET patch_merge_claimed_at = '2026-10-25T00:00:00.000Z', patch_merge_claim_sha = patch_gates_sha",
+    );
+    const held = await abandon();
+    expect(held.exitCode, held.all).toBe(1);
+    expect(held.all).toContain("merge-claim-held");
+    expect(w.row().status).toBe("patch_gates_clear");
+    expect(w.gh.seen.filter((x) => x.method === "PATCH")).toEqual([]);
+    expect(await hasRef("refs/heads/release/v2.0.1")).toBe(true);
+  });
+
+  test("abandon at released keeps a release/v2.0.1 and its pull request that are not this re-pull's", async () => {
+    await releasedN0();
+    expect((await resume()).exitCode).toBe(3);
+    await gitIn(w.fx.originRepo, ["update-ref", "refs/heads/release/v2.0.1", await mainHead()]);
+    const foreign = await w.commitOnto("refs/heads/release/v2.0.1", "code/other.txt", "Alice's.\n");
+    const n = (w.row().pr_number as number) + 5;
+    w.gh.pulls[`${w.fx.datasetId}#${n}`] = {
+      sha: foreign,
+      headRef: "release/v2.0.1",
+      author: "alice",
+    };
+    const run = await abandon();
+    expect(run.exitCode, run.all).toBe(0);
+    expect(w.row().status).toBe("patch_declined");
+    expect(run.all).toContain("The release branch was kept");
+    expect(w.gh.pulls[`${w.fx.datasetId}#${n}`]?.state ?? "open").toBe("open");
+    expect((await gitIn(w.fx.originRepo, ["rev-parse", "refs/heads/release/v2.0.1"])).trim()).toBe(
+      foreign,
+    );
+  });
+
+  test("abandon keeps a release/v2.0.1 it cannot judge: kept-unreadable", async () => {
+    await releasedN0();
+    expect((await resume()).exitCode).toBe(3);
+    await gitIn(w.fx.originRepo, ["update-ref", "refs/heads/release/v2.0.1", await mainHead()]);
+    // The record names a merge commit origin does not hold, so N.0.1's commit cannot be read.
+    w.db().run(`UPDATE upstream_repulls SET merge_sha = '${"f".repeat(40)}'`);
+    const run = await abandon();
+    expect(run.exitCode, run.all).toBe(0);
+    expect(run.all).toContain("could not be read");
+    expect(await hasRef("refs/heads/release/v2.0.1")).toBe(true);
+  });
+
+  test("abandon does not delete N.0.1's branch when it moved after it was judged: the delete is leased", async () => {
+    await patchOpen();
+    let moved = "";
+    w.gh.beforeClose = async () => {
+      moved = await w.commitOnto("refs/heads/release/v2.0.1", ".nemar/x.json", "{}\n");
+    };
+    const run = await abandon();
+    expect(run.exitCode, run.all).toBe(3);
+    expect(run.all).toContain("branch-moved");
+    expect((await gitIn(w.fx.originRepo, ["rev-parse", "refs/heads/release/v2.0.1"])).trim()).toBe(
+      moved,
+    );
+    expect(w.row().status).toBe("patch_synthesized");
   });
 });

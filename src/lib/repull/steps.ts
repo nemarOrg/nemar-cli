@@ -21,9 +21,10 @@ export type ResumeOutcome =
   /** The record ended (`abandoned`: the pull request was closed unmerged) (exit 1). */
   | "ended"
   /**
-   * The release was recorded and the objects locked, and the record waits at `released`: for an
-   * administrator's decision on the plan's conflicts before N.0.1 is made, or because the record
-   * does not say how many corrections it has (exit 3 for the first, 0 for neither).
+   * The release was recorded and the objects locked, and the record stays at `released` because it
+   * does not say how many corrections and conflicts its plan has, so it is not completed (exit 0;
+   * unknown is never zero). A wait for an administrator's decision on the plan's conflicts is
+   * `waiting`.
    */
   | "released"
   /** The re-pull is complete (exit 0). */

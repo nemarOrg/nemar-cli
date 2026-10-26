@@ -72,6 +72,7 @@ import {
   settleMergeState,
 } from "../pr-review-approve.js";
 import { readCatalogFacts } from "./execute/catalog.js";
+import { MOVED_REF_FETCH_DEPTH } from "./execute/head.js";
 import { type OriginScratch, fetchInto, openOriginScratch } from "./execute/origin.js";
 import { acceptsHead, checkMain, releaseRefOf } from "./execute/pull-request.js";
 import { guardedPush, pushCauseWords } from "./execute/push.js";
@@ -367,7 +368,8 @@ function openFields(
 }
 
 /**
- * A closed, unmerged pull request ends the record: decision 3's `abandoned` for N.0.0's, and
+ * A closed, unmerged pull request ends the record (ADR 0111: a declined re-pull is abandoned):
+ * `abandoned` for N.0.0's, and
  * `patch_declined` for N.0.1's (N.0.0 stays released).
  */
 async function closedUnmerged(ctx: ResumeContext, row: RepullRow, p: Pull): Promise<Turn> {
@@ -406,7 +408,7 @@ async function recognized(
   const recorded = await recordedPatchCommit(scratch, row, p);
   if (!recorded) return null;
   const found = await recognizePatchResynthesis({ dir: scratch.dir, row, recorded, head });
-  return found ? { synthSha: found.sha, synthTree: "", baseSha: found.baseSha } : null;
+  return found ? { synthSha: found.sha, synthTree: found.tree, baseSha: found.baseSha } : null;
 }
 
 /** N.0.1's own commit beneath its recorded head (the head may carry enrichment commits on it). */
@@ -415,8 +417,8 @@ async function recordedPatchCommit(
   row: RepullRow,
   p: Pull,
 ): Promise<string | null> {
-  if (!(await fetchInto(scratch, p.anchor, 22))) return null;
-  await fetchInto(scratch, row.merge_sha as string, 22);
+  if (!(await fetchInto(scratch, p.anchor, MOVED_REF_FETCH_DEPTH))) return null;
+  await fetchInto(scratch, row.merge_sha as string, MOVED_REF_FETCH_DEPTH);
   return (await findPatchCommit({ dir: scratch.dir, row, head: p.anchor }))?.commit ?? null;
 }
 

@@ -6,8 +6,9 @@
  *  - Conflicts the plan lists wait for an administrator's decision before anything is made, because
  *    N.0.1's content is fixed once its pull request is open: `--take-ours <path>` (or
  *    `--take-ours dataset_description.json#<Key>`) resolves one to NEMAR's side, and
- *    `--keep-upstream` leaves every one on upstream's side (decision 1: a conflict stays out of
- *    N.0.1 until an administrator resolves it).
+ *    `--keep-upstream` leaves every one not named on upstream's side (ADR 0111: a conflict stays out
+ *    of N.0.1 until an administrator resolves it). Naming some and not the others still waits,
+ *    unless `--keep-upstream` is given too: a conflict is left upstream's only by a decision.
  *  - Otherwise N.0.1 is made from the reviewed plan (`patch.ts`), which must be the record's (its
  *    digest), on NEMAR's `main` as the N.0.0 merge left it (moved by enrichment only, else
  *    `main-moved`); every annexed key it replays must be NEMAR's, in the bucket and at `nemar-s3`;
@@ -149,6 +150,16 @@ export async function patchTurn(ctx: ResumeContext, row: RepullRow): Promise<Tur
         `The plan lists ${selection.corrections} correction(s) and re-pull #${row.id} records ${corrections}; they are the same plan only when they agree.`,
       );
     }
+    if (selection.unresolved > 0 && !ctx.opts.keepUpstream) {
+      return {
+        kind: "done",
+        result: {
+          row,
+          outcome: "waiting",
+          waitingFor: `an administrator's decision on the ${selection.unresolved} conflict(s) the plan lists that no --take-ours names, before N.0.1 is made: name each to take NEMAR's side, or add --keep-upstream to leave them on upstream's side`,
+        },
+      };
+    }
     if (!hasReplay(selection)) {
       return complete(
         ctx,
@@ -255,7 +266,7 @@ async function makePatch(
     !existing &&
     ctx.opts.confirm &&
     !(await ctx.opts.confirm(
-      `Make v${version} of ${ctx.datasetId}: replay ${selection.paths.length} path(s) and ${selection.keys.length} description key(s) onto main (${selection.corrections} correction(s), ${selection.resolutions} conflict(s) resolved to NEMAR's side), push release/v${version} and open its pull request? Its merge will mint one more version DOI, which cannot be withdrawn.`,
+      `Make v${version} of ${ctx.datasetId}: replay ${selection.paths.length} path(s) and ${selection.keys.length} description key(s) onto main (${selection.corrections} correction(s), ${selection.resolutions} conflict(s) resolved to NEMAR's side, ${selection.unresolved} left on upstream's side), push release/v${version} and open its pull request? Its merge will mint one more version DOI, which cannot be withdrawn.`,
     ))
   ) {
     throw new ExecuteRefused("declined", "Not confirmed; nothing was pushed.");
@@ -299,7 +310,7 @@ async function makePatch(
     throw apiRefused(err, "N.0.1's pull request could not be recorded");
   }
   ctx.opts.out(
-    `${pr.reused ? "Found" : "Opened"} N.0.1's pull request #${pr.number} of release/v${version}; re-pull #${row.id} is patch_synthesized. Resume never merges.`,
+    `${pr.reused ? "Found" : "Opened"} N.0.1's pull request #${pr.number} of release/v${version} (${selection.resolutions} conflict(s) resolved to NEMAR's side, ${selection.unresolved} left on upstream's side); re-pull #${row.id} is patch_synthesized. Resume never merges.`,
   );
   return { kind: "next", row: next };
 }

@@ -435,7 +435,18 @@ async function check(
   );
   if (!clean.ok) return stopAt("github", `${clean.why} Nothing was claimed or merged.`);
 
-  // 8. The squash message, read as git reads it.
+  // 8. The squash message, read as git reads it. N.0.1's carries the count of corrections, which
+  // the record must state: unknown is never a count.
+  const corrections = row.counts?.corrections;
+  if (
+    pr === "n1" &&
+    (typeof corrections !== "number" || !Number.isSafeInteger(corrections) || corrections < 0)
+  ) {
+    return stopAt(
+      "message",
+      `Re-pull #${row.id} does not state how many corrections N.0.1 replays, so its squash message would not carry ${PATCH_TRAILER}:; nothing was claimed or merged.`,
+    );
+  }
   const squash = squashMessage(row, prNumber, pr);
   const problem = await trailersProblem(`${squash.title}\n\n${squash.message}`, row);
   if (problem) {

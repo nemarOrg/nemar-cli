@@ -15,8 +15,9 @@
  *                 and `.github/**` (the caller's `tree_verified`, which the Worker records as the
  *                 administrator's assertion and which alone upgrades the version's lineage; N.0.1
  *                 carries NEMAR's corrections, so its tree is never upstream's and no lineage is
- *                 asked for); then the release, in whose batch the Worker re-arms the dataset's
- *                 sweep stamps;
+ *                 asked for: its tagged tree must instead be its gated head's, outside the same
+ *                 paths, or the release is not recorded); then the release, in whose batch the
+ *                 Worker re-arms the dataset's sweep stamps;
  *   released      the objects N.0.0's copy and uploads wrote, and only those, locked under the
  *                 governance lock with the existing s3-lock route, named one by one (`objects`),
  *                 never the whole prefix: their keys come from the staging manifest the copy wrote,
@@ -88,10 +89,40 @@ async function outsideNemar(dir: string, commit: string): Promise<string | null>
 }
 
 /**
- * Whether the tagged tree is the synthesized one outside `.nemar/**` and `.github/**`, read from
- * origin: the tag's commit and the recorded commit (by id, else from the release branch or the
- * pull request's own ref). Unknown (a commit that could not be fetched) is false: lineage is never
- * recorded on a guess.
+ * Whether the tagged tree is `pr`'s commit's (N.0.0's synthesized commit, N.0.1's gated head)
+ * outside `.nemar/**` and `.github/**`, read from origin: the tag's commit and that commit (by id,
+ * else from the release branch or the pull request's own ref).
+ */
+async function tagTreeVersus(
+  scratch: OriginScratch,
+  row: RepullRow,
+  tagSha: string,
+  pr: RepullPullRequest,
+): Promise<"same" | "differs" | "tag-unread" | "commit-unread"> {
+  const c = PULL_REQUEST_COLUMNS[pr];
+  const commit = (pr === "n0" ? row.synth_sha : row[c.gates]) as string;
+  if (!(await fetchInto(scratch, tagSha, 1))) return "tag-unread";
+  const have = async () =>
+    (await git(scratch.dir, ["cat-file", "-e", `${commit}^{commit}`], { ok: true })).exitCode === 0;
+  if (!(await have())) {
+    for (const ref of [
+      commit,
+      releaseRefOf(row[c.version] as string),
+      `refs/pull/${row[c.number]}/head`,
+    ]) {
+      if ((await fetchInto(scratch, ref, MOVED_REF_FETCH_DEPTH)) && (await have())) break;
+    }
+  }
+  if (!(await have())) return "commit-unread";
+  const tagged = await outsideNemar(scratch.dir, tagSha);
+  const made = await outsideNemar(scratch.dir, commit);
+  if (tagged === null || made === null) return "tag-unread";
+  return tagged === made ? "same" : "differs";
+}
+
+/**
+ * Whether N.0.0's tagged tree is the synthesized one outside `.nemar/**` and `.github/**`. Unknown
+ * (a commit that could not be fetched) is false: lineage is never recorded on a guess.
  */
 export async function taggedTreeVerified(
   scratch: OriginScratch,
@@ -99,35 +130,44 @@ export async function taggedTreeVerified(
   tagSha: string,
   out: (line: string) => void,
 ): Promise<boolean> {
-  const synth = row.synth_sha as string;
-  if (!(await fetchInto(scratch, tagSha, 1))) {
-    out(
-      "The tagged commit could not be fetched, so its tree is not verified (lineage is not recorded).",
-    );
-    return false;
-  }
-  const have = async () =>
-    (await git(scratch.dir, ["cat-file", "-e", `${synth}^{commit}`], { ok: true })).exitCode === 0;
-  if (!(await have())) {
-    for (const ref of [synth, releaseRefOf(row.to_version), `refs/pull/${row.pr_number}/head`]) {
-      if ((await fetchInto(scratch, ref, MOVED_REF_FETCH_DEPTH)) && (await have())) break;
-    }
-  }
-  if (!(await have())) {
-    out(
-      "The re-pull's commit could not be fetched, so the tagged tree is not verified (lineage is not recorded).",
-    );
-    return false;
-  }
-  const tagged = await outsideNemar(scratch.dir, tagSha);
-  const synthesized = await outsideNemar(scratch.dir, synth);
-  if (tagged === null || synthesized === null || tagged !== synthesized) {
-    out(
-      "The tagged tree is not the re-pull's commit outside .nemar/ and .github/, so lineage is not recorded for it.",
-    );
-    return false;
-  }
-  return true;
+  const verdict = await tagTreeVersus(scratch, row, tagSha, "n0");
+  if (verdict === "same") return true;
+  out(
+    verdict === "tag-unread"
+      ? "The tagged commit could not be fetched, so its tree is not verified (lineage is not recorded)."
+      : verdict === "commit-unread"
+        ? "The re-pull's commit could not be fetched, so the tagged tree is not verified (lineage is not recorded)."
+        : "The tagged tree is not the re-pull's commit outside .nemar/ and .github/, so lineage is not recorded for it.",
+  );
+  return false;
+}
+
+/**
+ * N.0.1's tagged tree must be the head its gates cleared, outside `.nemar/**` and `.github/**`:
+ * N.0.1 records no lineage, so this is the one check that what was tagged is what was screened and
+ * gated. A tree that differs (`patch-tree-mismatch`) or that cannot be read (`origin-unreadable`)
+ * is recorded on the row, which stays `patch_merged`: unread is not a pass.
+ */
+async function assertPatchTagTree(
+  ctx: ResumeContext,
+  scratch: OriginScratch,
+  row: RepullRow,
+  tagSha: string,
+): Promise<void> {
+  const verdict = await tagTreeVersus(scratch, row, tagSha, "n1");
+  if (verdict === "same") return;
+  const failure =
+    verdict === "differs"
+      ? refused(
+          "patch-tree-mismatch",
+          `The tag v${row.patch_version} on NEMAR's main is not N.0.1's gated head outside .nemar/ and .github/, so its release is not recorded. The record stays ${row.status}; an administrator decides what follows.`,
+        )
+      : refused(
+          "origin-unreadable",
+          `The tag v${row.patch_version} or N.0.1's gated head could not be read from NEMAR's repository, so the tagged tree is not verified and its release is not recorded; run resume again.`,
+        );
+  await recordStepError(row, resumeErrorWords("release", failure), ctx.opts.out);
+  throw failure;
 }
 
 /** Whether the dataset's version rows hold `version` (either spelling). */
@@ -205,7 +245,9 @@ export async function releaseTurn(
   }
   if (!minted) return { kind: "wait", row, waitingFor: `the version row of v${version} (its DOI)` };
 
-  // Lineage is N.0.0's alone: N.0.1 carries NEMAR's corrections, so its tree is not upstream's.
+  // Lineage is N.0.0's alone: N.0.1 carries NEMAR's corrections, so its tree is not upstream's,
+  // and its tagged tree must be its gated head's instead.
+  if (pr === "n1") await assertPatchTagTree(ctx, scratch, row, tagSha);
   const treeVerified =
     pr === "n0" ? await taggedTreeVerified(scratch, row, tagSha, ctx.opts.out) : false;
   let res: Awaited<ReturnType<typeof recordRepullReleased>>;

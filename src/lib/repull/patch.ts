@@ -17,10 +17,10 @@
  * none, and `Version` N.0.1.
  *
  * No scrub and no copy: every replayed byte is in a version NEMAR already published, which ADR 0091
- * leaves as it is; the identifier screen still reads the head before the merge (decision 7). A
- * dataset whose privacy ledger records a correction never reaches here (the plan refuses any
- * unexplained path for it), and this refuses one all the same (`patch-ledger`), from the plan and
- * from `main`.
+ * leaves as it is; the identifier screen still reads the head before the merge (ADR 0111: the
+ * merge waits for a clean screen of the head). A dataset whose privacy ledger records a correction
+ * never reaches here (the plan refuses any unexplained path for it), and this refuses one all the
+ * same (`patch-ledger`), from the plan and from `main`.
  *
  * The commit is a function of NEMAR's `main` at the base, the new `main`, the plan, the resolutions
  * and the N.0.0 merge commit (whose committer time it carries, with the fixed re-pull identity), so
@@ -69,6 +69,11 @@ export interface PatchSelection {
   corrections: number;
   /** Conflicts resolved to NEMAR's side (`--take-ours`), each counted once. */
   resolutions: number;
+  /**
+   * Conflicts the plan lists that no resolution took (a path, the README family counted by member,
+   * or a description key): they stay on upstream's side, which only `--keep-upstream` decides.
+   */
+  unresolved: number;
 }
 
 function refuse(code: string, message: string): ExecuteRefused {
@@ -190,6 +195,9 @@ export function patchSelection(body: PlanBody, takeOurs: readonly string[]): Pat
   if (typeof corrections !== "number" || !Number.isSafeInteger(corrections) || corrections < 0) {
     throw refuse("plan-schema", "The plan does not state how many corrections it has.");
   }
+  const unresolved =
+    rows.filter((r) => r.cls === "conflict" && r.path !== DESCRIPTION_PATH && !chosen.has(r.path))
+      .length + keys.filter((k) => k.cls === "conflict" && !chosenKeys.has(k.key)).length;
   return {
     paths: [...chosen.values()].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0)),
     keys: [...chosenKeys]
@@ -197,6 +205,7 @@ export function patchSelection(body: PlanBody, takeOurs: readonly string[]): Pat
       .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0)),
     corrections,
     resolutions: named.length,
+    unresolved,
   };
 }
 
@@ -281,8 +290,25 @@ function patchedDescription(raw: string, keys: PatchSelection["keys"], version: 
     );
   }
   for (const { key, ours } of keys) {
-    if (ours === null) delete desc[key];
-    else desc[key] = JSON.parse(ours);
+    // `__proto__` assigned would set the object's prototype, not a key, and the key would be lost.
+    if (key === "__proto__") {
+      throw refuse(
+        "patch-description-unreadable",
+        `A ${DESCRIPTION_PATH} key N.0.1 replays is named __proto__, which is not written as a key.`,
+      );
+    }
+    if (ours === null) {
+      delete desc[key];
+      continue;
+    }
+    try {
+      desc[key] = JSON.parse(ours);
+    } catch {
+      throw refuse(
+        "patch-description-unreadable",
+        `NEMAR's value of a ${DESCRIPTION_PATH} key N.0.1 replays, as the plan records it, does not parse as JSON.`,
+      );
+    }
   }
   desc.Version = version;
   return canonicalJson(desc as CanonicalJsonValue);
@@ -365,7 +391,9 @@ async function mergeTime(dir: string, mergeSha: string): Promise<string> {
 
 /**
  * Make N.0.1's commit on `parent` (the new `main`), in the scratch repository, which must hold
- * `parent`, the record's base and the merge commit. Deterministic; nothing is pushed.
+ * `parent`, the record's base and the merge commit. Deterministic; nothing is pushed. A replayed path
+ * whose entry on `parent` is not the merge commit's refuses (`patch-main-moved`): enrichment wrote
+ * it after the merge, and what enrichment wrote is never undone.
  */
 export async function patchCommit(args: {
   scratch: OriginScratch;
@@ -388,6 +416,19 @@ export async function patchCommit(args: {
   await assertLedgerOnMain(dir, parent);
   const base = new Map((await treeOf(dir, row.base_sha)).map((e) => [e.path, e]));
   const entries = new Map((await treeOf(dir, parent)).map((e) => [e.path, e]));
+  if (parent !== row.merge_sha) {
+    const merged = new Map((await treeOf(dir, row.merge_sha as string)).map((e) => [e.path, e]));
+    for (const p of selection.paths) {
+      const a = entries.get(p.path);
+      const b = merged.get(p.path);
+      if (a?.mode !== b?.mode || a?.oid !== b?.oid) {
+        throw refuse(
+          "patch-main-moved",
+          "NEMAR's main moved by enrichment on a path N.0.1 replays, so N.0.1 is not made on it; decline N.0.1 (nemar admin repull abandon) and correct the dataset by hand.",
+        );
+      }
+    }
+  }
   const keys = new Set<string>();
   for (const p of selection.paths) {
     const { entry, key } = await oursEntry(dir, base, p);
@@ -585,14 +626,15 @@ export async function patchResynthesizedCommit(args: {
  * N.0.1's commit made again on a moved `main` by a run that pushed it and could not record it: it,
  * or an ancestor of it from which it moved by enrichment only, is exactly what
  * {@link patchResynthesizedCommit} makes of the recorded commit for that ancestor's own parent, an
- * enrichment-shaped descendant of the recorded base. Returns what to record, or null.
+ * enrichment-shaped descendant of the recorded base. Returns what to record (the commit, its tree and
+ * its parent), or null.
  */
 export async function recognizePatchResynthesis(args: {
   dir: string;
   row: RepullRow;
   recorded: string;
   head: string;
-}): Promise<{ sha: string; baseSha: string } | null> {
+}): Promise<{ sha: string; tree: string; baseSha: string } | null> {
   const { dir, row } = args;
   let candidate = args.head;
   for (let i = 0; i <= ENRICHMENT_MAX_COMMITS; i++) {
@@ -607,7 +649,7 @@ export async function recognizePatchResynthesis(args: {
         });
         if (made.sha === candidate) {
           return (await enrichmentOnlySince(dir, candidate, args.head)).ok
-            ? { sha: candidate, baseSha: parent }
+            ? { sha: candidate, tree: made.tree, baseSha: parent }
             : null;
         }
       } catch (err) {
