@@ -7,10 +7,11 @@
  *   plan     reports `started`; plans from live sources with a bucket listing; writes the plan
  *            file, which never leaves the runner, and says only counts; then refuses a plan that is
  *            not executable or that the automatic path does not take (`refused`, exit 3, no record
- *            written), or reports one that could not be made (exit 1).
- *   execute  runs the plan through its pull request exactly as an administrator's run does, with
- *            the dispatch presented at the create and the LIVE plan checked before any write;
- *            settles the release head; reports `opened`.
+ *            written), or reports one that could not be made (exit 1). A plan it takes is handed to
+ *            the execute with its clones and computed bytes (`keepPlanHandoff`).
+ *   execute  runs that plan through its pull request as an administrator's run does, without
+ *            planning again, with the dispatch presented at the create and the plan checked before
+ *            any write; settles the release head; reports `opened`.
  *   resume   (a finish) reports `started`; takes up only the automatic re-pull its dispatch names,
  *            and only past its merge; walks it to `complete`; reports `finished`.
  *
@@ -25,7 +26,8 @@
  * long the token was held when the command started and how long each step took, in seconds.
  */
 
-import { readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { sameUpstreamTag } from "../../shared/openneuro-tag.js";
 import { DISPATCH_ID_RE } from "../../shared/repull-state.js";
 import { getApiUrl } from "../lib/api/client.js";
@@ -50,6 +52,7 @@ import {
   dispatchCodeOf,
   installAutomaticQuiet,
   isAutomaticApi,
+  keepPlanHandoff,
   optionRefused,
   planCopySeconds,
   reportDispatch,
@@ -323,59 +326,73 @@ export function automaticPlan(
       const since = tokenSince();
       const catalog = await catalogOf(datasetId);
       assertNotAnonymous(catalog);
-      let planned: Awaited<ReturnType<typeof planRepull>>;
-      const planStarted = Date.now();
+      // The planner's clones and computed bytes are made beside the plan file, for the execute.
+      const planDir = options.out
+        ? dirname(options.out)
+        : join(getConfigDir(), "repull", datasetId);
+      mkdirSync(planDir, { recursive: true, mode: 0o700 });
+      const workRoot = mkdtempSync(join(planDir, ".planning-"));
       try {
-        planned = await planRepull({
-          datasetId,
-          toTag: ctx.dispatch.toTag,
-          maxFetchBytes: Math.floor(options.maxFetchGb * 1024 ** 3),
-          keepWorkdir: false,
-          catalog,
-          github: { token: process.env.GH_TOKEN?.trim() ?? null, apiBase: githubApiBase() },
-          environment: getApiUrl(),
-          presence: "bucket-listing",
-          openNeuroGraphqlUrl: openNeuroGraphqlUrl(process.env),
-        });
-      } catch (err) {
-        // The remotes could not be read: nothing was planned, and a later run may plan.
-        if (err instanceof RepullCannotPlan)
-          return { phase: "failed", code: "not-planned", exit: 1 };
-        throw err;
+        const computed = new Map<string, Buffer>();
+        let planned: Awaited<ReturnType<typeof planRepull>>;
+        const planStarted = Date.now();
+        try {
+          planned = await planRepull({
+            datasetId,
+            toTag: ctx.dispatch.toTag,
+            maxFetchBytes: Math.floor(options.maxFetchGb * 1024 ** 3),
+            keepWorkdir: true,
+            workRoot,
+            collect: { computed },
+            catalog,
+            github: { token: process.env.GH_TOKEN?.trim() ?? null, apiBase: githubApiBase() },
+            environment: getApiUrl(),
+            presence: "bucket-listing",
+            openNeuroGraphqlUrl: openNeuroGraphqlUrl(process.env),
+          });
+        } catch (err) {
+          // The remotes could not be read: nothing was planned, and a later run may plan.
+          if (err instanceof RepullCannotPlan)
+            return { phase: "failed", code: "not-planned", exit: 1 };
+          throw err;
+        } finally {
+          ctx.sink.time("plan", secondsSince(planStarted));
+        }
+        if (!planned.planned) return { phase: "refused", code: planned.reason, exit: 1 };
+        const file = planned.file;
+        const facts = planFacts(file.body);
+        if (
+          facts.ds !== ctx.dispatch.upstreamDs ||
+          !sameUpstreamTag(facts.fromTag, ctx.dispatch.fromTag)
+        ) {
+          return { phase: "refused", code: "dispatch-mismatch", exit: 1 };
+        }
+        const planPath =
+          options.out ?? defaultPlanPath(getConfigDir(), datasetId, facts.toTag, file.digest);
+        writePlanFile(planPath, file);
+        const counts = planCounts(file.body);
+        const fields: Record<string, LineValue> = { executable: file.executable };
+        for (const k of ["delta_paths", "copy_items", "unexplained", "conflicts", "corrections"]) {
+          if (counts[k] !== undefined) fields[k] = counts[k] as number;
+        }
+        ctx.sink.emit("plan", fields);
+        if (!file.executable) return { phase: "refused", code: notExecutableCode(file), exit: 3 };
+        try {
+          assertAutomaticPlan(file);
+        } catch (err) {
+          if (err instanceof ExecuteRefused) return { phase: "refused", code: err.code, exit: 3 };
+          throw err;
+        }
+        // What is left of the App token's hour must hold the copy, the pushes and the settle; the
+        // execute checks again, before its record and before each of them.
+        const late = tokenHourRefusal(since, Date.now(), planCopySeconds(file.body));
+        if (late) return { phase: "refused", code: late.code, exit: 1 };
+        if (planned.workdir === null) return { phase: "failed", code: "not-planned", exit: 1 };
+        keepPlanHandoff(planPath, planned.workdir, computed);
+        return { phase: "planned" };
       } finally {
-        ctx.sink.time("plan", secondsSince(planStarted));
+        rmSync(workRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
       }
-      if (!planned.planned) return { phase: "refused", code: planned.reason, exit: 1 };
-      const file = planned.file;
-      const facts = planFacts(file.body);
-      if (
-        facts.ds !== ctx.dispatch.upstreamDs ||
-        !sameUpstreamTag(facts.fromTag, ctx.dispatch.fromTag)
-      ) {
-        return { phase: "refused", code: "dispatch-mismatch", exit: 1 };
-      }
-      writePlanFile(
-        options.out ?? defaultPlanPath(getConfigDir(), datasetId, facts.toTag, file.digest),
-        file,
-      );
-      const counts = planCounts(file.body);
-      const fields: Record<string, LineValue> = { executable: file.executable };
-      for (const k of ["delta_paths", "copy_items", "unexplained", "conflicts", "corrections"]) {
-        if (counts[k] !== undefined) fields[k] = counts[k] as number;
-      }
-      ctx.sink.emit("plan", fields);
-      if (!file.executable) return { phase: "refused", code: notExecutableCode(file), exit: 3 };
-      try {
-        assertAutomaticPlan(file);
-      } catch (err) {
-        if (err instanceof ExecuteRefused) return { phase: "refused", code: err.code, exit: 3 };
-        throw err;
-      }
-      // What is left of the App token's hour must hold the copy, the pushes and the settle; the
-      // execute checks again, before its record and before each of them.
-      const late = tokenHourRefusal(since, Date.now(), planCopySeconds(file.body));
-      if (late) return { phase: "refused", code: late.code, exit: 1 };
-      return { phase: "planned" };
     },
   });
 }

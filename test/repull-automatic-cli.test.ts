@@ -22,8 +22,10 @@
  *  - a clean plan reaches `pr_open` with the App's token, the record is the automatic path's, and
  *    the dispatch ends `opened` with its run's page; the run prints only the fixed lines, and none
  *    of the fixture's paths, keys, file names, subject labels or secrets;
- *  - a plan with a correction is refused before anything is written, by `plan` and, from its
- *    live plan, by `execute`, and so is a record taken up past `prepared` whose plan has one;
+ *  - a plan with a correction is refused before anything is written, by `plan` and by `execute`,
+ *    and so is a record taken up past `prepared` whose plan has one;
+ *  - `execute` plans nothing again: it takes the plan step's plan and clones, and refuses
+ *    (`not-planned`) without them;
  *  - a copy the estimate puts past the App token's hour is refused at plan time; a run whose
  *    token has too little of its usable hour left is refused at the plan, at the execute before
  *    its record, and before a push, without writing what it could not finish; a run that outlived
@@ -66,7 +68,15 @@ import {
   setDefaultTimeout,
   test,
 } from "bun:test";
-import { chmodSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { which } from "bun";
@@ -565,7 +575,7 @@ describe.skipIf(!awsInstalled)("an automatic run opens its pull request", () => 
     expect(exec.exitCode, exec.all).toBe(0);
     expectQuiet(exec, c, "opened");
     expect(exec.all).toMatch(
-      /^repull-auto: quiet suppressed=\d+ token_age_s=\d+ replan_s=\d+ clone_s=\d+ prepare_s=\d+ copy_s=\d+ register_s=\d+ pr_s=\d+ settle_s=\d+ run_s=\d+$/m,
+      /^repull-auto: quiet suppressed=\d+ token_age_s=\d+ clone_s=\d+ prepare_s=\d+ copy_s=\d+ register_s=\d+ pr_s=\d+ settle_s=\d+ run_s=\d+$/m,
     );
     const [row] = repullRows();
     expect(row).toMatchObject({ status: "pr_open", origin: "automatic" });
@@ -641,7 +651,41 @@ describe.skipIf(!awsInstalled)("an automatic run opens its pull request", () => 
     expect(dispatchRow(resume.id)).toMatchObject({ status: "opened", repull_id: row?.id });
   });
 
-  test("execute refuses a plan with a correction from its live plan, before the record", async () => {
+  test("execute plans nothing again: OpenNeuro unanswered, it opens from the plan step's plan and clones", async () => {
+    const c = await claimOpen();
+    writeEvent(c);
+    expect((await auto(planArgs(c))).exitCode).toBe(0);
+    expect(existsSync(join(runner, "plan.json.planner", "upstream.git"))).toBe(true);
+    // Only the planner asks OpenNeuro (for the latest snapshot).
+    const asked = w.openNeuro.requests;
+    expect(asked).toBeGreaterThan(0);
+    w.openNeuro.status = 503;
+    try {
+      const exec = await auto(executeArgs(c));
+      expect(exec.exitCode, exec.all).toBe(0);
+      expectQuiet(exec, c, "opened");
+    } finally {
+      w.openNeuro.status = null;
+    }
+    expect(w.openNeuro.requests).toBe(asked);
+    expect(repullRows()).toMatchObject([{ status: "pr_open", origin: "automatic" }]);
+    expect(existsSync(join(runner, "plan.json.planner"))).toBe(false);
+  });
+
+  test("execute without its plan step's clones is not-planned, before the record", async () => {
+    const { path } = await libraryPlan();
+    const c = await claimOpen();
+    writeEvent(c);
+    const exec = await auto(executeArgs(c, path));
+    expect(exec.exitCode, exec.all).toBe(1);
+    expectQuiet(exec, c, "refused");
+    expect(dispatchRow(c.id)).toMatchObject({ status: "refused", code: "not-planned" });
+    expect(repullRows()).toEqual([]);
+    expect(ghWrites()).toEqual([]);
+    expect(s3Writes()).toEqual([]);
+  });
+
+  test("execute refuses a plan with a correction, before the record", async () => {
     await w.commitOnto("refs/heads/main", PATHS.sidecar, '{"TaskName":"rest","edited":true}\n');
     // A plan file the automatic plan would have refused, made by the planner itself.
     const { path, file } = await libraryPlan();

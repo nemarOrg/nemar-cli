@@ -6,16 +6,17 @@
  *
  *   S0  read the plan file, prove it is the reviewed one, plan again from live sources
  *       (`verify-plan.ts`); no API write, push or upload happens before this passes (the scratch
- *       directory for the planner's clones is a local write);
+ *       directory for the planner's clones is a local write). A dispatched run plans nothing
+ *       again: it takes its own plan step's plan, clones and computed bytes;
  *   S1  `POST /admin/repulls`: the record, or the open one for this same plan (`planned`);
  *   S2  a working clone at the base, the delta materialized, scrubbed, uploaded where the scrub
  *       re-keyed or annexed, and synthesized into one commit; the checkpoint saved; then
  *       `planned -> prepared` with the commit, its tree, the copy manifest's digest and counts;
  *   S3 to S5  the copy, the registration and the pull request (`advance.ts`), to `pr_open`.
  *
- * A dispatched run (`opts.automatic`, the central workflow's; `automatic.ts`) adds four things and
- * changes nothing else: before anything is written, the LIVE plan must be one the automatic path
- * takes (`assertAutomaticPlan`) and fit what is left of the App token's hour; S1 presents the
+ * A dispatched run (`opts.automatic`, the central workflow's; `automatic.ts`) adds four things
+ * besides: before anything is written, its plan must be one the automatic path takes
+ * (`assertAutomaticPlan`) and fit what is left of the App token's hour; S1 presents the
  * dispatch, so the Worker records the re-pull as automatic; the copy, the registration and the pull
  * request each check the token's hour again before they start (`tokenHourRefusal`); and at
  * `pr_open`, still holding the lock, the release head is settled (`settle.ts`), inside that hour,
@@ -97,6 +98,8 @@ import {
   assertAutomaticCounts,
   assertAutomaticPlan,
   planCopySeconds,
+  planHandoffDir,
+  readPlanHandoff,
   tokenHourRefusal,
 } from "./automatic.js";
 import { copyItems, copySection, planCounts, planFacts } from "./body.js";
@@ -197,7 +200,7 @@ export interface AutomaticExecution {
 }
 
 /** The steps a dispatched run times. */
-export type MeasuredStep = StepName | "replan" | "clone" | "prepare" | "settle";
+export type MeasuredStep = StepName | "clone" | "prepare" | "settle";
 
 /** Where a run stopped, and, for a dispatched run at `pr_open`, how its release head settled. */
 export interface ExecuteResult {
@@ -558,13 +561,18 @@ async function execute(
       };
     }
 
-    removeTree(paths.plan);
-    privateDir(paths.plan, top);
-    const computed = new Map<string, Buffer>();
-    let verified: Awaited<ReturnType<typeof readExecutablePlan>>;
+    // The planner's clones: made again here for an administrator's run, or a dispatched run's own
+    // plan step's, kept beside its plan file.
+    const plannerRoot = opts.automatic ? planHandoffDir(opts.planPath) : paths.plan;
+    let planned: PlanToPrepare;
     try {
-      verified = await measuredStep(opts.automatic, "replan", () =>
-        readExecutablePlan(opts.planPath, {
+      if (opts.automatic) {
+        planned = takeAutomaticPlan(opts.planPath, opts.automatic, env, openNeuroGraphqlUrl);
+      } else {
+        removeTree(paths.plan);
+        privateDir(paths.plan, top);
+        const computed = new Map<string, Buffer>();
+        const verified = await readExecutablePlan(opts.planPath, {
           catalog,
           github: { token: token.ok ? token.token : null, apiBase },
           environment: getApiUrl(),
@@ -574,24 +582,17 @@ async function execute(
           openNeuroGraphqlUrl,
           ...(opts.maxFetchBytes !== undefined ? { maxFetchBytes: opts.maxFetchBytes } : {}),
           ...(superseding ? { ownRelease: (facts) => onlyOwnRelease(superseding, facts) } : {}),
-        }),
-      );
-      // A dispatched run takes only a plan the automatic path takes, read from the LIVE plan
-      // this run just made, and only while what is left of the App token's hour holds its copy,
-      // the pushes and the settle: both before anything is written.
-      const a = opts.automatic;
-      if (a) {
-        assertAutomaticPlan(verified.live);
-        const late = tokenHourRefusal(
-          a.tokenSince,
-          (a.now ?? Date.now)(),
-          planCopySeconds(verified.live.body),
-        );
-        if (late) throw late;
+        });
+        planned = {
+          body: verified.live.body,
+          plannerDir: verified.workdir,
+          computed,
+          rebasedOnto: verified.rebasedOnto,
+        };
       }
     } catch (err) {
       // Refused before anything was prepared: leave no empty directory behind it.
-      removeQuietly(paths.plan, opts.out);
+      removeQuietly(plannerRoot, opts.out);
       removeIfEmpty(paths.root);
       removeIfEmpty(dirname(paths.root));
       throw err;
@@ -601,10 +602,10 @@ async function execute(
       token: token.ok ? token.token : null,
       datasetId,
       digest,
-      body: verified.live.body,
+      body: planned.body,
       paths,
-      plannerDir: verified.workdir,
-      computed,
+      plannerDir: planned.plannerDir,
+      computed: planned.computed,
       objectsBase,
       normalizeMaxBytes: opts.normalizeMaxBytes ?? NORMALIZE_MAX_BYTES,
       automatic: opts.automatic,
@@ -628,7 +629,7 @@ async function execute(
           out: opts.out,
         });
       }
-      const prepared = await recordAndPrepare(ctx, verified.rebasedOnto, until);
+      const prepared = await recordAndPrepare(ctx, planned.rebasedOnto, until);
       if (reached(prepared.row.status, until)) {
         const settled = await settleOpened(opts, env, ctx.token, digest, prepared.row);
         return settled ? { ...prepared, row: settled.row, settled } : prepared;
@@ -663,11 +664,44 @@ async function execute(
         ...(settled ? { settled } : {}),
       };
     } finally {
-      if (!opts.keepWorkdir) removeQuietly(paths.plan, opts.out);
+      if (!opts.keepWorkdir) removeQuietly(plannerRoot, opts.out);
     }
   } finally {
     release();
   }
+}
+
+/** What preparation reads of a plan: its body, the planner's clones and the bytes it computed. */
+interface PlanToPrepare {
+  body: PlanBody;
+  plannerDir: string;
+  computed: Map<string, Buffer>;
+  /** The live `main` an administrator's run bases on when it moved by `.nemar/**` only. */
+  rebasedOnto: string | null;
+}
+
+/**
+ * A dispatched run takes the plan its own plan step made moments before in the same job, and plans
+ * nothing again: the file proved by its digest, one the automatic path takes and that fits what is
+ * left of the App token's hour, both before anything is written, and the step's clones and
+ * computed bytes beside it (`readPlanHandoff`).
+ */
+function takeAutomaticPlan(
+  planPath: string,
+  a: AutomaticExecution,
+  env: Env,
+  openNeuroGraphqlUrl: string | undefined,
+): PlanToPrepare {
+  const { file, body } = readReviewedPlan(planPath, {
+    environment: getApiUrl(),
+    env,
+    openNeuroGraphqlUrl,
+  });
+  assertAutomaticPlan({ executable: file.executable === true, body });
+  const late = tokenHourRefusal(a.tokenSince, (a.now ?? Date.now)(), planCopySeconds(body));
+  if (late) throw late;
+  const { workdir, computed } = readPlanHandoff(planPath);
+  return { body, plannerDir: workdir, computed, rebasedOnto: null };
 }
 
 /**

@@ -4,8 +4,8 @@
  * The Worker claims a dispatch and sends it to the central `run-upstream-repull` workflow, whose
  * job runs `nemar admin repull plan`, `execute` or `resume` with `--automatic-dispatch <id>`. This
  * module is what those three share: the dispatch the run was handed, read and checked; the output
- * rule of a run whose log is public; the check of the live plan the automatic path takes; and the
- * run's reports to the Worker.
+ * rule of a run whose log is public; the check of the plan the automatic path takes, and what the
+ * plan step hands the execute; and the run's reports to the Worker.
  *
  * THE DISPATCH. The run reads the dispatch from the event GitHub delivered (`GITHUB_EVENT_PATH`),
  * the `client_payload` the Worker built with `buildUpstreamRepullPayload`: exactly its nine keys,
@@ -46,7 +46,16 @@
  * report the run again.
  */
 
-import { readFileSync, statSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { isOpenNeuroTag, sameUpstreamTag } from "../../../../shared/openneuro-tag.js";
 import {
@@ -607,15 +616,15 @@ export function optionRefused(option: string, why: "not-taken" | "required"): Ex
 // The plan the automatic path takes
 // ----------------------------------------------------------------------------
 
-/** The live plan, as the planner made it in this run: its body, and whether it is executable. */
+/** A plan this run's planner made: its body, and whether it is executable. */
 export interface LivePlan {
   executable: boolean;
   body: PlanBody;
 }
 
 /**
- * Refuse a plan the automatic path does not take, from the LIVE plan this run made and never from a
- * file's own fields: executable, then {@link assertAutomaticCounts}.
+ * Refuse a plan the automatic path does not take: executable, then {@link assertAutomaticCounts}.
+ * The plan is the one this run's `plan` made, never a file from elsewhere.
  */
 export function assertAutomaticPlan(live: LivePlan): void {
   if (!live.executable) {
@@ -661,6 +670,52 @@ export function assertAutomaticCounts(body: PlanBody): void {
       `An automatic re-pull takes only a plan whose copy, by its known size and count, fits ${Math.floor(budget / 60)} minutes: the App token that pushes it lasts an hour.`,
     );
   }
+}
+
+/**
+ * Beside the plan file the automatic `plan` writes: its scratch clones and the bytes it computed
+ * (`computed/<blob id>`), which the `execute` of the same run prepares from, so the run plans once.
+ */
+export function planHandoffDir(planPath: string): string {
+  return `${planPath}.planner`;
+}
+
+/** Keep the planner's `workdir` and its `computed` bytes beside `planPath`. */
+export function keepPlanHandoff(
+  planPath: string,
+  workdir: string,
+  computed: ReadonlyMap<string, Buffer>,
+): void {
+  const dir = planHandoffDir(planPath);
+  rmSync(dir, { recursive: true, force: true });
+  renameSync(workdir, dir);
+  mkdirSync(join(dir, "computed"), { mode: 0o700 });
+  for (const [oid, bytes] of computed) {
+    writeFileSync(join(dir, "computed", oid), bytes, { mode: 0o600 });
+  }
+}
+
+/**
+ * What {@link keepPlanHandoff} kept beside `planPath`; `not-planned` when the clones are not there.
+ * The preparation proves each computed blob by its git id, and refuses one that is missing.
+ */
+export function readPlanHandoff(planPath: string): {
+  workdir: string;
+  computed: Map<string, Buffer>;
+} {
+  const dir = planHandoffDir(planPath);
+  if (!existsSync(join(dir, "upstream.git"))) {
+    throw new ExecuteRefused(
+      "not-planned",
+      "The plan step's clones are not beside the plan file; an automatic execute plans nothing itself.",
+    );
+  }
+  const computed = new Map<string, Buffer>();
+  const bytesDir = join(dir, "computed");
+  for (const oid of existsSync(bytesDir) ? readdirSync(bytesDir) : []) {
+    computed.set(oid, readFileSync(join(bytesDir, oid)));
+  }
+  return { workdir: dir, computed };
 }
 
 /**

@@ -1155,7 +1155,7 @@ export const AUTO_SETTLE_RESERVE_SECONDS = 6 * 60;
 export const AUTO_AFTER_COPY_SECONDS = 5 * 60;
 
 /**
- * Everything else from the mint to the push, not the copy: the install, the two plans, the
+ * Everything else from the mint to the push, not the copy: the install, the plan, the
  * preparation and the steps after the copy ({@link AUTO_AFTER_COPY_SECONDS} among them). An
  * allowance no measurement here bounds; each run logs how long its steps took, so the first
  * production runs can check it.
