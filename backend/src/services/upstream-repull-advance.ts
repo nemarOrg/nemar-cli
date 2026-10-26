@@ -380,8 +380,9 @@ export interface AdvanceTickResult {
   /**
    * Of them, rows with nothing to send this tick. A stalled row, its hold cleared: the row or its
    * last dispatch moved within the quiet time, the tick's sends stopped after a refusal, or the last
-   * dispatch is in a state no resume follows. A merged row: its version is not minted yet (the
-   * finish waits for its DOI), or the tick's sends stopped after a refusal.
+   * dispatch is in a state no resume follows. A row that merged, at `merged` or `released`: the
+   * tick's sends stopped after a refusal, or, at `merged` only, its version is not minted yet (the
+   * finish waits for its DOI).
    */
   notDue: number;
   /** Identifier screens dispatched. */
