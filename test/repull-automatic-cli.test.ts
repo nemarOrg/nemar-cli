@@ -23,20 +23,30 @@
  *    the dispatch ends `opened` with its run's page; the run prints only the fixed lines, and none
  *    of the fixture's paths, keys, file names, subject labels or secrets;
  *  - a plan with a correction is refused before anything is written, by `plan` and, from its
- *    live plan, by `execute`;
- *  - the token on the command line, no App token, a tenth key and a development build are each
- *    refused, and only the first two are reported (the token's report ends the dispatch);
- *  - an administrator's record of the same plan is never taken up by a run;
+ *    live plan, by `execute`, and so is a record taken up past `prepared` whose plan has one;
+ *  - a copy the estimate puts past the App token's hour is refused at plan time, and a run that
+ *    outlived its token is reported `token-expired`;
+ *  - the token on the command line (checked before the plan file is read), no App token, a
+ *    development build, a finish dispatch fed to `plan`, another dataset and other tags are each
+ *    refused and reported (the token's report ends the dispatch); a tenth key, no event file, an
+ *    unknown option and an API that is not production's are refused and NOT reported by the CLI,
+ *    which ends with the failed result line (the workflow's backstop may report a shape-valid one);
+ *  - a rerun finds its dispatch started and goes on;
+ *  - an administrator's record of the same plan is never taken up by a run, and a create that
+ *    answers with an administrator's or another record is refused;
  *  - an enrichment-shaped commit on the release branch while the run settles is recorded, and any
  *    other is `head-foreign`, recorded on the row and reported `failed`; the settle waits for the
- *    branch to be quiet;
- *  - a finish takes a merged re-pull to `complete` and reports `finished`, and refuses one that has
- *    not merged without touching it.
+ *    branch to be quiet by what was read, and a branch that cannot be read is `head-unreadable`;
+ *  - a finish takes a merged re-pull to `complete` and reports `finished` (again, after it
+ *    completed), and refuses one that has not merged, another record or an administrator's,
+ *    without touching it.
  *
  * What only the first production runs can check: that GitHub answers the dispatch with 204 and the
  * runner masks the token as the workflow asks; that the App token GitHub mints opens and pushes as
- * the stand-in lets it; how soon enrichment commits after a push; and that the anonymous clones of
- * OpenNeuroDatasets the plan makes hold up on a runner.
+ * the stand-in lets it, and how GitHub refuses a push with one past its hour (simulated here by a
+ * hook that turns the push away while the stand-in answers the token 401); how soon enrichment
+ * commits after a push; how long a real copy takes against the estimate; and that the anonymous
+ * clones of OpenNeuroDatasets the plan makes hold up on a runner.
  *
  * CI TIER: integration, like the other CLI suites that start the binary against a local server.
  */
@@ -65,7 +75,7 @@ import {
 } from "../backend/src/services/upstream-repull-dispatch";
 import type { DispatchRow, RepullRow } from "../shared/repull-state";
 import { getRepull } from "../src/lib/api/repull";
-import { defaultPlanPath, writePlanFile } from "../src/lib/repull/digest";
+import { type PlanFile, defaultPlanPath, writePlanFile } from "../src/lib/repull/digest";
 import { AUTOMATIC_LINE_RE, RESULT_LINE_RE } from "../src/lib/repull/execute/automatic";
 import { type OriginScratch, openOriginScratch } from "../src/lib/repull/execute/origin";
 import {
@@ -288,6 +298,236 @@ async function opened(): Promise<{ c: Claim; row: RecordRow }> {
   return { c, row };
 }
 
+/** A plan file made by the planner itself, as the automatic plan would not have written it. */
+async function libraryPlan(): Promise<{ path: string; file: PlanFile }> {
+  const scratch = mkdtempSync(join(tmpdir(), "nemar-repull-auto-plan-"));
+  temps.push(scratch);
+  const made = await planRepull({
+    datasetId: w.fx.datasetId,
+    toTag: TAG_B,
+    catalog: {
+      dataset: { source: "openneuro", source_id: UPSTREAM_ID, concept_doi: CONCEPT_DOI },
+      versions: [{ version: "1.0.0", source_version: TAG_A, source_version_basis: "doi" }],
+    },
+    github: { token: APP_TOKEN, apiBase: w.gh.url },
+    env: w.fx.env,
+    environment: w.apiUrl,
+    workRoot: scratch,
+    openNeuroGraphqlUrl: w.openNeuro.url,
+  });
+  if (!made.planned || !made.file.executable) throw new Error("the plan was not made");
+  const path = defaultPlanPath(w.configDir, w.fx.datasetId, TAG_B, made.file.digest);
+  writePlanFile(path, made.file);
+  return { path, file: made.file };
+}
+
+/** A dispatch no claim would make (a finish of an unmerged record, say), written as one. */
+async function dispatchFor(kind: "open" | "finish", repullId: number | null): Promise<Claim> {
+  const nonce = crypto.randomUUID();
+  w.db().run(
+    `INSERT INTO upstream_repull_dispatches (kind, dataset_id, upstream_ds, from_tag, to_tag, repull_id, nonce, status)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'dispatched')`,
+    [kind, w.fx.datasetId, UPSTREAM_ID, TAG_A, TAG_B, repullId, nonce],
+  );
+  const { id } = w.db().query("SELECT last_insert_rowid() AS id").get() as { id: number };
+  return {
+    id,
+    token: await signRepullDispatchToken(
+      { dispatchId: id, datasetId: w.fx.datasetId, nonce },
+      CALLBACK_SECRET,
+    ),
+  };
+}
+
+const finishArgs = (c: Claim) => [
+  "resume",
+  w.fx.datasetId,
+  "--automatic-dispatch",
+  String(c.id),
+  "--wait-minutes",
+  "1",
+  "--yes",
+];
+
+describe.skipIf(!awsInstalled)("what a run checks before it acts", () => {
+  test("an API that is not production's is refused before anything is sent, and not reported", async () => {
+    const c = await claimOpen();
+    writeEvent(c);
+    const plan = await auto(planArgs(c), { TEST_API_URL: "https://api.nemar.org.evil.example" });
+    expect(plan.exitCode, plan.all).toBe(1);
+    expectQuiet(plan, c, "failed");
+    expect(plan.all).toContain("code=auto-api-not-production");
+    expect(dispatchRow(c.id)).toMatchObject({ status: "dispatched" });
+    expect(w.apiWrites).toEqual([]);
+  });
+
+  test("the token on the command line is refused before a plan file that cannot be read", async () => {
+    const c = await claimOpen();
+    writeEvent(c);
+    const exec = await auto([
+      "execute",
+      join(runner, `${c.token}.json`),
+      "--automatic-dispatch",
+      String(c.id),
+      "--yes",
+    ]);
+    expect(exec.exitCode, exec.all).toBe(1);
+    expectQuiet(exec, c, "refused");
+    expect(dispatchRow(c.id)).toMatchObject({
+      status: "refused",
+      code: "auto-token-on-argv",
+      nonce: null,
+    });
+  });
+
+  test("an unknown option, or no event file, still ends with the failed result line", async () => {
+    const c = await claimOpen();
+    writeEvent(c);
+    for (const run of [
+      await auto([...planArgs(c), "--no-such-option"]),
+      await auto(planArgs(c), { GITHUB_EVENT_PATH: join(runner, "absent.json") }),
+    ]) {
+      expect(run.exitCode, run.all).toBe(1);
+      expectQuiet(run, c, "failed");
+      expect(run.all.trim().split("\n").at(-1)).toBe(
+        "repull-auto: result phase=failed code=runner-failed",
+      );
+    }
+    expect(dispatchRow(c.id)).toMatchObject({ status: "dispatched" });
+    expect(w.apiWrites).toEqual([]);
+  });
+
+  test("a finish dispatch fed to plan, or a plan of another dataset, is dispatch-mismatch", async () => {
+    const c = await claimOpen();
+    writeEvent(c, { mode: "finish", repullId: 1 });
+    const finishFed = await auto(planArgs(c));
+    expect(finishFed.exitCode, finishFed.all).toBe(1);
+    expectQuiet(finishFed, c, "refused");
+    expect(dispatchRow(c.id)).toMatchObject({ status: "refused", code: "dispatch-mismatch" });
+
+    const other = await claimOpen();
+    writeEvent(other);
+    const args = planArgs(other);
+    args[1] = "on004362";
+    const otherDataset = await auto(args);
+    expect(otherDataset.exitCode, otherDataset.all).toBe(1);
+    expectQuiet(otherDataset, other, "refused");
+    expect(dispatchRow(other.id)).toMatchObject({ status: "refused", code: "dispatch-mismatch" });
+    expect(repullRows()).toEqual([]);
+  });
+
+  test("a --to-tag, or a plan file, for other tags than the dispatch's is dispatch-mismatch", async () => {
+    const c = await claimOpen();
+    writeEvent(c);
+    const args = planArgs(c);
+    args[3] = "1.2.0";
+    const plan = await auto(args);
+    expect(plan.exitCode, plan.all).toBe(1);
+    expectQuiet(plan, c, "refused");
+    expect(dispatchRow(c.id)).toMatchObject({ status: "refused", code: "dispatch-mismatch" });
+
+    // A dispatch for upstream's 1.2.0, and a plan file for 1.1.0.
+    const { path } = await libraryPlan();
+    const later = await claimOpenDispatch(w.bindings(), {
+      datasetId: w.fx.datasetId,
+      upstreamDs: UPSTREAM_ID,
+      fromTag: TAG_A,
+      toTag: "1.2.0",
+    });
+    if (!("id" in later)) throw new Error(`nothing was claimed: ${JSON.stringify(later)}`);
+    writeEvent(later, { toTag: "1.2.0" });
+    const exec = await auto(executeArgs(later, path));
+    expect(exec.exitCode, exec.all).toBe(1);
+    expectQuiet(exec, later, "refused");
+    expect(dispatchRow(later.id)).toMatchObject({ status: "refused", code: "dispatch-mismatch" });
+    // The run refused it itself, before the create: the Worker was not asked.
+    expect(w.apiWrites).not.toContain("POST /admin/repulls");
+    expect(repullRows()).toEqual([]);
+  });
+
+  test("a rerun of the same run finds its dispatch started and goes on", async () => {
+    const c = await claimOpen();
+    writeEvent(c);
+    expect((await auto(planArgs(c))).exitCode).toBe(0);
+    const again = await auto(planArgs(c));
+    expect(again.exitCode, again.all).toBe(0);
+    expectQuiet(again, c, "planned");
+    expect(again.all).toContain("repull-auto: report phase=started answer=already-started");
+    expect(dispatchRow(c.id).status).toBe("started");
+  });
+
+  test("a create that answers with an administrator's record is not taken as the run's", async () => {
+    // The Worker records the run's create as automatic; a create that answered otherwise (a
+    // Worker at fault) must not be acted on as the run's.
+    w.setApiAfter((req) => {
+      if (req.method !== "POST" || new URL(req.url).pathname !== "/admin/repulls") return null;
+      const row = w.db().query("SELECT * FROM upstream_repulls ORDER BY id DESC LIMIT 1").get() as
+        | (Record<string, unknown> & { counts: string })
+        | null;
+      if (!row) return null;
+      return Response.json({
+        repull: { ...row, counts: JSON.parse(row.counts), origin: "administrator" },
+        created: true,
+        lineage_rows: 0,
+      });
+    });
+    const c = await claimOpen();
+    writeEvent(c);
+    expect((await auto(planArgs(c))).exitCode).toBe(0);
+    const exec = await auto(executeArgs(c));
+    expect(exec.exitCode, exec.all).toBe(1);
+    expectQuiet(exec, c, "refused");
+    expect(dispatchRow(c.id)).toMatchObject({ status: "refused", code: "repull-in-flight" });
+    expect(repullRows()).toMatchObject([{ status: "planned" }]);
+    expect(ghWrites()).toEqual([]);
+  });
+
+  test("a dispatch that continues one record and is answered with another is repull-mismatch", async () => {
+    const c = await claimOpen();
+    // The run is handed a dispatch that says it continues re-pull #4242.
+    writeEvent(c, { repullId: 4242 });
+    expect((await auto(planArgs(c))).exitCode).toBe(0);
+    const exec = await auto(executeArgs(c));
+    expect(exec.exitCode, exec.all).toBe(1);
+    expectQuiet(exec, c, "refused");
+    expect(dispatchRow(c.id)).toMatchObject({ status: "refused", code: "repull-mismatch" });
+    expect(repullRows()).toMatchObject([{ status: "planned" }]);
+    expect(ghWrites()).toEqual([]);
+  });
+
+  test("a record taken up past prepared is refused when its plan has a correction", async () => {
+    await w.commitOnto("refs/heads/main", PATHS.sidecar, '{"TaskName":"rest","edited":true}\n');
+    const { path, file } = await libraryPlan();
+    expect(file.body.counts).toMatchObject({ corrections: 1 });
+    // An administrator executes it through its copy; the record is then the automatic path's (no
+    // create makes such a record, which is why the run reads the counts again).
+    const admin = await w.cli(
+      ["repull", "execute", path, "--until", "copied", "--yes"],
+      {},
+      undefined,
+      SOURCE_ENTRY,
+    );
+    expect(admin.exitCode, admin.all).toBe(0);
+    w.db().run("UPDATE upstream_repulls SET origin = 'automatic'");
+    const [row] = repullRows();
+    const c = await claimOpenDispatch(w.bindings(), {
+      datasetId: w.fx.datasetId,
+      upstreamDs: UPSTREAM_ID,
+      fromTag: TAG_A,
+      toTag: TAG_B,
+      repullId: row?.id ?? 0,
+    });
+    if (!("id" in c)) throw new Error(`nothing was claimed: ${JSON.stringify(c)}`);
+    writeEvent(c, { repullId: row?.id ?? 0 });
+    const exec = await auto(executeArgs(c, path));
+    expect(exec.exitCode, exec.all).toBe(1);
+    expectQuiet(exec, c, "refused");
+    expect(dispatchRow(c.id)).toMatchObject({ status: "refused", code: "auto-not-clean-plan" });
+    expect(repullRows()).toMatchObject([{ status: "copied" }]);
+    expect(ghWrites()).toEqual([]);
+  });
+});
+
 describe.skipIf(!awsInstalled)("an automatic run opens its pull request", () => {
   test("a clean plan reaches pr_open as the App, recorded automatic, reported opened, printing only fixed lines", async () => {
     const c = await claimOpen();
@@ -344,25 +584,8 @@ describe.skipIf(!awsInstalled)("an automatic run opens its pull request", () => 
   test("execute refuses a plan with a correction from its live plan, before the record", async () => {
     await w.commitOnto("refs/heads/main", PATHS.sidecar, '{"TaskName":"rest","edited":true}\n');
     // A plan file the automatic plan would have refused, made by the planner itself.
-    const scratch = mkdtempSync(join(tmpdir(), "nemar-repull-auto-plan-"));
-    temps.push(scratch);
-    const made = await planRepull({
-      datasetId: w.fx.datasetId,
-      toTag: TAG_B,
-      catalog: {
-        dataset: { source: "openneuro", source_id: UPSTREAM_ID, concept_doi: CONCEPT_DOI },
-        versions: [{ version: "1.0.0", source_version: TAG_A, source_version_basis: "doi" }],
-      },
-      github: { token: APP_TOKEN, apiBase: w.gh.url },
-      env: w.fx.env,
-      environment: w.apiUrl,
-      workRoot: scratch,
-      openNeuroGraphqlUrl: w.openNeuro.url,
-    });
-    if (!made.planned || !made.file.executable) throw new Error("the plan was not made");
-    expect(made.file.body.counts).toMatchObject({ corrections: 1 });
-    const path = defaultPlanPath(w.configDir, w.fx.datasetId, TAG_B, made.file.digest);
-    writePlanFile(path, made.file);
+    const { path, file } = await libraryPlan();
+    expect(file.body.counts).toMatchObject({ corrections: 1 });
     const c = await claimOpen();
     writeEvent(c);
     const exec = await auto(executeArgs(c, path));
@@ -721,37 +944,9 @@ describe.skipIf(!awsInstalled)("the release head settles before the run reports"
 });
 
 describe.skipIf(!awsInstalled)("a finish", () => {
-  /** A finish dispatch for a record that has not merged, which no claim makes: written as one. */
-  async function finishDispatchFor(repullId: number): Promise<Claim> {
-    const nonce = crypto.randomUUID();
-    w.db().run(
-      `INSERT INTO upstream_repull_dispatches (kind, dataset_id, upstream_ds, from_tag, to_tag, repull_id, nonce, status)
-       VALUES ('finish', ?, ?, ?, ?, ?, ?, 'dispatched')`,
-      [w.fx.datasetId, UPSTREAM_ID, TAG_A, TAG_B, repullId, nonce],
-    );
-    const { id } = w.db().query("SELECT last_insert_rowid() AS id").get() as { id: number };
-    return {
-      id,
-      token: await signRepullDispatchToken(
-        { dispatchId: id, datasetId: w.fx.datasetId, nonce },
-        CALLBACK_SECRET,
-      ),
-    };
-  }
-
-  const finishArgs = (c: Claim) => [
-    "resume",
-    w.fx.datasetId,
-    "--automatic-dispatch",
-    String(c.id),
-    "--wait-minutes",
-    "1",
-    "--yes",
-  ];
-
   test("at pr_open it is finish-not-merged, and nothing is touched", async () => {
     const { row } = await opened();
-    const c = await finishDispatchFor(row.id);
+    const c = await dispatchFor("finish", row.id);
     writeEvent(c, { mode: "finish", repullId: row.id });
     w.apiWrites.length = 0;
     w.gh.seen.length = 0;
@@ -795,5 +990,48 @@ describe.skipIf(!awsInstalled)("a finish", () => {
       nonce: null,
       workflow_run_url: RUN_URL,
     });
+
+    // A finish of the same record after it completed (an earlier run whose report was lost):
+    // there is no open record, the dataset's latest is the dispatch's and complete, so it is finished.
+    const again = await dispatchFor("finish", row.id);
+    writeEvent(again, { mode: "finish", repullId: row.id });
+    const rerun = await auto(finishArgs(again));
+    expect(rerun.exitCode, rerun.all).toBe(0);
+    expectQuiet(rerun, again, "finished");
+    expect(dispatchRow(again.id)).toMatchObject({ status: "finished" });
+  });
+
+  test("a finish naming another record, or an administrator's, is repull-mismatch and touches nothing", async () => {
+    const { row } = await opened();
+    w.apiWrites.length = 0;
+    w.gh.seen.length = 0;
+    const another = await dispatchFor("finish", row.id + 1);
+    writeEvent(another, { mode: "finish", repullId: row.id + 1 });
+    const r1 = await auto(finishArgs(another));
+    expect(r1.exitCode, r1.all).toBe(1);
+    expectQuiet(r1, another, "refused");
+    expect(dispatchRow(another.id)).toMatchObject({ status: "refused", code: "repull-mismatch" });
+
+    w.db().run("UPDATE upstream_repulls SET origin = 'administrator' WHERE id = ?", [row.id]);
+    const admins = await dispatchFor("finish", row.id);
+    writeEvent(admins, { mode: "finish", repullId: row.id });
+    const r2 = await auto(finishArgs(admins));
+    expect(r2.exitCode, r2.all).toBe(1);
+    expectQuiet(r2, admins, "refused");
+    expect(dispatchRow(admins.id)).toMatchObject({ status: "refused", code: "repull-mismatch" });
+
+    expect(repullRows()).toMatchObject([{ status: "pr_open" }]);
+    // Only the reports were written: no screen, no transition.
+    expect(w.apiWrites.every((p) => p === "POST /webhooks/repull-state")).toBe(true);
+    expect(ghWrites()).toEqual([]);
+  });
+
+  test("with no open record and none complete, a finish is finish-not-merged", async () => {
+    const c = await dispatchFor("finish", 1);
+    writeEvent(c, { mode: "finish", repullId: 1 });
+    const run = await auto(finishArgs(c));
+    expect(run.exitCode, run.all).toBe(1);
+    expectQuiet(run, c, "refused");
+    expect(dispatchRow(c.id)).toMatchObject({ status: "refused", code: "finish-not-merged" });
   });
 });
