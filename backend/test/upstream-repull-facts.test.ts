@@ -413,6 +413,39 @@ describe("each fact, flipped alone at its source, holds with its own word", () =
       },
       "pr-mismatch",
     ],
+    // GitHub always names both repositories; one not named, or not as a name, is unreadable.
+    [
+      "the head's repository is not named",
+      () => {
+        gh.pulls[`${DS}#7`] = appPull({
+          head: { sha: HEAD, ref: "release/v2.0.0", repo: undefined },
+        });
+      },
+      "pr-unreadable",
+    ],
+    [
+      "the head's repository has no name",
+      () => {
+        gh.pulls[`${DS}#7`] = appPull({
+          head: { sha: HEAD, ref: "release/v2.0.0", repo: {} as never },
+        });
+      },
+      "pr-unreadable",
+    ],
+    [
+      "the base's repository is not named",
+      () => {
+        gh.pulls[`${DS}#7`] = appPull({ base: { ref: "main", repo: undefined } });
+      },
+      "pr-unreadable",
+    ],
+    [
+      "the base's repository is named by a number",
+      () => {
+        gh.pulls[`${DS}#7`] = appPull({ base: { ref: "main", repo: { full_name: 5 as never } } });
+      },
+      "pr-unreadable",
+    ],
     [
       "GitHub answers for another number",
       () => {

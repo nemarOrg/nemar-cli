@@ -17,8 +17,8 @@
  * The properties, each with a test of its own:
  *  - a machine-clean row is merged once, by squash, at the screened head, with the gate's message,
  *    and only after its claim and its audit row are written; the merge is recorded;
- *  - the merge switch, the cap, the bound and every fact that is not clean (an unknown one
- *    included) each hold before anything is claimed or sent;
+ *  - the merge switch, the cap, the bound and a fact that is not clean each hold before anything
+ *    is claimed or sent;
  *  - an administrator's row is never merged, and nothing outside exact production is read;
  *  - GitHub's refusal and an answer that was lost each keep the claim, under their own words;
  *  - a claim the Worker holds is resolved from GitHub's word on a later tick, and a merge is sent
@@ -556,189 +556,22 @@ describe("the switches, the cap and the bound hold before anything is claimed or
 });
 
 describe("a fact that is not clean holds before the claim, and nothing is sent", () => {
-  const cases: Array<[string, () => void, string]> = [
-    [
-      "a fork",
-      () => {
-        gh.pulls[`${DS}#7`] = appPull(DS, {
-          head: { sha: HEAD, ref: "release/v2.0.0", repo: { full_name: "someone/on098811" } },
-        });
-      },
-      "pr-mismatch",
-    ],
-    [
-      "a deleted fork",
-      () => {
-        gh.pulls[`${DS}#7`] = appPull(DS, {
-          head: { sha: HEAD, ref: "release/v2.0.0", repo: null },
-        });
-      },
-      "pr-mismatch",
-    ],
-    [
-      "a foreign branch",
-      () => {
-        gh.pulls[`${DS}#7`] = appPull(DS, {
-          head: { sha: HEAD, ref: "add-subjects", repo: { full_name: `nemarDatasets/${DS}` } },
-        });
-      },
-      "pr-mismatch",
-    ],
-    [
-      "a draft",
-      () => {
-        gh.pulls[`${DS}#7`] = appPull(DS, { draft: true });
-      },
-      "pr-draft",
-    ],
-    [
-      "another author",
-      () => {
-        gh.pulls[`${DS}#7`] = appPull(DS, { user: { login: "someone", id: 4242, type: "User" } });
-      },
-      "pr-not-app",
-    ],
-    [
-      "a moved head",
-      () => {
-        gh.pulls[`${DS}#7`] = appPull(DS, {
-          head: { sha: OTHER, ref: "release/v2.0.0", repo: { full_name: `nemarDatasets/${DS}` } },
-        });
-      },
-      "head-moved",
-    ],
-    [
-      "a moved main",
-      () => {
-        gh.mainRefs[DS] = OTHER;
-      },
-      "main-moved",
-    ],
-    [
-      "a pull request merged by another hand",
-      () => {
-        gh.pulls[`${DS}#7`] = appPull(DS, { state: "closed", merged: true });
-      },
-      "pr-closed",
-    ],
-    [
-      "BIDS validation failed",
-      () => {
-        gh.checkRuns[`${DS}@${HEAD}`] = [
-          { ...BIDS_RUN, conclusion: "failure" },
-          { ...VERSION_RUN },
-        ];
-      },
-      "bids-failed",
-    ],
-    [
-      "version-check still running",
-      () => {
-        gh.checkRuns[`${DS}@${HEAD}`] = [
-          { ...BIDS_RUN },
-          { ...VERSION_RUN, status: "in_progress", conclusion: null },
-        ];
-      },
-      "version-check-pending",
-    ],
-    ["a screen that asks for a person", () => markScreen(1, DS, "review"), "screen-acknowledge"],
-    ["a review that failed", () => review(DS, "fail"), "review-not-pass"],
-    [
-      "GitHub reports it unstable",
-      () => {
-        gh.pulls[`${DS}#7`] = appPull(DS, { mergeable_state: "unstable" });
-      },
-      "not-clean",
-    ],
-    [
-      "GitHub reports it blocked",
-      () => {
-        gh.pulls[`${DS}#7`] = appPull(DS, { mergeable_state: "blocked" });
-      },
-      "not-clean",
-    ],
-    // Unknown is never clean.
-    [
-      "GitHub has not computed a mergeable state",
-      () => {
-        gh.pulls[`${DS}#7`] = appPull(DS, { mergeable_state: null });
-      },
-      "not-clean",
-    ],
-    [
-      "GitHub says the state is unknown",
-      () => {
-        gh.pulls[`${DS}#7`] = appPull(DS, { mergeable_state: "unknown" });
-      },
-      "not-clean",
-    ],
-    [
-      "the pull request cannot be read",
-      () => {
-        gh.pulls[`${DS}#7`] = { status: 500 };
-      },
-      "pr-unreadable",
-    ],
-    [
-      "the pull request reads in another shape",
-      () => {
-        gh.pulls[`${DS}#7`] = appPull(DS, { omit: ["user"] });
-      },
-      "pr-unreadable",
-    ],
-    [
-      "main cannot be read",
-      () => {
-        gh.mainRefs[DS] = 502;
-      },
-      "main-unreadable",
-    ],
-    [
-      "the checks cannot be read",
-      () => {
-        gh.checkRuns[`${DS}@${HEAD}`] = 500;
-      },
-      "checks-unreadable",
-    ],
-    // GitHub always names both repositories; an answer that does not, or not as a name, is
-    // unreadable, never read as the dataset's own.
-    [
-      "the head's repository is not named",
-      () => {
-        gh.pulls[`${DS}#7`] = appPull(DS, {
-          head: { sha: HEAD, ref: "release/v2.0.0", repo: undefined },
-        });
-      },
-      "pr-unreadable",
-    ],
-    [
-      "the head's repository has no name",
-      () => {
-        gh.pulls[`${DS}#7`] = appPull(DS, {
-          head: { sha: HEAD, ref: "release/v2.0.0", repo: {} as never },
-        });
-      },
-      "pr-unreadable",
-    ],
-    [
-      "the base's repository is not named",
-      () => {
-        gh.pulls[`${DS}#7`] = appPull(DS, { base: { ref: "main", repo: undefined } });
-      },
-      "pr-unreadable",
-    ],
-    [
-      "the base's repository is named by a number",
-      () => {
-        gh.pulls[`${DS}#7`] = appPull(DS, {
-          base: { ref: "main", repo: { full_name: 5 as never } },
-        });
-      },
-      "pr-unreadable",
-    ],
-    ["no screen of the head", () => db.run("DELETE FROM upstream_repull_screens"), "screen-rerun"],
-    ["no review of the head", () => db.run("DELETE FROM pr_reviews"), "review-absent"],
-  ];
+  // Each rule's word is pinned where the facts are read (upstream-repull-facts.test.ts); one
+  // case shows the merge applies the rule before its claim.
+  test("GitHub's word, the last rule, unknown: not-clean", async () => {
+    const id = ready();
+    gh.pulls[`${DS}#7`] = appPull(DS, { mergeable_state: null });
+    const r = await tick();
+    expect(r).toMatchObject({ examined: 1, mergesSent: 0, merged: 0, held: { "not-clean": 1 } });
+    expect(rowOf(id)).toMatchObject({
+      status: "gates_clear",
+      hold_reason: "not-clean",
+      merge_claim_sha: null,
+    });
+    expect(gh.merges).toEqual([]);
+    expect(usedToday()).toBe(0);
+    expect(auditsOf(WORKER_MERGE_ACTION, id)).toEqual([]);
+  });
 
   test("GitHub unreadable at the claim's own read of the live head: pr-unreadable, nothing claimed", async () => {
     const id = ready();
@@ -822,24 +655,6 @@ describe("a fact that is not clean holds before the claim, and nothing is sent",
     expect(rowOf(id)).toMatchObject({ hold_reason: "head-moved", merge_claim_sha: null });
     expect(gh.merges).toEqual([]);
   });
-
-  for (const [name, flip, word] of cases) {
-    test(`${name}: ${word}`, async () => {
-      const id = ready();
-      expect(id).toBe(1);
-      flip();
-      const r = await tick();
-      expect(r).toMatchObject({ examined: 1, mergesSent: 0, merged: 0, held: { [word]: 1 } });
-      expect(rowOf(id)).toMatchObject({
-        status: "gates_clear",
-        hold_reason: word,
-        merge_claim_sha: null,
-      });
-      expect(gh.merges).toEqual([]);
-      expect(usedToday()).toBe(0);
-      expect(auditsOf(WORKER_MERGE_ACTION, id)).toEqual([]);
-    });
-  }
 });
 
 describe("the Worker never merges an administrator's re-pull, and acts only in production", () => {
