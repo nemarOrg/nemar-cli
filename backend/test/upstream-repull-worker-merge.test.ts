@@ -48,9 +48,11 @@ import {
   runRepullAdvanceCron,
 } from "../src/services/upstream-repull-advance";
 import {
+  CLAIM_OWNER_SQL,
   FINISH_DISPATCHES_MAX,
   FINISH_DISPATCHES_SQL,
   WORKER_MERGES_MAX,
+  WORKER_MERGES_SQL,
   WORKER_MERGE_ACTION,
   WORKER_MERGE_ANSWER_ACTION,
   WORKER_MERGE_SENT_SQL,
@@ -1539,6 +1541,33 @@ describe("the rows past their gates share one rotation, five a tick", () => {
     expect(finishDispatches(merged)).toHaveLength(1);
     expect(sentRuns().map((p) => p.dataset_id)).toEqual([ds]);
     expect(held.every((id) => rowOf(id).hold_reason === "merge-switch-off")).toBe(true);
+  });
+});
+
+describe("every audit resource id is compared as text", () => {
+  // D1 can deliver a bound number as REAL, whose text is `5.0` and matches no `resource_id`;
+  // SQLite under Bun coerces the number to the column's text, so only the bind's type shows it.
+  test("each statement that compares resource_id is bound a string at that parameter", async () => {
+    const id = ready();
+    const seen = new Set<string>();
+    const wrong: string[] = [];
+    // The hook records rather than throws: the code under test catches some failures (an
+    // answer's audit row), and a throw there would be swallowed.
+    const watching = interceptingD1(realD1(db), (sql, binds) => {
+      for (const m of sql.matchAll(/resource_id\s*=\s*\?(\d+)/g)) {
+        seen.add(sql);
+        if (typeof binds[Number(m[1]) - 1] !== "string") wrong.push(`${sql} ?${m[1]}`);
+      }
+    });
+    gh.mergeAnswer = { status: 502 };
+    // The claim, the merge's audit row, the merge and an answer that was lost.
+    await tick(env({}, watching));
+    gh.mergeAnswer = null;
+    // The held claim: its owner and its merges are read, and the merge is sent again.
+    await tick(env({}, watching));
+    expect(wrong).toEqual([]);
+    expect(seen).toEqual(new Set([WORKER_MERGE_SENT_SQL, WORKER_MERGES_SQL, CLAIM_OWNER_SQL]));
+    expect(rowOf(id).merge_claim_sha).toBe(HEAD);
   });
 });
 

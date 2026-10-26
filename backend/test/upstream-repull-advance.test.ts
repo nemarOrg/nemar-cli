@@ -61,6 +61,7 @@ import {
   RESUME_WINDOW_UTC,
   REVIEW_RETRY_MINUTES,
   ROW_DISPATCHES_SQL,
+  SCREEN_DISPATCHES_SQL,
   advanceSelection,
   inResumeWindow,
   repullAdvanceLogLine,
@@ -784,6 +785,19 @@ describe("which rows a tick reads", () => {
 // ----------------------------------------------------------------------------
 
 describe("the gates of an automatic pull request", () => {
+  test("the screen's dispatch count binds the re-pull's id as text", async () => {
+    // D1 can deliver a bound number as REAL, which would match no `resource_id`; SQLite under Bun
+    // coerces it, so only the bind's type shows it.
+    const id = openRow();
+    markScreen(id, "error");
+    const bound: unknown[] = [];
+    const watching = interceptingD1(realD1(db), (sql, binds) => {
+      if (sql === SCREEN_DISPATCHES_SQL) bound.push(binds[0]);
+    });
+    await tick(env({}, watching));
+    expect(bound).toEqual([String(id)]);
+  });
+
   test("with no screen, the screen is dispatched for the head; the review waits for it to clear", async () => {
     const id = openRow();
     const r = await tick();
