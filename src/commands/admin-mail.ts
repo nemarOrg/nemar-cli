@@ -153,7 +153,7 @@ export const MAIL_ERROR_GUIDANCE: Record<MailErrorCode, string> = {
   block_sender_unverified:
     "The sender was not verified (DMARC did not pass), so its address may be forged. A domain is never blocked for such a sender; to block the address anyway, repeat with --force.",
   block_not_allowed:
-    "That sender cannot be blocked: our own domain is never blocked, nor the domain of a shared mailbox provider (block the address instead).",
+    "That sender cannot be blocked: our own domain is never blocked, nor the domain of a shared mailbox provider or a public suffix (block the address instead). Those lists are best effort and not exhaustive, so think before blocking any domain.",
   inbound_not_configured:
     "This deployment has no inbound mail bucket, so there is nothing to reprocess.",
   internal: "The mail routes failed unexpectedly; try again, and report it if it keeps happening.",
