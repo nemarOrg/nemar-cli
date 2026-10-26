@@ -779,8 +779,8 @@ describe("merges are counted by who held the claim, from the audit rows the writ
     openPatch(rec);
     await claim(rec, ADMIN, "n1");
     await record(rec, "n1", ADMIN);
-    // Each merge takes the latest claim edge BEFORE it: the first is not the administrator's later
-    // claim, and the second is not the Worker's earlier one.
+    // Each merge takes the latest claim edge of its own pull request BEFORE it: the first is not
+    // the administrator's later claim, and the second is not the Worker's earlier one.
     expect(mergedEdges(rec.id)).toEqual([
       "gates_clear > merged",
       "patch_gates_clear > patch_merged",
@@ -792,6 +792,49 @@ describe("merges are counted by who held the claim, from the audit rows the writ
       unattributed: 0,
     });
   });
+
+  for (const [who, claimant] of [
+    ["an administrator's", ADMIN],
+    ["the Worker's", SYSTEM_USER_ID],
+  ] as const) {
+    test(`N.0.1's merge, with its own claim edge lost, is unattributed and not ${who} claim on N.0.0`, async () => {
+      const rec = ready("gates_clear");
+      await claim(rec, claimant, "n0");
+      await record(rec, "n0", ADMIN);
+      openPatch(rec);
+      await claim(rec, ADMIN, "n1");
+      // The audit row of N.0.1's claim is lost; N.0.0's stays, and it is not N.0.1's claim.
+      db.run(
+        `DELETE FROM audit_log
+          WHERE action = 'repull_transition' AND resource_id = ?
+            AND json_extract(details, '$.from') = 'patch_gates_clear'
+            AND json_extract(details, '$.to') = 'patch_gates_clear'`,
+        [String(rec.id)],
+      );
+      await record(rec, "n1", ADMIN);
+      // The premise: the log holds N.0.0's claim edge and no other, and both merges.
+      const claimEdges = db
+        .query<{ edge: string }, [string]>(
+          `SELECT json_extract(details, '$.to') AS edge FROM audit_log
+            WHERE action = 'repull_transition' AND resource_id = ?
+              AND json_extract(details, '$.from') = json_extract(details, '$.to')
+              AND json_extract(details, '$.to') IN ('gates_clear', 'patch_gates_clear')`,
+        )
+        .all(String(rec.id))
+        .map((r) => r.edge);
+      expect(claimEdges).toEqual(["gates_clear"]);
+      expect(mergedEdges(rec.id)).toEqual([
+        "gates_clear > merged",
+        "patch_gates_clear > patch_merged",
+      ]);
+      expect(await counts()).toEqual({
+        worker: claimant === SYSTEM_USER_ID ? 1 : 0,
+        administrator: claimant === ADMIN ? 1 : 0,
+        outside_tool: 0,
+        unattributed: 1,
+      });
+    });
+  }
 
   test("a claim the audit log does not hold is unattributed, never the Worker's", async () => {
     await merged({ claimant: SYSTEM_USER_ID });

@@ -93,9 +93,10 @@ const TERMINAL_LIST = quoted(TERMINAL_STATUSES);
  *    errors write an edge from `merged` to `merged` (and the same for `patch_merged`) whenever a
  *    tag or a version row is not there yet, and that is not a merge, so a row whose edge ends where
  *    it began is not counted. Whether any NEMAR tool held a claim is in that row
- *    (`merged_outside_tool`), and who held it is the user of the latest claim edge (the
- *    gates-clear self-edge) before it: the system user is the Worker, anyone else is an
- *    administrator's tool, and none is a claim the audit log does not hold.
+ *    (`merged_outside_tool`), and who held it is the user of the latest claim edge before it, the
+ *    claim of the pull request that merged (the `gates_clear` self-edge for N.0.0's merge, the
+ *    `patch_gates_clear` one for N.0.1's, never the other's): the system user is the Worker,
+ *    anyone else is an administrator's tool, and none is a claim the audit log does not hold.
  *  - `failed`: the re-pulls that ended `failed` in the window.
  */
 export const REPULL_WEEK_SQL = {
@@ -125,7 +126,9 @@ export const REPULL_WEEK_SQL = {
           (SELECT c.user_id FROM audit_log c
             WHERE c.action = 'repull_transition' AND c.resource_type = 'upstream_repull'
               AND c.resource_id = a.resource_id
-              AND json_extract(c.details, '$.to') IN ('gates_clear', 'patch_gates_clear')
+              AND json_extract(c.details, '$.to') = CASE
+                    WHEN json_extract(a.details, '$.to') = 'patch_merged' THEN 'patch_gates_clear'
+                    ELSE 'gates_clear' END
               AND json_extract(c.details, '$.from') = json_extract(c.details, '$.to')
               AND c.id < a.id
             ORDER BY c.id DESC LIMIT 1) AS claimant

@@ -157,6 +157,15 @@ describe("the week's statements on D1", () => {
     await audit(15, 7, "gates_clear", "merged", at(-DAY), { merged_outside_tool: false });
     // A merge before the window is an earlier week's.
     await audit(16, 7, "pr_open", "merged", at(-10 * DAY), { merged_outside_tool: true });
+    // N.0.0 on an administrator's claim, and N.0.1 merged with its own claim edge lost: the second
+    // is unattributed, and is not the administrator's claim on the other pull request.
+    await audit(17, 7, "gates_clear", "gates_clear", at(-3 * DAY));
+    await audit(17, 7, "gates_clear", "merged", at(-3 * DAY + 60_000), {
+      merged_outside_tool: false,
+    });
+    await audit(17, 7, "patch_gates_clear", "patch_merged", at(-DAY), {
+      merged_outside_tool: false,
+    });
 
     const week = await gatherRepullWeek(
       { DB: d1 },
@@ -177,7 +186,7 @@ describe("the week's statements on D1", () => {
     });
     expect(week.held_claims).toBe(1);
     expect(week.ended_failed).toBe(1);
-    expect(week.merged).toEqual({ worker: 1, administrator: 2, outside_tool: 1, unattributed: 1 });
+    expect(week.merged).toEqual({ worker: 1, administrator: 3, outside_tool: 1, unattributed: 2 });
   });
 
   test("the whole facts, switches and scheduler included, are read on D1", async () => {
