@@ -26,8 +26,11 @@
  *    not settled), read by the rule's own reader; a row that fails one holds with its word;
  *  - a last run that `refused` holds `resume-refused`: it said in a fixed word why it would not go
  *    on, and another run would meet the same refusal, so an administrator looks;
- *  - fewer than {@link AUTOMATIC_RESUMES_MAX} `open` dispatches for the row, the first one that
- *    created it included and one GitHub refused included, or it holds `resume-exhausted`;
+ *  - fewer than {@link AUTOMATIC_OPEN_DISPATCHES_MAX} `open` dispatches for the row, or it holds
+ *    `resume-exhausted`. The one that created the row counts, so a row is resumed twice at most;
+ *    a run that failed or never reported counts, and so does a send GitHub refused for its payload
+ *    or its target (404, 422); a send GitHub turned away for the Worker's credential, permission
+ *    or rate (any other 4xx, `dispatch-deferred`) does not, since nothing about the row was tried;
  *  - the row has not moved for {@link RESUME_QUIET_MINUTES} minutes, and the UTC hour is within
  *    {@link RESUME_WINDOW_UTC}, so the run opens its pull request on the UTC day whose unit of the
  *    open cap it claims (the timing the dispatch record's open cap relies on); otherwise it waits;
@@ -35,7 +38,8 @@
  *    `REPULL_DAILY_OPEN_CAP` in the statement that claims, so a resume can never pass the cap; a
  *    full day holds `cap-exhausted` and no later row of the tick claims;
  *  - the send, as the scheduler sends a first dispatch: GitHub's 4xx ends the claim as
- *    `dispatch_failed` (its unit freed) and stops the tick's sends, and a lost answer keeps it.
+ *    `dispatch_failed` (its unit freed, its code `dispatch-refused` or `dispatch-deferred`) and
+ *    stops the tick's sends, and a lost answer keeps the dispatch and its unit.
  * The run continues the row the dispatch names; the automatic create returns that row to it and
  * never a second one.
  *
@@ -148,10 +152,18 @@ export const ADVANCE_STATUSES = [
 ] as const satisfies readonly RepullStatus[];
 
 /**
- * The `open` dispatches one row may have, at most: the first, which created it, and two resumes.
- * GitHub refusing one before it ran still counts, so a refusal that repeats cannot dispatch for ever.
+ * The `open` dispatches one row may have, at most. The first, which created the row, is one of
+ * them, so a row is resumed twice at most. A dispatch counts when its run ran (it failed, refused
+ * or never reported) or when GitHub refused the send for its payload or its target (404, 422), so a
+ * refusal that repeats cannot dispatch for ever; one GitHub turned away for the Worker's credential,
+ * permission or rate (`dispatch-deferred`) does not count. The bound relies on the creating
+ * dispatch being linked to the row, which the automatic create does in the batch that inserts the
+ * row and which rolls back without it, so an automatic row is never without it.
  */
-export const AUTOMATIC_RESUMES_MAX = 3;
+export const AUTOMATIC_OPEN_DISPATCHES_MAX = 3;
+
+/** GitHub's answers to a send that say the dispatch itself was refused, and so spend an attempt. */
+const REFUSED_FOR_THE_DISPATCH: ReadonlySet<number> = new Set([404, 422]);
 
 /**
  * The UTC hours a resume is dispatched in, both included. The daily first dispatches go at 03:00
@@ -209,12 +221,14 @@ export const ADVANCE_ROWS_SQL = `SELECT id, status FROM upstream_repulls
 
 /**
  * A row's dispatches, as one row of facts: `?1` its dataset, `?2` its id. `live` counts the
- * dataset's live dispatches (a run is out for it); `opens` the row's `open` dispatches, every status
- * included; `last_status` the status of its latest one, NULL when it has none.
+ * dataset's live dispatches (a run is out for it); `opens` the row's `open` dispatches that spend an
+ * attempt, every one but a send GitHub turned away for the Worker (`dispatch-deferred`);
+ * `last_status` the status of its latest one, by id, NULL when it has none.
  */
 export const ROW_DISPATCHES_SQL = `SELECT
   (SELECT COUNT(*) FROM upstream_repull_dispatches WHERE dataset_id = ?1 AND nonce IS NOT NULL) AS live,
-  (SELECT COUNT(*) FROM upstream_repull_dispatches WHERE repull_id = ?2 AND kind = 'open') AS opens,
+  (SELECT COUNT(*) FROM upstream_repull_dispatches WHERE repull_id = ?2 AND kind = 'open'
+    AND NOT (status = 'dispatch_failed' AND code = 'dispatch-deferred')) AS opens,
   (SELECT status FROM upstream_repull_dispatches WHERE repull_id = ?2 AND kind = 'open'
     ORDER BY id DESC LIMIT 1) AS last_status`;
 
@@ -274,6 +288,7 @@ export const ADVANCE_FAILURES = [
   "dispatch-unconfigured",
   "dispatch-failed",
   "dispatch-refused",
+  "dispatch-deferred",
   "cli-unreleased",
   "no-github-token",
   "cap-unreadable",
@@ -507,6 +522,53 @@ async function resume(t: Tick, row: RepullRow): Promise<HoldReason | null> {
         return null;
     }
   }
+  const sent = await sendResumeDispatch(env, row, claim, pat, {
+    cliVersion: t.cliVersion,
+    timeoutMs: t.dispatchTimeoutMs,
+  });
+  switch (sent.kind) {
+    case "sent":
+      r.resumed++;
+      return null;
+    case "unknown":
+      r.unconfirmed++;
+      return null;
+    case "unbuilt":
+      r.errors.push("dispatch-failed");
+      r.errorClass = sent.errorClass;
+      return null;
+    case "refused":
+      r.errors.push(sent.code);
+      t.sendStopped = true;
+      return null;
+  }
+}
+
+/** What sending a claimed resume came to. */
+export type ResumeSend =
+  /** GitHub took it. */
+  | { kind: "sent" }
+  /** Its answer was lost: the dispatch stays `dispatched` and keeps its unit, as it may be running. */
+  | { kind: "unknown" }
+  /** GitHub refused it (a 4xx): the claim is ended `dispatch_failed` with this code, its unit freed. */
+  | { kind: "refused"; status: number; code: "dispatch-refused" | "dispatch-deferred" }
+  /** Its payload could not be built: nothing was sent, and the claim is ended `dispatch-failed`. */
+  | { kind: "unbuilt"; errorClass: string };
+
+/**
+ * Build and send the dispatch that resumes `row` under `claim`, and end the claim when nothing ran:
+ * a payload that cannot be built (every field was checked before the claim, so this guards drift
+ * between the two checks) ends it `dispatch-failed`; GitHub's refusal of the dispatch itself (404,
+ * 422) ends it `dispatch-refused`, which spends one of the row's dispatches, and any other 4xx,
+ * about the Worker's credential, permission or rate, ends it `dispatch-deferred`, which does not.
+ */
+export async function sendResumeDispatch(
+  env: Bindings,
+  row: Pick<RepullRow, "id" | "dataset_id" | "upstream_ds" | "from_tag" | "to_tag">,
+  claim: { id: number; token: string },
+  pat: string,
+  opts: { cliVersion: string; timeoutMs: number },
+): Promise<ResumeSend> {
   let payload: ReturnType<typeof buildUpstreamRepullPayload>;
   try {
     payload = buildUpstreamRepullPayload({
@@ -518,28 +580,20 @@ async function resume(t: Tick, row: RepullRow): Promise<HoldReason | null> {
       dispatchId: claim.id,
       repullId: row.id,
       token: claim.token,
-      cliVersion: t.cliVersion,
+      cliVersion: opts.cliVersion,
     });
   } catch (err) {
     // Nothing was sent: the claim must not hold its unit and the live slot until the watchdog.
     await markDispatchSendFailed(env.DB, claim.id, "dispatch-failed");
-    r.errors.push("dispatch-failed");
-    r.errorClass = errorClassName(err);
-    return null;
+    return { kind: "unbuilt", errorClass: errorClassName(err) };
   }
-  const sent = await triggerUpstreamRepullRun(payload, pat, { timeoutMs: t.dispatchTimeoutMs });
-  if (sent === "sent") {
-    r.resumed++;
-    return null;
-  }
-  if (sent === "unknown") {
-    r.unconfirmed++;
-    return null;
-  }
-  await markDispatchSendFailed(env.DB, claim.id, "dispatch-refused");
-  r.errors.push("dispatch-refused");
-  t.sendStopped = true;
-  return null;
+  const sent = await triggerUpstreamRepullRun(payload, pat, { timeoutMs: opts.timeoutMs });
+  if (sent === "sent" || sent === "unknown") return { kind: sent };
+  const code = REFUSED_FOR_THE_DISPATCH.has(sent.refused)
+    ? "dispatch-refused"
+    : "dispatch-deferred";
+  await markDispatchSendFailed(env.DB, claim.id, code);
+  return { kind: "refused", status: sent.refused, code };
 }
 
 /** A row that stalled before its pull request opened: resume it, or say why it waits. */
@@ -563,7 +617,7 @@ async function advanceStalled(t: Tick, row: RepullRow): Promise<void> {
     r.waiting++;
     return observe(t, row, null);
   }
-  if (d.opens >= AUTOMATIC_RESUMES_MAX) return observe(t, row, "resume-exhausted");
+  if (d.opens >= AUTOMATIC_OPEN_DISPATCHES_MAX) return observe(t, row, "resume-exhausted");
   if (!inResumeWindow(t.now) || !quietSince(row.updated_at, t.now) || t.sendStopped) {
     r.waiting++;
     return observe(t, row, null);

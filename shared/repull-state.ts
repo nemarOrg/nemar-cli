@@ -637,6 +637,10 @@ export const DISPATCH_CODES = [
   "dispatch-unconfigured",
   "dispatch-refused",
   "dispatch-failed",
+  // GitHub turned a resume's send away for a reason about the Worker rather than the dispatch (its
+  // credential, its permission, a rate limit): nothing ran, and it spends none of the row's
+  // dispatches.
+  "dispatch-deferred",
   // The Worker's answers to a run's report, which the run may pass on when it then fails.
   "invalid-token",
   "already-started",
