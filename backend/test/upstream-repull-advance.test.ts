@@ -38,6 +38,7 @@ import { verifyRepullDispatchToken } from "../src/services/github";
 import { __resetRateLimitStateForTests } from "../src/services/github/transport";
 import {
   CREATE_FACTS_SQL,
+  REPULL_BY_ID_SQL,
   getRepull,
   isRefusal,
   transitionRepull,
@@ -45,6 +46,7 @@ import {
 import {
   ADVANCE_FAILURES,
   ADVANCE_ROWS_PER_TICK,
+  ADVANCE_ROWS_SQL,
   ADVANCE_TICK_MINUTES,
   AUTOMATIC_OPEN_DISPATCHES_MAX,
   AUTOMATIC_SCREENS_MAX,
@@ -408,7 +410,7 @@ describe("with the open switch off GitHub is asked nothing", () => {
       [DS, `ds${DS.slice(2)}`, id, "n".repeat(36)],
     );
     const r = await tick(env({ AUTO_REPULL_ENABLED: undefined }));
-    expect(r).toMatchObject({ waiting: 0, held: { "switch-off": 1 } });
+    expect(r).toMatchObject({ running: 0, held: { "switch-off": 1 } });
     expect(rowOf(id).hold_reason).toBe("switch-off");
   });
 
@@ -604,7 +606,7 @@ describe("a hold is the first rule that does not hold", () => {
       [DS, `ds${DS.slice(2)}`, id, "n".repeat(36)],
     );
     const r = await tick();
-    expect(r).toMatchObject({ examined: 1, waiting: 1, held: {}, holdsChanged: 1 });
+    expect(r).toMatchObject({ examined: 1, running: 1, held: {}, holdsChanged: 1 });
     expect(githubRequests()).toEqual([]);
     expect(rowOf(id)).toMatchObject({ hold_reason: null, hold_since: null });
     expect(JSON.parse(String(holdAudits(id)[0]?.details))).toMatchObject({
@@ -1104,6 +1106,60 @@ describe("the gates of an automatic pull request", () => {
 // What the tick says
 // ----------------------------------------------------------------------------
 
+describe("a failure", () => {
+  test("of one row is named by its id, and the next row is still taken up", async () => {
+    const first = openRow();
+    moveMain();
+    const second = openRow("on098802");
+    moveMain("on098802");
+    const failing = interceptingD1(realD1(db), (sql, binds) => {
+      if (sql === REPULL_BY_ID_SQL && binds[0] === first) throw new Error(`a message about ${DS}`);
+    });
+    const logged: string[] = [];
+    const original = console.error;
+    console.error = (...args: unknown[]) => {
+      logged.push(args.map(String).join(" "));
+    };
+    let r: AdvanceTickResult;
+    try {
+      r = await tick(env({}, failing));
+    } finally {
+      console.error = original;
+    }
+    expect(r).toMatchObject({ examined: 1, errors: ["row-failed"], errorClass: "Error" });
+    expect(rowOf(second).hold_reason).toBe("main-moved");
+    expect(rowOf(first).hold_reason).toBeNull();
+    const line = logged.find((l) => l.startsWith("[repull-advance]"));
+    expect(line).toBe(`[repull-advance] re-pull ${first}: its step failed (Error)`);
+    expect(logged.join("\n")).not.toContain(DS);
+    // The tick went through its rows, so it is stamped.
+    expect(
+      (
+        db.query("SELECT last_advance_at FROM upstream_repull_scheduler").get() as {
+          last_advance_at: string | null;
+        }
+      ).last_advance_at,
+    ).not.toBeNull();
+  });
+
+  test("of the tick itself, before any row, leaves the stamp alone", async () => {
+    openRow();
+    const failing = interceptingD1(realD1(db), (sql) => {
+      if (sql === ADVANCE_ROWS_SQL) throw new Error("the list could not be read");
+    });
+    const r = await tick(env({}, failing));
+    expect(r).toMatchObject({ examined: 0, errors: ["tick-failed"] });
+    expect(
+      (
+        db.query("SELECT last_advance_at FROM upstream_repull_scheduler").get() as {
+          last_advance_at: string | null;
+        }
+      ).last_advance_at,
+    ).toBeNull();
+    expect(repullAdvanceLogLine(r)?.level).toBe("error");
+  });
+});
+
 describe("the log line", () => {
   test("says nothing when nothing changed, and counts when something did", async () => {
     openRow();
@@ -1111,7 +1167,7 @@ describe("the log line", () => {
     const r = await tick();
     expect(repullAdvanceLogLine(r)).toEqual({
       level: "info",
-      line: "[repull-advance] examined=1 waiting=0 screens=0 reviews=0 review_refused=none gates_cleared=0 resumed=0 unconfirmed=0 holds_changed=1 held=main-moved:1 refused=none",
+      line: "[repull-advance] examined=1 running=0 not_due=0 screens=0 reviews=0 review_refused=none gates_cleared=0 resumed=0 unconfirmed=0 holds_changed=1 held=main-moved:1 refused=none",
     });
     expect(repullAdvanceLogLine(await tick())).toBeNull();
   });
@@ -1255,7 +1311,7 @@ describe("a stalled automatic re-pull is resumed", () => {
     endedDispatch(id, "failed");
     await resumeTick(TEN());
     const r = await resumeTick(new Date(TEN().getTime() + HALF_HOUR));
-    expect(r).toMatchObject({ resumed: 0, waiting: 1 });
+    expect(r).toMatchObject({ resumed: 0, running: 1 });
     expect(dispatched("run-upstream-repull")).toHaveLength(1);
   });
 
@@ -1270,7 +1326,7 @@ describe("a stalled automatic re-pull is resumed", () => {
     // The run's own create refuses an anonymous dataset; the tick does not speak for the run.
     db.run("UPDATE datasets SET first_published_at = NULL, anonymous = 1");
     const r = await resumeTick(TEN());
-    expect(r).toMatchObject({ resumed: 0, waiting: 1, held: {} });
+    expect(r).toMatchObject({ resumed: 0, running: 1, held: {} });
     expect(rowOf(id).hold_reason).toBeNull();
   });
 
@@ -1305,7 +1361,7 @@ describe("a stalled automatic re-pull is resumed", () => {
   test(`a row that moved within ${RESUME_QUIET_MINUTES} minutes waits`, async () => {
     const id = stalled("copied", TEN(), { quietMinutes: RESUME_QUIET_MINUTES - 1 });
     endedDispatch(id, "failed");
-    expect(await resumeTick(TEN())).toMatchObject({ resumed: 0, waiting: 1 });
+    expect(await resumeTick(TEN())).toMatchObject({ resumed: 0, notDue: 1 });
     expect(gh.dispatches).toEqual([]);
   });
 
@@ -1450,7 +1506,7 @@ describe("a stalled automatic re-pull is resumed", () => {
       [d1Time(new Date(TEN().getTime() + 5 * 60_000))],
     );
     const next = await resumeTick(new Date(TEN().getTime() + HALF_HOUR));
-    expect(next).toMatchObject({ resumed: 0, waiting: 1 });
+    expect(next).toMatchObject({ resumed: 0, notDue: 1 });
     expect(dispatched("run-upstream-repull")).toHaveLength(1);
     // An hour after that failure it is resumed again.
     const later = await resumeTick(new Date(TEN().getTime() + 65 * 60_000));
@@ -1569,7 +1625,7 @@ describe("a stalled automatic re-pull is resumed", () => {
     endedDispatch(b, "failed", "on098802");
     gh.dispatchStatus = 422;
     const r = await resumeTick(TEN());
-    expect(r).toMatchObject({ resumed: 0, waiting: 1, errors: ["dispatch-refused"] });
+    expect(r).toMatchObject({ resumed: 0, notDue: 1, errors: ["dispatch-refused"] });
     expect(dispatchesOf(a).at(-1)).toMatchObject({
       status: "dispatch_failed",
       code: "dispatch-refused",
@@ -1610,7 +1666,7 @@ describe("a stalled automatic re-pull is resumed", () => {
       [DS, `ds${DS.slice(2)}`, id, "n".repeat(36)],
     );
     const r = await resumeTick(TEN(), env({ AUTO_REPULL_ENABLED: undefined }));
-    expect(r).toMatchObject({ waiting: 0, held: { "switch-off": 1 } });
+    expect(r).toMatchObject({ running: 0, held: { "switch-off": 1 } });
   });
 
   test("a development build resumes nothing", async () => {

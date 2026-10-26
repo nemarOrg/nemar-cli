@@ -90,7 +90,7 @@
  * the 30-minute tick's production block, absent from `DEV_CRON_ALLOWLIST`. In production with
  * `AUTO_REPULL_ENABLED` not exactly `"1"`, GitHub is asked nothing, nothing is claimed or sent,
  * and every row it examines is held `switch-off`, a row a run is still out for included. Each
- * production tick stamps `upstream_repull_scheduler.last_advance_at`.
+ * production tick that could list its rows stamps `upstream_repull_scheduler.last_advance_at`.
  *
  * COST on the 30-minute tick, which shares one subrequest allowance with every job on it, measured
  * over five rows at `pr_open` (`upstream-repull-advance.test.ts` pins it): 67 D1 statements and 25
@@ -309,8 +309,17 @@ export type AdvanceFailure = (typeof ADVANCE_FAILURES)[number];
 export interface AdvanceTickResult {
   /** Rows the tick looked at. */
   examined: number;
-  /** Of them, rows a live dispatch is working on, which were left alone. */
-  waiting: number;
+  /**
+   * Of them, rows a run is out for (a live dispatch of the dataset, or one that started while the
+   * tick claimed): nothing was read for them from GitHub, and any hold they had was cleared.
+   */
+  running: number;
+  /**
+   * Of them, stalled rows whose resume is not due this tick, their holds cleared: the row or its
+   * last dispatch moved within the quiet time, the tick's sends stopped after a refusal, or the last
+   * dispatch is in a state no resume follows.
+   */
+  notDue: number;
   /** Identifier screens dispatched. */
   screensStarted: number;
   /** ADR 0107 reviews dispatched. */
@@ -537,7 +546,7 @@ async function resume(t: Tick, row: RepullRow): Promise<HoldReason | null> {
         return null;
       case "live":
         // A run started for the dataset meanwhile: it is working on this row.
-        r.waiting++;
+        r.running++;
         return null;
       default:
         // `row` (and `open-row`, which a resume cannot meet): the claim's own statement does not
@@ -628,7 +637,7 @@ async function advanceStalled(t: Tick, row: RepullRow): Promise<void> {
   const d = await rowDispatches(env.DB, row);
   // A run is out for the dataset: it is working on this row, or on nothing else.
   if (d.live > 0) {
-    r.waiting++;
+    r.running++;
     return observe(t, row, null);
   }
   // The record and the dataset, by the machine-clean rule's own rules and reader. The row has no
@@ -639,12 +648,12 @@ async function advanceStalled(t: Tick, row: RepullRow): Promise<void> {
   }
   if (d.last_status === "refused") return observe(t, row, "resume-refused");
   if (d.last_status !== null && !RESUME_AFTER.has(d.last_status)) {
-    r.waiting++;
+    r.notDue++;
     return observe(t, row, null);
   }
   if (d.opens >= AUTOMATIC_OPEN_DISPATCHES_MAX) return observe(t, row, "resume-exhausted");
   if (!inResumeWindow(t.now) || !quietSince(row.updated_at, d.last_at, t.now) || t.sendStopped) {
-    r.waiting++;
+    r.notDue++;
     return observe(t, row, null);
   }
   if (t.capHold !== null) return observe(t, row, t.capHold);
@@ -744,7 +753,7 @@ async function advanceOpenPullRequest(t: Tick, row: RepullRow): Promise<void> {
   if (!autoRepullEnabled(env)) return observe(t, row, "switch-off");
   // A run still out for the dataset is settling the head it opened: nothing is read until it ends.
   if (await dispatchLive(env.DB, row)) {
-    t.r.waiting++;
+    t.r.running++;
     return observe(t, row, null);
   }
   let facts = await gatherMachineCleanFacts(env, row, "gates");
@@ -781,7 +790,8 @@ export async function runRepullAdvanceCron(
   if (!isExactProduction(env)) return null;
   const r: AdvanceTickResult = {
     examined: 0,
-    waiting: 0,
+    running: 0,
+    notDue: 0,
     screensStarted: 0,
     reviewsStarted: 0,
     reviewRefused: {},
@@ -812,20 +822,26 @@ export async function runRepullAdvanceCron(
       try {
         await advanceRow(t, id);
       } catch (err) {
+        // The row by its id (an operator reads the record with it), never its dataset, and the
+        // error by its class, never its message; the next row is taken up.
         r.errors.push("row-failed");
         r.errorClass = errorClassName(err);
+        console.error(`[repull-advance] re-pull ${id}: its step failed (${r.errorClass})`);
       }
     }
   } catch (err) {
     r.errors.push("tick-failed");
     r.errorClass = errorClassName(err);
   }
-  try {
-    const res = await env.DB.prepare(ADVANCE_STAMP_SQL).run();
-    if (res.meta?.changes !== 1) throw new Error("the scheduler's row is missing");
-  } catch (err) {
-    r.errors.push("stamp-failed");
-    r.errorClass = errorClassName(err);
+  // Stamped only for a tick that went through its rows: one that could not list them did not run.
+  if (!r.errors.includes("tick-failed")) {
+    try {
+      const res = await env.DB.prepare(ADVANCE_STAMP_SQL).run();
+      if (res.meta?.changes !== 1) throw new Error("the scheduler's row is missing");
+    } catch (err) {
+      r.errors.push("stamp-failed");
+      r.errorClass = errorClassName(err);
+    }
   }
   return r;
 }
@@ -850,7 +866,8 @@ export function repullAdvanceLogLine(
       .join(",") || "none";
   const fields = [
     `examined=${r.examined}`,
-    `waiting=${r.waiting}`,
+    `running=${r.running}`,
+    `not_due=${r.notDue}`,
     `screens=${r.screensStarted}`,
     `reviews=${r.reviewsStarted}`,
     `review_refused=${words(r.reviewRefused)}`,
