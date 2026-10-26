@@ -698,6 +698,42 @@ describe("a fact that is not clean holds before the claim, and nothing is sent",
       },
       "checks-unreadable",
     ],
+    // GitHub always names both repositories; an answer that does not, or not as a name, is
+    // unreadable, never read as the dataset's own.
+    [
+      "the head's repository is not named",
+      () => {
+        gh.pulls[`${DS}#7`] = appPull(DS, {
+          head: { sha: HEAD, ref: "release/v2.0.0", repo: undefined },
+        });
+      },
+      "pr-unreadable",
+    ],
+    [
+      "the head's repository has no name",
+      () => {
+        gh.pulls[`${DS}#7`] = appPull(DS, {
+          head: { sha: HEAD, ref: "release/v2.0.0", repo: {} as never },
+        });
+      },
+      "pr-unreadable",
+    ],
+    [
+      "the base's repository is not named",
+      () => {
+        gh.pulls[`${DS}#7`] = appPull(DS, { base: { ref: "main", repo: undefined } });
+      },
+      "pr-unreadable",
+    ],
+    [
+      "the base's repository is named by a number",
+      () => {
+        gh.pulls[`${DS}#7`] = appPull(DS, {
+          base: { ref: "main", repo: { full_name: 5 as never } },
+        });
+      },
+      "pr-unreadable",
+    ],
     ["no screen of the head", () => db.run("DELETE FROM upstream_repull_screens"), "screen-rerun"],
     ["no review of the head", () => db.run("DELETE FROM pr_reviews"), "review-absent"],
   ];

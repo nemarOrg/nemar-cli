@@ -583,6 +583,40 @@ describe("the gates and the claim read the live pull request", () => {
     }
   });
 
+  // GitHub always names both repositories; an answer that does not, or not as a name, is not read
+  // as the record's pull request.
+  const unreadableRepositories: Array<[string, PullAnswer]> = [
+    ["no head repository", { head: { sha: HEAD, ref: "release/v2.0.0", repo: undefined } }],
+    [
+      "a head repository with no name",
+      { head: { sha: HEAD, ref: "release/v2.0.0", repo: {} as never } },
+    ],
+    ["no base repository", { base: { ref: "main", repo: undefined } }],
+    [
+      "a base repository named by a number",
+      { base: { ref: "main", repo: { full_name: 5 as never } } },
+    ],
+  ];
+  for (const [what, answer] of unreadableRepositories) {
+    test(`${what}: unreadable, 502 for the claim and the gates, and nothing is claimed`, async () => {
+      const claiming = ready("on099999");
+      seedMirror("on099998");
+      const opening = seedRepull("pr_open", { dataset_id: "on099998" });
+      markScreen(opening, "clean");
+      gh.pulls = { "on099999#7": answer, "on099998#7": answer };
+      const c = await claim(claiming);
+      const g = await gates(opening);
+      expect([c.status, c.body.code, g.status, g.body.code]).toEqual([
+        502,
+        "github-unreadable",
+        502,
+        "github-unreadable",
+      ]);
+      expect(rowOf(claiming)).toMatchObject({ merge_claim_sha: null, merge_claimed_at: null });
+      expect(rowOf(opening).status).toBe("pr_open");
+    });
+  }
+
   test("the dataset's own repository named in another case is its own, and is claimed", async () => {
     const id = ready("on099999");
     gh.pulls = {
@@ -790,6 +824,21 @@ describe("recording the merge", () => {
       [{ merged: true, merge_commit_sha: null }, "github-unreadable"],
       [{ merged: "true" }, "github-unreadable"],
       [{ merged: true, omit: ["merged"] }, "github-unreadable"],
+      // GitHub always names both repositories; an answer that does not, or not as a name, is not
+      // read as the record's pull request.
+      [
+        { merged: true, head: { sha: HEAD, ref: "release/v2.0.0", repo: undefined } },
+        "github-unreadable",
+      ],
+      [
+        { merged: true, head: { sha: HEAD, ref: "release/v2.0.0", repo: {} as never } },
+        "github-unreadable",
+      ],
+      [{ merged: true, base: { ref: "main", repo: undefined } }, "github-unreadable"],
+      [
+        { merged: true, base: { ref: "main", repo: { full_name: 5 as never } } },
+        "github-unreadable",
+      ],
       [{ status: 404 }, "pull-request-missing"],
       [{ merged: true, base: { ref: "dev" } }, "pull-request-mismatch"],
     ] as const) {
