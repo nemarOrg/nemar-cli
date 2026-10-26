@@ -59,8 +59,8 @@ import { ExecuteRefused } from "../lib/repull/execute/verify-plan.js";
 import { type CatalogFacts, RepullCannotPlan, planRepull } from "../lib/repull/plan.js";
 import { countsMarkdown, preflightLines, summaryLines } from "../lib/repull/render.js";
 import { openNeuroGraphqlUrl as openNeuroUrlFromEnv } from "../lib/repull/sources.js";
-import { AUTOMATIC_HELP, automaticExecute, automaticPlan } from "./admin-repull-automatic.js";
 import { abandonCommand } from "./admin-repull-abandon.js";
+import { AUTOMATIC_HELP, automaticExecute, automaticPlan } from "./admin-repull-automatic.js";
 import { mergeCommand } from "./admin-repull-merge.js";
 import { parseMinutes, resumeCommand, statusCommand } from "./admin-repull-resume.js";
 
