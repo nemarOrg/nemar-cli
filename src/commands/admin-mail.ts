@@ -150,6 +150,8 @@ export const MAIL_ERROR_GUIDANCE: Record<MailErrorCode, string> = {
     "The ticket was purged under the retention policy; only its summary remains and nothing can be changed.",
   reply_delivery_unknown:
     "The mail provider did not confirm the send, so the reply may or may not have reached the requester. This key will never send it again, so retrying it is pointless: read the thread with 'nemar admin mail show', and ask the requester if needed. Only a new --idempotency-key sends again, and it may deliver a second copy.",
+  block_sender_unverified:
+    "The sender was not verified (DMARC did not pass), so its address may be forged. A domain is never blocked for such a sender; to block the address anyway, repeat with --force.",
   block_not_allowed:
     "That sender cannot be blocked: our own domain is never blocked, nor the domain of a shared mailbox provider (block the address instead).",
   inbound_not_configured:
@@ -965,23 +967,28 @@ const escalateCommand = new MailCommand("escalate")
 
 const spamCommand = new MailCommand("spam")
   .description(
-    "Mark a ticket spam, unassign it, and block its sender (default: the address; --block domain, or none)",
+    "Mark a ticket spam and unassign it; --block address|domain also refuses the sender at delivery (default: none)",
   )
   .argument("<id>", "Ticket id")
-  .option("--block <what>", `${SPAM_BLOCK_CHOICES.join(" | ")} (default: address)`)
+  .option("--block <what>", `${SPAM_BLOCK_CHOICES.join(" | ")} (default: none)`)
+  .option("--force", "Block the address of an unverified sender (its From address may be forged)")
   .option("--reason <text>", "Why (up to 200 characters, kept on the block)")
   .option(...jsonOption)
   .action(async (rawId: string, _o, command: Command) => {
-    const o = optsOf<Common & { block?: string; reason?: string }>(command);
+    const o = optsOf<Common & { block?: string; reason?: string; force?: boolean }>(command);
     await run(!!o.json, async () => {
       const id = ticketIdOf(rawId);
-      const block = enumOf(o.block ?? "address", SPAM_BLOCK_CHOICES, "--block") as SpamBlockChoice;
+      const block = enumOf(o.block ?? "none", SPAM_BLOCK_CHOICES, "--block") as SpamBlockChoice;
       if (o.reason && o.reason.trim().length > 200) {
         throw new UsageError("--reason is limited to 200 characters.");
+      }
+      if (o.force && block !== "address") {
+        throw new UsageError("--force applies to --block address only.");
       }
       const res = await markMailTicketSpam(id, {
         block,
         ...(o.reason ? { reason: o.reason.trim() } : {}),
+        ...(o.force ? { force: true } : {}),
       });
       if (o.json) return printJson(res);
       await printTicketAction("Marked spam", res.ticket, new People());

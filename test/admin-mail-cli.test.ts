@@ -1391,7 +1391,7 @@ describe("screening: spam, blocklist, filtered list, quiet queues (ADR 0113)", (
     created_at: NOW,
   };
 
-  test("spam defaults to blocking the address, and --block and --reason are sent", async () => {
+  test("spam blocks nothing by default; --block, --reason and --force are sent", async () => {
     const server = startServer({
       "POST /admin/mail/tickets/42/spam": (c) =>
         Response.json({
@@ -1403,17 +1403,29 @@ describe("screening: spam, blocklist, filtered list, quiet queues (ADR 0113)", (
         }),
     });
     try {
-      const r = await runCli(["spam", "42"], server.url);
+      const r = await runCli(["spam", "42", "--block", "address"], server.url);
       expect(r.exitCode).toBe(0);
       expect(server.mail()[0].body).toEqual({ block: "address" });
       expect(r.stdout).toContain("Marked spam");
       expect(r.stdout).toContain("person@example.org");
+      // The default blocks nothing.
+      const plain = await runCli(["spam", "42"], server.url);
+      expect(plain.exitCode).toBe(0);
+      expect(server.mail()[1].body).toEqual({ block: "none" });
+      expect(plain.stdout).toContain("No block added");
+      const forced = await runCli(["spam", "42", "--block", "address", "--force"], server.url);
+      expect(forced.exitCode).toBe(0);
+      expect(server.mail()[2].body).toEqual({ block: "address", force: true });
+      expect((await runCli(["spam", "42", "--force"], server.url)).exitCode).toBe(2);
+      expect(
+        (await runCli(["spam", "42", "--block", "domain", "--force"], server.url)).exitCode,
+      ).toBe(2);
       const d = await runCli(
         ["spam", "42", "--block", "domain", "--reason", "newsletter", "--json"],
         server.url,
       );
       expect(d.exitCode).toBe(0);
-      expect(server.mail()[1].body).toEqual({ block: "domain", reason: "newsletter" });
+      expect(server.mail()[3].body).toEqual({ block: "domain", reason: "newsletter" });
       expect(JSON.parse(d.stdout).ticket.status).toBe("spam");
       const none = await runCli(["spam", "42", "--block", "none"], server.url);
       expect(none.exitCode).toBe(0);
@@ -1426,6 +1438,7 @@ describe("screening: spam, blocklist, filtered list, quiet queues (ADR 0113)", (
   test("spam usage errors exit 2, a refused block exits 1 with guidance, hidden is 3", async () => {
     const server = startServer({
       "POST /admin/mail/tickets/1/spam": () => err(422, "block_not_allowed"),
+      "POST /admin/mail/tickets/3/spam": () => err(422, "block_sender_unverified"),
       "POST /admin/mail/tickets/2/spam": () => err(404, "not_found"),
     });
     try {
@@ -1439,6 +1452,9 @@ describe("screening: spam, blocklist, filtered list, quiet queues (ADR 0113)", (
       expect(refused.exitCode).toBe(1);
       expect(refused.stderr).toContain("shared mailbox provider");
       expect((await runCli(["spam", "2"], server.url)).exitCode).toBe(3);
+      const unverified = await runCli(["spam", "3", "--block", "address"], server.url);
+      expect(unverified.exitCode).toBe(1);
+      expect(unverified.stderr).toContain("--force");
     } finally {
       server.stop();
     }
