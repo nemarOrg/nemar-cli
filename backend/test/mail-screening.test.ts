@@ -194,16 +194,13 @@ describe("classifyAutomatedMail", () => {
     );
     expect(classifyAutomatedMail(h(["X-Autoreply", "yes"]), "a@b.example")).toBe("auto_reply");
     expect(classifyAutomatedMail(h(["X-Autorespond", "1"]), "a@b.example")).toBe("auto_reply");
-    expect(
-      classifyAutomatedMail(h(["X-Auto-Response-Suppress", "DR, OOF, AutoReply"]), "a@b.example"),
-    ).toBe("auto_reply");
-    expect(classifyAutomatedMail(h(["X-Auto-Response-Suppress", "All"]), "a@b.example")).toBe(
-      "auto_reply",
-    );
     expect(classifyAutomatedMail(h(["Precedence", "auto_reply"]), "a@b.example")).toBe(
       "auto_reply",
     );
-    expect(classifyAutomatedMail(h(["X-Auto-Response-Suppress", "DR"]), "a@b.example")).toBe(null);
+    // Help desks stamp this on genuine mail to stop OTHERS auto-replying; it says nothing of the sender.
+    for (const v of ["All", "DR, OOF, AutoReply", "DR"]) {
+      expect(classifyAutomatedMail(h(["X-Auto-Response-Suppress", v]), "a@b.example")).toBe(null);
+    }
   });
 
   test("bounce: empty or <> sender, mailer-daemon or postmaster, multipart/report", () => {
@@ -267,11 +264,32 @@ describe("addressesIn and normalizeBlock", () => {
       "gmx.de",
       "gmx.co.uk",
       "mail.yahoo.com",
+      "yahoo.co.uk",
+      "outlook.fr",
+      "hotmail.de",
+      "live.com.au",
+      "web.de",
+      "126.com",
+      "yandex.ru",
+      "mail.ru",
+      "naver.com",
+      "zoho.com",
+      "fastmail.com",
+      "pm.me",
+      "msn.com",
+      "ymail.com",
       "163.com",
     ]) {
       const r = normalizeBlock("domain", d);
       expect("refusal" in r && !r.malformed).toBe(true);
     }
+    // Public suffixes: blocking one would block every organisation beneath it.
+    for (const d of ["ac.uk", "edu.au", "co.uk", "co.jp", "com.br", "ne.jp", "github.io"]) {
+      const r = normalizeBlock("domain", d);
+      expect([d, "refusal" in r && !r.malformed]).toEqual([d, true]);
+    }
+    // An organisation under a suffix is blockable.
+    expect(normalizeBlock("domain", "ox.ac.uk")).toEqual({ kind: "domain", value: "ox.ac.uk" });
     for (const v of ["nemar.org", "mail.nemar.org", "support.test.nemar.org"]) {
       const r = normalizeBlock("domain", v);
       expect("refusal" in r && !r.malformed).toBe(true);
@@ -339,6 +357,22 @@ describe("migration 0111", () => {
         "INSERT INTO mail_tickets (ref, queue_tag, requester_email, filtered) VALUES ('amber-falcon-river', 'support', 'a@example.org', 'junk')",
       ),
     ).toThrow();
+  });
+});
+
+describe("migration 0111: the event kinds", () => {
+  test("unfiltered is a kind, the old ones still are, and the index survived the rebuild", () => {
+    db.run(
+      "INSERT INTO mail_tickets (ref, queue_tag, requester_email) VALUES ('amber-falcon-river', 'support', 'a@example.org')",
+    );
+    for (const kind of ["created", "note", "purged", "unfiltered"]) {
+      db.run("INSERT INTO mail_ticket_events (ticket_id, kind) VALUES (1, ?)", [kind]);
+    }
+    expect(() =>
+      db.run("INSERT INTO mail_ticket_events (ticket_id, kind) VALUES (1, 'other')"),
+    ).toThrow();
+    const idx = db.query("PRAGMA index_list(mail_ticket_events)").all() as { name: string }[];
+    expect(idx.map((i) => i.name)).toContain("idx_mail_ticket_events_ticket");
   });
 });
 
@@ -850,5 +884,265 @@ describe("POST /tickets/:id/spam", () => {
     expect((await call("admin", "POST", "/tickets/99999/spam", { block: "none" })).status).toBe(
       404,
     );
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// Review round 1: a person's action un-hides a filtered ticket, the unverified-sender rule,
+// the cap counts only verified mail
+// ---------------------------------------------------------------------------------------------
+
+const authFor = (domain: string, result = "pass") =>
+  `mx.cloudflare.net; spf=${result} smtp.mailfrom=${domain}; dkim=${result} header.d=${domain}; dmarc=${result} header.from=${domain}`;
+
+describe("a person's action clears filtered", () => {
+  async function filteredTicket(extra: Parameters<typeof eml>[0] = {}) {
+    const r = await ingest({
+      subject: "Newsletter",
+      messageId: `<f${++n}@sender.example>`,
+      extraHeaders: ["Precedence: bulk"],
+      ...extra,
+    });
+    expect(ticketRow(r.ticketId).filtered).toBe("bulk");
+    return r.ticketId;
+  }
+  const unfilteredEvents = (id: number) =>
+    db
+      .query(
+        "SELECT actor_user_id, detail FROM mail_ticket_events WHERE ticket_id = ? AND kind = 'unfiltered'",
+      )
+      .all(id) as { actor_user_id: number | null; detail: string }[];
+
+  test("reply, note, assign, status and escalate each clear it and record who and why", async () => {
+    db.run("UPDATE mail_queues SET escalation_user_id = ? WHERE tag = '*'", [ids.owner]);
+    const cases: [string, (id: number) => Promise<unknown>][] = [
+      ["reply", (id) => call("admin", "POST", `/tickets/${id}/reply`, { text: "Thanks" })],
+      ["note", (id) => call("admin", "POST", `/tickets/${id}/note`, { text: "looked" })],
+      ["assign", (id) => call("admin", "POST", `/tickets/${id}/assign`, { user_id: ids.admin })],
+      ["status", (id) => call("admin", "POST", `/tickets/${id}/status`, { status: "pending" })],
+      ["escalate", (id) => call("admin", "POST", `/tickets/${id}/escalate`, {})],
+    ];
+    for (const [reason, act] of cases) {
+      const id = await filteredTicket();
+      const res = (await act(id)) as { status: number };
+      expect([reason, res.status]).toEqual([reason, 200]);
+      expect([reason, ticketRow(id).filtered]).toEqual([reason, null]);
+      const ev = unfilteredEvents(id);
+      expect(ev.length).toBe(1);
+      expect(ev[0].actor_user_id).toBe(ids.admin);
+      expect(JSON.parse(ev[0].detail)).toEqual({ from: "bulk", reason });
+    }
+  });
+
+  test("setting the same status or assignee still un-hides; unassigning and summaries do not", async () => {
+    const same = await filteredTicket();
+    expect(
+      (await call("admin", "POST", `/tickets/${same}/status`, { status: "open" })).status,
+    ).toBe(200);
+    expect(ticketRow(same).filtered).toBeNull();
+
+    const unassign = await filteredTicket();
+    await call("admin", "POST", `/tickets/${unassign}/assign`, { user_id: null });
+    expect(ticketRow(unassign).filtered).toBe("bulk");
+
+    const summed = await filteredTicket();
+    db.run("UPDATE mail_tickets SET status = 'closed' WHERE id = ?", [summed]);
+    expect(
+      (
+        await call("admin", "PUT", `/tickets/${summed}/summary`, {
+          summary: "Newsletter, no action.",
+        })
+      ).status,
+    ).toBe(200);
+    expect(ticketRow(summed).filtered).toBe("bulk");
+    expect(unfilteredEvents(summed)).toEqual([]);
+  });
+
+  test("an unfiltered ticket gets no unfiltered event", async () => {
+    const r = await ingest({ subject: "plain" });
+    await call("admin", "POST", `/tickets/${r.ticketId}/note`, { text: "n" });
+    expect(unfilteredEvents(r.ticketId)).toEqual([]);
+  });
+
+  test("marking it spam clears filtered and lists it under status=spam", async () => {
+    const id = await filteredTicket();
+    const res = await call("owner", "POST", `/tickets/${id}/spam`, { block: "none" });
+    expect(res.status).toBe(200);
+    expect(res.body.ticket.filtered).toBeNull();
+    const spam = (await call("owner", "GET", "/tickets?status=spam")).body.tickets as any[];
+    expect(spam.map((t) => t.id)).toEqual([id]);
+  });
+
+  test("a requester's genuine reply un-hides the ticket and announces it; another filtered message does not", async () => {
+    const deliver = (raw: Uint8Array) =>
+      handleInboundEmail(platform(raw, "ada@sender.example"), env() as never);
+    await clearBucket();
+    await deliver(
+      eml({
+        messageId: "<root@sender.example>",
+        subject: "Automatic notice",
+        extraHeaders: ["Auto-Submitted: auto-generated"],
+      }),
+    );
+    const id = (db.query("SELECT id FROM mail_tickets").get() as { id: number }).id;
+    expect(ticketRow(id).filtered).toBe("auto_reply");
+    expect(binding.sent.length).toBe(0);
+
+    // A second automatic message threads in and changes nothing.
+    await deliver(
+      eml({ inReplyTo: "<root@sender.example>", extraHeaders: ["Auto-Submitted: auto-replied"] }),
+    );
+    expect(ticketRow(id).filtered).toBe("auto_reply");
+    expect(binding.sent.length).toBe(0);
+
+    // A person's reply makes it visible, and the admins are told, as for a new ticket.
+    await deliver(eml({ inReplyTo: "<root@sender.example>", subject: "Re: Automatic notice" }));
+    expect(ticketRow(id).filtered).toBeNull();
+    expect(count("SELECT COUNT(*) AS n FROM mail_tickets")).toBe(1);
+    expect(unfilteredEvents(id).length).toBe(1);
+    const ev = unfilteredEvents(id)[0];
+    expect(ev.actor_user_id).toBeNull();
+    expect(JSON.parse(ev.detail)).toEqual({ from: "auto_reply", reason: "reply" });
+    expect(binding.sent.length).toBeGreaterThan(0);
+    expect((await call("owner", "GET", "/tickets")).body.tickets.map((t: any) => t.id)).toEqual([
+      id,
+    ]);
+    // A later reply is not announced again as new.
+    const before = binding.sent.length;
+    await deliver(eml({ inReplyTo: "<root@sender.example>" }));
+    expect(binding.sent.length).toBe(before);
+  });
+
+  test("a reply from someone who is not on the ticket does not un-hide it", async () => {
+    const id = await filteredTicket({ messageId: "<z@sender.example>" });
+    const stranger = await ingest({
+      from: "Eve <eve@sender.example>",
+      inReplyTo: "<z@sender.example>",
+    });
+    expect(stranger.ticketId).not.toBe(id);
+    expect(ticketRow(id).filtered).toBe("bulk");
+  });
+});
+
+describe("the default list hides filtered tickets only in the default view", () => {
+  test("status, assignee and q are specific requests, so filtered tickets are included", async () => {
+    const bulk = await ingest({
+      subject: "Weekly digest",
+      from: "News <news@sender.example>",
+      extraHeaders: ["Precedence: bulk"],
+    });
+    await ingest({ subject: "plain" });
+    const ids_ = async (q: string) =>
+      ((await call("owner", "GET", `/tickets${q}`)).body.tickets as any[]).map((t) => t.id).sort();
+    expect(await ids_("")).not.toContain(bulk.ticketId);
+    expect(await ids_("?q=digest")).toEqual([bulk.ticketId]);
+    expect(await ids_("?status=open")).toContain(bulk.ticketId);
+    expect(await ids_("?assignee=none")).toContain(bulk.ticketId);
+    db.run("UPDATE mail_tickets SET assignee_user_id = ? WHERE id = ?", [ids.admin, bulk.ticketId]);
+    expect(await ids_("?assignee=me")).toEqual([]);
+    expect(
+      (await call("admin", "GET", "/tickets?assignee=me")).body.tickets.map((t: any) => t.id),
+    ).toEqual([bulk.ticketId]);
+    // An explicit filter wins over the other options.
+    expect(await ids_("?filtered=only&status=open")).toEqual([bulk.ticketId]);
+    expect(await ids_("?filtered=only&q=plain")).toEqual([]);
+  });
+});
+
+describe("the cap counts only verified mail", () => {
+  const at = (minutes: number) => new Date(Date.UTC(2026, 9, 25, 13, minutes));
+  test("forged messages from the same From address do not push the real sender over the cap", async () => {
+    for (let i = 0; i < 6; i++) {
+      const forged = await ingest(
+        { auth: authFor("elsewhere.example", "fail") },
+        { cap: 2, at: at(i) },
+      );
+      expect(forged.status).toBe("spam");
+    }
+    const real = [];
+    for (let i = 0; i < 3; i++) real.push(await ingest({}, { cap: 2, at: at(10 + i) }));
+    expect(real.map((r) => r.filtered)).toEqual([null, null, "rate_limited"]);
+  });
+});
+
+describe("the spam route and unverified senders", () => {
+  async function ticketAuth(from: string, auth: string, to = "support@nemar.org") {
+    const r = await ingest({ from: `Sender <${from}>`, auth }, { to });
+    return r.ticketId;
+  }
+
+  test("a DMARC-failed ticket refuses a domain block, and an address block needs force", async () => {
+    const t = await ticketAuth("victim@innocent.example", authFor("elsewhere.example", "fail"));
+    expect(ticketRow(t).status).toBe("spam");
+    const domain = await call("admin", "POST", `/tickets/${t}/spam`, { block: "domain" });
+    expect([domain.status, domain.body.code]).toEqual([422, "block_sender_unverified"]);
+    const forcedDomain = await call("admin", "POST", `/tickets/${t}/spam`, {
+      block: "domain",
+      force: true,
+    });
+    expect([forcedDomain.status, forcedDomain.body.code]).toEqual([422, "block_sender_unverified"]);
+    const address = await call("admin", "POST", `/tickets/${t}/spam`, { block: "address" });
+    expect([address.status, address.body.code]).toEqual([422, "block_sender_unverified"]);
+    expect(count("SELECT COUNT(*) AS n FROM mail_blocklist")).toBe(0);
+    // Without a block the ticket can still be marked spam.
+    expect((await call("admin", "POST", `/tickets/${t}/spam`, { block: "none" })).status).toBe(200);
+    const forced = await call("admin", "POST", `/tickets/${t}/spam`, {
+      block: "address",
+      force: true,
+    });
+    expect(forced.status).toBe(200);
+    expect(forced.body.block).toMatchObject({ kind: "address", value: "victim@innocent.example" });
+    expect(
+      (await call("admin", "POST", `/tickets/${t}/spam`, { block: "address", force: "yes" }))
+        .status,
+    ).toBe(400);
+  });
+
+  test("a verified sender needs no force", async () => {
+    const t = await ticketAuth("bad@spam.example", authFor("spam.example"));
+    expect((await call("admin", "POST", `/tickets/${t}/spam`, { block: "domain" })).status).toBe(
+      200,
+    );
+  });
+
+  test("a ticket with no inbound message counts as unverified", async () => {
+    db.run(
+      "INSERT INTO mail_tickets (ref, queue_tag, requester_email) VALUES ('amber-falcon-river', 'support', 'x@spam.example')",
+    );
+    const t = (db.query("SELECT id FROM mail_tickets").get() as { id: number }).id;
+    const r = await call("admin", "POST", `/tickets/${t}/spam`, { block: "address" });
+    expect(r.body.code).toBe("block_sender_unverified");
+  });
+
+  test("public suffixes and shared providers are refused for a domain block from a ticket", async () => {
+    const t = await ticketAuth("someone@yahoo.co.uk", authFor("yahoo.co.uk"));
+    const r = await call("admin", "POST", `/tickets/${t}/spam`, { block: "domain" });
+    expect([r.status, r.body.code]).toEqual([422, "block_not_allowed"]);
+    expect(ticketRow(t).status).toBe("open");
+    const via = await call("admin", "POST", "/blocklist", { kind: "domain", value: "ac.uk" });
+    expect(via.body.code).toBe("block_not_allowed");
+    expect(
+      (await call("admin", "POST", "/blocklist", { kind: "domain", value: "web.de" })).status,
+    ).toBe(422);
+  });
+
+  test("an owner may block from a restricted ticket; an admin never sees it", async () => {
+    const t = await ticketAuth("bad@spam.example", authFor("spam.example"), "security@nemar.org");
+    expect(ticketRow(t).restricted).toBe(1);
+    expect((await call("admin", "POST", `/tickets/${t}/spam`, { block: "address" })).status).toBe(
+      404,
+    );
+    const owner = await call("owner", "POST", `/tickets/${t}/spam`, { block: "address" });
+    expect(owner.status).toBe(200);
+    expect(count("SELECT COUNT(*) AS n FROM mail_blocklist")).toBe(1);
+  });
+
+  test("the block and the status change are one write: a purged ticket leaves no block", async () => {
+    const t = await ticketAuth("bad@spam.example", authFor("spam.example"));
+    db.run("UPDATE mail_tickets SET purged_at = datetime('now') WHERE id = ?", [t]);
+    const r = await call("admin", "POST", `/tickets/${t}/spam`, { block: "address" });
+    expect([r.status, r.body.code]).toEqual([409, "ticket_purged"]);
+    expect(count("SELECT COUNT(*) AS n FROM mail_blocklist")).toBe(0);
+    expect(ticketRow(t).status).toBe("open");
   });
 });
