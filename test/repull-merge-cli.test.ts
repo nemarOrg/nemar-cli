@@ -295,6 +295,20 @@ describe.skipIf(!awsInstalled)("the gate's own checks, before the claim", () => 
     expect(w.row().merge_claim_sha).toBeNull();
   });
 
+  test("a pull request into another repository is not ready: nothing is claimed or sent", async () => {
+    await toGates();
+    Object.assign(w.gh.pulls[prKey(w)] as object, { baseRepo: `someone/${w.fx.datasetId}` });
+    const before = transitions();
+    const run = await merge();
+    expect(run.exitCode, run.all).toBe(1);
+    expect(run.all).toContain("(not-ready)");
+    expect(run.all).toContain(`its base someone/${w.fx.datasetId}`);
+    expect(run.all).toContain("a fork's pull request is never merged");
+    expect(transitions()).toBe(before);
+    expect(merges()).toEqual([]);
+    expect(w.row().merge_claim_sha).toBeNull();
+  });
+
   test("the dataset's own repository named in another case is its own, and merges", async () => {
     await toGates();
     Object.assign(w.gh.pulls[prKey(w)] as object, {

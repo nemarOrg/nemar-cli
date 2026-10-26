@@ -67,6 +67,8 @@ export interface PullState {
    * null for a deleted fork, whose head GitHub names no repository for.
    */
   headRepo?: string | null;
+  /** The base repository's full name: the dataset's own unless a test says otherwise. */
+  baseRepo?: string;
   /** The squash merge's commit, once merged (GitHub's `merge_commit_sha`); null before. */
   mergeCommitSha?: string;
   /**
@@ -485,7 +487,7 @@ export function startGitHubStandin(): GitHubStandin {
               sha: STANDIN_BASE_SHA,
               repo: {
                 name: pull[1],
-                full_name: `nemarDatasets/${pull[1]}`,
+                full_name: p.baseRepo ?? `nemarDatasets/${pull[1]}`,
                 owner: { login: "nemarDatasets" },
               },
             },
