@@ -44,6 +44,30 @@
  *  - a 5xx, no answer, a timeout, or a 2xx that does not say `merged: true`: the merge may have
  *    happened. The claim is kept, the record holds `claim-held`, and nothing is sent again blind.
  *
+ * A CLAIM THE WORKER HOLDS (`reconcileWorkerClaim`), on a later tick: GitHub, read again, says what
+ * became of the merge, whatever the switches say, because a merge that happened minted a DOI and
+ * must not be stranded; only sending one needs them. The claim is the Worker's when its own claim
+ * edge, as the system user, made it (the latest claim in the record's audit rows); an
+ * administrator's claim on an automatic record is theirs, and the Worker only records a merge
+ * GitHub made at its head, and otherwise waits (`claim-held`).
+ *  - Merged at the claimed head: the merge is recorded through the verified route. Merged at
+ *    another head: `claim-held`, for an administrator's `resume`, which records it with its counts.
+ *  - Not merged, and the last merge sent under this claim was refused: the claim is released
+ *    through the record's own writer (`refused`, which needs the claim five minutes old and reads
+ *    GitHub again), so its unit of the day's cap is free, and the record holds `merge-refused`.
+ *  - Not merged, and the merge was sent and its answer was lost, or none was sent under the claim:
+ *    while the pull request is open at the claimed head, the claim is younger than
+ *    {@link HELD_CLAIM_MAX_AGE_MINUTES} minutes (so no merge goes out under a claim the
+ *    administrator's `resume` may be expiring at 30), both switches are on, the bound allows, and
+ *    the machine-clean facts read now are clean, the merge is sent again under the SAME claim: a
+ *    second claim is never made for a merge that may have happened. Otherwise a claim under which
+ *    nothing was sent is released (`not_sent`, five minutes old), and one whose answer was lost is
+ *    kept (`claim-held`): only an administrator's `resume`, which expires it at 30 minutes, or
+ *    GitHub's own word that it merged, ends it.
+ *  - Closed and not merged: the claim is released through the record's writer (`refused` or
+ *    `not_sent` as above, `expired` at 30 minutes for an answer that was lost), and the record holds
+ *    `pr-closed` for an administrator.
+ *
  * PRODUCTION ONLY, and no mail: nothing here imports a mail service (`repull-no-mail-scan.test.ts`).
  */
 
@@ -57,8 +81,18 @@ import { getDatasetsToken } from "./github-auth.js";
 import { GITHUB_API, ORG_NAME, ghHeaders } from "./github/shared.js";
 import { autoRepullEnabled, autoRepullMergeEnabled, isExactProduction } from "./repull-switches.js";
 import { gatherMachineCleanFacts } from "./upstream-repull-facts.js";
-import { HELD_CLAIM_MAX_AGE_MINUTES, recordRepullMerged } from "./upstream-repull-verified.js";
-import { commitTransition, isRefusal, prepareTransition } from "./upstream-repull.js";
+import { readRecordedPullRequest } from "./upstream-repull-github.js";
+import {
+  HELD_CLAIM_MAX_AGE_MINUTES,
+  recordRepullMerged,
+  releaseMergeClaim,
+} from "./upstream-repull-verified.js";
+import {
+  type RepullRefusal,
+  commitTransition,
+  isRefusal,
+  prepareTransition,
+} from "./upstream-repull.js";
 
 /** The most merges the Worker ever sends for one record, a retry under a held claim included. */
 export const WORKER_MERGES_MAX = 3;
@@ -128,6 +162,24 @@ export interface WorkerMerges {
   last_outcome: "merged" | "refused" | "unknown" | null;
 }
 
+/**
+ * Who made the claim a record holds (`?1` the re-pull): the user of the latest claim edge in its
+ * audit rows (the gates-clear self-edge), which the claim's own batch writes. The system user is
+ * the Worker; any other is an administrator's `nemar admin repull merge`.
+ */
+export const CLAIM_OWNER_SQL = `SELECT user_id FROM audit_log
+  WHERE action = 'repull_transition' AND resource_type = 'upstream_repull'
+    AND resource_id = CAST(?1 AS TEXT)
+    AND json_extract(details, '$.from') = 'gates_clear' AND json_extract(details, '$.to') = 'gates_clear'
+  ORDER BY id DESC LIMIT 1`;
+
+/**
+ * Whether a claim (`?1` the re-pull) is younger than {@link HELD_CLAIM_MAX_AGE_MINUTES} minutes by
+ * its Worker-stamped time, so a merge may still be sent under it: 1 or 0, on D1's own clock.
+ */
+export const CLAIM_YOUNG_SQL = `SELECT CASE WHEN merge_claimed_at > datetime('now', '-${HELD_CLAIM_MAX_AGE_MINUTES} minutes')
+  THEN 1 ELSE 0 END AS young FROM upstream_repulls WHERE id = ?1`;
+
 /** The merges the Worker sent for `id`; a count that cannot be read throws (unknown is not zero). */
 export async function workerMerges(db: D1Database, id: number): Promise<WorkerMerges> {
   const m = await db.prepare(WORKER_MERGES_SQL).bind(id).first<WorkerMerges>();
@@ -144,10 +196,11 @@ export interface WorkerMergeOutcome {
   /**
    * `merged`: GitHub merged it and the merge is recorded. `held`: nothing was sent now (a rule, the
    * cap, a bound, a claim that waits on GitHub). `refused`: GitHub refused the merge sent now.
-   * `unknown`: a merge was sent now and GitHub's answer does not say what became of it. `skipped`:
+   * `unknown`: a merge was sent now and GitHub's answer does not say what became of it. `released`:
+   * a claim the Worker held was released, GitHub having said its merge did not happen. `skipped`:
    * not the Worker's row to merge, and nothing was read or written for it.
    */
-  kind: "merged" | "held" | "refused" | "unknown" | "skipped";
+  kind: "merged" | "held" | "refused" | "unknown" | "released" | "skipped";
   /** The record as the Worker last read or wrote it: a hold is recorded on this revision. */
   row: RepullRow;
   /** The word to record on the row, or null for none. */
@@ -403,4 +456,123 @@ export async function workerMergeRepull(
 
   // 7 and 8. The merge's audit row, then the merge, under the claim just made.
   return sendUnderClaim(env, claimed.row, token, { young: false, attempt: merges.sent + 1 });
+}
+
+// ----------------------------------------------------------------------------
+// A claim the Worker holds
+// ----------------------------------------------------------------------------
+
+/** Release the record's claim through its own writer, as the system user. */
+function releaseClaim(
+  env: Bindings,
+  row: RepullRow,
+  outcome: "not_sent" | "refused" | "expired",
+): Promise<{ row: RepullRow } | RepullRefusal> {
+  return releaseMergeClaim(env, { id: SYSTEM_USER_ID }, row.id, {
+    pr: "n0",
+    sha: row.merge_claim_sha as string,
+    outcome,
+  });
+}
+
+/**
+ * Send the merge again under the claim the record holds, when it may be: both switches on, fewer
+ * than {@link WORKER_MERGES_MAX} merges sent, the claim younger than
+ * {@link HELD_CLAIM_MAX_AGE_MINUTES} minutes, the record's trailers carried, and the machine-clean
+ * facts, read now, clean. Null when it may not, with nothing sent.
+ */
+async function sendAgainUnderClaim(
+  env: Bindings,
+  row: RepullRow,
+  merges: WorkerMerges,
+): Promise<WorkerMergeOutcome | null> {
+  if (!autoRepullMergeEnabled(env) || merges.sent >= WORKER_MERGES_MAX) return null;
+  const young = await env.DB.prepare(CLAIM_YOUNG_SQL).bind(row.id).first<{ young: number }>();
+  if (young?.young !== 1 || trailerValuesProblem(row) !== null) return null;
+  const verdict = machineClean(await gatherMachineCleanFacts(env, row, "merge"));
+  if (!verdict.clean) return null;
+  let token: string;
+  try {
+    token = await getDatasetsToken(env);
+  } catch {
+    return null;
+  }
+  return sendUnderClaim(env, row, token, { young: true, attempt: merges.sent + 1 });
+}
+
+/**
+ * Resolve the claim to merge `row` holds from GitHub's own word: see the module comment. Called
+ * for an automatic record at `gates_clear` holding a claim; any other row is `skipped`. GitHub is
+ * read, and a merge it made recorded, whatever the switches say; only a merge sent needs them.
+ */
+export async function reconcileWorkerClaim(
+  env: Bindings,
+  row: RepullRow,
+): Promise<WorkerMergeOutcome> {
+  const db = env.DB;
+  const sha = row.merge_claim_sha;
+  if (
+    !isExactProduction(env) ||
+    row.origin !== "automatic" ||
+    row.status !== "gates_clear" ||
+    sha === null ||
+    row.merge_claimed_at === null ||
+    row.merge_sha !== null
+  ) {
+    return { kind: "skipped", row, hold: null, sent: false };
+  }
+
+  // GitHub first: a merge that happened is recorded, whoever held the claim.
+  const read = await readRecordedPullRequest(env, row, "n0");
+  if (!read.ok) return held(row, "claim-held");
+  const pr = read.facts;
+  if (pr.merged) {
+    // At another head someone else merged it after a push: an administrator's `resume` records it.
+    if (pr.headSha !== sha) return held(row, "claim-held");
+    const done = await recordRepullMerged(env, { id: SYSTEM_USER_ID }, row.id, { pr: "n0" });
+    if (isRefusal(done)) return held(done.row ?? row, "claim-held", done.code);
+    return { kind: "merged", row: done.row, hold: null, sent: false };
+  }
+
+  // Not merged. An administrator's claim is theirs to resolve: the Worker neither sends under it
+  // nor releases it.
+  const owner = await db.prepare(CLAIM_OWNER_SQL).bind(row.id).first<{ user_id: number | null }>();
+  if (owner?.user_id !== SYSTEM_USER_ID) return held(row, "claim-held");
+
+  const merges = await workerMerges(db, row.id);
+  // Claims are one at a time, so a merge sent under this claim is the latest the record has.
+  const answer =
+    merges.sent > 0 && merges.last_claimed_at === row.merge_claimed_at
+      ? (merges.last_outcome ?? "unknown")
+      : "not-sent";
+
+  if (pr.state !== "open") {
+    // Closed, so nothing can merge now: the claim is freed, by the age its answer allows.
+    const freed = await releaseClaim(
+      env,
+      row,
+      answer === "refused" ? "refused" : answer === "not-sent" ? "not_sent" : "expired",
+    );
+    if (isRefusal(freed)) return held(row, "claim-held");
+    return { kind: "released", row: freed.row, hold: "pr-closed", sent: false };
+  }
+  if (answer === "refused") {
+    // GitHub refused it, and says it did not merge: the unit of the cap is freed once the claim is
+    // five minutes old, and an administrator looks.
+    const freed = await releaseClaim(env, row, "refused");
+    if (isRefusal(freed)) return held(row, "merge-refused");
+    return { kind: "released", row: freed.row, hold: "merge-refused", sent: false };
+  }
+
+  // A merge whose answer was lost, or none sent: again under the same claim, while it may be.
+  const again = await sendAgainUnderClaim(env, row, merges);
+  if (again !== null) return again;
+  if (answer === "not-sent") {
+    // Nothing went out under it: it is freed, and the record is taken on again from its facts.
+    const freed = await releaseClaim(env, row, "not_sent");
+    if (!isRefusal(freed)) return { kind: "released", row: freed.row, hold: null, sent: false };
+  }
+  // A merge that may have happened keeps its claim: GitHub's word, or an administrator's `resume`
+  // at 30 minutes, ends it.
+  return held(row, "claim-held");
 }

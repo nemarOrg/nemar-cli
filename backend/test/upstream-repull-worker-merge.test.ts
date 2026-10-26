@@ -810,6 +810,257 @@ describe("what GitHub answers the merge", () => {
   });
 });
 
+// ----------------------------------------------------------------------------
+// A claim the Worker holds, on a later tick
+// ----------------------------------------------------------------------------
+
+/** The claims made on `id`: its gates-clear self-edges in the audit rows. */
+const claimsOf = (id: number) =>
+  auditsOf("repull_transition", id).filter(
+    (a) => a.details.from === "gates_clear" && a.details.to === "gates_clear",
+  );
+
+/**
+ * Move the claim of `id` `minutes` into the past, and the Worker's audit rows of its merges with
+ * it, as time passing would: a claim and the merges sent under it name one time.
+ */
+function ageClaim(id: number, minutes: number): void {
+  db.run(
+    `UPDATE upstream_repulls SET merge_claimed_at = datetime(merge_claimed_at, '-${minutes} minutes') WHERE id = ?`,
+    [id],
+  );
+  db.run(
+    `UPDATE audit_log SET details = json_set(details, '$.claimed_at',
+       (SELECT merge_claimed_at FROM upstream_repulls WHERE id = ?1))
+     WHERE action IN ('${WORKER_MERGE_ACTION}', '${WORKER_MERGE_ANSWER_ACTION}') AND resource_id = CAST(?1 AS TEXT)`,
+    [id],
+  );
+}
+
+/** A claim on `id` made by `userId` now, with its claim edge's audit row, and nothing sent under it. */
+function claimBy(id: number, userId: number): void {
+  db.run(
+    "UPDATE upstream_repulls SET merge_claim_sha = gates_sha, merge_claimed_at = datetime('now'), revision = revision + 1 WHERE id = ?",
+    [id],
+  );
+  db.run(
+    `INSERT INTO audit_log (user_id, action, resource_type, resource_id, details)
+     VALUES (?, 'repull_transition', 'upstream_repull', ?, ?)`,
+    [
+      userId,
+      String(id),
+      JSON.stringify({
+        dataset_id: DS,
+        from: "gates_clear",
+        to: "gates_clear",
+        fields: ["merge_claim_sha"],
+      }),
+    ],
+  );
+}
+
+describe("a merge whose answer was lost is resolved from GitHub on a later tick", () => {
+  test("a 502 after GitHub merged: the next tick records the merge, with no second claim or merge", async () => {
+    const id = ready();
+    gh.mergeAnswer = { status: 502, applied: true };
+    await tick();
+    expect(rowOf(id)).toMatchObject({ status: "gates_clear", hold_reason: "claim-held" });
+    gh.mergeAnswer = null;
+    const r = await tick();
+    expect(r).toMatchObject({ mergesSent: 0, merged: 1 });
+    expect(rowOf(id)).toMatchObject({
+      status: "merged",
+      merge_sha: STANDIN_MERGE_SHA,
+      merge_claim_sha: HEAD,
+    });
+    expect(JSON.parse(String(rowOf(id).counts))).not.toHaveProperty("merged_outside_tool");
+    expect(claimsOf(id)).toHaveLength(1);
+    expect(mergeTo()).toHaveLength(1);
+  });
+
+  test("a 502 that did not merge: the next tick sends it once more under the same claim", async () => {
+    const id = ready();
+    gh.mergeAnswer = { status: 502 };
+    await tick();
+    const claimedAt = rowOf(id).merge_claimed_at;
+    gh.mergeAnswer = null;
+    const r = await tick();
+    expect(r).toMatchObject({ mergesSent: 1, merged: 1 });
+    expect(rowOf(id)).toMatchObject({ status: "merged", merge_claimed_at: claimedAt });
+    // One claim, one unit of the cap, two merges sent under it.
+    expect(claimsOf(id)).toHaveLength(1);
+    expect(usedToday()).toBe(1);
+    expect(mergeTo()).toHaveLength(2);
+    expect(auditsOf(WORKER_MERGE_ACTION, id).map((a) => a.details.attempt)).toEqual([1, 2]);
+  });
+
+  test(`no more than ${WORKER_MERGES_MAX} merges are sent for a record, every one under its one claim`, async () => {
+    const id = ready();
+    gh.mergeAnswer = { status: 502 };
+    for (let n = 0; n < WORKER_MERGES_MAX; n++) await tick();
+    expect(mergeTo()).toHaveLength(WORKER_MERGES_MAX);
+    // Past the bound a tick reads the pull request once, for a merge GitHub made, and nothing else.
+    gh.requests = [];
+    await tick();
+    await tick();
+    expect(datasetRequests()).toEqual([
+      `GET /repos/nemarDatasets/${DS}/pulls/7`,
+      `GET /repos/nemarDatasets/${DS}/pulls/7`,
+    ]);
+    expect(mergeTo()).toHaveLength(WORKER_MERGES_MAX);
+    expect(auditsOf(WORKER_MERGE_ACTION, id)).toHaveLength(WORKER_MERGES_MAX);
+    expect(claimsOf(id)).toHaveLength(1);
+    expect(rowOf(id)).toMatchObject({ merge_claim_sha: HEAD, hold_reason: "claim-held" });
+  });
+
+  test("under a claim 25 minutes old nothing is sent again, and the claim is kept for resume", async () => {
+    const id = ready();
+    gh.mergeAnswer = { status: 502 };
+    await tick();
+    ageClaim(id, 26);
+    gh.mergeAnswer = null;
+    const r = await tick();
+    expect(r).toMatchObject({ mergesSent: 0, claimsReleased: 0 });
+    expect(rowOf(id)).toMatchObject({ merge_claim_sha: HEAD, hold_reason: "claim-held" });
+    // Older still, past the half hour resume expires a claim at: the Worker still keeps it.
+    ageClaim(id, 30);
+    await tick();
+    expect(rowOf(id)).toMatchObject({ merge_claim_sha: HEAD, hold_reason: "claim-held" });
+    expect(mergeTo()).toHaveLength(1);
+  });
+
+  test("with the switches off, a merge GitHub made is still recorded, and nothing is sent", async () => {
+    const id = ready();
+    gh.mergeAnswer = { status: 502 };
+    await tick();
+    gh.requests = [];
+    const off = await tick(env({ AUTO_REPULL_ENABLED: undefined }));
+    expect(off).toMatchObject({ mergesSent: 0 });
+    expect(rowOf(id)).toMatchObject({ merge_claim_sha: HEAD, hold_reason: "claim-held" });
+    gh.pulls[`${DS}#7`] = appPull(DS, { state: "closed", merged: true });
+    const recorded = await tick(
+      env({ AUTO_REPULL_ENABLED: undefined, AUTO_REPULL_MERGE_ENABLED: undefined }),
+    );
+    expect(recorded).toMatchObject({ merged: 1, mergesSent: 0 });
+    expect(rowOf(id)).toMatchObject({ status: "merged" });
+    expect(mergeTo()).toHaveLength(1);
+  });
+
+  test("merged at another head: the claim is kept for resume, which records it with its counts", async () => {
+    const id = ready();
+    gh.mergeAnswer = { status: 502 };
+    await tick();
+    gh.pulls[`${DS}#7`] = appPull(DS, {
+      state: "closed",
+      merged: true,
+      head: { sha: OTHER, ref: "release/v2.0.0", repo: { full_name: `nemarDatasets/${DS}` } },
+    });
+    await tick();
+    expect(rowOf(id)).toMatchObject({
+      status: "gates_clear",
+      merge_claim_sha: HEAD,
+      hold_reason: "claim-held",
+    });
+  });
+});
+
+describe("a merge GitHub refused, and a claim nothing was sent under", () => {
+  test("405: five minutes on the claim is released and the row holds merge-refused; it is not claimed again", async () => {
+    const id = ready();
+    gh.mergeAnswer = { status: 405 };
+    await tick();
+    gh.mergeAnswer = null;
+    // Too soon: the record releases a claim only once it is five minutes old.
+    await tick();
+    expect(rowOf(id)).toMatchObject({ merge_claim_sha: HEAD, hold_reason: "merge-refused" });
+    ageClaim(id, 6);
+    const r = await tick();
+    expect(r).toMatchObject({ claimsReleased: 1, mergesSent: 0 });
+    expect(rowOf(id)).toMatchObject({
+      status: "gates_clear",
+      merge_claim_sha: null,
+      merge_claimed_at: null,
+      hold_reason: "merge-refused",
+    });
+    expect(auditsOf("repull_merge_claim_released", id).map((a) => a.details.outcome)).toEqual([
+      "refused",
+    ]);
+    // The unit of the day's cap is free, and no later tick claims the record again.
+    expect(usedToday()).toBe(0);
+    await tick();
+    expect(claimsOf(id)).toHaveLength(1);
+    expect(mergeTo()).toHaveLength(1);
+    expect(rowOf(id)).toMatchObject({ merge_claim_sha: null, hold_reason: "merge-refused" });
+  });
+
+  test("closed without a merge after a refusal: released five minutes on, and the row holds pr-closed", async () => {
+    const id = ready();
+    gh.mergeAnswer = { status: 409 };
+    await tick();
+    gh.mergeAnswer = null;
+    gh.pulls[`${DS}#7`] = appPull(DS, { state: "closed" });
+    ageClaim(id, 6);
+    await tick();
+    expect(rowOf(id)).toMatchObject({ merge_claim_sha: null, hold_reason: "pr-closed" });
+    expect(auditsOf("repull_merge_claim_released", id).map((a) => a.details.outcome)).toEqual([
+      "refused",
+    ]);
+  });
+
+  test("closed without a merge after a lost answer: released only past the half hour", async () => {
+    const id = ready();
+    gh.mergeAnswer = { status: 502 };
+    await tick();
+    gh.mergeAnswer = null;
+    gh.pulls[`${DS}#7`] = appPull(DS, { state: "closed" });
+    ageClaim(id, 6);
+    await tick();
+    expect(rowOf(id)).toMatchObject({ merge_claim_sha: HEAD, hold_reason: "claim-held" });
+    ageClaim(id, 30);
+    await tick();
+    expect(rowOf(id)).toMatchObject({ merge_claim_sha: null, hold_reason: "pr-closed" });
+    expect(auditsOf("repull_merge_claim_released", id).map((a) => a.details.outcome)).toEqual([
+      "expired",
+    ]);
+  });
+
+  test("a claim nothing was sent under is sent under while young, and released after five minutes otherwise", async () => {
+    const young = ready("on098816");
+    claimBy(young, SYSTEM_USER_ID);
+    const r = await tick();
+    expect(r).toMatchObject({ mergesSent: 1, merged: 1 });
+    expect(rowOf(young)).toMatchObject({ status: "merged" });
+
+    const old = ready("on098817");
+    claimBy(old, SYSTEM_USER_ID);
+    ageClaim(old, 26);
+    const released = await tick();
+    expect(released).toMatchObject({ claimsReleased: 1, mergesSent: 0 });
+    expect(rowOf(old)).toMatchObject({ merge_claim_sha: null, hold_reason: null });
+    expect(auditsOf("repull_merge_claim_released", old).map((a) => a.details.outcome)).toEqual([
+      "not_sent",
+    ]);
+    // Taken on again from its facts: a claim of its own, and the merge.
+    const next = await tick();
+    expect(next).toMatchObject({ mergesSent: 1, merged: 1 });
+    expect(rowOf(old)).toMatchObject({ status: "merged" });
+  });
+
+  test("an administrator's claim on an automatic record is theirs: nothing sent under it or released", async () => {
+    const id = ready();
+    claimBy(id, adminId);
+    ageClaim(id, 26);
+    const r = await tick();
+    expect(r).toMatchObject({ mergesSent: 0, claimsReleased: 0 });
+    expect(rowOf(id)).toMatchObject({ merge_claim_sha: HEAD, hold_reason: "claim-held" });
+    expect(gh.merges).toEqual([]);
+    // A merge GitHub made at the claimed head is recorded all the same: it happened.
+    gh.pulls[`${DS}#7`] = appPull(DS, { state: "closed", merged: true });
+    await tick();
+    expect(rowOf(id)).toMatchObject({ status: "merged" });
+  });
+});
+
 describe("what the merge costs a tick", () => {
   // The 30-minute tick shares one invocation's subrequest allowance with every job on it: every D1
   // statement prepared (a batch's statements each count) and every request to GitHub, over five
