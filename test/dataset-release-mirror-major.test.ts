@@ -39,6 +39,23 @@ describe("refuseMirrorMajor", () => {
     expect(ask("nm000200", null, "1.0.0", "2.0.0")).toBeNull();
     expect(ask("xx090123", "nemar-exemplar", "1.0.0", "2.0.0")).toBeNull();
   });
+
+  test("on a mirror, a version either side cannot read is refused: unknown is never a pass", () => {
+    for (const [current, next] of [
+      ["", "2.0.0"],
+      ["none", "1.0.1"],
+      ["1.0", "1.1.0"],
+      ["1.0.0", "1.2.3-dev0"],
+      ["1.0.0", ""],
+    ]) {
+      expect(ask("on004362", null, current as string, next as string)).toContain("cannot be read");
+      expect(ask("xx090123", "openneuro", current as string, next as string)).toContain(
+        "cannot be read",
+      );
+      // Not a mirror: not this rule's to judge.
+      expect(ask("nm000200", null, current as string, next as string)).toBeNull();
+    }
+  });
 });
 
 const REPO_ROOT = join(import.meta.dir, "..");

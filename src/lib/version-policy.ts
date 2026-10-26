@@ -20,8 +20,8 @@ export function isMirror(datasetId: string, source: string | null | undefined): 
 
 /**
  * Why `next` may not follow `current` for this dataset, or null when it may: a higher major on a
- * mirror. A version either side cannot read is not this rule's to judge (the commands refuse one
- * themselves), so it answers null for it.
+ * mirror. On a mirror, a version either side cannot read (empty, `none`, `1.0`, a prerelease) is
+ * refused too: whether it is a major is then not known, and unknown is never a pass.
  */
 export function refuseMirrorMajor(args: {
   datasetId: string;
@@ -32,6 +32,9 @@ export function refuseMirrorMajor(args: {
   if (!isMirror(args.datasetId, args.source)) return null;
   const current = parseVersion(args.current);
   const next = parseVersion(args.next);
-  if (!current || !next || next.major <= current.major) return null;
+  if (!current || !next) {
+    return `${args.datasetId} is a mirror, and its version ${JSON.stringify(args.current)} -> ${JSON.stringify(args.next)} cannot be read as two releases, so whether it is a major (an upstream re-pull, ADR 0111) is not known; it is not released by hand.`;
+  }
+  if (next.major <= current.major) return null;
   return `A major version of a mirror means an upstream re-pull (ADR 0006, ADR 0111): ${args.datasetId} ${args.current} -> ${args.next} is not released by hand. Plan one with: nemar admin repull plan ${args.datasetId}`;
 }
