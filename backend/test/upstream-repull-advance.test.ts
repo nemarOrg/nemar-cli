@@ -7,19 +7,24 @@
  * review's own start. A `Bun.serve()` stand-in for api.github.com (`helpers/repull-github-standin.ts`,
  * through NEMAR_GITHUB_API_URL) answers the pull request, `main`, the check runs, the review's check
  * and comment writes and every dispatch, and records each request; no dataset id here is asked of
- * the real GitHub. The happy paths run against the stand-in as well (the Phase 6 stand-in ruling), so
- * what GitHub itself answers is checked only by the first production runs. The Resend capture is
- * armed around every test and must stay empty.
+ * the real GitHub. The happy paths run against the stand-in as well, as in every re-pull suite: the
+ * organization is shared with production, so no suite asks the real GitHub, and what GitHub itself
+ * answers is checked only by the first production runs. The Resend capture is armed around every
+ * test and must stay empty.
  *
  * The properties, each with a test that fails when its line is changed:
  *  - outside ENVIRONMENT exactly `production` nothing is read, written or sent;
  *  - with the open switch not exactly "1" GitHub is asked nothing, and the row says `switch-off`;
  *  - a hold is the first rule that does not hold, written once per change of word with one audit
  *    row, never over a row that moved, and ended by an edge into another status;
- *  - an administrator's row is never read, and a tick reads at most five rows, in rotation;
- *  - the screen and the review of the head are started once every rule before the screen holds,
- *    the screen at most three times a head and the review only while the screen may still clear;
- *  - only a clean verdict writes `pr_open -> gates_clear`, as the system user, with the head.
+ *  - an administrator's row is never read, and a tick reads at most five rows of each kind, in two
+ *    rotations, every stalled row inside the resume window;
+ *  - the screen of the head is started once every rule before the screen holds, at most three
+ *    times a head, and the review only behind a clear screen, a refusal of it said by its reason;
+ *  - only a clean verdict writes `pr_open -> gates_clear`, as the system user, with the head, and a
+ *    refused edge holds `gates-refused`;
+ *  - a stalled row is resumed inside the window, once quiet, under the open cap and within three
+ *    open dispatches, and every refusal or failure on the way is a word in the result.
  */
 
 import type { Database } from "bun:sqlite";

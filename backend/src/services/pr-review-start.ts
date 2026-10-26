@@ -296,9 +296,10 @@ const notStarted = (reason: string): PrReviewResponse => ({ ok: true, dispatched
  *
  * GitHub is not asked anything outside exact production, with the switch off, or for a record or
  * a dataset that cannot be reviewed. A start that dispatched writes an audit row with no user, as
- * the automatic path's other rows have; a row that could not be written is logged and does not
- * undo or block the review, so the answer says nothing about it, by design (the review's own row
- * is the record that matters). Mails nobody.
+ * the dispatch record's claims and its watchdog do (the advance tick's own rows, its holds, its
+ * gates edge and the screens it dispatches, name the system user); a row that could not be written
+ * is logged and does not undo or block the review, so the answer says nothing about it, by design
+ * (the review's own row is the record that matters). Mails nobody.
  */
 export async function startRepullPullRequestReview(
   env: Bindings,

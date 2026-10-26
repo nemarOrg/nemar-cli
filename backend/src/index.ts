@@ -1120,12 +1120,16 @@ export default {
             ),
         );
         // #1913 (epic #1046 phase 7f, ADR 0111): the automatic re-pull's advance tick. It reads
-        // the open automatic re-pulls, a few a tick in rotation, and records why each waits where
-        // it is. PRODUCTION-ONLY, and deliberately NOT in DEV_CRON_ALLOWLIST: it reads and acts on
-        // pull requests in the shared nemarDatasets org. It also refuses outside exact production
-        // on its own, reads nothing from GitHub while AUTO_REPULL_ENABLED is not "1", never reads
-        // an administrator's re-pull, and sends no mail. One log line, only when it changed
-        // something or something failed.
+        // the open automatic re-pulls, a few of each kind a tick in rotation, and takes each one
+        // step on: it dispatches the identifier screen and starts the review of an open pull
+        // request's head, writes pr_open -> gates_clear for one machine clean, dispatches the
+        // central workflow again to resume a run that stalled before its pull request opened, and
+        // records why each row waits where it is. PRODUCTION-ONLY, and deliberately NOT in
+        // DEV_CRON_ALLOWLIST: it reads and acts on pull requests in the shared nemarDatasets org
+        // and dispatches against it. It also refuses outside exact production on its own, reads
+        // nothing from GitHub and dispatches nothing while AUTO_REPULL_ENABLED is not "1", never
+        // reads an administrator's re-pull, and sends no mail. One log line, only when it changed
+        // something, was refused or failed.
         ctx.waitUntil(
           runRepullAdvanceCron(env)
             .then((r) => {

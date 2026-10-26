@@ -13,9 +13,11 @@
  *    head again and re-asserts the screen's verdict in the statement that writes. Not clean: start
  *    what the gates are waiting for (below), then record the first rule that does not hold as the
  *    row's hold. Only a clean verdict writes `gates_clear`: an unknown fact, a `not-clean`
- *    mergeable state and every other word hold. The merge itself is a later slice's.
+ *    mergeable state and every other word hold, and a clean row whose edge the transition refuses
+ *    holds `gates-refused`. The merge itself is a later slice's.
  *  - a row a live dispatch is working on (its run is still out, settling its head): nothing is read
- *    from GitHub, and the row is not held, because nothing holds it but its own run.
+ *    from GitHub, and no hold is recorded for it, because nothing holds it but its own run; a hold
+ *    it had is cleared, which is a write, with its audit row.
  *
  * RESUMING A STALLED ROW. Its run ended without opening the pull request: no dispatch of the
  * dataset is live, and the row's last dispatch `failed`, went `unreported` or was refused by
@@ -70,7 +72,8 @@
  * bump its `revision` and does not touch `updated_at`, so the record's own compare-and-set and the
  * times other slices read are left as they were. It is written only when the word changes, with
  * one audit row (`repull_hold`) per change, so a row that waits for the same reason tick after tick
- * keeps the time it began and writes nothing more; and only to the row as the tick read it (its
+ * keeps the time it began and writes nothing more (clearing a hold is a change too, with its audit
+ * row); and only to the row as the tick read it (its
  * `revision`), so a row that moved while the tick looked at it is not overwritten with a reason
  * about what it was. An edge into another status clears the hold (`prepareTransition`); a self-edge
  * keeps it until the next tick reads the row again.
@@ -97,6 +100,8 @@
  * GitHub requests when each starts its screen, 37 and 20 while each waits, 82 and 35 when each
  * starts its review (the most), 52 and 25 when each is cleared; a stalled row's resume is eight
  * statements and one dispatch, and the tick itself two statements (the list of rows, the stamp).
+ * Plus one request to mint the App's installation token on a cold isolate, when the App's
+ * credential is configured: the suites use a personal token, so the figures leave it out.
  *
  * NO MAIL. Nothing here imports a mail service (`repull-no-mail-scan.test.ts`).
  */
@@ -281,14 +286,21 @@ export const ADVANCE_STAMP_SQL =
 // ----------------------------------------------------------------------------
 
 /**
- * What a tick failed at, as a fixed word, never a message. A dispatch that could not be made: the
- * Worker has no callback secret (`dispatch-unconfigured`), a screen or a resume that could not be
- * sent (`dispatch-failed`), GitHub refused a resume (`dispatch-refused`), the Worker is not a release
- * build (`cli-unreleased`), no GitHub token could be had (`no-github-token`), the open cap is set to
- * something unreadable (`cap-unreadable`), a recorded tag is not a tag (`to-tag-malformed`), the
- * claim does not find the row the tick read stalled with its tags (`repull-mismatch`); each
- * is a word of the dispatch record or of the scheduler. Then a row whose step threw, the tick
- * itself, its stamp.
+ * What a tick failed at, as a fixed word, never a message. Each of the first group is a word of the
+ * dispatch record or of the scheduler:
+ *  - `dispatch-unconfigured`: the Worker has no callback secret (or, for a screen, no API address
+ *    or GitHub credential), so nothing could be signed or sent;
+ *  - `dispatch-failed`: a screen's dispatch failed (the screen's own word, recorded on its row as an
+ *    error it is run again from), or a resume's payload could not be built after its claim;
+ *  - `dispatch-refused`: GitHub refused a resume's send for the dispatch itself (404, 422);
+ *  - `dispatch-deferred`: GitHub turned a resume's send away for the Worker (any other 4xx);
+ *  - `cli-unreleased`: the Worker is not a release build, so a run could not install its CLI;
+ *  - `no-github-token`: no GitHub token could be had for a resume's send;
+ *  - `cap-unreadable`: the open cap is set to something its reader cannot take;
+ *  - `to-tag-malformed`: a recorded tag is not a tag;
+ *  - `repull-mismatch`: the claim does not find the row the tick read stalled with its tags.
+ * Then the tick's own: a row whose step threw, the tick itself (it could not list its rows), its
+ * stamp.
  */
 export const ADVANCE_FAILURES = [
   "dispatch-unconfigured",
