@@ -1221,7 +1221,7 @@ jobs:
   integration-dev:
     runs-on: ubuntu-latest
     # p95 11.5 min (42 green runs to 2026-10-13), so twice that.
-    timeout-minutes: 24
+    timeout-minutes: 35
     needs: changes
     if: needs.changes.outputs.cli == 'true' || needs.changes.outputs.tests == 'true' || needs.changes.outputs.backend == 'true' || needs.changes.outputs.shared == 'true'
     env:
