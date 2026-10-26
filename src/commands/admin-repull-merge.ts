@@ -36,7 +36,8 @@ Merges the dataset's re-pull pull request with your own GitHub login (GH_TOKEN, 
 token\`; it must belong to a person, and when your NEMAR account names a GitHub login it must be
 that one), once its record is gates_clear (\`nemar admin repull resume <id>\` gets it there).
 Before anything is written it checks that the pull request is open, not a draft, into main at the
-screened head, that NEMAR's main moved by enrichment only, that the automated review of that head
+screened head, from and into nemarDatasets/<dataset> itself (never a fork's, the name compared
+without case), that NEMAR's main moved by enrichment only, that the automated review of that head
 allows it (one that failed, is running or cannot be read needs --force), that the identifier screen
 of that head passes, that GitHub reports the pull request clean, and that the squash message
 carries the re-pull commit's two trailers as its last paragraph. Then it reads the review once

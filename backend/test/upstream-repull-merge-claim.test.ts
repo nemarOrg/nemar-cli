@@ -17,7 +17,9 @@
  *    nothing; a claim landing between the read and the write takes the last unit; an unreadable
  *    cap reads 0;
  *  - the gates and the claim need GitHub's live head to be the sha they name, on an open pull
- *    request; the claim's statement also holds the screen, the cap and two dataset fences;
+ *    request from and into `nemarDatasets/<dataset_id>` (a fork's head or base is refused, the
+ *    name compared without case); the claim's statement also holds the screen, the cap and two
+ *    dataset fences;
  *  - a claim is released only after five minutes, only when GitHub says the pull request did not
  *    merge, and never for an unknown outcome;
  *  - `merged` is written from GitHub's answer; a merge with no claim held and one at a head other

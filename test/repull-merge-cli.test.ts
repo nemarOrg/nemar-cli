@@ -11,6 +11,8 @@
  *    paragraph is both of the re-pull commit's trailers as git reads them, and is recorded;
  *  - a cap that is used up sends no merge; a `main` moved by a commit enrichment does not make, a
  *    state that is not `clean`, and a review that is still running are refused before the claim;
+ *  - a pull request whose head or base repository is not `nemarDatasets/<dataset_id>` (a fork's, a
+ *    deleted fork's, another base) is refused before the claim, the name compared without case;
  *  - a squash message without both trailers as its last paragraph is refused at the gate;
  *  - a head that moves between the gate's last read and the merge is refused by GitHub, because
  *    the merge carries the screened `sha`, and the claim is then kept, not repeated;
