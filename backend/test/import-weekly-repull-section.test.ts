@@ -519,7 +519,7 @@ describe("merges are counted by who held the claim, from the audit rows the writ
     recorder?: number;
     patch?: boolean;
     origin?: "automatic" | "administrator";
-  }): Promise<string> {
+  }): Promise<{ id: number; dataset: string }> {
     const dataset = nextDataset();
     seedMirror(dataset);
     const patch = o.patch === true;
@@ -553,7 +553,36 @@ describe("merges are counted by who held the claim, from the audit rows the writ
       pr,
     });
     expect(done, JSON.stringify(done)).toHaveProperty("merged_outside_tool");
-    return dataset;
+    return { id, dataset };
+  }
+
+  /**
+   * What a release step writes when the tag or the version row is not there yet: the self-edge
+   * `resume` records on a merged record, through the same writer as every other edge. It is an
+   * edge from `merged` to `merged` (from `patch_merged` to itself for N.0.1), and it is not a merge.
+   */
+  async function releaseError(id: number, status: "merged" | "patch_merged"): Promise<void> {
+    const done = await transitionRepull(envFor(), { id: ADMIN }, id, {
+      from: status,
+      to: status,
+      fields: {},
+      error: "[release:tag-missing] the tag is not on GitHub yet",
+    });
+    expect(done, JSON.stringify(done)).toHaveProperty("row");
+  }
+
+  /** The edges into a merged status the audit log holds for a record, in the order written. */
+  function mergedEdges(id: number): string[] {
+    return db
+      .query<{ edge: string }, [string]>(
+        `SELECT json_extract(details, '$.from') || ' > ' || json_extract(details, '$.to') AS edge
+           FROM audit_log
+          WHERE action = 'repull_transition' AND resource_id = ?
+            AND json_extract(details, '$.to') IN ('merged', 'patch_merged')
+          ORDER BY id`,
+      )
+      .all(String(id))
+      .map((r) => r.edge);
   }
 
   // The real clock stamps the audit rows, so this report is made as of just after them.
@@ -602,6 +631,39 @@ describe("merges are counted by who held the claim, from the audit rows the writ
     // The same merge, a report that covers the week before it was recorded.
     const earlier = (await report({}, new Date(Date.now() - 8 * DAY))).facts.repulls?.merged;
     expect(earlier).toEqual({ worker: 0, administrator: 0, outside_tool: 0, unattributed: 0 });
+  });
+
+  test("a release step's error on a merged record is not another merge: one merge and two errors count once", async () => {
+    const rec = await merged({ claimant: SYSTEM_USER_ID });
+    await releaseError(rec.id, "merged");
+    await releaseError(rec.id, "merged");
+    // The premise: the writer left the merge's edge and two edges that end where they began.
+    expect(mergedEdges(rec.id)).toEqual([
+      "gates_clear > merged",
+      "merged > merged",
+      "merged > merged",
+    ]);
+    const merges = (await report({}, soon())).facts.repulls?.merged;
+    expect(merges).toEqual({ worker: 1, administrator: 0, outside_tool: 0, unattributed: 0 });
+  });
+
+  test("a merge outside NEMAR's tools followed by a release error is one merge outside, and none unattributed", async () => {
+    const rec = await merged({ claimant: null });
+    await releaseError(rec.id, "merged");
+    expect(mergedEdges(rec.id)).toEqual(["pr_open > merged", "merged > merged"]);
+    const merges = (await report({}, soon())).facts.repulls?.merged;
+    expect(merges).toEqual({ worker: 0, administrator: 0, outside_tool: 1, unattributed: 0 });
+  });
+
+  test("N.0.1's release error is no more a merge than N.0.0's", async () => {
+    const rec = await merged({ claimant: ADMIN, patch: true, origin: "administrator" });
+    await releaseError(rec.id, "patch_merged");
+    expect(mergedEdges(rec.id)).toEqual([
+      "patch_gates_clear > patch_merged",
+      "patch_merged > patch_merged",
+    ]);
+    const merges = (await report({}, soon())).facts.repulls?.merged;
+    expect(merges).toEqual({ worker: 0, administrator: 1, outside_tool: 0, unattributed: 0 });
   });
 });
 

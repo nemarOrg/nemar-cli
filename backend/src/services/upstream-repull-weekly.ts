@@ -89,8 +89,11 @@ const TERMINAL_LIST = quoted(TERMINAL_STATUSES);
  *  - `claims`: open re-pulls of any origin holding a claim to merge, for either pull request, that
  *    has no merge recorded and was made before the cutoff (`?1`), so it is older than the bound.
  *  - `merges`: the merges recorded in the window, by who held the claim to merge. A merge is the
- *    audit row of the edge into `merged` or `patch_merged`; whether any NEMAR tool held a claim is
- *    in that row (`merged_outside_tool`), and who held it is the user of the latest claim edge (the
+ *    audit row of an edge INTO `merged` or `patch_merged`, from another status: the release's step
+ *    errors write an edge from `merged` to `merged` (and the same for `patch_merged`) whenever a
+ *    tag or a version row is not there yet, and that is not a merge, so a row whose edge ends where
+ *    it began is not counted. Whether any NEMAR tool held a claim is in that row
+ *    (`merged_outside_tool`), and who held it is the user of the latest claim edge (the
  *    gates-clear self-edge) before it: the system user is the Worker, anyone else is an
  *    administrator's tool, and none is a claim the audit log does not hold.
  *  - `failed`: the re-pulls that ended `failed` in the window.
@@ -129,6 +132,7 @@ export const REPULL_WEEK_SQL = {
           FROM audit_log a
          WHERE a.action = 'repull_transition' AND a.resource_type = 'upstream_repull'
            AND json_extract(a.details, '$.to') IN ('merged', 'patch_merged')
+           AND json_extract(a.details, '$.from') IS NOT json_extract(a.details, '$.to')
            AND a.timestamp >= ?1 AND a.timestamp < ?2
       ) m`,
   failed: `SELECT COUNT(*) AS n

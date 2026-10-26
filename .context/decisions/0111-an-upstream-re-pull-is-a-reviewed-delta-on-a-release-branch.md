@@ -1999,7 +1999,9 @@ Three additions are made to earlier text: an annotation on the record's header, 
   It states, as of the moment the report is made, the open automatic re-pulls with the word each is held for, and the claims to merge still held.
 - A dispatch is counted in the week it was sent, in the state it has when the report is made.
   One still running then is counted as running and is not counted again if it later goes unreported; the re-pull it was for is then stalled, and the bound on its resumes is what the report sees next.
-- A merge is attributed by its claim, not by the row's origin or by who recorded it: to the user of the latest claim edge in the audit log before the edge into `merged` or `patch_merged`.
+- A merge is the edge into `merged` or `patch_merged` from another status.
+  The release's step errors write an edge from `merged` to itself (and the same for N.0.1) whenever a tag or a version row is not there yet, and that is not a merge, so an edge that ends where it began is not counted.
+- A merge is attributed by its claim, not by the row's origin or by who recorded it: to the user of the latest claim edge in the audit log before that edge.
   The system user is the Worker, any other user is an administrator's tool, and a merge whose own audit row says no claim was held (`merged_outside_tool`) is a merge outside NEMAR's tools.
   A claim the audit log does not hold is counted apart, never as the Worker's, so the four counts add up to the merges.
   So an automatic re-pull an administrator merged is the administrator's, and N.0.1's merges count as well as N.0.0's.
