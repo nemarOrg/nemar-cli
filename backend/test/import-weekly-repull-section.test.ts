@@ -45,7 +45,7 @@ import {
   runWeeklyImportSummary,
 } from "../src/services/import-weekly-summary-sweep";
 import { transitionRepull } from "../src/services/upstream-repull";
-import { recordRepullMerged } from "../src/services/upstream-repull-verified";
+import { recordRepullMerged, releaseMergeClaim } from "../src/services/upstream-repull-verified";
 import {
   HELD_CLAIM_ATTENTION_HOURS,
   REPULL_WEEK_SQL,
@@ -466,11 +466,40 @@ describe("re-pulls that ended failed are counted in the week they ended", () => 
     expect(r.facts.repulls?.ended_failed).toBe(2);
     expect(sectionOf(r.body)).toContain("| Re-pulls that ended failed this week | 2 |");
   });
+
+  /** A re-pull the writer ended `failed` (it stamps the real clock), moved to the instant `when`. */
+  async function endedAt(when: string): Promise<void> {
+    const id = seedAutomatic("pr_open");
+    const done = await transitionRepull(envFor(), { id: 1 }, id, {
+      from: "pr_open",
+      to: "failed",
+      fields: {},
+      error: "[auto:head-foreign]",
+    });
+    expect(done, JSON.stringify(done)).toHaveProperty("row");
+    db.run("UPDATE upstream_repulls SET terminal_at = ? WHERE id = ?", [when, id]);
+  }
+
+  test("the window's start is inclusive: a re-pull that ended at that second is this week's, one a second before is last week's", async () => {
+    await endedAt(at(-7 * DAY - 1000));
+    await endedAt(at(-7 * DAY));
+    expect((await report()).facts.repulls?.ended_failed).toBe(1);
+  });
+
+  test("the window's end is exclusive: a re-pull that ended at that second is next week's, one a second before is this week's", async () => {
+    await endedAt(at(-1000));
+    await endedAt(at(0));
+    expect((await report()).facts.repulls?.ended_failed).toBe(1);
+  });
 });
 
 describe("merges are counted by who held the claim, from the audit rows the writers leave", () => {
   const ADMIN = 4242;
   const MERGE = STANDIN_MERGE_SHA;
+  const PATCH_MERGE = "3333333333333333333333333333333333333333";
+  const TAG = "2222222222222222222222222222222222222222";
+  // The day's claims are capped at five unless told otherwise, and these tests make more than that.
+  const cap = { REPULL_DAILY_MERGE_CAP: "20" };
 
   beforeEach(() => {
     db.run(
@@ -510,6 +539,54 @@ describe("merges are counted by who held the claim, from the audit rows the writ
     );
   }
 
+  interface Rec {
+    id: number;
+    dataset: string;
+  }
+
+  /** A mirror and its re-pull at `status`, with a clear screen of the head wherever a claim can follow. */
+  function ready(
+    status: "pr_open" | "gates_clear" | "patch_gates_clear",
+    origin: "automatic" | "administrator" = "automatic",
+  ): Rec {
+    const dataset = nextDataset();
+    seedMirror(dataset);
+    const patch = status === "patch_gates_clear";
+    const id = seedRepull(status, {
+      dataset_id: dataset,
+      upstream_ds: "ds099999",
+      origin,
+      actor_user_id: ADMIN,
+      head_sha: HEAD,
+      ...(status === "gates_clear" ? { gates_sha: HEAD } : {}),
+      ...(patch ? { patch_head_sha: HEAD, patch_gates_sha: HEAD } : {}),
+    });
+    if (status !== "pr_open") markClear(id, patch ? "n1" : "n0");
+    return { id, dataset };
+  }
+
+  /** The claim to merge, as the writer takes it: the gates-clear self-edge of `pr`, by `userId`. */
+  async function claim(rec: Rec, userId: number, pr: "n0" | "n1"): Promise<void> {
+    const status = pr === "n1" ? "patch_gates_clear" : "gates_clear";
+    const done = await transitionRepull(envFor(cap), { id: userId }, rec.id, {
+      from: status,
+      to: status,
+      fields: pr === "n1" ? { patch_merge_claim_sha: HEAD } : { merge_claim_sha: HEAD },
+    });
+    expect(done, JSON.stringify(done)).toHaveProperty("row");
+  }
+
+  /** GitHub's word that `pr` merged, then the merge recorded from it by `recorder`. */
+  async function record(rec: Rec, pr: "n0" | "n1", recorder: number): Promise<void> {
+    gh.pulls[`${rec.dataset}#${pr === "n1" ? 8 : 7}`] = {
+      merged: true,
+      merge_commit_sha: pr === "n1" ? PATCH_MERGE : MERGE,
+      head: { sha: HEAD, ref: pr === "n1" ? "release/v2.0.1" : "release/v2.0.0" },
+    };
+    const done = await recordRepullMerged(envFor(cap), { id: recorder }, rec.id, { pr });
+    expect(done, JSON.stringify(done)).toHaveProperty("merged_outside_tool");
+  }
+
   /**
    * A re-pull merged through the real writers: claimed by `claimant` (null: no claim, a merge
    * outside NEMAR's tools), then recorded from GitHub's word that it merged, by `recorder`.
@@ -519,41 +596,52 @@ describe("merges are counted by who held the claim, from the audit rows the writ
     recorder?: number;
     patch?: boolean;
     origin?: "automatic" | "administrator";
-  }): Promise<{ id: number; dataset: string }> {
-    const dataset = nextDataset();
-    seedMirror(dataset);
-    const patch = o.patch === true;
-    const status: RepullStatus =
-      o.claimant === null ? "pr_open" : patch ? "patch_gates_clear" : "gates_clear";
-    const id = seedRepull(status, {
-      dataset_id: dataset,
-      upstream_ds: "ds099999",
-      origin: o.origin ?? "automatic",
-      actor_user_id: ADMIN,
-      head_sha: HEAD,
-      ...(status === "gates_clear" ? { gates_sha: HEAD } : {}),
-      ...(patch ? { patch_head_sha: HEAD, patch_gates_sha: HEAD } : {}),
-    });
-    const pr = patch ? "n1" : "n0";
-    if (o.claimant !== null) {
-      markClear(id, pr);
-      const claim = await transitionRepull(envFor(), { id: o.claimant }, id, {
-        from: status,
-        to: status,
-        fields: patch ? { patch_merge_claim_sha: HEAD } : { merge_claim_sha: HEAD },
-      });
-      expect(claim, JSON.stringify(claim)).toHaveProperty("row");
-    }
-    gh.pulls[`${dataset}#${patch ? 8 : 7}`] = {
-      merged: true,
-      merge_commit_sha: MERGE,
-      head: { sha: HEAD, ref: patch ? "release/v2.0.1" : "release/v2.0.0" },
-    };
-    const done = await recordRepullMerged(envFor(), { id: o.recorder ?? o.claimant ?? ADMIN }, id, {
-      pr,
-    });
-    expect(done, JSON.stringify(done)).toHaveProperty("merged_outside_tool");
-    return { id, dataset };
+  }): Promise<Rec> {
+    const pr = o.patch === true ? "n1" : "n0";
+    const rec = ready(
+      o.claimant === null ? "pr_open" : o.patch === true ? "patch_gates_clear" : "gates_clear",
+      o.origin,
+    );
+    if (o.claimant !== null) await claim(rec, o.claimant, pr);
+    await record(rec, pr, o.recorder ?? o.claimant ?? ADMIN);
+    return rec;
+  }
+
+  /**
+   * The state a merged and released N.0.0 leaves for its corrections: N.0.1's pull request open at
+   * `patch_gates_clear`, screened clear. A state fixture: the steps between, the release and the
+   * synthesis, need a version row and a tag, and are not what is counted. The claim and the merge
+   * that follow go through the writers.
+   */
+  function openPatch(rec: Rec): void {
+    db.run(
+      `UPDATE upstream_repulls
+          SET status = 'patch_gates_clear', tag_sha = ?1, patch_version = '2.0.1',
+              patch_branch = 'release/v2.0.1', patch_pr_number = 8, patch_head_sha = ?2,
+              patch_base_sha = ?1, patch_gates_sha = ?2
+        WHERE id = ?3`,
+      [TAG, HEAD, rec.id],
+    );
+    markClear(rec.id, "n1");
+  }
+
+  /** Let the claim age, so the writer that releases a claim not sent will take it. */
+  function ageClaim(rec: Rec): void {
+    db.run(
+      "UPDATE upstream_repulls SET merge_claimed_at = datetime('now', '-10 minutes') WHERE id = ?",
+      [rec.id],
+    );
+  }
+
+  /** Move a merge's audit row to `when`: the writer stamps the real clock, a window edge needs an instant. */
+  function restamp(rec: Rec, when: string): void {
+    db.run(
+      `UPDATE audit_log SET timestamp = ?
+        WHERE action = 'repull_transition' AND resource_id = ?
+          AND json_extract(details, '$.to') = 'merged'
+          AND json_extract(details, '$.from') <> json_extract(details, '$.to')`,
+      [when, String(rec.id)],
+    );
   }
 
   /**
@@ -587,30 +675,97 @@ describe("merges are counted by who held the claim, from the audit rows the writ
 
   // The real clock stamps the audit rows, so this report is made as of just after them.
   const soon = () => new Date(Date.now() + 60_000);
+  const counts = async (now: Date = soon()) => (await report({}, now)).facts.repulls?.merged;
 
-  test("the Worker, an administrator's tool and no tool at all are three counts, and N.0.1 counts too", async () => {
-    await merged({ claimant: SYSTEM_USER_ID });
+  test("the Worker, an administrator's tool, no tool and a claim the log lost are four different counts", async () => {
+    // Four different numbers, so a predicate swapped for another's moves a count: with two of a
+    // kind and two of another, swapping their predicates would change nothing.
     await merged({ claimant: SYSTEM_USER_ID });
     await merged({ claimant: ADMIN, origin: "administrator" });
     await merged({ claimant: ADMIN, patch: true, origin: "administrator" });
-    await merged({ claimant: null });
+    for (let i = 0; i < 3; i++) await merged({ claimant: null });
+    const lost: Rec[] = [];
+    for (let i = 0; i < 4; i++) lost.push(await merged({ claimant: SYSTEM_USER_ID }));
+    db.run(
+      `DELETE FROM audit_log WHERE action = 'repull_transition'
+         AND resource_id IN (${lost.map((r) => `'${r.id}'`).join(", ")})
+         AND json_extract(details, '$.from') = 'gates_clear'
+         AND json_extract(details, '$.to') = 'gates_clear'`,
+    );
     const r = await report({}, soon());
     expect(r.facts.repulls?.merged).toEqual({
-      worker: 2,
+      worker: 1,
       administrator: 2,
-      outside_tool: 1,
-      unattributed: 0,
+      outside_tool: 3,
+      unattributed: 4,
     });
     const section = sectionOf(r.body);
-    expect(section).toContain("| Merged by the Worker | 2 |");
+    expect(section).toContain("| Merged by the Worker | 1 |");
     expect(section).toContain("| Merged by an administrator | 2 |");
-    expect(section).toContain("| Merged outside NEMAR's tools | 1 |");
+    expect(section).toContain("| Merged outside NEMAR's tools | 3 |");
+    expect(section).toContain("| Merged, claim not in the audit log | 4 |");
   });
 
   test("an automatic re-pull an administrator merged is the administrator's, not the Worker's", async () => {
     await merged({ claimant: ADMIN, origin: "automatic" });
-    const merges = (await report({}, soon())).facts.repulls?.merged;
-    expect(merges).toEqual({ worker: 0, administrator: 1, outside_tool: 0, unattributed: 0 });
+    expect(await counts()).toEqual({
+      worker: 0,
+      administrator: 1,
+      outside_tool: 0,
+      unattributed: 0,
+    });
+  });
+
+  test("whoever records the merge does not decide: the Worker's claim recorded by an administrator is the Worker's", async () => {
+    await merged({ claimant: SYSTEM_USER_ID, recorder: ADMIN });
+    expect(await counts()).toEqual({
+      worker: 1,
+      administrator: 0,
+      outside_tool: 0,
+      unattributed: 0,
+    });
+  });
+
+  test("a claim taken over by an administrator is the administrator's, not the first claimant's", async () => {
+    const rec = ready("gates_clear");
+    await claim(rec, SYSTEM_USER_ID, "n0");
+    // The Worker's merge was never sent: the claim is released, and an administrator claims it.
+    ageClaim(rec);
+    const released = await releaseMergeClaim(envFor(cap), { id: ADMIN }, rec.id, {
+      pr: "n0",
+      sha: HEAD,
+      outcome: "not_sent",
+    });
+    expect(released, JSON.stringify(released)).toHaveProperty("row");
+    await claim(rec, ADMIN, "n0");
+    await record(rec, "n0", ADMIN);
+    expect(await counts()).toEqual({
+      worker: 0,
+      administrator: 1,
+      outside_tool: 0,
+      unattributed: 0,
+    });
+  });
+
+  test("N.0.0 on the Worker's claim and N.0.1 on an administrator's, one record, are one merge each", async () => {
+    const rec = ready("gates_clear");
+    await claim(rec, SYSTEM_USER_ID, "n0");
+    await record(rec, "n0", SYSTEM_USER_ID);
+    openPatch(rec);
+    await claim(rec, ADMIN, "n1");
+    await record(rec, "n1", ADMIN);
+    // Each merge takes the latest claim edge BEFORE it: the first is not the administrator's later
+    // claim, and the second is not the Worker's earlier one.
+    expect(mergedEdges(rec.id)).toEqual([
+      "gates_clear > merged",
+      "patch_gates_clear > patch_merged",
+    ]);
+    expect(await counts()).toEqual({
+      worker: 1,
+      administrator: 1,
+      outside_tool: 0,
+      unattributed: 0,
+    });
   });
 
   test("a claim the audit log does not hold is unattributed, never the Worker's", async () => {
@@ -620,17 +775,42 @@ describe("merges are counted by who held the claim, from the audit rows the writ
          AND json_extract(details, '$.from') = 'gates_clear'
          AND json_extract(details, '$.to') = 'gates_clear'`,
     );
-    const merges = (await report({}, soon())).facts.repulls?.merged;
-    expect(merges).toEqual({ worker: 0, administrator: 0, outside_tool: 0, unattributed: 1 });
+    expect(await counts()).toEqual({
+      worker: 0,
+      administrator: 0,
+      outside_tool: 0,
+      unattributed: 1,
+    });
   });
 
   test("a merge recorded before the window belongs to an earlier week", async () => {
     await merged({ claimant: SYSTEM_USER_ID });
-    const tick = (await report({}, soon())).facts.repulls?.merged.worker;
-    expect(tick).toBe(1);
+    expect((await counts())?.worker).toBe(1);
     // The same merge, a report that covers the week before it was recorded.
-    const earlier = (await report({}, new Date(Date.now() - 8 * DAY))).facts.repulls?.merged;
+    const earlier = await counts(new Date(Date.now() - 8 * DAY));
     expect(earlier).toEqual({ worker: 0, administrator: 0, outside_tool: 0, unattributed: 0 });
+  });
+
+  test("the window's start is inclusive: a merge recorded at that second is this week's, one a second before is last week's", async () => {
+    restamp(await merged({ claimant: null }), at(-7 * DAY - 1000));
+    restamp(await merged({ claimant: null }), at(-7 * DAY));
+    expect(await counts(NOW)).toEqual({
+      worker: 0,
+      administrator: 0,
+      outside_tool: 1,
+      unattributed: 0,
+    });
+  });
+
+  test("the window's end is exclusive: a merge recorded at that second is next week's, one a second before is this week's", async () => {
+    restamp(await merged({ claimant: null }), at(-1000));
+    restamp(await merged({ claimant: null }), at(0));
+    expect(await counts(NOW)).toEqual({
+      worker: 0,
+      administrator: 0,
+      outside_tool: 1,
+      unattributed: 0,
+    });
   });
 
   test("a release step's error on a merged record is not another merge: one merge and two errors count once", async () => {
