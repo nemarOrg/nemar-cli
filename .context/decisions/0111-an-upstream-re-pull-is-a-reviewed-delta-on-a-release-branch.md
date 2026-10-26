@@ -1610,3 +1610,81 @@ that the review's check and comment are published on a pull request the App open
 that a resumed run takes up the record its dispatch names (the unattended run's slice);
 that GitHub answers a send it refuses for the Worker's credential or rate with a status other than 404 and 422, which is what keeps such a send from spending a resume;
 and that the tick's real cost on the 30-minute tick is the one measured here.
+
+## Amendment 2026-10-25 (#1913): Phase 7d runs a re-pull unattended
+
+A further slice of the Phase 7 amendment above, built by Phase 7d.
+It builds the run a dispatch starts: the central workflow that opens an automatic re-pull's pull request and finishes a merged one, and the CLI's automatic mode that workflow runs.
+Nothing here merges; the Worker's merge is a later slice's.
+The workflow is authored in this repository and not deployed: its copy in `nemarDatasets/.github` is a pull request of its own, held until the epic ships, so until then GitHub takes the Worker's dispatches and nothing runs, and the watchdog ends each one `unreported`.
+Nothing here sends mail or adds a route.
+
+### Where the run executes
+
+- The run is the one job of `run-upstream-repull.yml` in `nemarDatasets/.github`, started by the Worker's repository dispatch and by no other event, as the import's own workflow is started.
+- In open mode it runs `nemar admin repull plan` and then `nemar admin repull execute`, through the execution an administrator's run takes (the record, the preparation, the copy, the registration, the release branch and the pull request), never a second path; in finish mode it runs `nemar admin repull resume`, through the release and the lock to `complete`.
+  It never merges.
+- The release branch is pushed, and the pull request opened, with an App token the job mints for the dispatch's dataset repository alone, with write on its contents and its pull requests and nothing else, so the App is the pull request's author.
+- Each run is its own concurrency group, never one taken from the payload: GitHub replaces the pending run of a group, so a group named by the dataset would let a forged event replace a dispatched run before it started, the reason ADR 0092's review workflow gives for its own.
+  The Worker's one live dispatch per dataset keeps two runs off one dataset.
+- The job's bound is 330 minutes, shared with the CLI as one constant.
+  An hour of queueing and that bound end inside the watchdog's eight hours, and a dispatch claimed at the daily tick, at 03:00 UTC, ends before the UTC day it was counted in does, which is the timing the Phase 7b slice asked a later slice to pin: the open cap then bounds the pull requests opened in a day.
+  The slice that resumes stalled runs claims open dispatches later in the day, and the same check (`opensTheSameUtcDay` in `shared/repull-state.ts`) bounds its last hour.
+
+### The log is public
+
+- In automatic mode the CLI prints only lines of the form `repull-auto: <event> <key>=<value>`, whose values are counts and fixed words, and ends with one result line, `repull-auto: result phase=<phase>`, with `code=<word>` when the run refused or failed.
+  Every other write of the process is swallowed from the moment the entry point sees the option: the libraries' progress lines, their warnings, a notice, a usage error and the exit hint.
+  Subprocesses print nothing: every git, git-annex and aws child runs with its output piped, which reaches the console only under `--verbose`, and the automatic mode refuses `--verbose` and `--debug` (`auto-verbose`).
+- The plan file and the work clones never leave the runner: no artifact is uploaded, `--json`, `--counts` and `--keep-workdir` are refused, and no path, key, file name or subject label is printed.
+- The CLI's sign-in prints nothing, and takes the key from its environment, not its command line.
+- What a run did in detail is the record's, which administrators read: the re-pull's `last_error` and the dispatch's code.
+
+### The dispatch and its token
+
+- The run reads its dispatch from the event GitHub delivered, and both the workflow and the CLI take exactly the nine keys the Worker's builder writes, `repull_id` absent on a first dispatch, each a string of the shape the Worker checks before it sends one.
+  A tenth key, a missing one, or a value of another type or shape is `dispatch-invalid`, and nothing in such a payload is trusted to name the dispatch, so it is not reported.
+- The token is masked by the job's first step, which reads it from the event file and has no environment of its own; each of its lines is masked, so no line of a crafted value becomes a workflow command.
+  It is in no environment variable at any level and in no argument: the CLI and the last step read it from the event file.
+- A token found on the command line refuses the run (`auto-token-on-argv`), and that refusal is reported first, which ends the dispatch and with it the token, since a token in a `run:` line is in the public log.
+- No `run:` script interpolates an expression; the payload reaches the shell through the job's environment only, after the second step checked it.
+
+### Production only
+
+- The workflow installs exactly the release the dispatch names and refuses any installed version that is not `X.Y.Z` or not that release, so a development build never runs; the CLI refuses itself the same way (`auto-cli-version`).
+- The CLI needs `GH_TOKEN`, the App token (`auto-no-app-token`); the Worker refuses an automatic record outside exact production on its own.
+- The copy takes short-lived credentials only, as it does on an administrator's machine, so the job exchanges the import's long-lived AWS pair for a six-hour session (`GetSessionToken`) inside the step that runs the CLI, masks it, and writes it nowhere (`runner-credentials` when it cannot).
+
+### The plan the automatic path takes, checked by the run
+
+- `plan` refuses a plan that is not executable, with the plan's first refusal, `key-without-pin`, or the word of the first check that is not ok, and one the automatic path does not take, with the create's own words (`auto-planner-version`, `auto-not-clean-plan`, `auto-copy-too-large`); both exit 3 and nothing is written.
+  It plans from a listing of the bucket, never the location log, because the log can claim content the bucket never received.
+- `execute` checks the LIVE plan it makes before anything is written, never the file's own fields: executable, this planner, `unexplained`, `conflicts` and `corrections` each stated and zero, and a copy whose size is known for every key and at most 1 TiB; it states that size at the automatic create, which bounds it again.
+- A record that a run takes up past `prepared` must be the automatic path's own, and the dispatch's when the dispatch names one: an administrator's record of the same plan is never taken up (`repull-in-flight`), since the run would push and open its pull request as the App.
+  No live plan can be made past the registration, so its counts are read from the reviewed body.
+
+### The settle rule (on "Whether enrichment commits on the release branch move its head")
+
+- Before the run reports its pull request open, it reads the release branch with git until enrichment has not moved it for five minutes, at most `--settle-minutes` (the workflow passes 30), holding the execution's lock.
+- Each move is judged by the head rule execution and resume use, the synthesized commit or an enrichment-shaped descendant of it, and recorded as the `pr_open` self-edge resume writes.
+- A move enrichment does not make is `head-foreign`: recorded on the row as the automatic path's error (`[auto:head-foreign]`), the row left at `pr_open`, and the run reported `failed`.
+- A read that cannot be made is counted and tried again, never taken as a move; a head that moves after the run reported holds the pull request for an administrator's `resume`, because the Worker never accepts a head it did not see recorded.
+
+### The reports, and the backstop
+
+- The run's first command (`plan`, or `resume` for a finish) reports `started`; a rerun of the same run that finds it started goes on.
+- Its last report is `opened` with the record, `finished`, `refused` (nothing was written, or a plan the path does not take) or `failed` (a step after the record exists, a foreign head, a finish that ended short of `complete`, or a success the Worker did not store), with a word from the closed list, `no-code` for any other.
+  A terminal report the Worker stored leaves a marker on the runner.
+- The job's last step runs always, and when there is no marker it reports the phase and the word of the run's last result line, `failed runner-failed` when there is none, to the production API's literal address, with the token on curl's standard input; a dispatch it cannot name is not reported, and nothing it does fails the job.
+- The new words are the run's own: `dispatch-invalid`, `auto-cli-version`, `auto-token-on-argv`, `auto-verbose`, `auto-option`, `finish-incomplete`, `report-unanswered` and `runner-credentials`.
+
+### A limit the slice that resumes stalled runs inherits
+
+- A run's plan file and checkpoint do not outlive its runner, so a resume dispatch plans again, and that plan is the record's only while nothing it reads has moved.
+  Once a copy has written objects, the bucket listing reads their keys as held, and once the registration has pushed, NEMAR's git-annex branch has moved, so the new plan has another digest, the create answers `repull-in-flight`, and the record waits for an administrator.
+  The slice that resumes stalled runs bounds its resumes to records that can take them.
+
+### Checked only against stand-ins
+
+- The suites run the real CLI from this checkout with a release version, the real record, dispatch and callback over bun:sqlite, the real `git`, `git-annex` and `aws` against stand-ins of GitHub and S3, and the workflow's own guard scripts under bash.
+- Only the first production runs can show: that GitHub answers the dispatch with 204 and runs this workflow; that the runner masks the token and the AWS session as the workflow asks; that the App token GitHub mints for one repository pushes the release branch and opens the pull request; that `GetSessionToken` takes the import's pair and its session copies as the import's own keys do; that Ubuntu's git-annex reads what the planner reads; how soon enrichment commits after a push; and that the plan's anonymous clones of `OpenNeuroDatasets` hold up from a runner, since the App token is never sent there.
