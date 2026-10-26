@@ -746,6 +746,30 @@ describe("a fact that is not clean holds before the claim, and nothing is sent",
     expect(auditsOf(WORKER_MERGE_ACTION, id)).toEqual([]);
   });
 
+  test("a record that moves between the facts and the claim is skipped, not claim-refused, and the next tick merges it", async () => {
+    const id = ready();
+    // Another writer moves the record after the claim's read of the dataset and before it commits.
+    let reads = 0;
+    const racing = interceptingD1(realD1(db), (sql) => {
+      if (sql === CREATE_FACTS_SQL && ++reads === 2) {
+        db.run("UPDATE upstream_repulls SET revision = revision + 1 WHERE id = ?", [id]);
+      }
+    });
+    const r = await tick(env({}, racing));
+    expect(reads).toBe(2);
+    expect(r.mergesSent).toBe(0);
+    // Exact: `toMatchObject` with `{}` matches any object.
+    expect(r.held).toEqual({});
+    expect(r.refused).toEqual({});
+    expect(r.errors).toEqual([]);
+    // Nothing changed and nothing failed, so the tick writes no log line at all.
+    expect(repullAdvanceLogLine(r)).toBeNull();
+    expect(rowOf(id)).toMatchObject({ hold_reason: null, merge_claim_sha: null });
+    expect(gh.merges).toEqual([]);
+    // The next tick reads the record as it is, and merges it.
+    expect(await tick()).toMatchObject({ mergesSent: 1, merged: 1 });
+  });
+
   test("the facts are the merge stage's: a screened head that is not the recorded one is head-moved", async () => {
     // Only a record written by hand can be at gates_clear with another head (the gates edge sets the
     // screened head from the recorded one): the merge stage compares both, the gates stage only one.
