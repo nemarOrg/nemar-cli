@@ -2190,6 +2190,7 @@ The "Checked only against stand-ins" section of each earlier amendment holds the
 - The first two re-pulls by hand:
   - Whether the standard edits are recognized on the early rewritten imports `on003645` and `on004362`, and what their plans count as unexplained paths: the owner's review of their dry-run plans.
   - Which relation the first re-pull's DOI record carries (above).
+  - That the new major's DOI resolves and the previous version still serves, which the owner reads before turning a switch on (gate G4; the Phase 7c amendment).
   - Whether OpenNeuro writes Simple Storage Service (S3) before it pushes to GitHub, whether the object at a path lags the pinned `versionId`, and that upstream's `.log.rmet` records a `versionId` per key.
   - What GitHub answers to the reads the release and the merge make: the tag's commit, the comparison words, a squash-merged pull request's `head` and `merge_commit_sha` (Phase 6e), the `mergeable_state` words for a re-pull pull request, how soon its `head.sha` follows a push, and whether a leased forced push to a release branch of a dataset repository is accepted (Phase 6f).
   - How GitHub opens and lists a pull request, the head's repository and the answer to a second one on the same branch included (Phase 6d), and lists open pull requests as the release-pr check reads them (Phase 6c).
@@ -2204,6 +2205,7 @@ The "Checked only against stand-ins" section of each earlier amendment holds the
   - That a run reaches the callback at the API host and that the token survives the dispatch payload and the run's environment unchanged (Phase 7b), that a resumed run takes up the record its dispatch names (Phase 7f), and that a 5xx can follow a queued event, which is assumed in the safe direction (Phase 7c).
   - How soon enrichment commits to a release branch after a push, which the settle rule of the Phase 7d amendment records and only production shows.
   - That the finish run records the release and the lock from a runner (Phase 7g).
+  - That the first automatic run works through the plan handoff, where `execute` takes the plan file the run's `plan` step wrote and proves it by its digest, and through the dispatch word list cut to 57 words (the epic cleanup, #1976, and the annotations of 2026-10-26 on the Phase 7d and 7b amendments).
 - The first Worker merge, which runs with `REPULL_DAILY_MERGE_CAP` set to `"1"`:
   - Whether the App's own token reads `mergeable_state` as an administrator does, that GitHub merges the App's squash at the screened head with the message it is sent and refuses a head that moved, and that the dataset workflows tag that squash and mint its DOI as they tag any merge to `main` (Phases 7a, 7e and 7g).
   - That GitHub names the author of the App's pull request `nemar-bot[bot]`, id 283755542, type `Bot` (the Phase 7e amendment, as the rename amendment restates it), that `check-runs` honors its filters on a mirror as it did on `nm000527`, that the screen and the review start on the App's pull request and the review's check and comment are published on it, and that the review workflow claims and reports on a pull request a bot opened (Phases 7e and 7f).
