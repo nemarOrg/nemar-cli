@@ -9,17 +9,24 @@
  *     `url.<base>.insteadOf` rewrite of the two GitHub URLs prepare builds, so no production code
  *     path is replaced and nothing can reach GitHub (the dataset id, ds999990, names no real
  *     dataset, and the token is not one);
- *   - the backend is a local server answering the two routes prepare calls (the import create,
- *     409 for a dataset that exists, and the version list), through the CLI's own API client and a
- *     scratch config;
+ *   - the backend is the REAL admin and datasets routers over bun:sqlite with every migration
+ *     applied, behind their real auth, on a local port that the CLI's own API client reaches
+ *     through a scratch config: the import create answers 409 because the database holds the
+ *     dataset, and the version list reads its version rows (and the description through the
+ *     GitHub stand-in, which answers 404);
  *   - OpenNeuro's GraphQL is a local server that names a newer latest tag than the one imported,
  *     the condition the warning is for.
  * `skipData` keeps S3 out: the guard, the clone and the entry are all before or beside the data.
  */
 
+import type { Database } from "bun:sqlite";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { hashApiKey } from "../backend/src/services/token";
+import type { Bindings } from "../backend/src/types/bindings";
+import { freshDb, realD1 } from "../backend/test/helpers/d1";
+import { makeRepullFullApp } from "../backend/test/helpers/repull-full-app";
 import { sourceSnapshotOf } from "../shared/source-snapshot";
 import { pushToGitHub } from "../src/lib/git-annex/clone-push";
 import {
@@ -30,33 +37,60 @@ import {
 } from "../src/lib/import-openneuro";
 import { makeScratch, run } from "./helpers/annex-repo";
 import { useTestGitIdentity } from "./helpers/git-identity";
+import { type GitHubStandin, WORKER_TOKEN, startGitHubStandin } from "./helpers/github-standin";
 import { buildTaggedUpstream } from "./helpers/tagged-upstream";
 
 const DS = "ds999990";
 const NEMAR_ID = "on999990";
+const ADMIN_KEY = "prepare-pin-admin-key-0123456789abcdef0123456789abcdef";
 const scratch = makeScratch("import-prepare-pin");
 
+let db: Database;
+let gh: GitHubStandin;
 let backend: ReturnType<typeof Bun.serve>;
 let graphql: ReturnType<typeof Bun.serve>;
-/** What the version list answers for the dataset: released when it holds a version. */
-let versions: unknown[] = [];
 let restoreGitIdentity: () => void;
+const handle = makeRepullFullApp();
 
-beforeAll(() => {
+/** The dataset's release state as the version list reads it: one version row, or none. */
+function setReleased(released: boolean): void {
+  db.run("DELETE FROM dataset_versions WHERE dataset_id = ?", [NEMAR_ID]);
+  if (released) {
+    db.run(
+      `INSERT INTO dataset_versions (dataset_id, version, doi, provider)
+       VALUES (?, '1.0.0', '10.5072/FK2X', 'ezid')`,
+      [NEMAR_ID],
+    );
+  }
+}
+
+beforeAll(async () => {
   restoreGitIdentity = useTestGitIdentity();
-  backend = Bun.serve({
-    port: 0,
-    fetch: async (req) => {
-      const path = new URL(req.url).pathname;
-      if (req.method === "POST" && path === "/admin/datasets/import") {
-        return Response.json({ error: `Dataset ${NEMAR_ID} already exists` }, { status: 409 });
-      }
-      if (req.method === "GET" && path === `/datasets/${NEMAR_ID}/versions`) {
-        return Response.json({ dataset_id: NEMAR_ID, current_version: "1.0.0", versions });
-      }
-      return Response.json({ error: "Dataset not found" }, { status: 404 });
-    },
-  });
+  db = freshDb();
+  db.run(
+    `INSERT INTO users (id, username, email, password_hash, status, role, email_verified)
+     VALUES (1, 'prepareadmin', 'prepareadmin@example.org', 'x', 'approved', 'admin', 1)`,
+  );
+  db.query("INSERT INTO tokens (user_id, api_key_hash, api_key_prefix) VALUES (1, ?, ?)").run(
+    await hashApiKey(ADMIN_KEY),
+    ADMIN_KEY.slice(0, 8),
+  );
+  // The dataset the first import made, so the import create refuses it as one that exists.
+  db.run(
+    `INSERT INTO datasets (dataset_id, name, owner_user_id, status, visibility, github_repo,
+                           source, source_id)
+     VALUES (?, 'A tagged upstream', 1, 'active', 'public', ?, 'openneuro', ?)`,
+    [NEMAR_ID, `nemarDatasets/${NEMAR_ID}`, DS],
+  );
+  gh = startGitHubStandin();
+  (globalThis as { NEMAR_GITHUB_API_URL?: string }).NEMAR_GITHUB_API_URL = gh.url;
+  // Production: the import create refuses every other environment before it reads the row.
+  const env = {
+    DB: realD1(db),
+    ENVIRONMENT: "production",
+    GITHUB_ADMIN_PAT: WORKER_TOKEN,
+  } as Bindings;
+  backend = Bun.serve({ port: 0, fetch: (req) => handle(req, env) });
   graphql = Bun.serve({
     port: 0,
     fetch: () => Response.json({ data: { dataset: { latestSnapshot: { tag: "1.0.2" } } } }),
@@ -66,6 +100,8 @@ beforeAll(() => {
 afterAll(() => {
   backend.stop(true);
   graphql.stop(true);
+  gh.stop();
+  (globalThis as { NEMAR_GITHUB_API_URL?: string }).NEMAR_GITHUB_API_URL = undefined;
   scratch.cleanup();
   restoreGitIdentity();
 });
@@ -135,7 +171,7 @@ async function prepare(
     JSON.stringify({
       activeAccount: "prepare-pin",
       accounts: {
-        "prepare-pin": { apiKey: "unused-key", apiUrl: `http://127.0.0.1:${backend.port}` },
+        "prepare-pin": { apiKey: ADMIN_KEY, apiUrl: `http://127.0.0.1:${backend.port}` },
       },
     }),
   );
@@ -202,7 +238,7 @@ describe("shouldRecordSourceEntry", () => {
 
 describe("prepareImport at a tag against a dataset that already exists", () => {
   test("released, recorded at 1.0.0, imported at 1.0.1: refused, nothing pushed, its work dir removed", async () => {
-    versions = [{ version: "v1.0.0", doi: "10.5072/FK2X", provider: "ezid", created_at: "x" }];
+    setReleased(true);
     const { root, bare, tip } = await world(RECORDED_1_0_0);
     const r = await prepare(root, "1.0.1", { workDir: false });
     expect(r.code).toBe(1);
@@ -218,7 +254,7 @@ describe("prepareImport at a tag against a dataset that already exists", () => {
   }, 120_000);
 
   test("unreleased, recorded at 1.0.0, imported at 1.0.1: retargeted, and 1.0.1 recorded", async () => {
-    versions = [];
+    setReleased(false);
     const { root, bare, tip } = await world(RECORDED_1_0_0);
     const r = await prepare(root, "1.0.1");
     expect({ code: r.code, lastFailure: r.lastFailure }).toEqual({ code: 0, lastFailure: "" });
@@ -238,7 +274,7 @@ describe("prepareImport at a tag against a dataset that already exists", () => {
   }, 120_000);
 
   test("released, recorded at the tag imported: the same-version reset, no refusal", async () => {
-    versions = [{ version: "v1.0.0", doi: "10.5072/FK2X", provider: "ezid", created_at: "x" }];
+    setReleased(true);
     const { root, bare } = await world(RECORDED_1_0_0);
     const r = await prepare(root, "1.0.0");
     expect({ code: r.code, lastFailure: r.lastFailure }).toEqual({ code: 0, lastFailure: "" });
@@ -247,7 +283,7 @@ describe("prepareImport at a tag against a dataset that already exists", () => {
   }, 120_000);
 
   test("origin records no tag: the hard reset records none either, and says the guard is inert", async () => {
-    versions = [{ version: "v1.0.0", doi: "10.5072/FK2X", provider: "ezid", created_at: "x" }];
+    setReleased(true);
     const { root, bare } = await world(undefined);
     const r = await prepare(root, "1.0.1");
     expect({ code: r.code, lastFailure: r.lastFailure }).toEqual({ code: 0, lastFailure: "" });
