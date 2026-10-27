@@ -2073,3 +2073,16 @@ What only production can show is how the counts read on real data, that every me
 
 With it, the slices of Phase 7 are complete: the automatic path is built, off by default, counted every week, listed for an administrator and stopped by removing one switch.
 What remains is the owner's act and the epic's release, not another slice: the held workflow pair merged with the epic release, gate G4's two manual re-pulls, and the switches, which the owner turns on in a reviewed change once those are done.
+
+## Amendment 2026-10-26 (#1979): the App is renamed to `nemar-bot`
+
+On 2026-10-26 the NEMAR GitHub App was renamed from `nemar-publish-bot` to `nemar-bot`.
+GitHub then reported the App's bot user as `nemar-bot[bot]`, with user id 283755542 and type `Bot` unchanged (`GET /users/nemar-bot%5Bbot%5D`),
+the App as slug `nemar-bot`, with id 3679074 unchanged (`GET /apps/nemar-bot`),
+and the old login as 404.
+`NEMAR_APP_BOT_LOGIN` in `shared/nemar-app.ts` now holds `nemar-bot[bot]`, and both ids stay as they were.
+
+- The lines above that name `nemar-publish-bot[bot]` are dated history and are kept as written: the measurement in the 7a slice of the Phase 7 amendment, and the review queue's label in the Phase 7e amendment, which now names the App `nemar-bot[bot]`.
+- The checks compare the id and the login, as stated above: the machine-clean rule, the Worker's start of the App's review and the review's intake by login, numeric id and type, and the review queue's labels by login and numeric id, the stored review's as well as GitHub's record.
+  A rename keeps both ids and frees the old login for anyone to register, so a later rename refuses the App's pull requests until the login follows it, and never admits whoever takes the old name.
+- The Phase 7e amendment's "Checked only against stand-ins" no longer names the old login: what only the first production runs can check is that GitHub names the author of the App's pull request `nemar-bot[bot]`, id 283755542, type `Bot`.
