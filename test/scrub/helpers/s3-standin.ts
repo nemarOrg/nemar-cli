@@ -214,11 +214,14 @@ export interface S3Standin {
    */
   stallBodyNext(opts: { keyPrefix: string; bytes: number; ms: number }): void;
   /**
-   * Hold the next `times` calls of `op` (only CopyObject honors it) for `ms` before they take
-   * effect, or until the client goes away: a copy that hangs. `holding()` counts the calls held now.
+   * Hold the next `times` calls of `op` (only CopyObject honors it) before they take effect: until
+   * `releaseHolds()` ends them, the client goes away, or `ms` passes. A copy that hangs.
+   * `holding()` counts the calls held now.
    */
   holdNext(op: StandinOp, ms: number, times?: number): void;
   holding(): number;
+  /** End every call held now, each then taking effect unless its client went away; how many. */
+  releaseHolds(): number;
   /**
    * How CopyObject and UploadPartCopy treat a source's `?versionId=`: honored (`honor`, as S3
    * documents); ignored, the current version copied and named (`ignore`); or ignored while the
@@ -312,21 +315,27 @@ export function startS3Standin(options: { region?: string } = {}): S3Standin {
   const bodyStalls: Array<{ keyPrefix: string; bytes: number; ms: number }> = [];
   const holds: Array<{ op: StandinOp; ms: number; times: number }> = [];
   let held = 0;
-  /** Wait out a hold of `op`, if one is set, or until the client goes away. */
+  /** How each call held now ends early, for `releaseHolds()`. */
+  const releasers = new Set<() => void>();
+  /** Wait out a hold of `op`, if one is set: until it is released, the client goes away, or `ms`. */
   const holdFor = async (op: StandinOp, req: Request): Promise<void> => {
     const h = holds.find((x) => x.op === op && x.times > 0);
     if (!h) return;
     h.times -= 1;
     held += 1;
+    let release: (() => void) | undefined;
     try {
       await new Promise<void>((resolve) => {
         const timer = setTimeout(resolve, h.ms);
-        req.signal.addEventListener("abort", () => {
+        release = () => {
           clearTimeout(timer);
           resolve();
-        });
+        };
+        releasers.add(release);
+        req.signal.addEventListener("abort", release);
       });
     } finally {
+      if (release) releasers.delete(release);
       held -= 1;
     }
   };
@@ -1240,6 +1249,11 @@ export function startS3Standin(options: { region?: string } = {}): S3Standin {
       holds.push({ op, ms, times });
     },
     holding: () => held,
+    releaseHolds() {
+      const now = [...releasers];
+      for (const release of now) release();
+      return now.length;
+    },
     setCopySourceVersionMode(mode) {
       copyMode = mode;
     },
