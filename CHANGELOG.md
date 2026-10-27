@@ -54,6 +54,7 @@ It sets no Worker variable or secret: the four re-pull switches and caps are abs
 - **Phase 5 (#1911): `nemar admin repull plan <id>` plans a re-pull and writes nothing to the mirror, S3, D1 or the NEMAR Application Programming Interface (API).**
   It writes a plan file (mode 0600, under `$NEMAR_CONFIG_DIR/repull/<id>/`) identified by a digest, and prints counts and that file's location, never a path, key or content of the dataset.
   Exit 0 means executable, 3 that a plan was made and is not executable, 1 that nothing was planned.
+  The one exception to "writes nothing" is the central workflow's unattended run, `plan --automatic-dispatch` (Phase 7): it reports its dispatch to the Worker, which stores `started` and then `refused` or `failed` if the run ends so.
   NEMAR's standard edits are recognized and re-applied as functions, never merged as text, and an unexplained path is a conflict or a correction.
 - **Phase 6 (#1912): an administrator takes a re-pull from its plan to a released version.**
   A re-pull's state is a row of `upstream_repulls` (migration 0105; 17 states, one row per attempt, one open row per dataset), never `import_jobs`; outside production only `xx` datasets are re-pulled, and an anonymous dataset is refused with no override.

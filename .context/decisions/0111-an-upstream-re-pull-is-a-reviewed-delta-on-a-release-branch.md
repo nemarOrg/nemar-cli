@@ -373,6 +373,8 @@ Decision 2 says `nemar admin repull <id>` is a dry run by default and `--execute
 The built shape is two subcommands: `plan` makes the plan, and `execute` (Phase 6) takes the plan file.
 
 `plan` writes nothing to the mirror, S3, D1 or the NEMAR API.
+*Annotated 2026-10-27: the central workflow's unattended run, `plan --automatic-dispatch` (Phase 7d), is the one exception.
+It reports its dispatch to the Worker, which stores `started` and then `refused` or `failed` if the run ends so; an administrator's `plan` still writes nothing.*
 What it writes is its scratch directory, removed on exit, on SIGINT and on SIGTERM unless `--keep-workdir`, and the plan file, which is its output: mode 0600 in the administrator's config directory (`$NEMAR_CONFIG_DIR/repull/<id>/`, `~/.config/nemar` by default), because a path can itself be an identifier.
 The default output holds counts and no path, key or file content.
 

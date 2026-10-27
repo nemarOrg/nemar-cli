@@ -68,7 +68,9 @@ with upstream at --to-tag (default: OpenNeuro's latest snapshot) and NEMAR's mai
 A --to-tag that is not OpenNeuro's latest is planned, and is not executable: that it is newer
 than from_tag cannot be proved (upstream's creation order decides, not the tag number).
 
-It writes nothing to the mirror, S3, D1 or the NEMAR API. Its output is the plan file, written
+It writes nothing to the mirror, S3, D1 or the NEMAR API, except under --automatic-dispatch (the
+central workflow's run, below): that run reports its dispatch to the Worker, which stores the
+state in D1 (started, then refused or failed if the run ends so). Its output is the plan file, written
 with mode 0600 to --out or to $NEMAR_CONFIG_DIR/repull/<id>/<to>.<digest8>.json, where
 NEMAR_CONFIG_DIR defaults to ~/.config/nemar. Clones go into a scratch directory that is deleted on
 exit, on SIGINT and on SIGTERM unless --keep-workdir. Blobs of 1 MiB or more are fetched only when a
@@ -115,7 +117,9 @@ export const repullCommand = new Command("repull").description(
 
 repullCommand
   .command("plan <datasetId>")
-  .description("Plan a re-pull of a newer upstream snapshot as the next major version (read-only)")
+  .description(
+    "Plan a re-pull of a newer upstream snapshot as the next major version (read-only, except under --automatic-dispatch)",
+  )
   .option("--to-tag <tag>", "The upstream tag to pull (default: OpenNeuro's latest snapshot)")
   .option(
     "--from-tag <tag>",
