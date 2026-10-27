@@ -68,6 +68,7 @@ import {
   versionCheck,
 } from "./preflight.js";
 import { guardedGitRunner, killLiveGit, readOnlyGit } from "./read-only.js";
+import { s3RemoteProblem } from "./shapes.js";
 import {
   BlobStore,
   type Env,
@@ -393,6 +394,9 @@ export async function planRepull(opts: PlanOptions): Promise<PlanOutcome> {
 
     // NEMAR's special remotes, from its git-annex branch.
     const remote = nemarRemoteOf(await readRemoteLog(nemar.path), id);
+    // A bucket or a datacenter S3 cannot have is refused here, before the listing or the marker
+    // read builds a host from it, and before a plan names it the destination.
+    if (remote.problem !== null) throw new RepullCannotPlan(remote.problem);
     const nemarUuids = remote.uuids;
     const nemarUuid = remote.uuid;
     const nemarRecord = remote.record;
@@ -780,6 +784,12 @@ export interface NemarRemote {
   region: string;
   /** Where its objects live: its own `fileprefix`, else `<id>/objects/`. */
   prefix: string;
+  /**
+   * Why its bucket or datacenter is not one S3 can have (`s3RemoteProblem`), else null. A caller
+   * refuses on it before it reads from or writes to the bucket: both values become a host and the
+   * one destination the write guard allows.
+   */
+  problem: string | null;
 }
 
 /**
@@ -791,12 +801,14 @@ export function nemarRemoteOf(remoteLog: string, datasetId: string): NemarRemote
   const uuids = uuidsNamedInRemoteLog(remoteLog, S3_REMOTE_NAME);
   const uuid = uuids.length === 1 ? (uuids[0] ?? null) : null;
   const record = uuid ? parseRemoteLog(remoteLog).get(uuid) : undefined;
+  const region = record ? (datacenterOf(remoteLog, record.uuid) ?? "us-east-2") : "us-east-2";
   return {
     uuids,
     uuid,
     record,
-    region: record ? (datacenterOf(remoteLog, record.uuid) ?? "us-east-2") : "us-east-2",
+    region,
     prefix: record?.fileprefix ?? `${datasetId}/objects/`,
+    problem: record ? s3RemoteProblem(record.bucket, region) : null,
   };
 }
 

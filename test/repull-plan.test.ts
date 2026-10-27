@@ -658,6 +658,38 @@ describe("a plan from tag A to tag B over an imported mirror", () => {
       }
     });
 
+    test("remote.log naming a bucket or a datacenter S3 cannot have refuses the plan, in words that do not echo it", async () => {
+      const annex = (await gitIn(fx.originRepo, ["rev-parse", "refs/heads/git-annex"])).trim();
+      const line = (bucket: string, datacenter: string) =>
+        `${fx.nemarUuid} bucket=${bucket} datacenter=${datacenter} fileprefix=${NEMAR_ID}/objects/ name=nemar-s3 type=S3 timestamp=1790000002s\n`;
+      try {
+        for (const [bucket, datacenter, offending] of [
+          ["evil.example/x#", "us-east-2", "evil.example/x#"],
+          ["Nemar", "us-east-2", "Nemar"],
+          ["ne", "us-east-2", ""],
+          ["nemar", "us-east-2.evil.example", "evil.example"],
+          ["nemar", "", ""],
+        ]) {
+          await gitIn(fx.originRepo, ["update-ref", "refs/heads/git-annex", annex]);
+          await writeAnnexBranchFile(fx.originRepo, "remote.log", line(bucket, datacenter));
+          const err = await planRepull(options(fx)).catch((e) => e);
+          expect([bucket, datacenter, err instanceof RepullCannotPlan]).toEqual([
+            bucket,
+            datacenter,
+            true,
+          ]);
+          expect(String(err.message)).toMatch(/bucket name|AWS region/);
+          if (offending) expect(String(err.message)).not.toContain(offending);
+        }
+        // The same plan with a bucket and a datacenter S3 can have is made.
+        await gitIn(fx.originRepo, ["update-ref", "refs/heads/git-annex", annex]);
+        await writeAnnexBranchFile(fx.originRepo, "remote.log", line("nemar", "us-east-2"));
+        expect((await plan(fx)).preflight.find((c) => c.name === "annex-uuid")?.status).toBe("ok");
+      } finally {
+        await gitIn(fx.originRepo, ["update-ref", "refs/heads/git-annex", annex]);
+      }
+    });
+
     test("a marker the bucket refuses to read is unchecked, never a match", async () => {
       const marker = join(fx.bucketBase, NEMAR_ID, "objects", "annex-uuid");
       chmodSync(marker, 0o000);
