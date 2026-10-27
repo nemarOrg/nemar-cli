@@ -840,7 +840,6 @@ describe("the gates of an automatic pull request", () => {
     db.run("DELETE FROM pr_reviews");
     review("pass");
     gh.dispatches = [];
-    gh.requests = [];
 
     const r = await tick();
     expect(r).toMatchObject({ gatesCleared: 1, screensStarted: 0, reviewsStarted: 0 });
@@ -860,8 +859,8 @@ describe("the gates of an automatic pull request", () => {
       fields: ["gates_sha"],
       automatic: true,
     });
-    // The transition took the head from the tick's one read of the pull request.
-    expect(githubRequests().filter((q) => q.endsWith(`/${DS}/pulls/7`))).toHaveLength(1);
+    // The record's own transition read GitHub's live head before it wrote.
+    expect(githubRequests().filter((q) => q.endsWith(`/${DS}/pulls/7`)).length).toBeGreaterThan(1);
     // A gates_clear row now waits for the Worker's merge, which the merge switch, off here, keeps
     // from reading anything (upstream-repull-worker-merge.test.ts has the rest).
     gh.requests = [];
@@ -999,24 +998,29 @@ describe("the gates of an automatic pull request", () => {
     const id = openRow();
     markScreen(id, "clean");
     review("pass");
-    // The screen is stored again (a new row, the same verdict) after the tick read it: the gates
-    // statement re-asserts the row it read, so the edge does not apply.
-    const rescreening = interceptingD1(realD1(db), (sql) => {
-      if (sql === REVIEW_OF_HEAD_SQL) markScreen(id, "clean");
+    // The dataset is withdrawn between the facts the rule read and the record's own fences.
+    let reads = 0;
+    const withdrawing = interceptingD1(realD1(db), (sql) => {
+      if (sql === CREATE_FACTS_SQL && ++reads === 2) {
+        db.run("UPDATE datasets SET withdrawn_at = datetime('now')");
+      }
     });
-    const r = await tick(env({}, rescreening));
-    expect(r).toMatchObject({ gatesCleared: 0, refused: { "screen-changed": 1 } });
+    const r = await tick(env({}, withdrawing));
+    expect(r).toMatchObject({ gatesCleared: 0, refused: { withdrawn: 1 } });
     expect(rowOf(id)).toMatchObject({
       status: "pr_open",
       gates_sha: null,
       hold_reason: "gates-refused",
     });
     expect(auditsOf("repull_transition", id)).toEqual([]);
+    expect(DISPATCH_CODES as readonly string[]).toContain("withdrawn");
     expect(repullAdvanceLogLine(r)).toMatchObject({ level: "error" });
-    expect(repullAdvanceLogLine(r)?.line).toContain("refused=screen-changed:1");
+    expect(repullAdvanceLogLine(r)?.line).toContain("refused=withdrawn:1");
     // Refused again on the next tick: the hold stands, and the log says so again.
-    const again = await tick(env({}, rescreening));
-    expect(again).toMatchObject({ holdsChanged: 0, refused: { "screen-changed": 1 } });
+    db.run("UPDATE datasets SET withdrawn_at = NULL");
+    reads = 0;
+    const again = await tick(env({}, withdrawing));
+    expect(again).toMatchObject({ holdsChanged: 0, refused: { withdrawn: 1 } });
     expect(holdAudits(id)).toHaveLength(1);
     expect(repullAdvanceLogLine(again)?.level).toBe("error");
   });
@@ -1725,8 +1729,7 @@ describe("what a tick costs", () => {
     // Each screen is clear, and each row's review is started: the most a tick spends.
     ids.forEach((id, k) => markScreen(id, "clean", datasets[k]));
     seen.push(await measure());
-    // Each is clean, and its transition writes on the tick's own reads: the pull request, the
-    // dataset and the screen are each read once.
+    // Each is clean, and the record's own transition reads its live head before it writes.
     db.run("DELETE FROM pr_reviews");
     datasets.forEach((ds) => review("pass", ds));
     seen.push(await measure());
@@ -1734,12 +1737,9 @@ describe("what a tick costs", () => {
       { d1: 67, github: 25 },
       { d1: 37, github: 20 },
       { d1: 82, github: 35 },
-      { d1: 42, github: 20 },
+      { d1: 52, github: 25 },
     ]);
     expect(ids.every((id) => rowOf(id).status === "gates_clear")).toBe(true);
-    for (const ds of datasets) {
-      expect(githubRequests().filter((q) => q.endsWith(`/${ds}/pulls/7`))).toHaveLength(1);
-    }
   });
 
   test("a stalled row's resume", async () => {

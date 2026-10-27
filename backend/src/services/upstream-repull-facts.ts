@@ -62,14 +62,9 @@ import { NEMAR_APP_ID, deriveContexts } from "./github/branch-protection.js";
 import { isScreenExempt, readStoredReport } from "./identifier-screen-stored.js";
 import { outcomeOfRow } from "./pr-review.js";
 import { autoRepullEnabled, autoRepullMergeEnabled, isExactProduction } from "./repull-switches.js";
-import {
-  type PullRequestFacts,
-  githubRead,
-  isObject,
-  pullRequestFacts,
-} from "./upstream-repull-github.js";
-import { type RepullScreenRow, readRepullScreen } from "./upstream-repull-screen.js";
-import { CREATE_FACTS_SQL, type DatasetFacts, type TransitionReads } from "./upstream-repull.js";
+import { githubRead, isObject, pullRequestFacts } from "./upstream-repull-github.js";
+import { readRepullScreen } from "./upstream-repull-screen.js";
+import { CREATE_FACTS_SQL, type DatasetFacts } from "./upstream-repull.js";
 
 const posInt = (x: unknown): x is number =>
   typeof x === "number" && Number.isSafeInteger(x) && x > 0;
@@ -116,24 +111,15 @@ export function pullRequestFactOf(body: unknown): PullRequestFact | "unreadable"
   };
 }
 
-/** The recorded pull request, as GitHub says it is now, and as `pullRequestFacts` parsed it. */
-async function readPullRequest(
-  env: Bindings,
-  datasetId: string,
-  prNumber: number,
-): Promise<{ fact: PullRequestFact | "unreadable"; parsed: PullRequestFacts | null }> {
-  const read = await githubRead(env, datasetId, `/pulls/${prNumber}`);
-  if (!read.ok || read.status !== 200) return { fact: "unreadable", parsed: null };
-  return { fact: pullRequestFactOf(read.body), parsed: pullRequestFacts(read.body) };
-}
-
 /** The recorded pull request, as GitHub says it is now. */
 export async function readPullRequestFact(
   env: Bindings,
   datasetId: string,
   prNumber: number,
 ): Promise<PullRequestFact | "unreadable"> {
-  return (await readPullRequest(env, datasetId, prNumber)).fact;
+  const read = await githubRead(env, datasetId, `/pulls/${prNumber}`);
+  if (!read.ok || read.status !== 200) return "unreadable";
+  return pullRequestFactOf(read.body);
 }
 
 /** The commit `main` points at, as GitHub says it is now. */
@@ -243,26 +229,13 @@ export async function readDatasetFact(
   db: D1Database,
   row: Pick<RepullRow, "dataset_id" | "upstream_ds">,
 ): Promise<DatasetFact> {
-  return datasetFactOf(await readDatasetRow(db, row), row);
-}
-
-/** `CREATE_FACTS_SQL`'s row, null for none, undefined when the read threw. */
-async function readDatasetRow(
-  db: D1Database,
-  row: Pick<RepullRow, "dataset_id">,
-): Promise<DatasetFacts | null | undefined> {
+  let facts: DatasetFacts | null;
   try {
-    return await db.prepare(CREATE_FACTS_SQL).bind(row.dataset_id).first<DatasetFacts>();
+    facts = await db.prepare(CREATE_FACTS_SQL).bind(row.dataset_id).first<DatasetFacts>();
   } catch (err) {
     console.error(`[repull-facts] ${row.dataset_id}: the dataset was not read (${said(err)})`);
-    return undefined;
+    facts = null;
   }
-}
-
-function datasetFactOf(
-  facts: DatasetFacts | null | undefined,
-  row: Pick<RepullRow, "upstream_ds">,
-): DatasetFact {
   if (!facts) return { anonymous: null, withdrawn: true, importInFlight: true, mirror: false };
   return {
     anonymous: typeof facts.anonymous === "number" ? facts.anonymous : null,
@@ -285,27 +258,14 @@ export async function readScreenFact(
   row: Pick<RepullRow, "id" | "dataset_id">,
   sha: string,
 ): Promise<ScreenFact> {
-  return (await readScreen(db, row, sha)).fact;
-}
-
-/** {@link readScreenFact}, and the row it was read from (undefined when none was read). */
-async function readScreen(
-  db: D1Database,
-  row: Pick<RepullRow, "id" | "dataset_id">,
-  sha: string,
-): Promise<{ fact: ScreenFact; screen?: RepullScreenRow | null }> {
-  if (isScreenExempt(row.dataset_id)) return { fact: "exempt" };
-  let screen: RepullScreenRow | null;
+  if (isScreenExempt(row.dataset_id)) return "exempt";
+  let screen: Awaited<ReturnType<typeof readRepullScreen>>;
   try {
     screen = await readRepullScreen(db, row.id, "n0", sha);
   } catch (err) {
     console.error(`[repull-facts] re-pull ${row.id}: the screen was not read (${said(err)})`);
-    return { fact: "unreadable" };
+    return "unreadable";
   }
-  return { fact: screenFactOf(screen, sha), screen };
-}
-
-function screenFactOf(screen: RepullScreenRow | null, sha: string): ScreenFact {
   if (!screen) return "absent";
   const state = isScreenState(screen.state) ? screen.state : null;
   if (state === null) return "unreadable";
@@ -425,19 +385,6 @@ export async function gatherMachineCleanFacts(
   row: RepullRow,
   stage: MachineCleanStage,
 ): Promise<MachineCleanFacts> {
-  return (await readMachineCleanFacts(env, row, stage)).facts;
-}
-
-/**
- * {@link gatherMachineCleanFacts}, with what was read for them, for the step that writes on a clean
- * verdict in the same tick (the gates edge, the claim): null unless the dataset row, the pull
- * request and the screen were each read.
- */
-export async function readMachineCleanFacts(
-  env: Bindings,
-  row: RepullRow,
-  stage: MachineCleanStage,
-): Promise<{ facts: MachineCleanFacts; reads: TransitionReads | null }> {
   const facts: MachineCleanFacts = {
     stage,
     switches: {
@@ -471,36 +418,26 @@ export async function readMachineCleanFacts(
     return !verdict.clean && before.has(verdict.hold);
   };
   // Nothing is read, the database included, outside exact production or with a switch off.
-  if (decided(BEFORE_DATASET)) return { facts, reads: null };
-  const dataset = await readDatasetRow(env.DB, row);
-  facts.dataset = datasetFactOf(dataset, row);
-  if (decided(BEFORE_GITHUB)) return { facts, reads: null };
+  if (decided(BEFORE_DATASET)) return facts;
+  facts.dataset = await readDatasetFact(env.DB, row);
+  if (decided(BEFORE_GITHUB)) return facts;
   // A record with no pull request holds before GitHub could say anything about one.
-  if (row.pr_number === null || row.branch === null || row.head_sha === null) {
-    return { facts, reads: null };
-  }
+  if (row.pr_number === null || row.branch === null || row.head_sha === null) return facts;
 
   const sha = stage === "gates" ? row.head_sha : row.gates_sha;
   const [pr, mainSha, checks] = await Promise.all([
-    readPullRequest(env, row.dataset_id, row.pr_number),
+    readPullRequestFact(env, row.dataset_id, row.pr_number),
     readMainSha(env, row.dataset_id),
     sha === null
       ? Promise.resolve({ bids: UNREADABLE_CHECK, versionCheck: UNREADABLE_CHECK })
       : readCheckFacts(env, row.dataset_id, sha),
   ]);
-  facts.pr = pr.fact;
+  facts.pr = pr;
   facts.mainSha = mainSha;
   facts.checks = checks;
-  let screen: RepullScreenRow | null | undefined;
   if (sha !== null) {
-    const read = await readScreen(env.DB, row, sha);
-    facts.screen = read.fact;
-    screen = read.screen;
+    facts.screen = await readScreenFact(env.DB, row, sha);
     facts.review = await readReviewFact(env.DB, row.dataset_id, row.pr_number, sha);
   }
-  const reads =
-    dataset !== undefined && pr.parsed !== null && screen !== undefined
-      ? { dataset, pullRequest: pr.parsed, screen }
-      : null;
-  return { facts, reads };
+  return facts;
 }

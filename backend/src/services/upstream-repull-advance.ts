@@ -9,12 +9,12 @@
  *  - a row at `pr_open`: read the machine-clean facts of its head at the gates
  *    (`gatherMachineCleanFacts`) and ask the rule (`machineClean`). Clean: write
  *    `pr_open -> gates_clear` with `gates_sha` the head, as the system user, through the record's
- *    own transition, which checks the screen bound to the row, the dataset fences and GitHub's head
- *    on the tick's own reads and re-asserts the screen's verdict in the statement that writes. Not
- *    clean: start what the gates are waiting for (below), then record the first rule that does not
- *    hold as the row's hold. Only a clean verdict writes `gates_clear`: an unknown fact, a
- *    `not-clean` mergeable state and every other word hold, and a clean row whose edge the
- *    transition refuses holds `gates-refused`. A row cleared on one tick is merged on a later one, from its own facts;
+ *    own transition, which reads the screen bound to the row, the dataset fences and GitHub's live
+ *    head again and re-asserts the screen's verdict in the statement that writes. Not clean: start
+ *    what the gates are waiting for (below), then record the first rule that does not hold as the
+ *    row's hold. Only a clean verdict writes `gates_clear`: an unknown fact, a `not-clean`
+ *    mergeable state and every other word hold, and a clean row whose edge the transition refuses
+ *    holds `gates-refused`. A row cleared on one tick is merged on a later one, from its own facts;
  *  - a row at `gates_clear` that holds no claim to merge: the Worker's merge (`workerMergeRepull`,
  *    `upstream-repull-merge.ts`), which reads both switches, the bound on its merges, the
  *    machine-clean facts at the merge stage and the day's merge cap itself, and says why it did not
@@ -114,11 +114,11 @@
  * COST on the 30-minute tick, which shares one subrequest allowance with every job on it, measured
  * over five rows at `pr_open` (`upstream-repull-advance.test.ts` pins it): 67 D1 statements and 25
  * GitHub requests when each starts its screen, 37 and 20 while each waits, 82 and 35 when each
- * starts its review (the most), 42 and 20 when each is cleared; a stalled row's resume is eight
+ * starts its review (the most), 52 and 25 when each is cleared; a stalled row's resume is eight
  * statements and one dispatch, and the tick itself two statements (the list of rows, the stamp).
  * Past the gates (`upstream-repull-worker-merge.test.ts` pins it), a row that waits at the merge is
- * seven statements and four requests, one merged fourteen and six, and a finish dispatched eight
- * and one, so five merges on one tick are 72 and 30. Plus one request to mint the App's
+ * seven statements and four requests, one merged sixteen and seven, and a finish dispatched eight
+ * and one, so five merges on one tick are 82 and 35. Plus one request to mint the App's
  * installation token on a cold isolate, when the App's credential is configured: the suites use a
  * personal token, so the figures leave it out.
  *
@@ -157,7 +157,7 @@ import {
   claimOpenDispatch,
   markDispatchSendFailed,
 } from "./upstream-repull-dispatch.js";
-import { gatherMachineCleanFacts, readMachineCleanFacts } from "./upstream-repull-facts.js";
+import { gatherMachineCleanFacts } from "./upstream-repull-facts.js";
 import {
   type WorkerMergeOutcome,
   finishAfterMerge,
@@ -165,13 +165,7 @@ import {
   workerMergeRepull,
 } from "./upstream-repull-merge.js";
 import { startRepullScreen } from "./upstream-repull-screen.js";
-import {
-  type TransitionReads,
-  commitTransition,
-  getRepull,
-  isRefusal,
-  prepareTransition,
-} from "./upstream-repull.js";
+import { commitTransition, getRepull, isRefusal, prepareTransition } from "./upstream-repull.js";
 
 /** Rows of each kind (at `pr_open`, stalled before it) one tick examines at most. */
 export const ADVANCE_ROWS_PER_TICK = 5;
@@ -826,26 +820,20 @@ async function startGateWork(
 
 /**
  * `pr_open -> gates_clear` for a row the rule found clean, through the record's own transition and
- * on the row as the tick read it (its revision), as the system user. The transition checks the
- * dataset fences, the screen bound to the row and GitHub's head on the tick's own reads, and
- * re-asserts the screen's verdict in the statement that writes. A refusal writes no edge: the rule
- * and the record disagree, or the screen changed since it was read, so it is counted by its code,
- * logged at error level and held `gates-refused`, unless the row moved meanwhile (then the hold is
- * not written either).
+ * on the row as the tick read it (its revision), as the system user. The transition reads the
+ * dataset fences, the screen bound to the row and GitHub's live head again, and re-asserts the
+ * screen's verdict in the statement that writes. A refusal writes no edge: the rule and the record
+ * disagree, which should not happen, so it is counted by its code, logged at error level and held
+ * `gates-refused`, unless the row moved meanwhile (then the hold is not written either).
  */
-async function clearGates(
-  t: Tick,
-  row: RepullRow,
-  head: string,
-  reads: TransitionReads | null,
-): Promise<void> {
+async function clearGates(t: Tick, row: RepullRow, head: string): Promise<void> {
   const { env, r } = t;
   const prepared = await prepareTransition(
     env,
     { id: SYSTEM_USER_ID },
     row,
     { from: "pr_open", to: "gates_clear", fields: { gates_sha: head } },
-    { auditDetails: { automatic: true }, ...(reads ? { reads } : {}) },
+    { auditDetails: { automatic: true } },
   );
   const done = isRefusal(prepared) ? prepared : await commitTransition(env.DB, prepared);
   if (isRefusal(done)) {
@@ -865,11 +853,10 @@ async function advanceOpenPullRequest(t: Tick, row: RepullRow): Promise<void> {
     t.r.running++;
     return observe(t, row, null);
   }
-  const read = await readMachineCleanFacts(env, row, "gates");
-  let facts = read.facts;
+  let facts = await gatherMachineCleanFacts(env, row, "gates");
   let verdict = machineClean(facts);
   // Only a clean verdict takes the edge; every other answer, an unknown fact's included, holds.
-  if (verdict.clean && row.head_sha !== null) return clearGates(t, row, row.head_sha, read.reads);
+  if (verdict.clean && row.head_sha !== null) return clearGates(t, row, row.head_sha);
   if (!verdict.clean && GATE_WORK_HOLDS.has(verdict.hold)) {
     facts = await startGateWork(t, row, facts);
     verdict = machineClean(facts);

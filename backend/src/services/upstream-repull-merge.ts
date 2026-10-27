@@ -25,12 +25,13 @@
  *  5. The squash message (`shared/repull-squash.ts`), whose last paragraph must carry the re-pull
  *     commit's two trailers, because the release reads them back from the merge on `main`
  *     (`merge-message` otherwise).
- *  6. The claim to merge: the record's own self-edge, as the system user. It checks the dataset
- *     fences, the screen and the pull request on step 4's reads, and counts
- *     `REPULL_DAILY_MERGE_CAP` in the statement that claims, so a full day holds `cap-exhausted` and
- *     a cap set to something unreadable `cap-unreadable`. A record that moved while it was read
- *     (`stale-status`) is `skipped`, for the next tick to read as it is; any other refusal is
- *     `claim-refused`, which should not happen and is said.
+ *  6. The claim to merge: the record's own self-edge, as the system user. It reads the dataset
+ *     fences, the screen and GitHub's live head again and counts `REPULL_DAILY_MERGE_CAP` in the
+ *     statement that claims, so a full day holds `cap-exhausted`, a cap set to something unreadable
+ *     `cap-unreadable`, and a live head GitHub could not answer `pr-unreadable` (the record's
+ *     `github-unreadable`, a 502). A record that moved while it was read (`stale-status`) is
+ *     `skipped`, for the next tick to read as it is; any other refusal is `claim-refused`, which
+ *     should not happen and is said.
  *  7. The audit row of the merge (`repull_auto_merge`), in one statement that applies only while
  *     the record still holds that claim at the revision the claim left, and only under the bound.
  *     Nothing is sent without it, so the count it keeps never misses a merge that was sent.
@@ -117,7 +118,6 @@ import {
 import {
   gatherMachineCleanFacts,
   readCheckFacts,
-  readMachineCleanFacts,
   readPullRequestFact,
 } from "./upstream-repull-facts.js";
 import { readRecordedPullRequest, unreadable } from "./upstream-repull-github.js";
@@ -472,8 +472,7 @@ export async function workerMergeRepull(
   if (merges.last_outcome === "refused") return held(row, "merge-refused");
 
   // 4. The machine-clean facts, read now.
-  const { facts, reads } = await readMachineCleanFacts(env, row, "merge");
-  const verdict = machineClean(facts);
+  const verdict = machineClean(await gatherMachineCleanFacts(env, row, "merge"));
   if (!verdict.clean) return held(row, verdict.hold);
 
   // 5. The squash message.
@@ -498,7 +497,7 @@ export async function workerMergeRepull(
     { id: SYSTEM_USER_ID },
     row,
     { from: "gates_clear", to: "gates_clear", fields: { merge_claim_sha: row.gates_sha } },
-    { auditDetails: { automatic: true, worker_merge: true }, ...(reads ? { reads } : {}) },
+    { auditDetails: { automatic: true, worker_merge: true } },
   );
   const claimed = isRefusal(prepared) ? prepared : await commitTransition(env.DB, prepared);
   if (isRefusal(claimed)) {

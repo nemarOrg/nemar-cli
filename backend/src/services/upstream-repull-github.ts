@@ -159,23 +159,34 @@ export function pullRequestFacts(body: unknown): PullRequestFacts | null {
   };
 }
 
-export type RecordedPullRequest =
-  | { ok: true; facts: PullRequestFacts }
-  | { ok: false; refusal: RepullRefusal };
-
 /**
- * Whether `facts` are the pull request the row names: the recorded branch into `main`, from and
- * into the dataset's own repository. A fork's branch of the recorded name, a deleted fork's
- * included, is not it (`pull-request-mismatch`), so every path that trusts the record's pull
- * request, the claim to merge first, refuses a fork whoever asks.
+ * The recorded pull request, read from GitHub, and checked to be the one the row names: the
+ * recorded branch into `main`, from and into the dataset's own repository. A fork's branch of the
+ * recorded name, a deleted fork's included, is not it (`pull-request-mismatch`), so every path that
+ * trusts the record's pull request, the claim to merge first, refuses a fork whoever asks.
  */
-function recordedPullRequest(
-  facts: PullRequestFacts,
+export async function readRecordedPullRequest(
+  env: Bindings,
   row: RepullRow,
   pr: RepullPullRequest,
-): RecordedPullRequest {
+): Promise<{ ok: true; facts: PullRequestFacts } | { ok: false; refusal: RepullRefusal }> {
   const cols = PULL_REQUEST_COLUMNS[pr];
   const number = row[cols.number];
+  const read = await githubRead(env, row.dataset_id, `/pulls/${number}`);
+  if (!read.ok) return read;
+  if (read.status !== 200) {
+    return {
+      ok: false,
+      refusal: {
+        status: 409,
+        code: "pull-request-missing",
+        message: `GitHub has no pull request #${number} on ${row.dataset_id} (or the Worker's token cannot see it).`,
+        row,
+      },
+    };
+  }
+  const facts = pullRequestFacts(read.body);
+  if (!facts) return { ok: false, refusal: unreadable(`pull request #${number}`, "its shape") };
   if (facts.headRef !== row[cols.branch] || facts.baseRef !== "main") {
     return {
       ok: false,
@@ -204,31 +215,6 @@ function recordedPullRequest(
   return { ok: true, facts };
 }
 
-/** The recorded pull request, read from GitHub, and checked to be the one the row names. */
-export async function readRecordedPullRequest(
-  env: Bindings,
-  row: RepullRow,
-  pr: RepullPullRequest,
-): Promise<RecordedPullRequest> {
-  const number = row[PULL_REQUEST_COLUMNS[pr].number];
-  const read = await githubRead(env, row.dataset_id, `/pulls/${number}`);
-  if (!read.ok) return read;
-  if (read.status !== 200) {
-    return {
-      ok: false,
-      refusal: {
-        status: 409,
-        code: "pull-request-missing",
-        message: `GitHub has no pull request #${number} on ${row.dataset_id} (or the Worker's token cannot see it).`,
-        row,
-      },
-    };
-  }
-  const facts = pullRequestFacts(read.body);
-  if (!facts) return { ok: false, refusal: unreadable(`pull request #${number}`, "its shape") };
-  return recordedPullRequest(facts, row, pr);
-}
-
 /**
  * The live pull request, before its gates are recorded and before a claim to merge: GitHub, not
  * the caller, says the head. It must be open, not a draft, not merged, aimed at `main` from the
@@ -237,23 +223,19 @@ export async function readRecordedPullRequest(
  * mismatch, a fork's head or base included, is `head-moved` (409), its message saying which.
  * Nothing is recorded either way. The read is followed by the UPDATE and then the caller's merge,
  * so it holds only if that merge passes the same `sha` to GitHub, which refuses a moved head.
- * `read` is the pull request as the caller read it moments ago; GitHub is read when it is not given.
  */
 export async function liveHeadRefusal(
   env: Bindings,
   row: RepullRow,
   pr: RepullPullRequest,
   sha: string,
-  read?: PullRequestFacts,
 ): Promise<RepullRefusal | null> {
-  const got = read
-    ? recordedPullRequest(read, row, pr)
-    : await readRecordedPullRequest(env, row, pr);
-  if (!got.ok) {
-    if (got.refusal.status === 502) return { ...got.refusal, row };
-    return { status: 409, code: "head-moved", message: got.refusal.message, row };
+  const read = await readRecordedPullRequest(env, row, pr);
+  if (!read.ok) {
+    if (read.refusal.status === 502) return { ...read.refusal, row };
+    return { status: 409, code: "head-moved", message: read.refusal.message, row };
   }
-  const { facts } = got;
+  const { facts } = read;
   const number = row[PULL_REQUEST_COLUMNS[pr].number];
   if (facts.state !== "open" || facts.merged) {
     return {
