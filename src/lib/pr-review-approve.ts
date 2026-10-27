@@ -319,6 +319,39 @@ export async function fetchPullRequest(
   };
 }
 
+/**
+ * One read of GitHub's REST API under the dataset's repository (`path` begins with `/`, as in
+ * `/commits/<sha>/status`), with the administrator's token: the parsed JSON body, or why there is
+ * none. An answer that is not JSON is no answer.
+ */
+export async function fetchDatasetRepoJson(
+  token: string,
+  datasetId: string,
+  path: string,
+  base = githubApiBase(),
+): Promise<FetchResult<unknown>> {
+  let res: Response;
+  try {
+    res = await fetch(`${base}/repos/${DATASETS_ORG}/${datasetId}${path}`, {
+      headers: headers(token),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+  } catch (err) {
+    return {
+      ok: false,
+      status: 0,
+      reason: `GitHub could not be reached (${err instanceof Error ? err.message : String(err)}).`,
+    };
+  }
+  const unreadable = Symbol("unreadable");
+  const body: unknown = await res.json().catch(() => unreadable);
+  if (!res.ok) return { ok: false, status: res.status, reason: why(res.status, body) };
+  if (body === unreadable) {
+    return { ok: false, status: res.status, reason: "GitHub's answer could not be read." };
+  }
+  return { ok: true, value: body };
+}
+
 /** Why a pull request cannot be approved at all, or null when it can. */
 export function refusalFor(pr: PullRequestFacts): string | null {
   if (pr.state === "merged") return "This pull request is already merged.";

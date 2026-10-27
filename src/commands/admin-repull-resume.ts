@@ -117,7 +117,11 @@ with your own GitHub token (GH_TOKEN, else \`gh auth token\`). It never merges.
                .github/, the commit is made again on the new main and pushed with a lease (asked
                first unless --yes). Then the identifier screen of the head is
                dispatched (when none exists or it produced no verdict), and once it passes and
-               GitHub reports the pull request clean, the gates are recorded: gates_clear.
+               GitHub reports the pull request clean, the gates are recorded: gates_clear. On a
+               re-pull you opened, unstable because BIDS validation failed and no other check
+               or status fails is recorded too (both read with your token), and that pull
+               request merges with --bids-failure-reason, or without it once the validation
+               passes.
   gates_clear  a held claim to merge is resolved from GitHub: a merge is recorded, and a claim
                GitHub says did not merge expires once it is 30 minutes old. A main enrichment
                moved outside .nemar/ and .github/ since the gates (the merge refuses it,
@@ -262,7 +266,11 @@ export const resumeCommand = new Command("resume")
       }
       switch (result.outcome) {
         case "ready":
-          out(`Ready to merge: nemar admin repull merge ${datasetId}`);
+          out(
+            result.bidsFailure
+              ? `Ready to merge over the failed BIDS validation: nemar admin repull merge ${datasetId} --bids-failure-reason "<reason>"`
+              : `Ready to merge: nemar admin repull merge ${datasetId}`,
+          );
           break;
         case "released":
           out(`Re-pull #${row?.id} of ${datasetId} is released.`);

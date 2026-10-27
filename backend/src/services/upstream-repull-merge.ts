@@ -90,6 +90,7 @@
 
 import { isOwnDatasetRepo } from "../../../shared/nemar-app.js";
 import { normalizeUpstreamTag } from "../../../shared/openneuro-tag.js";
+import { bidsOverrideFault } from "../../../shared/repull-bids-override.js";
 import { machineClean } from "../../../shared/repull-machine-clean.js";
 import { repullSquashMessage, trailerValuesProblem } from "../../../shared/repull-squash.js";
 import {
@@ -765,6 +766,14 @@ export async function finishAfterMerge(
 // An administrator's merge over a failed BIDS validation
 // ----------------------------------------------------------------------------
 
+/** A merge over a failed BIDS validation asked for on the automatic path's record. */
+const OVERRIDE_AUTOMATIC: RepullRefusal = {
+  status: 409,
+  code: "bids-override-automatic",
+  message:
+    "A merge over a failed BIDS validation is an administrator's, for a re-pull an administrator opened; an automatic re-pull's pull request is not merged over one.",
+};
+
 /**
  * The facts an administrator's merge over a failed BIDS validation rests on (ADR 0111, the Phase
  * 7g amendment), read at the claimed head `sha` of pull request `pr`: null when they hold, else the
@@ -773,14 +782,15 @@ export async function finishAfterMerge(
  * its read of the live head; the screen passing for that administrator, the fences and the cap
  * are the claim's own, unchanged.
  *  - The record is an administrator's: the automatic path never merges over a failed check, and
- *    an automatic record's pull request is merged over one by no one.
+ *    an automatic record's pull request is merged over one by no one. Asked before GitHub is read.
  *  - The pull request is from and into the dataset's own repository (`pull-request-mismatch`
  *    otherwise): a fork's branch of the same name is not the re-pull's.
- *  - GitHub reports the pull request `unstable`, which is a check that is not required failing:
- *    `blocked` means a rule requires the check, and merging would be a bypass, which a re-pull
- *    never uses; any other state is refused as the ordinary gate refuses it.
- *  - BIDS validation, the App's own run at that head, completed with `failure` (not pending, not
- *    unread), and `version-check` completed with `success`.
+ *  - Then the rule `bidsOverrideFault` (`shared/repull-bids-override.ts`), the one `resume`'s
+ *    gates and the merge gate ask too: GitHub reports the pull request `unstable`, which is a check
+ *    that is not required failing (`blocked` means a rule requires the check, and merging would be
+ *    a bypass, which a re-pull never uses; any other state is refused as the ordinary gate refuses
+ *    it), and BIDS validation, the App's own run at that head, completed with `failure` (not
+ *    pending, not unread), and `version-check` completed with `success`.
  */
 export async function bidsOverrideRefusal(
   env: Bindings,
@@ -788,15 +798,7 @@ export async function bidsOverrideRefusal(
   pr: RepullPullRequest,
   sha: string,
 ): Promise<RepullRefusal | null> {
-  if (row.origin !== "administrator") {
-    return {
-      status: 409,
-      code: "bids-override-automatic",
-      message:
-        "A merge over a failed BIDS validation is an administrator's, for a re-pull an administrator opened; an automatic re-pull's pull request is not merged over one.",
-      row,
-    };
-  }
+  if (row.origin !== "administrator") return { ...OVERRIDE_AUTOMATIC, row };
   const number = row[PULL_REQUEST_COLUMNS[pr].number];
   if (number === null) {
     return {
@@ -830,38 +832,47 @@ export async function bidsOverrideRefusal(
       row,
     };
   }
-  if (fact.mergeableState === "blocked") {
-    return {
-      status: 409,
-      code: "bids-override-blocked",
-      message:
-        "GitHub reports the pull request blocked: this dataset's rules require BIDS validation, and merging would be a bypass, which a re-pull never uses. Nothing was claimed.",
-      row,
-    };
+  const fault = bidsOverrideFault({
+    origin: row.origin,
+    mergeableState: fact.mergeableState,
+    bids: checks.bids,
+    versionCheck: checks.versionCheck,
+  });
+  switch (fault) {
+    case null:
+      return null;
+    case "automatic":
+      return { ...OVERRIDE_AUTOMATIC, row };
+    case "unreadable":
+      return { ...unreadable(`pull request #${number}`, "its state or its checks"), row };
+    case "blocked":
+      return {
+        status: 409,
+        code: "bids-override-blocked",
+        message:
+          "GitHub reports the pull request blocked: this dataset's rules require BIDS validation, and merging would be a bypass, which a re-pull never uses. Nothing was claimed.",
+        row,
+      };
+    case "not-unstable":
+      return {
+        status: 409,
+        code: "bids-override-not-unstable",
+        message: `GitHub reports the pull request ${fact.mergeableState ?? "with no state yet"}, not unstable: a merge over a failed BIDS validation is made only while that check is the one that fails. Nothing was claimed.`,
+        row,
+      };
+    case "bids":
+      return {
+        status: 409,
+        code: "bids-override-bids",
+        message: `BIDS validation of ${sha.slice(0, 12)} is ${checks.bids.status === "completed" ? `completed with ${checks.bids.conclusion ?? "no conclusion"}` : checks.bids.status}, not failed: the override is for a validation that ran and failed. Nothing was claimed.`,
+        row,
+      };
+    case "version-check":
+      return {
+        status: 409,
+        code: "bids-override-version-check",
+        message: `version-check of ${sha.slice(0, 12)} has not passed: the override is for BIDS validation alone. Nothing was claimed.`,
+        row,
+      };
   }
-  if (fact.mergeableState !== "unstable") {
-    return {
-      status: 409,
-      code: "bids-override-not-unstable",
-      message: `GitHub reports the pull request ${fact.mergeableState ?? "with no state yet"}, not unstable: a merge over a failed BIDS validation is made only while that check is the one that fails. Nothing was claimed.`,
-      row,
-    };
-  }
-  if (checks.bids.status !== "completed" || checks.bids.conclusion !== "failure") {
-    return {
-      status: 409,
-      code: "bids-override-bids",
-      message: `BIDS validation of ${sha.slice(0, 12)} is ${checks.bids.status === "completed" ? `completed with ${checks.bids.conclusion ?? "no conclusion"}` : checks.bids.status}, not failed: the override is for a validation that ran and failed. Nothing was claimed.`,
-      row,
-    };
-  }
-  if (checks.versionCheck.status !== "completed" || checks.versionCheck.conclusion !== "success") {
-    return {
-      status: 409,
-      code: "bids-override-version-check",
-      message: `version-check of ${sha.slice(0, 12)} has not passed: the override is for BIDS validation alone. Nothing was claimed.`,
-      row,
-    };
-  }
-  return null;
 }

@@ -2222,3 +2222,66 @@ The "Checked only against stand-ins" section of each earlier amendment holds the
 
 - A `failed` record that holds a claim to merge, or a merge with no tag, is reconciled by nothing and keeps its dataset blocked until an administrator resolves it by hand (the Phase 6f amendment, annotated by the Phase 6g amendment).
 - A mirror whose last three dispatches all ended `unreported` is skipped by the scheduler, nothing clears that streak, and the mirror stays on the administrator's path (the Phase 7c amendment).
+
+## Amendment 2026-10-27 (#1983 review): the BIDS override is reached through resume, and the mirrored tag reads both spellings
+
+The first review of the epic's pull request into `dev` (#1983) found two rules of this record that the code did not reach.
+This amendment says what changed and why.
+The decision text above and the earlier amendments are unchanged.
+
+### An administrator's merge over a failed BIDS validation is reached through `resume`
+
+- What was wrong.
+  `resume` recorded the gates only when GitHub reported the pull request `clean`.
+  A failed BIDS validation that no rule requires makes GitHub report `unstable`, so `resume` waited and exited 3, and `nemar admin repull merge --bids-failure-reason` refused, because the merge is taken only from `gates_clear`.
+  The merge the Phase 7g amendment built could not be reached in the normal order.
+  Its tests recorded the gates while the GitHub stand-in said `clean` and then turned it `unstable`.
+- What `resume` records now.
+  On a record an administrator opened, `resume` also records the gates when GitHub reports `unstable` and BIDS validation is the one check that fails at the head:
+  BIDS validation, the App's own latest run, completed with `failure`;
+  `version-check`, the App's own latest run, completed with `success`;
+  every other check run, taken as the latest run of each name and App, completed with `success`, `neutral` or `skipped`, the conclusions GitHub counts as passing;
+  and every commit status is `success`.
+  A check still running is not passing yet.
+  `resume` reads every check run and every commit status of the head with the administrator's own token, two reads, and a read that fails or an answer it cannot read waits: unknown is never a failure of BIDS validation alone.
+  It says when the gates were recorded over a failed validation, and its last line names the merge with `--bids-failure-reason`.
+- One rule, in `shared/repull-bids-override.ts`.
+  The facts every reader has, the record's origin, GitHub's state and the App's two runs, are `bidsOverrideFault`, which the Worker's claim to merge (`bidsOverrideRefusal`) now asks too, with its refusal words unchanged.
+  The App's latest run of a name is read by `checkFactOf`, which the Worker's reader of the two checks now uses as well.
+  The check names are declared once, in `shared/dataset-checks.ts`, which `deriveContexts` reads for the rulesets.
+- The merge gate reads the rest of the rule before the claim.
+  With `--bids-failure-reason` it refuses, before anything is written, a head where any other check run or commit status does not pass, so the reason covers BIDS validation and no other check.
+  That BIDS validation failed and `version-check` passed is still the claim's to read, in its own words.
+  The Worker's claim reads only the App's two runs, as before: that nothing else fails is the administrator's gate's to read, as `clean` is for an ordinary merge.
+- Everything else still requires `clean`.
+  An automatic record is never gated on `unstable`, by `resume` or by the advance tick, and the Worker's merge holds a failed BIDS validation as `bids-failed` and an `unstable` head as `not-clean`.
+  A merge without the reason refuses `unstable`, and `nemar admin pr-reviews`, which has no override, refuses it too.
+- Verified on 2026-10-27 against `nemarDatasets/on004362`, pull request #1 at head `c06fa1cf`, with read-only calls.
+  The repository's `main` has no branch protection (`GET .../branches/main/protection` answered 404, "Branch not protected"), and its one ruleset is the tag ruleset "Protect version tags", so no check is required on the branch.
+  GitHub reports the pull request `unstable` (`mergeable_state` in REST, `mergeStateStatus` `UNSTABLE` in GraphQL), and its one failing check is "NEMAR PR Review", which nothing requires there: a check that is not required and fails reads `unstable`, the state this rule rests on.
+  The check runs at the head are named exactly `version-check`, `Run BIDS Validation` and `NEMAR PR Review`, the first two being the names `shared/dataset-checks.ts` declares, and each is posted by App 3679074 (`nemar-bot`).
+  The unfiltered check-runs answer carries `total_count` and `check_runs[]`, each run with `id`, `name`, `status`, `conclusion`, `head_sha` and `app.id`, the fields `checkFactOf` and `othersNotPassing` read.
+  The combined status answers `state` `pending` with `total_count` 0 and an empty `statuses[]`, which the rule reads as no status at all, never as a pending one.
+  Run on those two answers, the rule reads BIDS validation and `version-check` as passed and "NEMAR PR Review" as the check that fails, so that head is not BIDS validation's failure alone, and `resume` would wait on it.
+- Still unverified: a live pull request on an unprotected dataset repository whose BIDS validation failed, read as `unstable` and not `blocked`, which the Phase 8 amendment lists too.
+  A check run again is read by its latest run, the highest id of its name and App, whatever `filter=latest` leaves out, so the rule does not depend on that filter.
+
+### The mirrored tag reads both spellings of a version
+
+- What was wrong.
+  `mirroredTagOf`, the derivation of decision 4, matched only a version row spelled `N.N.N`, while D1 holds `1.0.0` and `v1.0.0` (`shared/contract/version.ts`): the version-DOI callback strips the `v` before it writes, but older rows and other writers can carry it, the admin manifest route among them, which writes the version as its path names it.
+  A mirror whose rows carry the `v` read as unpublished in the staleness report, so it was never compared or dispatched, and a newer row spelled `v` lost to an older bare one.
+  The create check (`versionFactsProblem`) and the release already read both spellings.
+- What it reads now.
+  Decision 4's highest version row is found in both spellings and by number, and the version comes back bare.
+  The rows of one version in the two spellings are read together, because both name the tag `v<N.N.N>`:
+  a row never examined says nothing against one that was;
+  the tag is known when every examined row names it, with `lineage` only when each of them says `lineage`;
+  and two rows that disagree are `unknown`, never one of them picked.
+  The staleness report dates such a version by its earliest row, for "probably stale".
+  There is no migration, and no recorded value is rewritten.
+- The backfill examines both spellings too.
+  The Phase 2 amendment's "Only a version of the form N.N.N is a candidate" no longer holds: a row spelled `vN.N.N` is a candidate, read as `mirroredTagOf` reads it (one lowercase `v`, then `N.N.N`), so a row the staleness report calls never examined is one `nemar admin upstream-backfill` examines.
+  The ref is still the canonical tag `v<N.N.N>`, never `vv1.0.0`.
+  The rows of one version in both spellings are read once and each recorded from that read, the write stays on the row's own spelling, and the cursor carries that spelling, which the route takes back.
+  Any other spelling, `vv1.0.0` and `V1.0.0` among them, is still never a candidate.

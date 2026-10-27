@@ -23,7 +23,9 @@
  *                      acknowledged when the administrator gives a reason for a verdict that asks
  *                      for one. When the screen passes and GitHub reports `clean`, the gates are
  *                      recorded (the Worker reads the live head and the screen again); then it
- *                      stops: "Ready to merge".
+ *                      stops: "Ready to merge". On a record an administrator opened, `unstable`
+ *                      because BIDS validation failed and nothing else does (`bids-only.ts`) is
+ *                      recorded too, and that pull request merges with `--bids-failure-reason`.
  *   gates_clear        a held claim to merge is resolved from GitHub: merged is recorded; a claim
  *   patch_gates_clear  whose merge GitHub says did not happen expires once it is old enough (the
  *                      Worker's own bound); a head that moved, or a `main` enrichment moved
@@ -76,6 +78,7 @@ import {
   githubApiBase,
   settleMergeState,
 } from "../pr-review-approve.js";
+import { readBidsOnly } from "./bids-only.js";
 import { readCatalogFacts } from "./execute/catalog.js";
 import { MOVED_REF_FETCH_DEPTH, changedOutsideNemar } from "./execute/head.js";
 import { type OriginScratch, fetchInto, openOriginScratch } from "./execute/origin.js";
@@ -555,8 +558,26 @@ async function gatesTurn(ctx: ResumeContext, row: RepullRow, pr: RepullPullReque
   const screen = await screenTurn(ctx, row, p);
   const waits: string[] = [];
   if (screen !== null) waits.push(screen);
-  if (state !== "clean") {
-    waits.push(`GitHub to report pull request #${p.number} clean (it reports '${state}')`);
+  // GitHub's state: `clean`, or, on a record an administrator opened, `unstable` because BIDS
+  // validation failed and nothing else does, which is what `nemar admin repull merge
+  // --bids-failure-reason` merges over (ADR 0111, the #1983 review amendment), read by the rule the
+  // merge gate and the Worker's claim read. No `clean` comes while the validation fails, so without
+  // this the override could not be reached. Every other state waits, an automatic record's included.
+  const overBids =
+    state === "unstable" && row.origin === "administrator"
+      ? await readBidsOnly({
+          token: ctx.token,
+          base: ctx.base,
+          datasetId: ctx.datasetId,
+          sha: p.head,
+          origin: row.origin,
+          mergeableState: state,
+        })
+      : null;
+  if (state !== "clean" && overBids?.kind !== "bids-only") {
+    waits.push(
+      `GitHub to report pull request #${p.number} clean (it reports '${state}'${overBids ? `: ${overBids.why}` : ""})`,
+    );
   }
   if (waits.length > 0) return { kind: "wait", row, waitingFor: waits.join(", and ") };
 
@@ -577,13 +598,16 @@ async function gatesTurn(ctx: ResumeContext, row: RepullRow, pr: RepullPullReque
     }
     throw apiRefused(err, "The gates could not be recorded");
   }
+  if (state === "clean") {
+    ctx.opts.out(
+      `The identifier screen and GitHub pass for ${p.head.slice(0, 12)}: re-pull #${row.id} is ${c.gatesClear}.`,
+    );
+    return { kind: "done", result: { row: gated, outcome: "ready" } };
+  }
   ctx.opts.out(
-    `The identifier screen and GitHub pass for ${p.head.slice(0, 12)}: re-pull #${row.id} is ${c.gatesClear}.`,
+    `The identifier screen passes for ${p.head.slice(0, 12)}, and GitHub reports its pull request unstable only because BIDS validation failed: re-pull #${row.id} is ${c.gatesClear}. It merges over the failed validation with a reason, once you have read it, or without one once the validation passes.`,
   );
-  return {
-    kind: "done",
-    result: { row: gated, outcome: "ready" },
-  };
+  return { kind: "done", result: { row: gated, outcome: "ready", bidsFailure: true } };
 }
 
 /**

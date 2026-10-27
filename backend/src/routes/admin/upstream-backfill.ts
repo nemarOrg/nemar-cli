@@ -23,7 +23,7 @@ export function registerUpstreamBackfillRoutes(admin: AdminRouter): void {
   admin.post("/datasets/upstream-backfill", async (c) => {
     const after = c.req.query("after");
     if (after !== undefined && !CURSOR_RE.test(after)) {
-      return c.json({ error: "`after` must look like on000001@1.0.0" }, 400);
+      return c.json({ error: "`after` must look like on000001@1.0.0 or on000001@v1.0.0" }, 400);
     }
     // A flag that writes data is parsed strictly: a misspelling must not silently be a dry run
     // (the operator thinks it ran) or, worse, a run.

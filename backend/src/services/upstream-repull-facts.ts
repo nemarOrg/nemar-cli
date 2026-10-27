@@ -43,8 +43,10 @@
  * Reads only; nothing here writes to GitHub or to the database, and nothing mails anyone.
  */
 
+import { VERSION_CHECK_NAME } from "../../../shared/dataset-checks.js";
 import { isScreenState, screenGate } from "../../../shared/identifier-screen-report.js";
 import { verdictOf } from "../../../shared/pr-review.js";
+import { checkFactOf } from "../../../shared/repull-bids-override.js";
 import {
   type CheckFact,
   type DatasetFact,
@@ -138,15 +140,13 @@ export async function readMainSha(
 
 const UNREADABLE_CHECK: CheckFact = { status: "unreadable", conclusion: null };
 
-/** GitHub's check-run states before a run completes, which all wait. */
-const NOT_STARTED = new Set(["queued", "waiting", "requested", "pending"]);
-
 /**
  * The App's latest run named `name` at `sha`, or `absent`. Asked for that name and App only, and
- * filtered again here on the answer: a run of another name, another App or another commit is not
- * read, whatever GitHub returned. Of the App's runs, the one with the highest id is the latest (a
- * re-run is a new run). A page that does not hold every run GitHub counts, or a run whose fields
- * are not of their shape, is `unreadable`: unknown is never read as absent or green.
+ * read by `checkFactOf` (`shared/repull-bids-override.ts`), which filters the answer again: a run of
+ * another name, another App or another commit is not read, whatever GitHub returned. The same
+ * reading is the CLI's, from its own unfiltered read of the head's runs. A failed read, a page that
+ * does not hold every run GitHub counts, or a run whose fields are not of their shape, is
+ * `unreadable`: unknown is never read as absent or green.
  */
 async function readCheck(
   env: Bindings,
@@ -161,26 +161,8 @@ async function readCheck(
     per_page: "100",
   });
   const read = await githubRead(env, datasetId, `/commits/${sha}/check-runs?${query}`);
-  if (!read.ok || read.status !== 200 || !isObject(read.body)) return UNREADABLE_CHECK;
-  const { total_count: total, check_runs: runs } = read.body;
-  if (typeof total !== "number" || !Array.isArray(runs) || total > runs.length) {
-    return UNREADABLE_CHECK;
-  }
-  let latest: { id: number; status: string; conclusion: string | null } | null = null;
-  for (const run of runs) {
-    if (!isObject(run) || !isObject(run.app) || !posInt(run.id)) return UNREADABLE_CHECK;
-    if (typeof run.status !== "string") return UNREADABLE_CHECK;
-    if (run.conclusion !== null && typeof run.conclusion !== "string") return UNREADABLE_CHECK;
-    if (run.name !== name || run.app.id !== NEMAR_APP_ID || run.head_sha !== sha) continue;
-    if (latest === null || run.id > latest.id) {
-      latest = { id: run.id, status: run.status, conclusion: run.conclusion };
-    }
-  }
-  if (latest === null) return { status: "absent", conclusion: null };
-  if (latest.status === "completed") return { status: "completed", conclusion: latest.conclusion };
-  if (latest.status === "in_progress") return { status: "in_progress", conclusion: null };
-  if (NOT_STARTED.has(latest.status)) return { status: "queued", conclusion: null };
-  return UNREADABLE_CHECK;
+  if (!read.ok || read.status !== 200) return UNREADABLE_CHECK;
+  return checkFactOf(read.body, name, sha);
 }
 
 /** BIDS validation and `version-check` at `sha`, the App's own runs, by the dataset's names. */
@@ -190,7 +172,7 @@ export async function readCheckFacts(
   sha: string,
 ): Promise<{ bids: CheckFact; versionCheck: CheckFact }> {
   const [bidsCheck, versionCheck] = deriveContexts(datasetId);
-  if (!SHA_RE.test(sha) || !bidsCheck || versionCheck?.context !== "version-check") {
+  if (!SHA_RE.test(sha) || !bidsCheck || versionCheck?.context !== VERSION_CHECK_NAME) {
     return { bids: UNREADABLE_CHECK, versionCheck: UNREADABLE_CHECK };
   }
   const [bids, version] = await Promise.all([
