@@ -491,7 +491,8 @@ NEMAR_NO_BROWSER=1             # Never try to open a browser during sign-in (sam
 NEMAR_NO_COLOR                 # Disable colored output
 NEMAR_DATA_HOSTS               # Extra https origins of authenticated NEMAR data hosts the CLI may send your API key to (comma-separated; loopback http is accepted for local tests)
 NEMAR_DATA_HOSTS_ONLY=1        # Use only NEMAR_DATA_HOSTS, not the build's default data host
-NEMAR_CREDENTIAL_HELPER        # Command git runs as the credential helper in a data host clone (default: `nemar auth git-credential`)
+NEMAR_CREDENTIAL_HELPER        # Program git runs as the credential helper in a data host clone, in place of `nemar` (an absolute path to an executable, or a bare command name with no slash; `auth git-credential` is added)
+NEMAR_DATA_HOST_TIMEOUT_MS     # Whole milliseconds a data host request may go without progress; it can only shorten the default 60000 (for tests)
 NEMAR_APPROVAL_DISPATCH_TOKEN  # Dispatch token of a web approval; set only by the web approval executor, never by a person
 NEMAR_APPROVE_RETRY_DELAY_MS   # Whole milliseconds to wait between retries of an approval; it can only shorten the default wait (for tests), never lengthen it
 ```

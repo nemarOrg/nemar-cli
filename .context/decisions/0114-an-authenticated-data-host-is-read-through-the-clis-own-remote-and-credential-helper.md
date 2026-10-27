@@ -34,11 +34,13 @@ It is a second executable of the package, speaking git-annex's external special 
 A repository declares it in its `git-annex` branch with `externaltype=nemar`, `host=<origin>`, `dataset=<id>` and `autoenable=true`, so `git annex init` in a clone enables it.
 `INITREMOTE` and `PREPARE` refuse a `host` that is not on the CLI's list, one that is not an origin, and a `dataset` that is not two or three lower-case letters and six digits, and make no request.
 The API key is read from the CLI's own stored account, never from the repository.
-`TRANSFER RETRIEVE` sends `GET <host>/o/<dataset>/<key>` with the Bearer key and follows redirects by hand, at most three; `Authorization` is attached only to a URL whose origin is the configured host, and only `https` is followed.
+`TRANSFER RETRIEVE` sends `GET <host>/o/<dataset>/<key>` with the Bearer key and follows redirects by hand, at most three; `Authorization` is attached only to a URL whose origin is the configured host, and only `https` is followed (the one exception is a test: plain `http` on a loopback address, and only when the configured host is itself a loopback `http` origin that `NEMAR_DATA_HOSTS` listed).
 The byte count must equal the size the key declares.
 `CHECKPRESENT` is a `HEAD`: 200 present, 404 absent, anything else unknown, so a fault is never reported as absence.
 `TRANSFER STORE` and `REMOVE` are refused; the remote is read-only for now.
-No message the remote prints contains the key, a redirect address or its query string.
+No message the remote prints contains the API key, a redirect address or its query string; a failed request is described by the error's class and code (`ECONNREFUSED`, `ENOTFOUND`), never its text.
+The origin that carries the key is a branded `VettedOrigin`, produced only by the list check, and the list is checked again before each request that carries the key.
+A key is asked for only if it has the shape the server serves (a backend name, `-s<size>`, optional chunk fields, `--`, then letters, digits, `.`, `_` and `-`); the size is checked against the bytes that arrive and a body that passes it is cut off at once.
 
 **The repository is reached through a credential helper, `nemar auth git-credential`.**
 It answers git's `get` for an origin on the list, with the user name `nemar` and the stored key as the password, and for nothing else; `store` and `erase` do nothing.
@@ -47,7 +49,9 @@ The key is in no URL, no argument and no file of the clone.
 The command skips the update check, the notices and the dev-build banner, because git reads its output.
 
 **`nemar dataset clone <id>`** is unchanged for an id the main NEMAR service knows.
-For an id it does not know (a 404, or a 400 for an id shape it does not accept) and that has the shape of a data host id, and with `--host <origin>` for a host on the list, it asks each listed host `GET /api/datasets/<id>` with the key, never following a redirect, and clones from the first that says 200.
+For an id it does not know (a 404, or a 400 for an id shape it does not accept) and that has the shape of a data host id, and with `--host <origin>` for a host on the list, it asks each listed host, but only for a signed-in account: a signed-out run never asks a data host, and `--host` signed out stops with a request to sign in.
+If the main service itself fails (a 5xx, or no answer), no data host is asked, because the fallback is for an id the service says it lacks, not for an id it could not answer about.
+The question is `GET /api/datasets/<id>` with the key, never following a redirect; the clone is from the first host that answers 200.
 **`nemar dataset get`** in a clone whose `origin` is such a repository skips the download credentials the main service issues and runs `git annex get` through the special remote.
 
 ## Consequences
