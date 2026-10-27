@@ -616,6 +616,26 @@ describe("TRANSFER RETRIEVE", () => {
     }
   });
 
+  test("an empty object is written as an empty file", async () => {
+    const emptyKey =
+      "SHA256E-s0--e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.bin";
+    // A 200 with no body at all, as a server may send for an empty object.
+    const own = standin({
+      override: (_req, key) => (key === emptyKey ? new Response(null, { status: 200 }) : undefined),
+    });
+    try {
+      const s = new Session({ hosts: own.origin });
+      await s.ready(own.origin);
+      const file = outFile("empty");
+      s.send(`TRANSFER RETRIEVE ${emptyKey} ${file}`);
+      expect((await s.until("TRANSFER-")).line).toBe(`TRANSFER-SUCCESS RETRIEVE ${emptyKey}`);
+      expect(readFileSync(file).byteLength).toBe(0);
+      await s.close();
+    } finally {
+      own.stop();
+    }
+  });
+
   test("an object whose key declares no size is accepted at whatever length it has", async () => {
     const keyNoSize = "WORM-m1700000000--note.txt";
     const own = standin({
