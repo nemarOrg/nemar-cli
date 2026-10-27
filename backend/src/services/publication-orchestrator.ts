@@ -1919,8 +1919,11 @@ async function stepS3Lock(c: ApproveStepContext): Promise<RespondOutcome | undef
   // batchSize keys via max-keys) plus up to batchSize PutObjectRetention
   // calls — bounded subrequest cost regardless of dataset size. The CLI
   // re-invokes with the returned `s3_lock_continuation_token` until
-  // `hasMore` is false. Idempotent: 403 = already-locked = counted as
-  // success, so retries on the same token are safe.
+  // `hasMore` is false. Idempotent: an object already under the lock this
+  // route sets counts as locked, so retries on the same token are safe. A
+  // 403 counts only when the retention read-back shows that lock, because S3
+  // answers 403 for a credential without the permission too (lockOneObject
+  // in s3.ts).
   //
   // The previous offset-based approach paginated the entire dataset on
   // every call (full LIST + 40-PUT slice), which compounded across
@@ -1972,7 +1975,8 @@ async function stepS3Lock(c: ApproveStepContext): Promise<RespondOutcome | undef
             step_results: stepResults,
             details: lockResult,
             // Echo the same token the caller sent so the CLI's retry
-            // replays this exact batch (idempotent: 403=already-locked).
+            // replays this exact batch (idempotent: an object already under
+            // this route's lock counts as locked).
             // Without this echo, the CLI would lose its place and
             // re-stream from page 1 on retry.
             s3_lock_continuation_token: body.s3_lock_continuation_token,
