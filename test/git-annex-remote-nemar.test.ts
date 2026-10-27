@@ -227,6 +227,10 @@ describe("the protocol", () => {
     const configs: string[] = [];
     for (let line = await s.next(); line !== "CONFIGEND"; line = await s.next()) configs.push(line);
     expect(configs.map((l) => l.split(" ")[1])).toEqual(["host", "dataset"]);
+    s.send("EXPORTSUPPORTED");
+    expect(await s.next()).toBe("EXPORTSUPPORTED-FAILURE");
+    s.send("IMPORTSUPPORTED");
+    expect(await s.next()).toBe("IMPORTSUPPORTED-FAILURE");
     s.send("WHEREIS somekey");
     expect(await s.next()).toBe("WHEREIS-FAILURE");
     s.send("CLAIMURL https://example.org/x");

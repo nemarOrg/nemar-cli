@@ -448,6 +448,13 @@ export async function runRemote(io: RemoteIo, deps: RemoteDeps): Promise<number>
           }
           await io.send("INFOEND");
           break;
+        case "EXPORTSUPPORTED":
+          // git-annex asks right after EXTENSIONS, before any other request.
+          await io.send("EXPORTSUPPORTED-FAILURE");
+          break;
+        case "IMPORTSUPPORTED":
+          await io.send("IMPORTSUPPORTED-FAILURE");
+          break;
         case "WHEREIS":
           await io.send("WHEREIS-FAILURE");
           break;
