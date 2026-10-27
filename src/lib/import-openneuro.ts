@@ -1278,9 +1278,10 @@ export interface PinnedClone {
  * its window). Any other clone failure is an ordinary error.
  *
  * With an explicit `tag`, OpenNeuro's latest is still asked for (best effort) so a caller can warn
- * when they differ: the copy phase copies the object CURRENTLY at each upstream path (decision 8,
- * the version-pinned copy, is not built), so a recording that changed between the two tags
- * without changing size is copied with the newer bytes, and only the size check catches the rest.
+ * when they differ: the copy phase copies the object CURRENTLY at each upstream path (only a
+ * re-pull's copy pins the object version, ADR 0111 decision 8), so a recording that changed
+ * between the two tags without changing size is copied with the newer bytes, and only the size
+ * check catches the rest.
  *
  * `repoUrl` and `lookup` (passed to `fetchOpenNeuroLatestTag`) move the two endpoints and bound
  * the lookup's retries, for tests.
@@ -1477,7 +1478,7 @@ async function prepareImportSteps(
   if (pinned.latestTag !== null && !sameUpstreamTag(pinned.latestTag, pinned.tag)) {
     console.log(
       chalk.yellow(
-        `  Warning: importing ${pinned.tag}, but OpenNeuro's latest is ${pinned.latestTag}. The copy takes the object currently at each upstream path (ADR 0111 decision 8 is not built), so a recording that changed between the two without changing size would be copied with the newer bytes.`,
+        `  Warning: importing ${pinned.tag}, but OpenNeuro's latest is ${pinned.latestTag}. The copy takes the object currently at each upstream path (only a re-pull's copy pins the object version, ADR 0111 decision 8), so a recording that changed between the two without changing size would be copied with the newer bytes.`,
       ),
     );
   }

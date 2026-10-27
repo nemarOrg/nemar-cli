@@ -476,6 +476,7 @@ The lead's rulings of 2026-10-23 settle three questions decision 10 left open, a
 - **Which tag.** The auto-import passes the tag discovery found.
   Every other entry point (the retry engine, `recover --execute`, a dispatch without `--tag`) passes none, and prepare asks OpenNeuro's GraphQL for `latestSnapshot.tag` when it runs, so "the tag the retry discovers" is the latest at the retry.
   An explicit `--tag` is honored; when it is not the latest, prepare warns, because decision 8 is not built and the copy takes the object currently at each upstream path.
+  *Annotated 2026-10-27: decision 8 is built for a re-pull's copy by the Phase 6d amendment; the import's copy still takes the object currently at each upstream path, and the import's warning now says so.*
 - **Mirror lag.** A latest tag OpenNeuro cannot name refuses with `[openneuro-mirror-lag]` too, before the dataset record is created.
   Recovery quarantines it as `mirror_lag`, so it stays retryable rather than `not_found_dataset`.
   Retries are capped by the retry engine's 14-day window, counted from its first retry of the row; past it the row is parked as `mirror_lag` and one admin issue is filed then; no quarantine mail and no failure-time issue are sent for it (ruling 2).
