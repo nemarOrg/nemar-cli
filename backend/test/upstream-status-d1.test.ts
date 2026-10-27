@@ -62,12 +62,12 @@ beforeAll(async () => {
       `INSERT INTO import_jobs (dataset_id, source, source_id, status) VALUES ('on000003', 'openneuro', 'ds000003', 'copying')`,
     )
     .run();
-});
+}, 60_000);
 
 afterAll(async () => {
   await mf.dispose();
   openneuro.stop();
-});
+}, 30_000);
 
 const env = () =>
   ({ DB: d1, ENVIRONMENT: "test", OPENNEURO_GRAPHQL_URL: openneuro.url }) as Bindings;

@@ -14,12 +14,26 @@
  * CI TIER: unit-pure. Spawns the CLI against a loopback stand-in; no network.
  */
 
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  setDefaultTimeout,
+  test,
+} from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "bun";
 import { refuseMirrorMajor } from "../src/lib/version-policy";
+
+// A test here runs the CLI from source up to four times, each run bounded by its own 30-second
+// `timeout`. 60 seconds, git-credential.test.ts's bound for the same spawn, lets a hung run fail
+// on its own limit, with its output, instead of the default five seconds cutting the test short.
+setDefaultTimeout(60_000);
 
 describe("refuseMirrorMajor", () => {
   const ask = (datasetId: string, source: string | null, current: string, next: string) =>
