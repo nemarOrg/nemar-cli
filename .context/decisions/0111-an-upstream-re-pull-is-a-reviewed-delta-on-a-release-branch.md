@@ -2256,8 +2256,15 @@ The decision text above and the earlier amendments are unchanged.
 - Everything else still requires `clean`.
   An automatic record is never gated on `unstable`, by `resume` or by the advance tick, and the Worker's merge holds a failed BIDS validation as `bids-failed` and an `unstable` head as `not-clean`.
   A merge without the reason refuses `unstable`, and `nemar admin pr-reviews`, which has no override, refuses it too.
-- Checked only against stand-ins: that GitHub answers `GET .../commits/<sha>/check-runs` with no name or App filter, and `GET .../commits/<sha>/status`, as the stand-in serves them, with the latest run of each check under `filter=latest`.
-  That an unprotected mirror whose BIDS validation alone failed reads `unstable` is already on the list of the Phase 8 amendment.
+- Verified on 2026-10-27 against `nemarDatasets/on004362`, pull request #1 at head `c06fa1cf`, with read-only calls.
+  The repository's `main` has no branch protection (`GET .../branches/main/protection` answered 404, "Branch not protected"), and its one ruleset is the tag ruleset "Protect version tags", so no check is required on the branch.
+  GitHub reports the pull request `unstable` (`mergeable_state` in REST, `mergeStateStatus` `UNSTABLE` in GraphQL), and its one failing check is "NEMAR PR Review", which nothing requires there: a check that is not required and fails reads `unstable`, the state this rule rests on.
+  The check runs at the head are named exactly `version-check`, `Run BIDS Validation` and `NEMAR PR Review`, the first two being the names `shared/dataset-checks.ts` declares, and each is posted by App 3679074 (`nemar-bot`).
+  The unfiltered check-runs answer carries `total_count` and `check_runs[]`, each run with `id`, `name`, `status`, `conclusion`, `head_sha` and `app.id`, the fields `checkFactOf` and `othersNotPassing` read.
+  The combined status answers `state` `pending` with `total_count` 0 and an empty `statuses[]`, which the rule reads as no status at all, never as a pending one.
+  Run on those two answers, the rule reads BIDS validation and `version-check` as passed and "NEMAR PR Review" as the check that fails, so that head is not BIDS validation's failure alone, and `resume` would wait on it.
+- Still unverified: a live pull request on an unprotected dataset repository whose BIDS validation failed, read as `unstable` and not `blocked`, which the Phase 8 amendment lists too.
+  A check run again is read by its latest run, the highest id of its name and App, whatever `filter=latest` leaves out, so the rule does not depend on that filter.
 
 ### The mirrored tag reads both spellings of a version
 
