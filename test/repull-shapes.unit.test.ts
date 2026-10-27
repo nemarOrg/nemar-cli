@@ -29,6 +29,7 @@ import { ExecuteRefused } from "../src/lib/repull/execute/verify-plan";
 import { nemarRemoteOf } from "../src/lib/repull/plan";
 import {
   isAwsRegion,
+  isCommitId,
   isNemarDatasetId,
   isNemarVersion,
   isOpenNeuroDatasetId,
@@ -101,6 +102,28 @@ describe("the shape predicates", () => {
       expect([bad, isAwsRegion(bad)]).toEqual([bad, false]);
     }
     expect(isAwsRegion(undefined)).toBe(false);
+  });
+
+  test("a commit id is a full 40 lowercase hex digits and nothing else", () => {
+    for (const ok of ["0123456789abcdef0123456789abcdef01234567", "f".repeat(40), "0".repeat(40)]) {
+      expect([ok, isCommitId(ok)]).toEqual([ok, true]);
+    }
+    for (const bad of [
+      "",
+      "abc1234",
+      "a".repeat(39),
+      "a".repeat(41),
+      "a".repeat(64),
+      "A".repeat(40),
+      `${"a".repeat(39)}z`,
+      "--upload-pack=x",
+      "HEAD",
+      `${"a".repeat(40)}\n`,
+    ]) {
+      expect([bad, isCommitId(bad)]).toEqual([bad, false]);
+    }
+    expect(isCommitId(undefined)).toBe(false);
+    expect(isCommitId(1)).toBe(false);
   });
 
   test("a dataset id is two letters or ds and six digits, a version is N.N.N", () => {
@@ -240,6 +263,9 @@ describe("planFacts refuses a scalar of the plan that is not the shape execution
     current?: unknown;
     n0?: unknown;
     n1?: unknown;
+    to_commit?: unknown;
+    main_commit?: unknown;
+    annex_commit?: unknown;
   }): PlanBody =>
     ({
       dataset: "dataset" in over ? over.dataset : "on004362",
@@ -247,9 +273,12 @@ describe("planFacts refuses a scalar of the plan that is not the shape execution
         ds: "ds" in over ? over.ds : "ds004362",
         from_tag: "from_tag" in over ? over.from_tag : "1.0.0",
         to_tag: "to_tag" in over ? over.to_tag : "1.1.0",
-        to_commit: SHA,
+        to_commit: "to_commit" in over ? over.to_commit : SHA,
       },
-      nemar: { main_commit: SHA, annex_commit: SHA },
+      nemar: {
+        main_commit: "main_commit" in over ? over.main_commit : SHA,
+        annex_commit: "annex_commit" in over ? over.annex_commit : SHA,
+      },
       versions: {
         current: "current" in over ? over.current : "1.0.0",
         n0: "n0" in over ? over.n0 : "2.0.0",
@@ -281,12 +310,32 @@ describe("planFacts refuses a scalar of the plan that is not the shape execution
       patchVersion: "2.0.1",
     });
     expect(planFacts(body({ n1: null })).patchVersion).toBeNull();
+    // Full commit ids of any hex digits, the three of them, are read as they are.
+    const ids = ["0123456789abcdef0123456789abcdef01234567", "f".repeat(40), "1".repeat(40)];
+    expect(
+      planFacts(body({ to_commit: ids[0], main_commit: ids[1], annex_commit: ids[2] })),
+    ).toMatchObject({ toCommit: ids[0], mainCommit: ids[1], annexCommit: ids[2] });
     // A legacy five-digit tag, a v-prefixed one and a release candidate are tags the system reads.
     for (const tag of ["00002", "v1.0.0", "2.1.0-rc1", "A.b_c-9"]) {
       expect(planFacts(body({ to_tag: tag })).toTag).toBe(tag);
     }
     expect(planFacts(body({ current: "10.20.30", n0: "11.0.0" })).toVersion).toBe("11.0.0");
   });
+
+  const COMMIT_CASES = [
+    "",
+    "a".repeat(39),
+    "a".repeat(41),
+    "A".repeat(40),
+    "a".repeat(64),
+    `${"a".repeat(39)}g`,
+    "--upload-pack=touch-x",
+    "HEAD",
+    "refs/heads/main",
+    `${"a".repeat(40)}\n`,
+    `${"a".repeat(40)} `,
+    ` ${"a".repeat(40)}`,
+  ];
 
   const CASES: Array<
     [field: string, over: (v: unknown) => Parameters<typeof body>[0], bad: string[]]
@@ -310,6 +359,11 @@ describe("planFacts refuses a scalar of the plan that is not the shape execution
     ],
     ["N.0.0 version", (v) => ({ n0: v }), ["2", "2.0", "v2.0.0", "2.0.0 ", "../2.0.0", ""]],
     ["N.0.1 version", (v) => ({ n1: v }), ["2", "2.0", "v2.0.1", "2.0.1\n", "../2.0.1", ""]],
+    // A commit id ends up as an argument of git: a short, long, upper-case, SHA-256, non-hex or
+    // option-looking value is refused, and so is one with a newline or a space after a valid id.
+    ["upstream commit", (v) => ({ to_commit: v }), COMMIT_CASES],
+    ["main commit", (v) => ({ main_commit: v }), COMMIT_CASES],
+    ["git-annex commit", (v) => ({ annex_commit: v }), COMMIT_CASES],
   ];
 
   for (const [field, over, bad] of CASES) {

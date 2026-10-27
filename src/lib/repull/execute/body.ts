@@ -9,6 +9,7 @@
 import type { PlanBody } from "../digest.js";
 import type { Target } from "../edits.js";
 import {
+  isCommitId,
   isNemarDatasetId,
   isNemarVersion,
   isOpenNeuroDatasetId,
@@ -190,6 +191,12 @@ export function planFacts(body: PlanBody): PlanFacts {
   if (patchVersion !== null && !isNemarVersion(patchVersion)) {
     throw badShape("N.0.1 version", "a version of the form N.N.N");
   }
+  // The three commits become arguments of git (`fetch`, `checkout`, `commit-tree`, `ls-remote`), so
+  // each must be a full id and cannot be taken for an option or a ref.
+  const COMMIT = "a full commit id (40 lowercase hex digits)";
+  if (!isCommitId(facts.toCommit)) throw badShape("upstream commit", COMMIT);
+  if (!isCommitId(facts.mainCommit)) throw badShape("main commit", COMMIT);
+  if (!isCommitId(facts.annexCommit)) throw badShape("git-annex commit", COMMIT);
   return {
     ...(facts as { [K in keyof typeof facts]: string }),
     patchVersion,

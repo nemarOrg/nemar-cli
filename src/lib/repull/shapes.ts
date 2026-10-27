@@ -6,8 +6,8 @@
  * Two places hand the re-pull values nobody on this machine wrote: the dataset's own `remote.log`
  * (the bucket and the region of `nemar-s3`, which the write guard then treats as the only
  * destination and the annex-uuid read builds a host from) and the plan file (the dataset ids, the
- * tags and the versions, which execution turns into a clone URL, a ref, `release/v<N.0.0>` and
- * the S3 keys of the staging manifest). The plan file is digest-checked, but a digest proves the
+ * tags, the versions and the three commit ids, which execution turns into a clone URL, a ref,
+ * `release/v<N.0.0>`, the S3 keys of the staging manifest and the arguments of git). The plan file is digest-checked, but a digest proves the
  * file is the one that was reviewed, not that what it says is a value a URL or a ref can carry.
  * So each value is checked against the shape it must have at the read, and a value that does not
  * have it is refused with a message that names the field and the shape, never the value.
@@ -18,7 +18,7 @@
  */
 
 import { isOpenNeuroTag } from "../../../shared/openneuro-tag.js";
-import { NEMAR_VERSION_RE } from "../../../shared/repull-state.js";
+import { NEMAR_VERSION_RE, SHA_RE } from "../../../shared/repull-state.js";
 
 export { isOpenNeuroTag };
 
@@ -30,6 +30,15 @@ export function isOpenNeuroDatasetId(value: unknown): value is string {
 /** A NEMAR dataset id: two lowercase letters and six digits (`on004362`, `xx099991`). */
 export function isNemarDatasetId(value: unknown): value is string {
   return typeof value === "string" && /^[a-z]{2}\d{6}$/.test(value);
+}
+
+/**
+ * A full commit id: 40 lowercase hex digits, the shape the Worker holds `base_sha` to. A short id,
+ * an upper-case one, a SHA-256 one and anything with the look of an option are not one, and a
+ * commit id ends up as an argument of `git fetch`, `git checkout` and `git commit-tree`.
+ */
+export function isCommitId(value: unknown): value is string {
+  return typeof value === "string" && SHA_RE.test(value);
 }
 
 /** A NEMAR version as a re-pull records it: `N.N.N`, with no prefix and no suffix. */
