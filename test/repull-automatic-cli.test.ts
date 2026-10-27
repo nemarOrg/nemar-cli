@@ -971,6 +971,31 @@ describe.skipIf(!awsInstalled)("an automatic run opens its pull request", () => 
     expect(w.gh.seen.filter((s) => s.token === APP_TOKEN && s.method !== "GET")).toEqual([]);
   });
 
+  test("an open record of another plan is the record's class, record-refused", async () => {
+    const c = await claimOpen();
+    writeEvent(c);
+    expect((await auto(planArgs(c))).exitCode).toBe(0);
+    // Then an administrator records another plan of the same tags (read from the location log,
+    // not a listing) and leaves it at planned.
+    const { path } = await libraryPlan();
+    const admin = await w.cli(
+      ["repull", "execute", path, "--until", "planned", "--yes"],
+      {},
+      undefined,
+      SOURCE_ENTRY,
+    );
+    expect(admin.exitCode, admin.all).toBe(0);
+    const [open] = repullRows();
+    expect(JSON.parse(readFileSync(join(runner, "plan.json"), "utf8")).digest).not.toBe(
+      open?.plan_digest,
+    );
+    const exec = await auto(executeArgs(c));
+    expect(exec.exitCode, exec.all).toBe(1);
+    expectQuiet(exec, c, "refused");
+    expect(dispatchRow(c.id)).toMatchObject({ status: "refused", code: "record-refused" });
+    expect(repullRows()).toMatchObject([{ id: open?.id, status: "planned" }]);
+  });
+
   test("a record taken up past prepared leaves no handoff behind", async () => {
     const c = await claimOpen();
     writeEvent(c);

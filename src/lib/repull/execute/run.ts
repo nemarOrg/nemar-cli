@@ -724,9 +724,12 @@ function supersedable(
   body: PlanBody,
 ): RepullRow {
   if (!opts.supersede) {
-    throw new ExecuteRefused(
-      "repull-in-flight",
-      `Re-pull #${open.id} of ${datasetId} (${open.from_tag} to ${open.to_tag}) is ${open.status}, and a dataset has one open re-pull at a time: pass --supersede to end it and execute this plan (a newer tag, before its merge), or end it with nemar admin repull abandon ${datasetId}.`,
+    throw inStep(
+      new ExecuteRefused(
+        "repull-in-flight",
+        `Re-pull #${open.id} of ${datasetId} (${open.from_tag} to ${open.to_tag}) is ${open.status}, and a dataset has one open re-pull at a time: pass --supersede to end it and execute this plan (a newer tag, before its merge), or end it with nemar admin repull abandon ${datasetId}.`,
+      ),
+      "record",
     );
   }
   const facts = planFacts(body);
