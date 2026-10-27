@@ -48,6 +48,8 @@ function blob(path: string, sha: string, size: number, content = ""): void {
 
 describe.skipIf(!ISOLATED)("generateManifest — small root file handling (issue #509)", () => {
   beforeAll(async () => {
+    // Never install the mock in a shared run, whatever the runner does with a skipped describe.
+    if (!ISOLATED) return;
     // Preserve the real module and override only the two functions generateManifest calls. Other
     // tests in the suite transitively import the github service (webhooks, datasets routes pull
     // ensureMainBranch etc.), so we must not replace the entire module export shape.
@@ -164,7 +166,7 @@ describe.skipIf(ISOLATED)("generateManifest small root files, in a process of th
   test("pass when this file runs alone with the isolation switch on", async () => {
     const proc = spawn({
       cmd: [
-        "bun",
+        process.execPath,
         "test",
         `./${import.meta.path.slice(import.meta.path.indexOf("backend/test/"))}`,
       ],
