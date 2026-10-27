@@ -3,8 +3,8 @@
  * column did (epic #1046 phase 2, #1908; ADR 0111, decision 4).
  *
  * Every row that predates migration 0104 is NULL/NULL, "never examined". For each `on######`
- * version this reads `v<version>/dataset_description.json` through the authenticated raw CDN
- * and records what it says through the same parser the insert path uses
+ * version this reads `dataset_description.json` at the version's tag `v<N.N.N>` through the
+ * authenticated raw CDN and records what it says through the same parser the insert path uses
  * (`shared/source-snapshot.ts`): a tag with basis `doi`, or `unknown`.
  *
  * THE RULES THAT MAKE IT SAFE TO RUN AGAINST PRODUCTION
@@ -26,8 +26,14 @@
  *     `suspect_credential`, whatever else errored in the same batch.
  *   - A row younger than an hour is not a candidate: the raw CDN caches a 404 for a few
  *     minutes, so a freshly pushed tag can read as absent when it is not.
- *   - Only a version of the form N.N.N is a candidate, so a stored `v1.0.0` or a non-semver
- *     value can neither build a bad tag URL nor produce a cursor the route would refuse.
+ *   - A version is a candidate in either spelling D1 holds, `N.N.N` or `vN.N.N`, read as
+ *     `mirroredTagOf` reads it (`bareNemarVersion`: one lowercase `v`, then N.N.N), so the rows
+ *     the staleness report calls never examined are the rows this pass examines. The ref is always
+ *     the canonical tag `v<N.N.N>`, so a `v1.0.0` row never reads `vv1.0.0`; the rows of one
+ *     version in its two spellings name that one tag, so it is read once and each row is recorded
+ *     from that read; and the cursor carries the row's own spelling, which the route takes back.
+ *     Any other value (`vv1.0.0`, `V1.0.0`, a non-semver one) is never a candidate, so it can
+ *     neither build a bad tag URL nor produce a cursor the route would refuse.
  *   - The write is `... WHERE source_version_basis IS NULL`: it never overwrites a recorded
  *     value, so a rerun writes 0 and a live insert that lands first always wins. A write result
  *     that carries no change count is an error, never a zero.
@@ -39,10 +45,10 @@
  * GET per distinct repository whose tag read was absent, one candidate query, one D1 batch and
  * the count queries. The raw CDN returns no `x-ratelimit-*` and spends none of the installation's
  * hourly REST budget. `counts.not_examined` counts every `on` version row with no basis,
- * including rows whose version is not N.N.N and which no pass will ever examine.
+ * including rows whose version is neither spelling of N.N.N and which no pass will ever examine.
  */
 
-import { openNeuroSourceId } from "../../../shared/source-snapshot.js";
+import { bareNemarVersion, openNeuroSourceId } from "../../../shared/source-snapshot.js";
 import type { Bindings } from "../types/bindings.js";
 import { getDatasetsToken } from "./github-auth.js";
 import { errorMessage } from "./repo-metadata.js";
@@ -58,13 +64,22 @@ export const UPSTREAM_BACKFILL_MAX = 50;
 export const UPSTREAM_BACKFILL_MIN_AGE = "-1 hour";
 const CONCURRENCY = 5;
 
+/**
+ * The stored version without one leading lowercase `v`, as `bareNemarVersion` strips it, in SQL.
+ * GLOB, not `=` or LIKE, because GLOB is case-sensitive: `V1.0.0` keeps its `V` and is no
+ * candidate, and `vv1.0.0` keeps one `v`, which the shape below refuses.
+ */
+const BARE_VERSION =
+  "(CASE WHEN dv.version GLOB 'v*' THEN substr(dv.version, 2) ELSE dv.version END)";
+
+/** The three GLOBs together are `^\d+\.\d+\.\d+$` on the bare version: digits and two dots. */
 const ELIGIBLE = `dv.source_version_basis IS NULL
   AND dv.dataset_id GLOB 'on[0-9][0-9][0-9][0-9][0-9][0-9]'
   AND d.withdrawn_at IS NULL
   AND d.github_repo IS NOT NULL
-  AND dv.version NOT GLOB '*[^0-9.]*'
-  AND dv.version GLOB '[0-9]*.[0-9]*.[0-9]*'
-  AND dv.version NOT GLOB '*.*.*.*'
+  AND ${BARE_VERSION} NOT GLOB '*[^0-9.]*'
+  AND ${BARE_VERSION} GLOB '[0-9]*.[0-9]*.[0-9]*'
+  AND ${BARE_VERSION} NOT GLOB '*.*.*.*'
   AND dv.created_at < datetime('now', '${UPSTREAM_BACKFILL_MIN_AGE}')`;
 
 /** The rows to examine, in key order, after the cursor. */
@@ -92,7 +107,8 @@ FROM dataset_versions
 WHERE dataset_id GLOB 'on[0-9][0-9][0-9][0-9][0-9][0-9]'
 GROUP BY 1`;
 
-export const CURSOR_RE = /^(on\d{6})@(\d+\.\d+\.\d+)$/;
+/** `<dataset_id>@<version>`, the version in the row's own spelling, which the keyset compares. */
+export const CURSOR_RE = /^(on\d{6})@(v?\d+\.\d+\.\d+)$/;
 
 export interface UpstreamBackfillOptions {
   execute?: boolean;
@@ -151,24 +167,26 @@ interface Candidate {
   github_repo: string;
 }
 
-type Examined =
+/** What the read of one tag came to, for every row that names it. */
+type Reading =
   | {
       kind: "record";
-      candidate: Candidate;
       tag: string | null;
       basis: "doi" | "unknown";
       reason: string;
       unparseable: boolean;
       absent: boolean;
     }
-  | { kind: "error"; candidate: Candidate; error: string }
+  | { kind: "error"; error: string }
   /** The tag read was absent and the control read did not show the credential sees the repo. */
   | {
       kind: "unconfirmed";
-      candidate: Candidate;
       error: string;
       cause: "transient" | "needs_admin";
     };
+
+/** One candidate row and what the read of its tag came to. */
+type Examined = Reading & { candidate: Candidate };
 
 /** Run `work` over `items`, at most `width` at a time, keeping the order of the results. */
 export async function mapBounded<T, R>(
@@ -278,18 +296,18 @@ export async function runUpstreamBackfill(
       return read;
     };
 
-    const examined = await mapBounded(candidates, CONCURRENCY, async (c): Promise<Examined> => {
+    // The description at the tag `v<bare>` of the candidate's repository.
+    const readTag = async (c: Candidate, bare: string): Promise<Reading> => {
       const sourceId = openNeuroSourceId(c.dataset_id);
-      if (!sourceId) return { kind: "error", candidate: c, error: "not an on###### dataset id" };
+      if (!sourceId) return { kind: "error", error: "not an on###### dataset id" };
       const repo = c.github_repo.split("/")[1] || c.dataset_id;
-      const fetched = await fetchDescriptionAtTag(env, repo, c.version, pat);
-      if (fetched.kind === "error") return { kind: "error", candidate: c, error: fetched.reason };
+      const fetched = await fetchDescriptionAtTag(env, repo, bare, pat);
+      if (fetched.kind === "error") return { kind: "error", error: fetched.reason };
       if (fetched.kind === "absent") {
         const control = await controlOf(repo);
         if (control.kind !== "content") {
           return {
             kind: "unconfirmed",
-            candidate: c,
             cause: control.kind === "absent" ? "needs_admin" : "transient",
             error:
               control.kind === "absent"
@@ -299,7 +317,6 @@ export async function runUpstreamBackfill(
         }
         return {
           kind: "record",
-          candidate: c,
           tag: null,
           basis: "unknown",
           reason:
@@ -311,7 +328,6 @@ export async function runUpstreamBackfill(
       const { columns, unparseable } = snapshotFromDescriptionText(sourceId, fetched.body);
       return {
         kind: "record",
-        candidate: c,
         tag: columns.source_version,
         basis: columns.source_version_basis,
         reason: unparseable
@@ -320,6 +336,23 @@ export async function runUpstreamBackfill(
         unparseable,
         absent: false,
       };
+    };
+
+    // One read per tag: the rows of one version in its two spellings (`1.0.0`, `v1.0.0`) name the
+    // same tag, so they are read together and each is recorded from that one read.
+    const reads = new Map<string, Promise<Reading>>();
+    const examined = await mapBounded(candidates, CONCURRENCY, async (c): Promise<Examined> => {
+      const bare = bareNemarVersion(c.version);
+      // The candidate query and `bareNemarVersion` read one shape; a row they disagree on is
+      // reported, never read.
+      if (bare === null) return { kind: "error", candidate: c, error: "not a NEMAR version" };
+      const key = `${c.dataset_id}@${bare}`;
+      let read = reads.get(key);
+      if (!read) {
+        read = readTag(c, bare);
+        reads.set(key, read);
+      }
+      return { ...(await read), candidate: c };
     });
 
     const records = examined.filter((e): e is Extract<Examined, { kind: "record" }> => {

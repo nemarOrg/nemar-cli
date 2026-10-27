@@ -9,6 +9,9 @@
  *  - nothing is overwritten, even when another writer fills a row between the read and the write;
  *  - paging is a keyset, so a row that always errors does not starve the rows behind it;
  *  - a young row, a withdrawn dataset and a non-`on` dataset are never examined;
+ *  - a version stored as `N.N.N` or `vN.N.N` is a candidate (one lowercase `v`, as the staleness
+ *    report reads it), read once at its tag in either spelling, and its cursor is taken back; any
+ *    other stored version is never one;
  *  - a batch where everything is absent is a suspect credential and writes nothing;
  *  - a dry run writes nothing.
  */
@@ -229,9 +232,20 @@ describe("upstream-backfill: who may call it", () => {
     }
   });
 
-  test("a malformed `after` is 400", async () => {
-    for (const bad of ["on000001", "nm000001@1.0.0", "on000001@1.0", "garbage"]) {
+  test("a malformed `after` is 400, and a version in either spelling is taken", async () => {
+    for (const bad of [
+      "on000001",
+      "nm000001@1.0.0",
+      "on000001@1.0",
+      "garbage",
+      "on000001@vv1.0.0",
+      "on000001@V1.0.0",
+      "on000001@v1.0",
+    ]) {
       expect((await call(`?after=${bad}`)).status).toBe(400);
+    }
+    for (const ok of ["on000001@1.0.0", "on000001@v1.0.0"]) {
+      expect((await call(`?after=${ok}`)).status).toBe(200);
     }
   });
 });
@@ -659,25 +673,77 @@ describe("upstream-backfill: paging", () => {
     }
   });
 
-  test("a v-prefixed or non-semver stored version is never a candidate and never wedges the cursor", async () => {
-    seed("on000001", ["v1.0.0", "1.0", "1.0.0.1", "latest", "1.0.0-rc1", "1.x.0", "1.0.1"]);
-    raw.serve("on000001", "1.0.1", describing("on000001", "1.0.1"));
+  /** Follow `next_cursor` to the end, every call executed, the route taking each cursor back. */
+  async function pass(limit: number): Promise<string[]> {
+    const cursors: string[] = [];
     let cursor: string | null = null;
     let calls = 0;
     do {
-      const res: Response = await call(`?execute=1&limit=1${cursor ? `&after=${cursor}` : ""}`);
+      const res: Response = await call(
+        `?execute=1&limit=${limit}${cursor ? `&after=${cursor}` : ""}`,
+      );
       expect(res.status).toBe(200);
       const body: Body = await json(res);
       cursor = body.next_cursor;
+      if (cursor) cursors.push(cursor);
       calls++;
-    } while (cursor && calls < 10);
+    } while (cursor && calls < 20);
     expect(cursor).toBeNull();
+    return cursors;
+  }
+
+  test("a non-semver stored version is never a candidate and never wedges the cursor", async () => {
+    const odd = ["vv1.0.0", "V1.0.0", "v1.0", "1.0", "1.0.0.1", "latest", "1.0.0-rc1", "1.x.0"];
+    seed("on000001", [...odd, "1.0.1"]);
+    raw.serve("on000001", "1.0.1", describing("on000001", "1.0.1"));
+    await pass(1);
     expect(snapshotOf("on000001", "1.0.1")?.source_version_basis).toBe("doi");
-    for (const v of ["v1.0.0", "1.0", "1.0.0.1", "latest", "1.0.0-rc1", "1.x.0"]) {
-      expect(snapshotOf("on000001", v)).toEqual(NOT_EXAMINED);
-    }
+    for (const v of odd) expect(snapshotOf("on000001", v)).toEqual(NOT_EXAMINED);
     expect(raw.log.map((r) => r.path)).toEqual([
       "/nemarDatasets/on000001/v1.0.1/dataset_description.json",
+    ]);
+  });
+
+  test("a version stored as vN.N.N is a candidate: read at its tag, recorded on its own row", async () => {
+    // D1 holds both spellings (shared/contract/version.ts); the staleness report reads both, so
+    // a row it calls never examined must be one this pass examines.
+    seed("on000001", ["v1.0.0", "v2.0.0"]);
+    seed("on000002", ["1.0.0"]);
+    raw.serve("on000001", "1.0.0", describing("on000001", "1.0.0"));
+    raw.serve("on000001", "2.0.0", describing("on000001", "2.0.2"));
+    raw.serve("on000002", "1.0.0", describing("on000002", "1.0.0"));
+    // One row a call: the cursor after a v-spelled row carries its `v`, and the route takes it.
+    expect(await pass(1)).toEqual(["on000001@v1.0.0", "on000001@v2.0.0"]);
+    expect(snapshotOf("on000001", "v1.0.0")).toEqual({
+      source_version: "1.0.0",
+      source_version_basis: "doi",
+    });
+    expect(snapshotOf("on000001", "v2.0.0")).toEqual({
+      source_version: "2.0.2",
+      source_version_basis: "doi",
+    });
+    expect(snapshotOf("on000002", "1.0.0")?.source_version_basis).toBe("doi");
+    // The ref is the canonical tag, never `vv1.0.0`.
+    expect(raw.log.map((r) => r.path)).toEqual([
+      "/nemarDatasets/on000001/v1.0.0/dataset_description.json",
+      "/nemarDatasets/on000001/v2.0.0/dataset_description.json",
+      "/nemarDatasets/on000002/v1.0.0/dataset_description.json",
+    ]);
+  });
+
+  test("a version stored in both spellings is read once, and each row is recorded from it", async () => {
+    seed("on000001", ["1.0.0", "v1.0.0"]);
+    raw.serve("on000001", "1.0.0", describing("on000001", "2.0.2"));
+    const body = await json(await call("?execute=1"));
+    expect(body).toMatchObject({ scanned: 2, recorded: { doi: 2, unknown: 0 }, next_cursor: null });
+    for (const v of ["1.0.0", "v1.0.0"]) {
+      expect(snapshotOf("on000001", v)).toEqual({
+        source_version: "2.0.2",
+        source_version_basis: "doi",
+      });
+    }
+    expect(raw.log.map((r) => r.path)).toEqual([
+      "/nemarDatasets/on000001/v1.0.0/dataset_description.json",
     ]);
   });
 
