@@ -1,13 +1,14 @@
 /**
- * The first step of executing a re-pull (ADR 0111, decision 2): the reviewed plan file is read,
- * proved to be the plan that was reviewed, and made again from live sources.
+ * The first step of executing a re-pull (ADR 0111, decision 2): the reviewed plan file is read and
+ * proved to be the plan that was reviewed, and an administrator's run makes it again from live
+ * sources.
  *
  * What the file is trusted for: its body, and only once the body's digest is recomputed and equals
  * the one the file states (`plan-tampered` otherwise), so execution runs the reviewed plan and no
  * other. What it is never trusted for: its preflight and its `executable`. Both sit outside the
- * digest (they depend on the token the operator holds, not on the dataset), so the planner runs
- * again with the plan's own options and the LIVE answers decide; the file's two fields are not
- * read at all.
+ * digest (they depend on the token the operator holds, not on the dataset), and neither is read.
+ * An administrator's run plans again with the plan's own options, and the LIVE answers decide. A
+ * dispatched run decides nothing live; its plan step's handoff stands for them (`automatic.ts`).
  *
  * The live plan must be the reviewed one. When NEMAR's `main` moved since the plan, the rule of
  * decision 2 applies, read narrowly: the bodies may differ only in `main`'s commit and tree, and
@@ -329,14 +330,15 @@ export async function readExecutablePlan(path: string, live: LiveSources): Promi
       outcome.planned ? [] : preflightLines(outcome.preflight),
     );
   }
+  const livePlan = outcome.file;
   try {
     // 4. The live plan is the reviewed one, or differs by a `.nemar/**`-only move of `main`.
-    const verdict = comparePlans(body, outcome.file.body);
+    const verdict = comparePlans(body, livePlan.body);
     let rebasedOnto: string | null = null;
     if (verdict === "different") throw stale();
     if (verdict === "nemar-only-moved") {
       const fileMain = str(nemarOf(body).main_commit);
-      const liveMain = str(nemarOf(outcome.file.body).main_commit);
+      const liveMain = str(nemarOf(livePlan.body).main_commit);
       if (!fileMain || !liveMain) throw stale();
       const changed = await mainMoves(join(workdir, "nemar.git"), datasetId, fileMain, liveMain, {
         env: live.env,
@@ -347,26 +349,24 @@ export async function readExecutablePlan(path: string, live: LiveSources): Promi
     }
 
     // 5. Executable now, by the live answers; the file's preflight and `executable` are not read.
-    const tolerated = outcome.file.executable
-      ? null
-      : ownReleaseOnly(outcome.file, outcome.release, live);
-    if (!outcome.file.executable && tolerated?.ok !== true) {
-      const refusals = (outcome.file.body.refusals as Array<{ code?: unknown }> | undefined) ?? [];
-      const unpinned = (objectOf(outcome.file.body.copy).unpinned as unknown[] | undefined) ?? [];
+    const tolerated = livePlan.executable ? null : ownReleaseOnly(livePlan, outcome.release, live);
+    if (!livePlan.executable && tolerated?.ok !== true) {
+      const refusals = (livePlan.body.refusals as Array<{ code?: unknown }> | undefined) ?? [];
+      const unpinned = (objectOf(livePlan.body.copy).unpinned as unknown[] | undefined) ?? [];
       throw new ExecuteRefused(
         "not-executable",
         `The plan is not executable now: ${[
-          ...outcome.file.preflight.filter((c) => c.status !== "ok").map((c) => c.code ?? c.name),
+          ...livePlan.preflight.filter((c) => c.status !== "ok").map((c) => c.code ?? c.name),
           ...refusals.map((r) => String(r.code)),
           ...(unpinned.length > 0 ? [`${unpinned.length} unpinned key(s)`] : []),
         ].join(", ")}.`,
         [
-          ...preflightLines(outcome.file.preflight),
+          ...preflightLines(livePlan.preflight),
           ...(tolerated && !tolerated.ok ? [`Not superseded: ${tolerated.why}.`] : []),
         ],
       );
     }
-    return { file, body, live: outcome.file, rebasedOnto, workdir };
+    return { file, body, live: livePlan, rebasedOnto, workdir };
   } catch (err) {
     discard();
     throw err;
