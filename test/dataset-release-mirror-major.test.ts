@@ -11,8 +11,8 @@
  * apiUrl): the row's `source` and the current version the CLI reads are the Worker's own answers,
  * not a copy of them. GitHub, which the versions route reads the description from, is the
  * `Bun.serve()` stand-in. `git` and `gh` are on PATH as shims that record every call: `gh` answers
- * its version probe only, and `git` refuses a clone (so nothing can reach a real repository) and
- * runs every other call. A refusal shows as no clone, branch, commit or push in the record.
+ * its version probe only, and `git` refuses every call that reaches a remote (clone, fetch, pull,
+ * push, ls-remote) and runs the rest. A refusal shows as no clone, branch, commit or push in the record.
  *
  * CI TIER: unit-pure. Spawns the CLI against loopback servers only; no network.
  */
