@@ -366,6 +366,14 @@ describe("each fact, flipped alone at its source, holds with its own word", () =
       "pr-unreadable",
     ],
     [
+      // An absent draft is not read as "not a draft".
+      "the pull request's answer names no draft",
+      () => {
+        gh.pulls[`${DS}#7`] = appPull({ omit: ["draft"] });
+      },
+      "pr-unreadable",
+    ],
+    [
       "the pull request was closed",
       () => {
         gh.pulls[`${DS}#7`] = appPull({ state: "closed" });
