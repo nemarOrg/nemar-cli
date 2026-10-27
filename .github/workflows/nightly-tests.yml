@@ -64,6 +64,15 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y git-annex
 
+      # test/import-annex-uuid-preflight.test.ts and test/import-upstream-moved-guard.test.ts run git
+      # in German, to show an outcome is read from a status and not from git's message. Without the
+      # de_DE.UTF-8 locale git speaks English and those cases assert nothing, so with CI set they
+      # fail instead (test/helpers/in-german.ts). The language pack generates the locale and carries
+      # git's German catalog; the mirror was updated by the step above.
+      - name: Install the German locale
+        timeout-minutes: 10
+        run: sudo apt-get install -y language-pack-de-base
+
       # Every suite runs here, so every tool test.yml's jobs install and name: a suite that needs
       # one fails instead of skipping when CI is set (test/scrub/helpers/require-tools.ts), and
       # the aws CLI comes with the runner image, so the last step names every tool by name.
@@ -82,6 +91,7 @@ jobs:
           git annex version --raw && echo
           uv --version
           aws --version
+          locale -a | grep -ix 'de_DE.utf8'
 
       - name: Install dependencies
         run: bun install
