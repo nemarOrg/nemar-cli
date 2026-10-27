@@ -5,12 +5,12 @@
  * Such a case asserts nothing unless git really speaks German: without the de_DE.UTF-8 locale, or
  * without git's German catalog, git falls back to English and the case passes on English. So the
  * locale is checked first, by asking git something whose answer differs from the C locale's. Where
- * git does not speak German, the case FAILS with `CI` set (CI installs the language pack, which
- * carries both), and elsewhere runs in English after a warning, as a missing tool skips
- * (test/helpers/git-annex-gate.ts reads `CI` by the same rule).
+ * git does not speak German, the case FAILS under `NEMAR_REQUIRE_SCRUB_TOOLS=1`, which the CI jobs
+ * that install the language pack (it carries both) set, and elsewhere runs in English after a
+ * warning, as a missing tool skips (test/scrub/helpers/require-tools.ts says why it is not `CI`).
  */
 
-import { ciIsSet } from "./git-annex-gate";
+import { REQUIRE_TOOLS } from "../scrub/helpers/require-tools";
 
 const GERMAN = { LC_ALL: "de_DE.UTF-8", LANG: "de_DE.UTF-8", LANGUAGE: "de" } as const;
 const KEYS = ["LC_ALL", "LANG", "LANGUAGE"] as const;
@@ -40,8 +40,8 @@ export async function inGerman<T>(fn: () => Promise<T>): Promise<T> {
   if (!gitSpeaksGerman()) {
     const why =
       "git does not speak German here (no de_DE.UTF-8 locale, or no German catalog for git), so a case run in German would assert nothing";
-    if (ciIsSet(process.env.CI)) {
-      throw new Error(`${why}; CI must install language-pack-de-base`);
+    if (REQUIRE_TOOLS) {
+      throw new Error(`NEMAR_REQUIRE_SCRUB_TOOLS=1 and ${why}; install language-pack-de-base`);
     }
     console.warn(`NOT IN GERMAN: ${why}. It runs in English.`);
   }
