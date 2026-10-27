@@ -21,10 +21,11 @@ import { runCommand } from "../git-annex/run-command.js";
 import { ISOLATED_GIT_ENV } from "./execute/workdir.js";
 
 // The two lines: one formatter, `repullTrailerLines` in `shared/repull-squash.ts`, which builds the
-// squash message the administrator's gate and the Worker's merge both send, the check below, and
-// the N.0.1 patch commit (`patchMessage`). Three sites still write the same lines by hand: the
-// re-pull commit's own message (`execute/synthesize.ts`) and the N.0.0 and N.0.1 pull request
-// bodies (`execute/pull-request.ts`, `patch-turn.ts`).
+// squash message the administrator's gate and the Worker's merge both send, the check below, the
+// N.0.1 patch commit (`patchMessage`), the re-pull commit's own message (`execute/synthesize.ts`)
+// and the N.0.0 and N.0.1 pull request bodies (`execute/pull-request.ts`, `patch-turn.ts`). No
+// writer formats them itself, and `test/repull-trailers.unit.test.ts` pins each writer's lines to
+// the formatter's output (N.0.1's third line is `repullPatchTrailerLine`, in the same module).
 export { repullTrailerLines };
 
 /**

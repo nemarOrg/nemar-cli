@@ -21,6 +21,7 @@
  */
 
 import { AwsCliError, failureWord } from "../../../scripts/scrub/s3/s3-lib.js";
+import { repullPatchTrailerLine, repullTrailerLines } from "../../../shared/repull-squash.js";
 import { type RepullRow, patchVersionOf } from "../../../shared/repull-state.js";
 import { getApiUrl } from "../api/client.js";
 import { transitionRepull } from "../api/repull.js";
@@ -104,9 +105,8 @@ export function patchBody(row: RepullRow, s: PatchSelection, version: string): s
     "The squash commit message must end with the re-pull's trailers, as its last paragraph; the merge path writes that message itself and refuses one that does not:",
     "",
     "```",
-    `Upstream-Snapshot: ${row.upstream_ds}@${row.to_tag}`,
-    `Repull-Plan: ${row.plan_digest}`,
-    `Repull-Patch: corrections=${s.corrections}`,
+    ...repullTrailerLines(row),
+    repullPatchTrailerLine(s.corrections),
     "```",
     "",
     "Do not merge this from GitHub's page.",
