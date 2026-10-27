@@ -568,7 +568,8 @@ So the recorded tag must appear in upstream's snapshot list, and upstream's late
 A latest tag that the Phase 2 parser could never record (`57fecb0c...` is a legacy snapshot id; `v2.0.2.` is a negative example of the parser's tag pattern) is an anomaly, because a re-pull to it could never be proved afterwards by a recorded `source_version`.
 Known limit: a tag re-created upstream under the SAME tag (OpenNeuro's `ds003645` 2.1.0 carries a creation time later than its first sighting) cannot be detected from the tag, so the mirror reads `current` or `stale` by tag alone.
 The dry-run plan of the re-pull phase compares trees and sees it.
-*Annotated 2026-10-27: it does not. A plan to a tag equal to the mirrored tag is refused as `nothing-to-pull` before any tree is compared (`src/lib/repull/preflight.ts`), so nothing detects a tag re-created under the same name.*
+*Annotated 2026-10-27: not for the mirrored tag. A plan to a tag equal to the mirrored tag is refused as `nothing-to-pull` before any tree of upstream is cloned or compared (`src/lib/repull/preflight.ts:157-158`, `src/lib/repull/plan.ts:278-294`), so nothing detects that a mirror's recorded tag was re-created.
+A re-created target tag is caught once a plan has read it: before the copy, the registration and the pull request, execution refuses with `upstream-tag-moved` when the tag names another commit than the plan read (`src/lib/repull/execute/advance.ts:146-176`).*
 
 ### Mirror lag is proved, not inferred
 
