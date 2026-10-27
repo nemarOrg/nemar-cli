@@ -8,7 +8,7 @@
  * DOI and its upstream tag, as `/webhooks/manifest-ready` writes it); everything the re-pull does
  * itself is real: the Worker's verified release route reads the tag and the comparison on the
  * GitHub stand-in, and the lock is the real s3-lock route, signing its requests to the S3
- * stand-in through the test endpoint override. The API is reached through TEST_API_URL in the
+ * stand-in through the test endpoint override. The API is on a loopback port named in the
  * child's environment. No mocks.
  *
  * The properties, each with a test that fails when its line is changed:
@@ -28,7 +28,7 @@
  * object as the stand-in does (in particular the s3-lock route's reading of a 403 as "already
  * locked").
  *
- * CI TIER: integration, like the other CLI suites that start the binary against a local server.
+ * CI TIER: unit-pure. Hermetic: every server the suite starts or reaches listens on loopback.
  */
 
 import {

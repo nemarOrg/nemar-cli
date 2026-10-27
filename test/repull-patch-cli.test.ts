@@ -4,8 +4,8 @@
  * default fixture: NEMAR edited a sidecar and added a description key (two corrections) and edited
  * `participants.tsv`, which upstream changed too (a conflict). N.0.0 is merged by the real gate;
  * the test plays the dataset workflow (the tag) and the DOI's callback (the version row); every
- * step of the re-pull itself is the real CLI and the real Worker routes over bun:sqlite, reached
- * through TEST_API_URL in the child's environment. GitHub and S3 are stand-ins. No mocks.
+ * step of the re-pull itself is the real CLI and the real Worker routes over bun:sqlite, on a
+ * loopback port named in the child's environment. GitHub and S3 are stand-ins. No mocks.
  *
  * The properties, each with a test:
  *  - after the release and the lock, a plan with conflicts waits for an administrator's decision,
@@ -38,7 +38,7 @@
  * a second release pull request on the same repository as the stand-in does, and that the dataset
  * workflows tag v2.0.1 and mint its DOI as they do any other patch release.
  *
- * CI TIER: integration, like the other CLI suites that start the binary against a local server.
+ * CI TIER: unit-pure. Hermetic: every server the suite starts or reaches listens on loopback.
  */
 
 import {

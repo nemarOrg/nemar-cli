@@ -3,7 +3,7 @@
  * re-pull pull request over a failed BIDS validation (ADR 0111, the Phase 7g amendment; epic
  * #1046 phase 7, #1913), driven through the real entry point against `repull-pr-world.ts` (a
  * re-pull executed to `pr_open` by the real `execute`, taken to `gates_clear` by the real `resume`;
- * the real API over bun:sqlite, reached through TEST_API_URL; stand-ins for GitHub and S3 only,
+ * the real API over bun:sqlite on a loopback port; stand-ins for GitHub and S3 only,
  * GitHub's squash merge committing onto the bare origin's `main`). No mocks.
  *
  * The properties, each with a test of its own:
@@ -22,7 +22,7 @@
  * for an unprotected mirror whose BIDS validation failed, as `nm000413#3` read for a held review,
  * and that its merge endpoint merges an `unstable` pull request with `sha` as the stand-in does.
  *
- * CI TIER: integration, like the other CLI suites that start the binary against a local server.
+ * CI TIER: unit-pure. Hermetic: every server the suite starts or reaches listens on loopback.
  */
 
 import {

@@ -2,8 +2,8 @@
  * `nemar admin repull resume <id>` and `status <id>` past the open pull request (ADR 0111, decisions
  * 2, 3, 6 and 7; epic #1046 phase 6, #1912), driven through the real entry point
  * (`bun run src/index.ts admin repull ...`) as a subprocess against `repull-pr-world.ts`: a re-pull
- * executed to `pr_open` by the real `execute`, the real API over bun:sqlite reached through
- * TEST_API_URL in the child's environment, the real `git`, and stand-ins for GitHub and S3 only.
+ * executed to `pr_open` by the real `execute`, the real API over bun:sqlite on a loopback port
+ * named in the child's environment, the real `git`, and stand-ins for GitHub and S3 only.
  * No mocks.
  *
  * The properties, each with a test that fails when its line is changed:
@@ -24,7 +24,7 @@
  * re-pull pull request, how soon its `head.sha` follows a push, and that a forced push with a
  * lease is accepted on a release branch of a dataset repository.
  *
- * CI TIER: integration, like the other CLI suites that start the binary against a local server.
+ * CI TIER: unit-pure. Hermetic: every server the suite starts or reaches listens on loopback.
  */
 
 import {
