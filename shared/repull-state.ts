@@ -626,8 +626,9 @@ export type DispatchPhase = (typeof DISPATCH_PHASES)[number];
  * The fixed words a dispatch's `code` may hold. Closed on purpose: a code is counted in the weekly
  * report, filed on a public-facing repository, so it can never carry a path, a key or a message,
  * and the callback refuses any other word. A run reports a refusal whose word is not here as the
- * class of the step that met it ({@link STEP_CLASSES}). Once the record exists, the exact word is
- * kept in its `last_error`; a refusal before the record exists keeps only the listed word.
+ * class of the step that met it ({@link STEP_CLASSES}). When the preparation, the copy, the
+ * registration or the pull request fails on its own, that step also writes the exact word to the
+ * record's `last_error` (`[<step>:<word>]`); every other refusal keeps only its listed word.
  */
 export const DISPATCH_CODES = [
   // The Worker's own, at the automatic create and when it sends or ends a dispatch. A resume's send
