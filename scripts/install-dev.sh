@@ -14,13 +14,16 @@ echo "Installing new version..."
 npm install -g .
 
 echo "Manually updating global file (npm install doesn't update it)..."
-GLOBAL_PATH="$HOME/.bun/install/global/node_modules/nemar-cli/dist/index.js"
+GLOBAL_DIST="$HOME/.bun/install/global/node_modules/nemar-cli/dist"
+GLOBAL_PATH="$GLOBAL_DIST/index.js"
+GLOBAL_REMOTE_PATH="$GLOBAL_DIST/git-annex-remote-nemar.js"
 cp -f dist/index.js "$GLOBAL_PATH"
+cp -f dist/git-annex-remote-nemar.js "$GLOBAL_REMOTE_PATH"
 
 echo "Verifying installation..."
-if [ -f "$GLOBAL_PATH" ]; then
+if [ -f "$GLOBAL_PATH" ] && [ -f "$GLOBAL_REMOTE_PATH" ]; then
   echo "✓ Installation successful"
-  ls -lh "$GLOBAL_PATH"
+  ls -lh "$GLOBAL_PATH" "$GLOBAL_REMOTE_PATH"
 else
   echo "✗ Installation failed - file not found"
   exit 1

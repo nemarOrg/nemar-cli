@@ -211,7 +211,12 @@ nothing, narrowing ADR 0093's merge for that class only),
 visibility predicate decides every ticket read and write (restricted queues are owner-only and a
 conduct ticket can exclude a named account), ticket notifications are production-only with no
 first-admin fallback, and a reply whose outcome is unknown is never recorded as sent and never
-re-sent under its key).
+re-sent under its key),
+0114 (PROPOSED, not yet accepted; an authenticated data host is read through the CLI's own special
+remote and credential helper: the API key goes only to origins on the CLI's own list and nothing a repository holds can
+add one, `git-annex-remote-nemar` refuses a configured host that is not listed and never carries
+the key across a redirect to another origin, and the generic web remote with a header command is
+refused because it would send the key to any URL a writer registered).
 
 **Account copy and the profile-gap matrix are declared once, in
 [`shared/contract/account-copy.ts`](shared/contract/account-copy.ts) and
