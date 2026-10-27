@@ -2130,7 +2130,7 @@ The pages were written from the merged epic head `1abf9286` and checked against 
   A consumer shows `null` without a mirror marker and never as a mirror.
   Only an id of the form `on` plus six digits is ever `true` or `null`, so an `xx` mirror fixture reads `false`; the CLI's refusal of a manual major is wider, because it also covers a row recorded as an OpenNeuro import.
 - The public wire carries the flag and nothing of the tag.
-  A landing entry has exactly `version`, `doi`, `created_at`, `mirror`, `manifest_url` and `browse_url`, in `GET /<id>` as JSON and in `landing.data.versions` of the page bundle (`backend/test/landing-mirror-flag.test.ts`, `backend/test/page-bundle-mirror-flag.test.ts`).
+  A landing entry has exactly `version`, `doi`, `created_at`, `mirror`, `manifest_url` and `browse_url`, in `GET /<id>` as JavaScript Object Notation (JSON) and in `landing.data.versions` of the page bundle (`backend/test/landing-mirror-flag.test.ts`, `backend/test/page-bundle-mirror-flag.test.ts`).
   `metadata.json` is unchanged: its `extensions.nemar.versions` entries keep `version`, `doi`, `created_at` and `manifest_url` (the mapping in `backend/src/services/data-router.ts`, pinned by `test/data-route.unit.test.ts`).
 - `GET /datasets/:id/versions` also carries `source_version` and `source_version_basis`.
   It is open to the dataset's owner, its collaborators and administrators (`backend/src/routes/datasets/manifests.ts`), which corrects the Phase 4b amendment's "owner-or-admin route".
@@ -2145,7 +2145,7 @@ The pages were written from the merged epic head `1abf9286` and checked against 
 - The documentation follows the release.
   The docs deploy on merge, so a page merged first describes commands and a field the deployed Application Programming Interface (API) lacks.
   `nemarOrg/docs#90` and `nemarOrg/docs#92` were merged on 2026-10-27, before the release.
-  `test/docs-links.unit.test.ts` fails a link in this repository to a page that is not on `main` of `nemarOrg/docs`, when it reads a fresh docs checkout, which CI supplies (`NEMAR_DOCS_CHECKOUT` in `.github/workflows/test.yml`).
+  `test/docs-links.unit.test.ts` fails a link in this repository to a page that is not on `main` of `nemarOrg/docs`, when it reads a fresh docs checkout, which continuous integration (CI) supplies (`NEMAR_DOCS_CHECKOUT` in `.github/workflows/test.yml`).
 - The website's fallback is deleted only after `nemar admin upstream-backfill --execute` has run in production and `mirror` reads `true` for the mirrors the backfill could establish.
   Until then an `on` N.0.0 whose snapshot is not recorded reads `null` and has no chip, so deleting the fallback early takes the chip from every mirror.
   The fallback covers only a payload with no key; once production sends the key, a `null` has no chip with or without it, so the website is promoted after the backfill and not between the release and the backfill (`nemarOrg/website#489`).
@@ -2199,7 +2199,7 @@ The "Checked only against stand-ins" section of each earlier amendment holds the
   - Whether the central `run-identifier-screen` workflow posts a re-pull screen's report to its callback (Phase 6e).
   - On a staging rehearsal, that the dev bucket answers the plan's anonymous read of its `annex-uuid` marker, and that a rehearsal plan establishes the lineage the fixture's never-examined version rows need at create (Phase 6g).
 - The first unattended run:
-  - That GitHub answers the dispatch with 204 and runs the workflow, that the runner masks the token and the AWS session as the workflow asks, that the App token GitHub mints for one repository pushes the release branch and opens the pull request, and how GitHub refuses one past its hour (Phases 7c and 7d).
+  - That GitHub answers the dispatch with 204 and runs the workflow, that the runner masks the token and the Amazon Web Services (AWS) session as the workflow asks, that the App token GitHub mints for one repository pushes the release branch and opens the pull request, and how GitHub refuses one past its hour (Phases 7c and 7d).
   - How long a real copy takes against the estimate, that `GetSessionToken` takes the import's pair and its session copies as the import's own keys do, that Ubuntu's git-annex reads what the planner reads, and that the plan's anonymous clones of `OpenNeuroDatasets` hold up from a runner, since the App token is never sent there (Phase 7d).
   - Whether the installation token is accepted for the raw files of `OpenNeuroDatasets`; if it is not, every probe reads `stale_unverified` (Phase 7c).
   - That a run reaches the callback at the API host and that the token survives the dispatch payload and the run's environment unchanged (Phase 7b), that a resumed run takes up the record its dispatch names (Phase 7f), and that a 5xx can follow a queued event, which is assumed in the safe direction (Phase 7c).

@@ -23,7 +23,7 @@ It sets no Worker variable or secret: the four re-pull switches and caps are abs
 
 - **Phase 2 (#1908): every version records the upstream snapshot it mirrors.**
   `dataset_versions` gains `source_version` (the OpenNeuro tag) and `source_version_basis` (`doi`, `lineage` or `unknown`; both NULL means never examined).
-  Each version insert of an `on` dataset reads the tagged `dataset_description.json` once through the raw CDN, under a time bound, and records the snapshot; a failed read leaves the row unexamined and never fails the insert.
+  Each version insert of an `on` dataset reads the tagged `dataset_description.json` once through the raw content delivery network (CDN), under a time bound, and records the snapshot; a failed read leaves the row unexamined and never fails the insert.
   One parser, `sourceSnapshotOf`, reads the dataset's own `SourceDatasets` entry; signals that disagree give `unknown`, and a tag is never guessed.
   `nemar admin upstream-backfill` records it for versions published before the columns (a dry run unless `--execute`); it writes `unknown` for a missing file only after a control read proves the 404 is about the tag and not the credential.
 - **Phase 3 (#1909): an import is pinned to an upstream snapshot tag, never the mirror's default HEAD (ADR 0111 decision 10).**
@@ -33,7 +33,7 @@ It sets no Worker variable or secret: the four re-pull switches and caps are abs
   A tag not yet on the GitHub mirror, or a latest tag OpenNeuro cannot name, refuses with `[openneuro-mirror-lag]` before the dataset record is created.
   The classifier calls it `mirror_lag`; recovery quarantines it as `mirror_lag` rather than `not_found_dataset`, sends no mail and files no issue; the retry engine retries it and, once its 14-day window has passed, parks it as `mirror_lag` and files its one admin issue.
   A re-import of a released mirror whose upstream moved refuses with `[openneuro-upstream-moved]` before any reset, Simple Storage Service (S3) setup or push (#993); moving a released mirror is a re-pull's job.
-  The tag `origin/main` records is read from its `SourceDatasets` entries naming the dataset's own `ds` (their `Version`, Digital Object Identifier (DOI) or URL, never NEMAR's top-level `Version`).
+  The tag `origin/main` records is read from its `SourceDatasets` entries naming the dataset's own `ds` (their `Version`, Digital Object Identifier (DOI) or uniform resource locator (URL), never NEMAR's top-level `Version`).
   The refusal names `nemar admin repull plan <id>` and the repair that passes the guard, `nemar admin import-openneuro <ds> --tag <recorded tag>`.
   An unreleased import is moved to the new tag instead, as a fast-forward of `origin/main` (`git reset --soft`), which drops `.github/` until finalize deploys it again; it is refused instead when origin's privacy ledger holds a recorded correction (ADR 0085), or an import scrub that changed git, whose originals origin's history still holds (ADR 0089).
   An unrecorded tag, or the same one, takes the same-version hard reset as before, and an unreadable or missing record is printed as a warning, because the guard cannot fire then.
@@ -67,7 +67,7 @@ It sets no Worker variable or secret: the four re-pull switches and caps are abs
   `GET /admin/repulls/switches` reports what the Worker reads.
   A daily scheduler, which runs in production at 03:00 Coordinated Universal Time (UTC), dispatches the central workflow `run-upstream-repull.yml` for `stale_ready` mirrors within the open cap, at most once per dataset in 30 days and not before the first two re-pulls were run by an administrator; a 30-minute tick holds, gates and resumes the pull requests it opened.
   The unattended run plans once and hands the plan file to `execute` with a digest-checked handoff (the epic cleanup, #1976), opens the pull request as the GitHub App, `nemar-bot[bot]`, and never merges; its public log carries only counts and fixed words.
-  The Worker merges only a machine-clean re-pull pull request the automatic path opened (zero unexplained paths, a `clear` identifier screen, Brain Imaging Data Structure (BIDS) validation and `version-check` green, an ADR 0107 review of that head that passes, the head equal to the screened SHA, GitHub `clean`, the merge cap not exhausted), approves nothing, and a finish run then takes the re-pull to `complete`.
+  The Worker merges only a machine-clean re-pull pull request the automatic path opened (zero unexplained paths, a `clear` identifier screen, Brain Imaging Data Structure (BIDS) validation and `version-check` green, an ADR 0107 review of that head that passes, the head equal to the screened commit, GitHub `clean`, the merge cap not exhausted), approves nothing, and a finish run then takes the re-pull to `complete`.
   An administrator may merge a re-pull they opened over a failed BIDS validation (`nemar admin repull merge --bids-failure-reason`, only while GitHub says `unstable`).
   The ADR 0107 review admits one bot's pull request, the App's automatic re-pull, and only when the Worker starts it.
   The Monday report gains `## Upstream re-pulls`, `GET /admin/repulls/dispatches` lists the dispatches, and `nemar admin repull auto` shows the switches, the scheduler, the open automatic re-pulls (filtered by origin since the epic cleanup, #1976) and the recent dispatches.
@@ -81,7 +81,7 @@ It sets no Worker variable or secret: the four re-pull switches and caps are abs
 
 ### Production behavior changes
 
-- **Every version in the data plane's landing JSON and the page bundle's `landing.data.versions` carries `mirror`:** `true` for an N.0.0 of an `on` dataset whose upstream tag is recorded, `false` for every other dataset and version, `null` for an N.0.0 whose tag is unknown or not yet examined.
+- **Every version in the data plane's landing JavaScript Object Notation (JSON) and the page bundle's `landing.data.versions` carries `mirror`:** `true` for an N.0.0 of an `on` dataset whose upstream tag is recorded, `false` for every other dataset and version, `null` for an N.0.0 whose tag is unknown or not yet examined.
   The tag itself is not on the public wire.
   `GET /datasets/:id/versions` (owner, collaborators, administrators) also carries `source_version` and `source_version_basis`.
 - **`nemar dataset release` and `nemar dataset update --bump major` refuse a major version of a mirror** (an `on` id, or a row recorded as an OpenNeuro import), exit 1 before anything is cloned, and point at `nemar admin repull plan`.
