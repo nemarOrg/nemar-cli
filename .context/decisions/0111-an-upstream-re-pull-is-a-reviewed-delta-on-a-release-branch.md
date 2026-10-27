@@ -137,7 +137,7 @@ Everything in this section is designed and not yet built.
 
 - A version row with `source_version` set (not NULL, so never an unknown tag) and a version of the form `N.0.0` is a mirror.
   The API exposes that as a derived flag, computed at read time and never stored, and the website shows a mirror tag on that version.
-  *Annotated 2026-10-27: built by the Phase 8 amendment: the website shows a chip from the flag (`mirror === true`), not the tag, which the public wire never carries.*
+  *Annotated 2026-10-27: built by the Phase 8 amendment, on the website's `staging` branch only (`nemarOrg/website#489`): the website shows a chip from the flag (`mirror === true`), not the tag, which the public wire never carries.*
 - A manual major bump is refused on `on` datasets: `nemar dataset release --type major`, and `nemar dataset update --bump major`, which reaches the same number.
   NEMAR's own changes to a mirror take minor and patch.
   *Annotated 2026-10-25: built by the Phase 6g amendment in the CLI only (`nemar dataset release`, `nemar dataset update`), for `on` ids and for rows recorded as OpenNeuro imports; the dataset repositories' `version-check` workflow is not changed (ADR 0020), so a major merged outside the CLI is not stopped.*
@@ -2126,21 +2126,21 @@ The pages were written from the merged epic head `1abf9286` and checked against 
   A consumer shows `null` without a mirror marker and never as a mirror.
   Only an id of the form `on` plus six digits is ever `true` or `null`, so an `xx` mirror fixture reads `false`; the CLI's refusal of a manual major is wider, because it also covers a row recorded as an OpenNeuro import.
 - The public wire carries the flag and nothing of the tag.
-  A landing entry has exactly `version`, `doi`, `created_at`, `mirror`, `manifest_url` and `browse_url`, in `GET /<id>` as JSON and in `landing.data.versions` of the page bundle.
-  `metadata.json` is unchanged (`backend/test/landing-mirror-flag.test.ts`, `backend/test/page-bundle-mirror-flag.test.ts`).
+  A landing entry has exactly `version`, `doi`, `created_at`, `mirror`, `manifest_url` and `browse_url`, in `GET /<id>` as JSON and in `landing.data.versions` of the page bundle (`backend/test/landing-mirror-flag.test.ts`, `backend/test/page-bundle-mirror-flag.test.ts`).
+  `metadata.json` is unchanged: its `extensions.nemar.versions` entries keep `version`, `doi`, `created_at` and `manifest_url` (the mapping in `backend/src/services/data-router.ts`, pinned by `test/data-route.unit.test.ts`).
 - `GET /datasets/:id/versions` also carries `source_version` and `source_version_basis`.
   It is open to the dataset's owner, its collaborators and administrators (`backend/src/routes/datasets/manifests.ts`), which corrects the Phase 4b amendment's "owner-or-admin route".
 - A Worker that predates the release omits the key, and a reader takes an absent key as not stated, never as `false`.
 - The CLI's reader of the listing types the field.
   `dataPlaneVersionListingSchema` in `shared/contract/data-plane.ts` takes `mirror` as an optional boolean that may be `null` and still passes every other key through, so a producer that sent any other value fails the CLI's read of a listing instead of having it passed on.
 - No parity file between this repository and the website holds the field.
-  The producer's tests and the website's three payloads (`test/fixtures/landing-mirror-flag-*.json`, recorded from the real data-plane route) cover it, and the epic changes none of the contract files the website's drift tests compare.
+  The producer's tests and the website's three recorded payloads (`test/fixtures/landing-mirror-flag-*.json` in `nemarOrg/website`, recorded from the real data-plane route) cover it, and the epic changes none of the contract files the website's drift tests compare.
 
 ### The order the pieces reach production
 
 - The documentation follows the release.
-  The docs deploy on merge, so a page merged first describes commands and a field the deployed API lacks; compare `https://api.nemar.org/health` with the version of the release that carries the epic before merging a docs change for it.
-  `nemarOrg/docs#90` and `nemarOrg/docs#92` were merged on 2026-10-27, before the release, so those pages run ahead of the deployed API until the release is deployed.
+  The docs deploy on merge, so a page merged first describes commands and a field the deployed API lacks.
+  `nemarOrg/docs#90` and `nemarOrg/docs#92` were merged on 2026-10-27, before the release.
   `test/docs-links.unit.test.ts` fails a link in this repository to a page that is not on `main` of `nemarOrg/docs`, when it reads a fresh docs checkout, which CI supplies (`NEMAR_DOCS_CHECKOUT` in `.github/workflows/test.yml`).
 - The website's fallback is deleted only after `nemar admin upstream-backfill --execute` has run in production and `mirror` reads `true` for the mirrors the backfill could establish.
   Until then an `on` N.0.0 whose snapshot is not recorded reads `null` and has no chip, so deleting the fallback early takes the chip from every mirror.

@@ -89,6 +89,7 @@ It sets no Worker variable or secret: the four re-pull switches and caps are abs
   It runs only on a `repository_dispatch` of the type `run-upstream-repull`, which only the automatic path sends, so merging it turned nothing on.
 - The onboard workflow change (`openneuro_tag`) shipped in 0.10.24 (#1933), with its copy in `nemarDatasets/.github`.
   `nemar admin import-openneuro --tag` in dispatch mode sends `openneuro_tag`, which an older workflow answers with 422; it is inert with an older Worker, and with an older CLI the workflow passes `--tag` only when the installed CLI's help lists it.
+- The documentation pull requests (`nemarOrg/docs#90` and `#92`) merged before this release; the pages they add describe what the release carries.
 - The `mirror` field reads `null` for every `on` N.0.0 whose snapshot is not recorded until `nemar admin upstream-backfill --execute` has run, and the website shows no chip for a `null`; the backfill runs after the deploy and the website is promoted after the backfill.
 - No order is required between the Worker and the npm release for imports: a CLI released before its Worker refuses a mirror lag that the older Worker quarantines as `not_found_dataset` with a mail and an issue, and the new Worker's retry query keys on the marker in `last_error`, which recovery keeps, so it picks those rows up once deployed.
 - The jobs of one workflow run install the CLI independently; mixing versions inside a run is harmless, because only prepare changed.
