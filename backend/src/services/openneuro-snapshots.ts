@@ -21,6 +21,7 @@ import {
 } from "../../../shared/openneuro-snapshots.js";
 import type { UpstreamRead } from "../../../shared/upstream-staleness.js";
 import type { Bindings } from "../types/bindings.js";
+import { isNonProductionEnv } from "./environment.js";
 import { OPENNEURO_GRAPHQL_URL } from "./openneuro-endpoint.js";
 import { errorMessage } from "./repo-metadata.js";
 
@@ -43,17 +44,51 @@ export interface UpstreamSnapshotsResult {
   errors: string[];
 }
 
+/** True for an `http` URL on a loopback host: the only address a test stand-in listens on. */
+function isLoopbackHttpUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return (
+      url.protocol === "http:" &&
+      (url.hostname === "127.0.0.1" || url.hostname === "localhost" || url.hostname === "[::1]")
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The endpoint the snapshot reader posts to. `OPENNEURO_GRAPHQL_URL` exists so a test can point
+ * the reader at a local stand-in; it is not a setting. What the reads say decides which mirrors
+ * the automatic re-pull dispatches, so a stray value (a Worker secret of the same name) must not
+ * be able to send production's reads to a host nobody chose.
+ *
+ * In production, and in an unknown or unset environment, which counts as production like
+ * {@link isNonProductionEnv} (fail-closed), the answer is OpenNeuro's own endpoint, whatever the
+ * binding says. Elsewhere (development, staging, test) the binding is honored. A loopback `http`
+ * address is honored in every environment, as the command-line interface's `githubApiBase` does:
+ * a deployed Worker cannot reach one, and the suites that run the production-only scheduler
+ * against a local stand-in need it. A blank binding is no binding.
+ */
+export function snapshotGraphqlUrl(
+  env: Pick<Bindings, "ENVIRONMENT" | "OPENNEURO_GRAPHQL_URL">,
+): string {
+  const override = env.OPENNEURO_GRAPHQL_URL?.trim();
+  if (!override) return OPENNEURO_GRAPHQL_URL;
+  return isNonProductionEnv(env) || isLoopbackHttpUrl(override) ? override : OPENNEURO_GRAPHQL_URL;
+}
+
 /**
  * The snapshot lists of `ids` (OpenNeuro `ds` ids), in batches. Never throws: a batch that fails
  * makes every one of its ids an `error` read and adds a line to `errors`.
  */
 export async function readUpstreamSnapshots(
-  env: Pick<Bindings, "OPENNEURO_GRAPHQL_URL">,
+  env: Pick<Bindings, "ENVIRONMENT" | "OPENNEURO_GRAPHQL_URL">,
   ids: readonly string[],
   opts: { timeoutMs?: number } = {},
 ): Promise<UpstreamSnapshotsResult> {
   const unique = [...new Set(ids)];
-  const url = env.OPENNEURO_GRAPHQL_URL ?? OPENNEURO_GRAPHQL_URL;
+  const url = snapshotGraphqlUrl(env);
   const timeoutMs = opts.timeoutMs ?? OPENNEURO_SNAPSHOT_TIMEOUT_MS;
   const result: UpstreamSnapshotsResult = { reads: new Map(), requests: 0, errors: [] };
 

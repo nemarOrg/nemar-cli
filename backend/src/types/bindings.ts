@@ -222,7 +222,8 @@ export interface Bindings {
    *  `GITHUB_RAW_ORIGIN` applies; tests point it at a local server. */
   GITHUB_RAW_BASE?: string;
   /** OpenNeuro GraphQL endpoint for the upstream staleness report. Unset in
-   *  production; tests point it at a local server. */
+   *  production; tests point it at a local server. Production ignores any value
+   *  that is not a loopback `http` address (`snapshotGraphqlUrl`). */
   OPENNEURO_GRAPHQL_URL?: string;
   /** Size below which a brokered git file is buffered so the runtime can
    *  declare its length. Unset everywhere but tests, which lower it to reach
