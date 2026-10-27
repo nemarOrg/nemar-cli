@@ -100,7 +100,7 @@ function faultWords(f: BidsOnlyFault, a: BidsOnlyAsk): string {
     case "blocked":
       return "GitHub reports it blocked: a rule requires BIDS validation, and a merge would be a bypass, which a re-pull never uses";
     case "not-unstable":
-      return `GitHub reports it '${sanitizeNote(a.mergeableState, 30) || "unrecognised"}', not unstable`;
+      return `GitHub reports it '${sanitizeNote(a.mergeableState, 30) || "unrecognized"}', not unstable`;
     case "bids":
       return `BIDS validation of ${head} has not completed with failure`;
     case "version-check":
