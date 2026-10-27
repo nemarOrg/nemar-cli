@@ -290,7 +290,7 @@ nemar auth keys                # List, create, or revoke this account's named AP
 nemar dataset validate <path>  # Validate BIDS dataset
 nemar dataset upload <path>    # Upload new dataset
 nemar dataset download <id>    # Download dataset (with data)
-nemar dataset clone <id>       # Clone metadata only
+nemar dataset clone <id>       # Clone metadata only (--host <origin> for an authenticated data host)
 nemar dataset get [files]      # Download annexed data files
 nemar dataset drop [files]     # Free local copies of data
 nemar dataset list             # List all datasets (--mine for own)
@@ -489,6 +489,10 @@ See [the Zenodo testing guide](https://docs.nemar.org/develop/zenodo-testing/) f
 NEMAR_API_KEY                  # API key (alternative to `nemar auth login -k`)
 NEMAR_NO_BROWSER=1             # Never try to open a browser during sign-in (same as --no-open)
 NEMAR_NO_COLOR                 # Disable colored output
+NEMAR_DATA_HOSTS               # Extra https origins of authenticated NEMAR data hosts the CLI may send your API key to (comma-separated; loopback http is accepted for local tests)
+NEMAR_DATA_HOSTS_ONLY=1        # Use only NEMAR_DATA_HOSTS, not the build's default data host
+NEMAR_CREDENTIAL_HELPER        # Program git runs as the credential helper in a data host clone, in place of `nemar` (an absolute path to an executable, or a bare command name with no slash; `auth git-credential` is added)
+NEMAR_DATA_HOST_TIMEOUT_MS     # Whole milliseconds a data host request may go without progress; it can only shorten the default 60000 (for tests)
 NEMAR_APPROVAL_DISPATCH_TOKEN  # Dispatch token of a web approval; set only by the web approval executor, never by a person
 NEMAR_APPROVE_RETRY_DELAY_MS   # Whole milliseconds to wait between retries of an approval; it can only shorten the default wait (for tests), never lengthen it
 ```

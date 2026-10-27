@@ -6,11 +6,12 @@
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "nemar": "dist/index.js"
+    "nemar": "dist/index.js",
+    "git-annex-remote-nemar": "dist/git-annex-remote-nemar.js"
   },
   "scripts": {
     "dev": "bun run src/index.ts",
-    "build": "bun build src/index.ts --outdir dist --target bun --minify && sed '1s|#!/usr/bin/env node|#!/usr/bin/env bun|' dist/index.js > dist/index.js.tmp && mv dist/index.js.tmp dist/index.js",
+    "build": "bun build src/index.ts src/git-annex-remote-nemar.ts --outdir dist --target bun --minify && sed '1s|#!/usr/bin/env node|#!/usr/bin/env bun|' dist/index.js > dist/index.js.tmp && mv dist/index.js.tmp dist/index.js",
     "test": "bun test",
     "lint": "biome check src/",
     "lint:scrub": "biome check scripts/scrub shared/identifier-scrub.ts test/scrub",

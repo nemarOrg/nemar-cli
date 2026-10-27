@@ -50,6 +50,7 @@ import {
   wasUsageExit,
   writeDebugLogSync,
 } from "./lib/debug-log.js";
+import { isGitCredentialInvocation } from "./lib/git-credential.js";
 import { printMaintenanceBanner } from "./lib/maintenance-banner.js";
 import { fetchAndDisplayNotices } from "./lib/notices.js";
 import { initUpdateCheck, printUpdateBanner } from "./lib/update-check.js";
@@ -155,6 +156,10 @@ process.on("exit", (code) => {
     );
   }
 });
+
+// `nemar auth git-credential` is a git credential helper: git reads its stdout, so it runs
+// with no notices, no update banner and no dev-build banner (ADR 0114).
+const isCredentialHelper = isGitCredentialInvocation(rawArgs);
 
 const program = new Command();
 
@@ -300,11 +305,12 @@ markCommanderExitsRecursively(program);
 
 // Display system notices before command execution
 program.hook("preAction", async () => {
+  if (isCredentialHelper) return;
   await fetchAndDisplayNotices();
 });
 
 // Warn if running a dev build (injected URL via CI)
-if (IS_DEV_BUILD) {
+if (IS_DEV_BUILD && !isCredentialHelper) {
   console.warn(
     chalk.yellow.bold("[DEV BUILD]") +
       chalk.yellow(" Connected to development backend. Not for production use."),
@@ -349,7 +355,7 @@ async function main() {
     await primeEnvironmentSnapshot();
   }
 
-  const pendingUpdate = await initUpdateCheck();
+  const pendingUpdate = isCredentialHelper ? null : await initUpdateCheck();
 
   if (pendingUpdate) {
     // postAction fires after commands; exit handler covers --help/--version
