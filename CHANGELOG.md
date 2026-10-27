@@ -46,8 +46,8 @@ earlier releases are described only by their generated notes.
 
 ### Deploy coupling
 
-- The onboard workflow change (`openneuro_tag`) is its own pull request to `dev` with a copy to `nemarDatasets/.github`, and lands first: `nemar admin import-openneuro --tag` in dispatch mode sends `openneuro_tag`, which an older workflow answers with 422.
-  It is inert with an older Worker (no tag in the payload) and with an older CLI: the workflow passes `--tag` only when the installed CLI's help lists it, so a workflow that lands before the CLI reaches npm imports as before.
+- The onboard workflow change (`openneuro_tag`) shipped in 0.10.24 (#1933), with its copy in `nemarDatasets/.github`. `nemar admin import-openneuro --tag` in dispatch mode sends `openneuro_tag`, which an older workflow answers with 422.
+  It is inert with an older Worker (no tag in the payload) and with an older CLI: the workflow passes `--tag` only when the installed CLI's help lists it, so an older CLI imports as before.
 - No order is required between the Worker and the npm release. A CLI released before its Worker refuses a mirror lag that the older Worker quarantines as `not_found_dataset` with a mail and an issue; the new Worker's retry query keys on the marker in `last_error`, which recovery keeps, so it picks those rows up once deployed.
 - The jobs of one workflow run install the CLI independently; mixing versions inside a run is harmless, because only prepare changed.
 
