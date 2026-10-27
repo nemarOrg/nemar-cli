@@ -716,6 +716,20 @@ describe.skipIf(!awsInstalled)("an automatic run opens its pull request", () => 
     expect(s3Writes()).toEqual([]);
   });
 
+  test("a handoff without its clones is not-planned, before the record", async () => {
+    const c = await claimOpen();
+    writeEvent(c);
+    expect((await auto(planArgs(c))).exitCode).toBe(0);
+    rmSync(join(runner, "plan.json.planner", "upstream.git"), { recursive: true, force: true });
+    const exec = await auto(executeArgs(c));
+    expect(exec.exitCode, exec.all).toBe(1);
+    expectQuiet(exec, c, "refused");
+    expect(dispatchRow(c.id)).toMatchObject({ status: "refused", code: "not-planned" });
+    expect(repullRows()).toEqual([]);
+    expect(ghWrites()).toEqual([]);
+    expect(s3Writes()).toEqual([]);
+  });
+
   test("a handoff without its computed bytes is not-planned, before the record", async () => {
     const c = await claimOpen();
     writeEvent(c);
@@ -1074,6 +1088,8 @@ describe.skipIf(!awsInstalled)("an automatic run opens its pull request", () => 
     expect(repullRows()).toEqual([]);
     expect(ghWrites()).toEqual([]);
     expect(s3Writes()).toEqual([]);
+    // A plan the step does not take leaves no handoff.
+    expect(existsSync(join(runner, "plan.json.planner"))).toBe(false);
   });
 
   test("a run that cannot tell when its token was minted is refused before it reads anything", async () => {
