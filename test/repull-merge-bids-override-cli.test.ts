@@ -16,7 +16,14 @@
  *    skipped) and a `version-check` that did not complete with `success` (failed, running, skipped,
  *    canceled) are refused by the Worker's claim, which writes nothing;
  *  - without the reason the ordinary gate refuses `unstable`; a reason outside the length rule and
- *    a re-pull the automatic path opened are refused before anything is written.
+ *    a re-pull the automatic path opened are refused before anything is written;
+ *  - in the normal order (ADR 0111, the #1983 review amendment): with BIDS validation the one check
+ *    that fails at an `unstable` head, `resume` records the gates and the merge goes over it with the
+ *    reason; another check or status that does not pass, a `version-check` that failed, a BIDS
+ *    validation that passed, and a re-pull the automatic path opened are not gated; `clean` is gated
+ *    as before and reads no check; a merge without the reason refuses the head gated over the
+ *    failure; and the merge gate refuses, before anything is written, a head where another check
+ *    fails.
  *
  * What only the first production use can check: that GitHub reports `unstable`, and not `blocked`,
  * for an unprotected mirror whose BIDS validation failed, as `nm000413#3` read for a held review,
@@ -55,6 +62,8 @@ beforeEach(async () => {
 });
 
 const REASON = "The validator flags a sidecar upstream ships this way; read and accepted.";
+/** GitHub Actions' App, which posts a dataset workflow's own job runs. */
+const GITHUB_ACTIONS = 15368;
 
 const resume = () => w.cli(["repull", "resume", w.fx.datasetId, "--wait-minutes", "0", "--yes"]);
 const merge = (extra: string[] = []) =>
@@ -283,5 +292,163 @@ describe.skipIf(!awsInstalled)("a merge over a failed BIDS validation", () => {
     expect(run.exitCode, run.all).toBe(3);
     expect(merges()).toEqual([]);
     expect(w.row()).toMatchObject({ status: "gates_clear", merge_claim_sha: head });
+  });
+
+  test("another check that fails at the head is refused before any request that writes", async () => {
+    const head = await toGates();
+    bidsFailed(head);
+    otherFailing(head);
+    const writes = w.apiWrites.length;
+    const run = await overrideMerge();
+    expect(run.exitCode, run.all).toBe(1);
+    expect(run.all).toContain("(bids)");
+    expect(run.all).toContain("another check");
+    expect(run.all).toContain("lint");
+    expect(w.apiWrites.length).toBe(writes);
+    expect(merges()).toEqual([]);
+    expect(auditOf("repull_bids_override")).toEqual([]);
+  });
+});
+
+/** A check of the dataset's own workflow, posted by GitHub Actions, that failed at `head`. */
+function otherFailing(head: string): void {
+  w.gh.checkRuns[`${w.fx.datasetId}@${head}`]?.push({
+    id: 33,
+    name: "lint",
+    status: "completed",
+    conclusion: "failure",
+    app_id: GITHUB_ACTIONS,
+  });
+}
+
+/** What an administrator's own token read of the head's checks and statuses. */
+const checkReads = () =>
+  w.gh.seen.filter(
+    (s) =>
+      s.method === "GET" &&
+      s.token === ADMIN_TOKEN &&
+      (s.path.endsWith("/check-runs") || s.path.endsWith("/status")),
+  );
+
+describe.skipIf(!awsInstalled)("the override in the normal order: resume, then the merge", () => {
+  test("BIDS validation alone fails: resume records the gates, and the merge goes over it with the reason", async () => {
+    const head = w.row().head_sha as string;
+    bidsFailed(head);
+    // The screen is dispatched and waited for; GitHub's `unstable` is not what it waits for.
+    const first = await resume();
+    expect(first.exitCode, first.all).toBe(3);
+    expect(first.all).toContain(`identifier screen of ${head.slice(0, 12)}`);
+    expect(first.all).not.toContain("clean (it reports");
+    await w.reportScreen(head, "clean");
+    const ready = await resume();
+    expect(ready.exitCode, ready.all).toBe(0);
+    expect(ready.all).toContain("unstable only because BIDS validation failed");
+    expect(ready.all).toContain(
+      `Ready to merge over the failed BIDS validation: nemar admin repull merge ${w.fx.datasetId} --bids-failure-reason`,
+    );
+    expect(w.row()).toMatchObject({ status: "gates_clear", gates_sha: head, last_error: null });
+    // Resume read the head's checks and statuses with the administrator's own token, and merged nothing.
+    expect(checkReads().length).toBeGreaterThanOrEqual(2);
+    expect(merges()).toEqual([]);
+
+    const run = await overrideMerge();
+    expect(run.exitCode, run.all).toBe(0);
+    expect(run.all).toContain("over a failed BIDS validation");
+    const sent = merges();
+    expect(sent).toHaveLength(1);
+    expect(sent[0]?.token).toBe(ADMIN_TOKEN);
+    expect(sent[0]?.body).toMatchObject({ sha: head, merge_method: "squash" });
+    expect(w.row()).toMatchObject({ status: "merged", merge_claim_sha: head });
+    expect(auditOf("repull_bids_override")).toHaveLength(1);
+  });
+
+  const notBidsOnly: Array<[string, (head: string) => void, string]> = [
+    ["another check fails", (head) => otherFailing(head), "another check"],
+    [
+      "a commit status fails",
+      (head) => {
+        w.gh.statuses[`${w.fx.datasetId}@${head}`] = [{ context: "ci/external", state: "failure" }];
+      },
+      "ci/external",
+    ],
+    [
+      "another check is still running",
+      (head) => {
+        w.gh.checkRuns[`${w.fx.datasetId}@${head}`]?.push({
+          id: 34,
+          name: "slow",
+          status: "in_progress",
+          conclusion: null,
+          app_id: GITHUB_ACTIONS,
+        });
+      },
+      "slow",
+    ],
+    [
+      "version-check failed too",
+      (head) => bidsFailed(head, { versionCheck: ["completed", "failure"] }),
+      "version-check",
+    ],
+    [
+      "BIDS validation passed, so something else makes it unstable",
+      (head) => bidsFailed(head, { bids: ["completed", "success"] }),
+      "BIDS validation",
+    ],
+  ];
+  for (const [name, flip, word] of notBidsOnly) {
+    test(`unstable where ${name}: resume does not record the gates`, async () => {
+      const head = w.row().head_sha as string;
+      bidsFailed(head);
+      flip(head);
+      expect((await resume()).exitCode).toBe(3);
+      await w.reportScreen(head, "clean");
+      const run = await resume();
+      expect(run.exitCode, run.all).toBe(3);
+      expect(run.all).toContain("it reports 'unstable'");
+      expect(run.all).toContain(word);
+      expect(w.row()).toMatchObject({ status: "pr_open", gates_sha: null });
+    });
+  }
+
+  test("clean is gated as before: no read of the checks, and the ordinary merge is named", async () => {
+    const head = w.row().head_sha as string;
+    expect((await resume()).exitCode).toBe(3);
+    await w.reportScreen(head, "clean");
+    const ready = await resume();
+    expect(ready.exitCode, ready.all).toBe(0);
+    expect(ready.all).toContain(`Ready to merge: nemar admin repull merge ${w.fx.datasetId}`);
+    expect(ready.all).not.toContain("BIDS");
+    expect(checkReads()).toEqual([]);
+    expect(w.row()).toMatchObject({ status: "gates_clear", gates_sha: head });
+  });
+
+  test("a re-pull the automatic path opened is not gated on unstable, BIDS validation alone failing", async () => {
+    w.db().run("UPDATE upstream_repulls SET origin = 'automatic'");
+    const head = w.row().head_sha as string;
+    bidsFailed(head);
+    expect((await resume()).exitCode).toBe(3);
+    await w.reportScreen(head, "clean");
+    const run = await resume();
+    expect(run.exitCode, run.all).toBe(3);
+    expect(run.all).toContain("it reports 'unstable'");
+    expect(checkReads()).toEqual([]);
+    expect(w.row()).toMatchObject({ status: "pr_open", gates_sha: null });
+  });
+
+  test("gated over a failed BIDS validation, the merge without the reason refuses unstable", async () => {
+    const head = w.row().head_sha as string;
+    bidsFailed(head);
+    expect((await resume()).exitCode).toBe(3);
+    await w.reportScreen(head, "clean");
+    expect((await resume()).exitCode).toBe(0);
+    expect(w.row()).toMatchObject({ status: "gates_clear", gates_sha: head });
+    const before = transitions();
+    const run = await merge();
+    expect(run.exitCode, run.all).toBe(1);
+    expect(run.all).toContain("(github)");
+    expect(run.all).toContain("'unstable'");
+    expect(transitions()).toBe(before);
+    expect(merges()).toEqual([]);
+    expect(w.row()).toMatchObject({ status: "gates_clear", merge_claim_sha: null });
   });
 });

@@ -172,6 +172,12 @@ export interface GitHubStandin {
     Array<{ id: number; name: string; status: string; conclusion: string | null; app_id: number }>
   >;
   /**
+   * The commit statuses of a commit (`GET .../commits/<sha>/status`), keyed `<dataset>@<sha>`, as
+   * GitHub's combined status lists them, the latest of each context. None when a commit has no
+   * entry, which GitHub answers with an empty list and the combined state `pending`.
+   */
+  statuses: Record<string, Array<{ context: string; state: string }>>;
+  /**
    * When true, the review POST and the merge PUT are APPLIED and answered 200 with a body that is
    * not JSON: the case where a write happened and its answer cannot be read.
    */
@@ -225,6 +231,7 @@ export function startGitHubStandin(): GitHubStandin {
     resolveTag: null as GitHubStandin["resolveTag"],
     compareCommits: null as GitHubStandin["compareCommits"],
     checkRuns: {} as GitHubStandin["checkRuns"],
+    statuses: {} as GitHubStandin["statuses"],
     expiredTokens: new Set<string>(),
   };
   /** The head a pull request has now: its branch's commit when heads are live. */
@@ -322,6 +329,25 @@ export function startGitHubStandin(): GitHubStandin {
             head_sha: runs[2],
             app: { id: r.app_id },
           })),
+        });
+      }
+      const combined = url.pathname.match(
+        /^\/repos\/nemarDatasets\/([^/]+)\/commits\/([0-9a-f]{40})\/status$/,
+      );
+      if (req.method === "GET" && combined) {
+        const list = state.statuses[`${combined[1]}@${combined[2]}`] ?? [];
+        // GitHub's combined state: `pending` with no status at all, as it answers then.
+        const word =
+          list.length === 0 || list.some((s) => s.state === "pending")
+            ? "pending"
+            : list.some((s) => s.state !== "success")
+              ? "failure"
+              : "success";
+        return Response.json({
+          state: word,
+          sha: combined[2],
+          total_count: list.length,
+          statuses: list.map((s, i) => ({ id: i + 1, context: s.context, state: s.state })),
         });
       }
       // The question the review's exemption asks once an account has matched (ADR 0107): an
@@ -731,6 +757,9 @@ export function startGitHubStandin(): GitHubStandin {
     get checkRuns() {
       return state.checkRuns;
     },
+    get statuses() {
+      return state.statuses;
+    },
     reset() {
       state.seen.length = 0;
       state.searchPages = [];
@@ -754,6 +783,7 @@ export function startGitHubStandin(): GitHubStandin {
       state.expiredTokens.clear();
       for (const k of Object.keys(state.pulls)) delete state.pulls[k];
       for (const k of Object.keys(state.checkRuns)) delete state.checkRuns[k];
+      for (const k of Object.keys(state.statuses)) delete state.statuses[k];
       for (const k of Object.keys(state.naming)) delete state.naming[k];
       for (const k of Object.keys(state.users)) delete state.users[k];
       for (const k of Object.keys(reads)) delete reads[k];
