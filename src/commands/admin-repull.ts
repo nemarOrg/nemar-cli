@@ -12,9 +12,11 @@
  * `nemar-s3`'s prefix with the ambient AWS credentials. Everything after the two API reads and the
  * token goes through the planner's read-only guard (`lib/repull/read-only.ts`).
  *
- * What `plan` writes: nothing to the mirror, S3, D1 or the NEMAR API. It writes a scratch
- * directory, deleted on exit, on SIGINT and on SIGTERM unless `--keep-workdir`, and the plan file,
- * its output, mode 0600 in the administrator's config directory.
+ * What `plan` writes: nothing to the mirror, S3, D1 or the NEMAR API, except under
+ * `--automatic-dispatch` (below), where the run reports its dispatch to the Worker, which stores
+ * the state in D1. It writes a scratch directory, deleted on exit, on SIGINT and on SIGTERM unless
+ * `--keep-workdir`, and the plan file, its output, mode 0600 in the administrator's config
+ * directory.
  *
  *   nemar admin repull execute <plan-file>   the reviewed plan, executed on this machine through
  *                                            its pull request: record, prepare, copy, register,
@@ -63,12 +65,16 @@ import { parseMinutes, resumeCommand, statusCommand } from "./admin-repull-resum
 export const EXIT_NOT_EXECUTABLE = 3;
 
 const PLAN_HELP = `
-A dry run, always. It compares upstream at the tag NEMAR's latest version mirrors (from_tag)
-with upstream at --to-tag (default: OpenNeuro's latest snapshot) and NEMAR's main, path by path.
+A dry run: it changes no dataset, no bucket and no record of a re-pull, except for the report an
+unattended run (--automatic-dispatch, below) makes to the Worker. It compares upstream at the tag
+NEMAR's latest version mirrors (from_tag) with upstream at --to-tag (default: OpenNeuro's latest
+snapshot) and NEMAR's main, path by path.
 A --to-tag that is not OpenNeuro's latest is planned, and is not executable: that it is newer
 than from_tag cannot be proved (upstream's creation order decides, not the tag number).
 
-It writes nothing to the mirror, S3, D1 or the NEMAR API. Its output is the plan file, written
+It writes nothing to the mirror, S3, D1 or the NEMAR API, except under --automatic-dispatch (the
+central workflow's run, below): that run reports its dispatch to the Worker, which stores the
+state in D1 (started, then refused or failed if the run ends so). Its output is the plan file, written
 with mode 0600 to --out or to $NEMAR_CONFIG_DIR/repull/<id>/<to>.<digest8>.json, where
 NEMAR_CONFIG_DIR defaults to ~/.config/nemar. Clones go into a scratch directory that is deleted on
 exit, on SIGINT and on SIGTERM unless --keep-workdir. Blobs of 1 MiB or more are fetched only when a
@@ -115,7 +121,9 @@ export const repullCommand = new Command("repull").description(
 
 repullCommand
   .command("plan <datasetId>")
-  .description("Plan a re-pull of a newer upstream snapshot as the next major version (read-only)")
+  .description(
+    "Plan a re-pull of a newer upstream snapshot as the next major version (read-only, except under --automatic-dispatch)",
+  )
   .option("--to-tag <tag>", "The upstream tag to pull (default: OpenNeuro's latest snapshot)")
   .option(
     "--from-tag <tag>",

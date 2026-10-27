@@ -34,11 +34,15 @@
  *
  * A merge over a failed BIDS validation (`bidsFailureReason`, the administrator's own reason; ADR
  * 0111, the Phase 7g amendment) is for a record an administrator opened. Step 7 then needs GitHub's
- * `unstable` instead of `clean` and refuses `blocked`, where a rule requires the check and the
- * merge would be a bypass, which a re-pull never uses; the claim carries the reason, and the Worker
- * records it only after reading, at the claimed head, BIDS validation completed with `failure`,
- * `version-check` with `success` and the state `unstable`; a claim already held is not used for
- * it; and the merge is sent only while GitHub still says `unstable`.
+ * `unstable` instead of `clean`, with no check or status but BIDS validation failing at the head
+ * (`bids-only.ts`; the #1983 review amendment), read again under the lock before the claim so a
+ * check that starts failing after the gate's read is not merged over, and refuses `blocked`, where
+ * a rule requires the check and the merge would be a bypass, which a re-pull never uses; the claim
+ * carries the reason, and the Worker records it only after reading, at the claimed head, BIDS
+ * validation completed with `failure`, `version-check` with `success` and the state `unstable`; a
+ * claim already held is not used for it; and the merge is sent only while GitHub still says
+ * `unstable`. `resume` records the gates of such a head, which never reads `clean` while the
+ * validation fails.
  *
  * A claim already held for the screened head (a merge whose answer was lost, a run that stopped
  * after its claim) is used again, without a second claim, since a pull request merges once, but
@@ -83,6 +87,7 @@ import {
   reviewForApproval,
   settleMergeState,
 } from "../pr-review-approve.js";
+import { readNothingElseFails } from "./bids-only.js";
 import { readCatalogFacts } from "./execute/catalog.js";
 import { changedOutsideNemar } from "./execute/head.js";
 import { openOriginScratch } from "./execute/origin.js";
@@ -477,9 +482,10 @@ async function check(
     }
   }
 
-  // 7. GitHub's own state: `clean`, or, for a merge over a failed BIDS validation, `unstable`.
+  // 7. GitHub's own state: `clean`, or, for a merge over a failed BIDS validation, `unstable` with
+  //    nothing else failing.
   if (ctx.bidsFailureReason !== undefined) {
-    const refused = await unstableOnly(ctx, prNumber, head, live.value.mergeableState);
+    const refused = await unstableOnly(ctx, row, prNumber, head, live.value.mergeableState);
     if (refused) return refused;
   } else {
     const clean = await checkMergeable(
@@ -532,10 +538,14 @@ async function check(
  * `unknown`, must be `unstable`, which is a check that is not required failing. `blocked` is a rule
  * that requires the check, where merging would be a bypass, which a re-pull never uses; `clean` is
  * no failing check, so the override is not needed; every other state is refused as the ordinary
- * gate refuses it. Null when the merge may go on to the claim.
+ * gate refuses it. Then nothing but BIDS validation may fail at the head (`bids-only.ts`, the rule
+ * `resume`'s gates read): the reason covers that validation and no other check. That BIDS
+ * validation failed and `version-check` passed is the claim's to read, in its own words. Null when
+ * the merge may go on to the claim.
  */
 async function unstableOnly(
   ctx: GateContext,
+  row: RepullRow,
   prNumber: number,
   head: string,
   seen: string,
@@ -561,7 +571,7 @@ async function unstableOnly(
         : `Pull request #${prNumber} is no longer open; nothing was claimed or merged.`,
     );
   }
-  if (read.state === "unstable") return null;
+  if (read.state === "unstable") return nothingElseFails(ctx, row, prNumber, head);
   if (read.state === "blocked") {
     return stopAt(
       "bids",
@@ -579,6 +589,40 @@ async function unstableOnly(
     "github",
     `${check.ok ? "GitHub's state is not unstable." : check.why} Nothing was claimed or merged.`,
   );
+}
+
+/**
+ * Nothing but BIDS validation fails at the head, read now with the administrator's token
+ * (`bids-only.ts`): null when so, else the refusal, `bids` for a check or status that does not pass
+ * and `github` when the checks could not be read. Step 7 reads it, and `sendUnderLock` reads it
+ * again under the lock and before the claim, so a check that started failing after the gate's read
+ * is not merged over: the claim reads only the App's two runs, and the merge's last look only the
+ * state.
+ */
+async function nothingElseFails(
+  ctx: GateContext,
+  row: RepullRow,
+  prNumber: number,
+  head: string,
+): Promise<GateRefusal | null> {
+  const only = await readNothingElseFails({
+    token: ctx.token,
+    base: ctx.base,
+    datasetId: ctx.datasetId,
+    sha: head,
+    origin: row.origin,
+    mergeableState: "unstable",
+  });
+  if (only.kind === "bids-only") return null;
+  return only.kind === "unreadable"
+    ? stopAt(
+        "github",
+        `Whether BIDS validation is the one check of #${prNumber} that fails could not be read: ${only.why}. Nothing was claimed or merged.`,
+      )
+    : stopAt(
+        "bids",
+        `A merge over a failed BIDS validation is made only while that validation is the one check that fails, and ${only.why}. Nothing was claimed or merged.`,
+      );
 }
 
 function errorText(err: unknown): string {
@@ -728,6 +772,13 @@ async function sendUnderLock(
       claimHeld: true,
       reason: `A claim to merge ${head.slice(0, 12)} is already held, and a merge over a failed BIDS validation is sent only under a claim of its own, which records its reason. Nothing was merged. nemar admin repull resume ${ctx.datasetId} records a merge that happened, or expires the claim once it is 30 minutes old; then run this again.`,
     };
+  }
+  if (reason !== undefined) {
+    // The gate read that nothing but BIDS validation fails before the review was read again and the
+    // merge confirmed. A check that started failing since is not merged over: it is read again here,
+    // under the lock and before the claim, and a refusal claims nothing.
+    const late = await nothingElseFails(ctx, row, prNumber, head);
+    if (late) return { merged: false, stage: late.stage, reason: late.reason };
   }
   if (!check.heldClaim) {
     try {

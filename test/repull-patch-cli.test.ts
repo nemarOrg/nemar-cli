@@ -4,8 +4,8 @@
  * default fixture: NEMAR edited a sidecar and added a description key (two corrections) and edited
  * `participants.tsv`, which upstream changed too (a conflict). N.0.0 is merged by the real gate;
  * the test plays the dataset workflow (the tag) and the DOI's callback (the version row); every
- * step of the re-pull itself is the real CLI and the real Worker routes over bun:sqlite, reached
- * through TEST_API_URL in the child's environment. GitHub and S3 are stand-ins. No mocks.
+ * step of the re-pull itself is the real CLI and the real Worker routes over bun:sqlite, on a
+ * loopback port named in the child's environment. GitHub and S3 are stand-ins. No mocks.
  *
  * The properties, each with a test:
  *  - after the release and the lock, a plan with conflicts waits for an administrator's decision,
@@ -38,7 +38,7 @@
  * a second release pull request on the same repository as the stand-in does, and that the dataset
  * workflows tag v2.0.1 and mint its DOI as they do any other patch release.
  *
- * CI TIER: integration, like the other CLI suites that start the binary against a local server.
+ * CI TIER: unit-pure. Hermetic: every server the suite starts or reaches listens on loopback.
  */
 
 import {
@@ -169,6 +169,26 @@ describe.skipIf(!awsInstalled)("N.0.1", () => {
     expect(JSON.parse(row.counts).locked).toBeGreaterThan(0);
     expect(await hasRef("refs/heads/release/v2.0.1")).toBe(false);
     expect(Object.values(w.gh.pulls).filter((p) => p.headRef === "release/v2.0.1")).toEqual([]);
+  });
+
+  test("a record that does not say its counts stays released, exits 0, and the message names the way out", async () => {
+    await lockedN0();
+    // Unknown is never zero: the record loses the two numbers the plan's tallies gave it.
+    const counts = JSON.parse(w.row().counts);
+    Reflect.deleteProperty(counts, "corrections");
+    Reflect.deleteProperty(counts, "conflicts");
+    w.db().run("UPDATE upstream_repulls SET counts = ?", [JSON.stringify(counts)]);
+    const run = await resume();
+    expect(run.exitCode, run.all).toBe(0);
+    expect(run.all).toContain("does not say how many corrections and conflicts");
+    expect(run.all).toContain("it blocks");
+    expect(run.all).toContain(`nemar admin repull abandon ${w.fx.datasetId}`);
+    expect(w.row().status).toBe("released");
+    expect(await hasRef("refs/heads/release/v2.0.1")).toBe(false);
+    // The way the message names works: it ends the record, and v2.0.0 stays released.
+    const ended = await abandon();
+    expect(ended.exitCode, ended.all).toBe(0);
+    expect(w.row().status).toBe("patch_declined");
   });
 
   test("--keep-upstream replays the corrections byte for byte, and N.0.1 goes to complete through the same gates", async () => {

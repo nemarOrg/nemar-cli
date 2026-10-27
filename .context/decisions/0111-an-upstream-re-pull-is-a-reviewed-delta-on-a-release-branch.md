@@ -16,9 +16,14 @@ Decisions 4 and 10 are built, as their dated amendments below record, and so are
 *Annotated 2026-10-25: and by the Phase 6f amendment (#1912): resume, the administrator's merge through one gate, the release and the lock are built through `released`.*
 *Annotated 2026-10-25: and by the Phase 7f amendment (#1913): the advance tick holds, gates and resumes the automatic re-pulls, in production only, and while its switch is off only records that it is off; decision 7's merge is still not built.*
 *Annotated 2026-10-25: and by the Phase 7d amendment (#1913): the unattended run that opens an automatic re-pull's pull request and finishes a merged one is built, in a central workflow deployed only with the epic release.*
+*Annotated 2026-10-27: the workflow is not held for the release.
+Its copy in `nemarDatasets/.github` merged as `nemarDatasets/.github#148`, and this repository's #1980 compares the two copies byte for byte.
+It runs only on a `repository_dispatch` of the type `run-upstream-repull`, which only the automatic path sends, and that is off until the owner turns its switch on (see the Phase 8 amendment, "The workflow pairs").*
 *Annotated 2026-10-25: and by the Phase 6g amendment (#1912): N.0.1, abandoning a record, superseding one, the manual-major refusal and a mirror rehearsal fixture are built, which completes Phase 6's manual execution.*
 *Annotated 2026-10-26: and by the Phase 7g amendment (#1913): decision 7's merge is built: the Worker merges a machine-clean automatic re-pull pull request and finishes it after its merge, and an administrator may merge a re-pull they opened over a failed BIDS validation, never over a rule that requires it.*
 *Annotated 2026-10-26: and by the Phase 7h amendment (#1913): the automatic path is observable (the weekly report's re-pull section, the administrator's list of dispatches and `nemar admin repull auto`), which completes the slices of Phase 7; the owner's switches, gates G4 and G5 and the held workflow pair remain.*
+*Annotated 2026-10-27: the workflow pair is no longer held: `nemarDatasets/.github#148` merged and this repository's #1980 compares the copies (the Phase 8 amendment, "The workflow pairs").
+The owner's switches and gates G4 and G5 remain.*
 *Annotated 2026-10-27: and by the Phase 8 amendment (#1914): the Decision section is built, and what that amendment lists under "Not yet verified" is unobserved, not unbuilt; what remains is the owner's act and the epic's release.
 Phase 8 itself documents the epic, fixes the website's contract for the `mirror` flag and records the order in which the pieces reach production.*
 
@@ -261,6 +266,7 @@ ADR 0086 exempts `xx` from the identifier screen, so an `xx` re-pull never has a
 - Whether the rulesets let the GitHub App merge without a human review, and without using its bypass; the merge call is not built until this is checked.
   *Annotated 2026-10-26: checked by the owner on 2026-10-26 for what can be read, and passed: the installation's permissions allow it and no organization ruleset applies (the Phase 7g amendment); the App token's own reading of `mergeable_state` and GitHub's merge of its squash are seen only by the first production merge.*
 - Where `source_version` is inserted under the central manifest flow.
+  *Annotated 2026-10-27: closed by the Phase 2 amendment (#1908), "Where `source_version` is inserted under the central manifest flow (verified)".*
 - Whether "explained" edits are detected on early rewritten imports (`on003645`, `on004362`); local dry-run plans count the unexplained paths.
 - Whether ADR 0107's review can ever pass a re-pull diff.
   The App is not exempt, so the review runs, and ADR 0109 fails a changed `CHANGES` line and holds a replaced recording, both normal in a re-pull; until a re-pull's review passes, none is machine clean.
@@ -348,6 +354,8 @@ Both hold for a batch of any size, a single row included.
 The row must also be older than one hour, so a CDN-cached 404 on a fresh tag is never made final.
 A fetch error in the backfill writes nothing, and a batch in which no read proved the credential while at least one 404 is unconfirmed is refused as `suspect_credential` (502), whatever else errored beside it.
 Only a version of the form N.N.N is a candidate, and a ref is always the canonical `vX.Y.Z` tag, so a stored `v1.0.0` can never read `vv1.0.0`.
+*Annotated 2026-10-27: a row spelled `vN.N.N` is a candidate too, read as `mirroredTagOf` reads it (one lowercase `v`, then `N.N.N`).
+The ref is still the canonical `v<N.N.N>` tag, never `vv1.0.0`; see the #1983 review amendment, "The mirrored tag reads both spellings of a version".*
 The write is `WHERE source_version_basis IS NULL`, so it never overwrites a recorded value; its paging is a keyset on `(dataset_id, version)`, so a row that always errors cannot starve the rows behind it.
 A dry run, which is the default, writes nothing.
 
@@ -373,6 +381,8 @@ Decision 2 says `nemar admin repull <id>` is a dry run by default and `--execute
 The built shape is two subcommands: `plan` makes the plan, and `execute` (Phase 6) takes the plan file.
 
 `plan` writes nothing to the mirror, S3, D1 or the NEMAR API.
+*Annotated 2026-10-27: the central workflow's unattended run, `plan --automatic-dispatch` (Phase 7d), is the one exception.
+It reports its dispatch to the Worker, which stores `started` and then `refused` or `failed` if the run ends so; an administrator's `plan` still writes nothing.*
 What it writes is its scratch directory, removed on exit, on SIGINT and on SIGTERM unless `--keep-workdir`, and the plan file, which is its output: mode 0600 in the administrator's config directory (`$NEMAR_CONFIG_DIR/repull/<id>/`, `~/.config/nemar` by default), because a path can itself be an identifier.
 The default output holds counts and no path, key or file content.
 
@@ -650,6 +660,7 @@ The flag is three-valued, because a literal boolean would have to say "not a mir
 `null`: an N.0.0 of an `on######` dataset whose tag is unknown or was never examined; a consumer must not show it as a mirror.
 It is read from each row's own tag, not from the dataset's highest version, derived at read time and never stored, so `datasets` gains no column.
 It rides on every version of `GET /datasets/:id/versions` (beside the tag and its basis, which that owner-or-admin route already carried) and of the public landing, `data.nemar.org/<id>/` as JSON and the page bundle's landing, which exposes the flag only and neither the tag nor its basis.
+*Annotated 2026-10-27: the route is open to the dataset's owner, its collaborators and administrators (`backend/src/routes/datasets/manifests.ts`), not only to an owner or an administrator; the Phase 8 amendment, "The `mirror` field, as a reader sees it", corrects the phrase.*
 Decision 5 says the website shows a mirror tag on that version.
 What the website receives is the flag, so it shows a chip from `mirror`; the public wire carries the flag and never the tag itself.
 `metadata.json` is not changed.
@@ -1164,6 +1175,7 @@ Not checked here, and left to the later slices' canary and the first production 
 
 Phase 7c builds the scheduled half of decision 6: a daily tick, in production only, that finds the mirrors upstream has moved past and dispatches the central workflow that is to open their re-pull pull requests.
 The workflow, the unattended run and the merge are later slices, and the workflow is not deployed, so nothing here can open a pull request yet; with the open switch off, as it is, the tick dispatches nothing at all.
+*Annotated 2026-10-27: the unattended run (Phase 7d) and the merge (Phase 7g) are built, and the workflow's copy in `nemarDatasets/.github` merged as `nemarDatasets/.github#148`, so "not deployed" no longer holds; the tick still dispatches nothing while the open switch is off (the Phase 8 amendment, "The workflow pairs").*
 Nothing here sends mail, and the source scan that pins the record's import closure covers the scheduler.
 
 Candidates come from `stale_ready` alone.
@@ -1664,6 +1676,8 @@ A further slice of the Phase 7 amendment above, built by Phase 7d.
 It builds the run a dispatch starts: the central workflow that opens an automatic re-pull's pull request and finishes a merged one, and the CLI's automatic mode that workflow runs.
 Nothing here merges; the Worker's merge is a later slice's.
 The workflow is authored in this repository and not deployed: its copy in `nemarDatasets/.github` is a pull request of its own, held until the epic ships, so until then GitHub takes the Worker's dispatches and nothing runs, and the watchdog ends each one `unreported`.
+*Annotated 2026-10-27: the copy in `nemarDatasets/.github` merged as `nemarDatasets/.github#148` before the release, and this repository's #1980 makes the `unit-pure` tier compare the two copies byte for byte.
+The workflow runs only on a dispatch the automatic path sends, and that is off, so nothing runs because no dispatch is sent, not because the workflow is missing.*
 Nothing here sends mail or adds a route.
 Four annotations are added to earlier text, on the record's header, on the Decision section's, on the 7c slice's timing sentence and on the "Not yet verified" item about enrichment.
 
@@ -2043,6 +2057,10 @@ Three additions are made to earlier text: an annotation on the record's header, 
   a re-pull that ended `failed`;
   a re-pull that used all its resumes (`resume-exhausted`) or all its finish runs (`finish-exhausted`);
   and a cap set to something unreadable.
+  *Annotated 2026-10-27: the round 1 review of the epic's pull request (#1983) added one reason to this list.
+  A switch is on and the scheduler's last tick concluded `waiting-for-manual-run`, which is gate G4 unmet: nothing dispatches until a person runs the two first re-pulls, so a switch turned on early would otherwise change nothing and say nothing.
+  It depends on a switch as the first reason does, so with the switch off it is quiet, and the section's closing sentence names it.
+  "Only the first reason depends on a switch" below now holds for these two.*
 - The scheduler's age is read against the report's own instant.
   A scheduler silent for exactly 26 hours is not yet a reason, and neither is a claim exactly an hour old; one second more is.
   Only the first reason depends on a switch.
@@ -2082,6 +2100,8 @@ What only production can show is how the counts read on real data, that every me
 
 With it, the slices of Phase 7 are complete: the automatic path is built, off by default, counted every week, listed for an administrator and stopped by removing one switch.
 What remains is the owner's act and the epic's release, not another slice: the held workflow pair merged with the epic release, gate G4's two manual re-pulls, and the switches, which the owner turns on in a reviewed change once those are done.
+*Annotated 2026-10-27: the workflow pair is not held for the epic release: `nemarDatasets/.github#148` merged and this repository's #1980 compares the copies.
+What remains is gate G4's two manual re-pulls, the switches and the epic's release.*
 
 ## Amendment 2026-10-26 (#1979): the App is renamed to `nemar-bot`
 
@@ -2222,3 +2242,67 @@ The "Checked only against stand-ins" section of each earlier amendment holds the
 
 - A `failed` record that holds a claim to merge, or a merge with no tag, is reconciled by nothing and keeps its dataset blocked until an administrator resolves it by hand (the Phase 6f amendment, annotated by the Phase 6g amendment).
 - A mirror whose last three dispatches all ended `unreported` is skipped by the scheduler, nothing clears that streak, and the mirror stays on the administrator's path (the Phase 7c amendment).
+
+## Amendment 2026-10-27 (#1983 review): the BIDS override is reached through resume, and the mirrored tag reads both spellings
+
+The first review of the epic's pull request into `dev` (#1983) found two rules of this record that the code did not reach.
+This amendment says what changed and why.
+The decision text above is unchanged.
+Earlier text is annotated, in a note that begins "Annotated 2026-10-27", where this amendment corrects it.
+
+### An administrator's merge over a failed BIDS validation is reached through `resume`
+
+- What was wrong.
+  `resume` recorded the gates only when GitHub reported the pull request `clean`.
+  A failed BIDS validation that no rule requires makes GitHub report `unstable`, so `resume` waited and exited 3, and `nemar admin repull merge --bids-failure-reason` refused, because the merge is taken only from `gates_clear`.
+  The merge the Phase 7g amendment built could not be reached in the normal order.
+  Its tests recorded the gates while the GitHub stand-in said `clean` and then turned it `unstable`.
+- What `resume` records now.
+  On a record an administrator opened, `resume` also records the gates when GitHub reports `unstable` and BIDS validation is the one check that fails at the head:
+  BIDS validation, the App's own latest run, completed with `failure`;
+  `version-check`, the App's own latest run, completed with `success`;
+  every other check run, taken as the latest run of each name and App, completed with `success`, `neutral` or `skipped`, the conclusions GitHub counts as passing;
+  and every commit status is `success`.
+  A check still running is not passing yet.
+  `resume` reads every check run and every commit status of the head with the administrator's own token, two reads, and a read that fails or an answer it cannot read waits: unknown is never a failure of BIDS validation alone.
+  It says when the gates were recorded over a failed validation, and its last line names the merge with `--bids-failure-reason`.
+- One rule, in `shared/repull-bids-override.ts`.
+  The facts every reader has, the record's origin, GitHub's state and the App's two runs, are `bidsOverrideFault`, which the Worker's claim to merge (`bidsOverrideRefusal`) now asks too, with its refusal words unchanged.
+  The App's latest run of a name is read by `checkFactOf`, which the Worker's reader of the two checks now uses as well.
+  The check names are declared once, in `shared/dataset-checks.ts`, which `deriveContexts` reads for the rulesets.
+- The merge gate reads the rest of the rule before the claim.
+  With `--bids-failure-reason` it refuses, before anything is written, a head where any other check run or commit status does not pass, so the reason covers BIDS validation and no other check.
+  That BIDS validation failed and `version-check` passed is still the claim's to read, in its own words.
+  The Worker's claim reads only the App's two runs, as before: that nothing else fails is the administrator's gate's to read, as `clean` is for an ordinary merge.
+- Everything else still requires `clean`.
+  An automatic record is never gated on `unstable`, by `resume` or by the advance tick, and the Worker's merge holds a failed BIDS validation as `bids-failed` and an `unstable` head as `not-clean`.
+  A merge without the reason refuses `unstable`, and `nemar admin pr-reviews`, which has no override, refuses it too.
+- Verified on 2026-10-27 against `nemarDatasets/on004362`, pull request #1 at head `c06fa1cf`, with read-only calls.
+  The repository's `main` has no branch protection (`GET .../branches/main/protection` answered 404, "Branch not protected"), and its one ruleset is the tag ruleset "Protect version tags", so no check is required on the branch.
+  GitHub reports the pull request `unstable` (`mergeable_state` in REST, `mergeStateStatus` `UNSTABLE` in GraphQL), and its one failing check is "NEMAR PR Review", which nothing requires there: a check that is not required and fails reads `unstable`, the state this rule rests on.
+  The check runs at the head are named exactly `version-check`, `Run BIDS Validation` and `NEMAR PR Review`, the first two being the names `shared/dataset-checks.ts` declares, and each is posted by App 3679074 (`nemar-bot`).
+  The unfiltered check-runs answer carries `total_count` and `check_runs[]`, each run with `id`, `name`, `status`, `conclusion`, `head_sha` and `app.id`, the fields `checkFactOf` and `othersNotPassing` read.
+  The combined status answers `state` `pending` with `total_count` 0 and an empty `statuses[]`, which the rule reads as no status at all, never as a pending one.
+  Run on those two answers, the rule reads BIDS validation and `version-check` as passed and "NEMAR PR Review" as the check that fails, so that head is not BIDS validation's failure alone, and `resume` would wait on it.
+- Still unverified: a live pull request on an unprotected dataset repository whose BIDS validation failed, read as `unstable` and not `blocked`, which the Phase 8 amendment lists too.
+  A check run again is read by its latest run, the highest id of its name and App, whatever `filter=latest` leaves out, so the rule does not depend on that filter.
+
+### The mirrored tag reads both spellings of a version
+
+- What was wrong.
+  `mirroredTagOf`, the derivation of decision 4, matched only a version row spelled `N.N.N`, while D1 holds `1.0.0` and `v1.0.0` (`shared/contract/version.ts`): the version-DOI callback strips the `v` before it writes, but older rows and other writers can carry it, the admin manifest route among them, which writes the version as its path names it.
+  A mirror whose rows carry the `v` read as unpublished in the staleness report, so it was never compared or dispatched, and a newer row spelled `v` lost to an older bare one.
+  The create check (`versionFactsProblem`) and the release already read both spellings.
+- What it reads now.
+  Decision 4's highest version row is found in both spellings and by number, and the version comes back bare.
+  The rows of one version in the two spellings are read together, because both name the tag `v<N.N.N>`:
+  a row never examined says nothing against one that was;
+  the tag is known when every examined row names it, with `lineage` only when each of them says `lineage`;
+  and two rows that disagree are `unknown`, never one of them picked.
+  The staleness report dates such a version by its earliest row, for "probably stale".
+  There is no migration, and no recorded value is rewritten.
+- The backfill examines both spellings too.
+  The Phase 2 amendment's "Only a version of the form N.N.N is a candidate" no longer holds: a row spelled `vN.N.N` is a candidate, read as `mirroredTagOf` reads it (one lowercase `v`, then `N.N.N`), so a row the staleness report calls never examined is one `nemar admin upstream-backfill` examines.
+  The ref is still the canonical tag `v<N.N.N>`, never `vv1.0.0`.
+  The rows of one version in both spellings are read once and each recorded from that read, the write stays on the row's own spelling, and the cursor carries that spelling, which the route takes back.
+  Any other spelling, `vv1.0.0` and `V1.0.0` among them, is still never a candidate.

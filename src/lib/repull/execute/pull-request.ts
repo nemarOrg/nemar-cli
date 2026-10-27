@@ -13,6 +13,7 @@
 
 import { isOwnDatasetRepo } from "../../../../shared/nemar-app.js";
 import { sanitizeNote } from "../../../../shared/pr-review.js";
+import { repullTrailerLines } from "../../../../shared/repull-squash.js";
 import { DATASETS_ORG } from "../../pr-review-approve.js";
 import { buildReleaseTitle, findSentTitleProblem } from "../../pr-text.js";
 import { type ListedPull, listPulls, listedPull, pullListWhy } from "../pulls.js";
@@ -366,8 +367,11 @@ export function releaseBody(args: {
     "The squash commit message must end with both trailers of the re-pull commit, as its last paragraph; the merge path writes that message itself and refuses one that does not:",
     "",
     "```",
-    `Upstream-Snapshot: ${args.ds}@${args.toTag}`,
-    `Repull-Plan: ${args.digest}`,
+    ...repullTrailerLines({
+      upstream_ds: args.ds,
+      to_tag: args.toTag,
+      plan_digest: args.digest,
+    }),
     "```",
     "",
     "GitHub's default squash message lists each commit as a bullet, which puts the trailers mid-message; the privacy ledger's fresh-clone proof (ADR 0085) then fails the dataset. Do not merge this from GitHub's page.",

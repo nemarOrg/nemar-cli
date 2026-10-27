@@ -3,8 +3,8 @@
  * epic #1046 phase 6, #1912): `approve --merge` and `y` in `next` merge it only through the
  * re-pull's gate, whose checks run before the approval is written, and an ordinary release pull
  * request is merged as before. Driven through the real entry point against `repull-pr-world.ts`
- * (the real `execute`, `resume` and API, reached through TEST_API_URL in the child's environment;
- * stand-ins for GitHub and S3 only). No mocks.
+ * (the real `execute`, `resume` and API, the API on a loopback port named in the child's
+ * environment; stand-ins for GitHub and S3 only). No mocks.
  *
  * The properties, each with a test that fails when its line is changed:
  *  - `approve --merge` on a re-pull pull request approves, then claims the cap and squash-merges
@@ -16,7 +16,7 @@
  *    merge, and approves nothing;
  *  - `y` in `next` merges a re-pull pull request through the gate.
  *
- * CI TIER: integration, like the other CLI suites that start the binary against a local server.
+ * CI TIER: unit-pure. Hermetic: every server the suite starts or reaches listens on loopback.
  */
 
 import {
@@ -65,6 +65,8 @@ const approve = (pr: number, extra: string[] = []) =>
 const reviewPosts = () =>
   w.gh.seen.filter((s) => s.method === "POST" && s.path.endsWith("/reviews"));
 const merges = () => w.gh.seen.filter((s) => s.method === "PUT" && s.path.endsWith("/merge"));
+/** The exit hook's request for a debug log, printed only when an exit may be a bug. */
+const BUG_HINT = "attach the log to a new issue";
 
 describe.skipIf(!awsInstalled)("approve --merge", () => {
   test("approves, then merges a re-pull pull request through its gate", async () => {
@@ -138,8 +140,49 @@ describe.skipIf(!awsInstalled)("approve --merge", () => {
     expect(run.all).toContain("the merge is not recorded");
     expect(run.all).toContain(`nemar admin repull resume ${w.fx.datasetId}`);
     expect(run.all).not.toContain("through the re-pull's gate).");
+    // Exit 3 is the command's answer, as for `repull merge`: no debug log is asked for.
+    expect(run.all).not.toContain(BUG_HINT);
     expect(merges()).toHaveLength(1);
     expect(w.row().status).toBe("gates_clear");
+  });
+
+  test("a merge GitHub did not make keeps its claim and exits 3, as `repull merge` does", async () => {
+    await toGates();
+    // GitHub's state turns to blocked between the gate's read and the merge's last look: when the
+    // claim reaches the API.
+    w.setApiHook(async (req) => {
+      if (req.method === "POST" && new URL(req.url).pathname.endsWith("/transition")) {
+        Object.assign(w.gh.pulls[prKey(w)] as object, { mergeableState: "blocked" });
+      }
+    });
+    const run = await approve(w.row().pr_number as number);
+    expect(run.exitCode, run.all).toBe(3);
+    expect(run.all).toContain("The claim to merge is kept");
+    expect(run.all).not.toContain("through the re-pull's gate).");
+    expect(run.all).not.toContain(BUG_HINT);
+    expect(merges()).toEqual([]);
+    expect(w.row().merge_claim_sha).toBe(w.row().gates_sha);
+  });
+
+  test("a merge whose answer is lost keeps its claim and exits 3", async () => {
+    await toGates();
+    w.gh.lostMergeAnswers = true;
+    const run = await approve(w.row().pr_number as number);
+    expect(run.exitCode, run.all).toBe(3);
+    expect(run.all).toContain("may have merged it");
+    expect(run.all).not.toContain(BUG_HINT);
+    expect(w.row()).toMatchObject({ status: "gates_clear", merge_claim_sha: w.row().gates_sha });
+  });
+
+  test("a merge refused with no claim held still exits 1", async () => {
+    await toGates();
+    // The cap is used up: the claim is refused, so nothing is held and nothing waits.
+    w.workerEnv.REPULL_DAILY_MERGE_CAP = "0";
+    const run = await approve(w.row().pr_number as number);
+    expect(run.exitCode, run.all).toBe(1);
+    expect(run.all).toContain("(cap)");
+    expect(merges()).toEqual([]);
+    expect(w.row()).toMatchObject({ status: "gates_clear", merge_claim_sha: null });
   });
 
   test("a NEMAR API that cannot say whether it is a re-pull's refuses the merge, and approves nothing", async () => {

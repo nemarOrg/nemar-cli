@@ -62,7 +62,7 @@ beforeAll(async () => {
   const g = globalThis as { NEMAR_GITHUB_API_URL?: string };
   previousBase = g.NEMAR_GITHUB_API_URL;
   g.NEMAR_GITHUB_API_URL = `http://127.0.0.1:${github.port}`;
-});
+}, 60_000);
 
 afterAll(async () => {
   (globalThis as { NEMAR_GITHUB_API_URL?: string }).NEMAR_GITHUB_API_URL = previousBase;
@@ -70,7 +70,7 @@ afterAll(async () => {
   raw?.stop();
   github?.stop(true);
   await mf?.dispose();
-});
+}, 30_000);
 
 async function insert(table: string, row: Row): Promise<void> {
   const cols = Object.keys(row);

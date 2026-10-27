@@ -309,6 +309,15 @@ export const IMMUTABLE_ONCE_SET = [
 export const SHA_RE = /^[0-9a-f]{40}$/;
 /** `sha256:` and 64 lowercase hex digits: the shape migration 0105's CHECK pins by length. */
 export const DIGEST_RE = /^sha256:[0-9a-f]{64}$/;
+/**
+ * A version as a re-pull record and its requests carry it, and the CLI's own released version:
+ * `N.N.N`, always bare. Narrower than `STORED_NEMAR_VERSION_RE` in `source-snapshot.ts`, which also
+ * reads the `v1.0.0` spelling a `dataset_versions` row may hold, on purpose, so the two are not one
+ * constant: the record's statements find a version row in either spelling by prefixing the `v`
+ * themselves (`version IN (?, 'v' || ?)`), so a version that already carried one would miss the
+ * bare row, and `nextMajorVersion` and `patchVersionOf` build bare numbers from what this accepts. A
+ * reader of stored rows strips the `v` first (`bareNemarVersion`).
+ */
 export const NEMAR_VERSION_RE = /^\d+\.\d+\.\d+$/;
 
 /**

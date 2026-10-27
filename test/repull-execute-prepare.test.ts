@@ -49,6 +49,7 @@ import { makeRepullApp } from "../backend/test/helpers/repull-app";
 import { hashDirLower, isDead } from "../scripts/scrub/git/git-lib";
 import { EDF_HEADER_BYTES } from "../shared/identifier-scan";
 import { PROVENANCE_NOTE_KEY } from "../shared/privacy-correction-text";
+import { repullTrailerLines } from "../shared/repull-squash";
 import { getApiUrl } from "../src/lib/api/client";
 import { runCommand } from "../src/lib/git-annex/run-command";
 import { listAnnexedKeys } from "../src/lib/git-annex/transfer";
@@ -103,6 +104,7 @@ const XX_E = "xx099995";
 const XX_F = "xx099996";
 const XX_G = "xx099997";
 const XX_H = "xx099998";
+const XX_I = "xx099990";
 const REGION = "us-east-2";
 
 let gh: GitHubStandin;
@@ -730,8 +732,18 @@ describe.skipIf(!awsInstalled)("preparing the default delta", () => {
       "1",
     );
     const trailers = await gitIn(repo, ["show", "-s", "--format=%(trailers:only,unfold)", sha]);
+    const digest = JSON.parse(readFileSync(planPath, "utf8")).digest as string;
     expect(trailers).toContain(`Upstream-Snapshot: ${UPSTREAM_ID}@${TAG_B}`);
-    expect(trailers).toContain(`Repull-Plan: ${JSON.parse(readFileSync(planPath, "utf8")).digest}`);
+    expect(trailers).toContain(`Repull-Plan: ${digest}`);
+    // And the message's last paragraph is exactly the shared builder's two lines, byte for byte
+    // (#1972): the commit is written from the builder and not from a template of its own.
+    const message = await gitIn(repo, ["show", "-s", "--format=%B", sha]);
+    const expected = repullTrailerLines({
+      upstream_ds: UPSTREAM_ID,
+      to_tag: TAG_B,
+      plan_digest: digest,
+    });
+    expect(message.trimEnd().split("\n\n").at(-1)).toBe(expected.join("\n"));
     const author = await gitIn(repo, ["show", "-s", "--format=%an <%ae> %at %cn %ct", sha]);
     expect(author.trim()).toMatch(/^NEMAR re-pull <noreply@nemar\.org> \d+ NEMAR re-pull \d+$/);
     const meta = JSON.parse(await show(repo, `${sha}:.nemar/metadata.json`));
@@ -1545,6 +1557,45 @@ describe.skipIf(!awsInstalled)("the destination prefix", () => {
       expect(err.code).toBe("destination-prefix");
       expect(s3Writes()).toBe(writes);
       expect(repullRows()[0]?.last_error).toContain("destination-prefix");
+    } finally {
+      fx.cleanup();
+    }
+  });
+});
+
+describe.skipIf(!awsInstalled)("the destination bucket", () => {
+  test("a remote.log that names a bucket S3 cannot have refuses the copy: nemar-s3-invalid, nothing uploaded or pushed", async () => {
+    // The guard of `advancePrepared`'s setup reads the working clone's own remote.log. A plan
+    // cannot carry a bucket: it names a git-annex commit, and a plan forged onto another commit has
+    // another digest, so it is another plan, which a prepared record does not take up. So it is the
+    // clone that is forged: the line of nemar-s3 now names the bucket as a path, as a write to the
+    // git-annex branch could have left it, and the real `executeRepull` walks the record on.
+    await reset();
+    const fx = await buildRepullFixture({ datasetId: XX_I, s3 });
+    try {
+      seedMirror(XX_I);
+      const path = await makePlan(fx);
+      const { result } = await execute(fx, path);
+      expect(result.row.status).toBe("prepared");
+      const repo = workPaths(configDir, XX_I, result.row.plan_digest).repo;
+      const log = await gitIn(repo, ["show", "refs/heads/git-annex:remote.log"]);
+      const forged = log.replace(/bucket=nemar\b/, "bucket=evil.example/x#");
+      expect(forged).not.toBe(log);
+      await writeAnnexBranchFile(repo, "remote.log", forged);
+
+      const writes = s3Writes();
+      const origin = await refsOf(fx.originRepo);
+      const err = await refusal(execute(fx, path, { until: "pr_open" }));
+      expect(err.code).toBe("nemar-s3-invalid");
+      expect(err.message).not.toContain("evil.example");
+      // Nothing was uploaded, pushed or opened: the S3 stand-in saw no write, origin's refs are
+      // where they were, and GitHub saw no request that is not a read.
+      expect(s3Writes()).toBe(writes);
+      expect(await refsOf(fx.originRepo)).toBe(origin);
+      expect(gh.seen.filter((s) => s.method !== "GET")).toEqual([]);
+      // The record stays prepared and says why, in the copy step's words.
+      expect(repullRows()).toMatchObject([{ status: "prepared" }]);
+      expect(repullRows()[0]?.last_error).toStartWith("[copy:nemar-s3-invalid]");
     } finally {
       fx.cleanup();
     }

@@ -117,7 +117,11 @@ with your own GitHub token (GH_TOKEN, else \`gh auth token\`). It never merges.
                .github/, the commit is made again on the new main and pushed with a lease (asked
                first unless --yes). Then the identifier screen of the head is
                dispatched (when none exists or it produced no verdict), and once it passes and
-               GitHub reports the pull request clean, the gates are recorded: gates_clear.
+               GitHub reports the pull request clean, the gates are recorded: gates_clear. On a
+               re-pull you opened, unstable because BIDS validation failed and no other check
+               or status fails is recorded too (both read with your token), and that pull
+               request merges with --bids-failure-reason, or without it once the validation
+               passes.
   gates_clear  a held claim to merge is resolved from GitHub: a merge is recorded, and a claim
                GitHub says did not merge expires once it is 30 minutes old. A main enrichment
                moved outside .nemar/ and .github/ since the gates (the merge refuses it,
@@ -148,7 +152,8 @@ of the description. The README family is replayed as a unit.
 
 Exit codes:
   0  ready to merge (gates_clear, patch_gates_clear), complete, or released with a record that
-     does not say how many corrections and conflicts its plan has (it is not completed).
+     does not say how many corrections and conflicts its plan has (it is not completed, and it
+     blocks the dataset's next re-pull until \`nemar admin repull abandon <id>\` ends it).
   3  waiting (for the screen, GitHub, a person, your decision on conflicts) after
      --wait-minutes, or stopped with why recorded on the record; run resume again.
   1  refused before anything was written, nothing to resume, or the record ended (abandoned,
@@ -254,7 +259,13 @@ export const resumeCommand = new Command("resume")
       if (json) {
         console.log(
           JSON.stringify(
-            { repull: row, outcome: result.outcome, waiting_for: result.waitingFor ?? null },
+            {
+              repull: row,
+              outcome: result.outcome,
+              waiting_for: result.waitingFor ?? null,
+              // `ready` over a failed BIDS validation: the merge needs --bids-failure-reason.
+              bids_failure: result.bidsFailure === true,
+            },
             null,
             2,
           ),
@@ -262,7 +273,11 @@ export const resumeCommand = new Command("resume")
       }
       switch (result.outcome) {
         case "ready":
-          out(`Ready to merge: nemar admin repull merge ${datasetId}`);
+          out(
+            result.bidsFailure
+              ? `Ready to merge over the failed BIDS validation: nemar admin repull merge ${datasetId} --bids-failure-reason "<reason>"`
+              : `Ready to merge: nemar admin repull merge ${datasetId}`,
+          );
           break;
         case "released":
           out(`Re-pull #${row?.id} of ${datasetId} is released.`);

@@ -4,12 +4,14 @@
  * rests on, pinned so a later "simplification" cannot remove one without a test saying which.
  *
  * The workflow is authored in this repository and deployed by copying it whole into
- * `nemarDatasets/.github`, in a pull request held until the epic ships. The parity check at the
- * bottom compares the two byte for byte. The `unit-pure-shard` CI job checks the deployed copy out
- * of `nemarDatasets/.github` `main` and names it in `NEMAR_REPULL_WORKFLOW_LIVE`, which turns a
- * missing copy into a failure: the job stays red until that pull request is merged, and from then
- * on any difference between the two copies fails it. Without the variable it looks for a sibling
- * checkout of `nemarDatasets/.github` and SKIPS VISIBLY when there is none.
+ * `nemarDatasets/.github`, where it is merged (`nemarDatasets/.github#148`); it is not held for the
+ * epic's release. The parity check at the bottom compares the two byte for byte. The
+ * `unit-pure-shard` CI job checks the deployed copy out of `nemarDatasets/.github` `main` and names
+ * it in `NEMAR_REPULL_WORKFLOW_LIVE`, which turns a missing copy into a failure, and any difference
+ * between the two copies fails it. Without the variable it looks for a sibling checkout of
+ * `nemarDatasets/.github` and SKIPS VISIBLY when there is none. The workflow runs only on a
+ * dispatch the automatic path sends. That path is off until the owner turns its switch on, except
+ * that the finish of an already merged re-pull is sent in production whatever the switch says.
  *
  * The step scripts that guard the run are executed here with bash, as the runner executes them:
  * the validation against the Worker's own payload builder, the mask, the install's release check
@@ -167,6 +169,11 @@ function jobEnvOf(payload: Record<string, unknown>): Record<string, string> {
 /** Executables a test puts first on PATH, each a bash script. */
 type Fakes = Record<string, string>;
 
+/**
+ * One step's script, run by bash in a temp directory as the runner runs it. A test that runs
+ * steps in a loop (about thirty times, at most) is given 20 seconds, the bound
+ * publication-review-workflow.test.ts gives its own loops of step scripts, not the default five.
+ */
 async function runStep(
   name: string,
   opts: {
@@ -426,7 +433,7 @@ describe("the dispatch is checked before anything is installed or minted", () =>
       expect(r.log).toBe("");
       expect(r.stdout).not.toContain(TOKEN);
     }
-  });
+  }, 20_000);
 
   test("a tenth key, a missing key or a value that is not a string is refused", async () => {
     const cases: Array<Record<string, unknown>> = [
@@ -442,7 +449,7 @@ describe("the dispatch is checked before anything is installed or minted", () =>
       expect(r.log).toBe("repull-auto: result phase=failed code=dispatch-invalid\n");
       expect(r.envFile).toBe("");
     }
-  });
+  }, 20_000);
 
   test("every malformed field is refused, and the value is never echoed", async () => {
     const cases: Array<[string, string]> = [
@@ -497,7 +504,7 @@ describe("the dispatch is checked before anything is installed or minted", () =>
     expect(finish.status).toBe(0);
     const { repull_id: _, ...noRepull } = sent({ mode: "finish", repullId: 1 });
     expect((await runStep(VALIDATE, { payload: noRepull })).status).not.toBe(0);
-  });
+  }, 20_000);
 
   test("a tag passes exactly when the Worker's tag rule takes it", async () => {
     for (const tag of [
@@ -517,7 +524,7 @@ describe("the dispatch is checked before anything is installed or minted", () =>
       const takes = isOpenNeuroTag(tag) && !sameUpstreamTag("1.0.0", tag);
       expect([tag, r.status === 0]).toEqual([tag, takes]);
     }
-  });
+  }, 20_000);
 });
 
 describe("production only", () => {
@@ -561,7 +568,7 @@ describe("production only", () => {
       expect([installed, r.status === 0]).toEqual([installed, false]);
       expect(r.log).toBe("repull-auto: result phase=failed code=auto-cli-version\n");
     }
-  });
+  }, 20_000);
 
   test("the CLI signs in with the key in its environment, on no command line, and prints nothing", async () => {
     const login = step("Sign in the nemar CLI");
@@ -577,7 +584,7 @@ describe("production only", () => {
       expect([exit, r.status === 0]).toEqual([exit, exit === 0]);
       expect(r.stdout + r.stderr).toBe("");
     }
-  });
+  }, 20_000);
 });
 
 describe("the CLI runs unattended", () => {
@@ -745,7 +752,7 @@ describe("the backstop reports a run that did not", () => {
     // A refused or failed report does not fail the step either.
     const refused = await runStep(BACKSTOP, { fakes: curlFake("401") });
     expect(refused.status).toBe(0);
-  });
+  }, 20_000);
 
   test("every word the workflow reports is on the closed list, and its result lines are the CLI's", () => {
     const words = [

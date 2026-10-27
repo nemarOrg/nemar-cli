@@ -18,13 +18,23 @@ import { PULL_REQUEST_COLUMNS, type RepullPullRequest, type RepullRow } from "./
 /** The trailer N.0.1's commit and its squash carry beside the re-pull's two. */
 export const REPULL_PATCH_TRAILER = "Repull-Patch";
 
-/** The two lines, exactly as the re-pull commit and its squash merge carry them. */
+/**
+ * The two lines, exactly as the re-pull commit and its squash merge carry them. This is the one
+ * place they are written: the re-pull commit's own message (`execute/synthesize.ts`), the squash
+ * message, the N.0.1 commit (`patchMessage`) and both pull request bodies call it, and
+ * `test/repull-trailers.unit.test.ts` pins each writer's lines to its output.
+ */
 export function repullTrailerLines(r: {
   upstream_ds: string;
   to_tag: string;
   plan_digest: string;
 }): [string, string] {
   return [`Upstream-Snapshot: ${r.upstream_ds}@${r.to_tag}`, `Repull-Plan: ${r.plan_digest}`];
+}
+
+/** N.0.1's third trailer, with the plan's count of corrections: the one place it is written. */
+export function repullPatchTrailerLine(corrections: number): string {
+  return `${REPULL_PATCH_TRAILER}: corrections=${corrections}`;
 }
 
 /**
@@ -90,7 +100,7 @@ export function repullSquashMessage(
       snapshot,
       plan,
       ...(pr === "n1" && typeof corrections === "number"
-        ? [`${REPULL_PATCH_TRAILER}: corrections=${corrections}`]
+        ? [repullPatchTrailerLine(corrections)]
         : []),
     ].join("\n"),
   };

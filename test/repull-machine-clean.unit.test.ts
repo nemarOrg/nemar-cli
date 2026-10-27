@@ -273,6 +273,27 @@ describe("unknown is never clean", () => {
     }
   });
 
+  test("the failed BIDS validation an administrator may merge over is never machine clean", () => {
+    // What `resume` records an administrator's gates on (ADR 0111, the #1983 review amendment):
+    // `unstable`, BIDS validation failed, version-check passed. The automatic path holds it at the
+    // gates and at the merge, by the failed check and, were the check green, by the state.
+    for (const stage of ["gates", "merge"] as const) {
+      expect(
+        holdOf((f) => {
+          f.stage = stage;
+          f.checks.bids = { status: "completed", conclusion: "failure" };
+          pr(f).mergeableState = "unstable";
+        }),
+      ).toBe("bids-failed");
+      expect(
+        holdOf((f) => {
+          f.stage = stage;
+          pr(f).mergeableState = "unstable";
+        }),
+      ).toBe("not-clean");
+    }
+  });
+
   test("a check is green only completed with `success`", () => {
     for (const conclusion of ["neutral", "skipped", "failure", "cancelled", "timed_out", null]) {
       expect([

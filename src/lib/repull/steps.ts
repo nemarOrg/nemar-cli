@@ -36,6 +36,14 @@ export interface ResumeResult {
   row: RepullRow | null;
   outcome: ResumeOutcome;
   waitingFor?: string;
+  /**
+   * `ready` over a failed BIDS validation: on a record an administrator opened, GitHub reports the
+   * pull request `unstable` because BIDS validation fails and nothing else does, read when the
+   * gates are recorded and again by each later resume at the gates, so it merges with
+   * `--bids-failure-reason` (or without it once the validation passes). `resume --json` carries it
+   * as `bids_failure`.
+   */
+  bidsFailure?: true;
 }
 
 export interface ResumeOptions {

@@ -54,6 +54,7 @@ It sets no Worker variable or secret: the four re-pull switches and caps are abs
 - **Phase 5 (#1911): `nemar admin repull plan <id>` plans a re-pull and writes nothing to the mirror, S3, D1 or the NEMAR Application Programming Interface (API).**
   It writes a plan file (mode 0600, under `$NEMAR_CONFIG_DIR/repull/<id>/`) identified by a digest, and prints counts and that file's location, never a path, key or content of the dataset.
   Exit 0 means executable, 3 that a plan was made and is not executable, 1 that nothing was planned.
+  The one exception to "writes nothing" is the central workflow's unattended run, `plan --automatic-dispatch` (Phase 7): it reports its dispatch to the Worker, which stores `started` and then `refused` or `failed` if the run ends so.
   NEMAR's standard edits are recognized and re-applied as functions, never merged as text, and an unexplained path is a conflict or a correction.
 - **Phase 6 (#1912): an administrator takes a re-pull from its plan to a released version.**
   A re-pull's state is a row of `upstream_repulls` (migration 0105; 17 states, one row per attempt, one open row per dataset), never `import_jobs`; outside production only `xx` datasets are re-pulled, and an anonymous dataset is refused with no override.
@@ -68,7 +69,7 @@ It sets no Worker variable or secret: the four re-pull switches and caps are abs
   A daily scheduler, which runs in production at 03:00 Coordinated Universal Time (UTC), dispatches the central workflow `run-upstream-repull.yml` for `stale_ready` mirrors within the open cap, at most once per dataset in 30 days and not before the first two re-pulls were run by an administrator; a 30-minute tick holds, gates and resumes the pull requests it opened.
   The unattended run plans once and hands the plan file to `execute` with a digest-checked handoff (the epic cleanup, #1976), opens the pull request as the GitHub App, `nemar-bot[bot]`, and never merges; its public log carries only counts and fixed words.
   The Worker merges only a machine-clean re-pull pull request the automatic path opened (zero unexplained paths, a `clear` identifier screen, Brain Imaging Data Structure (BIDS) validation and `version-check` green, an ADR 0107 review of that head that passes, the head equal to the screened commit, GitHub `clean`, the merge cap not exhausted), approves nothing, and a finish run then takes the re-pull to `complete`.
-  An administrator may merge a re-pull they opened over a failed BIDS validation (`nemar admin repull merge --bids-failure-reason`, only while GitHub says `unstable`).
+  An administrator may merge a re-pull they opened over a failed BIDS validation (`nemar admin repull merge --bids-failure-reason`, only while GitHub says `unstable` and no other check or status of the head fails); `resume` records the gates of such a pull request, which GitHub never reports `clean` while the validation fails.
   The ADR 0107 review admits one bot's pull request, the App's automatic re-pull, and only when the Worker starts it.
   The Monday report gains `## Upstream re-pulls`, `GET /admin/repulls/dispatches` lists the dispatches, and `nemar admin repull auto` shows the switches, the scheduler, the open automatic re-pulls (filtered by origin since the epic cleanup, #1976) and the recent dispatches.
   The dispatch record is migration 0112, numbered after `dev` took 0111 (the epic cleanup, #1976).
@@ -86,6 +87,26 @@ It sets no Worker variable or secret: the four re-pull switches and caps are abs
   `GET /datasets/:id/versions` (owner, collaborators, administrators) also carries `source_version` and `source_version_basis`.
 - **`nemar dataset release` and `nemar dataset update --bump major` refuse a major version of a mirror** (an `on` id, or a row recorded as an OpenNeuro import), exit 1 before anything is cloned, and point at `nemar admin repull plan`.
   The rule is the CLI's only; the dataset repositories' `version-check` workflow is unchanged (ADR 0020).
+- **The Monday report asks for attention when the scheduler waits for gate G4.**
+  With the open switch on and the scheduler's last tick concluded `waiting-for-manual-run` (the first two re-pulls are not both run by hand to `complete`), the headline and `nemar admin import-weekly` name it as a reason, because a switch turned on early would otherwise change nothing and say nothing.
+  With the switch off the section stays quiet.
+- **Production ignores `OPENNEURO_GRAPHQL_URL`, unless it is a loopback `http` URL.**
+  The staleness reader behind the report, the scheduler and `GET /admin/upstream-status` posts to OpenNeuro's own endpoint in production and in an unknown environment, whatever the binding says, a Worker secret of the same name included.
+  Development, staging and test honor the binding.
+  A loopback `http` address (`127.0.0.1`, `localhost`, `[::1]`) is honored everywhere: the test suites that run the production-only scheduler against a local stand-in use it, and a deployed Worker cannot reach one.
+  `https`, and every other protocol, on a loopback host is refused.
+- **`nemar admin pr-reviews approve --merge` exits 3 while a claim to merge is held.**
+  A lost answer, or a merge GitHub did not make, keeps the claim and exits with the waiting code, as `nemar admin repull merge` does, so the same run again or `nemar admin repull resume` settles it.
+  A refusal with no claim held exits 1.
+- **A re-pull refuses a malformed bucket, region, dataset id, tag, version or commit id where it reads one.**
+  The bucket and datacenter `remote.log` names for `nemar-s3` must be an S3 bucket name and an AWS region: `nemar admin repull plan` refuses (exit 1), `execute` and the release refuse as `nemar-s3-invalid`, and neither the annex-uuid read nor the bucket listing builds a host from one.
+  A plan's dataset ids, tags, versions and its three commit ids must have the shape execution builds a URL, a ref, a branch name or an argument of git from, or `execute` refuses as `plan-schema`.
+  The words name the field and the shape, never the value.
+- **The staleness report and `nemar admin upstream-backfill` read version rows spelled `vN.N.N`.**
+  The report used to ignore them: a mirror whose rows carry the `v` read as unpublished, so it was never compared or dispatched, and a newer `v` row lost to an older bare one.
+  Both spellings are now read together and by number, and the version comes back bare.
+  `nemar admin upstream-backfill --execute` therefore writes more rows than before, the ones spelled `vN.N.N`, each recorded on its own spelling (a dry run, the default, writes nothing).
+  There is no migration, and no recorded value is rewritten.
 - Imports that used to clone HEAD now clone the latest tag. On OpenNeuro's mirrors HEAD and the latest tag normally name the same commit, so most imports are unchanged; a dataset whose mirror carries commits past its latest snapshot is imported at the snapshot.
 - A re-import of a released mirror whose `origin/main` records a tag, and whose upstream published a newer one, used to keep the old tree while copying the new tag's data (#993); it now refuses and parks. An unrecorded tag still takes the hard reset.
 - The Monday import report gains `## Upstream freshness` and `## Upstream re-pulls`, and `nemar admin import-weekly` prints both.

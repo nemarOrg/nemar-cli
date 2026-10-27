@@ -8,7 +8,7 @@
  * DOI and its upstream tag, as `/webhooks/manifest-ready` writes it); everything the re-pull does
  * itself is real: the Worker's verified release route reads the tag and the comparison on the
  * GitHub stand-in, and the lock is the real s3-lock route, signing its requests to the S3
- * stand-in through the test endpoint override. The API is reached through TEST_API_URL in the
+ * stand-in through the test endpoint override. The API is on a loopback port named in the
  * child's environment. No mocks.
  *
  * The properties, each with a test that fails when its line is changed:
@@ -28,7 +28,7 @@
  * object as the stand-in does (in particular the s3-lock route's reading of a 403 as "already
  * locked").
  *
- * CI TIER: integration, like the other CLI suites that start the binary against a local server.
+ * CI TIER: unit-pure. Hermetic: every server the suite starts or reaches listens on loopback.
  */
 
 import {
@@ -41,7 +41,7 @@ import {
   test,
 } from "bun:test";
 import { which } from "bun";
-import { TAG_B, gitIn } from "./helpers/repull-fixture";
+import { TAG_B, gitIn, writeAnnexBranchFile } from "./helpers/repull-fixture";
 import { type RepullWorld, type WorldPoint, startRepullWorld } from "./helpers/repull-pr-world";
 import { toolOrFail } from "./scrub/helpers/require-tools";
 
@@ -277,6 +277,25 @@ describe.skipIf(!awsInstalled)("the release", () => {
     expect(w.row().last_error).toStartWith("[lock:manifest-mismatch]");
     expect(w.s3.calls("PutObjectRetention")).toEqual([]);
     expect(lockOf(other)).toBeUndefined();
+  });
+
+  test("a remote.log that names a bucket S3 cannot have locks nothing: nemar-s3-invalid", async () => {
+    await merged();
+    await tagged();
+    // origin's git-annex branch, which the lock reads live, now names a bucket that is a path.
+    await writeAnnexBranchFile(
+      w.fx.originRepo,
+      "remote.log",
+      `${w.fx.nemarUuid} bucket=evil.example/x# datacenter=us-east-2 encryption=none fileprefix=${w.fx.datasetId}/objects/ name=nemar-s3 type=S3 timestamp=1790000003s\n`,
+    );
+    const run = await resume();
+    expect(run.exitCode, run.all).toBe(3);
+    expect(run.all).toContain("nemar-s3-invalid");
+    expect(run.all).not.toContain("evil.example");
+    expect(w.row().status).toBe("released");
+    expect(w.row().last_error).toStartWith("[lock:nemar-s3-invalid]");
+    expect(w.s3.calls("PutObjectRetention")).toEqual([]);
+    for (const key of writtenKeys()) expect(lockOf(key)).toBeUndefined();
   });
 
   test("a merge commit whose trailers are not its last paragraph is refused at release: it stays merged", async () => {

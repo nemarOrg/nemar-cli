@@ -111,7 +111,15 @@ import { workPaths } from "../src/lib/repull/execute/workdir";
 import { planRepull } from "../src/lib/repull/plan";
 import { ADMIN_TOKEN, APP_TOKEN } from "./helpers/github-standin";
 import { type ReleaseCli, releaseCli } from "./helpers/release-cli";
-import { CONCEPT_DOI, PATHS, TAG_A, TAG_B, UPSTREAM_ID, gitIn } from "./helpers/repull-fixture";
+import {
+  CONCEPT_DOI,
+  PATHS,
+  TAG_A,
+  TAG_B,
+  UPSTREAM_ID,
+  gitIn,
+  writeAnnexBranchFile,
+} from "./helpers/repull-fixture";
 import {
   ADMIN_KEY,
   type RepullWorld,
@@ -790,6 +798,40 @@ describe.skipIf(!awsInstalled)("an automatic run opens its pull request", () => 
       (plan.counts as Record<string, number>).delta_paths += 1;
     });
     await refusedBeforeAnything(c, "plan-refused");
+  });
+
+  test("a plan forged onto a git-annex commit that names a bucket S3 cannot have is refused at prepare: nemar-s3-invalid, nothing uploaded or pushed", async () => {
+    const c = await claimOpen();
+    writeEvent(c);
+    expect((await auto(planArgs(c))).exitCode).toBe(0);
+    // The automatic execute plans nothing again, so only the plan file and its handoff stand between
+    // the run and origin. Origin's git-annex branch moves to a commit whose remote.log names the
+    // bucket as a path (a live plan would refuse it), the plan is forged to name that commit and
+    // digested again, and the handoff is made to name the new digest.
+    const log = await gitIn(w.fx.originRepo, ["show", "refs/heads/git-annex:remote.log"]);
+    const forgedLog = log.replace(/bucket=nemar\b/, "bucket=evil.example/x#");
+    expect(forgedLog).not.toBe(log);
+    await writeAnnexBranchFile(w.fx.originRepo, "remote.log", forgedLog);
+    const head = (await gitIn(w.fx.originRepo, ["rev-parse", "refs/heads/git-annex"])).trim();
+    editPlan((plan) => {
+      (plan.nemar as Record<string, unknown>).annex_commit = head;
+      plan.digest = readPlanFile(JSON.stringify(plan)).digest;
+    });
+    const digest = JSON.parse(readFileSync(join(runner, "plan.json"), "utf8")).digest as string;
+    writeFileSync(join(runner, "plan.json.planner", "digest"), `${digest}\n`);
+
+    const exec = await auto(executeArgs(c));
+    // The record exists (the create came first) and stays planned, with why in the prepare step's
+    // words; the dispatch is reported with the step's class, the word being the record's.
+    expect(exec.exitCode, exec.all).toBe(3);
+    expectQuiet(exec, c, "failed");
+    expect(exec.all).not.toContain("evil.example");
+    expect(dispatchRow(c.id)).toMatchObject({ status: "failed", code: "prepare-failed" });
+    expect(repullRows()).toMatchObject([{ status: "planned", origin: "automatic" }]);
+    expect(repullRows()[0]?.last_error).toStartWith("[prepare:nemar-s3-invalid]");
+    // Nothing was uploaded, pushed or opened.
+    expect(ghWrites()).toEqual([]);
+    expect(s3Writes()).toEqual([]);
   });
 
   test("a plan edited and digested again is not its handoff's plan: not-planned, nothing written", async () => {

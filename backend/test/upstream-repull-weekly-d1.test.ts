@@ -39,11 +39,11 @@ beforeAll(async () => {
        VALUES (7, 'weeklyadmin', 'weeklyadmin@example.org', 'x', 'approved', 'admin', 1)`,
     )
     .run();
-});
+}, 60_000);
 
 afterAll(async () => {
   await mf?.dispose();
-});
+}, 30_000);
 
 async function insert(table: string, row: Row): Promise<number> {
   const cols = Object.keys(row);

@@ -6,20 +6,56 @@
  * before anything is cloned, branched or pushed. The CLI's rule only: the dataset repositories'
  * `version-check` workflow does not read it (ADR 0020).
  *
- * The spawned cases run the real CLI against a local stand-in backend named in config.json (the
- * account's apiUrl), with `git` and `gh` on PATH as shims that record every call: `gh` answers its
- * version probe only, and `git` refuses a clone (so nothing can reach a real repository) and runs
- * every other call. A refusal shows as no clone, branch, commit or push in the record.
+ * The spawned cases run the real CLI against the REAL datasets router over bun:sqlite with every
+ * migration applied, behind its real auth, on a loopback port named in config.json (the account's
+ * apiUrl): the row's `source` and the current version the CLI reads are the Worker's own answers,
+ * not a copy of them. GitHub, which the versions route reads the description from, is the
+ * `Bun.serve()` stand-in. `git` and `gh` are on PATH as shims that record every call. `gh` answers
+ * its version probe and refuses every other call. `git` (`gitShim` below) finds the command past
+ * git's own options (`-c`, `-C`, `--git-dir` and the like) and refuses, with exit 128 and without
+ * running the real git: clone, fetch, pull, push, ls-remote, archive, request-pull, send-pack,
+ * fetch-pack, http-fetch, http-push, svn, p4 and every submodule command; `remote` update, prune,
+ * show and set-head; and every `annex` command but `annex version`. It runs every other call with
+ * the real git. The CLI runs with no GH_TOKEN or GITHUB_TOKEN in its environment. A refusal shows
+ * as no clone, branch, commit or push in the record.
  *
- * CI TIER: unit-pure. Spawns the CLI against a loopback stand-in; no network.
+ * CI TIER: unit-pure. Spawns the CLI against loopback servers only; no network.
  */
 
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import type { Database } from "bun:sqlite";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  setDefaultTimeout,
+  test,
+} from "bun:test";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "bun";
+import { hashApiKey } from "../backend/src/services/token";
+import type { Bindings } from "../backend/src/types/bindings";
+import { freshDb, realD1 } from "../backend/test/helpers/d1";
+import { makeRepullApp } from "../backend/test/helpers/repull-app";
 import { refuseMirrorMajor } from "../src/lib/version-policy";
+import { type GitHubStandin, WORKER_TOKEN, startGitHubStandin } from "./helpers/github-standin";
+
+// A test here runs the CLI from source up to four times, each run bounded by its own 30-second
+// `timeout`. 60 seconds, git-credential.test.ts's bound for the same spawn, lets a hung run fail
+// on its own limit, with its output, instead of the default five seconds cutting the test short.
+setDefaultTimeout(60_000);
 
 describe("refuseMirrorMajor", () => {
   const ask = (datasetId: string, source: string | null, current: string, next: string) =>
@@ -73,47 +109,126 @@ const SCRUBBED = [
   "NO_PROXY",
   "FORCE_COLOR",
   "CLICOLOR_FORCE",
+  // No credential for GitHub: the gh shim answers in its place, and the real git reaches no remote.
+  "GH_TOKEN",
+  "GITHUB_TOKEN",
 ];
 
-/** The rows the stand-in serves: two mirrors (an `on` id, an `xx` OpenNeuro import) and a dataset that is not one. */
+/** Commands that can reach a remote, which the git shim refuses wherever they stand. */
+const REFUSED_COMMANDS = [
+  "clone",
+  "fetch",
+  "pull",
+  "push",
+  "ls-remote",
+  "archive",
+  "request-pull",
+  "send-pack",
+  "fetch-pack",
+  "http-fetch",
+  "http-push",
+  "svn",
+  "p4",
+  "submodule",
+];
+/** The `remote` subcommands that ask the remote itself. */
+const REFUSED_REMOTE = ["update", "prune", "show", "set-head"];
+/** What the shim writes when the CLI was handed a GitHub token. */
+const TOKEN_SEEN = "a GitHub token is in the environment";
+
+/**
+ * The git shim: every call recorded in `log`, the command found past git's own options (one that
+ * takes a value skips it too), and a call that can reach a remote refused with exit 128 before
+ * `realGit` runs. Everything else is handed to `realGit`.
+ */
+function gitShim(log: string, realGit: string): string {
+  return [
+    "#!/bin/sh",
+    `printf 'git %s\\n' "$*" >> '${log}'`,
+    `if [ -n "$GH_TOKEN$GITHUB_TOKEN" ]; then printf '${TOKEN_SEEN}\\n' >> '${log}'; fi`,
+    'refuse() { echo "git $*: refused by the test\'s shim, it can reach a remote" >&2; exit 128; }',
+    "verb=; sub=; skip=",
+    'for arg in "$@"; do',
+    '  if [ -n "$skip" ]; then skip=; continue; fi',
+    '  if [ -z "$verb" ]; then',
+    '    case "$arg" in',
+    "      -c|-C|--git-dir|--work-tree|--namespace|--config-env|--super-prefix) skip=1 ;;",
+    "      -*) ;;",
+    "      *) verb=$arg ;;",
+    "    esac",
+    "  else",
+    '    case "$arg" in -*) ;; *) sub=$arg; break ;; esac',
+    "  fi",
+    "done",
+    'case "$verb" in',
+    `  ${REFUSED_COMMANDS.join("|")}) refuse "$@" ;;`,
+    `  remote) case "$sub" in ${REFUSED_REMOTE.join("|")}) refuse "$@" ;; esac ;;`,
+    '  annex) [ "$sub" = version ] || refuse "$@" ;;',
+    "esac",
+    `exec '${realGit}' "$@"`,
+    "",
+  ].join("\n");
+}
+
+const API_KEY = "mirror-major-owner-key-0123456789abcdef0123456789abcdef";
+
+/** The rows the API holds: two mirrors (an `on` id, an `xx` OpenNeuro import) and a dataset that is not one. */
 const ROWS: Record<string, { source: string | null; source_id: string | null }> = {
   on000001: { source: "openneuro", source_id: "ds000001" },
   xx090123: { source: "openneuro", source_id: "ds000123" },
   nm000200: { source: null, source_id: null },
 };
 
+let db: Database;
+let gh: GitHubStandin;
 let backend: ReturnType<typeof Bun.serve>;
 let root: string;
 let configDir: string;
 let shims: string;
 let log: string;
+const handle = makeRepullApp();
 
-beforeAll(() => {
+beforeAll(async () => {
+  db = freshDb();
+  db.run(
+    `INSERT INTO users (id, username, email, password_hash, status, role, email_verified)
+     VALUES (1, 'mirrorowner', 'mirrorowner@example.org', 'x', 'approved', 'member', 1)`,
+  );
+  db.query("INSERT INTO tokens (user_id, api_key_hash, api_key_prefix) VALUES (1, ?, ?)").run(
+    await hashApiKey(API_KEY),
+    API_KEY.slice(0, 8),
+  );
+  // No version rows: the versions route's current version is then the description's, which the
+  // GitHub stand-in answers 404 for, so the route's own default, v1.0.0.
+  for (const [id, row] of Object.entries(ROWS)) {
+    db.run(
+      `INSERT INTO datasets (dataset_id, name, owner_user_id, status, visibility, github_repo,
+                             source, source_id)
+       VALUES (?, 'A sufficiently descriptive fixture title', 1, 'active', 'public', ?, ?, ?)`,
+      [id, NO_SUCH_REPO, row.source, row.source_id],
+    );
+  }
+  gh = startGitHubStandin();
+  (globalThis as { NEMAR_GITHUB_API_URL?: string }).NEMAR_GITHUB_API_URL = gh.url;
+  const env = {
+    DB: realD1(db),
+    ENVIRONMENT: "production",
+    GITHUB_ADMIN_PAT: WORKER_TOKEN,
+  } as Bindings;
   backend = Bun.serve({
     port: 0,
     fetch(req) {
-      const { pathname } = new URL(req.url);
-      if (pathname === "/notices") return Response.json({ notices: [] });
-      const m = /^\/datasets\/([a-z]{2}\d{6})(\/versions)?$/.exec(pathname);
-      const row = m ? ROWS[m[1] as string] : undefined;
-      if (!m || !row) return Response.json({ error: "not found" }, { status: 404 });
-      if (m[2]) {
-        return Response.json({ dataset_id: m[1], current_version: "v1.0.0", versions: [] });
-      }
-      return Response.json({
-        dataset: {
-          dataset_id: m[1],
-          name: "Stand-in dataset",
-          github_repo: NO_SUCH_REPO,
-          status: "active",
-          visibility: "public",
-          ...row,
-        },
-      });
+      // The CLI's notices banner, which no route here serves; answered as the re-pull suites do.
+      if (new URL(req.url).pathname === "/notices") return Response.json({ notices: [] });
+      return handle(req, env);
     },
   });
 });
-afterAll(() => backend.stop(true));
+afterAll(() => {
+  backend.stop(true);
+  gh.stop();
+  (globalThis as { NEMAR_GITHUB_API_URL?: string }).NEMAR_GITHUB_API_URL = undefined;
+});
 
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), "nemar-mirror-major-"));
@@ -130,16 +245,15 @@ beforeEach(() => {
       accounts: {
         "mirror-major": {
           apiUrl: `http://127.0.0.1:${backend.port}`,
-          apiKey: "mirror-major-key-0123456789abcdef",
+          apiKey: API_KEY,
         },
       },
     }),
   );
-  // git: every call recorded; a clone refused (nothing may reach a real repository).
-  writeFileSync(
-    join(shims, "git"),
-    `#!/bin/sh\nprintf 'git %s\\n' "$*" >> '${log}'\ncase "$1" in clone) exit 128;; esac\nexec '${REAL_GIT}' "$@"\n`,
-  );
+  // git: every call recorded; one that can reach a remote refused, so nothing can reach a real
+  // repository. The update case's clone names `nemarDatasets/<id>` on GitHub as its origin, and a
+  // regression past the refusal used to push there: a mutation of the detail route showed it.
+  writeFileSync(join(shims, "git"), gitShim(log, REAL_GIT));
   // gh: its version probe answered, every other call recorded and refused.
   writeFileSync(
     join(shims, "gh"),
@@ -273,6 +387,100 @@ describe("nemar dataset update", () => {
       expect(JSON.parse(readFileSync(join(dir, "dataset_description.json"), "utf8")).Version).toBe(
         "1.0.0",
       );
+    }
+  });
+});
+
+describe("the git shim reaches no remote", () => {
+  // Here the shim stands in front of a recorder instead of the real git, so a refused call that got
+  // through would show in the recorder's record; the calls it allows show that it is reached.
+  let dir: string;
+  let shim: string;
+  let reached: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "nemar-git-shim-"));
+    reached = join(dir, "reached.log");
+    const recorder = join(dir, "real-git");
+    writeFileSync(recorder, `#!/bin/sh\nprintf '%s\\n' "$*" >> '${reached}'\n`);
+    shim = join(dir, "git");
+    writeFileSync(shim, gitShim(join(dir, "calls.log"), recorder));
+    chmodSync(recorder, 0o755);
+    chmodSync(shim, 0o755);
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  const runShim = (args: string[]) =>
+    Bun.spawnSync([shim, ...args], { cwd: dir, env: { PATH: process.env.PATH ?? "" } });
+  const realCalls = () =>
+    existsSync(reached) ? readFileSync(reached, "utf8").split("\n").filter(Boolean) : [];
+
+  for (const args of [
+    ["-c", "key=value", "push", "origin", "main"],
+    ["-C", "/tmp", "push", "origin", "main"],
+    ["--git-dir=/tmp/x.git", "fetch", "origin"],
+    ["--git-dir", "/tmp/x.git", "fetch", "origin"],
+    ["-c", "a=b", "-C", "/tmp", "remote", "update"],
+    ["remote", "update"],
+    ["remote", "-v", "show", "origin"],
+    ["remote", "prune", "origin"],
+    ["remote", "set-head", "origin", "--auto"],
+    ["annex", "sync"],
+    ["-C", "/tmp", "annex", "copy", "--to", "origin", "."],
+    ["annex", "get", "sub-01"],
+    ["submodule", "update", "--init"],
+    ["clone", "https://github.com/nemarDatasets/on000001.git"],
+    ["fetch"],
+    ["pull"],
+    ["push"],
+    ["ls-remote", "origin"],
+  ]) {
+    test(`git ${args.join(" ")}: refused, and the real git never runs`, () => {
+      const r = runShim(args);
+      expect([r.exitCode, r.stderr.toString()]).toEqual([
+        128,
+        expect.stringContaining("refused by the test's shim"),
+      ]);
+      expect(realCalls()).toEqual([]);
+    });
+  }
+
+  test("the calls the CLI makes here before a refusal still reach the real git", () => {
+    const allowed = [
+      ["--version"],
+      ["status", "--porcelain"],
+      ["-C", "/tmp", "rev-parse", "--abbrev-ref", "HEAD"],
+      ["remote", "get-url", "origin"],
+      ["remote", "-v"],
+      ["annex", "version"],
+    ];
+    for (const args of allowed) expect([args, runShim(args).exitCode]).toEqual([args, 0]);
+    expect(realCalls()).toEqual(allowed.map((a) => a.join(" ")));
+  });
+
+  test("the header names every command the shim refuses", () => {
+    const header = readFileSync(import.meta.path, "utf8").split("*/")[0] as string;
+    for (const word of [...REFUSED_COMMANDS, ...REFUSED_REMOTE]) {
+      expect([word, header.includes(word)]).toEqual([word, true]);
+    }
+  });
+
+  test("the CLI runs with no GitHub token, whatever the test process holds", async () => {
+    const saved = [process.env.GH_TOKEN, process.env.GITHUB_TOKEN];
+    process.env.GH_TOKEN = "ghp_mirror_major_must_not_pass";
+    process.env.GITHUB_TOKEN = "ghp_mirror_major_must_not_pass";
+    try {
+      writeFileSync(log, "");
+      await cli(["dataset", "release", "on000001", "--type", "major", "--yes"]);
+      const record = readFileSync(log, "utf8");
+      // The CLI asked git something, so the shim ran and looked.
+      expect(record).toContain("git --version");
+      expect(record).not.toContain(TOKEN_SEEN);
+    } finally {
+      for (const [i, key] of (["GH_TOKEN", "GITHUB_TOKEN"] as const).entries()) {
+        const value = saved[i];
+        if (value === undefined) Reflect.deleteProperty(process.env, key);
+        else process.env[key] = value;
+      }
     }
   });
 });

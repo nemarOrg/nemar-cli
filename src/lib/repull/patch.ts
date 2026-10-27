@@ -37,7 +37,7 @@ import {
   type CanonicalJsonValue,
   canonicalJson,
 } from "../../../shared/neurobagel/canonical-json.js";
-import { REPULL_PATCH_TRAILER } from "../../../shared/repull-squash.js";
+import { REPULL_PATCH_TRAILER, repullPatchTrailerLine } from "../../../shared/repull-squash.js";
 import { type RepullRow, patchVersionOf } from "../../../shared/repull-state.js";
 import { DESCRIPTION_PATH } from "./description.js";
 import type { PlanBody } from "./digest.js";
@@ -325,7 +325,7 @@ export function patchMessage(row: RepullRow, s: PatchSelection, version: string)
     "",
     snapshot,
     plan,
-    `${PATCH_TRAILER}: corrections=${s.corrections}`,
+    repullPatchTrailerLine(s.corrections),
     "",
   ].join("\n");
 }

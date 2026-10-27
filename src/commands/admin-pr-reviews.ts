@@ -2110,11 +2110,17 @@ prReviewsCommand
         );
         if (!gated.merged) {
           console.log(chalk.yellow(`Not merged (${gated.stage}): ${gated.reason}`));
-          process.exit(1);
+          // While a claim to merge is held and nothing more is known, the exit is the waiting
+          // code, as `repull merge` exits it: the same run again, or resume, settles it. That code
+          // is the command's answer, so no debug log is asked for, as `repull merge` marks it.
+          if (gated.claimHeld) markReportedExit();
+          process.exit(gated.claimHeld ? EXIT_WAITING : 1);
         }
         if (!gated.recorded) {
-          // Merged on GitHub, not on the record: resume reads GitHub and records it.
+          // Merged on GitHub, not on the record: resume reads GitHub and records it. The waiting
+          // code is the answer here too.
           console.log(chalk.yellow(notRecordedLine(dataset, pr)));
+          markReportedExit();
           process.exit(EXIT_WAITING);
         }
         console.log(chalk.green(`Merged ${dataset} #${pr} (squash, through the re-pull's gate).`));

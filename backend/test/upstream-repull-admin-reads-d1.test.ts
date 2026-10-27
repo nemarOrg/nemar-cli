@@ -30,11 +30,11 @@ beforeAll(async () => {
   });
   d1 = await mf.getD1Database("DB");
   await applyMigrations(d1, migrationFiles());
-});
+}, 60_000);
 
 afterAll(async () => {
   await mf?.dispose();
-});
+}, 30_000);
 
 async function dispatch(o: {
   dataset: string;
