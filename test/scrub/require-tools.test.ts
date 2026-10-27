@@ -1,8 +1,8 @@
 /**
- * The CI rule for the suites that need a tool: a missing tool is a failure when `CI` is set or
- * NEMAR_REQUIRE_SCRUB_TOOLS=1, and a clean skip otherwise. Run in a real subprocess with an empty
- * PATH, so no tool resolves, and an environment built from nothing, so the runner's own `CI`
- * cannot leak into the cases that leave it out.
+ * The CI rule for the suites that need a tool: a missing tool is a failure when
+ * NEMAR_REQUIRE_SCRUB_TOOLS=1 and a clean skip otherwise, `CI` or not. Run in a real subprocess
+ * with an empty PATH, so no tool resolves, and an environment built from nothing, so the
+ * runner's own variables cannot leak into the cases that leave them out.
  */
 
 import { describe, expect, test } from "bun:test";
@@ -48,18 +48,19 @@ describe("NEMAR_REQUIRE_SCRUB_TOOLS", () => {
   });
 });
 
-describe("CI", () => {
-  test("set as GitHub Actions sets it, a missing tool is an error that names it and why", async () => {
+describe("CI alone does not require the tools", () => {
+  // nightly-tests.yml and bump-validator.yml run dev's tests with main's workflow files, which do
+  // not install every tool, and GitHub sets CI=true in every job: CI alone must stay a skip.
+  test("CI=true without the variable: the same missing tools are a clean skip", async () => {
     const r = await importFixture({ CI: "true" });
-    expect(r.exitCode).not.toBe(0);
-    expect(r.stderr).toContain("CI is set and a required tool is missing: git");
+    expect(r.exitCode, r.stderr).toBe(0);
+    expect(JSON.parse(r.stdout)).toEqual({ tools: false, annex: false });
   });
 
-  test("set to false, 0 or nothing, it is not a CI run, and a missing tool is a clean skip", async () => {
-    for (const ci of ["false", "0", ""]) {
-      const r = await importFixture({ CI: ci });
-      expect([ci, r.exitCode], r.stderr).toEqual([ci, 0]);
-      expect(JSON.parse(r.stdout)).toEqual({ tools: false, annex: false });
+  test("only the value 1 requires them: 0, true and empty are a clean skip", async () => {
+    for (const value of ["0", "true", ""]) {
+      const r = await importFixture({ CI: "true", NEMAR_REQUIRE_SCRUB_TOOLS: value });
+      expect([value, r.exitCode], r.stderr).toEqual([value, 0]);
     }
   });
 });

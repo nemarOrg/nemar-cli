@@ -178,6 +178,12 @@ export interface GitHubStandin {
    */
   statuses: Record<string, Array<{ context: string; state: string }>>;
   /**
+   * A check-runs or combined-status read answered with this HTTP status instead, keyed
+   * `<dataset>@<sha>/check-runs` or `<dataset>@<sha>/status`: GitHub failing that one read, an
+   * error-path fixture. None unless a test adds one.
+   */
+  readFaults: Record<string, number>;
+  /**
    * When true, the review POST and the merge PUT are APPLIED and answered 200 with a body that is
    * not JSON: the case where a write happened and its answer cannot be read.
    */
@@ -232,6 +238,7 @@ export function startGitHubStandin(): GitHubStandin {
     compareCommits: null as GitHubStandin["compareCommits"],
     checkRuns: {} as GitHubStandin["checkRuns"],
     statuses: {} as GitHubStandin["statuses"],
+    readFaults: {} as GitHubStandin["readFaults"],
     expiredTokens: new Set<string>(),
   };
   /** The head a pull request has now: its branch's commit when heads are live. */
@@ -314,6 +321,8 @@ export function startGitHubStandin(): GitHubStandin {
         /^\/repos\/nemarDatasets\/([^/]+)\/commits\/([0-9a-f]{40})\/check-runs$/,
       );
       if (req.method === "GET" && runs) {
+        const fault = state.readFaults[`${runs[1]}@${runs[2]}/check-runs`];
+        if (fault) return Response.json({ message: "Server Error" }, { status: fault });
         const name = url.searchParams.get("check_name");
         const app = url.searchParams.get("app_id");
         const kept = (state.checkRuns[`${runs[1]}@${runs[2]}`] ?? []).filter(
@@ -335,6 +344,8 @@ export function startGitHubStandin(): GitHubStandin {
         /^\/repos\/nemarDatasets\/([^/]+)\/commits\/([0-9a-f]{40})\/status$/,
       );
       if (req.method === "GET" && combined) {
+        const fault = state.readFaults[`${combined[1]}@${combined[2]}/status`];
+        if (fault) return Response.json({ message: "Server Error" }, { status: fault });
         const list = state.statuses[`${combined[1]}@${combined[2]}`] ?? [];
         // GitHub's combined state: `pending` with no status at all, as it answers then.
         const word =
@@ -760,6 +771,9 @@ export function startGitHubStandin(): GitHubStandin {
     get statuses() {
       return state.statuses;
     },
+    get readFaults() {
+      return state.readFaults;
+    },
     reset() {
       state.seen.length = 0;
       state.searchPages = [];
@@ -784,6 +798,7 @@ export function startGitHubStandin(): GitHubStandin {
       for (const k of Object.keys(state.pulls)) delete state.pulls[k];
       for (const k of Object.keys(state.checkRuns)) delete state.checkRuns[k];
       for (const k of Object.keys(state.statuses)) delete state.statuses[k];
+      for (const k of Object.keys(state.readFaults)) delete state.readFaults[k];
       for (const k of Object.keys(state.naming)) delete state.naming[k];
       for (const k of Object.keys(state.users)) delete state.users[k];
       for (const k of Object.keys(reads)) delete reads[k];

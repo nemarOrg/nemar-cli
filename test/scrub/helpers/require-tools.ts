@@ -1,29 +1,20 @@
 /**
- * A suite that needs an external tool skips cleanly on a developer machine without it, and FAILS
- * in CI: wherever `CI` is set (GitHub Actions sets `CI=true` in every job), or where
- * `NEMAR_REQUIRE_SCRUB_TOOLS=1`. A skipped suite reports green, and these suites guard tools that
- * delete locked objects and rewrite published history, so every CI job that runs one installs its
- * tools and names them in a "Tool versions" step before the tests.
+ * A suite that needs an external tool skips cleanly on a machine without it, and FAILS where
+ * `NEMAR_REQUIRE_SCRUB_TOOLS=1`: a skipped suite reports green, and these suites guard tools that
+ * delete locked objects and rewrite published history.
  *
- * `CI` is read by the same rule as `gitAnnexGate`'s (test/helpers/git-annex-gate.ts).
+ * The variable is set at job level by every CI job that installs the tools: test.yml's
+ * unit-pure-shard, integration-dev and scrub-tools-shard, and deploy-backend.yml's test-gate. It
+ * is not keyed on `CI`, because nightly-tests.yml and bump-validator.yml run dev's tests with the
+ * workflow files on main, which do not install every tool until a release carries them there.
  */
 
-import { ciIsSet } from "../../helpers/git-annex-gate";
-
-/** Why a missing tool is a failure in this process, or null where it is a clean skip. */
-const REQUIRED_BECAUSE: string | null =
-  process.env.NEMAR_REQUIRE_SCRUB_TOOLS === "1"
-    ? "NEMAR_REQUIRE_SCRUB_TOOLS=1"
-    : ciIsSet(process.env.CI)
-      ? "CI is set"
-      : null;
-
-export const REQUIRE_TOOLS = REQUIRED_BECAUSE !== null;
+export const REQUIRE_TOOLS = process.env.NEMAR_REQUIRE_SCRUB_TOOLS === "1";
 
 /** `ok` as given, or a thrown error naming the missing tool when tools are required. */
 export function toolOrFail(name: string, ok: boolean): boolean {
-  if (!ok && REQUIRED_BECAUSE !== null) {
-    throw new Error(`${REQUIRED_BECAUSE} and a required tool is missing: ${name}`);
+  if (!ok && REQUIRE_TOOLS) {
+    throw new Error(`NEMAR_REQUIRE_SCRUB_TOOLS=1 and a required tool is missing: ${name}`);
   }
   return ok;
 }

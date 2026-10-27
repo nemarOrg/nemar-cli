@@ -58,6 +58,7 @@ import { startOpenNeuroStandin } from "./helpers/openneuro-standin";
 import { startRawHost } from "./helpers/raw-mirror-standin";
 import { type Row, SHA, rowAt } from "./helpers/repull-rows";
 import { type CapturedEmail, withFakeResend } from "./helpers/resend";
+import { insideOneUtcDay } from "./helpers/utc-day";
 
 const SECRET = "repull-scheduler-test-secret";
 const PAT = "repull-scheduler-test-pat";
@@ -117,6 +118,8 @@ let ownerId = 0;
 
 beforeEach(async () => {
   db = freshDb();
+  // The day caps count a UTC day on the database's clock, and no claim takes a clock.
+  await insideOneUtcDay(db);
   openneuro.reset();
   openneuro.synthetic(true);
   raw.reset();

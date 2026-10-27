@@ -544,3 +544,49 @@ describe.skipIf(!awsInstalled)("the override in the normal order: resume, then t
     expect(w.row()).toMatchObject({ status: "gates_clear", gates_sha: head });
   });
 });
+
+/**
+ * GitHub failing one of the two reads the override rests on (`src/lib/repull/bids-only.ts`: every
+ * check run of the head, and its combined status), with the administrator's own token. The stand-in
+ * answers that read with an HTTP error, an error-path fixture; unknown is never BIDS-only.
+ */
+describe.skipIf(!awsInstalled)(
+  "an HTTP error on a read of the head's checks refuses the override",
+  () => {
+    const reads = [
+      ["check-runs", "the check runs of"],
+      ["status", "the commit statuses of"],
+    ] as const;
+
+    for (const [read, words] of reads) {
+      test(`the ${read} read answers 500: the merge over BIDS is refused before anything is written`, async () => {
+        const head = await toGates();
+        bidsFailed(head);
+        w.gh.readFaults[`${w.fx.datasetId}@${head}/${read}`] = 500;
+        const writes = w.apiWrites.length;
+        const run = await overrideMerge();
+        expect(run.exitCode, run.all).toBe(1);
+        expect(run.all).toContain("(github)");
+        expect(run.all).toContain(`${words} ${head.slice(0, 12)} could not be read`);
+        expect(run.all).toContain("HTTP 500");
+        expect(w.apiWrites.length).toBe(writes);
+        expect(merges()).toEqual([]);
+        expect(auditOf("repull_bids_override")).toEqual([]);
+        expect(w.row()).toMatchObject({ status: "gates_clear", merge_claim_sha: null });
+      });
+
+      test(`the ${read} read answers 500: resume does not record the gates of a BIDS-only head`, async () => {
+        const head = w.row().head_sha as string;
+        bidsFailed(head);
+        w.gh.readFaults[`${w.fx.datasetId}@${head}/${read}`] = 500;
+        expect((await resume()).exitCode).toBe(3);
+        await w.reportScreen(head, "clean");
+        const run = await resume();
+        expect(run.exitCode, run.all).toBe(3);
+        expect(run.all).toContain("it reports 'unstable'");
+        expect(run.all).toContain(`${words} ${head.slice(0, 12)} could not be read`);
+        expect(w.row()).toMatchObject({ status: "pr_open", gates_sha: null });
+      });
+    }
+  },
+);
