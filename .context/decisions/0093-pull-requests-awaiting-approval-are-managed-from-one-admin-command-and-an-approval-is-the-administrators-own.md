@@ -8,6 +8,8 @@ Partially superseded by [ADR 0107](0107-dataset-pull-requests-are-screened-on-co
 `allow` only clears an administrator's block, `start --all` no longer stops on a daily pool, the queue gains the verdict `exempt` and a volume line, and the review will join the required checks where its ruleset exists.
 Its "What this supersedes" section lists what it replaces here.
 Narrowed by [ADR 0111](0111-an-upstream-re-pull-is-a-reviewed-delta-on-a-release-branch.md) (its Phase 7g amendment, 2026-10-26) in one aspect, the merge, for one class only: a machine-clean re-pull pull request the automatic path opened, which the Worker merges while `AUTO_REPULL_MERGE_ENABLED` is on, approving nothing; the approval sentences stand as written, and every other pull request is approved and merged as this record says.
+*Annotated 2026-10-27: "while `AUTO_REPULL_MERGE_ENABLED` is on" is shorter than the rule.
+The Worker merges only in production, and only when `AUTO_REPULL_ENABLED` and `AUTO_REPULL_MERGE_ENABLED` are both exactly `"1"` (`autoRepullMergeEnabled`, `backend/src/services/repull-switches.ts`); the merge switch alone does nothing.*
 
 Follows ADR 0092 (the review this command lists and acts on), ADR 0001 (published datasets are
 PR-only), ADR 0054 and ADR 0086 (unknown is never zero, and never clear).
@@ -288,6 +290,7 @@ ADR 0107 already partially supersedes this record, and ADR 0111 narrows one more
 The approval sentences stand as written, "its approval is made by the administrator, from their machine, with their own GitHub login" and "No Worker code path approves", because the Worker will submit no review.
 What will change for that class is that a merge no longer always follows an administrator's approval and `--merge` or `y`.
 While `AUTO_REPULL_MERGE_ENABLED` is on, the Worker will merge one that is machine clean: zero unexplained paths, an identifier screen that says `clear`, BIDS validation and `version-check` green, an ADR 0107 review stored for that head whose verdict is `pass` (any other verdict, or none, is not machine clean), a head equal to the screened SHA, the daily merge cap claimed, and GitHub reporting `clean`.
+*Annotated 2026-10-27: and only in production with `AUTO_REPULL_ENABLED` exactly `"1"` as well; see the annotation on this record's header.*
 Every other pull request, and a re-pull pull request that is not machine clean or that an administrator opened, will be approved and merged as this record says.
 For a re-pull pull request this command will add two checks once built: an identifier screen of that head that is `clear` or carries the administrator's recorded acknowledgment (ADR 0086), which `approve --merge` does not require today, and a claim on the re-pull daily merge cap from the backend before the merge is sent.
 AGENTS.md's summary of this record ("nothing merges without `--merge` or a `y`") is updated by the phase that builds the merge.

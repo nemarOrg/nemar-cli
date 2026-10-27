@@ -21,6 +21,7 @@
  */
 
 import { AwsCliError, failureWord } from "../../../scripts/scrub/s3/s3-lib.js";
+import { repullPatchTrailerLine, repullTrailerLines } from "../../../shared/repull-squash.js";
 import { type RepullRow, patchVersionOf } from "../../../shared/repull-state.js";
 import { getApiUrl } from "../api/client.js";
 import { transitionRepull } from "../api/repull.js";
@@ -104,9 +105,8 @@ export function patchBody(row: RepullRow, s: PatchSelection, version: string): s
     "The squash commit message must end with the re-pull's trailers, as its last paragraph; the merge path writes that message itself and refuses one that does not:",
     "",
     "```",
-    `Upstream-Snapshot: ${row.upstream_ds}@${row.to_tag}`,
-    `Repull-Plan: ${row.plan_digest}`,
-    `Repull-Patch: corrections=${s.corrections}`,
+    ...repullTrailerLines(row),
+    repullPatchTrailerLine(s.corrections),
     "```",
     "",
     "Do not merge this from GitHub's page.",
@@ -120,8 +120,10 @@ export async function patchTurn(ctx: ResumeContext, row: RepullRow): Promise<Tur
   const takeOurs = ctx.opts.takeOurs ?? [];
   if (typeof corrections !== "number" || typeof conflicts !== "number") {
     // Unknown is never zero: a record that does not say is not completed.
+    // The record stays open and blocks the dataset's next re-pull, so the way out is named:
+    // abandon ends a released record as patch_declined, with v<N.0.0> still released.
     ctx.opts.out(
-      `Re-pull #${row.id}'s record does not say how many corrections and conflicts its plan has, so it is not completed; it stays released.`,
+      `Re-pull #${row.id}'s record does not say how many corrections and conflicts its plan has, so it is not completed; it stays released, and it blocks ${row.dataset_id}'s next re-pull until it is ended. nemar admin repull abandon ${row.dataset_id} ends it as patch_declined (v${row.to_version} stays released and N.0.1 is not made).`,
     );
     return { kind: "done", result: { row, outcome: "released" } };
   }

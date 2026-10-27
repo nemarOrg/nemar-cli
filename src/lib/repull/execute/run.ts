@@ -1191,6 +1191,7 @@ async function prepareOnce(ctx: RunContext, row: RepullRow, baseSha: string): Pr
 
   // NEMAR's bucket and the uuid uploads register against: what remote.log names, as the plan read.
   const remote = nemarRemoteOf(await readRemoteLog(repo), datasetId);
+  if (remote.problem !== null) throw new ExecuteRefused("nemar-s3-invalid", remote.problem);
   const bucket = remote.record?.bucket;
   if (!remote.uuid || !bucket) {
     throw new ExecuteRefused("no-nemar-s3", "NEMAR's remote.log names no single nemar-s3 bucket.");

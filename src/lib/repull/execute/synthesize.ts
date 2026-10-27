@@ -24,6 +24,7 @@ import {
   PROVENANCE_PATH,
   PROVENANCE_README_PATH,
 } from "../../../../shared/privacy-correction-text.js";
+import { repullTrailerLines } from "../../../../shared/repull-squash.js";
 import { listAnnexedKeys } from "../../git-annex/transfer.js";
 import {
   type ImportScrubResult,
@@ -459,8 +460,11 @@ export async function synthesizeCommit(args: {
       `Recording headers scrubbed: ${c.headers_scrubbed}; acquisition dates set: ${c.headers_dates_normalized}; JSON values blanked: ${c.json_values_blanked}.`,
     ].join("\n"),
     "",
-    `Upstream-Snapshot: ${facts.ds}@${facts.toTag}`,
-    `Repull-Plan: ${args.digest}`,
+    ...repullTrailerLines({
+      upstream_ds: facts.ds,
+      to_tag: facts.toTag,
+      plan_digest: args.digest,
+    }),
     "",
   ].join("\n");
   const when = `${Math.floor(rowTime(args.createdAt).getTime() / 1000)} +0000`;

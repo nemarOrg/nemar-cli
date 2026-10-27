@@ -4,12 +4,13 @@
  * rests on, pinned so a later "simplification" cannot remove one without a test saying which.
  *
  * The workflow is authored in this repository and deployed by copying it whole into
- * `nemarDatasets/.github`, in a pull request held until the epic ships. The parity check at the
- * bottom compares the two byte for byte. The `unit-pure-shard` CI job checks the deployed copy out
- * of `nemarDatasets/.github` `main` and names it in `NEMAR_REPULL_WORKFLOW_LIVE`, which turns a
- * missing copy into a failure: the job stays red until that pull request is merged, and from then
- * on any difference between the two copies fails it. Without the variable it looks for a sibling
- * checkout of `nemarDatasets/.github` and SKIPS VISIBLY when there is none.
+ * `nemarDatasets/.github`, where it is merged (`nemarDatasets/.github#148`); it is not held for the
+ * epic's release. The parity check at the bottom compares the two byte for byte. The
+ * `unit-pure-shard` CI job checks the deployed copy out of `nemarDatasets/.github` `main` and names
+ * it in `NEMAR_REPULL_WORKFLOW_LIVE`, which turns a missing copy into a failure, and any difference
+ * between the two copies fails it. Without the variable it looks for a sibling checkout of
+ * `nemarDatasets/.github` and SKIPS VISIBLY when there is none. The workflow runs only on a
+ * dispatch the automatic path sends, and that path is off until the owner turns its switch on.
  *
  * The step scripts that guard the run are executed here with bash, as the runner executes them:
  * the validation against the Worker's own payload builder, the mask, the install's release check

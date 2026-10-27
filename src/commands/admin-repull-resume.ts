@@ -152,7 +152,8 @@ of the description. The README family is replayed as a unit.
 
 Exit codes:
   0  ready to merge (gates_clear, patch_gates_clear), complete, or released with a record that
-     does not say how many corrections and conflicts its plan has (it is not completed).
+     does not say how many corrections and conflicts its plan has (it is not completed, and it
+     blocks the dataset's next re-pull until \`nemar admin repull abandon <id>\` ends it).
   3  waiting (for the screen, GitHub, a person, your decision on conflicts) after
      --wait-minutes, or stopped with why recorded on the record; run resume again.
   1  refused before anything was written, nothing to resume, or the record ended (abandoned,

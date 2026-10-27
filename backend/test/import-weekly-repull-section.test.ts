@@ -1335,6 +1335,22 @@ describe("each reason asks for attention alone", () => {
       footer: "a scheduler that stopped while a switch is on",
     },
     {
+      // Gate G4: the tick ran and dispatched nothing, because the two first re-pulls are not both
+      // run by hand. A switch an administrator turned on that will not start by itself.
+      name: "a switch on and a scheduler waiting for the two first re-pulls to be run by hand",
+      env: ON,
+      seed: () =>
+        stampScheduler({
+          tick: at(-HOUR),
+          outcome: "waiting-for-manual-run",
+          advance: at(-HOUR / 2),
+        }),
+      phrase:
+        "the automatic re-pull is on, and its scheduler is waiting for the two first re-pulls to be run by hand",
+      footer:
+        "a scheduler that waits for the two first re-pulls to be run by hand while a switch is on",
+    },
+    {
       name: "a dispatch nobody answered",
       seed: () => seedDispatch({ status: "unreported", at: WEEK }),
       phrase: "1 re-pull dispatch(es) were not reported by their run in time",
@@ -1489,6 +1505,27 @@ describe("what is not a reason, with nothing to do", () => {
       const r = await report({ ...ON, ENVIRONMENT: environment });
       expect([environment, r.facts.repulls?.attention]).toEqual([environment, []]);
     }
+  });
+
+  test("a scheduler that last concluded waiting-for-manual-run is quiet while the switch is off", async () => {
+    // The outcome was stamped while the switch was on. If the owner has turned it off since, and
+    // the next tick has not restamped the row, nothing is waiting on a person any more.
+    stampScheduler({ tick: at(-HOUR), outcome: "waiting-for-manual-run", advance: at(-HOUR / 2) });
+    for (const value of [undefined, "", "0", "true", " 1"]) {
+      expect([
+        value,
+        (await report({ AUTO_REPULL_ENABLED: value })).facts.repulls?.attention,
+      ]).toEqual([value, []]);
+    }
+    // And a Worker that is not exactly production honors no switch, so it is quiet there too.
+    for (const environment of ["staging", "Production", undefined]) {
+      const r = await report({ ...ON, ENVIRONMENT: environment });
+      expect([environment, r.facts.repulls?.attention]).toEqual([environment, []]);
+    }
+    // The control: the same row with the switch on asks, so the quiet above is the switch's doing.
+    expect((await report(ON)).facts.repulls?.attention).toEqual([
+      "the automatic re-pull is on, and its scheduler is waiting for the two first re-pulls to be run by hand",
+    ]);
   });
 
   test("a hold waiting on a gate is the expected state of a path that works", async () => {

@@ -129,6 +129,9 @@ function asRefusal(step: StepName, err: unknown): ExecuteRefused {
 /** NEMAR's remote as the working clone's git-annex branch names it, and the one prefix it allows. */
 async function nemarRemote(work: string, datasetId: string) {
   const remote = nemarRemoteOf(await readRemoteLog(work), datasetId);
+  // The bucket becomes the write guard's one destination and the region a host: refused unless S3
+  // can have both.
+  if (remote.problem !== null) throw new ExecuteRefused("nemar-s3-invalid", remote.problem);
   const bucket = remote.record?.bucket;
   const prefix = `${datasetId}/objects/`;
   if (!remote.uuid || !bucket) {

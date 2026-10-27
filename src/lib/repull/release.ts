@@ -318,6 +318,7 @@ export async function nemarBucket(
     { ok: true },
   );
   const remote = nemarRemoteOf(log.exitCode === 0 ? log.stdout : "", ctx.datasetId);
+  if (remote.problem !== null) throw refused("nemar-s3-invalid", remote.problem);
   const bucket = remote.record?.bucket;
   if (log.exitCode !== 0 || !remote.uuid || !bucket) {
     throw refused("no-nemar-s3", "NEMAR's remote.log names no single nemar-s3 bucket.");

@@ -49,6 +49,7 @@ import { makeRepullApp } from "../backend/test/helpers/repull-app";
 import { hashDirLower, isDead } from "../scripts/scrub/git/git-lib";
 import { EDF_HEADER_BYTES } from "../shared/identifier-scan";
 import { PROVENANCE_NOTE_KEY } from "../shared/privacy-correction-text";
+import { repullTrailerLines } from "../shared/repull-squash";
 import { getApiUrl } from "../src/lib/api/client";
 import { runCommand } from "../src/lib/git-annex/run-command";
 import { listAnnexedKeys } from "../src/lib/git-annex/transfer";
@@ -730,8 +731,18 @@ describe.skipIf(!awsInstalled)("preparing the default delta", () => {
       "1",
     );
     const trailers = await gitIn(repo, ["show", "-s", "--format=%(trailers:only,unfold)", sha]);
+    const digest = JSON.parse(readFileSync(planPath, "utf8")).digest as string;
     expect(trailers).toContain(`Upstream-Snapshot: ${UPSTREAM_ID}@${TAG_B}`);
-    expect(trailers).toContain(`Repull-Plan: ${JSON.parse(readFileSync(planPath, "utf8")).digest}`);
+    expect(trailers).toContain(`Repull-Plan: ${digest}`);
+    // And the message's last paragraph is exactly the shared builder's two lines, byte for byte
+    // (#1972): the commit is written from the builder and not from a template of its own.
+    const message = await gitIn(repo, ["show", "-s", "--format=%B", sha]);
+    const expected = repullTrailerLines({
+      upstream_ds: UPSTREAM_ID,
+      to_tag: TAG_B,
+      plan_digest: digest,
+    });
+    expect(message.trimEnd().split("\n\n").at(-1)).toBe(expected.join("\n"));
     const author = await gitIn(repo, ["show", "-s", "--format=%an <%ae> %at %cn %ct", sha]);
     expect(author.trim()).toMatch(/^NEMAR re-pull <noreply@nemar\.org> \d+ NEMAR re-pull \d+$/);
     const meta = JSON.parse(await show(repo, `${sha}:.nemar/metadata.json`));

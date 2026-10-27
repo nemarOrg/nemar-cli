@@ -142,6 +142,43 @@ describe.skipIf(!awsInstalled)("approve --merge", () => {
     expect(w.row().status).toBe("gates_clear");
   });
 
+  test("a merge GitHub did not make keeps its claim and exits 3, as `repull merge` does", async () => {
+    await toGates();
+    // GitHub's state turns to blocked between the gate's read and the merge's last look: when the
+    // claim reaches the API.
+    w.setApiHook(async (req) => {
+      if (req.method === "POST" && new URL(req.url).pathname.endsWith("/transition")) {
+        Object.assign(w.gh.pulls[prKey(w)] as object, { mergeableState: "blocked" });
+      }
+    });
+    const run = await approve(w.row().pr_number as number);
+    expect(run.exitCode, run.all).toBe(3);
+    expect(run.all).toContain("The claim to merge is kept");
+    expect(run.all).not.toContain("through the re-pull's gate).");
+    expect(merges()).toEqual([]);
+    expect(w.row().merge_claim_sha).toBe(w.row().gates_sha);
+  });
+
+  test("a merge whose answer is lost keeps its claim and exits 3", async () => {
+    await toGates();
+    w.gh.lostMergeAnswers = true;
+    const run = await approve(w.row().pr_number as number);
+    expect(run.exitCode, run.all).toBe(3);
+    expect(run.all).toContain("may have merged it");
+    expect(w.row()).toMatchObject({ status: "gates_clear", merge_claim_sha: w.row().gates_sha });
+  });
+
+  test("a merge refused with no claim held still exits 1", async () => {
+    await toGates();
+    // The cap is used up: the claim is refused, so nothing is held and nothing waits.
+    w.workerEnv.REPULL_DAILY_MERGE_CAP = "0";
+    const run = await approve(w.row().pr_number as number);
+    expect(run.exitCode, run.all).toBe(1);
+    expect(run.all).toContain("(cap)");
+    expect(merges()).toEqual([]);
+    expect(w.row()).toMatchObject({ status: "gates_clear", merge_claim_sha: null });
+  });
+
   test("a NEMAR API that cannot say whether it is a re-pull's refuses the merge, and approves nothing", async () => {
     await toGates();
     w.setApiOverride((req) =>

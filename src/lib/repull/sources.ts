@@ -34,6 +34,7 @@ import {
   readOnlyGit,
   readOnlyGitText,
 } from "./read-only.js";
+import { isAwsRegion, isS3BucketName } from "./shapes.js";
 
 export const NEMAR_ORG = "nemarDatasets";
 export const UPSTREAM_ORG = "OpenNeuroDatasets";
@@ -431,6 +432,14 @@ export async function readAnnexUuidMarker(args: {
       return { status: "error", detail: code ?? "read failed" };
     }
   }
+  // The host is built from both, so a value that is not a bucket name or a region (a `/`, a `#`
+  // or an `@` would name another host) is refused before any request is made.
+  if (!isS3BucketName(args.bucket) || !isAwsRegion(args.region)) {
+    return {
+      status: "error",
+      detail: "the bucket name or the region is not one S3 can have, so nothing was requested",
+    };
+  }
   const path = `${args.prefix}annex-uuid`.split("/").map(encodeURIComponent).join("/");
   const url = `https://${args.bucket}.s3.${args.region}.amazonaws.com/${path}`;
   try {
@@ -481,6 +490,9 @@ export async function listBucketObjects(args: {
       if (st.isFile()) out.set(name, st.size);
     }
     return withControl(out, args.prefix);
+  }
+  if (!isS3BucketName(args.bucket) || !isAwsRegion(args.region)) {
+    throw new Error("the bucket name or the region is not one S3 can have, so it was not listed");
   }
   const r = await readOnlyAws(
     [
