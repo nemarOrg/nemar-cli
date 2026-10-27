@@ -40,7 +40,7 @@ The byte count must equal the size the key declares.
 `TRANSFER STORE` and `REMOVE` are refused; the remote is read-only for now.
 No message the remote prints contains the API key, a redirect address or its query string; a failed request is described by the error's class and code (`ECONNREFUSED`, `ENOTFOUND`), never its text.
 The origin that carries the key is a branded `VettedOrigin`, produced only by the list check, and the list is checked again before each request that carries the key.
-A key is asked for only if it has the shape the server serves (a backend name, `-s<size>`, optional chunk fields, `--`, then letters, digits, `.`, `_` and `-`); the size is checked against the bytes that arrive and a body that passes it is cut off at once.
+A key is asked for only if it has the shape the data host serves: an upper-case backend name of letters, digits and underscores (`SHA256E`, `SHA3_256E`), `-s<size>`, optional `-S<n>-C<n>` chunk fields (each number at most 16 digits), `--`, then letters, digits, `.`, `_` and `-`, in at most 255 characters; the size is checked against the bytes that arrive and a body that passes it is cut off at once.
 
 **The repository is reached through a credential helper, `nemar auth git-credential`.**
 It answers git's `get` for an origin on the list, with the user name `nemar` and the stored key as the password, and for nothing else; `store` and `erase` do nothing.
