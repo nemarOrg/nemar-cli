@@ -84,9 +84,7 @@ import {
 } from "../../../shared/publication-limits.js";
 import type { RepullCapReading } from "../../../shared/repull-observability.js";
 import {
-  AUTO_MAX_COPY_BYTES,
   CLEARING_SELF_EDGES,
-  CURRENT_PLANNER_VERSION,
   DIGEST_RE,
   DISPATCH_TOKEN_RE,
   type DispatchRow,
@@ -97,6 +95,7 @@ import {
   PULL_REQUEST_COLUMNS,
   REPULL_PULL_REQUESTS,
   REPULL_STATUSES,
+  type RepullOrigin,
   type RepullPullRequest,
   type RepullRow,
   type RepullStatus,
@@ -104,6 +103,7 @@ import {
   TERMINAL_STATUSES,
   VERIFIED_ONLY_STATUSES,
   WORKER_COUNT_KEYS,
+  automaticPlanRefusal,
   canTransition,
   fieldProblem,
   fieldsFor,
@@ -158,13 +158,14 @@ export const REPULL_OPEN_FOR_DATASET_SQL = `SELECT * FROM upstream_repulls WHERE
 
 /**
  * Keyset on `id DESC`. `?1` dataset or NULL, `?2` 1 for open rows only, `?3` the last id seen or
- * NULL, `?4` the page size. Never an `IN (...)` list: D1 binds at most 100 parameters.
+ * NULL, `?4` origin or NULL, `?5` the page size.
  */
 export const REPULL_LIST_SQL = `SELECT * FROM upstream_repulls
   WHERE (?1 IS NULL OR dataset_id = ?1)
     AND (?2 = 0 OR status NOT IN (${TERMINAL_LIST}))
     AND (?3 IS NULL OR id < ?3)
-  ORDER BY id DESC LIMIT ?4`;
+    AND (?4 IS NULL OR origin = ?4)
+  ORDER BY id DESC LIMIT ?5`;
 
 /**
  * The next attempt number for a tag, and how many earlier attempts forbid another: any that did
@@ -404,12 +405,12 @@ export async function getRepull(db: D1Database, id: number): Promise<RepullRow |
 
 export async function listRepulls(
   db: D1Database,
-  q: { dataset?: string; open?: boolean; after?: number; limit?: number },
+  q: { dataset?: string; open?: boolean; after?: number; origin?: RepullOrigin; limit?: number },
 ): Promise<RepullRow[]> {
   const limit = Math.min(Math.max(q.limit ?? REPULL_PAGE_DEFAULT, 1), REPULL_PAGE_MAX);
   const { results } = await db
     .prepare(REPULL_LIST_SQL)
-    .bind(q.dataset ?? null, q.open ? 1 : 0, q.after ?? null, limit)
+    .bind(q.dataset ?? null, q.open ? 1 : 0, q.after ?? null, q.origin ?? null, limit)
     .all<RawRow>();
   return results.map(parseRow);
 }
@@ -731,40 +732,6 @@ function automaticEnvRefusal(env: Bindings, body: CreateRepullBody): RepullRefus
   return null;
 }
 
-/**
- * What an automatic create's plan must be (ADR 0111, decision 6, "the automatic path takes only a
- * plan with zero unexplained paths"): made by this planner, with `unexplained`, `conflicts` and
- * `corrections` each stated and 0 (a count left out is not 0), and a copy whose size is stated and
- * within {@link AUTO_MAX_COPY_BYTES}. The administrator's path has none of these bounds.
- */
-function automaticPlanRefusal(body: CreateRepullBody): RepullRefusal | null {
-  if (body.planner !== CURRENT_PLANNER_VERSION) {
-    return {
-      status: 409,
-      code: "auto-planner-version",
-      message: `An automatic re-pull takes only a plan of planner ${CURRENT_PLANNER_VERSION}.`,
-    };
-  }
-  const counts = body.counts as Record<string, number | undefined>;
-  if (["unexplained", "conflicts", "corrections"].some((k) => counts[k] !== 0)) {
-    return {
-      status: 409,
-      code: "auto-not-clean-plan",
-      message:
-        "An automatic re-pull takes only a plan that states zero unexplained paths, zero conflicts and zero corrections.",
-    };
-  }
-  const bytes = counts.copy_bytes;
-  if (bytes === undefined || bytes > AUTO_MAX_COPY_BYTES) {
-    return {
-      status: 409,
-      code: "auto-copy-too-large",
-      message: `An automatic re-pull takes only a plan whose copy size is stated and at most ${AUTO_MAX_COPY_BYTES} bytes.`,
-    };
-  }
-  return null;
-}
-
 /** The dispatch checks (an automatic create only), then {@link createOnce}. */
 async function createChecked(
   env: Bindings,
@@ -783,8 +750,8 @@ async function createChecked(
     toTag: body.to_tag,
   });
   if (isRefusal(verified)) return verified;
-  const plan = automaticPlanRefusal(body);
-  if (plan) return plan;
+  const plan = automaticPlanRefusal(body.planner, body.counts);
+  if (plan) return { status: 409, ...plan };
   return createOnce(env, admin, body, verified.dispatch);
 }
 

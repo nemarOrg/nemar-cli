@@ -448,6 +448,10 @@ export function patchVersionOf(toVersion: string): string | null {
   return `${major}.0.1`;
 }
 
+/** Who opened a re-pull: the automatic path or an administrator (migration 0105's CHECK). */
+export const REPULL_ORIGINS = ["automatic", "administrator"] as const;
+export type RepullOrigin = (typeof REPULL_ORIGINS)[number];
+
 /** The row as the API speaks it: every column, `counts` parsed. */
 export interface RepullRow {
   id: number;
@@ -461,7 +465,7 @@ export interface RepullRow {
   patch_version: string | null;
   plan_digest: string;
   planner: number;
-  origin: "automatic" | "administrator";
+  origin: RepullOrigin;
   actor_user_id: number;
   status: RepullStatus;
   base_sha: string;
@@ -582,7 +586,7 @@ export function fieldProblem(
 /**
  * A dispatch asks a central workflow run to do one thing: `open` runs a plan to an open pull
  * request (or resumes a row that stalled before it), `finish` walks a merged re-pull to
- * `complete`. Its row is `upstream_repull_dispatches` (migration 0111).
+ * `complete`. Its row is `upstream_repull_dispatches` (migration 0112).
  */
 export const DISPATCH_KINDS = ["open", "finish"] as const;
 export type DispatchKind = (typeof DISPATCH_KINDS)[number];
@@ -619,17 +623,17 @@ export const DISPATCH_PHASES = [
 export type DispatchPhase = (typeof DISPATCH_PHASES)[number];
 
 /**
- * The fixed words a dispatch's `code` may hold: why it was refused, why it failed, or why the
- * Worker could not send it. Closed on purpose. A code is shown to administrators and counted in
- * the weekly report, which is filed on a public-facing repository, so it must never be able to
- * carry a path, a key, a subject label or a message; a word that is not here is refused by the
- * callback, and a run reports `no-code` for a refusal whose word this list does not hold, so a new
- * word is added here deliberately. `test/repull-dispatch-words.unit.test.ts` pins that every literal
- * refusal word of the CLI's plan and execution, of the scrub, and of the Worker's re-pull routes
- * is here.
+ * The fixed words a dispatch's `code` may hold. Closed on purpose: a code is counted in the weekly
+ * report, filed on a public-facing repository, so it can never carry a path, a key or a message,
+ * and the callback refuses any other word. A run reports a refusal whose word is not here as the
+ * class of the step that met it ({@link STEP_CLASSES}). When the preparation, the copy, the
+ * registration or the pull request fails on its own, that step also writes the exact word to the
+ * record's `last_error` (`[<step>:<word>]`); every other refusal keeps only its listed word.
  */
 export const DISPATCH_CODES = [
-  // The Worker's own, at the automatic create and when it sends or ends a dispatch.
+  // The Worker's own, at the automatic create and when it sends or ends a dispatch. A resume's send
+  // GitHub turned away for the Worker (its credential, permission or rate) is `dispatch-deferred`,
+  // which spends none of the row's dispatches.
   "auto-production-only",
   "auto-repull-off",
   "auto-on-only",
@@ -641,290 +645,88 @@ export const DISPATCH_CODES = [
   "dispatch-unconfigured",
   "dispatch-refused",
   "dispatch-failed",
-  // GitHub turned a resume's send away for a reason about the Worker rather than the dispatch (its
-  // credential, its permission, a rate limit): nothing ran, and it spends none of the row's
-  // dispatches.
   "dispatch-deferred",
   // The Worker's answers to a run's report, which the run may pass on when it then fails.
+  "invalid-body",
   "invalid-token",
   "already-started",
   "kind-mismatch",
   "repull-mismatch",
   "repull-not-ready",
   "stale-dispatch",
-  // The unattended run's own words.
-  "auto-no-app-token",
-  "key-without-pin",
-  "head-foreign",
-  "finish-not-merged",
-  "runner-failed",
-  "runner-disk",
-  "no-code",
-  // The unattended run's own words (Phase 7d): the dispatch the run was handed is not the nine
-  // keys the Worker sends; the CLI is not the release the dispatch names; the dispatch token is on
-  // the command line, where the public log shows it; output that would print what the run reads
-  // is on; an option the automatic mode does not take, or one it needs is missing; a finish that
-  // ended short of `complete`; a report the Worker never answered; the runner could not make the
-  // short-lived AWS session the copy needs.
+  // The run's own: the workflow's steps before the CLI, the CLI's guards, the token's hour, the
+  // settle, the finish, the reports.
   "dispatch-invalid",
+  "runner-disk",
   "auto-cli-version",
+  "runner-credentials",
+  "runner-failed",
+  "auto-no-app-token",
   "auto-token-on-argv",
   "auto-verbose",
   "auto-option",
-  "finish-incomplete",
-  "report-unanswered",
-  "runner-credentials",
-  // The copy would outlast the App token's hour (`automaticCopySeconds` over the budget); and a run
-  // that failed while GitHub no longer took its App token, which only a new run's token can carry on.
-  "auto-copy-too-long",
-  "token-expired",
-  // The time already spent since the App token was minted, and what is left to do, would pass the
-  // usable hour: refused before the copy or a push rather than failed half way; or the run cannot
-  // tell when its token was minted.
+  "auto-api-not-production",
   "auto-token-hour",
   "auto-token-clock",
-  // The release branch could not be read in the settle's last quiet period, so the run cannot say
-  // its head settled.
-  "head-unreadable",
-  // The API the run would talk to is not production's (an override aimed elsewhere): nothing was
-  // sent there, the token included, so this word reaches the Worker only through the backstop.
-  "auto-api-not-production",
-  // The plan: its preflight checks, its refusals, and why it planned nothing.
-  "annex-uuid-mismatch",
-  "concept-doi-disagrees",
-  "dead-recording-unpinned",
-  "fetch-bound",
-  "from-tag-disagrees",
-  "from-tag-malformed",
-  "from-tag-not-recorded",
-  "from-tag-unknown",
-  "github-error",
-  "github-unreachable",
-  "gitlink",
-  "latest-unknown",
-  "ledger-correction-unexplained",
-  "ledger-unreadable",
-  "mirror-lag",
-  "nemar-s3-ambiguous",
-  "never-released",
-  "no-bucket",
-  "no-nemar-s3",
-  "no-nemar-s3-remote",
-  "no-source-id",
-  "no-token",
-  "nothing-to-pull",
-  "order-unverified",
-  "preflight",
-  "release-branch-exists",
-  "release-pr-open",
-  "rows-unavailable",
-  "source",
-  "source-disagrees",
-  "target-names-dead-key",
-  "target-unknown",
-  "to-tag-malformed",
-  "to-tag-unrecordable",
-  "too-many-open",
-  "version",
-  "versions-disagree",
-  // Execution: the plan proved, the record, the preparation and what follows it.
-  "anonymity-unknown",
-  "blob-unavailable",
-  "checkpoint-failed",
-  "clone-failed",
-  "computed-missing",
-  "dataset-missing",
-  "destination-prefix",
-  "execution-locked",
-  "git-failed",
-  "main-moved",
-  "materialize-failed",
-  "nemar-owned-moved",
-  "not-executable",
+  "auto-copy-too-long",
+  "token-expired",
   "not-planned",
-  "path-conflict",
-  "path-unsafe",
-  "plan-environment",
-  "plan-schema",
-  "plan-sources",
-  "plan-stale",
-  "plan-tampered",
-  "plan-unreadable",
-  "planner-version",
-  "prepare-failed",
-  "prepare-not-reproducible",
-  "record-refused",
-  "synthesis-failed",
-  "synthesis-mismatch",
-  "target-mismatch",
-  "test-base-refused",
-  "unannex-content-mismatch",
-  "unannex-unreadable",
-  "unpinned-key",
-  "until-not-built",
-  "workdir-busy",
-  // Execution past `prepared` (Phase 6d): the copy, the registration, the release branch and its
-  // pull request. A run reports the word of the step that refused, as `[copy:<word>]`,
-  // `[register:<word>]` or `[pr:<word>]` on the record; `copy-failed`, `register-failed`,
-  // `pr-failed` and `s3-failed` are the words of a failure no more specific word names.
-  "branch-foreign",
-  "branch-unreadable",
-  "checkpoint-lost",
-  "copy-failed",
-  "copy-size-mismatch",
-  "copy-source",
-  "copy-unverified",
-  "declined",
-  "held-key-absent",
-  "main-unreadable",
-  "manifest-mismatch",
-  "no-github-token",
-  "origin-unreadable",
-  "pin-absent",
-  "pin-changed",
-  "pin-size-mismatch",
-  "pin-version-mismatch",
-  "pr-create-refused",
-  "pr-create-unknown",
-  "pr-created-unreadable",
-  "pr-failed",
-  "pr-foreign",
-  "pr-title",
-  "pr-unreadable",
-  "push-failed",
-  "push-refused",
-  "register-failed",
-  "registration-failed",
-  "registration-push-failed",
-  "registration-push-refused",
-  "registration-push-rejected",
-  "registration-unproven",
-  "s3-failed",
-  "unreadable",
-  "until-not-allowed",
-  "upstream-tag-moved",
-  "upstream-unreadable",
-  "write-refused",
-  // Past the open pull request (Phase 6f): resume, the re-synthesis onto a moved `main`, the
-  // merge gate, the release and the lock. A run reports them as `[gates:<word>]`,
-  // `[release:<word>]` or `[lock:<word>]` on the record. `gates-failed`, `release-failed` and
-  // `lock-failed` are the words a step records for a failure no more specific word names, and
-  // `github-failed` the word of an API call that got no usable answer.
-  "branch-moved",
-  "gates-failed",
-  "github-failed",
-  "lock-failed",
-  "lock-incomplete",
-  "merge-trailers",
-  "merge-unreadable",
-  "not-built",
-  "release-failed",
-  "resume-looped",
-  "staging-unreadable",
-  "use-execute",
-  "claim-too-old",
-  // N.0.1, abandoning and superseding a record (Phase 6g): a run reports N.0.1's words as
-  // `[patch:<word>]` on the record; abandon and supersede record nothing but their end.
-  "patch-ledger",
-  "patch-plan-mismatch",
-  "plan-not-the-record",
-  "patch-ours-moved",
-  "patch-path-conflict",
-  "patch-description-unreadable",
-  "patch-key-absent",
-  "patch-key-dead",
-  "patch-main-moved",
-  "patch-tree-mismatch",
-  "merge-main-moved",
-  // An administrator's merge over a failed BIDS validation (Phase 7g), refused at the claim: the
-  // record is the automatic path's, which no one merges over a failed check; GitHub reports the
-  // pull request `blocked` (a rule requires the check, so merging would be a bypass) or anything
-  // but `unstable`; BIDS validation did not complete with `failure`, or `version-check` did not
-  // complete with `success`, at the claimed head; or the claim named it where nothing reads those
-  // facts.
-  "bids-override-automatic",
-  "bids-override-blocked",
-  "bids-override-not-unstable",
-  "bids-override-bids",
-  "bids-override-version-check",
-  "bids-override-unverified",
-  "foreign-pull-request-merged",
-  "take-ours-invalid",
-  "wait-for-release",
-  "supersede-automatic",
-  "supersede-same-tag",
-  "supersede-from-tag",
-  "supersede-too-late",
-  // The scrub's refusals (`IMPORT_SCRUB_REFUSALS`), which execution passes on as they are.
-  "already-imported-unscrubbed",
-  "bound-exceeded",
-  "content-mismatch",
-  "header-unreadable",
-  "old-key-still-named",
-  "provenance-out-of-scope",
-  "retire-failed",
-  "scope-incomplete",
-  "scrub-failed",
-  "scrub-unverified",
-  "unsupported-key-backend",
-  "upload-failed",
-  "upstream-size-mismatch",
-  // The Worker's record of a re-pull, as a run meets it (create, transition, screen, merge).
-  "invalid-body",
-  "invalid-id",
-  "env-fence",
-  "not-found",
-  "not-a-mirror",
+  "head-foreign",
+  "head-unreadable",
+  "finish-not-merged",
+  "finish-incomplete",
+  "report-unanswered",
+  "no-code",
+  // The plan's and the record's words that end the automatic path for a tag (DISPATCH_FINAL_CODES).
+  "key-without-pin",
+  "ledger-correction-unexplained",
+  "dead-recording-unpinned",
+  "target-names-dead-key",
+  "concept-doi-disagrees",
+  "gitlink",
   "anonymous-dataset",
-  "withdrawn",
-  "import-in-flight",
-  "repull-in-flight",
-  "merge-unreconciled",
-  "version-facts-disagree",
-  "tag-already-pulled",
-  "stale-status",
-  "bad-transition",
-  "use-verified-route",
-  "merge-claim-held",
-  "field-not-allowed",
-  "field-missing",
-  "field-invalid",
-  "immutable-field",
-  "screen-not-clear",
-  "screen-changed",
-  "screen-exempt",
-  "screen-exists",
-  "screen-not-found",
-  "screen-blocks",
-  "screen-not-acknowledgeable",
-  "not-screenable",
-  "not-the-head",
-  "head-moved",
-  "pr-draft",
-  "github-unreadable",
-  "merge-cap",
-  "merge-cap-unreadable",
-  "already-acknowledged",
-  "already-merged",
-  "already-released",
-  "claim-mismatch",
-  "claim-too-recent",
-  "compare-unresolved",
-  "no-claim",
-  "not-merged",
-  "not-released",
-  "pull-request-merged",
-  "pull-request-mismatch",
-  "pull-request-missing",
-  "tag-mismatch",
-  "tag-missing",
-  "lock-unrecorded",
+  "not-a-mirror",
+  // The step classes (STEP_CLASSES).
+  "plan-refused",
+  "record-refused",
+  "prepare-failed",
+  "scrub-failed",
+  "copy-failed",
+  "register-failed",
+  "pr-failed",
+  "settle-failed",
+  "finish-failed",
 ] as const;
 export type DispatchCode = (typeof DISPATCH_CODES)[number];
 
 export function isDispatchCode(value: unknown): value is DispatchCode {
   return typeof value === "string" && (DISPATCH_CODES as readonly string[]).includes(value);
 }
+
+/** The steps of a dispatched run, each with the word its unlisted refusals are reported as. */
+export const RUN_STEPS = [
+  "plan",
+  "record",
+  "prepare",
+  "copy",
+  "register",
+  "pr",
+  "settle",
+  "finish",
+] as const;
+export type RunStep = (typeof RUN_STEPS)[number];
+
+/** A scrub's refusal in the preparation is `scrub-failed`, the scrub's own class. */
+export const STEP_CLASSES: Readonly<Record<RunStep, DispatchCode>> = {
+  plan: "plan-refused",
+  record: "record-refused",
+  prepare: "prepare-failed",
+  copy: "copy-failed",
+  register: "register-failed",
+  pr: "pr-failed",
+  settle: "settle-failed",
+  finish: "finish-failed",
+};
 
 /**
  * Refusals another run at the same tag would meet again, because they are facts about the tag's
@@ -1070,8 +872,10 @@ export type SchedulerOutcome = (typeof REPULL_SCHEDULER_OUTCOMES)[number];
 
 /**
  * The shape of every fixed word the automatic path stores (a dispatch code, a hold reason, the
- * scheduler's outcome): what migration 0111's CHECKs admit, so the database refuses anything a
- * message or a path could look like even from a writer that skips the service.
+ * scheduler's outcome). Migration 0112's CHECKs hold the stored words to this shape only, so the
+ * database refuses anything a message or a path could look like even from a writer that skips the
+ * service; which words a code may be is enforced by the callback (`z.enum(DISPATCH_CODES)`) and
+ * {@link isDispatchCode}.
  */
 export const FIXED_WORD_RE = /^[a-z0-9-]{1,64}$/;
 
@@ -1088,6 +892,43 @@ export const CURRENT_PLANNER_VERSION = 2;
  * administrator's path has no such bound.
  */
 export const AUTO_MAX_COPY_BYTES = 1024 ** 4;
+
+/**
+ * Why the automatic path does not take a plan (ADR 0111, decision 6), or null: another planner's,
+ * `unexplained`, `conflicts` or `corrections` not stated as 0 (a count left out is not 0), or a copy
+ * size not stated or over {@link AUTO_MAX_COPY_BYTES}. The Worker asks it at the automatic create;
+ * the CLI asks it of the plan `plan` made, and again at `execute` of that plan's proved body,
+ * before the checks only a run can make.
+ */
+export function automaticPlanRefusal(
+  planner: unknown,
+  counts: Readonly<Record<string, unknown>>,
+): {
+  code: "auto-planner-version" | "auto-not-clean-plan" | "auto-copy-too-large";
+  message: string;
+} | null {
+  if (planner !== CURRENT_PLANNER_VERSION) {
+    return {
+      code: "auto-planner-version",
+      message: `An automatic re-pull takes only a plan of planner ${CURRENT_PLANNER_VERSION}.`,
+    };
+  }
+  if (["unexplained", "conflicts", "corrections"].some((k) => counts[k] !== 0)) {
+    return {
+      code: "auto-not-clean-plan",
+      message:
+        "An automatic re-pull takes only a plan that states zero unexplained paths, zero conflicts and zero corrections.",
+    };
+  }
+  const bytes = counts.copy_bytes;
+  if (typeof bytes !== "number" || bytes > AUTO_MAX_COPY_BYTES) {
+    return {
+      code: "auto-copy-too-large",
+      message: `An automatic re-pull takes only a plan whose copy size is stated and at most ${AUTO_MAX_COPY_BYTES} bytes.`,
+    };
+  }
+  return null;
+}
 
 /** A dispatch token as the Worker signs it: an HMAC-SHA256 digest in lowercase hex. */
 export const DISPATCH_TOKEN_RE = /^[0-9a-f]{64}$/;
@@ -1115,7 +956,7 @@ export const AUTO_SETTLE_RESERVE_SECONDS = 6 * 60;
 export const AUTO_AFTER_COPY_SECONDS = 5 * 60;
 
 /**
- * Everything else from the mint to the push, not the copy: the install, the two plans, the
+ * Everything else from the mint to the push, not the copy: the install, the plan, the
  * preparation and the steps after the copy ({@link AUTO_AFTER_COPY_SECONDS} among them). An
  * allowance no measurement here bounds; each run logs how long its steps took, so the first
  * production runs can check it.
@@ -1126,10 +967,10 @@ export const AUTO_OTHER_STEPS_SECONDS = 29 * 60;
  * The automatic copy's time budget, in seconds: what the usable hour leaves once the settle's
  * share and the other steps' allowance are kept back, twenty minutes. A plan whose copy
  * {@link automaticCopySeconds} puts past it is refused before the copy starts
- * (`auto-copy-too-long`), at the plan and again from the live plan at execute, as a copy over
- * {@link AUTO_MAX_COPY_BYTES} is. Before the copy and before each push the run also checks the time
- * already spent (`auto-token-hour`), and a run that fails with the token expired anyway says so
- * (`token-expired`).
+ * (`auto-copy-too-long`), at the plan and again at execute from the plan's proved body, as a copy
+ * over {@link AUTO_MAX_COPY_BYTES} is. Before the copy and before each push the run also checks the
+ * time already spent (`auto-token-hour`), and a run that fails with the token expired anyway says
+ * so (`token-expired`).
  */
 export const AUTO_COPY_BUDGET_SECONDS =
   APP_TOKEN_USABLE_SECONDS - AUTO_SETTLE_RESERVE_SECONDS - AUTO_OTHER_STEPS_SECONDS;

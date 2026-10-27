@@ -9,8 +9,8 @@
  *  - it shows the switches and both caps as the Worker reads them, an unreadable cap as unreadable,
  *    the scheduler's stamps without its cursor, the open AUTOMATIC re-pulls with the word each is
  *    held for, and the recent dispatches, by dataset and id (an administrator's read);
- *  - it reads every page of open re-pulls (an administrator's re-pull among them is not listed),
- *    and says so when the list stopped before its end rather than counting what it read as all;
+ *  - it asks the Worker for the open automatic re-pulls only, reads every page of them, and says so
+ *    when the list stopped before its end rather than counting what it read as all;
  *  - an unknown is unknown: no scheduler row is not "never recorded";
  *  - `--json` prints the same facts, and no nonce is in either output;
  *  - it only ever reads (every request is a GET), refuses a member, and prints nothing partial when
@@ -58,7 +58,7 @@ const SHA = "a".repeat(40);
 let db: Database;
 let configDir: string;
 let extraEnv: Record<string, string | undefined> = {};
-let requests: Array<{ method: string; path: string }> = [];
+let requests: Array<{ method: string; path: string; search: string }> = [];
 const handle = makeRepullApp();
 
 const server = Bun.serve({
@@ -66,7 +66,7 @@ const server = Bun.serve({
   fetch: async (req) => {
     const url = new URL(req.url);
     if (url.pathname === "/notices") return Response.json({ notices: [] });
-    requests.push({ method: req.method, path: url.pathname });
+    requests.push({ method: req.method, path: url.pathname, search: url.search });
     const bindings: Record<string, unknown> = { DB: realD1(db), ENVIRONMENT: "production" };
     for (const [k, v] of Object.entries(extraEnv)) if (v !== undefined) bindings[k] = v;
     return handle(req, bindings as unknown as Bindings);
@@ -310,7 +310,7 @@ describe("nemar admin repull auto: every page of open re-pulls", () => {
     db.run("COMMIT");
   }
 
-  test("120 open re-pulls of every origin are three pages, and the automatic ones among them are all listed", async () => {
+  test("of 120 open re-pulls of both origins, the 60 automatic ones are asked for and listed in two pages", async () => {
     signIn(ADMIN_KEY);
     seedOpen(120, true);
     const r = await runCli(["--json"]);
@@ -323,7 +323,8 @@ describe("nemar admin repull auto: every page of open re-pulls", () => {
     expect(out.open_automatic.every((x) => x.origin === "automatic")).toBe(true);
     expect(out.open_automatic_truncated).toBe(false);
     const pages = requests.filter((q) => q.path === "/admin/repulls");
-    expect(pages).toHaveLength(3);
+    expect(pages).toHaveLength(2);
+    for (const p of pages) expect(new URLSearchParams(p.search).get("origin")).toBe("automatic");
     const text = await runCli([]);
     expect(text.stdout).toContain("Open automatic re-pulls: 60");
     expect(text.stdout).not.toContain("read so far");
@@ -459,7 +460,7 @@ describe("nemar admin repull auto: it only reads, and prints nothing partial", (
     const r = await runCli([]);
     expect(r.exitCode).toBe(1);
     expect(r.stdout).toContain("Could not read the automatic re-pull");
-    expect(r.stdout).toContain("migration 0111");
+    expect(r.stdout).toContain("migration 0112");
     // The switches were read first and are not printed: a table with a hole would claim a read.
     expect(r.stdout).not.toContain("Switches, as this Worker reads them");
     expect(r.stdout).not.toContain("Open automatic re-pulls");

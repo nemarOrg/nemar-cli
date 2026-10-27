@@ -2,7 +2,7 @@
  * What `nemar admin repull` tells an administrator (ADR 0111; epic #1046 phase 6, #1912): the
  * confirmation names only what the run will do up to `--until`, and no help, output or pull request
  * body names a command that does not exist (`plan`, `execute`, `status`, `resume`, `merge`,
- * `abandon`, `canary` and `auto` are; there is no `--abandon` flag).
+ * `abandon` and `auto` are; there is no `--abandon` flag; the canary is a script).
  */
 
 import { describe, expect, test } from "bun:test";
@@ -77,11 +77,10 @@ function helpOf(name: string): string {
 }
 
 describe("no text names a command that does not exist", () => {
-  test("the commands that exist are plan, execute, status, resume, merge, abandon, canary and auto", () => {
+  test("the commands that exist are plan, execute, status, resume, merge, abandon and auto", () => {
     expect(repullCommand.commands.map((c) => c.name()).sort()).toEqual([
       "abandon",
       "auto",
-      "canary",
       "execute",
       "merge",
       "plan",
@@ -142,12 +141,6 @@ describe("no text names a command that does not exist", () => {
     // A claim GitHub did not merge under is kept, never released after five minutes.
     expect(merge).toContain("A merge GitHub did not make keeps its claim");
     expect(merge).not.toMatch(/released after five minutes|five minutes old/);
-  });
-
-  test("the canary help names the scratch prefix and bucket rules", () => {
-    const help = helpOf("canary");
-    expect(help).toContain("xx099900 to xx099999");
-    expect(help).toContain("--bucket must be nemar");
   });
 });
 

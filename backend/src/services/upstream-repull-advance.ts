@@ -297,7 +297,7 @@ export const ROW_DISPATCHES_SQL = `SELECT
  * same, the audit row that follows it is written once per change, and a row that moved meanwhile
  * (any transition bumps its revision) is not written. It touches neither `revision` nor
  * `updated_at`: a hold is an observation, not a transition. Only an automatic row is ever held, as
- * migration 0111's CHECK also says.
+ * migration 0112's CHECK also says.
  */
 export const REPULL_HOLD_SQL = `UPDATE upstream_repulls
   SET hold_reason = ?4,
@@ -344,13 +344,12 @@ export const ADVANCE_STAMP_SQL =
  *  - `dispatch-refused`: GitHub refused a resume's send for the dispatch itself (404, 422);
  *  - `dispatch-deferred`: GitHub turned a resume's send away for the Worker (any other 4xx);
  *  - `cli-unreleased`: the Worker is not a release build, so a run could not install its CLI;
- *  - `no-github-token`: no GitHub token could be had for a resume's send;
  *  - `cap-unreadable`: the open cap is set to something its reader cannot take;
- *  - `to-tag-malformed`: a recorded tag is not a tag;
  *  - `repull-mismatch`: the claim does not find the row the tick read stalled with its tags.
- * Then the tick's own: a stalled row's time or its last dispatch's that does not parse
- * (`time-unreadable`), a row whose step threw, the tick itself (it could not list its rows), its
- * stamp.
+ * Then the tick's own: no GitHub token for a resume's send (`no-github-token`), a recorded tag that
+ * is not a tag (`to-tag-malformed`), a stalled row's time or its last dispatch's that does not
+ * parse (`time-unreadable`), a row whose step threw, the tick itself (it could not list its rows),
+ * its stamp.
  */
 export const ADVANCE_FAILURES = [
   "dispatch-unconfigured",
@@ -358,10 +357,10 @@ export const ADVANCE_FAILURES = [
   "dispatch-refused",
   "dispatch-deferred",
   "cli-unreleased",
-  "no-github-token",
   "cap-unreadable",
-  "to-tag-malformed",
   "repull-mismatch",
+  "no-github-token",
+  "to-tag-malformed",
   "time-unreadable",
   "row-failed",
   "tick-failed",

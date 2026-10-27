@@ -62,7 +62,7 @@ import { NEMAR_APP_ID, deriveContexts } from "./github/branch-protection.js";
 import { isScreenExempt, readStoredReport } from "./identifier-screen-stored.js";
 import { outcomeOfRow } from "./pr-review.js";
 import { autoRepullEnabled, autoRepullMergeEnabled, isExactProduction } from "./repull-switches.js";
-import { githubRead, isObject } from "./upstream-repull-github.js";
+import { githubRead, isObject, pullRequestFacts } from "./upstream-repull-github.js";
 import { readRepullScreen } from "./upstream-repull-screen.js";
 import { CREATE_FACTS_SQL, type DatasetFacts } from "./upstream-repull.js";
 
@@ -78,48 +78,35 @@ function said(err: unknown): string {
 // ----------------------------------------------------------------------------
 
 /**
- * GitHub's REST record of a pull request, as the rule reads it, or `unreadable` when any field
- * the rule reads is missing or not of its shape. Nothing else of the record (its title, its body,
- * its branch's commits) is read.
+ * GitHub's pull request as the rule reads it: {@link pullRequestFacts}, the one parser of it, and
+ * the fields only the rule reads (the author, the number, `draft` as sent, `mergeable_state`), or
+ * `unreadable` when any of them is missing or not of its shape.
  */
 export function pullRequestFactOf(body: unknown): PullRequestFact | "unreadable" {
-  if (!isObject(body) || !isObject(body.user) || !isObject(body.head) || !isObject(body.base)) {
-    return "unreadable";
-  }
-  const { state, merged, draft, number, mergeable_state: mergeable } = body;
-  const { user, head, base } = body;
-  if (state !== "open" && state !== "closed") return "unreadable";
-  if (typeof merged !== "boolean" || typeof draft !== "boolean" || !posInt(number)) {
-    return "unreadable";
-  }
+  const pr = pullRequestFacts(body);
+  if (pr === null || !isObject(body) || !isObject(body.user)) return "unreadable";
+  const { user, draft, number, mergeable_state: mergeable } = body;
+  if (pr.state !== "open" && pr.state !== "closed") return "unreadable";
+  if (typeof draft !== "boolean" || !posInt(number)) return "unreadable";
   if (typeof user.login !== "string" || !posInt(user.id) || typeof user.type !== "string") {
     return "unreadable";
   }
-  if (typeof head.ref !== "string" || typeof head.sha !== "string" || !SHA_RE.test(head.sha)) {
-    return "unreadable";
-  }
-  // A deleted fork leaves `head.repo` null; that is a fork, and the rule says so.
-  if (head.repo !== null && !(isObject(head.repo) && typeof head.repo.full_name === "string")) {
-    return "unreadable";
-  }
-  if (typeof base.ref !== "string" || !isObject(base.repo)) return "unreadable";
-  if (typeof base.repo.full_name !== "string") return "unreadable";
   if (mergeable !== undefined && mergeable !== null && typeof mergeable !== "string") {
     return "unreadable";
   }
   return {
-    state,
-    merged,
-    draft,
+    state: pr.state,
+    merged: pr.merged,
+    draft: pr.draft,
     number,
     authorLogin: user.login,
     authorId: user.id,
     authorType: user.type,
-    headRef: head.ref,
-    headSha: head.sha,
-    headRepo: head.repo === null ? null : (head.repo.full_name as string),
-    baseRepo: base.repo.full_name,
-    baseRef: base.ref,
+    headRef: pr.headRef,
+    headSha: pr.headSha,
+    headRepo: pr.headRepo,
+    baseRepo: pr.baseRepo,
+    baseRef: pr.baseRef,
     mergeableState: typeof mergeable === "string" ? mergeable : null,
   };
 }

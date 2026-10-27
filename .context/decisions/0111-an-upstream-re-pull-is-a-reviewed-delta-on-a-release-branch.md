@@ -1082,6 +1082,7 @@ The record.
 
 - Migration 0109 adds `upstream_repull_dispatches`, one row per dispatch, keyed by nothing but its id: a dispatch exists before any re-pull row does, a run that refuses before its create leaves none, and one re-pull may have many (a first dispatch, its resumes, its finish).
   *Annotated 2026-10-25: the migration is numbered 0111, not 0109; origin/dev took 0109 and 0110 for the ticket work after this slice was written.*
+  *Annotated 2026-10-26: renumbered 0112; origin/dev took 0111.*
   A dispatch is `open` (run a plan to an open pull request, or resume a row that stalled before it) or `finish` (walk a merged re-pull to `complete`).
 - Its states are `dispatched` and `started` while it is live, then the run's own last word (`opened`, `finished`, `refused`, `failed`) or the Worker's: `dispatch_failed` when GitHub refused the dispatch, so it never ran, and `unreported` when the run said nothing in time.
 - A one-shot nonce is held exactly while the dispatch is live, and the edge that ends it clears it, so a token replayed after its run ended has nothing to verify against.
@@ -1119,6 +1120,10 @@ The token and the callback.
   A token that leaks (the later slice that sends a dispatch masks it in the step output, and this record asks that of it) lets anyone end a live dispatch as `failed` for up to eight hours; it is denial only, since a report stores fixed words and the record it opens or finishes is checked in the statement that writes.
 - A code is a word from a closed list, never a message, a path or a key, because the weekly report will count codes on a public-facing repository.
   The callback refuses any other word, a run reports `no-code` for a refusal whose word the list does not hold, and a source scan requires every literal refusal word of the plan, the execution, the scrub and the Worker's re-pull routes to be on it.
+  *Annotated 2026-10-26: the list is cut to 57 words: the Worker's own and its answers to a report, the run's own, the final codes and nine step classes (`plan-refused`, `record-refused`, `prepare-failed`, `scrub-failed`, `copy-failed`, `register-failed`, `pr-failed`, `settle-failed`, `finish-failed`).
+  A run reports a refusal whose word the list does not hold as the class of the step that met it, `no-code` only when it met none.
+  When the preparation, the copy, the registration or the pull request fails on its own, that step also writes the exact word to the record's `last_error`; every other refusal, before the record exists or after it, keeps only its listed word, as the owner accepted.
+  The scan now requires every literal refusal word to reach a report as a listed word.*
 - The watchdog ends a live dispatch eight hours after it was sent (the job's bound of 330 minutes, plus queueing) as `unreported`, and writes one audit row when it marked any; the production daily cron calls it, and that wiring lands in this slice rather than in 7c, because the cron declaration rule needs a call site for every sweep export; 7c keeps the scheduling of dispatches.
 
 `origin` automatic only through a Worker-signed dispatch.
@@ -1339,6 +1344,7 @@ The checkpoint is kept for the slices that follow.
 ### The canary
 
 `nemar admin repull canary --prefix <p> --source <ds>/<path>@<versionId> --multipart-source <ds>/<path>@<versionId>` is the real-bucket check of what the copy believes, for the owner to run before the first production re-pull.
+*Annotated 2026-10-26: moved out of the shipped CLI to `bun run scripts/repull-canary.ts`, with the same arguments, fences, dry-run default and `--execute`.*
 The prefix must be `nm099999/repull-canary-<word>/` or `xx<090001 to 099899>/repull-canary-<word>/`, never a dataset's `objects/` or `staging/` and never the permanent exemplar fleet (`xx099900` to `xx099999`, ADR 0068), the bucket must be NEMAR's, and the two objects must belong to one dataset; the run itself checks all of it, so no caller can skip it.
 A dry run, the default, makes no call and prints the calls.
 With `--execute` it heads both sources at their versions, copies the small one with one `copy-object` and the other, over 10 MiB, in 5 MiB parts with `upload-part-copy`, through the same write guard; it requires S3 to name the pinned version as the one it copied, for the copy and for every part, compares the copies' sizes, and the small copy's ETag with its source's when the source is a single-part object.
@@ -1729,6 +1735,11 @@ Four annotations are added to earlier text, on the record's header, on the Decis
 - `plan` writes the plan file, which stays on the runner, and then refuses a plan that is not executable, with the plan's first refusal, `key-without-pin`, or the word of the first check that is not ok, and one the automatic path does not take, with the create's own words (`auto-planner-version`, `auto-not-clean-plan`, `auto-copy-too-large`) or `auto-copy-too-long`; both exit 3, and no record is written.
   It plans from a listing of the bucket, never the location log, because the log can claim content the bucket never received.
 - `execute` checks the LIVE plan it makes before anything is written, never the file's own fields: executable, this planner, `unexplained`, `conflicts` and `corrections` each stated and zero, a copy whose size is known for every key and at most 1 TiB, and one inside the token's hour; it states that size at the automatic create, which bounds it again.
+  *Annotated 2026-10-26: `execute` no longer plans again.
+  It takes the plan file the run's own `plan` wrote, proved by its digest, its API and its remotes, with the clones, the computed bytes and the digest of the plan that `plan` kept beside it.
+  Before anything is written it checks the plan's counts and the token's hour, and it never reads the file's `executable` or `preflight`: the handoff, which `plan` leaves only for a plan it took, stands for them.
+  Without a handoff that names the plan's digest it refuses (`not-planned`).
+  So the run plans once, and `replan_s` and the second plan in the allowance above are gone.*
 - A record that a run takes up past `prepared` must be the automatic path's own, and the dispatch's when the dispatch names one: an administrator's record of the same plan is never taken up (`repull-in-flight`), since the run would push and open its pull request as the App, and a create that answered with such a record, or with another than the dispatch's, is refused the same way (`repull-in-flight`, `repull-mismatch`).
   No live plan can be made past the registration, so its counts are read from the reviewed body.
 - `plan` and `execute` refuse a dispatch for another kind of run, another dataset or other tags than the command or the plan file names (`dispatch-mismatch`), before the Worker is asked.
@@ -2041,6 +2052,7 @@ Three additions are made to earlier text: an annotation on the record's header, 
   It names the dataset, which the weekly report never does, and it is an administrator's read.
 - `GET /admin/repulls/switches` also returns the scheduler's three stamps, never its cursor, which is a dataset id.
   The row absent is null, which is unknown and not "never", and a table that is missing is a 500 that names migration 0111.
+  *Annotated 2026-10-26: the migration is now 0112.*
 - `nemar admin repull auto [--json]` prints the switches and both caps, the scheduler's stamps, the open automatic re-pulls with their hold words and any claim still held, and the 20 newest dispatches.
   It reads every page of open re-pulls (an administrator's is not listed) up to ten pages, and says when the list stopped before its end; it makes only GET requests; and when a read fails it prints the failure and no table, because a table with a hole would claim what was not read.
 

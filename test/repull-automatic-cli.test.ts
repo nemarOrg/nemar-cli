@@ -22,8 +22,10 @@
  *  - a clean plan reaches `pr_open` with the App's token, the record is the automatic path's, and
  *    the dispatch ends `opened` with its run's page; the run prints only the fixed lines, and none
  *    of the fixture's paths, keys, file names, subject labels or secrets;
- *  - a plan with a correction is refused before anything is written, by `plan` and, from its
- *    live plan, by `execute`, and so is a record taken up past `prepared` whose plan has one;
+ *  - a plan with a correction is refused before anything is written, by `plan` and by `execute`,
+ *    and so is a record taken up past `prepared` whose plan has one;
+ *  - `execute` plans nothing again: it takes the plan step's plan and clones, and refuses
+ *    (`not-planned`) without them;
  *  - a copy the estimate puts past the App token's hour is refused at plan time; a run whose
  *    token has too little of its usable hour left is refused at the plan, at the execute before
  *    its record, and before a push, without writing what it could not finish; a run that outlived
@@ -66,7 +68,17 @@ import {
   setDefaultTimeout,
   test,
 } from "bun:test";
-import { chmodSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { which } from "bun";
@@ -82,7 +94,12 @@ import {
 import { readCandidateBlockers } from "../backend/src/services/upstream-repull-scheduler";
 import type { DispatchRow, RepullRow } from "../shared/repull-state";
 import { getRepull } from "../src/lib/api/repull";
-import { type PlanFile, defaultPlanPath, writePlanFile } from "../src/lib/repull/digest";
+import {
+  type PlanFile,
+  defaultPlanPath,
+  readPlanFile,
+  writePlanFile,
+} from "../src/lib/repull/digest";
 import { AUTOMATIC_LINE_RE, RESULT_LINE_RE } from "../src/lib/repull/execute/automatic";
 import { type OriginScratch, openOriginScratch } from "../src/lib/repull/execute/origin";
 import {
@@ -90,6 +107,7 @@ import {
   type Settled,
   settleReleaseHead,
 } from "../src/lib/repull/execute/settle";
+import { workPaths } from "../src/lib/repull/execute/workdir";
 import { planRepull } from "../src/lib/repull/plan";
 import { ADMIN_TOKEN, APP_TOKEN } from "./helpers/github-standin";
 import { type ReleaseCli, releaseCli } from "./helpers/release-cli";
@@ -491,7 +509,7 @@ describe.skipIf(!awsInstalled)("what a run checks before it acts", () => {
     const exec = await auto(executeArgs(c));
     expect(exec.exitCode, exec.all).toBe(1);
     expectQuiet(exec, c, "refused");
-    expect(dispatchRow(c.id)).toMatchObject({ status: "refused", code: "repull-in-flight" });
+    expect(dispatchRow(c.id)).toMatchObject({ status: "refused", code: "record-refused" });
     expect(repullRows()).toMatchObject([{ status: "planned" }]);
     expect(ghWrites()).toEqual([]);
   });
@@ -555,6 +573,9 @@ describe.skipIf(!awsInstalled)("an automatic run opens its pull request", () => 
       /^repull-auto: quiet suppressed=\d+ token_age_s=\d+ plan_s=\d+ run_s=\d+$/m,
     );
     expect(dispatchRow(c.id).status).toBe("started");
+    // The planning scratch is gone; only the plan file and its handoff are left for the execute.
+    expect(readdirSync(runner).filter((n) => n.startsWith(".planning-"))).toEqual([]);
+    expect(existsSync(join(runner, "plan.json.planner", "upstream.git"))).toBe(true);
     // The plan never left the runner, and nothing was written but the report.
     expect(readFileSync(join(runner, "plan.json"), "utf8")).toContain('"dataset": "on099999"');
     expect(w.apiWrites).toEqual(["POST /webhooks/repull-state"]);
@@ -565,7 +586,7 @@ describe.skipIf(!awsInstalled)("an automatic run opens its pull request", () => 
     expect(exec.exitCode, exec.all).toBe(0);
     expectQuiet(exec, c, "opened");
     expect(exec.all).toMatch(
-      /^repull-auto: quiet suppressed=\d+ token_age_s=\d+ replan_s=\d+ clone_s=\d+ prepare_s=\d+ copy_s=\d+ register_s=\d+ pr_s=\d+ settle_s=\d+ run_s=\d+$/m,
+      /^repull-auto: quiet suppressed=\d+ token_age_s=\d+ clone_s=\d+ prepare_s=\d+ copy_s=\d+ register_s=\d+ pr_s=\d+ settle_s=\d+ run_s=\d+$/m,
     );
     const [row] = repullRows();
     expect(row).toMatchObject({ status: "pr_open", origin: "automatic" });
@@ -598,6 +619,28 @@ describe.skipIf(!awsInstalled)("an automatic run opens its pull request", () => 
     expect(dispatchRow(c.id)).toMatchObject({ status: "refused", code: "auto-not-clean-plan" });
     expect(repullRows()).toEqual([]);
     expect(w.apiWrites).toEqual(["POST /webhooks/repull-state", "POST /webhooks/repull-state"]);
+    expect(ghWrites()).toEqual([]);
+    expect(s3Writes()).toEqual([]);
+    // A plan it does not take leaves no clones behind: no handoff, no planning scratch.
+    expect(existsSync(join(runner, "plan.json.planner"))).toBe(false);
+    expect(readdirSync(runner).filter((n) => n.startsWith(".planning-"))).toEqual([]);
+  });
+
+  test("a plan that is not executable is refused by plan and leaves no handoff", async () => {
+    // A release branch of the target version is already on origin: the planner's release check
+    // refuses, so the plan is not executable. The plan step is execute's only gate on this.
+    const main = (await gitIn(w.fx.originRepo, ["rev-parse", "refs/heads/main"])).trim();
+    await gitIn(w.fx.originRepo, ["update-ref", RELEASE_REF, main]);
+    const c = await claimOpen();
+    writeEvent(c);
+    const plan = await auto(planArgs(c));
+    expect(plan.exitCode, plan.all).toBe(3);
+    expectQuiet(plan, c, "refused");
+    expect(plan.all).toContain("plan executable=no");
+    expect(dispatchRow(c.id)).toMatchObject({ status: "refused", code: "plan-refused" });
+    expect(existsSync(join(runner, "plan.json.planner"))).toBe(false);
+    expect(readdirSync(runner).filter((n) => n.startsWith(".planning-"))).toEqual([]);
+    expect(repullRows()).toEqual([]);
     expect(ghWrites()).toEqual([]);
     expect(s3Writes()).toEqual([]);
   });
@@ -641,7 +684,238 @@ describe.skipIf(!awsInstalled)("an automatic run opens its pull request", () => 
     expect(dispatchRow(resume.id)).toMatchObject({ status: "opened", repull_id: row?.id });
   });
 
-  test("execute refuses a plan with a correction from its live plan, before the record", async () => {
+  test("execute plans nothing again: OpenNeuro unanswered, it opens from the plan step's plan and clones", async () => {
+    const c = await claimOpen();
+    writeEvent(c);
+    expect((await auto(planArgs(c))).exitCode).toBe(0);
+    expect(existsSync(join(runner, "plan.json.planner", "upstream.git"))).toBe(true);
+    // Only the planner asks OpenNeuro (for the latest snapshot).
+    const asked = w.openNeuro.requests;
+    expect(asked).toBeGreaterThan(0);
+    w.openNeuro.status = 503;
+    try {
+      const exec = await auto(executeArgs(c));
+      expect(exec.exitCode, exec.all).toBe(0);
+      expectQuiet(exec, c, "opened");
+    } finally {
+      w.openNeuro.status = null;
+    }
+    expect(w.openNeuro.requests).toBe(asked);
+    expect(repullRows()).toMatchObject([{ status: "pr_open", origin: "automatic" }]);
+    expect(existsSync(join(runner, "plan.json.planner"))).toBe(false);
+  });
+
+  test("execute without its plan step's clones is not-planned, before the record", async () => {
+    const { path } = await libraryPlan();
+    const c = await claimOpen();
+    writeEvent(c);
+    const exec = await auto(executeArgs(c, path));
+    expect(exec.exitCode, exec.all).toBe(1);
+    expectQuiet(exec, c, "refused");
+    expect(dispatchRow(c.id)).toMatchObject({ status: "refused", code: "not-planned" });
+    expect(repullRows()).toEqual([]);
+    expect(ghWrites()).toEqual([]);
+    expect(s3Writes()).toEqual([]);
+  });
+
+  test("a handoff without its clones is not-planned, before the record", async () => {
+    const c = await claimOpen();
+    writeEvent(c);
+    expect((await auto(planArgs(c))).exitCode).toBe(0);
+    rmSync(join(runner, "plan.json.planner", "upstream.git"), { recursive: true, force: true });
+    const exec = await auto(executeArgs(c));
+    expect(exec.exitCode, exec.all).toBe(1);
+    expectQuiet(exec, c, "refused");
+    expect(dispatchRow(c.id)).toMatchObject({ status: "refused", code: "not-planned" });
+    expect(repullRows()).toEqual([]);
+    expect(ghWrites()).toEqual([]);
+    expect(s3Writes()).toEqual([]);
+  });
+
+  test("a handoff without its computed bytes is not-planned, before the record", async () => {
+    const c = await claimOpen();
+    writeEvent(c);
+    expect((await auto(planArgs(c))).exitCode).toBe(0);
+    rmSync(join(runner, "plan.json.planner", "computed"), { recursive: true, force: true });
+    const exec = await auto(executeArgs(c));
+    expect(exec.exitCode, exec.all).toBe(1);
+    expectQuiet(exec, c, "refused");
+    expect(dispatchRow(c.id)).toMatchObject({ status: "refused", code: "not-planned" });
+    expect(repullRows()).toEqual([]);
+    expect(ghWrites()).toEqual([]);
+    expect(s3Writes()).toEqual([]);
+  });
+
+  test("execute never reads the file's executable: flipped on disk, the run opens all the same", async () => {
+    const c = await claimOpen();
+    writeEvent(c);
+    expect((await auto(planArgs(c))).exitCode).toBe(0);
+    const path = join(runner, "plan.json");
+    const text = readFileSync(path, "utf8");
+    expect(text).toContain('"executable": true');
+    writeFileSync(path, text.replace('"executable": true', '"executable": false'));
+    // The flag sits outside the digest, so the body still proves.
+    const flipped = readFileSync(path, "utf8");
+    expect(readPlanFile(flipped).digest).toBe(JSON.parse(flipped).digest);
+    const exec = await auto(executeArgs(c));
+    expect(exec.exitCode, exec.all).toBe(0);
+    expectQuiet(exec, c, "opened");
+  });
+
+  /** A plan step's plan file, read back, edited by `edit`, and written again. */
+  function editPlan(edit: (plan: Record<string, unknown>) => void): void {
+    const path = join(runner, "plan.json");
+    const plan = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+    edit(plan);
+    writeFileSync(path, `${JSON.stringify(plan, null, 2)}\n`);
+  }
+
+  /** Execute a dispatch's plan, which must be refused with `code` and write nothing. */
+  async function refusedBeforeAnything(c: Claim, code: string): Promise<void> {
+    const exec = await auto(executeArgs(c));
+    expect(exec.exitCode, exec.all).toBe(1);
+    expectQuiet(exec, c, "refused");
+    expect(dispatchRow(c.id)).toMatchObject({ status: "refused", code });
+    expect(w.apiWrites).not.toContain("POST /admin/repulls");
+    expect(repullRows()).toEqual([]);
+    expect(ghWrites()).toEqual([]);
+    expect(s3Writes()).toEqual([]);
+  }
+
+  test("a plan edited after its plan step does not prove, and nothing is written", async () => {
+    const c = await claimOpen();
+    writeEvent(c);
+    expect((await auto(planArgs(c))).exitCode).toBe(0);
+    editPlan((plan) => {
+      (plan.counts as Record<string, number>).delta_paths += 1;
+    });
+    await refusedBeforeAnything(c, "plan-refused");
+  });
+
+  test("a plan edited and digested again is not its handoff's plan: not-planned, nothing written", async () => {
+    const c = await claimOpen();
+    writeEvent(c);
+    expect((await auto(planArgs(c))).exitCode).toBe(0);
+    editPlan((plan) => {
+      (plan.counts as Record<string, number>).delta_paths += 1;
+      plan.digest = readPlanFile(JSON.stringify(plan)).digest;
+    });
+    await refusedBeforeAnything(c, "not-planned");
+  });
+
+  test("a plan made against another API is refused on the automatic path too", async () => {
+    const c = await claimOpen();
+    writeEvent(c);
+    expect((await auto(planArgs(c))).exitCode).toBe(0);
+    editPlan((plan) => {
+      plan.environment = "https://api.other.example";
+    });
+    await refusedBeforeAnything(c, "plan-refused");
+  });
+
+  test("a plan made from other remotes is refused on the automatic path too", async () => {
+    const c = await claimOpen();
+    writeEvent(c);
+    expect((await auto(planArgs(c))).exitCode).toBe(0);
+    editPlan((plan) => {
+      expect(plan.sources).toBe("test-bases");
+      plan.sources = "remotes";
+    });
+    await refusedBeforeAnything(c, "plan-refused");
+  });
+
+  test("a step's own word the list does not hold is reported as the step's class", async () => {
+    const c = await claimOpen();
+    writeEvent(c);
+    expect((await auto(planArgs(c))).exitCode).toBe(0);
+    // A precondition S3 refuses is the copy's `pin-changed`, which the list does not hold.
+    w.s3.inject("CopyObject", { code: "PreconditionFailed", status: 412 });
+    try {
+      const exec = await auto(executeArgs(c));
+      expect(exec.exitCode, exec.all).toBe(3);
+      expectQuiet(exec, c, "failed");
+    } finally {
+      w.s3.clearFaults();
+    }
+    expect(dispatchRow(c.id)).toMatchObject({ status: "failed", code: "copy-failed" });
+    // The exact word stays on the record, for an administrator.
+    expect(repullRows()[0]?.last_error).toStartWith("[copy:pin-changed]");
+  });
+
+  /** The record's API refuses the first transition `matches` names, with `code`, as a 409. */
+  function refuseTransition(matches: (from?: string, to?: string) => boolean, code: string): void {
+    let refuse = false;
+    let refused = false;
+    w.setApiHook(async (req) => {
+      refuse = false;
+      if (refused || req.method !== "POST" || !/\/admin\/repulls\/\d+\/transition$/.test(req.url))
+        return;
+      const body = (await req.json()) as { from?: string; to?: string };
+      refuse = matches(body.from, body.to);
+      refused = refuse;
+    });
+    w.setApiOverride(() =>
+      refuse ? Response.json({ error: "refused", code }, { status: 409 }) : null,
+    );
+  }
+
+  test("a preparation the record refuses for a word the list does not hold is prepare-failed", async () => {
+    refuseTransition((from, to) => from === "planned" && to === "prepared", "field-invalid");
+    const c = await claimOpen();
+    writeEvent(c);
+    expect((await auto(planArgs(c))).exitCode).toBe(0);
+    const exec = await auto(executeArgs(c));
+    expect(exec.exitCode, exec.all).toBe(3);
+    expectQuiet(exec, c, "failed");
+    expect(dispatchRow(c.id)).toMatchObject({ status: "failed", code: "prepare-failed" });
+  });
+
+  test("a pull request GitHub did not answer for is the pull request step's class, pr-failed", async () => {
+    const c = await claimOpen();
+    writeEvent(c);
+    expect((await auto(planArgs(c))).exitCode).toBe(0);
+    // The step's own word is `pr-create-unknown`, which the list does not hold.
+    w.gh.createPullFaults.push({ status: 500 });
+    const exec = await auto(executeArgs(c));
+    expect(exec.exitCode, exec.all).toBe(3);
+    expectQuiet(exec, c, "failed");
+    expect(dispatchRow(c.id)).toMatchObject({ status: "failed", code: "pr-failed" });
+    expect(repullRows()[0]?.last_error).toStartWith("[pr:pr-create-unknown]");
+  });
+
+  test("a settle whose move the record refuses for a word the list does not hold is settle-failed", async () => {
+    // Enrichment moves the release branch as the pull request opens, and the record refuses the
+    // settle's self-edge that records the move with `stale-status`.
+    let moved = false;
+    let refuse = false;
+    w.setApiHook(async (req) => {
+      refuse = false;
+      if (req.method !== "POST" || !/\/admin\/repulls\/\d+\/transition$/.test(req.url)) return;
+      const body = (await req.json()) as { from?: string; to?: string };
+      if (!moved && body.from === "registered" && body.to === "pr_open") {
+        moved = true;
+        await w.commitOnto(
+          RELEASE_REF,
+          ".nemar/metadata.json",
+          await enrichedMetadata(w.fx.originRepo, RELEASE_REF),
+        );
+      }
+      refuse = body.from === "pr_open" && body.to === "pr_open";
+    });
+    w.setApiOverride(() =>
+      refuse ? Response.json({ error: "moved", code: "stale-status" }, { status: 409 }) : null,
+    );
+    const c = await claimOpen();
+    writeEvent(c);
+    expect((await auto(planArgs(c))).exitCode).toBe(0);
+    const exec = await auto(executeArgs(c));
+    expect(moved).toBe(true);
+    expect(exec.exitCode, exec.all).toBe(3);
+    expectQuiet(exec, c, "failed");
+    expect(dispatchRow(c.id)).toMatchObject({ status: "failed", code: "settle-failed" });
+  });
+
+  test("execute refuses a plan with a correction, before the record", async () => {
     await w.commitOnto("refs/heads/main", PATHS.sidecar, '{"TaskName":"rest","edited":true}\n');
     // A plan file the automatic plan would have refused, made by the planner itself.
     const { path, file } = await libraryPlan();
@@ -727,9 +1001,91 @@ describe.skipIf(!awsInstalled)("an automatic run opens its pull request", () => 
     const exec = await auto(executeArgs(c));
     expect(exec.exitCode, exec.all).toBe(1);
     expectQuiet(exec, c, "refused");
-    expect(dispatchRow(c.id)).toMatchObject({ status: "refused", code: "repull-in-flight" });
+    expect(dispatchRow(c.id)).toMatchObject({ status: "refused", code: "record-refused" });
     expect(repullRows()).toMatchObject([{ status: "copied", origin: "administrator" }]);
     expect(w.gh.seen.filter((s) => s.token === APP_TOKEN && s.method !== "GET")).toEqual([]);
+  });
+
+  test("an open record of another plan is the record's class, record-refused", async () => {
+    const c = await claimOpen();
+    writeEvent(c);
+    expect((await auto(planArgs(c))).exitCode).toBe(0);
+    // Then an administrator records another plan of the same tags (read from the location log,
+    // not a listing) and leaves it at planned.
+    const { path } = await libraryPlan();
+    const admin = await w.cli(
+      ["repull", "execute", path, "--until", "planned", "--yes"],
+      {},
+      undefined,
+      SOURCE_ENTRY,
+    );
+    expect(admin.exitCode, admin.all).toBe(0);
+    const [open] = repullRows();
+    expect(JSON.parse(readFileSync(join(runner, "plan.json"), "utf8")).digest).not.toBe(
+      open?.plan_digest,
+    );
+    const exec = await auto(executeArgs(c));
+    expect(exec.exitCode, exec.all).toBe(1);
+    expectQuiet(exec, c, "refused");
+    expect(dispatchRow(c.id)).toMatchObject({ status: "refused", code: "record-refused" });
+    expect(repullRows()).toMatchObject([{ id: open?.id, status: "planned" }]);
+  });
+
+  test("an execute refused at the plan's lock keeps the handoff for the execution that holds it", async () => {
+    const c = await claimOpen();
+    writeEvent(c);
+    expect((await auto(planArgs(c))).exitCode).toBe(0);
+    const digest = JSON.parse(readFileSync(join(runner, "plan.json"), "utf8")).digest as string;
+    // Another execution of this plan holds its lock: a live process, this one.
+    const lock = workPaths(w.configDir, w.fx.datasetId, digest).lock;
+    mkdirSync(lock, { recursive: true });
+    writeFileSync(join(lock, "pid"), `${process.pid}\n`);
+    try {
+      const exec = await auto(executeArgs(c));
+      expect(exec.exitCode, exec.all).toBe(1);
+      expectQuiet(exec, c, "refused");
+      expect(dispatchRow(c.id)).toMatchObject({ status: "refused", code: "plan-refused" });
+      expect(existsSync(join(runner, "plan.json.planner", "upstream.git"))).toBe(true);
+      expect(repullRows()).toEqual([]);
+    } finally {
+      rmSync(lock, { recursive: true, force: true });
+    }
+  });
+
+  test("a record taken up past prepared leaves no handoff behind", async () => {
+    const c = await claimOpen();
+    writeEvent(c);
+    expect((await auto(planArgs(c))).exitCode).toBe(0);
+    // The record of this very plan is taken through its copy, and is the automatic path's; its
+    // first run failed, and a resume dispatch names it.
+    const admin = await w.cli(
+      ["repull", "execute", join(runner, "plan.json"), "--until", "copied", "--yes"],
+      {},
+      undefined,
+      SOURCE_ENTRY,
+    );
+    expect(admin.exitCode, admin.all).toBe(0);
+    w.db().run("UPDATE upstream_repulls SET origin = 'automatic'");
+    w.db().run(
+      "UPDATE upstream_repull_dispatches SET status = 'failed', code = 'runner-failed', nonce = NULL WHERE id = ?",
+      [c.id],
+    );
+    const [row] = repullRows();
+    const resume = await claimOpenDispatch(w.bindings(), {
+      datasetId: w.fx.datasetId,
+      upstreamDs: UPSTREAM_ID,
+      fromTag: TAG_A,
+      toTag: TAG_B,
+      repullId: row?.id ?? 0,
+    });
+    if (!("id" in resume)) throw new Error(`nothing was claimed: ${JSON.stringify(resume)}`);
+    writeEvent(resume, { repullId: row?.id ?? 0 });
+    expect(existsSync(join(runner, "plan.json.planner"))).toBe(true);
+    const exec = await auto(executeArgs(resume));
+    expect(exec.exitCode, exec.all).toBe(0);
+    expectQuiet(exec, resume, "opened");
+    expect(repullRows()).toMatchObject([{ id: row?.id, status: "pr_open" }]);
+    expect(existsSync(join(runner, "plan.json.planner"))).toBe(false);
   });
 
   test("a copy the estimate puts past the App token's hour is refused at plan time", async () => {
@@ -755,6 +1111,8 @@ describe.skipIf(!awsInstalled)("an automatic run opens its pull request", () => 
     expect(repullRows()).toEqual([]);
     expect(ghWrites()).toEqual([]);
     expect(s3Writes()).toEqual([]);
+    // A plan the step does not take leaves no handoff.
+    expect(existsSync(join(runner, "plan.json.planner"))).toBe(false);
   });
 
   test("a run that cannot tell when its token was minted is refused before it reads anything", async () => {
@@ -779,6 +1137,8 @@ describe.skipIf(!awsInstalled)("an automatic run opens its pull request", () => 
     expect(repullRows()).toEqual([]);
     expect(ghWrites()).toEqual([]);
     expect(s3Writes()).toEqual([]);
+    // The plan step's handoff is for this run only: gone however the execute ended.
+    expect(existsSync(join(runner, "plan.json.planner"))).toBe(false);
   });
 
   /**
@@ -1164,6 +1524,23 @@ describe.skipIf(!awsInstalled)("a finish", () => {
     expect(repullRows()).toMatchObject([{ status: "pr_open" }]);
     expect(w.apiWrites).toEqual(["POST /webhooks/repull-state", "POST /webhooks/repull-state"]);
     expect(ghWrites()).toEqual([]);
+  });
+
+  test("a finish that refuses for a word the list does not hold is finish-failed", async () => {
+    const { row } = await opened();
+    const c = await dispatchFor("finish", row.id);
+    writeEvent(c, { mode: "finish", repullId: row.id });
+    // The catalog no longer has the dataset: `dataset-missing`, before the record is read.
+    w.setApiOverride((req) =>
+      req.method === "GET" && new URL(req.url).pathname === `/datasets/${w.fx.datasetId}`
+        ? Response.json({ error: "Dataset not found" }, { status: 404 })
+        : null,
+    );
+    const run = await auto(finishArgs(c));
+    expect(run.exitCode, run.all).toBe(1);
+    expectQuiet(run, c, "refused");
+    expect(dispatchRow(c.id)).toMatchObject({ status: "refused", code: "finish-failed" });
+    expect(repullRows()).toMatchObject([{ status: "pr_open" }]);
   });
 
   test("a merged automatic re-pull is walked to complete and reported finished", async () => {

@@ -7,10 +7,11 @@
  *   plan     reports `started`; plans from live sources with a bucket listing; writes the plan
  *            file, which never leaves the runner, and says only counts; then refuses a plan that is
  *            not executable or that the automatic path does not take (`refused`, exit 3, no record
- *            written), or reports one that could not be made (exit 1).
- *   execute  runs the plan through its pull request exactly as an administrator's run does, with
- *            the dispatch presented at the create and the LIVE plan checked before any write;
- *            settles the release head; reports `opened`.
+ *            written), or reports one that could not be made (exit 1). A plan it takes is handed to
+ *            the execute with its clones and computed bytes (`keepPlanHandoff`).
+ *   execute  runs that plan through its pull request as an administrator's run does, without
+ *            planning again, with the dispatch presented at the create and the plan checked before
+ *            any write; settles the release head; reports `opened`.
  *   resume   (a finish) reports `started`; takes up only the automatic re-pull its dispatch names,
  *            and only past its merge; walks it to `complete`; reports `finished`.
  *
@@ -25,9 +26,10 @@
  * long the token was held when the command started and how long each step took, in seconds.
  */
 
-import { readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { sameUpstreamTag } from "../../shared/openneuro-tag.js";
-import { DISPATCH_ID_RE } from "../../shared/repull-state.js";
+import { DISPATCH_ID_RE, type RunStep } from "../../shared/repull-state.js";
 import { getApiUrl } from "../lib/api/client.js";
 import { ApiError } from "../lib/api/errors.js";
 import { getConfigDir, isAuthenticated } from "../lib/config.js";
@@ -50,8 +52,10 @@ import {
   dispatchCodeOf,
   installAutomaticQuiet,
   isAutomaticApi,
+  keepPlanHandoff,
   optionRefused,
   planCopySeconds,
+  planHandoffDir,
   reportDispatch,
   tokenHourRefusal,
   tokenOnArgvRefusal,
@@ -81,7 +85,7 @@ type Outcome =
   | { phase: "planned" }
   | { phase: "opened"; repullId: number }
   | { phase: "finished" }
-  | { phase: "refused" | "failed"; code: string; exit: 1 | 3 };
+  | { phase: "refused" | "failed"; code: string; exit: 1 | 3; step?: RunStep };
 
 /** The polling interval a test may shorten (`NEMAR_REPULL_POLL_MS`, as `resume` reads it). */
 function pollMs(fallback: number): number {
@@ -92,9 +96,10 @@ function pollMs(fallback: number): number {
 /** A refusal or a failure as the run's outcome. */
 function outcomeOf(err: unknown): Outcome {
   if (err instanceof ExecuteRefused) {
+    const step = err.step ? { step: err.step } : {};
     return err.resumable
-      ? { phase: "failed", code: err.code, exit: 3 }
-      : { phase: "refused", code: err.code, exit: 1 };
+      ? { phase: "failed", code: err.code, exit: 3, ...step }
+      : { phase: "refused", code: err.code, exit: 1, ...step };
   }
   return { phase: "failed", code: "runner-failed", exit: 1 };
 }
@@ -102,12 +107,20 @@ function outcomeOf(err: unknown): Outcome {
 interface Spec {
   command: "plan" | "execute" | "resume";
   mode: "open" | "finish";
+  /** The step a refusal that names none met: what an unlisted word is reported as. */
+  step: RunStep;
   option: string;
   /** The dataset the command was given (for `execute`, the plan file's); may refuse. */
   datasetOf(): string;
   /** Whether this command is the run's first, which reports `started`. */
   reportsStart: boolean;
   body(ctx: AutomaticContext): Promise<Outcome>;
+  /**
+   * What no later command reads, removed however this one ended, given the word it was refused or
+   * failed with, if any. An execute refused at the plan's lock (`execution-locked`) keeps the
+   * handoff: the execution holding the lock reads it.
+   */
+  cleanup?: (word: string | undefined) => void;
 }
 
 /**
@@ -156,6 +169,20 @@ function end(sink: AutomaticSink, outcome: Outcome, startedMs: number): void {
 
 /** One automatic run of a command; see the module comment. */
 async function runAutomatic(spec: Spec): Promise<void> {
+  let word: string | undefined;
+  try {
+    word = await runOnce(spec);
+  } finally {
+    try {
+      spec.cleanup?.(word);
+    } catch {
+      // A runner's temporary directory: nothing the run reports depends on it.
+    }
+  }
+}
+
+/** The run of a command; the word its body was refused or failed with, if any. */
+async function runOnce(spec: Spec): Promise<string | undefined> {
   const startedMs = Date.now();
   const sink = installAutomaticQuiet();
   markReportedExit();
@@ -217,6 +244,7 @@ async function runAutomatic(spec: Spec): Promise<void> {
   } catch (err) {
     outcome = outcomeOf(err);
   }
+  const word = outcome.phase === "refused" || outcome.phase === "failed" ? outcome.code : undefined;
   // A run that outlived its App token fails at its next push or pull-request call, with that step's
   // word: when GitHub no longer takes the token, the report says why, whatever the step called it.
   // Once an open run left its record (a resumable failure), the word is a refusal, final for the
@@ -236,6 +264,9 @@ async function runAutomatic(spec: Spec): Promise<void> {
       exit: outcome.exit,
     };
   }
+  if (outcome.phase === "refused" || outcome.phase === "failed") {
+    outcome = { ...outcome, code: dispatchCodeOf(outcome.code, outcome.step ?? spec.step) };
+  }
   if (outcome.phase !== "planned") {
     const answer = await reportDispatch(
       ctx,
@@ -253,6 +284,7 @@ async function runAutomatic(spec: Spec): Promise<void> {
     }
   }
   end(sink, outcome, startedMs);
+  return word;
 }
 
 /** The catalog row and its versions, as the plan reads them; an API failure is a refusal. */
@@ -305,6 +337,7 @@ export function automaticPlan(
   return runAutomatic({
     command: "plan",
     mode: "open",
+    step: "plan",
     option,
     datasetOf: () => datasetId,
     reportsStart: true,
@@ -323,59 +356,73 @@ export function automaticPlan(
       const since = tokenSince();
       const catalog = await catalogOf(datasetId);
       assertNotAnonymous(catalog);
-      let planned: Awaited<ReturnType<typeof planRepull>>;
-      const planStarted = Date.now();
+      // The planner's clones and computed bytes are made beside the plan file, for the execute.
+      const planDir = options.out
+        ? dirname(options.out)
+        : join(getConfigDir(), "repull", datasetId);
+      mkdirSync(planDir, { recursive: true, mode: 0o700 });
+      const workRoot = mkdtempSync(join(planDir, ".planning-"));
       try {
-        planned = await planRepull({
-          datasetId,
-          toTag: ctx.dispatch.toTag,
-          maxFetchBytes: Math.floor(options.maxFetchGb * 1024 ** 3),
-          keepWorkdir: false,
-          catalog,
-          github: { token: process.env.GH_TOKEN?.trim() ?? null, apiBase: githubApiBase() },
-          environment: getApiUrl(),
-          presence: "bucket-listing",
-          openNeuroGraphqlUrl: openNeuroGraphqlUrl(process.env),
-        });
-      } catch (err) {
-        // The remotes could not be read: nothing was planned, and a later run may plan.
-        if (err instanceof RepullCannotPlan)
-          return { phase: "failed", code: "not-planned", exit: 1 };
-        throw err;
+        const computed = new Map<string, Buffer>();
+        let planned: Awaited<ReturnType<typeof planRepull>>;
+        const planStarted = Date.now();
+        try {
+          planned = await planRepull({
+            datasetId,
+            toTag: ctx.dispatch.toTag,
+            maxFetchBytes: Math.floor(options.maxFetchGb * 1024 ** 3),
+            keepWorkdir: true,
+            workRoot,
+            collect: { computed },
+            catalog,
+            github: { token: process.env.GH_TOKEN?.trim() ?? null, apiBase: githubApiBase() },
+            environment: getApiUrl(),
+            presence: "bucket-listing",
+            openNeuroGraphqlUrl: openNeuroGraphqlUrl(process.env),
+          });
+        } catch (err) {
+          // The remotes could not be read: nothing was planned, and a later run may plan.
+          if (err instanceof RepullCannotPlan)
+            return { phase: "failed", code: "not-planned", exit: 1 };
+          throw err;
+        } finally {
+          ctx.sink.time("plan", secondsSince(planStarted));
+        }
+        if (!planned.planned) return { phase: "refused", code: planned.reason, exit: 1 };
+        const file = planned.file;
+        const facts = planFacts(file.body);
+        if (
+          facts.ds !== ctx.dispatch.upstreamDs ||
+          !sameUpstreamTag(facts.fromTag, ctx.dispatch.fromTag)
+        ) {
+          return { phase: "refused", code: "dispatch-mismatch", exit: 1 };
+        }
+        const planPath =
+          options.out ?? defaultPlanPath(getConfigDir(), datasetId, facts.toTag, file.digest);
+        writePlanFile(planPath, file);
+        const counts = planCounts(file.body);
+        const fields: Record<string, LineValue> = { executable: file.executable };
+        for (const k of ["delta_paths", "copy_items", "unexplained", "conflicts", "corrections"]) {
+          if (counts[k] !== undefined) fields[k] = counts[k] as number;
+        }
+        ctx.sink.emit("plan", fields);
+        if (!file.executable) return { phase: "refused", code: notExecutableCode(file), exit: 3 };
+        try {
+          assertAutomaticPlan(file);
+        } catch (err) {
+          if (err instanceof ExecuteRefused) return { phase: "refused", code: err.code, exit: 3 };
+          throw err;
+        }
+        // What is left of the App token's hour must hold the copy, the pushes and the settle; the
+        // execute checks again, before its record and before each of them.
+        const late = tokenHourRefusal(since, Date.now(), planCopySeconds(file.body));
+        if (late) return { phase: "refused", code: late.code, exit: 1 };
+        if (planned.workdir === null) return { phase: "failed", code: "not-planned", exit: 1 };
+        keepPlanHandoff(planPath, planned.workdir, computed, file.digest);
+        return { phase: "planned" };
       } finally {
-        ctx.sink.time("plan", secondsSince(planStarted));
+        rmSync(workRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
       }
-      if (!planned.planned) return { phase: "refused", code: planned.reason, exit: 1 };
-      const file = planned.file;
-      const facts = planFacts(file.body);
-      if (
-        facts.ds !== ctx.dispatch.upstreamDs ||
-        !sameUpstreamTag(facts.fromTag, ctx.dispatch.fromTag)
-      ) {
-        return { phase: "refused", code: "dispatch-mismatch", exit: 1 };
-      }
-      writePlanFile(
-        options.out ?? defaultPlanPath(getConfigDir(), datasetId, facts.toTag, file.digest),
-        file,
-      );
-      const counts = planCounts(file.body);
-      const fields: Record<string, LineValue> = { executable: file.executable };
-      for (const k of ["delta_paths", "copy_items", "unexplained", "conflicts", "corrections"]) {
-        if (counts[k] !== undefined) fields[k] = counts[k] as number;
-      }
-      ctx.sink.emit("plan", fields);
-      if (!file.executable) return { phase: "refused", code: notExecutableCode(file), exit: 3 };
-      try {
-        assertAutomaticPlan(file);
-      } catch (err) {
-        if (err instanceof ExecuteRefused) return { phase: "refused", code: err.code, exit: 3 };
-        throw err;
-      }
-      // What is left of the App token's hour must hold the copy, the pushes and the settle; the
-      // execute checks again, before its record and before each of them.
-      const late = tokenHourRefusal(since, Date.now(), planCopySeconds(file.body));
-      if (late) return { phase: "refused", code: late.code, exit: 1 };
-      return { phase: "planned" };
     },
   });
 }
@@ -399,9 +446,14 @@ export function automaticExecute(
   return runAutomatic({
     command: "execute",
     mode: "open",
+    step: "plan",
     option,
     datasetOf: () => peekPlan(planFile).datasetId,
     reportsStart: false,
+    cleanup: (word) => {
+      if (word !== "execution-locked")
+        rmSync(planHandoffDir(planFile), { recursive: true, force: true });
+    },
     async body(ctx) {
       refuseOptions([
         ["--json", options.json === true],
@@ -473,6 +525,7 @@ export function automaticFinish(
   return runAutomatic({
     command: "resume",
     mode: "finish",
+    step: "finish",
     option,
     datasetOf: () => datasetId,
     reportsStart: true,

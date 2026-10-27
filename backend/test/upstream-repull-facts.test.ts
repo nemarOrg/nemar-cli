@@ -366,6 +366,14 @@ describe("each fact, flipped alone at its source, holds with its own word", () =
       "pr-unreadable",
     ],
     [
+      // An absent draft is not read as "not a draft".
+      "the pull request's answer names no draft",
+      () => {
+        gh.pulls[`${DS}#7`] = appPull({ omit: ["draft"] });
+      },
+      "pr-unreadable",
+    ],
+    [
       "the pull request was closed",
       () => {
         gh.pulls[`${DS}#7`] = appPull({ state: "closed" });
@@ -412,6 +420,48 @@ describe("each fact, flipped alone at its source, holds with its own word", () =
         gh.pulls[`${DS}#7`] = appPull({ head: { sha: HEAD, ref: "release/v2.0.0", repo: null } });
       },
       "pr-mismatch",
+    ],
+    // GitHub always names both repositories; one not named, or not as a name, is unreadable.
+    [
+      "the head's repository is not named",
+      () => {
+        gh.pulls[`${DS}#7`] = appPull({
+          head: { sha: HEAD, ref: "release/v2.0.0", repo: undefined },
+        });
+      },
+      "pr-unreadable",
+    ],
+    [
+      "the head's repository has no name",
+      () => {
+        gh.pulls[`${DS}#7`] = appPull({
+          head: { sha: HEAD, ref: "release/v2.0.0", repo: {} as never },
+        });
+      },
+      "pr-unreadable",
+    ],
+    [
+      "the base's repository is not named",
+      () => {
+        gh.pulls[`${DS}#7`] = appPull({ base: { ref: "main", repo: undefined } });
+      },
+      "pr-unreadable",
+    ],
+    [
+      "the base's repository is named by a number",
+      () => {
+        gh.pulls[`${DS}#7`] = appPull({ base: { ref: "main", repo: { full_name: 5 as never } } });
+      },
+      "pr-unreadable",
+    ],
+    [
+      "its head is not a commit id",
+      () => {
+        gh.pulls[`${DS}#7`] = appPull({
+          head: { sha: "main", ref: "release/v2.0.0", repo: { full_name: `nemarDatasets/${DS}` } },
+        });
+      },
+      "pr-unreadable",
     ],
     [
       "GitHub answers for another number",

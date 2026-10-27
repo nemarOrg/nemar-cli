@@ -4,8 +4,8 @@
  * The Worker claims a dispatch and sends it to the central `run-upstream-repull` workflow, whose
  * job runs `nemar admin repull plan`, `execute` or `resume` with `--automatic-dispatch <id>`. This
  * module is what those three share: the dispatch the run was handed, read and checked; the output
- * rule of a run whose log is public; the check of the live plan the automatic path takes; and the
- * run's reports to the Worker.
+ * rule of a run whose log is public; the check of the plan the automatic path takes, and what the
+ * plan step hands the execute; and the run's reports to the Worker.
  *
  * THE DISPATCH. The run reads the dispatch from the event GitHub delivered (`GITHUB_EVENT_PATH`),
  * the `client_payload` the Worker built with `buildUpstreamRepullPayload`: exactly its nine keys,
@@ -41,31 +41,43 @@
  *
  * THE REPORTS. `POST /webhooks/repull-state` with the dispatch token: `started` once, by the run's
  * first command, then `opened`, `finished`, `refused` or `failed`. A code is a word from
- * `DISPATCH_CODES`; a refusal whose word the list does not hold is reported as `no-code`. A
+ * `DISPATCH_CODES`; a refusal whose word the list does not hold is reported as its step's class
+ * ({@link dispatchCodeOf}). A
  * terminal report the Worker stored leaves `$RUNNER_TEMP/repull-reported`, so the backstop does not
  * report the run again.
  */
 
-import { readFileSync, statSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { isOpenNeuroTag, sameUpstreamTag } from "../../../../shared/openneuro-tag.js";
 import {
   APP_TOKEN_USABLE_SECONDS,
   AUTO_AFTER_COPY_SECONDS,
   AUTO_COPY_BUDGET_SECONDS,
-  AUTO_MAX_COPY_BYTES,
   AUTO_SETTLE_RESERVE_SECONDS,
-  CURRENT_PLANNER_VERSION,
   DISPATCH_ID_RE,
   DISPATCH_TOKEN_RE,
   type DispatchCode,
   type DispatchPhase,
   NEMAR_VERSION_RE,
+  type RunStep,
+  STEP_CLASSES,
   automaticCopySeconds,
+  automaticPlanRefusal,
   isDispatchCode,
 } from "../../../../shared/repull-state.js";
 import { IS_DEV_BUILD, getApiUrl } from "../../api/client.js";
 import { isDebugEnabled } from "../../debug-log.js";
+import { IMPORT_SCRUB_REFUSALS } from "../../import-scrub.js";
 import { githubApiBase } from "../../pr-review-approve.js";
 import { isVerbose } from "../../verbose.js";
 import { version as cliVersion } from "../../version.js";
@@ -608,61 +620,49 @@ export function optionRefused(option: string, why: "not-taken" | "required"): Ex
 // The plan the automatic path takes
 // ----------------------------------------------------------------------------
 
-/** The live plan, as the planner made it in this run: its body, and whether it is executable. */
+/** A plan this run's planner made: its body, and whether it is executable. */
 export interface LivePlan {
   executable: boolean;
   body: PlanBody;
 }
 
 /**
- * Refuse a plan the automatic path does not take (ADR 0111, decision 6: "the automatic path takes
- * only a plan with zero unexplained paths"), from the LIVE plan this run made and never from a
- * file's own fields: executable; made by the planner the automatic create takes
- * (`auto-planner-version`); `unexplained`, `conflicts` and `corrections` each stated and zero, a
- * count left out being unknown and never zero (`auto-not-clean-plan`); and a copy whose size is
- * known, every key of it, and at most {@link AUTO_MAX_COPY_BYTES} (`auto-copy-too-large`). The
- * Worker checks the same counts at the automatic create, from what the plan states.
+ * `plan`'s check of the plan it just made: executable, then {@link assertAutomaticCounts}. `execute`
+ * asks the counts again of the proved body; the file's `executable` it never reads, and the plan
+ * step's handoff stands for it.
  */
 export function assertAutomaticPlan(live: LivePlan): void {
   if (!live.executable) {
-    throw new ExecuteRefused("not-executable", "The live plan is not executable.");
+    throw new ExecuteRefused("not-executable", "The plan is not executable.");
   }
   assertAutomaticCounts(live.body);
 }
 
 /**
- * The counts {@link assertAutomaticPlan} reads, of a plan body. On its own only where no live plan
- * can be made: a record past `prepared` that a run takes up, whose registration moved the git-annex
- * branch the planner reads (the record itself was made by an automatic create, which checked them).
+ * A plan body's counts as the automatic path takes them: the shared rule the Worker also asks at
+ * the automatic create (`automaticPlanRefusal`), then what only a run can check, that every key's
+ * size is known and the copy fits the App token's hour. `plan` asks it of the plan it made, and
+ * `execute` of that plan's proved body, a record past `prepared` included.
  */
 export function assertAutomaticCounts(body: PlanBody): void {
-  if (body.planner !== CURRENT_PLANNER_VERSION) {
-    throw new ExecuteRefused(
-      "auto-planner-version",
-      `An automatic re-pull takes only a plan of planner ${CURRENT_PLANNER_VERSION}.`,
-    );
-  }
   const counts = planCounts(body);
-  if (["unexplained", "conflicts", "corrections"].some((k) => counts[k] !== 0)) {
-    throw new ExecuteRefused(
-      "auto-not-clean-plan",
-      "An automatic re-pull takes only a plan with zero unexplained paths, zero conflicts and zero corrections.",
-    );
-  }
-  const bytes = counts.copy_bytes;
-  if (counts.copy_bytes_unknown !== 0 || bytes === undefined || bytes > AUTO_MAX_COPY_BYTES) {
+  const refused = automaticPlanRefusal(body.planner, counts);
+  if (refused) throw new ExecuteRefused(refused.code, refused.message);
+  if (counts.copy_bytes_unknown !== 0) {
     throw new ExecuteRefused(
       "auto-copy-too-large",
-      `An automatic re-pull takes only a plan whose copy size is known and at most ${AUTO_MAX_COPY_BYTES} bytes.`,
+      "An automatic re-pull takes only a plan whose copy size is known for every key.",
     );
   }
   // The copy runs inside the App token's hour: what it and the uploads of the preparation would take,
   // by the estimate, must fit the budget. A count left out is unknown, never zero.
+  const bytes = counts.copy_bytes;
   const objects = counts.copy_items;
   const localBytes = counts.local_bytes;
   const localObjects = counts.local_uploads;
   const budget = copyBudgetSeconds();
   if (
+    bytes === undefined ||
     objects === undefined ||
     localBytes === undefined ||
     localObjects === undefined ||
@@ -674,6 +674,67 @@ export function assertAutomaticCounts(body: PlanBody): void {
       `An automatic re-pull takes only a plan whose copy, by its known size and count, fits ${Math.floor(budget / 60)} minutes: the App token that pushes it lasts an hour.`,
     );
   }
+}
+
+/**
+ * Beside the plan file the automatic `plan` writes: its scratch clones and the bytes it computed
+ * (`computed/<blob id>`), which the `execute` of the same run prepares from, so the run plans once.
+ */
+export function planHandoffDir(planPath: string): string {
+  return `${planPath}.planner`;
+}
+
+/**
+ * Keep the planner's `workdir`, its `computed` bytes and the `digest` of the plan they belong to
+ * beside `planPath`, for a plan the plan step took (executable, and one the automatic path takes).
+ * Everything is written inside `workdir` first and the whole is renamed into place last, so a
+ * handoff is complete or absent.
+ */
+export function keepPlanHandoff(
+  planPath: string,
+  workdir: string,
+  computed: ReadonlyMap<string, Buffer>,
+  digest: string,
+): void {
+  mkdirSync(join(workdir, "computed"), { mode: 0o700 });
+  for (const [oid, bytes] of computed) {
+    writeFileSync(join(workdir, "computed", oid), bytes, { mode: 0o600 });
+  }
+  writeFileSync(join(workdir, "digest"), `${digest}\n`, { mode: 0o600 });
+  const dir = planHandoffDir(planPath);
+  rmSync(dir, { recursive: true, force: true });
+  renameSync(workdir, dir);
+}
+
+/**
+ * What {@link keepPlanHandoff} kept beside `planPath` for the plan of `digest`; `not-planned` when
+ * the clones or the computed bytes are not there, or the handoff is another plan's. The preparation
+ * proves each computed blob by its git id.
+ */
+export function readPlanHandoff(
+  planPath: string,
+  digest: string,
+): {
+  workdir: string;
+  computed: Map<string, Buffer>;
+} {
+  const dir = planHandoffDir(planPath);
+  const bytesDir = join(dir, "computed");
+  const digestFile = join(dir, "digest");
+  if (
+    !existsSync(join(dir, "upstream.git")) ||
+    !existsSync(bytesDir) ||
+    !existsSync(digestFile) ||
+    readFileSync(digestFile, "utf8").trim() !== digest
+  ) {
+    throw new ExecuteRefused(
+      "not-planned",
+      "No handoff of this plan's own plan step is beside the plan file; an automatic execute plans nothing itself.",
+    );
+  }
+  const computed = new Map<string, Buffer>();
+  for (const oid of readdirSync(bytesDir)) computed.set(oid, readFileSync(join(bytesDir, oid)));
+  return { workdir: dir, computed };
 }
 
 /**
@@ -726,9 +787,17 @@ export async function appTokenRefused(
   }
 }
 
-/** A word for a report: the refusal's own when the closed list holds it, `no-code` otherwise. */
-export function dispatchCodeOf(word: string | undefined): DispatchCode {
-  return isDispatchCode(word) ? word : "no-code";
+/**
+ * A word for a report: the refusal's own when the closed list holds it, else the class of the step
+ * that met it (`scrub-failed` for a scrub's refusal in the preparation), `no-code` with no step.
+ */
+export function dispatchCodeOf(word: string | undefined, step?: RunStep): DispatchCode {
+  if (isDispatchCode(word)) return word;
+  if (step === undefined) return "no-code";
+  if (step === "prepare" && (IMPORT_SCRUB_REFUSALS as readonly string[]).includes(word ?? "")) {
+    return "scrub-failed";
+  }
+  return STEP_CLASSES[step];
 }
 
 // ----------------------------------------------------------------------------

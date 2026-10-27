@@ -1,5 +1,5 @@
 /**
- * Migration 0111_upstream_repull_automatic.sql (epic #1046 phase 7, #1913; ADR 0111, decisions 6
+ * Migration 0112_upstream_repull_automatic.sql (epic #1046 phase 7, #1913; ADR 0111, decisions 6
  * and 7), on two engines: bun:sqlite, which every other suite uses, and Miniflare's D1, the
  * implementation `wrangler --local` runs. bun:sqlite is more permissive than the SQLite D1 ships
  * (a GLOB that D1 calls too complex, a construct it compiles differently), so a CHECK, a partial
@@ -39,7 +39,7 @@ import { MIGRATIONS_DIR, applyMigrations, migrationFiles } from "./helpers/minif
 import { startRepullGitHub } from "./helpers/repull-github-standin";
 import { type Row, rowAt } from "./helpers/repull-rows";
 
-const FILE = "0111_upstream_repull_automatic.sql";
+const FILE = "0112_upstream_repull_automatic.sql";
 const SQL = readFileSync(join(MIGRATIONS_DIR, FILE), "utf-8");
 const NONCE = "0f4b8e3c-7a1d-4c2e-9b6f-1d2e3f4a5b6c";
 const RUN_URL = "https://github.com/nemarDatasets/.github/actions/runs/123456789";

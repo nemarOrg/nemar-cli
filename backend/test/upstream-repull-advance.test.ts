@@ -56,6 +56,7 @@ import {
   AUTOMATIC_OPEN_DISPATCHES_MAX,
   AUTOMATIC_SCREENS_MAX,
   type AdvanceTickResult,
+  GATE_WORK_HOLDS,
   REPULL_HOLD_SQL,
   RESUME_QUIET_MINUTES,
   RESUME_WINDOW_UTC,
@@ -453,93 +454,40 @@ describe("with the open switch off GitHub is asked nothing", () => {
 // ----------------------------------------------------------------------------
 
 describe("a hold is the first rule that does not hold", () => {
-  const cases: Array<[string, () => void, string, { github: boolean }]> = [
-    [
-      "the dataset became anonymous",
-      () => db.run("UPDATE datasets SET first_published_at = NULL, anonymous = 1"),
-      "dataset-anonymous",
-      { github: false },
-    ],
-    [
-      "an import of the dataset has not settled",
-      () =>
-        db.run(
-          `INSERT INTO import_jobs (dataset_id, source, source_id, status)
-           VALUES (?, 'openneuro', ?, 'incomplete')`,
-          [DS, `ds${DS.slice(2)}`],
-        ),
-      "import-in-flight",
-      { github: false },
-    ],
-    [
-      "the pull request was closed",
-      () => {
-        gh.pulls[`${DS}#7`] = appPull(DS, { state: "closed" });
-      },
-      "pr-closed",
-      { github: true },
-    ],
-    [
-      "the head moved",
-      () => {
-        gh.pulls[`${DS}#7`] = appPull(DS, {
-          head: { sha: OTHER, ref: "release/v2.0.0", repo: { full_name: `nemarDatasets/${DS}` } },
-        });
-      },
-      "head-moved",
-      { github: true },
-    ],
-    ["main moved", () => moveMain(), "main-moved", { github: true }],
-    [
-      "BIDS validation is still running",
-      () => {
-        gh.checkRuns[`${DS}@${HEAD}`] = [
-          { ...(greenRuns()[0] as CheckRunAnswer), status: "in_progress", conclusion: null },
-          greenRuns()[1] as CheckRunAnswer,
-        ];
-      },
-      "bids-pending",
-      { github: true },
-    ],
-    [
-      "GitHub does not say the pull request is clean",
-      () => {
-        gh.pulls[`${DS}#7`] = appPull(DS, { mergeable_state: "unstable" });
-      },
-      "not-clean",
-      { github: true },
-    ],
-  ];
-
-  for (const [name, flip, word, o] of cases) {
-    test(`${name}: ${word}, written once over two ticks`, async () => {
-      const id = openRow();
-      // Every rule holds but the one flipped, so the word is that rule's.
-      markScreen(id, "clean");
-      review("pass");
-      flip();
-      await tick();
-      expect(rowOf(id)).toMatchObject({ status: "pr_open", hold_reason: word });
-      if (!o.github) expect(githubRequests()).toEqual([]);
-      const first = rowOf(id);
-      const [audit] = holdAudits(id);
-      expect(holdAudits(id)).toHaveLength(1);
-      expect(audit).toMatchObject({ user_id: SYSTEM_USER_ID, resource_type: "upstream_repull" });
-      expect(JSON.parse(String(audit?.details))).toEqual({
-        dataset_id: DS,
-        status: "pr_open",
-        from: null,
-        to: word,
-      });
-
-      const again = await tick();
-      expect(again.holdsChanged).toBe(0);
-      expect(again.held).toEqual({ [word]: 1 });
-      // The same word: no second audit row, and the time it began is kept.
-      expect(holdAudits(id)).toHaveLength(1);
-      expect(rowOf(id)).toEqual(first);
+  // Each rule's word is pinned where the facts are read (upstream-repull-facts.test.ts); one
+  // case shows the tick applies the rule and records its word.
+  test("GitHub's word, the last rule, unknown: not-clean, written once over two ticks, never gates_clear", async () => {
+    const id = openRow();
+    markScreen(id, "clean");
+    review("pass");
+    gh.pulls[`${DS}#7`] = appPull(DS, { mergeable_state: null });
+    const r = await tick();
+    expect(r.gatesCleared).toBe(0);
+    expect(rowOf(id)).toMatchObject({
+      status: "pr_open",
+      gates_sha: null,
+      hold_reason: "not-clean",
     });
-  }
+    expect(auditsOf("repull_transition", id)).toEqual([]);
+    expect(gh.dispatches).toEqual([]);
+    const first = rowOf(id);
+    const [audit] = holdAudits(id);
+    expect(holdAudits(id)).toHaveLength(1);
+    expect(audit).toMatchObject({ user_id: SYSTEM_USER_ID, resource_type: "upstream_repull" });
+    expect(JSON.parse(String(audit?.details))).toEqual({
+      dataset_id: DS,
+      status: "pr_open",
+      from: null,
+      to: "not-clean",
+    });
+
+    const again = await tick();
+    expect(again.holdsChanged).toBe(0);
+    expect(again.held).toEqual({ "not-clean": 1 });
+    // The same word: no second audit row, and the time it began is kept.
+    expect(holdAudits(id)).toHaveLength(1);
+    expect(rowOf(id)).toEqual(first);
+  });
 
   test("a hold is an observation: it moves neither the revision nor updated_at", async () => {
     // An old time, so a hold that stamped updated_at would show; the resume's quiet time reads it.
@@ -922,121 +870,54 @@ describe("the gates of an automatic pull request", () => {
     expect(githubRequests()).toEqual([]);
   });
 
-  const unknown: Array<[string, () => void, string]> = [
-    [
-      "GitHub has not computed a mergeable state",
-      () => {
-        gh.pulls[`${DS}#7`] = appPull(DS, { mergeable_state: null });
-      },
-      "not-clean",
-    ],
-    [
-      "GitHub says the mergeable state is unknown",
-      () => {
-        gh.pulls[`${DS}#7`] = appPull(DS, { mergeable_state: "unknown" });
-      },
-      "not-clean",
-    ],
-    [
-      "GitHub says the pull request is blocked",
-      () => {
-        gh.pulls[`${DS}#7`] = appPull(DS, { mergeable_state: "blocked" });
-      },
-      "not-clean",
-    ],
-    [
-      "the pull request cannot be read",
-      () => {
-        gh.pulls[`${DS}#7`] = { status: 500 };
-      },
-      "pr-unreadable",
-    ],
-    [
-      "main cannot be read",
-      () => {
-        gh.mainRefs[DS] = 500;
-      },
-      "main-unreadable",
-    ],
-    [
-      "the checks cannot be read",
-      () => {
-        gh.checkRuns[`${DS}@${HEAD}`] = 500;
-      },
-      "checks-unreadable",
-    ],
-    ["the screen is still out", () => markScreen(1, "pending"), "screen-pending"],
-    [
-      "the review failed",
-      () => {
-        db.run("DELETE FROM pr_reviews");
-        review("fail");
-      },
+  test("a hold before the screen starts no gate work", async () => {
+    const id = openRow();
+    gh.checkRuns[`${DS}@${HEAD}`] = [
+      { ...(greenRuns()[0] as CheckRunAnswer), conclusion: "failure" },
+      greenRuns()[1] as CheckRunAnswer,
+    ];
+    const r = await tick();
+    expect(r).toMatchObject({ screensStarted: 0, reviewsStarted: 0 });
+    expect(rowOf(id).hold_reason).toBe("bids-failed");
+    expect(gh.dispatches).toEqual([]);
+    expect(gh.writes).toEqual([]);
+    expect(screens()).toEqual([]);
+    expect(reviews()).toEqual([]);
+  });
+
+  test("a check is still running: nothing is started", async () => {
+    const id = openRow();
+    gh.checkRuns[`${DS}@${HEAD}`] = [
+      greenRuns()[0] as CheckRunAnswer,
+      { ...(greenRuns()[1] as CheckRunAnswer), status: "queued", conclusion: null },
+    ];
+    const r = await tick();
+    expect(r).toMatchObject({ screensStarted: 0, reviewsStarted: 0 });
+    expect(rowOf(id).hold_reason).toBe("version-check-pending");
+    expect(gh.dispatches).toEqual([]);
+    expect(screens()).toEqual([]);
+    expect(reviews()).toEqual([]);
+  });
+
+  test("gate work starts on the screen's, the review's and GitHub's own words only", () => {
+    expect([...GATE_WORK_HOLDS]).toEqual([
+      "screen-pending",
+      "screen-unreported",
+      "screen-acknowledge",
+      "screen-blocks",
+      "screen-unchecked",
+      "screen-rerun",
+      "screen-error",
+      "screen-unreadable",
+      "screen-exempt",
+      "review-absent",
+      "review-running",
       "review-not-pass",
-    ],
-  ];
-
-  for (const [name, flip, word] of unknown) {
-    test(`${name}: never gates_clear, held ${word}`, async () => {
-      const id = openRow();
-      expect(id).toBe(1);
-      markScreen(id, "clean");
-      review("pass");
-      flip();
-      const r = await tick();
-      expect(r.gatesCleared).toBe(0);
-      expect(rowOf(id)).toMatchObject({ status: "pr_open", gates_sha: null, hold_reason: word });
-      expect(auditsOf("repull_transition", id)).toEqual([]);
-      expect(gh.dispatches).toEqual([]);
-    });
-  }
-
-  const before: Array<[string, () => void, string]> = [
-    [
-      "a check is still running",
-      () => {
-        gh.checkRuns[`${DS}@${HEAD}`] = [
-          greenRuns()[0] as CheckRunAnswer,
-          { ...(greenRuns()[1] as CheckRunAnswer), status: "queued", conclusion: null },
-        ];
-      },
-      "version-check-pending",
-    ],
-    [
-      "BIDS validation failed",
-      () => {
-        gh.checkRuns[`${DS}@${HEAD}`] = [
-          { ...(greenRuns()[0] as CheckRunAnswer), conclusion: "failure" },
-          greenRuns()[1] as CheckRunAnswer,
-        ];
-      },
-      "bids-failed",
-    ],
-    ["main moved", () => moveMain(), "main-moved"],
-    [
-      "another bot opened the pull request",
-      () => {
-        gh.pulls[`${DS}#7`] = appPull(DS, {
-          user: { login: "dependabot[bot]", id: 49699333, type: "Bot" },
-        });
-      },
-      "pr-not-app",
-    ],
-  ];
-
-  for (const [name, flip, word] of before) {
-    test(`${name}: nothing is started, held ${word}`, async () => {
-      const id = openRow();
-      flip();
-      const r = await tick();
-      expect(r).toMatchObject({ screensStarted: 0, reviewsStarted: 0 });
-      expect(rowOf(id).hold_reason).toBe(word);
-      expect(gh.dispatches).toEqual([]);
-      expect(gh.writes).toEqual([]);
-      expect(screens()).toEqual([]);
-      expect(reviews()).toEqual([]);
-    });
-  }
+      "review-exempt",
+      "review-unreadable",
+      "not-clean",
+    ]);
+  });
 
   test("the screen of one head is dispatched 3 times at most", async () => {
     const id = openRow();
@@ -1167,7 +1048,6 @@ describe("the gates of an automatic pull request", () => {
       hold_reason: "gates-refused",
     });
     expect(auditsOf("repull_transition", id)).toEqual([]);
-    expect(DISPATCH_CODES as readonly string[]).toContain("withdrawn");
     expect(repullAdvanceLogLine(r)).toMatchObject({ level: "error" });
     expect(repullAdvanceLogLine(r)?.line).toContain("refused=withdrawn:1");
     // Refused again on the next tick: the hold stands, and the log says so again.
@@ -1288,7 +1168,14 @@ describe("the log line", () => {
 
   test("every failure word has the stored shape, and is the dispatch record's or the scheduler's", () => {
     const known = new Set<string>([...DISPATCH_CODES, ...REPULL_SCHEDULER_OUTCOMES]);
-    const own = ["time-unreadable", "row-failed", "tick-failed", "stamp-failed"];
+    const own = [
+      "no-github-token",
+      "to-tag-malformed",
+      "time-unreadable",
+      "row-failed",
+      "tick-failed",
+      "stamp-failed",
+    ];
     for (const w of ADVANCE_FAILURES) {
       expect(w).toMatch(FIXED_WORD_RE);
       expect([w, known.has(w) || own.includes(w)]).toEqual([w, true]);

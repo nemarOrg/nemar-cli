@@ -47,8 +47,8 @@ export async function readAuto(): Promise<AutoView> {
   let after: number | undefined;
   let openTruncated = false;
   for (let pages = 1; ; pages++) {
-    const res = await listRepulls({ open: true, limit: 50, after });
-    open.push(...res.repulls.filter((r) => r.origin === "automatic"));
+    const res = await listRepulls({ open: true, origin: "automatic", limit: 50, after });
+    open.push(...res.repulls);
     if (res.next_after === null) break;
     if (pages >= AUTO_OPEN_PAGES_MAX) {
       openTruncated = true;
@@ -90,7 +90,7 @@ function capText(c: RepullCapReading): string {
 function schedulerLines(s: RepullSchedulerRow | null): string[] {
   if (s === null) {
     return [
-      "  Unknown: the Worker found no scheduler row (migration 0111 inserts it), which is not the same as a scheduler that never ran.",
+      "  Unknown: the Worker found no scheduler row (migration 0112 inserts it), which is not the same as a scheduler that never ran.",
     ];
   }
   const outcome = s.last_outcome === null ? "" : `, concluded ${plain(s.last_outcome)}`;
@@ -145,7 +145,7 @@ export function autoLines(v: AutoView): string[] {
     for (const r of v.open) lines.push(openLine(r));
     if (v.openTruncated) {
       lines.push(
-        `  The list stopped after ${AUTO_OPEN_PAGES_MAX} pages of open re-pulls of every origin; more are open than are shown.`,
+        `  The list stopped after ${AUTO_OPEN_PAGES_MAX} pages; more are open than are shown.`,
       );
     }
   }

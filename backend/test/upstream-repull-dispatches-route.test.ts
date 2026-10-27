@@ -296,7 +296,7 @@ describe("GET /repulls/dispatches", () => {
     const res = await get("/repulls/dispatches");
     expect(res.status).toBe(500);
     expect(res.body.error).toContain("Failed to read the dispatches");
-    expect(res.body.error).toContain("is migration 0111 applied?");
+    expect(res.body.error).toContain("is migration 0112 applied?");
   });
 
   test("it writes nothing", async () => {

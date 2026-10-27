@@ -1,31 +1,22 @@
+#!/usr/bin/env bun
 /**
- * The re-pull's S3 canary (`nemar admin repull canary`, ADR 0111 decision 8; epic #1046 phase 6):
- * the real-bucket check of what the copy step believes about S3, on a scratch prefix, before the
- * first production re-pull. Only stand-ins have answered these calls otherwise.
- *
- * It copies two upstream objects into the scratch prefix by version, through the same write guard
- * the copy uses: a small one with one `copy-object`, and one over 10 MiB as a multipart upload of
- * 5 MiB parts copied with `upload-part-copy`, so the multipart path runs. It heads both copies and
- * compares their sizes with the versions they came from, and the ETag where the source is a
- * single-part object; it writes a staging-shaped key and deletes it; it deletes both copies by
- * version id; and it lists the prefix's versions to show nothing is left, not even a delete marker.
- * It never locks and never bypasses a lock: an object the bucket's default retention locked cannot
- * be deleted by version, and the canary says so.
- *
- * The prefix is refused unless it is `nm099999/repull-canary-<word>/` or
- * `xx<090001..099899>/repull-canary-<word>/`: the standing end-to-end dataset or a dev-ephemeral
- * one, never a dataset's `objects/` or `staging/`, and never the permanent exemplar fleet
- * (`xx099900` to `xx099999`, ADR 0068). The bucket must be NEMAR's. Both are enforced by
- * {@link runCanary} itself, so no caller can skip them. A dry run (the default) makes no call at
- * all and prints the calls it would make. The owner runs it with `--execute` (a real-bucket write).
- *
- * Every object the canary writes is deleted by version id on every path, including when a check of
- * the copy fails; an upload an abort could not close, or one left open, is a failed step.
+ * The re-pull's S3 canary (ADR 0111, decision 8): the owner's check, before the first production
+ * re-pull, of the copy's S3 calls against the real buckets, which only stand-ins answer otherwise.
+ * It runs them through the copy's write guard on a scratch prefix and deletes by version id
+ * everything it wrote, on every path. It never locks and never bypasses a lock.
  */
 
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { parseArgs } from "node:util";
+import { UPSTREAM_BUCKET } from "../src/lib/fleet-content-recovery.js";
+import { UPSTREAM_REGION } from "../src/lib/repull/execute/copy.js";
+import {
+  type AwsGuardContext,
+  RepullWriteRefused,
+  guardedAws,
+} from "../src/lib/repull/write-guard.js";
 import {
   AwsCliError,
   type AwsRunner,
@@ -34,21 +25,14 @@ import {
   cliCredentialSource,
   createAwsRunner,
   failureWord,
-} from "../../../scripts/scrub/s3/s3-lib.js";
-import { UPSTREAM_BUCKET } from "../fleet-content-recovery.js";
-import { UPSTREAM_REGION } from "./execute/copy.js";
-import { type AwsGuardContext, RepullWriteRefused, guardedAws } from "./write-guard.js";
+} from "./scrub/s3/s3-lib.js";
 
 /** NEMAR's bucket, the only one the canary writes to. */
 export const NEMAR_BUCKET = "nemar";
 
 const CANARY_PREFIX_RE = /^(nm099999|xx(\d{6}))\/repull-canary-[0-9A-Za-z-]{1,64}\/$/;
 
-/**
- * Whether `prefix` is a canary scratch prefix: `nm099999/repull-canary-<word>/`, or the same under
- * a dev-ephemeral id `xx090001` to `xx099899`. The top 100 ids of the `xx` prefix are the
- * permanent exemplar fleet (ADR 0068) and are refused.
- */
+/** `nm099999/repull-canary-<word>/`, or the same under `xx090001` to `xx099899` (ADR 0068). */
 export function isCanaryPrefix(prefix: string): boolean {
   const m = CANARY_PREFIX_RE.exec(prefix);
   if (!m) return false;
@@ -454,3 +438,86 @@ export async function runCanary(
 
   return { ok: steps.every((s) => s.ok) && steps.length > 0, steps };
 }
+
+const HELP = `Usage: bun run scripts/repull-canary.ts --prefix <prefix> --source <ds>/<path>@<versionId>
+  --multipart-source <ds>/<path>@<versionId> [--bucket nemar] [--region us-east-2] [--execute] [--json]
+
+Checks the copy's S3 calls against the real buckets with the ambient short-lived AWS credentials:
+a copy by version id, a multipart copy in 5 MiB parts, the copies' sizes and ETag, a staging-shaped
+key, and deletes by version id that leave the prefix empty. A dry run (the default) makes no call
+and prints the calls --execute makes.
+
+--prefix must be nm099999/repull-canary-<word>/ or xx<090001 to 099899>/repull-canary-<word>/,
+never the exemplar fleet (xx099900 to xx099999). --bucket must be nemar. --source is a small
+upstream object and --multipart-source one over 10 MiB, of the same dataset.
+
+Exit codes: 0 every step passed (or a dry run); 1 a step failed or the arguments were refused.`;
+
+const OPTIONS = {
+  prefix: { type: "string" },
+  source: { type: "string" },
+  "multipart-source": { type: "string" },
+  bucket: { type: "string" },
+  region: { type: "string" },
+  execute: { type: "boolean" },
+  json: { type: "boolean" },
+  help: { type: "boolean" },
+} as const;
+
+const parse = (argv: string[]) => parseArgs({ args: argv, options: OPTIONS, strict: true }).values;
+
+/** The script's entry point; returns its exit code. */
+export async function main(argv: string[]): Promise<number> {
+  let values: ReturnType<typeof parse>;
+  try {
+    values = parse(argv);
+  } catch (err) {
+    console.error(`${err instanceof Error ? err.message : String(err)}\n\n${HELP}`);
+    return 1;
+  }
+  if (values.help) {
+    console.log(HELP);
+    return 0;
+  }
+  const json = values.json === true;
+  const out = (line: string) => (json ? console.error(line) : console.log(line));
+  if (!values.prefix || !values.source || !values["multipart-source"]) {
+    out(`--prefix, --source and --multipart-source are required.\n\n${HELP}`);
+    return 1;
+  }
+  const single = parseCanarySource(values.source);
+  const multipart = parseCanarySource(values["multipart-source"]);
+  if (!single || !multipart) {
+    out(
+      "--source and --multipart-source take <ds>/<path>@<versionId>; a version id may hold only letters, digits, '.', '_' and '-'.",
+    );
+    return 1;
+  }
+  const args: CanaryArgs = {
+    prefix: values.prefix,
+    single,
+    multipart,
+    bucket: values.bucket ?? NEMAR_BUCKET,
+    region: values.region ?? "us-east-2",
+  };
+  const problem = canaryArgsProblem(args);
+  if (problem) {
+    out(`Refused: ${problem}.`);
+    return 1;
+  }
+  if (!values.execute) {
+    if (json) {
+      console.log(JSON.stringify({ dry_run: true, calls: canaryCalls(args) }, null, 2));
+    } else {
+      console.log("Dry run; --execute makes these calls:");
+      for (const call of canaryCalls(args)) console.log(`  ${call}`);
+    }
+    return 0;
+  }
+  const result = await runCanary({ ...args, env: process.env, out });
+  if (json) console.log(JSON.stringify(result, null, 2));
+  else console.log(result.ok ? "The canary passed." : "The canary FAILED; see the steps above.");
+  return result.ok ? 0 : 1;
+}
+
+if (import.meta.main) process.exitCode = await main(process.argv.slice(2));

@@ -121,7 +121,10 @@ export interface PullRequestFacts {
 export const isObject = (x: unknown): x is Record<string, unknown> =>
   typeof x === "object" && x !== null && !Array.isArray(x);
 
-/** The fields of GitHub's pull request this reads, each checked for its shape; null when one is off. */
+/**
+ * The one parser of GitHub's pull request (`pullRequestFactOf` adds the rule's own fields): the
+ * fields this reads, each checked for its shape; null when one is off.
+ */
 export function pullRequestFacts(body: unknown): PullRequestFacts | null {
   if (!isObject(body) || !isObject(body.head) || !isObject(body.base)) return null;
   const { state, merged, merge_commit_sha: mergeCommitSha } = body;

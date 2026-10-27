@@ -2,16 +2,15 @@
  * The automatic re-pull's fixed words (`shared/repull-state.ts`, epic #1046 phase 7, #1913; ADR
  * 0111, decision 6), checked against the code that produces them.
  *
- * A dispatch's `code` is a closed list: the callback refuses any other word, and the run reports
- * `no-code` for a refusal whose word the list does not hold. So the list must hold every word a
- * run can meet, or a refusal arrives as `no-code` and the weekly report cannot say why. This scans
- * the CLI's plan and execution code, the scrub's declared refusals and the Worker's re-pull
- * routes for the words they refuse with, and requires each to be on the list.
+ * A dispatch's `code` is a closed list, and the callback refuses any other word. A run reports a
+ * refusal whose word the list does not hold as the class of the step that met it, so every word the
+ * CLI's plan and execution, the scrub and the Worker's re-pull routes refuse with must reach a
+ * report as a listed word, at whichever step it is met.
  *
  * A source scan finds the literal words only (`code: "x"`, `new ExecuteRefused("x"`, a local
  * `refuse("x"` or `refused("x"`, and a Worker refusal `{ status: 4xx, code: "x" }`); a word built at
- * run time is not seen, which is why a run maps any unknown word to `no-code` rather than trusting
- * this test alone. Each pattern is proven to find a word it should.
+ * run time is not seen, which is why a word met at no step is `no-code`. Each pattern is proven to
+ * find a word it should.
  *
  * CI TIER: unit-pure. Reads source files; no server, no database.
  */
@@ -28,9 +27,12 @@ import {
   FIXED_WORD_RE,
   REPULL_HOLD_REASONS,
   REPULL_SCHEDULER_OUTCOMES,
+  RUN_STEPS,
+  STEP_CLASSES,
 } from "../shared/repull-state";
 import { IMPORT_SCRUB_REFUSALS } from "../src/lib/import-scrub";
 import { PLANNER_VERSION } from "../src/lib/repull/digest";
+import { dispatchCodeOf } from "../src/lib/repull/execute/automatic";
 import { PREPARE_ERROR_PREFIX } from "../src/lib/repull/execute/run";
 
 const ROOT = join(import.meta.dir, "..");
@@ -80,9 +82,87 @@ const workerWords = () =>
   );
 
 const listed = new Set<string>(DISPATCH_CODES);
-const missing = (words: Iterable<string>) => [...words].filter((w) => !listed.has(w)).sort();
 
-describe("DISPATCH_CODES holds every word a run can meet", () => {
+/** The list, as the cut of the Phase 7 cleanup left it. */
+const PINNED = [
+  // The Worker's own.
+  "auto-production-only",
+  "auto-repull-off",
+  "auto-on-only",
+  "auto-planner-version",
+  "auto-not-clean-plan",
+  "auto-copy-too-large",
+  "dispatch-token",
+  "dispatch-mismatch",
+  "dispatch-unconfigured",
+  "dispatch-refused",
+  "dispatch-failed",
+  "dispatch-deferred",
+  // The Worker's answers to a report.
+  "invalid-body",
+  "invalid-token",
+  "already-started",
+  "kind-mismatch",
+  "repull-mismatch",
+  "repull-not-ready",
+  "stale-dispatch",
+  // The run's own.
+  "dispatch-invalid",
+  "runner-disk",
+  "auto-cli-version",
+  "runner-credentials",
+  "runner-failed",
+  "auto-no-app-token",
+  "auto-token-on-argv",
+  "auto-verbose",
+  "auto-option",
+  "auto-api-not-production",
+  "auto-token-hour",
+  "auto-token-clock",
+  "auto-copy-too-long",
+  "token-expired",
+  "not-planned",
+  "head-foreign",
+  "head-unreadable",
+  "finish-not-merged",
+  "finish-incomplete",
+  "report-unanswered",
+  "no-code",
+  // The final codes not above.
+  "key-without-pin",
+  "ledger-correction-unexplained",
+  "dead-recording-unpinned",
+  "target-names-dead-key",
+  "concept-doi-disagrees",
+  "gitlink",
+  "anonymous-dataset",
+  "not-a-mirror",
+  // The step classes.
+  "plan-refused",
+  "record-refused",
+  "prepare-failed",
+  "scrub-failed",
+  "copy-failed",
+  "register-failed",
+  "pr-failed",
+  "settle-failed",
+  "finish-failed",
+];
+
+describe("DISPATCH_CODES: the step classes, the final codes and the words written as codes", () => {
+  test("the list is the pinned one", () => {
+    expect([...DISPATCH_CODES].sort()).toEqual([...PINNED].sort());
+  });
+
+  test("every step's class, the scrub's, every final code and dispatch-deferred is listed", () => {
+    for (const step of RUN_STEPS) {
+      expect([step, listed.has(STEP_CLASSES[step])]).toEqual([step, true]);
+    }
+    expect(listed.has("scrub-failed")).toBe(true);
+    for (const w of DISPATCH_FINAL_CODES) expect([w, listed.has(w)]).toEqual([w, true]);
+    expect(listed.has("dispatch-deferred")).toBe(true);
+  });
+
   test("the scans find what they should, so an empty result is not a pass", () => {
     const cli = cliWords();
     for (const w of [
@@ -98,23 +178,28 @@ describe("DISPATCH_CODES holds every word a run can meet", () => {
       expect([w, cli.has(w)]).toEqual([w, true]);
     }
     const worker = workerWords();
-    for (const w of ["repull-in-flight", "auto-not-clean-plan", "dispatch-mismatch", "merge-cap"]) {
+    for (const w of ["repull-in-flight", "auto-repull-off", "dispatch-mismatch", "merge-cap"]) {
       expect([w, worker.has(w)]).toEqual([w, true]);
     }
   });
 
-  test("every refusal word of the CLI's plan and execution is listed", () => {
-    const cli = cliWords();
-    expect(missing(cli.keys()).map((w) => `${w} (${cli.get(w)})`)).toEqual([]);
+  test("every word the CLI, the scrub and the Worker refuse with reaches a report as a listed word, at every step", () => {
+    const words = [...cliWords().keys(), ...IMPORT_SCRUB_REFUSALS, ...workerWords().keys()];
+    for (const w of words) {
+      for (const step of RUN_STEPS) {
+        const code = dispatchCodeOf(w, step);
+        expect([w, step, code, listed.has(code)]).toEqual([w, step, code, true]);
+      }
+    }
   });
 
-  test("every refusal the scrub declares is listed", () => {
-    expect(missing(IMPORT_SCRUB_REFUSALS)).toEqual([]);
-  });
-
-  test("every refusal of the Worker's re-pull routes is listed", () => {
-    const worker = workerWords();
-    expect(missing(worker.keys()).map((w) => `${w} (${worker.get(w)})`)).toEqual([]);
+  test("every word the dispatch record refuses with is listed as itself, so a run can pass it on", () => {
+    const own = wordsIn(
+      [join(ROOT, "backend/src/services/upstream-repull-dispatch.ts")],
+      [WORKER_PATTERN],
+    );
+    expect(own.has("already-started")).toBe(true);
+    for (const w of own.keys()) expect([w, listed.has(w)]).toEqual([w, true]);
   });
 
   test("every word has the stored shape, and none repeats", () => {
@@ -125,7 +210,6 @@ describe("DISPATCH_CODES holds every word a run can meet", () => {
     expect(new Set(REPULL_HOLD_REASONS).size).toBe(REPULL_HOLD_REASONS.length);
     expect(new Set(REPULL_SCHEDULER_OUTCOMES).size).toBe(REPULL_SCHEDULER_OUTCOMES.length);
     expect(new Set(DISPATCH_FINAL_CODES).size).toBe(DISPATCH_FINAL_CODES.length);
-    for (const w of DISPATCH_FINAL_CODES) expect(listed.has(w)).toBe(true);
   });
 });
 
@@ -188,10 +272,10 @@ describe("publicWord: the words a report on a public repository may print", () =
     }
   });
 
-  test("a digit does not withhold a word: the list does, so the four codes that hold one print", () => {
-    for (const word of ["nemar-s3-ambiguous", "no-nemar-s3", "no-nemar-s3-remote", "s3-failed"]) {
-      expect(word).toMatch(/\d/);
-      expect(publicWord(word, "code")).toBe(word);
+  test("the list decides, not the word's characters: a word off it is other, digit or not", () => {
+    for (const word of ["nemar-s3-ambiguous", "s3-failed", "plan-stale"]) {
+      expect(publicWord(word, "code")).toBe(OTHER_WORD);
     }
+    expect(publicWord("plan-refused", "code")).toBe("plan-refused");
   });
 });

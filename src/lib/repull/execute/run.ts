@@ -6,16 +6,17 @@
  *
  *   S0  read the plan file, prove it is the reviewed one, plan again from live sources
  *       (`verify-plan.ts`); no API write, push or upload happens before this passes (the scratch
- *       directory for the planner's clones is a local write);
+ *       directory for the planner's clones is a local write). A dispatched run plans nothing
+ *       again: it takes its own plan step's plan, clones and computed bytes;
  *   S1  `POST /admin/repulls`: the record, or the open one for this same plan (`planned`);
  *   S2  a working clone at the base, the delta materialized, scrubbed, uploaded where the scrub
  *       re-keyed or annexed, and synthesized into one commit; the checkpoint saved; then
  *       `planned -> prepared` with the commit, its tree, the copy manifest's digest and counts;
  *   S3 to S5  the copy, the registration and the pull request (`advance.ts`), to `pr_open`.
  *
- * A dispatched run (`opts.automatic`, the central workflow's; `automatic.ts`) adds four things and
- * changes nothing else: before anything is written, the LIVE plan must be one the automatic path
- * takes (`assertAutomaticPlan`) and fit what is left of the App token's hour; S1 presents the
+ * A dispatched run (`opts.automatic`, the central workflow's; `automatic.ts`) adds four things
+ * besides: before anything is written, its plan must be one the automatic path takes and fit what
+ * is left of the App token's hour (`takeAutomaticPlan`); S1 presents the
  * dispatch, so the Worker records the re-pull as automatic; the copy, the registration and the pull
  * request each check the token's hour again before they start (`tokenHourRefusal`); and at
  * `pr_open`, still holding the lock, the release head is settled (`settle.ts`), inside that hour,
@@ -74,7 +75,7 @@ import { describeError, httpUpstreamReader } from "../../import-scrub.js";
 import { awsCliUpload } from "../../normalize-dataset.js";
 import { adminGitHubToken, githubApiBase } from "../../pr-review-approve.js";
 import { BRANCH_PUSHED, endBeforeMerge } from "../abandon.js";
-import type { PlanBody } from "../digest.js";
+import { type PlanBody, planDigest } from "../digest.js";
 import { nemarRemoteOf } from "../plan.js";
 import type { ReleaseFacts } from "../preflight.js";
 import {
@@ -95,8 +96,8 @@ import {
 } from "./advance.js";
 import {
   assertAutomaticCounts,
-  assertAutomaticPlan,
   planCopySeconds,
+  readPlanHandoff,
   tokenHourRefusal,
 } from "./automatic.js";
 import { copyItems, copySection, planCounts, planFacts } from "./body.js";
@@ -109,6 +110,7 @@ import { type Entry, readIndex, readTree, rowTime, synthesizeCommit } from "./sy
 import {
   ExecuteRefused,
   assertNotAnonymous,
+  inStep,
   peekPlan,
   readExecutablePlan,
   readReviewedPlan,
@@ -197,7 +199,7 @@ export interface AutomaticExecution {
 }
 
 /** The steps a dispatched run times. */
-export type MeasuredStep = StepName | "replan" | "clone" | "prepare" | "settle";
+export type MeasuredStep = StepName | "clone" | "prepare" | "settle";
 
 /** Where a run stopped, and, for a dispatched run at `pr_open`, how its release head settled. */
 export interface ExecuteResult {
@@ -319,15 +321,21 @@ export async function executeRepull(opts: ExecuteOptions): Promise<ExecuteResult
  */
 function assertAutomaticRecord(a: AutomaticExecution, row: RepullRow): void {
   if (row.origin !== "automatic") {
-    throw new ExecuteRefused(
-      "repull-in-flight",
-      `Re-pull #${row.id} of ${row.dataset_id} is an administrator's: a dispatched run never takes it up.`,
+    throw inStep(
+      new ExecuteRefused(
+        "repull-in-flight",
+        `Re-pull #${row.id} of ${row.dataset_id} is an administrator's: a dispatched run never takes it up.`,
+      ),
+      "record",
     );
   }
   if (a.repullId !== null && row.id !== a.repullId) {
-    throw new ExecuteRefused(
-      "repull-mismatch",
-      `The dispatch continues re-pull #${a.repullId}, and the record found is #${row.id}.`,
+    throw inStep(
+      new ExecuteRefused(
+        "repull-mismatch",
+        `The dispatch continues re-pull #${a.repullId}, and the record found is #${row.id}.`,
+      ),
+      "record",
     );
   }
 }
@@ -367,7 +375,7 @@ async function settleOpened(
       }),
     );
   } catch (err) {
-    throw resumable(err);
+    throw resumable(inStep(err, "settle"));
   } finally {
     scratch.close();
   }
@@ -378,7 +386,7 @@ async function openRecord(datasetId: string): Promise<RepullRow | null> {
   try {
     return (await listRepulls({ dataset: datasetId, open: true, limit: 1 })).repulls[0] ?? null;
   } catch (err) {
-    if (err instanceof ApiError) throw recordRefused(err);
+    if (err instanceof ApiError) throw inStep(recordRefused(err), "record");
     throw err;
   }
 }
@@ -558,13 +566,17 @@ async function execute(
       };
     }
 
-    removeTree(paths.plan);
-    privateDir(paths.plan, top);
-    const computed = new Map<string, Buffer>();
-    let verified: Awaited<ReturnType<typeof readExecutablePlan>>;
+    // The planner's clones: made again here for an administrator's run, or a dispatched run's own
+    // plan step's, kept beside its plan file, which the command that ran this removes.
+    let planned: PlanToPrepare;
     try {
-      verified = await measuredStep(opts.automatic, "replan", () =>
-        readExecutablePlan(opts.planPath, {
+      if (opts.automatic) {
+        planned = takeAutomaticPlan(opts.planPath, opts.automatic, env, openNeuroGraphqlUrl);
+      } else {
+        removeTree(paths.plan);
+        privateDir(paths.plan, top);
+        const computed = new Map<string, Buffer>();
+        const verified = await readExecutablePlan(opts.planPath, {
           catalog,
           github: { token: token.ok ? token.token : null, apiBase },
           environment: getApiUrl(),
@@ -574,20 +586,13 @@ async function execute(
           openNeuroGraphqlUrl,
           ...(opts.maxFetchBytes !== undefined ? { maxFetchBytes: opts.maxFetchBytes } : {}),
           ...(superseding ? { ownRelease: (facts) => onlyOwnRelease(superseding, facts) } : {}),
-        }),
-      );
-      // A dispatched run takes only a plan the automatic path takes, read from the LIVE plan
-      // this run just made, and only while what is left of the App token's hour holds its copy,
-      // the pushes and the settle: both before anything is written.
-      const a = opts.automatic;
-      if (a) {
-        assertAutomaticPlan(verified.live);
-        const late = tokenHourRefusal(
-          a.tokenSince,
-          (a.now ?? Date.now)(),
-          planCopySeconds(verified.live.body),
-        );
-        if (late) throw late;
+        });
+        planned = {
+          body: verified.live.body,
+          plannerDir: verified.workdir,
+          computed,
+          rebasedOnto: verified.rebasedOnto,
+        };
       }
     } catch (err) {
       // Refused before anything was prepared: leave no empty directory behind it.
@@ -601,10 +606,10 @@ async function execute(
       token: token.ok ? token.token : null,
       datasetId,
       digest,
-      body: verified.live.body,
+      body: planned.body,
       paths,
-      plannerDir: verified.workdir,
-      computed,
+      plannerDir: planned.plannerDir,
+      computed: planned.computed,
       objectsBase,
       normalizeMaxBytes: opts.normalizeMaxBytes ?? NORMALIZE_MAX_BYTES,
       automatic: opts.automatic,
@@ -628,7 +633,7 @@ async function execute(
           out: opts.out,
         });
       }
-      const prepared = await recordAndPrepare(ctx, verified.rebasedOnto, until);
+      const prepared = await recordAndPrepare(ctx, planned.rebasedOnto, until);
       if (reached(prepared.row.status, until)) {
         const settled = await settleOpened(opts, env, ctx.token, digest, prepared.row);
         return settled ? { ...prepared, row: settled.row, settled } : prepared;
@@ -670,6 +675,40 @@ async function execute(
   }
 }
 
+/** What preparation reads of a plan: its body, the planner's clones and the bytes it computed. */
+interface PlanToPrepare {
+  body: PlanBody;
+  plannerDir: string;
+  computed: Map<string, Buffer>;
+  /** The live `main` an administrator's run bases on when it moved by `.nemar/**` only. */
+  rebasedOnto: string | null;
+}
+
+/**
+ * A dispatched run takes the plan its own plan step made moments before in the same job, and plans
+ * nothing again. Before anything is written: the file is proved by its digest, the API and the
+ * remotes; its counts are the automatic path's and its copy fits what is left of the App token's
+ * hour; and the plan step's handoff names that digest. The handoff, which the plan step leaves only
+ * for a plan it took, says the plan is executable; the file's own `executable` is never read.
+ */
+function takeAutomaticPlan(
+  planPath: string,
+  a: AutomaticExecution,
+  env: Env,
+  openNeuroGraphqlUrl: string | undefined,
+): PlanToPrepare {
+  const { body } = readReviewedPlan(planPath, {
+    environment: getApiUrl(),
+    env,
+    openNeuroGraphqlUrl,
+  });
+  assertAutomaticCounts(body);
+  const late = tokenHourRefusal(a.tokenSince, (a.now ?? Date.now)(), planCopySeconds(body));
+  if (late) throw late;
+  const { workdir, computed } = readPlanHandoff(planPath, planDigest(body));
+  return { body, plannerDir: workdir, computed, rebasedOnto: null };
+}
+
 /**
  * The open record `open` of another plan, when this run may supersede it; refuses otherwise. A run
  * without `--supersede` refuses (`repull-in-flight`) before anything is planned. With it, the record
@@ -685,9 +724,12 @@ function supersedable(
   body: PlanBody,
 ): RepullRow {
   if (!opts.supersede) {
-    throw new ExecuteRefused(
-      "repull-in-flight",
-      `Re-pull #${open.id} of ${datasetId} (${open.from_tag} to ${open.to_tag}) is ${open.status}, and a dataset has one open re-pull at a time: pass --supersede to end it and execute this plan (a newer tag, before its merge), or end it with nemar admin repull abandon ${datasetId}.`,
+    throw inStep(
+      new ExecuteRefused(
+        "repull-in-flight",
+        `Re-pull #${open.id} of ${datasetId} (${open.from_tag} to ${open.to_tag}) is ${open.status}, and a dataset has one open re-pull at a time: pass --supersede to end it and execute this plan (a newer tag, before its merge), or end it with nemar admin repull abandon ${datasetId}.`,
+      ),
+      "record",
     );
   }
   const facts = planFacts(body);
@@ -879,7 +921,7 @@ async function recordAndPrepare(
         unexplained: counts.unexplained ?? 0,
         conflicts: counts.conflicts ?? 0,
         corrections: counts.corrections ?? 0,
-        // The automatic create bounds the copy by its stated size (`assertAutomaticPlan` has
+        // The automatic create bounds the copy by its stated size (`assertAutomaticCounts` has
         // proved it known); an administrator's record does not need it.
         ...(ctx.automatic && counts.copy_bytes !== undefined
           ? { copy_bytes: counts.copy_bytes }
@@ -891,7 +933,7 @@ async function recordAndPrepare(
         : {}),
     });
   } catch (err) {
-    if (err instanceof ApiError) throw recordRefused(err);
+    if (err instanceof ApiError) throw inStep(recordRefused(err), "record");
     throw err;
   }
   let row = created.repull;
@@ -916,7 +958,7 @@ async function recordAndPrepare(
         : resumePrepared(ctx, from, baseSha),
     );
   } catch (err) {
-    throw resumable(err);
+    throw resumable(inStep(err, "prepare"));
   }
   return { row, stoppedAt: row.status };
 }

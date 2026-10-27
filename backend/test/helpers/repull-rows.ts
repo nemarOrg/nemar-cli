@@ -4,7 +4,7 @@
  * The production code never builds a row like this: it moves one along its edges.
  *
  * Also the one dispatch seeder of the suites that read `upstream_repull_dispatches` (migration
- * 0111): a row that satisfies every CHECK for its state, written through bun:sqlite by
+ * 0112): a row that satisfies every CHECK for its state, written through bun:sqlite by
  * {@link seedDispatch} or through any driver by {@link DISPATCH_INSERT_SQL} and
  * {@link dispatchBinds}. The production code makes these rows by claiming and reporting.
  */

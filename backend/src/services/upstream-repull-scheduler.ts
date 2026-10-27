@@ -215,7 +215,7 @@ export const SCHEDULER_STATUS_SQL =
   "SELECT last_tick_at, last_outcome, last_advance_at FROM upstream_repull_scheduler WHERE id = 1";
 
 /**
- * The scheduler's stamps, or null when the row is absent (migration 0111 inserts it, so that is a
+ * The scheduler's stamps, or null when the row is absent (migration 0112 inserts it, so that is a
  * fault to see, not a scheduler that never ran: the caller says unknown). A NULL time inside the
  * row means nothing has stamped it yet.
  */

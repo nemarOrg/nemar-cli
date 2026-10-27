@@ -3,7 +3,8 @@
  * decision 3).
  *
  *   POST /admin/repulls                  create the record, or return the open one for the same plan
- *   GET  /admin/repulls                  list (`dataset`, `open`, `after`, `limit` up to 50)
+ *   GET  /admin/repulls                  list (`dataset`, `open`, `origin`, `after`, `limit` up
+ *                                        to 50)
  *   GET  /admin/repulls/switches         what the Worker reads of the automatic re-pull's
  *                                        switches and both caps, and the scheduler's stamps
  *                                        (before `:id`, which would answer 400 for "switches")
@@ -42,7 +43,12 @@
  */
 
 import { zValidator } from "@hono/zod-validator";
-import { DISPATCH_STATUSES, type DispatchStatus } from "../../../../shared/repull-state";
+import {
+  DISPATCH_STATUSES,
+  type DispatchStatus,
+  REPULL_ORIGINS,
+  type RepullOrigin,
+} from "../../../../shared/repull-state";
 import { isValidDatasetId } from "../../services/datasetId";
 import { repullSwitchesReport } from "../../services/repull-switches";
 import {
@@ -94,7 +100,7 @@ function refusalBody(r: RepullRefusal) {
 
 /**
  * Only a missing table or column suggests the migration is not applied; any other error is not
- * that. `migration` names the one that creates what the read needs: 0105 for the record, 0111 for
+ * that. `migration` names the one that creates what the read needs: 0105 for the record, 0112 for
  * the automatic path's dispatches and scheduler.
  */
 function failure(what: string, err: unknown, migration = "0105") {
@@ -147,6 +153,13 @@ export function registerUpstreamRepullRoutes(admin: AdminRouter): void {
     if (openRaw !== undefined && !["1", "true", "0", "false"].includes(openRaw)) {
       return c.json({ error: "`open` must be 1, true, 0 or false", code: "invalid-query" }, 400);
     }
+    const origin = c.req.query("origin");
+    if (origin !== undefined && !(REPULL_ORIGINS as readonly string[]).includes(origin)) {
+      return c.json(
+        { error: `\`origin\` must be one of ${REPULL_ORIGINS.join(", ")}`, code: "invalid-query" },
+        400,
+      );
+    }
     const afterRaw = c.req.query("after");
     const after = afterRaw === undefined ? undefined : parseId(afterRaw);
     if (after === null)
@@ -170,6 +183,7 @@ export function registerUpstreamRepullRoutes(admin: AdminRouter): void {
         dataset,
         open: openRaw === "1" || openRaw === "true",
         after,
+        origin: origin as RepullOrigin | undefined,
         limit,
       });
       return c.json({
@@ -193,7 +207,7 @@ export function registerUpstreamRepullRoutes(admin: AdminRouter): void {
         scheduler: await readSchedulerRow(c.env.DB),
       });
     } catch (err) {
-      return c.json({ error: failure("read the scheduler", err, "0111") }, 500);
+      return c.json({ error: failure("read the scheduler", err, "0112") }, 500);
     }
   });
 
@@ -250,7 +264,7 @@ export function registerUpstreamRepullRoutes(admin: AdminRouter): void {
             : null,
       });
     } catch (err) {
-      return c.json({ error: failure("read the dispatches", err, "0111") }, 500);
+      return c.json({ error: failure("read the dispatches", err, "0112") }, 500);
     }
   });
 

@@ -1,15 +1,10 @@
 /**
- * `nemar admin repull canary` (ADR 0111, decision 8; epic #1046 phase 6, #1912), driven through the
- * real entry point as a subprocess, with the REAL `aws` CLI against the S3 stand-in.
+ * `scripts/repull-canary.ts` (ADR 0111, decision 8), run as a subprocess with the REAL `aws` CLI
+ * against the S3 stand-in: the calls it sends, in order and at their versions; an empty prefix
+ * after it; a dry run that sends nothing; the fences, refused before any call; and a locked copy
+ * that fails the canary rather than being bypassed.
  *
- * The canary exists because only stand-ins answer the copy's S3 calls in the suites: it is the
- * check the owner runs against the real buckets. Here it is pinned that it sends exactly the calls
- * its help lists, in order, each copy at a version id, that it leaves its scratch prefix empty by
- * version (no delete marker), that a dry run sends nothing, that a prefix which is not a scratch
- * prefix is refused before any call, and that a copy it cannot delete (a lock) fails the canary
- * rather than being bypassed.
- *
- * CI TIER: unit-pure. It starts the binary and the real aws CLI against a loopback S3 stand-in; it
+ * CI TIER: unit-pure. It starts the script and the real aws CLI against a loopback S3 stand-in; it
  * needs no live backend, no database and no network beyond loopback.
  */
 
@@ -26,14 +21,14 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn, which } from "bun";
-import { isCanaryPrefix, runCanary } from "../src/lib/repull/canary";
+import { isCanaryPrefix, runCanary } from "../scripts/repull-canary";
 import { toolOrFail } from "./scrub/helpers/require-tools";
 import { type S3Standin, startS3Standin } from "./scrub/helpers/s3-standin";
 
 setDefaultTimeout(240_000);
 
 const awsInstalled = toolOrFail("aws", which("aws") !== null);
-const CLI_ENTRY = join(import.meta.dir, "..", "src", "index.ts");
+const SCRIPT = join(import.meta.dir, "..", "scripts", "repull-canary.ts");
 const REPO_ROOT = join(import.meta.dir, "..");
 const MIB = 1024 * 1024;
 const PREFIX = "nm099999/repull-canary-20261024T000000Z/";
@@ -83,12 +78,10 @@ beforeEach(() => {
 
 async function canary(args: string[]): Promise<{ exitCode: number; all: string }> {
   const proc = spawn({
-    cmd: ["bun", "run", CLI_ENTRY, "admin", "repull", "canary", ...args],
+    cmd: ["bun", "run", SCRIPT, ...args],
     cwd: REPO_ROOT,
     env: {
       ...process.env,
-      NEMAR_CONFIG_DIR: home,
-      NEMAR_NO_UPDATE_CHECK: "1",
       NO_COLOR: "1",
       AWS_ACCESS_KEY_ID: "ASIATESTDUMMY000001",
       AWS_SECRET_ACCESS_KEY: "dummySecretAccessKeyForRepullCanary",
@@ -120,6 +113,13 @@ const args = (prefix = PREFIX) => [
   "--multipart-source",
   `${BIG}@${versions.big}`,
 ];
+
+test("the help names the scratch prefix and bucket rules", async () => {
+  const run = await canary(["--help"]);
+  expect(run.exitCode, run.all).toBe(0);
+  expect(run.all).toContain("xx099900 to xx099999");
+  expect(run.all).toContain("--bucket must be nemar");
+});
 
 describe.skipIf(!awsInstalled)("the S3 canary", () => {
   test("--execute sends exactly the listed calls, each copy at its version, and leaves the prefix empty", async () => {

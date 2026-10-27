@@ -62,7 +62,7 @@ import {
 import { annexedKeysAt, registerCopied } from "./register.js";
 import { heldKeys } from "./scrub-delta.js";
 import { type CopyManifest, buildCopyManifest, manifestDigest } from "./synthesize.js";
-import { ExecuteRefused } from "./verify-plan.js";
+import { ExecuteRefused, inStep } from "./verify-plan.js";
 import { type WorkPaths, git, privateDir, removeTree, restoreCheckpoint } from "./workdir.js";
 
 /** The statuses execution can stop at, in order: it never goes past the open pull request. */
@@ -315,7 +315,7 @@ async function step<T>(
     return await fn();
   } catch (err) {
     await rec.recordError(row, stepErrorWords(name, err).slice(0, 2000));
-    throw asRefusal(name, err);
+    throw inStep(asRefusal(name, err), name);
   } finally {
     hooks?.timed?.(name, Date.now() - started);
   }
