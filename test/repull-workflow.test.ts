@@ -10,7 +10,8 @@
  * it in `NEMAR_REPULL_WORKFLOW_LIVE`, which turns a missing copy into a failure, and any difference
  * between the two copies fails it. Without the variable it looks for a sibling checkout of
  * `nemarDatasets/.github` and SKIPS VISIBLY when there is none. The workflow runs only on a
- * dispatch the automatic path sends, and that path is off until the owner turns its switch on.
+ * dispatch the automatic path sends. That path is off until the owner turns its switch on, except
+ * that the finish of an already merged re-pull is sent in production whatever the switch says.
  *
  * The step scripts that guard the run are executed here with bash, as the runner executes them:
  * the validation against the Worker's own payload builder, the mask, the install's release check
