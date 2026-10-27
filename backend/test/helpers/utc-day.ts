@@ -4,10 +4,12 @@
  * The re-pull's daily caps (the merge cap, `MERGE_CLAIMS_TODAY_SQL`; the open cap,
  * `OPEN_DISPATCHES_TODAY_SQL`) count a fixed UTC day with `date('now')` inside the statement
  * (ADR 0099: a fixed window on D1's clock), and none of the functions that claim takes a clock to
- * fix the instant. So a test that makes several claims and expects them in one day fails when it
- * runs across 00:00 UTC. Awaited before such a test: when less than `marginMs` is left of the UTC
- * day, it waits, polling, for the day to turn. The wait happens only in that margin before
- * midnight and is at most the margin; the tests it guards take well under a second.
+ * fix the instant: the advance tick's `now` decides its windows, not the day a cap counts. So a test
+ * that makes several claims and expects them in one day fails when it runs across 00:00 UTC.
+ * Awaited before such a test: when less than `marginMs` is left of the UTC day, it waits, polling,
+ * for the day to turn. The wait happens only in that margin before midnight and is at most the
+ * margin; the tests it guards take well under a second. Used by the suites of both caps: the
+ * merge claim, the Worker's merge, the dispatch, the advance tick and the scheduler.
  */
 
 import type { Database } from "bun:sqlite";
