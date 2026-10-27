@@ -201,8 +201,9 @@ export type MirroredTag =
 /**
  * A NEMAR version as `dataset_versions.version` stores it: `N.N.N`, or the tag's spelling `vN.N.N`
  * with one lowercase `v`. D1 holds both (`shared/contract/version.ts`): the version-DOI callback
- * strips the `v` before it writes, and older writers kept it. Both spellings of one version name the
- * same tag, `v<N.N.N>`.
+ * strips the `v` before it writes, but older rows and other writers (the admin manifest route writes
+ * the version as its path names it) can carry it. Both spellings of one version name the same tag,
+ * `v<N.N.N>`.
  *
  * Wider than `NEMAR_VERSION_RE` in `repull-state.ts` on purpose, so the two are not one constant:
  * that one checks a version a re-pull record or request carries, which is always bare, because the
