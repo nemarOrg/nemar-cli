@@ -231,8 +231,10 @@ describe("prepareImport at a tag against a dataset that already exists", () => {
     expect(await git(bare, "show", "main:README.md")).toBe("README at 1.0.1");
     // The tag imported is not OpenNeuro's latest, and the run says so.
     expect(r.log).toContain("importing 1.0.1, but OpenNeuro's latest is 1.0.2");
-    // And it says why the copy can differ: only a re-pull's copy pins the object version.
-    expect(r.log).toContain("only a re-pull's copy pins the object version");
+    // And it says why the copy can differ: a re-pull's copy pins the object version; this import's does not.
+    expect(r.log).toContain("a re-pull's copy pins the object version, ADR 0111 decision 8");
+    expect(r.log).not.toContain("is not built");
+    expect(r.log).not.toContain("only a re-pull");
   }, 120_000);
 
   test("released, recorded at the tag imported: the same-version reset, no refusal", async () => {

@@ -1278,7 +1278,7 @@ export interface PinnedClone {
  * its window). Any other clone failure is an ordinary error.
  *
  * With an explicit `tag`, OpenNeuro's latest is still asked for (best effort) so a caller can warn
- * when they differ: the copy phase copies the object CURRENTLY at each upstream path (only a
+ * when they differ: the copy phase copies the object CURRENTLY at each upstream path (a
  * re-pull's copy pins the object version, ADR 0111 decision 8), so a recording that changed
  * between the two tags without changing size is copied with the newer bytes, and only the size
  * check catches the rest.
