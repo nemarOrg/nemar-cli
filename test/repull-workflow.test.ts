@@ -141,11 +141,16 @@ interface StepRun {
   log: string;
 }
 
-/** The environment GitHub gives the job for `payload`: each field as a string, absent as "". */
+/**
+ * The environment GitHub gives the job for `payload`: each field as a string, absent as "". An
+ * environment variable is a C string, so a NUL ends its value: the shell sees what precedes it,
+ * while the event file, which jq and the CLI read, holds all of it.
+ */
 function jobEnvOf(payload: Record<string, unknown>): Record<string, string> {
   const s = (k: string) => {
     const v = payload[k];
-    return v === undefined || v === null ? "" : typeof v === "string" ? v : JSON.stringify(v);
+    const text = v === undefined || v === null ? "" : typeof v === "string" ? v : JSON.stringify(v);
+    return text.split("\0")[0] ?? "";
   };
   return {
     MODE: s("mode"),
@@ -346,6 +351,15 @@ describe("the dispatch token is a secret in a public log", () => {
       payload: { ...sent(), dispatch_token: "abc\n::warning::forged\n" },
     });
     expect(crafted.stdout).toBe("::add-mask::abc\n::add-mask::::warning::forged\n");
+    // A carriage return ends a line for the runner as a line feed does. Left in, a lone one would
+    // keep the forged command inside the first mask line, where only `abc` is masked and the runner
+    // reads the rest as a line of its own, so the output is read here the way the runner reads it.
+    const lone = await runStep(MASK, {
+      payload: { ...sent(), dispatch_token: "abc\r::warning::forged" },
+    });
+    const lines = lone.stdout.split(/\r\n|\r|\n/).filter((l) => l !== "");
+    expect(lines).toEqual(["::add-mask::abc", "::add-mask::::warning::forged"]);
+    expect(lines.filter((l) => l.startsWith("::warning::"))).toEqual([]);
     expect((await runStep(MASK, { payload: null })).stdout).toBe("");
   });
 
@@ -449,14 +463,35 @@ describe("the dispatch is checked before anything is installed or minted", () =>
       ["cli_version", "v0.10.24"],
       ["dispatch_token", TOKEN.toUpperCase()],
       ["dispatch_token", `${TOKEN}0`],
+      // The token and the re-pull id are checked on the event file, where a final newline is still
+      // there: a shell variable loses the token's to `$(...)`, and cannot tell an empty re-pull id
+      // from an absent one.
+      ["dispatch_token", `${TOKEN}\n`],
+      ["repull_id", ""],
+      ["repull_id", "1\n"],
+      // A NUL ends an environment variable, so the checks on the variables see only what precedes
+      // it while the event file, which the CLI reads, holds the rest: a control character in any
+      // field is refused at the file.
+      ...Object.entries(sent({ repullId: 4 })).map(([key, value]): [string, string] => [
+        key,
+        `${String(value)}\0junk`,
+      ]),
     ];
+    const accepted: string[] = [];
     for (const [key, value] of cases) {
       const r = await runStep(VALIDATE, { payload: { ...sent(), [key]: value } });
-      expect([key, value, r.status === 0]).toEqual([key, value, false]);
-      expect(r.stdout + r.stderr).not.toContain(value);
+      if (r.status === 0) {
+        // Shown as JSON, so a case with a control character in it can be told apart.
+        accepted.push(`${key}=${JSON.stringify(value)}`);
+        continue;
+      }
+      // Every string contains "", so the echo check has nothing to say about the empty value.
+      if (value !== "") expect(r.stdout + r.stderr).not.toContain(value);
       expect(r.log).toBe("repull-auto: result phase=failed code=dispatch-invalid\n");
       expect(existsSync(join(r.dir, "pwned"))).toBe(false);
     }
+    // Together, so a weakened check shows every case it lets through and not only the first.
+    expect(accepted).toEqual([]);
     // A finish names its re-pull.
     const finish = await runStep(VALIDATE, { payload: sent({ mode: "finish", repullId: 1 }) });
     expect(finish.status).toBe(0);
