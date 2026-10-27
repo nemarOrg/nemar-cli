@@ -14,7 +14,8 @@
  * writer registered in the repository; never into the clone's config; and never to git's own
  * credential store, which the clone's configuration resets for the data host.
  *
- * Skipped, loudly, when git-annex is not installed. CI's unit-pure job installs it.
+ * Skipped, loudly, when git-annex is not installed, and a failure when `CI` is set (CI's unit-pure
+ * job installs it).
  */
 
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
@@ -32,6 +33,8 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DataHostStandin, patternBytes } from "./helpers/data-host-standin";
+import { type EgressSpy, startEgressSpy } from "./helpers/egress-spy";
+import { gitAnnexGate } from "./helpers/git-annex-gate";
 import { cliBaseEnv, fakeApiKey, makeConfigDir } from "./helpers/nemar-account";
 
 // git and git-annex children, each starting the CLI: a slow runner needs more than the default 5 seconds.
@@ -41,16 +44,7 @@ const SRC = join(import.meta.dir, "..", "src");
 const DATASET = "np099999";
 const API_KEY = fakeApiKey();
 
-const gitAnnexVersion = Bun.spawnSync(["git", "annex", "version", "--raw"], {
-  stdout: "pipe",
-  stderr: "pipe",
-});
-const HAVE_GIT_ANNEX = gitAnnexVersion.exitCode === 0;
-if (!HAVE_GIT_ANNEX) {
-  console.warn(
-    "SKIPPING test/data-host-e2e.test.ts: git-annex is not installed, so the special remote is not exercised against it.",
-  );
-}
+const HAVE_GIT_ANNEX = gitAnnexGate("test/data-host-e2e.test.ts");
 
 interface Run {
   stdout: string;
@@ -94,6 +88,9 @@ describe.skipIf(!HAVE_GIT_ANNEX)("a dataset on an authenticated data host, end t
   let foreign: ReturnType<typeof Bun.serve>;
   let api: ReturnType<typeof Bun.serve>;
   let apiPaths: string[];
+  let spy: EgressSpy;
+  let cloneResult: Run;
+  let globalConfigPath: string;
   let foreignSeen: { path: string; authorization: string | null; cookie: string | null }[];
   let clone: string;
   let configDir: string;
@@ -123,8 +120,12 @@ describe.skipIf(!HAVE_GIT_ANNEX)("a dataset on an authenticated data host, end t
     return result;
   }
 
+  const cli = (args: string[], cwd?: string) =>
+    sh(["bun", "run", join(SRC, "index.ts"), ...args], cwd);
+
   beforeAll(async () => {
     root = mkdtempSync(join(tmpdir(), "nemar-e2e-"));
+    spy = startEgressSpy();
     const shims = join(root, "bin");
     mkdirSync(shims);
     for (const [name, entry] of [
@@ -187,8 +188,10 @@ describe.skipIf(!HAVE_GIT_ANNEX)("a dataset on an authenticated data host, end t
       globalConfig,
       `[user]\n\tname = Fixture\n\temail = fixture@example.org\n[init]\n\tdefaultBranch = master\n[credential]\n\thelper = !${trap}\n`,
     );
+    globalConfigPath = globalConfig;
     env = {
       ...cliBaseEnv(),
+      ...spy.env,
       PATH: `${shims}:${process.env.PATH}`,
       HOME: join(root, "home"),
       GIT_CONFIG_GLOBAL: globalConfig,
@@ -246,6 +249,21 @@ describe.skipIf(!HAVE_GIT_ANNEX)("a dataset on an authenticated data host, end t
       ],
       source,
     );
+    // A second special remote the main service's flow would enable by name; a data host clone
+    // must leave it alone.
+    mkdirSync(join(root, "s3-standin"));
+    await mustSh(
+      [
+        "git",
+        "annex",
+        "initremote",
+        "nemar-s3",
+        "type=directory",
+        `directory=${join(root, "s3-standin")}`,
+        "encryption=none",
+      ],
+      source,
+    );
     const uuid = (await mustSh(["git", "config", "remote.nemar.annex-uuid"], source)).stdout.trim();
     for (const key of [keys.small, keys.big]) {
       await mustSh(["git", "annex", "setpresentkey", key, uuid, "1"], source);
@@ -259,9 +277,14 @@ describe.skipIf(!HAVE_GIT_ANNEX)("a dataset on an authenticated data host, end t
     await mustSh(["git", "clone", "-q", "--bare", source, join(gitRoot, `${DATASET}.git`)]);
 
     clone = join(root, "clone");
+    // Every test below starts from this clone, so each can run on its own.
+    cloneResult = await cli(["dataset", "clone", DATASET, "--host", host.origin, "-o", clone]);
   }, 120_000);
 
   afterAll(() => {
+    // Nothing any command here did reached a host outside this machine.
+    expect(spy?.seen).toEqual([]);
+    spy?.stop();
     host?.stop();
     foreign?.stop(true);
     api?.stop(true);
@@ -274,12 +297,8 @@ describe.skipIf(!HAVE_GIT_ANNEX)("a dataset on an authenticated data host, end t
     if (configDir) rmSync(configDir, { recursive: true, force: true });
   });
 
-  const cli = (args: string[], cwd?: string) =>
-    sh(["bun", "run", join(SRC, "index.ts"), ...args], cwd);
-
   test("clone --host finds the dataset, clones over the credential helper and enables the special remote", async () => {
-    const result = await cli(["dataset", "clone", DATASET, "--host", host.origin, "-o", clone]);
-    expect(result.code).toBe(0);
+    expect(cloneResult.code).toBe(0);
     expect(existsSync(join(clone, "README.txt"))).toBe(true);
     expect(readFileSync(join(clone, "README.txt"), "utf8")).toBe("A tracked text file.\n");
 
@@ -303,11 +322,13 @@ describe.skipIf(!HAVE_GIT_ANNEX)("a dataset on an authenticated data host, end t
   test("the clone's config holds the helper for the data host and not the key", async () => {
     const config = readFileSync(join(clone, ".git", "config"), "utf8");
     expect(config).toContain(`[credential "${host.origin}"]`);
-    expect(config).toContain("helper = !nemar auth git-credential");
-    // An empty helper comes first: it resets any helper configured for all hosts.
-    const reset = config.search(/helper = ?\n/);
-    expect(reset).toBeGreaterThanOrEqual(0);
-    expect(reset).toBeLessThan(config.indexOf("helper = !nemar"));
+    // Exactly an empty helper, which resets any helper configured for all hosts, and then ours,
+    // in that order and once each.
+    const helpers = await mustSh(
+      ["git", "config", "--local", "--get-all", `credential.${host.origin}.helper`],
+      clone,
+    );
+    expect(helpers.stdout).toBe("\n!nemar auth git-credential\n");
     expect(config).not.toContain(API_KEY);
     expect(config).not.toContain(btoa(`nemar:${API_KEY}`));
     // Nor is it in any other file under .git (logs, remote.log, the branch refs).
@@ -335,6 +356,13 @@ describe.skipIf(!HAVE_GIT_ANNEX)("a dataset on an authenticated data host, end t
     const fsck = await sh(["git", "annex", "fsck", "small.bin", "big.bin"], clone);
     expect(fsck.code).toBe(0);
     expect(fsck.stdout + fsck.stderr).not.toContain("failed");
+
+    // The main service's remote is not enabled by a data host clone, though the repository
+    // declares one by that name.
+    // Trying would also show: `enableremote` on that one fails and the command warns about it.
+    expect(result.stdout + result.stderr).not.toContain("S3 remote");
+    const s3 = await sh(["git", "config", "--get-regexp", "^remote\\.nemar-s3\\."], clone);
+    expect(s3.stdout).toBe("");
 
     // And git-annex says it came from the data remote.
     const whereis = await mustSh(["git", "annex", "whereis", "big.bin"], clone);
@@ -373,6 +401,80 @@ describe.skipIf(!HAVE_GIT_ANNEX)("a dataset on an authenticated data host, end t
     // the list for the data host, so it must never have been run for it.
     expect(existsSync(trapLog) ? readFileSync(trapLog, "utf8") : "").not.toContain(API_KEY);
     expect(existsSync(trapLog) ? readFileSync(trapLog, "utf8") : "").not.toContain("store");
+  });
+
+  test("positive control: without the reset, git's credential store is offered the key", async () => {
+    // The same kind of clone, but with only our helper and no empty helper before it, under a
+    // global config whose helper logs every call: the trap is shown to catch what the real
+    // clone's reset keeps out.
+    const log = join(root, "control-helper.log");
+    const script = join(root, "control-helper.sh");
+    writeFileSync(script, `#!/bin/sh\n{ echo "$1"; cat; } >> ${JSON.stringify(log)}\n`);
+    chmodSync(script, 0o755);
+    const config = join(root, "control-gitconfig");
+    writeFileSync(
+      config,
+      `[user]\n\tname = Fixture\n\temail = fixture@example.org\n[credential]\n\thelper = !${script}\n`,
+    );
+    const key = `credential.${host.origin}.helper`;
+    const done = await sh(
+      [
+        "git",
+        "clone",
+        "-q",
+        "-c",
+        `${key}=!nemar auth git-credential`,
+        `${host.origin}/git/${DATASET}.git`,
+        join(root, "control-clone"),
+      ],
+      undefined,
+      { GIT_CONFIG_GLOBAL: config },
+    );
+    expect(done.code).toBe(0);
+    const logged = existsSync(log) ? readFileSync(log, "utf8") : "";
+    expect(logged).toContain("store");
+    expect(logged).toContain(API_KEY);
+  });
+
+  test("a clone that is redirected to another origin after it authenticated sends that origin no credential", async () => {
+    const redirecting = new DataHostStandin({
+      apiKey: API_KEY,
+      datasetId: DATASET,
+      gitRedirectTo: "storage",
+    });
+    try {
+      // The helper is configured for every host here. git itself keeps the credential tied to
+      // the host it started at and curl drops it at a cross-origin redirect, so the helper is
+      // not even asked for the second origin; if it were, it answers nothing for it. Either
+      // way the second origin gets no credential, which is what is pinned.
+      const helper = `!bun run ${join(SRC, "index.ts")} auth git-credential`;
+      const done = await sh(
+        [
+          "git",
+          "-c",
+          "credential.helper=",
+          "-c",
+          `credential.helper=${helper}`,
+          "clone",
+          "-q",
+          `${redirecting.origin}/git/${DATASET}.git`,
+          join(root, "redirected-clone"),
+        ],
+        undefined,
+        { NEMAR_DATA_HOSTS: redirecting.origin },
+      );
+      expect(done.code).not.toBe(0);
+      // It authenticated at the data host, was redirected, and asked the other origin without
+      // a credential: that origin saw requests, none with an Authorization header.
+      expect(
+        redirecting.dataRequests("/git/").some((r) => r.authorization?.startsWith("Basic ")),
+      ).toBe(true);
+      expect(redirecting.storageSeen.length).toBeGreaterThan(0);
+      expect(redirecting.storageSeen.every((r) => r.authorization === null)).toBe(true);
+      expect(JSON.stringify(redirecting.storageSeen)).not.toContain(API_KEY);
+    } finally {
+      redirecting.stop();
+    }
   });
 
   test("without --host, an id the main service does not know is looked up on the data hosts", async () => {

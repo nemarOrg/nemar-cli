@@ -13,7 +13,8 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DataHostStandin } from "./helpers/data-host-standin";
-import { cliBaseEnv, fakeApiKey, makeConfigDir } from "./helpers/nemar-account";
+import { fakeApiKey, makeConfigDir } from "./helpers/nemar-account";
+import { useSessions } from "./helpers/remote-session";
 
 // a bundle build and child processes: a slow runner needs more than the default 5 seconds.
 setDefaultTimeout(60_000);
@@ -91,35 +92,13 @@ describe("packaging", () => {
   });
 });
 
+const open = useSessions();
+
 /** git-annex's side of INITREMOTE for a bundle, returning the reply. */
 async function initremote(bundle: string, host: string): Promise<string> {
-  const proc = Bun.spawn(["bun", bundle], {
-    stdin: "pipe",
-    stdout: "pipe",
-    stderr: "pipe",
-    env: {
-      ...cliBaseEnv(),
-      NEMAR_CONFIG_DIR: configDir,
-      NEMAR_DATA_HOSTS: "",
-      NEMAR_NO_UPDATE_CHECK: "1",
-    },
-  });
-  const stdin = proc.stdin as {
-    write: (s: string) => number;
-    flush: () => unknown;
-    end: () => unknown;
-  };
-  // The remote asks for each setting, in order; answer them from a script of lines. It does
-  // not wait for a reply to anything but GETCONFIG, so sending everything up front is fine.
-  stdin.write(`INITREMOTE\nVALUE ${host}\nVALUE np099999\n`);
-  stdin.flush();
-  stdin.end();
-  const [out] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-  ]);
-  await proc.exited;
-  return out.split("\n").find((line) => line.startsWith("INITREMOTE-")) ?? out;
+  const session = open({ entry: bundle, hosts: "", config: configDir });
+  expect(await session.next()).toBe("VERSION 1");
+  return await session.configure("INITREMOTE", host, "np099999");
 }
 
 describe("the built remote", () => {
@@ -155,37 +134,18 @@ describe("the built remote", () => {
     });
     try {
       const file = join(outdir, "fetched.bin");
-      const proc = Bun.spawn(["bun", join(outdir, "git-annex-remote-nemar.js")], {
-        stdin: "pipe",
-        stdout: "pipe",
-        stderr: "pipe",
-        env: {
-          ...cliBaseEnv(),
-          NEMAR_CONFIG_DIR: configDir,
-          NEMAR_DATA_HOSTS: host.origin,
-          NEMAR_NO_UPDATE_CHECK: "1",
-        },
+      const session = open({
+        entry: join(outdir, "git-annex-remote-nemar.js"),
+        hosts: host.origin,
+        config: configDir,
       });
-      const stdin = proc.stdin as {
-        write: (s: string) => number;
-        flush: () => unknown;
-        end: () => unknown;
-      };
-      stdin.write(
-        `PREPARE\nVALUE ${host.origin}\nVALUE np099999\nCHECKPRESENT ${key}\nTRANSFER RETRIEVE ${key} ${file}\n`,
-      );
-      stdin.flush();
-      stdin.end();
-      const [out] = await Promise.all([
-        new Response(proc.stdout).text(),
-        new Response(proc.stderr).text(),
-      ]);
-      await proc.exited;
-      expect(out).toContain("PREPARE-SUCCESS");
-      expect(out).toContain(`CHECKPRESENT-SUCCESS ${key}`);
-      expect(out).toContain(`TRANSFER-SUCCESS RETRIEVE ${key}`);
+      await session.ready();
+      session.send(`CHECKPRESENT ${key}`);
+      expect(await session.next()).toBe(`CHECKPRESENT-SUCCESS ${key}`);
+      session.send(`TRANSFER RETRIEVE ${key} ${file}`);
+      expect((await session.until("TRANSFER-")).line).toBe(`TRANSFER-SUCCESS RETRIEVE ${key}`);
       expect(readFileSync(file, "utf8")).toBe("hello");
-      expect(out).not.toContain(API_KEY);
+      expect(await session.everything()).not.toContain(API_KEY);
     } finally {
       host.stop();
     }

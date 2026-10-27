@@ -107,19 +107,21 @@ import {
   confirm,
 } from "../lib/confirm.js";
 import {
+  CredentialHelperError,
   type DataHostLookup,
   cloneFromDataHost,
+  credentialHelperCommand,
   declaresNemarRemote,
   detectDataHostClone,
   findDatasetOnDataHosts,
   specialRemoteOnPath,
 } from "../lib/data-host-clone.js";
 import {
+  type VettedOrigin,
   allowedDataHosts,
-  isAllowedDataHost,
   isDataHostDatasetId,
-  parseDataHostOrigin,
   rejectedDataHostEntries,
+  vetDataHostOrigin,
 } from "../lib/data-hosts.js";
 import {
   type LocalDatasetConfig,
@@ -4908,6 +4910,19 @@ Examples:
 datasetCommand.addCommand(publishCommand);
 
 /**
+ * When the main service could not say whether it has a dataset (an error, not a 404), the data
+ * hosts are not asked: a dataset it does hold must not be looked for elsewhere on a guess.
+ */
+function printNoDataHostFallback(datasetId: string): void {
+  if (isDataHostDatasetId(datasetId) && isAuthenticated()) {
+    console.log(
+      chalk.dim("  Data hosts were not asked: the main service did not say it lacks this dataset."),
+    );
+    console.log(chalk.dim("  Try again, or use --host <origin> to read from one data host."));
+  }
+}
+
+/**
  * Clone a dataset from an authenticated NEMAR data host (ADR 0114).
  *
  * `onlyHost` is the value of `--host`: it must be a data host this CLI allows, and only that
@@ -4920,10 +4935,10 @@ async function cloneViaDataHost(
   options: { output?: string },
   onlyHost?: string,
 ): Promise<boolean> {
-  let only: string | undefined;
+  let only: VettedOrigin | undefined;
   if (onlyHost !== undefined) {
-    const origin = parseDataHostOrigin(onlyHost);
-    if (origin === null || !isAllowedDataHost(origin)) {
+    const origin = vetDataHostOrigin(onlyHost);
+    if (origin === null) {
       console.log(
         chalk.red(
           `Error: ${clip(onlyHost, 100)} is not a data host this CLI sends your API key to.`,
@@ -4964,8 +4979,8 @@ async function cloneViaDataHost(
     for (const host of lookup.refused) {
       console.log(chalk.yellow(`  ${host} did not accept your API key. Run 'nemar auth login'.`));
     }
-    for (const host of lookup.unreachable) {
-      console.log(chalk.yellow(`  Could not get an answer from ${host}.`));
+    for (const { origin, detail } of lookup.unreachable) {
+      console.log(chalk.yellow(`  Could not get an answer from ${origin} (${detail}).`));
     }
     if (only) console.log(chalk.red(`Error: Dataset ${datasetId} not found on ${only}`));
     return false;
@@ -4979,8 +4994,17 @@ async function cloneViaDataHost(
     process.exit(1);
   }
 
+  let helper: string;
+  try {
+    helper = credentialHelperCommand();
+  } catch (error) {
+    if (!(error instanceof CredentialHelperError)) throw error;
+    console.log(chalk.red(`Error: ${error.message}`));
+    process.exit(1);
+  }
+
   const cloneSpinner = ora("Cloning dataset...").start();
-  const result = await cloneFromDataHost(origin, datasetId, outputPath);
+  const result = await cloneFromDataHost(lookup.found.origin, datasetId, outputPath, helper);
   if (!result.success) {
     cloneSpinner.fail("Clone failed");
     console.log(chalk.red(`  ${result.error}`));
@@ -4990,16 +5014,17 @@ async function cloneViaDataHost(
 
   if (await declaresNemarRemote(outputPath)) {
     console.log(chalk.dim("  Data remote enabled for data downloads"));
-    if (!specialRemoteOnPath()) {
-      console.log(
-        chalk.yellow(
-          "  Warning: git-annex-remote-nemar is not on your PATH, so git-annex cannot fetch data files.",
-        ),
-      );
-      console.log(
-        chalk.dim("  It is installed with the nemar CLI; check that its bin directory is on PATH."),
-      );
-    }
+  } else if (!specialRemoteOnPath()) {
+    // git-annex enables the remote by running its program, so a program it cannot find is the
+    // likely reason none is enabled.
+    console.log(
+      chalk.yellow(
+        "  Warning: git-annex-remote-nemar is not on your PATH, so git-annex could not enable the data remote.",
+      ),
+    );
+    console.log(
+      chalk.dim("  It is installed with the nemar CLI; check that its bin directory is on PATH."),
+    );
   } else {
     console.log(
       chalk.yellow(
@@ -5038,9 +5063,11 @@ Description:
   only accessible to the owner or designated collaborators.
 
   A dataset that NEMAR's main service does not list may be held on an
-  authenticated NEMAR data host. When you are signed in, the CLI then asks
-  each data host on its list whether you can read the dataset, and clones
-  it from the first that says yes (--host asks one host only). The CLI sends
+  authenticated NEMAR data host. If you are signed in (nemar auth login; a
+  signed-out run never asks a data host), the CLI then asks each data host
+  on its list whether you can read the dataset, and clones it from the
+  first that says yes (--host asks one host only, and needs you signed in
+  too). If the main service itself fails, no data host is asked. The CLI sends
   your API key to listed data hosts only, through a git credential helper
   set for that host in the clone (the key itself is never stored in the
   clone), and fetches data files with the git-annex-remote-nemar special
@@ -5053,7 +5080,7 @@ Requirements:
 Examples:
   $ nemar dataset clone nm000104
   $ nemar dataset clone nm000104 -o ./my-dataset
-  $ nemar dataset clone np000001 --host https://private.nemar.org`,
+  $ nemar dataset clone np000001 --host https://<data host>`,
   )
   .action(async (datasetId, options) => {
     // Check required tools first
@@ -5112,10 +5139,12 @@ Examples:
       } else if (error instanceof ApiError) {
         spinner.fail("Failed to resolve dataset");
         console.log(chalk.red(`Error: ${error.message}`));
+        printNoDataHostFallback(datasetId);
       } else {
         spinner.fail("Failed to resolve dataset");
         const msg = error instanceof Error ? error.message : String(error);
         console.log(chalk.red(`Error: ${msg}`));
+        printNoDataHostFallback(datasetId);
       }
       process.exit(1);
     }

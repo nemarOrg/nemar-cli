@@ -10,17 +10,21 @@ import { join } from "node:path";
 import { upsertAccount } from "../../src/lib/config";
 
 /**
- * Make a config directory holding one active account with `apiKey` (and none when it is
- * null: an empty directory, which is a signed-out CLI). `apiUrl` is where the CLI's own API
- * calls (notices, say) would go; point it at a local port so nothing leaves the machine.
+ * Make a config directory holding one active account with `apiKey`, or with no key when it is
+ * null: a signed-out CLI whose stored account still names `apiUrl`, so nothing the CLI does on
+ * its own (the notices call before every command, say) can reach the real API. Point `apiUrl`
+ * at a local port; the default is a loopback port that refuses connections.
  */
 export function makeConfigDir(apiKey: string | null, apiUrl = "http://127.0.0.1:9"): string {
   const dir = mkdtempSync(join(tmpdir(), "nemar-cfg-"));
-  if (apiKey === null) return dir;
   const previous = process.env.NEMAR_CONFIG_DIR;
   process.env.NEMAR_CONFIG_DIR = dir;
   try {
-    upsertAccount("fixture", { apiKey, apiUrl, keySource: "paste" });
+    upsertAccount("fixture", {
+      ...(apiKey === null ? {} : { apiKey }),
+      apiUrl,
+      keySource: "paste",
+    });
   } finally {
     if (previous === undefined) Reflect.deleteProperty(process.env, "NEMAR_CONFIG_DIR");
     else process.env.NEMAR_CONFIG_DIR = previous;

@@ -35,6 +35,12 @@ export interface StandinOptions {
   /** A directory holding `<datasetId>.git`, served at `/git/`. */
   gitRoot?: string;
   /**
+   * Answer an authenticated git request with a 302 to the same path on this origin (another
+   * origin, the storage server's by default when given as `"storage"`), so a clone is redirected
+   * across origins after it has authenticated.
+   */
+  gitRedirectTo?: "storage";
+  /**
    * Answer a request for an object instead of the default. Return undefined to fall through.
    * `storageOrigin` is the other server's origin.
    */
@@ -86,6 +92,14 @@ export class DataHostStandin {
 
   private handleStorage(req: Request): Response {
     this.record(this.storageSeen, req);
+    const path = new URL(req.url).pathname;
+    if (path.startsWith("/git/")) {
+      // A git request that arrives here asks for credentials, as a protected host would.
+      return new Response("authentication required", {
+        status: 401,
+        headers: { "WWW-Authenticate": 'Basic realm="storage"' },
+      });
+    }
     if (req.headers.get("authorization") !== null) {
       // A presigned address refuses a request that also names a credential.
       return new Response("refused: Authorization sent", { status: 403 });
@@ -160,6 +174,12 @@ export class DataHostStandin {
       return new Response("authentication required", {
         status: 401,
         headers: { "WWW-Authenticate": 'Basic realm="NEMAR"' },
+      });
+    }
+    if (this.options.gitRedirectTo === "storage") {
+      return new Response(null, {
+        status: 302,
+        headers: { Location: `${this.storageOrigin}${url.pathname}${url.search}` },
       });
     }
     if (!this.options.gitRoot) return new Response("not found", { status: 404 });

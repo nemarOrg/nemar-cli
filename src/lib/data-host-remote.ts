@@ -18,29 +18,37 @@
  *     Redirects are followed by hand, at most {@link MAX_REDIRECTS}, and `Authorization` is sent
  *     only to a URL whose origin is the configured host: the short-lived address a large
  *     object redirects to carries its own signature and lives on another origin, which must
- *     not see the key. Only `https` is followed (see `isPermittedTransport`).
+ *     not see the key. Only `https` is followed, with one exception for tests: a loopback `http`
+ *     address, and only when the configured host is itself a loopback `http` origin that
+ *     `NEMAR_DATA_HOSTS` listed (see `isPermittedTransport`).
  *   - `CHECKPRESENT`: a `HEAD` to the same address; 200 present, 404 absent, anything else
  *     unknown (a fault is never reported as absence, which git-annex would act on).
  *   - `TRANSFER STORE` and `REMOVE` are refused: the remote is read-only for now.
  *
  * stdout is the protocol channel, so nothing else may be written to it. Messages sent to
- * git-annex are built from fixed text, status codes and error class names; none contains the
- * API key, a redirect address or its query string.
+ * git-annex are built from fixed text, status codes, error class names and error codes; none
+ * contains the API key, a redirect address or its query string.
  */
 
 import { type FileHandle, open, rm } from "node:fs/promises";
 import {
   type DataHostOptions,
+  type VettedOrigin,
+  dataHostTimeoutMs,
+  describeError,
   isAllowedDataHost,
   isDataHostDatasetId,
   isPermittedTransport,
-  parseDataHostOrigin,
+  vetDataHostOrigin,
 } from "./data-hosts.js";
 
 /** The most redirects followed for one request. */
 export const MAX_REDIRECTS = 3;
 
-/** How long a request may take to answer with headers, and a body to produce its next bytes. */
+/**
+ * How long a request may take to answer with headers, and a body to produce its next bytes.
+ * `NEMAR_DATA_HOST_TIMEOUT_MS` can shorten it (see `dataHostTimeoutMs`).
+ */
 export const REQUEST_TIMEOUT_MS = 60_000;
 
 /** A progress line is sent at most this often, in bytes received. */
@@ -50,16 +58,19 @@ const PROGRESS_STEP_BYTES = 256 * 1024;
 const KEY_MAX_LENGTH = 255;
 
 /**
- * A key safe to put in a URL path: letters, digits and `. _ + -`, so it cannot hold a
- * separator, a dot segment, a query or whitespace. git-annex keys that fall outside this
- * (one holding `%` or `:`) are not on a data host.
+ * A key a data host serves, by the server's own rule: a backend name, `-s<size>`, optional
+ * `-S<n>-C<n>` chunk fields, `--`, then a name of letters, digits, `.`, `_` and `-`. Anything
+ * else is a 404 there, and the shape also keeps the key URL-safe: no separator, dot segment,
+ * query, `%` or whitespace can get through.
  */
-const SAFE_KEY = /^[A-Za-z0-9][A-Za-z0-9._+-]*$/;
+const SAFE_KEY = /^[A-Za-z0-9]+-s\d+(?:-S\d+-C\d+)?--[A-Za-z0-9._-]+$/;
 
 /** The configuration `INITREMOTE` and `PREPARE` accept: a vetted host and dataset id. */
 export interface RemoteSettings {
-  origin: string;
+  origin: VettedOrigin;
   dataset: string;
+  /** The options the origin was vetted with, so the check can be made again at the request. */
+  options?: DataHostOptions;
 }
 
 export function isSafeKey(key: string): boolean {
@@ -67,8 +78,8 @@ export function isSafeKey(key: string): boolean {
 }
 
 /**
- * The byte size a key declares (`SHA256E-s123--hash.ext` is 123), or null when it declares
- * none or is a chunk key, whose `-s` field this remote does not interpret.
+ * The byte size a key declares (`SHA256E-s123--hash.ext` is 123), or null for a chunk key,
+ * whose `-s` field this remote does not interpret.
  */
 export function sizeOfKey(key: string): number | null {
   if (/-S\d+-C\d+(?:-|$)/.test(key)) return null;
@@ -95,30 +106,22 @@ export function vetSettings(
       message: "The dataset setting is not a dataset id (two or three letters and six digits).",
     };
   }
-  const origin = parseDataHostOrigin(host);
+  // A host that is not even an origin and one that is not listed get the same refusal: both
+  // are a repository naming a place this CLI does not send its key.
+  const origin = vetDataHostOrigin(host, options);
   if (origin === null) {
     return {
       ok: false,
-      message: `The host setting ${printable(host)} is not an https origin.`,
+      message: `The host setting ${printable(host)} is not an https origin on this CLI's list of data hosts. The remote's host setting is part of the repository, so it cannot add one.`,
     };
   }
-  if (!isAllowedDataHost(origin, options)) {
-    return {
-      ok: false,
-      message: `${origin} is not a data host this CLI sends its API key to. The remote's host setting is part of the repository, so it cannot add one.`,
-    };
-  }
-  return { ok: true, settings: { origin, dataset } };
+  return { ok: true, settings: { origin, dataset, options } };
 }
 
 /** Make text safe as the free-text part of one protocol line. */
 export function printable(text: string, max = 200): string {
   const flat = text.replace(/[^\x20-\x7e]/g, "?");
   return flat.length > max ? `${flat.slice(0, max)}...` : flat;
-}
-
-function errorClass(error: unknown): string {
-  return error instanceof Error ? error.name : "error";
 }
 
 /** The address of an object on a data host. The key is already vetted by {@link isSafeKey}. */
@@ -156,6 +159,11 @@ async function fetchObject(
   follow: boolean,
   signal: AbortSignal,
 ): Promise<Fetched> {
+  // Fail closed: the key is attached below to any URL on this origin, so the origin is checked
+  // against the list again here, whatever the caller believes it vetted.
+  if (!isAllowedDataHost(settings.origin, settings.options)) {
+    return { kind: "failed", message: "The host is not on this CLI's list of data hosts." };
+  }
   let url = objectUrl(settings, key);
   let redirected = false;
   for (let hop = 0; ; hop++) {
@@ -166,7 +174,7 @@ async function fetchObject(
       response = await fetch(url, { method, headers, redirect: "manual", signal });
     } catch (error) {
       if (signal.aborted) return { kind: "failed", message: "The request timed out." };
-      return { kind: "failed", message: `Could not reach the host (${errorClass(error)}).` };
+      return { kind: "failed", message: `Could not reach the host (${describeError(error)}).` };
     }
     if (response.status < 300 || response.status >= 400) {
       return { kind: "response", response, redirected };
@@ -226,7 +234,7 @@ export async function retrieveObject(
 ): Promise<RetrieveResult> {
   if (!isSafeKey(key)) return { ok: false, message: "The key is not one a data host serves." };
   const expected = sizeOfKey(key);
-  return withIdleTimeout(REQUEST_TIMEOUT_MS, async (signal, touch) => {
+  return withIdleTimeout(dataHostTimeoutMs(REQUEST_TIMEOUT_MS), async (signal, touch) => {
     const fetched = await fetchObject(settings, key, apiKey, "GET", true, signal);
     if (fetched.kind === "failed") return { ok: false, message: fetched.message };
     const { response, redirected } = fetched;
@@ -276,7 +284,7 @@ export async function retrieveObject(
       await rm(file, { force: true }).catch(() => {});
       if (error instanceof SizeError) return { ok: false, message: error.message };
       if (signal.aborted) return { ok: false, message: "The transfer stalled and timed out." };
-      return { ok: false, message: `The transfer failed (${errorClass(error)}).` };
+      return { ok: false, message: `The transfer failed (${describeError(error)}).` };
     }
   });
 }
@@ -299,8 +307,10 @@ export async function checkObject(
   key: string,
   apiKey: string,
 ): Promise<PresenceResult> {
-  if (!isSafeKey(key)) return { state: "absent" };
-  return withIdleTimeout(REQUEST_TIMEOUT_MS, async (signal) => {
+  if (!isSafeKey(key)) {
+    return { state: "unknown", message: "The key is not one a data host serves." };
+  }
+  return withIdleTimeout(dataHostTimeoutMs(REQUEST_TIMEOUT_MS), async (signal) => {
     const fetched = await fetchObject(settings, key, apiKey, "HEAD", false, signal);
     if (fetched.kind === "failed") return { state: "unknown", message: fetched.message };
     const { status } = fetched.response;

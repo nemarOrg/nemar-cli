@@ -46,6 +46,20 @@ export function isDataHostDatasetId(value: string): boolean {
   return DATA_HOST_DATASET_ID.test(value);
 }
 
+declare const vettedBrand: unique symbol;
+
+/**
+ * An origin that has been checked against the allow-list. The only producers are
+ * {@link allowedDataHosts} and {@link vetDataHostOrigin}, so a function that takes one is
+ * handed an origin the list admitted and not a string a caller made up. Code that sends the API
+ * key takes this type and, as a second line, checks the list again.
+ */
+export type VettedOrigin = string & { readonly [vettedBrand]: true };
+
+function vetted(origin: string): VettedOrigin {
+  return origin as VettedOrigin;
+}
+
 export interface DataHostOptions {
   /** The environment to read `NEMAR_DATA_HOSTS` from; the process environment by default. */
   env?: Record<string, string | undefined>;
@@ -102,13 +116,13 @@ function envOf(options: DataHostOptions): Record<string, string | undefined> {
 }
 
 /** The origins this CLI may send its key to, defaults first, without duplicates. */
-export function allowedDataHosts(options: DataHostOptions = {}): string[] {
+export function allowedDataHosts(options: DataHostOptions = {}): VettedOrigin[] {
   const env = envOf(options);
   const isDev = options.isDevBuild ?? IS_DEV_BUILD;
   const defaults =
     env[DATA_HOSTS_ONLY_ENV] === "1" ? [] : [isDev ? DEV_DATA_HOST : PRODUCTION_DATA_HOST];
   const { origins } = parseDataHostList(env[DATA_HOSTS_ENV]);
-  return [...defaults, ...origins.filter((origin) => !defaults.includes(origin))];
+  return [...defaults, ...origins.filter((origin) => !defaults.includes(origin))].map(vetted);
 }
 
 /** `NEMAR_DATA_HOSTS` entries that were ignored, for a command to tell the user about. */
@@ -116,17 +130,32 @@ export function rejectedDataHostEntries(options: DataHostOptions = {}): string[]
   return parseDataHostList(envOf(options)[DATA_HOSTS_ENV]).rejected;
 }
 
+/**
+ * The vetted origin for `value`: a bare origin that is exactly one of {@link allowedDataHosts},
+ * or null. Parses once.
+ */
+export function vetDataHostOrigin(
+  value: string,
+  options: DataHostOptions = {},
+): VettedOrigin | null {
+  const origin = parseDataHostOrigin(value);
+  if (origin === null) return null;
+  return allowedDataHosts(options).find((allowed) => allowed === origin) ?? null;
+}
+
 /** True when `value` is a bare origin that is exactly one of {@link allowedDataHosts}. */
 export function isAllowedDataHost(value: string, options: DataHostOptions = {}): boolean {
-  const origin = parseDataHostOrigin(value);
-  return origin !== null && allowedDataHosts(options).includes(origin);
+  return vetDataHostOrigin(value, options) !== null;
 }
 
 /**
  * The allow-listed origin a full URL belongs to (a repository's remote URL, say), or null.
  * Unlike {@link isAllowedDataHost} the URL may carry a path.
  */
-export function dataHostOriginOfUrl(url: string, options: DataHostOptions = {}): string | null {
+export function dataHostOriginOfUrl(
+  url: string,
+  options: DataHostOptions = {},
+): VettedOrigin | null {
   let parsed: URL;
   try {
     parsed = new URL(url);
@@ -134,7 +163,7 @@ export function dataHostOriginOfUrl(url: string, options: DataHostOptions = {}):
     return null;
   }
   if (parsed.username !== "" || parsed.password !== "") return null;
-  return isAllowedDataHost(parsed.origin, options) ? parsed.origin : null;
+  return vetDataHostOrigin(parsed.origin, options);
 }
 
 /**
@@ -151,4 +180,35 @@ export function isPermittedTransport(target: URL, origin: string): boolean {
     isLoopbackHostname(target.hostname) &&
     new URL(origin).protocol === "http:"
   );
+}
+
+export const DATA_HOST_TIMEOUT_ENV = "NEMAR_DATA_HOST_TIMEOUT_MS";
+
+/**
+ * How long a data host request may go without progress: `defaultMs`, or the whole number of
+ * milliseconds in `NEMAR_DATA_HOST_TIMEOUT_MS` when that is smaller. It can only shorten the
+ * default (the tests use it to see a host that never answers without waiting a minute); a value
+ * that is not a positive whole number is ignored.
+ */
+export function dataHostTimeoutMs(
+  defaultMs: number,
+  env: Record<string, string | undefined> = process.env,
+): number {
+  const raw = env[DATA_HOST_TIMEOUT_ENV];
+  if (raw === undefined || !/^[0-9]+$/.test(raw)) return defaultMs;
+  const value = Number(raw);
+  return value > 0 && value < defaultMs ? value : defaultMs;
+}
+
+/**
+ * The detail of a failed request that is safe to show: the error's class and, when it has one
+ * that looks like an operating-system or TLS code (`ECONNREFUSED`, `ENOTFOUND`,
+ * `CERT_HAS_EXPIRED`, `ENOSPC`), that code. Never the message, which can hold the URL.
+ */
+export function describeError(error: unknown): string {
+  if (!(error instanceof Error)) return "error";
+  const code = (error as { code?: unknown }).code;
+  return typeof code === "string" && /^[A-Z][A-Z0-9_]+$/.test(code)
+    ? `${error.name} ${code}`
+    : error.name;
 }

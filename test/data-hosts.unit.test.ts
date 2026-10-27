@@ -12,12 +12,15 @@ import {
   PRODUCTION_DATA_HOST,
   allowedDataHosts,
   dataHostOriginOfUrl,
+  dataHostTimeoutMs,
+  describeError,
   isAllowedDataHost,
   isDataHostDatasetId,
   isPermittedTransport,
   parseDataHostList,
   parseDataHostOrigin,
   rejectedDataHostEntries,
+  vetDataHostOrigin,
 } from "../src/lib/data-hosts";
 
 describe("build defaults", () => {
@@ -272,5 +275,74 @@ describe("dataset ids", () => {
     ]) {
       expect([id, isDataHostDatasetId(id)]).toEqual([id, false]);
     }
+  });
+});
+
+describe("vetDataHostOrigin", () => {
+  const options = { env: { NEMAR_DATA_HOSTS: "https://staging.example.org" }, isDevBuild: false };
+
+  test("gives the origin the list holds, normalized, and nothing for any other", () => {
+    expect(vetDataHostOrigin("https://private.nemar.org/", options)).toBe(
+      "https://private.nemar.org",
+    );
+    expect(vetDataHostOrigin("HTTPS://Staging.Example.org:443", options)).toBe(
+      "https://staging.example.org",
+    );
+    for (const value of [
+      "https://evil.example",
+      "http://private.nemar.org",
+      "private.nemar.org",
+      "",
+    ]) {
+      expect([value, vetDataHostOrigin(value, options)]).toEqual([value, null]);
+    }
+  });
+});
+
+describe("dataHostTimeoutMs", () => {
+  test("is the default unless the environment shortens it", () => {
+    expect(dataHostTimeoutMs(60_000, {})).toBe(60_000);
+    expect(dataHostTimeoutMs(60_000, { NEMAR_DATA_HOST_TIMEOUT_MS: "300" })).toBe(300);
+  });
+
+  test("can never lengthen it, and a value that is not a positive whole number is ignored", () => {
+    for (const value of ["60000", "70000", "1e3", "-5", "0", "12.5", "", " 300", "abc"]) {
+      expect([value, dataHostTimeoutMs(60_000, { NEMAR_DATA_HOST_TIMEOUT_MS: value })]).toEqual([
+        value,
+        60_000,
+      ]);
+    }
+  });
+});
+
+describe("describeError", () => {
+  const withCode = (code: unknown, name = "Error") => {
+    const error = new Error("GET https://secret.example/x?sig=abc failed");
+    error.name = name;
+    (error as { code?: unknown }).code = code;
+    return error;
+  };
+
+  test("the class, plus a code that looks like an operating-system or TLS code", () => {
+    expect(describeError(withCode("ECONNREFUSED"))).toBe("Error ECONNREFUSED");
+    expect(describeError(withCode("ENOTFOUND", "TypeError"))).toBe("TypeError ENOTFOUND");
+    expect(describeError(withCode("CERT_HAS_EXPIRED"))).toBe("Error CERT_HAS_EXPIRED");
+    expect(describeError(withCode("ENOSPC"))).toBe("Error ENOSPC");
+  });
+
+  test("never the message, and no code that does not match the shape", () => {
+    for (const code of [
+      "connection refused",
+      "https://x.example/?k=1",
+      "ConnectionRefused",
+      "E",
+      "",
+      7,
+      undefined,
+    ]) {
+      expect(describeError(withCode(code))).toBe("Error");
+    }
+    expect(describeError(withCode("ECONNREFUSED"))).not.toContain("secret.example");
+    expect(describeError("a string")).toBe("error");
   });
 });

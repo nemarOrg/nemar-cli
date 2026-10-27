@@ -12,9 +12,19 @@
  * `src/lib/data-hosts.ts`, and redirects are never followed with the key.
  */
 
-import { type DataHostOptions, dataHostOriginOfUrl } from "./data-hosts.js";
+import { constants, accessSync, statSync } from "node:fs";
+import { isAbsolute } from "node:path";
+import {
+  type DataHostOptions,
+  type VettedOrigin,
+  dataHostOriginOfUrl,
+  dataHostTimeoutMs,
+  describeError,
+  isAllowedDataHost,
+} from "./data-hosts.js";
 import { ANNEX_CLONE_DESCRIPTION } from "./git-annex/init.js";
 import { runCommand } from "./git-annex/run-command.js";
+import { plain } from "./terminal-text.js";
 
 /** How long to wait for a data host to answer a dataset lookup. */
 export const LOOKUP_TIMEOUT_MS = 15_000;
@@ -24,17 +34,57 @@ export function dataHostCloneUrl(origin: string, datasetId: string): string {
   return `${origin}/git/${datasetId}.git`;
 }
 
+/** `NEMAR_CREDENTIAL_HELPER` named something that is not a program. */
+export class CredentialHelperError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "CredentialHelperError";
+  }
+}
+
+function isExecutableFile(path: string): boolean {
+  try {
+    if (!statSync(path).isFile()) return false;
+    accessSync(path, constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * The shell command git runs as the credential helper: `!nemar auth git-credential`.
  *
- * `NEMAR_CREDENTIAL_HELPER` overrides it (an unusual install, or a test whose `nemar` is not on
- * `PATH`). Otherwise `nemar` is used when it is on `PATH`, since a bare name survives a
- * reinstall, and the running program's own path when it is not.
+ * `NEMAR_CREDENTIAL_HELPER` names the program in place of `nemar` (an unusual install, or a test
+ * whose `nemar` is not on `PATH`); the arguments `auth git-credential` are still added. It must
+ * be an absolute path to an executable file, or a bare command word with no `/` (letters,
+ * digits, `.`, `_`, `-`); anything else throws {@link CredentialHelperError}, because the value
+ * ends up in the clone's `.git/config` and is run by git through a shell.
+ *
+ * Without it, `nemar` is used when it is on `PATH` (looked up in `env`'s `PATH`), since a bare
+ * name survives a reinstall, and the running program's own path when it is not.
  */
-export function credentialHelperCommand(env: Record<string, string | undefined> = process.env) {
+export function credentialHelperCommand(
+  env: Record<string, string | undefined> = process.env,
+): string {
   const override = env.NEMAR_CREDENTIAL_HELPER?.trim();
-  if (override) return override.startsWith("!") ? override : `!${override}`;
-  if (Bun.which("nemar")) return "!nemar auth git-credential";
+  if (override) {
+    if (isAbsolute(override)) {
+      if (!isExecutableFile(override)) {
+        throw new CredentialHelperError(
+          "NEMAR_CREDENTIAL_HELPER is not an executable file; give an absolute path to the program or a bare command name.",
+        );
+      }
+      return `!${shellQuote(override)} auth git-credential`;
+    }
+    if (!/^[A-Za-z0-9._-]+$/.test(override)) {
+      throw new CredentialHelperError(
+        "NEMAR_CREDENTIAL_HELPER must be an absolute path to an executable or a bare command name with no slash.",
+      );
+    }
+    return `!${override} auth git-credential`;
+  }
+  if (Bun.which("nemar", { PATH: env.PATH ?? "" })) return "!nemar auth git-credential";
   const script = process.argv[1];
   if (script) return `!${shellQuote(process.execPath)} ${shellQuote(script)} auth git-credential`;
   return "!nemar auth git-credential";
@@ -46,17 +96,18 @@ function shellQuote(text: string): string {
 
 /** What a lookup learned from one data host. */
 export interface DataHostLookup {
-  found: { origin: string; name?: string } | null;
+  found: { origin: VettedOrigin; name?: string } | null;
   /** Hosts that answered but refused the API key. */
-  refused: string[];
-  /** Hosts that could not be asked (down, slow, or an answer that is not a dataset). */
-  unreachable: string[];
+  refused: VettedOrigin[];
+  /** Hosts that could not be asked (down, slow, or an answer that is not a dataset), and why. */
+  unreachable: { origin: VettedOrigin; detail: string }[];
 }
 
 /**
- * Ask each of `origins` whether it holds `datasetId` for this key. The caller passes only
- * allow-listed origins (`allowedDataHosts()` or the one `--host` named after the list check),
- * and this function sends the key to nothing else.
+ * Ask each of `origins` whether it holds `datasetId` for this key. The origins are vetted ones
+ * (`allowedDataHosts()` or the one `--host` named), and the list is checked again before each
+ * request: the key is sent to nothing else, and an origin that fails the check is an error, not
+ * a skipped host.
  *
  * `GET <origin>/api/datasets/<id>` with the key, never following a redirect: 200 is a hit, 404
  * is "not here", 401 is a refused key.
@@ -64,15 +115,19 @@ export interface DataHostLookup {
 export async function findDatasetOnDataHosts(
   datasetId: string,
   apiKey: string,
-  origins: readonly string[],
+  origins: readonly VettedOrigin[],
+  options: DataHostOptions = {},
 ): Promise<DataHostLookup> {
   const result: DataHostLookup = { found: null, refused: [], unreachable: [] };
   for (const origin of origins) {
+    if (!isAllowedDataHost(origin, options)) {
+      throw new Error("refusing to send the API key to a host that is not on the data host list");
+    }
     try {
       const response = await fetch(`${origin}/api/datasets/${encodeURIComponent(datasetId)}`, {
         headers: { Authorization: `Bearer ${apiKey}`, Accept: "application/json" },
         redirect: "manual",
-        signal: AbortSignal.timeout(LOOKUP_TIMEOUT_MS),
+        signal: AbortSignal.timeout(dataHostTimeoutMs(LOOKUP_TIMEOUT_MS, options.env)),
       });
       if (response.status === 200) {
         const body = (await response.json().catch(() => null)) as {
@@ -83,7 +138,7 @@ export async function findDatasetOnDataHosts(
           result.found = { origin, name };
           return result;
         }
-        result.unreachable.push(origin);
+        result.unreachable.push({ origin, detail: "an answer that is not this dataset" });
       } else if (response.status === 404) {
         await response.body?.cancel().catch(() => {});
       } else if (response.status === 401) {
@@ -91,10 +146,10 @@ export async function findDatasetOnDataHosts(
         result.refused.push(origin);
       } else {
         await response.body?.cancel().catch(() => {});
-        result.unreachable.push(origin);
+        result.unreachable.push({ origin, detail: `status ${response.status}` });
       }
-    } catch {
-      result.unreachable.push(origin);
+    } catch (error) {
+      result.unreachable.push({ origin, detail: describeError(error) });
     }
   }
   return result;
@@ -108,44 +163,33 @@ export interface DataHostCloneResult {
 /**
  * Clone `<origin>/git/<id>.git` into `outputPath` and initialize git-annex.
  *
- * The credential helper is passed to the clone with `-c` and written into the clone's own
- * config, scoped to the origin (`credential.<origin>.helper`), and preceded by an empty helper,
- * which resets the list git has collected from lower-priority files: without it a keychain
- * helper configured for all hosts would be offered the key to store. The key itself is never
- * written anywhere.
+ * The credential helper is passed with the clone's own `-c`, which git uses for the fetch and
+ * keeps in the clone's config (`credential.<origin>.helper`, scoped to the origin), preceded by
+ * an empty helper that resets the list git has collected from lower-priority files: without it
+ * a keychain helper configured for all hosts would be offered the key to store. The key itself
+ * is never written anywhere.
  */
 export async function cloneFromDataHost(
-  origin: string,
+  origin: VettedOrigin,
   datasetId: string,
   outputPath: string,
   helper: string = credentialHelperCommand(),
 ): Promise<DataHostCloneResult> {
   const helperKey = `credential.${origin}.helper`;
+  // `clone -c`, after the subcommand: git applies it to the new repository before it fetches
+  // and keeps it in that repository's config. (`git -c ... clone` would apply to this run only.)
   const clone = await runCommand([
     "git",
+    "clone",
     "-c",
     `${helperKey}=`,
     "-c",
     `${helperKey}=${helper}`,
-    "clone",
     dataHostCloneUrl(origin, datasetId),
     outputPath,
   ]);
   if (clone.exitCode !== 0) {
-    return { success: false, error: clone.stderr.trim() || "Failed to clone dataset" };
-  }
-
-  // The reset and then the helper, in that order, as two values of one multi-valued key.
-  for (const value of ["", helper]) {
-    const set = await runCommand(["git", "config", "--add", helperKey, value], {
-      cwd: outputPath,
-    });
-    if (set.exitCode !== 0) {
-      return {
-        success: false,
-        error: `Cloned but could not write the credential helper to the clone's config: ${set.stderr.trim()}`,
-      };
-    }
+    return { success: false, error: plain(clone.stderr).trim() || "Failed to clone dataset" };
   }
 
   const init = await runCommand(["git", "annex", "init", ANNEX_CLONE_DESCRIPTION], {
@@ -156,7 +200,7 @@ export async function cloneFromDataHost(
     if (check.exitCode !== 0) {
       return {
         success: false,
-        error: `Cloned repository but git-annex initialization failed: ${init.stderr.trim()}`,
+        error: `Cloned repository but git-annex initialization failed: ${plain(init.stderr).trim()}`,
       };
     }
   }
@@ -173,9 +217,11 @@ export async function declaresNemarRemote(repoPath: string): Promise<boolean> {
   return stdout.split("\n").some((line) => line.trim().split(/\s+/)[1]?.toLowerCase() === "nemar");
 }
 
-/** True when the special remote program git-annex would run is on `PATH`. */
-export function specialRemoteOnPath(): boolean {
-  return Bun.which("git-annex-remote-nemar") !== null;
+/** True when the special remote program git-annex would run is on `PATH` (the one in `env`). */
+export function specialRemoteOnPath(
+  env: Record<string, string | undefined> = process.env,
+): boolean {
+  return Bun.which("git-annex-remote-nemar", { PATH: env.PATH ?? "" }) !== null;
 }
 
 /**
@@ -187,7 +233,7 @@ export function specialRemoteOnPath(): boolean {
 export async function detectDataHostClone(
   repoPath: string,
   options: DataHostOptions = {},
-): Promise<{ origin: string; datasetId: string } | null> {
+): Promise<{ origin: VettedOrigin; datasetId: string } | null> {
   const { stdout, exitCode } = await runCommand(["git", "remote", "get-url", "origin"], {
     cwd: repoPath,
   });

@@ -6,16 +6,19 @@
  */
 
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
-import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  CredentialHelperError,
   credentialHelperCommand,
   dataHostCloneUrl,
   declaresNemarRemote,
   detectDataHostClone,
   findDatasetOnDataHosts,
+  specialRemoteOnPath,
 } from "../src/lib/data-host-clone";
+import { type VettedOrigin, allowedDataHosts } from "../src/lib/data-hosts";
 import { DataHostStandin } from "./helpers/data-host-standin";
 import { cliBaseEnv, fakeApiKey, makeConfigDir } from "./helpers/nemar-account";
 
@@ -36,9 +39,22 @@ describe("findDatasetOnDataHosts", () => {
     for (const s of stand) s.stop();
   });
 
+  /** The list holds exactly these origins (never the real default host), as the CLI builds it. */
+  function listing(origins: string[], extraEnv: Record<string, string> = {}) {
+    const options = {
+      env: { NEMAR_DATA_HOSTS: origins.join(","), NEMAR_DATA_HOSTS_ONLY: "1", ...extraEnv },
+      isDevBuild: false,
+    };
+    return { origins: allowedDataHosts(options), options };
+  }
+  const lookup = (origins: string[], extraEnv: Record<string, string> = {}) => {
+    const { origins: vetted, options } = listing(origins, extraEnv);
+    return findDatasetOnDataHosts(DATASET, API_KEY, vetted, options);
+  };
+
   test("the first host that answers 200 wins, and carries the dataset's name", async () => {
     const a = standin();
-    const found = await findDatasetOnDataHosts(DATASET, API_KEY, [a.origin]);
+    const found = await lookup([a.origin]);
     expect(found.found).toEqual({ origin: a.origin, name: "Fixture dataset" });
     expect(a.dataSeen).toEqual([
       { method: "GET", path: `/api/datasets/${DATASET}`, authorization: `Bearer ${API_KEY}` },
@@ -49,12 +65,8 @@ describe("findDatasetOnDataHosts", () => {
     const empty = standin("np000001");
     const has = standin();
     const later = standin();
-    const lookup = await findDatasetOnDataHosts(DATASET, API_KEY, [
-      empty.origin,
-      has.origin,
-      later.origin,
-    ]);
-    expect(lookup.found?.origin).toBe(has.origin);
+    const found = await lookup([empty.origin, has.origin, later.origin]);
+    expect(found.found?.origin).toBe(has.origin);
     expect(empty.dataSeen).toHaveLength(1);
     expect(has.dataSeen).toHaveLength(1);
     // The search stops at the first hit: a later host is never sent the key.
@@ -63,21 +75,53 @@ describe("findDatasetOnDataHosts", () => {
 
   test("a refused key is reported as refused, not as missing", async () => {
     const a = standin(DATASET, fakeApiKey());
-    const lookup = await findDatasetOnDataHosts(DATASET, API_KEY, [a.origin]);
-    expect(lookup).toEqual({ found: null, refused: [a.origin], unreachable: [] });
+    expect(await lookup([a.origin])).toEqual({ found: null, refused: [a.origin], unreachable: [] });
   });
 
-  test("a host that is down is reported as unreachable", async () => {
+  test("a host that is down is unreachable, with the error's code and not its address", async () => {
     const down = standin();
     const origin = down.origin;
     down.stop();
-    const lookup = await findDatasetOnDataHosts(DATASET, API_KEY, [origin]);
-    expect(lookup).toEqual({ found: null, refused: [], unreachable: [origin] });
+    const result = await lookup([origin]);
+    expect(result.found).toBeNull();
+    expect(result.unreachable).toHaveLength(1);
+    expect(result.unreachable[0].origin).toBe(origin);
+    expect(result.unreachable[0].detail).toMatch(/ECONNREFUSED/);
+    expect(result.unreachable[0].detail).not.toContain(origin);
+  });
+
+  test("a host that accepts and never answers times out, and the timeout can only be shortened", async () => {
+    const listener = Bun.listen({
+      hostname: "127.0.0.1",
+      port: 0,
+      socket: { data() {}, open() {}, close() {}, error() {} },
+    });
+    try {
+      const origin = `http://127.0.0.1:${listener.port}`;
+      const started = performance.now();
+      const result = await lookup([origin], { NEMAR_DATA_HOST_TIMEOUT_MS: "300" });
+      expect(result.unreachable).toEqual([{ origin, detail: "TimeoutError" }]);
+      expect(performance.now() - started).toBeLessThan(5000);
+    } finally {
+      listener.stop(true);
+    }
+  });
+
+  test("a 5xx answer is unreachable, with its status", async () => {
+    const server = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch: () => new Response("down", { status: 503 }),
+    });
+    try {
+      const origin = `http://127.0.0.1:${server.port}`;
+      expect((await lookup([origin])).unreachable).toEqual([{ origin, detail: "status 503" }]);
+    } finally {
+      server.stop(true);
+    }
   });
 
   test("a 200 that is not this dataset is not a hit", async () => {
-    // The stand-in only answers its own dataset id; ask it for another id with a 200 body for
-    // the wrong dataset by putting the other id in the path of a custom server.
     const server = Bun.serve({
       port: 0,
       hostname: "127.0.0.1",
@@ -85,9 +129,9 @@ describe("findDatasetOnDataHosts", () => {
     });
     try {
       const origin = `http://127.0.0.1:${server.port}`;
-      const lookup = await findDatasetOnDataHosts(DATASET, API_KEY, [origin]);
-      expect(lookup.found).toBeNull();
-      expect(lookup.unreachable).toEqual([origin]);
+      const result = await lookup([origin]);
+      expect(result.found).toBeNull();
+      expect(result.unreachable.map((u) => u.origin)).toEqual([origin]);
     } finally {
       server.stop(true);
     }
@@ -105,36 +149,93 @@ describe("findDatasetOnDataHosts", () => {
         }),
     });
     try {
-      const origin = `http://127.0.0.1:${redirecting.port}`;
-      const lookup = await findDatasetOnDataHosts(DATASET, API_KEY, [origin]);
-      expect(lookup.found).toBeNull();
+      const result = await lookup([`http://127.0.0.1:${redirecting.port}`]);
+      expect(result.found).toBeNull();
       expect(target.dataSeen).toEqual([]);
     } finally {
       redirecting.stop(true);
     }
   });
+
+  test("an origin the list does not have is refused with an error, and gets no request", async () => {
+    const a = standin();
+    // Typed as a vetted origin by a caller that skipped the vetting.
+    const forged = [a.origin as VettedOrigin];
+    await expect(
+      findDatasetOnDataHosts(DATASET, API_KEY, forged, { env: {}, isDevBuild: false }),
+    ).rejects.toThrow("not on the data host list");
+    expect(a.dataSeen).toEqual([]);
+  });
 });
 
 describe("credentialHelperCommand", () => {
-  test("an override is used as written, with the leading ! git needs", () => {
-    expect(
-      credentialHelperCommand({ NEMAR_CREDENTIAL_HELPER: "my-nemar auth git-credential" }),
-    ).toBe("!my-nemar auth git-credential");
-    expect(credentialHelperCommand({ NEMAR_CREDENTIAL_HELPER: "!x y" })).toBe("!x y");
+  test("NEMAR_CREDENTIAL_HELPER names the program; the arguments are still added", () => {
+    expect(credentialHelperCommand({ NEMAR_CREDENTIAL_HELPER: "my-nemar" })).toBe(
+      "!my-nemar auth git-credential",
+    );
+    const dir = mkdtempSync(join(tmpdir(), "nemar-helper-abs-"));
+    try {
+      const program = join(dir, "nemar with space");
+      writeFileSync(program, "#!/bin/sh\n");
+      chmodSync(program, 0o755);
+      expect(credentialHelperCommand({ NEMAR_CREDENTIAL_HELPER: program })).toBe(
+        `!'${program}' auth git-credential`,
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
-  test("nemar on PATH is named by its bare name, so the config survives a reinstall", () => {
+  test("anything else is refused: a command line, a relative path, a missing or plain file", () => {
+    const dir = mkdtempSync(join(tmpdir(), "nemar-helper-bad-"));
+    try {
+      const plain = join(dir, "not-executable");
+      writeFileSync(plain, "x");
+      chmodSync(plain, 0o644);
+      for (const value of [
+        "nemar auth git-credential",
+        "!nemar",
+        "./nemar",
+        "bin/nemar",
+        "../nemar",
+        "nemar;rm",
+        "$(id)",
+        "a`b`",
+        "x'y",
+        join(dir, "missing"),
+        plain,
+        dir,
+      ]) {
+        expect(() => credentialHelperCommand({ NEMAR_CREDENTIAL_HELPER: value })).toThrow(
+          CredentialHelperError,
+        );
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("nemar on the PATH it is given is named by its bare name, so the config survives a reinstall", () => {
     const bin = mkdtempSync(join(tmpdir(), "nemar-which-"));
-    const previous = process.env.PATH;
     try {
       writeFileSync(join(bin, "nemar"), "#!/bin/sh\n");
-      Bun.spawnSync(["chmod", "+x", join(bin, "nemar")]);
-      process.env.PATH = `${bin}:${previous}`;
-      expect(credentialHelperCommand({})).toBe("!nemar auth git-credential");
+      chmodSync(join(bin, "nemar"), 0o755);
+      expect(credentialHelperCommand({ PATH: `${bin}:/usr/bin:/bin` })).toBe(
+        "!nemar auth git-credential",
+      );
     } finally {
-      if (previous === undefined) Reflect.deleteProperty(process.env, "PATH");
-      else process.env.PATH = previous;
       rmSync(bin, { recursive: true, force: true });
+    }
+  });
+
+  test("the lookup uses the PATH it is given and not the machine's", () => {
+    const empty = mkdtempSync(join(tmpdir(), "nemar-no-nemar-"));
+    try {
+      // A PATH with no nemar in it: the answer is the running program's own path, whatever
+      // this machine has installed.
+      expect(credentialHelperCommand({ PATH: empty })).not.toBe("!nemar auth git-credential");
+    } finally {
+      rmSync(empty, { recursive: true, force: true });
     }
   });
 
@@ -155,6 +256,20 @@ describe("credentialHelperCommand", () => {
       expect(command).toBe(`!'${process.execPath}' '${script}' auth git-credential`);
     } finally {
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("specialRemoteOnPath", () => {
+  test("looks in the PATH it is given", () => {
+    const bin = mkdtempSync(join(tmpdir(), "nemar-remote-path-"));
+    try {
+      expect(specialRemoteOnPath({ PATH: bin })).toBe(false);
+      writeFileSync(join(bin, "git-annex-remote-nemar"), "#!/bin/sh\n");
+      chmodSync(join(bin, "git-annex-remote-nemar"), 0o755);
+      expect(specialRemoteOnPath({ PATH: bin })).toBe(true);
+    } finally {
+      rmSync(bin, { recursive: true, force: true });
     }
   });
 });
@@ -235,79 +350,5 @@ describe("repositories", () => {
     const other = repo("other-type", undefined, [["remote.other.annex-externaltype", "rclone"]]);
     expect(await declaresNemarRemote(other)).toBe(false);
     expect(await declaresNemarRemote(repo("plain"))).toBe(false);
-  });
-});
-
-describe("nemar dataset get in a clone from a data host", () => {
-  const CLI = join(import.meta.dir, "..", "src", "index.ts");
-  const haveAnnex = Bun.spawnSync(["git", "annex", "version", "--raw"]).exitCode === 0;
-  let root: string;
-  let signedIn: string;
-  let signedOut: string;
-
-  beforeAll(() => {
-    root = mkdtempSync(join(tmpdir(), "nemar-get-"));
-    signedIn = makeConfigDir(API_KEY);
-    signedOut = makeConfigDir(null);
-  });
-  afterAll(() => {
-    rmSync(root, { recursive: true, force: true });
-    rmSync(signedIn, { recursive: true, force: true });
-    rmSync(signedOut, { recursive: true, force: true });
-  });
-
-  async function getIn(config: string, name: string, env: Record<string, string> = {}) {
-    const dir = join(root, name);
-    const base = {
-      ...cliBaseEnv(),
-      GIT_CONFIG_GLOBAL: "/dev/null",
-      GIT_CONFIG_NOSYSTEM: "1",
-      GIT_AUTHOR_NAME: "t",
-      GIT_AUTHOR_EMAIL: "t@example.org",
-      GIT_COMMITTER_NAME: "t",
-      GIT_COMMITTER_EMAIL: "t@example.org",
-      NEMAR_CONFIG_DIR: config,
-      NEMAR_NO_UPDATE_CHECK: "1",
-      ...env,
-    };
-    for (const cmd of [
-      ["git", "init", "-q", dir],
-      [
-        "git",
-        "-C",
-        dir,
-        "remote",
-        "add",
-        "origin",
-        dataHostCloneUrl("https://private.nemar.org", DATASET),
-      ],
-      ["git", "-C", dir, "annex", "init", "fixture"],
-    ]) {
-      const done = Bun.spawnSync(cmd, { env: base });
-      if (done.exitCode !== 0) throw new Error(done.stderr.toString());
-    }
-    const proc = Bun.spawn(["bun", "run", CLI, "dataset", "get"], {
-      cwd: dir,
-      stdout: "pipe",
-      stderr: "pipe",
-      env: base,
-    });
-    const [stdout, stderr] = await Promise.all([
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
-    ]);
-    return { out: stdout + stderr, code: await proc.exited };
-  }
-
-  test.skipIf(!haveAnnex)("signed out, it says to sign in and goes no further", async () => {
-    const result = await getIn(signedOut, "signed-out");
-    expect(result.code).not.toBe(0);
-    expect(result.out).toContain("nemar auth login");
-  });
-
-  test.skipIf(!haveAnnex)("signed in but with no data remote declared, it says so", async () => {
-    const result = await getIn(signedIn, "no-remote");
-    expect(result.code).not.toBe(0);
-    expect(result.out).toContain("declares no data remote");
   });
 });

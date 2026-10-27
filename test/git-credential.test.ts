@@ -9,7 +9,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
-import { rmSync } from "node:fs";
+import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   asksForDataHost,
@@ -17,6 +17,7 @@ import {
   isGitCredentialInvocation,
   parseCredentialInput,
 } from "../src/lib/git-credential";
+import { type EgressSpy, startEgressSpy } from "./helpers/egress-spy";
 import { cliBaseEnv, fakeApiKey, makeConfigDir } from "./helpers/nemar-account";
 
 // a CLI child process for every call: a slow runner needs more than the default 5 seconds.
@@ -118,8 +119,10 @@ describe("as git runs it", () => {
   /** Records any request the CLI makes to "the API" so the helper's silence can be shown. */
   let apiRequests: string[];
   let api: ReturnType<typeof Bun.serve>;
+  let spy: EgressSpy;
 
   beforeAll(() => {
+    spy = startEgressSpy();
     apiRequests = [];
     api = Bun.serve({
       port: 0,
@@ -134,6 +137,9 @@ describe("as git runs it", () => {
   });
 
   afterAll(() => {
+    // Nothing the helper, or the CLI around it, did reached a host outside this machine.
+    expect(spy.seen).toEqual([]);
+    spy.stop();
     api.stop(true);
     rmSync(configDir, { recursive: true, force: true });
     rmSync(signedOutDir, { recursive: true, force: true });
@@ -142,6 +148,7 @@ describe("as git runs it", () => {
   function env(config: string, hosts = ""): Record<string, string> {
     return {
       ...cliBaseEnv(),
+      ...spy.env,
       NEMAR_CONFIG_DIR: config,
       NEMAR_DATA_HOSTS: hosts,
       GIT_CONFIG_GLOBAL: "/dev/null",
@@ -217,6 +224,38 @@ describe("as git runs it", () => {
     await helper("get", "protocol=https\nhost=private.nemar.org\n\n");
     await helper("store", "protocol=https\nhost=private.nemar.org\n\n");
     expect(apiRequests).toEqual([]);
+  });
+
+  test("it skips the update check: a newer version on record is not announced", async () => {
+    // A fresh cache that names a newer version makes any command that runs the check print the
+    // banner without touching the network, so a banner (or its absence) shows whether it ran.
+    // Nothing is set to switch the check off.
+    const dir = makeConfigDir(API_KEY, `http://127.0.0.1:${api.port}`);
+    try {
+      writeFileSync(
+        join(dir, "update-check.json"),
+        JSON.stringify({ checkedAt: Date.now(), latestVersion: "99.0.0" }),
+      );
+      const helperRun = await helper("get", "protocol=https\nhost=private.nemar.org\n\n", dir);
+      expect(helperRun.stdout).toBe(`username=nemar\npassword=${API_KEY}\n`);
+      expect(helperRun.stderr).not.toContain("Update available");
+      expect(helperRun.stderr).toBe("");
+
+      // The control: an ordinary command, same cache and environment, does announce it.
+      const proc = Bun.spawn(["bun", "run", CLI, "--version"], {
+        stdout: "pipe",
+        stderr: "pipe",
+        env: env(dir),
+      });
+      const [, stderr] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+      ]);
+      await proc.exited;
+      expect(stderr).toContain("Update available");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test("real git asks it through credential.<origin>.helper and gets the key for the data host only", async () => {

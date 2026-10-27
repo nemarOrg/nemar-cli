@@ -15,13 +15,17 @@ import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { checkObject, retrieveObject } from "../src/lib/data-host-remote";
+import type { VettedOrigin } from "../src/lib/data-hosts";
 import { DataHostStandin, type StandinOptions, patternBytes } from "./helpers/data-host-standin";
-import { cliBaseEnv, fakeApiKey, makeConfigDir } from "./helpers/nemar-account";
+import { fakeApiKey, makeConfigDir } from "./helpers/nemar-account";
+import { Session, useSessions } from "./helpers/remote-session";
 
 // a child process for every session: a slow runner needs more than the default 5 seconds.
 setDefaultTimeout(60_000);
 
-const REMOTE = join(import.meta.dir, "..", "src", "git-annex-remote-nemar.ts");
+const open = useSessions();
+
 const DATASET = "np099999";
 const API_KEY = fakeApiKey();
 
@@ -84,141 +88,19 @@ function chunked(...pieces: Uint8Array[]): Response {
   );
 }
 
-/** git-annex's side of the conversation, over the real child process. */
-class Session {
-  private readonly proc: ReturnType<typeof Bun.spawn>;
-  private readonly queue: string[] = [];
-  private waiter: ((line: string | null) => void) | null = null;
-  private ended = false;
-  /** Everything the process wrote on stdout, in order. */
-  readonly transcript: string[] = [];
-  private stderrText: Promise<string>;
-  private pump: Promise<void>;
-
-  constructor(options: { hosts?: string; config?: string } = {}) {
-    this.proc = Bun.spawn(["bun", "run", REMOTE], {
-      stdin: "pipe",
-      stdout: "pipe",
-      stderr: "pipe",
-      env: {
-        ...cliBaseEnv(),
-        NEMAR_CONFIG_DIR: options.config ?? configDir,
-        NEMAR_DATA_HOSTS: options.hosts ?? host.origin,
-        NEMAR_NO_UPDATE_CHECK: "1",
-      },
-    });
-    this.stderrText = new Response(this.proc.stderr as ReadableStream).text();
-    this.pump = this.read();
-  }
-
-  private async read(): Promise<void> {
-    const decoder = new TextDecoder();
-    let buffer = "";
-    for await (const chunk of this.proc.stdout as ReadableStream<Uint8Array>) {
-      buffer += decoder.decode(chunk, { stream: true });
-      let at = buffer.indexOf("\n");
-      while (at >= 0) {
-        this.push(buffer.slice(0, at));
-        buffer = buffer.slice(at + 1);
-        at = buffer.indexOf("\n");
-      }
-    }
-    if (buffer !== "") this.push(buffer);
-    this.ended = true;
-    this.waiter?.(null);
-  }
-
-  private push(line: string): void {
-    this.transcript.push(line);
-    if (this.waiter) {
-      const waiter = this.waiter;
-      this.waiter = null;
-      waiter(line);
-    } else {
-      this.queue.push(line);
-    }
-  }
-
-  send(line: string): void {
-    const stdin = this.proc.stdin as { write: (s: string) => number; flush: () => unknown };
-    stdin.write(`${line}\n`);
-    stdin.flush();
-  }
-
-  /** The next line git-annex would read; fails the test when none comes in time. */
-  async next(timeoutMs = 20_000): Promise<string> {
-    const queued = this.queue.shift();
-    if (queued !== undefined) return queued;
-    if (this.ended) throw new Error("the remote closed its output");
-    return await new Promise<string>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.waiter = null;
-        reject(new Error(`no line from the remote within ${timeoutMs} ms`));
-      }, timeoutMs);
-      this.waiter = (line) => {
-        clearTimeout(timer);
-        if (line === null) reject(new Error("the remote closed its output"));
-        else resolve(line);
-      };
-    });
-  }
-
-  /** Read lines until one starts with `prefix`; the lines before it are returned too. */
-  async until(prefix: string): Promise<{ line: string; before: string[] }> {
-    const before: string[] = [];
-    while (true) {
-      const line = await this.next();
-      if (line.startsWith(prefix)) return { line, before };
-      before.push(line);
-    }
-  }
-
-  /** Answer the GETCONFIG requests of INITREMOTE or PREPARE and return the final reply. */
-  async configure(command: "INITREMOTE" | "PREPARE", hostValue: string, dataset: string) {
-    this.send(command);
-    const answers: Record<string, string> = { host: hostValue, dataset };
-    for (let i = 0; i < 2; i++) {
-      const request = await this.next();
-      const name = request.replace(/^GETCONFIG /, "");
-      expect(request.startsWith("GETCONFIG ")).toBe(true);
-      this.send(`VALUE ${answers[name] ?? ""}`);
-    }
-    return await this.next();
-  }
-
-  /** The first line, then PREPARE with the configured host. */
-  async ready(hostValue = host.origin, dataset = DATASET): Promise<void> {
-    expect(await this.next()).toBe("VERSION 1");
-    expect(await this.configure("PREPARE", hostValue, dataset)).toBe("PREPARE-SUCCESS");
-  }
-
-  /** Close git-annex's side and wait for the process; returns its exit code and stderr. */
-  async close(): Promise<{ code: number; stderr: string }> {
-    (this.proc.stdin as { end: () => unknown }).end();
-    const code = await this.proc.exited;
-    await this.pump;
-    return { code, stderr: await this.stderrText };
-  }
-
-  async everything(): Promise<string> {
-    const { stderr } = await this.close();
-    return `${this.transcript.join("\n")}\n${stderr}`;
-  }
-}
-
 function outFile(name: string): string {
   return join(root, `${name}-${crypto.randomUUID()}`);
 }
 
 describe("the protocol", () => {
   test("starts with VERSION 1 and ends cleanly when git-annex closes its side", async () => {
-    const s = new Session();
+    const s = open({ hosts: host.origin, config: configDir });
     expect(await s.next()).toBe("VERSION 1");
     expect((await s.close()).code).toBe(0);
   });
 
   test("answers cost, availability, configs and extensions, and refuses what it does not know", async () => {
-    const s = new Session();
+    const s = open({ hosts: host.origin, config: configDir });
     expect(await s.next()).toBe("VERSION 1");
     s.send("EXTENSIONS INFO ASYNC");
     expect(await s.next()).toBe("EXTENSIONS");
@@ -247,14 +129,14 @@ describe("the protocol", () => {
   });
 
   test("an ERROR from git-annex ends the remote with a failure status", async () => {
-    const s = new Session();
+    const s = open({ hosts: host.origin, config: configDir });
     expect(await s.next()).toBe("VERSION 1");
     s.send("ERROR the protocol went wrong");
     expect((await s.close()).code).toBe(1);
   });
 
   test("a line that arrives while a GETCONFIG waits for its VALUE is handled afterwards, in order", async () => {
-    const s = new Session();
+    const s = open({ hosts: host.origin, config: configDir });
     expect(await s.next()).toBe("VERSION 1");
     s.send("PREPARE");
     expect(await s.next()).toBe("GETCONFIG host");
@@ -269,7 +151,7 @@ describe("the protocol", () => {
   });
 
   test("a VALUE nobody asked for is ignored", async () => {
-    const s = new Session();
+    const s = open({ hosts: host.origin, config: configDir });
     expect(await s.next()).toBe("VERSION 1");
     s.send("VALUE stray");
     s.send("GETCOST");
@@ -278,7 +160,7 @@ describe("the protocol", () => {
   });
 
   test("GETINFO reports the host and dataset once prepared", async () => {
-    const s = new Session();
+    const s = open({ hosts: host.origin, config: configDir });
     await s.ready();
     s.send("GETINFO");
     const lines: string[] = [];
@@ -296,7 +178,7 @@ describe("the protocol", () => {
 describe("what the repository's configuration may name", () => {
   test("a host on the CLI's list and a well-formed dataset id initialize without a request", async () => {
     const before = host.dataSeen.length;
-    const s = new Session();
+    const s = open({ hosts: host.origin, config: configDir });
     expect(await s.next()).toBe("VERSION 1");
     expect(await s.configure("INITREMOTE", "https://private.nemar.org", DATASET)).toBe(
       "INITREMOTE-SUCCESS",
@@ -319,7 +201,7 @@ describe("what the repository's configuration may name", () => {
       "not a url",
     ];
     // The one spelling with a trailing slash is the same origin, so it is the exception.
-    const s = new Session();
+    const s = open({ hosts: host.origin, config: configDir });
     expect(await s.next()).toBe("VERSION 1");
     for (const value of refused.filter((v) => v !== "https://private.nemar.org/")) {
       const reply = await s.configure("INITREMOTE", value, DATASET);
@@ -334,7 +216,7 @@ describe("what the repository's configuration may name", () => {
   test("a host that is not on the list gets no request, however the rest of the conversation goes", async () => {
     const foreign = standin();
     try {
-      const s = new Session({ hosts: host.origin });
+      const s = open({ hosts: host.origin, config: configDir });
       expect(await s.next()).toBe("VERSION 1");
       // A real loopback server, but its origin is not on this CLI's list.
       const reply = await s.configure("PREPARE", foreign.origin, DATASET);
@@ -352,7 +234,7 @@ describe("what the repository's configuration may name", () => {
   });
 
   test("an http host is refused even when it is on this machine, unless the environment lists it", async () => {
-    const s = new Session({ hosts: "" });
+    const s = open({ hosts: "", config: configDir });
     expect(await s.next()).toBe("VERSION 1");
     const reply = await s.configure("INITREMOTE", host.origin, DATASET);
     expect(reply.startsWith("INITREMOTE-FAILURE ")).toBe(true);
@@ -360,8 +242,9 @@ describe("what the repository's configuration may name", () => {
   });
 
   test("an environment entry that is not a loopback http or an https origin adds nothing", async () => {
-    const s = new Session({
+    const s = open({
       hosts: "http://example.com,http://192.168.0.5:8080,https://x.example/path",
+      config: configDir,
     });
     expect(await s.next()).toBe("VERSION 1");
     for (const value of ["http://example.com", "http://192.168.0.5:8080", "https://x.example"]) {
@@ -372,7 +255,7 @@ describe("what the repository's configuration may name", () => {
   });
 
   test("a dataset setting that is not a dataset id is refused", async () => {
-    const s = new Session();
+    const s = open({ hosts: host.origin, config: configDir });
     expect(await s.next()).toBe("VERSION 1");
     for (const dataset of [
       "NP099999",
@@ -390,7 +273,7 @@ describe("what the repository's configuration may name", () => {
   });
 
   test("a missing host or dataset setting is refused", async () => {
-    const s = new Session();
+    const s = open({ hosts: host.origin, config: configDir });
     expect(await s.next()).toBe("VERSION 1");
     expect((await s.configure("PREPARE", "", DATASET)).startsWith("PREPARE-FAILURE ")).toBe(true);
     expect((await s.configure("PREPARE", host.origin, "")).startsWith("PREPARE-FAILURE ")).toBe(
@@ -402,7 +285,7 @@ describe("what the repository's configuration may name", () => {
 
 describe("the stored API key", () => {
   test("PREPARE without a stored key fails and says how to sign in", async () => {
-    const s = new Session({ config: signedOutDir });
+    const s = open({ hosts: host.origin, config: signedOutDir });
     expect(await s.next()).toBe("VERSION 1");
     const reply = await s.configure("PREPARE", host.origin, DATASET);
     expect(reply.startsWith("PREPARE-FAILURE ")).toBe(true);
@@ -413,7 +296,7 @@ describe("the stored API key", () => {
   test("a key the data host refuses is reported as refused, for a transfer and for a check", async () => {
     const wrongKey = makeConfigDir(fakeApiKey());
     try {
-      const s = new Session({ config: wrongKey });
+      const s = open({ hosts: host.origin, config: wrongKey });
       await s.ready();
       const file = outFile("wrong-key");
       s.send(`TRANSFER RETRIEVE ${SMALL_KEY} ${file}`);
@@ -431,7 +314,7 @@ describe("the stored API key", () => {
 
   test("a request before PREPARE is answered as not prepared, with no request made", async () => {
     const before = host.dataSeen.length;
-    const s = new Session();
+    const s = open({ hosts: host.origin, config: configDir });
     expect(await s.next()).toBe("VERSION 1");
     s.send(`TRANSFER RETRIEVE ${SMALL_KEY} ${outFile("early")}`);
     expect((await s.next()).startsWith(`TRANSFER-FAILURE RETRIEVE ${SMALL_KEY} `)).toBe(true);
@@ -444,7 +327,7 @@ describe("the stored API key", () => {
 
 describe("TRANSFER RETRIEVE", () => {
   test("a small object is read from the data host with the Bearer key", async () => {
-    const s = new Session();
+    const s = open({ hosts: host.origin, config: configDir });
     await s.ready();
     const file = outFile("small");
     const before = host.dataSeen.length;
@@ -460,7 +343,7 @@ describe("TRANSFER RETRIEVE", () => {
   });
 
   test("a file name with spaces is written where git-annex said", async () => {
-    const s = new Session();
+    const s = open({ hosts: host.origin, config: configDir });
     await s.ready();
     const file = `${outFile("with space")} and more`;
     s.send(`TRANSFER RETRIEVE ${SMALL_KEY} ${file}`);
@@ -472,7 +355,7 @@ describe("TRANSFER RETRIEVE", () => {
   test("a large object is redirected to another origin, which is sent no Authorization", async () => {
     const own = standin();
     try {
-      const s = new Session({ hosts: own.origin });
+      const s = open({ hosts: own.origin, config: configDir });
       await s.ready(own.origin);
       const file = outFile("big");
       s.send(`TRANSFER RETRIEVE ${BIG_KEY} ${file}`);
@@ -513,7 +396,7 @@ describe("TRANSFER RETRIEVE", () => {
           : undefined,
     });
     try {
-      const s = new Session({ hosts: own.origin });
+      const s = open({ hosts: own.origin, config: configDir });
       await s.ready(own.origin);
       s.send(`TRANSFER RETRIEVE ${BIG_KEY} ${outFile("storage-404")}`);
       const failure = (await s.until("TRANSFER-")).line;
@@ -528,7 +411,7 @@ describe("TRANSFER RETRIEVE", () => {
   });
 
   test("an object the data host does not have is reported as missing", async () => {
-    const s = new Session();
+    const s = open({ hosts: host.origin, config: configDir });
     await s.ready();
     const absent =
       "SHA256E-s3--aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bin";
@@ -543,7 +426,7 @@ describe("TRANSFER RETRIEVE", () => {
 
   test("a key that is not safe in a URL path is refused before any request", async () => {
     const before = host.dataSeen.length;
-    const s = new Session();
+    const s = open({ hosts: host.origin, config: configDir });
     await s.ready();
     for (const key of [
       "../../etc/passwd",
@@ -567,7 +450,7 @@ describe("TRANSFER RETRIEVE", () => {
       override: (_req, key) => (key === SMALL_KEY ? chunked(SMALL.slice(0, 10)) : undefined),
     });
     try {
-      const s = new Session({ hosts: own.origin });
+      const s = open({ hosts: own.origin, config: configDir });
       await s.ready(own.origin);
       const file = outFile("short");
       s.send(`TRANSFER RETRIEVE ${SMALL_KEY} ${file}`);
@@ -587,7 +470,7 @@ describe("TRANSFER RETRIEVE", () => {
         key === SMALL_KEY ? chunked(patternBytes(20, 3), patternBytes(20, 4)) : undefined,
     });
     try {
-      const s = new Session({ hosts: own.origin });
+      const s = open({ hosts: own.origin, config: configDir });
       await s.ready(own.origin);
       const file = outFile("long");
       s.send(`TRANSFER RETRIEVE ${SMALL_KEY} ${file}`);
@@ -605,7 +488,7 @@ describe("TRANSFER RETRIEVE", () => {
       override: (_req, key) => (key === SMALL_KEY ? new Response(SMALL.slice(0, 10)) : undefined),
     });
     try {
-      const s = new Session({ hosts: own.origin });
+      const s = open({ hosts: own.origin, config: configDir });
       await s.ready(own.origin);
       const file = outFile("cl-mismatch");
       s.send(`TRANSFER RETRIEVE ${SMALL_KEY} ${file}`);
@@ -627,7 +510,7 @@ describe("TRANSFER RETRIEVE", () => {
       override: (_req, key) => (key === emptyKey ? new Response(null, { status: 200 }) : undefined),
     });
     try {
-      const s = new Session({ hosts: own.origin });
+      const s = open({ hosts: own.origin, config: configDir });
       await s.ready(own.origin);
       const file = outFile("empty");
       s.send(`TRANSFER RETRIEVE ${emptyKey} ${file}`);
@@ -639,19 +522,16 @@ describe("TRANSFER RETRIEVE", () => {
     }
   });
 
-  test("an object whose key declares no size is accepted at whatever length it has", async () => {
-    const keyNoSize = "WORM-m1700000000--note.txt";
-    const own = standin({
-      objects: new Map([[keyNoSize, patternBytes(40, 9)]]),
-    });
+  test("a chunk key's own size field is not interpreted, so any length is accepted", async () => {
+    const chunkKey = "SHA256E-s40-S20-C1--0a1b2c3d4e5f6071.bin";
+    const own = standin({ objects: new Map([[chunkKey, patternBytes(15, 9)]]) });
     try {
-      const s = new Session({ hosts: own.origin });
+      const s = open({ hosts: own.origin, config: configDir });
       await s.ready(own.origin);
-      const file = outFile("no-size");
-      s.send(`TRANSFER RETRIEVE ${keyNoSize} ${file}`);
-      expect((await s.until("TRANSFER-")).line).toBe(`TRANSFER-SUCCESS RETRIEVE ${keyNoSize}`);
-      expect(new Uint8Array(readFileSync(file))).toEqual(patternBytes(40, 9));
-      await s.close();
+      const file = outFile("chunk");
+      s.send(`TRANSFER RETRIEVE ${chunkKey} ${file}`);
+      expect((await s.until("TRANSFER-")).line).toBe(`TRANSFER-SUCCESS RETRIEVE ${chunkKey}`);
+      expect(new Uint8Array(readFileSync(file))).toEqual(patternBytes(15, 9));
     } finally {
       own.stop();
     }
@@ -670,7 +550,7 @@ describe("TRANSFER RETRIEVE", () => {
       },
     });
     try {
-      const s = new Session({ hosts: own.origin });
+      const s = open({ hosts: own.origin, config: configDir });
       await s.ready(own.origin);
       s.send(`TRANSFER RETRIEVE ${SMALL_KEY} ${outFile("loop")}`);
       const failure = (await s.until("TRANSFER-")).line;
@@ -699,7 +579,7 @@ describe("TRANSFER RETRIEVE", () => {
       },
     });
     try {
-      const s = new Session({ hosts: own.origin });
+      const s = open({ hosts: own.origin, config: configDir });
       await s.ready(own.origin);
       const file = outFile("three");
       s.send(`TRANSFER RETRIEVE ${SMALL_KEY} ${file}`);
@@ -725,7 +605,7 @@ describe("TRANSFER RETRIEVE", () => {
             : undefined,
       });
       try {
-        const s = new Session({ hosts: own.origin });
+        const s = open({ hosts: own.origin, config: configDir });
         await s.ready(own.origin);
         s.send(`TRANSFER RETRIEVE ${SMALL_KEY} ${outFile("scheme")}`);
         const failure = (await s.until("TRANSFER-")).line;
@@ -749,7 +629,7 @@ describe("TRANSFER RETRIEVE", () => {
           key === SMALL_KEY ? new Response(null, { status: 302, headers }) : undefined,
       });
       try {
-        const s = new Session({ hosts: own.origin });
+        const s = open({ hosts: own.origin, config: configDir });
         await s.ready(own.origin);
         s.send(`TRANSFER RETRIEVE ${SMALL_KEY} ${outFile("badloc")}`);
         expect((await s.until("TRANSFER-")).line.startsWith("TRANSFER-FAILURE RETRIEVE ")).toBe(
@@ -766,7 +646,7 @@ describe("TRANSFER RETRIEVE", () => {
     const down = standin();
     const origin = down.origin;
     down.stop();
-    const s = new Session({ hosts: origin });
+    const s = open({ hosts: origin, config: configDir });
     await s.ready(origin);
     s.send(`TRANSFER RETRIEVE ${SMALL_KEY} ${outFile("down")}`);
     const failure = (await s.until("TRANSFER-")).line;
@@ -778,7 +658,7 @@ describe("TRANSFER RETRIEVE", () => {
 
 describe("CHECKPRESENT", () => {
   test("200 is present, 404 is absent, and the check is a HEAD", async () => {
-    const s = new Session();
+    const s = open({ hosts: host.origin, config: configDir });
     await s.ready();
     const before = host.dataSeen.length;
     s.send(`CHECKPRESENT ${SMALL_KEY}`);
@@ -796,7 +676,7 @@ describe("CHECKPRESENT", () => {
   test("a large object is present by HEAD alone: no redirect is followed and nothing is downloaded", async () => {
     const own = standin();
     try {
-      const s = new Session({ hosts: own.origin });
+      const s = open({ hosts: own.origin, config: configDir });
       await s.ready(own.origin);
       s.send(`CHECKPRESENT ${BIG_KEY}`);
       expect(await s.next()).toBe(`CHECKPRESENT-SUCCESS ${BIG_KEY}`);
@@ -814,7 +694,7 @@ describe("CHECKPRESENT", () => {
           key === SMALL_KEY ? new Response("fault", { status }) : undefined,
       });
       try {
-        const s = new Session({ hosts: own.origin });
+        const s = open({ hosts: own.origin, config: configDir });
         await s.ready(own.origin);
         s.send(`CHECKPRESENT ${SMALL_KEY}`);
         const reply = await s.next();
@@ -830,7 +710,7 @@ describe("CHECKPRESENT", () => {
     const down = standin();
     const origin = down.origin;
     down.stop();
-    const s = new Session({ hosts: origin });
+    const s = open({ hosts: origin, config: configDir });
     await s.ready(origin);
     s.send(`CHECKPRESENT ${SMALL_KEY}`);
     expect((await s.next()).startsWith(`CHECKPRESENT-UNKNOWN ${SMALL_KEY} `)).toBe(true);
@@ -845,7 +725,7 @@ describe("CHECKPRESENT", () => {
           : undefined,
     });
     try {
-      const s = new Session({ hosts: own.origin });
+      const s = open({ hosts: own.origin, config: configDir });
       await s.ready(own.origin);
       s.send(`CHECKPRESENT ${SMALL_KEY}`);
       expect((await s.next()).startsWith(`CHECKPRESENT-UNKNOWN ${SMALL_KEY} `)).toBe(true);
@@ -856,12 +736,20 @@ describe("CHECKPRESENT", () => {
     }
   });
 
-  test("a key that cannot be on a data host is absent without a request", async () => {
+  test("a key that cannot be on a data host is unknown, not absent, and makes no request", async () => {
     const before = host.dataSeen.length;
-    const s = new Session();
+    const s = open({ hosts: host.origin, config: configDir });
     await s.ready();
-    s.send("CHECKPRESENT a/b");
-    expect(await s.next()).toBe("CHECKPRESENT-FAILURE a/b");
+    for (const key of [
+      "a/b",
+      "WORM-s40-m17--note.txt",
+      "URL--http&c%3A%2F%2Fx",
+      "SHA256E-s5--a+b.bin",
+    ]) {
+      s.send(`CHECKPRESENT ${key}`);
+      const reply = await s.next();
+      expect([key, reply.startsWith(`CHECKPRESENT-UNKNOWN ${key} `)]).toEqual([key, true]);
+    }
     await s.close();
     expect(host.dataSeen.length).toBe(before);
   });
@@ -870,7 +758,7 @@ describe("CHECKPRESENT", () => {
 describe("read-only for now", () => {
   test("TRANSFER STORE and REMOVE are refused, and nothing is sent to the data host", async () => {
     const before = host.dataSeen.length;
-    const s = new Session();
+    const s = open({ hosts: host.origin, config: configDir });
     await s.ready();
     const source = outFile("store-source");
     writeFileSync(source, "payload");
@@ -891,7 +779,7 @@ describe("what the remote prints", () => {
   test("no line of a whole session holds the API key", async () => {
     const own = standin();
     try {
-      const s = new Session({ hosts: own.origin });
+      const s = open({ hosts: own.origin, config: configDir });
       await s.ready(own.origin);
       s.send(`TRANSFER RETRIEVE ${SMALL_KEY} ${outFile("hygiene-small")}`);
       await s.until("TRANSFER-");
@@ -905,6 +793,249 @@ describe("what the remote prints", () => {
       expect(output).not.toContain(API_KEY);
       expect(output).not.toContain(own.storageOrigin);
       for (const token of own.redirectTokens) expect(output).not.toContain(token);
+    } finally {
+      own.stop();
+    }
+  });
+});
+
+describe("where a redirect may lead", () => {
+  test("a scheme-relative or backslash Location is resolved first, then judged", async () => {
+    // Each resolves, against the data host's http://127.0.0.1 URL, to plain http on a host that
+    // is not on this machine, which is refused without a request.
+    for (const location of [
+      "//example.invalid/blob/x?sig=abc",
+      "\\\\example.invalid\\blob\\x?sig=abc",
+      "/\\example.invalid/blob/x?sig=abc",
+    ]) {
+      const own = standin({
+        override: (_req, key) =>
+          key === SMALL_KEY
+            ? new Response(null, { status: 302, headers: { Location: location } })
+            : undefined,
+      });
+      try {
+        const s = open({ hosts: own.origin, config: configDir });
+        await s.ready(own.origin);
+        s.send(`TRANSFER RETRIEVE ${SMALL_KEY} ${outFile("relative")}`);
+        const failure = (await s.until("TRANSFER-")).line;
+        expect([location, failure.includes("not https")]).toEqual([location, true]);
+        expect(failure).not.toContain("sig=abc");
+      } finally {
+        own.stop();
+      }
+    }
+  });
+
+  test("a scheme-relative Location to another loopback origin is followed without the key", async () => {
+    const own = standin({
+      override: (_req, key, storage) =>
+        key === BIG_KEY
+          ? new Response(null, {
+              status: 302,
+              headers: { Location: `//${new URL(storage).host}/blob/${BIG_KEY}?X-Signature=s1` },
+            })
+          : undefined,
+    });
+    try {
+      const s = open({ hosts: own.origin, config: configDir });
+      await s.ready(own.origin);
+      const file = outFile("relative-ok");
+      s.send(`TRANSFER RETRIEVE ${BIG_KEY} ${file}`);
+      expect((await s.until("TRANSFER-")).line).toBe(`TRANSFER-SUCCESS RETRIEVE ${BIG_KEY}`);
+      expect(new Uint8Array(readFileSync(file))).toEqual(BIG);
+      expect(own.storageSeen.map((r) => r.authorization)).toEqual([null]);
+    } finally {
+      own.stop();
+    }
+  });
+
+  test("data host to another origin and back: the key is attached only at the data host's own origin", async () => {
+    // Pinned: a chain that returns to the configured origin carries the key there again, and
+    // never carries it to the origin in between.
+    const bounce = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch: (req) => {
+        bounced.push(req.headers.get("authorization"));
+        return new Response(null, {
+          status: 302,
+          headers: { Location: `${own.origin}/o/${DATASET}/${SMALL_KEY}?via=back` },
+        });
+      },
+    });
+    const bounced: (string | null)[] = [];
+    const own: DataHostStandin = standin({
+      override: (req, key) => {
+        if (key !== SMALL_KEY) return undefined;
+        if (new URL(req.url).searchParams.get("via") === "back") {
+          return new Response(SMALL, { headers: { "Content-Length": String(SMALL.byteLength) } });
+        }
+        return new Response(null, {
+          status: 302,
+          headers: { Location: `http://127.0.0.1:${bounce.port}/hop` },
+        });
+      },
+    });
+    try {
+      const s = open({ hosts: own.origin, config: configDir });
+      await s.ready(own.origin);
+      const file = outFile("chain");
+      s.send(`TRANSFER RETRIEVE ${SMALL_KEY} ${file}`);
+      expect((await s.until("TRANSFER-")).line).toBe(`TRANSFER-SUCCESS RETRIEVE ${SMALL_KEY}`);
+      expect(new Uint8Array(readFileSync(file))).toEqual(SMALL);
+      expect(bounced).toEqual([null]);
+      expect(own.dataSeen.map((r) => r.authorization)).toEqual([
+        `Bearer ${API_KEY}`,
+        `Bearer ${API_KEY}`,
+      ]);
+    } finally {
+      bounce.stop(true);
+      own.stop();
+    }
+  });
+});
+
+describe("a body that never ends", () => {
+  test("is cut off as soon as it passes the key's size, and the connection is cancelled", async () => {
+    let cancelled = false;
+    let sent = 0;
+    const own = standin({
+      override: (_req, key) =>
+        key === SMALL_KEY
+          ? new Response(
+              new ReadableStream({
+                async pull(controller) {
+                  await Bun.sleep(2);
+                  sent += 10;
+                  controller.enqueue(patternBytes(10, sent));
+                },
+                cancel() {
+                  cancelled = true;
+                },
+              }),
+            )
+          : undefined,
+    });
+    try {
+      const s = open({ hosts: own.origin, config: configDir });
+      await s.ready(own.origin);
+      const file = outFile("endless");
+      s.send(`TRANSFER RETRIEVE ${SMALL_KEY} ${file}`);
+      const failure = (await s.until("TRANSFER-")).line;
+      expect(failure).toBe(
+        `TRANSFER-FAILURE RETRIEVE ${SMALL_KEY} More bytes arrived than the key's 29.`,
+      );
+      expect(existsSync(file)).toBe(false);
+      for (let i = 0; i < 200 && !cancelled; i++) await Bun.sleep(10);
+      expect(cancelled).toBe(true);
+      // Cut off near the limit, not drained: a handful of chunks, not an endless stream.
+      expect(sent).toBeLessThan(500);
+    } finally {
+      own.stop();
+    }
+  });
+});
+
+describe("a host that does not answer", () => {
+  /** A TCP listener that accepts connections and never writes a byte. */
+  function silentHost(): { origin: string; stop: () => void } {
+    const listener = Bun.listen({
+      hostname: "127.0.0.1",
+      port: 0,
+      socket: { data() {}, open() {}, close() {}, error() {} },
+    });
+    return { origin: `http://127.0.0.1:${listener.port}`, stop: () => listener.stop(true) };
+  }
+  const SHORT = { NEMAR_DATA_HOST_TIMEOUT_MS: "300" };
+
+  test("a transfer and a check time out, with a message that says so", async () => {
+    const silent = silentHost();
+    try {
+      const s = open({ hosts: silent.origin, config: configDir, env: SHORT });
+      await s.ready(silent.origin);
+      const file = outFile("silent");
+      s.send(`TRANSFER RETRIEVE ${SMALL_KEY} ${file}`);
+      const failure = (await s.until("TRANSFER-")).line;
+      expect(failure).toBe(`TRANSFER-FAILURE RETRIEVE ${SMALL_KEY} The request timed out.`);
+      expect(existsSync(file)).toBe(false);
+      s.send(`CHECKPRESENT ${SMALL_KEY}`);
+      expect(await s.next()).toBe(`CHECKPRESENT-UNKNOWN ${SMALL_KEY} The request timed out.`);
+    } finally {
+      silent.stop();
+    }
+  });
+
+  test("a body that stalls after the headers times out and leaves no file", async () => {
+    const own = standin({
+      override: (_req, key) =>
+        key === SMALL_KEY
+          ? new Response(
+              new ReadableStream({
+                pull(controller) {
+                  controller.enqueue(SMALL.slice(0, 5));
+                  return new Promise(() => {});
+                },
+              }),
+            )
+          : undefined,
+    });
+    try {
+      const s = open({ hosts: own.origin, config: configDir, env: SHORT });
+      await s.ready(own.origin);
+      const file = outFile("stalled");
+      s.send(`TRANSFER RETRIEVE ${SMALL_KEY} ${file}`);
+      const failure = (await s.until("TRANSFER-")).line;
+      expect(failure).toBe(
+        `TRANSFER-FAILURE RETRIEVE ${SMALL_KEY} The transfer stalled and timed out.`,
+      );
+      expect(existsSync(file)).toBe(false);
+    } finally {
+      own.stop();
+    }
+  });
+
+  test("a host that is down is reported with the error's code, never its address", async () => {
+    const down = standin();
+    const origin = down.origin;
+    down.stop();
+    const s = open({ hosts: origin, config: configDir });
+    await s.ready(origin);
+    s.send(`TRANSFER RETRIEVE ${SMALL_KEY} ${outFile("down-code")}`);
+    const failure = (await s.until("TRANSFER-")).line;
+    expect(failure).toMatch(/\(\w+ ECONNREFUSED\)\.$/);
+    expect(failure).not.toContain(origin);
+    s.send(`CHECKPRESENT ${SMALL_KEY}`);
+    expect(await s.next()).toMatch(/ECONNREFUSED/);
+  });
+});
+
+describe("a caller that hands over an origin the list does not have", () => {
+  const forged = (origin: string) => ({
+    origin: origin as VettedOrigin,
+    dataset: DATASET,
+    options: { env: {}, isDevBuild: false },
+  });
+
+  test("a transfer and a check refuse it and make no request", async () => {
+    const own = standin();
+    try {
+      const file = outFile("forged");
+      const retrieved = await retrieveObject(
+        forged(own.origin),
+        SMALL_KEY,
+        API_KEY,
+        file,
+        () => {},
+      );
+      expect(retrieved).toEqual({
+        ok: false,
+        message: "The host is not on this CLI's list of data hosts.",
+      });
+      const checked = await checkObject(forged(own.origin), SMALL_KEY, API_KEY);
+      expect(checked.state).toBe("unknown");
+      expect(own.dataSeen).toEqual([]);
+      expect(existsSync(file)).toBe(false);
     } finally {
       own.stop();
     }
