@@ -54,16 +54,20 @@ export const REQUEST_TIMEOUT_MS = 60_000;
 /** A progress line is sent at most this often, in bytes received. */
 const PROGRESS_STEP_BYTES = 256 * 1024;
 
-/** The longest object name the data host accepts; the same limit as the server's key rule. */
+/** The longest key the data host accepts. */
 const KEY_MAX_LENGTH = 255;
 
 /**
- * A key a data host serves, by the server's own rule: a backend name, `-s<size>`, optional
- * `-S<n>-C<n>` chunk fields, `--`, then a name of letters, digits, `.`, `_` and `-`. Anything
- * else is a 404 there, and the shape also keeps the key URL-safe: no separator, dot segment,
- * query, `%` or whitespace can get through.
+ * The data host's key rule, exactly: an upper-case backend name (letters, digits, underscores:
+ * `SHA256E`, `SHA3_256E`), `-s<size>`, optional `-S<n>-C<n>` chunk fields, each number at most 16
+ * digits, `--`, then a name of letters, digits, `.`, `_` and `-`. The whole key is at most
+ * {@link KEY_MAX_LENGTH} characters. Anything else is a 404 there, and the shape also keeps the key
+ * URL-safe: no separator, dot segment, query, `%` or whitespace can get through. It is anchored,
+ * and the size and chunk fields are read from its groups, so a name that happens to contain
+ * `-S1-C1` is never taken for chunk fields.
  */
-const SAFE_KEY = /^[A-Za-z0-9]+-s\d+(?:-S\d+-C\d+)?--[A-Za-z0-9._-]+$/;
+const KEY_RULE =
+  /^[A-Z0-9][A-Z0-9_]*-s([0-9]{1,16})(?:-S([0-9]{1,16})-C([0-9]{1,16}))?--[A-Za-z0-9._-]+$/;
 
 /** The configuration `INITREMOTE` and `PREPARE` accept: a vetted host and dataset id. */
 export interface RemoteSettings {
@@ -73,18 +77,20 @@ export interface RemoteSettings {
   options?: DataHostOptions;
 }
 
+/** A key the data host serves (its key rule, and at most 255 characters). */
 export function isSafeKey(key: string): boolean {
-  return key.length <= KEY_MAX_LENGTH && SAFE_KEY.test(key);
+  return key.length <= KEY_MAX_LENGTH && KEY_RULE.test(key);
 }
 
 /**
- * The byte size a key declares (`SHA256E-s123--hash.ext` is 123), or null for a chunk key,
- * whose `-s` field this remote does not interpret.
+ * The byte size a key declares (`SHA256E-s123--hash.ext` is 123), or null for a key that is not
+ * one the data host serves, for a chunk key (whose `-s` field this remote does not interpret),
+ * and for a size too large for an exact number.
  */
 export function sizeOfKey(key: string): number | null {
-  if (/-S\d+-C\d+(?:-|$)/.test(key)) return null;
-  const match = /^[A-Za-z0-9]+-s(\d+)(?:-|$)/.exec(key);
-  if (!match) return null;
+  if (key.length > KEY_MAX_LENGTH) return null;
+  const match = KEY_RULE.exec(key);
+  if (!match || match[2] !== undefined) return null;
   const size = Number(match[1]);
   return Number.isSafeInteger(size) ? size : null;
 }
@@ -234,59 +240,64 @@ export async function retrieveObject(
 ): Promise<RetrieveResult> {
   if (!isSafeKey(key)) return { ok: false, message: "The key is not one a data host serves." };
   const expected = sizeOfKey(key);
-  return withIdleTimeout(dataHostTimeoutMs(REQUEST_TIMEOUT_MS), async (signal, touch) => {
-    const fetched = await fetchObject(settings, key, apiKey, "GET", true, signal);
-    if (fetched.kind === "failed") return { ok: false, message: fetched.message };
-    const { response, redirected } = fetched;
-    if (response.status !== 200 || !response.body) {
-      await response.body?.cancel().catch(() => {});
-      return { ok: false, message: statusMessage(response.status, redirected) };
-    }
-    const declared = response.headers.get("content-length");
-    if (expected !== null && declared !== null && Number(declared) !== expected) {
-      await response.body.cancel().catch(() => {});
-      return {
-        ok: false,
-        message: `The object is ${printable(declared, 20)} bytes but its key says ${expected}.`,
-      };
-    }
-    touch();
-    let handle: FileHandle | undefined;
-    let received = 0;
-    let reported = 0;
-    try {
-      handle = await open(file, "w");
-      const reader = response.body.getReader();
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        touch();
-        received += value.byteLength;
-        if (expected !== null && received > expected) {
-          await reader.cancel().catch(() => {});
-          throw new SizeError(`More bytes arrived than the key's ${expected}.`);
-        }
-        await handle.write(value);
-        if (received - reported >= PROGRESS_STEP_BYTES) {
-          reported = received;
-          onProgress(received);
-        }
+  return withIdleTimeout(
+    dataHostTimeoutMs(REQUEST_TIMEOUT_MS, settings.options?.env),
+    async (signal, touch) => {
+      const fetched = await fetchObject(settings, key, apiKey, "GET", true, signal);
+      if (fetched.kind === "failed") return { ok: false, message: fetched.message };
+      const { response, redirected } = fetched;
+      if (response.status !== 200 || !response.body) {
+        await response.body?.cancel().catch(() => {});
+        return { ok: false, message: statusMessage(response.status, redirected) };
       }
-      await handle.close();
-      handle = undefined;
-      if (expected !== null && received !== expected) {
-        throw new SizeError(`The object ended after ${received} bytes; its key says ${expected}.`);
+      const declared = response.headers.get("content-length");
+      if (expected !== null && declared !== null && Number(declared) !== expected) {
+        await response.body.cancel().catch(() => {});
+        return {
+          ok: false,
+          message: `The object is ${printable(declared, 20)} bytes but its key says ${expected}.`,
+        };
       }
-      if (received !== reported) onProgress(received);
-      return { ok: true, bytes: received } as RetrieveResult;
-    } catch (error) {
-      await handle?.close().catch(() => {});
-      await rm(file, { force: true }).catch(() => {});
-      if (error instanceof SizeError) return { ok: false, message: error.message };
-      if (signal.aborted) return { ok: false, message: "The transfer stalled and timed out." };
-      return { ok: false, message: `The transfer failed (${describeError(error)}).` };
-    }
-  });
+      touch();
+      let handle: FileHandle | undefined;
+      let received = 0;
+      let reported = 0;
+      try {
+        handle = await open(file, "w");
+        const reader = response.body.getReader();
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          touch();
+          received += value.byteLength;
+          if (expected !== null && received > expected) {
+            await reader.cancel().catch(() => {});
+            throw new SizeError(`More bytes arrived than the key's ${expected}.`);
+          }
+          await handle.write(value);
+          if (received - reported >= PROGRESS_STEP_BYTES) {
+            reported = received;
+            onProgress(received);
+          }
+        }
+        await handle.close();
+        handle = undefined;
+        if (expected !== null && received !== expected) {
+          throw new SizeError(
+            `The object ended after ${received} bytes; its key says ${expected}.`,
+          );
+        }
+        if (received !== reported) onProgress(received);
+        return { ok: true, bytes: received } as RetrieveResult;
+      } catch (error) {
+        await handle?.close().catch(() => {});
+        await rm(file, { force: true }).catch(() => {});
+        if (error instanceof SizeError) return { ok: false, message: error.message };
+        if (signal.aborted) return { ok: false, message: "The transfer stalled and timed out." };
+        return { ok: false, message: `The transfer failed (${describeError(error)}).` };
+      }
+    },
+  );
 }
 
 class SizeError extends Error {
@@ -310,15 +321,18 @@ export async function checkObject(
   if (!isSafeKey(key)) {
     return { state: "unknown", message: "The key is not one a data host serves." };
   }
-  return withIdleTimeout(dataHostTimeoutMs(REQUEST_TIMEOUT_MS), async (signal) => {
-    const fetched = await fetchObject(settings, key, apiKey, "HEAD", false, signal);
-    if (fetched.kind === "failed") return { state: "unknown", message: fetched.message };
-    const { status } = fetched.response;
-    await fetched.response.body?.cancel().catch(() => {});
-    if (status === 200) return { state: "present" };
-    if (status === 404) return { state: "absent" };
-    return { state: "unknown", message: statusMessage(status, false) };
-  });
+  return withIdleTimeout(
+    dataHostTimeoutMs(REQUEST_TIMEOUT_MS, settings.options?.env),
+    async (signal) => {
+      const fetched = await fetchObject(settings, key, apiKey, "HEAD", false, signal);
+      if (fetched.kind === "failed") return { state: "unknown", message: fetched.message };
+      const { status } = fetched.response;
+      await fetched.response.body?.cancel().catch(() => {});
+      if (status === 200) return { state: "present" };
+      if (status === 404) return { state: "absent" };
+      return { state: "unknown", message: statusMessage(status, false) };
+    },
+  );
 }
 
 /** Where the protocol's lines come from and go to. */

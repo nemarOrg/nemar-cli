@@ -15,8 +15,8 @@ import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { checkObject, retrieveObject } from "../src/lib/data-host-remote";
-import type { VettedOrigin } from "../src/lib/data-hosts";
+import { checkObject, isSafeKey, retrieveObject, sizeOfKey } from "../src/lib/data-host-remote";
+import { type VettedOrigin, allowedDataHosts } from "../src/lib/data-hosts";
 import { DataHostStandin, type StandinOptions, patternBytes } from "./helpers/data-host-standin";
 import { fakeApiKey, makeConfigDir } from "./helpers/nemar-account";
 import { Session, useSessions } from "./helpers/remote-session";
@@ -1038,6 +1038,172 @@ describe("a caller that hands over an origin the list does not have", () => {
       expect(existsSync(file)).toBe(false);
     } finally {
       own.stop();
+    }
+  });
+});
+
+describe("the key rule is the data host's", () => {
+  const HASH = "0123456789abcdef";
+  /** A key of exactly `length` characters: the fixed part, then a name that fills the rest. */
+  const keyOfLength = (length: number): string => {
+    const head = "SHA256E-s5--";
+    return head + "a".repeat(length - head.length);
+  };
+
+  test("accepted: upper-case backends with digits and underscores, names of letters, digits . _ -", () => {
+    for (const key of [
+      `SHA256E-s29--${HASH}.bin`,
+      `SHA3_256E-s29--${HASH}.tar.gz`,
+      `SHA256-s0--${HASH}`,
+      "BLAKE2B_512E-s7--a_b-c.d",
+      "MD5E-s1--X",
+      `SHA256E-s40-S20-C1--${HASH}.bin`,
+    ]) {
+      expect([key, isSafeKey(key)]).toEqual([key, true]);
+    }
+  });
+
+  test("refused: lower-case or empty backends, missing or malformed fields, other name characters", () => {
+    for (const key of [
+      `sha256e-s29--${HASH}.bin`,
+      `Sha256E-s29--${HASH}.bin`,
+      `_SHA256E-s29--${HASH}`,
+      `-s29--${HASH}`,
+      `SHA256E--${HASH}`,
+      `SHA256E-s--${HASH}`,
+      `SHA256E-s29-${HASH}`,
+      "SHA256E-s29--",
+      `SHA256E-S29--${HASH}`,
+      `SHA256E-s29-S5--${HASH}`,
+      `SHA256E-s29-S5-C--${HASH}`,
+      `SHA256E-s29-C1-S5--${HASH}`,
+      "SHA256E-s29--a+b",
+      "SHA256E-s29--a b",
+      "SHA256E-s29--a/b",
+      "SHA256E-s29--a%2Fb",
+      "SHA256E-s29--a\nb",
+      "WORM-s40-m17--note.txt",
+    ]) {
+      expect([key, isSafeKey(key)]).toEqual([key, false]);
+    }
+  });
+
+  test("a size and each chunk field may have 16 digits and no more", () => {
+    const sixteen = "1234567890123456";
+    const seventeen = "12345678901234567";
+    expect(isSafeKey(`SHA256E-s${sixteen}--x`)).toBe(true);
+    expect(isSafeKey(`SHA256E-s${seventeen}--x`)).toBe(false);
+    expect(isSafeKey(`SHA256E-s5-S${sixteen}-C1--x`)).toBe(true);
+    expect(isSafeKey(`SHA256E-s5-S${seventeen}-C1--x`)).toBe(false);
+    expect(isSafeKey(`SHA256E-s5-S1-C${sixteen}--x`)).toBe(true);
+    expect(isSafeKey(`SHA256E-s5-S1-C${seventeen}--x`)).toBe(false);
+  });
+
+  test("the whole key is at most 255 characters", () => {
+    expect(keyOfLength(255)).toHaveLength(255);
+    expect(isSafeKey(keyOfLength(255))).toBe(true);
+    expect(isSafeKey(keyOfLength(256))).toBe(false);
+    expect(sizeOfKey(keyOfLength(255))).toBe(5);
+    expect(sizeOfKey(keyOfLength(256))).toBeNull();
+  });
+
+  test("sizeOfKey reads the size from the anchored pattern's groups", () => {
+    expect(sizeOfKey(`SHA256E-s29--${HASH}.bin`)).toBe(29);
+    expect(sizeOfKey(`SHA3_256E-s1048576--${HASH}`)).toBe(1048576);
+    expect(sizeOfKey(`SHA256E-s0--${HASH}`)).toBe(0);
+    // A chunk key's own size field is not interpreted.
+    expect(sizeOfKey(`SHA256E-s40-S20-C1--${HASH}`)).toBeNull();
+    // Not a key the data host serves, so no size.
+    expect(sizeOfKey("WORM-s40-m17--note.txt")).toBeNull();
+    // Too large for an exact number: no size check rather than a wrong one.
+    expect(sizeOfKey("SHA256E-s9999999999999999--x")).toBeNull();
+  });
+
+  test("a name that merely contains chunk-like text keeps its size check", () => {
+    const key = "SHA256E-s5--x-S1-C1-y";
+    expect(isSafeKey(key)).toBe(true);
+    expect(sizeOfKey(key)).toBe(5);
+  });
+
+  test("a name containing chunk-like text is held to its size through the remote", async () => {
+    const key = "SHA256E-s5--x-S1-C1-y";
+    const own = standin({ objects: new Map([[key, patternBytes(9, 4)]]) });
+    try {
+      const s = open({ hosts: own.origin, config: configDir });
+      await s.ready(own.origin);
+      const file = outFile("name-chunky");
+      s.send(`TRANSFER RETRIEVE ${key} ${file}`);
+      const failure = (await s.until("TRANSFER-")).line;
+      expect(failure.startsWith(`TRANSFER-FAILURE RETRIEVE ${key} `)).toBe(true);
+      expect(existsSync(file)).toBe(false);
+    } finally {
+      own.stop();
+    }
+  });
+
+  test("a lower-case backend is refused through the remote without a request", async () => {
+    const before = host.dataSeen.length;
+    const key = `sha256e-s29--${HASH}.bin`;
+    const s = open({ hosts: host.origin, config: configDir });
+    await s.ready();
+    s.send(`TRANSFER RETRIEVE ${key} ${outFile("lower")}`);
+    expect((await s.until("TRANSFER-")).line.startsWith(`TRANSFER-FAILURE RETRIEVE ${key} `)).toBe(
+      true,
+    );
+    s.send(`CHECKPRESENT ${key}`);
+    expect((await s.next()).startsWith(`CHECKPRESENT-UNKNOWN ${key} `)).toBe(true);
+    expect(host.dataSeen.length).toBe(before);
+  });
+
+  test("SHA3_256E keys are transferred", async () => {
+    const key = `SHA3_256E-s29--${HASH}.bin`;
+    const own = standin({ objects: new Map([[key, SMALL]]) });
+    try {
+      const s = open({ hosts: own.origin, config: configDir });
+      await s.ready(own.origin);
+      const file = outFile("sha3");
+      s.send(`TRANSFER RETRIEVE ${key} ${file}`);
+      expect((await s.until("TRANSFER-")).line).toBe(`TRANSFER-SUCCESS RETRIEVE ${key}`);
+      expect(new Uint8Array(readFileSync(file))).toEqual(SMALL);
+    } finally {
+      own.stop();
+    }
+  });
+});
+
+describe("the timeout comes from the environment the settings carry", () => {
+  test("a transfer and a check use options.env, whatever the process environment holds", async () => {
+    const listener = Bun.listen({
+      hostname: "127.0.0.1",
+      port: 0,
+      socket: { data() {}, open() {}, close() {}, error() {} },
+    });
+    try {
+      const origin = `http://127.0.0.1:${listener.port}`;
+      const options = {
+        env: {
+          NEMAR_DATA_HOSTS: origin,
+          NEMAR_DATA_HOSTS_ONLY: "1",
+          NEMAR_DATA_HOST_TIMEOUT_MS: "300",
+        },
+        isDevBuild: false,
+      };
+      const [vetted] = allowedDataHosts(options);
+      const settings = { origin: vetted, dataset: DATASET, options };
+      const started = performance.now();
+      const retrieved = await retrieveObject(
+        settings,
+        SMALL_KEY,
+        API_KEY,
+        outFile("env"),
+        () => {},
+      );
+      expect(retrieved).toEqual({ ok: false, message: "The request timed out." });
+      const checked = await checkObject(settings, SMALL_KEY, API_KEY);
+      expect(checked).toEqual({ state: "unknown", message: "The request timed out." });
+      expect(performance.now() - started).toBeLessThan(5000);
+    } finally {
+      listener.stop(true);
     }
   });
 });
