@@ -100,6 +100,7 @@ Everything in this section is designed and not yet built.
   A recording the commit does not touch keeps its bytes and its key.
 - `nemar admin repull <id>` is a dry run by default, and `--execute` requires `--plan <file>` with the digest of the reviewed plan; when `main` moved since the plan, it plans again and stops for review of the new digest, unless the new commits touch only `.nemar/**`.
 - The merge goes through the existing release path: the existing dataset workflows tag the merge, the tag mints the version DOI through EZID (ADR 0007), and the DOI carries `IsDerivedFrom` `openneuro.<ds>.v<to_tag>` because the mint reads `SourceDatasets` at the tag.
+  *Annotated 2026-10-27: not verified until gate G4; a second source can name the same DOI as `IsIdenticalTo`. See the Phase 8 amendment, "The relation on a re-pull's DOI".*
 - New behavior the build adds, because no callback does it today: after the tag, one ADR 0023 reconcile (`--clean`, never `--wipe`) is queued for the dataset, so the Zarr stores of deleted recordings go, and the dataset's hed, channel-montage, data and availability stamps are re-armed.
   Today those four stamps are cleared only fleet-wide, by `?reset=1` on the sweep routes in `backend/src/routes/admin/datasets-lifecycle.ts`; the identifier sweep's verdict already counts only for the version it was dispatched for (ADR 0088).
 
@@ -1217,6 +1218,7 @@ Production only, and gate G4 in code.
   It is called only from the production-only daily block, `DEV_CRON_ALLOWLIST` is unchanged, and the wiring test now pins every production-only daily job out of the allowlist.
 - In production, with `AUTO_REPULL_ENABLED` not exactly `"1"`, the tick only stamps its row (`switch-off`) and asks OpenNeuro nothing.
 - The design record's gate G4 is that the first two re-pulls, of `on004362` and of `on003645` (either first, as upstream's snapshots allow), are run by hand, that the new major's DOI then resolves with `IsDerivedFrom`, and that the previous version still serves.
+  *Annotated 2026-10-27: which relation the DOI carries is not verified until G4 runs; see the Phase 8 amendment, "The relation on a re-pull's DOI".*
   The scheduler dispatches nothing (`waiting-for-manual-run`) until this database records both of those re-pulls as run by an administrator to `complete` with their tags.
   One of them alone, two runs of the same one, an automatic or an unfinished run, and any other mirror's re-pull do not count.
   The DOI and the previous version are read by the owner before turning the switch on, which is the act that opens the path.

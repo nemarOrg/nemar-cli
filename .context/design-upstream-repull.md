@@ -99,6 +99,7 @@ New behavior to build (no callback does this today): one ADR 0023 reconcile (`--
 - Command shape: ADR 0111's Phase 5 amendment builds `nemar admin repull plan <id>`, and execution is `nemar admin repull execute`; the `nemar admin repull <id>` spellings in this record predate it.
 - Merge (squash, as ADR 0093's `y`): manual through `nemar admin repull <id> --merge` (claims the daily DOI budget, requires `clean`) or `nemar admin pr-reviews` (which must then require the screen and claim the cap); automatic merge by the Worker only of a PR the automatic path opened, under the machine definition below.
 - After merge the existing release path runs: run-pr-merge tags, the tag webhook, run-version-doi, EZID; the DOI carries IsDerivedFrom `openneuro.<ds>.v<tag>` because the mint reads `SourceDatasets` at the tag.
+  *Annotated 2026-10-27: not verified until G4; see ADR 0111, Amendment 2026-10-27, "The relation on a re-pull's DOI".*
 
 Machine definition of clean (Worker merge; ADR 0111 narrows only ADR 0093's merge, for this PR class only):
 
@@ -153,6 +154,7 @@ Gates before the automatic path:
 - G2: the staleness report is live and the measurement is done (stale counts per state; files added, changed, deleted; bytes to copy; metadata-only versus data-changing; conflict and unexplained counts from batch dry runs; DOI volume from GraphQL `snapshots{tag created}` over twelve months under one re-pull per snapshot and under at most one per 30 days, counting 2.0.1 patches).
 - G3: the owner has reviewed dry-run plans for on003645 and on004362.
 - G4: on003645 executed, then on004362; the 2.0.0 DOI resolves with IsDerivedFrom and 1.0.0 still serves. These production runs are deferred until everything is built and ds003645 2.1.0 is on the GitHub mirror (owner, 2026-10-23); if it is still missing, run on004362 first.
+  *Annotated 2026-10-27: which relation the 2.0.0 DOI carries is not known until G4 runs; see ADR 0111, Amendment 2026-10-27, "The relation on a re-pull's DOI".*
 - G5: the owner sets the caps from the measured estimate and turns the flags on; the first Worker merges run with `REPULL_DAILY_MERGE_CAP=1`.
 
 The Worker's merge has no staging rehearsal: outside production only `xx` datasets are re-pulled and they are never machine clean, so its first run is in production behind the flag and the cap of 1.
