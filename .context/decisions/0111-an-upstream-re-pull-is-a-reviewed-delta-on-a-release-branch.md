@@ -2272,7 +2272,9 @@ The decision text above and the earlier amendments are unchanged.
   the tag is known when every examined row names it, with `lineage` only when each of them says `lineage`;
   and two rows that disagree are `unknown`, never one of them picked.
   The staleness report dates such a version by its earliest row, for "probably stale".
-  Only the read path changed: no migration, and no row is rewritten.
-- Left open.
-  The backfill still examines only rows spelled `N.N.N` (the Phase 2 amendment), so a row spelled `v` from before migration 0104 stays never examined.
-  Such a mirror now reads `not_examined` instead of `unpublished`, and the report's advice to run `nemar admin upstream-backfill` does not reach that row; which writer examines it is a question for the owner.
+  There is no migration, and no recorded value is rewritten.
+- The backfill examines both spellings too.
+  The Phase 2 amendment's "Only a version of the form N.N.N is a candidate" no longer holds: a row spelled `vN.N.N` is a candidate, read as `mirroredTagOf` reads it (one lowercase `v`, then `N.N.N`), so a row the staleness report calls never examined is one `nemar admin upstream-backfill` examines.
+  The ref is still the canonical tag `v<N.N.N>`, never `vv1.0.0`.
+  The rows of one version in both spellings are read once and each recorded from that read, the write stays on the row's own spelling, and the cursor carries that spelling, which the route takes back.
+  Any other spelling, `vv1.0.0` and `V1.0.0` among them, is still never a candidate.
