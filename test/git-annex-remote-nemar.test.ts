@@ -11,12 +11,15 @@
  * ADR 0114. The end-to-end run with real git and git-annex is test/data-host-e2e.test.ts.
  */
 
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DataHostStandin, type StandinOptions, patternBytes } from "./helpers/data-host-standin";
 import { fakeApiKey, makeConfigDir } from "./helpers/nemar-account";
+
+// a child process for every session: a slow runner needs more than the default 5 seconds.
+setDefaultTimeout(60_000);
 
 const REMOTE = join(import.meta.dir, "..", "src", "git-annex-remote-nemar.ts");
 const DATASET = "np099999";

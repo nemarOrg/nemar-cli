@@ -5,7 +5,7 @@
  * test/data-host-e2e.test.ts.
  */
 
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -18,6 +18,9 @@ import {
 } from "../src/lib/data-host-clone";
 import { DataHostStandin } from "./helpers/data-host-standin";
 import { fakeApiKey, makeConfigDir } from "./helpers/nemar-account";
+
+// CLI and git-annex children: a slow runner needs more than the default 5 seconds.
+setDefaultTimeout(60_000);
 
 const API_KEY = fakeApiKey();
 const DATASET = "np099999";

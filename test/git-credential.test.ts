@@ -8,7 +8,7 @@
  * answer reaches stdout, which git parses.
  */
 
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { rmSync } from "node:fs";
 import { join } from "node:path";
 import {
@@ -18,6 +18,9 @@ import {
   parseCredentialInput,
 } from "../src/lib/git-credential";
 import { fakeApiKey, makeConfigDir } from "./helpers/nemar-account";
+
+// a CLI child process for every call: a slow runner needs more than the default 5 seconds.
+setDefaultTimeout(60_000);
 
 const CLI = join(import.meta.dir, "..", "src", "index.ts");
 const API_KEY = fakeApiKey();

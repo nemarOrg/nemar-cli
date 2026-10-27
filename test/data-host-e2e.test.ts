@@ -17,7 +17,7 @@
  * Skipped, loudly, when git-annex is not installed. CI's unit-pure job installs it.
  */
 
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import {
   chmodSync,
   existsSync,
@@ -33,6 +33,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DataHostStandin, patternBytes } from "./helpers/data-host-standin";
 import { fakeApiKey, makeConfigDir } from "./helpers/nemar-account";
+
+// git and git-annex children, each starting the CLI: a slow runner needs more than the default 5 seconds.
+setDefaultTimeout(60_000);
 
 const SRC = join(import.meta.dir, "..", "src");
 const DATASET = "np099999";

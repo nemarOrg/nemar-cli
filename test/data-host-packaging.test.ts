@@ -8,12 +8,15 @@
  * and run as a child process through the protocol.
  */
 
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DataHostStandin } from "./helpers/data-host-standin";
 import { fakeApiKey, makeConfigDir } from "./helpers/nemar-account";
+
+// a bundle build and child processes: a slow runner needs more than the default 5 seconds.
+setDefaultTimeout(60_000);
 
 const ROOT = join(import.meta.dir, "..");
 const API_KEY = fakeApiKey();
