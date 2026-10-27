@@ -181,10 +181,14 @@ jobs:
       - name: Inject dev backend URL (dev branch only)
         if: steps.version.outputs.branch == 'dev'
         run: |
-          echo "Replacing production API URL with dev API URL in dist/index.js"
-          sed -i 's|https://api.nemar.org|https://nemar-api-dev.sccn-org.workers.dev|g' dist/index.js
-          echo "Verifying replacement:"
-          grep -c "nemar-api-dev.sccn-org.workers.dev" dist/index.js || (echo "ERROR: URL replacement failed" && exit 1)
+          # Both bundles carry the literal: git-annex-remote-nemar reads IS_DEV_BUILD to pick
+          # its default data host (src/lib/data-hosts.ts), so it needs the same rewrite.
+          echo "Replacing production API URL with dev API URL in dist/index.js and dist/git-annex-remote-nemar.js"
+          for bundle in dist/index.js dist/git-annex-remote-nemar.js; do
+            sed -i 's|https://api.nemar.org|https://nemar-api-dev.sccn-org.workers.dev|g' "$bundle"
+            echo "Verifying replacement in $bundle:"
+            grep -c "nemar-api-dev.sccn-org.workers.dev" "$bundle" || (echo "ERROR: URL replacement failed in $bundle" && exit 1)
+          done
           echo "✓ Dev backend URL injected successfully"
 
       - name: Publish to npm
