@@ -65,6 +65,8 @@ const approve = (pr: number, extra: string[] = []) =>
 const reviewPosts = () =>
   w.gh.seen.filter((s) => s.method === "POST" && s.path.endsWith("/reviews"));
 const merges = () => w.gh.seen.filter((s) => s.method === "PUT" && s.path.endsWith("/merge"));
+/** The exit hook's request for a debug log, printed only when an exit may be a bug. */
+const BUG_HINT = "attach the log to a new issue";
 
 describe.skipIf(!awsInstalled)("approve --merge", () => {
   test("approves, then merges a re-pull pull request through its gate", async () => {
@@ -138,6 +140,8 @@ describe.skipIf(!awsInstalled)("approve --merge", () => {
     expect(run.all).toContain("the merge is not recorded");
     expect(run.all).toContain(`nemar admin repull resume ${w.fx.datasetId}`);
     expect(run.all).not.toContain("through the re-pull's gate).");
+    // Exit 3 is the command's answer, as for `repull merge`: no debug log is asked for.
+    expect(run.all).not.toContain(BUG_HINT);
     expect(merges()).toHaveLength(1);
     expect(w.row().status).toBe("gates_clear");
   });
@@ -155,6 +159,7 @@ describe.skipIf(!awsInstalled)("approve --merge", () => {
     expect(run.exitCode, run.all).toBe(3);
     expect(run.all).toContain("The claim to merge is kept");
     expect(run.all).not.toContain("through the re-pull's gate).");
+    expect(run.all).not.toContain(BUG_HINT);
     expect(merges()).toEqual([]);
     expect(w.row().merge_claim_sha).toBe(w.row().gates_sha);
   });
@@ -165,6 +170,7 @@ describe.skipIf(!awsInstalled)("approve --merge", () => {
     const run = await approve(w.row().pr_number as number);
     expect(run.exitCode, run.all).toBe(3);
     expect(run.all).toContain("may have merged it");
+    expect(run.all).not.toContain(BUG_HINT);
     expect(w.row()).toMatchObject({ status: "gates_clear", merge_claim_sha: w.row().gates_sha });
   });
 
