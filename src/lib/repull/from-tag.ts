@@ -71,8 +71,8 @@ export async function resolveFromTag(args: {
   let recorded: { tag: string; source: FromTagSource } | null = null;
   let unknownWhy: string | null = null;
 
-  const rows = args.rows?.map((r) => ({ ...r, version: bareVersion(r.version) })) ?? null;
-  const mirrored = rows ? mirroredTagOf(rows) : null;
+  // The API spells a version `v1.0.0`; `mirroredTagOf` reads both spellings and answers bare.
+  const mirrored = args.rows ? mirroredTagOf(args.rows) : null;
   let taggedVersion: string | null = null;
   if (mirrored?.state === "known") {
     recorded = { tag: mirrored.tag, source: "version-row" };

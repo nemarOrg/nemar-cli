@@ -22,6 +22,7 @@
 import { annexKeyFieldSize } from "./annex-key.js";
 import {
   type SourceVersionRow,
+  bareNemarVersion,
   isSourceTag,
   mirroredTagOf,
   openNeuroSourceId,
@@ -93,6 +94,7 @@ export interface MirrorFacts {
   repullStatus?: string | null;
   /** The upstream tag that open re-pull is pulling. */
   repullToTag?: string | null;
+  /** The mirror's version rows as D1 stores them, a version spelled `1.0.0` or `v1.0.0`. */
   versions: Array<SourceVersionRow & { created_at: string | null }>;
 }
 
@@ -195,6 +197,21 @@ function parseMs(value: string | null | undefined): number {
   if (value === null || value === undefined) return Number.NaN;
   const bare = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(value);
   return Date.parse(bare ? `${value.replace(" ", "T")}Z` : value);
+}
+
+/**
+ * When NEMAR version `version` (bare) was recorded, in ms, or NaN: the earliest readable
+ * `created_at` of its rows, in either spelling (`1.0.0`, `v1.0.0`), so a row in the other spelling
+ * written later does not move it and the order of the rows decides nothing.
+ */
+function releasedMs(versions: MirrorFacts["versions"], version: string): number {
+  let earliest = Number.NaN;
+  for (const v of versions) {
+    if (bareNemarVersion(v.version) !== version) continue;
+    const ms = parseMs(v.created_at);
+    if (!Number.isNaN(ms) && (Number.isNaN(earliest) || ms < earliest)) earliest = ms;
+  }
+  return earliest;
 }
 
 function base(m: MirrorFacts): ClassifiedMirror {
@@ -377,7 +394,7 @@ export function classifyMirror(
   // 6. The tag is unknown: never current, never stale. Say "probably stale" by date, for display.
   if (mt.state === "unknown") {
     const latestCreated = parseMs(snapshot?.latest?.created);
-    const versionCreated = parseMs(m.versions.find((v) => v.version === mt.version)?.created_at);
+    const versionCreated = releasedMs(m.versions, mt.version);
     if (!Number.isNaN(latestCreated) && !Number.isNaN(versionCreated)) {
       row.probably_stale = latestCreated > versionCreated;
     }

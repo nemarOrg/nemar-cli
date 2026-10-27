@@ -426,6 +426,36 @@ describe("precedence, first match wins", () => {
     );
     expect(row.state).toBe("not_examined");
   });
+
+  test("a mirror whose rows are spelled vN.N.N is compared, not unpublished", () => {
+    // What the Worker passes: the rows as D1 stores them, here only in the tag's spelling.
+    const spelled = (version: string, tag: string | null, basis: string | null) => ({
+      version,
+      source_version: tag,
+      source_version_basis: basis,
+      created_at: "2025-01-01 00:00:00",
+    });
+    const vOnly = facts({
+      versions: [spelled("v1.0.0", "1.0.0", "doi"), spelled("v2.0.0", "2.0.2", "doi")],
+    });
+    expect(needsUpstream(vOnly)).toBe(true);
+    const stale = classifyMirror(vOnly, recorded("ds003645"), READY);
+    expect(stale.state).toBe("stale_ready");
+    expect(stale.recorded).toEqual({ version: "2.0.0", tag: "2.0.2", basis: "doi" });
+    // Mixed: the v-spelled row is the highest by number, so its tag is the recorded one.
+    const mixed = facts({
+      versions: [spelled("2.0.0", "2.0.2", "doi"), spelled("v10.0.0", "2.1.0", "lineage")],
+    });
+    const current = classifyMirror(mixed, recorded("ds003645"));
+    expect(current.state).toBe("current");
+    expect(current.recorded).toEqual({ version: "10.0.0", tag: "2.1.0", basis: "lineage" });
+    // A newest v-spelled row never examined is not_examined, never the older row's tag.
+    const newest = facts({
+      versions: [spelled("2.0.0", "2.0.2", "doi"), spelled("v3.0.0", null, null)],
+    });
+    expect(classifyMirror(newest, recorded("ds003645")).state).toBe("not_examined");
+    expect(needsUpstream(newest)).toBe(false);
+  });
 });
 
 describe("the GitHub mirror probe", () => {
@@ -512,6 +542,28 @@ describe("probably_stale, for unknown rows only", () => {
   test("false when the mirror's version row is later", () => {
     const row = classifyMirror(unknown("2026-10-25 00:00:00"), up);
     expect([row.state, row.probably_stale]).toEqual(["unknown", false]);
+  });
+
+  test("a version stored in both spellings is dated by its earliest row, in either order", () => {
+    const rowOf = (version: string, created: string) => ({
+      version,
+      source_version: null,
+      source_version_basis: "unknown",
+      created_at: created,
+    });
+    // Released before upstream's latest (v1.0.0), then a second row in the bare spelling after it.
+    const early = rowOf("v1.0.0", "2025-01-01 00:00:00");
+    const late = rowOf("1.0.0", "2026-10-25 00:00:00");
+    for (const versions of [
+      [early, late],
+      [late, early],
+    ]) {
+      const row = classifyMirror(facts({ versions }), up);
+      expect([row.state, row.probably_stale]).toEqual(["unknown", true]);
+    }
+    // A v-spelled row alone is dated too, not left uncompared.
+    const vOnly = classifyMirror(facts({ versions: [early] }), up);
+    expect([vOnly.state, vOnly.probably_stale]).toEqual(["unknown", true]);
   });
 
   test("a zone-less D1 timestamp is read as UTC, not local time", () => {

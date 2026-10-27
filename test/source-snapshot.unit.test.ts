@@ -14,6 +14,7 @@
 
 import { describe, expect, test } from "bun:test";
 import {
+  bareNemarVersion,
   compareSourceTags,
   isOwnSourceEntry,
   mirrorFlagOf,
@@ -323,6 +324,123 @@ describe("mirroredTagOf: the highest NEMAR version speaks", () => {
     }
     const legacy = [{ version: "1.0.0", source_version: "00006", source_version_basis: "doi" }];
     expect(mirroredTagOf(legacy)).toMatchObject({ state: "known", tag: "00006" });
+  });
+});
+
+describe("mirroredTagOf: D1 spells a version `1.0.0` or `v1.0.0`, and both are read", () => {
+  const row = (version: string, tag: string | null, basis: string | null) => ({
+    version,
+    source_version: tag,
+    source_version_basis: basis,
+  });
+  const known = (tag: string, version: string, basis = "doi") => ({
+    state: "known",
+    tag,
+    version,
+    basis,
+  });
+
+  test("v-only rows: the highest is read, and its version comes back bare", () => {
+    const rows = [row("v1.0.0", "1.0.0", "doi"), row("v2.0.0", "2.0.2", "doi")];
+    expect(mirroredTagOf(rows)).toEqual(known("2.0.2", "2.0.0"));
+  });
+
+  test("bare-only rows are read as before", () => {
+    const rows = [row("1.0.0", "1.0.0", "doi"), row("2.0.0", "2.0.2", "lineage")];
+    expect(mirroredTagOf(rows)).toEqual(known("2.0.2", "2.0.0", "lineage"));
+  });
+
+  test("mixed rows: the highest version wins across spellings, by number", () => {
+    // A text sort puts `v2.0.0` above `10.0.0`; only the numbers decide.
+    expect(mirroredTagOf([row("v2.0.0", "2.0.2", "doi"), row("10.0.0", "3.0.0", "doi")])).toEqual(
+      known("3.0.0", "10.0.0"),
+    );
+    expect(
+      mirroredTagOf([
+        row("10.0.0", "3.0.0", "doi"),
+        row("v11.0.0", "3.1.0", "lineage"),
+        row("9.0.0", "2.0.0", "doi"),
+      ]),
+    ).toEqual(known("3.1.0", "11.0.0", "lineage"));
+    expect(mirroredTagOf([row("v1.0.1", "2.0.2", "doi"), row("1.0.0", "2.0.1", "doi")])).toEqual(
+      known("2.0.2", "1.0.1"),
+    );
+  });
+
+  test("a newest row that was never examined, or is unknown, speaks in either spelling", () => {
+    expect(mirroredTagOf([row("1.0.0", "2.0.2", "doi"), row("v2.0.0", null, null)])).toEqual({
+      state: "unexamined",
+      tag: null,
+      version: "2.0.0",
+    });
+    expect(mirroredTagOf([row("v1.0.0", "2.0.2", "doi"), row("2.0.0", null, null)])).toEqual({
+      state: "unexamined",
+      tag: null,
+      version: "2.0.0",
+    });
+    expect(mirroredTagOf([row("1.0.0", "2.0.2", "doi"), row("v2.0.0", null, "unknown")])).toEqual({
+      state: "unknown",
+      tag: null,
+      version: "2.0.0",
+    });
+    expect(mirroredTagOf([row("v1.0.0", "2.0.2", "lineage"), row("2.0.0", "", "doi")])).toEqual({
+      state: "unknown",
+      tag: null,
+      version: "2.0.0",
+    });
+  });
+
+  test("one version stored in both spellings is read as one, whatever the order of the rows", () => {
+    const tagged = row("1.0.0", "2.0.2", "doi");
+    // Both spellings name the tag v1.0.0, so a row never examined says nothing against one that was.
+    for (const rows of [
+      [tagged, row("v1.0.0", null, null)],
+      [row("v1.0.0", null, null), tagged],
+    ]) {
+      expect(mirroredTagOf(rows)).toEqual(known("2.0.2", "1.0.0"));
+    }
+    // Two rows of one version that disagree are unknown: neither is picked.
+    for (const rows of [
+      [tagged, row("v1.0.0", "2.0.3", "doi")],
+      [row("v1.0.0", "2.0.3", "doi"), tagged],
+      [tagged, row("v1.0.0", null, "unknown")],
+      [row("v1.0.0", null, "unknown"), tagged],
+    ]) {
+      expect(mirroredTagOf(rows)).toEqual({ state: "unknown", tag: null, version: "1.0.0" });
+    }
+    expect(mirroredTagOf([row("v1.0.0", null, null), row("1.0.0", null, null)])).toEqual({
+      state: "unexamined",
+      tag: null,
+      version: "1.0.0",
+    });
+    // `lineage` only when every row that knows the tag says so; otherwise the weaker `doi`.
+    const lineage = row("1.0.0", "2.0.2", "lineage");
+    expect(mirroredTagOf([lineage, row("v1.0.0", "2.0.2", "lineage")])).toEqual(
+      known("2.0.2", "1.0.0", "lineage"),
+    );
+    expect(mirroredTagOf([row("v1.0.0", "2.0.2", "doi"), lineage])).toEqual(
+      known("2.0.2", "1.0.0"),
+    );
+  });
+
+  test("only one lowercase leading v makes a stored NEMAR version", () => {
+    for (const version of ["vv1.0.0", "V1.0.0", "v1.0", "v1.0.0.0", " v1.0.0", "v1.0.0-rc1", "v"]) {
+      expect(mirroredTagOf([row(version, "2.0.2", "doi")])).toEqual({
+        state: "none",
+        tag: null,
+        version: null,
+      });
+    }
+  });
+});
+
+describe("bareNemarVersion", () => {
+  test("the bare N.N.N of either spelling, and null for anything else", () => {
+    expect(bareNemarVersion("1.0.0")).toBe("1.0.0");
+    expect(bareNemarVersion("v10.2.3")).toBe("10.2.3");
+    for (const bad of ["", "v", "vv1.0.0", "V1.0.0", "1.0", "1.0.0.0", "1.0.0-rc1", "x1.0.0"]) {
+      expect(bareNemarVersion(bad)).toBeNull();
+    }
   });
 });
 

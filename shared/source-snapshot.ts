@@ -195,19 +195,40 @@ export interface SourceVersionRow {
 /**
  * What is known about the tag a dataset mirrors: `known` (with the tag), `unknown` (examined, no
  * tag), `unexamined` (the row was never looked at), or `none` (no NEMAR-numbered version yet).
+ * `version` is the highest NEMAR version, bare (`2.0.0`), whichever spelling its rows are stored in.
  */
 export type MirroredTag =
   | { state: "known"; tag: string; version: string; basis: "doi" | "lineage" }
   | { state: "unknown" | "unexamined"; tag: null; version: string }
   | { state: "none"; tag: null; version: null };
 
-const NEMAR_VERSION_RE = /^\d+\.\d+\.\d+$/;
+/**
+ * A NEMAR version as `dataset_versions.version` stores it: `N.N.N`, or the tag's spelling `vN.N.N`
+ * with one lowercase `v`. D1 holds both (`shared/contract/version.ts`): the version-DOI callback
+ * strips the `v` before it writes, and older writers kept it. Both spellings of one version name the
+ * same tag, `v<N.N.N>`.
+ *
+ * Wider than `NEMAR_VERSION_RE` in `repull-state.ts` on purpose, so the two are not one constant:
+ * that one checks a version a re-pull record or request carries, which is always bare, because the
+ * record's statements find a version row in either spelling by prefixing the `v` themselves
+ * (`version IN (?, 'v' || ?)`), and a `v` already there would miss the bare row.
+ */
+const STORED_NEMAR_VERSION_RE = /^v?(\d+\.\d+\.\d+)$/;
+
+/** The bare `N.N.N` of a stored NEMAR version, `v1.0.0` and `1.0.0` alike; null for anything else. */
+export function bareNemarVersion(version: string): string | null {
+  return STORED_NEMAR_VERSION_RE.exec(version)?.[1] ?? null;
+}
 
 function versionParts(version: string): number[] {
   return version.split(".").map((p) => Number.parseInt(p, 10));
 }
 
-/** Numeric order on `N.N.N`, so `10.0.0` is newer than `9.0.0`. */
+/**
+ * Numeric order on two bare `N.N.N` versions, so `10.0.0` is newer than `9.0.0`. Equal numbers
+ * written differently (`01.0.0`) fall back to the text, so the order is total and 0 means the same
+ * version, which names one tag.
+ */
 function compareNemarVersions(a: string, b: string): number {
   const pa = versionParts(a);
   const pb = versionParts(b);
@@ -215,34 +236,74 @@ function compareNemarVersions(a: string, b: string): number {
     const d = (pa[i] as number) - (pb[i] as number);
     if (d !== 0) return d;
   }
-  return 0;
+  return a < b ? -1 : a > b ? 1 : 0;
 }
 
-/**
- * The dataset's mirrored tag, derived from its highest NEMAR version row (ADR 0111, decision 4).
- * Only that row speaks: an older row that knows its tag never stands in for a newer one that was
- * not examined or is unknown, because the newest version is the one a re-pull would start from.
- * Rows whose version is not `N.N.N` are ignored.
- */
-export function mirroredTagOf(rows: readonly SourceVersionRow[]): MirroredTag {
-  let top: SourceVersionRow | null = null;
-  for (const row of rows) {
-    if (!NEMAR_VERSION_RE.test(row.version)) continue;
-    if (top === null || compareNemarVersions(row.version, top.version) > 0) top = row;
-  }
-  if (top === null) return { state: "none", tag: null, version: null };
-  const basis = top.source_version_basis;
+/** What one version row says of its tag. */
+type RowReading =
+  | { state: "known"; tag: string; basis: "doi" | "lineage" }
+  | { state: "unknown" | "unexamined" };
+
+function readingOf(row: SourceVersionRow): RowReading {
+  const basis = row.source_version_basis;
   // One definition of a known tag, shared with `mirrorFlagOf`: only a tag the parser could have
   // recorded. A stored value it could not (an empty string, a hex snapshot id) is not known.
-  if (isSourceTag(top.source_version) && (basis === "doi" || basis === "lineage")) {
-    return { state: "known", tag: top.source_version, version: top.version, basis };
+  if (isSourceTag(row.source_version) && (basis === "doi" || basis === "lineage")) {
+    return { state: "known", tag: row.source_version, basis };
   }
   // Examined, and no tag the parser could record: unknown, which includes a stored basis whose tag
   // is not a recordable one.
-  if (basis === "unknown" || basis === "doi" || basis === "lineage") {
-    return { state: "unknown", tag: null, version: top.version };
+  if (basis === "unknown" || basis === "doi" || basis === "lineage") return { state: "unknown" };
+  return { state: "unexamined" };
+}
+
+/**
+ * The dataset's mirrored tag, derived from its highest NEMAR version (ADR 0111, decision 4), read in
+ * both spellings D1 stores (`1.0.0` and `v1.0.0`) and ordered by number. Only that version speaks:
+ * an older row that knows its tag never stands in for a newer one that was not examined or is
+ * unknown, because the newest version is the one a re-pull would start from. Rows whose version is
+ * neither spelling of `N.N.N` are ignored.
+ *
+ * The highest version can have a row in each spelling, and their order in `rows` decides nothing.
+ * Both name the same tag, so a row never examined says nothing against one that was: the tag is
+ * known when every row that was examined names it, with `lineage` only when each of them says
+ * `lineage`. Two rows that name different tags, or one that names a tag beside one recorded
+ * unknown, disagree, and a disagreement is unknown: neither is picked.
+ */
+export function mirroredTagOf(rows: readonly SourceVersionRow[]): MirroredTag {
+  let version: string | null = null;
+  let top: SourceVersionRow[] = [];
+  for (const row of rows) {
+    const bare = bareNemarVersion(row.version);
+    if (bare === null) continue;
+    const order = version === null ? 1 : compareNemarVersions(bare, version);
+    if (order > 0) {
+      version = bare;
+      top = [row];
+    } else if (order === 0) {
+      top.push(row);
+    }
   }
-  return { state: "unexamined", tag: null, version: top.version };
+  if (version === null) return { state: "none", tag: null, version: null };
+  const readings = top.map(readingOf);
+  const tags = new Set<string>();
+  let lineage = true;
+  for (const r of readings) {
+    if (r.state !== "known") continue;
+    tags.add(r.tag);
+    if (r.basis !== "lineage") lineage = false;
+  }
+  const unknown = readings.some((r) => r.state === "unknown");
+  if (tags.size === 1 && !unknown) {
+    return {
+      state: "known",
+      tag: [...tags][0] as string,
+      version,
+      basis: lineage ? "lineage" : "doi",
+    };
+  }
+  if (tags.size > 0 || unknown) return { state: "unknown", tag: null, version };
+  return { state: "unexamined", tag: null, version };
 }
 
 /** A NEMAR version of the form N.0.0, with the `v` some stored rows and tags carry. */
