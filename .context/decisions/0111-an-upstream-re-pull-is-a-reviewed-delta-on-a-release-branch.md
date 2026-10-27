@@ -354,6 +354,8 @@ Both hold for a batch of any size, a single row included.
 The row must also be older than one hour, so a CDN-cached 404 on a fresh tag is never made final.
 A fetch error in the backfill writes nothing, and a batch in which no read proved the credential while at least one 404 is unconfirmed is refused as `suspect_credential` (502), whatever else errored beside it.
 Only a version of the form N.N.N is a candidate, and a ref is always the canonical `vX.Y.Z` tag, so a stored `v1.0.0` can never read `vv1.0.0`.
+*Annotated 2026-10-27: a row spelled `vN.N.N` is a candidate too, read as `mirroredTagOf` reads it (one lowercase `v`, then `N.N.N`).
+The ref is still the canonical `v<N.N.N>` tag, never `vv1.0.0`; see the #1983 review amendment, "The mirrored tag reads both spellings of a version".*
 The write is `WHERE source_version_basis IS NULL`, so it never overwrites a recorded value; its paging is a keyset on `(dataset_id, version)`, so a row that always errors cannot starve the rows behind it.
 A dry run, which is the default, writes nothing.
 
@@ -2245,7 +2247,8 @@ The "Checked only against stand-ins" section of each earlier amendment holds the
 
 The first review of the epic's pull request into `dev` (#1983) found two rules of this record that the code did not reach.
 This amendment says what changed and why.
-The decision text above and the earlier amendments are unchanged.
+The decision text above is unchanged.
+Earlier text is annotated, in a note that begins "Annotated 2026-10-27", where this amendment corrects it.
 
 ### An administrator's merge over a failed BIDS validation is reached through `resume`
 
