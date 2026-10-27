@@ -6,20 +6,43 @@
  * before anything is cloned, branched or pushed. The CLI's rule only: the dataset repositories'
  * `version-check` workflow does not read it (ADR 0020).
  *
- * The spawned cases run the real CLI against a local stand-in backend named in config.json (the
- * account's apiUrl), with `git` and `gh` on PATH as shims that record every call: `gh` answers its
- * version probe only, and `git` refuses a clone (so nothing can reach a real repository) and runs
- * every other call. A refusal shows as no clone, branch, commit or push in the record.
+ * The spawned cases run the real CLI against the REAL datasets router over bun:sqlite with every
+ * migration applied, behind its real auth, on a loopback port named in config.json (the account's
+ * apiUrl): the row's `source` and the current version the CLI reads are the Worker's own answers,
+ * not a copy of them. GitHub, which the versions route reads the description from, is the
+ * `Bun.serve()` stand-in. `git` and `gh` are on PATH as shims that record every call: `gh` answers
+ * its version probe only, and `git` refuses a clone (so nothing can reach a real repository) and
+ * runs every other call. A refusal shows as no clone, branch, commit or push in the record.
  *
- * CI TIER: unit-pure. Spawns the CLI against a loopback stand-in; no network.
+ * CI TIER: unit-pure. Spawns the CLI against loopback servers only; no network.
  */
 
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import type { Database } from "bun:sqlite";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  setDefaultTimeout,
+  test,
+} from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "bun";
+import { hashApiKey } from "../backend/src/services/token";
+import type { Bindings } from "../backend/src/types/bindings";
+import { freshDb, realD1 } from "../backend/test/helpers/d1";
+import { makeRepullApp } from "../backend/test/helpers/repull-app";
 import { refuseMirrorMajor } from "../src/lib/version-policy";
+import { type GitHubStandin, WORKER_TOKEN, startGitHubStandin } from "./helpers/github-standin";
+
+// A test here runs the CLI from source up to four times, each run bounded by its own 30-second
+// `timeout`. 60 seconds, git-credential.test.ts's bound for the same spawn, lets a hung run fail
+// on its own limit, with its output, instead of the default five seconds cutting the test short.
+setDefaultTimeout(60_000);
 
 describe("refuseMirrorMajor", () => {
   const ask = (datasetId: string, source: string | null, current: string, next: string) =>
@@ -75,45 +98,65 @@ const SCRUBBED = [
   "CLICOLOR_FORCE",
 ];
 
-/** The rows the stand-in serves: two mirrors (an `on` id, an `xx` OpenNeuro import) and a dataset that is not one. */
+const API_KEY = "mirror-major-owner-key-0123456789abcdef0123456789abcdef";
+
+/** The rows the API holds: two mirrors (an `on` id, an `xx` OpenNeuro import) and a dataset that is not one. */
 const ROWS: Record<string, { source: string | null; source_id: string | null }> = {
   on000001: { source: "openneuro", source_id: "ds000001" },
   xx090123: { source: "openneuro", source_id: "ds000123" },
   nm000200: { source: null, source_id: null },
 };
 
+let db: Database;
+let gh: GitHubStandin;
 let backend: ReturnType<typeof Bun.serve>;
 let root: string;
 let configDir: string;
 let shims: string;
 let log: string;
+const handle = makeRepullApp();
 
-beforeAll(() => {
+beforeAll(async () => {
+  db = freshDb();
+  db.run(
+    `INSERT INTO users (id, username, email, password_hash, status, role, email_verified)
+     VALUES (1, 'mirrorowner', 'mirrorowner@example.org', 'x', 'approved', 'member', 1)`,
+  );
+  db.query("INSERT INTO tokens (user_id, api_key_hash, api_key_prefix) VALUES (1, ?, ?)").run(
+    await hashApiKey(API_KEY),
+    API_KEY.slice(0, 8),
+  );
+  // No version rows: the versions route's current version is then the description's, which the
+  // GitHub stand-in answers 404 for, so the route's own default, v1.0.0.
+  for (const [id, row] of Object.entries(ROWS)) {
+    db.run(
+      `INSERT INTO datasets (dataset_id, name, owner_user_id, status, visibility, github_repo,
+                             source, source_id)
+       VALUES (?, 'A sufficiently descriptive fixture title', 1, 'active', 'public', ?, ?, ?)`,
+      [id, NO_SUCH_REPO, row.source, row.source_id],
+    );
+  }
+  gh = startGitHubStandin();
+  (globalThis as { NEMAR_GITHUB_API_URL?: string }).NEMAR_GITHUB_API_URL = gh.url;
+  const env = {
+    DB: realD1(db),
+    ENVIRONMENT: "production",
+    GITHUB_ADMIN_PAT: WORKER_TOKEN,
+  } as Bindings;
   backend = Bun.serve({
     port: 0,
     fetch(req) {
-      const { pathname } = new URL(req.url);
-      if (pathname === "/notices") return Response.json({ notices: [] });
-      const m = /^\/datasets\/([a-z]{2}\d{6})(\/versions)?$/.exec(pathname);
-      const row = m ? ROWS[m[1] as string] : undefined;
-      if (!m || !row) return Response.json({ error: "not found" }, { status: 404 });
-      if (m[2]) {
-        return Response.json({ dataset_id: m[1], current_version: "v1.0.0", versions: [] });
-      }
-      return Response.json({
-        dataset: {
-          dataset_id: m[1],
-          name: "Stand-in dataset",
-          github_repo: NO_SUCH_REPO,
-          status: "active",
-          visibility: "public",
-          ...row,
-        },
-      });
+      // The CLI's notices banner, which no route here serves; answered as the re-pull suites do.
+      if (new URL(req.url).pathname === "/notices") return Response.json({ notices: [] });
+      return handle(req, env);
     },
   });
 });
-afterAll(() => backend.stop(true));
+afterAll(() => {
+  backend.stop(true);
+  gh.stop();
+  (globalThis as { NEMAR_GITHUB_API_URL?: string }).NEMAR_GITHUB_API_URL = undefined;
+});
 
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), "nemar-mirror-major-"));
@@ -130,15 +173,17 @@ beforeEach(() => {
       accounts: {
         "mirror-major": {
           apiUrl: `http://127.0.0.1:${backend.port}`,
-          apiKey: "mirror-major-key-0123456789abcdef",
+          apiKey: API_KEY,
         },
       },
     }),
   );
-  // git: every call recorded; a clone refused (nothing may reach a real repository).
+  // git: every call recorded; one that reaches a remote refused, so nothing can reach a real
+  // repository. The update case's clone names `nemarDatasets/<id>` on GitHub as its origin, and a
+  // regression past the refusal used to push there: a mutation of the detail route showed it.
   writeFileSync(
     join(shims, "git"),
-    `#!/bin/sh\nprintf 'git %s\\n' "$*" >> '${log}'\ncase "$1" in clone) exit 128;; esac\nexec '${REAL_GIT}' "$@"\n`,
+    `#!/bin/sh\nprintf 'git %s\\n' "$*" >> '${log}'\ncase "$1" in clone|fetch|pull|push|ls-remote) exit 128;; esac\nexec '${REAL_GIT}' "$@"\n`,
   );
   // gh: its version probe answered, every other call recorded and refused.
   writeFileSync(

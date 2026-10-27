@@ -734,24 +734,31 @@ describe.skipIf(!awsInstalled)("execute through the pull request", () => {
 
   test("killed while a copy hangs, the next run takes the lock over and completes", async () => {
     const plan = await makePlan(fx);
-    s3.holdNext("CopyObject", 8_000);
+    // Held until this test ends the hold, below; its bound is a backstop no passing run reaches.
+    // An 8-second hold used to end on its own, and the test sat out whatever was left of it.
+    s3.holdNext("CopyObject", 120_000);
     const proc = startCli(fx, ["execute", plan, "--yes"]);
-    const deadline = Date.now() + 240_000;
-    while (s3.holding() === 0 && Date.now() < deadline) await Bun.sleep(50);
-    expect(s3.holding()).toBe(1);
-    proc.kill("SIGKILL");
-    await proc.exited;
-    expect(repullRows()[0]?.status).toBe("prepared");
-    const run = await execute(fx, plan);
-    expect(run.exitCode, run.all).toBe(0);
-    expect(repullRows()[0]).toMatchObject({ status: "pr_open", last_error: null });
-    // The killed run's held copy ends on its own (the hold times out, or its client is seen gone);
-    // wait for that observable end, every call the stand-in counted being logged, so it cannot land
-    // after the next test restores the stand-in.
-    const until = Date.now() + 15_000;
     const settled = () =>
       s3.holding() === 0 && s3.calls("CopyObject").length === s3.opCount("CopyObject");
-    while (!settled() && Date.now() < until) await Bun.sleep(50);
+    try {
+      const deadline = Date.now() + 240_000;
+      while (s3.holding() === 0 && Date.now() < deadline) await Bun.sleep(50);
+      expect(s3.holding()).toBe(1);
+      proc.kill("SIGKILL");
+      await proc.exited;
+      expect(repullRows()[0]?.status).toBe("prepared");
+      const run = await execute(fx, plan);
+      expect(run.exitCode, run.all).toBe(0);
+      expect(repullRows()[0]).toMatchObject({ status: "pr_open", last_error: null });
+    } finally {
+      // The killed run's copy is still held: the CLI's aws child outlives the kill and keeps its
+      // connection open, so the stand-in never sees its client go. End the hold, then wait for
+      // that observable end, every call the stand-in counted being logged, so it cannot land
+      // after the next test restores the stand-in.
+      s3.releaseHolds();
+      const until = Date.now() + 15_000;
+      while (!settled() && Date.now() < until) await Bun.sleep(50);
+    }
     expect(settled()).toBe(true);
   });
 

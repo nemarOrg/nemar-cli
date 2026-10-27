@@ -897,6 +897,39 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y git-annex
 
+      # test/import-annex-uuid-preflight.test.ts and test/import-upstream-moved-guard.test.ts run git
+      # in German, to show an outcome is read from a status and not from git's message. Without the
+      # de_DE.UTF-8 locale git speaks English and those cases assert nothing, so with CI set they
+      # fail instead (test/helpers/in-german.ts). The language pack generates the locale and carries
+      # git's German catalog; the mirror was updated by the step above.
+      - name: Install the German locale
+        timeout-minutes: 10
+        run: sudo apt-get install -y language-pack-de-base
+
+      # test/identifier-scrub.test.ts and test/identifier-dates.test.ts read files back through
+      # an independent EDF reader run by uv. Without uv here those cases skipped, and a skip
+      # reports green; the same Python and uv as scrub-tools-shard.
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v5
+
+      # A suite that needs a tool fails instead of skipping when CI is set
+      # (test/scrub/helpers/require-tools.ts). The aws CLI comes with the runner image and no step
+      # installs it, so this step names every tool the pure suites need and fails here, by name,
+      # when one is missing.
+      - name: Tool versions
+        shell: bash
+        run: |
+          git --version
+          git annex version --raw && echo
+          uv --version
+          aws --version
+          locale -a | grep -ix 'de_DE.utf8'
+
       - name: Install dependencies
         run: bun install
 
@@ -1256,6 +1289,16 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y git-annex
+
+      # The live suites that drive the real aws CLI against a loopback S3 stand-in fail instead of
+      # skipping when CI is set (test/scrub/helpers/require-tools.ts). The aws CLI comes with the
+      # runner image and no step installs it, so name it here and fail by name when it is missing.
+      - name: Tool versions
+        shell: bash
+        run: |
+          git --version
+          git annex version --raw && echo
+          aws --version
 
       - name: Install dependencies
         run: bun install

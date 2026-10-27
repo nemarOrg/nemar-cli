@@ -1,8 +1,8 @@
 /**
  * `nemar admin repull abandon <id>` (ADR 0111, decision 3; epic #1046 phase 6, #1912), driven
  * through the real entry point against `repull-pr-world.ts` (a re-pull executed to `pr_open` by the
- * real `execute`; the real API over bun:sqlite through TEST_API_URL in the child's environment;
- * stand-ins for GitHub and S3 only). No mocks.
+ * real `execute`; the real API over bun:sqlite on a loopback port named in the child's
+ * environment; stand-ins for GitHub and S3 only). No mocks.
  *
  * The properties, each with a test:
  *  - before the merge, the pull request is closed, the release branch deleted, the orphans equal
@@ -25,7 +25,7 @@
  * branch of a dataset repository as the stand-in does, and lists a branch's pull requests by its
  * `head` filter.
  *
- * CI TIER: integration, like the other CLI suites that start the binary against a local server.
+ * CI TIER: unit-pure. Hermetic: every server the suite starts or reaches listens on loopback.
  */
 
 import {

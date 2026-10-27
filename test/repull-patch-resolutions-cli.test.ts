@@ -10,7 +10,7 @@
  *  - no `participants.tsv` on either side, so enrichment can add its placeholder to `main` after a
  *    pull request's gates.
  *
- * The real CLI and the real Worker routes over bun:sqlite, reached through TEST_API_URL in the
+ * The real CLI and the real Worker routes over bun:sqlite, on a loopback port named in the
  * child's environment; GitHub and S3 are stand-ins. No mocks.
  *
  * The properties, each with a test:
@@ -25,7 +25,7 @@
  *    merge refuse before any claim (`merge-main-moved`), for N.0.0 and N.0.1 alike, and resume
  *    then makes the commit again on the new main, which is screened, gated, merged and released.
  *
- * CI TIER: integration, like the other CLI suites that start the binary against a local server.
+ * CI TIER: unit-pure. Hermetic: every server the suite starts or reaches listens on loopback.
  */
 
 import {

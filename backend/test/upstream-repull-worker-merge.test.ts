@@ -33,7 +33,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } fr
 import { parseScreenReport } from "../../shared/identifier-screen-report";
 import { NEMAR_APP_BOT_LOGIN, NEMAR_APP_BOT_USER_ID, NEMAR_APP_ID } from "../../shared/nemar-app";
 import { repullSquashMessage, repullTrailerLines } from "../../shared/repull-squash";
-import type { DispatchRow, RepullStatus } from "../../shared/repull-state";
+import { type DispatchRow, REPULL_STATUSES, type RepullStatus } from "../../shared/repull-state";
 import { SYSTEM_USER_ID } from "../src/lib/constants";
 import { verifyRepullDispatchToken } from "../src/services/github/callback-tokens";
 import { __resetRateLimitStateForTests } from "../src/services/github/transport";
@@ -47,6 +47,7 @@ import {
   repullAdvanceLogLine,
   runRepullAdvanceCron,
 } from "../src/services/upstream-repull-advance";
+import { REVIEW_OF_HEAD_SQL } from "../src/services/upstream-repull-facts";
 import {
   CLAIM_OWNER_SQL,
   FINISH_DISPATCHES_MAX,
@@ -73,6 +74,7 @@ import {
 } from "./helpers/repull-github-standin";
 import { type Row, rowAt } from "./helpers/repull-rows";
 import { type CapturedEmail, withFakeResend } from "./helpers/resend";
+import { insideOneUtcDay } from "./helpers/utc-day";
 
 const DS = "on098811";
 const HEAD = "0123456789abcdef0123456789abcdef01234567";
@@ -95,6 +97,8 @@ afterAll(() => gh.stop());
 
 beforeEach(async () => {
   db = freshDb();
+  // The day caps count a UTC day on the database's clock, and no claim takes a clock.
+  await insideOneUtcDay(db);
   db.run(
     `INSERT INTO users (username, email, password_hash, status, role, email_verified)
      VALUES ('mergeadmin', 'mergeadmin@example.org', 'x', 'approved', 'admin', 1)`,
@@ -718,6 +722,93 @@ describe("the Worker never merges an administrator's re-pull, and acts only in p
     expect(o.kind).toBe("skipped");
     expect(gh.requests).toEqual([]);
     expect(rowOf(id)).toMatchObject({ status: "gates_clear", merge_claim_sha: HEAD });
+  });
+});
+
+describe("the Worker merges, and resolves a claim on, only an automatic record at gates_clear", () => {
+  const OTHER_STATUSES = REPULL_STATUSES.filter((s) => s !== "gates_clear");
+  const snapshot = () =>
+    JSON.stringify({
+      repulls: db.query("SELECT * FROM upstream_repulls ORDER BY id").all(),
+      audit: db.query("SELECT * FROM audit_log ORDER BY id").all(),
+    });
+
+  /** A machine-clean world around an automatic record of DS at `status`: only the status differs. */
+  function automaticAt(status: RepullStatus, over: Row = {}): number {
+    mirror(DS);
+    githubClean(DS);
+    const id = seedRow(DS, status, over);
+    markScreen(id, DS);
+    review(DS);
+    return id;
+  }
+
+  for (const status of OTHER_STATUSES) {
+    test(`asked to merge a record at ${status}: skipped, nothing read, nothing claimed or written`, async () => {
+      const id = automaticAt(status);
+      const before = snapshot();
+      const row = await getRepull(realD1(db), id);
+      const o = await workerMergeRepull(env(), row as NonNullable<typeof row>);
+      expect(o).toMatchObject({ kind: "skipped", hold: null, sent: false });
+      expect(gh.requests).toEqual([]);
+      expect(gh.merges).toEqual([]);
+      expect(snapshot()).toBe(before);
+      expect(rowOf(id)).toMatchObject({ status, merge_claim_sha: null, merge_claimed_at: null });
+      expect(usedToday()).toBe(0);
+    });
+  }
+
+  // A claim recorded on a record that has left gates_clear is not the Worker's to resolve either.
+  // pr_open is the case only the status rule refuses: it has no merge commit, which the rule's
+  // other terms would refuse on.
+  for (const status of OTHER_STATUSES) {
+    test(`a claim held on a record at ${status}: skipped, nothing read, nothing written`, async () => {
+      const id = automaticAt(status, {
+        gates_sha: HEAD,
+        merge_claim_sha: HEAD,
+        merge_claimed_at: "2026-10-27 10:00:00",
+      });
+      const before = snapshot();
+      const row = await getRepull(realD1(db), id);
+      const o = await reconcileWorkerClaim(env(), row as NonNullable<typeof row>);
+      expect(o).toMatchObject({ kind: "skipped", hold: null, sent: false });
+      expect(gh.requests).toEqual([]);
+      expect(snapshot()).toBe(before);
+    });
+  }
+
+  test("the credential is read before the claim: when it fails, nothing is claimed and nothing is sent", async () => {
+    const id = ready();
+    // The datasets credential goes away at the facts' last read (the review), after GitHub was read
+    // with it, and comes back at the claim's own read of the dataset, before the claim reads
+    // GitHub. So a claim made before the credential was read would succeed, and be stranded with
+    // nothing sent: only the order this test pins keeps the record unclaimed.
+    let reviews = 0;
+    let facts = 0;
+    const bindings = env(
+      {},
+      interceptingD1(realD1(db), (sql) => {
+        if (sql === REVIEW_OF_HEAD_SQL && ++reviews === 1) {
+          Reflect.deleteProperty(bindings, "GITHUB_ADMIN_PAT");
+        }
+        if (sql === CREATE_FACTS_SQL && ++facts === 2) {
+          (bindings as unknown as Record<string, unknown>).GITHUB_ADMIN_PAT = PAT;
+        }
+      }),
+    );
+    const row = await getRepull(realD1(db), id);
+    const o = await workerMergeRepull(bindings, row as NonNullable<typeof row>);
+    expect(o).toMatchObject({ kind: "held", hold: "pr-unreadable", sent: false });
+    expect({ reviews, facts }).toEqual({ reviews: 1, facts: 1 });
+    expect(rowOf(id)).toMatchObject({
+      status: "gates_clear",
+      merge_claim_sha: null,
+      merge_claimed_at: null,
+    });
+    expect(auditsOf("repull_transition", id)).toEqual([]);
+    expect(auditsOf(WORKER_MERGE_ACTION, id)).toEqual([]);
+    expect(usedToday()).toBe(0);
+    expect(gh.merges).toEqual([]);
   });
 });
 

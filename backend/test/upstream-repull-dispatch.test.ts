@@ -53,6 +53,7 @@ import type { Bindings } from "../src/types/bindings";
 import { freshDb, realD1, wrapD1, yieldingD1 } from "./helpers/d1";
 import { type Row, rowAt } from "./helpers/repull-rows";
 import { type CapturedEmail, withFakeResend } from "./helpers/resend";
+import { insideOneUtcDay } from "./helpers/utc-day";
 
 const SECRET = "repull-dispatch-test-secret";
 const DS = "on099991";
@@ -70,6 +71,8 @@ let mailDone: Promise<void> | null = null;
 
 beforeEach(async () => {
   db = freshDb();
+  // The day caps count a UTC day on the database's clock, and no claim takes a clock.
+  await insideOneUtcDay(db);
   app = new Hono<{ Bindings: Bindings }>();
   app.route("/webhooks", webhooks);
   await new Promise<void>((armed) => {

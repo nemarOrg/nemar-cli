@@ -20,7 +20,8 @@ export function gitAnnexInstalled(): boolean {
   );
 }
 
-function ciIsSet(ci: string | undefined): boolean {
+/** Whether a value of `CI` means a CI run: set, and not empty, `0` or `false`. */
+export function ciIsSet(ci: string | undefined): boolean {
   return ci !== undefined && ci !== "" && ci !== "0" && ci.toLowerCase() !== "false";
 }
 

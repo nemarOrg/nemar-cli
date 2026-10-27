@@ -2,8 +2,8 @@
  * `nemar admin repull execute --supersede` (ADR 0111, decision 3; epic #1046 phase 6, #1912),
  * driven through the real entry point against `repull-pr-world.ts`: a re-pull to tag B (1.1.0) is
  * open at `pr_open` when upstream makes tag C (1.2.0). The real `plan` and `execute` commands, the
- * real API over bun:sqlite through TEST_API_URL in the child's environment; stand-ins for GitHub,
- * OpenNeuro and S3 only. No mocks.
+ * real API over bun:sqlite on a loopback port named in the child's environment; stand-ins for
+ * GitHub, OpenNeuro and S3 only. No mocks.
  *
  * The properties, each with a test:
  *  - without the flag, a plan for tag C refuses `repull-in-flight` and changes nothing;
@@ -27,7 +27,7 @@
  * branch name opens on GitHub after the first was closed and its branch deleted, as the stand-in
  * opens it.
  *
- * CI TIER: integration, like the other CLI suites that start the binary against a local server.
+ * CI TIER: unit-pure. Hermetic: every server the suite starts or reaches listens on loopback.
  */
 
 import {

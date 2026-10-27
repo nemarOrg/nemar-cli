@@ -58,6 +58,7 @@ import {
 } from "./helpers/repull-github-standin";
 import { type Row, rowAt } from "./helpers/repull-rows";
 import { type CapturedEmail, withFakeResend } from "./helpers/resend";
+import { insideOneUtcDay } from "./helpers/utc-day";
 
 const ADMIN_KEY = "rpm-admin-key-0123456789abcdef0123456789abcdef012";
 const HEAD = "0123456789abcdef0123456789abcdef01234567";
@@ -84,6 +85,8 @@ afterAll(() => gh.stop());
 
 beforeEach(async () => {
   db = freshDb();
+  // The day caps count a UTC day on the database's clock, and no claim takes a clock.
+  await insideOneUtcDay(db);
   app = new Hono();
   app.use("*", authMiddleware);
   app.use("*", adminMiddleware);

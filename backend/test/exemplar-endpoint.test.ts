@@ -8,6 +8,12 @@
  * gates). The happy path's repo-create + INSERT is driven once per kind of
  * exemplar against a GitHub stand-in (NEMAR_GITHUB_API_URL) for what the row
  * records; end to end it is validated by the CLI clone tool.
+ *
+ * No mocks (no-mocks policy, .rules/testing.md): the stand-in is a loopback
+ * server that the route's own GitHub client calls, standing in for GitHub only,
+ * as backend/test/helpers/repull-github-standin.ts does. No NEMAR code is
+ * replaced: every assertion is on the route's answer, the row, the audit log
+ * or the request the route sent.
  */
 
 import type { Database } from "bun:sqlite";
