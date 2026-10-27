@@ -87,6 +87,21 @@ It sets no Worker variable or secret: the four re-pull switches and caps are abs
   `GET /datasets/:id/versions` (owner, collaborators, administrators) also carries `source_version` and `source_version_basis`.
 - **`nemar dataset release` and `nemar dataset update --bump major` refuse a major version of a mirror** (an `on` id, or a row recorded as an OpenNeuro import), exit 1 before anything is cloned, and point at `nemar admin repull plan`.
   The rule is the CLI's only; the dataset repositories' `version-check` workflow is unchanged (ADR 0020).
+- **The Monday report asks for attention when the scheduler waits for gate G4.**
+  With the open switch on and the scheduler's last tick concluded `waiting-for-manual-run` (the first two re-pulls are not both run by hand to `complete`), the headline and `nemar admin import-weekly` name it as a reason, because a switch turned on early would otherwise change nothing and say nothing.
+  With the switch off the section stays quiet.
+- **Production ignores `OPENNEURO_GRAPHQL_URL`, unless it is a loopback `http` URL.**
+  The staleness reader behind the report, the scheduler and `GET /admin/upstream-status` posts to OpenNeuro's own endpoint in production and in an unknown environment, whatever the binding says, a Worker secret of the same name included.
+  Development, staging and test honor the binding.
+  A loopback `http` address (`127.0.0.1`, `localhost`, `[::1]`) is honored everywhere: the test suites that run the production-only scheduler against a local stand-in use it, and a deployed Worker cannot reach one.
+  `https`, and every other protocol, on a loopback host is refused.
+- **`nemar admin pr-reviews approve --merge` exits 3 while a claim to merge is held.**
+  A lost answer, or a merge GitHub did not make, keeps the claim and exits with the waiting code, as `nemar admin repull merge` does, so the same run again or `nemar admin repull resume` settles it.
+  A refusal with no claim held exits 1.
+- **A re-pull refuses a malformed bucket, region, dataset id, tag, version or commit id where it reads one.**
+  The bucket and datacenter `remote.log` names for `nemar-s3` must be an S3 bucket name and an AWS region: `nemar admin repull plan` refuses (exit 1), `execute` and the release refuse as `nemar-s3-invalid`, and neither the annex-uuid read nor the bucket listing builds a host from one.
+  A plan's dataset ids, tags, versions and its three commit ids must have the shape execution builds a URL, a ref, a branch name or an argument of git from, or `execute` refuses as `plan-schema`.
+  The words name the field and the shape, never the value.
 - Imports that used to clone HEAD now clone the latest tag. On OpenNeuro's mirrors HEAD and the latest tag normally name the same commit, so most imports are unchanged; a dataset whose mirror carries commits past its latest snapshot is imported at the snapshot.
 - A re-import of a released mirror whose `origin/main` records a tag, and whose upstream published a newer one, used to keep the old tree while copying the new tag's data (#993); it now refuses and parks. An unrecorded tag still takes the hard reset.
 - The Monday import report gains `## Upstream freshness` and `## Upstream re-pulls`, and `nemar admin import-weekly` prints both.
