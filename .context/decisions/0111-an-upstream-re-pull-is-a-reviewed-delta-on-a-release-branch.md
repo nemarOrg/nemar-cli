@@ -2043,6 +2043,10 @@ Three additions are made to earlier text: an annotation on the record's header, 
   a re-pull that ended `failed`;
   a re-pull that used all its resumes (`resume-exhausted`) or all its finish runs (`finish-exhausted`);
   and a cap set to something unreadable.
+  *Annotated 2026-10-27: the round 1 review of the epic's pull request (#1983) added one reason to this list.
+  A switch is on and the scheduler's last tick concluded `waiting-for-manual-run`, which is gate G4 unmet: nothing dispatches until a person runs the two first re-pulls, so a switch turned on early would otherwise change nothing and say nothing.
+  It depends on a switch as the first reason does, so with the switch off it is quiet, and the section's closing sentence names it.
+  "Only the first reason depends on a switch" below now holds for these two.*
 - The scheduler's age is read against the report's own instant.
   A scheduler silent for exactly 26 hours is not yet a reason, and neither is a claim exactly an hour old; one second more is.
   Only the first reason depends on a switch.

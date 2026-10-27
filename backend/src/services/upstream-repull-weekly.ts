@@ -25,7 +25,9 @@
  *
  * ATTENTION FOLLOWS ADR 0053: silence is evidence of a problem only when there was work to do.
  * {@link repullAttention} raises a reason for exactly these, and for nothing else: a switch is on
- * and the daily scheduler has not stamped its row for {@link SCHEDULER_STALE_HOURS}; a dispatch
+ * and the daily scheduler has not stamped its row for {@link SCHEDULER_STALE_HOURS}; a switch is on
+ * and the scheduler's last tick concluded `waiting-for-manual-run` (gate G4: the two first re-pulls
+ * are not both run by hand, so nothing dispatches until a person acts); a dispatch
  * nobody answered (`unreported`) or that GitHub did not accept (`dispatch_failed`); a claim to
  * merge held for over {@link HELD_CLAIM_ATTENTION_HOURS} hour; a re-pull that ended `failed`; a
  * re-pull that used all its resumes or finish runs; a cap set to something unreadable. A switch
@@ -346,6 +348,14 @@ export function repullAttention(
       );
     } else if (silence === "unreadable") {
       problems.push("the automatic re-pull is on, and its scheduler's last run could not be read");
+    }
+    // The tick ran and dispatched nothing because gate G4 is not met: the two first re-pulls are
+    // not both run by hand to `complete`, and only a person can change that. With the switch on
+    // this is a path that will not start by itself, so it asks; with the switch off it is quiet.
+    if (scheduler?.last_outcome === "waiting-for-manual-run") {
+      problems.push(
+        "the automatic re-pull is on, and its scheduler is waiting for the two first re-pulls to be run by hand",
+      );
     }
   }
 
