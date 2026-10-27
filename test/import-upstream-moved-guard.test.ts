@@ -25,6 +25,7 @@ import {
 } from "../src/lib/import-openneuro";
 import { makeScratch, run } from "./helpers/annex-repo";
 import { useTestGitIdentity } from "./helpers/git-identity";
+import { inGerman } from "./helpers/in-german";
 import {
   type TaggedUpstream,
   UPSTREAM_ID,
@@ -127,28 +128,6 @@ async function reimportClone(bare: string, tag: "1.0.0" | "1.0.1"): Promise<stri
   await run(["git", "fetch", "origin", "git-annex"], dir);
   await run(["git", "annex", "merge"], dir);
   return dir;
-}
-
-/**
- * Run `fn` with git speaking German, where the locale exists (git falls back to English when it
- * does not, so the assertions are on the outcome, never on a message). Restored with
- * Reflect.deleteProperty: assigning undefined to process.env stores the string "undefined".
- */
-async function inGerman<T>(fn: () => Promise<T>): Promise<T> {
-  const keys = ["LC_ALL", "LANG", "LANGUAGE"] as const;
-  const saved = keys.map((k) => process.env[k]);
-  process.env.LC_ALL = "de_DE.UTF-8";
-  process.env.LANG = "de_DE.UTF-8";
-  process.env.LANGUAGE = "de";
-  try {
-    return await fn();
-  } finally {
-    keys.forEach((k, i) => {
-      const v = saved[i];
-      if (v === undefined) Reflect.deleteProperty(process.env, k);
-      else process.env[k] = v;
-    });
-  }
 }
 
 function releaseState(released: boolean) {
