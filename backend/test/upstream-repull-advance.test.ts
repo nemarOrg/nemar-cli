@@ -56,6 +56,7 @@ import {
   AUTOMATIC_OPEN_DISPATCHES_MAX,
   AUTOMATIC_SCREENS_MAX,
   type AdvanceTickResult,
+  GATE_WORK_HOLDS,
   REPULL_HOLD_SQL,
   RESUME_QUIET_MINUTES,
   RESUME_WINDOW_UTC,
@@ -882,6 +883,40 @@ describe("the gates of an automatic pull request", () => {
     expect(gh.writes).toEqual([]);
     expect(screens()).toEqual([]);
     expect(reviews()).toEqual([]);
+  });
+
+  test("a check is still running: nothing is started", async () => {
+    const id = openRow();
+    gh.checkRuns[`${DS}@${HEAD}`] = [
+      greenRuns()[0] as CheckRunAnswer,
+      { ...(greenRuns()[1] as CheckRunAnswer), status: "queued", conclusion: null },
+    ];
+    const r = await tick();
+    expect(r).toMatchObject({ screensStarted: 0, reviewsStarted: 0 });
+    expect(rowOf(id).hold_reason).toBe("version-check-pending");
+    expect(gh.dispatches).toEqual([]);
+    expect(screens()).toEqual([]);
+    expect(reviews()).toEqual([]);
+  });
+
+  test("gate work starts on the screen's, the review's and GitHub's own words only", () => {
+    expect([...GATE_WORK_HOLDS]).toEqual([
+      "screen-pending",
+      "screen-unreported",
+      "screen-acknowledge",
+      "screen-blocks",
+      "screen-unchecked",
+      "screen-rerun",
+      "screen-error",
+      "screen-unreadable",
+      "screen-exempt",
+      "review-absent",
+      "review-running",
+      "review-not-pass",
+      "review-exempt",
+      "review-unreadable",
+      "not-clean",
+    ]);
   });
 
   test("the screen of one head is dispatched 3 times at most", async () => {
