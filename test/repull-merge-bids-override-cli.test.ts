@@ -25,6 +25,8 @@
  *    failure; and the merge gate refuses, before anything is written, a head where another check
  *    fails, read again under the lock before the claim, so a check that starts failing after the
  *    gate's read is refused; the ordinary merge of a clean head reads no check.
+ *  - a second resume at the gates names `--bids-failure-reason` while BIDS validation alone fails,
+ *    in its ready line and as `bids_failure` in `--json`, and the ordinary merge once it passes.
  *
  * What only the first production use can check: that GitHub reports `unstable`, and not `blocked`,
  * for an unprotected mirror whose BIDS validation failed, as `nm000413#3` read for a held review,
@@ -67,6 +69,19 @@ const REASON = "The validator flags a sidecar upstream ships this way; read and 
 const GITHUB_ACTIONS = 15368;
 
 const resume = () => w.cli(["repull", "resume", w.fx.datasetId, "--wait-minutes", "0", "--yes"]);
+/** `resume --json`: the record and the outcome on standard output, every other line on standard error. */
+const resumeJson = async () => {
+  const run = await w.cli([
+    "repull",
+    "resume",
+    w.fx.datasetId,
+    "--wait-minutes",
+    "0",
+    "--yes",
+    "--json",
+  ]);
+  return { run, json: JSON.parse(run.stdout) as Record<string, unknown> };
+};
 const merge = (extra: string[] = []) =>
   w.cli(["repull", "merge", w.fx.datasetId, "--yes", ...extra]);
 const overrideMerge = (reason = REASON) => merge(["--bids-failure-reason", reason]);
@@ -489,5 +504,43 @@ describe.skipIf(!awsInstalled)("the override in the normal order: resume, then t
     expect(transitions()).toBe(before);
     expect(merges()).toEqual([]);
     expect(w.row()).toMatchObject({ status: "gates_clear", merge_claim_sha: null });
+  });
+
+  test("a second resume at the gates names the override while BIDS validation alone fails, and so does --json", async () => {
+    const head = w.row().head_sha as string;
+    bidsFailed(head);
+    expect((await resume()).exitCode).toBe(3);
+    await w.reportScreen(head, "clean");
+    // The gates recorded over the failed validation, read as JSON.
+    const gated = await resumeJson();
+    expect(gated.run.exitCode, gated.run.all).toBe(0);
+    expect(gated.json).toMatchObject({ outcome: "ready", bids_failure: true, waiting_for: null });
+    expect(w.row()).toMatchObject({ status: "gates_clear", gates_sha: head });
+
+    // A second resume takes the record at gates_clear, where nothing is recorded again.
+    const ready = `Ready to merge: nemar admin repull merge ${w.fx.datasetId}`;
+    const over = `Ready to merge over the failed BIDS validation: nemar admin repull merge ${w.fx.datasetId} --bids-failure-reason`;
+    const again = await resume();
+    expect(again.exitCode, again.all).toBe(0);
+    expect(again.all).toContain(over);
+    expect(again.all).not.toContain(ready);
+    const againJson = await resumeJson();
+    expect(againJson.run.exitCode, againJson.run.all).toBe(0);
+    expect(againJson.json).toMatchObject({
+      outcome: "ready",
+      bids_failure: true,
+      waiting_for: null,
+      repull: { status: "gates_clear" },
+    });
+    expect(againJson.run.stderr).toContain(over);
+
+    // Once BIDS validation passes, GitHub reports clean and the ordinary merge is named.
+    bidsFailed(head, { bids: ["completed", "success"], state: "clean" });
+    const clean = await resume();
+    expect(clean.exitCode, clean.all).toBe(0);
+    expect(clean.all).toContain(ready);
+    expect(clean.all).not.toContain("--bids-failure-reason");
+    expect((await resumeJson()).json).toMatchObject({ outcome: "ready", bids_failure: false });
+    expect(w.row()).toMatchObject({ status: "gates_clear", gates_sha: head });
   });
 });

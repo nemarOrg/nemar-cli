@@ -30,7 +30,9 @@
  *   patch_gates_clear  whose merge GitHub says did not happen expires once it is old enough (the
  *                      Worker's own bound); a head that moved, or a `main` enrichment moved
  *                      outside `.nemar/` and `.github/` (which the merge gate refuses), goes back
- *                      to the open status.
+ *                      to the open status. Otherwise it is ready, and the ready line names
+ *                      `--bids-failure-reason` while GitHub reports the pull request `unstable`
+ *                      for BIDS validation alone.
  *   merged             the merge commit's trailers read back, the tag and the version row waited
  *   patch_merged       for, the tagged tree compared (N.0.0's for lineage; N.0.1's must be its
  *                      gated head, or `--accept-tag-tree` given), the release recorded through the
@@ -856,7 +858,45 @@ async function claimTurn(ctx: ResumeContext, row: RepullRow, pr: RepullPullReque
     );
     return { kind: "next", row: back };
   }
-  return { kind: "done", result: { row, outcome: "ready" } };
+  const bidsFailure = await readyOverBids(ctx, row, p, live);
+  return {
+    kind: "done",
+    result: { row, outcome: "ready", ...(bidsFailure ? { bidsFailure: true as const } : {}) },
+  };
+}
+
+/**
+ * Whether a pull request at its gates merges now only over a failed BIDS validation: GitHub
+ * reports it `unstable` and BIDS validation is the one check that fails at its head, on a record an
+ * administrator opened (`bids-only.ts`, the rule its gates were recorded by). The ready line then
+ * names `--bids-failure-reason`, which the merge gate needs while GitHub says `unstable`. Any
+ * other state, a read that fails included, leaves the ordinary ready line, and the gate says why
+ * it refuses when it does.
+ */
+async function readyOverBids(
+  ctx: ResumeContext,
+  row: RepullRow,
+  p: Pull,
+  live: PullRequestFacts,
+): Promise<boolean> {
+  if (row.origin !== "administrator") return false;
+  const settled = await settleMergeState(
+    ctx.token,
+    ctx.datasetId,
+    p.number,
+    { headSha: live.headSha, mergeableState: live.mergeableState },
+    { base: ctx.base, sleep: ctx.sleep },
+  );
+  if (!settled.ok || settled.state !== "unstable") return false;
+  const only = await readBidsOnly({
+    token: ctx.token,
+    base: ctx.base,
+    datasetId: ctx.datasetId,
+    sha: live.headSha,
+    origin: row.origin,
+    mergeableState: settled.state,
+  });
+  return only.kind === "bids-only";
 }
 
 /** At `patch_released`: N.0.1 copied nothing of its own, so the record is complete. */

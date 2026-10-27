@@ -259,7 +259,13 @@ export const resumeCommand = new Command("resume")
       if (json) {
         console.log(
           JSON.stringify(
-            { repull: row, outcome: result.outcome, waiting_for: result.waitingFor ?? null },
+            {
+              repull: row,
+              outcome: result.outcome,
+              waiting_for: result.waitingFor ?? null,
+              // `ready` over a failed BIDS validation: the merge needs --bids-failure-reason.
+              bids_failure: result.bidsFailure === true,
+            },
             null,
             2,
           ),
