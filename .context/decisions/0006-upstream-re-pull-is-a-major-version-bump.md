@@ -44,6 +44,10 @@ A privacy correction under [ADR 0085](0085-a-privacy-correction-scrubs-every-ver
 ## Amendment 2026-10-23 (#1046): the re-pull mechanism
 
 Designed in [ADR 0111](0111-an-upstream-re-pull-is-a-reviewed-delta-on-a-release-branch.md) and not yet built; this policy stands: pulling new upstream content is a major bump.
+*Annotated 2026-10-27: built by epic #1046, and reaching production with the epic's release.
+Each version of an `on` dataset records the snapshot it mirrors (`dataset_versions.source_version` and its basis), `nemar admin repull` re-pulls a mirror by hand and N.0.1 replays NEMAR's corrections, the version listing carries the `mirror` flag, and the CLI refuses a manual major on a mirror.
+The automatic path is built and off until the owner turns its switch on.
+The future tense below states the rule; what is not yet observed is listed under "Not yet verified" in ADR 0111's Phase 8 amendment.*
 ADR 0111 refines what the numbers will mean on a mirror once it is built.
 N.0.0 will be a pure mirror of one upstream snapshot, upstream's tree at the pulled tag with NEMAR's standard edits applied, and upstream will win every conflict.
 NEMAR's corrections that upstream did not touch will replay as the next patch, N.0.1, in a pull request to `main` merged only after N.0.0 has merged and been tagged.
