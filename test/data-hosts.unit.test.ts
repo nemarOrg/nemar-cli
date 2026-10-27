@@ -39,6 +39,30 @@ describe("build defaults", () => {
   });
 });
 
+describe("NEMAR_DATA_HOSTS_ONLY", () => {
+  test("1 drops the build default, leaving exactly the environment's origins", () => {
+    const env = { NEMAR_DATA_HOSTS_ONLY: "1", NEMAR_DATA_HOSTS: "https://staging.example.org" };
+    expect(allowedDataHosts({ env, isDevBuild: false })).toEqual(["https://staging.example.org"]);
+    expect(isAllowedDataHost(PRODUCTION_DATA_HOST, { env, isDevBuild: false })).toBe(false);
+  });
+
+  test("with no origins it leaves an empty list: nothing is allowed", () => {
+    expect(allowedDataHosts({ env: { NEMAR_DATA_HOSTS_ONLY: "1" }, isDevBuild: false })).toEqual(
+      [],
+    );
+  });
+
+  test("only the exact value 1 narrows the list", () => {
+    for (const value of ["", "0", "true", "yes", "TRUE", " 1"]) {
+      const env = { NEMAR_DATA_HOSTS_ONLY: value };
+      expect([value, allowedDataHosts({ env, isDevBuild: false })]).toEqual([
+        value,
+        [PRODUCTION_DATA_HOST],
+      ]);
+    }
+  });
+});
+
 describe("NEMAR_DATA_HOSTS", () => {
   test("adds origins after the defaults, once each, in order", () => {
     const env = {

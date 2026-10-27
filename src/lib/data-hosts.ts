@@ -24,6 +24,10 @@
  * a plain-HTTP data host on its own machine. A non-loopback `http` origin is refused, so the
  * key can never travel in clear text over a network.
  *
+ * `NEMAR_DATA_HOSTS_ONLY=1` drops the build default, so the list is exactly the origins in
+ * `NEMAR_DATA_HOSTS`. It can only narrow the list; the tests use it to keep a lookup from
+ * reaching the real hosts.
+ *
  * Origins are compared exactly, as `URL.origin` writes them: scheme, lower-cased host and the
  * port when it is not the scheme's default.
  */
@@ -31,6 +35,7 @@
 import { IS_DEV_BUILD } from "./api/client.js";
 
 export const DATA_HOSTS_ENV = "NEMAR_DATA_HOSTS";
+export const DATA_HOSTS_ONLY_ENV = "NEMAR_DATA_HOSTS_ONLY";
 export const PRODUCTION_DATA_HOST = "https://private.nemar.org";
 export const DEV_DATA_HOST = "https://private-test.nemar.org";
 
@@ -98,9 +103,11 @@ function envOf(options: DataHostOptions): Record<string, string | undefined> {
 
 /** The origins this CLI may send its key to, defaults first, without duplicates. */
 export function allowedDataHosts(options: DataHostOptions = {}): string[] {
+  const env = envOf(options);
   const isDev = options.isDevBuild ?? IS_DEV_BUILD;
-  const defaults = [isDev ? DEV_DATA_HOST : PRODUCTION_DATA_HOST];
-  const { origins } = parseDataHostList(envOf(options)[DATA_HOSTS_ENV]);
+  const defaults =
+    env[DATA_HOSTS_ONLY_ENV] === "1" ? [] : [isDev ? DEV_DATA_HOST : PRODUCTION_DATA_HOST];
+  const { origins } = parseDataHostList(env[DATA_HOSTS_ENV]);
   return [...defaults, ...origins.filter((origin) => !defaults.includes(origin))];
 }
 
