@@ -15,41 +15,120 @@ earlier releases are described only by their generated notes.
 
 ## Unreleased
 
+An OpenNeuro mirror can be moved to a newer upstream snapshot as its next major version, through a reviewed pull request that an administrator drives by hand or, once the owner turns it on, the automatic path drives (epic #1046; Architecture Decision Record (ADR) 0111).
+The release has four migrations, 0104, 0105, 0106 and 0112, each of which adds a column, a table or an index and drops nothing.
+It sets no Worker variable or secret: the four re-pull switches and caps are absent from the wrangler configuration, so the automatic path is off unless a Worker secret of the same name turns it on (`GET /admin/repulls/switches` reports what the Worker reads).
+
 ### Changed
 
-- **An OpenNeuro import is pinned to an upstream snapshot tag, never the mirror's default HEAD (epic #1046 Phase 3, #1909; ADR 0111 decision 10).**
+- **Phase 2 (#1908): every version records the upstream snapshot it mirrors.**
+  `dataset_versions` gains `source_version` (the OpenNeuro tag) and `source_version_basis` (`doi`, `lineage` or `unknown`; both NULL means never examined).
+  Each version insert of an `on` dataset reads the tagged `dataset_description.json` once through the raw content delivery network (CDN), under a time bound, and records the snapshot; a failed read leaves the row unexamined and never fails the insert.
+  One parser, `sourceSnapshotOf`, reads the dataset's own `SourceDatasets` entry; signals that disagree give `unknown`, and a tag is never guessed.
+  `nemar admin upstream-backfill` records it for versions published before the columns (a dry run unless `--execute`); it writes `unknown` for a missing file only after a control read proves the 404 is about the tag and not the credential.
+- **Phase 3 (#1909): an import is pinned to an upstream snapshot tag, never the mirror's default HEAD (ADR 0111 decision 10).**
   The auto-import dispatches the tag discovery found (`client_payload.openneuro_tag`, also in its `auto_import_dispatch` audit row), `nemar admin import-openneuro --tag <tag>` names one for a single dataset, and with neither, prepare asks OpenNeuro's GraphQL for `latestSnapshot.tag` when it runs, which is what a retry gets: the retry engine dispatches no tag.
   The clone's branch is reset to `refs/tags/<tag>` before anything else happens.
-  When an explicit tag is not OpenNeuro's latest, prepare warns: the copy still takes the object currently at each upstream path (decision 8 is not built).
-- **A tag not yet on the GitHub mirror, or a latest tag OpenNeuro cannot name, refuses with `[openneuro-mirror-lag]` before the dataset record is created.**
+  When an explicit tag is not OpenNeuro's latest, prepare warns: the import's copy still takes the object currently at each upstream path (a re-pull's copy pins the object version).
+  A tag not yet on the GitHub mirror, or a latest tag OpenNeuro cannot name, refuses with `[openneuro-mirror-lag]` before the dataset record is created.
   The classifier calls it `mirror_lag`; recovery quarantines it as `mirror_lag` rather than `not_found_dataset`, sends no mail and files no issue; the retry engine retries it and, once its 14-day window has passed, parks it as `mirror_lag` and files its one admin issue.
-- **Step 4c guards a re-import whose upstream moved (#993).**
-  The tag `origin/main` records is read from its `SourceDatasets` entries naming the dataset's own `ds` (their `Version`, DOI or URL, never NEMAR's top-level `Version`).
-  When it differs from the tag being imported and the dataset has a `dataset_versions` row, prepare refuses with `[openneuro-upstream-moved]` before any reset, S3 setup or push; moving a released mirror is a re-pull's job. The refusal names the repair that passes the guard, `nemar admin import-openneuro <ds> --tag <recorded tag>`.
+  A re-import of a released mirror whose upstream moved refuses with `[openneuro-upstream-moved]` before any reset, Simple Storage Service (S3) setup or push (#993); moving a released mirror is a re-pull's job.
+  The tag `origin/main` records is read from its `SourceDatasets` entries naming the dataset's own `ds` (their `Version`, Digital Object Identifier (DOI) or uniform resource locator (URL), never NEMAR's top-level `Version`).
+  The refusal names `nemar admin repull plan <id>` and the repair that passes the guard, `nemar admin import-openneuro <ds> --tag <recorded tag>`.
   An unreleased import is moved to the new tag instead, as a fast-forward of `origin/main` (`git reset --soft`), which drops `.github/` until finalize deploys it again; it is refused instead when origin's privacy ledger holds a recorded correction (ADR 0085), or an import scrub that changed git, whose originals origin's history still holds (ADR 0089).
   An unrecorded tag, or the same one, takes the same-version hard reset as before, and an unreadable or missing record is printed as a warning, because the guard cannot fire then.
   An origin whose `main` cannot be fetched now stops prepare instead of reading as a first import.
-- **The #1320 preflight compares the bucket's `annex-uuid` with the `nemar-s3` uuids the git-annex branch records**, before the remote is configured, and refuses a disagreement with `[nemar-annex-uuid-conflict]`, both uuids and the recovery that fits.
+  The #1320 preflight compares the bucket's `annex-uuid` with the `nemar-s3` uuids the git-annex branch records, before the remote is configured, and refuses a disagreement with `[nemar-annex-uuid-conflict]`, both uuids and the recovery that fits.
   When the comparison is incomplete (Step 4b failed, git cannot read the branch, the bucket cannot be asked, or origin's git-annex branch records no `nemar-s3`), it warns and configures the remote as before.
-- **Parks for `upstream_moved` and `annex_uuid_conflict`.** Recovery has no rule for either, so a failure usually quarantines the row by the dataset's state first; the retry engine's park, in both wordings of the annex conflict, is the backstop for a `failed` or `incomplete` row that carries one. An operator restarts a parked annex conflict by hand after fixing the bucket marker.
-- **A refusal in a run that persists staging (the workflow's `--phase prepare`) clears the dataset's `staging/` prefix** before it exits. The copy and finalize jobs still run under `if: !cancelled()`, and fail at once on the missing manifest instead of acting on one an earlier attempt left. A refusal also removes a work directory the run created, never one named with `--dir`.
-- **A first import, or a retargeted one, records the snapshot it mirrors** as a `SourceDatasets` entry `{DOI: doi:10.18112/openneuro.<ds>.v<tag>, URL, Version: <tag>}`, all from the tag and kept in git; it is not written after a same-version hard reset, or when an entry already records a tag for the dataset, and an untagged entry naming the dataset alone is completed in place instead of joined by a second.
+  Recovery has no rule for `upstream_moved` or `annex_uuid_conflict`, so a failure usually quarantines the row by the dataset's state first; the retry engine's park, in both wordings of the annex conflict, is the backstop for a `failed` or `incomplete` row that carries one, and an operator restarts a parked annex conflict by hand after fixing the bucket marker.
+  A refusal in a run that persists staging (the workflow's `--phase prepare`) clears the dataset's `staging/` prefix before it exits; the copy and finalize jobs still run under `if: !cancelled()`, and fail at once on the missing manifest instead of acting on one an earlier attempt left.
+  A refusal also removes a work directory the run created, never one named with `--dir`.
+  A first import, and a retargeted one, records the snapshot it mirrors as a `SourceDatasets` entry `{DOI: doi:10.18112/openneuro.<ds>.v<tag>, URL, Version: <tag>}`, all from the tag and kept in git; it is not written after a same-version hard reset, or when an entry already records a tag for the dataset, and an untagged entry naming the dataset alone is completed in place instead of joined by a second.
   The tag is read with Phase 2's parser, `sourceSnapshotOf`, by the guard and by the record alike, and a record that parser would not read as the tag (an entry for the dataset carrying another tag or naming another dataset too, or a tag such as `2.1.0-rc1` that is not numeric) is not written; prepare warns instead.
   DataCite gets one `IsDerivedFrom` for it, the DOI: the OpenNeuro page of the same dataset is not a second relation.
   Publication no longer adds upstream's `DatasetDOI` as a second source when it is the same DOI spelled another way, or another version of a dataset an entry already names (the parser's `isOwnSourceEntry`), so the recorded tag never disagrees with itself.
+- **Phase 4 (#1910): which mirrors are behind upstream.**
+  `GET /admin/upstream-status` (read-only, admin-only) puts each managed mirror in one of eleven states (`current`, `stale_ready`, `mirror_lag`, `stale_unverified`, `anomaly`, `unknown`, `not_examined`, `unpublished`, `in_progress`, `parked`, `unchecked`); upstream's creation order decides which tag is newer, not the number, and `unknown` is never current and never stale.
+  `nemar admin upstream-status` walks it and exits 0 when nothing was unseen (stale is a finding, not a failure), 2 when the pass could not see, 1 when a request failed; `--measure` totals what a re-pull of each stale mirror would carry and estimates the DOI volume, and unknown is never counted as zero.
+  The Monday import report gains `## Upstream freshness`, counts only, with no dataset named.
+- **Phase 5 (#1911): `nemar admin repull plan <id>` plans a re-pull and writes nothing to the mirror, S3, D1 or the NEMAR Application Programming Interface (API).**
+  It writes a plan file (mode 0600, under `$NEMAR_CONFIG_DIR/repull/<id>/`) identified by a digest, and prints counts and that file's location, never a path, key or content of the dataset.
+  Exit 0 means executable, 3 that a plan was made and is not executable, 1 that nothing was planned.
+  NEMAR's standard edits are recognized and re-applied as functions, never merged as text, and an unexplained path is a conflict or a correction.
+- **Phase 6 (#1912): an administrator takes a re-pull from its plan to a released version.**
+  A re-pull's state is a row of `upstream_repulls` (migration 0105; 17 states, one row per attempt, one open row per dataset), never `import_jobs`; outside production only `xx` datasets are re-pulled, and an anonymous dataset is refused with no override.
+  `nemar admin repull execute <plan-file>` prepares the delta (scrubbed on its own paths, before anything is copied), copies the objects it needs at their pinned S3 `versionId`, registers them, pushes `release/vN.0.0` and opens the pull request; it never merges.
+  `status` and `resume` take it on through the identifier screen, the gates, the release and the lock; the screen is bound to the row and the pull request's head (`upstream_repull_screens`, migration 0106) and its callback sends no mail.
+  `merge` goes through one gate, which `nemar admin pr-reviews` shares for a re-pull's pull request: it reads the record, the review, the screen and GitHub's `clean`, ends the squash message with the two trailers, and claims one unit of `REPULL_DAILY_MERGE_CAP` before it merges, because every merge mints one version DOI.
+  N.0.1 replays NEMAR's corrections after N.0.0 is merged and tagged (`--take-ours`, `--keep-upstream` for conflicts), `abandon` ends an open re-pull, `execute --supersede` replaces one for a newer tag, and `nemar admin exemplar create <xx> --source <on> --mirror <ds>` makes a staging rehearsal fixture.
+  `bun run scripts/repull-canary.ts` checks the copy's S3 calls against the real buckets (a dry run unless `--execute`); it is a script in a checkout, not a subcommand, since the epic cleanup (#1976) moved it out of the shipped command-line interface (CLI).
+- **Phase 7 (#1913): the automatic path, built and off.**
+  `AUTO_REPULL_ENABLED` and `AUTO_REPULL_MERGE_ENABLED` are on only as the exact string `"1"`, and only in production; `REPULL_DAILY_OPEN_CAP` (default 2) and `REPULL_DAILY_MERGE_CAP` (default 5) read 0 when set to anything but one or two digits no larger than 20.
+  `GET /admin/repulls/switches` reports what the Worker reads.
+  A daily scheduler, which runs in production at 03:00 Coordinated Universal Time (UTC), dispatches the central workflow `run-upstream-repull.yml` for `stale_ready` mirrors within the open cap, at most once per dataset in 30 days and not before the first two re-pulls were run by an administrator; a 30-minute tick holds, gates and resumes the pull requests it opened.
+  The unattended run plans once and hands the plan file to `execute` with a digest-checked handoff (the epic cleanup, #1976), opens the pull request as the GitHub App, `nemar-bot[bot]`, and never merges; its public log carries only counts and fixed words.
+  The Worker merges only a machine-clean re-pull pull request the automatic path opened (zero unexplained paths, a `clear` identifier screen, Brain Imaging Data Structure (BIDS) validation and `version-check` green, an ADR 0107 review of that head that passes, the head equal to the screened commit, GitHub `clean`, the merge cap not exhausted), approves nothing, and a finish run then takes the re-pull to `complete`.
+  An administrator may merge a re-pull they opened over a failed BIDS validation (`nemar admin repull merge --bids-failure-reason`, only while GitHub says `unstable`).
+  The ADR 0107 review admits one bot's pull request, the App's automatic re-pull, and only when the Worker starts it.
+  The Monday report gains `## Upstream re-pulls`, `GET /admin/repulls/dispatches` lists the dispatches, and `nemar admin repull auto` shows the switches, the scheduler, the open automatic re-pulls (filtered by origin since the epic cleanup, #1976) and the recent dispatches.
+  The dispatch record is migration 0112, numbered after `dev` took 0111 (the epic cleanup, #1976).
+- **Phase 8 (#1914): documentation, the website contract and the typed field.**
+  The public pages `platform/doi-and-versioning`, `platform/data-api` and `cli/guides/versioning` describe mirror versions and the `mirror` flag, and three gated runbooks cover freshness, the manual re-pull and the automatic path (the links are in `AGENTS.md` and `.context/README.md`).
+  ADR 0111 gains its final amendment, and `dataPlaneVersionListingSchema` in `shared/contract/data-plane.ts` types `mirror` as an optional boolean that may be `null`, so a listing whose `mirror` is any other value fails the CLI's read.
+- **Carried from `dev` by the epic's two syncs (#1979, #1981).**
+  The GitHub App is `nemar-bot`, renamed from `nemar-publish-bot` (#1975); #1979 follows the rename in the epic, and the checks compare the numeric id as well as the login.
+  A dataset held on an authenticated data host can be read with the CLI's own git-annex special remote, `git-annex-remote-nemar`, and its credential helper, `nemar auth git-credential`, and the API key goes only to origins on the CLI's own list (#1978, ADR 0114, proposed).
 
 ### Production behavior changes
 
+- **Every version in the data plane's landing JavaScript Object Notation (JSON) and the page bundle's `landing.data.versions` carries `mirror`:** `true` for an N.0.0 of an `on` dataset whose upstream tag is recorded, `false` for every other dataset and version, `null` for an N.0.0 of an `on` dataset whose tag is unknown or not yet examined.
+  The tag itself is not on the public wire.
+  `GET /datasets/:id/versions` (owner, collaborators, administrators) also carries `source_version` and `source_version_basis`.
+- **`nemar dataset release` and `nemar dataset update --bump major` refuse a major version of a mirror** (an `on` id, or a row recorded as an OpenNeuro import), exit 1 before anything is cloned, and point at `nemar admin repull plan`.
+  The rule is the CLI's only; the dataset repositories' `version-check` workflow is unchanged (ADR 0020).
 - Imports that used to clone HEAD now clone the latest tag. On OpenNeuro's mirrors HEAD and the latest tag normally name the same commit, so most imports are unchanged; a dataset whose mirror carries commits past its latest snapshot is imported at the snapshot.
-- New tracking-issue labels `mirror-lag` and `upstream-moved` on `nemarDatasets/.github`; GitHub creates a label the first time an issue carries it.
 - A re-import of a released mirror whose `origin/main` records a tag, and whose upstream published a newer one, used to keep the old tree while copying the new tag's data (#993); it now refuses and parks. An unrecorded tag still takes the hard reset.
+- The Monday import report gains `## Upstream freshness` and `## Upstream re-pulls`, and `nemar admin import-weekly` prints both.
+  Against a Worker that predates this release the command prints them as unknown and exits 1.
+- The production daily tick runs the re-pull scheduler and the dispatch watchdog, and the 30-minute tick runs the advance tick.
+  While the switches are absent they dispatch, advance and merge nothing; they only stamp their own rows.
+- New tracking-issue labels `mirror-lag` and `upstream-moved` on `nemarDatasets/.github`; GitHub creates a label the first time an issue carries it.
 
 ### Deploy coupling
 
-- The onboard workflow change (`openneuro_tag`) shipped in 0.10.24 (#1933), with its copy in `nemarDatasets/.github`. `nemar admin import-openneuro --tag` in dispatch mode sends `openneuro_tag`, which an older workflow answers with 422.
-  It is inert with an older Worker (no tag in the payload) and with an older CLI: the workflow passes `--tag` only when the installed CLI's help lists it, so an older CLI imports as before.
-- No order is required between the Worker and the npm release. A CLI released before its Worker refuses a mirror lag that the older Worker quarantines as `not_found_dataset` with a mail and an issue; the new Worker's retry query keys on the marker in `last_error`, which recovery keeps, so it picks those rows up once deployed.
+- The migrations are applied by the release's deploy; 0112 also seeds the scheduler's one row.
+- `run-upstream-repull.yml` is authored at `.github/dataset-workflows/run-upstream-repull.yml`, and its byte-identical copy is on `main` of `nemarDatasets/.github` (`nemarDatasets/.github#148`, merged first; #1980 here makes the `unit-pure` tier compare the two).
+  It runs only on a `repository_dispatch` of the type `run-upstream-repull`, which only the automatic path sends, so merging it turned nothing on.
+- The onboard workflow change (`openneuro_tag`) shipped in 0.10.24 (#1933), with its copy in `nemarDatasets/.github`.
+  `nemar admin import-openneuro --tag` in dispatch mode sends `openneuro_tag`, which an older workflow answers with 422; it is inert with an older Worker, and with an older CLI the workflow passes `--tag` only when the installed CLI's help lists it.
+- The documentation pull requests (`nemarOrg/docs#90` and `#92`) merged before this release; the pages they add describe what the release carries.
+- The `mirror` field reads `null` for every `on` N.0.0 whose snapshot is not recorded until `nemar admin upstream-backfill --execute` has run, and the website shows no chip for a `null`; the backfill runs after the deploy and the website is promoted after the backfill.
+- No order is required between the Worker and the npm release for imports: a CLI released before its Worker refuses a mirror lag that the older Worker quarantines as `not_found_dataset` with a mail and an issue, and the new Worker's retry query keys on the marker in `last_error`, which recovery keeps, so it picks those rows up once deployed.
 - The jobs of one workflow run install the CLI independently; mixing versions inside a run is harmless, because only prepare changed.
+
+### Owner steps after release
+
+None of these is done by the release.
+The runbooks are [freshness](https://docs.nemar.org/admin/operations/upstream-freshness/), [manual re-pull](https://docs.nemar.org/admin/operations/upstream-repull/) and [automatic re-pull](https://docs.nemar.org/admin/operations/upstream-repull-automatic/).
+
+1. Run `nemar admin upstream-backfill` (the dry run), then `--execute`, then `nemar admin upstream-status` (freshness).
+2. Promote the website after the backfill, by the website's own release procedure.
+3. Run the canary, then make a dry-run plan for `on004362` and `on003645` and review the counts (manual re-pull).
+4. Re-pull those two by hand, either first as upstream's snapshots allow, and read the new version DOI's record: which relation it carries is not known until then (ADR 0111, Amendment 2026-10-27).
+5. In a reviewed change to `backend/wrangler-sccn.toml` that also edits `backend/test/repull-switches-flag.test.ts`, turn on opening only (`AUTO_REPULL_ENABLED = "1"`, `REPULL_DAILY_OPEN_CAP = "1"`), read the first run's public log, then turn on merging (`AUTO_REPULL_MERGE_ENABLED = "1"`, `REPULL_DAILY_MERGE_CAP = "1"`), then set the caps from `nemar admin upstream-status --measure` (automatic re-pull).
+
+### Known limits
+
+- The manual-major refusal is the CLI's only; a major merged outside the CLI is not stopped.
+- A mirror's recorded tag that upstream later re-creates under the same name is not detected: the staleness report compares tags, and a plan to the mirrored tag is refused as `nothing-to-pull` before any tree of upstream is compared.
+  A target tag re-created after a plan has read it is caught: `execute` refuses with `upstream-tag-moved` before the copy, the registration and the pull request, and the record has to be ended with `abandon` and the dataset planned again.
+- Most mirror repositories have no branch protection or ruleset (16 of 21 sampled on 2026-10-24), so GitHub's `clean` proves no check ran on them; the Worker reads the two checks itself.
+- The merge cap binds NEMAR's tools, not the GitHub merge button.
+- The Worker's merge has no staging rehearsal, because outside production only `xx` datasets are re-pulled and the Worker never merges one.
+  Only the first production merge, under a cap of 1, shows whether the App's token reads `mergeable_state` as an administrator does and whether the dataset workflows tag the App's squash.
+- ADR 0107's review may never pass a re-pull diff; until one passes, an administrator merges each re-pull.
+- A re-pull with corrections mints two version DOIs, N.0.0 and N.0.1.
+- The ADR 0111 amendment of 2026-10-27 lists, under "Not yet verified", what only the canary, the first two re-pulls, the first unattended run, the first Worker merge and the release with its first weeks can show.
 
 ## 0.10.25 - 2026-10-26
 
