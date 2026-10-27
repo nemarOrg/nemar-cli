@@ -214,3 +214,14 @@ The scrub named by the amendment above runs in prepare's step 5b, before this AD
 Its downloads count against `NORMALIZE_MAX_BYTES` together with the data git holds, and `--normalize-max-gb` raises the one bound for both.
 As built, prepare re-checks its own scrub (`verifyScrub`, and a re-scan of the blanked JSON), and the identifier screen runs at finalize through the publication request (ADR 0086), not in prepare.
 A key the git-annex branch records as dead is dropped from the copy, not refused; a replaced key that the tree still names refuses (`old-key-still-named`).
+
+## Amendment 2026-10-23 (#1046): a re-pull re-applies the policy as a function on its delta paths
+
+Designed in [ADR 0111](0111-an-upstream-re-pull-is-a-reviewed-delta-on-a-release-branch.md) and not yet built.
+*Annotated 2026-10-27: built by epic #1046, in the form ADR 0111's Phase 5 and Phase 6c amendments record.
+The planner re-applies the `.gitattributes` strip as a function and explains a git-held file NEMAR's policy annexed, and `execute` annexes and uploads the git-held data a delta path brings, with the import's normalization.
+The future tense below states the rule, not each call.*
+An upstream re-pull will work on a clone of NEMAR's `main`, which is already governed, and will bring only what it changes onto this record's policy.
+`applyNemarAnnexPolicy` will run again as a function after the delta is applied, never merged as text, so an `annex.largefiles` line a new upstream snapshot brings back is stripped again and NEMAR's expression is read back before the copy and before the commit.
+Data upstream left in git on a path the commit adds or changes will be moved into the annex and uploaded as in prepare, and a path the commit does not touch will not be normalized again.
+A file NEMAR moved into the annex will count as an explained edit when its key hashes the upstream blob at the base tag, so a re-pull does not mistake it for a NEMAR correction.

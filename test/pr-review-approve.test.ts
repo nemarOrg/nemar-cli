@@ -16,6 +16,7 @@ import {
   asVerdict,
   checkMergeable,
   closePullRequest,
+  fetchDatasetRepoJson,
   fetchPullRequest,
   githubApiBase,
   identityMatches,
@@ -399,7 +400,12 @@ describe("reading the pull request", () => {
         state: "open",
         draft: false,
         baseRef: "main",
+        // The head branch, which tells a `release/*` pull request (maybe a re-pull's) apart.
+        headRef: "add-subjects",
         headSha: SHA_A,
+        // The two repositories, which a re-pull's merge requires be the dataset's own.
+        headRepo: "nemarDatasets/nm000201",
+        baseRepo: "nemarDatasets/nm000201",
         authorLogin: "alice",
         mergeableState: "blocked",
       },
@@ -410,6 +416,70 @@ describe("reading the pull request", () => {
     const r = await fetchPullRequest(ADMIN_TOKEN, "nm000201", 99, base());
     expect(r).toMatchObject({ ok: false, status: 404 });
     if (!r.ok) expect(r.reason).toContain("has no pull request #99");
+  });
+});
+
+describe("reading a dataset repository's JSON", () => {
+  // The read the BIDS-only override rests on (src/lib/repull/bids-only.ts): an answer that is not a
+  // 2xx, or not JSON, or no answer at all, is never a value. The error answers come from
+  // one-request servers, error-path fixtures.
+  async function answeredBy(res: () => Response) {
+    const srv = Bun.serve({ port: 0, fetch: res });
+    try {
+      return await fetchDatasetRepoJson(
+        ADMIN_TOKEN,
+        "nm000201",
+        `/commits/${SHA_A}/check-runs`,
+        `http://127.0.0.1:${srv.port}`,
+      );
+    } finally {
+      srv.stop(true);
+    }
+  }
+
+  test("a 2xx JSON answer is the value", async () => {
+    const r = await fetchDatasetRepoJson(
+      ADMIN_TOKEN,
+      "nm000201",
+      `/commits/${SHA_A}/status`,
+      base(),
+    );
+    expect(r).toMatchObject({ ok: true, value: { state: "pending", total_count: 0 } });
+  });
+
+  test("an HTTP error is refused with GitHub's message and its status", async () => {
+    const r = await answeredBy(() =>
+      Response.json({ message: "Resource not accessible by integration" }, { status: 403 }),
+    );
+    expect(r).toEqual({
+      ok: false,
+      status: 403,
+      reason: "Resource not accessible by integration (HTTP 403)",
+    });
+  });
+
+  test("an HTTP error with no JSON body is refused with its status", async () => {
+    const r = await answeredBy(() => new Response("<html>bad gateway</html>", { status: 502 }));
+    expect(r).toEqual({ ok: false, status: 502, reason: "GitHub answered HTTP 502." });
+  });
+
+  test("a 200 that is not JSON is refused, not read as empty", async () => {
+    const r = await answeredBy(() => new Response("not json", { status: 200 }));
+    expect(r).toEqual({ ok: false, status: 200, reason: "GitHub's answer could not be read." });
+  });
+
+  test("no answer at all is refused, with status 0", async () => {
+    const srv = Bun.serve({ port: 0, fetch: () => new Response() });
+    const port = srv.port;
+    srv.stop(true);
+    const r = await fetchDatasetRepoJson(
+      ADMIN_TOKEN,
+      "nm000201",
+      `/commits/${SHA_A}/status`,
+      `http://127.0.0.1:${port}`,
+    );
+    expect(r).toMatchObject({ ok: false, status: 0 });
+    if (!r.ok) expect(r.reason).toStartWith("GitHub could not be reached");
   });
 });
 

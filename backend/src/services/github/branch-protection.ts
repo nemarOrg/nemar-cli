@@ -10,6 +10,13 @@
  * it is the code that moved and that section is not.
  */
 
+import {
+  BIDS_CHECK_NAME,
+  LEGACY_BIDS_CHECK_NAME,
+  LEGACY_INLINE_BIDS_REPOS,
+  VERSION_CHECK_NAME,
+} from "../../../../shared/dataset-checks.js";
+import { NEMAR_APP_ID } from "../../../../shared/nemar-app.js";
 import { PR_REVIEW_CHECK_NAME } from "../../../../shared/pr-review.js";
 import { HttpError } from "../retry";
 import {
@@ -80,13 +87,25 @@ export async function applyTagProtection(repo: string, pat: string): Promise<voi
 }
 
 /**
- * NEMAR GitHub App id (`nemar-bot`). Required status checks are pinned
- * to this integration so only a check-run posted by the App satisfies them
- * (spoof-resistant), and the App is a ruleset bypass actor so its automation
- * (enrichment commit-to-main, version-DOI / pr-merge `v*` tag pushes) is not
- * blocked by the PR rule that gates humans. Epic #713.
+ * NEMAR GitHub App id (`nemar-bot`) and its bot user, as GitHub names the author of a pull
+ * request the App opens, defined once in `shared/nemar-app.ts` (the pure machine-clean rule of the
+ * automatic re-pull reads them, and nothing in `shared/` imports the Worker) and re-exported here,
+ * where the Worker's code reads them from. Required status checks are pinned to the App id so only
+ * a check-run posted by the App satisfies them (spoof-resistant), and the App is a ruleset bypass
+ * actor so its automation (enrichment commit-to-main, version-DOI / pr-merge `v*` tag pushes) is
+ * not blocked by the PR rule that gates humans. Epic #713.
+ *
+ * A pull request is the App's only when the author's login, numeric id and type all match
+ * (ADR 0111, decision 7, as its Phase 7 amendment builds it): the review admits exactly the App's
+ * automatic re-pull pull request on those terms (`pr-review.ts`), and the machine-clean rule
+ * requires them (`shared/repull-machine-clean.ts`).
  */
-export const NEMAR_APP_ID = 3679074;
+export {
+  NEMAR_APP_BOT_LOGIN,
+  NEMAR_APP_BOT_TYPE,
+  NEMAR_APP_BOT_USER_ID,
+  NEMAR_APP_ID,
+} from "../../../../shared/nemar-app.js";
 
 /** Ruleset name for dataset-repo branch protection (the idempotent upsert key). */
 export const BRANCH_RULESET_NAME = "NEMAR branch protection";
@@ -95,9 +114,10 @@ export const BRANCH_RULESET_NAME = "NEMAR branch protection";
  * Dataset repos created before the centralized-BIDS migration (#601) that still
  * run the OLD inline `bids-validation.yml`, whose check-run is literally named
  * `bids-validation`. Everything else is on the central shim that posts
- * `Run BIDS Validation`.
+ * `Run BIDS Validation`. Named once in `shared/dataset-checks.ts` with the two
+ * check names, which the CLI's re-pull gates read too, and re-exported here.
  */
-export const LEGACY_INLINE_BIDS_REPOS = new Set(["nm000103", "nm000105", "nm000106", "nm000107"]);
+export { LEGACY_INLINE_BIDS_REPOS } from "../../../../shared/dataset-checks.js";
 
 /**
  * A required status check. `integration_id` pins the check to a specific
@@ -115,13 +135,17 @@ export interface RequiredCheck {
  *  - BIDS: central-flow repos require `Run BIDS Validation`, posted cross-repo by
  *    the NEMAR App, so it is pinned to the App. The four legacy-inline repos still
  *    emit `bids-validation` from github-actions (not the App), so it is unpinned.
- *  - `version-check`: emitted by github-actions in the dataset repo; unpinned.
+ *  - `version-check`: on central-flow repos the shim dispatches the central
+ *    `run-version-check`, and the NEMAR App posts the check (measured on
+ *    `nm000527#1`, 2026-10-25); the rulesets still leave it unpinned, a gap ADR
+ *    0111's Phase 7 amendment names. The automatic re-pull's machine-clean reader
+ *    pins both checks to the App itself (`upstream-repull-facts.ts`).
  */
 export function deriveContexts(repo: string): RequiredCheck[] {
   const bids: RequiredCheck = LEGACY_INLINE_BIDS_REPOS.has(repo)
-    ? { context: "bids-validation" }
-    : { context: "Run BIDS Validation", integration_id: NEMAR_APP_ID };
-  return [bids, { context: "version-check" }];
+    ? { context: LEGACY_BIDS_CHECK_NAME }
+    : { context: BIDS_CHECK_NAME, integration_id: NEMAR_APP_ID };
+  return [bids, { context: VERSION_CHECK_NAME }];
 }
 
 export interface BranchRulesetPayload {

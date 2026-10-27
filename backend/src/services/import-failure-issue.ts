@@ -41,7 +41,11 @@ import {
   listOpenIssuesByLabel,
   setIssueLabels,
 } from "./github.js";
-import { type ClassifiedImportFailure, classifyImportFailure } from "./import-failure-cause.js";
+import {
+  type ClassifiedImportFailure,
+  type ImportFailureCause,
+  classifyImportFailure,
+} from "./import-failure-cause.js";
 import {
   IMPORT_ROLLUP_ISSUE_LABEL,
   type RollupEntry,
@@ -82,15 +86,38 @@ export interface ImportFailureIssueContext {
   /** !isNonProductionEnv(env) -- the dev/test worker shares real GitHub org
    *  access but must never open real org issues. */
   isProduction: boolean;
+  /** The cause classified from the STORED `last_error`. Absent means "not a
+   *  cause whose issue waits for a park", which is every cause but one. */
+  cause?: ImportFailureCause;
+  /** True when the retry engine has just parked the row, rather than a
+   *  failure callback landing; `resultingStatus` is not read then. */
+  parked?: boolean;
 }
 
 /**
+ * Causes whose one issue is filed when the retry engine PARKS the row, never by
+ * the failure callback. A mirror lag (ADR 0111 decision 10) usually clears
+ * within minutes of a new snapshot and is retried for its whole window, so an
+ * issue on its first occurrence would open and close as noise; the lead's
+ * ruling (2026-10-23) is one admin issue when it is parked, and no mail per
+ * attempt.
+ */
+export const ISSUE_FILED_WHEN_PARKED: ReadonlySet<ImportFailureCause> = new Set(["mirror_lag"]);
+
+/**
  * Gate: file (create or update) an import-failure issue only for a GENUINE,
- * production, non-sandbox/exemplar failure. Pure -- no I/O.
+ * production, non-sandbox/exemplar failure, or for a park of a cause whose issue
+ * waits for the park ({@link ISSUE_FILED_WHEN_PARKED}). Pure -- no I/O.
  */
 export function shouldFileImportFailureIssue(ctx: ImportFailureIssueContext): boolean {
   if (!ctx.isProduction) return false;
-  if (ctx.resultingStatus !== "failed") return false;
+  const deferred = ctx.cause !== undefined && ISSUE_FILED_WHEN_PARKED.has(ctx.cause);
+  if (ctx.parked) {
+    if (!deferred) return false;
+  } else {
+    if (ctx.resultingStatus !== "failed") return false;
+    if (deferred) return false;
+  }
   if (isSandboxDatasetId(ctx.datasetId)) return false;
   if (ctx.isSandbox || ctx.isExemplar) return false;
   return true;
@@ -158,8 +185,11 @@ export interface FileImportFailureIssueArgs {
   errorMessage: string | null;
   workflowRunUrl: string | null;
   /** The import_jobs row's status after the upsert -- see
-   *  ImportFailureIssueContext.resultingStatus. */
+   *  ImportFailureIssueContext.resultingStatus. Not read when `parked`. */
   resultingStatus: string;
+  /** The retry engine parked the row (see ImportFailureIssueContext.parked).
+   *  A null `errorMessage` or `workflowRunUrl` is then taken from the row. */
+  parked?: boolean;
 }
 
 /**
@@ -219,45 +249,9 @@ export async function fileImportFailureIssueIfNeeded(
   // from (see the note on classifiedCause below). Read here, next to the other
   // gate read, because the caller has already upserted it.
   const jobRow = await db
-    .prepare("SELECT last_error FROM import_jobs WHERE dataset_id = ?")
+    .prepare("SELECT last_error, workflow_run_url FROM import_jobs WHERE dataset_id = ?")
     .bind(args.datasetId)
-    .first<{ last_error: string | null }>();
-
-  const shouldFile = shouldFileImportFailureIssue({
-    datasetId: args.datasetId,
-    resultingStatus: args.resultingStatus,
-    isSandbox: row?.is_sandbox === 1,
-    isExemplar: row?.is_exemplar === 1,
-    isProduction: !isNonProductionEnv(env),
-  });
-  if (!shouldFile) return;
-
-  const pat = await token(env);
-  const title = importFailureIssueTitle(args.datasetId, args.sourceId);
-  const details: ImportFailureIssueDetails = {
-    datasetId: args.datasetId,
-    sourceId: args.sourceId,
-    stage: args.stage,
-    errorMessage: args.errorMessage,
-    workflowRunUrl: args.workflowRunUrl,
-  };
-
-  // ONE listing answers all three questions this function asks of GitHub: is
-  // there already an issue for this dataset, how many per-dataset issues are
-  // open (the mode), and is this cause's rollup already open. Rollups carry the
-  // tracking label too, so they are in the same listing -- paging it once per
-  // question would be three identical walks of the same pages.
-  //
-  // Dedup is check-then-act (find open issue by title, else create) with no
-  // lock/idempotency key. Within one workflow run the report job posts
-  // status=failed exactly once per dataset, so no self-race. The only race is
-  // two near-simultaneous FIRST failures for the same dataset from two
-  // different workflow runs (e.g. overlapping manual + auto dispatch): both see
-  // "no open issue" and both create one. Worst case = a cosmetic duplicate
-  // issue, never data loss or a masked failure. Accepted; the triage sweep
-  // (services/import-issue-sweep.ts) also cleans these up on recovery.
-  const open = await listOpenIssues(IMPORT_FAILURE_ISSUES_REPO, IMPORT_FAILURE_ISSUE_LABEL, pat);
-  const existing = open.find((i) => i.title === title) ?? null;
+    .first<{ last_error: string | null; workflow_run_url: string | null }>();
 
   // Classified from the STORED `last_error`, never from `args.errorMessage`.
   //
@@ -277,11 +271,54 @@ export async function fileImportFailureIssueIfNeeded(
   // Reading the stored value makes both writers agree because they read the same
   // column. `args.errorMessage` is still what the issue BODY and the comment
   // quote -- that is this callback's own report and belongs verbatim -- but it no
-  // longer decides a label.
+  // longer decides a label. Classified before the gate, which needs the cause.
   const classified = classifyImportFailure({
     stage: args.stage,
     lastError: jobRow?.last_error ?? args.errorMessage,
   });
+
+  const shouldFile = shouldFileImportFailureIssue({
+    datasetId: args.datasetId,
+    resultingStatus: args.resultingStatus,
+    isSandbox: row?.is_sandbox === 1,
+    isExemplar: row?.is_exemplar === 1,
+    isProduction: !isNonProductionEnv(env),
+    cause: classified.cause,
+    parked: args.parked,
+  });
+  if (!shouldFile) return;
+
+  const pat = await token(env);
+  const title = importFailureIssueTitle(args.datasetId, args.sourceId);
+  // A park has no callback of its own to quote, so the row's stored report stands in for it.
+  const details: ImportFailureIssueDetails = {
+    datasetId: args.datasetId,
+    sourceId: args.sourceId,
+    stage: args.stage,
+    errorMessage: args.parked
+      ? (args.errorMessage ?? jobRow?.last_error ?? null)
+      : args.errorMessage,
+    workflowRunUrl: args.parked
+      ? (args.workflowRunUrl ?? jobRow?.workflow_run_url ?? null)
+      : args.workflowRunUrl,
+  };
+
+  // ONE listing answers all three questions this function asks of GitHub: is
+  // there already an issue for this dataset, how many per-dataset issues are
+  // open (the mode), and is this cause's rollup already open. Rollups carry the
+  // tracking label too, so they are in the same listing -- paging it once per
+  // question would be three identical walks of the same pages.
+  //
+  // Dedup is check-then-act (find open issue by title, else create) with no
+  // lock/idempotency key. Within one workflow run the report job posts
+  // status=failed exactly once per dataset, so no self-race. The only race is
+  // two near-simultaneous FIRST failures for the same dataset from two
+  // different workflow runs (e.g. overlapping manual + auto dispatch): both see
+  // "no open issue" and both create one. Worst case = a cosmetic duplicate
+  // issue, never data loss or a masked failure. Accepted; the triage sweep
+  // (services/import-issue-sweep.ts) also cleans these up on recovery.
+  const open = await listOpenIssues(IMPORT_FAILURE_ISSUES_REPO, IMPORT_FAILURE_ISSUE_LABEL, pat);
+  const existing = open.find((i) => i.title === title) ?? null;
 
   if (existing) {
     await comment(

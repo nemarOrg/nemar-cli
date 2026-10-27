@@ -71,6 +71,7 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "getManifest",
     "getUserCiStatus",
     "getVersionHistory",
+    "hasReleasedVersion",
     "inviteCollaborator",
     "listAccessRequests",
     "listCollaborators",
@@ -101,8 +102,10 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "withdrawPublishRequest",
   ],
   data: [
+    "OBJECTS_PER_EXPLICIT_LOCK",
     "applyS3Lock",
     "getDatasetFiles",
+    "lockS3Objects",
     "requestDownloadCredentials",
     "requestUploadCredentials",
     "requestUploadUrls",
@@ -206,6 +209,8 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "updateDoi",
     "updateEmailPreferences",
     "uploadTierOf",
+    "upstreamBackfill",
+    "upstreamStatus",
     "validateCi",
     "verifyImport",
     "verifyUserById",
@@ -214,6 +219,22 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "zarrFidelitySweep",
   ],
   notices: ["NOTICE_LEVELS", "createNotice", "deleteNotice", "getNotices", "listAdminNotices"],
+  repull: [
+    "acknowledgeRepullScreen",
+    "checkRepullMergeClaim",
+    "createRepull",
+    "dispatchRepullScreen",
+    "getRepull",
+    "getRepullSwitches",
+    "listRepullDispatches",
+    "listRepullScreens",
+    "listRepulls",
+    "recordRepullMerged",
+    "recordRepullReleased",
+    "releaseRepullMergeClaim",
+    "repullErrorCode",
+    "transitionRepull",
+  ],
 };
 
 /** Exported only for sibling api/* modules; never part of the CLI surface. */
@@ -280,6 +301,8 @@ const POST_SPLIT_ADDITIONS = [
   "signalDefaultsSweepReset", // #1194, CLI wrapper for the signal-defaults sweep reset
   "uploadTierOf", // #1251, ADR 0040: upload / browse / unknown from a listed row
   "zarrFidelitySweep", // #1068, epic #1181 phase 8: POST /admin/datasets/zarr-fidelity-sweep
+  "upstreamBackfill", // #1908, epic #1046 phase 2, ADR 0111: POST /admin/datasets/upstream-backfill
+  "upstreamStatus", // #1910, epic #1046 phase 4, ADR 0111: GET /admin/upstream-status
   "anonymitySweep", // #1409, epic #1406: POST /admin/datasets/anonymity-sweep
   "anonymitySweepReset", // the same route with ?reset=1
   "getNeurobagelStatus", // epic #1586 phase 4, ADR 0084: GET /admin/neurobagel/status
@@ -299,6 +322,7 @@ const POST_SPLIT_ADDITIONS = [
   "commentOnPublication", // ADR 0102: POST /admin/publish/:id/comment (mails the depositor an administrator's words)
   "reviewErrorCode", // ADR 0102: the closed word of a review route's refusal (rawBody.code, not ApiError.code)
   "isRouteNotFound", // a backend that predates a route answers its not-found body: say so, do not call it a bug
+  "hasReleasedVersion", // ADR 0111 decision 10: the import's upstream-moved guard asks GET /datasets/:id/versions
   "addMailNote", // epic #1893 phase 4: `nemar admin mail`, routes in shared/contract/mail-admin.ts
   "assignMailTicket", // epic #1893 phase 4: `nemar admin mail`, routes in shared/contract/mail-admin.ts
   "escalateMailTicket", // epic #1893 phase 4: `nemar admin mail`, routes in shared/contract/mail-admin.ts
@@ -317,6 +341,22 @@ const POST_SPLIT_ADDITIONS = [
   "listMailBlocklist", // ADR 0113: `nemar admin mail blocklist`, GET /admin/mail/blocklist
   "addMailBlock", // ADR 0113: `nemar admin mail blocklist add`, POST /admin/mail/blocklist
   "removeMailBlock", // ADR 0113: `nemar admin mail blocklist remove`, DELETE /admin/mail/blocklist/:id
+  "createRepull", // #1912, epic #1046 phase 6, ADR 0111 decision 3: POST /admin/repulls
+  "getRepull", // #1912: GET /admin/repulls/:id
+  "listRepulls", // #1912: GET /admin/repulls
+  "transitionRepull", // #1912: POST /admin/repulls/:id/transition
+  "repullErrorCode", // #1912: the closed word of a /admin/repulls refusal (rawBody.code)
+  "listRepullScreens", // #1912 phase 6f: GET /admin/repulls/:id/screens
+  "dispatchRepullScreen", // #1912 phase 6f: POST /admin/repulls/:id/screen
+  "acknowledgeRepullScreen", // #1912 phase 6f: POST /admin/repulls/:id/screen/acknowledge
+  "releaseRepullMergeClaim", // #1912 phase 6f: POST /admin/repulls/:id/merge-claim/release
+  "recordRepullMerged", // #1912 phase 6f: POST /admin/repulls/:id/merged
+  "recordRepullReleased", // #1912 phase 6f: POST /admin/repulls/:id/released
+  "checkRepullMergeClaim", // #1912 phase 6f: POST /admin/repulls/:id/merge-claim/check
+  "getRepullSwitches", // #1913 phase 7h: GET /admin/repulls/switches
+  "listRepullDispatches", // #1913 phase 7h: GET /admin/repulls/dispatches
+  "lockS3Objects", // #1912 phase 6f: POST /admin/datasets/:id/s3-lock with an explicit list
+  "OBJECTS_PER_EXPLICIT_LOCK", // #1912 phase 6f: the explicit lock's batch size
 ];
 
 /** The api.ts monolith's runtime surface, captured at #908 commit 1. */

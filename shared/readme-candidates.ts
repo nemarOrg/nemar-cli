@@ -9,7 +9,8 @@
  *
  * The format makes no difference to any of them: a `.rst` or `.txt` README is read as text like
  * the others. Enrichment, the reindex and the webhook's trigger list keep their own lists for now
- * (#1754), and the orchestrator's `update_readme` step picks a badge source by its own rule.
+ * (#1754), and the orchestrator's `update_readme` step picks a badge source by its own rule
+ * (`PUBLISH_README_ORDER` in `shared/standard-edits/readme.ts`).
  */
 
 /** The README forms BIDS allows, in the order the first present one is chosen. */

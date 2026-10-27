@@ -60,6 +60,17 @@ export interface PullState {
   mergeableStateAfterReview?: string;
   /** The head every read AFTER THE FIRST sees: a push that lands between two readers' reads. */
   headAfterFirstRead?: string;
+  /** The head branch's name; "add-subjects" unless a test says otherwise. */
+  headRef?: string;
+  /**
+   * The head repository's full name: the dataset's own unless a test says otherwise (a fork's), or
+   * null for a deleted fork, whose head GitHub names no repository for.
+   */
+  headRepo?: string | null;
+  /** The base repository's full name: the dataset's own unless a test says otherwise. */
+  baseRepo?: string;
+  /** The squash merge's commit, once merged (GitHub's `merge_commit_sha`); null before. */
+  mergeCommitSha?: string;
   /**
    * What every read made with the administrator's own token AFTER ITS FIRST answers instead: a
    * status (a GitHub that stops answering), a head (a push), a mergeable state (a check that turns
@@ -107,13 +118,81 @@ export interface GitHubStandin {
   commentStatus: number | null;
   /** When set, closing a pull request answers this status instead of closing it. */
   closeStatus: number | null;
+  /** When set, listing a repository's pull requests answers this status instead of the list. */
+  pullsListStatus: number | null;
+  /**
+   * What opening a pull request (`POST /repos/nemarDatasets/<id>/pulls`) answers, one entry per
+   * request, in order, before it answers normally: a status instead of the pull request, and with
+   * `applied` the pull request is opened all the same (an answer lost on the way back).
+   */
+  createPullFaults: Array<{ status: number; applied?: boolean }>;
+  /**
+   * The commit a branch of a dataset's repository names, for the pull request GitHub opens on it:
+   * a test reads its bare origin. Null, or unset, is a branch GitHub does not have (422).
+   */
+  resolveHead: ((dataset: string, ref: string) => Promise<string | null>) | null;
   /** The comments recorded, in order: `{ dataset, number, body, token }`. */
   comments: Array<{ dataset: string; number: number; body: string; token: string | null }>;
+  /**
+   * When true, a pull request's head is the commit its branch names NOW (`resolveHead`), on every
+   * read and at the merge, which GitHub refuses (409) when the `sha` it was sent is another: a push
+   * that lands between a reader's read and its merge. Off unless a suite turns it on.
+   */
+  liveHeads: boolean;
+  /**
+   * Makes the merge a merge PUT asks for (`dataset`, `number`, the request body): a squash commit
+   * on the bare origin's `main`, say. Returns the merge commit, or null to answer 405 instead.
+   */
+  onMerge:
+    | ((dataset: string, number: number, body: Record<string, unknown>) => Promise<string | null>)
+    | null;
+  /**
+   * Runs when a merge PUT arrives, before GitHub compares its `sha` with the head: a push that lands
+   * between the merge's last read of the pull request and the merge itself.
+   */
+  beforeMerge: ((dataset: string, number: number) => Promise<void>) | null;
+  /**
+   * Runs when a close (PATCH) arrives, before the pull request is closed: a push or a merge that
+   * lands between a reader's look and the close.
+   */
+  beforeClose: ((dataset: string, number: number) => Promise<void>) | null;
+  /** When true, a merge PUT is applied and then answered 502: the answer lost on the way back. */
+  lostMergeAnswers: boolean;
+  /** The commit a tag names (`GET .../commits/tags/<tag>`, asked as `vnd.github.sha`), or null. */
+  resolveTag: ((dataset: string, tag: string) => Promise<string | null>) | null;
+  /** GitHub's comparison word for `base...head` (`identical`, `ahead`, ...), or null for 404. */
+  compareCommits: ((dataset: string, base: string, head: string) => Promise<string | null>) | null;
+  /**
+   * The check runs of a commit (`GET .../commits/<sha>/check-runs`), keyed `<dataset>@<sha>`,
+   * filtered by the query's `check_name` and `app_id` as GitHub filters them: the Worker reads BIDS
+   * validation and `version-check` this way. None when a commit has no entry.
+   */
+  checkRuns: Record<
+    string,
+    Array<{ id: number; name: string; status: string; conclusion: string | null; app_id: number }>
+  >;
+  /**
+   * The commit statuses of a commit (`GET .../commits/<sha>/status`), keyed `<dataset>@<sha>`, as
+   * GitHub's combined status lists them, the latest of each context. None when a commit has no
+   * entry, which GitHub answers with an empty list and the combined state `pending`.
+   */
+  statuses: Record<string, Array<{ context: string; state: string }>>;
+  /**
+   * A check-runs or combined-status read answered with this HTTP status instead, keyed
+   * `<dataset>@<sha>/check-runs` or `<dataset>@<sha>/status`: GitHub failing that one read, an
+   * error-path fixture. None unless a test adds one.
+   */
+  readFaults: Record<string, number>;
   /**
    * When true, the review POST and the merge PUT are APPLIED and answered 200 with a body that is
    * not JSON: the case where a write happened and its answer cannot be read.
    */
   unreadableAnswers: boolean;
+  /**
+   * Tokens GitHub no longer takes: every request that carries one is answered 401, as an
+   * installation token past its hour is. Empty unless a test adds one.
+   */
+  expiredTokens: Set<string>;
   reset(): void;
   stop(): void;
 }
@@ -138,6 +217,9 @@ export function startGitHubStandin(): GitHubStandin {
     dispatchStatus: 204,
     users: {} as GitHubStandin["users"],
     reviewStatus: null as number | null,
+    pullsListStatus: null as number | null,
+    createPullFaults: [] as Array<{ status: number; applied?: boolean }>,
+    resolveHead: null as GitHubStandin["resolveHead"],
     reviewState: null as string | null,
     reviewCommit: null as string | null,
     userStatus: null as number | null,
@@ -147,7 +229,23 @@ export function startGitHubStandin(): GitHubStandin {
     closeStatus: null as number | null,
     comments: [] as GitHubStandin["comments"],
     unreadableAnswers: false,
+    liveHeads: false,
+    onMerge: null as GitHubStandin["onMerge"],
+    beforeMerge: null as GitHubStandin["beforeMerge"],
+    beforeClose: null as GitHubStandin["beforeClose"],
+    lostMergeAnswers: false,
+    resolveTag: null as GitHubStandin["resolveTag"],
+    compareCommits: null as GitHubStandin["compareCommits"],
+    checkRuns: {} as GitHubStandin["checkRuns"],
+    statuses: {} as GitHubStandin["statuses"],
+    readFaults: {} as GitHubStandin["readFaults"],
+    expiredTokens: new Set<string>(),
   };
+  /** The head a pull request has now: its branch's commit when heads are live. */
+  const headOf = async (dataset: string, p: PullState): Promise<string> =>
+    state.liveHeads && state.resolveHead
+      ? ((await state.resolveHead(dataset, p.headRef ?? "add-subjects")) ?? p.sha)
+      : p.sha;
   const reads: Record<string, number> = {};
   const adminReads: Record<string, number> = {};
 
@@ -158,6 +256,9 @@ export function startGitHubStandin(): GitHubStandin {
       const token = (req.headers.get("authorization") ?? "").replace(/^Bearer /, "") || null;
       const body = req.method === "GET" ? null : ((await req.json().catch(() => null)) as never);
       state.seen.push({ method: req.method, path: url.pathname, token, body });
+      if (token !== null && state.expiredTokens.has(token)) {
+        return Response.json({ message: "Bad credentials" }, { status: 401 });
+      }
 
       if (req.method === "POST" && url.pathname === "/graphql") {
         const after = (body as { variables?: { after?: string | null } } | null)?.variables?.after;
@@ -193,6 +294,73 @@ export function startGitHubStandin(): GitHubStandin {
           : Response.json({ message: "Bad credentials" }, { status: 401 });
       }
 
+      // The re-pull's release reads (a tag's commit, a comparison) when a suite answers them from
+      // its bare origin; ahead of the naming rule's comparison, which would answer otherwise.
+      const tag = url.pathname.match(/^\/repos\/nemarDatasets\/([^/]+)\/commits\/tags\/(.+)$/);
+      if (req.method === "GET" && tag && state.resolveTag) {
+        const sha = await state.resolveTag(tag[1] as string, decodeURIComponent(tag[2] as string));
+        if (!sha) return Response.json({ message: "No commit found" }, { status: 422 });
+        return req.headers.get("accept") === "application/vnd.github.sha"
+          ? new Response(sha, { status: 200 })
+          : Response.json({ sha });
+      }
+      const compare = url.pathname.match(
+        /^\/repos\/nemarDatasets\/([^/]+)\/compare\/([0-9a-f]{40})\.\.\.([0-9a-f]{40})$/,
+      );
+      if (req.method === "GET" && compare && state.compareCommits) {
+        const word = await state.compareCommits(
+          compare[1] as string,
+          compare[2] as string,
+          compare[3] as string,
+        );
+        return word
+          ? Response.json({ status: word })
+          : Response.json({ message: "Not Found" }, { status: 404 });
+      }
+      const runs = url.pathname.match(
+        /^\/repos\/nemarDatasets\/([^/]+)\/commits\/([0-9a-f]{40})\/check-runs$/,
+      );
+      if (req.method === "GET" && runs) {
+        const fault = state.readFaults[`${runs[1]}@${runs[2]}/check-runs`];
+        if (fault) return Response.json({ message: "Server Error" }, { status: fault });
+        const name = url.searchParams.get("check_name");
+        const app = url.searchParams.get("app_id");
+        const kept = (state.checkRuns[`${runs[1]}@${runs[2]}`] ?? []).filter(
+          (r) => (name === null || r.name === name) && (app === null || String(r.app_id) === app),
+        );
+        return Response.json({
+          total_count: kept.length,
+          check_runs: kept.map((r) => ({
+            id: r.id,
+            name: r.name,
+            status: r.status,
+            conclusion: r.conclusion,
+            head_sha: runs[2],
+            app: { id: r.app_id },
+          })),
+        });
+      }
+      const combined = url.pathname.match(
+        /^\/repos\/nemarDatasets\/([^/]+)\/commits\/([0-9a-f]{40})\/status$/,
+      );
+      if (req.method === "GET" && combined) {
+        const fault = state.readFaults[`${combined[1]}@${combined[2]}/status`];
+        if (fault) return Response.json({ message: "Server Error" }, { status: fault });
+        const list = state.statuses[`${combined[1]}@${combined[2]}`] ?? [];
+        // GitHub's combined state: `pending` with no status at all, as it answers then.
+        const word =
+          list.length === 0 || list.some((s) => s.state === "pending")
+            ? "pending"
+            : list.some((s) => s.state !== "success")
+              ? "failure"
+              : "success";
+        return Response.json({
+          state: word,
+          sha: combined[2],
+          total_count: list.length,
+          statuses: list.map((s, i) => ({ id: i + 1, context: s.context, state: s.state })),
+        });
+      }
       // The question the review's exemption asks once an account has matched (ADR 0107): an
       // administrator on every dataset, whoever is asked. A test that needs another answer says
       // so in the Worker's own suites (backend/test/pr-review-*.test.ts), where the table lives.
@@ -238,6 +406,90 @@ export function startGitHubStandin(): GitHubStandin {
         return Response.json({ id: state.comments.length, body: text }, { status: 201 });
       }
 
+      // The list the re-pull plan reads (ADR 0111): the open pull requests of one repository.
+      const list = url.pathname.match(/^\/repos\/nemarDatasets\/([^/]+)\/pulls$/);
+      if (req.method === "GET" && list) {
+        if (state.pullsListStatus !== null) {
+          return Response.json({ message: "Server Error" }, { status: state.pullsListStatus });
+        }
+        const wanted = url.searchParams.get("state") ?? "open";
+        // `head=<owner>:<branch>`, as GitHub filters it.
+        const head = url.searchParams.get("head");
+        return Response.json(
+          await Promise.all(
+            Object.entries(state.pulls)
+              .filter(
+                ([k, p]) =>
+                  k.startsWith(`${list[1]}#`) &&
+                  (wanted === "all" || (p.state ?? "open") === wanted) &&
+                  (head === null || head === `nemarDatasets:${p.headRef ?? "add-subjects"}`),
+              )
+              .map(async ([k, p]) => ({
+                number: Number(k.split("#")[1]),
+                state: p.state ?? "open",
+                head: {
+                  ref: p.headRef ?? "add-subjects",
+                  sha: await headOf(list[1] as string, p),
+                  repo:
+                    p.headRepo === null
+                      ? null
+                      : { full_name: p.headRepo ?? `nemarDatasets/${list[1]}` },
+                },
+                base: { ref: p.base ?? "main" },
+              })),
+          ),
+        );
+      }
+      // Opening a pull request: a head branch of the same repository, into `base`.
+      if (req.method === "POST" && list) {
+        const fault = state.createPullFaults.shift();
+        const b = (body ?? {}) as { title?: string; head?: string; base?: string; body?: string };
+        const open = async (): Promise<{ number: number; sha: string } | null> => {
+          const sha =
+            typeof b.head === "string" && state.resolveHead
+              ? await state.resolveHead(list[1] as string, b.head)
+              : null;
+          if (!sha) return null;
+          const taken = Object.keys(state.pulls)
+            .filter((k) => k.startsWith(`${list[1]}#`))
+            .map((k) => Number(k.split("#")[1]));
+          const number = Math.max(0, ...taken) + 1;
+          state.pulls[`${list[1]}#${number}`] = {
+            sha,
+            headRef: b.head as string,
+            base: b.base ?? "main",
+            title: b.title,
+            state: "open",
+          };
+          return { number, sha };
+        };
+        if (fault) {
+          if (fault.applied) await open();
+          return Response.json({ message: "Server Error" }, { status: fault.status });
+        }
+        const made = await open();
+        if (!made) {
+          return Response.json(
+            { message: "Validation Failed", errors: [{ field: "head", code: "invalid" }] },
+            { status: 422 },
+          );
+        }
+        return Response.json(
+          {
+            number: made.number,
+            state: "open",
+            title: b.title,
+            head: {
+              ref: b.head,
+              sha: made.sha,
+              repo: { full_name: `nemarDatasets/${list[1]}` },
+            },
+            base: { ref: b.base ?? "main" },
+          },
+          { status: 201 },
+        );
+      }
+
       const pull = url.pathname.match(/^\/repos\/nemarDatasets\/([^/]+)\/pulls\/(\d+)(\/[a-z]+)?$/);
       if (pull) {
         const key = `${pull[1]}#${pull[2]}`;
@@ -272,20 +524,30 @@ export function startGitHubStandin(): GitHubStandin {
               sha: STANDIN_BASE_SHA,
               repo: {
                 name: pull[1],
-                full_name: `nemarDatasets/${pull[1]}`,
+                full_name: p.baseRepo ?? `nemarDatasets/${pull[1]}`,
                 owner: { login: "nemarDatasets" },
               },
             },
+            merge_commit_sha: p.mergeCommitSha ?? null,
             head: {
               sha:
                 later?.sha ??
-                (p.headAfterFirstRead && reads[key] > 1 ? p.headAfterFirstRead : p.sha),
-              ref: "add-subjects",
-              repo: { full_name: `nemarDatasets/${pull[1]}`, owner: { login: "nemarDatasets" } },
+                (p.headAfterFirstRead && reads[key] > 1
+                  ? p.headAfterFirstRead
+                  : await headOf(pull[1] as string, p)),
+              ref: p.headRef ?? "add-subjects",
+              repo:
+                p.headRepo === null
+                  ? null
+                  : {
+                      full_name: p.headRepo ?? `nemarDatasets/${pull[1]}`,
+                      owner: { login: (p.headRepo ?? "nemarDatasets/").split("/")[0] },
+                    },
             },
           });
         }
         if (req.method === "PATCH" && !pull[3]) {
+          if (state.beforeClose) await state.beforeClose(pull[1] as string, Number(pull[2]));
           if (state.closeStatus !== null) {
             return Response.json({ message: "Validation Failed" }, { status: state.closeStatus });
           }
@@ -315,12 +577,35 @@ export function startGitHubStandin(): GitHubStandin {
         }
         if (req.method === "PUT" && pull[3] === "/merge") {
           if (state.unreadableAnswers) return new Response("<html>proxy</html>", { status: 200 });
+          if (state.beforeMerge) await state.beforeMerge(pull[1] as string, Number(pull[2]));
+          const sent = (body as { sha?: unknown } | null)?.sha;
+          if (
+            state.liveHeads &&
+            typeof sent === "string" &&
+            sent !== (await headOf(pull[1] as string, p))
+          ) {
+            // GitHub's answer when the head is not the `sha` the merge was sent with.
+            return Response.json(
+              { message: "Head branch was modified. Review and try the merge again." },
+              { status: 409 },
+            );
+          }
+          let mergeSha = "f".repeat(40);
+          if (state.mergeStatus === 200 && state.onMerge) {
+            const made = await state.onMerge(pull[1] as string, Number(pull[2]), body ?? {});
+            if (made === null) {
+              return Response.json({ message: "Pull Request is not mergeable" }, { status: 405 });
+            }
+            mergeSha = made;
+          }
           if (state.mergeStatus === 200) {
             p.merged = true;
             p.state = "closed";
+            p.mergeCommitSha = mergeSha;
+            if (state.lostMergeAnswers) return new Response("bad gateway", { status: 502 });
           }
           return state.mergeStatus === 200
-            ? Response.json({ merged: true, sha: "f".repeat(40) })
+            ? Response.json({ merged: true, sha: mergeSha })
             : Response.json(
                 { message: "Pull Request is not mergeable" },
                 { status: state.mergeStatus },
@@ -414,11 +699,80 @@ export function startGitHubStandin(): GitHubStandin {
     get comments() {
       return state.comments;
     },
+    get pullsListStatus() {
+      return state.pullsListStatus;
+    },
+    set pullsListStatus(v) {
+      state.pullsListStatus = v;
+    },
+    get createPullFaults() {
+      return state.createPullFaults;
+    },
+    get resolveHead() {
+      return state.resolveHead;
+    },
+    set resolveHead(v) {
+      state.resolveHead = v;
+    },
     get unreadableAnswers() {
       return state.unreadableAnswers;
     },
+    get liveHeads() {
+      return state.liveHeads;
+    },
+    set liveHeads(v) {
+      state.liveHeads = v;
+    },
+    get onMerge() {
+      return state.onMerge;
+    },
+    get beforeMerge() {
+      return state.beforeMerge;
+    },
+    set beforeMerge(v) {
+      state.beforeMerge = v;
+    },
+    get beforeClose() {
+      return state.beforeClose;
+    },
+    set beforeClose(v) {
+      state.beforeClose = v;
+    },
+    get lostMergeAnswers() {
+      return state.lostMergeAnswers;
+    },
+    set lostMergeAnswers(v) {
+      state.lostMergeAnswers = v;
+    },
+    set onMerge(v) {
+      state.onMerge = v;
+    },
+    get resolveTag() {
+      return state.resolveTag;
+    },
+    set resolveTag(v) {
+      state.resolveTag = v;
+    },
+    get compareCommits() {
+      return state.compareCommits;
+    },
+    set compareCommits(v) {
+      state.compareCommits = v;
+    },
     set unreadableAnswers(v) {
       state.unreadableAnswers = v;
+    },
+    get expiredTokens() {
+      return state.expiredTokens;
+    },
+    get checkRuns() {
+      return state.checkRuns;
+    },
+    get statuses() {
+      return state.statuses;
+    },
+    get readFaults() {
+      return state.readFaults;
     },
     reset() {
       state.seen.length = 0;
@@ -432,10 +786,19 @@ export function startGitHubStandin(): GitHubStandin {
       state.userMessage = "Server Error";
       state.mergeStatus = 200;
       state.unreadableAnswers = false;
+      state.beforeMerge = null;
+      state.beforeClose = null;
+      state.lostMergeAnswers = false;
       state.commentStatus = null;
       state.closeStatus = null;
+      state.pullsListStatus = null;
+      state.createPullFaults.length = 0;
       state.comments.length = 0;
+      state.expiredTokens.clear();
       for (const k of Object.keys(state.pulls)) delete state.pulls[k];
+      for (const k of Object.keys(state.checkRuns)) delete state.checkRuns[k];
+      for (const k of Object.keys(state.statuses)) delete state.statuses[k];
+      for (const k of Object.keys(state.readFaults)) delete state.readFaults[k];
       for (const k of Object.keys(state.naming)) delete state.naming[k];
       for (const k of Object.keys(state.users)) delete state.users[k];
       for (const k of Object.keys(reads)) delete reads[k];

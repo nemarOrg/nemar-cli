@@ -20,6 +20,8 @@
  * and {@link scrubEdfHeader} never calls it: it sets the acquisition dates of a NEW recording to
  * 1 January of their year (ADR 0091), for the importer and the upload, and ADR 0085's correction of
  * published data does not use it. {@link normalizeScansTableDates} is its scans-table counterpart.
+ * {@link importHeaderPatch} is the importer's composite of the two (scrub, then dates), with both
+ * proofs, as a result rather than a refusal.
  *
  * {@link blankIdentifierJsonKeys} is the JSON half, for a caller that edits one document at a time
  * (the importer, ADR 0089): the rule ADR 0085's history rewrite applies to every commit
@@ -27,6 +29,7 @@
  */
 
 import {
+  DATE_KINDS,
   EDF_HEADER_BYTES,
   type Finding,
   type FindingKind,
@@ -304,6 +307,79 @@ export function verifyDateNormalization(before: Uint8Array, after: Uint8Array): 
     reasons.push("other-findings-changed");
   }
   return { ok: reasons.length === 0, reasons };
+}
+
+/** What the importer's patch does to one header ({@link importHeaderPatch}). */
+export interface ImportHeaderChange {
+  /** `scrubEdfHeader` rewrites an identification field. */
+  scrub: boolean;
+  /** `normalizeEdfDates` sets an acquisition date, after the scrub (first import only). */
+  dates: boolean;
+  /** The header as the patch would leave it still holds an acquisition date (a layout the rule leaves). */
+  datesLeft: boolean;
+  /** The date rule faulted or could not prove its result, so the dates were left (never a refusal). */
+  datesUnproven: boolean;
+}
+
+/**
+ * The outcome of {@link importHeaderPatch}. `ok: true` carries the header as the import leaves it,
+ * which equals the input's first {@link EDF_HEADER_BYTES} bytes when `change.scrub` and
+ * `change.dates` are both false. `not-edf` is a header the scrub does not read as EDF or BDF (or
+ * one too short to be one). `scrub-unverified` is a scrub `verifyScrub` could not prove, which
+ * the importer refuses.
+ */
+export type ImportHeaderPatch =
+  | { ok: true; header: Uint8Array; change: ImportHeaderChange }
+  | { ok: false; reason: "not-edf" | "scrub-unverified" };
+
+/**
+ * The importer's patch of one header and its proof (ADR 0089): the identifier scrub (ADR 0085's
+ * rule, proven by {@link verifyScrub}), then, when `dates` is set, the date rule on the scrubbed
+ * header (ADR 0091, proven by {@link verifyDateNormalization}). The scrub may rewrite all of bytes
+ * 8..168, and the slot date lies inside them, so the order matters: the date rule reads the
+ * scrubbed header, and each proof is of its own step, so the composite differs from the original
+ * only where one of them may write. A date rule that faults or cannot be proven leaves the dates
+ * (ADR 0090: a date never gates).
+ *
+ * It returns its outcome rather than throwing a refusal, so a caller that only needs to know what
+ * the import would do to these bytes (the upstream re-pull's planner, ADR 0111) can ask without
+ * the importer's error type. `patchHeader` in `src/lib/import-scrub.ts` turns `scrub-unverified`
+ * into the importer's refusal. An error the scrub throws other than {@link ScrubRefused} is a fault
+ * and propagates.
+ */
+export function importHeaderPatch(before: Uint8Array, dates: boolean): ImportHeaderPatch {
+  let scrubbed: ScrubResult;
+  try {
+    scrubbed = scrubEdfHeader(before);
+  } catch (err) {
+    if (err instanceof ScrubRefused) return { ok: false, reason: "not-edf" };
+    throw err;
+  }
+  if (scrubbed.changed && !verifyScrub(before, scrubbed.header).ok) {
+    return { ok: false, reason: "scrub-unverified" };
+  }
+  let header = scrubbed.header;
+  let datesChanged = false;
+  let datesUnproven = false;
+  if (dates) {
+    try {
+      const normalized = normalizeEdfDates(scrubbed.header);
+      if (normalized.changed && verifyDateNormalization(scrubbed.header, normalized.header).ok) {
+        header = normalized.header;
+        datesChanged = true;
+      } else if (normalized.changed) {
+        datesUnproven = true;
+      }
+    } catch {
+      datesUnproven = true;
+    }
+  }
+  const datesLeft = scanEdfHeader(header).some((f) => DATE_KINDS.has(f.kind));
+  return {
+    ok: true,
+    header,
+    change: { scrub: scrubbed.changed, dates: datesChanged, datesLeft, datesUnproven },
+  };
 }
 
 /** What {@link normalizeScansTableDates} did. Counts and a fixed word; never a value. */

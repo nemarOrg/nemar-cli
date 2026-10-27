@@ -51,6 +51,7 @@ import {
   neurobagelVerificationState,
 } from "../../shared/contract/neurobagel-admin.js";
 import { weeklyAttention } from "../../shared/contract/weekly-attention.js";
+import { isOpenNeuroTag } from "../../shared/openneuro-tag.js";
 import {
   checkedAfterDatasetId,
   checkedDatasetId,
@@ -107,6 +108,7 @@ import {
   type ReviewRulesetOutcome,
   type SignalDefaultsSweepBatchResponse,
   type SummaryVersionCoverage,
+  type UpstreamBackfillResponse,
   type UserListItem,
   type WeeklySummaryResponse,
   type ZarrFidelitySweepBatchResponse,
@@ -181,6 +183,7 @@ import {
   updateDoi,
   updateEmailPreferences,
   uploadTierOf,
+  upstreamBackfill,
   validateCi,
   verifyImport,
   verifyUserById,
@@ -243,6 +246,8 @@ import {
 import { mailCommand } from "./admin-mail.js";
 import { prReviewsCommand } from "./admin-pr-reviews.js";
 import { publishCommand } from "./admin-publish.js";
+import { repullCommand } from "./admin-repull.js";
+import { upstreamStatusCommand } from "./admin-upstream-status.js";
 
 /**
  * Fetch a file from a GitHub repo via the gh CLI, returning its decoded content.
@@ -4037,6 +4042,38 @@ export function chunkDatasetIds(
 }
 
 /**
+ * The `--field` arguments of one `gh workflow run onboard-openneuro.yml`. `openneuro_tag` only when
+ * a tag is given: a workflow older than the tag pin has no such input and GitHub answers 422 for an
+ * unknown one, so a dispatch without `--tag` keeps its old shape. Exported for the test.
+ */
+export function openNeuroDispatchFields(chunk: string[], tag?: string): string[] {
+  return [
+    "--field",
+    `openneuro_ids=${chunk.join(",")}`,
+    ...(tag !== undefined ? ["--field", `openneuro_tag=${tag}`] : []),
+  ];
+}
+
+/**
+ * Why `--tag` cannot be used with these arguments, or null when it can. A tag names one dataset's
+ * snapshot, so it cannot apply to a batch, and only prepare clones: copy and finalize read what
+ * prepare staged. Exported for the test.
+ */
+export function importTagOptionError(
+  tag: string | undefined,
+  ids: string[],
+  phase: string | undefined,
+): string | null {
+  if (tag === undefined) return null;
+  if (!isOpenNeuroTag(tag)) {
+    return `Invalid --tag "${tag}". Expected an OpenNeuro snapshot tag such as 1.0.1.`;
+  }
+  if (ids.length !== 1) return "--tag applies to a single dataset ID";
+  if (phase !== undefined && phase !== "prepare") return "--tag is only valid with --phase prepare";
+  return null;
+}
+
+/**
  * Dispatch the onboard-openneuro.yml workflow (nemarDatasets/.github) for a
  * batch of OpenNeuro `ds######` ids -- the prepare/copy/finalize matrix
  * hardened in epic #967 Phases 1-3. Shared by `import-openneuro`'s default
@@ -4051,6 +4088,7 @@ export function chunkDatasetIds(
  */
 async function dispatchOpenNeuroImportWorkflow(
   dsIds: string[],
+  tag?: string,
 ): Promise<{ ok: true } | { ok: false; error: string }> {
   const { runCommand } = await import("../lib/git-annex/run-command.js");
   const chunks = chunkDatasetIds(dsIds);
@@ -4070,8 +4108,7 @@ async function dispatchOpenNeuroImportWorkflow(
       "onboard-openneuro.yml",
       "--repo",
       "nemarDatasets/.github",
-      "--field",
-      `openneuro_ids=${chunk.join(",")}`,
+      ...openNeuroDispatchFields(chunk, tag),
     ]);
     if (result.exitCode !== 0) {
       return {
@@ -4284,6 +4321,10 @@ adminCommand
     "--screen-wait-minutes <n>",
     "How long finalize waits for the identifier screen's verdict before leaving the publication for an admin (default: what the finalize job's 90-minute timeout leaves, at most 45; ADR 0089).",
   )
+  .option(
+    "--tag <tag>",
+    "Import this upstream snapshot tag (e.g. 1.0.1) instead of OpenNeuro's latest. One dataset only; with --phase, prepare only. Without it, prepare asks OpenNeuro for the latest tag; it never imports the mirror's default HEAD (ADR 0111). A tag not yet on the GitHub mirror is refused as a mirror lag. When dispatching the workflow, nemarDatasets/.github must carry the onboard-openneuro.yml that takes openneuro_tag (GitHub answers 422 otherwise).",
+  )
   .action(
     async (
       openneuroIds: string,
@@ -4296,6 +4337,7 @@ adminCommand
         shard?: string;
         normalizeMaxGb?: string;
         screenWaitMinutes?: string;
+        tag?: string;
       },
     ) => {
       if (!requireAuth()) return;
@@ -4304,6 +4346,12 @@ adminCommand
         .split(",")
         .map((id) => id.trim())
         .filter(Boolean);
+
+      const tagError = importTagOptionError(options.tag, ids, options.phase);
+      if (tagError !== null) {
+        console.error(chalk.red(tagError));
+        process.exit(1);
+      }
 
       // Validate all IDs
       for (const id of ids) {
@@ -4381,6 +4429,7 @@ adminCommand
           persistStaging: true,
           normalizeMaxBytes,
           screenWaitMs,
+          tag: options.tag,
         };
         try {
           if (options.phase === "prepare") {
@@ -4412,6 +4461,7 @@ adminCommand
             trustUpstream: options.trustUpstream,
             normalizeMaxBytes,
             screenWaitMs,
+            tag: options.tag,
           });
         } catch (error) {
           const msg = error instanceof Error ? error.message : String(error);
@@ -4423,9 +4473,13 @@ adminCommand
 
       // Default: dispatch GitHub Actions workflow on nemarDatasets/.github
       const idsStr = ids.join(",");
-      console.log(chalk.cyan(`\nDispatching OpenNeuro import workflow for: ${idsStr}\n`));
+      console.log(
+        chalk.cyan(
+          `\nDispatching OpenNeuro import workflow for: ${idsStr}${options.tag !== undefined ? ` at upstream tag ${options.tag}` : ""}\n`,
+        ),
+      );
 
-      const dispatch = await dispatchOpenNeuroImportWorkflow(ids);
+      const dispatch = await dispatchOpenNeuroImportWorkflow(ids, options.tag);
       if (!dispatch.ok) {
         console.error(chalk.red(`Failed to dispatch workflow: ${dispatch.error}`));
         console.error(
@@ -5141,6 +5195,10 @@ exemplarCommand
   .option("--fleet-file <path>", "Path to the fleet JSON (default: scripts/exemplar-fleet.json)")
   .option("--publish", "Request and approve publication after data lands (mints a sandbox DOI)")
   .option("--include-derived", "Also copy zarr/, archives/, and records.json derived artifacts")
+  .option(
+    "--mirror <ds>",
+    "A mirror rehearsal fixture of this OpenNeuro dataset (from its on mirror): the row says source openneuro, so an upstream re-pull can be rehearsed on staging",
+  )
   .action(
     async (
       xxId: string | undefined,
@@ -5150,6 +5208,7 @@ exemplarCommand
         fleetFile?: string;
         publish?: boolean;
         includeDerived?: boolean;
+        mirror?: string;
       },
     ) => {
       if (!requireAuth()) return;
@@ -5159,8 +5218,8 @@ exemplarCommand
       const cloneOpts = { publish: options.publish, includeDerived: options.includeDerived };
 
       if (options.all) {
-        if (xxId || options.source) {
-          console.error(chalk.red("--all cannot be combined with an xx-id or --source"));
+        if (xxId || options.source || options.mirror) {
+          console.error(chalk.red("--all cannot be combined with an xx-id, --source or --mirror"));
           process.exit(1);
         }
         let entries: Awaited<ReturnType<typeof loadExemplarFleet>>;
@@ -5231,12 +5290,21 @@ exemplarCommand
         console.error(chalk.red(`Invalid source id "${sourceId}". Expected an nm/on dataset id.`));
         process.exit(1);
       }
+      if (options.mirror !== undefined) {
+        const { mirrorProblem } = await import("../lib/exemplar-clone.js");
+        const problem = mirrorProblem(sourceId, options.mirror);
+        if (problem) {
+          console.error(chalk.red(problem));
+          process.exit(1);
+        }
+      }
 
       try {
         await cloneExemplar({
           xxId,
           sourceId,
           ...cloneOpts,
+          ...(options.mirror !== undefined ? { mirror: options.mirror } : {}),
         });
       } catch (error) {
         console.error(chalk.red(`\nExemplar clone failed: ${errorDetail(error)}`));
@@ -7728,6 +7796,171 @@ zarrFidelitySweepCommand
 adminCommand.addCommand(zarrFidelitySweepCommand);
 
 // ============================================================================
+// Upstream snapshot backfill (epic #1046 phase 2, #1908; ADR 0111)
+// ============================================================================
+
+const BACKFILL_PAUSE_MS = 250;
+
+const upstreamBackfillCommand = new Command("upstream-backfill").description(
+  "Record which upstream snapshot each mirrored version came from (dry run unless --execute)",
+);
+
+upstreamBackfillCommand
+  .option("--execute", "Write the results; without it nothing is recorded")
+  .option("--limit <n>", "Version rows per batch (server clamps to [1,50])", "25")
+  .option("--after <cursor>", "Resume after this key, e.g. on000123@1.0.0 (skips a stuck row)")
+  .option("--max-batches <n>", "Stop after this many batches", "200")
+  .option("--json", "Output one JSON summary instead of progress lines")
+  .action(
+    async (options: {
+      execute?: boolean;
+      limit?: string;
+      after?: string;
+      maxBatches?: string;
+      json?: boolean;
+    }) => {
+      if (!requireAuth()) return;
+
+      const limit = Number.parseInt(options.limit ?? "25", 10) || 25;
+      const maxBatches = Number.parseInt(options.maxBatches ?? "200", 10) || 200;
+      const execute = options.execute === true;
+      const say = (line: string) => {
+        if (!options.json) console.log(line);
+      };
+      if (!execute) say(chalk.yellow("Dry run: nothing is written. Pass --execute to record."));
+      say(
+        chalk.dim(
+          "A recorded 'unknown' is final: it is never examined again. A read that fails or whose 404 a control read does not confirm is not recorded.",
+        ),
+      );
+
+      const total = {
+        batches: 0,
+        scanned: 0,
+        recorded: { doi: 0, unknown: 0 },
+        not_examined: 0,
+        unparseable: 0,
+        absent: 0,
+        skipped_existing: 0,
+      };
+      const errors: UpstreamBackfillResponse["errors"] = [];
+      let cursor = options.after;
+      let last: UpstreamBackfillResponse | null = null;
+      let failure: string | null = null;
+      let suspectCredential = false;
+
+      for (let batch = 0; batch < maxBatches; batch++) {
+        let res: UpstreamBackfillResponse;
+        try {
+          res = await upstreamBackfill({ execute, limit, after: cursor });
+        } catch (err) {
+          failure = errorDetail(err);
+          break;
+        }
+        last = res;
+        total.batches++;
+        total.scanned += res.scanned;
+        total.recorded.doi += res.recorded.doi;
+        total.recorded.unknown += res.recorded.unknown;
+        total.not_examined += res.not_examined;
+        total.unparseable += res.unparseable;
+        total.absent += res.absent;
+        total.skipped_existing += res.skipped_existing;
+        errors.push(...res.errors);
+        say(
+          `${chalk.cyan(`batch ${total.batches}`)}  scanned=${res.scanned} ${execute ? "recorded" : "would record"} doi=${res.recorded.doi} unknown=${res.recorded.unknown}  not_examined=${res.not_examined}  remaining=${res.remaining}`,
+        );
+        for (const sample of res.unknown_samples) {
+          say(
+            `    ${chalk.dim("unknown")} ${sample.dataset_id}@${sample.version}: ${sample.reason}`,
+          );
+        }
+        for (const e of res.errors) {
+          say(
+            `    ${chalk.red("error")}   ${e.dataset_id}@${e.version}${e.kind === "needs_admin" ? " [needs admin]" : ""}: ${e.error}`,
+          );
+        }
+        if (!res.ok) {
+          suspectCredential = res.suspect_credential;
+          failure = res.error ?? "the batch failed";
+          cursor = res.next_cursor ?? cursor;
+          break;
+        }
+        cursor = res.next_cursor ?? undefined;
+        if (!res.next_cursor) break;
+        await new Promise((resolve) => setTimeout(resolve, BACKFILL_PAUSE_MS));
+      }
+
+      const done = failure === null && last !== null && last.next_cursor === null;
+      const resumeCursor = done ? null : (cursor ?? null);
+
+      if (options.json) {
+        console.log(
+          JSON.stringify(
+            {
+              execute,
+              done,
+              failure,
+              suspect_credential: suspectCredential,
+              ...total,
+              errors,
+              next_cursor: resumeCursor,
+              counts: last?.counts ?? null,
+            },
+            null,
+            2,
+          ),
+        );
+      } else {
+        if (failure) console.error(chalk.red(`Stopped: ${failure}`));
+        if (!done && !failure) {
+          console.log(
+            chalk.yellow(`Stopped at --max-batches ${maxBatches}; the pass is not done.`),
+          );
+        }
+        if (resumeCursor) console.log(`Resume with: --after ${resumeCursor}`);
+        if (done && total.not_examined > 0) {
+          // An error without a kind comes from an older backend; a rerun is the safe advice.
+          const needsAdmin = errors.filter((e) => e.kind === "needs_admin");
+          const transient = total.not_examined - needsAdmin.length;
+          if (transient > 0) {
+            console.log(
+              chalk.yellow(
+                `${transient} row(s) were not examined after a transient error: rerun without --after to try them again.`,
+              ),
+            );
+          }
+          if (needsAdmin.length > 0) {
+            console.log(
+              chalk.yellow(
+                `${needsAdmin.length} row(s) have no description at the tag or at main (or the default branch is not main): a rerun will not fix them and they need an admin look. They are the 'error' lines above (${needsAdmin
+                  .slice(0, 3)
+                  .map((e) => `${e.dataset_id}@${e.version}`)
+                  .join(", ")}${needsAdmin.length > 3 ? ", ..." : ""}).`,
+              ),
+            );
+          }
+        }
+        if (last) {
+          console.log(
+            chalk.cyan(
+              `On versions now: doi=${last.counts.doi} lineage=${last.counts.lineage} unknown=${last.counts.unknown} not_examined=${last.counts.not_examined}`,
+            ),
+          );
+        }
+        if (!execute) console.log(chalk.yellow("Dry run, pass --execute to record."));
+      }
+
+      // Non-zero on any error, any failed batch, and any pass that did not finish, so a
+      // caller never reads a partial or uncertain backfill as success.
+      if (failure !== null || errors.length > 0 || !done) process.exit(1);
+    },
+  );
+
+adminCommand.addCommand(upstreamBackfillCommand);
+adminCommand.addCommand(upstreamStatusCommand);
+
+// ============================================================================
 // Anonymity verification sweep (issue #1409, epic #1406)
 // ============================================================================
 
@@ -9517,6 +9750,51 @@ importWeeklyCommand
           `closed_this_week=${weeklyCount(f.issuesClosed)} relabelled=${weeklyCount(f.issuesRelabelled)}`,
       ),
     );
+    // Epic #1046 phase 4b: the upstream freshness pass, as counts. Absent or null is unknown.
+    if (f.upstream == null) {
+      console.log(chalk.cyan(`upstream=${chalk.yellow("unknown")}`));
+    } else {
+      const u = f.upstream.counts.states;
+      const partial = f.upstream.truncated
+        ? ` ${chalk.yellow("(did not reach every mirror)")}`
+        : "";
+      const line =
+        `upstream: stale=${weeklyCount(f.upstream.counts.stale)} current=${weeklyCount(u.current)} ` +
+        `anomaly=${weeklyCount(u.anomaly)} unknown=${weeklyCount(u.unknown)} unchecked=${weeklyCount(u.unchecked)}`;
+      console.log(chalk.cyan(`${line}${partial}`));
+    }
+    // Epic #1046 phase 7: the upstream re-pulls' week, as the report counts it. Absent or null is
+    // unknown; the reasons to look arrive below with the rest, from the shared rule.
+    if (f.repulls == null) {
+      console.log(chalk.cyan(`repulls=${chalk.yellow("unknown")}`));
+    } else {
+      const r = f.repulls;
+      const sw = r.switches;
+      const switches = sw.auto_repull_merge_enabled
+        ? "open+merge"
+        : sw.auto_repull_enabled
+          ? "open"
+          : "off";
+      console.log(
+        chalk.cyan(
+          `repulls: switches=${switches} dispatched=${weeklyCount(r.dispatches.sent)} ` +
+            `opened=${weeklyCount(r.dispatches.by_status.opened)} ` +
+            `refused=${weeklyCount(r.dispatches.by_status.refused)} ` +
+            `failed=${weeklyCount(r.dispatches.by_status.failed)} ` +
+            `unreported=${weeklyCount(r.dispatches.by_status.unreported)} ` +
+            `not_accepted=${weeklyCount(r.dispatches.by_status.dispatch_failed)}`,
+        ),
+      );
+      console.log(
+        chalk.cyan(
+          `repulls: open=${weeklyCount(r.open_automatic.total)} held=${weeklyCount(r.open_automatic.held)} ` +
+            `claims_held=${weeklyCount(r.held_claims)} ended_failed=${weeklyCount(r.ended_failed)} ` +
+            `merged_worker=${weeklyCount(r.merged.worker)} merged_admin=${weeklyCount(r.merged.administrator)} ` +
+            `merged_outside=${weeklyCount(r.merged.outside_tool)} ` +
+            `merged_unattributed=${weeklyCount(r.merged.unattributed)}`,
+        ),
+      );
+    }
 
     if (f.failuresByCause !== null) {
       const nonZero = Object.entries(f.failuresByCause).filter(([, n]) => n > 0);
@@ -10217,4 +10495,5 @@ neurobagelCommand
 
 adminCommand.addCommand(neurobagelCommand);
 adminCommand.addCommand(prReviewsCommand);
+adminCommand.addCommand(repullCommand);
 adminCommand.addCommand(mailCommand);

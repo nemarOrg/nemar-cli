@@ -412,6 +412,40 @@ export async function catBatch(
   }
 }
 
+/**
+ * {@link readObjects} through a {@link GitRunner}: one `git cat-file --batch`, its answer held
+ * whole and sliced by the byte counts its headers give. Small objects only (location logs).
+ */
+async function readObjectsVia(
+  run: GitRunner,
+  repo: string,
+  specs: string[],
+): Promise<(Buffer | null)[]> {
+  if (specs.length === 0) return [];
+  const r = await run(repo, ["cat-file", "--batch"], `${specs.join("\n")}\n`);
+  if (r.exitCode !== 0) throw new GitScrubError("git-command-failed", "git cat-file", r.stderr);
+  const out: (Buffer | null)[] = [];
+  let cursor = 0;
+  for (const _spec of specs) {
+    const newline = r.stdout.indexOf(0x0a, cursor);
+    if (newline < 0) throw new GitScrubError("git-command-failed", "git cat-file");
+    const tokens = r.stdout.subarray(cursor, newline).toString("utf8").split(" ");
+    const last = tokens[tokens.length - 1];
+    if (last === "missing" || last === "ambiguous") {
+      out.push(null);
+      cursor = newline + 1;
+      continue;
+    }
+    const size = Number(tokens[2]);
+    if (!Number.isFinite(size) || size < 0)
+      throw new GitScrubError("git-command-failed", "git cat-file");
+    const start = newline + 1;
+    out.push(Buffer.from(r.stdout.subarray(start, start + size)));
+    cursor = start + size + 1;
+  }
+  return out;
+}
+
 /** The whole content of each spec, or null for a missing one. Small objects only. */
 async function readObjects(repo: string, specs: string[]): Promise<(Buffer | null)[]> {
   const parts: Buffer[][] = specs.map(() => []);
@@ -1342,17 +1376,31 @@ export async function verifyRewrite(opts: VerifyOptions): Promise<VerifyResult> 
 }
 
 /**
- * Whether the lines a commit appended to the ledger are all the importer's own `import-scrubbed`
- * line. The importer commits that line in the SAME commit as the files it scrubbed (ADR 0089), so a
- * dataset imported that way would otherwise fail `ledger-commit-not-alone` for good. Anything else
- * (a line that is not an append, one of another action, one that does not parse) is not that.
- *
- * What this does NOT prove: that the other files in the commit are the importer's. Nothing in the
- * repository tells the importer's commit from one made by hand with the same line, so the bound is
- * on what the commit may do to the LEDGER (append `import-scrubbed` lines, edit nothing before
- * them); the lines themselves are validated for this dataset at every head tip (`ledger-invalid`).
+ * A re-pull commit's two trailers (ADR 0111, decision 2): the snapshot it pulled and the plan.
+ * Exported so the merge that lands N.0.0 checks the squash message it sends against the very
+ * patterns this proof reads it with (`src/lib/repull/trailers.ts`).
  */
-async function addsOnlyImportLines(repo: string, sha: string): Promise<boolean> {
+export const UPSTREAM_SNAPSHOT_TRAILER = /^Upstream-Snapshot: ds\d{6}@[0-9A-Za-z][0-9A-Za-z._-]*$/m;
+export const REPULL_PLAN_TRAILER = /^Repull-Plan: sha256:[0-9a-f]{64}$/m;
+
+/**
+ * Whether a commit that touches the ledger and other files is a scrub's own commit: every line it
+ * adds to the ledger is a scrub's (`import-scrubbed` from the importer, ADR 0089, or
+ * `repull-scrubbed` from an upstream re-pull's delta scrub, ADR 0111), it edits nothing before
+ * them, and a commit that adds a `repull-scrubbed` line carries the re-pull commit's
+ * `Upstream-Snapshot:` and `Repull-Plan:` trailers. Each scrub commits its line in the SAME
+ * commit as the files it scrubbed, so a dataset imported or re-pulled that way would otherwise
+ * fail `ledger-commit-not-alone` for good. Anything else (a line that is not an append, one of
+ * another action, one that does not parse, a re-pull line without both trailers) is not that.
+ *
+ * What this does NOT prove: that the other files in the commit are the scrub's. Nothing in the
+ * repository tells the scrub's commit from one made by hand with the same line and trailers, so
+ * the bound is on what the commit may do to the LEDGER (append scrub lines, edit nothing before
+ * them) and on what it must say of itself; the words cannot be typed at the ledger's command
+ * line (`ledger-cli.ts`), and the lines themselves are validated for this dataset at every head
+ * tip (`ledger-invalid`).
+ */
+async function isScrubLedgerCommit(repo: string, sha: string): Promise<boolean> {
   const lines = async (rev: string): Promise<string[] | undefined> => {
     const r = await gitRaw(repo, ["cat-file", "blob", `${rev}:${LEDGER_PATH}`]);
     if (r.exitCode !== 0) return undefined;
@@ -1365,19 +1413,23 @@ async function addsOnlyImportLines(repo: string, sha: string): Promise<boolean> 
   // A first commit, or a parent with no ledger, appends everything.
   const before = (await lines(`${sha}^`)) ?? [];
   if (!now || now.length <= before.length || before.some((l, i) => l !== now[i])) return false;
+  let actions: unknown[];
   try {
-    return now.slice(before.length).every((l) => {
-      const entry = JSON.parse(l) as { action?: unknown };
-      return entry.action === "import-scrubbed";
-    });
+    actions = now.slice(before.length).map((l) => (JSON.parse(l) as { action?: unknown }).action);
   } catch {
     return false;
   }
+  if (!actions.every((a) => a === "import-scrubbed" || a === "repull-scrubbed")) return false;
+  if (!actions.includes("repull-scrubbed")) return true;
+  const trailers = await gitRaw(repo, ["show", "-s", "--format=%(trailers:only,unfold)", sha]);
+  if (trailers.exitCode !== 0) return false;
+  const text = trailers.stdout.toString("utf8");
+  return UPSTREAM_SNAPSHOT_TRAILER.test(text) && REPULL_PLAN_TRAILER.test(text);
 }
 
 /**
  * The commits that touch {@link LEDGER_PATH}: how many there are, how many touch anything else
- * too (the importer's own commit excepted, see {@link addsOnlyImportLines}), and at how many head
+ * too (a scrub's own commit excepted, see {@link isScrubLedgerCommit}), and at how many head
  * tips the ledger is not a valid ledger of `dataset`.
  */
 async function ledgerChecks(
@@ -1400,7 +1452,7 @@ async function ledgerChecks(
     const paths = rest.filter((p) => p !== "");
     if (!paths.includes(LEDGER_PATH)) continue;
     commits++;
-    if (paths.some((p) => p !== LEDGER_PATH) && !(await addsOnlyImportLines(repo, sha))) {
+    if (paths.some((p) => p !== LEDGER_PATH) && !(await isScrubLedgerCommit(repo, sha))) {
       notAlone++;
     }
   }
@@ -1621,8 +1673,128 @@ async function whereisHolders(repo: string, keys: string[]): Promise<Map<string,
   return out;
 }
 
-function presentIn(log: string): Set<string> {
+/** The uuids whose newest line in a location log's text says present (`1`). */
+export function presentIn(log: string): Set<string> {
   return new Set([...newestStatuses(log)].filter(([, status]) => status === "1").map(([u]) => u));
+}
+
+/**
+ * git-annex's `keyFile`: the name a key's logs are stored under on the git-annex branch. A key
+ * holding `&`, `%`, `:` or `/` (a URL key, for one) is escaped so the tree stays flat and the
+ * mapping one to one; any other key is its own name. The hash directory is still computed from
+ * the key itself ({@link hashDirLower}).
+ */
+export function annexKeyFile(key: string): string {
+  if (!/[&%:/]/.test(key)) return key;
+  const escapes: Record<string, string> = { "&": "&a", "%": "&s", ":": "&c", "/": "%" };
+  return key.replace(/[&%:/]/g, (c) => escapes[c] as string);
+}
+
+/** How many paths one `ls-tree` names: far under any argv limit, few processes for a large dataset. */
+const LS_TREE_BATCH = 500;
+
+/**
+ * How {@link readLocationLogsAt} runs git: `git -C repo args`, binary-safe, never throwing on a
+ * non-zero exit. {@link gitRaw} by default; the re-pull planner passes its read-only guard.
+ */
+export type GitRunner = (
+  repo: string,
+  args: string[],
+  stdin?: string | Uint8Array,
+) => Promise<GitResult>;
+
+/** Each `<mode> <type> <oid>\t<path>` entry of an `ls-tree -z` listing, by path. */
+async function treeEntries(
+  repo: string,
+  commit: string,
+  paths: string[],
+  run: GitRunner = gitRaw,
+): Promise<Map<string, { type: string; oid: string }>> {
+  const out = new Map<string, { type: string; oid: string }>();
+  for (let i = 0; i < paths.length; i += LS_TREE_BATCH) {
+    // ls-tree matches its paths literally (it turns wildcards off), and a log path starts with
+    // its hash directory, never `:`, so no pathspec magic applies to a key's file name.
+    const r = await run(repo, [
+      "ls-tree",
+      "-z",
+      "--full-tree",
+      commit,
+      "--",
+      ...paths.slice(i, i + LS_TREE_BATCH),
+    ]);
+    if (r.exitCode !== 0) throw new GitScrubError("git-command-failed", "git ls-tree", r.stderr);
+    for (const entry of r.stdout.toString("utf8").split("\0")) {
+      const m = /^[0-7]{6} (\S+) ([0-9a-f]{40}(?:[0-9a-f]{24})?)\t([\s\S]+)$/.exec(entry);
+      if (m) out.set(m[3] as string, { type: m[1] as string, oid: m[2] as string });
+    }
+  }
+  return out;
+}
+
+/**
+ * Location-log text for each key as the git-annex branch records it at `ref`; "" when the branch
+ * has no log for the key (git-annex never recorded it). Plain git only (`rev-parse`, `ls-tree`
+ * and one `cat-file --batch`): unlike {@link locationLogs}, which asks `git annex examinekey` for
+ * each path, it computes the path itself, so it works in a bare clone with no git-annex installed.
+ * Like `locationLogs` it reads what was COMMITTED, never a journal, and unlike `whereis` it merges
+ * no remote git-annex branch: name the ref to read. A key named twice gets the same answer twice.
+ *
+ * `ref` is resolved to one commit first and every log is read from that commit, so a branch that
+ * moves during the read cannot mix two states. Every way of reading "no log" for a reason other
+ * than the branch having none refuses instead, because "" reads as nothing dead and nothing
+ * present:
+ *
+ * - a ref that does not resolve: `refused: annex-ref-missing` (`git rev-parse`);
+ * - a ref that resolves but is not a git-annex branch (`HEAD`, `main`): its tree has no
+ *   `uuid.log`, which every git-annex branch has: `refused: annex-ref-not-git-annex`
+ *   (`git ls-tree`);
+ * - a log the tree names whose object this clone does not have (a partial or blobless clone), or
+ *   a log path that is not a file: `refused: annex-log-unreadable` (`git cat-file`).
+ *
+ * Exported for the upstream re-pull's planner (ADR 0111), which reads dead marks and `nemar-s3`
+ * presence from a bare clone and passes `run`, its read-only guard, so these reads go through it.
+ */
+export async function readLocationLogsAt(
+  repo: string,
+  ref: string,
+  keys: string[],
+  run: GitRunner = gitRaw,
+): Promise<string[]> {
+  if (!/^[^\s:^~?*[\\-][^\s:^~?*[\\]*$/.test(ref)) {
+    throw new ContractError("annex ref is not a ref name");
+  }
+  if (!keys.every((k) => k.length > 0 && !/[\r\n]/.test(k))) {
+    throw new ContractError("location log read holds a bad key");
+  }
+  const resolved = await run(repo, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]);
+  const commit = resolved.stdout.toString("utf8").trim();
+  if (resolved.exitCode !== 0 || !/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(commit)) {
+    throw new GitScrubError("refused: annex-ref-missing", "git rev-parse", resolved.stderr);
+  }
+  if ((await treeEntries(repo, commit, ["uuid.log"], run)).get("uuid.log")?.type !== "blob") {
+    throw new GitScrubError("refused: annex-ref-not-git-annex", "git ls-tree");
+  }
+  if (keys.length === 0) return [];
+  const paths = keys.map((k) => `${hashDirLower(k)}${annexKeyFile(k)}.log`);
+  const unique = [...new Set(paths)];
+  const entries = await treeEntries(repo, commit, unique, run);
+  const named = unique.filter((p) => entries.has(p));
+  if (named.some((p) => entries.get(p)?.type !== "blob")) {
+    throw new GitScrubError("refused: annex-log-unreadable", "git cat-file");
+  }
+  const contents = await readObjectsVia(
+    run,
+    repo,
+    named.map((p) => entries.get(p)?.oid as string),
+  );
+  const text = new Map<string, string>();
+  named.forEach((p, i) => {
+    const c = contents[i];
+    // The tree names this log, so a missing object is this clone lacking it, never "no log".
+    if (!c) throw new GitScrubError("refused: annex-log-unreadable", "git cat-file");
+    text.set(p, c.toString("utf8"));
+  });
+  return paths.map((p) => text.get(p) ?? "");
 }
 
 /** Dead: some repository's newest line is `X` and none is present. */

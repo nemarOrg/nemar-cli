@@ -221,6 +221,10 @@ export interface Bindings {
   /** Raw content host for the git-file broker. Unset in production, where
    *  `GITHUB_RAW_ORIGIN` applies; tests point it at a local server. */
   GITHUB_RAW_BASE?: string;
+  /** OpenNeuro GraphQL endpoint for the upstream staleness report. Unset in
+   *  production; tests point it at a local server. Production ignores any value
+   *  that is not a loopback `http` address (`snapshotGraphqlUrl`). */
+  OPENNEURO_GRAPHQL_URL?: string;
   /** Size below which a brokered git file is buffered so the runtime can
    *  declare its length. Unset everywhere but tests, which lower it to reach
    *  the streaming branch without a multi-megabyte fixture. */
@@ -315,6 +319,26 @@ export interface Bindings {
   // Set in [env.dev.vars] only; production turns it on by adding it to [vars] in a reviewed
   // change, once ADR 0102's "Before it is switched on" is done.
   PUBLICATION_REVIEW_ENABLED?: string; // "1" enables the review
+
+  // Upstream re-pull merges a day (ADR 0111, decision 6). Every merge a NEMAR tool makes of a
+  // re-pull pull request claims one unit first, N.0.0's and N.0.1's alike, in a fixed UTC day, and
+  // a refused claim merges nothing, because every merge mints a DOI that cannot be withdrawn.
+  // Absent: 5. "0" to "20": that many ("0" stops every merge). Anything else is unreadable and
+  // reads 0, so a typo stops merging instead of falling back to the default.
+  REPULL_DAILY_MERGE_CAP?: string;
+
+  // The automatic upstream re-pull (ADR 0111; services/repull-switches.ts). Each switch reads as on
+  // only when it is exactly "1" AND ENVIRONMENT is exactly "production"; unset, "true" and anything
+  // else are off. AUTO_REPULL_MERGE_ENABLED acts only while AUTO_REPULL_ENABLED is also on.
+  // Deliberately absent from every vars block in wrangler-sccn.toml: the owner turns them on in a
+  // reviewed change, never in the dashboard or as a Worker secret. The Worker reads them from its
+  // environment, so a secret of the same name would turn them on too, survive a deploy and not show
+  // in the file; a dashboard-only variable is dropped by the next deploy.
+  AUTO_REPULL_ENABLED?: string; // "1" lets the Worker open and advance re-pulls (production only)
+  AUTO_REPULL_MERGE_ENABLED?: string; // "1" lets the Worker merge them (needs AUTO_REPULL_ENABLED)
+  // Re-pull dispatches claimed to open a re-pull in a UTC day. Absent: 2. "0" to "20": that many.
+  // Anything else is unreadable and reads 0 (the same rule as REPULL_DAILY_MERGE_CAP).
+  REPULL_DAILY_OPEN_CAP?: string;
 
   // Import recovery (issue #754). onboard-openneuro.yml POSTs import state to
   // /webhooks/import-state (bearer NEMAR_WEBHOOK_TOKEN). On a terminal failure

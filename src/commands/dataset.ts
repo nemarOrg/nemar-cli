@@ -296,6 +296,7 @@ import {
   createOrResumeDataset,
   initializeAnnexDataset,
 } from "../lib/upload/transfer.js";
+import { isMirror, refuseMirrorMajor } from "../lib/version-policy.js";
 
 /**
  * What to call a failed dataset lookup.
@@ -3059,6 +3060,10 @@ Examples:
           {
             name: `major  ${currentVersion} -> ${bumpVersion(currentVersion, "major")}`,
             value: "major",
+            // A mirror's major is an upstream re-pull's (ADR 0111); the check below refuses it too.
+            ...(isMirror(datasetId, dataset.source)
+              ? { disabled: "a mirror's major is an upstream re-pull (nemar admin repull plan)" }
+              : {}),
           },
           { name: "custom version", value: "custom" },
         ];
@@ -3087,6 +3092,15 @@ Examples:
           newVersion = bumpVersion(currentVersion, bumpType);
         }
       }
+
+      // Every spelling that reaches a higher major (--type major, --version, the prompt's major or
+      // custom version) is refused on a mirror here, before the confirmation and any clone.
+      requireNotMirrorMajor({
+        datasetId,
+        source: dataset.source,
+        current: currentVersion,
+        next: newVersion,
+      });
 
       console.log();
       console.log(
@@ -3460,6 +3474,28 @@ function requireSentTitle(sent: string): void {
 }
 
 /**
+ * Refuse a major version of a mirror before anything is cloned, changed or pushed: on an OpenNeuro
+ * mirror a major means an upstream re-pull, which only `nemar admin repull` makes (ADR 0006, ADR
+ * 0111 decision 5). The CLI's own rule; the dataset repositories' workflows do not read it.
+ */
+function requireNotMirrorMajor(args: {
+  datasetId: string;
+  source: string | null | undefined;
+  current: string;
+  next: string;
+}): void {
+  const refusal = refuseMirrorMajor(args);
+  if (refusal === null) return;
+  console.log(chalk.red(`Error: ${refusal}`));
+  console.log(
+    chalk.dim("  Nothing was changed. NEMAR's own changes to a mirror take minor and patch."),
+  );
+  // A refusal of what was asked for, not a failure worth a bug report (see the exit hook in index.ts).
+  markUsageExit();
+  process.exit(1);
+}
+
+/**
  * The version `update` will release, read from the clone's own `dataset_description.json`, or null
  * when it cannot be told from here: no file, no `Version`, a version or a bump it cannot read. The
  * steps after sign-in report each of those in their own words; this only answers when it can, so
@@ -3744,6 +3780,13 @@ Examples:
         process.exit(1);
       }
       const newVersion = bumpVersion(currentVersion, bumpType);
+      // `--bump major` reaches a mirror's next major: refused before the branch or any change.
+      requireNotMirrorMajor({
+        datasetId,
+        source: dataset.source,
+        current: currentVersion,
+        next: newVersion,
+      });
 
       console.log(
         `  ${chalk.bold("Version bump:")} ${currentVersion} -> ${chalk.green(newVersion)}`,

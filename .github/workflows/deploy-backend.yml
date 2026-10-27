@@ -163,6 +163,12 @@ jobs:
     # migrated-database template cut the backend suite's time; the limit is kept at twice that
     # until a run measures the new duration.
     timeout-minutes: 44
+    # A missing tool fails instead of skipping (test/scrub/helpers/require-tools.ts,
+    # test/helpers/in-german.ts). This job installs git-annex ("Install git-annex"), the German
+    # locale ("Install the German locale"), Python and uv ("Setup Python", "Setup uv"); the aws CLI
+    # comes with the runner image; "Tool versions" names each before the tests.
+    env:
+      NEMAR_REQUIRE_SCRUB_TOOLS: "1"
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -186,6 +192,35 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y git-annex
+
+      # test/import-annex-uuid-preflight.test.ts and test/import-upstream-moved-guard.test.ts run git
+      # in German, to show an outcome is read from a status and not from git's message. Without the
+      # de_DE.UTF-8 locale git speaks English and those cases assert nothing, so under this job's
+      # NEMAR_REQUIRE_SCRUB_TOOLS=1 they fail instead (test/helpers/in-german.ts). The language pack
+      # generates the locale and carries git's German catalog; the mirror was updated just above.
+      - name: Install the German locale
+        timeout-minutes: 10
+        run: sudo apt-get install -y language-pack-de-base
+
+      # The pure tier's tools, as test.yml's unit-pure-shard installs and names them: under this
+      # job's NEMAR_REQUIRE_SCRUB_TOOLS=1 a suite that needs one fails instead of skipping, and the
+      # aws CLI comes with the runner image, so the last step names every tool by name.
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Tool versions
+        shell: bash
+        run: |
+          git --version
+          git annex version --raw && echo
+          uv --version
+          aws --version
+          locale -a | grep -ix 'de_DE.utf8'
 
       - name: Install dependencies
         run: bun install

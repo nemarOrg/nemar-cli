@@ -236,7 +236,19 @@ export interface PullRequestFacts {
   state: "open" | "closed" | "merged";
   draft: boolean;
   baseRef: string;
+  /**
+   * The head branch's name: a `release/*` one may be an upstream re-pull's pull request, which
+   * merges only through the re-pull's gate (ADR 0111).
+   */
+  headRef: string;
   headSha: string;
+  /**
+   * The head repository's and the base repository's `owner/name`, or null when GitHub names none
+   * (a deleted fork leaves the head's null): a re-pull's pull request merges only from and into the
+   * dataset's own repository (`lib/repull/merge.ts`).
+   */
+  headRepo: string | null;
+  baseRepo: string | null;
   authorLogin: string;
   /** GitHub's own mergeability verdict, which already weighs every required check and review. */
   mergeableState: string;
@@ -282,23 +294,62 @@ export async function fetchPullRequest(
           : why(res.status, body),
     };
   }
-  const head = body?.head as { sha?: unknown } | undefined;
-  const baseInfo = body?.base as { ref?: unknown } | undefined;
+  type Repo = { full_name?: unknown } | null | undefined;
+  const head = body?.head as { sha?: unknown; ref?: unknown; repo?: Repo } | undefined;
+  const baseInfo = body?.base as { ref?: unknown; repo?: Repo } | undefined;
   const user = body?.user as { login?: unknown } | undefined;
   if (typeof head?.sha !== "string" || !/^[0-9a-f]{40}$/.test(head.sha)) {
     return { ok: false, status: res.status, reason: "GitHub's answer had no head commit." };
   }
+  const repoName = (repo: Repo): string | null =>
+    typeof repo?.full_name === "string" ? repo.full_name : null;
   return {
     ok: true,
     value: {
       state: body?.merged === true ? "merged" : body?.state === "open" ? "open" : "closed",
       draft: body?.draft === true,
       baseRef: typeof baseInfo?.ref === "string" ? baseInfo.ref : "",
+      headRef: typeof head.ref === "string" ? head.ref : "",
       headSha: head.sha,
+      headRepo: repoName(head.repo),
+      baseRepo: repoName(baseInfo?.repo),
       authorLogin: typeof user?.login === "string" ? user.login : "",
       mergeableState: typeof body?.mergeable_state === "string" ? body.mergeable_state : "unknown",
     },
   };
+}
+
+/**
+ * One read of GitHub's REST API under the dataset's repository (`path` begins with `/`, as in
+ * `/commits/<sha>/status`), with the administrator's token: the parsed JSON body, or why there is
+ * none. An answer that is not JSON is no answer.
+ */
+export async function fetchDatasetRepoJson(
+  token: string,
+  datasetId: string,
+  path: string,
+  base = githubApiBase(),
+): Promise<FetchResult<unknown>> {
+  let res: Response;
+  try {
+    res = await fetch(`${base}/repos/${DATASETS_ORG}/${datasetId}${path}`, {
+      headers: headers(token),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+  } catch (err) {
+    return {
+      ok: false,
+      status: 0,
+      reason: `GitHub could not be reached (${err instanceof Error ? err.message : String(err)}).`,
+    };
+  }
+  const unreadable = Symbol("unreadable");
+  const body: unknown = await res.json().catch(() => unreadable);
+  if (!res.ok) return { ok: false, status: res.status, reason: why(res.status, body) };
+  if (body === unreadable) {
+    return { ok: false, status: res.status, reason: "GitHub's answer could not be read." };
+  }
+  return { ok: true, value: body };
 }
 
 /** Why a pull request cannot be approved at all, or null when it can. */
@@ -897,7 +948,24 @@ export async function mergeWhenClean(
   prNumber: number,
   headSha: string,
   method: MergeMethod,
-  options: { base?: string; sleep?: (ms: number) => Promise<void>; tries?: number } = {},
+  options: {
+    base?: string;
+    sleep?: (ms: number) => Promise<void>;
+    tries?: number;
+    /**
+     * The merge commit's title and message, sent as GitHub's `commit_title` and `commit_message`;
+     * GitHub's default otherwise. An upstream re-pull's squash merge writes its own, so its
+     * trailers are the message's last paragraph (ADR 0111, `lib/repull/merge.ts`).
+     */
+    commit?: { title: string; message: string };
+    /**
+     * The one state the merge is sent on: `clean`, the default and every other caller's, or
+     * `unstable`, for an administrator's merge of an upstream re-pull over a failed BIDS
+     * validation (ADR 0111, the Phase 7g amendment), whose claim the Worker checked was made for
+     * exactly that. `blocked` is never one: a merge then would be a bypass.
+     */
+    state?: "clean" | "unstable";
+  } = {},
 ): Promise<MergeResult> {
   const base = options.base ?? githubApiBase();
 
@@ -932,7 +1000,17 @@ export async function mergeWhenClean(
       reason: `Not merged: ${read.reason} The approval stands.`,
     };
   }
-  const check = mergeCheckOf(read.state);
+  const check =
+    options.state === "unstable"
+      ? read.state === "unstable"
+        ? ({ ok: true } as const)
+        : ({
+            ok: false,
+            why: `GitHub reports this pull request as '${stateWord(read.state)}', not 'unstable', so a merge over a failed BIDS validation would not be attempted.`,
+            card: `not unstable (GitHub: ${stateWord(read.state)})`,
+            advice: "none",
+          } as const)
+      : mergeCheckOf(read.state);
   if (!check.ok) {
     return {
       ok: false,
@@ -948,7 +1026,13 @@ export async function mergeWhenClean(
     res = await fetch(`${base}/repos/${DATASETS_ORG}/${datasetId}/pulls/${prNumber}/merge`, {
       method: "PUT",
       headers: headers(token),
-      body: JSON.stringify({ sha: headSha, merge_method: method }),
+      body: JSON.stringify({
+        sha: headSha,
+        merge_method: method,
+        ...(options.commit
+          ? { commit_title: options.commit.title, commit_message: options.commit.message }
+          : {}),
+      }),
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
   } catch (err) {

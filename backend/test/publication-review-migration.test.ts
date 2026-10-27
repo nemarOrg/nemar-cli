@@ -61,10 +61,10 @@ interface ColumnInfo {
 }
 
 /** Every migration before 0098, applied in order: the schema this migration starts from. */
-function dbBefore0098(): Database {
+function dbBefore0098(upTo = "0098"): Database {
   const db = new Database(":memory:");
   for (const file of readdirSync(MIGRATIONS_DIR)
-    .filter((f) => f.endsWith(".sql") && f < "0098")
+    .filter((f) => f.endsWith(".sql") && f < upTo)
     .sort()) {
     db.exec(readFileSync(join(MIGRATIONS_DIR, file), "utf-8"));
   }
@@ -129,7 +129,9 @@ describe("0098 publication_reviews: columns", () => {
 describe("0098 adds one table and two indexes, and no column anywhere else", () => {
   test("datasets and publication_requests have the columns they had before 0098", () => {
     const before = dbBefore0098();
-    const after = freshDb();
+    // Through 0098 only: a later migration may add a column to these tables (0104 did, to
+    // dataset_versions), and this test is about what 0098 itself did.
+    const after = dbBefore0098("0099");
     for (const table of ["datasets", "publication_requests", "users", "dataset_versions"]) {
       const cols = (db: Database) =>
         (db.query(`PRAGMA table_info(${table})`).all() as ColumnInfo[]).map((c) => c.name);
@@ -145,24 +147,8 @@ describe("0098 adds one table and two indexes, and no column anywhere else", () 
           .map((o) => `${o.type}:${o.name}`),
       );
     const before = objects(dbBefore0098());
-    // `freshDb` applies every migration, so objects a LATER migration adds are not 0098's:
-    // 0100 adds broadcast_outcomes; 0101 adds email_delivery_events and its two indexes;
-    // 0102 and later mail migrations add the support-ticket objects (every table, index or trigger
-    // whose name starts with mail_ or idx_mail_).
-    const laterMigrations = new Set([
-      "table:broadcast_outcomes",
-      "table:email_delivery_events",
-      "index:idx_email_delivery_events_recipient",
-      "index:idx_email_delivery_events_occurred_at",
-    ]);
-    const added = [...objects(freshDb())]
-      .filter(
-        (o) =>
-          !before.has(o) &&
-          !laterMigrations.has(o) &&
-          !/^(table|index|trigger):(idx_)?mail_/.test(o),
-      )
-      .sort();
+    // Through 0098 only, as the columns test above: a later migration adds its own objects.
+    const added = [...objects(dbBefore0098("0099"))].filter((o) => !before.has(o)).sort();
     expect(added).toEqual([
       "index:idx_publication_reviews_depositor",
       "index:idx_publication_reviews_state",

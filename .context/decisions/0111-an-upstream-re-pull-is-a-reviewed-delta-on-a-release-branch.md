@@ -11,6 +11,21 @@ Builds on ADR 0001 (published datasets are PR-only), ADR 0023 (`--clean` reconci
 The analysis is `.context/design-upstream-repull.md`; where it and this record disagree, this record wins.
 Decisions 4 and 10 are built, as their dated amendments below record, and so are the record of decision 3 (the table, its routes and its fences) and the fences of decision 6 (Amendment 2026-10-24 (#1912), Phase 6a); every other rule in the Decision section is designed here and built by the later phases of #1046, and its present tense states the rule, not today's behavior.
 *Annotated 2026-10-24: superseded in part by the Phase 6e amendment (#1912): the identifier screen bound to the re-pull row (decision 7), the merge cap of decision 6, and the verified merge and release are built too.*
+*Annotated 2026-10-24: and by the Phase 6d amendment (#1912): decision 8's pinned copy, and decision 2's registration, release branch and pull request, are built through `pr_open`.*
+*Annotated 2026-10-25: and by the Phase 7 amendment's 7c slice (#1913): decision 6's scheduled path is built, in production only, and does nothing while its switch is off.*
+*Annotated 2026-10-25: and by the Phase 6f amendment (#1912): resume, the administrator's merge through one gate, the release and the lock are built through `released`.*
+*Annotated 2026-10-25: and by the Phase 7f amendment (#1913): the advance tick holds, gates and resumes the automatic re-pulls, in production only, and while its switch is off only records that it is off; decision 7's merge is still not built.*
+*Annotated 2026-10-25: and by the Phase 7d amendment (#1913): the unattended run that opens an automatic re-pull's pull request and finishes a merged one is built, in a central workflow deployed only with the epic release.*
+*Annotated 2026-10-27: the workflow is not held for the release.
+Its copy in `nemarDatasets/.github` merged as `nemarDatasets/.github#148`, and this repository's #1980 compares the two copies byte for byte.
+It runs only on a `repository_dispatch` of the type `run-upstream-repull`, which only the automatic path sends, and that is off until the owner turns its switch on (see the Phase 8 amendment, "The workflow pairs").*
+*Annotated 2026-10-25: and by the Phase 6g amendment (#1912): N.0.1, abandoning a record, superseding one, the manual-major refusal and a mirror rehearsal fixture are built, which completes Phase 6's manual execution.*
+*Annotated 2026-10-26: and by the Phase 7g amendment (#1913): decision 7's merge is built: the Worker merges a machine-clean automatic re-pull pull request and finishes it after its merge, and an administrator may merge a re-pull they opened over a failed BIDS validation, never over a rule that requires it.*
+*Annotated 2026-10-26: and by the Phase 7h amendment (#1913): the automatic path is observable (the weekly report's re-pull section, the administrator's list of dispatches and `nemar admin repull auto`), which completes the slices of Phase 7; the owner's switches, gates G4 and G5 and the held workflow pair remain.*
+*Annotated 2026-10-27: the workflow pair is no longer held: `nemarDatasets/.github#148` merged and this repository's #1980 compares the copies (the Phase 8 amendment, "The workflow pairs").
+The owner's switches and gates G4 and G5 remain.*
+*Annotated 2026-10-27: and by the Phase 8 amendment (#1914): the Decision section is built, and what that amendment lists under "Not yet verified" is unobserved, not unbuilt; what remains is the owner's act and the epic's release.
+Phase 8 itself documents the epic, fixes the website's contract for the `mirror` flag and records the order in which the pieces reach production.*
 
 ## Context
 
@@ -28,6 +43,15 @@ Measured staleness is real: `on004362` missed upstream's 1.0.1 metadata fix (#18
 Everything in this section is designed and not yet built.
 *Annotated 2026-10-24: decisions 4 and 10 are built, as their dated amendments below record; the record of decision 3 and the fences of decision 6 are built by Phase 6a (#1912); every other rule is still designed and not built.*
 *Annotated 2026-10-24: superseded in part by the Phase 6e amendment: the screen bound to the row, the merge cap and the verified merge and release are built as well.*
+*Annotated 2026-10-24: and by the Phase 6d amendment: the pinned copy, the registration and the pull request are built through `pr_open`.*
+*Annotated 2026-10-25: and by the Phase 7 amendment's 7c slice: the scheduled path of decision 6 is built, and does nothing while `AUTO_REPULL_ENABLED` is off.*
+*Annotated 2026-10-25: and by the Phase 6f amendment: resume, the administrator's merge, the release and the lock are built through `released`.*
+*Annotated 2026-10-25: and by the Phase 7f amendment: the automatic path's gates edge and its resume of a stalled run are built; the Worker's merge is not.*
+*Annotated 2026-10-25: and by the Phase 7d amendment: the unattended run of decision 6's scheduled path is built, to the open pull request and from a merge to `complete`.*
+*Annotated 2026-10-25: and by the Phase 6g amendment: N.0.1, abandon, supersede and the manual-major refusal are built.*
+*Annotated 2026-10-26: and by the Phase 7g amendment: decision 7's merge is built, with its follow-through to `complete` and an administrator's merge over a failed BIDS validation.*
+*Annotated 2026-10-26: and by the Phase 7h amendment: what the automatic path did is counted every week and listed for an administrator, and nothing about what it does changes.*
+*Annotated 2026-10-27: and by the Phase 8 amendment: every rule in this section is built; the unobserved parts are listed under "Not yet verified" in that amendment, and nothing in it changes what a rule says.*
 
 **An upstream re-pull replays the delta between two pinned upstream tags onto NEMAR's `main` as one synthesized commit on `release/vN.0.0`, landed through a pull request; N.0.0 is a pure mirror of the upstream snapshot, and NEMAR's corrections follow as N.0.1.**
 
@@ -67,6 +91,7 @@ Everything in this section is designed and not yet built.
   That pull request is opened at `patch_synthesized`, on the new `main` after N.0.0 is merged and tagged, and its gates are read on that commit; until then the `patch_*` columns (decision 3) are NULL and the plan lists the corrections.
   Both pull requests are squash-merged, as `y` in ADR 0093's `next` merges, so N.0.1 is synthesized on the new `main` (the corrections replayed onto N.0.0's tree) and never stacked by branch ancestry.
   A re-pull with no corrections opens no N.0.1.
+  *Annotated 2026-10-25: built by the Phase 6g amendment: the plan's conflicts wait for an administrator's decision (`--take-ours`, `--keep-upstream`) before N.0.1 is made, and a re-pull with no correction and no conflict resolved to NEMAR's side opens no N.0.1.*
 
 ### 2. The delta is replayed as one commit, through a pull request
 
@@ -80,22 +105,26 @@ Everything in this section is designed and not yet built.
   A recording the commit does not touch keeps its bytes and its key.
 - `nemar admin repull <id>` is a dry run by default, and `--execute` requires `--plan <file>` with the digest of the reviewed plan; when `main` moved since the plan, it plans again and stops for review of the new digest, unless the new commits touch only `.nemar/**`.
 - The merge goes through the existing release path: the existing dataset workflows tag the merge, the tag mints the version DOI through EZID (ADR 0007), and the DOI carries `IsDerivedFrom` `openneuro.<ds>.v<to_tag>` because the mint reads `SourceDatasets` at the tag.
+  *Annotated 2026-10-27: not verified until gate G4; a second source can name the same DOI as `IsIdenticalTo`. See the Phase 8 amendment, "The relation on a re-pull's Digital Object Identifier (DOI)".*
 - New behavior the build adds, because no callback does it today: after the tag, one ADR 0023 reconcile (`--clean`, never `--wipe`) is queued for the dataset, so the Zarr stores of deleted recordings go, and the dataset's hed, channel-montage, data and availability stamps are re-armed.
   Today those four stamps are cleared only fleet-wide, by `?reset=1` on the sweep routes in `backend/src/routes/admin/datasets-lifecycle.ts`; the identifier sweep's verdict already counts only for the version it was dispatched for (ADR 0088).
 
 ### 3. Re-pull state lives in `upstream_repulls`, never in `import_jobs`
 
 - One row per `(dataset_id, to_tag)`, `UNIQUE`, plus a partial unique index allowing one non-terminal row per dataset.
+  *Annotated 2026-10-25: read per attempt by the Phase 6a amendment (`(dataset_id, to_tag, attempt)`), so an abandoned or superseded tag can be tried again.*
 - The one row records both pull requests: `branch`, `pr_number` and `head_sha` for N.0.0, and `patch_branch`, `patch_pr_number` and `patch_head_sha` for N.0.1, which stay NULL until `patch_synthesized`, and for good when there are no corrections.
   `origin` records who opened them: `automatic` for the scheduled path, `administrator` for `nemar admin repull <id> --execute`.
   A second row keyed by version was rejected: created at plan time it would be open beside the N.0.0 row, which the one-non-terminal-row index forbids, and created at `patch_synthesized` it would leave a gap after N.0.0's release in which another re-pull could start before the corrections land.
 - Its states are planned, prepared, copied, registered, pr_open, gates_clear, merged and released, then, when there is an N.0.1, patch_synthesized, patch_gates_clear, patch_merged and patch_released, and finally complete.
   Abandoned, failed, superseded and patch_declined are terminal, and superseded means a newer tag arrived before N.0.0 merged, so its pull request is closed and the plan made again from the same `from_tag`.
 - Every step checks its own end state before it acts, so `--resume` continues from the recorded status.
+  *Annotated 2026-10-25: built as commands, not flags: `nemar admin repull execute <plan-file>` and `nemar admin repull resume <id>` (the Phase 6c, 6d and 6f amendments).*
 - `--abandon` before N.0.0 merges closes its pull request and deletes its branch, when they exist, reports the orphaned bytes and ends the row `abandoned`.
   After N.0.0 has merged, it closes only N.0.1's pull request and branch, when they exist, and ends the row `patch_declined` (terminal).
   N.0.0 stays released, because its tag and DOI exist, and its corrections remain corrections in the next plan.
   A step that finds a recorded pull request closed unmerged ends the row the same way: `abandoned` before the N.0.0 merge, `patch_declined` after it.
+  *Annotated 2026-10-25: built by the Phase 6g amendment as `nemar admin repull abandon <id>` (no `--abandon` flag) and `nemar admin repull execute --supersede`; abandon refuses between the N.0.0 merge and its release, and never ends a record whose pull request merged.*
 - `last_error` is written through `import-error.ts`, so ADR 0051's rule applies.
 - A re-pull never writes `import_jobs`: its sticky row per dataset, its `preparing` reset, its six-hour sweep and the retry engine, which reads only `import_jobs`, would each treat a re-pull as a broken import.
 
@@ -114,16 +143,20 @@ Everything in this section is designed and not yet built.
 
 - A version row with `source_version` set (not NULL, so never an unknown tag) and a version of the form `N.0.0` is a mirror.
   The API exposes that as a derived flag, computed at read time and never stored, and the website shows a mirror tag on that version.
+  *Annotated 2026-10-27: built by the Phase 8 amendment, on the website's `staging` branch only (`nemarOrg/website#489`): the website shows a chip from the flag (`mirror === true`), not the tag, which the public wire never carries.*
 - A manual major bump is refused on `on` datasets: `nemar dataset release --type major`, and `nemar dataset update --bump major`, which reaches the same number.
   NEMAR's own changes to a mirror take minor and patch.
+  *Annotated 2026-10-25: built by the Phase 6g amendment in the CLI only (`nemar dataset release`, `nemar dataset update`), for `on` ids and for rows recorded as OpenNeuro imports; the dataset repositories' `version-check` workflow is not changed (ADR 0020), so a major merged outside the CLI is not stopped.*
 
 ### 6. Discovery stays id-only, and the re-pull has its own switches and caps
 
 - `diffNewDatasets` stays id-only, so the live auto-import never sees a stale mirror; staleness is computed by its own report.
 - `AUTO_REPULL_ENABLED` lets the scheduled path open re-pull pull requests, and `AUTO_REPULL_MERGE_ENABLED` lets the Worker merge them (decision 7).
   Both are off when absent, and the scheduled path is production-only through the dev cron's allowlist.
-- `REPULL_DAILY_OPEN_CAP` (default 2) bounds the re-pull pull requests the automatic path opens in a day.
+- `REPULL_DAILY_OPEN_CAP` (default 2) bounds the dispatches the automatic path claims to open a re-pull in a day; the pull requests follow only under the timing the Phase 7b amendment ("The open cap") says a later slice pins.
 - `REPULL_DAILY_MERGE_CAP` (default 5) bounds merges: every merge a NEMAR tool makes of a re-pull pull request, the Worker's and the manual ones (`nemar admin repull <id> --merge`, `nemar admin pr-reviews`) alike, first claims one from the backend, and a refused claim merges nothing, because every merge mints an irreversible DOI.
+  *Annotated 2026-10-25: the manual command is built by Phase 6f as `nemar admin repull merge <id>`; no `--merge` flag exists (see the Phase 6f amendment).*
+  *Annotated 2026-10-26: and the Worker's merge claims its unit through the same statement (the Phase 7g amendment).*
 - The automatic path takes only a plan with zero unexplained paths.
 - Outside production, the re-pull routes refuse every dataset that is not `xx`, because the GitHub organization is shared, and re-pull mail goes through the admin-only fence.
 
@@ -142,6 +175,7 @@ A re-pull pull request is machine clean when all of these hold:
 The merge is sent with the screened SHA, so GitHub refuses a branch that moved, and only when GitHub reports the pull request `clean`: the NEMAR App is a bypass actor (ADR 0001, ADR 0107), and `clean` is what keeps "never a bypass" true for a merge the App makes.
 The Worker submits no approving review on this class either, since ADR 0001 requires none; the record is the merge, the `upstream_repulls` row and the plan digest.
 The Worker's merge call is not built until the ruleset check under "Not yet verified" is done.
+*Annotated 2026-10-26: the check was run by the owner on 2026-10-26 and passed, and the merge call is built by the Phase 7g amendment.*
 
 **What this narrows in ADR 0093, for re-pull pull requests only.**
 ADR 0107 already partially supersedes ADR 0093; this record narrows one more aspect of it, the merge, and only for this class.
@@ -149,9 +183,13 @@ ADR 0093's approval sentences stand as written, "its approval is made by the adm
 What changes, for a re-pull pull request the automatic path opened, is that a merge no longer always follows an administrator's approval and `--merge` or `y`: the Worker merges one that is machine clean.
 For every other pull request the Worker neither approves nor merges.
 AGENTS.md's summary of ADR 0093 ("nothing merges without `--merge` or a `y`") is updated by the phase that builds the merge.
+*Annotated 2026-10-25: updated by Phase 6f, which builds the administrator's merge (see the Phase 6f amendment).*
+*Annotated 2026-10-26: and by Phase 7g, which names the Worker's merge of this one class (see the Phase 7g amendment).*
 
 A re-pull pull request that is not machine clean, or that an administrator opened, is merged by an administrator, through `nemar admin repull <id> --merge` or `nemar admin pr-reviews`, under ADR 0093, with a screen that is `clear` or carries the administrator's recorded acknowledgment (ADR 0086).
+*Annotated 2026-10-25: built by Phase 6f as `nemar admin repull merge <id>` (no `--merge` flag exists) and through `nemar admin pr-reviews`, both through one gate (see the Phase 6f amendment).*
 `nemar admin pr-reviews` will require that screen for a re-pull pull request other than an `xx` one (below), which its `approve --merge` does not check today, and will claim the merge cap before the merge is sent.
+*Annotated 2026-10-25: built by Phase 6f: `approve --merge` and `y` in `next` merge a re-pull pull request only through the re-pull's gate, which reads that screen and claims the cap (see the Phase 6f amendment).*
 
 An `xx` re-pull takes the administrator path only.
 ADR 0086 exempts `xx` from the identifier screen, so an `xx` re-pull never has a `clear` verdict and is never machine clean, and an administrator merges it under that exemption, with no screen.
@@ -163,6 +201,7 @@ ADR 0086 exempts `xx` from the identifier screen, so an `xx` re-pull never has a
   Today `parseS3Url` drops the query string, so the import copy takes whatever object is current at the path.
 - Prior-version objects stay under their governance lock, and the old version's manifest, DOI and data-plane routes are unchanged.
 - An abandoned re-pull leaves locked orphan objects; the plan states their size, and `--abandon` reports them.
+  *Annotated 2026-10-25: as built by Phase 6f, a release locks only the objects its own copy and uploads wrote, so an abandoned attempt's orphans are not locked (see the Phase 6f amendment).*
 
 ### 9. A re-pull is a new version of a published dataset, not a publication
 
@@ -197,6 +236,7 @@ ADR 0086 exempts `xx` from the identifier screen, so an `xx` re-pull never has a
   Every other correction is in the window, including a privacy-minded one the ledger does not record.
 - **Orphan locked objects.**
   An abandoned re-pull leaves copied objects under the governance lock; they cost storage and are reported, not deleted.
+  *Annotated 2026-10-25: not under the lock, as built by Phase 6f: a release locks only what its own copy and uploads wrote, so an abandoned attempt's orphans stay unlocked (see the Phase 6f amendment).*
 - **One synthesized commit instead of upstream's history.**
   NEMAR's log shows one commit per re-pull, named by its trailers, and not upstream's commits; upstream's repository and `CHANGES` remain the record of how the snapshot was made.
 - **Few re-pulls will be merged by the Worker at first.**
@@ -224,17 +264,23 @@ ADR 0086 exempts `xx` from the identifier screen, so an `xx` re-pull never has a
 ## Not yet verified
 
 - Whether the rulesets let the GitHub App merge without a human review, and without using its bypass; the merge call is not built until this is checked.
+  *Annotated 2026-10-26: checked by the owner on 2026-10-26 for what can be read, and passed: the installation's permissions allow it and no organization ruleset applies (the Phase 7g amendment); the App token's own reading of `mergeable_state` and GitHub's merge of its squash are seen only by the first production merge.*
 - Where `source_version` is inserted under the central manifest flow.
+  *Annotated 2026-10-27: closed by the Phase 2 amendment (#1908), "Where `source_version` is inserted under the central manifest flow (verified)".*
 - Whether "explained" edits are detected on early rewritten imports (`on003645`, `on004362`); local dry-run plans count the unexplained paths.
 - Whether ADR 0107's review can ever pass a re-pull diff.
   The App is not exempt, so the review runs, and ADR 0109 fails a changed `CHANGES` line and holds a replaced recording, both normal in a re-pull; until a re-pull's review passes, none is machine clean.
+  *Annotated 2026-10-25: corrected by the Phase 7e amendment: the review's intake skipped every bot's pull request, so it did not run; it now runs on the App's automatic re-pull pull request when the Worker starts it, and on no other bot's.*
 - Whether enrichment commits on the release branch move its head after the screen read it.
+  *Annotated 2026-10-25: the Phase 7d amendment's settle records enrichment's moves of an automatic run's release head before the run reports it, and a later move holds the pull request; how soon enrichment commits is seen only in production.*
 - Whether OpenNeuro writes S3 before it pushes to GitHub, and whether the object at a path lags the pinned `versionId`.
 - That upstream's `.log.rmet` records a `versionId` per key, which the design record states and nothing here has checked.
 - That the dataset workflows tag the squash merge of a re-pull pull request as they tag other merges to `main`.
+  *Annotated 2026-10-26: still not seen for a squash the App makes: the first production merge of the Phase 7g amendment, under a cap of 1, is the check.*
 - Whether the NEMAR installation token is accepted for another organization's public raw files (`OpenNeuroDatasets`), which the staleness report's mirror probe uses; if it is not, every probe reads `stale_unverified` with the reason and the first production run shows it.
 - That the central `run-identifier-screen` workflow posts a re-pull screen's report to its own callback path (`/webhooks/identifier-screen-repull-result`); the workflow accepts any plain https `callback_url` (read), and no run has used this one yet (added by the Phase 6e amendment).
 - GitHub's answers to the reads the re-pull's release and merge make (`commits/tags/<tag>` asked for `application/vnd.github.sha`, `compare/<merge>...<tag>` and its status words, a squash-merged pull request's `head` and `merge_commit_sha`); only stand-ins have answered them (added by the Phase 6e amendment).
+- What the weekly report's re-pull section reads on production data: the week's counts, the attribution of a merge to the user of its claim in the audit log, and the first week a switch is on (added by the Phase 7h amendment).
 
 ## Receipts
 
@@ -308,6 +354,8 @@ Both hold for a batch of any size, a single row included.
 The row must also be older than one hour, so a CDN-cached 404 on a fresh tag is never made final.
 A fetch error in the backfill writes nothing, and a batch in which no read proved the credential while at least one 404 is unconfirmed is refused as `suspect_credential` (502), whatever else errored beside it.
 Only a version of the form N.N.N is a candidate, and a ref is always the canonical `vX.Y.Z` tag, so a stored `v1.0.0` can never read `vv1.0.0`.
+*Annotated 2026-10-27: a row spelled `vN.N.N` is a candidate too, read as `mirroredTagOf` reads it (one lowercase `v`, then `N.N.N`).
+The ref is still the canonical `v<N.N.N>` tag, never `vv1.0.0`; see the #1983 review amendment, "The mirrored tag reads both spellings of a version".*
 The write is `WHERE source_version_basis IS NULL`, so it never overwrites a recorded value; its paging is a keyset on `(dataset_id, version)`, so a row that always errors cannot starve the rows behind it.
 A dry run, which is the default, writes nothing.
 
@@ -333,6 +381,8 @@ Decision 2 says `nemar admin repull <id>` is a dry run by default and `--execute
 The built shape is two subcommands: `plan` makes the plan, and `execute` (Phase 6) takes the plan file.
 
 `plan` writes nothing to the mirror, S3, D1 or the NEMAR API.
+*Annotated 2026-10-27: the central workflow's unattended run, `plan --automatic-dispatch` (Phase 7d), is the one exception.
+It reports its dispatch to the Worker, which stores `started` and then `refused` or `failed` if the run ends so; an administrator's `plan` still writes nothing.*
 What it writes is its scratch directory, removed on exit, on SIGINT and on SIGTERM unless `--keep-workdir`, and the plan file, which is its output: mode 0600 in the administrator's config directory (`$NEMAR_CONFIG_DIR/repull/<id>/`, `~/.config/nemar` by default), because a path can itself be an identifier.
 The default output holds counts and no path, key or file content.
 
@@ -436,6 +486,7 @@ The lead's rulings of 2026-10-23 settle three questions decision 10 left open, a
 - **Which tag.** The auto-import passes the tag discovery found.
   Every other entry point (the retry engine, `recover --execute`, a dispatch without `--tag`) passes none, and prepare asks OpenNeuro's GraphQL for `latestSnapshot.tag` when it runs, so "the tag the retry discovers" is the latest at the retry.
   An explicit `--tag` is honored; when it is not the latest, prepare warns, because decision 8 is not built and the copy takes the object currently at each upstream path.
+  *Annotated 2026-10-27: decision 8 is built for a re-pull's copy by the Phase 6d amendment; the import's copy still takes the object currently at each upstream path, and the import's warning now says so.*
 - **Mirror lag.** A latest tag OpenNeuro cannot name refuses with `[openneuro-mirror-lag]` too, before the dataset record is created.
   Recovery quarantines it as `mirror_lag`, so it stays retryable rather than `not_found_dataset`.
   Retries are capped by the retry engine's 14-day window, counted from its first retry of the row; past it the row is parked as `mirror_lag` and one admin issue is filed then; no quarantine mail and no failure-time issue are sent for it (ruling 2).
@@ -527,6 +578,8 @@ So the recorded tag must appear in upstream's snapshot list, and upstream's late
 A latest tag that the Phase 2 parser could never record (`57fecb0c...` is a legacy snapshot id; `v2.0.2.` is a negative example of the parser's tag pattern) is an anomaly, because a re-pull to it could never be proved afterwards by a recorded `source_version`.
 Known limit: a tag re-created upstream under the SAME tag (OpenNeuro's `ds003645` 2.1.0 carries a creation time later than its first sighting) cannot be detected from the tag, so the mirror reads `current` or `stale` by tag alone.
 The dry-run plan of the re-pull phase compares trees and sees it.
+*Annotated 2026-10-27: not for the mirrored tag. A plan to a tag equal to the mirrored tag is refused as `nothing-to-pull` before any tree of upstream is cloned or compared (`src/lib/repull/preflight.ts:157-158`, `src/lib/repull/plan.ts:278-294`), so nothing detects that a mirror's recorded tag was re-created.
+A re-created target tag is caught once a plan has read it: before the copy, the registration and the pull request, execution refuses with `upstream-tag-moved` when the tag names another commit than the plan read (`src/lib/repull/execute/advance.ts:146-176`).*
 
 ### Mirror lag is proved, not inferred
 
@@ -607,6 +660,7 @@ The flag is three-valued, because a literal boolean would have to say "not a mir
 `null`: an N.0.0 of an `on######` dataset whose tag is unknown or was never examined; a consumer must not show it as a mirror.
 It is read from each row's own tag, not from the dataset's highest version, derived at read time and never stored, so `datasets` gains no column.
 It rides on every version of `GET /datasets/:id/versions` (beside the tag and its basis, which that owner-or-admin route already carried) and of the public landing, `data.nemar.org/<id>/` as JSON and the page bundle's landing, which exposes the flag only and neither the tag nor its basis.
+*Annotated 2026-10-27: the route is open to the dataset's owner, its collaborators and administrators (`backend/src/routes/datasets/manifests.ts`), not only to an owner or an administrator; the Phase 8 amendment, "The `mirror` field, as a reader sees it", corrects the phrase.*
 Decision 5 says the website shows a mirror tag on that version.
 What the website receives is the flag, so it shows a chip from `mirror`; the public wire carries the flag and never the tag itself.
 `metadata.json` is not changed.
@@ -632,8 +686,10 @@ Create refuses (`merge-unreconciled`) when any record of the dataset holds a mer
 `complete` is finished, and so is `patch_declined`, which is reachable only from a released N.0.0 and is refused while the patch claim is held.
 A `failed` row that has a tag sha and no patch claim or patch merge is finished too: N.0.0 is merged and tagged, so nothing is unreconciled, though its tag stays pulled.
 The case Phase 6f still owns is a `failed` row with a claim or a merge sha and no tag sha, or with any patch claim or patch merge: nothing in 6a writes out of it.
+*Annotated 2026-10-25: Phase 6f did not reconcile it: no path it builds writes `failed`, and such a record keeps the dataset blocked until an administrator resolves it by hand; the Phase 6f amendment names it as an open item for the owner.*
 `failed` stays writable on purpose, so a lost merge answer can be reported; it does not free the dataset, because a merge may be on `main` with no row saying so, and a second major would be a second DOI.
 Clearing a claim after GitHub confirms the pull request was not merged, and expiring a stuck open row, are written by Phase 6f (resume and reconcile); Phase 6a has no writer for either, and open rows never expire here.
+*Annotated 2026-10-25: the first half is built by the Phase 6f amendment (a stuck claim on an open record expires, `expired`, through resume); the second is not: a `failed` record holding a claim is still not reconciled, an open item the Phase 6f amendment names.*
 
 ### The fences, as built
 
@@ -646,6 +702,7 @@ Clearing a claim after GitHub confirms the pull request was not merged, and expi
 - **A withdrawn dataset**, **an import that is preparing, copying or finalizing**, and **a dataset not recorded as a mirror of that `ds`** are refused, each by its own code.
   These run at create only: the execution phases must re-check the anonymity, withdrawn and import fences when they move a record, which a transition does not do today.
   *Annotated 2026-10-24: superseded by the Phase 6e amendment: the mirror, anonymity, withdrawn and import fences now also run at the screen's dispatch, at the gates and at the claim to merge.*
+  *Annotated 2026-10-25: and by the Phase 6f amendment: on every step past `prepared` that keeps the record open.*
 - **The dataset's own version rows must agree with the plan.**
   The highest version (both `1.0.0` and `v1.0.0` spellings, ordered by number) must be the plan's `from_version`, and every row at it must name `from_tag` by `doi` or `lineage`.
   A row recorded `unknown` is never re-pulled (decision 4).
@@ -659,10 +716,14 @@ It takes only an allowed edge, writes only the columns its target names, and kee
 A branch must be the release branch of the version the row carries.
 `counts` is merged key by key and holds only declared keys with non-negative integers, never a path or a key.
 `last_error` goes through the ADR 0051 rule and is never blank; an edge into `failed`, or the `planned` edge that records why a step could not finish, must say why, and an edge into a different, non-terminal status clears the stored error.
+*Annotated 2026-10-24: the Phase 6c amendment adds that a `prepared` self-edge sent with no error clears it too, because it records the whole stage again; execution sends one that way only when the stored error is a preparation's own (its words begin `[prepare:`), so an error a later step recorded is not cleared.*
 
 Four edges repeat a status to write one thing: `planned` (the error), `released` (the count of locked objects) and `gates_clear` and `patch_gates_clear` (the claim to merge).
+*Annotated 2026-10-24: the `prepared` self-edge is allowed as well and Phase 6c uses it, to record a preparation again (onto a moved base, or to clear a stale error of a preparation's own) or why it failed; see the Phase 6c amendment.*
+*Annotated 2026-10-24: the Phase 6d amendment adds `copied` and `registered`, which repeat to record the error of the step that follows them, as `planned` does.*
 The claim is recorded before the merge is sent, names exactly the screened head, and cannot be recorded twice.
 The caller sends the head and nothing else: the Worker stamps the time with its own clock and refuses a request that carries one, because a caller-stated time could be backdated or set ahead and defeat the sweep for stuck claims that Phase 6f writes.
+*Annotated 2026-10-25: Phase 6f writes no sweep: a stuck claim expires when resume reads it, through the claim's release with the outcome `expired`, once the Worker's own stamp is 30 minutes old (see the Phase 6f amendment).*
 The time and the head are set together or not at all (a CHECK).
 While it is held, closing the pull request (`abandoned`, `superseded`, `patch_declined`) and moving its head (`pr_open`, `patch_synthesized`) are refused, because the pull request may have merged; `failed` is not.
 
@@ -801,6 +862,7 @@ The route is built here; Phase 6f's resume is its caller.
 A merge with no claim held by a NEMAR tool, and a merge at a head other than the screened one, are still recorded, because they happened and the record must say so before a second major could follow; each is counted on its own, `merged_outside_tool` meaning only that no claim was held and `merged_unscreened_head` only that the merged head is not the screened one, and those two counts are written only by the Worker and shown in the record.
 The cap binds NEMAR's tools only (Consequences); this is how a merge outside them shows.
 A pull request merged while the row is still `pr_open` has no edge here; the row stays open, which blocks a new re-pull, and Phase 6f's resume owns it.
+*Annotated 2026-10-25: built by the Phase 6f amendment: the edge `pr_open -> merged` is the verified route's alone, and resume records such a merge through it.*
 
 `released` and `patch_released` are written by `POST /admin/repulls/:id/released` once the version row exists with a DOI (either spelling of the version), the tag `v<version>` resolves to the commit the caller reports, and that commit contains the merge.
 Containing, not equal: the dataset workflow tags `main`'s head when it runs, which can be an enrichment commit after the merge.
@@ -883,3 +945,1364 @@ Decision 10's `[openneuro-upstream-moved]` refusal of a released mirror now name
 ### The finalize gate is three functions
 
 The verify, tree gate and register steps of an import's finalize are `verifyManifestObjects`, `treeGate` and `registerTreeKeys` (`src/lib/import-finalize-gate.ts`), with every message as it was, because the Worker classifies them; the re-pull's register step will call the same three.
+*Annotated 2026-10-24: corrected by the Phase 6d amendment: the re-pull calls `verifyManifestObjects` and `treeGate`, and registers by a commit of its own instead of `registerTreeKeys`.*
+
+## Amendment 2026-10-24 (#1912): Phase 6c prepares a re-pull, through `prepared`
+
+A further slice of the Phase 6 amendment above, built by Phase 6c.
+It builds the first half of decision 2's execution: the reviewed plan is proved and made again from live sources, the record is created, and the delta is materialized, scrubbed and synthesized into the one commit, which waits at `prepared`.
+Nothing here copies from upstream, pushes or opens a pull request; those follow `prepared` and are a later slice's.
+The decision text above is unchanged; two sentences of the first Phase 6 slice are annotated where this slice extends them.
+
+### Execution runs on the administrator's machine
+
+Execution is a library entry the `execute` command will call, run by an administrator with their own GitHub token and the ambient AWS credentials, against the API it is configured for.
+The Worker records each step through the record's routes; this slice adds no route, so nothing in it can send mail.
+The working directory is `$NEMAR_CONFIG_DIR/repull/<id>/work/<digest8>/`, mode 0700 like every directory above it up to `repull/`, because the clone holds every path of the dataset and a path can be an identifier.
+It is kept until the pull request is open, which a later slice does.
+Only a `prepared` record resumes from it: from its working clone or from the checkpoint beside it.
+A `planned` record is prepared again from scratch, which clones, scrubs and uploads again, to the same result.
+One execution of a plan runs at a time: a lock beside the working directory, holding the process id, refuses a second (`execution-locked`) rather than let it delete a live run's clones.
+The lock is made atomically, its pid written in a private sibling directory that is then renamed onto the lock's path, so no lock is ever seen without its pid; a lock whose pid cannot be read is taken for a live one.
+A lock whose process is gone is moved aside and taken over only when what was moved is still that crashed run's; the refusal names the lock's path and says to remove it when no execution is running (a crashed run whose process id is now another process's).
+
+Every git and git-annex call of an execution, the planner's included, runs with neither the administrator's global configuration nor the system's, and the working clone is made with its own: locked annexed files, no line-ending conversion, no hooks, no attributes or excludes file but the tree's own, and no background gc or maintenance.
+Without that, a setting on the administrator's machine (`annex.addunlocked`, `core.autocrlf`, a global attributes file) changes what is prepared, and a later run on another machine could not reproduce it.
+
+### The reviewed plan, proved, and its preflight recomputed
+
+The plan file is trusted for its body only.
+It is refused, in this order: when it is not a plan this build reads (`plan-schema`); when another planner made it (`planner-version`), so it is never read under rules it was not made with; and when its body does not hash to the digest it states (`plan-tampered`).
+Then, before anything is cloned: a plan made against another API (`plan-environment`), and a plan made from test bases when execution reads the real remotes, or the reverse (`plan-sources`).
+Then the dataset must have a row (`dataset-missing` otherwise), and the row must say the dataset is not an anonymous deposit, by an `anonymous` of exactly 0: one is refused (`anonymous-dataset`), as the Worker refuses it at the record, and a row that does not say is refused as unknown (`anonymity-unknown`), since unknown is never clean.
+The planner then runs again with the plan's own options, and its live preflight and `executable` decide: the file's two fields are not read at all, so a file that says not executable proceeds when the live plan is, and one that says executable is refused when a release pull request has since opened (`not-executable`).
+
+### The `.nemar/**` rule, read narrowly (clarification)
+
+Decision 2 lets execution go on when the commits since the plan "touch only `.nemar/**`".
+As built, the live plan may differ from the reviewed one only in `main`'s commit and tree, with the git-annex branch where it was, and every path that differs between the two `main` commits must be under `.nemar/` and must not be the privacy ledger (`.nemar/corrections.jsonl`); execution then bases on the live `main`.
+A ledger line is excluded because a recorded correction changes what the plan refuses: a line appended changes the plan's own ledger facts, and a line edited in place does not, so the path rule is what refuses the second.
+A moved `main` with no path that differs is `plan-stale` too, and so is a moved git-annex branch whatever `main` did, and so is anything else: plan again and review the new digest.
+The working clone checks the git-annex branch again when it fetches it, so one that moved after the plan was made again is refused there (`plan-stale`).
+
+### A dead recording the plan would name refuses the plan
+
+The Phase 5 amendment lists a dead key N.0.0 would name at a recording path as `dead_recordings`, a recording "the scrub will re-key".
+The plan pins only the keys it copies, so nothing names the upstream version to read such a recording from.
+The plan now says so itself, as a refusal (`dead-recording-unpinned`), so a reviewer sees it and execution refuses it as not executable.
+Pinning those keys is the planner's to add.
+
+### The preparation
+
+The working clone is a fresh, non-partial clone of NEMAR's `main` at depth 2, checked out at the base, with git-annex initialized without enabling any special remote (`--no-autoenable`).
+Each delta target is written from where the plan says it comes from and staged by its exact id, never through `git add`, so no attribute, filter or line-ending rule can change what is staged: a CRLF blob upstream committed stays the blob N.0.0 holds.
+Upstream's blobs come from the planner's clone of upstream, fetched by id when missing; computed bytes come from the planner itself, which records the bytes of every computed target as it plans (outside the plan's body, so the digest does not move), and execution never rebuilds a standard edit; root metadata upstream annexed is read at its pinned version and must hash to its key (`unannex-content-mismatch`).
+The NEMAR-owned edit rewrites `.nemar/metadata.json`'s `IsIdenticalTo`, reading the file as the planner reads it (a byte-order mark set aside and kept); an edit the plan lists with another status is left as it is, said to the operator and counted on the record.
+
+The materialized index is committed locally on the work branch before the scrub, so the scrub works on committed paths as it does in an import; first, every path that differs from the base must be in the scrub's scope (`scope-incomplete`), the check the scrub makes of its own scope, made here because the scrub would see no change once the index is committed.
+That commit is never pushed and is never an ancestor of the synthesized one, but it holds the delta's original, unscrubbed blobs: they stay in the private working clone (mode 0700), are not in the checkpoint and are not pushed, and go when the working directory is removed, when the pull request is open.
+
+The scope is every path written or deleted, the NEMAR-owned edit included, and the provenance files, which the scrub annotates when a header changes: a header change needs its provenance file in the scope, or the scrub refuses (`provenance-out-of-scope`), so the caller always puts both in it.
+The scrub reads each annexed recording at the version the plan pinned, sets dates (it is not a re-import), writes `repull-scrubbed` at the record's creation time under the fixed actor `nemar-repull`, and refuses with its own word for anything it cannot do.
+Its refusal keeps the scrub's message as it is, and when upstream no longer serves a pinned object that message begins with the OpenNeuro-upstream marker (`[openneuro-upstream-inaccessible]`): the marker text is the contract that the failure may pass on a later run, as for an import, and no other field says so.
+Dates are set on the delta's recordings and scans tables only, and a scans table in the scope has every dated row of the file set to 1 January, as the import does: N.0.0 is new, so this is the privacy-safe direction, and the versions already published are not touched.
+
+To retire a key it re-keys, the scrub needs a location log for it, and NEMAR's git-annex branch has never recorded a key upstream added after the import; so before the scrub, the working clone records, for each recording the plan copies and NEMAR's branch does not know, the holders upstream's own git-annex branch records, and nothing else.
+The scrub then retracts them and marks the key dead, which is what lets the next plan explain the scrubbed recording.
+For a recording the scrub did not re-key, those records stay: upstream's own remote uuids, recorded present, in the working clone's local git-annex branch.
+The slice that pushes that branch must decide, before it pushes, how such foreign holders are handled.
+*Annotated 2026-10-24: decided by the Phase 6d amendment: that branch is never pushed, and the registration names no such holder.*
+Git-held data NEMAR's policy annexes, and that the scrub did not take, is annexed and uploaded from this host with the same upload, to `<id>/objects/` only.
+
+### The synthesized commit
+
+The commit is the prepared index written as a tree and committed with `git commit-tree` onto the base: one parent, the fixed identity `NEMAR re-pull <noreply@nemar.org>`, author and committer dates the record's `created_at`, a body of counts with no path, and decision 2's two trailers as the message's last paragraph.
+Before it is accepted, the tree must be the plan's targets, modes included, with the scrub's changes and nothing else: a recording the scrub re-keyed, a git-held data file annexed (each under a key this host uploaded, each a symlink), a JSON blanked, a scans table dated or a provenance file annotated in place (each with its mode kept).
+Under `.nemar/**` and `.github/**` every path must be NEMAR's side as it was, except `.nemar/metadata.json`, which must be what the NEMAR-owned edit wrote, and the privacy ledger, which must be the base's text followed by exactly the scrub's one `repull-scrubbed` line when the scrub's counts show a change, and NEMAR's side as it was otherwise; an edited earlier line, a removal or a second line refuses.
+No key the scrub replaced may be named, and every named key must be one the plan counted held, one it copies, or one this host uploaded.
+The copy manifest is the tree's named keys the plan copies, at their pinned versions, and the keys this host uploaded; it must be a subset of the plan's copy keys, every upload must be a local one the tree names, and its digest is recorded.
+After the commit, the original of every git blob the scrub changed must not be reachable from it, within what the clone holds (the commit, the base and the base's parent, the clone being two commits deep); one that NEMAR's own history already reaches there refuses the commit.
+Every one of these refusals is `synthesis-mismatch` and names counts only.
+
+### Deterministic re-preparation, the checkpoint and the record
+
+Preparing twice from the same plan and base gives the same tree and the same commit, the scrub's downloads, re-keyed uploads and ledger line included, because every date in it is the record's and every identity is fixed.
+After the commit, the work branch and the local git-annex branch are saved as a git bundle, mode 0600, at `$NEMAR_CONFIG_DIR/repull/<id>/<digest8>.bundle`, whose prerequisites are the base and origin's git-annex branch as fetched.
+A run that finds its record `prepared` leaves it as it is when the working clone is at the recorded commit; restores the clone from the checkpoint when it is not, and only when the bundle delivers the recorded commit itself; and otherwise prepares again, which must reproduce the recorded tree, commit and copy manifest digest (`prepare-not-reproducible`, the record left `prepared` with why; abandoning it is the way out).
+Each time it says why the clone or the checkpoint was not used, in fixed words.
+A record found `prepared` whose base moved by `.nemar/**` only is prepared again onto the live `main`, and the self-edge records the new facts.
+A step that fails records why on the record (`planned` to `planned`, or `prepared` to `prepared` with the facts it already holds) and refuses; what it records names counts, never a path, and when the record cannot be written the operator is told.
+Every error the preparation records begins `[prepare:<code>]`.
+When a `prepared` record is shown to hold its facts again and its stored error begins so, the `prepared` self-edge records them with no error, and the Worker clears that error: the self-edge records the whole stage again, so the step it repeats succeeded (the Worker's rule for it, `CLEARING_SELF_EDGES` in `shared/repull-state.ts`).
+An error any other step recorded (one written after `prepared`, by the slices that follow) is left as it is.
+The record's `delta_paths` count is the plan's at `planned` (the paths it writes, deletions aside) and, at `prepared`, the paths the preparation wrote, deleted and edited; beside it the record keeps what the scrub could not read or prove (JSON files unread or annexed, scans tables unread, dates unproven or left), so unknown is never recorded as nothing.
+
+### Checked only against stand-ins
+
+That an anonymous ranged GET of `openneuro.org` at `?versionId=` answers as the stand-in does was measured once, for one object of `ds004362`, while Phase 6 was planned.
+That `aws s3 sync` and `list-objects-v2` answer the uploads as the stand-in does, and that GitHub lists open pull requests as the release-pr check reads them, only the canary and the first production runs can show.
+
+## Amendment 2026-10-24 (#1913): Phase 7 builds the automatic path
+
+Phase 7 builds the scheduled path of decision 6 and the Worker's merge of decision 7, in the slices below, one per pull request.
+Nothing in this phase turns a switch on: the owner does, in a reviewed change, once the first two re-pulls have been run by hand.
+
+### 7a: the switches and the caps are declared, and off
+
+The automatic path has four variables, two switches and two caps, and the Worker's configuration file sets none of them, so it is off.
+
+- A switch is on only as the exact string `"1"`, as `PR_REVIEW_ENABLED` is; `"true"`, `" 1"`, an empty string and an unset binding are all off.
+- A switch is honored only when `ENVIRONMENT` is exactly `production`: no trim, no case fold, and an unset binding is not production.
+  The dev cron's allowlist already keeps the daily jobs out of dev, but `isNonProductionEnv` reads an unknown `ENVIRONMENT` as production, so every automatic job also tests the exact string itself, and decision 6's re-pull fence (an `on` dataset only in production) now reads through the same test.
+- `AUTO_REPULL_MERGE_ENABLED` acts only while `AUTO_REPULL_ENABLED` is also on, so switching the open switch off stops the whole automatic path whatever the merge switch says.
+- `REPULL_DAILY_OPEN_CAP` defaults to 2 and `REPULL_DAILY_MERGE_CAP` to 5 when absent.
+  A cap that is set to anything but one or two digits no larger than 20 (a sign, a decimal, a space, an empty string, 21) reads 0 and is reported as unreadable, so a typo stops the work instead of falling back to a number the owner never chose.
+  Both caps read through one function, so the merge cap of Phase 6e and the open cap cannot drift apart; the merge cap's behavior is unchanged.
+- The four variables are absent from `[vars]` and from `[env.dev.vars]`, a test pins that for every table of the file, and a value set only in the dashboard is dropped by the next deploy, so the owner sets them in the file.
+  The first Worker merges run with `REPULL_DAILY_MERGE_CAP` set to `"1"`.
+- `GET /admin/repulls/switches` reports what the Worker reads (production or not, both switches, and the open cap and the merge cap, each with how it was read) and no binding value.
+  It is read-only, admin-only and sends no mail.
+- The App's bot user is named once, beside the App's id: `nemar-publish-bot[bot]`, user id 283755542, type `Bot`, as `GET /users/nemar-publish-bot%5Bbot%5D` answered on 2026-10-24.
+  A pull request is the App's only when both the login and the id match.
+
+### 7a: what was measured about the rulesets, and what is still the owner's (updates "Not yet verified")
+
+Read-only, 2026-10-24.
+
+- The App (id 3679074) requests `contents`, `pull_requests`, `checks`, `administration`, `actions`, `workflows` and `issues` write, and subscribes to `pull_request` and `push` events only, so it learns no check result by event; the Worker reads checks on a tick.
+- It has never opened a pull request in `nemarDatasets`, so an App merge has not been exercised.
+- Most mirrors have no branch protection at all.
+  `on003645` and `on004362` have no classic protection and no ruleset on `main`.
+  Of 21 more repositories sampled, 16 have nothing; 5 carry the repository ruleset "NEMAR branch protection" (a pull request rule with no required approvals, the required checks `Run BIDS Validation`, pinned to the App, and `version-check`, `non_fast_forward`, `deletion`, and the App and the organization's administrators as bypass actors); `nm000103` has classic protection.
+  So on most mirrors GitHub enforces nothing and `clean` proves no check ran, and on a ruleset repository the App may merge anything, so `clean` is the only thing that keeps an App merge from being a bypass.
+  The Worker therefore reads the two checks itself, by name and pinned to the App, at the head it merges; that reader is a later slice.
+- `mergeable_state` read by an always-bypass administrator: `blocked` where a ruleset's checks were never posted, `clean` on an unprotected repository with both checks green, `unstable` where a non-required check was `action_required`.
+  A bypass-capable reader still saw `blocked`; whether the App's own token reads the same cannot be shown read-only, and the first Worker merge under a cap of 1 is the check.
+- The ADR 0107 review's intake skips every pull request whose author is a bot, as ADR 0092 says ("not drafts, not bots"), so as the code stands no review row can exist for the App's pull request and none can be machine clean.
+  This contradicts the sentence under "Not yet verified" that the App is not exempt from the review; the correction is built with the machine-clean rule, and it narrows ADR 0092 for exactly the App's re-pull pull request.
+
+The split of the ruleset check, which the merge call waits for:
+
+- Read by an administrator with the `neuromechanist` login on 2026-10-24: the `nemarDatasets` installation of App 3679074 has `contents: write`, `pull_requests: write`, `actions: write`, `administration: write`, `checks: write`, `workflows: write` and `issues: write`, with `repository_selection: all`.
+  The App can therefore open a pull request, and the permission half of the check passes.
+- Not read: the organization's rulesets.
+  Listing them needs the `admin:org` scope, which that token does not hold, so whether an organization ruleset targets default branches, and whether the App is a bypass actor of it, is unknown.
+  That half stays an owner step before the Worker's merge is built: `gh auth refresh -h github.com -s admin:org`, then `gh api orgs/nemarDatasets/rulesets --jq '.[] | {id, name, target, enforcement}'`.
+  It passes when no organization ruleset targets default branches, or each one that does has the App as a bypass actor and asks for nothing the Worker does not read.
+  If it fails, the Worker's merge is not built, `AUTO_REPULL_MERGE_ENABLED` has no effect, and an administrator merges each automatic pull request under the cap and the screen.
+  *Annotated 2026-10-26: the owner ran it on 2026-10-26 and it passed (the Phase 7g amendment), so the Worker's merge is built.*
+
+### 7b, 2026-10-25: the dispatch record, and an automatic record only through it
+
+Phase 7b builds the record the automatic path keeps of what the Worker asked a run to do, the run's report back, and the one way a re-pull is recorded with `origin` automatic.
+Nothing here sends a dispatch, schedules anything or merges: the Worker that sends dispatches, the scheduler, the unattended run and the merge are later slices, so this slice is inert until they land, and nothing in it sends mail (the source scan covers its service and its callback).
+
+The record.
+
+- Migration 0109 adds `upstream_repull_dispatches`, one row per dispatch, keyed by nothing but its id: a dispatch exists before any re-pull row does, a run that refuses before its create leaves none, and one re-pull may have many (a first dispatch, its resumes, its finish).
+  *Annotated 2026-10-25: the migration is numbered 0111, not 0109; origin/dev took 0109 and 0110 for the ticket work after this slice was written.*
+  *Annotated 2026-10-26: renumbered 0112; origin/dev took 0111.*
+  A dispatch is `open` (run a plan to an open pull request, or resume a row that stalled before it) or `finish` (walk a merged re-pull to `complete`).
+- Its states are `dispatched` and `started` while it is live, then the run's own last word (`opened`, `finished`, `refused`, `failed`) or the Worker's: `dispatch_failed` when GitHub refused the dispatch, so it never ran, and `unreported` when the run said nothing in time.
+- A one-shot nonce is held exactly while the dispatch is live, and the edge that ends it clears it, so a token replayed after its run ended has nothing to verify against.
+  One live dispatch per dataset, which also keeps two runs from working on one dataset at once.
+- Only an `on` dataset has dispatches; the table refuses any other id, so an `xx` re-pull, which takes the administrator's path only (decision 7), cannot reach the automatic one even by a writer that skips the service.
+- The same migration adds the scheduler's one row and, on `upstream_repulls`, `hold_reason` and `hold_since`, which a later slice writes: a fixed word and since when, set together, on an automatic row only.
+  *Annotated 2026-10-25: the Phase 7f amendment's advance tick writes them, and the record's own transition clears them on every edge into another status.*
+  The record, as Phase 6 said, is deleted with its dataset, and so are its dispatches, those with no re-pull row included.
+
+Production only.
+
+- Claiming a dispatch needs `ENVIRONMENT` exactly `production` and the open switch on; claiming the finish of a re-pull that already merged needs exact production only, because turning the switches off must not strand a minted DOI's lineage, lock and `complete`.
+  The report callback and the watchdog read no switch either, for the same reason: a run dispatched before the switch went off must still be able to say how it ended, and its live row must not hold the dataset's one live slot for good.
+- Outside exact production nothing is claimed, verified, stored or swept, and nothing is read: the `nemarDatasets` organization is shared with dev.
+
+The open cap (decision 6).
+
+- `REPULL_DAILY_OPEN_CAP` counts the day's `open` dispatches, first ones and resumes alike, on D1's own clock in a fixed UTC day, and the count is in the statement that claims the unit, so two claims racing for the last unit cannot both win; a refused claim writes nothing (ADR 0099).
+- A dispatch GitHub refused never ran, so it frees its unit; one whose answer was lost keeps it, because it may be running, and so does one the watchdog ended `unreported`.
+  A claim whose token could not be signed or whose row could not be read back is ended the same way, `dispatch-failed`, before the error goes on, so a claim that committed but was never sent does not hold a unit and the dataset's live slot for eight hours.
+  A `finish` never counts: its merge already minted the DOI the cap exists to bound.
+- The cap counts surviving rows: deleting a dataset deletes its dispatches (an administrator-only path), which frees that day's units.
+- A cap set to something unreadable is `cap-unreadable`, not `cap`: it reads 0 but is not a full day, and the caller says which.
+  An upstream tag that is not a tag, or two that name one snapshot, is the refusal `candidate`, because it comes from outside.
+- The cap bounds dispatches, so it bounds the pull requests opened in a day only while every run that opens one starts on the day its unit was claimed; the later slice that schedules dispatches pins the timing that makes the two the same.
+- A first dispatch is refused for a dataset with an open re-pull, and a resume names an automatic row of the same dataset and tags that stalled before its pull request opened, both read in the statement that claims.
+
+The token and the callback.
+
+- The dispatch token is a kind of its own, signed with the callback secret every other kind uses and domain-separated the same way: its message begins with a line no other kind's begins with, and binds the dispatch, its dataset and its nonce.
+- A run reports to `POST /webhooks/repull-state`: `started` once, then `opened` (for the automatic record its dispatch is linked to, at `pr_open` or later), `finished` (a finish whose record is `complete`), or `refused` or `failed` with a code.
+  Each is a compare-and-set on the dispatch's id, its nonce and the status it was read in, and the record's state is read in the statement that writes, so it holds when the report is stored.
+  Every refusal of the token is one answer, at the callback (`invalid-token`) and at the automatic create alike (`dispatch-token`, 401, the same body whatever the cause), whether the dispatch does not exist, belongs to another dataset, has ended or the token is wrong, so neither door says which dispatches exist or how they ended; the token is checked before anything else is said about the dispatch, and no answer names a status.
+  The one answer at the create door that is not a token answer is a Worker with no callback secret, which is configuration and answers 503 `dispatch-unconfigured` at both doors.
+  A token that leaks (the later slice that sends a dispatch masks it in the step output, and this record asks that of it) lets anyone end a live dispatch as `failed` for up to eight hours; it is denial only, since a report stores fixed words and the record it opens or finishes is checked in the statement that writes.
+- A code is a word from a closed list, never a message, a path or a key, because the weekly report will count codes on a public-facing repository.
+  The callback refuses any other word, a run reports `no-code` for a refusal whose word the list does not hold, and a source scan requires every literal refusal word of the plan, the execution, the scrub and the Worker's re-pull routes to be on it.
+  *Annotated 2026-10-26: the list is cut to 57 words: the Worker's own and its answers to a report, the run's own, the final codes and nine step classes (`plan-refused`, `record-refused`, `prepare-failed`, `scrub-failed`, `copy-failed`, `register-failed`, `pr-failed`, `settle-failed`, `finish-failed`).
+  A run reports a refusal whose word the list does not hold as the class of the step that met it, `no-code` only when it met none.
+  When the preparation, the copy, the registration or the pull request fails on its own, that step also writes the exact word to the record's `last_error`; every other refusal, before the record exists or after it, keeps only its listed word, as the owner accepted.
+  The scan now requires every literal refusal word to reach a report as a listed word.*
+- The watchdog ends a live dispatch eight hours after it was sent (the job's bound of 330 minutes, plus queueing) as `unreported`, and writes one audit row when it marked any; the production daily cron calls it, and that wiring lands in this slice rather than in 7c, because the cron declaration rule needs a call site for every sweep export; 7c keeps the scheduling of dispatches.
+
+`origin` automatic only through a Worker-signed dispatch.
+
+- `POST /admin/repulls` takes an optional `dispatch_id` and `dispatch_token`, both or neither, and `origin` is in no request: a create with a live dispatch whose token the Worker signed is automatic, and every other is the administrator's.
+- Before the record's fences, in order: exact production, the open switch (so switching it off stops a run before its first write), and an `on` dataset; then the dispatch: its token verifies over a live dispatch (one answer for every failure of it, above), it is an `open` dispatch, and it names this dataset, this `ds` and both tags.
+- Then the plan (decision 6, "the automatic path takes only a plan with zero unexplained paths"): it was made by the planner the CLI runs today (planner 2, which a test pins to the CLI's), and it states `unexplained`, `conflicts` and `corrections`, each zero, because a count left out is not zero; and it states the size of its copy, at most 1 TiB, so one run fits a runner's job.
+  The administrator's path has no such bound.
+  The Worker can check only what the plan states; the run checks the live plan itself before it writes, which is a later slice's.
+- The insert links the dispatch to its record in the same batch, by the record's key and never by `last_insert_rowid()`, which the audit row moves, and only while the dispatch is still live under the nonce that verified: a dispatch that ended between the check and the write links nothing, the batch rolls back on the link's guard, and the create writes nothing and answers as any other failure of the token; when two creates of one valid dispatch race, the loser therefore gets that same 401 rather than `created: false`, which is kept because a retry converges on the winner's record.
+
+The same plan is the same record, for a caller of the same origin (clarification of the Phase 6 amendment).
+
+- The Phase 6 amendment returns an open record with the same tag and plan digest as it is.
+  That is now so only for a caller of the record's own origin: an administrator's create never takes over a record a dispatched run is working on, and a run never takes over an administrator's; each is `repull-in-flight`, which names the record.
+  Two executions of one record from two machines would each push its branch and open its pull request.
+- A dispatch that names its record (a resume, or one whose own create already recorded it) takes only that record, and once that record has ended it creates none (`dispatch-mismatch`), so a resume never starts a second re-pull.
+- An administrator who wants to take over a stalled automatic record abandons it and plans again; the record's history stays.
+  *Annotated 2026-10-25: built by the Phase 6g amendment: abandon ends an automatic record as it ends an administrator's, and a supersede refuses one.*
+
+What later slices use from here.
+
+- The hold words, the content refusals that end the automatic path for a tag, and the prefix of every error the automatic path records on a re-pull row, `[auto:`, which is not the preparation's `[prepare:`, so a `prepared` self-edge never clears one (the Phase 6c amendment's rule).
+- An administrator can now reset a stored review pass on the same head (`nemar admin pr-reviews start --redo`), so the slices that read the review for machine clean read it at each stage, the gates and the merge, and never carry one stage's reading to the next.
+
+Every statement here was run on bun:sqlite and on Miniflare's D1.
+Not checked here, and left to the later slices' canary and the first production run: that a run reaches the callback at the API host, and that the token survives the dispatch payload and the run's environment unchanged.
+
+### 7c, 2026-10-25: the scheduled path, in production only and off
+
+Phase 7c builds the scheduled half of decision 6: a daily tick, in production only, that finds the mirrors upstream has moved past and dispatches the central workflow that is to open their re-pull pull requests.
+The workflow, the unattended run and the merge are later slices, and the workflow is not deployed, so nothing here can open a pull request yet; with the open switch off, as it is, the tick dispatches nothing at all.
+*Annotated 2026-10-27: the unattended run (Phase 7d) and the merge (Phase 7g) are built, and the workflow's copy in `nemarDatasets/.github` merged as `nemarDatasets/.github#148`, so "not deployed" no longer holds; the tick still dispatches nothing while the open switch is off (the Phase 8 amendment, "The workflow pairs").*
+Nothing here sends mail, and the source scan that pins the record's import closure covers the scheduler.
+
+Candidates come from `stale_ready` alone.
+
+- A candidate is a mirror the staleness report (the Phase 4a amendment) calls `stale_ready`, read through the same service its route and the weekly section read, so the three cannot disagree.
+  The pull goes from the recorded tag to the latest tag the report read.
+- No other state is a candidate.
+  `mirror_lag` and `stale_unverified` are stale but cannot be planned yet, `unknown` and `not_examined` have no tag to pull from, and an anomaly is not a verdict.
+- A never-published mirror is `unpublished`, never `stale_ready`, because it has no version row.
+  The import retry already prepares it again at the latest tag in place (decision 10, the retarget ruling), so the automatic re-pull never takes it, and a completed import with no version row is left to an administrator.
+- Withdrawn mirrors, imports in flight and mirrors with an open re-pull never reach `stale_ready`, and each fact is read again per candidate, below.
+
+What is not dispatched.
+
+- Each `stale_ready` mirror is checked again in one statement before any claim, and skipped with a fixed word:
+  `missing` when its row is gone, and `anonymous` unless it says `anonymous` is exactly 0, because a re-pull would undo the blind (ADR 0065) and unknown is never clean;
+  `unreconciled` when a record of it holds a merge nothing reconciled, by the create's own rule, which the statement imports and never retypes;
+  `open-row` for an open re-pull, and `live` for a live dispatch;
+  `final-refusal` when a run already refused this tag for content (the content refusals the 7b slice names): the automatic path is over for that tag, and an administrator may still re-pull it by hand;
+  `unreported-streak` when its last three dispatches all ended `unreported`;
+  and `recent` when a re-pull of it was created, or a first dispatch for it sent, in the last 30 days.
+- The streak exists because a workflow that answers the dispatch and never runs leaves each one `unreported`, and the mirror would then be sent again on every rotation.
+  Only a later dispatch that reports would break it, and the scheduler sends that mirror none, so nothing clears it: the mirror stays on the administrator's path.
+  An administrator keeps it current by re-pulling it by hand (`nemar admin repull plan`, then `execute`), and a later staleness of it is the administrator's again.
+  While the tick skips a mirror for the streak, its log line is raised to warn, so the skip is seen.
+- Then the create's dataset fences (a mirror of that `ds`, not withdrawn, no import in flight) are read again through the record's own function, and a refusal is skipped under its code.
+  The automatic create checks everything once more when the run arrives.
+
+The 30-day reading.
+
+- At most one first dispatch, or one re-pull of any origin, per dataset in 30 days.
+- Every first dispatch counts except one GitHub refused (`dispatch_failed`), which never ran, and one whose run created a record counts through that record.
+- A resume of an existing record is not a first dispatch: a later slice bounds it by its own count, not by the window.
+  *Annotated 2026-10-25: the Phase 7f amendment's advance tick does: at most three `open` dispatches a record, the one that created it included.*
+- An administrator's re-pull counts too, which errs toward fewer DOIs.
+
+The open cap, claimed at dispatch.
+
+- Every dispatch goes through the dispatch record's claim (the 7b slice), whose statement counts the day's `open` dispatches and claims the unit at once, so the scheduler cannot pass `REPULL_DAILY_OPEN_CAP`, and two ticks at once cannot either.
+  The day's count is also read once before the scan, only so that a full day costs no OpenNeuro request (`cap-reached`); the claim alone decides a unit.
+- The 7b slice says a dispatch GitHub refused frees its unit; this slice defines refused as a 4xx, which GitHub answers before it creates an event, so the dispatch ends `dispatch_failed` and its unit is freed.
+  A 5xx, a lost connection and the 10-second timeout are a lost answer, because GitHub's edge can answer a 502, 503 or 504 after it queued the event (the reasoning the approval dispatch records): the dispatch stays `dispatched`, keeps its unit, and the watchdog ends it `unreported` if its run never reports.
+- A refusal the next mirror would meet too stops the tick before that mirror, and the tick records `send-refused`: a 401, 403 or 404 (the credential cannot reach the central repository), a 429 (GitHub's rate limit), and a second refusal of any status in one tick.
+  The next tick starts with that mirror, and the refused dispatch has freed its unit.
+  One refusal of another status frees its unit, and the scan goes on to the next candidate.
+- The claim reads the switch, the secret and the cap again when it claims, so one that changed while a tick ran ends the tick with the claim's own word (`switch-off`, `unconfigured`, `cap-unreadable`, or `cap-reached` when the day filled), before that mirror.
+- The tick runs on the production daily cron at 03:00 UTC.
+  The timing that makes a day's dispatches that day's pull requests is pinned by the slice that writes the workflow, as the 7b slice says.
+  *Annotated 2026-10-25: pinned by the Phase 7d amendment's test, for the daily tick and for the stalled-run slice's resume window.*
+
+Production only, and gate G4 in code.
+
+- Outside `ENVIRONMENT` exactly `production` the tick returns before it reads, writes or sends anything, whatever the switches say.
+  It is called only from the production-only daily block, `DEV_CRON_ALLOWLIST` is unchanged, and the wiring test now pins every production-only daily job out of the allowlist.
+- In production, with `AUTO_REPULL_ENABLED` not exactly `"1"`, the tick only stamps its row (`switch-off`) and asks OpenNeuro nothing.
+- The design record's gate G4 is that the first two re-pulls, of `on004362` and of `on003645` (either first, as upstream's snapshots allow), are run by hand, that the new major's DOI then resolves with `IsDerivedFrom`, and that the previous version still serves.
+  *Annotated 2026-10-27: which relation the DOI carries is not verified until G4 runs; see the Phase 8 amendment, "The relation on a re-pull's Digital Object Identifier (DOI)".*
+  The scheduler dispatches nothing (`waiting-for-manual-run`) until this database records both of those re-pulls as run by an administrator to `complete` with their tags.
+  One of them alone, two runs of the same one, an automatic or an unfinished run, and any other mirror's re-pull do not count.
+  The DOI and the previous version are read by the owner before turning the switch on, which is the act that opens the path.
+- The dispatch names the CLI version the run installs, the dispatching Worker's own, and only a release version is sent, so a Worker built from a development version dispatches nothing (`cli-unreleased`).
+- An accepted, narrow limit: the Worker deployed from the release bump on `main` carries the release version before npm has published it from the release tag, so a tick between that deploy and that publish can dispatch a run that cannot install its CLI.
+  Such a run fails at its install and reports `failed`, or says nothing and is ended `unreported`; its unit stays used for the day, and its mirror waits out the 30-day window.
+  The window is the minutes between the deploy and the publish, and the tick runs once a day.
+- A Worker without the callback secret, which signs the dispatch token, dispatches nothing (`unconfigured`).
+- Every tick in production stamps the scheduler's row with its time and its outcome, one of a closed list of words (`shared/repull-state.ts`), which the observability slice reads.
+
+The rotation, and what may hold it.
+
+- A tick reads at most three pages of the report (300 mirrors) from where the last one stopped, and once one reaches the end of the fleet the next starts again at the first mirror, so the fleet is covered in rotation.
+- The GitHub probes that turn a stale row into `stale_ready` are bounded to ten for the whole tick.
+  A stale row the budget did not reach reads `stale_unverified`, so the cursor stops before the first such row and the next tick probes it.
+  Passing it by until the next rotation would starve every stale mirror that sits behind ten ineligible ones, whose probes would be spent first on every pass.
+- The tick is `blind`, dispatches nothing from what it could not see and leaves the cursor where it was, in three cases: OpenNeuro failed a batch of the page; the probes had no GitHub credential (`probe-credential-missing`); or every probe the tick made came back unverified (`probes-unverified`: an expired token, GitHub's raw host down, or a credential that cannot read OpenNeuro's repositories).
+- A page whose rows are all `unchecked` with no batch failure is a per-dataset problem: those mirrors are passed by and counted, and met again on the next rotation, so one mirror OpenNeuro will not answer for cannot hold the cursor.
+- Two holds are bounded: a candidate whose own reads throw holds the tick before it, and a tick whose every probe failed holds where it started, but each holds at most two ticks at one place in 30 days, counted from the audit rows it writes; the third passes on (the candidate counted as `candidate-error`).
+  A stale mirror whose OpenNeuro repository is gone probes unverified on every pass, and one that always throws would fail every tick, so an unbounded hold would stop the rotation for good.
+  A batch failure holds without a bound: OpenNeuro down means nothing can be seen.
+- Each tick logs one line of counts and fixed words, at error level when it could not see, a send was refused or unanswered, a mirror could not be compared or probed, or a candidate threw; a failure is named by a fixed word and its error's class, never its message.
+
+What the dispatch carries.
+
+- A `repository_dispatch` of the event `run-upstream-repull` on `nemarDatasets/.github`, whose payload holds the mode, the dataset, its `ds`, both tags, the dispatch's id and token, the CLI version and, for a resume or a finish, the re-pull's id: strings only, nine keys at most, under GitHub's limit of ten.
+- Every field is checked before it is sent, and a malformed one stops the send and ends the claim; no error message names a value.
+- It carries no callback URL: the run reports to the production API, whose address the workflow states.
+- The token is the one secret in it, and the workflow's first step masks it before any step can print it (a later slice, as the 7b slice asks).
+  A send that got no answer is logged by its error's class only.
+
+What a tick costs.
+
+- Counted from the code: 3 D1 statements before the first page (the proof, the day's count, the cursor) and 1 after it (the stamp); per page 3 statements and at most 2 GraphQL requests; at most 10 tag probes and 10 control reads; one token for an App credential; and per `stale_ready` mirror 2 statements to skip it, or 4 and the send to dispatch it, one more when GitHub refuses.
+- A tick of three pages, ten probes and ten dispatches measures 79 calls, which a test pins; by the count, no tick exceeds about 85 of the daily tick's shared allowance.
+
+Discovery untouched.
+
+- Decision 6's id-only discovery is unchanged, and a source scan pins the separation both ways: the auto-import and discovery load no re-pull or staleness module, and the staleness report and the scheduler load neither.
+- OpenNeuro's endpoint, which both read, moved to a module that imports nothing, because the report's snapshot reader used to import it from discovery.
+
+Checked only against stand-ins.
+
+- OpenNeuro, its GitHub mirror and GitHub's dispatch endpoint are loopback stand-ins in the suites, and the scheduler's statements, one whole tick included, run on bun:sqlite and on Miniflare's D1.
+- Only production can show: that GitHub answers the dispatch with 204 and nothing runs until the workflow is deployed; that the installation token reads `OpenNeuroDatasets` raw files (an item under "Not yet verified": if it does not, every probe is unverified and the tick is `blind` until its bounded hold passes on); and that a 5xx can follow a queued event, which is assumed here in the safe direction.
+
+## Amendment 2026-10-24 (#1912): Phase 6d copies, registers and opens the pull request
+
+A further slice of the Phase 6 amendment above, built by Phase 6d.
+It builds the second half of decision 2's execution and decision 8's copy: from `prepared` the record goes to `copied`, `registered` and `pr_open`, where `nemar admin repull execute` stops.
+It never merges: a merge mints a version DOI that cannot be withdrawn, and is the administrator's own act through the merge path a later slice builds.
+*Annotated 2026-10-25: that path is built by Phase 6f, `nemar admin repull merge <id>` and `nemar admin pr-reviews` through one gate (see the Phase 6f amendment).*
+Nothing here adds a route, so nothing here can send mail; five annotations are added to earlier text (two on the record's header, three on sentences of earlier slices) where this one builds, decides or corrects them.
+
+### The command, and a record past `prepared`
+
+`nemar admin repull execute <plan-file>` runs on the administrator's machine with their own GitHub token and the ambient short-lived AWS credentials.
+It asks before it writes anything, and the question says how many objects it copies, that it pushes the release branch and opens its pull request, how many version DOIs the merges will mint, and that execute never merges; `--yes` answers it.
+`--until` stops after `planned`, `prepared`, `copied`, `registered` or `pr_open` (the default), and a later run takes the record up where it stopped.
+Exit 0 means the requested status was reached, 3 that a step stopped and left the record as it was with why on it, and 1 that nothing was written or the run failed.
+
+A record for the same digest past `prepared` is taken up without planning again.
+A live plan cannot be compared with the reviewed one any more: the registration moved NEMAR's git-annex branch, which the plan reads, and the release branch and its pull request exist, which the release-pr check refuses.
+Such a run proves the file instead (its digest, its planner, the API and the remotes it was made against), and takes the working clone, or the checkpoint when the clone is gone, as preparation left it; with neither it refuses (`checkpoint-lost`), and abandoning the record is the way out, for which no command is built yet.
+*Annotated 2026-10-25: built by the Phase 6g amendment: `nemar admin repull abandon <id>`.*
+Every run, whatever the record's status, first refuses a dataset whose catalog row does not say `anonymous` is exactly 0, before anything is written, as the Worker refuses one at the record.
+Before each step past `prepared`, upstream's tag must still be the commit the plan read, because the commit's trailers name it (`upstream-tag-moved`): OpenNeuro has re-created a tag before.
+
+### The copy pins the version (decision 8, as built)
+
+The copy manifest is rebuilt from the synthesized commit and the plan, of which it is a function, and must hash to the digest recorded at `prepared` (`manifest-mismatch`).
+It is written to `<id>/staging/repull-<to_tag>.json` before the first copy, as decision 8 says, because an abandoned attempt's orphans are read from it.
+Each key it copies is skipped when the bucket holds it at the size the key declares, and copied again at any other size (#967).
+Otherwise upstream's object is headed at the pinned version: a version upstream no longer serves is `pin-absent`, another size than the key declares is `pin-size-mismatch`, and an answer for another version, or for none, is `pin-version-mismatch` (unknown is never success); a key that declares no size is skipped only when the destination holds the pinned object's size, and otherwise copied, its pinned size being the one checked, never zero.
+The copy is one server-side `copy-object` with `?versionId=` on the source and `--copy-source-if-match` on that version's ETag, or, above S3's 5 GiB single-copy limit, a multipart upload whose parts are each copied from the same version under the same condition, aborted when any part fails.
+S3 must name the pinned version as the one it copied from (`CopySourceVersionId`), for the copy and for every part; any other answer, or none, is `pin-version-mismatch`, a single copy that already landed is deleted by its version id (a rerun would otherwise skip it at the declared size), and a multipart upload is aborted.
+An abort that fails leaves the upload open, and the refusal names the count and the upload ids.
+An endpoint that ignores the version and says so is refused here; one that ignores both the version and the ETag condition and says it copied the pinned version can only be shown up by the canary, which compares the copy's ETag.
+The destination is headed after and must be the size copied.
+A refusal stops new copies, the step refuses once those in flight have finished, and nothing is registered for a partial copy; a rerun skips what landed.
+`prepared -> copied` is written only after a fresh listing shows every key of the manifest, copied or uploaded at preparation, at its declared size (`copy-unverified`).
+The copy does not lock what it copies: decision 8's "locked orphan objects" holds only once a later slice locks a released version's objects.
+*Annotated 2026-10-25: Phase 6f locks, at the release, only the objects that release's own copy and uploads wrote, so an abandoned attempt's orphans are never locked (see the Phase 6f amendment).*
+
+### The write guard
+
+Every push and every `aws s3api` call after `prepared` passes an allowlist before the process starts (`src/lib/repull/write-guard.ts`).
+A push goes to `origin` only, one refspec at a time, from a commit id, and only to `release/v<N.0.0>` (or `release/v<N.0.1>`) or to `git-annex`, never forced; a release branch may also be deleted, or leased onto a re-synthesized commit, which later slices use.
+*Annotated 2026-10-25: the lease is used by Phase 6f's re-synthesis onto a moved `main`; the deletion is still the abandon slice's.*
+*Annotated 2026-10-25: the deletion is used by the Phase 6g amendment's abandon and supersede, and the lease by N.0.1's re-synthesis too; a deletion now carries a lease on the head that was judged, and one without it is refused (`delete-without-lease`).*
+Never `main`, never a tag, never `+`, `--force`, `--mirror` or any option the list does not name.
+An S3 call writes only under `<id>/objects/` or to the one staging key, copies only from upstream's bucket under the dataset's own `ds/` and only at a version id, and names no lock, ACL, metadata directive or governance bypass.
+The one other write is `delete-object` by version id under `<id>/objects/`, which removes a copy S3 reported as made from another version than the pinned one.
+A key or prefix with a `.` or `..` segment, or an empty one, is refused before the prefix test, because the test is lexical; a version id with a character the guard does not allow (older S3 version ids can hold `+` and `/`) is refused with that cause, which fails closed.
+A push that origin's own rule refuses (a hook, a protected branch) is told apart from one that lost a race with a moved branch, and is not tried again; a push that fails carries a fixed-word cause (credentials, the network, or unknown).
+
+### The registration publishes no holder NEMAR does not control (decides the Phase 6c amendment's open point)
+
+The Phase 6c amendment left the holders preparation adopted from upstream's location log in the working clone's own git-annex branch, recorded present, for every copied recording the scrub did not re-key, and said the slice that pushes must decide what becomes of them.
+The decision: the working clone's git-annex branch is never pushed.
+What is pushed is one commit on top of origin's git-annex branch as fetched, written from facts, which changes location logs and nothing else.
+For each annexed key the N.0.0 tree names it adds `nemar-s3`'s present line, and for each upstream key the scrub replaced it writes the dead mark: every repository origin's log for that key already names set to `X`, or `nemar-s3` alone when it names none.
+So no line it adds names a repository origin's log did not already name, other than `nemar-s3`.
+Three things the working clone's branch holds are therefore never published: the adopted upstream holders, which are presence claims for remotes NEMAR does not control; the working clone's own repository, recorded present for the content it annexed and gone when the working directory is removed; and that repository's `uuid.log` entry.
+This is stricter than the import, which pushes its clone's whole git-annex branch, upstream's records included; the import is unchanged.
+
+The registration runs only after the import's tree gate passes on a fresh listing: a key the location log claims and the bucket lacks refuses (`held-key-absent`) before anything is pushed (#1396).
+It calls the import's `treeGate`, and `verifyManifestObjects` at the copy, but not `registerTreeKeys`, which records presence in the clone's own branch: the correction to the Phase 6b amendment's sentence that the register step would call all three.
+A push GitHub rejects because origin's branch moved is written again on top of it, three times at most; the result is proved from origin's branch as fetched again, `nemar-s3` present for every tree key and every replaced key dead (`registration-unproven` otherwise).
+
+### The release branch and its pull request
+
+Before the push, NEMAR's `main` must be the commit the record bases on, or a descendant of it by commits of the three shapes enrichment writes and nothing else: a regular file under `.nemar/` other than the privacy ledger, the `.nemar/` line added to `.bidsignore` as `withBidsignoreEntry` adds it, or a root `participants.tsv` that is the placeholder of that commit's subjects (`main-moved` otherwise).
+The ledger is excluded for the reason the Phase 6c amendment gives for `.nemar/**`: a line in it changes what a plan refuses.
+A `release/v<N.0.0>` that already exists is reused only when it is the synthesized commit or such a descendant of it, since enrichment commits to every release push (`branch-foreign` otherwise).
+The pull request is looked for among the open ones by its head branch before one is opened, so a run whose answer was lost finds it and never opens a second; another open release pull request refuses (`release-pr-open`), as the plan's preflight does, and so do 100 or more open, which one page cannot show complete.
+It is opened into `main` with the administrator's token, titled `Release v<N.0.0>`, and its body holds counts, the record's number and the plan digest, never a path or a key.
+The body also says what the Phase 6b amendment requires of the merge: the squash commit message must end with both trailers, `Upstream-Snapshot:` and `Repull-Plan:`, as its last paragraph, because GitHub's default squash message puts them mid-message and the privacy ledger's fresh-clone proof then fails the dataset; the merge path enforces it.
+*Annotated 2026-10-25: built by the Phase 6f amendment: the merge gate writes that message and refuses one without both trailers.*
+`pr_open` records the head GitHub reports, accepted only when it is the synthesized commit or an enrichment-shaped descendant of it.
+
+### The record, and the working directory
+
+`copied` and `registered` repeat, as `planned` does, to record why the step that follows them failed; the error is the whole write, and the edge forward clears it.
+A step's error begins with its step, `[copy:`, `[register:` or `[pr:`, and never with `[prepare:`, which only a preparation clears; a `prepared` record that holds a copy's error keeps it until it is copied.
+At `pr_open`, and on any later run that finds the record at `pr_open` or past it (one killed before the removal), the working directory is removed unless `--keep-workdir`, because it holds the delta's unscrubbed originals in the local commit preparation made before the scrub.
+That commit is never pushed and never in the checkpoint: the suites check that neither origin nor the bundle holds the original blob of a JSON file the scrub blanked, and that the upstream key of a re-keyed recording is neither copied into the bucket nor anything but dead on origin.
+The checkpoint is kept for the slices that follow.
+
+### The canary
+
+`nemar admin repull canary --prefix <p> --source <ds>/<path>@<versionId> --multipart-source <ds>/<path>@<versionId>` is the real-bucket check of what the copy believes, for the owner to run before the first production re-pull.
+*Annotated 2026-10-26: moved out of the shipped CLI to `bun run scripts/repull-canary.ts`, with the same arguments, fences, dry-run default and `--execute`.*
+The prefix must be `nm099999/repull-canary-<word>/` or `xx<090001 to 099899>/repull-canary-<word>/`, never a dataset's `objects/` or `staging/` and never the permanent exemplar fleet (`xx099900` to `xx099999`, ADR 0068), the bucket must be NEMAR's, and the two objects must belong to one dataset; the run itself checks all of it, so no caller can skip it.
+A dry run, the default, makes no call and prints the calls.
+With `--execute` it heads both sources at their versions, copies the small one with one `copy-object` and the other, over 10 MiB, in 5 MiB parts with `upload-part-copy`, through the same write guard; it requires S3 to name the pinned version as the one it copied, for the copy and for every part, compares the copies' sizes, and the small copy's ETag with its source's when the source is a single-part object.
+It then writes a staging-shaped key, deletes it and both copies by version id, and lists the prefix's versions, which must hold neither a version nor a delete marker.
+Every object it writes is deleted by version id on every path, including when a check of the copy fails, and an upload left open under the prefix is a failed step.
+It never locks and never bypasses a lock, so a bucket whose default retention locks new objects makes the canary fail at its deletes, which is what an owner needs to know before a re-pull's orphans are counted.
+
+### Checked only against stand-ins
+
+The suites drive the real `git`, `git-annex` and `aws` CLI, but S3 and GitHub are stand-ins, and these are what only the canary and the first production runs can check:
+that a signed cross-account `copy-object` and `upload-part-copy` of a public versioned object honor `?versionId=` and `--copy-source-if-match` and name the copied version (`x-amz-copy-source-version-id`) as the stand-in does;
+that a multipart copy over 5 GiB in 4 GiB parts, and the CLI's retries and its ten-minute bound per copy call, behave as they do here;
+that upstream's bucket answers from `us-east-1`, which the copy assumes;
+whether NEMAR's bucket locks a copy by default retention;
+and how GitHub opens and lists a pull request (the head's repository, the answer to a second one on the same branch).
+git-annex reading the registration's location-log lines is checked locally: a fresh clone's `git annex whereis` finds the copied recording at `nemar-s3` alone (git-annex 10.20261006).
+
+## Amendment 2026-10-25 (#1913): Phase 7e builds machine clean and reviews the App's pull request
+
+A further slice of the Phase 7 amendment above, built by Phase 7e.
+It builds decision 7's definition of machine clean, the readers of the facts it is decided from, and the review of the pull request the automatic path opens.
+Nothing here merges, moves a record, dispatches a run or mails anyone: the slices that advance the gates and send the merge call what this one builds, and a source scan keeps its import closure free of mail.
+One annotation is added to earlier text, on the sentence of "Not yet verified" this slice corrects.
+
+### Machine clean, as built
+
+- The rule is one pure function, `machineClean` in `shared/repull-machine-clean.ts`, of facts read at decision time, and it answers clean or the word of the first rule that does not hold.
+  The gates and the merge each gather their own facts (`gatherMachineCleanFacts` in `backend/src/services/upstream-repull-facts.ts`) and nothing is carried from one stage to the next.
+  A pass is never carried between stages; an administrator's `--redo` resets passes on other pull requests, and none can touch this class, whose review only the Worker starts (below).
+- The rules, in their order:
+  exact production and the open switch, and at the merge the merge switch;
+  a record the automatic path made, of an `on` dataset;
+  no N.0.1, and the plan's unexplained, conflict and correction counts each stated and zero;
+  a named dataset (anonymity that cannot be read holds as anonymous), not withdrawn, with no import that has not settled, and still the mirror of the record's `ds`;
+  the recorded pull request, open and unmerged, by its number, from the recorded release branch into `main`, from the dataset's own repository (a fork, a deleted one included, is refused), not a draft, and opened by the App, its login, numeric id and type all matching;
+  its head the recorded head at the gates, and at the merge the screened head, which must also still be the recorded head;
+  `main` exactly the commit the record bases on;
+  BIDS validation and `version-check`;
+  the screen;
+  the review;
+  and GitHub's `clean`, where `unknown`, null and every other state wait.
+- The facts come from GitHub's record of the pull request, `git/ref/heads/main` and the check runs, read with the Worker's own credential; from the record; from the dataset row and its import, read by the statement the create reads; from the screen bound to the record; and from the review row of the head.
+- Unknown is never clean.
+  A GitHub answer that is not 200 (a 404 included), a timeout, a throttle and an answer of another shape read as unreadable, and each holds, as do a missing screen, a missing review and any value outside the declared ones.
+- Outside exact production and with a switch off nothing is read, the database included, and for a record or a dataset the rule already refuses GitHub is not asked: the organization is shared with dev, and the tick's subrequests are shared by every job on it.
+- An import has settled only at `complete`, `failed`, `quarantined` or `rolled_back`; any other status holds, `incomplete` included (the retry engine is repairing it), and so does a status no list declares.
+  This is stricter than the record's own fence, which refuses an import that is preparing, copying or finalizing and is unchanged: that fence asks whether an import is writing, and machine clean whether it has settled.
+- Three hold words are added, `dataset-not-mirror`, `pr-draft` and `screen-exempt`; the last is an `xx` screen, which decision 7 says is never clear.
+- The daily merge cap is not a fact the rule reads.
+  The claim to merge counts it in the statement that writes the claim (the Phase 6e amendment), so a reading taken earlier could only be stale, and the merge sent with the screened head is the last check.
+
+### The checks are the App's own
+
+- Each check is asked for by name (the names `deriveContexts` gives the dataset), for App 3679074's runs only and the latest of each, and the answer is filtered again by name, App and head, so a GitHub that ignored a filter cannot pass another App's run or one a person posted.
+  Of the App's runs of a name the one with the highest id is read, since a re-run is a new run, and a page that does not hold every run GitHub counts is unreadable.
+- Green is `completed` with `success` and nothing else.
+  `neutral` and `skipped`, which GitHub counts as passing a required check, are not green here, and a commit status, which names no App, is not read.
+- Measured read-only on 2026-10-25 on `nm000527#1`, a central-flow repository: both `Run BIDS Validation` and `version-check` are posted by App 3679074, the shims' own job runs are GitHub Actions' under other names, and GitHub honored `check_name`, `app_id` and `filter=latest`.
+  `deriveContexts` still leaves `version-check` unpinned for the rulesets, which this slice does not change.
+  The four legacy-inline repositories post `bids-validation` as GitHub Actions and so never read green here, which is the safe direction; none of them is a mirror.
+
+### The screen and the review, read strictly
+
+- The screen is read as its own gate reads it, a run past its report deadline included, but `acknowledge` never passes here, whoever recorded the reason, because machine clean needs `clear`.
+  A clear verdict whose stored report does not name the head is unreadable, and no screen of the head is read as one to dispatch.
+- The review is read as ADR 0093's detail view reads it: the stricter of the stored verdict and the one its stored report re-derives, so either can lower it and neither can raise it.
+  A stored report that no longer parses is an error unless the column says `fail`.
+
+### The review of the App's pull request (corrects "Not yet verified")
+
+- "Not yet verified" says the App is not exempt, so the review runs.
+  As the code stood, that was false: the review's intake skipped every bot's pull request (`bot_author`), as ADR 0092 says ("not drafts, not bots"), so no review row could exist for the App's pull request and none could be machine clean.
+- The correction admits exactly one class, the App's automatic re-pull pull request, and only when the Worker itself starts its review from the record (`startRepullPullRequestReview` in `backend/src/services/pr-review-start.ts`).
+  Nothing calls the start yet; the slice that advances the gates will.
+  *Annotated 2026-10-25: the Phase 7f amendment's advance tick calls it, and nothing else does.*
+  Its gates, in order, each with the answer it starts nothing with:
+  exact production (`not_production`) and the open switch (`auto_repull_off`);
+  a dataset this Worker owns (`not_owned_here`), which is every dataset outside the dev Worker's own ids, none of which is an `on` mirror;
+  an automatic record of an `on` dataset (`not_automatic`) at `pr_open` with its branch, number and head (`not_pr_open`);
+  the review switched on (`pr_review_disabled`) and a dataset the review may read, live, named and published (`unknown_dataset`, `dataset_not_reviewable`);
+  and GitHub's record of the recorded pull request (`github_unreadable` when it cannot be read), authored by the App by login, numeric id and type (`not_app_author`), at the recorded head (`head_moved`).
+  The intake then admits it only from the release branch the record names, in the dataset's own repository, and any other is the intake's `bot_author`.
+  A start that dispatched writes an audit row with no user; a row that could not be written is logged and does not undo or block the review, so the answer says nothing about it, by design.
+- Nothing else about bot authors changes.
+  A delivery GitHub sends for the App's pull request, and an administrator's `nemar admin pr-reviews start` of it, still answer `bot_author`, and every other bot's pull request is skipped as before.
+- The App has no NEMAR account and its login is not a person's login, so it is never exempt, and every other rule of ADR 0107 applies to it unchanged: a reviewable dataset, an administrator's block, the per-commit row and the edit cap.
+  The Worker's start is not an administrator's: it does not start again a commit whose review errored, was declined or went unreported, and only a review whose dispatch failed (`dispatch_failed`, a run GitHub never started) is tried again.
+- 2026-10-25: this narrows ADR 0092's "not bots" for one class only, the NEMAR App's automatic re-pull pull request, which is reviewed when the Worker starts its review; for every other pull request ADR 0092 stands as written, and its header says so.
+- Keeping the webhook out has two consequences.
+  An edit of the App's pull request's title or body, which ADR 0107 re-reviews for anyone else, is not taken up, so a stored pass stands across it; a change of its base is still refused by machine clean.
+  And nobody but the Worker's own start can restart the review of the App's pull request on the same head, and that start restarts only a review whose dispatch failed (`dispatch_failed`, a run GitHub never started); an administrator's `--redo` cannot.
+  So once a review of a head has errored, been declined or gone unreported, the re-pull holds at `review-not-pass` until its pull request has a new head, and an administrator's merge is the only other way on.
+- The review queue's detail view names the App's pull request's author `nemar-publish-bot[bot]`, from the stored review and from GitHub when the login and the numeric id both match, where it showed `(unknown)` and a mangled login before; every other login is reduced to a login's characters as before.
+
+### Checked only against stand-ins
+
+The suites run the real record, screen and review rows, but GitHub is a stand-in, and these are what only the first production runs can check:
+that GitHub names the author of the App's pull request `nemar-publish-bot[bot]`, id 283755542, type `Bot`, as `GET /users` answered;
+that the App's token reads `mergeable_state` as an administrator does;
+that `check-runs` honors its filters on a mirror as it did on `nm000527`;
+and that the review workflow claims and reports on a pull request a bot opened as it does on any other.
+
+## Amendment 2026-10-25 (#1912): Phase 6f takes a re-pull past its pull request, merges it through one gate, and records the release
+
+A further slice of the Phase 6 amendment above, built by Phase 6f.
+It builds `nemar admin repull status`, `resume` and `merge`, routes `nemar admin pr-reviews`' merges of a re-pull pull request through the same gate, and records the release and the lock: a re-pull now goes from `pr_open` through `released`, and to `complete` when its plan had no corrections.
+N.0.1, abandoning a record and superseding one are a later slice's.
+*Annotated 2026-10-25: built by the Phase 6g amendment.*
+Nothing here sends mail; the administrator reads a re-pull's state with `nemar admin repull status <id>`, which shows the record, its identifier screens and the command that takes it on.
+Seventeen annotations are added to earlier text, where this slice builds, changes or does not build what it said was a later phase's.
+
+### Resume never merges
+
+`nemar admin repull resume <id>` runs on the administrator's machine with their own GitHub token, and refuses a dataset whose catalog row does not say `anonymous` is exactly 0 before anything is written, as every run of execution does.
+The working clone is gone by then (it held the delta's unscrubbed originals and is removed at `pr_open`), so resume reads NEMAR's origin through a bare scratch repository of its own, `$NEMAR_CONFIG_DIR/repull/<id>/resume/<digest8>-<pid>/`, mode 0700 and removed at the end of the run (the merge gate keeps its own under `merge/`, so the two never remove each other's), under the same lock as an execution of the record's plan, so an execute and a resume of one record never both push.
+
+At `pr_open` it reads the pull request on GitHub.
+One found merged is recorded through the Worker's verified route, which reads the merge on GitHub itself; the record gains the edge `pr_open -> merged` (and its N.0.1 twin) for that route alone, and such a merge is counted as one no tool held a claim for, at a head that was not screened, which closes the case the Phase 6e amendment left to this slice.
+One found closed without a merge ends the record `abandoned` (decision 3), at `pr_open` and at `gates_clear` alike.
+A head that moved by the commits enrichment writes is recorded; any other head is `head-foreign`, recorded as the step's error with the recorded head kept, so a foreign commit is never screened or gated.
+On top of a synthesized N.0.0 only the first of the three enrichment shapes can arise on the release branch (a regular file under `.nemar/`), because the commit's tree already carries the `.nemar/` line in `.bidsignore` and a `participants.tsv`; the other two are accepted by the same function and are covered by its own suite.
+`main` must be the record's base or an enrichment-shaped descendant of it (`main-moved` otherwise).
+
+The identifier screen of the recorded head is dispatched when none exists or it produced no verdict, and waited for.
+A verdict that asks for a person is acknowledged with `--acknowledge-identifier-screen "<reason>"` on resume, not on merge: the edge into `gates_clear` already requires the screen to pass for the administrator who takes it, so the reason must be recorded before the gates (ADR 0086's rule that it counts only for the administrator who recorded it).
+A direct identifier stops the gates, recorded as `screen-blocks`.
+When the screen passes and GitHub reports the pull request `clean`, resume records `gates_clear` with the screened head, and stops: "Ready to merge".
+It waits up to `--wait-minutes` (10 by default) for the screen and for GitHub, reading both again on each turn; still waiting at the bound is exit 3, with what it waits for.
+Every error a step past the open pull request records begins with that step's word (`[gates:`, `[release:`, `[lock:`), never `[prepare:`, so a `prepared` self-edge never clears one.
+
+### The re-synthesis onto a moved `main`
+
+When `main` moved by enrichment and GitHub reports the pull request `dirty` or `behind`, resume makes the re-pull's commit again on the new `main` and replaces the release branch with the write guard's leased push, asking first unless `--yes`; a pull request GitHub reports `clean` is not re-synthesized.
+The new commit has the recorded commit's message, identity and dates, one parent (the new `main`), and the recorded tree with what enrichment did on `main` applied to it as enrichment itself would, never undone.
+Under `.nemar/**` it holds the new `main`'s files, except `.nemar/metadata.json`, which is the new `main`'s with the NEMAR-owned `IsIdenticalTo` edit applied again, and the privacy ledger, which is the recorded commit's (enrichment never writes it).
+When enrichment changed `.bidsignore` on `main`, the new `.bidsignore` is the recorded one with the `.nemar/` line added, so upstream's lines stay and enrichment's line is kept.
+When enrichment added a root `participants.tsv` on `main`, the new tree keeps N.0.0's own when it has one (upstream's, or the standard edit's placeholder of `to_tag`'s subjects), and otherwise holds the placeholder of the new tree's subjects, as enrichment makes it, or none when it has no subject.
+Every other path is the recorded commit's, entry for entry, so the keys it names, their copies and their registration all stand.
+The `IsIdenticalTo` edit is read off the recorded commit itself, which must differ from the base's file by exactly that edit, so resume needs no plan file, and the recorded commit's trailers are checked as git reads them before anything is made.
+
+The new commit is a function of the recorded commit, the base and the new `main`, so it is made the same, byte for byte, every time.
+A run that pushed it and could not record it (the write after the push failed) leaves a release branch whose head does not descend from the recorded commit; the next resume does not call that head foreign: it recognizes it as the commit it would make for that head's own parent, that parent being the base or an enrichment-shaped descendant of it (beneath enrichment commits on the release branch too), and records it.
+The record's `base_sha`, `synth_sha`, `synth_tree` and head are written in one `pr_open` self-edge; the screen then runs again for the new head.
+
+### The merge gate (decisions 6 and 7, the administrator's path)
+
+Every merge of a re-pull pull request by a NEMAR tool, `nemar admin repull merge <id>` and `nemar admin pr-reviews` (`approve --merge`, `y` in `next`) alike, goes through one gate (`src/lib/repull/merge.ts`).
+Before anything is written it reads, in order: the record at `gates_clear`; the dataset not anonymous; the live pull request open, not a draft, the record's release branch into `main`, at the screened head; `main` the base or moved by enrichment only; the ADR 0107 review of that head, with one that failed, is running or cannot be read needing `--force` as `approve` does; the identifier screen of that head; GitHub's state `clean`; and the squash message.
+The gate writes the squash message itself: the title `Release v<N.0.0> (#<pull request>)` and a body whose last paragraph is the re-pull commit's two trailers, checked with `git interpret-trailers` against the privacy ledger proof's own patterns, so the merge on `main` is read as the re-pull's commit (the Phase 6b amendment's requirement); a message that would not carry both is refused at the gate (`message`).
+Then the review is read once more, at the merge and never carried over, since an administrator can reset a stored pass on the same head (`start --redo`), and the administrator confirms (one version DOI that cannot be withdrawn).
+Then, holding the record's lock, the one `resume` and `execute` take, so no resume expires the claim or moves the head while the merge is out, one unit of the day's merge cap is claimed from the Worker, the squash merge is sent with the screened `sha` (so GitHub refuses a head that moved after the gate's last read, which the Phase 6e amendment relies on), and the merge is recorded through the verified route.
+A claim whose answer is lost (no answer, or a 5xx a gateway may send after the Worker wrote) may be held, and the gate says so and exits 3, never "nothing was claimed".
+
+A claim already held for the screened head (a merge whose answer was lost, a run that stopped after its claim) is used again, without a second claim, because a pull request merges once, but only after `POST /admin/repulls/:id/merge-claim/check` passes: the Worker reads again, for that claim, what the claim's statement read when it was made (the dataset a mirror of its `ds`, not anonymous, not withdrawn, no import in flight; the identifier screen passing for this administrator, so one administrator never merges under another's acknowledgment; the live head at the screened `sha`), and the claim younger than 25 minutes by its own stamp, so no merge is sent under a claim resume may be expiring at 30 (`claim-too-old` otherwise).
+That route writes nothing.
+A merge GitHub did not make (not sent at its last look, or refused) keeps its claim: the claim is seconds old, younger than the five minutes the Worker requires before any release, so the gate does not try; a merge sent again within 25 minutes uses it, and resume expires it at 30.
+A merge whose answer is lost keeps its claim too, and the next resume reads GitHub and records the merge; a merge GitHub made that could not be recorded exits 3 and is recorded by resume.
+`nemar admin repull merge` uses a token that must belong to a person (never an App or workflow token), and, when the administrator's NEMAR account names a GitHub login, must be that login; an account that names none is not checked, as `pr-reviews` does, and only a different login refuses.
+It submits no approving review: ADR 0001 requires none, and an administrator cannot approve the pull request they opened through `execute`.
+
+`nemar admin pr-reviews` looks up a pull request whose head branch is `release/*` in the re-pull records.
+A re-pull's runs the gate's checks before the approval is written, and again after the confirmation, so a refusal writes nothing, then the approval as before, then the gate's merge in place of its own; an explicit `--method` other than `squash` is refused before anything is written, and so is a re-pull's N.0.1 pull request (its merge is not built).
+*Annotated 2026-10-25: N.0.1's merge is built by the Phase 6g amendment, through the same gate, and `pr-reviews` merges an N.0.1 pull request only through it.*
+A NEMAR API that cannot say whether the pull request is a re-pull's refuses its merge ("could not tell"), never merges it unguarded, and so does a GitHub answer that does not name the head branch.
+An ordinary release pull request, one no record names, is merged as before.
+AGENTS.md's summary of ADR 0093 now names the three ways a NEMAR tool merges and the one gate a re-pull's pull request goes through (decision 7 asked the phase that builds the merge to update it).
+
+### A stuck claim expires (closes the Phase 6a amendment's open point for open records)
+
+A claim whose outcome the caller does not know (a lost answer, a run that stopped between its claim and its merge) is released with a third outcome, `expired`, only once the Worker's own stamp says the claim is 30 minutes old, long past any merge a tool can have in flight, and only when GitHub, read by the Worker, says the pull request did not merge, in a statement that clears the claim only while no merge is recorded.
+`unknown` is still not an outcome a caller may send: only GitHub, read after nothing can be in flight, says a merge did not happen.
+Resume sends `expired` when it finds a claim on a `gates_clear` record; a younger claim is kept, and resume says how to go on.
+
+Left open, for the owner: a `failed` record holding a claim or a merge with no tag, which only a hand-made transition could leave, is not reconciled by anything.
+No path built here writes `failed`, and such a record keeps the dataset blocked (a new re-pull is refused `merge-unreconciled`), the safe direction; until a later slice builds a reconcile for it, an administrator resolves it by hand.
+*Annotated 2026-10-25: not reconciled by the Phase 6g amendment either: `failed` is terminal and abandon ends only an open record, so such a record still keeps the dataset blocked; the open item stays the owner's.*
+
+### The fences on every step past `prepared`
+
+The Worker now reads the dataset fences again (a mirror of that `ds`, not anonymous, not withdrawn, no import in flight) on every edge into a status after `prepared` that keeps the record open: the copy, the registration, the pull request and its head, the gates and the claim (as before, with the screen), and the lock's count; and the held-claim check reads them before a claim is used again.
+Not on an edge that ends the record, so giving up stays possible on a dataset that became anonymous or withdrawn; not on a self-edge that writes nothing but why a step failed; and not on a fact a verified route writes from GitHub or the version row, because a merge that happened is recorded whatever the dataset has become since.
+
+### The release and the lock (decisions 2, 4 and 8)
+
+From `merged`, resume first reads back the squash commit GitHub wrote on `main`: its message must carry the re-pull commit's two trailers as its last paragraph, as git reads them.
+The gate checked the message it sent; this checks the one committed, because a host that appends a paragraph of its own (a `Co-authored-by:` line, say) would push them out of the last paragraph and the privacy ledger's fresh-clone proof would then fail the dataset.
+A message that does not is `merge-trailers`, recorded, and the record stays `merged`, loudly: the version may already be tagged and minted, and only an administrator decides what follows.
+Then resume waits for the tag `v<N.0.0>` on NEMAR's origin and for the version row, compares the tagged tree with the recorded synthesized tree outside `.nemar/**` and `.github/**`, and records the release through the Worker's verified route with that comparison as `tree_verified`, which alone upgrades the version's lineage; the Worker re-arms the dataset's four sweep stamps in the same batch.
+A tag on another commit leaves the record `merged` with the error recorded, through a new `merged` self-edge that records only an error, as `planned`'s does: still resumable, and never `failed`, which would end a record whose merge minted a DOI.
+Nothing here mints; the existing DOI tooling repairs a mint that failed.
+
+Then the objects N.0.0's copy and uploads wrote, and only those, are locked under the governance lock with the existing s3-lock route, named one by one (`objects`, at most 100 per call), never the whole prefix: the earlier versions' objects are their publications' to lock, and an abandoned attempt's orphans are not N.0.0's.
+Their keys come from the staging manifest the copy wrote to `<id>/staging/repull-<to_tag>.json` before its first copy, read with the ambient AWS credentials from the bucket NEMAR's git-annex branch names, whose digest must be the one recorded at `prepared` (`manifest-mismatch` otherwise).
+For each key the route reads the current version and locks that version.
+Read before it was relied on, the route took a 403 on PutObjectRetention for "already locked", which a credential without that permission also answers; it now reads the object's retention back on a 403 and counts it locked only when that is a GOVERNANCE or COMPLIANCE lock at least 50 years ahead (the lock it sets is 100), and the publication path's prefix mode reads it back the same way.
+The count is recorded only when every one of the keys is locked; otherwise the `released` self-edge records why (`lock-incomplete`, counts only, never a key) and the record stays `released` without its count, a resumable state and never a silent release, and the next run locks again.
+The Worker refuses a count below what the record says the copy and uploads wrote (`copied`, `skipped`, `local_uploads`; `lock-incomplete`, and a record that does not say is refused too, since unknown is never zero), refuses `released -> complete` and `released -> patch_synthesized` while the count is not recorded (`lock-unrecorded`), and a `released` self-edge that records the count clears the error the lock's failure recorded (`CLEARING_SELF_EDGES`).
+A record whose plan stated zero corrections then ends `complete`; one with corrections, or that does not state the count, stays `released` until N.0.1 is built.
+*Annotated 2026-10-25: N.0.1 is built by the Phase 6g amendment: a record with corrections goes on to N.0.1, one whose plan lists conflicts waits for an administrator's decision first, and one that does not state both counts stays `released`.*
+
+### Checked only against stand-ins
+
+The suites drive the real `execute`, `resume`, `merge` and `pr-reviews` commands, the real Worker routes over bun:sqlite and the real `git`; GitHub and S3 are stand-ins, and these are what only the canary and the first production runs can check:
+that GitHub's merge endpoint refuses a head that moved for `sha` (a 409, as the stand-in answers) and writes `commit_title` and `commit_message` as the squash commit's message unchanged (the release reads the commit back, so a host that changes it is caught, not missed);
+GitHub's `mergeable_state` words for a re-pull pull request, how soon its `head.sha` follows a push, and that a leased forced push to a release branch of a dataset repository is accepted;
+that the dataset workflows tag the squash merge of a re-pull as they tag other merges (already under "Not yet verified");
+and that the real bucket answers HEAD, PutObjectRetention and GetObjectRetention on a copied object's version as the stand-in does, including what it answers a credential without the lock permission.
+The s3-lock route signs PutObjectRetention with an MD5 `Content-MD5`, which workerd's WebCrypto digests and Bun's does not; the suites give Bun's that one algorithm from `node:crypto` while the Worker's routes run in their process.
+
+## Amendment 2026-10-25 (#1913): Phase 7f advances an automatic re-pull to its gates
+
+A further slice of the Phase 7 amendment above, built by Phase 7f.
+It builds the tick that takes an open automatic re-pull one step on, or says why it waits: the hold, the edge into `gates_clear`, the screen and the review that edge waits for, and the resume of a run that stalled before its pull request opened.
+Nothing here merges, claims a merge or mails anyone: the merge, the follow-through after it and the observability are later slices, and a source scan keeps this slice's import closure free of mail.
+*Annotated 2026-10-26: the merge and the follow-through after it are built by the Phase 7g amendment.*
+Five annotations are added to earlier text: on the record's header, on the opening of the Decision section, on the 7b slice's sentence that a later slice writes `hold_reason` and `hold_since`, on the 7c slice's sentence that a later slice bounds a resume by its own count, and on the 7e slice's sentence that nothing calls the review's start yet.
+
+### The tick
+
+- It runs on the 30-minute production tick, inside that tick's production guard and absent from `DEV_CRON_ALLOWLIST`, and returns before it reads or writes anything unless `ENVIRONMENT` is exactly `production`, because the `nemarDatasets` organization is shared with dev.
+- In production with `AUTO_REPULL_ENABLED` not exactly `"1"` it asks GitHub nothing, claims and sends nothing, and records `switch-off` on each row it reads, a row a run is still out for included.
+  *Annotated 2026-10-26: but for the rows a merge minted a DOI for, or may have, which the Phase 7g amendment takes on whatever the switches say: a held claim is resolved from GitHub and a merged re-pull finished; nothing is merged while a switch is off.*
+- It reads only automatic rows: an administrator's row is never read, held or advanced, because the Worker never takes an administrator's re-pull on (decision 7).
+- It reads the rows stalled before their pull request opened (`planned` to `registered`) and the rows at `pr_open`.
+  A row at `gates_clear`, `merged` or `released` waits for the merge slice, and this tick does not read it; a row that reaches another status between the tick's list and its own read of the row is left alone.
+  *Annotated 2026-10-26: the Phase 7g amendment's merge and finish read those rows, in a third rotation; a row that reaches another kind between the list and its own read is still left alone.*
+- At most five rows of each kind a tick, in two rotations by id, so neither kind crowds out the other.
+  The rows at `pr_open` turn every half hour.
+  The stalled rows are read only inside the resume window, the only time one can be resumed, and turn once for each half hour of the window, counted across days, so each is read inside the window within as many window ticks as it takes five at a time to cover them, whatever the number of rows of either kind.
+- Two readings of the first design were changed, each because it would leave rows unread.
+  Reading the five least recently updated rows would read the same five that wait on an administrator on every tick and a newer row never, because a hold does not update a row, and most automatic pull requests will wait on one, since most mirrors' screens ask for an acknowledgment (Consequences).
+  One rotation turned by the half hour of the day would come back to the same rows at the same hours every day (48 ticks of five rows a day is one full turn of 240 rows), so of 240 open rows only 130 would ever be read inside the window, and the rest could never be resumed; a test reads every stalled row inside the window over 60 days for sets of 239, 240, 241 and 480 rows and for mixed sets.
+- Each production tick that could list its rows stamps the scheduler's row with when it ran (`last_advance_at`), for the observability slice; one that could not list them stamps nothing.
+- It sends no mail.
+  Its one log line, in counts and fixed words, is written only when it changed something, a review's start or a clean row's edge was refused, or something failed; a row whose step threw is logged by the record's id and its error's class, never its dataset or a message, and the next row is taken up.
+
+### A hold is an observation
+
+- A hold is a fixed word and since when, on the row, and only on an automatic row.
+  It is the first machine-clean rule that does not hold, or a bound the automatic path reached.
+- It is written only when the word changes, with one audit row (`repull_hold`, by the system user) per change, so a row that waits for the same reason keeps the time it began.
+  Clearing a hold is such a change too.
+- It is written only to the row as the tick read it (its `revision`), so a row that moved meanwhile is not given a reason about what it was.
+- It moves neither `revision` nor `updated_at`: the record's compare-and-set, and the times other slices read, are untouched.
+- An edge into another status clears it, and a self-edge keeps it until the tick reads the row again.
+- A row a run is still out for (a live dispatch of its dataset) has no hold recorded, because nothing holds it but its own run, and GitHub is not read for it while the run settles the head it opened; a hold it had is cleared, with its audit row.
+- This slice adds three hold words, `resume-refused`, `cap-unreadable` and `gates-refused` (below), and one code to the dispatch record's, `dispatch-deferred`.
+
+### The gates
+
+- A row at `pr_open` is read at the gates by the 7e slice's reader and decided by its rule, at the recorded head.
+- Only a clean verdict writes `pr_open -> gates_clear`, with the head as `gates_sha`, as the system user, through the record's own transition on the row as the tick read it.
+  The transition reads the dataset fences, the screen bound to the row and GitHub's live head again, and re-asserts the screen's verdict in the statement that writes, so a fact that changed in between refuses the edge and nothing is written.
+- An unknown fact never writes the edge: an unreadable pull request, `main` or check, a mergeable state that is `unknown`, null or anything but `clean`, and every other word hold.
+- A clean row whose edge the transition refuses holds `gates-refused`, and the tick's log line is an error with the refusal's code on every tick it happens: the rule and the record disagree, which should not happen, and is seen when it does.
+
+### What the gates wait for
+
+- The tick starts the screen of the head only once every rule before the screen holds: the switches, the record, the dataset, the recorded pull request opened by the App at the recorded head, `main` unmoved, and both checks green.
+  So no screen run is spent on a pull request the Worker would not take on anyway, and a pull request whose BIDS validation failed waits for an administrator, who may dispatch its screen by hand.
+- The identifier screen is dispatched for the head (the 6e slice's start, `ref` the head, `request_id` 0, its callback bound to the row) when the head has no verdict: no screen, a screen that errored or one that never reported.
+  At most three times for one head, counted from the screen's own audit rows of that head, so a workflow that always fails is not run on every tick, and a new head has its own three; an administrator may dispatch it again.
+  A verdict that asks for a person is not dispatched again here: it never passes machine clean, and the same commit would be asked the same question.
+- The ADR 0107 review is started (the 7e slice's start, the one that admits the App's pull request) only once the screen of the head is `clear`, so on a later tick than the screen, when the head has no review, or when its dispatch failed, a run GitHub never started, at least an hour before.
+  A screen still out may yet block or ask for a person, and one that errored, blocks or asks for a person means the head is not machine clean now, so a review then would be a model call spent on a head that may never pass.
+- When the review's own start declines (the review switched off, a dataset it may not read, GitHub unreadable, another author or another head), its reason is counted and logged on every tick it declines, so a row held `review-absent` says why.
+
+### The resume of a stalled run
+
+- A row stalled before its pull request opened is resumed when no dispatch of its dataset is live and its latest dispatch, by id, `failed`, went `unreported`, or was refused by GitHub before it ran (`dispatch_failed`), or it has none.
+  The first design named the first two; a refused send ran nothing, and a row left with it would otherwise wait for good with nothing said.
+- Before anything is claimed: the record and the dataset must pass the machine-clean rule's own rules for them, read by its reader (an automatic record with no correction, of a named, not withdrawn mirror with no import that has not settled), or the row holds with that rule's word.
+- A latest run that refused holds `resume-refused`: the run said why it would not go on, and another would meet the same refusal, so an administrator looks.
+- A row has at most three `open` dispatches, the one that created it included, so it is resumed twice at most; past that it holds `resume-exhausted`.
+  A run that failed, refused or never reported counts, and so does a send GitHub refused for the dispatch itself (a 404 or a 422, `dispatch-refused`), so a refusal that repeats cannot dispatch for ever.
+  A send GitHub turned away for a reason about the Worker (its credential, its permission, a rate limit: any other 4xx, a new dispatch code, `dispatch-deferred`) does not count, because nothing about the row was tried.
+  GitHub also answers 404 when a token cannot see a private repository, so a credential outage that shows as 404 spends an attempt on each send, two at most for each stalled row, and can leave rows `resume-exhausted` for an administrator; this is accepted, because a 404 cannot be told from a refusal of the dispatch's own target, and counting it errs toward fewer dispatches, at the cost of an administrator's look.
+- The bound relies on the creating dispatch being linked to its record.
+  The automatic create links it in the batch that inserts the record, which rolls back when the link does not apply, so an automatic record is never without it; a record that somehow had none would be resumed up to three times more, which the bound cannot see.
+- It is resumed only once neither the row nor its latest dispatch (its report, or its send when it has none) has moved for an hour: a run that fails before it writes anything leaves the row's `updated_at` hours old, and would otherwise be resumed on the next tick.
+  A time that does not parse is the error word `time-unreadable`, never a wait, though D1 writes every one of these times itself.
+- Only from 03:00 to 15:59 UTC, so a run dispatched at the end of the window has its 330 minutes and an hour of queueing before the UTC day ends and opens its pull request on the day whose unit of the open cap it claimed, the timing the 7b slice's open cap relies on.
+- The claim is the dispatch record's own, naming the row, so the open cap is counted in the statement that claims and a resume can never pass it.
+  The claim matches the record's tags in either spelling (`v1.0.0` and `1.0.0`), as the lineage write does, and one that does not find the row the tick read is the error word `repull-mismatch`, never a silent wait.
+  A full day holds `cap-exhausted`; a cap set to something its reader cannot take holds `cap-unreadable` and is an error, because it is a fault in the configuration and not a full day; after either, no later row of the tick claims.
+- The dispatch is sent as the scheduler sends a first one, in `open` mode with the row's id, from a release build only: GitHub's refusal ends the claim `dispatch_failed`, freeing its unit, and stops the tick's sends, and a lost answer keeps the dispatch and its unit, as the 7c slice reads them.
+  A payload that cannot be built after the claim (every field is checked before it, so this guards drift between the two checks) ends the claim `dispatch-failed`.
+- No GitHub token, no callback secret and a recorded tag that is not a tag each stop the resume before a claim, with their own error words.
+
+### What a tick costs
+
+Measured over five rows at `pr_open`, the most a tick reads of that kind: 67 D1 statements and 25 GitHub requests when each starts its screen, 37 and 20 while each waits, 82 and 35 when each starts its review, the most, and 52 and 25 when each is cleared; a resume is eight statements and one dispatch, and the tick itself two statements.
+Add one request to mint the App's installation token on a cold isolate when the App's credential is configured; the suites use a personal token, so the figures leave it out.
+The first design estimated about 45 in all; a tick that starts five rows' reviews and resumes five stalled rows costs more than three times that, within the shared allowance of 1,000 but no longer a small part of it, and a test pins each figure.
+
+### Checked only against stand-ins
+
+GitHub is a stand-in in the suites, and the unattended run is not built yet, so these are what only the first production runs can check:
+that the screen and the review start on the App's pull request as they do on the stand-in;
+that the review's check and comment are published on a pull request the App opened;
+that a resumed run takes up the record its dispatch names (the unattended run's slice);
+that GitHub answers a send it refuses for the Worker's credential or rate with a status other than 404 and 422, which is what keeps such a send from spending a resume;
+and that the tick's real cost on the 30-minute tick is the one measured here.
+
+## Amendment 2026-10-25 (#1913): Phase 7d runs a re-pull unattended
+
+A further slice of the Phase 7 amendment above, built by Phase 7d.
+It builds the run a dispatch starts: the central workflow that opens an automatic re-pull's pull request and finishes a merged one, and the CLI's automatic mode that workflow runs.
+Nothing here merges; the Worker's merge is a later slice's.
+The workflow is authored in this repository and not deployed: its copy in `nemarDatasets/.github` is a pull request of its own, held until the epic ships, so until then GitHub takes the Worker's dispatches and nothing runs, and the watchdog ends each one `unreported`.
+*Annotated 2026-10-27: the copy in `nemarDatasets/.github` merged as `nemarDatasets/.github#148` before the release, and this repository's #1980 makes the `unit-pure` tier compare the two copies byte for byte.
+The workflow runs only on a dispatch the automatic path sends, and that is off, so nothing runs because no dispatch is sent, not because the workflow is missing.*
+Nothing here sends mail or adds a route.
+Four annotations are added to earlier text, on the record's header, on the Decision section's, on the 7c slice's timing sentence and on the "Not yet verified" item about enrichment.
+
+### Where the run executes
+
+- The run is the one job of `run-upstream-repull.yml` in `nemarDatasets/.github`, started by the Worker's repository dispatch and by no other event, as the import's own workflow is started.
+- In open mode it runs `nemar admin repull plan` and then `nemar admin repull execute`, through the execution an administrator's run takes (the record, the preparation, the copy, the registration, the release branch and the pull request), never a second path.
+  In finish mode it runs `nemar admin repull resume`, through the release and the lock to `complete`, waiting at most 30 minutes (`--wait-minutes 30`) for the tag and the version row, which the finish dispatch is claimed after anyway; still waiting at that bound is `failed finish-incomplete`, resumable.
+  It never merges.
+- The release branch is pushed, and the pull request opened, with an App token the job mints for the dispatch's dataset repository alone, with write on its contents and its pull requests and nothing else, so the App is the pull request's author.
+  Every action the job uses is pinned to a full commit, the commits the publication review's workflow pins.
+- Each run is its own concurrency group, never one taken from the payload: GitHub replaces the pending run of a group, so a group named by the dataset would let a forged event replace a dispatched run before it started, the reason ADR 0092's review workflow gives for its own.
+  The Worker's one live dispatch per dataset keeps two runs off one dataset.
+  The plan named a group per dataset; this departs from it, in the safer direction.
+- The job's bound is 330 minutes, `REPULL_JOB_TIMEOUT_MINUTES` in `shared/repull-state.ts`, which the workflow's test pins `timeout-minutes` to; nothing in the CLI or the Worker reads it.
+  An hour of queueing and that bound end inside the watchdog's eight hours, and a dispatch claimed at the daily tick, at 03:00 UTC, ends before the UTC day it was counted in does, which is the timing the Phase 7b slice asked a later slice to pin: the open cap then bounds the pull requests opened in a day.
+  The plan put the check of the last resume hour in this slice's test as well; the stalled-run slice, merged first, owns that hour (`RESUME_WINDOW_UTC`, 03:00 to 15:59 UTC), and this slice's test now checks it with the same function (`opensTheSameUtcDay`).
+
+### The App token's hour
+
+- An installation token lasts an hour, and the job mints it before it installs anything, so no code installed later runs before the App's private key is used.
+  The step just before the mint notes the time, in epoch seconds (`NEMAR_REPULL_TOKEN_SINCE`), so the hour the run counts starts no later than the token's own.
+  Everything the run does with the token, the registration, the push, the pull request and the settle of the release head, ends inside the first 55 minutes of it (`APP_TOKEN_USABLE_SECONDS`); the last five are kept for the clocks and the last calls.
+  A run that cannot read that time, or reads one more than five minutes ahead of its own clock, refuses before it reads anything (`auto-token-clock`).
+- The 55 minutes are shared out ahead of time.
+  The settle keeps six, its five-minute quiet window and a minute of reads (`AUTO_SETTLE_RESERVE_SECONDS`).
+  The install, the two plans, the preparation, the registration, the push and the pull request keep 29, an allowance no measurement here bounds (`AUTO_OTHER_STEPS_SECONDS`), five of them after the copy (`AUTO_AFTER_COPY_SECONDS`).
+  The copy has the 20 that are left (`AUTO_COPY_BUDGET_SECONDS`, derived from the others, never set on its own).
+  An earlier version of this slice gave the copy 20 minutes and the other steps the remaining 40 of a full hour, and left the settle out of it; the settle now has its share inside the hour.
+- So the automatic path refuses a plan whose copy would take more than 20 minutes (`auto-copy-too-long`), at the plan and again from the live plan at execute, before the copy starts, as it refuses a copy over 1 TiB; it is one of the words that end the automatic path for a tag, and an administrator may still re-pull such a dataset by hand.
+  The estimate is the copy's bytes and the preparation's uploads at 30 MiB/s, the server-side CopyObject rate ADR 0064 records as measured into NEMAR's bucket, with no credit for the eight copies in flight, plus a second an object, three `aws` calls an object having measured about 0.29 s each against a local stand-in; a count the plan does not state is unknown and refuses.
+  The Worker does not check this bound: it does not receive the object count.
+- The time already spent is checked as well, on the run's clock against the noted mint: the plan, the execute before its record, and each of the copy, the registration and the pull request at its start refuse (`auto-token-hour`) when what is left of the 55 minutes is less than the step's own estimate (the copy's, or none) with the five minutes after the copy and the settle's six.
+  A refusal before the record writes nothing; one at a step leaves the record where it stopped, with `[<step>:auto-token-hour]` on it, before that step wrote anything, so no push is begun that the hour could not finish.
+  It is not one of the words that end the automatic path for a tag: a slow install is a fact about the run, not about the tag.
+- The settle ends at the end of the 55 minutes, whatever `--settle-minutes` asks, and reads nothing once they are over; a settle that they end before the branch was seen quiet is `head-unreadable`, with the cause `token-hour`, never a token error.
+- A run that fails while GitHub answers its App token 401 is reported `token-expired`, whatever its step called the failure, so a run that outlived its token is never reported as a refusal it did not make; the record keeps the step's own error.
+  GitHub is not asked when the run's word says why already: the token on the command line (whose report must go first), the token hour's own two words, and a settle's outcome (`head-unreadable`, `head-foreign`), a fact about a pull request that is open whatever the token's state.
+- Once an open run wrote its record, `token-expired` is reported `refused`, and it is one of the words that end the automatic path for the tag (`DISPATCH_FINAL_CODES`): the registration and the pull request are the steps that use the token, both after the copy, and a later run would plan again over what the copy wrote and meet a record it cannot take up (the last section but one), so an administrator takes the record on.
+  A token GitHub refuses earlier, at the preparation's clone of origin, which an aged token cannot be, ends the path the same way, the safe direction.
+  Before the record exists it is reported `failed`, which ends nothing: a later dispatch's token may yet be taken.
+  An earlier version of this slice reported it `failed` throughout and said a later dispatch's run could take the record up; past the copy none can.
+- Each command's quiet line says, in whole seconds, how long the token had been held when the command started (`token_age_s`: the install and the sign-in for `plan`, and the plan as well for `execute`), how long each step took (`plan_s`; `replan_s`, `clone_s`, `prepare_s`, `copy_s`, `register_s`, `pr_s` and `settle_s`) and the command itself (`run_s`), so the first production runs can check the allowance against what the steps took.
+
+### The log is public
+
+- In automatic mode the CLI prints only lines of the form `repull-auto: <event> <key>=<value>`, and ends with one result line, `repull-auto: result phase=<phase>`, with `code=<word>` when the run refused or failed.
+  What keeps a value out of the log is that every value is chosen by the code, a count, a status or a word from a closed list, never taken from the dataset, the plan, a message or the environment; the grammar only refuses what could not be one of those.
+- Every other write of the process is swallowed from the moment the entry point sees the option: the libraries' progress lines, their warnings, a usage error and the exit hint; the notices request, which would carry the NEMAR key, is not made.
+  An uncaught exception or an unhandled rejection, which the runtime would print with its message and a source excerpt, ends the run instead, with the fixed lines, and exits 1 whatever happens while it writes them.
+  The run ends `failed`, unless the Worker had already stored a terminal report: then the last lines say the report stands (`repull-auto: report-stands phase=<phase>`) and repeat what was stored, which is what the dispatch's record holds and what the backstop, finding the marker, leaves alone.
+  Subprocesses print nothing: every git, git-annex and aws child runs with its output piped, which reaches the console only under `--verbose`, and the automatic mode refuses `--verbose` and `--debug` (`auto-verbose`).
+- The plan file and the work clones never leave the runner: no artifact is uploaded, `--json`, `--counts` and `--keep-workdir` are refused, and no path, key, file name or subject label is printed.
+- The CLI's sign-in prints nothing, on either stream, and takes the key from its environment, not its command line, and the AWS session's request sends its error nowhere, because an explicit deny names the IAM user and the account.
+- What a run did in detail is the record's, which administrators read: the re-pull's `last_error` and the dispatch's code.
+
+### The dispatch and its token
+
+- The run reads its dispatch from the event GitHub delivered, and both the workflow and the CLI take exactly the nine keys the Worker's builder writes, `repull_id` absent on a first dispatch, each a string of the shape the Worker checks before it sends one; a dispatch or re-pull id is at most fifteen digits for all three (`DISPATCH_ID_MAX`).
+  A tenth key, a missing one, or a value of another type or shape is `dispatch-invalid`: the workflow refuses it before anything is installed, and the CLI reports nothing for it, since nothing in such a payload can be trusted to name the dispatch.
+  The workflow's last step reports `failed dispatch-invalid` when the dispatch id, the dataset and the token at least have their shapes, and the Worker stores that report only for a token it signed over a live dispatch, so only the dispatch's own run can end it so.
+  No event file at all is the runner's failure (`runner-failed`), not the dispatch's.
+- The token is masked by the job's first step, which reads it from the event file and has no environment of its own; each of its lines is masked, so no line of a crafted value becomes a workflow command.
+  It is in no environment variable at any level and in no argument: the CLI and the last step read it from the event file.
+- A token found on the command line refuses the run (`auto-token-on-argv`), checked before anything that reads a file can refuse instead, and that refusal is reported first, which ends the dispatch and with it the token, since a token in a `run:` line is in the public log.
+- The token and the NEMAR key go to the production API only: a `TEST_API_URL` or a stored `apiUrl` that names anything but production (or a loopback address, for the suites) refuses the run before anything is sent (`auto-api-not-production`), and the CLI does not report it, since the report would go there too; the workflow's last step reports it to the production API.
+- No `run:` script interpolates an expression; the payload reaches the shell through the job's environment only, after the second step checked it.
+- The CLI's report and its probe of the App token refuse a redirect rather than follow it, so neither token is sent wherever an answer points; a report so answered is unanswered, and a probe so answered is not taken as expiry.
+
+### Production only
+
+- The workflow installs exactly the release the dispatch names and refuses any installed version that is not `X.Y.Z` or not that release, so a development build never runs; the CLI refuses itself the same way (`auto-cli-version`).
+- The CLI needs `GH_TOKEN`, the App token (`auto-no-app-token`); the Worker refuses an automatic record outside exact production on its own.
+- The copy takes short-lived credentials only, as it does on an administrator's machine, so the job exchanges the import's long-lived AWS pair for a six-hour session (`GetSessionToken`) inside the step that runs the CLI, masks it, and writes it nowhere (`runner-credentials` when it cannot).
+
+### The plan the automatic path takes, checked by the run
+
+- `plan` writes the plan file, which stays on the runner, and then refuses a plan that is not executable, with the plan's first refusal, `key-without-pin`, or the word of the first check that is not ok, and one the automatic path does not take, with the create's own words (`auto-planner-version`, `auto-not-clean-plan`, `auto-copy-too-large`) or `auto-copy-too-long`; both exit 3, and no record is written.
+  It plans from a listing of the bucket, never the location log, because the log can claim content the bucket never received.
+- `execute` checks the LIVE plan it makes before anything is written, never the file's own fields: executable, this planner, `unexplained`, `conflicts` and `corrections` each stated and zero, a copy whose size is known for every key and at most 1 TiB, and one inside the token's hour; it states that size at the automatic create, which bounds it again.
+  *Annotated 2026-10-26: `execute` no longer plans again.
+  It takes the plan file the run's own `plan` wrote, proved by its digest, its API and its remotes, with the clones, the computed bytes and the digest of the plan that `plan` kept beside it.
+  Before anything is written it checks the plan's counts and the token's hour, and it never reads the file's `executable` or `preflight`: the handoff, which `plan` leaves only for a plan it took, stands for them.
+  Without a handoff that names the plan's digest it refuses (`not-planned`).
+  So the run plans once, and `replan_s` and the second plan in the allowance above are gone.*
+- A record that a run takes up past `prepared` must be the automatic path's own, and the dispatch's when the dispatch names one: an administrator's record of the same plan is never taken up (`repull-in-flight`), since the run would push and open its pull request as the App, and a create that answered with such a record, or with another than the dispatch's, is refused the same way (`repull-in-flight`, `repull-mismatch`).
+  No live plan can be made past the registration, so its counts are read from the reviewed body.
+- `plan` and `execute` refuse a dispatch for another kind of run, another dataset or other tags than the command or the plan file names (`dispatch-mismatch`), before the Worker is asked.
+
+### The settle rule (on "Whether enrichment commits on the release branch move its head")
+
+- Before the run reports its pull request open, it reads the release branch with git, holding the execution's lock, until successful reads have seen the recorded head unchanged for five minutes, or `--settle-minutes` passes (the workflow passes 30), and never past the App token's 55 minutes (above).
+- Each move is judged by the head rule execution and resume use, the synthesized commit or an enrichment-shaped descendant of it, and recorded as the `pr_open` self-edge resume writes.
+- A move enrichment does not make is `head-foreign`: recorded on the row as the automatic path's error (`[auto:head-foreign]`), the row left at `pr_open`, and the run reported `failed`.
+- A read that cannot be made is counted and tried again, never taken as a move, and never taken as quiet: the branch is settled only when a read succeeded in the last five minutes before the settle ended.
+  Otherwise, and when the token's hour ended the settle before the branch was seen quiet, the run records `[auto:head-unreadable]` on the row, with the cause in fixed words, and reports `failed head-unreadable`.
+  The pull request stays open, and the gates read its head; no automatic run takes a `pr_open` record up again, so an administrator's `resume` is the only way to settle it again.
+  An earlier version of this slice said a later run would take such a record up at `pr_open` and settle it; none does.
+- A head that moves after the run reported holds the pull request for an administrator's `resume`, because the Worker never accepts a head it did not see recorded.
+
+### The reports, and the backstop
+
+- The run's first command (`plan`, or `resume` for a finish) reports `started`; a rerun of the same run that finds it started (`already-started`) goes on.
+- Its last report is `opened` with the record, `finished`, `refused` (nothing was written, a plan the path does not take, or a token GitHub stopped taking after the record was written) or `failed` (a step after the record exists, a foreign or unreadable head, a finish that ended short of `complete`, a token GitHub stopped taking before the record, or a success the Worker did not store), with a word from the closed list, `no-code` for any other.
+  A terminal report the Worker stored leaves a marker on the runner.
+- The job's last step runs always, and when there is no marker it reports the phase and the word of the run's last result line, `failed runner-failed` when there is none, to the production API's literal address, with the token in curl's configuration on its standard input; a dispatch it cannot name is not reported, and nothing it does fails the job.
+- The new words are the run's own: `dispatch-invalid`, `auto-cli-version`, `auto-token-on-argv`, `auto-verbose`, `auto-option`, `finish-incomplete`, `report-unanswered`, `runner-credentials`, `auto-copy-too-long`, `token-expired`, `auto-token-hour`, `auto-token-clock`, `head-unreadable` and `auto-api-not-production`.
+
+### A limit the slice that resumes stalled runs inherits
+
+- A run's plan file and checkpoint do not outlive its runner, so a resume dispatch plans again, and that plan is the record's only while nothing it reads has moved.
+  Once a copy has written objects, the bucket listing reads their keys as held, and once the registration has pushed, NEMAR's git-annex branch has moved, so the new plan has another digest and the create answers `repull-in-flight`.
+- The stalled-run slice dispatches a resume for a record anywhere from `planned` to `registered`, and the replanned digest decides which of them a resume can take on.
+  It still works from `planned`, and from `prepared` while no object has been copied: the preparation's own uploads do not change the plan, which the suites measured with a bucket listing that held them, the resume taking the record on to `pr_open`.
+  A record a run left at `prepared` with `[copy:auto-token-hour]` is such a one.
+  From `prepared` once the copy has begun, and from `copied` and `registered`, the replanned digest differs, the create answers `repull-in-flight`, which the run reports `refused`, and the stalled-run rule then holds the row `resume-refused` for an administrator, the safe direction.
+  An earlier version of this section said the stalled-run slice resumes records from `planned` to `registered`, which reads as if each of them resumes; only the first two do.
+
+### Checked only against stand-ins
+
+- The suites run the real CLI from this checkout with a release version, the real record, dispatch and callback over bun:sqlite, the real `git`, `git-annex` and `aws` against stand-ins of GitHub and S3, and the workflow's own guard scripts under bash.
+  An expired token is a stand-in that answers it 401 while a hook turns the registration's push away; the token's hour is a mint time noted minutes in the past; the settle's timing, and its end at the token's hour, run on an injected clock.
+- Only the first production runs can show: that GitHub answers the dispatch with 204 and runs this workflow; that the runner masks the token and the AWS session as the workflow asks; that the App token GitHub mints for one repository pushes the release branch and opens the pull request, and how GitHub refuses one past its hour; how long a real copy takes against the estimate; that `GetSessionToken` takes the import's pair and its session copies as the import's own keys do; that Ubuntu's git-annex reads what the planner reads; how soon enrichment commits after a push; and that the plan's anonymous clones of `OpenNeuroDatasets` hold up from a runner, since the App token is never sent there.
+
+## Amendment 2026-10-25 (#1912): Phase 6g replays N.0.1, ends a record by hand, and refuses a mirror's manual major
+
+The last slice of the Phase 6 amendment above, built by Phase 6g.
+It builds N.0.1 (decision 1's corrections, replayed after N.0.0 is merged and tagged), the conflict resolutions, abandoning a record and superseding one (decision 3), the manual-major refusal (decision 5) and a mirror rehearsal fixture on staging.
+With it, Phase 6's manual execution is complete: an administrator can take a re-pull from its plan to `complete`, or end it.
+Nothing here sends mail, adds a route or a migration, or builds any part of the automatic path; fourteen annotations are added to earlier text where this slice builds what it said was a later one's, or where its words were stale.
+
+### N.0.1, as built
+
+`nemar admin repull resume <id>` makes N.0.1 at `released`, once the count of N.0.0's locked objects is recorded.
+A plan with no correction and no conflict ends the record `complete`, as before.
+A plan that lists conflicts now waits for an administrator's decision before anything is made, because N.0.1's content is fixed once its pull request is open: `--take-ours <path>` resolves one conflict to NEMAR's side, `--take-ours dataset_description.json#<Key>` one key of the description, and `--keep-upstream` leaves every conflict on upstream's side.
+This changes the Phase 6f slice's rule, under which a plan with conflicts and no correction completed at `released` without anyone deciding.
+Naming some conflicts and not the others still waits: a conflict stays on upstream's side only by `--keep-upstream`, and the run says how many conflicts it resolved and how many it left on upstream's side.
+A name that is not a conflict the plan lists (a correction, which is replayed anyway, an explained path, an unknown name, or the description file as a whole) refuses (`take-ours-invalid`) and writes nothing.
+A record that does not state both counts stays `released`: unknown is never zero.
+
+N.0.1 is made from the reviewed plan file (`--plan <file>`, else the plan's own default path), which must be the record's plan by its digest (`plan-not-the-record`) and must count the corrections the record counts (`patch-plan-mismatch`: the plan's own count against the record's, which execution copied from that plan, so only a row written by hand trips it).
+Its ledger must record no correction, in the plan and on `main` (`patch-ledger`); the plan already refuses any unexplained path otherwise, so this is a second guard that no reachable plan trips.
+NEMAR's `main` must be the N.0.0 merge or an enrichment-shaped descendant of it (`main-moved`).
+
+Per path it replays the plan's identity of NEMAR's side, read from NEMAR's `main` as N.0.0 was based on it (the record's `base_sha`, in NEMAR's own history), entry for entry: `absent` is a deletion, `G:<mode>:<oid>` is the blob NEMAR had, and `A:<key>` is the annexed entry NEMAR had, its symlink or its pointer file, byte for byte.
+Replaying NEMAR's own entry, rather than writing a new link with `git annex fromkey`, gives the same tree with no working clone, so N.0.1 is made in a bare scratch repository of origin, as resume's other steps are.
+An entry the base no longer holds as the plan read it refuses (`patch-ours-moved`), and so does a replayed file where N.0.0 holds a directory, or one under a path N.0.0 holds as a file (`patch-path-conflict`).
+So does a replayed path whose entry on the new `main` is not the N.0.0 merge's (`patch-main-moved`): enrichment wrote it after the merge (a `.bidsignore` line, a generated `participants.tsv`), and what enrichment wrote is never undone.
+The README family is replayed as a unit: a correction or a resolution of one member takes every member.
+`dataset_description.json` is N.0.0's as `main` holds it, after N.0.0's own scrub, with each corrected key and each resolved key set to NEMAR's value (removed where NEMAR had none), `Version` set to N.0.1, written as canonical JSON.
+A value the plan records for NEMAR's side that does not parse as JSON, or a key named `__proto__` (which an assignment would not write as a key), refuses (`patch-description-unreadable`).
+
+Nothing is scrubbed and nothing is copied: every replayed byte is in a version NEMAR already published, which ADR 0091 leaves as it is.
+So every annexed key N.0.1 replays must already be NEMAR's: in NEMAR's bucket at the size the key declares (a listing, with the ambient AWS credentials), recorded at `nemar-s3` on NEMAR's git-annex branch, and not dead there (`patch-key-absent`, `patch-key-dead`); N.0.1 would otherwise name content nothing serves.
+The identifier screen still reads N.0.1's head before its merge (decision 7).
+
+The commit has one parent, the new `main`; the fixed re-pull identity; and as its author and committer dates the N.0.0 merge commit's committer time, read from origin, so the commit is a function of `main`, the base, the plan, the resolutions and the merge, and is made the same every time.
+The date is not the record's `updated_at`, which every write to the record moves: a run that pushed the branch and could not record it would then not make the same commit again.
+Its message ends with the re-pull's two trailers and `Repull-Patch: corrections=<n>` as its last paragraph.
+A `release/v<N.0.1>` an earlier run pushed is reused only when it holds exactly the commit this makes for that commit's own parent, beneath enrichment commits (`branch-foreign` otherwise).
+The pull request is opened as N.0.0's is, with the administrator's token and another open release pull request refusing it, its body counts only, and the record goes to `patch_synthesized` with the resolutions counted (`resolutions`).
+It asks before it pushes; `--yes` answers.
+
+Then N.0.1 takes N.0.0's steps on its own columns: the screen of its head (`n1`), its gates (`patch_gates_clear`), the merge gate (the claim on the patch columns, so N.0.0's and N.0.1's claims count together in the day's cap; the title `Release v<N.0.1> (#<n>)`; the squash message ending with the trailers and `Repull-Patch:`, and a record that does not state its count of corrections refused at the message, before any claim), `pr-reviews` merging it only through that gate, the merge commit's trailers read back, the tag `v<N.0.1>` and its version row, and the release through the verified route, whose batch re-arms the dataset's sweep stamps.
+No lineage is asked for: N.0.1 carries NEMAR's corrections, so its tree is not upstream's.
+Instead the tagged tree must be N.0.1's gated head outside `.nemar/**` and `.github/**`, the one check that what was tagged is what was screened and gated: a tree that differs (`patch-tree-mismatch`) or cannot be read leaves the record `patch_merged` with why recorded, and its release is not recorded.
+
+The enrichment window, closed at the merge gate.
+Enrichment may move `main` after a pull request's gates, and on two paths outside NEMAR's own: the `.nemar/` line in `.bidsignore` and the placeholder `participants.tsv` of a tree that has none.
+The squash would then tag `main`'s tree with the pull request's changes, which outside `.nemar/` and `.github/` is no longer the screened head, and N.0.1's release would refuse it after its DOI was minted, on every run, with its lock never taken, abandon refusing a merged record and the one-open-record rule blocking every later re-pull.
+So the merge gate, for N.0.0 and N.0.1 alike and before any claim, refuses a `main` that changed any path outside `.nemar/` and `.github/` since the pull request's base (`merge-main-moved`); with no such change, `main`'s tree plus the pull request's changes is the screened head outside those paths, so that one reading also decides the predicted tree.
+The recovery is `nemar admin repull resume <id>`: it takes the record back to its open status (`gates_clear` to `pr_open`, `patch_gates_clear` to `patch_synthesized`) and makes the commit again on the new `main`, pushed with a lease, whose screen and gates then run again; a main moved outside those paths is re-synthesized even when GitHub reports the pull request clean.
+When enrichment wrote a path N.0.1 replays, that re-synthesis refuses (`patch-main-moved`) and the way out is to decline N.0.1 with `nemar admin repull abandon <id>`.
+What can still reach `patch-tree-mismatch` is a `main` that moved in the seconds between the gate's last reading and GitHub's merge, or a tag that names other content.
+Its recovery is named too: read the difference (`git diff <gated head> v<N.0.1> -- . ':!.nemar' ':!.github'`), then run `nemar admin repull resume <id> --accept-tag-tree "<reason>"`, which records the release (its batch re-arms the dataset's sweep stamps, so the identifier sweep reads the published version again, ADR 0088) and goes on to `complete`.
+The reason is printed with the release; it is not stored, since the Worker's release route has no field for it, and a tree that could not be read is never accepted.
+N.0.1 wrote no object, so it has nothing of its own to lock, and `patch_released` goes on to `complete`.
+When `main` moved by enrichment and GitHub reports N.0.1's pull request `dirty` or `behind`, the commit is made again on the new `main`: its own changes applied to the new `main`'s tree, with its message, identity and dates, pushed with the write guard's lease; a path it replays that enrichment changed too refuses (`patch-main-moved`), because what enrichment wrote is never undone.
+A re-synthesis a run pushed and could not record is recognized, byte for byte, as N.0.0's is.
+N.0.1's pull request found closed without a merge ends the record `patch_declined`.
+
+### Abandon, as built
+
+`nemar admin repull abandon <id>` ends the dataset's open record, on the administrator's machine with their own GitHub token, holding the record's lock.
+
+- Before N.0.0 merges (`planned` to `gates_clear`) the record ends `abandoned`: its pull request is closed and its release branch deleted, when they exist and are this re-pull's, and the objects its copy and uploads wrote are reported.
+- Between N.0.0's merge and its release (`merged`) it refuses (`wait-for-release`): the merge minted a DOI, and its release, lineage, sweep stamps and lock are recorded first, by resume, which decision 3 does not say.
+- After the release (`released`, `patch_synthesized`, `patch_gates_clear`) the record ends `patch_declined`: only N.0.1's pull request and branch are closed and deleted, when they exist; N.0.0 stays released, and its corrections remain corrections in the next plan.
+  A `released` record whose lock is not recorded is refused (`lock-unrecorded`): the Worker lets an edge that gives up skip the lock, and abandon does not use that to leave a released version's objects unlocked; resume locks them first.
+- Once N.0.1 merged (`patch_merged`, `patch_released`) it refuses (`wait-for-release`).
+- A terminal record is not ended again, so a `failed` record holding a claim or a merge with no tag (the Phase 6f slice's open item) is still not reconciled, and still keeps the dataset blocked.
+
+A merged record is never ended this way.
+Before anything is written, every pull request GitHub holds of the release branch is read by its number (the recorded one is read by its number even when the list by branch misses it, and a list of 100 or more, or one that cannot be read, refuses), and one that merged refuses (`pull-request-merged`; resume records the merge); so does a claim to merge that is held (`merge-claim-held`; resume resolves it from GitHub), which the Worker refuses as well.
+After each close the pull request is read again, and one found merged then is not ended either.
+A release branch is deleted, through the write guard, only when its head is the record's commit or an enrichment-shaped descendant of it (for N.0.1, when it holds this record's N.0.1 commit beneath enrichment); any other head, or one that cannot be judged, is kept, and said, and a release pull request that is not the record's is not closed.
+The deletion is leased on the head that was judged (the write guard refuses a deletion without a lease): a branch that moved after it was judged is not deleted (`branch-moved`).
+A merged pull request of the branch that is provably not the record's (the record names another number) refuses with its own word (`foreign-pull-request-merged`): that version was released outside the re-pull, which resume does not record, so abandon says so rather than sending the administrator to resume, and ends nothing.
+
+The orphans are the staging manifest's keys that NEMAR's bucket holds at their declared size and that `main`'s current tree does not name, recorded as `orphan_objects` and `orphan_bytes`.
+Nothing is deleted, the staging manifest included, and nothing is locked (the Phase 6f slice locks only a released version's own objects).
+When they cannot be counted (a record ended before the copy wrote its manifest, which then lists nothing preparation uploaded, or no AWS credentials), nothing is recorded for them and the command says why: unknown is never zero.
+The record's working directory, which holds the delta's unscrubbed originals, and its checkpoint are removed.
+Abandon ends a record on a dataset that became anonymous or withdrawn, since the Worker exempts an edge that ends a record from the dataset fences, and it ends an automatic record as it ends an administrator's, which is how the Phase 7b slice says an administrator takes one over; it touches no dispatch and no workflow run, and ends the record only (what an unattended run still in flight does with an ended record is the Phase 7d slice's).
+A refusal before anything was written exits 1; one after a close or a deletion exits 3, resumable: abandon runs again.
+
+### Supersede, as built
+
+`nemar admin repull execute <plan-file>` now refuses a dataset's open record of another plan before planning anything (`repull-in-flight`, naming the record), unless `--supersede` is given.
+With it, the open record must be the administrator's (`supersede-automatic`: an automatic record is taken over by abandoning it, the Phase 7b slice's rule), for another tag than the new plan's (`supersede-same-tag`), pulled from the same `from_tag` (`supersede-from-tag`, decision 3), before its merge (`supersede-too-late`), and holding no claim to merge (`merge-claim-held`, which abandon refuses too), each checked before anything is planned or written, and each refusing with exit 1.
+The new plan is proved and made again from live sources first.
+Its preflight then finds the open record's own release branch or pull request, so the one refusal tolerated is the `release-pr` check, judged from what that check itself read (nothing is read twice).
+At a status at which the old record may have pushed its branch (`registered`, `pr_open`, `gates_clear`), the dataset's release branches must be at most the record's `release/v<N.0.0>` and its open release pull requests at most the record's own; with no pull request recorded (a run that opened it and could not record it), exactly one open pull request of that branch from the dataset's own repository, never a fork's; at an earlier status the record pushed nothing, so any release branch or release pull request refuses; and a list of open pull requests that was not read whole (100 or more, or unreadable) refuses.
+A refusal for another release branch names it, so the administrator knows which stale branch to delete by hand.
+Any other refusal, plan refusal or unpinned key still refuses (`not-executable`), with the reason the supersede was not tolerated said beside the live preflight, and a plan that went stale refuses (`plan-stale`) with the old record untouched.
+Only then, after the confirmation, is the old record ended `superseded` under its own lock, by abandon's own steps, and the new record created.
+A branch abandon would keep refuses the supersede before anything is closed (`branch-foreign`), because the new N.0.0 is the same version and pushes the same branch name.
+
+What the old attempt registered stays on NEMAR's git-annex branch, as it stays after abandon: its copies are recorded present, so a new plan counts them held, and the upstream keys its scrub replaced are marked dead.
+A new plan whose N.0.0 names such a key at a recording path refuses (`dead-recording-unpinned`), as the Phase 6c slice describes, until the planner pins those keys; an abandoned or superseded attempt that scrubbed a recording can therefore block the next plan of the same snapshot.
+
+### The manual-major refusal, and its limit
+
+`refuseMirrorMajor` (`src/lib/version-policy.ts`) is the rule: a higher major on an `on` id, or on a row recorded as an OpenNeuro import (`source = 'openneuro'`, so an `xx` mirror fixture too), is refused.
+On a mirror, a version either side the rule cannot read (empty, `none`, `1.0`, a prerelease) is refused too, since whether it is a major is then not known and unknown is never a pass; the refusal says a version is of the form `X.Y.Z`.
+`nemar dataset release` asks it after the new version is settled from `--type major`, `--version`, or the prompt's custom version (its `major` choice is disabled for a mirror), and `nemar dataset update --bump major` after it reads the bump, each before the confirmation and before anything is cloned, branched, changed or pushed; it exits 1 with the plan command to run instead.
+The limit: the rule is the CLI's only.
+The dataset repositories' `version-check` workflow is not changed, because a workflow edit reaches about 785 repositories at once (ADR 0020), so a major made outside NEMAR's CLI is not stopped, and its version row would record the old `source_version`.
+
+### A mirror rehearsal fixture
+
+Decision 6 re-pulls only `xx` datasets outside production, and no tool made an `xx` row a re-pull would take.
+`nemar admin exemplar create <xx> --source <on> --mirror <ds>` makes one: an exemplar whose row records `source = 'openneuro'` and `source_id = <ds>`, the `ds` its `on` source mirrors (any other pair is refused, `exemplar_mirror_mismatch`), the source it was cloned from kept in the audit row and the answer.
+Every other rule of an exemplar stands: the route answers 403 in production and for an unknown `ENVIRONMENT`, an anonymous exemplar is refused, and an `xx` publishes only through the exemplar exception.
+The copy's own dev-bucket remote takes the name `nemar-s3`, the one remote a re-pull reads, after the inherited production remote is renamed out of its way (`nemar-s3-source`, in the copy's git config and in its `remote.log`) and ignored, so a re-pull of the fixture reads and writes the fixture's own prefix in the dev bucket and never the source's.
+A rename that leaves anything still named `nemar-s3`, or a git-annex branch whose `remote.log` cannot be read, refuses before the new remote is configured; the clone step initializes git-annex first, so a missing branch means that step did not run, and the refusal says to run `git annex init`.
+The fixture's row sets `source_id` to the `ds` id, which the `/resolve` lookup and the auto-import's duplicate check (migration 0049) also match on; that is harmless while the dev D1 holds only fixtures, and the route answers 403 in production.
+Not verified: that the dev bucket answers the plan's anonymous read of its `annex-uuid` marker (if not, the plan's `annex-uuid` check is unchecked and the plan is not executable), and that a rehearsal plan establishes the lineage the fixture's never-examined version rows need at create.
+
+### Checked only against stand-ins
+
+The suites drive the real `resume`, `merge`, `pr-reviews`, `abandon`, `execute`, `plan`, `dataset release` and `dataset update` commands, the real Worker routes over bun:sqlite and the real `git` and `git-annex`; GitHub and S3 are stand-ins, and these are what only the first production runs (and, for the fixture, a staging rehearsal) can check:
+that GitHub opens a second release pull request on a repository whose first one merged, and squash-merges it with the message it is sent;
+that it lists a branch's pull requests by its `head` filter, closes one and deletes a branch as the stand-in does, and reports a merged pull request's state when it is read by number after a close;
+that the dataset workflows tag `v<N.0.1>` and mint its DOI as they do any patch release;
+and that the real bucket lists the keys N.0.1 replays as the stand-in does.
+
+## Amendment 2026-10-26 (#1913): Phase 7g merges a machine-clean automatic re-pull, finishes it, and merges over a BIDS failure
+
+A further slice of the Phase 7 amendment above, built by Phase 7g.
+It builds decision 7's merge: the Worker's merge of a machine-clean automatic re-pull pull request, what follows a merge whose answer was lost or refused, the finish run that walks a merged re-pull to `complete`, and an administrator's merge of a re-pull they opened over a failed BIDS validation.
+Nothing here sends mail, adds a migration or a route, or approves a pull request; the claim to merge gains one field, and a source scan keeps the merge's import closure free of mail.
+Eleven annotations are added to earlier text, where this slice builds what it said was later, and where the ruleset check it waited for was run; ADR 0093's header now names the narrowing, and its amendment of 2026-10-23 is annotated as built.
+
+### The ruleset check, as the owner ran it (on "Not yet verified")
+
+- The owner ran the ruleset check on 2026-10-26, with an organization owner's token, and it passed.
+- The `nemarDatasets` installation of App 3679074 (installation 131475246) has `contents` and `pull_requests` at write, and `actions`, `administration`, `checks`, `issues` and `workflows` at write too, with `repository_selection: all`.
+- `GET orgs/nemarDatasets/rulesets` returned an empty list, so no organization ruleset applies to any dataset repository.
+- What it cannot show stays unverified until the first production merge, which runs with `REPULL_DAILY_MERGE_CAP` set to `"1"`: whether the App's own token reads `mergeable_state` as an administrator does, that GitHub merges the App's squash at the `sha` it is sent with the message it is sent, and that the dataset workflows tag that squash and mint its DOI as they tag any merge to `main`.
+
+### The Worker's merge, as built
+
+- The advance tick reads the automatic records past their gates in a third rotation of its own, five a tick, turned every half hour, so neither the open pull requests nor the stalled runs crowd them out, and a record is taken on by the kind its list read it in.
+  A record cleared at its gates on one tick is merged on a later one, from facts read then.
+- A record at `gates_clear` holding no claim to merge is merged only when, in this order:
+  both switches are exactly `"1"`, in exact production (`switch-off`, `merge-switch-off`, before anything is read);
+  fewer than three merges were ever sent for it (`merge-exhausted`), and the last one it was sent was not refused (`merge-refused`: another would be refused too, so an administrator looks);
+  machine clean holds on facts read now at the merge stage, never the gates' reading, and an unknown fact is never clean;
+  its trailers are values the squash message can carry (`merge-message`);
+  and the record's own claim, made as the system user, takes a unit of `REPULL_DAILY_MERGE_CAP` in the statement that claims (`cap-exhausted`, `cap-unreadable`, and `pr-unreadable` when GitHub could not answer for the live head; a record that moved while it was read is skipped, for the next tick to read as it is; any other refusal of a clean record is `claim-refused`, which should not happen and is logged at error level).
+- Machine clean's `main` rule is the commit the record bases on, exactly, so any move of `main` holds `main-moved`: the administrator's gate refuses only a move outside `.nemar/` and `.github/` (`merge-main-moved`), and the Worker refuses more.
+- From Phase 7g every merge gate and the claim refuse a pull request whose head or base repository is not `nemarDatasets/<dataset_id>` (compared without case, a deleted fork's head included), whoever merges; the earlier lists of what the gates and the claim read do not repeat it.
+- Then one audit row of the merge (`repull_auto_merge`) is written, in a statement that applies only while the record holds that claim at the revision the claim left and the bound allows, so a merge is never sent without its row and the count never misses one.
+- Then one squash merge, `PUT .../pulls/<n>/merge`, with the screened head as `sha`, `merge_method` `squash`, the Worker's own GitHub credential, and the message the administrator's gate writes, its title `Release v<N.0.0> (#<n>)` and its last paragraph the re-pull commit's two trailers.
+  The message is built once, in `shared/repull-squash.ts`, for the gate and the Worker alike; the Worker cannot run `git interpret-trailers`, so it checks the two values against the privacy ledger proof's own patterns, and a test proves git reads the message it builds as the trailers.
+- The merge is sent once, never retried blind.
+  `merged: true` is recorded through the verified route, which reads GitHub again and stores GitHub's merge commit.
+  Only GitHub's 405, 409 and 422 are its refusal of the merge, so nothing merged: the claim is kept (the record releases a claim only once it is five minutes old) and the record holds `merge-refused`, which the tick's log line counts at error level (`merge_refused=`); every other answer that is not a 2xx saying `merged: true`, a 401, a 403 or a 429, any other status, a 5xx, no answer, a timeout or a 2xx that does not say it merged, leaves what became of the merge unknown, so the claim is kept and the record holds `claim-held`.
+  GitHub's answer is kept in an audit row of its own (`repull_auto_merge_answer`).
+- The Worker submits no review, here or anywhere: ADR 0001 requires none, and ADR 0093's sentences that an approval is the administrator's own and that no Worker code path approves stand as written.
+- An administrator's record is never merged by the Worker, outside exact production nothing is read, and nothing is ever merged while a switch is off.
+
+### A claim the Worker holds, on a later tick
+
+- A record at `gates_clear` that holds a claim is resolved from GitHub, whatever the switches say, because a merge that happened minted a DOI and must not be stranded; only a merge sent needs the switches.
+- Merged at the claimed head, the merge is recorded through the verified route; merged at another head, the record holds `claim-held` for an administrator's `resume`, which records it with its counts.
+- A claim is the Worker's when its own claim edge, as the system user, made it; an administrator's claim on an automatic record is theirs, and the Worker neither sends under it nor releases it.
+- Not merged, and the last merge sent under the claim was refused: the claim is released through the record's own writer (`refused`, which needs the claim five minutes old and reads GitHub again), so its unit of the day's cap is free, and the record holds `merge-refused`.
+- Not merged, and the merge's answer was lost or did not say what became of it, or none was sent under the claim: it is sent again under the same claim, and never a second one, only while the pull request is open at the claimed head, both switches are on, the bound allows, machine clean holds on facts read now, and the claim is younger than 25 minutes, the bound every merge sent again under a held claim obeys, so no merge goes out under a claim `resume` may be expiring at 30.
+  On the 30-minute tick a claim is older than that by the next tick, so in production a merge whose answer was lost or did not say what became of it, and that GitHub says did not happen, waits, held `claim-held`, for an administrator's `resume`, which expires the claim; a claim under which nothing was sent is released (`not_sent`) and the record is taken on again from its facts.
+- Closed and not merged, the claim is released by the age its answer allows (`refused` or `not_sent` at five minutes, `expired` at 30 for an answer that was lost or did not say what became of it), and the record holds `pr-closed` for an administrator.
+
+### The finish run
+
+- An automatic record at `merged` or `released` is walked to `complete` by the central workflow's finish run (`nemar admin repull resume`, trigger mode `finish`), which reads the merge commit's trailers back, records the release and the lineage, locks the objects the copy wrote and completes the record.
+- It is dispatched at `merged` once the version row of N.0.0 has its DOI, in either spelling of the version, and at `released` at once, through the dispatch record's own claim: one live dispatch per dataset, outside the open cap, because the merge already minted the DOI the cap bounds.
+- At most three finish dispatches a record, a send GitHub refused for the dispatch itself (404, 422) included and one it turned away for the Worker's credential, permission or rate not, then `finish-exhausted` for an administrator's `resume`.
+- It reads no switch, in exact production only: turning the switches off never strands a minted DOI's lineage, lock and `complete`.
+  A Worker built from a development version dispatches nothing.
+
+### An administrator's merge over a failed BIDS validation
+
+- `nemar admin repull merge <id> --bids-failure-reason "<text>"` merges a re-pull pull request over a failed BIDS validation, with the reason recorded, under the publication path's text rule (10 to 500 characters).
+- It is an administrator's act alone, for a re-pull an administrator opened: the automatic path never merges over a failed check, and its pull request is merged over one by no one, through any NEMAR tool; an administrator merges it once BIDS validation passes, or abandons it and re-pulls by hand.
+- It is taken only while GitHub reports the pull request `unstable`, which is a check that is not required failing.
+  `blocked` means a rule requires the check, so a merge would be a bypass, which a re-pull never uses: it is refused before anything is written, and so is `clean`, which needs no override.
+- Every other check of the gate is unchanged: the record, the dataset, the pull request at the screened head, `main`, the review (one that failed, is running or cannot be read still needs `--force`), the identifier screen for that administrator and the squash message.
+- The claim carries the override, and the Worker reads, at the claimed head, that BIDS validation, the App's own run, completed with `failure`, that `version-check` completed with `success`, and that GitHub reports `unstable`, then records the claim and writes the reason in an audit row of its own (`repull_bids_override`) in the claim's batch, which applies only when the claim does.
+  A claim that names the override where nothing reads those facts is refused (`bids-override-unverified`), so nothing takes it unchecked.
+- A claim already held is never used for it, since the reason belongs to the claim it is made for, and the merge is sent only while GitHub still says `unstable`.
+
+### The kill switch, as it now stands
+
+- `AUTO_REPULL_ENABLED` removed stops new dispatches, gate work, resumes and merges at the next tick, and refuses a run's automatic create.
+- A held claim is still resolved from GitHub and a merged re-pull still finished, whatever the switches say.
+- `REPULL_DAILY_MERGE_CAP = "0"` stops every merge, the Worker's and the administrators', without touching the switches.
+
+### Words
+
+- Hold words added: `merge-exhausted`, `merge-message` and `claim-refused`; `claim-held`, `merge-refused` and `finish-exhausted`, which earlier slices declared, are written now.
+- Refusal words added, for the claim over a failed BIDS validation: `bids-override-automatic`, `bids-override-blocked`, `bids-override-not-unstable`, `bids-override-bids`, `bids-override-version-check` and `bids-override-unverified`.
+
+### What a tick costs
+
+Measured over five rows, the most a tick reads past the gates, and pinned by a test: a row that waits at the merge costs seven D1 statements and four GitHub requests, one that is merged sixteen and seven, and a finish dispatched eight and one; the tick itself two statements.
+Five merges on one tick are 82 statements and 35 requests, within the 30-minute tick's shared allowance of 1,000.
+
+### Checked only against stand-ins
+
+The suites run the real record, its claim and its cap, the machine-clean facts and rule, the verified routes, the real `nemar admin repull merge` with the real `git`, `git-annex` and `aws`; GitHub and S3 are stand-ins, and these are what only the first production runs can check:
+the App token's reading of `mergeable_state`;
+that GitHub merges the App's squash at `sha` with the title and message it is sent, and refuses a head that moved;
+that an App's squash merge fires the dataset workflows that tag it and mint its DOI;
+that the finish run, once its workflow is deployed with the epic release, records the release and the lock from a runner;
+and that an unprotected mirror whose BIDS validation failed reads `unstable`, and not `blocked`, for an administrator's merge over it.
+
+## Amendment 2026-10-26 (#1913): Phase 7h observes the automatic path, and the slices of Phase 7 are complete
+
+The last slice of the Phase 7 amendment above, built by Phase 7h.
+It builds what the owner reads while the automatic path runs: the weekly report's section, the administrator's list of dispatches, and `nemar admin repull auto`.
+Nothing here adds a migration, a cron trigger or a route that writes, and nothing sends mail: the new service is a root of the source scan that pins the record's import closure.
+Three additions are made to earlier text: an annotation on the record's header, one on the opening of the Decision section, and a new last item under "Not yet verified".
+
+### The weekly report's section
+
+- The Monday report gains `## Upstream re-pulls`, after the upstream freshness section.
+  It arrives every week (ADR 0054), in a week with nothing to do and the switches off too, where its zeros are true zeros and it says the switches are off.
+- It shows the switches and both caps as the Worker reads them, with a cap set to something unreadable said to read 0, the scheduler's last daily tick and what it concluded, and the advance tick's last run.
+  "Never recorded" means nothing has stamped the row; a row the report could not find is unknown, and the section says so.
+- It counts, over the seven days the report covers, the dispatches sent (by kind, by state and, for the three states that carry one, by word), the merges recorded (below) and the re-pulls that ended `failed`.
+  It states, as of the moment the report is made, the open automatic re-pulls with the word each is held for, and the claims to merge still held.
+- A dispatch is counted in the week it was sent, in the state it has when the report is made.
+  One still running then is counted as running and is not counted again if it later goes unreported; the re-pull it was for is then stalled, and the bound on its resumes is what the report sees next.
+- A merge is the edge into `merged` or `patch_merged` from another status.
+  The release's step errors write an edge from `merged` to itself (and the same for N.0.1) whenever a tag or a version row is not there yet, and that is not a merge, so an edge that ends where it began is not counted.
+- A merge is attributed by its claim, not by the row's origin or by who recorded it: to the user of the latest claim edge in the audit log before that edge, the claim of the pull request that merged (N.0.0's merge takes a `gates_clear` claim edge, N.0.1's a `patch_gates_clear` one, never the other's).
+  The system user is the Worker, any other user is an administrator's tool, and a merge whose own audit row says no claim was held (`merged_outside_tool`) is a merge outside NEMAR's tools.
+  A claim the audit log does not hold is counted apart, never as the Worker's, so the four counts add up to the merges.
+  So an automatic re-pull an administrator merged is the administrator's, and N.0.1's merges count as well as N.0.0's.
+- The report is filed on a public-facing repository, so it names no dataset.
+  A word is printed only when it is on the closed list it belongs to (the dispatch codes, the hold words, the scheduler's outcomes) and does not name anonymity; any other is counted under `other`, because the tables check only the shape of a word and a dataset id has that shape.
+  One function (`publicWord`) decides it, and it runs twice, where the counts are made and again where the report is written, so a fact that holds an identifier where a word should be does not reach the repository by either road.
+  The scheduler's two stamps are text columns that check nothing about their content, so the report prints one only in the form SQLite writes a time, and says any other value could not be read.
+- The reads are one batch of five statements and one read of the scheduler's row, so the Monday tick spends two D1 calls on them and no GitHub request.
+  A read that fails leaves the section's facts null and lists a failed part; the section says unknown and the headline asks for attention, never a zero (ADR 0054).
+  A batch that comes back with more or fewer answers than statements, with an answer that did not succeed, or with one that has no rows array, is a read that failed in the same way: a partial week is unknown, never the counts that did arrive.
+  An answer whose rows array is empty is not missing: on a grouped read (the dispatches, the holds) it is a true zero, and on a count, which always returns one row, it is a read that failed.
+
+### What asks for attention (ADR 0053)
+
+- A week asks for attention for exactly these, each as a fixed phrase with a count:
+  a switch is on and the scheduler's daily tick has not stamped its row for 26 hours (or ever, or the row cannot be read);
+  a dispatch nobody answered (`unreported`) or that GitHub did not accept (`dispatch_failed`);
+  a claim to merge held, unresolved, for over an hour;
+  a re-pull that ended `failed`;
+  a re-pull that used all its resumes (`resume-exhausted`) or all its finish runs (`finish-exhausted`);
+  and a cap set to something unreadable.
+  *Annotated 2026-10-27: the round 1 review of the epic's pull request (#1983) added one reason to this list.
+  A switch is on and the scheduler's last tick concluded `waiting-for-manual-run`, which is gate G4 unmet: nothing dispatches until a person runs the two first re-pulls, so a switch turned on early would otherwise change nothing and say nothing.
+  It depends on a switch as the first reason does, so with the switch off it is quiet, and the section's closing sentence names it.
+  "Only the first reason depends on a switch" below now holds for these two.*
+- The scheduler's age is read against the report's own instant.
+  A scheduler silent for exactly 26 hours is not yet a reason, and neither is a claim exactly an hour old; one second more is.
+  Only the first reason depends on a switch.
+  A cap that cannot be read is a fault seen, not silence, and a dispatch, a claim, a failed re-pull or a resume or finish bound reached are there to be looked at, so each asks whatever the switches say.
+- Nothing else asks: not a switch that is off, which is a path with nothing to do, not a hold waiting on a gate (the identifier screen, the review, BIDS validation and its checks, `not-clean`), which is the expected state of a path that works and would be an alarm that never clears, not a hold that names a fault the path saw (`gates-refused`, `claim-refused`, `merge-refused` and every other hold word but the two bounds above), which the table of holds counts and `nemar admin repull auto` lists, and not a run's refusal.
+  A dispatch that ended `failed` is counted and shown by word, and is not a reason by itself: a re-pull stalled before its pull request opened is resumed within its bound and reaching the bound is the reason, and one that failed after it opened waits, held, for an administrator's `resume`, which the table of holds shows.
+- One rule decides the week.
+  The Worker decides the phrases, the facts carry them, and the shared attention rule adds them to the headline and to `nemar admin import-weekly`'s exit code, so the issue and the command cannot disagree.
+  The field absent, from an older backend, is unknown and a reason of its own, and the command exits 1; the field null with a failed part is exit 2, as the freshness pass is.
+
+### The administrator's list and command
+
+- `GET /admin/repulls/dispatches?dataset=&status=&after=&limit=` lists the dispatches newest first, as a keyset page: `after` continues strictly below an id, a page is 25 rows by default and 50 at most (more is refused at the route and clamped in the service), and a cursor is returned only when the page is full.
+  It is registered before `/repulls/:id`, which would answer 400 for "dispatches".
+  It names its columns and never selects the row, because a live dispatch's nonce is the secret its run's token is checked against and leaves the Worker nowhere.
+  It names the dataset, which the weekly report never does, and it is an administrator's read.
+- `GET /admin/repulls/switches` also returns the scheduler's three stamps, never its cursor, which is a dataset id.
+  The row absent is null, which is unknown and not "never", and a table that is missing is a 500 that names migration 0111.
+  *Annotated 2026-10-26: the migration is now 0112.*
+- `nemar admin repull auto [--json]` prints the switches and both caps, the scheduler's stamps, the open automatic re-pulls with their hold words and any claim still held, and the 20 newest dispatches.
+  It reads every page of open re-pulls (an administrator's is not listed) up to ten pages, and says when the list stopped before its end; it makes only GET requests; and when a read fails it prints the failure and no table, because a table with a hole would claim what was not read.
+
+### The kill switch, as the runbook states it
+
+- `AUTO_REPULL_ENABLED` removed from `[vars]` in `backend/wrangler-sccn.toml`, in a reviewed change that is deployed (a value set only in the dashboard is dropped by the next deploy), stops new dispatches, gate work, resumes and merges at the next tick, and refuses an in-flight run's create (`auto-repull-off`).
+- A run already past its create continues to `pr_open`: stopping it half way would only strand orphan objects.
+- The watchdog continues, and so does the finish of a re-pull that already merged, because a minted DOI's lineage, lock and `complete` must not be stranded; a claim to merge the Worker holds is still resolved from GitHub.
+- `REPULL_DAILY_OPEN_CAP = "0"` and `REPULL_DAILY_MERGE_CAP = "0"` stop opening and merging without touching the switches; a cap set to something unreadable reads 0, so a typo stops the work too.
+  The merge cap stops every merge, the Worker's and the administrators' alike.
+- `AUTO_REPULL_MERGE_ENABLED` removed stops the Worker's merges alone: the re-pulls still reach their gates and hold `merge-switch-off`.
+- `nemar admin repull auto` shows what the Worker reads of all of this, and the next Monday's report states it.
+
+### Checked only against stand-ins
+
+The suites run the report's own entry point on real SQLite with every migration, the audit rows its merge counts read are written by the production writers, and the same statements run on Miniflare's D1; GitHub, OpenNeuro and the coverage sweep are stand-ins, and the report reads no GitHub.
+What only production can show is how the counts read on real data, that every merge's claim is in the audit log as the attribution assumes, and the first week a switch is on.
+
+With it, the slices of Phase 7 are complete: the automatic path is built, off by default, counted every week, listed for an administrator and stopped by removing one switch.
+What remains is the owner's act and the epic's release, not another slice: the held workflow pair merged with the epic release, gate G4's two manual re-pulls, and the switches, which the owner turns on in a reviewed change once those are done.
+*Annotated 2026-10-27: the workflow pair is not held for the epic release: `nemarDatasets/.github#148` merged and this repository's #1980 compares the copies.
+What remains is gate G4's two manual re-pulls, the switches and the epic's release.*
+
+## Amendment 2026-10-26 (#1979): the App is renamed to `nemar-bot`
+
+On 2026-10-26 the NEMAR GitHub App was renamed from `nemar-publish-bot` to `nemar-bot`.
+GitHub then reported the App's bot user as `nemar-bot[bot]`, with user id 283755542 and type `Bot` unchanged (`GET /users/nemar-bot%5Bbot%5D`),
+the App as slug `nemar-bot`, with id 3679074 unchanged (`GET /apps/nemar-bot`),
+and the old login as 404.
+`NEMAR_APP_BOT_LOGIN` in `shared/nemar-app.ts` now holds `nemar-bot[bot]`, and both ids stay as they were.
+
+- The lines above that name `nemar-publish-bot[bot]` are dated history and are kept as written: the measurement in the 7a slice of the Phase 7 amendment, and the review queue's label in the Phase 7e amendment, which now names the App `nemar-bot[bot]`.
+- The checks compare the id and the login, as stated above: the machine-clean rule, the Worker's start of the App's review and the review's intake by login, numeric id and type, and the review queue's labels by login and numeric id, the stored review's as well as GitHub's record.
+  A rename keeps both ids and frees the old login for anyone to register, so a later rename refuses the App's pull requests until the login follows it, and never admits whoever takes the old name.
+- The Phase 7e amendment's "Checked only against stand-ins" no longer names the old login: what only the first production runs can check is that GitHub names the author of the App's pull request `nemar-bot[bot]`, id 283755542, type `Bot`.
+
+## Amendment 2026-10-27 (#1914): Phase 8 documents the epic and fixes the website contract
+
+Epic #1046, Phase 8.
+Phase 8 adds no behavior to the Worker.
+It documents what Phases 2 to 7 built, makes the website read the `mirror` flag, types that flag in the reader of the version listing in the command-line interface (CLI), and records the order in which these reach production.
+The decision text above and the earlier amendments are unchanged.
+Dated annotations are added to earlier text wherever this amendment builds, corrects or qualifies it; each begins "Annotated 2026-10-27".
+
+### Where the documentation is
+
+The pages were written from the merged epic head `1abf9286` and checked against its code, and each pull request named below carries its checks.
+`nemar admin repull <command> --help` is the authority for flags, and the runbooks say what to do with them.
+
+- Public pages, in `nemarOrg/docs` (`nemarOrg/docs#90`):
+  `platform/doi-and-versioning`, the section "Versions of an OpenNeuro mirror" (the version rule, the separate numberings of NEMAR and OpenNeuro, what a reader can rely on);
+  `platform/data-api`, the section "The `mirror` flag" (`#the-mirror-flag`);
+  `platform/api`, the fields of `GET /datasets/:id/versions`;
+  `cli/guides/versioning`, the Major bullet and the section "OpenNeuro Mirrors" (the CLI's refusal of a manual major, and its limit);
+  and one sentence and a link in `why-nemar`.
+- Gated pages, in `nemarOrg/docs` under `admin/operations/` (`nemarOrg/docs#92`):
+  `upstream-freshness` (the staleness report, the backfill, the Monday section),
+  `upstream-repull` (the manual path, the canary, the first two re-pulls, the staging rehearsal)
+  and `upstream-repull-automatic` (the switches and caps, what runs, machine clean, the kill switch, the owner's steps).
+  The same pull request edits `admin/index`, `identifier-screening`, `pr-reviews`, `systems-inventory` and `staging-environment`, regenerates `admin/commands`, and lists the three pages and their `.md` mirrors in `GATED_PAGES` of `scripts/probe-admin-gate.ts`.
+- The website, in `nemarOrg/website` on `staging` (`nemarOrg/website#489`):
+  `listMirrorVersions` in `src/lib/provenance.ts` lists only the versions whose `mirror` is `true` as soon as any version of a listing carries the key, and keeps the old rule (a version of the form `vN.0.0`) for a payload with no key at all.
+
+### The `mirror` field, as a reader sees it
+
+- The flag is three-valued, derived at read time and never stored (`mirrorFlagOf`, `shared/source-snapshot.ts`).
+  `true` is an N.0.0 of an `on` dataset whose upstream tag is recorded, `false` is every other dataset and every other version, and `null` is an N.0.0 of an `on` dataset whose tag is unknown or was never examined.
+  A consumer shows `null` without a mirror marker and never as a mirror.
+  Only an id of the form `on` plus six digits is ever `true` or `null`, so an `xx` mirror fixture reads `false`; the CLI's refusal of a manual major is wider, because it also covers a row recorded as an OpenNeuro import.
+- The public wire carries the flag and nothing of the tag.
+  A landing entry has exactly `version`, `doi`, `created_at`, `mirror`, `manifest_url` and `browse_url`, in `GET /<id>` as JavaScript Object Notation (JSON) and in `landing.data.versions` of the page bundle (`backend/test/landing-mirror-flag.test.ts`, `backend/test/page-bundle-mirror-flag.test.ts`).
+  `metadata.json` is unchanged: its `extensions.nemar.versions` entries keep `version`, `doi`, `created_at` and `manifest_url` (the mapping in `backend/src/services/data-router.ts`, pinned by `test/data-route.unit.test.ts`).
+- `GET /datasets/:id/versions` also carries `source_version` and `source_version_basis`.
+  It is open to the dataset's owner, its collaborators and administrators (`backend/src/routes/datasets/manifests.ts`), which corrects the Phase 4b amendment's "owner-or-admin route".
+- A Worker that predates the release omits the key, and a reader takes an absent key as not stated, never as `false`.
+- The CLI's reader of the listing types the field.
+  `dataPlaneVersionListingSchema` in `shared/contract/data-plane.ts` takes `mirror` as an optional boolean that may be `null` and still passes every other key through, so a producer that sent any other value fails the CLI's read of a listing instead of having it passed on.
+- No parity file between this repository and the website holds the field.
+  The producer's tests and the website's three recorded payloads (`test/fixtures/landing-mirror-flag-*.json` in `nemarOrg/website`, recorded from the real data-plane route) cover it, and the epic changes none of the contract files the website's drift tests compare.
+
+### The order the pieces reach production
+
+- The documentation follows the release.
+  The docs deploy on merge, so a page merged first describes commands and a field the deployed Application Programming Interface (API) lacks.
+  `nemarOrg/docs#90` and `nemarOrg/docs#92` were merged on 2026-10-27, before the release.
+  `test/docs-links.unit.test.ts` fails a link in this repository to a page that is not on `main` of `nemarOrg/docs`, when it reads a fresh docs checkout, which continuous integration (CI) supplies (`NEMAR_DOCS_CHECKOUT` in `.github/workflows/test.yml`).
+- The website's fallback is deleted only after `nemar admin upstream-backfill --execute` has run in production and `mirror` reads `true` for the mirrors the backfill could establish.
+  Until then an `on` N.0.0 whose snapshot is not recorded reads `null` and has no chip, so deleting the fallback early takes the chip from every mirror.
+  The fallback covers only a payload with no key; once production sends the key, a `null` has no chip with or without it, so the website is promoted after the backfill and not between the release and the backfill (`nemarOrg/website#489`).
+
+### The workflow pairs
+
+Two workflows are authored here and copied into `nemarDatasets/.github`, per Architecture Decision Record (ADR) 0020, the copy there first.
+
+- `onboard-openneuro.yml` takes the optional input `openneuro_tag` (Phase 3): `nemarDatasets/.github#144`, then this repository's #1933, which shipped in 0.10.24 (`CHANGELOG.md`).
+- `run-upstream-repull.yml` (Phase 7d), authored at `.github/dataset-workflows/run-upstream-repull.yml`:
+  `nemarDatasets/.github#148`, then this repository's #1980, which makes the `unit-pure` tier compare the two copies byte for byte (`NEMAR_REPULL_WORKFLOW_LIVE` in `.github/workflows/test.yml`, `test/repull-workflow.test.ts`).
+  The workflow runs only on a `repository_dispatch` of the type `run-upstream-repull`, which only the automatic path sends, and the automatic path is off until the owner turns its switch on; neither merge turns anything on.
+
+### The relation on a re-pull's Digital Object Identifier (DOI)
+
+This clarifies decision 2, which says the version DOI of a re-pull carries `IsDerivedFrom` `openneuro.<ds>.v<to_tag>`, because the mint reads `SourceDatasets` at the tag.
+That describes one of two sources of related identifiers, and no re-pull's record has been observed yet.
+The DataCite builder turns each `SourceDatasets` DOI into `IsDerivedFrom` (`backend/src/services/datacite.ts`, the loop over the `SourceDatasets` entries).
+The importer also seeds `.nemar/metadata.json` with the snapshot's DOI as `IsIdenticalTo` (`seedMetadata` in `src/lib/import-openneuro.ts`).
+The builder carries that file's related identifiers into the record, and its de-duplication is by identifier and relation together, so one DOI can appear under both relations.
+A re-pull rewrites both to the new tag's DOI: the `SourceDatasets` entry (`src/lib/repull/description.ts`) and the `IsIdenticalTo` identifier (`rewriteIsIdenticalTo` in `src/lib/repull/execute/materialize.ts`).
+The record of an import published before the epic shows the second source alone.
+DataCite's record for `10.82901/nemar.on005506.v1.0.0`, read on 2026-10-27, lists `IsIdenticalTo` `10.18112/openneuro.ds005506.v1.0.1` and no `IsDerivedFrom`, because that version's description has no `SourceDatasets` entry (`nemarOrg/docs#90`).
+Which relation a re-pull's record carries, one or both, is therefore read from the first real N.0.0 DOI, which the owner's first two re-pulls produce.
+Until then the public page says only that the DOI record lists the OpenNeuro snapshot's DOI among its related identifiers, and the runbook tells the owner to read what the record shows (`upstream-repull`, "The first two re-pulls").
+Decision 2's sentence stays as the design's expectation.
+
+### Not yet verified
+
+Phase 8 moves nothing to verified.
+Its checks read the code at `1abf9286` and a few public records, and it ran no re-pull, no canary and no Worker merge.
+Two items of the "Not yet verified" list near the top of this record are closed by earlier amendments: where `source_version` is inserted (the Phase 2 amendment), and the ruleset half of the App's merge (the Phase 7g amendment).
+The Phase 7e amendment corrects the item about the review.
+These remain, grouped by what shows them.
+The "Checked only against stand-ins" section of each earlier amendment holds the same items in its own words, and this list holds all of them.
+
+- The canary (`scripts/repull-canary.ts`) and the first copy:
+  - That a signed cross-account `copy-object` and `upload-part-copy` of a public versioned object honor `?versionId=` and `--copy-source-if-match` and name the copied version, that upstream's bucket answers from `us-east-1`, and whether NEMAR's bucket locks a copy by default retention (Phase 6d).
+  - That a multipart copy over 5 GiB in 4 GiB parts, and the CLI's retries and its ten-minute bound per copy call, behave as they do against the stand-in (Phase 6d).
+  - That `aws s3 sync` and `list-objects-v2` answer the uploads as the stand-in does (Phase 6c), that the real bucket answers HEAD, PutObjectRetention and GetObjectRetention on a copied object's version as the stand-in does, including what it answers a credential without the lock permission (Phase 6f), and that it lists the keys N.0.1 replays as the stand-in does (Phase 6g).
+  - An anonymous ranged GET of `openneuro.org` at `?versionId=` was measured once, for one object of `ds004362`, while Phase 6 was planned (Phase 6c).
+- The first two re-pulls by hand:
+  - Whether the standard edits are recognized on the early rewritten imports `on003645` and `on004362`, and what their plans count as unexplained paths: the owner's review of their dry-run plans.
+  - Which relation the first re-pull's DOI record carries (above).
+  - That the new major's DOI resolves and the previous version still serves, which the owner reads before turning a switch on (gate G4; the Phase 7c amendment).
+  - Whether OpenNeuro writes Simple Storage Service (S3) before it pushes to GitHub, whether the object at a path lags the pinned `versionId`, and that upstream's `.log.rmet` records a `versionId` per key.
+  - What GitHub answers to the reads the release and the merge make: the tag's commit, the comparison words, a squash-merged pull request's `head` and `merge_commit_sha` (Phase 6e), the `mergeable_state` words for a re-pull pull request, how soon its `head.sha` follows a push, and whether a leased forced push to a release branch of a dataset repository is accepted (Phase 6f).
+  - How GitHub opens and lists a pull request, the head's repository and the answer to a second one on the same branch included (Phase 6d), and lists open pull requests as the release-pr check reads them (Phase 6c).
+  - That GitHub opens a second release pull request on a repository whose first one merged and squash-merges it with the message it is sent, lists a branch's pull requests by its `head` filter, closes one, deletes a branch, and reports a merged pull request's state when it is read by number after a close (Phase 6g).
+  - That the dataset workflows tag the squash merge of a re-pull as they tag other merges to `main` (Phase 6f), and tag `v<N.0.1>` and mint its DOI as they do any patch release (Phase 6g).
+  - Whether the central `run-identifier-screen` workflow posts a re-pull screen's report to its callback (Phase 6e).
+  - On a staging rehearsal, that the dev bucket answers the plan's anonymous read of its `annex-uuid` marker, and that a rehearsal plan establishes the lineage the fixture's never-examined version rows need at create (Phase 6g).
+- The first unattended run:
+  - That GitHub answers the dispatch with 204 and runs the workflow, that the runner masks the token and the Amazon Web Services (AWS) session as the workflow asks, that the App token GitHub mints for one repository pushes the release branch and opens the pull request, and how GitHub refuses one past its hour (Phases 7c and 7d).
+  - How long a real copy takes against the estimate, that `GetSessionToken` takes the import's pair and its session copies as the import's own keys do, that Ubuntu's git-annex reads what the planner reads, and that the plan's anonymous clones of `OpenNeuroDatasets` hold up from a runner, since the App token is never sent there (Phase 7d).
+  - Whether the installation token is accepted for the raw files of `OpenNeuroDatasets`; if it is not, every probe reads `stale_unverified` (Phase 7c).
+  - That a run reaches the callback at the API host and that the token survives the dispatch payload and the run's environment unchanged (Phase 7b), that a resumed run takes up the record its dispatch names (Phase 7f), and that a 5xx can follow a queued event, which is assumed in the safe direction (Phase 7c).
+  - How soon enrichment commits to a release branch after a push, which the settle rule of the Phase 7d amendment records and only production shows.
+  - That the finish run records the release and the lock from a runner (Phase 7g).
+  - That the first automatic run works through the plan handoff, where `execute` takes the plan file the run's `plan` step wrote and proves it by its digest, and through the dispatch word list cut to 57 words (the epic cleanup, #1976, and the annotations of 2026-10-26 on the Phase 7d and 7b amendments).
+- The first Worker merge, which runs with `REPULL_DAILY_MERGE_CAP` set to `"1"`:
+  - Whether the App's own token reads `mergeable_state` as an administrator does, that GitHub merges the App's squash at the screened head with the message it is sent and refuses a head that moved, and that the dataset workflows tag that squash and mint its DOI as they tag any merge to `main` (Phases 7a, 7e and 7g).
+  - That GitHub names the author of the App's pull request `nemar-bot[bot]`, id 283755542, type `Bot` (the Phase 7e amendment, as the rename amendment restates it), that `check-runs` honors its filters on a mirror as it did on `nm000527`, that the screen and the review start on the App's pull request and the review's check and comment are published on it, and that the review workflow claims and reports on a pull request a bot opened (Phases 7e and 7f).
+  - That GitHub answers a send it refuses for the Worker's credential or rate with a status other than 404 and 422, and that the tick's real cost on the 30-minute tick is the one measured (Phase 7f).
+  - That an unprotected mirror whose Brain Imaging Data Structure (BIDS) validation failed reads `unstable`, and not `blocked`, for an administrator's merge over it (Phase 7g).
+  - Whether ADR 0107's review can ever pass a re-pull diff.
+    The App's pull request is reviewed now, but ADR 0109 fails a changed `CHANGES` line and holds a replaced recording, both normal in a re-pull; until one passes, no re-pull is machine clean and an administrator merges each.
+- The release and the first weeks:
+  - What the weekly report's re-pull section reads on production data, that every merge's claim is in the audit log as the attribution assumes, and the first week a switch is on (Phase 7h).
+  - That the `mirror` field reaches production as the pages say.
+    After the release, `curl -s -H 'Accept: application/json' https://data.nemar.org/<id>/ | jq '[.versions[].mirror]'` shows it on a mirror, and `null` is expected until the backfill has run.
+
+### Left open for the owner, unchanged
+
+- A `failed` record that holds a claim to merge, or a merge with no tag, is reconciled by nothing and keeps its dataset blocked until an administrator resolves it by hand (the Phase 6f amendment, annotated by the Phase 6g amendment).
+- A mirror whose last three dispatches all ended `unreported` is skipped by the scheduler, nothing clears that streak, and the mirror stays on the administrator's path (the Phase 7c amendment).
+
+## Amendment 2026-10-27 (#1983 review): the BIDS override is reached through resume, and the mirrored tag reads both spellings
+
+The first review of the epic's pull request into `dev` (#1983) found two rules of this record that the code did not reach.
+This amendment says what changed and why.
+The decision text above is unchanged.
+Earlier text is annotated, in a note that begins "Annotated 2026-10-27", where this amendment corrects it.
+
+### An administrator's merge over a failed BIDS validation is reached through `resume`
+
+- What was wrong.
+  `resume` recorded the gates only when GitHub reported the pull request `clean`.
+  A failed BIDS validation that no rule requires makes GitHub report `unstable`, so `resume` waited and exited 3, and `nemar admin repull merge --bids-failure-reason` refused, because the merge is taken only from `gates_clear`.
+  The merge the Phase 7g amendment built could not be reached in the normal order.
+  Its tests recorded the gates while the GitHub stand-in said `clean` and then turned it `unstable`.
+- What `resume` records now.
+  On a record an administrator opened, `resume` also records the gates when GitHub reports `unstable` and BIDS validation is the one check that fails at the head:
+  BIDS validation, the App's own latest run, completed with `failure`;
+  `version-check`, the App's own latest run, completed with `success`;
+  every other check run, taken as the latest run of each name and App, completed with `success`, `neutral` or `skipped`, the conclusions GitHub counts as passing;
+  and every commit status is `success`.
+  A check still running is not passing yet.
+  `resume` reads every check run and every commit status of the head with the administrator's own token, two reads, and a read that fails or an answer it cannot read waits: unknown is never a failure of BIDS validation alone.
+  It says when the gates were recorded over a failed validation, and its last line names the merge with `--bids-failure-reason`.
+- One rule, in `shared/repull-bids-override.ts`.
+  The facts every reader has, the record's origin, GitHub's state and the App's two runs, are `bidsOverrideFault`, which the Worker's claim to merge (`bidsOverrideRefusal`) now asks too, with its refusal words unchanged.
+  The App's latest run of a name is read by `checkFactOf`, which the Worker's reader of the two checks now uses as well.
+  The check names are declared once, in `shared/dataset-checks.ts`, which `deriveContexts` reads for the rulesets.
+- The merge gate reads the rest of the rule before the claim.
+  With `--bids-failure-reason` it refuses, before anything is written, a head where any other check run or commit status does not pass, so the reason covers BIDS validation and no other check.
+  That BIDS validation failed and `version-check` passed is still the claim's to read, in its own words.
+  The Worker's claim reads only the App's two runs, as before: that nothing else fails is the administrator's gate's to read, as `clean` is for an ordinary merge.
+- Everything else still requires `clean`.
+  An automatic record is never gated on `unstable`, by `resume` or by the advance tick, and the Worker's merge holds a failed BIDS validation as `bids-failed` and an `unstable` head as `not-clean`.
+  A merge without the reason refuses `unstable`, and `nemar admin pr-reviews`, which has no override, refuses it too.
+- Verified on 2026-10-27 against `nemarDatasets/on004362`, pull request #1 at head `c06fa1cf`, with read-only calls.
+  The repository's `main` has no branch protection (`GET .../branches/main/protection` answered 404, "Branch not protected"), and its one ruleset is the tag ruleset "Protect version tags", so no check is required on the branch.
+  GitHub reports the pull request `unstable` (`mergeable_state` in REST, `mergeStateStatus` `UNSTABLE` in GraphQL), and its one failing check is "NEMAR PR Review", which nothing requires there: a check that is not required and fails reads `unstable`, the state this rule rests on.
+  The check runs at the head are named exactly `version-check`, `Run BIDS Validation` and `NEMAR PR Review`, the first two being the names `shared/dataset-checks.ts` declares, and each is posted by App 3679074 (`nemar-bot`).
+  The unfiltered check-runs answer carries `total_count` and `check_runs[]`, each run with `id`, `name`, `status`, `conclusion`, `head_sha` and `app.id`, the fields `checkFactOf` and `othersNotPassing` read.
+  The combined status answers `state` `pending` with `total_count` 0 and an empty `statuses[]`, which the rule reads as no status at all, never as a pending one.
+  Run on those two answers, the rule reads BIDS validation and `version-check` as passed and "NEMAR PR Review" as the check that fails, so that head is not BIDS validation's failure alone, and `resume` would wait on it.
+- Still unverified: a live pull request on an unprotected dataset repository whose BIDS validation failed, read as `unstable` and not `blocked`, which the Phase 8 amendment lists too.
+  A check run again is read by its latest run, the highest id of its name and App, whatever `filter=latest` leaves out, so the rule does not depend on that filter.
+
+### The mirrored tag reads both spellings of a version
+
+- What was wrong.
+  `mirroredTagOf`, the derivation of decision 4, matched only a version row spelled `N.N.N`, while D1 holds `1.0.0` and `v1.0.0` (`shared/contract/version.ts`): the version-DOI callback strips the `v` before it writes, but older rows and other writers can carry it, the admin manifest route among them, which writes the version as its path names it.
+  A mirror whose rows carry the `v` read as unpublished in the staleness report, so it was never compared or dispatched, and a newer row spelled `v` lost to an older bare one.
+  The create check (`versionFactsProblem`) and the release already read both spellings.
+- What it reads now.
+  Decision 4's highest version row is found in both spellings and by number, and the version comes back bare.
+  The rows of one version in the two spellings are read together, because both name the tag `v<N.N.N>`:
+  a row never examined says nothing against one that was;
+  the tag is known when every examined row names it, with `lineage` only when each of them says `lineage`;
+  and two rows that disagree are `unknown`, never one of them picked.
+  The staleness report dates such a version by its earliest row, for "probably stale".
+  There is no migration, and no recorded value is rewritten.
+- The backfill examines both spellings too.
+  The Phase 2 amendment's "Only a version of the form N.N.N is a candidate" no longer holds: a row spelled `vN.N.N` is a candidate, read as `mirroredTagOf` reads it (one lowercase `v`, then `N.N.N`), so a row the staleness report calls never examined is one `nemar admin upstream-backfill` examines.
+  The ref is still the canonical tag `v<N.N.N>`, never `vv1.0.0`.
+  The rows of one version in both spellings are read once and each recorded from that read, the write stays on the row's own spelling, and the cursor carries that spelling, which the route takes back.
+  Any other spelling, `vv1.0.0` and `V1.0.0` among them, is still never a candidate.

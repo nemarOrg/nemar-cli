@@ -30,6 +30,25 @@ import type { AdminRouter } from "./shared";
 export const EXEMPLAR_ID_RE = /^xx0999\d{2}$/;
 /** Source dataset the exemplar is cloned from (an nm/on dataset). */
 const SOURCE_ID_RE = /^(nm|on)\d{6}$/;
+/** An OpenNeuro dataset id, the `ds` a mirror names. */
+const MIRROR_RE = /^ds\d{6}$/;
+
+/**
+ * What an exemplar's row records as its source. An ordinary exemplar records the NEMAR dataset it
+ * was cloned from (`nemar-exemplar`, `source_id` the nm/on id). A mirror rehearsal fixture
+ * (`mirror`, ADR 0111's Phase 6 amendment) records what a re-pull reads: `openneuro`, and the `ds`
+ * it mirrors, which must be the one its `on` source mirrors (`on004362` mirrors `ds004362`); the id
+ * it was cloned from then lives in the audit row. Null when the pair is not one: an `nm` source
+ * mirrors nothing.
+ */
+export function exemplarSource(args: {
+  source_id: string;
+  mirror?: string;
+}): { source: "nemar-exemplar" | "openneuro"; source_id: string } | null {
+  if (args.mirror === undefined) return { source: "nemar-exemplar", source_id: args.source_id };
+  if (!MIRROR_RE.test(args.mirror) || args.source_id !== `on${args.mirror.slice(2)}`) return null;
+  return { source: "openneuro", source_id: args.mirror };
+}
 
 export function registerExemplarRoutes(admin: AdminRouter): void {
   const createExemplarSchema = z.object({
@@ -68,6 +87,17 @@ export function registerExemplarRoutes(admin: AdminRouter): void {
      * the normal publish-and-mint flow can never be made anonymous again.
      */
     anonymous: z.literal(true).optional(),
+    /**
+     * A mirror rehearsal fixture (ADR 0111's Phase 6 amendment): the `ds` the `on` source mirrors.
+     * The row then says `source = 'openneuro'` and `source_id = <ds>`, which is what a re-pull
+     * reads, so an upstream re-pull can be rehearsed on an `xx` id on staging. Nothing else of an
+     * exemplar changes: it is staging-only like every exemplar, and it publishes, as every exemplar
+     * does, only through the exemplar exception.
+     */
+    mirror: z
+      .string()
+      .regex(MIRROR_RE, "mirror must be an OpenNeuro dataset id (e.g. ds004362)")
+      .optional(),
   });
 
   /**
@@ -90,7 +120,7 @@ export function registerExemplarRoutes(admin: AdminRouter): void {
       );
     }
 
-    const { dataset_id, source_id, name, description, anonymous } = c.req.valid("json");
+    const { dataset_id, source_id, name, description, anonymous, mirror } = c.req.valid("json");
 
     // Refused before anything is created (#1434): no GitHub repository, no row,
     // nothing to roll back. See the field's declaration for why it is refused
@@ -101,6 +131,19 @@ export function registerExemplarRoutes(admin: AdminRouter): void {
           error: "exemplar_anonymous_retired",
           message:
             "An exemplar can no longer be created anonymous. The `xx` band publishes only through the exemplar exception, so an anonymous exemplar could take no publish path at all and was permanently stuck. The standing anonymous deposit is nm099998, built through the normal upload path (ADR 0068).",
+        },
+        400,
+      );
+    }
+
+    // A mirror fixture names the `ds` its `on` source mirrors; any other pair is refused here,
+    // before anything is created.
+    const recorded = exemplarSource({ source_id, ...(mirror !== undefined ? { mirror } : {}) });
+    if (!recorded) {
+      return c.json(
+        {
+          error: "exemplar_mirror_mismatch",
+          message: `A mirror fixture is cloned from the on dataset that mirrors ${mirror}, on${mirror?.slice(2)}; ${source_id} is not it.`,
         },
         400,
       );
@@ -140,7 +183,7 @@ export function registerExemplarRoutes(admin: AdminRouter): void {
       await db
         .prepare(
           `INSERT INTO datasets (dataset_id, name, description, owner_user_id, github_repo, is_sandbox, is_exemplar, visibility, anonymous, source, source_id, last_activity_at)
-           VALUES (?, ?, ?, ?, ?, 1, 1, 'private', ?, 'nemar-exemplar', ?, datetime('now'))`,
+           VALUES (?, ?, ?, ?, ?, 1, 1, 'private', ?, ?, ?, datetime('now'))`,
         )
         .bind(
           dataset_id,
@@ -152,7 +195,8 @@ export function registerExemplarRoutes(admin: AdminRouter): void {
           // literal rather than dropped from the statement so the column stays
           // visible at the one place it could ever have been set.
           0,
-          source_id,
+          recorded.source,
+          recorded.source_id,
         )
         .run();
     } catch (error) {
@@ -197,7 +241,12 @@ export function registerExemplarRoutes(admin: AdminRouter): void {
       await auditLogStatement(db, {
         userId: adminUser.id,
         action: "exemplar_created",
-        details: JSON.stringify({ dataset_id, source_id, name: displayName }),
+        details: JSON.stringify({
+          dataset_id,
+          source_id,
+          name: displayName,
+          ...(mirror !== undefined ? { mirror } : {}),
+        }),
       }).run();
     } catch (err) {
       console.error(`Failed to write audit log for exemplar ${dataset_id}:`, err);
@@ -208,8 +257,9 @@ export function registerExemplarRoutes(admin: AdminRouter): void {
         dataset_id,
         name: displayName,
         github_repo: githubRepo.full_name,
-        source: "nemar-exemplar",
-        source_id,
+        source: recorded.source,
+        source_id: recorded.source_id,
+        cloned_from: source_id,
       },
       201,
     );

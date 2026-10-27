@@ -5,7 +5,15 @@
  */
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "bun";
@@ -114,6 +122,22 @@ describe("ledger-cli append", () => {
       const badCount = await append(file, "plan", ["--counts", "objects=lots"]);
       expect(badCount.exitCode).toBe(2);
       expect(readFileSync(file, "utf8").trim().split("\n").length).toBe(1);
+    },
+    SLOW,
+  );
+});
+
+describe("ledger-cli append refuses the words only a scrub writes", () => {
+  test(
+    "import-scrubbed and repull-scrubbed cannot be typed, and nothing is appended",
+    async () => {
+      const file = join(work(), "ledger.jsonl");
+      for (const action of ["import-scrubbed", "repull-scrubbed"]) {
+        const typed = await append(file, action);
+        expect(typed.exitCode, typed.all).toBe(3);
+        expect(typed.stderr).toContain("action-written-by-the-scrub-only");
+      }
+      expect(existsSync(file)).toBe(false);
     },
     SLOW,
   );

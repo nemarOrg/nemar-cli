@@ -168,10 +168,22 @@ contributor back, which ADR 0107 settled).
 0093 (`nemar admin pr-reviews` lists the open dataset pull requests with the automated review: a verdict
 belongs to the commit it read, an approval is the administrator's OWN act from their machine with their
 own GitHub login and no Worker code path approves, a failing, running or unreadable review needs
-`--force`, nothing merges without `--merge` or a `y` in `nemar admin pr-reviews next`, both of which
-read GitHub's state before approving and need `clean`, each Worker lists only the datasets it
-owns, and an administrator runs a finished review again only with `start --redo`, which never
-supersedes a running one).
+`--force`, an administrator merges through NEMAR's tools by three paths only:
+`pr-reviews approve --merge` and a `y` in `nemar admin pr-reviews next`, both of which read
+GitHub's state before approving and need `clean`, and, for an upstream re-pull's pull request only,
+`nemar admin repull merge`, which approves nothing; a re-pull's pull request merges through one
+gate all three share, which reads the record, the pull request from and into
+`nemarDatasets/<dataset_id>` itself (never a fork's), `main`, the review, the identifier screen and
+GitHub's `clean` (or, with
+`--bids-failure-reason` on a re-pull an administrator opened, `unstable` over a failed BIDS
+validation, never `blocked`), then claims the daily merge cap; ADR 0111 narrows the merge for one
+class, a machine-clean automatic re-pull pull request, which the Worker (the one merge that is not
+an administrator's) makes only in production, when `AUTO_REPULL_ENABLED` and
+`AUTO_REPULL_MERGE_ENABLED` are both exactly `"1"` (`autoRepullMergeEnabled`), and approves nothing;
+the GitHub merge button is bound by none of this, and a re-pull merged there is recorded afterwards
+as a merge outside NEMAR's tools; each Worker lists only the datasets it owns, and an
+administrator runs a finished review again only with `start --redo`, which never supersedes a
+running one).
 0094 (the upload save step skips re-reading annexed content only once recorded annexed bytes reach
 1 GiB, only for files whose size and mtime still match the upload plan, and only while it can clear
 `assume-unchanged` safely; failures to verify or clear the state fail the save),
@@ -191,14 +203,15 @@ one at the first version tag, else with the merge base; the facts carry only cla
 0110 (mail is sent through the Cloudflare `send_email` binding behind a provider switch; Resend is
 a fallback only on a certain non-delivery limit or availability refusal, never on a timeout or an
 unknown error, so a sign-in code is never sent twice),
-0111 (decision 10 is built in Phase 3 and the read-only plan, `nemar admin repull plan`, in Phase 5; execution is not yet built: an upstream re-pull is one synthesized delta commit on `release/vN.0.0`
-through a pull request, never a bypass or a git merge of upstream history; N.0.0 is a pure mirror where
-upstream wins every conflict, and corrections replay as N.0.1 to `main` once N.0.0 is merged and
-tagged; the scrub runs on delta paths before the copy and the commit, and a privacy-ledger change is
-never reverted; state is `upstream_repulls`, never `import_jobs`; the tag is
-`dataset_versions.source_version`, NULL when unknown and never guessed; discovery stays id-only; the
-Worker merges only a machine-clean re-pull pull request the automatic path opened and approves
-nothing, narrowing ADR 0093's merge for that class only),
+0111 (an upstream re-pull is one synthesized delta commit on `release/vN.0.0`, landed by a pull
+request and never by a bypass or a git merge of upstream history; N.0.0 is a pure mirror where
+upstream wins every conflict, NEMAR's corrections replay as N.0.1, the scrub runs on delta paths
+before anything is copied, and a privacy-ledger change is never reverted; state is
+`upstream_repulls`, never `import_jobs`; the tag is `dataset_versions.source_version`, NULL when
+unknown and never guessed, and `mirror` on the data plane is `true`, `false` or `null` for unknown;
+discovery stays id-only; the switches and caps are the owner's (see the hard rules); the Worker
+merges only a machine-clean re-pull pull request the automatic path opened and approves nothing,
+narrowing ADR 0093's merge for that class only),
 0112 (inbound mail is a support ticket: the raw message is stored first and never lost, one
 visibility predicate decides every ticket read and write (restricted queues are owner-only and a
 conduct ticket can exclude a named account), ticket notifications are production-only with no
@@ -314,6 +327,21 @@ than assuming someone else did. A role demotion and an API key revocation delibe
 `package.json` version is owned by CI. Do not edit it, and do **not** run
 `./scripts/bump-version.sh` before a dev → main PR — a manual bump desyncs the tag,
 the version, and the npm release. See ADR 0016 and the release section below.
+
+### The re-pull switches and caps are the owner's
+
+`AUTO_REPULL_ENABLED`, `AUTO_REPULL_MERGE_ENABLED`, `REPULL_DAILY_OPEN_CAP` and
+`REPULL_DAILY_MERGE_CAP` appear in no table of `backend/wrangler-sccn.toml`, and
+`backend/test/repull-switches-flag.test.ts` fails a change that adds one. No change adds one except
+the owner's own, in a reviewed pull request that edits that test, because every merge of a re-pull
+mints a version DOI that cannot be withdrawn (ADR 0111). The test reads the file only; a Worker
+secret of the same name also takes effect, so `GET /admin/repulls/switches` is what says what the
+Worker reads.
+
+A manual major bump on an `on` dataset is refused by the CLI, in `nemar dataset release` and in
+`nemar dataset update --bump major`: a major of a mirror is an upstream re-pull, so plan one with
+`nemar admin repull plan <id>`. The refusal is the CLI's only; the dataset repositories'
+`version-check` workflow does not read it (ADR 0020).
 
 ### Work in a worktree
 
@@ -501,6 +529,7 @@ PR, the final epic PR); see `.rules/code_review.md` and `.rules/git.md`.
 | The HTTP API surface | [API reference](https://docs.nemar.org/platform/api/) |
 | Dataset download and byte-range access | [data API](https://docs.nemar.org/platform/data-api/) |
 | DOIs, versioning, what is permanent | [DOI and versioning](https://docs.nemar.org/platform/doi-and-versioning/) |
+| Mirror versions and the `mirror` flag | [mirror versions](https://docs.nemar.org/platform/doi-and-versioning/#versions-of-an-openneuro-mirror), [the flag](https://docs.nemar.org/platform/data-api/#the-mirror-flag) |
 | Which host serves what | [hosts and routes](https://docs.nemar.org/platform/hosts-and-routes/) |
 | The Zarr serving copy, end to end | [Zarr](https://docs.nemar.org/platform/zarr/) |
 | The `index.json` contract | [index contract](https://docs.nemar.org/platform/zarr/index-contract/) |
@@ -518,6 +547,7 @@ Gated, and worth knowing exist:
 | Zarr operations, including the maintenance commands | [Zarr serving runbook](https://docs.nemar.org/admin/operations/zarr-serving/) |
 | Staging and the exemplar fleet | [staging environment](https://docs.nemar.org/admin/operations/staging-environment/) |
 | Backup and restore | [disaster recovery](https://docs.nemar.org/admin/disaster-recovery/) |
+| Upstream freshness and the re-pull runbooks | [freshness](https://docs.nemar.org/admin/operations/upstream-freshness/), [manual re-pull](https://docs.nemar.org/admin/operations/upstream-repull/), [automatic re-pull](https://docs.nemar.org/admin/operations/upstream-repull-automatic/) |
 
 ---
 
