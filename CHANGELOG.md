@@ -102,6 +102,11 @@ It sets no Worker variable or secret: the four re-pull switches and caps are abs
   The bucket and datacenter `remote.log` names for `nemar-s3` must be an S3 bucket name and an AWS region: `nemar admin repull plan` refuses (exit 1), `execute` and the release refuse as `nemar-s3-invalid`, and neither the annex-uuid read nor the bucket listing builds a host from one.
   A plan's dataset ids, tags, versions and its three commit ids must have the shape execution builds a URL, a ref, a branch name or an argument of git from, or `execute` refuses as `plan-schema`.
   The words name the field and the shape, never the value.
+- **The staleness report and `nemar admin upstream-backfill` read version rows spelled `vN.N.N`.**
+  The report used to ignore them: a mirror whose rows carry the `v` read as unpublished, so it was never compared or dispatched, and a newer `v` row lost to an older bare one.
+  Both spellings are now read together and by number, and the version comes back bare.
+  `nemar admin upstream-backfill --execute` therefore writes more rows than before, the ones spelled `vN.N.N`, each recorded on its own spelling (a dry run, the default, writes nothing).
+  There is no migration, and no recorded value is rewritten.
 - Imports that used to clone HEAD now clone the latest tag. On OpenNeuro's mirrors HEAD and the latest tag normally name the same commit, so most imports are unchanged; a dataset whose mirror carries commits past its latest snapshot is imported at the snapshot.
 - A re-import of a released mirror whose `origin/main` records a tag, and whose upstream published a newer one, used to keep the old tree while copying the new tag's data (#993); it now refuses and parks. An unrecorded tag still takes the hard reset.
 - The Monday import report gains `## Upstream freshness` and `## Upstream re-pulls`, and `nemar admin import-weekly` prints both.

@@ -52,9 +52,10 @@ and only while the claim is younger than 25 minutes; an older one is expired by 
 
 --bids-failure-reason "<text>" (10 to 500 characters) merges a re-pull you opened over a failed
 BIDS validation, with your reason recorded beside the claim. It is taken only while GitHub reports
-the pull request unstable, a check that is not required failing, and no check run or commit status
-of the head but BIDS validation fails or is still running (resume records the gates of such a
-head); blocked, where this dataset's rules require BIDS validation and a merge would be a bypass,
+the pull request unstable, a check that is not required failing: BIDS validation must have
+completed with failure, and every other check run and commit status of the head must pass, none
+still running (resume records the gates of such a head, and waits while any check is still
+running); blocked, where this dataset's rules require BIDS validation and a merge would be a bypass,
 is refused before anything is written, and so is clean, which needs no override. The Worker then
 reads, at the screened head, that BIDS validation completed with failure and version-check with
 success before it records the claim; every other check of the gate (the review, the screen, main,
