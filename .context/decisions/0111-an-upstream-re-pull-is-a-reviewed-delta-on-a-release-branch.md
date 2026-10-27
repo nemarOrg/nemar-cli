@@ -19,6 +19,8 @@ Decisions 4 and 10 are built, as their dated amendments below record, and so are
 *Annotated 2026-10-25: and by the Phase 6g amendment (#1912): N.0.1, abandoning a record, superseding one, the manual-major refusal and a mirror rehearsal fixture are built, which completes Phase 6's manual execution.*
 *Annotated 2026-10-26: and by the Phase 7g amendment (#1913): decision 7's merge is built: the Worker merges a machine-clean automatic re-pull pull request and finishes it after its merge, and an administrator may merge a re-pull they opened over a failed BIDS validation, never over a rule that requires it.*
 *Annotated 2026-10-26: and by the Phase 7h amendment (#1913): the automatic path is observable (the weekly report's re-pull section, the administrator's list of dispatches and `nemar admin repull auto`), which completes the slices of Phase 7; the owner's switches, gates G4 and G5 and the held workflow pair remain.*
+*Annotated 2026-10-27: and by the Phase 8 amendment (#1914): the Decision section is built, and what that amendment lists under "Not yet verified" is unobserved, not unbuilt; what remains is the owner's act and the epic's release.
+Phase 8 itself documents the epic, fixes the website's contract for the `mirror` flag and records the order in which the pieces reach production.*
 
 ## Context
 
@@ -44,6 +46,7 @@ Everything in this section is designed and not yet built.
 *Annotated 2026-10-25: and by the Phase 6g amendment: N.0.1, abandon, supersede and the manual-major refusal are built.*
 *Annotated 2026-10-26: and by the Phase 7g amendment: decision 7's merge is built, with its follow-through to `complete` and an administrator's merge over a failed BIDS validation.*
 *Annotated 2026-10-26: and by the Phase 7h amendment: what the automatic path did is counted every week and listed for an administrator, and nothing about what it does changes.*
+*Annotated 2026-10-27: and by the Phase 8 amendment: every rule in this section is built; the unobserved parts are listed under "Not yet verified" in that amendment, and nothing in it changes what a rule says.*
 
 **An upstream re-pull replays the delta between two pinned upstream tags onto NEMAR's `main` as one synthesized commit on `release/vN.0.0`, landed through a pull request; N.0.0 is a pure mirror of the upstream snapshot, and NEMAR's corrections follow as N.0.1.**
 
@@ -134,6 +137,7 @@ Everything in this section is designed and not yet built.
 
 - A version row with `source_version` set (not NULL, so never an unknown tag) and a version of the form `N.0.0` is a mirror.
   The API exposes that as a derived flag, computed at read time and never stored, and the website shows a mirror tag on that version.
+  *Annotated 2026-10-27: built by the Phase 8 amendment: the website shows a chip from the flag (`mirror === true`), not the tag, which the public wire never carries.*
 - A manual major bump is refused on `on` datasets: `nemar dataset release --type major`, and `nemar dataset update --bump major`, which reaches the same number.
   NEMAR's own changes to a mirror take minor and patch.
   *Annotated 2026-10-25: built by the Phase 6g amendment in the CLI only (`nemar dataset release`, `nemar dataset update`), for `on` ids and for rows recorded as OpenNeuro imports; the dataset repositories' `version-check` workflow is not changed (ADR 0020), so a major merged outside the CLI is not stopped.*
@@ -2086,3 +2090,111 @@ and the old login as 404.
 - The checks compare the id and the login, as stated above: the machine-clean rule, the Worker's start of the App's review and the review's intake by login, numeric id and type, and the review queue's labels by login and numeric id, the stored review's as well as GitHub's record.
   A rename keeps both ids and frees the old login for anyone to register, so a later rename refuses the App's pull requests until the login follows it, and never admits whoever takes the old name.
 - The Phase 7e amendment's "Checked only against stand-ins" no longer names the old login: what only the first production runs can check is that GitHub names the author of the App's pull request `nemar-bot[bot]`, id 283755542, type `Bot`.
+
+## Amendment 2026-10-27 (#1914): Phase 8 documents the epic and fixes the website contract
+
+Epic #1046, Phase 8.
+Phase 8 adds no behavior to the Worker.
+It documents what Phases 2 to 7 built, makes the website read the `mirror` flag, types that flag in the CLI's reader of the version listing, and records the order in which these reach production.
+The decision text above and the earlier amendments are unchanged.
+Three annotations are added to earlier text: on the record's header, on the opening of the Decision section, and on decision 5's sentence about the website.
+
+### Where the documentation is
+
+The pages were written from the merged epic head `1abf9286` and checked against its code, and each pull request named below carries its checks.
+`nemar admin repull <command> --help` is the authority for flags, and the runbooks say what to do with them.
+
+- Public pages, in `nemarOrg/docs` (`nemarOrg/docs#90`):
+  `platform/doi-and-versioning`, the section "Versions of an OpenNeuro mirror" (the version rule, the separate numberings of NEMAR and OpenNeuro, what a reader can rely on);
+  `platform/data-api`, the section "The `mirror` flag" (`#the-mirror-flag`);
+  `platform/api`, the fields of `GET /datasets/:id/versions`;
+  `cli/guides/versioning`, the Major bullet and the section "OpenNeuro Mirrors" (the CLI's refusal of a manual major, and its limit);
+  and one sentence and a link in `why-nemar`.
+- Gated pages, in `nemarOrg/docs` under `admin/operations/` (`nemarOrg/docs#92`):
+  `upstream-freshness` (the staleness report, the backfill, the Monday section),
+  `upstream-repull` (the manual path, the canary, the first two re-pulls, the staging rehearsal)
+  and `upstream-repull-automatic` (the switches and caps, what runs, machine clean, the kill switch, the owner's steps).
+  The same pull request edits `admin/index`, `identifier-screening`, `pr-reviews`, `systems-inventory` and `staging-environment`, regenerates `admin/commands`, and lists the three pages and their `.md` mirrors in `GATED_PAGES` of `scripts/probe-admin-gate.ts`.
+- The website, in `nemarOrg/website` on `staging` (`nemarOrg/website#489`):
+  `listMirrorVersions` in `src/lib/provenance.ts` lists only the versions whose `mirror` is `true` as soon as any version of a listing carries the key, and keeps the old rule (a version of the form `vN.0.0`) for a payload with no key at all.
+
+### The `mirror` field, as a reader sees it
+
+- The flag is three-valued, derived at read time and never stored (`mirrorFlagOf`, `shared/source-snapshot.ts`).
+  `true` is an N.0.0 of an `on` dataset whose upstream tag is recorded, `false` is every other dataset and every other version, and `null` is an N.0.0 of an `on` dataset whose tag is unknown or was never examined.
+  A consumer shows `null` without a mirror marker and never as a mirror.
+  Only an id of the form `on` plus six digits is ever `true` or `null`, so an `xx` mirror fixture reads `false`; the CLI's refusal of a manual major is wider, because it also covers a row recorded as an OpenNeuro import.
+- The public wire carries the flag and nothing of the tag.
+  A landing entry has exactly `version`, `doi`, `created_at`, `mirror`, `manifest_url` and `browse_url`, in `GET /<id>` as JSON and in `landing.data.versions` of the page bundle.
+  `metadata.json` is unchanged (`backend/test/landing-mirror-flag.test.ts`, `backend/test/page-bundle-mirror-flag.test.ts`).
+- `GET /datasets/:id/versions` also carries `source_version` and `source_version_basis`.
+  It is open to the dataset's owner, its collaborators and administrators (`backend/src/routes/datasets/manifests.ts`), which corrects the Phase 4b amendment's "owner-or-admin route".
+- A Worker that predates the release omits the key, and a reader takes an absent key as not stated, never as `false`.
+- The CLI's reader of the listing types the field.
+  `dataPlaneVersionListingSchema` in `shared/contract/data-plane.ts` takes `mirror` as an optional boolean that may be `null` and still passes every other key through, so a producer that sent any other value fails the CLI's read of a listing instead of having it passed on.
+- No parity file between this repository and the website holds the field.
+  The producer's tests and the website's three payloads (`test/fixtures/landing-mirror-flag-*.json`, recorded from the real data-plane route) cover it, and the epic changes none of the contract files the website's drift tests compare.
+
+### The order the pieces reach production
+
+- The documentation follows the release.
+  The docs deploy on merge, so a page merged first describes commands and a field the deployed API lacks; compare `https://api.nemar.org/health` with the version of the release that carries the epic before merging a docs change for it.
+  `nemarOrg/docs#90` and `nemarOrg/docs#92` were merged on 2026-10-27, before the release, so those pages run ahead of the deployed API until the release is deployed.
+  `test/docs-links.unit.test.ts` fails a link in this repository to a page that is not on `main` of `nemarOrg/docs`, when it reads a fresh docs checkout, which CI supplies (`NEMAR_DOCS_CHECKOUT` in `.github/workflows/test.yml`).
+- The website's fallback is deleted only after `nemar admin upstream-backfill --execute` has run in production and `mirror` reads `true` for the mirrors the backfill could establish.
+  Until then an `on` N.0.0 whose snapshot is not recorded reads `null` and has no chip, so deleting the fallback early takes the chip from every mirror.
+  The fallback covers only a payload with no key; once production sends the key, a `null` has no chip with or without it, so the website is promoted after the backfill and not between the release and the backfill (`nemarOrg/website#489`).
+
+### The workflow pairs
+
+Two workflows are authored here and copied into `nemarDatasets/.github` (ADR 0020), the copy there first.
+
+- `onboard-openneuro.yml` takes the optional input `openneuro_tag` (Phase 3): `nemarDatasets/.github#144`, then this repository's #1933, which shipped in 0.10.24 (`CHANGELOG.md`).
+- `run-upstream-repull.yml` (Phase 7d), authored at `.github/dataset-workflows/run-upstream-repull.yml`:
+  `nemarDatasets/.github#148`, then this repository's #1980, which makes the `unit-pure` tier compare the two copies byte for byte (`NEMAR_REPULL_WORKFLOW_LIVE` in `.github/workflows/test.yml`, `test/repull-workflow.test.ts`).
+  The workflow runs only on a `repository_dispatch` of the type `run-upstream-repull`, which only the automatic path sends, and the automatic path is off until the owner turns its switch on; neither merge turns anything on.
+
+### The relation on a re-pull's DOI (clarifies decision 2)
+
+Decision 2 says the version DOI of a re-pull carries `IsDerivedFrom` `openneuro.<ds>.v<to_tag>`, because the mint reads `SourceDatasets` at the tag.
+That describes one of two sources of related identifiers, and no re-pull's record has been observed yet.
+The DataCite builder turns each `SourceDatasets` DOI into `IsDerivedFrom` (`backend/src/services/datacite.ts`, the loop under "BIDS SourceDatasets -> IsDerivedFrom relations").
+The importer also seeds `.nemar/metadata.json` with the snapshot's DOI as `IsIdenticalTo` (`seedMetadata` in `src/lib/import-openneuro.ts`).
+The builder carries that file's related identifiers into the record, and its de-duplication is by identifier and relation together, so one DOI can appear under both relations.
+A re-pull rewrites both to the new tag's DOI: the `SourceDatasets` entry (`src/lib/repull/description.ts`) and the `IsIdenticalTo` identifier (`rewriteIsIdenticalTo` in `src/lib/repull/execute/materialize.ts`).
+The record of an import published before the epic shows the second source alone.
+DataCite's record for `10.82901/nemar.on005506.v1.0.0`, read on 2026-10-27, lists `IsIdenticalTo` `10.18112/openneuro.ds005506.v1.0.1` and no `IsDerivedFrom`, because that version's description has no `SourceDatasets` entry (`nemarOrg/docs#90`).
+Which relation a re-pull's record carries, one or both, is therefore read from the first real N.0.0 DOI, which the owner's first two re-pulls produce.
+Until then the public page says only that the DOI record lists the OpenNeuro snapshot's DOI among its related identifiers, and the runbook tells the owner to read what the record shows (`upstream-repull`, "The first two re-pulls").
+Decision 2's sentence stays as the design's expectation.
+
+### Not yet verified
+
+Phase 8 moves nothing to verified.
+Its checks read the code at `1abf9286` and a few public records, and it ran no re-pull, no canary and no Worker merge.
+Two items of the "Not yet verified" list near the top of this record are closed by earlier amendments: where `source_version` is inserted (the Phase 2 amendment), and the ruleset half of the App's merge (the Phase 7g amendment).
+The Phase 7e amendment corrects the item about the review.
+These remain:
+
+- Whether the App's own token reads `mergeable_state` as an administrator does, that GitHub merges the App's squash at the screened head with the message it is sent, and that the dataset workflows tag that squash and mint its DOI as they tag any merge to `main`.
+  Only the first production merge shows them, and it runs with `REPULL_DAILY_MERGE_CAP` set to `"1"`.
+- That a signed cross-account `copy-object` and `upload-part-copy` of a public versioned object honor `?versionId=` and `--copy-source-if-match` and name the copied version, that upstream's bucket answers from `us-east-1`, and whether NEMAR's bucket locks a copy by default retention.
+  The canary (`scripts/repull-canary.ts`) checks them; a multipart copy over 5 GiB in 4 GiB parts is first met in a real re-pull.
+- Whether the standard edits are recognized on the early rewritten imports `on003645` and `on004362`, and what their plans count as unexplained paths: the owner's review of their dry-run plans.
+- Whether ADR 0107's review can ever pass a re-pull diff.
+  The App's pull request is reviewed now, but ADR 0109 fails a changed `CHANGES` line and holds a replaced recording, both normal in a re-pull; until one passes, no re-pull is machine clean and an administrator merges each.
+- Which relation the first re-pull's DOI record carries (above).
+- Whether OpenNeuro writes S3 before it pushes to GitHub, whether the object at a path lags the pinned `versionId`, and that upstream's `.log.rmet` records a `versionId` per key.
+- Whether the installation token is accepted for the raw files of `OpenNeuroDatasets` (if it is not, every probe reads `stale_unverified`).
+- Whether the central `run-identifier-screen` workflow posts a re-pull screen's report to its callback.
+- What GitHub answers to the reads the release and the merge make (the tag's commit, the comparison words, a squash-merged pull request's `head` and `merge_commit_sha`).
+  Only production shows these last three.
+- How soon enrichment commits to a release branch after a push, which the settle rule of the Phase 7d amendment records and only production shows.
+- What the weekly report's re-pull section reads on production data, and the first week a switch is on.
+- That the `mirror` field reaches production as the pages say.
+  After the release, `curl -s -H 'Accept: application/json' https://data.nemar.org/<id>/ | jq '[.versions[].mirror]'` shows it on a mirror, and `null` is expected until the backfill has run.
+
+### Left open for the owner, unchanged
+
+- A `failed` record that holds a claim to merge, or a merge with no tag, is reconciled by nothing and keeps its dataset blocked until an administrator resolves it by hand (the Phase 6f amendment, annotated by the Phase 6g amendment).
+- A mirror whose last three dispatches all ended `unreported` is skipped by the scheduler, nothing clears that streak, and the mirror stays on the administrator's path (the Phase 7c amendment).
