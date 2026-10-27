@@ -627,8 +627,9 @@ export interface LivePlan {
 }
 
 /**
- * `plan`'s check of the plan it just made: executable, then {@link assertAutomaticCounts}. At
- * `execute` neither is read from the file; the plan step's handoff stands for them.
+ * `plan`'s check of the plan it just made: executable, then {@link assertAutomaticCounts}. `execute`
+ * asks the counts again of the proved body; the file's `executable` it never reads, and the plan
+ * step's handoff stands for it.
  */
 export function assertAutomaticPlan(live: LivePlan): void {
   if (!live.executable) {
