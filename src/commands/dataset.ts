@@ -5229,7 +5229,7 @@ Examples:
     }
 
     // A clone from an authenticated data host is read through git-annex-remote-nemar with the
-    // stored API key (ADR 0114): no S3 credentials, no dataset lookup at the main service.
+    // stored API key (ADR 0114): no download credentials, no dataset lookup at the main service.
     const dataHostClone = await detectDataHostClone(cwd);
     if (dataHostClone) {
       if (!isAuthenticated()) {
@@ -5343,7 +5343,7 @@ Examples:
 
     const getS3Creds = getCreds ? toS3Credentials(getCreds.credentials) : undefined;
 
-    // Enable S3 remote if available (idempotent); a data host clone has none.
+    // Enable the main service's remote if available (idempotent); a data host clone has none.
     if (!dataHostClone) {
       const s3Enable = await enableS3Remote(cwd, "nemar-s3", getS3Creds);
       if (!s3Enable.success && !s3Enable.enabled) {

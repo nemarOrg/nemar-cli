@@ -228,7 +228,7 @@ describe("repositories", () => {
       ["remote.nemar.annex-uuid", "00000000-0000-0000-0000-0000000000aa"],
     ]);
     expect(await declaresNemarRemote(withNemar)).toBe(true);
-    const other = repo("other-type", undefined, [["remote.s3.annex-externaltype", "rclone"]]);
+    const other = repo("other-type", undefined, [["remote.other.annex-externaltype", "rclone"]]);
     expect(await declaresNemarRemote(other)).toBe(false);
     expect(await declaresNemarRemote(repo("plain"))).toBe(false);
   });
