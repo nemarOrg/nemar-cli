@@ -627,22 +627,21 @@ export interface LivePlan {
 }
 
 /**
- * Refuse a plan the automatic path does not take: executable, then {@link assertAutomaticCounts}.
- * The plan is the one this run's `plan` made, never a file from elsewhere.
+ * `plan`'s check of the plan it just made: executable, then {@link assertAutomaticCounts}. At
+ * `execute` neither is read from the file; the plan step's handoff stands for them.
  */
 export function assertAutomaticPlan(live: LivePlan): void {
   if (!live.executable) {
-    throw new ExecuteRefused("not-executable", "The live plan is not executable.");
+    throw new ExecuteRefused("not-executable", "The plan is not executable.");
   }
   assertAutomaticCounts(live.body);
 }
 
 /**
- * The counts {@link assertAutomaticPlan} reads, of a plan body: the shared rule the Worker also
- * asks at the automatic create (`automaticPlanRefusal`), then what only a run can check, that every
- * key's size is known and the copy fits the App token's hour. On its own only where no live plan
- * can be made: a record past `prepared` that a run takes up, whose registration moved the git-annex
- * branch the planner reads (the record itself was made by an automatic create, which checked them).
+ * A plan body's counts as the automatic path takes them: the shared rule the Worker also asks at
+ * the automatic create (`automaticPlanRefusal`), then what only a run can check, that every key's
+ * size is known and the copy fits the App token's hour. `plan` asks it of the plan it made, and
+ * `execute` of that plan's proved body, a record past `prepared` included.
  */
 export function assertAutomaticCounts(body: PlanBody): void {
   const counts = planCounts(body);

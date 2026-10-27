@@ -626,8 +626,8 @@ export type DispatchPhase = (typeof DISPATCH_PHASES)[number];
  * The fixed words a dispatch's `code` may hold. Closed on purpose: a code is counted in the weekly
  * report, filed on a public-facing repository, so it can never carry a path, a key or a message,
  * and the callback refuses any other word. A run reports a refusal whose word is not here as the
- * class of the step that met it ({@link STEP_CLASSES}); the exact word stays in the record's
- * `last_error` and the run's own output.
+ * class of the step that met it ({@link STEP_CLASSES}). Once the record exists, the exact word is
+ * kept in its `last_error`; a refusal before the record exists keeps only the listed word.
  */
 export const DISPATCH_CODES = [
   // The Worker's own, at the automatic create and when it sends or ends a dispatch. A resume's send
@@ -871,8 +871,10 @@ export type SchedulerOutcome = (typeof REPULL_SCHEDULER_OUTCOMES)[number];
 
 /**
  * The shape of every fixed word the automatic path stores (a dispatch code, a hold reason, the
- * scheduler's outcome): what migration 0112's CHECKs admit, so the database refuses anything a
- * message or a path could look like even from a writer that skips the service.
+ * scheduler's outcome). Migration 0112's CHECKs hold the stored words to this shape only, so the
+ * database refuses anything a message or a path could look like even from a writer that skips the
+ * service; which words a code may be is enforced by the callback (`z.enum(DISPATCH_CODES)`) and
+ * {@link isDispatchCode}.
  */
 export const FIXED_WORD_RE = /^[a-z0-9-]{1,64}$/;
 
@@ -893,8 +895,9 @@ export const AUTO_MAX_COPY_BYTES = 1024 ** 4;
 /**
  * Why the automatic path does not take a plan (ADR 0111, decision 6), or null: another planner's,
  * `unexplained`, `conflicts` or `corrections` not stated as 0 (a count left out is not 0), or a copy
- * size not stated or over {@link AUTO_MAX_COPY_BYTES}. The Worker asks it at the automatic create,
- * the CLI of the live plan, before the checks only a run can make.
+ * size not stated or over {@link AUTO_MAX_COPY_BYTES}. The Worker asks it at the automatic create;
+ * the CLI asks it of the plan `plan` made, and again at `execute` of that plan's proved body,
+ * before the checks only a run can make.
  */
 export function automaticPlanRefusal(
   planner: unknown,
@@ -963,10 +966,10 @@ export const AUTO_OTHER_STEPS_SECONDS = 29 * 60;
  * The automatic copy's time budget, in seconds: what the usable hour leaves once the settle's
  * share and the other steps' allowance are kept back, twenty minutes. A plan whose copy
  * {@link automaticCopySeconds} puts past it is refused before the copy starts
- * (`auto-copy-too-long`), at the plan and again from the live plan at execute, as a copy over
- * {@link AUTO_MAX_COPY_BYTES} is. Before the copy and before each push the run also checks the time
- * already spent (`auto-token-hour`), and a run that fails with the token expired anyway says so
- * (`token-expired`).
+ * (`auto-copy-too-long`), at the plan and again at execute from the plan's proved body, as a copy
+ * over {@link AUTO_MAX_COPY_BYTES} is. Before the copy and before each push the run also checks the
+ * time already spent (`auto-token-hour`), and a run that fails with the token expired anyway says
+ * so (`token-expired`).
  */
 export const AUTO_COPY_BUDGET_SECONDS =
   APP_TOKEN_USABLE_SECONDS - AUTO_SETTLE_RESERVE_SECONDS - AUTO_OTHER_STEPS_SECONDS;
