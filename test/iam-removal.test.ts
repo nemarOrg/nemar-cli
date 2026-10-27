@@ -89,6 +89,40 @@ function postJson(body: unknown = {}): RequestInit {
   return { method: "POST", body: JSON.stringify(body) };
 }
 
+/**
+ * The three collaborator cases need test-user to be a collaborator of nm099999: a
+ * dataset_collaborators row and test-user's user_s3_permissions row for the prefix, both seeded
+ * by scripts/seed-dev-db.sql. POST /admin/datasets/nm099999/reset deletes both and restores
+ * neither, and the only routes that write a collaborator row (invite, and approving an access
+ * request) first invite test-user's GitHub login to nemarDatasets/nm099999 on GitHub, which a
+ * test must not do. So the cases read the collaborator list first and fail with a message that
+ * names the missing precondition instead of the 403 the route under test would answer. Only a
+ * listing that names test-user is kept; an answer that is not 200 is asked again by the next case.
+ */
+const RESEED_COLLABORATOR =
+  "A reset of nm099999 deletes test-user's dataset_collaborators and user_s3_permissions rows for it and nothing restores them; re-seed both from scripts/seed-dev-db.sql (an owner's action on the dev database).";
+let testUserListed = false;
+
+async function requireTestUserCollaborator(): Promise<void> {
+  if (testUserListed) return;
+  const { status, data } = await testRequest<{ collaborators?: { username?: string }[] }>(
+    "/datasets/nm099999/collaborators",
+    {},
+    adminKey,
+  );
+  if (status !== 200) {
+    throw new Error(
+      `Precondition unread: GET /datasets/nm099999/collaborators answered ${status} to test-admin, so whether test-user is a collaborator of nm099999 is unknown.`,
+    );
+  }
+  if (!(data.collaborators ?? []).some((c) => c.username === "test-user")) {
+    throw new Error(
+      `Missing precondition: test-user is not a collaborator of nm099999 on this backend. ${RESEED_COLLABORATOR}`,
+    );
+  }
+  testUserListed = true;
+}
+
 // -- Tests -----------------------------------------------------------------
 
 describeLive("IAM Removal: Upload credentials (STS tokens)", () => {
@@ -167,6 +201,7 @@ describeLive("IAM Removal: Presigned upload URLs", () => {
 
 describeLive("IAM Removal: Collaborator access", () => {
   test("collaborator (test-user) can get upload credentials for nm099999", async () => {
+    await requireTestUserCollaborator();
     const { status, data } = await testRequest<UploadCredentialsResponse>(
       "/datasets/nm099999/upload-credentials",
       postJson(),
@@ -178,6 +213,7 @@ describeLive("IAM Removal: Collaborator access", () => {
   });
 
   test("collaborator can get presigned upload URLs", async () => {
+    await requireTestUserCollaborator();
     const { status, data } = await testRequest<UploadUrlsResponse>(
       "/datasets/nm099999/upload-urls",
       postJson({ files: ["collaborator-test.txt"] }),
@@ -219,6 +255,7 @@ describeLive("IAM Removal: Download credentials", () => {
   });
 
   test("collaborator gets download credentials", async () => {
+    await requireTestUserCollaborator();
     const { status, data } = await testRequest<{
       credentials: StsCredentials;
     }>("/datasets/nm099999/download-credentials", postJson(), userKey);
