@@ -75,12 +75,28 @@ export type DataPlaneManifestEntry = z.infer<typeof dataPlaneManifestEntrySchema
 /** A version's manifest: one entry per file, no envelope. */
 export const dataPlaneManifestSchema = z.array(dataPlaneManifestEntrySchema);
 
-/** `GET <data>/<id>` — every published version, newest first. */
+/**
+ * `GET <data>/<id>`: every published version, newest first.
+ *
+ * `mirror` is typed here because the CLI reads this document and the field is a three-valued flag a
+ * consumer must not flatten (ADR 0111, decision 5): `true` for an N.0.0 of an OpenNeuro dataset whose
+ * upstream tag is recorded, `false` for any other version, `null` for an N.0.0 whose tag is unknown or
+ * was never examined, which is not "no". It is optional because a backend that predates it omits the
+ * key, and an absent key reads as "not stated", never as `false`. Any other value fails the read,
+ * where passthrough alone would hand it on.
+ */
 export const dataPlaneVersionListingSchema = z
   .object({
     dataset_id: z.string().optional(),
     latest: z.string().nullish(),
-    versions: z.array(z.object({ version: z.string().min(1) }).passthrough()),
+    versions: z.array(
+      z
+        .object({
+          version: z.string().min(1),
+          mirror: z.boolean().nullable().optional(),
+        })
+        .passthrough(),
+    ),
   })
   .passthrough();
 
