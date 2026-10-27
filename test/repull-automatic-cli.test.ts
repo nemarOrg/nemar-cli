@@ -71,6 +71,7 @@ import {
 import {
   chmodSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
@@ -106,6 +107,7 @@ import {
   type Settled,
   settleReleaseHead,
 } from "../src/lib/repull/execute/settle";
+import { workPaths } from "../src/lib/repull/execute/workdir";
 import { planRepull } from "../src/lib/repull/plan";
 import { ADMIN_TOKEN, APP_TOKEN } from "./helpers/github-standin";
 import { type ReleaseCli, releaseCli } from "./helpers/release-cli";
@@ -1027,6 +1029,27 @@ describe.skipIf(!awsInstalled)("an automatic run opens its pull request", () => 
     expectQuiet(exec, c, "refused");
     expect(dispatchRow(c.id)).toMatchObject({ status: "refused", code: "record-refused" });
     expect(repullRows()).toMatchObject([{ id: open?.id, status: "planned" }]);
+  });
+
+  test("an execute refused at the plan's lock keeps the handoff for the execution that holds it", async () => {
+    const c = await claimOpen();
+    writeEvent(c);
+    expect((await auto(planArgs(c))).exitCode).toBe(0);
+    const digest = JSON.parse(readFileSync(join(runner, "plan.json"), "utf8")).digest as string;
+    // Another execution of this plan holds its lock: a live process, this one.
+    const lock = workPaths(w.configDir, w.fx.datasetId, digest).lock;
+    mkdirSync(lock, { recursive: true });
+    writeFileSync(join(lock, "pid"), `${process.pid}\n`);
+    try {
+      const exec = await auto(executeArgs(c));
+      expect(exec.exitCode, exec.all).toBe(1);
+      expectQuiet(exec, c, "refused");
+      expect(dispatchRow(c.id)).toMatchObject({ status: "refused", code: "plan-refused" });
+      expect(existsSync(join(runner, "plan.json.planner", "upstream.git"))).toBe(true);
+      expect(repullRows()).toEqual([]);
+    } finally {
+      rmSync(lock, { recursive: true, force: true });
+    }
   });
 
   test("a record taken up past prepared leaves no handoff behind", async () => {

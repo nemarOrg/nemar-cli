@@ -115,8 +115,12 @@ interface Spec {
   /** Whether this command is the run's first, which reports `started`. */
   reportsStart: boolean;
   body(ctx: AutomaticContext): Promise<Outcome>;
-  /** What no later command reads, removed however this one ended. */
-  cleanup?: () => void;
+  /**
+   * What no later command reads, removed however this one ended, given the word it was refused or
+   * failed with, if any. An execute refused at the plan's lock (`execution-locked`) keeps the
+   * handoff: the execution holding the lock reads it.
+   */
+  cleanup?: (word: string | undefined) => void;
 }
 
 /**
@@ -165,18 +169,20 @@ function end(sink: AutomaticSink, outcome: Outcome, startedMs: number): void {
 
 /** One automatic run of a command; see the module comment. */
 async function runAutomatic(spec: Spec): Promise<void> {
+  let word: string | undefined;
   try {
-    await runOnce(spec);
+    word = await runOnce(spec);
   } finally {
     try {
-      spec.cleanup?.();
+      spec.cleanup?.(word);
     } catch {
       // A runner's temporary directory: nothing the run reports depends on it.
     }
   }
 }
 
-async function runOnce(spec: Spec): Promise<void> {
+/** The run of a command; the word its body was refused or failed with, if any. */
+async function runOnce(spec: Spec): Promise<string | undefined> {
   const startedMs = Date.now();
   const sink = installAutomaticQuiet();
   markReportedExit();
@@ -238,6 +244,7 @@ async function runOnce(spec: Spec): Promise<void> {
   } catch (err) {
     outcome = outcomeOf(err);
   }
+  const word = outcome.phase === "refused" || outcome.phase === "failed" ? outcome.code : undefined;
   // A run that outlived its App token fails at its next push or pull-request call, with that step's
   // word: when GitHub no longer takes the token, the report says why, whatever the step called it.
   // Once an open run left its record (a resumable failure), the word is a refusal, final for the
@@ -277,6 +284,7 @@ async function runOnce(spec: Spec): Promise<void> {
     }
   }
   end(sink, outcome, startedMs);
+  return word;
 }
 
 /** The catalog row and its versions, as the plan reads them; an API failure is a refusal. */
@@ -442,7 +450,10 @@ export function automaticExecute(
     option,
     datasetOf: () => peekPlan(planFile).datasetId,
     reportsStart: false,
-    cleanup: () => rmSync(planHandoffDir(planFile), { recursive: true, force: true }),
+    cleanup: (word) => {
+      if (word !== "execution-locked")
+        rmSync(planHandoffDir(planFile), { recursive: true, force: true });
+    },
     async body(ctx) {
       refuseOptions([
         ["--json", options.json === true],
