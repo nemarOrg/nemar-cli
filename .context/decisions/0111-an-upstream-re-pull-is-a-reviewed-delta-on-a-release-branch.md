@@ -16,9 +16,14 @@ Decisions 4 and 10 are built, as their dated amendments below record, and so are
 *Annotated 2026-10-25: and by the Phase 6f amendment (#1912): resume, the administrator's merge through one gate, the release and the lock are built through `released`.*
 *Annotated 2026-10-25: and by the Phase 7f amendment (#1913): the advance tick holds, gates and resumes the automatic re-pulls, in production only, and while its switch is off only records that it is off; decision 7's merge is still not built.*
 *Annotated 2026-10-25: and by the Phase 7d amendment (#1913): the unattended run that opens an automatic re-pull's pull request and finishes a merged one is built, in a central workflow deployed only with the epic release.*
+*Annotated 2026-10-27: the workflow is not held for the release.
+Its copy in `nemarDatasets/.github` merged as `nemarDatasets/.github#148`, and this repository's #1980 compares the two copies byte for byte.
+It runs only on a `repository_dispatch` of the type `run-upstream-repull`, which only the automatic path sends, and that is off until the owner turns its switch on (see the Phase 8 amendment, "The workflow pairs").*
 *Annotated 2026-10-25: and by the Phase 6g amendment (#1912): N.0.1, abandoning a record, superseding one, the manual-major refusal and a mirror rehearsal fixture are built, which completes Phase 6's manual execution.*
 *Annotated 2026-10-26: and by the Phase 7g amendment (#1913): decision 7's merge is built: the Worker merges a machine-clean automatic re-pull pull request and finishes it after its merge, and an administrator may merge a re-pull they opened over a failed BIDS validation, never over a rule that requires it.*
 *Annotated 2026-10-26: and by the Phase 7h amendment (#1913): the automatic path is observable (the weekly report's re-pull section, the administrator's list of dispatches and `nemar admin repull auto`), which completes the slices of Phase 7; the owner's switches, gates G4 and G5 and the held workflow pair remain.*
+*Annotated 2026-10-27: the workflow pair is no longer held: `nemarDatasets/.github#148` merged and this repository's #1980 compares the copies (the Phase 8 amendment, "The workflow pairs").
+The owner's switches and gates G4 and G5 remain.*
 *Annotated 2026-10-27: and by the Phase 8 amendment (#1914): the Decision section is built, and what that amendment lists under "Not yet verified" is unobserved, not unbuilt; what remains is the owner's act and the epic's release.
 Phase 8 itself documents the epic, fixes the website's contract for the `mirror` flag and records the order in which the pieces reach production.*
 
@@ -261,6 +266,7 @@ ADR 0086 exempts `xx` from the identifier screen, so an `xx` re-pull never has a
 - Whether the rulesets let the GitHub App merge without a human review, and without using its bypass; the merge call is not built until this is checked.
   *Annotated 2026-10-26: checked by the owner on 2026-10-26 for what can be read, and passed: the installation's permissions allow it and no organization ruleset applies (the Phase 7g amendment); the App token's own reading of `mergeable_state` and GitHub's merge of its squash are seen only by the first production merge.*
 - Where `source_version` is inserted under the central manifest flow.
+  *Annotated 2026-10-27: closed by the Phase 2 amendment (#1908), "Where `source_version` is inserted under the central manifest flow (verified)".*
 - Whether "explained" edits are detected on early rewritten imports (`on003645`, `on004362`); local dry-run plans count the unexplained paths.
 - Whether ADR 0107's review can ever pass a re-pull diff.
   The App is not exempt, so the review runs, and ADR 0109 fails a changed `CHANGES` line and holds a replaced recording, both normal in a re-pull; until a re-pull's review passes, none is machine clean.
@@ -652,6 +658,7 @@ The flag is three-valued, because a literal boolean would have to say "not a mir
 `null`: an N.0.0 of an `on######` dataset whose tag is unknown or was never examined; a consumer must not show it as a mirror.
 It is read from each row's own tag, not from the dataset's highest version, derived at read time and never stored, so `datasets` gains no column.
 It rides on every version of `GET /datasets/:id/versions` (beside the tag and its basis, which that owner-or-admin route already carried) and of the public landing, `data.nemar.org/<id>/` as JSON and the page bundle's landing, which exposes the flag only and neither the tag nor its basis.
+*Annotated 2026-10-27: the route is open to the dataset's owner, its collaborators and administrators (`backend/src/routes/datasets/manifests.ts`), not only to an owner or an administrator; the Phase 8 amendment, "The `mirror` field, as a reader sees it", corrects the phrase.*
 Decision 5 says the website shows a mirror tag on that version.
 What the website receives is the flag, so it shows a chip from `mirror`; the public wire carries the flag and never the tag itself.
 `metadata.json` is not changed.
@@ -1166,6 +1173,7 @@ Not checked here, and left to the later slices' canary and the first production 
 
 Phase 7c builds the scheduled half of decision 6: a daily tick, in production only, that finds the mirrors upstream has moved past and dispatches the central workflow that is to open their re-pull pull requests.
 The workflow, the unattended run and the merge are later slices, and the workflow is not deployed, so nothing here can open a pull request yet; with the open switch off, as it is, the tick dispatches nothing at all.
+*Annotated 2026-10-27: the unattended run (Phase 7d) and the merge (Phase 7g) are built, and the workflow's copy in `nemarDatasets/.github` merged as `nemarDatasets/.github#148`, so "not deployed" no longer holds; the tick still dispatches nothing while the open switch is off (the Phase 8 amendment, "The workflow pairs").*
 Nothing here sends mail, and the source scan that pins the record's import closure covers the scheduler.
 
 Candidates come from `stale_ready` alone.
@@ -1666,6 +1674,8 @@ A further slice of the Phase 7 amendment above, built by Phase 7d.
 It builds the run a dispatch starts: the central workflow that opens an automatic re-pull's pull request and finishes a merged one, and the CLI's automatic mode that workflow runs.
 Nothing here merges; the Worker's merge is a later slice's.
 The workflow is authored in this repository and not deployed: its copy in `nemarDatasets/.github` is a pull request of its own, held until the epic ships, so until then GitHub takes the Worker's dispatches and nothing runs, and the watchdog ends each one `unreported`.
+*Annotated 2026-10-27: the copy in `nemarDatasets/.github` merged as `nemarDatasets/.github#148` before the release, and this repository's #1980 makes the `unit-pure` tier compare the two copies byte for byte.
+The workflow runs only on a dispatch the automatic path sends, and that is off, so nothing runs because no dispatch is sent, not because the workflow is missing.*
 Nothing here sends mail or adds a route.
 Four annotations are added to earlier text, on the record's header, on the Decision section's, on the 7c slice's timing sentence and on the "Not yet verified" item about enrichment.
 
@@ -2088,6 +2098,8 @@ What only production can show is how the counts read on real data, that every me
 
 With it, the slices of Phase 7 are complete: the automatic path is built, off by default, counted every week, listed for an administrator and stopped by removing one switch.
 What remains is the owner's act and the epic's release, not another slice: the held workflow pair merged with the epic release, gate G4's two manual re-pulls, and the switches, which the owner turns on in a reviewed change once those are done.
+*Annotated 2026-10-27: the workflow pair is not held for the epic release: `nemarDatasets/.github#148` merged and this repository's #1980 compares the copies.
+What remains is gate G4's two manual re-pulls, the switches and the epic's release.*
 
 ## Amendment 2026-10-26 (#1979): the App is renamed to `nemar-bot`
 
