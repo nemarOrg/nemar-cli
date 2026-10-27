@@ -93,7 +93,12 @@ import {
 import { readCandidateBlockers } from "../backend/src/services/upstream-repull-scheduler";
 import type { DispatchRow, RepullRow } from "../shared/repull-state";
 import { getRepull } from "../src/lib/api/repull";
-import { type PlanFile, defaultPlanPath, writePlanFile } from "../src/lib/repull/digest";
+import {
+  type PlanFile,
+  defaultPlanPath,
+  readPlanFile,
+  writePlanFile,
+} from "../src/lib/repull/digest";
 import { AUTOMATIC_LINE_RE, RESULT_LINE_RE } from "../src/lib/repull/execute/automatic";
 import { type OriginScratch, openOriginScratch } from "../src/lib/repull/execute/origin";
 import {
@@ -704,6 +709,84 @@ describe.skipIf(!awsInstalled)("an automatic run opens its pull request", () => 
     expect(repullRows()).toEqual([]);
     expect(ghWrites()).toEqual([]);
     expect(s3Writes()).toEqual([]);
+  });
+
+  test("execute never reads the file's executable: flipped on disk, the run opens all the same", async () => {
+    const c = await claimOpen();
+    writeEvent(c);
+    expect((await auto(planArgs(c))).exitCode).toBe(0);
+    const path = join(runner, "plan.json");
+    const text = readFileSync(path, "utf8");
+    expect(text).toContain('"executable": true');
+    writeFileSync(path, text.replace('"executable": true', '"executable": false'));
+    // The flag sits outside the digest, so the body still proves.
+    const flipped = readFileSync(path, "utf8");
+    expect(readPlanFile(flipped).digest).toBe(JSON.parse(flipped).digest);
+    const exec = await auto(executeArgs(c));
+    expect(exec.exitCode, exec.all).toBe(0);
+    expectQuiet(exec, c, "opened");
+  });
+
+  /** A plan step's plan file, read back, edited by `edit`, and written again. */
+  function editPlan(edit: (plan: Record<string, unknown>) => void): void {
+    const path = join(runner, "plan.json");
+    const plan = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+    edit(plan);
+    writeFileSync(path, `${JSON.stringify(plan, null, 2)}\n`);
+  }
+
+  /** Execute a dispatch's plan, which must be refused with `code` and write nothing. */
+  async function refusedBeforeAnything(c: Claim, code: string): Promise<void> {
+    const exec = await auto(executeArgs(c));
+    expect(exec.exitCode, exec.all).toBe(1);
+    expectQuiet(exec, c, "refused");
+    expect(dispatchRow(c.id)).toMatchObject({ status: "refused", code });
+    expect(w.apiWrites).not.toContain("POST /admin/repulls");
+    expect(repullRows()).toEqual([]);
+    expect(ghWrites()).toEqual([]);
+    expect(s3Writes()).toEqual([]);
+  }
+
+  test("a plan edited after its plan step does not prove, and nothing is written", async () => {
+    const c = await claimOpen();
+    writeEvent(c);
+    expect((await auto(planArgs(c))).exitCode).toBe(0);
+    editPlan((plan) => {
+      (plan.counts as Record<string, number>).delta_paths += 1;
+    });
+    await refusedBeforeAnything(c, "plan-refused");
+  });
+
+  test("a plan edited and digested again is not its handoff's plan: not-planned, nothing written", async () => {
+    const c = await claimOpen();
+    writeEvent(c);
+    expect((await auto(planArgs(c))).exitCode).toBe(0);
+    editPlan((plan) => {
+      (plan.counts as Record<string, number>).delta_paths += 1;
+      plan.digest = readPlanFile(JSON.stringify(plan)).digest;
+    });
+    await refusedBeforeAnything(c, "not-planned");
+  });
+
+  test("a plan made against another API is refused on the automatic path too", async () => {
+    const c = await claimOpen();
+    writeEvent(c);
+    expect((await auto(planArgs(c))).exitCode).toBe(0);
+    editPlan((plan) => {
+      plan.environment = "https://api.other.example";
+    });
+    await refusedBeforeAnything(c, "plan-refused");
+  });
+
+  test("a plan made from other remotes is refused on the automatic path too", async () => {
+    const c = await claimOpen();
+    writeEvent(c);
+    expect((await auto(planArgs(c))).exitCode).toBe(0);
+    editPlan((plan) => {
+      expect(plan.sources).toBe("test-bases");
+      plan.sources = "remotes";
+    });
+    await refusedBeforeAnything(c, "plan-refused");
   });
 
   test("a step's own word the list does not hold is reported as the step's class", async () => {

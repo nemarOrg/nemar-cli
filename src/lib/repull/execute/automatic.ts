@@ -685,38 +685,51 @@ export function planHandoffDir(planPath: string): string {
 }
 
 /**
- * Keep the planner's `workdir` and its `computed` bytes beside `planPath`: the bytes are written
- * inside `workdir` first, and the whole is renamed into place last, so a handoff is complete or
- * absent.
+ * Keep the planner's `workdir`, its `computed` bytes and the `digest` of the plan they belong to
+ * beside `planPath`, for a plan the plan step took (executable, and one the automatic path takes).
+ * Everything is written inside `workdir` first and the whole is renamed into place last, so a
+ * handoff is complete or absent.
  */
 export function keepPlanHandoff(
   planPath: string,
   workdir: string,
   computed: ReadonlyMap<string, Buffer>,
+  digest: string,
 ): void {
   mkdirSync(join(workdir, "computed"), { mode: 0o700 });
   for (const [oid, bytes] of computed) {
     writeFileSync(join(workdir, "computed", oid), bytes, { mode: 0o600 });
   }
+  writeFileSync(join(workdir, "digest"), `${digest}\n`, { mode: 0o600 });
   const dir = planHandoffDir(planPath);
   rmSync(dir, { recursive: true, force: true });
   renameSync(workdir, dir);
 }
 
 /**
- * What {@link keepPlanHandoff} kept beside `planPath`; `not-planned` when the clones or the
- * computed bytes are not there. The preparation proves each computed blob by its git id.
+ * What {@link keepPlanHandoff} kept beside `planPath` for the plan of `digest`; `not-planned` when
+ * the clones or the computed bytes are not there, or the handoff is another plan's. The preparation
+ * proves each computed blob by its git id.
  */
-export function readPlanHandoff(planPath: string): {
+export function readPlanHandoff(
+  planPath: string,
+  digest: string,
+): {
   workdir: string;
   computed: Map<string, Buffer>;
 } {
   const dir = planHandoffDir(planPath);
   const bytesDir = join(dir, "computed");
-  if (!existsSync(join(dir, "upstream.git")) || !existsSync(bytesDir)) {
+  const digestFile = join(dir, "digest");
+  if (
+    !existsSync(join(dir, "upstream.git")) ||
+    !existsSync(bytesDir) ||
+    !existsSync(digestFile) ||
+    readFileSync(digestFile, "utf8").trim() !== digest
+  ) {
     throw new ExecuteRefused(
       "not-planned",
-      "The plan step's clones and computed bytes are not beside the plan file; an automatic execute plans nothing itself.",
+      "No handoff of this plan's own plan step is beside the plan file; an automatic execute plans nothing itself.",
     );
   }
   const computed = new Map<string, Buffer>();

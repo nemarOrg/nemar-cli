@@ -15,8 +15,8 @@
  *   S3 to S5  the copy, the registration and the pull request (`advance.ts`), to `pr_open`.
  *
  * A dispatched run (`opts.automatic`, the central workflow's; `automatic.ts`) adds four things
- * besides: before anything is written, its plan must be one the automatic path takes
- * (`assertAutomaticPlan`) and fit what is left of the App token's hour; S1 presents the
+ * besides: before anything is written, its plan must be one the automatic path takes and fit what
+ * is left of the App token's hour (`takeAutomaticPlan`); S1 presents the
  * dispatch, so the Worker records the re-pull as automatic; the copy, the registration and the pull
  * request each check the token's hour again before they start (`tokenHourRefusal`); and at
  * `pr_open`, still holding the lock, the release head is settled (`settle.ts`), inside that hour,
@@ -75,7 +75,7 @@ import { describeError, httpUpstreamReader } from "../../import-scrub.js";
 import { awsCliUpload } from "../../normalize-dataset.js";
 import { adminGitHubToken, githubApiBase } from "../../pr-review-approve.js";
 import { BRANCH_PUSHED, endBeforeMerge } from "../abandon.js";
-import type { PlanBody } from "../digest.js";
+import { type PlanBody, planDigest } from "../digest.js";
 import { nemarRemoteOf } from "../plan.js";
 import type { ReleaseFacts } from "../preflight.js";
 import {
@@ -96,7 +96,6 @@ import {
 } from "./advance.js";
 import {
   assertAutomaticCounts,
-  assertAutomaticPlan,
   planCopySeconds,
   readPlanHandoff,
   tokenHourRefusal,
@@ -687,9 +686,10 @@ interface PlanToPrepare {
 
 /**
  * A dispatched run takes the plan its own plan step made moments before in the same job, and plans
- * nothing again: the file proved by its digest, one the automatic path takes and that fits what is
- * left of the App token's hour, both before anything is written, and the step's clones and
- * computed bytes beside it (`readPlanHandoff`).
+ * nothing again. Before anything is written: the file is proved by its digest, the API and the
+ * remotes; its counts are the automatic path's and its copy fits what is left of the App token's
+ * hour; and the plan step's handoff names that digest. The handoff, which the plan step leaves only
+ * for a plan it took, says the plan is executable; the file's own `executable` is never read.
  */
 function takeAutomaticPlan(
   planPath: string,
@@ -697,15 +697,15 @@ function takeAutomaticPlan(
   env: Env,
   openNeuroGraphqlUrl: string | undefined,
 ): PlanToPrepare {
-  const { file, body } = readReviewedPlan(planPath, {
+  const { body } = readReviewedPlan(planPath, {
     environment: getApiUrl(),
     env,
     openNeuroGraphqlUrl,
   });
-  assertAutomaticPlan({ executable: file.executable === true, body });
+  assertAutomaticCounts(body);
   const late = tokenHourRefusal(a.tokenSince, (a.now ?? Date.now)(), planCopySeconds(body));
   if (late) throw late;
-  const { workdir, computed } = readPlanHandoff(planPath);
+  const { workdir, computed } = readPlanHandoff(planPath, planDigest(body));
   return { body, plannerDir: workdir, computed, rebasedOnto: null };
 }
 
@@ -918,7 +918,7 @@ async function recordAndPrepare(
         unexplained: counts.unexplained ?? 0,
         conflicts: counts.conflicts ?? 0,
         corrections: counts.corrections ?? 0,
-        // The automatic create bounds the copy by its stated size (`assertAutomaticPlan` has
+        // The automatic create bounds the copy by its stated size (`assertAutomaticCounts` has
         // proved it known); an administrator's record does not need it.
         ...(ctx.automatic && counts.copy_bytes !== undefined
           ? { copy_bytes: counts.copy_bytes }

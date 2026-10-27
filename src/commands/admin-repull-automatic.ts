@@ -410,7 +410,7 @@ export function automaticPlan(
         const late = tokenHourRefusal(since, Date.now(), planCopySeconds(file.body));
         if (late) return { phase: "refused", code: late.code, exit: 1 };
         if (planned.workdir === null) return { phase: "failed", code: "not-planned", exit: 1 };
-        keepPlanHandoff(planPath, planned.workdir, computed);
+        keepPlanHandoff(planPath, planned.workdir, computed, file.digest);
         return { phase: "planned" };
       } finally {
         rmSync(workRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
