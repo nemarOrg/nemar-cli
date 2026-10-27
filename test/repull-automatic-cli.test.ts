@@ -685,6 +685,20 @@ describe.skipIf(!awsInstalled)("an automatic run opens its pull request", () => 
     expect(s3Writes()).toEqual([]);
   });
 
+  test("a handoff without its computed bytes is not-planned, before the record", async () => {
+    const c = await claimOpen();
+    writeEvent(c);
+    expect((await auto(planArgs(c))).exitCode).toBe(0);
+    rmSync(join(runner, "plan.json.planner", "computed"), { recursive: true, force: true });
+    const exec = await auto(executeArgs(c));
+    expect(exec.exitCode, exec.all).toBe(1);
+    expectQuiet(exec, c, "refused");
+    expect(dispatchRow(c.id)).toMatchObject({ status: "refused", code: "not-planned" });
+    expect(repullRows()).toEqual([]);
+    expect(ghWrites()).toEqual([]);
+    expect(s3Writes()).toEqual([]);
+  });
+
   test("a step's own word the list does not hold is reported as the step's class", async () => {
     const c = await claimOpen();
     writeEvent(c);

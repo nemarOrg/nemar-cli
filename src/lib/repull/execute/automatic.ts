@@ -684,41 +684,43 @@ export function planHandoffDir(planPath: string): string {
   return `${planPath}.planner`;
 }
 
-/** Keep the planner's `workdir` and its `computed` bytes beside `planPath`. */
+/**
+ * Keep the planner's `workdir` and its `computed` bytes beside `planPath`: the bytes are written
+ * inside `workdir` first, and the whole is renamed into place last, so a handoff is complete or
+ * absent.
+ */
 export function keepPlanHandoff(
   planPath: string,
   workdir: string,
   computed: ReadonlyMap<string, Buffer>,
 ): void {
+  mkdirSync(join(workdir, "computed"), { mode: 0o700 });
+  for (const [oid, bytes] of computed) {
+    writeFileSync(join(workdir, "computed", oid), bytes, { mode: 0o600 });
+  }
   const dir = planHandoffDir(planPath);
   rmSync(dir, { recursive: true, force: true });
   renameSync(workdir, dir);
-  mkdirSync(join(dir, "computed"), { mode: 0o700 });
-  for (const [oid, bytes] of computed) {
-    writeFileSync(join(dir, "computed", oid), bytes, { mode: 0o600 });
-  }
 }
 
 /**
- * What {@link keepPlanHandoff} kept beside `planPath`; `not-planned` when the clones are not there.
- * The preparation proves each computed blob by its git id, and refuses one that is missing.
+ * What {@link keepPlanHandoff} kept beside `planPath`; `not-planned` when the clones or the
+ * computed bytes are not there. The preparation proves each computed blob by its git id.
  */
 export function readPlanHandoff(planPath: string): {
   workdir: string;
   computed: Map<string, Buffer>;
 } {
   const dir = planHandoffDir(planPath);
-  if (!existsSync(join(dir, "upstream.git"))) {
+  const bytesDir = join(dir, "computed");
+  if (!existsSync(join(dir, "upstream.git")) || !existsSync(bytesDir)) {
     throw new ExecuteRefused(
       "not-planned",
-      "The plan step's clones are not beside the plan file; an automatic execute plans nothing itself.",
+      "The plan step's clones and computed bytes are not beside the plan file; an automatic execute plans nothing itself.",
     );
   }
   const computed = new Map<string, Buffer>();
-  const bytesDir = join(dir, "computed");
-  for (const oid of existsSync(bytesDir) ? readdirSync(bytesDir) : []) {
-    computed.set(oid, readFileSync(join(bytesDir, oid)));
-  }
+  for (const oid of readdirSync(bytesDir)) computed.set(oid, readFileSync(join(bytesDir, oid)));
   return { workdir: dir, computed };
 }
 
