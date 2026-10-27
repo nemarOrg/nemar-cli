@@ -5241,7 +5241,11 @@ Examples:
         console.log(
           chalk.yellow("This clone declares no data remote, so files cannot be fetched."),
         );
-        console.log(chalk.dim("  The dataset's owner must declare it; fetch and run this again."));
+        console.log(
+          chalk.dim(
+            "  Once the dataset declares it, 'git fetch' then 'git annex init' here enables it.",
+          ),
+        );
         process.exit(1);
       }
       if (!specialRemoteOnPath()) {
