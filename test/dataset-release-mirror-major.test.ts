@@ -178,10 +178,12 @@ beforeEach(() => {
       },
     }),
   );
-  // git: every call recorded; a clone refused (nothing may reach a real repository).
+  // git: every call recorded; one that reaches a remote refused, so nothing can reach a real
+  // repository. The update case's clone names `nemarDatasets/<id>` on GitHub as its origin, and a
+  // regression past the refusal used to push there: a mutation of the detail route showed it.
   writeFileSync(
     join(shims, "git"),
-    `#!/bin/sh\nprintf 'git %s\\n' "$*" >> '${log}'\ncase "$1" in clone) exit 128;; esac\nexec '${REAL_GIT}' "$@"\n`,
+    `#!/bin/sh\nprintf 'git %s\\n' "$*" >> '${log}'\ncase "$1" in clone|fetch|pull|push|ls-remote) exit 128;; esac\nexec '${REAL_GIT}' "$@"\n`,
   );
   // gh: its version probe answered, every other call recorded and refused.
   writeFileSync(
