@@ -32,7 +32,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DataHostStandin, patternBytes } from "./helpers/data-host-standin";
-import { fakeApiKey, makeConfigDir } from "./helpers/nemar-account";
+import { cliBaseEnv, fakeApiKey, makeConfigDir } from "./helpers/nemar-account";
 
 // git and git-annex children, each starting the CLI: a slow runner needs more than the default 5 seconds.
 setDefaultTimeout(60_000);
@@ -188,7 +188,7 @@ describe.skipIf(!HAVE_GIT_ANNEX)("a dataset on an authenticated data host, end t
       `[user]\n\tname = Fixture\n\temail = fixture@example.org\n[init]\n\tdefaultBranch = master\n[credential]\n\thelper = !${trap}\n`,
     );
     env = {
-      ...(process.env as Record<string, string>),
+      ...cliBaseEnv(),
       PATH: `${shims}:${process.env.PATH}`,
       HOME: join(root, "home"),
       GIT_CONFIG_GLOBAL: globalConfig,

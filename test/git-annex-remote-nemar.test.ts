@@ -16,7 +16,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DataHostStandin, type StandinOptions, patternBytes } from "./helpers/data-host-standin";
-import { fakeApiKey, makeConfigDir } from "./helpers/nemar-account";
+import { cliBaseEnv, fakeApiKey, makeConfigDir } from "./helpers/nemar-account";
 
 // a child process for every session: a slow runner needs more than the default 5 seconds.
 setDefaultTimeout(60_000);
@@ -101,7 +101,7 @@ class Session {
       stdout: "pipe",
       stderr: "pipe",
       env: {
-        ...process.env,
+        ...cliBaseEnv(),
         NEMAR_CONFIG_DIR: options.config ?? configDir,
         NEMAR_DATA_HOSTS: options.hosts ?? host.origin,
         NEMAR_NO_UPDATE_CHECK: "1",

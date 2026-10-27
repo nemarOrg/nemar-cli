@@ -17,7 +17,7 @@ import {
   isGitCredentialInvocation,
   parseCredentialInput,
 } from "../src/lib/git-credential";
-import { fakeApiKey, makeConfigDir } from "./helpers/nemar-account";
+import { cliBaseEnv, fakeApiKey, makeConfigDir } from "./helpers/nemar-account";
 
 // a CLI child process for every call: a slow runner needs more than the default 5 seconds.
 setDefaultTimeout(60_000);
@@ -141,7 +141,7 @@ describe("as git runs it", () => {
 
   function env(config: string, hosts = ""): Record<string, string> {
     return {
-      ...(process.env as Record<string, string>),
+      ...cliBaseEnv(),
       NEMAR_CONFIG_DIR: config,
       NEMAR_DATA_HOSTS: hosts,
       GIT_CONFIG_GLOBAL: "/dev/null",

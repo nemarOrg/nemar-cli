@@ -17,7 +17,7 @@ import {
   findDatasetOnDataHosts,
 } from "../src/lib/data-host-clone";
 import { DataHostStandin } from "./helpers/data-host-standin";
-import { fakeApiKey, makeConfigDir } from "./helpers/nemar-account";
+import { cliBaseEnv, fakeApiKey, makeConfigDir } from "./helpers/nemar-account";
 
 // CLI and git-annex children: a slow runner needs more than the default 5 seconds.
 setDefaultTimeout(60_000);
@@ -132,7 +132,8 @@ describe("credentialHelperCommand", () => {
       process.env.PATH = `${bin}:${previous}`;
       expect(credentialHelperCommand({})).toBe("!nemar auth git-credential");
     } finally {
-      process.env.PATH = previous;
+      if (previous === undefined) Reflect.deleteProperty(process.env, "PATH");
+      else process.env.PATH = previous;
       rmSync(bin, { recursive: true, force: true });
     }
   });
@@ -161,7 +162,7 @@ describe("credentialHelperCommand", () => {
 describe("repositories", () => {
   let root: string;
   const gitEnv = {
-    ...process.env,
+    ...cliBaseEnv(),
     GIT_CONFIG_GLOBAL: "/dev/null",
     GIT_CONFIG_NOSYSTEM: "1",
   } as Record<string, string>;
@@ -258,7 +259,7 @@ describe("nemar dataset get in a clone from a data host", () => {
   async function getIn(config: string, name: string, env: Record<string, string> = {}) {
     const dir = join(root, name);
     const base = {
-      ...(process.env as Record<string, string>),
+      ...cliBaseEnv(),
       GIT_CONFIG_GLOBAL: "/dev/null",
       GIT_CONFIG_NOSYSTEM: "1",
       GIT_AUTHOR_NAME: "t",

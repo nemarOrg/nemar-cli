@@ -13,7 +13,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DataHostStandin } from "./helpers/data-host-standin";
-import { fakeApiKey, makeConfigDir } from "./helpers/nemar-account";
+import { cliBaseEnv, fakeApiKey, makeConfigDir } from "./helpers/nemar-account";
 
 // a bundle build and child processes: a slow runner needs more than the default 5 seconds.
 setDefaultTimeout(60_000);
@@ -98,7 +98,7 @@ async function initremote(bundle: string, host: string): Promise<string> {
     stdout: "pipe",
     stderr: "pipe",
     env: {
-      ...(process.env as Record<string, string>),
+      ...cliBaseEnv(),
       NEMAR_CONFIG_DIR: configDir,
       NEMAR_DATA_HOSTS: "",
       NEMAR_NO_UPDATE_CHECK: "1",
@@ -160,7 +160,7 @@ describe("the built remote", () => {
         stdout: "pipe",
         stderr: "pipe",
         env: {
-          ...(process.env as Record<string, string>),
+          ...cliBaseEnv(),
           NEMAR_CONFIG_DIR: configDir,
           NEMAR_DATA_HOSTS: host.origin,
           NEMAR_NO_UPDATE_CHECK: "1",

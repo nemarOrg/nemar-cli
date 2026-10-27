@@ -32,3 +32,18 @@ export function makeConfigDir(apiKey: string | null, apiUrl = "http://127.0.0.1:
 export function fakeApiKey(): string {
   return `nmr_fixture_${crypto.randomUUID().replaceAll("-", "")}`;
 }
+
+/**
+ * The test process's environment without anything that steers the CLI: no `TEST_*` variable (a
+ * live-backend suite that ran earlier in the same process may have left one, and it outranks a
+ * stored account's API URL) and no `NEMAR_*` variable. A test adds the few it means to set.
+ */
+export function cliBaseEnv(): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const [name, value] of Object.entries(process.env)) {
+    if (value === undefined) continue;
+    if (name.startsWith("TEST_") || name.startsWith("NEMAR_")) continue;
+    env[name] = value;
+  }
+  return env;
+}
