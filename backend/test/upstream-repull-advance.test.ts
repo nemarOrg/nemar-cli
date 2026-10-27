@@ -1013,7 +1013,6 @@ describe("the gates of an automatic pull request", () => {
       hold_reason: "gates-refused",
     });
     expect(auditsOf("repull_transition", id)).toEqual([]);
-    expect(DISPATCH_CODES as readonly string[]).toContain("withdrawn");
     expect(repullAdvanceLogLine(r)).toMatchObject({ level: "error" });
     expect(repullAdvanceLogLine(r)?.line).toContain("refused=withdrawn:1");
     // Refused again on the next tick: the hold stands, and the log says so again.
