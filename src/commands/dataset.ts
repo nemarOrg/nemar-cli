@@ -107,6 +107,21 @@ import {
   confirm,
 } from "../lib/confirm.js";
 import {
+  type DataHostLookup,
+  cloneFromDataHost,
+  declaresNemarRemote,
+  detectDataHostClone,
+  findDatasetOnDataHosts,
+  specialRemoteOnPath,
+} from "../lib/data-host-clone.js";
+import {
+  allowedDataHosts,
+  isAllowedDataHost,
+  isDataHostDatasetId,
+  parseDataHostOrigin,
+  rejectedDataHostEntries,
+} from "../lib/data-hosts.js";
+import {
   type LocalDatasetConfig,
   readLocalConfig,
   updateLastUpload,
@@ -231,6 +246,7 @@ import {
 import { renderSnippetLine, truncateTokenList } from "../lib/render/snippet.js";
 import { resolveSandboxCompletion } from "../lib/sandbox-status.js";
 import { bumpVersion, isValidStableVersion, parseVersion } from "../lib/semver.js";
+import { clip } from "../lib/terminal-text.js";
 import { theme } from "../lib/theme.js";
 import type { UploadProgress } from "../lib/upload-progress.js";
 import {
@@ -4891,12 +4907,126 @@ Examples:
 
 datasetCommand.addCommand(publishCommand);
 
+/**
+ * Clone a dataset from an authenticated NEMAR data host (ADR 0114).
+ *
+ * `onlyHost` is the value of `--host`: it must be a data host this CLI allows, and only that
+ * host is asked. Without it every allowed host is asked in order and the first that lets this
+ * account read the dataset is used. Returns true when a host had the dataset (the clone was
+ * attempted and its outcome printed, exiting non-zero on failure), false when none did.
+ */
+async function cloneViaDataHost(
+  datasetId: string,
+  options: { output?: string },
+  onlyHost?: string,
+): Promise<boolean> {
+  let only: string | undefined;
+  if (onlyHost !== undefined) {
+    const origin = parseDataHostOrigin(onlyHost);
+    if (origin === null || !isAllowedDataHost(origin)) {
+      console.log(
+        chalk.red(
+          `Error: ${clip(onlyHost, 100)} is not a data host this CLI sends your API key to.`,
+        ),
+      );
+      console.log(chalk.dim(`  Allowed: ${allowedDataHosts().join(", ")}`));
+      console.log(chalk.dim("  NEMAR_DATA_HOSTS adds https origins (for staging)."));
+      process.exit(1);
+    }
+    only = origin;
+    if (!isDataHostDatasetId(datasetId)) {
+      console.log(chalk.red(`Error: ${clip(datasetId, 40)} is not a dataset id on a data host.`));
+      console.log(chalk.dim("  A dataset id is two or three letters and six digits."));
+      process.exit(1);
+    }
+  }
+
+  const apiKey = getConfig().apiKey;
+  if (!apiKey) {
+    console.log(chalk.red("Error: Reading from a data host needs your NEMAR API key."));
+    console.log(chalk.dim("  Run 'nemar auth login' first."));
+    process.exit(1);
+  }
+  for (const entry of rejectedDataHostEntries()) {
+    console.log(
+      chalk.yellow(`  Ignoring NEMAR_DATA_HOSTS entry ${clip(entry, 60)}: not an https origin.`),
+    );
+  }
+
+  const spinner = ora(`Looking for ${datasetId} on ${only ?? "NEMAR data hosts"}...`).start();
+  const lookup: DataHostLookup = await findDatasetOnDataHosts(
+    datasetId,
+    apiKey,
+    only ? [only] : allowedDataHosts(),
+  );
+  if (!lookup.found) {
+    spinner.stop();
+    for (const host of lookup.refused) {
+      console.log(chalk.yellow(`  ${host} did not accept your API key. Run 'nemar auth login'.`));
+    }
+    for (const host of lookup.unreachable) {
+      console.log(chalk.yellow(`  Could not get an answer from ${host}.`));
+    }
+    if (only) console.log(chalk.red(`Error: Dataset ${datasetId} not found on ${only}`));
+    return false;
+  }
+  const { origin, name } = lookup.found;
+  spinner.succeed(`Found: ${name ? clip(name, 100) : datasetId} (${origin})`);
+
+  const outputPath = resolve(options.output || datasetId);
+  if (existsSync(outputPath)) {
+    console.log(chalk.red(`Error: Path already exists: ${outputPath}`));
+    process.exit(1);
+  }
+
+  const cloneSpinner = ora("Cloning dataset...").start();
+  const result = await cloneFromDataHost(origin, datasetId, outputPath);
+  if (!result.success) {
+    cloneSpinner.fail("Clone failed");
+    console.log(chalk.red(`  ${result.error}`));
+    process.exit(1);
+  }
+  cloneSpinner.succeed("Dataset cloned");
+
+  if (await declaresNemarRemote(outputPath)) {
+    console.log(chalk.dim("  Data remote enabled for data downloads"));
+    if (!specialRemoteOnPath()) {
+      console.log(
+        chalk.yellow(
+          "  Warning: git-annex-remote-nemar is not on your PATH, so git-annex cannot fetch data files.",
+        ),
+      );
+      console.log(
+        chalk.dim("  It is installed with the nemar CLI; check that its bin directory is on PATH."),
+      );
+    }
+  } else {
+    console.log(
+      chalk.yellow(
+        "  This dataset does not declare a data remote yet, so data files cannot be fetched.",
+      ),
+    );
+  }
+
+  console.log();
+  console.log(`  Location: ${chalk.cyan(outputPath)}`);
+  console.log();
+  console.log(chalk.dim("Data files are not downloaded yet. To get them:"));
+  console.log(chalk.dim(`  cd ${outputPath}`));
+  console.log(chalk.dim("  nemar dataset get"));
+  return true;
+}
+
 // Clone command
 datasetCommand
   .command("clone")
   .description("Clone a dataset from NEMAR")
   .argument("<dataset-id>", "Dataset ID (e.g., nm000104)")
   .option("-o, --output <path>", "Output directory (default: ./<dataset-id>)")
+  .option(
+    "--host <origin>",
+    "Read the dataset from this authenticated NEMAR data host (must be on the CLI's list)",
+  )
   .addHelpText(
     "after",
     `
@@ -4907,13 +5037,23 @@ Description:
   Private datasets require authentication (nemar auth login) and are
   only accessible to the owner or designated collaborators.
 
+  A dataset that NEMAR's main service does not list may be held on an
+  authenticated NEMAR data host. When you are signed in, the CLI then asks
+  each data host on its list whether you can read the dataset, and clones
+  it from the first that says yes (--host asks one host only). The CLI sends
+  your API key to listed data hosts only, through a git credential helper
+  set for that host in the clone (the key itself is never stored in the
+  clone), and fetches data files with the git-annex-remote-nemar special
+  remote. NEMAR_DATA_HOSTS adds https origins to the list, for staging.
+
 Requirements:
   - git-annex installed
   - NEMAR account (for private datasets)
 
 Examples:
   $ nemar dataset clone nm000104
-  $ nemar dataset clone nm000104 -o ./my-dataset`,
+  $ nemar dataset clone nm000104 -o ./my-dataset
+  $ nemar dataset clone np000001 --host https://private.nemar.org`,
   )
   .action(async (datasetId, options) => {
     // Check required tools first
@@ -4931,6 +5071,13 @@ Examples:
     }
     spinner.succeed("Prerequisites OK");
 
+    // `--host` names one data host and skips the main service.
+    if (options.host) {
+      const handled = await cloneViaDataHost(datasetId, options, options.host);
+      if (!handled) process.exit(1);
+      return;
+    }
+
     // Resolve dataset ID to repo URL
     spinner = ora(`Resolving dataset ${datasetId}...`).start();
     let repoUrl: string;
@@ -4947,6 +5094,11 @@ Examples:
       spinner.succeed(`Found: ${dataset.name}`);
     } catch (error) {
       if (error instanceof ApiError && (error.statusCode === 404 || error.statusCode === 400)) {
+        // Not one the main service knows: it may be held on an authenticated data host.
+        if (isDataHostDatasetId(datasetId) && isAuthenticated()) {
+          spinner.stop();
+          if (await cloneViaDataHost(datasetId, options)) return;
+        }
         spinner.fail(`Dataset ${datasetId} not found`);
         console.log(chalk.red(`Error: Dataset ${datasetId} not found`));
         console.log(chalk.dim(`  ${error.message}`));
@@ -5038,6 +5190,10 @@ Description:
   For private datasets, credentials are fetched automatically
   if you are logged in (nemar auth login).
 
+  In a clone from an authenticated NEMAR data host, files are fetched through
+  the git-annex-remote-nemar special remote with your stored API key; sign in
+  first (nemar auth login).
+
   By default, content under stimuli/ and derivatives/ is skipped because
   these folders can be very large. Pass --stimuli or --derivatives to
   fetch them. When you supply explicit file paths, the path itself is
@@ -5072,9 +5228,32 @@ Examples:
       process.exit(1);
     }
 
+    // A clone from an authenticated data host is read through git-annex-remote-nemar with the
+    // stored API key (ADR 0114): no S3 credentials, no dataset lookup at the main service.
+    const dataHostClone = await detectDataHostClone(cwd);
+    if (dataHostClone) {
+      if (!isAuthenticated()) {
+        console.log(chalk.red("Error: This dataset is on an authenticated data host."));
+        console.log(chalk.dim("Run 'nemar auth login' first."));
+        process.exit(1);
+      }
+      if (!(await declaresNemarRemote(cwd))) {
+        console.log(
+          chalk.yellow("This clone declares no data remote, so files cannot be fetched."),
+        );
+        console.log(chalk.dim("  The dataset's owner must declare it; fetch and run this again."));
+        process.exit(1);
+      }
+      if (!specialRemoteOnPath()) {
+        console.log(chalk.red("Error: git-annex-remote-nemar is not on your PATH."));
+        console.log(chalk.dim("  It is installed with the nemar CLI; check its bin directory."));
+        process.exit(1);
+      }
+    }
+
     // Detect dataset ID and check if private (needs authenticated S3 creds)
     let getCreds: Awaited<ReturnType<typeof requestDownloadCredentials>> | null = null;
-    const getDatasetId = await getDatasetIdFromRemote(cwd);
+    const getDatasetId = dataHostClone ? null : await getDatasetIdFromRemote(cwd);
     if (getDatasetId) {
       let dsInfo: Awaited<ReturnType<typeof getDataset>> | null = null;
       let apiReachable = true;
@@ -5164,10 +5343,12 @@ Examples:
 
     const getS3Creds = getCreds ? toS3Credentials(getCreds.credentials) : undefined;
 
-    // Enable S3 remote if available (idempotent)
-    const s3Enable = await enableS3Remote(cwd, "nemar-s3", getS3Creds);
-    if (!s3Enable.success && !s3Enable.enabled) {
-      console.log(chalk.yellow(`  Warning: Could not enable S3 remote: ${s3Enable.error}`));
+    // Enable S3 remote if available (idempotent); a data host clone has none.
+    if (!dataHostClone) {
+      const s3Enable = await enableS3Remote(cwd, "nemar-s3", getS3Creds);
+      if (!s3Enable.success && !s3Enable.enabled) {
+        console.log(chalk.yellow(`  Warning: Could not enable S3 remote: ${s3Enable.error}`));
+      }
     }
 
     const paths = files.length > 0 ? files : undefined;
