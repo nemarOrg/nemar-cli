@@ -104,6 +104,7 @@ const XX_E = "xx099995";
 const XX_F = "xx099996";
 const XX_G = "xx099997";
 const XX_H = "xx099998";
+const XX_I = "xx099990";
 const REGION = "us-east-2";
 
 let gh: GitHubStandin;
@@ -1556,6 +1557,45 @@ describe.skipIf(!awsInstalled)("the destination prefix", () => {
       expect(err.code).toBe("destination-prefix");
       expect(s3Writes()).toBe(writes);
       expect(repullRows()[0]?.last_error).toContain("destination-prefix");
+    } finally {
+      fx.cleanup();
+    }
+  });
+});
+
+describe.skipIf(!awsInstalled)("the destination bucket", () => {
+  test("a remote.log that names a bucket S3 cannot have refuses the copy: nemar-s3-invalid, nothing uploaded or pushed", async () => {
+    // The guard of `advancePrepared`'s setup reads the working clone's own remote.log. A plan
+    // cannot carry a bucket: it names a git-annex commit, and a plan forged onto another commit has
+    // another digest, so it is another plan, which a prepared record does not take up. So it is the
+    // clone that is forged: the line of nemar-s3 now names the bucket as a path, as a write to the
+    // git-annex branch could have left it, and the real `executeRepull` walks the record on.
+    await reset();
+    const fx = await buildRepullFixture({ datasetId: XX_I, s3 });
+    try {
+      seedMirror(XX_I);
+      const path = await makePlan(fx);
+      const { result } = await execute(fx, path);
+      expect(result.row.status).toBe("prepared");
+      const repo = workPaths(configDir, XX_I, result.row.plan_digest).repo;
+      const log = await gitIn(repo, ["show", "refs/heads/git-annex:remote.log"]);
+      const forged = log.replace(/bucket=nemar\b/, "bucket=evil.example/x#");
+      expect(forged).not.toBe(log);
+      await writeAnnexBranchFile(repo, "remote.log", forged);
+
+      const writes = s3Writes();
+      const origin = await refsOf(fx.originRepo);
+      const err = await refusal(execute(fx, path, { until: "pr_open" }));
+      expect(err.code).toBe("nemar-s3-invalid");
+      expect(err.message).not.toContain("evil.example");
+      // Nothing was uploaded, pushed or opened: the S3 stand-in saw no write, origin's refs are
+      // where they were, and GitHub saw no request that is not a read.
+      expect(s3Writes()).toBe(writes);
+      expect(await refsOf(fx.originRepo)).toBe(origin);
+      expect(gh.seen.filter((s) => s.method !== "GET")).toEqual([]);
+      // The record stays prepared and says why, in the copy step's words.
+      expect(repullRows()).toMatchObject([{ status: "prepared" }]);
+      expect(repullRows()[0]?.last_error).toStartWith("[copy:nemar-s3-invalid]");
     } finally {
       fx.cleanup();
     }
