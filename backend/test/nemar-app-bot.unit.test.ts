@@ -4,7 +4,8 @@
  * each only when the login, the numeric id and the type all match, so a change to any of these
  * values is a change to whose pull request may be reviewed as the App's and merged without a
  * person. They were measured on 2026-10-24 with `GET /users/nemar-publish-bot%5Bbot%5D` and
- * `GET /apps/nemar-publish-bot`.
+ * `GET /apps/nemar-publish-bot`, and again on 2026-10-26, after the App was renamed, with
+ * `GET /users/nemar-bot%5Bbot%5D` and `GET /apps/nemar-bot`: the login changed, both ids did not.
  *
  * They are defined once, in `shared/nemar-app.ts`, because the pure rule reads them and nothing in
  * `shared/` imports the Worker; the Worker reads them through `branch-protection.ts`, which
@@ -23,7 +24,7 @@ import { ORG_NAME } from "../src/services/github/shared";
 
 describe("the NEMAR GitHub App identity", () => {
   test("the bot login, user id and type are the measured values", () => {
-    expect(NEMAR_APP_BOT_LOGIN).toBe("nemar-publish-bot[bot]");
+    expect(NEMAR_APP_BOT_LOGIN).toBe("nemar-bot[bot]");
     expect(NEMAR_APP_BOT_USER_ID).toBe(283755542);
     expect(NEMAR_APP_BOT_TYPE).toBe("Bot");
   });
