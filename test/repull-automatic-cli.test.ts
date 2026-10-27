@@ -807,6 +807,79 @@ describe.skipIf(!awsInstalled)("an automatic run opens its pull request", () => 
     expect(repullRows()[0]?.last_error).toStartWith("[copy:pin-changed]");
   });
 
+  /** The record's API refuses the first transition `matches` names, with `code`, as a 409. */
+  function refuseTransition(matches: (from?: string, to?: string) => boolean, code: string): void {
+    let refuse = false;
+    let refused = false;
+    w.setApiHook(async (req) => {
+      refuse = false;
+      if (refused || req.method !== "POST" || !/\/admin\/repulls\/\d+\/transition$/.test(req.url))
+        return;
+      const body = (await req.json()) as { from?: string; to?: string };
+      refuse = matches(body.from, body.to);
+      refused = refuse;
+    });
+    w.setApiOverride(() =>
+      refuse ? Response.json({ error: "refused", code }, { status: 409 }) : null,
+    );
+  }
+
+  test("a preparation the record refuses for a word the list does not hold is prepare-failed", async () => {
+    refuseTransition((from, to) => from === "planned" && to === "prepared", "field-invalid");
+    const c = await claimOpen();
+    writeEvent(c);
+    expect((await auto(planArgs(c))).exitCode).toBe(0);
+    const exec = await auto(executeArgs(c));
+    expect(exec.exitCode, exec.all).toBe(3);
+    expectQuiet(exec, c, "failed");
+    expect(dispatchRow(c.id)).toMatchObject({ status: "failed", code: "prepare-failed" });
+  });
+
+  test("a pull request GitHub did not answer for is the pull request step's class, pr-failed", async () => {
+    const c = await claimOpen();
+    writeEvent(c);
+    expect((await auto(planArgs(c))).exitCode).toBe(0);
+    // The step's own word is `pr-create-unknown`, which the list does not hold.
+    w.gh.createPullFaults.push({ status: 500 });
+    const exec = await auto(executeArgs(c));
+    expect(exec.exitCode, exec.all).toBe(3);
+    expectQuiet(exec, c, "failed");
+    expect(dispatchRow(c.id)).toMatchObject({ status: "failed", code: "pr-failed" });
+    expect(repullRows()[0]?.last_error).toStartWith("[pr:pr-create-unknown]");
+  });
+
+  test("a settle whose move the record refuses for a word the list does not hold is settle-failed", async () => {
+    // Enrichment moves the release branch as the pull request opens, and the record refuses the
+    // settle's self-edge that records the move with `stale-status`.
+    let moved = false;
+    let refuse = false;
+    w.setApiHook(async (req) => {
+      refuse = false;
+      if (req.method !== "POST" || !/\/admin\/repulls\/\d+\/transition$/.test(req.url)) return;
+      const body = (await req.json()) as { from?: string; to?: string };
+      if (!moved && body.from === "registered" && body.to === "pr_open") {
+        moved = true;
+        await w.commitOnto(
+          RELEASE_REF,
+          ".nemar/metadata.json",
+          await enrichedMetadata(w.fx.originRepo, RELEASE_REF),
+        );
+      }
+      refuse = body.from === "pr_open" && body.to === "pr_open";
+    });
+    w.setApiOverride(() =>
+      refuse ? Response.json({ error: "moved", code: "stale-status" }, { status: 409 }) : null,
+    );
+    const c = await claimOpen();
+    writeEvent(c);
+    expect((await auto(planArgs(c))).exitCode).toBe(0);
+    const exec = await auto(executeArgs(c));
+    expect(moved).toBe(true);
+    expect(exec.exitCode, exec.all).toBe(3);
+    expectQuiet(exec, c, "failed");
+    expect(dispatchRow(c.id)).toMatchObject({ status: "failed", code: "settle-failed" });
+  });
+
   test("execute refuses a plan with a correction, before the record", async () => {
     await w.commitOnto("refs/heads/main", PATHS.sidecar, '{"TaskName":"rest","edited":true}\n');
     // A plan file the automatic plan would have refused, made by the planner itself.
@@ -1368,6 +1441,23 @@ describe.skipIf(!awsInstalled)("a finish", () => {
     expect(repullRows()).toMatchObject([{ status: "pr_open" }]);
     expect(w.apiWrites).toEqual(["POST /webhooks/repull-state", "POST /webhooks/repull-state"]);
     expect(ghWrites()).toEqual([]);
+  });
+
+  test("a finish that refuses for a word the list does not hold is finish-failed", async () => {
+    const { row } = await opened();
+    const c = await dispatchFor("finish", row.id);
+    writeEvent(c, { mode: "finish", repullId: row.id });
+    // The catalog no longer has the dataset: `dataset-missing`, before the record is read.
+    w.setApiOverride((req) =>
+      req.method === "GET" && new URL(req.url).pathname === `/datasets/${w.fx.datasetId}`
+        ? Response.json({ error: "Dataset not found" }, { status: 404 })
+        : null,
+    );
+    const run = await auto(finishArgs(c));
+    expect(run.exitCode, run.all).toBe(1);
+    expectQuiet(run, c, "refused");
+    expect(dispatchRow(c.id)).toMatchObject({ status: "refused", code: "finish-failed" });
+    expect(repullRows()).toMatchObject([{ status: "pr_open" }]);
   });
 
   test("a merged automatic re-pull is walked to complete and reported finished", async () => {
