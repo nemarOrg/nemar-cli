@@ -501,7 +501,7 @@ describe.skipIf(!awsInstalled)("what a run checks before it acts", () => {
     const exec = await auto(executeArgs(c));
     expect(exec.exitCode, exec.all).toBe(1);
     expectQuiet(exec, c, "refused");
-    expect(dispatchRow(c.id)).toMatchObject({ status: "refused", code: "repull-in-flight" });
+    expect(dispatchRow(c.id)).toMatchObject({ status: "refused", code: "record-refused" });
     expect(repullRows()).toMatchObject([{ status: "planned" }]);
     expect(ghWrites()).toEqual([]);
   });
@@ -685,6 +685,24 @@ describe.skipIf(!awsInstalled)("an automatic run opens its pull request", () => 
     expect(s3Writes()).toEqual([]);
   });
 
+  test("a step's own word the list does not hold is reported as the step's class", async () => {
+    const c = await claimOpen();
+    writeEvent(c);
+    expect((await auto(planArgs(c))).exitCode).toBe(0);
+    // A precondition S3 refuses is the copy's `pin-changed`, which the list does not hold.
+    w.s3.inject("CopyObject", { code: "PreconditionFailed", status: 412 });
+    try {
+      const exec = await auto(executeArgs(c));
+      expect(exec.exitCode, exec.all).toBe(3);
+      expectQuiet(exec, c, "failed");
+    } finally {
+      w.s3.clearFaults();
+    }
+    expect(dispatchRow(c.id)).toMatchObject({ status: "failed", code: "copy-failed" });
+    // The exact word stays on the record, for an administrator.
+    expect(repullRows()[0]?.last_error).toStartWith("[copy:pin-changed]");
+  });
+
   test("execute refuses a plan with a correction, before the record", async () => {
     await w.commitOnto("refs/heads/main", PATHS.sidecar, '{"TaskName":"rest","edited":true}\n');
     // A plan file the automatic plan would have refused, made by the planner itself.
@@ -771,7 +789,7 @@ describe.skipIf(!awsInstalled)("an automatic run opens its pull request", () => 
     const exec = await auto(executeArgs(c));
     expect(exec.exitCode, exec.all).toBe(1);
     expectQuiet(exec, c, "refused");
-    expect(dispatchRow(c.id)).toMatchObject({ status: "refused", code: "repull-in-flight" });
+    expect(dispatchRow(c.id)).toMatchObject({ status: "refused", code: "record-refused" });
     expect(repullRows()).toMatchObject([{ status: "copied", origin: "administrator" }]);
     expect(w.gh.seen.filter((s) => s.token === APP_TOKEN && s.method !== "GET")).toEqual([]);
   });

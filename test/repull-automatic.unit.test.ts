@@ -889,11 +889,23 @@ describe("a redirect is refused, never followed", () => {
 });
 
 describe("the words a run reports", () => {
-  test("a listed word is reported as it is, any other as no-code", () => {
+  test("a listed word is reported as it is, any other as its step's class, or no-code with none", () => {
     expect(dispatchCodeOf("auto-not-clean-plan")).toBe("auto-not-clean-plan");
+    expect(dispatchCodeOf("auto-not-clean-plan", "copy")).toBe("auto-not-clean-plan");
     // The planner builds this word at run time (`marker-<status>`), and the list does not hold it.
     expect(dispatchCodeOf("marker-absent")).toBe("no-code");
     expect(dispatchCodeOf(undefined)).toBe("no-code");
+    expect(dispatchCodeOf("marker-absent", "plan")).toBe("plan-refused");
+    expect(dispatchCodeOf("repull-in-flight", "record")).toBe("record-refused");
+    expect(dispatchCodeOf("materialize-failed", "prepare")).toBe("prepare-failed");
+    // A scrub's refusal in the preparation is the scrub's own class.
+    expect(dispatchCodeOf("bound-exceeded", "prepare")).toBe("scrub-failed");
+    expect(dispatchCodeOf("pin-changed", "copy")).toBe("copy-failed");
+    expect(dispatchCodeOf("push-refused", "register")).toBe("register-failed");
+    expect(dispatchCodeOf("pr-title", "pr")).toBe("pr-failed");
+    expect(dispatchCodeOf("origin-unreadable", "settle")).toBe("settle-failed");
+    expect(dispatchCodeOf("lock-failed", "finish")).toBe("finish-failed");
+    expect(dispatchCodeOf(undefined, "finish")).toBe("finish-failed");
     for (const w of [
       "dispatch-invalid",
       "auto-cli-version",

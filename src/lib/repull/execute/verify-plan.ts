@@ -22,6 +22,7 @@
 
 import { readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import type { RunStep } from "../../../../shared/repull-state.js";
 import {
   PLANNER_VERSION,
   PLAN_FILE_VERSION,
@@ -55,6 +56,15 @@ export class ExecuteRefused extends Error {
    * take it up again (the command's exit 3). Unset, nothing was written (exit 1).
    */
   resumable = false;
+
+  /** The step of a dispatched run that met it: its report's word when `code` is not listed. */
+  step?: RunStep;
+}
+
+/** Name the step `err` met, unless a step inside it already did; returns `err`. */
+export function inStep<T>(err: T, step: RunStep): T {
+  if (err instanceof ExecuteRefused) err.step ??= step;
+  return err;
 }
 
 /** Where the live plan comes from, and what it may read. */

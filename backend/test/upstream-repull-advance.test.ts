@@ -1130,7 +1130,14 @@ describe("the log line", () => {
 
   test("every failure word has the stored shape, and is the dispatch record's or the scheduler's", () => {
     const known = new Set<string>([...DISPATCH_CODES, ...REPULL_SCHEDULER_OUTCOMES]);
-    const own = ["time-unreadable", "row-failed", "tick-failed", "stamp-failed"];
+    const own = [
+      "no-github-token",
+      "to-tag-malformed",
+      "time-unreadable",
+      "row-failed",
+      "tick-failed",
+      "stamp-failed",
+    ];
     for (const w of ADVANCE_FAILURES) {
       expect(w).toMatch(FIXED_WORD_RE);
       expect([w, known.has(w) || own.includes(w)]).toEqual([w, true]);

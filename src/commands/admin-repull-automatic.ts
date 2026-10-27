@@ -29,7 +29,7 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { sameUpstreamTag } from "../../shared/openneuro-tag.js";
-import { DISPATCH_ID_RE } from "../../shared/repull-state.js";
+import { DISPATCH_ID_RE, type RunStep } from "../../shared/repull-state.js";
 import { getApiUrl } from "../lib/api/client.js";
 import { ApiError } from "../lib/api/errors.js";
 import { getConfigDir, isAuthenticated } from "../lib/config.js";
@@ -84,7 +84,7 @@ type Outcome =
   | { phase: "planned" }
   | { phase: "opened"; repullId: number }
   | { phase: "finished" }
-  | { phase: "refused" | "failed"; code: string; exit: 1 | 3 };
+  | { phase: "refused" | "failed"; code: string; exit: 1 | 3; step?: RunStep };
 
 /** The polling interval a test may shorten (`NEMAR_REPULL_POLL_MS`, as `resume` reads it). */
 function pollMs(fallback: number): number {
@@ -95,9 +95,10 @@ function pollMs(fallback: number): number {
 /** A refusal or a failure as the run's outcome. */
 function outcomeOf(err: unknown): Outcome {
   if (err instanceof ExecuteRefused) {
+    const step = err.step ? { step: err.step } : {};
     return err.resumable
-      ? { phase: "failed", code: err.code, exit: 3 }
-      : { phase: "refused", code: err.code, exit: 1 };
+      ? { phase: "failed", code: err.code, exit: 3, ...step }
+      : { phase: "refused", code: err.code, exit: 1, ...step };
   }
   return { phase: "failed", code: "runner-failed", exit: 1 };
 }
@@ -105,6 +106,8 @@ function outcomeOf(err: unknown): Outcome {
 interface Spec {
   command: "plan" | "execute" | "resume";
   mode: "open" | "finish";
+  /** The step a refusal that names none met: what an unlisted word is reported as. */
+  step: RunStep;
   option: string;
   /** The dataset the command was given (for `execute`, the plan file's); may refuse. */
   datasetOf(): string;
@@ -239,6 +242,9 @@ async function runAutomatic(spec: Spec): Promise<void> {
       exit: outcome.exit,
     };
   }
+  if (outcome.phase === "refused" || outcome.phase === "failed") {
+    outcome = { ...outcome, code: dispatchCodeOf(outcome.code, outcome.step ?? spec.step) };
+  }
   if (outcome.phase !== "planned") {
     const answer = await reportDispatch(
       ctx,
@@ -308,6 +314,7 @@ export function automaticPlan(
   return runAutomatic({
     command: "plan",
     mode: "open",
+    step: "plan",
     option,
     datasetOf: () => datasetId,
     reportsStart: true,
@@ -416,6 +423,7 @@ export function automaticExecute(
   return runAutomatic({
     command: "execute",
     mode: "open",
+    step: "plan",
     option,
     datasetOf: () => peekPlan(planFile).datasetId,
     reportsStart: false,
@@ -490,6 +498,7 @@ export function automaticFinish(
   return runAutomatic({
     command: "resume",
     mode: "finish",
+    step: "finish",
     option,
     datasetOf: () => datasetId,
     reportsStart: true,

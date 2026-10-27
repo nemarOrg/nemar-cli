@@ -350,13 +350,12 @@ export const ADVANCE_STAMP_SQL =
  *  - `dispatch-refused`: GitHub refused a resume's send for the dispatch itself (404, 422);
  *  - `dispatch-deferred`: GitHub turned a resume's send away for the Worker (any other 4xx);
  *  - `cli-unreleased`: the Worker is not a release build, so a run could not install its CLI;
- *  - `no-github-token`: no GitHub token could be had for a resume's send;
  *  - `cap-unreadable`: the open cap is set to something its reader cannot take;
- *  - `to-tag-malformed`: a recorded tag is not a tag;
  *  - `repull-mismatch`: the claim does not find the row the tick read stalled with its tags.
- * Then the tick's own: a stalled row's time or its last dispatch's that does not parse
- * (`time-unreadable`), a row whose step threw, the tick itself (it could not list its rows), its
- * stamp.
+ * Then the tick's own: no GitHub token for a resume's send (`no-github-token`), a recorded tag that
+ * is not a tag (`to-tag-malformed`), a stalled row's time or its last dispatch's that does not
+ * parse (`time-unreadable`), a row whose step threw, the tick itself (it could not list its rows),
+ * its stamp.
  */
 export const ADVANCE_FAILURES = [
   "dispatch-unconfigured",
@@ -364,10 +363,10 @@ export const ADVANCE_FAILURES = [
   "dispatch-refused",
   "dispatch-deferred",
   "cli-unreleased",
-  "no-github-token",
   "cap-unreadable",
-  "to-tag-malformed",
   "repull-mismatch",
+  "no-github-token",
+  "to-tag-malformed",
   "time-unreadable",
   "row-failed",
   "tick-failed",

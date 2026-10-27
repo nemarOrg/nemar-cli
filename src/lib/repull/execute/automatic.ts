@@ -41,7 +41,8 @@
  *
  * THE REPORTS. `POST /webhooks/repull-state` with the dispatch token: `started` once, by the run's
  * first command, then `opened`, `finished`, `refused` or `failed`. A code is a word from
- * `DISPATCH_CODES`; a refusal whose word the list does not hold is reported as `no-code`. A
+ * `DISPATCH_CODES`; a refusal whose word the list does not hold is reported as its step's class
+ * ({@link dispatchCodeOf}). A
  * terminal report the Worker stored leaves `$RUNNER_TEMP/repull-reported`, so the backstop does not
  * report the run again.
  */
@@ -68,12 +69,15 @@ import {
   type DispatchCode,
   type DispatchPhase,
   NEMAR_VERSION_RE,
+  type RunStep,
+  STEP_CLASSES,
   automaticCopySeconds,
   automaticPlanRefusal,
   isDispatchCode,
 } from "../../../../shared/repull-state.js";
 import { IS_DEV_BUILD, getApiUrl } from "../../api/client.js";
 import { isDebugEnabled } from "../../debug-log.js";
+import { IMPORT_SCRUB_REFUSALS } from "../../import-scrub.js";
 import { githubApiBase } from "../../pr-review-approve.js";
 import { isVerbose } from "../../verbose.js";
 import { version as cliVersion } from "../../version.js";
@@ -768,9 +772,17 @@ export async function appTokenRefused(
   }
 }
 
-/** A word for a report: the refusal's own when the closed list holds it, `no-code` otherwise. */
-export function dispatchCodeOf(word: string | undefined): DispatchCode {
-  return isDispatchCode(word) ? word : "no-code";
+/**
+ * A word for a report: the refusal's own when the closed list holds it, else the class of the step
+ * that met it (`scrub-failed` for a scrub's refusal in the preparation), `no-code` with no step.
+ */
+export function dispatchCodeOf(word: string | undefined, step?: RunStep): DispatchCode {
+  if (isDispatchCode(word)) return word;
+  if (step === undefined) return "no-code";
+  if (step === "prepare" && (IMPORT_SCRUB_REFUSALS as readonly string[]).includes(word ?? "")) {
+    return "scrub-failed";
+  }
+  return STEP_CLASSES[step];
 }
 
 // ----------------------------------------------------------------------------

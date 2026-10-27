@@ -112,6 +112,7 @@ import { type Entry, readIndex, readTree, rowTime, synthesizeCommit } from "./sy
 import {
   ExecuteRefused,
   assertNotAnonymous,
+  inStep,
   peekPlan,
   readExecutablePlan,
   readReviewedPlan,
@@ -322,15 +323,21 @@ export async function executeRepull(opts: ExecuteOptions): Promise<ExecuteResult
  */
 function assertAutomaticRecord(a: AutomaticExecution, row: RepullRow): void {
   if (row.origin !== "automatic") {
-    throw new ExecuteRefused(
-      "repull-in-flight",
-      `Re-pull #${row.id} of ${row.dataset_id} is an administrator's: a dispatched run never takes it up.`,
+    throw inStep(
+      new ExecuteRefused(
+        "repull-in-flight",
+        `Re-pull #${row.id} of ${row.dataset_id} is an administrator's: a dispatched run never takes it up.`,
+      ),
+      "record",
     );
   }
   if (a.repullId !== null && row.id !== a.repullId) {
-    throw new ExecuteRefused(
-      "repull-mismatch",
-      `The dispatch continues re-pull #${a.repullId}, and the record found is #${row.id}.`,
+    throw inStep(
+      new ExecuteRefused(
+        "repull-mismatch",
+        `The dispatch continues re-pull #${a.repullId}, and the record found is #${row.id}.`,
+      ),
+      "record",
     );
   }
 }
@@ -370,7 +377,7 @@ async function settleOpened(
       }),
     );
   } catch (err) {
-    throw resumable(err);
+    throw resumable(inStep(err, "settle"));
   } finally {
     scratch.close();
   }
@@ -381,7 +388,7 @@ async function openRecord(datasetId: string): Promise<RepullRow | null> {
   try {
     return (await listRepulls({ dataset: datasetId, open: true, limit: 1 })).repulls[0] ?? null;
   } catch (err) {
-    if (err instanceof ApiError) throw recordRefused(err);
+    if (err instanceof ApiError) throw inStep(recordRefused(err), "record");
     throw err;
   }
 }
@@ -925,7 +932,7 @@ async function recordAndPrepare(
         : {}),
     });
   } catch (err) {
-    if (err instanceof ApiError) throw recordRefused(err);
+    if (err instanceof ApiError) throw inStep(recordRefused(err), "record");
     throw err;
   }
   let row = created.repull;
@@ -950,7 +957,7 @@ async function recordAndPrepare(
         : resumePrepared(ctx, from, baseSha),
     );
   } catch (err) {
-    throw resumable(err);
+    throw resumable(inStep(err, "prepare"));
   }
   return { row, stoppedAt: row.status };
 }
