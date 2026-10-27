@@ -16,8 +16,10 @@
  *    valid one (the host it builds is the one S3 serves the bucket at);
  *  - `planFacts` refuses each malformed scalar of a plan, by field, and passes a valid plan.
  *
- * Fetch is routed here, as `withFakeS3` is in `doctor-fix-route.test.ts`: a request is recorded and
- * answered locally, and nothing leaves the machine.
+ * The annex-uuid read runs the real `fetch`, with a local egress spy as this process's proxy
+ * (`test/helpers/egress-spy.ts`): the spy records the host each request was for and answers 502, so
+ * nothing leaves the machine. The exact object it asks for is read from a 404 and a 403 answered
+ * here, error-path fixtures: no test serves it a canned success.
  *
  * CI TIER: unit-pure (no repository, no network).
  */
@@ -37,6 +39,7 @@ import {
   s3RemoteProblem,
 } from "../src/lib/repull/shapes";
 import { listBucketObjects, readAnnexUuidMarker } from "../src/lib/repull/sources";
+import { startEgressSpy } from "./helpers/egress-spy";
 
 describe("the shape predicates", () => {
   test("a bucket name is S3's: 3 to 63 lowercase letters, digits, dots and hyphens", () => {
@@ -186,8 +189,31 @@ describe("s3RemoteProblem and nemarRemoteOf", () => {
 });
 
 /**
- * Runs `fn` with `fetch` answered here: each request's URL is recorded, `answer` says what it gets,
- * and nothing is sent anywhere. The real `fetch` comes back even if `fn` throws.
+ * Runs `fn` with every HTTP and HTTPS request of this process sent to a local egress spy as its
+ * proxy. The real `fetch` runs; the spy records each request's first line (`CONNECT host:443` for
+ * HTTPS) and refuses it with 502, so nothing leaves the machine. The proxy variables are put back
+ * even if `fn` throws.
+ */
+async function throughSpy<T>(fn: () => Promise<T>): Promise<{ value: T; seen: string[] }> {
+  const spy = startEgressSpy();
+  const keys = Object.keys(spy.env);
+  const saved = keys.map((k) => process.env[k]);
+  Object.assign(process.env, spy.env);
+  try {
+    return { value: await fn(), seen: [...spy.seen] };
+  } finally {
+    keys.forEach((k, i) => {
+      const v = saved[i];
+      if (v === undefined) Reflect.deleteProperty(process.env, k);
+      else process.env[k] = v;
+    });
+    spy.stop();
+  }
+}
+
+/**
+ * Runs `fn` with `fetch` answered here with an error, an error-path fixture: each request's URL is
+ * recorded and `answer` says what it gets. The real `fetch` comes back even if `fn` throws.
  */
 async function withFetch<T>(
   answer: (url: string) => Response,
@@ -216,12 +242,26 @@ describe("the annex-uuid read builds its host only from a bucket and a region S3
   });
 
   test("a valid pair is requested at the host S3 serves the bucket at, once", async () => {
-    const { value, urls } = await withFetch(
-      () => new Response("uuid-from-bucket\n", { status: 200 }),
-      () => readAnnexUuidMarker(args("nemar", "us-east-2")),
-    );
-    expect(urls).toEqual(["https://nemar.s3.us-east-2.amazonaws.com/on004362/objects/annex-uuid"]);
-    expect(value).toEqual({ status: "ok", uuid: "uuid-from-bucket" });
+    const { value, seen } = await throughSpy(() => readAnnexUuidMarker(args("nemar", "us-east-2")));
+    expect(seen).toEqual(["CONNECT nemar.s3.us-east-2.amazonaws.com:443 HTTP/1.1"]);
+    // The spy refuses the tunnel: a read that got no answer is an error, never absent or a uuid.
+    expect(value).toMatchObject({ status: "error" });
+  });
+
+  test("the object asked for is the prefix's annex-uuid; a 404 is absent and a 403 forbidden", async () => {
+    for (const [status, read] of [
+      [404, { status: "absent", detail: "HTTP 404" }],
+      [403, { status: "forbidden", detail: "HTTP 403" }],
+    ] as const) {
+      const { value, urls } = await withFetch(
+        () => new Response(null, { status }),
+        () => readAnnexUuidMarker(args("nemar", "us-east-2")),
+      );
+      expect(urls).toEqual([
+        "https://nemar.s3.us-east-2.amazonaws.com/on004362/objects/annex-uuid",
+      ]);
+      expect(value).toEqual(read);
+    }
   });
 
   test("a bucket or a region that could name another host makes no request at all", async () => {
@@ -233,11 +273,8 @@ describe("the annex-uuid read builds its host only from a bucket and a region S3
       ["nemar", "us-east-2#"],
       ["nemar", ""],
     ] as const) {
-      const { value, urls } = await withFetch(
-        () => new Response("hello", { status: 200 }),
-        () => readAnnexUuidMarker(args(bucket, region)),
-      );
-      expect([bucket, region, urls]).toEqual([bucket, region, []]);
+      const { value, seen } = await throughSpy(() => readAnnexUuidMarker(args(bucket, region)));
+      expect([bucket, region, seen]).toEqual([bucket, region, []]);
       expect(value).toMatchObject({ status: "error" });
       expect((value as { detail: string }).detail).toContain("nothing was requested");
     }
