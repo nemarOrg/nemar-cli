@@ -17,7 +17,7 @@ earlier releases are described only by their generated notes.
 
 An OpenNeuro mirror can be moved to a newer upstream snapshot as its next major version, through a reviewed pull request that an administrator drives by hand or, once the owner turns it on, the automatic path drives (epic #1046, ADR 0111).
 The release has four migrations, 0104, 0105, 0106 and 0112, each of which adds a column, a table or an index and drops nothing.
-It sets no Worker variable or secret: the four re-pull switches and caps are absent from the Worker's configuration, so the automatic path is off.
+It sets no Worker variable or secret: the four re-pull switches and caps are absent from the wrangler configuration, so the automatic path is off unless a Worker secret of the same name turns it on (`GET /admin/repulls/switches` reports what the Worker reads).
 
 ### Changed
 
@@ -44,7 +44,7 @@ It sets no Worker variable or secret: the four re-pull switches and caps are abs
   `nemar admin upstream-status` walks it and exits 0 when nothing was unseen (stale is a finding, not a failure), 2 when the pass could not see, 1 when a request failed; `--measure` totals what a re-pull of each stale mirror would carry and estimates the DOI volume, and unknown is never counted as zero.
   The Monday import report gains `## Upstream freshness`, counts only, with no dataset named.
 - **Phase 5 (#1911): `nemar admin repull plan <id>` plans a re-pull and writes nothing to the mirror, S3, D1 or the NEMAR API.**
-  It writes a plan file (mode 0600, under `$NEMAR_CONFIG_DIR/repull/<id>/`) identified by a digest and prints counts, never a path.
+  It writes a plan file (mode 0600, under `$NEMAR_CONFIG_DIR/repull/<id>/`) identified by a digest, and prints counts and that file's location, never a path, key or content of the dataset.
   Exit 0 means executable, 3 that a plan was made and is not executable, 1 that nothing was planned.
   NEMAR's standard edits are recognized and re-applied as functions, never merged as text, and an unexplained path is a conflict or a correction.
 - **Phase 6 (#1912): an administrator takes a re-pull from its plan to a released version.**
