@@ -10,6 +10,12 @@
  * it is the code that moved and that section is not.
  */
 
+import {
+  BIDS_CHECK_NAME,
+  LEGACY_BIDS_CHECK_NAME,
+  LEGACY_INLINE_BIDS_REPOS,
+  VERSION_CHECK_NAME,
+} from "../../../../shared/dataset-checks.js";
 import { NEMAR_APP_ID } from "../../../../shared/nemar-app.js";
 import { PR_REVIEW_CHECK_NAME } from "../../../../shared/pr-review.js";
 import { HttpError } from "../retry";
@@ -108,9 +114,10 @@ export const BRANCH_RULESET_NAME = "NEMAR branch protection";
  * Dataset repos created before the centralized-BIDS migration (#601) that still
  * run the OLD inline `bids-validation.yml`, whose check-run is literally named
  * `bids-validation`. Everything else is on the central shim that posts
- * `Run BIDS Validation`.
+ * `Run BIDS Validation`. Named once in `shared/dataset-checks.ts` with the two
+ * check names, which the CLI's re-pull gates read too, and re-exported here.
  */
-export const LEGACY_INLINE_BIDS_REPOS = new Set(["nm000103", "nm000105", "nm000106", "nm000107"]);
+export { LEGACY_INLINE_BIDS_REPOS } from "../../../../shared/dataset-checks.js";
 
 /**
  * A required status check. `integration_id` pins the check to a specific
@@ -136,9 +143,9 @@ export interface RequiredCheck {
  */
 export function deriveContexts(repo: string): RequiredCheck[] {
   const bids: RequiredCheck = LEGACY_INLINE_BIDS_REPOS.has(repo)
-    ? { context: "bids-validation" }
-    : { context: "Run BIDS Validation", integration_id: NEMAR_APP_ID };
-  return [bids, { context: "version-check" }];
+    ? { context: LEGACY_BIDS_CHECK_NAME }
+    : { context: BIDS_CHECK_NAME, integration_id: NEMAR_APP_ID };
+  return [bids, { context: VERSION_CHECK_NAME }];
 }
 
 export interface BranchRulesetPayload {
