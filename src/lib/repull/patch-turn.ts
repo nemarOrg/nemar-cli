@@ -120,8 +120,10 @@ export async function patchTurn(ctx: ResumeContext, row: RepullRow): Promise<Tur
   const takeOurs = ctx.opts.takeOurs ?? [];
   if (typeof corrections !== "number" || typeof conflicts !== "number") {
     // Unknown is never zero: a record that does not say is not completed.
+    // The record stays open and blocks the dataset's next re-pull, so the way out is named:
+    // abandon ends a released record as patch_declined, with v<N.0.0> still released.
     ctx.opts.out(
-      `Re-pull #${row.id}'s record does not say how many corrections and conflicts its plan has, so it is not completed; it stays released.`,
+      `Re-pull #${row.id}'s record does not say how many corrections and conflicts its plan has, so it is not completed; it stays released, and it blocks ${row.dataset_id}'s next re-pull until it is ended. nemar admin repull abandon ${row.dataset_id} ends it as patch_declined (v${row.to_version} stays released and N.0.1 is not made).`,
     );
     return { kind: "done", result: { row, outcome: "released" } };
   }

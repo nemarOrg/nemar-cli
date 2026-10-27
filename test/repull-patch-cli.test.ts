@@ -171,6 +171,26 @@ describe.skipIf(!awsInstalled)("N.0.1", () => {
     expect(Object.values(w.gh.pulls).filter((p) => p.headRef === "release/v2.0.1")).toEqual([]);
   });
 
+  test("a record that does not say its counts stays released, exits 0, and the message names the way out", async () => {
+    await lockedN0();
+    // Unknown is never zero: the record loses the two numbers the plan's tallies gave it.
+    const counts = JSON.parse(w.row().counts);
+    Reflect.deleteProperty(counts, "corrections");
+    Reflect.deleteProperty(counts, "conflicts");
+    w.db().run("UPDATE upstream_repulls SET counts = ?", [JSON.stringify(counts)]);
+    const run = await resume();
+    expect(run.exitCode, run.all).toBe(0);
+    expect(run.all).toContain("does not say how many corrections and conflicts");
+    expect(run.all).toContain("it blocks");
+    expect(run.all).toContain(`nemar admin repull abandon ${w.fx.datasetId}`);
+    expect(w.row().status).toBe("released");
+    expect(await hasRef("refs/heads/release/v2.0.1")).toBe(false);
+    // The way the message names works: it ends the record, and v2.0.0 stays released.
+    const ended = await abandon();
+    expect(ended.exitCode, ended.all).toBe(0);
+    expect(w.row().status).toBe("patch_declined");
+  });
+
   test("--keep-upstream replays the corrections byte for byte, and N.0.1 goes to complete through the same gates", async () => {
     await releasedN0();
     const base = w.row().base_sha;
