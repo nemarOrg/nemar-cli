@@ -17,18 +17,14 @@
  * -- GitHub's git/trees + blobs JSON, EZID's ANVL -- so the production
  * request/parse path runs end to end.
  *
- * ONE COVERAGE GAP, and it is not fixable from here: the metadata refresh's
- * happy path needs a REAL `getTreeAtRef`, and
- * backend/test/manifest-small-root-files.test.ts installs a process-wide
- * `mock.module("../src/services/github", ...)` whose `getTreeAtRef` returns
- * an empty array. `mock.module` is permanent for the process (neither
- * `mock.restore()` nor re-registering the real namespace undoes it) and
- * `test/` + `backend/test/` share one, so every later file sees an empty
- * tree. A refresh test asserting on the rebuilt XML therefore passes alone
- * and fails in a full run. The equivalent assertion -- real name in, username
- * nowhere -- is made instead on the two paths that do NOT need a tree: the
- * concept mint and the exemplar re-mint. The refresh's own SKIP behaviour,
- * which is the new logic, needs no tree and is asserted directly below.
+ * ONE COVERAGE GAP, which a process-wide mock no longer blocks: the metadata refresh's happy path
+ * needs a REAL `getTreeAtRef`. backend/test/manifest-small-root-files.test.ts used to install a
+ * process-wide `mock.module("../src/services/github", ...)`, which cannot be undone, so every later
+ * file saw an empty tree. That file now runs in a process of its own, so the real function is in
+ * place here in a full run, and a refresh test asserting on the rebuilt XML is possible now; this
+ * change does not write it. The equivalent assertion -- real name in, username nowhere -- is made
+ * instead on the two paths that do NOT need a tree: the concept mint and the exemplar re-mint. The
+ * refresh's own SKIP behaviour, which is the new logic, needs no tree and is asserted directly below.
  */
 
 import type { Database } from "bun:sqlite";

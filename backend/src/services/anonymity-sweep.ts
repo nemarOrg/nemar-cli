@@ -1680,12 +1680,11 @@ function defaultZarrIndexReader(env: Bindings): AnonymitySweepSeams["fetchZarrIn
  * a manifest is a snapshot of the release while this sweep has to answer for
  * the tree as it stands today.
  *
- * Imported from `github/contents.js` rather than the `services/github` barrel
- * ON PURPOSE. `backend/test/manifest-small-root-files.test.ts` installs a
- * process-wide `mock.module` on the barrel that makes `getTreeAtRef` return an
- * empty array, and `test/` and `backend/test/` share one process -- so a sweep
- * reading through the barrel would see no files in a full run and report a
- * clean deposit it never looked at.
+ * Imported from `github/contents.js` rather than the `services/github` barrel. A process-wide
+ * `mock.module` on the barrel (`manifest-small-root-files.test.ts` installed one until it moved to a
+ * process of its own) made `getTreeAtRef` return an empty array for every later file in a shared
+ * run, so a sweep reading through the barrel could see no files and report a clean deposit it never
+ * looked at.
  *
  * A truncated tree (GitHub's cap, ~100k entries) is not distinguished here.
  * Every file this scan prioritizes is at the repository root, and a recursive

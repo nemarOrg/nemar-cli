@@ -4,9 +4,10 @@
  * and the registrar (epic #1046 phase 2, #1908; ADR 0111, decision 4).
  *
  * WHY THE TESTS RUN IN A PROCESS OF THEIR OWN. The handler reads the tagged description with
- * the REAL `getTreeAtRef`, and several other backend tests install a process-wide
- * `mock.module("../src/services/github", ...)` whose `getTreeAtRef` returns an empty tree.
- * `mock.module` cannot be undone, and `test/` and `backend/test/` share one Bun process, so in a
+ * the REAL `getTreeAtRef`, and a process-wide `mock.module("../src/services/github", ...)` replaces
+ * it for every later file. The one such mock in the tree, in manifest-small-root-files.test.ts, now
+ * runs in a process of its own, but `mock.module` cannot be undone, and `test/` and `backend/test/`
+ * share one Bun process, so in a
  * full run this handler would read an empty tree and record NULL/NULL for a description that is
  * there: the assertions pass alone and fail in a full run (see
  * `doi-attribution-routes.test.ts` for the same gap). So the assertions live in the first

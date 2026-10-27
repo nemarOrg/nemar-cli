@@ -2,14 +2,13 @@
  * enrichDataset wires the #1549 relation guard, the resolved DOI titles, the
  * Dataset evidence for IsDerivedFrom, and the shared registry cache.
  *
- * WHY THE REAL `enrichDataset` IS NOT DRIVEN HERE
- * ----------------------------------------------
- * The same blocker `enrich-doi-sync-skip.test.ts` documents in full:
- * `manifest-small-root-files.test.ts` installs a process-wide
- * `mock.module("../src/services/github", ...)` whose `getTreeAtRef` returns
- * an empty array, `mock.module` cannot be undone, and `enrichDataset` returns
- * "No README found" on an empty tree long before any relation is written. A
- * test driving it would pass alone and test nothing in a full run.
+ * WHY THE REAL `enrichDataset` WAS NOT DRIVEN HERE
+ * -----------------------------------------------
+ * `manifest-small-root-files.test.ts` used to install a process-wide
+ * `mock.module("../src/services/github", ...)`, which cannot be undone, so `enrichDataset` read an
+ * empty tree in a full run and returned "No README found" before any relation was written. That
+ * file now runs in a process of its own, so the real tree is in place for this suite; driving
+ * `enrichDataset` from here is possible now, and this comment change does not do it.
  *
  * So the behavior is covered where it lives (enforceNeverDataPaper and
  * mergeWithExisting in test/never-data-paper.test.ts and
