@@ -368,6 +368,12 @@ describe("the review queue shows the App's pull request under the App's name", (
     expect(d.live?.author_login).toBe("(unknown)");
   });
 
+  test("a bot that only carries the App's id is not shown as the App", async () => {
+    pulls[`${DS}#7`] = appPull({ user: { ...APP, login: "nemar-bot2[bot]" } });
+    const d = await detail();
+    expect(d.live?.author_login).toBe("(unknown)");
+  });
+
   // A stored review is named as GitHub's record is: the App's login AND its numeric id, because a
   // rename frees the App's old login for anyone to register. Each half alone is another author's,
   // reduced as any other login is.
