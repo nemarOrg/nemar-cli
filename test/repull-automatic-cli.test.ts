@@ -624,6 +624,25 @@ describe.skipIf(!awsInstalled)("an automatic run opens its pull request", () => 
     expect(readdirSync(runner).filter((n) => n.startsWith(".planning-"))).toEqual([]);
   });
 
+  test("a plan that is not executable is refused by plan and leaves no handoff", async () => {
+    // A release branch of the target version is already on origin: the planner's release check
+    // refuses, so the plan is not executable. The plan step is execute's only gate on this.
+    const main = (await gitIn(w.fx.originRepo, ["rev-parse", "refs/heads/main"])).trim();
+    await gitIn(w.fx.originRepo, ["update-ref", RELEASE_REF, main]);
+    const c = await claimOpen();
+    writeEvent(c);
+    const plan = await auto(planArgs(c));
+    expect(plan.exitCode, plan.all).toBe(3);
+    expectQuiet(plan, c, "refused");
+    expect(plan.all).toContain("plan executable=no");
+    expect(dispatchRow(c.id)).toMatchObject({ status: "refused", code: "plan-refused" });
+    expect(existsSync(join(runner, "plan.json.planner"))).toBe(false);
+    expect(readdirSync(runner).filter((n) => n.startsWith(".planning-"))).toEqual([]);
+    expect(repullRows()).toEqual([]);
+    expect(ghWrites()).toEqual([]);
+    expect(s3Writes()).toEqual([]);
+  });
+
   test("a resume of a record left at prepared, before its copy, plans to its digest and opens", async () => {
     const c = await claimOpen();
     writeEvent(c);
