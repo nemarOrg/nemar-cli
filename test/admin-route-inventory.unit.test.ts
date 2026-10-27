@@ -29,11 +29,16 @@ const EXPECTED_ENTRIES: Record<string, number> = {
   // check the role inside it, not in extra middleware.
   "GET /mail/tickets": 1,
   "GET /mail/tickets/:id": 1,
+  "GET /mail/unread-count": 1,
   "POST /mail/tickets/:id/reply": 1,
   "POST /mail/tickets/:id/note": 1,
   "POST /mail/tickets/:id/assign": 1,
   "POST /mail/tickets/:id/status": 1,
   "POST /mail/tickets/:id/escalate": 1,
+  "POST /mail/tickets/:id/spam": 1,
+  "GET /mail/blocklist": 1,
+  "POST /mail/blocklist": 1,
+  "DELETE /mail/blocklist/:id": 1,
   "GET /mail/queues": 1,
   "PUT /mail/queues/:tag": 1,
   "GET /mail/availability": 1,
@@ -301,7 +306,7 @@ describe("admin route inventory", () => {
   });
 
   test("entry total is pinned", () => {
-    expect(adminRoutes.routes.length).toBe(193);
+    expect(adminRoutes.routes.length).toBe(198);
   });
 
   // The count pin above can't see a SWAP of the router-level middleware

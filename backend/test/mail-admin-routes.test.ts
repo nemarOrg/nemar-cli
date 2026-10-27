@@ -14,7 +14,7 @@ import { handleInboundEmail } from "../src/services/inbound-mail";
 import { buildReferences } from "../src/services/mail-admin";
 import { hashApiKey } from "../src/services/token";
 import type { Bindings, Variables } from "../src/types/bindings";
-import { bindingError, recordingBinding } from "./helpers/cloudflare-email";
+import { bindingError, headerRefusal, recordingBinding } from "./helpers/cloudflare-email";
 import { freshDb, realD1, wrapD1, yieldingD1 } from "./helpers/d1";
 import { withFakeResend } from "./helpers/resend";
 import { eml } from "./helpers/tickets";
@@ -311,12 +311,15 @@ describe("reply", () => {
     const sent = binding.sent[0];
     const ref = row(t).ref as string;
     expect(sent.from).toEqual({ email: "support@nemar.org", name: "NEMAR Support" });
-    expect(sent.replyTo).toBe(`support+t${ref}@nemar.org`);
+    expect(sent.replyTo).toBe(`support+t${ref}@nemar.org`); // a legacy ten-character ref
     expect(sent.to).toBe("ada@sender.example");
     expect(sent.subject).toBe("Re: Help with an upload");
     expect(sent.headers?.["In-Reply-To"]).toBe("<second@sender.example>");
     expect(sent.headers?.References).toBe("<first@sender.example> <second@sender.example>");
-    expect(sent.headers?.["Message-ID"]).toMatch(/^<[0-9a-f-]{36}@nemar\.org>$/);
+    // The platform controls Message-ID: the reply never sets it, and every header it does set
+    // passes the Cloudflare allowlist (the recorder refuses the send otherwise).
+    expect(Object.keys(sent.headers ?? {}).map((h) => h.toLowerCase())).not.toContain("message-id");
+    expect(headerRefusal(sent.headers)).toBeUndefined();
     expect(sent.html).toContain("&lt;b&gt;two&lt;/b&gt;");
     expect(sent.html).not.toContain("<b>two");
 
@@ -324,7 +327,8 @@ describe("reply", () => {
       .query("SELECT * FROM mail_messages WHERE ticket_id = ? AND direction = 'out'")
       .get(t) as Record<string, any>;
     expect(out.author_user_id).toBe(ids.agent);
-    expect(out.message_id).toBe(sent.headers?.["Message-ID"]);
+    expect(out.message_id).toBe("<1.recorded@staging.nemar.test>");
+    expect(r.body.header_message_id).toBe("<1.recorded@staging.nemar.test>");
     expect(out.from_addr).toBe("support@nemar.org");
     expect(row(t).status).toBe("pending");
     expect(events(t).map((e) => [e.kind, e.actor_user_id])).toEqual([
@@ -336,8 +340,41 @@ describe("reply", () => {
     const next = await call("admin", "POST", `/tickets/${t}/reply`, { text: "again" });
     expect(next.status).toBe(200);
     expect(binding.sent[1].headers?.References).toBe(
-      `<first@sender.example> <second@sender.example> ${sent.headers?.["Message-ID"]}`,
+      "<first@sender.example> <second@sender.example> <1.recorded@staging.nemar.test>",
     );
+  });
+
+  test("a word-ref ticket replies to support+t-<ref>@, which threads the answer back", async () => {
+    const t = ticket();
+    db.run("UPDATE mail_tickets SET ref = 'amber-falcon-river' WHERE id = ?", [t]);
+    const r = await call("admin", "POST", `/tickets/${t}/reply`, { text: "hi" });
+    expect(r.status).toBe(200);
+    expect(binding.sent[0].replyTo).toBe("support+t-amber-falcon-river@nemar.org");
+  });
+
+  test("a provider id that is not a Message-ID is stored as NULL, and the plus-tag still threads", async () => {
+    envOverrides = { EMAIL: { send: async () => ({ messageId: "0192-opaque-provider-id" }) } };
+    const t = ticket();
+    const r = await call("admin", "POST", `/tickets/${t}/reply`, { text: "hi" });
+    expect(r.status).toBe(200);
+    expect(r.body.header_message_id).toBeNull();
+    const out = db
+      .query("SELECT message_id FROM mail_messages WHERE ticket_id = ? AND direction = 'out'")
+      .get(t) as { message_id: string | null };
+    expect(out.message_id).toBeNull();
+    expect(r.body.message_id).toBeGreaterThan(0);
+  });
+
+  test("a bare provider id is stored in angle brackets", async () => {
+    const bare = { send: async () => ({ messageId: "bare.id@mail.example" }) };
+    envOverrides = { EMAIL: bare };
+    const t = ticket();
+    const r = await call("admin", "POST", `/tickets/${t}/reply`, { text: "hi" });
+    expect(r.body.header_message_id).toBe("<bare.id@mail.example>");
+    const out = db
+      .query("SELECT message_id FROM mail_messages WHERE ticket_id = ? AND direction = 'out'")
+      .get(t) as { message_id: string };
+    expect(out.message_id).toBe("<bare.id@mail.example>");
   });
 
   test("staging derives its domain from FROM_EMAIL and wraps the subject", async () => {
@@ -361,7 +398,7 @@ describe("reply", () => {
     envOverrides = { ENVIRONMENT: "development", DEV_EMAIL_ALLOWLIST: "someone@else.example" };
     const t = ticket();
     const r = await call("admin", "POST", `/tickets/${t}/reply`, { text: "hi" });
-    expect(r.status).toBe(502);
+    expect(r.status).toBe(422);
     expect(r.body.code).toBe("reply_not_sent");
     expect(JSON.stringify(r.body)).not.toContain("ada@sender");
     expect(binding.sent.length).toBe(0);
@@ -374,7 +411,7 @@ describe("reply", () => {
     binding = recordingBinding(() => bindingError("E_RECIPIENT_SUPPRESSED", "suppressed"));
     const t = ticket();
     const r = await call("admin", "POST", `/tickets/${t}/reply`, { text: "hi" });
-    expect(r.status).toBe(502);
+    expect(r.status).toBe(422);
     expect(r.body.code).toBe("reply_not_sent");
     expect(db.query("SELECT COUNT(*) AS n FROM mail_messages").get()).toEqual({ n: 0 });
     expect(events(t)).toEqual([]);
@@ -384,7 +421,7 @@ describe("reply", () => {
     binding = recordingBinding(() => bindingError("E_INTERNAL_SERVER_ERROR", "boom"));
     const t = ticket();
     const r = await call("admin", "POST", `/tickets/${t}/reply`, { text: "hi" });
-    expect(r.status).toBe(502);
+    expect(r.status).toBe(409);
     expect(r.body.code).toBe("reply_delivery_unknown");
     expect(db.query("SELECT COUNT(*) AS n FROM mail_messages").get()).toEqual({ n: 0 });
     const [event] = events(t);
@@ -392,18 +429,19 @@ describe("reply", () => {
     expect(event.actor_user_id).toBe(ids.admin);
     const detail = JSON.parse(event.detail ?? "{}");
     expect(detail.delivery).toBe("unknown");
-    expect(detail.header_message_id).toBe(binding.sent[0].headers?.["Message-ID"]);
+    expect(detail.header_message_id).toBeNull();
     expect(row(t).status).toBe("open");
   });
 
-  test("Resend carries the headers when it is the provider", async () => {
+  test("Resend sends the reply with no Message-ID header when it is the provider", async () => {
     envOverrides = { EMAIL_PROVIDER: "resend", EMAIL: undefined };
     const t = ticket();
     await withFakeResend(async (calls) => {
       const r = await call("admin", "POST", `/tickets/${t}/reply`, { text: "hi" });
       expect(r.status).toBe(200);
-      const body = calls[0].body as { headers: Record<string, string>; reply_to: string };
-      expect(body.headers["Message-ID"]).toMatch(/@nemar\.org>$/);
+      const body = calls[0].body as { headers?: Record<string, string>; reply_to: string };
+      // A ticket with no inbound Message-ID has nothing to thread by, and no Message-ID is set.
+      expect(body.headers).toBeUndefined();
       expect(body.reply_to).toStartWith("support+t");
     });
   });
@@ -463,7 +501,7 @@ describe("long threads", () => {
     const t = ticket();
     inbound(t, `<${"y".repeat(997)}>`);
     const r = await call("admin", "POST", `/tickets/${t}/reply`, { text: "hi" });
-    expect(r.status).toBe(502);
+    expect(r.status).toBe(422);
     expect(r.body.code).toBe("reply_not_sent");
     expect(binding.sent.length).toBe(0);
     expect(events(t)).toEqual([]);
@@ -525,7 +563,7 @@ describe("reply idempotency and recording faults", () => {
       "UPDATE mail_reply_keys SET created_at = datetime('now', '-10 minutes') WHERE idem_key = 'k-2'",
     );
     const stale = await send("agent", t, "k-2");
-    expect([stale.status, stale.body.code]).toEqual([502, "reply_delivery_unknown"]);
+    expect([stale.status, stale.body.code]).toEqual([409, "reply_delivery_unknown"]);
     expect(binding.sent.length).toBe(0);
   });
 
@@ -542,7 +580,7 @@ describe("reply idempotency and recording faults", () => {
     const t = ticket();
     expect((await send("agent", t, "k-4")).body.code).toBe("reply_delivery_unknown");
     const retry = await send("agent", t, "k-4");
-    expect([retry.status, retry.body.code]).toEqual([502, "reply_delivery_unknown"]);
+    expect([retry.status, retry.body.code]).toEqual([409, "reply_delivery_unknown"]);
     expect(binding.sent.length).toBe(1);
 
     let refuse = true;
@@ -554,14 +592,14 @@ describe("reply idempotency and recording faults", () => {
     expect(binding.sent.length).toBe(2);
   });
 
-  test("if the event write fails too, the 502 and its clear text still come back", async () => {
+  test("if the event write fails too, the 409 and its clear text still come back", async () => {
     binding = recordingBinding(() => bindingError("E_INTERNAL_SERVER_ERROR", "boom"));
     db.run(
       "CREATE TRIGGER no_failed_events BEFORE INSERT ON mail_ticket_events WHEN NEW.kind = 'reply_failed' BEGIN SELECT RAISE(ABORT, 'disk'); END",
     );
     const t = ticket();
     const r = await send("agent", t, "k-6");
-    expect([r.status, r.body.code]).toEqual([502, "reply_delivery_unknown"]);
+    expect([r.status, r.body.code]).toEqual([409, "reply_delivery_unknown"]);
     expect(r.body.error).toContain("may or may not have gone out");
     expect(events(t)).toEqual([]);
   });
@@ -572,16 +610,16 @@ describe("reply idempotency and recording faults", () => {
     );
     const t = ticket();
     const r = await send("agent", t, "k-7");
-    expect([r.status, r.body.code]).toEqual([502, "reply_delivery_unknown"]);
+    expect([r.status, r.body.code]).toEqual([409, "reply_delivery_unknown"]);
     expect(r.body.error).toContain("Do not send it again");
     expect(binding.sent.length).toBe(1);
     const [event] = events(t);
     expect(event.kind).toBe("reply_failed");
     expect(JSON.parse(event.detail ?? "{}")).toEqual({
       delivery: "sent_unrecorded",
-      header_message_id: binding.sent[0].headers?.["Message-ID"],
+      header_message_id: "<1.recorded@staging.nemar.test>",
     });
-    expect((await send("agent", t, "k-7")).status).toBe(502);
+    expect((await send("agent", t, "k-7")).status).toBe(409);
     expect(binding.sent.length).toBe(1);
   });
 });
@@ -825,7 +863,7 @@ describe("escalate", () => {
     expect(binding.sent.length).toBe(1);
     expect(binding.sent[0].to).toBe("mail-owner2@example.org");
     expect(binding.sent[0].subject).toBe(
-      "[NEMAR support] Escalated " + row(t).ref + ": Broken <upload>",
+      `[NEMAR support] Escalated ${row(t).ref}: Broken <upload>`,
     );
     expect(binding.sent[0].html).toContain("Broken &lt;upload&gt;");
     expect(binding.sent[0].html).toContain("needs an owner &lt;now&gt;");
@@ -1045,9 +1083,7 @@ describe("review round 1: reprocess, counts, reopen, ids", () => {
     });
     // A trigger stands in for an exclusion present at creation: the new ticket excludes the caller.
     db.run(
-      "CREATE TRIGGER excl AFTER INSERT ON mail_tickets BEGIN UPDATE mail_tickets SET excluded_user_id = " +
-        ids.owner2 +
-        " WHERE id = NEW.id; END",
+      `CREATE TRIGGER excl AFTER INSERT ON mail_tickets BEGIN UPDATE mail_tickets SET excluded_user_id = ${ids.owner2} WHERE id = NEW.id; END`,
     );
     const r = await call("owner2", "POST", "/reprocess", { raw_key: key });
     expect(r.status).toBe(404);
@@ -1140,7 +1176,7 @@ describe("reprocess", () => {
     );
   });
 
-  test("a missing key is 404, a malformed one 400, and no bucket is 503", async () => {
+  test("a missing key is 404, a malformed one 400, and no bucket is 409", async () => {
     const absent = "inbound/raw/2026/10/24/aaaaaaaa-1111-4222-8333-444455556666.eml";
     expect((await call("owner", "POST", "/reprocess", { raw_key: absent })).status).toBe(404);
     expect((await call("owner", "POST", "/reprocess", { raw_key: "../etc/passwd" })).status).toBe(
@@ -1264,5 +1300,122 @@ describe("cascades", () => {
       "escalation_owner_ineligible",
     );
     expect(row(t).status).toBe("open");
+  });
+});
+
+describe("unread tracking (per admin)", () => {
+  const unreadOf = async (who: Who, id: number) => {
+    const list = await call(who, "GET", "/tickets");
+    const t = (list.body.tickets as { id: number; unread: boolean }[]).find((x) => x.id === id);
+    return t?.unread;
+  };
+  const reads = (id: number) =>
+    db
+      .query<{ user_id: number; read_message_id: number }, [number]>(
+        "SELECT user_id, read_message_id FROM mail_ticket_reads WHERE ticket_id = ? ORDER BY user_id",
+      )
+      .all(id);
+  const count = async (who: Who) => (await call(who, "GET", "/unread-count")).body.count;
+
+  test("unread for a new inbound ticket, read after the viewer opens it, unread again on new mail", async () => {
+    const t = ticket();
+    inbound(t, "<u1@x.example>");
+    expect(await unreadOf("admin", t)).toBe(true);
+    expect(await count("admin")).toBe(1);
+
+    const detail = await call("admin", "GET", `/tickets/${t}`);
+    expect(detail.status).toBe(200);
+    expect(await unreadOf("admin", t)).toBe(false);
+    expect(await count("admin")).toBe(0);
+
+    inbound(t, "<u2@x.example>");
+    expect(await unreadOf("admin", t)).toBe(true);
+    expect(await count("admin")).toBe(1);
+  });
+
+  test("another admin who has not opened it still sees it unread", async () => {
+    const t = ticket();
+    inbound(t, "<u3@x.example>");
+    await call("admin", "GET", `/tickets/${t}`);
+    expect(await unreadOf("admin", t)).toBe(false);
+    expect(await unreadOf("agent", t)).toBe(true);
+    expect(await count("agent")).toBe(1);
+    expect(reads(t).map((r) => r.user_id)).toEqual([ids.admin]);
+  });
+
+  test("an outgoing reply or a note never makes a ticket unread", async () => {
+    const t = ticket();
+    inbound(t, "<u4@x.example>");
+    await call("admin", "GET", `/tickets/${t}`);
+    db.run(
+      `INSERT INTO mail_messages (ticket_id, direction, from_addr, to_addr, subject, text_body)
+       VALUES (?, 'out', 'support@nemar.org', 'ada@sender.example', 's', 'reply'),
+              (?, 'note', '', '', 's', 'internal')`,
+      [t, t],
+    );
+    expect(await unreadOf("admin", t)).toBe(false);
+    expect(await count("admin")).toBe(0);
+  });
+
+  test("a ticket with no inbound message is not unread", async () => {
+    const t = ticket();
+    expect(await unreadOf("admin", t)).toBe(false);
+    await call("admin", "GET", `/tickets/${t}`);
+    expect(reads(t)).toEqual([]);
+  });
+
+  test("the count only includes visible, open-ish, unread tickets", async () => {
+    const mk = (o: Parameters<typeof ticket>[0]) => {
+      const t = ticket(o);
+      inbound(t, `<c${t}@x.example>`);
+      return t;
+    };
+    mk({});
+    mk({ status: "pending" });
+    mk({ status: "escalated" });
+    mk({ status: "closed" });
+    mk({ status: "spam" });
+    mk({ queue: "security", restricted: true });
+    mk({ queue: "conduct", restricted: true, excluded: ids.owner2 });
+    mk({ excluded: ids.admin });
+    // admin: three unread non-closed ordinary tickets; the restricted and excluded ones never count.
+    expect(await count("admin")).toBe(3);
+    expect(await count("agent")).toBe(4);
+    // owner: ordinary 3 + 1 excluded-for-admin + security restricted + conduct restricted = 6.
+    expect(await count("owner")).toBe(6);
+    // owner2 is excluded from the conduct ticket only.
+    expect(await count("owner2")).toBe(5);
+    expect((await call("member", "GET", "/unread-count")).status).toBe(403);
+  });
+
+  test("a ticket the viewer cannot see writes no marker", async () => {
+    const t = ticket({ queue: "security", restricted: true });
+    inbound(t, "<h1@x.example>");
+    expect((await call("admin", "GET", `/tickets/${t}`)).status).toBe(404);
+    const x = ticket({ queue: "conduct", restricted: true, excluded: ids.owner2 });
+    inbound(x, "<h2@x.example>");
+    expect((await call("owner2", "GET", `/tickets/${x}`)).status).toBe(404);
+    expect(reads(t)).toEqual([]);
+    expect(reads(x)).toEqual([]);
+    expect(await count("owner2")).toBe(1);
+  });
+
+  test("a failed marker write does not fail the read", async () => {
+    const t = ticket();
+    inbound(t, "<f1@x.example>");
+    db.run("DROP TABLE mail_ticket_reads");
+    const res = await call("admin", "GET", `/tickets/${t}`);
+    expect(res.status).toBe(200);
+    expect(res.body.ticket.id).toBe(t);
+  });
+
+  test("the marker only moves forward", async () => {
+    const t = ticket();
+    inbound(t, "<m1@x.example>");
+    await call("admin", "GET", `/tickets/${t}`);
+    const first = reads(t)[0]?.read_message_id as number;
+    db.run("UPDATE mail_ticket_reads SET read_message_id = ? WHERE ticket_id = ?", [first + 50, t]);
+    await call("admin", "GET", `/tickets/${t}`);
+    expect(reads(t)[0]?.read_message_id).toBe(first + 50);
   });
 });

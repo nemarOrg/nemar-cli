@@ -9,6 +9,8 @@
  *   nemar admin mail assign <id> <user|me|none>
  *   nemar admin mail status <id> <open|pending|closed|spam>     (`close <id>` is `closed`)
  *   nemar admin mail escalate <id> [--reason r]
+ *   nemar admin mail spam <id> [--block address|domain|none] [--reason r]   spam, unassign, block
+ *   nemar admin mail blocklist [add <address-or-domain> | remove <id>]      refuse senders at delivery
  *   nemar admin mail queues [set <tag> ...]      queues and how they assign (set: owner)
  *   nemar admin mail away [set|clear]            your away window (--user: owner)
  *   nemar admin mail reprocess <raw_key>         owner
@@ -20,12 +22,16 @@
 import { readFileSync } from "node:fs";
 import { Command } from "commander";
 import {
+  FILTERED_LIST_MODES,
   QUEUE_STRATEGIES,
   SETTABLE_STATUSES,
+  SPAM_BLOCK_CHOICES,
   TICKET_STATUSES,
 } from "../../shared/contract/mail-admin.js";
 import type {
   Availability,
+  BlocklistEntry,
+  FilteredListMode,
   ListTicketsQuery,
   MailErrorCode,
   MailQueue,
@@ -33,11 +39,13 @@ import type {
   PutQueueRequest,
   QueueStrategy,
   SettableStatus,
+  SpamBlockChoice,
   TicketDetail,
   TicketStatus,
   TicketSummary,
 } from "../../shared/contract/mail-admin.js";
 import {
+  addMailBlock,
   addMailNote,
   assignMailTicket,
   escalateMailTicket,
@@ -45,10 +53,13 @@ import {
   getMailAvailability,
   getMailTicket,
   getUsernameById,
+  listMailBlocklist,
   listMailQueues,
   listMailTickets,
+  markMailTicketSpam,
   putMailAvailability,
   putMailQueue,
+  removeMailBlock,
   replyToMailTicket,
   reprocessMail,
   setMailTicketStatus,
@@ -139,6 +150,10 @@ export const MAIL_ERROR_GUIDANCE: Record<MailErrorCode, string> = {
     "The ticket was purged under the retention policy; only its summary remains and nothing can be changed.",
   reply_delivery_unknown:
     "The mail provider did not confirm the send, so the reply may or may not have reached the requester. This key will never send it again, so retrying it is pointless: read the thread with 'nemar admin mail show', and ask the requester if needed. Only a new --idempotency-key sends again, and it may deliver a second copy.",
+  block_sender_unverified:
+    "The sender was not verified (DMARC did not pass), so its address may be forged. A domain is never blocked for such a sender; to block the address anyway, repeat with --force.",
+  block_not_allowed:
+    "That sender cannot be blocked: our own domain is never blocked, nor the domain of a shared mailbox provider or a public suffix (block the address instead). Those lists are best effort and not exhaustive, so think before blocking any domain.",
   inbound_not_configured:
     "This deployment has no inbound mail bucket, so there is nothing to reprocess.",
   internal: "The mail routes failed unexpectedly; try again, and report it if it keeps happening.",
@@ -163,11 +178,12 @@ function guidanceFor(word: string | undefined): string | undefined {
 type KeyedKind = "reply" | "note";
 
 /**
- * Whether a reply is worth retrying under its key: the connection failed or the server answered 5xx
- * (including an HTML gateway error and maintenance mode), so the retry learns what happened, or the
- * route said the send is still running or certainly sent nothing. Not `reply_delivery_unknown`: the
- * server answers every repeat of that key the same way and never sends it. Not a definite 4xx
- * refusal either: the same request would be refused again.
+ * Whether a reply is worth retrying under its key, decided by the closed `code` first: the mail
+ * routes answer 409 and 422, not 502, whose body a proxy can strip. Retry when the connection failed
+ * or the server answered 5xx (including an HTML gateway error and maintenance mode), so the retry
+ * learns what happened, or when the route said the send is still running or certainly sent nothing.
+ * Not `reply_delivery_unknown`: the server answers every repeat of that key the same way and never
+ * sends it. Not a definite 4xx refusal either: the same request would be refused again.
  */
 function retryableWithKey(error: ApiError, kind: KeyedKind = "reply"): boolean {
   // A note sends no mail and a repeat is idempotent: a lost answer (a network failure, a 5xx) or a
@@ -384,7 +400,7 @@ class People {
 // ---------------------------------------------------------------------------------------------
 
 function ticketLine(t: TicketSummary, assignee: string): string {
-  return `#${t.id}  ${oneLine(t.ref)}  ${oneLine(t.status)}${t.purged ? " (purged)" : ""}  ${oneLine(t.queue_tag)}${t.restricted ? " (restricted)" : ""}  assignee ${assignee}  ${oneLine(t.subject)}`;
+  return `#${t.id}  ${oneLine(t.ref)}  ${oneLine(t.status)}${t.purged ? " (purged)" : ""}${t.filtered ? ` (filtered: ${oneLine(t.filtered)})` : ""}  ${oneLine(t.queue_tag)}${t.restricted ? " (restricted)" : ""}  assignee ${assignee}  ${oneLine(t.subject)}`;
 }
 
 async function printTicketAction(verb: string, t: TicketSummary, people: People): Promise<void> {
@@ -399,9 +415,10 @@ async function renderList(tickets: TicketSummary[], people: People): Promise<voi
   const rows: string[][] = [];
   for (const t of tickets) {
     rows.push([
+      t.unread ? "new" : "",
       `#${t.id}`,
       oneLine(t.ref),
-      t.purged ? `${oneLine(t.status)} (purged)` : oneLine(t.status),
+      `${oneLine(t.status)}${t.purged ? " (purged)" : ""}${t.filtered ? ` [${oneLine(t.filtered)}]` : ""}`,
       `${oneLine(t.queue_tag)}${t.restricted ? "*" : ""}`,
       await people.name(t.assignee_user_id),
       oneLine(t.last_message_at),
@@ -409,7 +426,17 @@ async function renderList(tickets: TicketSummary[], people: People): Promise<voi
       oneLine(t.subject),
     ]);
   }
-  const head = ["ID", "REF", "STATUS", "QUEUE", "ASSIGNEE", "LAST MESSAGE", "FROM", "SUBJECT"];
+  const head = [
+    "NEW",
+    "ID",
+    "REF",
+    "STATUS",
+    "QUEUE",
+    "ASSIGNEE",
+    "LAST MESSAGE",
+    "FROM",
+    "SUBJECT",
+  ];
   const widths = head.map((h, i) => Math.max(h.length, ...rows.map((r) => r[i].length)));
   const line = (cells: string[]) =>
     cells
@@ -427,6 +454,9 @@ async function renderTicket(detail: TicketDetail, people: People): Promise<strin
   out.push(`Ticket #${t.id}  ${oneLine(t.ref)}`);
   out.push(`Subject:    ${oneLine(t.subject)}`);
   out.push(`Status:     ${oneLine(t.status)}`);
+  if (t.filtered) {
+    out.push(`Filtered:   ${oneLine(t.filtered)}  (filed quietly: not assigned, nobody was told)`);
+  }
   out.push(`Queue:      ${oneLine(t.queue_tag)}${t.restricted ? " (restricted)" : ""}`);
   out.push(`Assignee:   ${await people.name(t.assignee_user_id)}`);
   const requester =
@@ -491,6 +521,7 @@ async function renderQueue(q: MailQueue, people: People): Promise<string[]> {
   out.push(`  members:     ${await people.list(q.rr_members)}`);
   out.push(`  escalation:  ${await people.name(q.escalation_user_id)}`);
   out.push(`  open:        ${oneLine(q.open_tickets)}`);
+  out.push(`  notify:      ${q.notify ? "yes" : "no (quiet: new tickets announce nothing)"}`);
   return out;
 }
 
@@ -643,6 +674,10 @@ const listCommand = new MailCommand("list")
   .option("--queue <tag>", "Only this queue")
   .option("--mine", "Only tickets assigned to you")
   .option("--assignee <user>", "Only tickets assigned to this user, or 'none' for unassigned")
+  .option(
+    "--filtered <mode>",
+    `${FILTERED_LIST_MODES.join(" | ")}: filtered tickets (bulk, auto-reply, bounce, rate-limited) are hidden by default`,
+  )
   .option("--needs-summary", "Only closed tickets that still have no summary (not purged)")
   .option("--search <text>", "Part of the subject or the requester's address")
   .option("--limit <n>", "Page size, 1 to 100 (default 25; 100 with --all)")
@@ -657,6 +692,7 @@ const listCommand = new MailCommand("list")
         mine?: boolean;
         assignee?: string;
         needsSummary?: boolean;
+        filtered?: string;
         search?: string;
         limit?: string;
         cursor?: string;
@@ -673,6 +709,9 @@ const listCommand = new MailCommand("list")
       else if (o.assignee) {
         const id = await people.resolve(o.assignee, "--assignee", true);
         query.assignee = id === null ? "none" : o.assignee === "me" ? "me" : String(id);
+      }
+      if (o.filtered) {
+        query.filtered = enumOf(o.filtered, FILTERED_LIST_MODES, "--filtered") as FilteredListMode;
       }
       if (o.needsSummary) query.summary = "missing";
       if (o.search) query.q = o.search;
@@ -926,6 +965,118 @@ const escalateCommand = new MailCommand("escalate")
     });
   });
 
+const spamCommand = new MailCommand("spam")
+  .description(
+    "Mark a ticket spam and unassign it; --block address|domain also refuses the sender at delivery (default: none)",
+  )
+  .argument("<id>", "Ticket id")
+  .option("--block <what>", `${SPAM_BLOCK_CHOICES.join(" | ")} (default: none)`)
+  .option("--force", "Block the address of an unverified sender (its From address may be forged)")
+  .option("--reason <text>", "Why (up to 200 characters, kept on the block)")
+  .option(...jsonOption)
+  .action(async (rawId: string, _o, command: Command) => {
+    const o = optsOf<Common & { block?: string; reason?: string; force?: boolean }>(command);
+    await run(!!o.json, async () => {
+      const id = ticketIdOf(rawId);
+      const block = enumOf(o.block ?? "none", SPAM_BLOCK_CHOICES, "--block") as SpamBlockChoice;
+      if (o.reason && o.reason.trim().length > 200) {
+        throw new UsageError("--reason is limited to 200 characters.");
+      }
+      if (o.force && block !== "address") {
+        throw new UsageError("--force applies to --block address only.");
+      }
+      const res = await markMailTicketSpam(id, {
+        block,
+        ...(o.reason ? { reason: o.reason.trim() } : {}),
+        ...(o.force ? { force: true } : {}),
+      });
+      if (o.json) return printJson(res);
+      await printTicketAction("Marked spam", res.ticket, new People());
+      console.log(
+        res.block
+          ? `Blocked ${oneLine(res.block.kind)} ${oneLine(res.block.value)} (entry #${res.block.id}); mail from it is refused at delivery.`
+          : "No block added.",
+      );
+    });
+  });
+
+function renderBlock(e: BlocklistEntry): string {
+  return `#${e.id}  ${oneLine(e.kind)}  ${oneLine(e.value)}  ${oneLine(e.created_at)}${e.reason ? `  ${oneLine(e.reason)}` : ""}`;
+}
+
+const blocklistAddCommand = new MailCommand("add")
+  .description("Refuse mail from an address, or with --domain from a domain and its subdomains")
+  .argument("<value>", "An email address, or a domain with --domain")
+  .option("--domain", "Block the domain (and every subdomain) instead of one address")
+  .option("--reason <text>", "Why (up to 200 characters)")
+  .option(...jsonOption)
+  .action(async (value: string, _o, command: Command) => {
+    const o = optsOf<Common & { domain?: boolean; reason?: string }>(command);
+    await run(!!o.json, async () => {
+      if (!o.domain && !value.includes("@")) {
+        throw new UsageError(
+          `'${oneLine(value)}' is not an email address; to block a domain add --domain.`,
+        );
+      }
+      if (o.domain && value.includes("@") && !value.startsWith("@")) {
+        throw new UsageError("--domain takes a domain (spam.example), not an address.");
+      }
+      if (o.reason && o.reason.trim().length > 200) {
+        throw new UsageError("--reason is limited to 200 characters.");
+      }
+      const res = await addMailBlock({
+        kind: o.domain ? "domain" : "address",
+        value,
+        ...(o.reason ? { reason: o.reason.trim() } : {}),
+      });
+      if (o.json) return printJson(res);
+      console.log(`${res.created ? "Blocked" : "Already blocked"}: ${renderBlock(res.entry)}`);
+    });
+  });
+
+const blocklistRemoveCommand = new MailCommand("remove")
+  .description("Lift a block")
+  .argument("<id>", "Blocklist entry id (see 'blocklist')")
+  .option(...jsonOption)
+  .action(async (rawId: string, _o, command: Command) => {
+    const o = optsOf<Common>(command);
+    await run(!!o.json, async () => {
+      if (!/^\d{1,12}$/.test(rawId) || Number(rawId) < 1) {
+        throw new UsageError(`'${oneLine(rawId)}' is not a blocklist entry id.`);
+      }
+      const res = await removeMailBlock(Number(rawId));
+      if (o.json) return printJson(res);
+      console.log(`Removed: ${renderBlock(res.removed)}`);
+    });
+  });
+
+const blocklistCommand = new MailCommand("blocklist")
+  .description("List the sender blocklist; 'blocklist add' and 'blocklist remove' change it")
+  .option("--limit <n>", "Page size, 1 to 100 (default 50)")
+  .option("--cursor <cursor>", "The next_cursor of the previous page")
+  .option(...jsonOption)
+  .action(async (_o, command: Command) => {
+    const o = optsOf<Common & { limit?: string; cursor?: string }>(command);
+    await run(!!o.json, async () => {
+      if (
+        o.limit !== undefined &&
+        (!/^\d{1,3}$/.test(o.limit) || Number(o.limit) < 1 || Number(o.limit) > 100)
+      ) {
+        throw new UsageError("--limit must be a number from 1 to 100.");
+      }
+      const res = await listMailBlocklist({
+        ...(o.limit !== undefined ? { limit: Number(o.limit) } : {}),
+        ...(o.cursor ? { cursor: o.cursor } : {}),
+      });
+      if (o.json) return printJson(res);
+      if (res.entries.length === 0) console.log("The blocklist is empty.");
+      for (const e of res.entries) console.log(renderBlock(e));
+      if (res.next_cursor) console.log(`More: --cursor ${oneLine(res.next_cursor)}`);
+    });
+  })
+  .addCommand(blocklistAddCommand)
+  .addCommand(blocklistRemoveCommand);
+
 const queuesSetCommand = new MailCommand("set")
   .description("Create or change a queue (owner); only the options you give change")
   .argument("<tag>", "Queue tag")
@@ -935,6 +1086,10 @@ const queuesSetCommand = new MailCommand("set")
   .option("--members <users>", "Comma-separated users of the rotation (restarts it); '' empties it")
   .option("--escalation <user>", "The escalation owner: a user, or 'none'")
   .option("--restricted <bool>", "true or false: only owners see a restricted queue")
+  .option(
+    "--notify <bool>",
+    "true or false: false makes the queue quiet (no notice for new tickets)",
+  )
   .option(...jsonOption)
   .action(async (tag: string, _o, command: Command) => {
     const o = optsOf<
@@ -945,6 +1100,7 @@ const queuesSetCommand = new MailCommand("set")
         members?: string;
         escalation?: string;
         restricted?: string;
+        notify?: string;
       }
     >(command);
     await run(!!o.json, async () => {
@@ -956,6 +1112,9 @@ const queuesSetCommand = new MailCommand("set")
       if (o.restricted !== undefined) {
         body.restricted =
           enumOf(o.restricted, ["true", "false"] as const, "--restricted") === "true";
+      }
+      if (o.notify !== undefined) {
+        body.notify = enumOf(o.notify, ["true", "false"] as const, "--notify") === "true";
       }
       if (o.assignee !== undefined) {
         body.assignee_user_id = await people.resolve(o.assignee, "--assignee", true);
@@ -1122,6 +1281,8 @@ Examples:
   .addCommand(statusCommand)
   .addCommand(closeCommand)
   .addCommand(escalateCommand)
+  .addCommand(spamCommand)
+  .addCommand(blocklistCommand)
   .addCommand(queuesCommand)
   .addCommand(awayCommand)
   .addCommand(reprocessCommand);

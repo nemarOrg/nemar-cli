@@ -26,13 +26,14 @@
  * still polling in the background.
  */
 
-import { afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "bun";
 import { machineName } from "../src/lib/device-login";
 import "./setup";
+import { deleteSeededAccounts, rememberSeededAccount } from "./helpers/seeded-account-teardown";
 import { LIVE_TARGET_BLOCKED, TEST_CONFIG } from "./setup";
 
 const API = TEST_CONFIG.apiUrl;
@@ -120,6 +121,7 @@ async function seedWebUser(
     throw new Error(`seedWebUser failed (${r.status}): ${await r.text()}`);
   }
   const body = (await r.json()) as { user: { id: number } };
+  rememberSeededAccount(body);
   return { id: body.user.id };
 }
 
@@ -169,6 +171,12 @@ let configDir: string;
 
 beforeEach(() => {
   configDir = mkdtempSync(join(tmpdir(), "nemar-auth-device-cli-live-"));
+});
+
+// Best effort: tombstone this run's seeded accounts; the daily sweep is the backstop.
+afterAll(async () => {
+  if (PROD_GUARD_ACTIVE) return;
+  await deleteSeededAccounts(API, baseHeaders);
 });
 
 afterEach(() => {

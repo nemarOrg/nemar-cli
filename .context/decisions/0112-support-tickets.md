@@ -23,11 +23,11 @@ A queue is chosen by the local part of the address the mail was sent to (`suppor
 Plus tags other than a ticket reference are kept as tags.
 
 **Threading.**
-A reply from NEMAR is sent from `support@<domain>` with reply-to `support+t<ref>@<domain>`, so the requester's answer reaches the ticket by the plus address even if their client drops every header.
+A reply from NEMAR is sent from `support@<domain>` with reply-to `support+t<ref>@<domain>` (amended 2026-10-25: `support+t-<ref>@<domain>` for a three-word reference), so the requester's answer reaches the ticket by the plus address even if their client drops every header.
 Failing that, an inbound message threads by `In-Reply-To` and then `References` against stored Message-IDs.
-NEMAR sets its own `Message-ID`, `In-Reply-To` (the latest inbound message) and `References` (the chain) on every reply; the sender accepts only those three header names, with no control characters, so no value can add a header.
+NEMAR sets its own `Message-ID` (amended 2026-10-25: no longer; the mail provider sets it), `In-Reply-To` (the latest inbound message) and `References` (the chain) on every reply; the sender accepts only those three header names, with no control characters, so no value can add a header.
 The domain comes from `FROM_EMAIL`, so staging replies come from the staging subdomain and production from the apex, each an allowed sender of its own binding.
-A ticket reference is 50 random bits, not a secret: it routes, it does not authorize, and a message judged spam is never threaded.
+A ticket reference is 50 random bits (amended 2026-10-25: about 31 bits for a three-word reference), not a secret: it routes, it does not authorize, and a message judged spam is never threaded.
 
 **Spam.**
 A message whose sender fails DMARC, or that passes no authentication mechanism at all, is stored with status `spam`: kept, never assigned, never notified, and not replyable.
@@ -124,3 +124,36 @@ Production holds the inbound bucket binding from this change, but no routing rul
 
 - ADR 0110 (the mail platform and the raw record in R2).
 - Epic #1893, phase 3, issue #1896.
+
+## Amendment, 2026-10-25: replies do not set Message-ID
+
+The Cloudflare Email Service owns `Message-ID` (and `Date`, `MIME-Version`, `Content-Type`) and refuses the whole send for a caller-supplied one (`E_HEADER_NOT_ALLOWED`); line 28 above is superseded on that point.
+A reply now sets only `In-Reply-To` and `References`.
+The outgoing message row stores the provider's returned id as its `message_id` only when that is a valid RFC 5322 msg-id (brackets added when absent), otherwise NULL; Resend's opaque id is therefore NULL.
+The requester's answer threads by the reply-to plus address first, so a NULL id costs nothing.
+Every header handed to the Cloudflare binding is checked against its allowlist before the call and a refusal is a certain non-delivery.
+`header_message_id` stays in the reply response and is now nullable.
+
+## Amendment, 2026-10-25: mail errors avoid 502
+
+The website's same-origin proxy on Cloudflare Pages appears to replace the body of a 502 while keeping its status, so the client lost the `code` and showed a generic message.
+The mail routes therefore answer no gateway status: `reply_not_sent` is 422 (a definite refusal, nothing sent) and `reply_delivery_unknown` is 409 (the outcome is fixed for that key; do not retry), and `inbound_not_configured` is 409 instead of 503.
+Clients decide by `code`, never by status; an unexpected `internal` stays 500.
+
+## Amendment, 2026-10-25: three-word ticket references
+
+A ten-character base32 reference was hard for a person to read aloud or type, so new tickets get three lowercase words joined by dashes (`amber-falcon-river`), chosen with `crypto.getRandomValues` and rejection sampling from the EFF Short Wordlist #1 (CC BY 3.0; 1,295 words once the one hyphenated entry is dropped), about 31 bits.
+The reply-to plus tag is `support+t-<ref>@<domain>`; the legacy `support+t<ten base32>@` form still parses and still threads, because existing tickets keep their references and mail in flight carries them.
+This changes the reference size stated under Threading above from 50 bits to about 31 for new tickets; the reference still only routes and never authorizes, and the unique index on `ref` is the only collision check, so creating a ticket retries up to five times with a fresh reference when that index refuses one.
+Migration 0109 rebuilds `mail_tickets` with a CHECK that accepts either form.
+It copies the five cascading child tables aside and restores them, because dropping the parent cascades their deletes even under `PRAGMA defer_foreign_keys`, which defers only the violation check.
+
+## Amendment, 2026-10-25: unread is per admin
+
+The Mail badge counted only open tickets assigned to the viewer, so new unassigned mail showed nothing.
+A ticket is now unread for an admin when it has an incoming message newer than that admin's marker, or the admin has no marker and the ticket has any incoming message.
+Outgoing replies and notes never make a ticket unread.
+The marker is a row in `mail_ticket_reads` (migration 0110), written when the admin opens the ticket (`GET /admin/mail/tickets/:id`), after the visibility check and never fatally; one admin opening a ticket marks nothing for another.
+The list carries `unread` per ticket, and `GET /admin/mail/unread-count` counts the unread tickets that are visible to the caller (the list's own predicate) and not closed or spam.
+The rows are removed by `mailReleaseStatements` with the rest of an admin's mail references.
+`mail_ticket_reads` is a sixth child table of `mail_tickets`, so any future rebuild of that table must back it up and restore it as 0109 does for the others.

@@ -31,9 +31,13 @@ import {
   duplicateReportSchema,
 } from "../../../shared/contract/index.js";
 import type {
+  AddBlockRequest,
+  AddBlockResponse,
   AssignRequest,
   Availability,
   EscalateRequest,
+  ListBlocklistQuery,
+  ListBlocklistResponse,
   ListQueuesResponse,
   ListTicketsQuery,
   ListTicketsResponse,
@@ -42,10 +46,13 @@ import type {
   NoteResponse,
   PutAvailabilityRequest,
   PutQueueRequest,
+  RemoveBlockResponse,
   ReplyRequest,
   ReplyResponse,
   ReprocessResponse,
   SettableStatus,
+  SpamRequest,
+  SpamResponse,
   SummaryRequest,
   SummaryResponse,
   TicketActionResponse,
@@ -2748,6 +2755,33 @@ export async function escalateMailTicket(
 ): Promise<TicketActionResponse> {
   const body: EscalateRequest = reason ? { reason } : {};
   return request(`/admin/mail/tickets/${id}/escalate`, post(body), true);
+}
+
+/** `POST /admin/mail/tickets/:id/spam`: mark spam, unassign, and optionally block the sender. */
+export async function markMailTicketSpam(id: number, body: SpamRequest): Promise<SpamResponse> {
+  return request(`/admin/mail/tickets/${id}/spam`, post(body), true);
+}
+
+/** `GET /admin/mail/blocklist`: one page of the sender blocklist, newest first. */
+export async function listMailBlocklist(
+  query: ListBlocklistQuery = {},
+): Promise<ListBlocklistResponse> {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(query)) {
+    if (value !== undefined && value !== "") params.set(key, String(value));
+  }
+  const qs = params.toString();
+  return request<ListBlocklistResponse>(`/admin/mail/blocklist${qs ? `?${qs}` : ""}`, {}, true);
+}
+
+/** `POST /admin/mail/blocklist`: block an address or a domain (idempotent). */
+export async function addMailBlock(body: AddBlockRequest): Promise<AddBlockResponse> {
+  return request("/admin/mail/blocklist", post(body), true);
+}
+
+/** `DELETE /admin/mail/blocklist/:id`. */
+export async function removeMailBlock(id: number): Promise<RemoveBlockResponse> {
+  return request(`/admin/mail/blocklist/${id}`, { method: "DELETE" }, true);
 }
 
 /** `GET /admin/mail/queues`. */

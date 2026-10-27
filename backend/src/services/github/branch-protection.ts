@@ -81,7 +81,7 @@ export async function applyTagProtection(repo: string, pat: string): Promise<voi
 }
 
 /**
- * NEMAR GitHub App id (`nemar-publish-bot`) and its bot user, as GitHub names the author of a pull
+ * NEMAR GitHub App id (`nemar-bot`) and its bot user, as GitHub names the author of a pull
  * request the App opens, defined once in `shared/nemar-app.ts` (the pure machine-clean rule of the
  * automatic re-pull reads them, and nothing in `shared/` imports the Worker) and re-exported here,
  * where the Worker's code reads them from. Required status checks are pinned to the App id so only

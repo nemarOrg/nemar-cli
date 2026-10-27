@@ -7,7 +7,7 @@
  * already stored short-circuits to `duplicate`, and a concurrent second insert that loses the
  * unique constraint is re-checked and reported as `duplicate` too.
  *
- * Threading finds a candidate ticket by the `+t<ref>` plus tag of the recipient, then by
+ * Threading finds a candidate ticket by the `+t-<ref>` plus tag (legacy `+t<ten base32>` too) of the recipient, then by
  * `In-Reply-To` and `References` matched against stored Message-IDs (the oldest holder of an id
  * wins). Finding a candidate is not permission to append to it. The message is appended only when
  * ALL of these hold; otherwise it opens a new ticket whose `created` event records the
@@ -25,14 +25,17 @@
  */
 
 import PostalMime from "postal-mime";
+import type { FilterReason } from "../../../shared/contract/mail-admin";
 import { htmlToText } from "../lib/html-to-text";
 import { clampUtf8Bytes } from "../lib/utf8";
+import { classifyAutomatedMail } from "./mail-screening";
 import {
   FALLBACK_QUEUE_TAG,
   isEligibleAssignee,
   isRestrictedQueue,
   resolveAssignee,
 } from "./ticket-assignment";
+import { TICKET_WORDS } from "./ticket-words";
 
 /** The stored body is clamped to this many UTF-8 bytes. */
 export const TEXT_BODY_MAX_BYTES = 64 * 1024;
@@ -78,23 +81,48 @@ export interface IngestResult {
   status: string;
   assigneeUserId: number | null;
   spam: boolean;
+  /**
+   * Why the message was filed quietly (ADR 0113), else null. For `created` it is the new ticket's
+   * `filtered`; for `threaded` it is why this message sent no notice and changed nothing.
+   */
+  filtered: FilterReason | null;
+  /**
+   * An unfiltered message threaded into a ticket that was filtered until now, so the ticket is
+   * visible again and worth an admin notice (ADR 0113).
+   */
+  unfiltered?: boolean;
 }
 
-/** A ticket reference as it appears after the `+` of a plus address: `t` and ten base32 characters. */
-const REF_TAG = /^t([a-z2-7]{10})$/;
-const BASE32 = "abcdefghijklmnopqrstuvwxyz234567";
+/**
+ * A ticket reference as it appears after the `+` of a plus address: `t-` and three lowercase words
+ * (`t-amber-falcon-river`), or the legacy form, `t` and ten base32 characters. Parsing does not
+ * check the words against the list: the lookup is by exact stored value, and a legacy ticket keeps
+ * its legacy reference for good.
+ */
+const REF_TAG = /^(?:t([a-z2-7]{10})|t-([a-z]{1,16}-[a-z]{1,16}-[a-z]{1,16}))$/;
+/** The legacy stored reference: ten base32 characters, no `t`. */
+const LEGACY_REF = /^[a-z2-7]{10}$/;
+/** Uniform random integer in [0, n) by rejection sampling over 16 bits, so there is no modulo bias. */
+function randomBelow(n: number): number {
+  const limit = Math.floor(0x10000 / n) * n;
+  const buf = new Uint16Array(1);
+  for (;;) {
+    crypto.getRandomValues(buf);
+    if (buf[0] < limit) return buf[0] % n;
+  }
+}
 
-/** A new short random lowercase base32 ticket reference (50 bits). */
+/** A new ticket reference: three words from {@link TICKET_WORDS} joined by `-` (about 31 bits). */
 export function newTicketRef(): string {
-  const bytes = crypto.getRandomValues(new Uint8Array(10));
-  let ref = "";
-  for (const b of bytes) ref += BASE32[b & 31];
-  return ref;
+  return [0, 1, 2].map(() => TICKET_WORDS[randomBelow(TICKET_WORDS.length)]).join("-");
 }
 
-/** The plus-address token that threads a reply to ticket `ref`: `support+t<ref>@domain`. */
+/**
+ * The plus-address token that threads a reply to ticket `ref`: `support+t-<ref>@domain`, or
+ * `support+t<ref>@domain` for a legacy reference.
+ */
 export function ticketPlusTag(ref: string): string {
-  return `t${ref}`;
+  return LEGACY_REF.test(ref) ? `t${ref}` : `t-${ref}`;
 }
 
 const domainOf = (address: string): string => address.split("@")[1]?.toLowerCase() ?? "";
@@ -226,17 +254,19 @@ interface TicketHead {
   assignee_user_id: number | null;
   requester_email: string;
   purged_at: string | null;
+  filtered: FilterReason | null;
 }
 
 const HEAD_COLUMNS =
-  "t.id, t.status, t.restricted, t.queue_tag, t.excluded_user_id, t.assignee_user_id, t.requester_email, t.purged_at";
+  "t.id, t.status, t.restricted, t.queue_tag, t.excluded_user_id, t.assignee_user_id, t.requester_email, t.purged_at, t.filtered";
 
 async function findByRef(db: D1Database, plus: string): Promise<TicketHead | null> {
   const m = REF_TAG.exec(plus);
-  if (!m) return null;
+  const ref = m?.[1] ?? m?.[2];
+  if (!ref) return null;
   return db
     .prepare(`SELECT ${HEAD_COLUMNS} FROM mail_tickets t WHERE t.ref = ?`)
-    .bind(m[1])
+    .bind(ref)
     .first<TicketHead>();
 }
 
@@ -296,11 +326,16 @@ async function accountForAddress(db: D1Database, email: string): Promise<number 
 async function existingByRawKey(db: D1Database, rawKey: string): Promise<IngestResult | null> {
   const existing = await db
     .prepare(
-      `SELECT t.id, t.status, t.assignee_user_id FROM mail_messages m
+      `SELECT t.id, t.status, t.assignee_user_id, t.filtered FROM mail_messages m
          JOIN mail_tickets t ON t.id = m.ticket_id WHERE m.raw_key = ?`,
     )
     .bind(rawKey)
-    .first<{ id: number; status: string; assignee_user_id: number | null }>();
+    .first<{
+      id: number;
+      status: string;
+      assignee_user_id: number | null;
+      filtered: FilterReason | null;
+    }>();
   if (!existing) return null;
   return {
     outcome: "duplicate",
@@ -308,6 +343,7 @@ async function existingByRawKey(db: D1Database, rawKey: string): Promise<IngestR
     status: existing.status,
     assigneeUserId: existing.assignee_user_id,
     spam: existing.status === "spam",
+    filtered: existing.filtered,
   };
 }
 
@@ -318,11 +354,12 @@ async function existingByRawKey(db: D1Database, rawKey: string): Promise<IngestR
 export async function ingestInboundMessage(
   db: D1Database,
   input: InboundTicketInput,
+  options: IngestOptions = {},
 ): Promise<IngestResult> {
   const already = await existingByRawKey(db, input.rawKey);
   if (already) return already;
   try {
-    return await ingestNew(db, input);
+    return await ingestNew(db, input, options);
   } catch (error) {
     // A concurrent ingest of the same key won the unique raw_key constraint and this batch
     // rolled back whole; that is a duplicate, not a failure.
@@ -332,7 +369,36 @@ export async function ingestInboundMessage(
   }
 }
 
-async function ingestNew(db: D1Database, input: InboundTicketInput): Promise<IngestResult> {
+/** `newRef` replaces the reference source; a test uses it to force a collision. */
+export interface IngestOptions {
+  newRef?: () => string;
+  /**
+   * Inbound messages one sender address may send in the hour before this one; at or above it the
+   * message is filed as `rate_limited`. Unset means no cap (a reprocess of an old message must not
+   * be judged against today's traffic).
+   */
+  senderHourlyCap?: number;
+}
+
+/** The window of the per-sender cap. */
+const SENDER_WINDOW_MS = 60 * 60 * 1000;
+
+/** Fresh references tried when one collides with an existing ticket's, before giving up. */
+const REF_ATTEMPTS = 5;
+
+/** Whether a failed batch lost the unique index on the ticket reference (and so wrote nothing). */
+function isRefCollision(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    /UNIQUE constraint failed: mail_tickets\.ref|idx_mail_tickets_ref/.test(error.message)
+  );
+}
+
+async function ingestNew(
+  db: D1Database,
+  input: InboundTicketInput,
+  options: IngestOptions,
+): Promise<IngestResult> {
   const parsed = await PostalMime.parse(input.raw);
   const fromAddr = singleLine(
     clampUtf8Bytes(
@@ -342,6 +408,30 @@ async function ingestNew(db: D1Database, input: InboundTicketInput): Promise<Ing
   );
   const auth = parseAuthResults(parsed.headers, fromAddr);
   const spam = isSpam(auth);
+  // Spam wins over every filter: a spam ticket is kept, never assigned, and listed under `spam`.
+  let filtered: FilterReason | null = spam
+    ? null
+    : classifyAutomatedMail(parsed.headers, input.envelopeFrom, fromAddr);
+  if (!spam && filtered === null && options.senderHourlyCap !== undefined && fromAddr !== "") {
+    // Two lanes (ADR 0113): a message is counted against mail of its own kind from the address.
+    // DMARC-passing mail is capped against DMARC-passing mail, anything else (not spam, so it
+    // passed an aligned check without DMARC) against the rest. A forger, whose mail fails DMARC,
+    // can only fill the second lane and never touches the first.
+    const lane = auth.dmarc === "pass" ? "=" : "<>";
+    const recent = await db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM mail_messages
+          WHERE from_addr = ? AND direction = 'in' AND dmarc ${lane} 'pass'
+            AND created_at > ? AND created_at <= ?`,
+      )
+      .bind(
+        fromAddr,
+        sqlDate(new Date(input.receivedAt.getTime() - SENDER_WINDOW_MS)),
+        sqlDate(input.receivedAt),
+      )
+      .first<{ n: number }>();
+    if ((recent?.n ?? 0) >= options.senderHourlyCap) filtered = "rate_limited";
+  }
 
   const envelopeTo = input.envelopeTo || parsed.to?.[0]?.address || "";
   const { base, plus } = splitRecipient(envelopeTo);
@@ -450,6 +540,49 @@ async function ingestNew(db: D1Database, input: InboundTicketInput): Promise<Ing
         )
         .bind(created, created, created, target.id),
     ];
+    // A genuine message (it passed the classifier, the cap and the participant check above)
+    // makes a filtered ticket visible again, and the event keeps why it had been hidden.
+    // An open ticket nobody holds goes to its queue's holder, as a new ticket would; the UPDATE
+    // does it in the same statement, so only the reply that actually un-hides assigns.
+    const unfiltering = filtered === null && target.filtered !== null;
+    let unfilterIndex = -1;
+    let unfilterAssignee: number | null = null;
+    if (unfiltering) {
+      if (target.status === "open" && target.assignee_user_id === null) {
+        unfilterAssignee = await resolveAssignee(
+          db,
+          target.queue_tag,
+          { excludedUserId: target.excluded_user_id, restricted: target.restricted === 1 },
+          input.receivedAt,
+        );
+      }
+      unfilterIndex = statements.length;
+      statements.push(
+        db
+          .prepare(
+            "UPDATE mail_tickets SET filtered = NULL, assignee_user_id = COALESCE(assignee_user_id, CASE WHEN status = 'open' THEN ? END) WHERE id = ? AND filtered IS NOT NULL AND purged_at IS NULL",
+          )
+          .bind(unfilterAssignee, target.id),
+        db
+          .prepare(
+            "INSERT INTO mail_ticket_events (ticket_id, kind, actor_user_id, detail, created_at) SELECT ?, 'unfiltered', NULL, ?, ? WHERE changes() > 0",
+          )
+          .bind(target.id, JSON.stringify({ from: target.filtered, reason: "reply" }), created),
+      );
+      if (unfilterAssignee !== null) {
+        statements.push(
+          db
+            .prepare(
+              "INSERT INTO mail_ticket_events (ticket_id, kind, actor_user_id, detail, created_at) SELECT ?, 'assigned', NULL, ?, ? WHERE changes() > 0",
+            )
+            .bind(
+              target.id,
+              JSON.stringify({ to: unfilterAssignee, reason: "unfiltered" }),
+              created,
+            ),
+        );
+      }
+    }
     for (const tag of tags) {
       statements.push(
         db
@@ -461,12 +594,13 @@ async function ingestNew(db: D1Database, input: InboundTicketInput): Promise<Ing
       );
     }
     let status = target.status;
-    let assignee = target.assignee_user_id;
+    let assignee = target.assignee_user_id ?? (unfiltering ? unfilterAssignee : null);
     // A reply to a closed ticket reopens it, and one to a pending ticket (waiting on the
     // requester) puts it back with the team. Escalated tickets keep their status. The holder
     // is kept only if still eligible for THIS ticket (restricted, excluded, role, status);
     // otherwise the queue's strategy picks again, else the pool.
-    if (status === "closed" || status === "pending") {
+    // A filtered message (ADR 0113) is appended and changes nothing else.
+    if (filtered === null && (status === "closed" || status === "pending")) {
       const keep =
         assignee !== null &&
         (await isEligibleAssignee(db, assignee, target.restricted === 1, target.excluded_user_id));
@@ -514,6 +648,9 @@ async function ingestNew(db: D1Database, input: InboundTicketInput): Promise<Ing
       status = "open";
     }
     const results = await db.batch(statements);
+    // Announced only by the reply whose UPDATE really cleared the mark: of two concurrent
+    // genuine replies, one wins it.
+    const unfilteredNow = unfilterIndex >= 0 && (results[unfilterIndex]?.meta?.changes ?? 0) > 0;
     if ((results[0]?.meta?.changes ?? 0) > 0) {
       return {
         outcome: "threaded",
@@ -521,6 +658,8 @@ async function ingestNew(db: D1Database, input: InboundTicketInput): Promise<Ing
         status,
         assigneeUserId: assignee,
         spam: false,
+        filtered,
+        unfiltered: unfilteredNow,
       };
     }
     // The purge claimed the ticket after it was loaded: every gated statement wrote nothing, so
@@ -530,62 +669,82 @@ async function ingestNew(db: D1Database, input: InboundTicketInput): Promise<Ing
 
   const requesterUserId =
     !spam && auth.dmarc === "pass" ? await accountForAddress(db, fromAddr) : null;
-  const assignee = spam
-    ? null
-    : await resolveAssignee(db, queueTag, { restricted: queueRestricted }, input.receivedAt);
+  const assignee =
+    spam || filtered !== null
+      ? null
+      : await resolveAssignee(db, queueTag, { restricted: queueRestricted }, input.receivedAt);
   const status = spam ? "spam" : "open";
-  const ref = newTicketRef();
-
-  const statements: D1PreparedStatement[] = [
-    db
-      .prepare(
-        `INSERT INTO mail_tickets (ref, queue_tag, restricted, status, assignee_user_id,
+  const buildStatements = (ref: string): D1PreparedStatement[] => {
+    const statements: D1PreparedStatement[] = [
+      db
+        .prepare(
+          `INSERT INTO mail_tickets (ref, queue_tag, restricted, status, assignee_user_id,
             requester_email, requester_user_id, subject, created_at, updated_at, last_message_at,
-            last_activity_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .bind(
-        ref,
-        queueTag,
-        queueRestricted ? 1 : 0,
-        status,
-        assignee,
-        fromAddr,
-        requesterUserId,
-        subject,
-        created,
-        created,
-        created,
-        created,
-      ),
-    messageInsert("(SELECT id FROM mail_tickets WHERE ref = ?)", [ref]),
-    db
-      .prepare(
-        `INSERT INTO mail_ticket_events (ticket_id, kind, actor_user_id, detail, created_at)
-         VALUES ((SELECT id FROM mail_tickets WHERE ref = ?), 'created', NULL, ?, ?)`,
-      )
-      .bind(ref, JSON.stringify({ queue: queueTag, spam, ...(declined ?? {}) }), created),
-  ];
-  if (assignee !== null) {
-    statements.push(
+            last_activity_at, filtered)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .bind(
+          ref,
+          queueTag,
+          queueRestricted ? 1 : 0,
+          status,
+          assignee,
+          fromAddr,
+          requesterUserId,
+          subject,
+          created,
+          created,
+          created,
+          created,
+          filtered,
+        ),
+      messageInsert("(SELECT id FROM mail_tickets WHERE ref = ?)", [ref]),
       db
         .prepare(
           `INSERT INTO mail_ticket_events (ticket_id, kind, actor_user_id, detail, created_at)
+         VALUES ((SELECT id FROM mail_tickets WHERE ref = ?), 'created', NULL, ?, ?)`,
+        )
+        .bind(
+          ref,
+          JSON.stringify({ queue: queueTag, spam, filtered, ...(declined ?? {}) }),
+          created,
+        ),
+    ];
+    if (assignee !== null) {
+      statements.push(
+        db
+          .prepare(
+            `INSERT INTO mail_ticket_events (ticket_id, kind, actor_user_id, detail, created_at)
            VALUES ((SELECT id FROM mail_tickets WHERE ref = ?), 'assigned', NULL, ?, ?)`,
-        )
-        .bind(ref, JSON.stringify({ to: assignee, reason: "queue" }), created),
-    );
+          )
+          .bind(ref, JSON.stringify({ to: assignee, reason: "queue" }), created),
+      );
+    }
+    for (const tag of tags) {
+      statements.push(
+        db
+          .prepare(
+            "INSERT OR IGNORE INTO mail_ticket_tags (ticket_id, tag) VALUES ((SELECT id FROM mail_tickets WHERE ref = ?), ?)",
+          )
+          .bind(ref, tag),
+      );
+    }
+    return statements;
+  };
+
+  // The reference is about 31 bits, so a collision is rare but possible. The batch is atomic: a
+  // collision on the unique index writes nothing, and the retry rebuilds every statement around a
+  // fresh reference, so no message, event or tag is ever inserted twice.
+  let ref = "";
+  for (let attempt = 1; ; attempt++) {
+    ref = (options.newRef ?? newTicketRef)();
+    try {
+      await db.batch(buildStatements(ref));
+      break;
+    } catch (error) {
+      if (!isRefCollision(error) || attempt >= REF_ATTEMPTS) throw error;
+    }
   }
-  for (const tag of tags) {
-    statements.push(
-      db
-        .prepare(
-          "INSERT OR IGNORE INTO mail_ticket_tags (ticket_id, tag) VALUES ((SELECT id FROM mail_tickets WHERE ref = ?), ?)",
-        )
-        .bind(ref, tag),
-    );
-  }
-  await db.batch(statements);
   const row = await db
     .prepare("SELECT id FROM mail_tickets WHERE ref = ?")
     .bind(ref)
@@ -596,6 +755,7 @@ async function ingestNew(db: D1Database, input: InboundTicketInput): Promise<Ing
     status,
     assigneeUserId: assignee,
     spam,
+    filtered,
   };
 }
 

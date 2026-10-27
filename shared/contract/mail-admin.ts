@@ -2,7 +2,9 @@
  * The wire shapes of the support-ticket admin routes (epic #1893 phase 3b, ADR 0112):
  *
  *   GET  /admin/mail/tickets                    list, filtered, keyset-paged
- *   GET  /admin/mail/tickets/:id                one ticket: messages, tags, events
+ *   GET  /admin/mail/tickets/:id                one ticket: messages, tags, events (opening it marks it
+ *                                               read for the caller)
+ *   GET  /admin/mail/unread-count               how many tickets have mail the caller has not read
  *   POST /admin/mail/tickets/:id/reply          send a reply to the requester from support@
  *   POST /admin/mail/tickets/:id/note           an internal note
  *   POST /admin/mail/tickets/:id/assign         assign or unassign
@@ -10,6 +12,10 @@
  *                                               restricted flag no longer matches its queue is 409
  *                                               `restriction_mismatch`)
  *   POST /admin/mail/tickets/:id/escalate       hand to the escalation owner
+ *   POST /admin/mail/tickets/:id/spam           mark spam, unassign, and optionally block the sender
+ *   GET  /admin/mail/blocklist                  the sender blocklist, keyset-paged
+ *   POST /admin/mail/blocklist                  add an address or domain (idempotent)
+ *   DELETE /admin/mail/blocklist/:id            remove an entry
  *   GET  /admin/mail/queues                     queues the caller may see
  *   PUT  /admin/mail/queues/:tag                (owner) create or change a queue
  *   GET  /admin/mail/availability               the caller's own away window
@@ -39,6 +45,26 @@ export type SettableStatus = (typeof SETTABLE_STATUSES)[number];
 export const QUEUE_STRATEGIES = ["fixed", "round_robin", "pool"] as const;
 export type QueueStrategy = (typeof QUEUE_STRATEGIES)[number];
 
+/**
+ * Why a ticket is filed quietly (ADR 0113): mail that is automatic or bulk is not assigned, not
+ * announced and hidden from the default list and the unread badge. `rate_limited` is a sender over
+ * the hourly cap. Spam wins: a spam ticket has none.
+ */
+export const FILTER_REASONS = ["bulk", "auto_reply", "bounce", "rate_limited"] as const;
+export type FilterReason = (typeof FILTER_REASONS)[number];
+
+/** The `filtered` option of the list: `only` the filtered tickets, or `include` them among the rest. */
+export const FILTERED_LIST_MODES = ["only", "include"] as const;
+export type FilteredListMode = (typeof FILTERED_LIST_MODES)[number];
+
+/** What a blocklist entry covers: one address, or a domain and every subdomain of it. */
+export const BLOCK_KINDS = ["address", "domain"] as const;
+export type BlockKind = (typeof BLOCK_KINDS)[number];
+
+/** What the spam route blocks, derived from the ticket's requester address. */
+export const SPAM_BLOCK_CHOICES = ["address", "domain", "none"] as const;
+export type SpamBlockChoice = (typeof SPAM_BLOCK_CHOICES)[number];
+
 export type MailErrorCode =
   | "bad_request"
   | "not_found"
@@ -59,6 +85,8 @@ export type MailErrorCode =
   | "summary_has_address"
   | "ticket_purged"
   | "inbound_not_configured"
+  | "block_not_allowed"
+  | "block_sender_unverified"
   | "internal";
 
 export interface MailErrorBody {
@@ -68,6 +96,11 @@ export interface MailErrorBody {
 
 export interface TicketSummary {
   id: number;
+  /**
+   * The ticket's reference: three lowercase words joined by dashes (`amber-falcon-river`) for a
+   * ticket created from 2026-10-25, or ten lowercase base32 characters (`wphdw6vce6`) for an older
+   * one. Never rewritten. Display it as is.
+   */
   ref: string;
   queue_tag: string;
   restricted: boolean;
@@ -83,9 +116,39 @@ export interface TicketSummary {
   has_summary: boolean;
   /** The retention purge has run on this ticket: its messages are gone and its address and subject are empty. */
   purged: boolean;
+  /**
+   * The caller has not read this ticket: it has an incoming message newer than the last one the
+   * caller saw when opening it, or the caller never opened it and it has any incoming message.
+   * Per admin: another admin opening the ticket changes nothing here. Outgoing replies and notes
+   * never make a ticket unread. Opening it (`GET /admin/mail/tickets/:id`) marks it read. Computed
+   * by the list route; every other response carries false (the detail has just marked it read).
+   */
+  unread: boolean;
+  /**
+   * Why the ticket was filed quietly, else null. Set when the ticket is created. A filtered ticket
+   * stays `open` but is not assigned and nobody was told of it. It is cleared (with an
+   * `unfiltered` event naming the previous reason) when a person replies, adds a note, assigns,
+   * sets a status or escalates, when a genuine (unfiltered) message from a participant threads
+   * into it, and when it is marked spam. Setting a summary does not clear it.
+   */
+  filtered: FilterReason | null;
 }
 
-/** Query of the list route. `status` absent hides spam and closed tickets. */
+/**
+ * `GET /admin/mail/unread-count`: the number behind the Mail badge. Counts the tickets the caller
+ * may see (the visibility of the list, so a restricted queue never counts for a non-owner and a
+ * ticket that excludes the caller never counts) that are not closed or spam and are unread for the
+ * caller.
+ */
+export interface UnreadCountResponse {
+  count: number;
+}
+
+/**
+ * Query of the list route. `status` absent hides spam and closed tickets. `filtered` absent hides
+ * filtered ones, but only in the default view: giving `status`, `assignee` or `q`, or
+ * `summary=missing` (which lists every closed ticket), shows them.
+ */
 export interface ListTicketsQuery {
   status?: TicketStatus;
   queue?: string;
@@ -98,6 +161,8 @@ export interface ListTicketsQuery {
    * (the default hiding of closed tickets does not apply). The queue of tickets to summarize.
    */
   summary?: "missing";
+  /** `only` lists just the filtered tickets, `include` lists them with the others. */
+  filtered?: FilteredListMode;
   /** The `next_cursor` of the previous page. */
   cursor?: string;
   /** 1 to 100, default 25. */
@@ -154,7 +219,7 @@ export interface TicketDetail {
  * agent that can retry after a lost response SHOULD. The key is unique per ticket and stored
  * before anything is sent: a repeat of a reply that was sent returns the same response without
  * sending; a repeat while the first is still being sent is 409 `reply_in_progress`; a repeat of a
- * reply whose outcome was unknown is 502 `reply_delivery_unknown` again and is never re-sent; a
+ * reply whose outcome was unknown is 409 `reply_delivery_unknown` again and is never re-sent; a
  * reply that certainly sent nothing (`reply_not_sent`) releases its key so the retry can go. Without
  * a key every request sends.
  */
@@ -168,8 +233,13 @@ export interface ReplyResponse {
    * ticket holds no trace of it. Replaying that key then answers 409 `ticket_purged`.
    */
   message_id: number;
-  /** The Message-ID the reply went out under. */
-  header_message_id: string;
+  /**
+   * The Message-ID the mail provider reported for the sent reply, or null. It is set only when the
+   * provider returned a valid RFC 5322 msg-id (the Cloudflare binding does; Resend's opaque id is
+   * not one). The Worker no longer chooses the Message-ID: the provider controls it. Threading of
+   * the requester's answer never depends on this value.
+   */
+  header_message_id: string | null;
   status: TicketStatus;
 }
 
@@ -208,6 +278,71 @@ export interface AssignRequest {
 export interface StatusRequest {
   status: SettableStatus;
 }
+/**
+ * `POST /admin/mail/tickets/:id/spam`: sets the status to `spam`, unassigns, records an event with
+ * the caller, and blocks the requester's address (`address`) or its domain (`domain`) unless
+ * `block` is `none`; a block from a restricted ticket needs an owner (403 `forbidden`). Same visibility as every other ticket route (404 when hidden), 409
+ * `ticket_purged` on a purged ticket, 422 `block_not_allowed` when the address or domain cannot be
+ * blocked (ours, a shared mailbox provider's, or a public suffix), 422 `block_sender_unverified`
+ * when the sender's first message did not pass DMARC (see `force`). The block and the status
+ * change are one transaction. Re-blocking a value returns the stored entry.
+ */
+export interface SpamRequest {
+  block: SpamBlockChoice;
+  reason?: string;
+  /**
+   * Block the address of a sender that was not verified (DMARC did not pass), whose From address
+   * may be forged. Without it that is 422 `block_sender_unverified`; a domain block of such a
+   * sender is refused even with it.
+   */
+  force?: boolean;
+}
+export interface SpamResponse {
+  ticket: TicketSummary;
+  /** The entry that now covers the requester, or null for `none`. */
+  block: BlocklistEntry | null;
+}
+
+export interface BlocklistEntry {
+  id: number;
+  kind: BlockKind;
+  /** Lowercased: an address, or a domain without a leading `@`. */
+  value: string;
+  reason: string | null;
+  created_by: number;
+  created_at: string;
+}
+export interface ListBlocklistQuery {
+  /** The `next_cursor` of the previous page. */
+  cursor?: string;
+  /** 1 to 100, default 50. */
+  limit?: number;
+}
+/** Newest first (by id). */
+export interface ListBlocklistResponse {
+  entries: BlocklistEntry[];
+  next_cursor: string | null;
+}
+/**
+ * A block refuses mail at delivery: the sender gets a rejection and nothing is stored. A domain
+ * block covers the domain and its subdomains. Not blockable: our own domain and its subdomains,
+ * and the domains of shared mailbox providers (an address on one is fine); 422 `block_not_allowed`.
+ * Malformed values are 400 `bad_request`. `reason` is up to 200 characters.
+ */
+export interface AddBlockRequest {
+  kind: BlockKind;
+  value: string;
+  reason?: string;
+}
+/** `created` is false when the value was already blocked (the stored entry is returned). */
+export interface AddBlockResponse {
+  entry: BlocklistEntry;
+  created: boolean;
+}
+export interface RemoveBlockResponse {
+  removed: BlocklistEntry;
+}
+
 export interface EscalateRequest {
   reason?: string;
 }
@@ -226,6 +361,11 @@ export interface MailQueue {
   escalation_user_id: number | null;
   /** Tickets in this queue that are not closed and that the caller may see. */
   open_tickets: number;
+  /**
+   * Whether a new ticket in this queue sends the admins a notice. False makes the queue quiet:
+   * tickets are still created, assigned and listed, and escalation notices still go out.
+   */
+  notify: boolean;
 }
 
 export interface ListQueuesResponse {
@@ -246,6 +386,8 @@ export interface PutQueueRequest {
   backup_user_id?: number | null;
   rr_members?: number[];
   escalation_user_id?: number | null;
+  /** See {@link MailQueue.notify}. Default true for a new queue. */
+  notify?: boolean;
 }
 
 export interface Availability {

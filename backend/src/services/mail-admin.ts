@@ -8,6 +8,8 @@
  */
 
 import type {
+  FilterReason,
+  FilteredListMode,
   MailErrorCode,
   SettableStatus,
   TicketEvent,
@@ -32,7 +34,7 @@ import { ticketPlusTag } from "./tickets";
 
 export class MailAdminError extends Error {
   constructor(
-    readonly status: 400 | 403 | 404 | 409 | 422 | 502 | 503,
+    readonly status: 400 | 403 | 404 | 409 | 422,
     readonly code: MailErrorCode,
     message: string,
   ) {
@@ -65,9 +67,13 @@ export interface TicketRow {
   summary_author_user_id: number | null;
   summarized_at: string | null;
   purged_at: string | null;
+  filtered: FilterReason | null;
 }
 
-export function toSummary(row: TicketRow): TicketSummary {
+/** `TicketRow` plus the `unread` column the list query adds (0 or 1). */
+export type TicketListRow = TicketRow & { unread?: number };
+
+export function toSummary(row: TicketListRow): TicketSummary {
   return {
     id: row.id,
     ref: row.ref,
@@ -83,16 +89,79 @@ export function toSummary(row: TicketRow): TicketSummary {
     last_message_at: row.last_message_at,
     has_summary: row.summary !== null,
     purged: row.purged_at !== null,
+    unread: row.unread === 1,
+    filtered: row.filtered ?? null,
   };
 }
 
+/**
+ * SQL for "ticket `alias` has mail `viewer` has not read": an inbound message above the viewer's
+ * marker, or any inbound message when there is no marker. Outgoing replies and notes never count.
+ * One bind, the viewer id.
+ */
+function unreadSql(alias: string, viewerId: number): { sql: string; binds: unknown[] } {
+  return {
+    sql: `EXISTS (SELECT 1 FROM mail_messages m
+                   WHERE m.ticket_id = ${alias}.id AND m.direction = 'in'
+                     AND m.id > COALESCE((SELECT r.read_message_id FROM mail_ticket_reads r
+                                           WHERE r.user_id = ? AND r.ticket_id = ${alias}.id), 0))`,
+    binds: [viewerId],
+  };
+}
+
+/**
+ * Tickets the viewer may see (the same predicate as the list), that are not closed or spam, and
+ * that have mail the viewer has not read: the Mail badge. Filtered tickets (ADR 0113) never count.
+ */
+export async function countUnreadTickets(db: D1Database, viewer: Viewer): Promise<number> {
+  const vis = ticketVisibleTo(viewer, "t");
+  const unread = unreadSql("t", viewer.id);
+  const row = await db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM mail_tickets t
+        WHERE ${vis.sql} AND t.status NOT IN ('closed', 'spam') AND t.filtered IS NULL
+          AND ${unread.sql}`,
+    )
+    .bind(...vis.binds, ...unread.binds)
+    .first<{ n: number }>();
+  return row?.n ?? 0;
+}
+
+/**
+ * Record that `viewer` has read `ticketId` up to its newest message. Call only after the
+ * visibility check has passed. Never throws: a failed marker must not fail the read.
+ */
+export async function markTicketRead(
+  db: D1Database,
+  viewer: Viewer,
+  ticketId: number,
+): Promise<void> {
+  try {
+    await db
+      .prepare(
+        `INSERT INTO mail_ticket_reads (user_id, ticket_id, read_message_id)
+         SELECT ?1, ?2, MAX(id) FROM mail_messages WHERE ticket_id = ?2 HAVING COUNT(*) > 0
+         ON CONFLICT(user_id, ticket_id) DO UPDATE SET
+           read_message_id = MAX(read_message_id, excluded.read_message_id),
+           read_at = datetime('now')`,
+      )
+      .bind(viewer.id, ticketId)
+      .run();
+  } catch (error) {
+    console.warn(
+      "[admin/mail] could not record the read marker:",
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+}
+
 /** A purged ticket is read-only: its raw record is gone, so nothing may be added to it. */
-function assertNotPurged(ticket: TicketRow): void {
+export function assertNotPurged(ticket: TicketRow): void {
   if (ticket.purged_at !== null) throwPurged();
 }
 
 /** A write was refused by its `purged_at IS NULL` gate: the purge claimed the ticket first. */
-function throwPurged(): never {
+export function throwPurged(): never {
   throw new MailAdminError(
     409,
     "ticket_purged",
@@ -131,6 +200,7 @@ export interface ListFilters {
   assignee?: string;
   q?: string;
   summary?: "missing";
+  filtered?: FilteredListMode;
   cursor?: string;
   limit: number;
 }
@@ -153,6 +223,20 @@ export async function listTickets(
     binds.push(f.status);
   } else if (f.summary !== "missing") {
     where.push("t.status NOT IN ('spam', 'closed')");
+  }
+  // Filtered tickets (ADR 0113) are hidden by default, as spam is, so the default view is the
+  // work. Asking for something specific (a status, an assignee, a search) is not the default view:
+  // a person who searches for a sender must find the filtered ticket too. The summary queue lists
+  // every closed ticket, filtered or not, because the retention purge treats them alike.
+  if (f.filtered === "only") where.push("t.filtered IS NOT NULL");
+  else if (
+    f.filtered === undefined &&
+    f.summary !== "missing" &&
+    f.status === undefined &&
+    f.assignee === undefined &&
+    !f.q
+  ) {
+    where.push("t.filtered IS NULL");
   }
   if (f.queue) {
     where.push("t.queue_tag = ?");
@@ -181,13 +265,14 @@ export async function listTickets(
     where.push("(t.last_message_at < ? OR (t.last_message_at = ? AND t.id < ?))");
     binds.push(m[1], m[1], Number(m[2]));
   }
+  const unread = unreadSql("t", viewer.id);
   const rows = await db
     .prepare(
-      `SELECT t.* FROM mail_tickets t WHERE ${where.join(" AND ")}
+      `SELECT t.*, ${unread.sql} AS unread FROM mail_tickets t WHERE ${where.join(" AND ")}
         ORDER BY t.last_message_at DESC, t.id DESC LIMIT ?`,
     )
-    .bind(...binds, f.limit + 1)
-    .all<TicketRow>();
+    .bind(...unread.binds, ...binds, f.limit + 1)
+    .all<TicketListRow>();
   const all = rows.results ?? [];
   const page = all.slice(0, f.limit);
   const last = page[page.length - 1];
@@ -269,7 +354,7 @@ function eventStatement(
 }
 
 /** An event row that is written only while the ticket is not purged (a purge may race a reply). */
-function liveEventStatement(
+export function liveEventStatement(
   db: D1Database,
   ticketId: number,
   kind: string,
@@ -289,7 +374,33 @@ function liveEventStatement(
     .bind(ticketId, kind, actor, JSON.stringify(detail));
 }
 
-async function reload(db: D1Database, id: number): Promise<TicketSummary> {
+/**
+ * The event that records a human taking a filtered ticket (ADR 0113): none when it is not
+ * filtered. The UPDATE next to it sets `filtered = NULL`, so a ticket someone has answered, taken,
+ * moved or escalated is no longer hidden from the default list. The previous reason is kept here.
+ */
+export function unfilteredEvents(
+  db: D1Database,
+  ticket: { id: number; filtered: FilterReason | null },
+  viewer: Viewer,
+  reason: string,
+  afterChange = false,
+): D1PreparedStatement[] {
+  return ticket.filtered === null
+    ? []
+    : [
+        liveEventStatement(
+          db,
+          ticket.id,
+          "unfiltered",
+          viewer.id,
+          { from: ticket.filtered, reason },
+          afterChange,
+        ),
+      ];
+}
+
+export async function reload(db: D1Database, id: number): Promise<TicketSummary> {
   const row = await db
     .prepare("SELECT * FROM mail_tickets WHERE id = ?")
     .bind(id)
@@ -367,7 +478,8 @@ export function buildReferences(
 
 export interface ReplyOutcome {
   message_id: number;
-  header_message_id: string;
+  /** The provider's Message-ID for the sent reply when it is a valid msg-id, else null. */
+  header_message_id: string | null;
   status: TicketStatus;
 }
 
@@ -389,7 +501,7 @@ async function tryRun(label: string, work: () => Promise<unknown>): Promise<void
  * Send a reply and record it. With an `idempotencyKey` a retry is safe: the key is stored unique
  * per ticket BEFORE anything is sent, a repeat of a sent reply returns its stored outcome without
  * sending, a repeat while the first is still in flight is 409 `reply_in_progress`, and a repeat of
- * a reply whose outcome was unknown is the same 502 again (never a second send). A reply that
+ * a reply whose outcome was unknown is the same 409 again (never a second send). A reply that
  * certainly sent nothing releases its key so the retry can go.
  */
 export async function replyToTicket(
@@ -432,7 +544,7 @@ export async function replyToTicket(
       if (prior?.state === "sent" && prior.outcome)
         return JSON.parse(prior.outcome) as ReplyOutcome;
       if (prior && (prior.state === "unknown" || prior.stale === 1)) {
-        throw new MailAdminError(502, "reply_delivery_unknown", UNKNOWN_MESSAGE);
+        throw new MailAdminError(409, "reply_delivery_unknown", UNKNOWN_MESSAGE);
       }
       throw new MailAdminError(
         409,
@@ -441,7 +553,7 @@ export async function replyToTicket(
       );
     }
   }
-  const setKey = (state: "unknown", headerId: string) =>
+  const setKey = (state: "unknown", headerId: string | null) =>
     idempotencyKey === undefined
       ? Promise.resolve()
       : db
@@ -475,12 +587,11 @@ async function sendAndRecord(
   ticket: TicketRow,
   text: string,
   idempotencyKey: string | undefined,
-  setKey: (state: "unknown", headerId: string) => Promise<unknown>,
+  setKey: (state: "unknown", headerId: string | null) => Promise<unknown>,
 ): Promise<ReplyOutcome> {
   const db = env.DB;
   const domain = supportDomain(env);
   const supportAddress = `support@${domain}`;
-  const headerId = `<${crypto.randomUUID()}@${domain}>`;
 
   const latestIn = await db
     .prepare(
@@ -513,7 +624,10 @@ async function sendAndRecord(
   if (root && MESSAGE_ID.test(root.message_id) && !ids.includes(root.message_id)) {
     ids.unshift(root.message_id);
   }
-  const headers: Record<string, string> = { "Message-ID": headerId };
+  // No Message-ID: the Cloudflare Email Service owns it and refuses the send for one. The id the
+  // provider reports back (when it is a valid msg-id) is stored below as a bonus for threading;
+  // the requester's answer reaches the ticket by the `support+t-<ref>@` reply-to either way.
+  const headers: Record<string, string> = {};
   if (latestIn && MESSAGE_ID.test(latestIn.message_id)) {
     headers["In-Reply-To"] = latestIn.message_id;
   }
@@ -532,8 +646,9 @@ async function sendAndRecord(
   const from = `NEMAR Support <${supportAddress}>`;
   const replyTo = `${supportAddress.replace("@", `+${ticketPlusTag(ticket.ref)}@`)}`;
 
+  let providerId: string | null;
   try {
-    await sendEmail(
+    const sent = await sendEmail(
       ticket.requester_email,
       subject,
       textToHtml(text),
@@ -545,6 +660,7 @@ async function sendAndRecord(
       undefined,
       headers,
     );
+    providerId = sent.messageId;
   } catch (error) {
     const reason = redactAddressIn(
       error instanceof Error ? error.message : String(error),
@@ -553,7 +669,7 @@ async function sendAndRecord(
     if (isCertainNonDelivery(error)) {
       console.warn(`[mail-admin] reply on ticket ${ticket.id} not sent: ${reason}`);
       throw new MailAdminError(
-        502,
+        422,
         "reply_not_sent",
         error instanceof DevEmailFenceError
           ? "Nothing was sent: this environment does not deliver to that recipient."
@@ -564,18 +680,18 @@ async function sendAndRecord(
     }
     // The provider may have accepted it and only the answer was lost. Storing nothing would
     // invite a second send; storing it as sent would claim a delivery nobody saw. So the
-    // attempt is recorded as an event naming the Message-ID, the admin is told it is unknown,
-    // and the requester's own reply (which carries that id) will thread if it did arrive. The
-    // writes are best effort: a failing database must not hide the 502 and its clear text.
+    // attempt is recorded as an event, the admin is told it is unknown, and the requester's own
+    // reply (which comes back through the plus address) will thread if it did arrive. The
+    // writes are best effort: a failing database must not hide the 409 and its clear text.
     console.error(`[mail-admin] reply on ticket ${ticket.id} outcome unknown: ${reason}`);
     await tryRun("recording the unknown reply", () =>
       eventStatement(db, ticket.id, "reply_failed", viewer.id, {
         delivery: "unknown",
-        header_message_id: headerId,
+        header_message_id: null,
       }).run(),
     );
-    await tryRun("marking the reply key unknown", () => setKey("unknown", headerId));
-    throw new MailAdminError(502, "reply_delivery_unknown", UNKNOWN_MESSAGE);
+    await tryRun("marking the reply key unknown", () => setKey("unknown", null));
+    throw new MailAdminError(409, "reply_delivery_unknown", UNKNOWN_MESSAGE);
   }
 
   const nextStatus: TicketStatus = ticket.status === "open" ? "pending" : ticket.status;
@@ -589,7 +705,7 @@ async function sendAndRecord(
       )
       .bind(
         ticket.id,
-        headerId,
+        providerId,
         headers["In-Reply-To"] ?? null,
         headers.References ?? null,
         supportAddress,
@@ -601,10 +717,11 @@ async function sendAndRecord(
       ),
     db
       .prepare(
-        "UPDATE mail_tickets SET last_message_at = datetime('now'), last_activity_at = datetime('now'), updated_at = datetime('now'), status = ? WHERE id = ? AND purged_at IS NULL",
+        "UPDATE mail_tickets SET last_message_at = datetime('now'), last_activity_at = datetime('now'), updated_at = datetime('now'), status = ?, filtered = NULL WHERE id = ? AND purged_at IS NULL",
       )
       .bind(nextStatus, ticket.id),
-    liveEventStatement(db, ticket.id, "reply", viewer.id, { message_id: headerId }),
+    liveEventStatement(db, ticket.id, "reply", viewer.id, { message_id: providerId }),
+    ...unfilteredEvents(db, ticket, viewer, "reply"),
   ];
   if (nextStatus !== ticket.status) {
     statements.push(
@@ -616,49 +733,54 @@ async function sendAndRecord(
     );
   }
   if (idempotencyKey !== undefined) {
-    statements.push(
+    // Right after the insert so last_insert_rowid() is still that row's id. The id is read only
+    // while the ticket is unpurged, which is exactly when the guarded insert wrote.
+    statements.splice(
+      1,
+      0,
       db
         .prepare(
           `UPDATE mail_reply_keys SET state = 'sent', header_message_id = ?1,
               outcome = json_object('message_id',
-                (SELECT id FROM mail_messages WHERE ticket_id = ?2 AND message_id = ?1),
+                (SELECT CASE WHEN EXISTS (SELECT 1 FROM mail_tickets WHERE id = ?2 AND purged_at IS NULL)
+                             THEN last_insert_rowid() END),
                 'header_message_id', ?1, 'status', ?3)
             WHERE ticket_id = ?2 AND idem_key = ?4`,
         )
-        .bind(headerId, ticket.id, nextStatus, idempotencyKey),
+        .bind(providerId, ticket.id, nextStatus, idempotencyKey),
     );
   }
+  let results: D1Result[];
   try {
-    await db.batch(statements);
+    results = await db.batch(statements);
   } catch (error) {
     console.error(
       `[mail-admin] reply on ticket ${ticket.id} was sent but not recorded: ${error instanceof Error ? error.message : String(error)}`,
     );
     // The mail went out, so leave a trace that names it (best effort, like the unknown case),
-    // and make a repeat of the same key answer 502 and not send again.
+    // and make a repeat of the same key answer 409 and not send again.
     await tryRun("recording the unrecorded reply", () =>
       eventStatement(db, ticket.id, "reply_failed", viewer.id, {
         delivery: "sent_unrecorded",
-        header_message_id: headerId,
+        header_message_id: providerId,
       }).run(),
     );
-    await tryRun("marking the reply key unknown", () => setKey("unknown", headerId));
+    await tryRun("marking the reply key unknown", () => setKey("unknown", providerId));
     throw new MailAdminError(
-      502,
+      409,
       "reply_delivery_unknown",
       "The reply was sent but could not be recorded. Do not send it again.",
     );
   }
-  const stored = await db
-    .prepare("SELECT id FROM mail_messages WHERE ticket_id = ? AND message_id = ?")
-    .bind(ticket.id, headerId)
-    .first<{ id: number }>();
-  if (!stored) {
+  // The insert is the first statement; it wrote a row unless the purge won the race.
+  const inserted = results[0]?.meta?.changes ?? 0;
+  const storedId = inserted > 0 ? Number(results[0]?.meta?.last_row_id ?? 0) : 0;
+  if (storedId === 0) {
     // The purge won the race after the mail went out: the guarded statements wrote nothing. The
     // reply was sent, so report success; the ticket holds no trace of it by design.
     console.warn(`[mail-admin] reply on ticket ${ticket.id} was sent after the ticket was purged`);
   }
-  return { message_id: stored?.id ?? 0, header_message_id: headerId, status: nextStatus };
+  return { message_id: storedId, header_message_id: providerId, status: nextStatus };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -733,12 +855,13 @@ export async function addNote(
   statements.push(
     db
       .prepare(
-        `UPDATE mail_tickets SET updated_at = datetime('now'), last_activity_at = datetime('now') WHERE id = ? AND purged_at IS NULL${
+        `UPDATE mail_tickets SET updated_at = datetime('now'), last_activity_at = datetime('now'), filtered = NULL WHERE id = ? AND purged_at IS NULL${
           gate ? " AND changes() > 0" : ""
         }`,
       )
       .bind(ticket.id),
     liveEventStatement(db, ticket.id, "note", viewer.id, null, gate),
+    ...unfilteredEvents(db, ticket, viewer, "note", gate),
   );
   const results = await db.batch(statements);
   if ((results[0]?.meta?.changes ?? 0) === 0) {
@@ -789,11 +912,15 @@ export async function assignTicket(
       );
     }
   }
-  if (userId === ticket.assignee_user_id) return toSummary(ticket);
+  if (userId === ticket.assignee_user_id && (userId === null || ticket.filtered === null)) {
+    return toSummary(ticket);
+  }
   const results = await db.batch([
     db
       .prepare(
-        "UPDATE mail_tickets SET assignee_user_id = ?, updated_at = datetime('now'), last_activity_at = datetime('now') WHERE id = ? AND purged_at IS NULL",
+        `UPDATE mail_tickets SET assignee_user_id = ?, updated_at = datetime('now'), last_activity_at = datetime('now')${
+          userId === null ? "" : ", filtered = NULL"
+        } WHERE id = ? AND purged_at IS NULL`,
       )
       .bind(userId, ticket.id),
     liveEventStatement(db, ticket.id, userId === null ? "unassigned" : "assigned", viewer.id, {
@@ -801,6 +928,7 @@ export async function assignTicket(
       to: userId,
       reason: "manual",
     }),
+    ...(userId === null ? [] : unfilteredEvents(db, ticket, viewer, "assign")),
   ]);
   if ((results[0]?.meta?.changes ?? 0) === 0) throwPurged();
   return reload(db, ticket.id);
@@ -814,7 +942,7 @@ export async function setTicketStatus(
 ): Promise<TicketSummary> {
   const ticket = await requireVisibleTicket(db, viewer, ticketId);
   assertNotPurged(ticket);
-  if (ticket.status === status) return toSummary(ticket);
+  if (ticket.status === status && ticket.filtered === null) return toSummary(ticket);
   if (
     (ticket.status === "closed" || ticket.status === "spam") &&
     (status === "open" || status === "pending")
@@ -837,10 +965,19 @@ export async function setTicketStatus(
   const results = await db.batch([
     db
       .prepare(
-        "UPDATE mail_tickets SET status = ?, updated_at = datetime('now'), last_activity_at = datetime('now') WHERE id = ? AND purged_at IS NULL",
+        "UPDATE mail_tickets SET status = ?, updated_at = datetime('now'), last_activity_at = datetime('now'), filtered = NULL WHERE id = ? AND purged_at IS NULL",
       )
       .bind(status, ticket.id),
-    liveEventStatement(db, ticket.id, "status", viewer.id, { from: ticket.status, to: status }),
+    // The same status on a filtered ticket only un-hides it: no no-op `status` event.
+    ...(ticket.status === status
+      ? []
+      : [
+          liveEventStatement(db, ticket.id, "status", viewer.id, {
+            from: ticket.status,
+            to: status,
+          }),
+        ]),
+    ...unfilteredEvents(db, ticket, viewer, "status"),
   ]);
   if ((results[0]?.meta?.changes ?? 0) === 0) throwPurged();
   return reload(db, ticket.id);
@@ -893,7 +1030,7 @@ export async function escalateTicket(
   const results = await db.batch([
     db
       .prepare(
-        "UPDATE mail_tickets SET status = 'escalated', assignee_user_id = ?, updated_at = datetime('now'), last_activity_at = datetime('now') WHERE id = ? AND purged_at IS NULL",
+        "UPDATE mail_tickets SET status = 'escalated', assignee_user_id = ?, updated_at = datetime('now'), last_activity_at = datetime('now'), filtered = NULL WHERE id = ? AND purged_at IS NULL",
       )
       .bind(ownerId, ticket.id),
     liveEventStatement(db, ticket.id, "escalated", viewer.id, { to: ownerId, reason }),
@@ -902,6 +1039,7 @@ export async function escalateTicket(
       to: ownerId,
       reason: "escalation",
     }),
+    ...unfilteredEvents(db, ticket, viewer, "escalate"),
   ]);
   if ((results[0]?.meta?.changes ?? 0) === 0) throwPurged();
   return { ticket: await reload(db, ticket.id), ownerId };

@@ -450,9 +450,9 @@ describe("mail reply", () => {
     }
   });
 
-  test("502 reply_delivery_unknown says the key will never send and does not advise a retry", async () => {
+  test("409 reply_delivery_unknown says the key will never send and does not advise a retry", async () => {
     const server = startServer({
-      "POST /admin/mail/tickets/42/reply": () => err(502, "reply_delivery_unknown", "Unknown."),
+      "POST /admin/mail/tickets/42/reply": () => err(409, "reply_delivery_unknown", "Unknown."),
     });
     try {
       const r = await runCli(["reply", "42", "--text", "hi", "--yes"], server.url);
@@ -468,9 +468,26 @@ describe("mail reply", () => {
     }
   });
 
+  test("422 reply_not_sent advises a retry under the same key, decided by code and not status", async () => {
+    const server = startServer({
+      "POST /admin/mail/tickets/42/reply": () => err(422, "reply_not_sent", "Nothing was sent."),
+    });
+    try {
+      const r = await runCli(
+        ["reply", "42", "--text", "hi", "--yes", "--idempotency-key", "k-ns"],
+        server.url,
+      );
+      expect(r.exitCode).toBe(1);
+      expect(r.stderr).toContain("Nothing was sent");
+      expect(r.stderr).toContain("Retry with: --idempotency-key k-ns");
+    } finally {
+      server.stop();
+    }
+  });
+
   test("--json reports the failure as {error, code} on stderr, with the key it was sent under", async () => {
     const server = startServer({
-      "POST /admin/mail/tickets/42/reply": () => err(502, "reply_delivery_unknown", "Unknown."),
+      "POST /admin/mail/tickets/42/reply": () => err(409, "reply_delivery_unknown", "Unknown."),
     });
     try {
       const r = await runCli(
@@ -1358,6 +1375,196 @@ describe("note idempotency key", () => {
       const r = await runCli(["note", "42", "--text", "x"], server.url);
       expect(r.exitCode).toBe(1);
       expect(r.stderr).not.toContain("Retry with");
+    } finally {
+      server.stop();
+    }
+  });
+});
+
+describe("screening: spam, blocklist, filtered list, quiet queues (ADR 0113)", () => {
+  const entry = {
+    id: 5,
+    kind: "domain",
+    value: "spam.example",
+    reason: "flood",
+    created_by: 1,
+    created_at: NOW,
+  };
+
+  test("spam blocks nothing by default; --block, --reason and --force are sent", async () => {
+    const server = startServer({
+      "POST /admin/mail/tickets/42/spam": (c) =>
+        Response.json({
+          ticket: ticket({ status: "spam", assignee_user_id: null }),
+          block:
+            (c.body as { block: string }).block === "none"
+              ? null
+              : { ...entry, kind: "address", value: "person@example.org" },
+        }),
+    });
+    try {
+      const r = await runCli(["spam", "42", "--block", "address"], server.url);
+      expect(r.exitCode).toBe(0);
+      expect(server.mail()[0].body).toEqual({ block: "address" });
+      expect(r.stdout).toContain("Marked spam");
+      expect(r.stdout).toContain("person@example.org");
+      // The default blocks nothing.
+      const plain = await runCli(["spam", "42"], server.url);
+      expect(plain.exitCode).toBe(0);
+      expect(server.mail()[1].body).toEqual({ block: "none" });
+      expect(plain.stdout).toContain("No block added");
+      const forced = await runCli(["spam", "42", "--block", "address", "--force"], server.url);
+      expect(forced.exitCode).toBe(0);
+      expect(server.mail()[2].body).toEqual({ block: "address", force: true });
+      expect((await runCli(["spam", "42", "--force"], server.url)).exitCode).toBe(2);
+      expect(
+        (await runCli(["spam", "42", "--block", "domain", "--force"], server.url)).exitCode,
+      ).toBe(2);
+      const d = await runCli(
+        ["spam", "42", "--block", "domain", "--reason", "newsletter", "--json"],
+        server.url,
+      );
+      expect(d.exitCode).toBe(0);
+      expect(server.mail()[3].body).toEqual({ block: "domain", reason: "newsletter" });
+      expect(JSON.parse(d.stdout).ticket.status).toBe("spam");
+      const none = await runCli(["spam", "42", "--block", "none"], server.url);
+      expect(none.exitCode).toBe(0);
+      expect(none.stdout).toContain("No block added");
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("spam usage errors exit 2, a refused block exits 1 with guidance, hidden is 3", async () => {
+    const server = startServer({
+      "POST /admin/mail/tickets/1/spam": () => err(422, "block_not_allowed"),
+      "POST /admin/mail/tickets/3/spam": () => err(422, "block_sender_unverified"),
+      "POST /admin/mail/tickets/2/spam": () => err(404, "not_found"),
+    });
+    try {
+      expect((await runCli(["spam", "42", "--block", "ip"], server.url)).exitCode).toBe(2);
+      expect((await runCli(["spam", "abc"], server.url)).exitCode).toBe(2);
+      expect((await runCli(["spam", "42", "--reason", "x".repeat(201)], server.url)).exitCode).toBe(
+        2,
+      );
+      expect(server.mail().length).toBe(0);
+      const refused = await runCli(["spam", "1"], server.url);
+      expect(refused.exitCode).toBe(1);
+      expect(refused.stderr).toContain("shared mailbox provider");
+      expect((await runCli(["spam", "2"], server.url)).exitCode).toBe(3);
+      const unverified = await runCli(["spam", "3", "--block", "address"], server.url);
+      expect(unverified.exitCode).toBe(1);
+      expect(unverified.stderr).toContain("--force");
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("blocklist lists, adds (address or --domain), removes", async () => {
+    const server = startServer({
+      "GET /admin/mail/blocklist": () => Response.json({ entries: [entry], next_cursor: "5" }),
+      "POST /admin/mail/blocklist": (c) =>
+        Response.json({
+          entry: { ...entry, ...(c.body as object), id: 6 },
+          created: (c.body as { value: string }).value !== "again.example",
+        }),
+      "DELETE /admin/mail/blocklist/5": () => Response.json({ removed: entry }),
+      "DELETE /admin/mail/blocklist/6": () => err(404, "not_found"),
+    });
+    try {
+      const list = await runCli(["blocklist", "--limit", "10"], server.url);
+      expect(list.exitCode).toBe(0);
+      expect(server.mail()[0].query).toEqual({ limit: "10" });
+      expect(list.stdout).toContain("spam.example");
+      expect(list.stdout).toContain("--cursor 5");
+      expect(
+        JSON.parse((await runCli(["blocklist", "--json"], server.url)).stdout).entries.length,
+      ).toBe(1);
+
+      const addr = await runCli(
+        ["blocklist", "add", "bad@spam.example", "--reason", "junk"],
+        server.url,
+      );
+      expect(addr.exitCode).toBe(0);
+      expect(server.mail()[2].body).toEqual({
+        kind: "address",
+        value: "bad@spam.example",
+        reason: "junk",
+      });
+      expect(addr.stdout).toContain("Blocked");
+      const dom = await runCli(["blocklist", "add", "spam.example", "--domain"], server.url);
+      expect(dom.exitCode).toBe(0);
+      expect(server.mail()[3].body).toEqual({ kind: "domain", value: "spam.example" });
+      const again = await runCli(["blocklist", "add", "again.example", "--domain"], server.url);
+      expect(again.stdout).toContain("Already blocked");
+
+      const rm = await runCli(["blocklist", "remove", "5"], server.url);
+      expect(rm.exitCode).toBe(0);
+      expect(rm.stdout).toContain("Removed");
+      expect((await runCli(["blocklist", "remove", "6"], server.url)).exitCode).toBe(3);
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("blocklist add and remove usage errors exit 2 without a request", async () => {
+    const server = startServer();
+    try {
+      expect((await runCli(["blocklist", "add", "spam.example"], server.url)).exitCode).toBe(2);
+      expect(
+        (await runCli(["blocklist", "add", "a@spam.example", "--domain"], server.url)).exitCode,
+      ).toBe(2);
+      expect((await runCli(["blocklist", "remove", "abc"], server.url)).exitCode).toBe(2);
+      expect((await runCli(["blocklist", "--limit", "0"], server.url)).exitCode).toBe(2);
+      expect((await runCli(["blocklist", "add"], server.url)).exitCode).toBe(2);
+      expect(server.mail().length).toBe(0);
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("list --filtered is sent, validated, and a filtered ticket is marked", async () => {
+    const server = startServer({
+      "GET /admin/mail/tickets": () =>
+        Response.json({ tickets: [ticket({ filtered: "bulk" })], next_cursor: null }),
+    });
+    try {
+      const r = await runCli(["list", "--filtered", "only"], server.url);
+      expect(r.exitCode).toBe(0);
+      expect(server.mail()[0].query).toEqual({ filtered: "only" });
+      expect(r.stdout).toContain("[bulk]");
+      expect((await runCli(["list", "--filtered", "all"], server.url)).exitCode).toBe(2);
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("queues shows notify, and queues set --notify sends a boolean", async () => {
+    const quiet = {
+      tag: "*",
+      restricted: false,
+      strategy: "pool",
+      assignee_user_id: null,
+      backup_user_id: null,
+      rr_members: [],
+      escalation_user_id: null,
+      open_tickets: 0,
+      notify: false,
+    };
+    const server = startServer({
+      "GET /admin/mail/queues": () => Response.json({ queues: [quiet] }),
+      "PUT /admin/mail/queues/*": () => Response.json({ queue: quiet }),
+    });
+    try {
+      const list = await runCli(["queues"], server.url);
+      expect(list.stdout).toContain("notify:");
+      expect(list.stdout).toContain("quiet");
+      const set = await runCli(["queues", "set", "*", "--notify", "false"], server.url);
+      expect(set.exitCode).toBe(0);
+      expect(server.mail()[1].body).toEqual({ notify: false });
+      expect((await runCli(["queues", "set", "*", "--notify", "maybe"], server.url)).exitCode).toBe(
+        2,
+      );
     } finally {
       server.stop();
     }
