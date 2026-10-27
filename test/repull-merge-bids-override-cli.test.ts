@@ -23,7 +23,8 @@
  *    validation that passed, and a re-pull the automatic path opened are not gated; `clean` is gated
  *    as before and reads no check; a merge without the reason refuses the head gated over the
  *    failure; and the merge gate refuses, before anything is written, a head where another check
- *    fails.
+ *    fails, read again under the lock before the claim, so a check that starts failing after the
+ *    gate's read is refused; the ordinary merge of a clean head reads no check.
  *
  * What only the first production use can check: that GitHub reports `unstable`, and not `blocked`,
  * for an unprotected mirror whose BIDS validation failed, as `nm000413#3` read for a held review,
@@ -110,6 +111,26 @@ function bidsFailed(
   ];
   Object.assign(w.gh.pulls[prKey(w)] as object, { mergeableState: o.state ?? "unstable" });
 }
+
+/** A check of the dataset's own workflow, posted by GitHub Actions, that failed at `head`. */
+function otherFailing(head: string): void {
+  w.gh.checkRuns[`${w.fx.datasetId}@${head}`]?.push({
+    id: 33,
+    name: "lint",
+    status: "completed",
+    conclusion: "failure",
+    app_id: GITHUB_ACTIONS,
+  });
+}
+
+/** What an administrator's own token read of the head's checks and statuses. */
+const checkReads = () =>
+  w.gh.seen.filter(
+    (s) =>
+      s.method === "GET" &&
+      s.token === ADMIN_TOKEN &&
+      (s.path.endsWith("/check-runs") || s.path.endsWith("/status")),
+  );
 
 const merges = () => w.gh.seen.filter((s) => s.method === "PUT" && s.path.endsWith("/merge"));
 const transitions = () => w.apiWrites.filter((x) => x.endsWith("/transition")).length;
@@ -308,27 +329,45 @@ describe.skipIf(!awsInstalled)("a merge over a failed BIDS validation", () => {
     expect(merges()).toEqual([]);
     expect(auditOf("repull_bids_override")).toEqual([]);
   });
-});
 
-/** A check of the dataset's own workflow, posted by GitHub Actions, that failed at `head`. */
-function otherFailing(head: string): void {
-  w.gh.checkRuns[`${w.fx.datasetId}@${head}`]?.push({
-    id: 33,
-    name: "lint",
-    status: "completed",
-    conclusion: "failure",
-    app_id: GITHUB_ACTIONS,
+  test("a check that starts failing after the gate's read is refused under the lock, before the claim", async () => {
+    const head = await toGates();
+    bidsFailed(head);
+    // The gate reads the checks at its step 7, then the review is read again before the
+    // confirmation and the lock: the failing check lands between the two reads of the checks.
+    let reviewReads = 0;
+    w.setApiHook(async (req) => {
+      if (req.method === "GET" && new URL(req.url).pathname.startsWith("/admin/pr-reviews/")) {
+        reviewReads++;
+        if (reviewReads === 2) otherFailing(head);
+      }
+    });
+    const before = transitions();
+    const run = await overrideMerge();
+    expect(run.exitCode, run.all).toBe(1);
+    expect(run.all).toContain("(bids)");
+    expect(run.all).toContain("another check");
+    expect(run.all).toContain("lint");
+    expect(reviewReads).toBe(2);
+    // The gate's read passed it; the read under the lock refused it, so nothing was claimed.
+    expect(checkReads().filter((s) => s.path.endsWith("/check-runs"))).toHaveLength(2);
+    expect(transitions()).toBe(before);
+    expect(merges()).toEqual([]);
+    expect(w.row()).toMatchObject({ status: "gates_clear", merge_claim_sha: null });
+    expect(auditOf("repull_bids_override")).toEqual([]);
   });
-}
 
-/** What an administrator's own token read of the head's checks and statuses. */
-const checkReads = () =>
-  w.gh.seen.filter(
-    (s) =>
-      s.method === "GET" &&
-      s.token === ADMIN_TOKEN &&
-      (s.path.endsWith("/check-runs") || s.path.endsWith("/status")),
-  );
+  test("the ordinary merge of a clean head reads no check, as before", async () => {
+    const head = await toGates();
+    const run = await merge();
+    expect(run.exitCode, run.all).toBe(0);
+    expect(merges()).toHaveLength(1);
+    expect(merges()[0]?.body).toMatchObject({ sha: head, merge_method: "squash" });
+    expect(checkReads()).toEqual([]);
+    expect(w.row()).toMatchObject({ status: "merged" });
+    expect(auditOf("repull_bids_override")).toEqual([]);
+  });
+});
 
 describe.skipIf(!awsInstalled)("the override in the normal order: resume, then the merge", () => {
   test("BIDS validation alone fails: resume records the gates, and the merge goes over it with the reason", async () => {
