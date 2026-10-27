@@ -566,6 +566,7 @@ So the recorded tag must appear in upstream's snapshot list, and upstream's late
 A latest tag that the Phase 2 parser could never record (`57fecb0c...` is a legacy snapshot id; `v2.0.2.` is a negative example of the parser's tag pattern) is an anomaly, because a re-pull to it could never be proved afterwards by a recorded `source_version`.
 Known limit: a tag re-created upstream under the SAME tag (OpenNeuro's `ds003645` 2.1.0 carries a creation time later than its first sighting) cannot be detected from the tag, so the mirror reads `current` or `stale` by tag alone.
 The dry-run plan of the re-pull phase compares trees and sees it.
+*Annotated 2026-10-27: it does not. A plan to a tag equal to the mirrored tag is refused as `nothing-to-pull` before any tree is compared (`src/lib/repull/preflight.ts`), so nothing detects a tag re-created under the same name.*
 
 ### Mirror lag is proved, not inferred
 
@@ -2097,7 +2098,7 @@ Epic #1046, Phase 8.
 Phase 8 adds no behavior to the Worker.
 It documents what Phases 2 to 7 built, makes the website read the `mirror` flag, types that flag in the CLI's reader of the version listing, and records the order in which these reach production.
 The decision text above and the earlier amendments are unchanged.
-Three annotations are added to earlier text: on the record's header, on the opening of the Decision section, and on decision 5's sentence about the website.
+Dated annotations are added to earlier text wherever this amendment builds, corrects or qualifies it; each begins "Annotated 2026-10-27".
 
 ### Where the documentation is
 

@@ -107,7 +107,7 @@ The runbooks are [freshness](https://docs.nemar.org/admin/operations/upstream-fr
 ### Known limits
 
 - The manual-major refusal is the CLI's only; a major merged outside the CLI is not stopped.
-- A tag re-created upstream under the same name is invisible to the staleness report; the dry-run plan compares trees and sees it.
+- A tag re-created upstream under the same name is not detected: the staleness report compares tags, and the plan refuses a tag equal to the mirrored one (`nothing-to-pull`) before any tree is compared.
 - Most mirror repositories have no branch protection or ruleset (16 of 21 sampled on 2026-10-24), so GitHub's `clean` proves no check ran on them; the Worker reads the two checks itself.
 - The merge cap binds NEMAR's tools, not the GitHub merge button.
 - The Worker's merge has no staging rehearsal, because outside production only `xx` datasets are re-pulled and the Worker never merges one.
