@@ -23,7 +23,7 @@ beforeAll(() => {
     modules: true,
     script: "export default { fetch() { return new Response(null, { status: 204 }); } };",
     compatibilityDate: "2024-12-01",
-    d1Databases: ["DB1", "DB2"],
+    d1Databases: ["DB1", "DB2", "DB3"],
   });
 });
 
@@ -100,6 +100,33 @@ describe("the sweep on D1", () => {
       .bind(swept[0])
       .first<{ n: number }>();
     expect(live?.n).toBe(0);
+  });
+
+  test("an open upload-access request is swept on D1, a granted one is not", async () => {
+    const d1 = await freshD1();
+    const open = await seed(d1, "dcli-signup-flags-1760000000010-abc123@nemar.test");
+    const granted = await seed(d1, "dcli-signup-flags-1760000000011-abc123@nemar.test");
+    const real = await seed(d1, "jane.doe@example.org");
+    await d1
+      .prepare(
+        "UPDATE users SET upload_access_requested_at = datetime('now', '-20 days') WHERE id IN (?, ?, ?)",
+      )
+      .bind(open, granted, real)
+      .run();
+    await d1.prepare("UPDATE users SET service_access = 1 WHERE id = ?").bind(granted).run();
+
+    const result = await sweepCiTestAccounts({ DB: d1, ENVIRONMENT: "test" });
+
+    expect(result.errors).toBe(0);
+    expect(result.tombstoned).toBe(1);
+    expect(await deletedAt(d1, open)).not.toBeNull();
+    expect(await deletedAt(d1, granted)).toBeNull();
+    expect(await deletedAt(d1, real)).toBeNull();
+    const stamp = await d1
+      .prepare("SELECT upload_access_requested_at AS r FROM users WHERE id = ?")
+      .bind(open)
+      .first<{ r: string | null }>();
+    expect(stamp?.r).toBeNull();
   });
 
   test("a second run pages past the look-alikes and reaches later candidates", async () => {

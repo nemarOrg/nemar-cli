@@ -267,7 +267,7 @@ import recovery, cron digests) is production-only by default,
 via `getAdminEmailsForCategory`'s fence in `backend/src/services/email.ts`.
 Set `DEV_ADMIN_NOTIFICATIONS=1` only for a deliberate staging test of admin mail.
 The dev worker's `DEV_EMAIL_ALLOWLIST` is a Worker secret holding exact human addresses, never a domain:
-`@nemar.org` has a catch-all that lands in a real inbox, and `@nemar.test` fixtures get their sign-in codes echoed in the response instead of delivered.
+`@nemar.org` has a catch-all that turns every message into a production support ticket (epic #1893, ADR 0112), and `@nemar.test` fixtures get their sign-in codes echoed in the response instead of delivered.
 
 `users.account_kind` (ADR 0048) is explicit on the seeded fixtures: `test-owner` and `test-admin`
 are `service` (operational, no human signs in to them directly); `test-user`, `test-pending`,

@@ -46,10 +46,134 @@ earlier releases are described only by their generated notes.
 
 ### Deploy coupling
 
-- The onboard workflow change (`openneuro_tag`) is its own pull request to `dev` with a copy to `nemarDatasets/.github`, and lands first: `nemar admin import-openneuro --tag` in dispatch mode sends `openneuro_tag`, which an older workflow answers with 422.
-  It is inert with an older Worker (no tag in the payload) and with an older CLI: the workflow passes `--tag` only when the installed CLI's help lists it, so a workflow that lands before the CLI reaches npm imports as before.
+- The onboard workflow change (`openneuro_tag`) shipped in 0.10.24 (#1933), with its copy in `nemarDatasets/.github`. `nemar admin import-openneuro --tag` in dispatch mode sends `openneuro_tag`, which an older workflow answers with 422.
+  It is inert with an older Worker (no tag in the payload) and with an older CLI: the workflow passes `--tag` only when the installed CLI's help lists it, so an older CLI imports as before.
 - No order is required between the Worker and the npm release. A CLI released before its Worker refuses a mirror lag that the older Worker quarantines as `not_found_dataset` with a mail and an issue; the new Worker's retry query keys on the marker in `last_error`, which recovery keeps, so it picks those rows up once deployed.
 - The jobs of one workflow run install the CLI independently; mixing versions inside a run is harmless, because only prepare changed.
+
+## 0.10.25 - 2026-10-26
+
+Production sends its mail through the Cloudflare Email Service, and inbound support mail is screened before it reaches anyone (epic #1893).
+This release has one migration, 0111: two `ADD COLUMN`s with safe defaults (`mail_tickets.filtered`, `mail_queues.notify`), a new `mail_blocklist` table, an index on `mail_messages (from_addr, created_at)`, and a rebuild of the leaf table `mail_ticket_events` to allow the `unfiltered` event kind, in the same shape as 0107's rebuild.
+It sets no new Worker secret.
+The production Worker configuration sets `EMAIL_PROVIDER` to `cloudflare`, `EMAIL_FALLBACK` to `resend` and `MAIL_SENDER_HOURLY_CAP` to `20`.
+
+### Changed
+
+- **Production mail goes out through the Cloudflare binding (ADR 0110, #1966).**
+  Sign-in codes, account mail and ticket replies are sent from `noreply@` and `support@nemar.org` by Cloudflare.
+  A refusal for a quota or account-level reason is retried once through Resend; any other refusal is final, so a sign-in code is never sent twice.
+
+### Added
+
+- **Inbound mail is screened (ADR 0113, #1968).**
+  A blocked sender, by address or by domain, is refused at delivery and never stored; a domain block is refused for our own domains, public suffixes and large shared mail providers, and a failed blocklist lookup accepts the mail.
+  Bulk mail, mailing lists, automatic replies and bounces are filed as filtered tickets: stored and listed on request, never assigned and never announced, until a person works the ticket or the requester writes back.
+  More than `MAIL_SENDER_HOURLY_CAP` messages an hour from one address are filed the same way, counted separately for mail that passed DMARC and mail that did not, so forged mail cannot silence a real sender.
+  A queue can be made quiet, which stops its new-ticket notices; escalation notices still go out.
+- **`nemar admin mail spam <id>` and `nemar admin mail blocklist`.**
+  Marking a ticket as spam can block its sender, but only when the sender passed DMARC; an address block for an unverified sender needs `--force`, and a domain block for one is refused.
+  `nemar admin mail queues set <tag> --notify <bool>` and the `--filtered` list option are new.
+
+## 0.10.24 - 2026-10-26
+
+NEMAR mail moves onto the Cloudflare Email Service in code, and the platform gains support tickets and `nemar admin mail`; production keeps sending through Resend (epic #1893).
+This release has eight migrations, 0100, 0101, 0102, 0103, 0107, 0108, 0109 and 0110, all on new tables or additive (`CREATE ... IF NOT EXISTS` or `ADD COLUMN` with defaults); 0107's backfill and 0109's rebuild touch only `mail_tickets`, which this release creates, so they run on empty tables in production.
+It sets no new Worker secret.
+The production Worker configuration adds a `send_email` binding restricted to `noreply@` and `support@nemar.org`, a `MAIL_INBOUND` R2 bucket binding, the `EMAIL_OUTBOX` queue producer, consumers for the outbox and events queues with a dead-letter queue each, and the variable `MAIL_RETENTION_DAYS` (`730`); it does not set `EMAIL_PROVIDER`, and `REPLY_TO` changes to `support@nemar.org`.
+The queues, the bucket and the sending onboarding of the domain have to exist before the deploy, or it fails on a missing resource; they were created and checked before this release.
+One workflow changes: `onboard-openneuro.yml` gains an optional input, and it is deployed by copying it into `nemarDatasets/.github` (ADR 0020), and the copy there already matches this one byte for byte, which the parity test checks.
+The dataset CI shims change in the backend template and reach a dataset repository only when that repository's workflows are next synced.
+
+### Added
+
+- **Sending selects its provider with `EMAIL_PROVIDER`, and a refusal can fall back to Resend (ADR 0110, Phases 1 and 2a).**
+  `EMAIL_PROVIDER=cloudflare` sends through the `send_email` binding; unset, empty or `resend` is Resend, so production, which sets nothing, is unchanged.
+  Any other value, and `cloudflare` with no binding, is a configuration error that sends nothing and never falls back.
+  With `EMAIL_FALLBACK=resend` and a Resend key set, a send falls back to Resend once, only when Cloudflare refuses with a code that certainly sent nothing and that Resend can answer (`E_RATE_LIMIT_EXCEEDED`, `E_DAILY_LIMIT_EXCEEDED`, `E_ACCOUNT_SUSPENDED`, `E_SENDER_DOMAIN_NOT_AVAILABLE`).
+  A suppressed recipient, a validation or delivery error, a timeout and an internal or unknown error never fall back.
+  Staging sends from `test.nemar.org` through the binding, never sets `EMAIL_FALLBACK`, and so cannot reach Resend; the delivery fence of the development Worker runs before either provider.
+- **Announcements go through a queue when Cloudflare is the provider (Phase 2b).**
+  `nemar admin notify` records the broadcast as `queued` and enqueues one message per allowed, de-duplicated recipient on the outbox queue, which the same Worker consumes.
+  A redelivered message is never re-sent or counted twice (`broadcast_outcomes`, migration 0100).
+  A rate or daily limit retries with a growing delay, other certain non-delivery is a failure with the address redacted, and anything that may have been accepted is counted unknown and never retried.
+  `GET /admin/notify/:id` and `nemar admin notify --status <id>` read the counts, and a partial enqueue answers 200 with `queue_enqueue_failed`.
+- **Bounces and complaints are stored (Phase 2c).**
+  Cloudflare publishes `message.bounced` and `message.complained` for each sending domain to the events queue; the Worker stores them in `email_delivery_events` (migration 0101, one row per event id, no subject, the SMTP response clamped) and prunes rows after 180 days.
+- **Inbound mail is kept in R2 and filed as a support ticket in D1 (ADR 0111 and ADR 0112, Phase 3a).**
+  The raw message is stored in `MAIL_INBOUND`, parsed with `postal-mime` and filed in the tables of migration 0102.
+  A reply threads onto its ticket by the `support+t...@` address, then by `In-Reply-To` and `References`, and reopens a closed or pending ticket; tags come from the recipient's local part and plus tag.
+  Queues are `*` (the default, seeded to the `nemarAdmin` account) and the restricted `security` and `conduct`, which are never assigned automatically and are visible to owners only; a ticket hidden from an administrator answers 404 on every route, counts included.
+  Assignment is `fixed`, `round_robin` or `pool` per queue, with away windows and an optional backup.
+  A message that fails sender authentication, or has no passing result, becomes its own spam ticket: never threaded, assigned or notified, and never linked to an account.
+  A failure after the raw copy is stored keeps the copy and logs one redacted line, and a raw key can be rebuilt idempotently.
+  Demotion, revocation and soft delete release the person's open tickets, away setting and queue references in the same batch.
+  No mail is auto-answered, and ticket notices go only to owners and administrators who have the new `support_tickets` notification preference on.
+- **A ticket admin API under `/admin/mail` (Phase 3b).**
+  It lists tickets (filters, keyset paging) and shows one, and replies, adds a note, assigns, sets status and escalates; it also serves `/admin/mail/queues`, `/admin/mail/availability` and `/admin/mail/reprocess`.
+  A reply is sent from `support@` with reply-to `support+t<ref>@` and carries `In-Reply-To` and `References`.
+  An optional `Idempotency-Key` on a reply returns the first outcome of a retried reply instead of sending twice, and an unknown outcome is never re-sent; a note takes the same key, stored once and replayed (#1945; keys in migration 0108, separate from reply keys in 0103).
+  Migration 0103 also adds an escalation owner per queue, who must be an owner and is cleared by every revocation path.
+- **`nemar admin mail` works tickets from the command line (Phase 4, #1940).**
+  Subcommands are `list`, `show`, `reply`, `note`, `assign`, `status`, `close`, `escalate`, `queues` (list and set), `away` (show, set, clear), `reprocess` and `summarize`; `--json` is available on each, with the API body on stdout and `{error, code}` on stderr.
+  `reply` and `note` always send an `Idempotency-Key`, print it before sending, and after a lost or uncertain send say to retry with it; a reply with no terminal and no `--yes` is refused and sends nothing.
+  Exit codes are 0 for success, 1 for an API or network error, 2 for a usage error or a refused confirmation, 3 for a ticket that is not found or not visible, and 4 for an action the caller is not permitted to take.
+  Users may be named as `me`, `none`, an id or a username.
+  Ticket text comes from outside, so human output escapes every control and bidirectional character except newlines and tabs; `--json` stays verbatim.
+- **Unread tickets are tracked per administrator.**
+  A ticket is unread for an administrator when it has an incoming message newer than that administrator's marker, or no marker exists and it has any incoming message; replies and notes never make a ticket unread.
+  Migration 0110 adds `mail_ticket_reads`, which the release cascade clears; the list carries `unread` for each ticket, `nemar admin mail list` shows it in a NEW column, and `GET /admin/mail/unread-count` counts the unread tickets the caller can see that are not closed or spam.
+- **`nemar admin pr-reviews start` takes `--redo` and `--concurrency` (#1922, #1929).**
+  `--redo` starts a commit whose review already has a result again, or with `--all` every open pull request whose current commit has a finished review; a running review is never superseded, and a blocked contributor's finished review is left alone (`contributor_paused`).
+  A redo is a second run of up to two model calls, which the help and the `--all` question state.
+  `--concurrency <n>` keeps at most `n` of the started reviews in progress at once, as a sliding window, because every review reserves its whole output budget against the workspace's rate limit when it begins.
+  Ctrl-C stops an `--all` run after the request in flight, lists the pull requests never started and exits 130.
+- **`onboard-openneuro.yml` takes an optional `openneuro_tag` (#1933).**
+  The import is pinned to that upstream snapshot tag; `parse-ids` validates it and refuses it with more than one id, and `prepare` passes `--tag` only when the installed CLI's help lists it, so an older CLI imports as before with a warning.
+
+### Changed
+
+- **A ticket is kept for 730 days in production and 30 on staging, then reduced to a summary (Phase 6a, #1944).**
+  `PUT /admin/mail/tickets/:id/summary` and `nemar admin mail summarize` write a summary, and `list --needs-summary` finds closed tickets without one; the Worker never calls a model, restricted tickets are never shown to one, and a summary containing an email address is refused (`summary_has_address`).
+  A daily job, driven by `MAIL_RETENTION_DAYS` (missing or invalid deletes nothing), removes the messages, reply and note keys, non-queue tags, event details, subject, and the requester's address and account link of each ticket whose last message is older than the period.
+  It keeps the id, queue, status, dates, summary and a conduct exclusion, closes active tickets, leaves spam as spam, never sends mail and never touches R2.
+  The raw copies in R2 expire on the bucket's own lifecycle rule (730 days in production, 30 on staging), which matches the period.
+  After a purge an action on the ticket answers 409 `ticket_purged`, a purged ticket's raw key cannot be reprocessed back into existence, and mail to its plus address opens a new ticket.
+  The job joins the development cron allowlist and touches only that environment's own mail tables.
+- **Tickets get three-word references, and reply errors no longer use 502 (#1952).**
+  New tickets are named from the Electronic Frontier Foundation's short word list (`amber-falcon-river`) with the plus tag `support+t-<ref>@`; the earlier ten-character references keep working and are not rewritten (migration 0109 rebuilds `mail_tickets` so it accepts both, preserving every row and child row).
+  Cloudflare treats `Message-ID` as its own, so a reply now sends only `In-Reply-To` and `References`, and the provider's id is stored only when it is a valid message id.
+  `reply_not_sent` is now 422, `reply_delivery_unknown` is 409 and `inbound_not_configured` is 409, so the website's proxy keeps the JSON body; clients decide by `code`, and `ReplyResponse.header_message_id` may be `null`.
+- **The dataset CI shims `bids-validation.yml` and `version-check.yml` run on `pull_request_target` (#1784, #1947).**
+  A pull request from a fork got no secrets under `pull_request`, so the central validation was never dispatched and the check showed red.
+  The job checks out and runs nothing from the pull request; it passes four checked fields to `nemarDatasets/.github` through `env`, where before a branch name was written into the script, and it checks the dataset id, the head sha and the pull request number before calling `gh`.
+  Tests pin the safety properties, and ADR 0020 is amended; the change reaches a dataset repository only through the template sync, and until then its trigger is unchanged.
+- **Continuous integration is faster.**
+  `unit-pure` runs as six shards behind a gate that keeps the required check name and proves every classified file ran, and the migrated test database is built once per process.
+  This changes only CI, not the product.
+- **The staging test-account sweep also removes generated accounts with an open upload-access request, in batches of 300.**
+  An account with granted upload access is still not swept; the sweep runs in non-production environments only.
+
+### Fixed
+
+- **The live test suites delete the accounts they seed.**
+  They left them behind for the daily sweep to find.
+
+### Production behavior changes
+
+- **Reply-To on account mail becomes `support@nemar.org`.**
+  Until the receiving cutover, that address reaches the same inbox as before through the existing catch-all.
+- **No mail is turned into a ticket in production until the receiving cutover.**
+  No routing rule targets the production Worker yet, so its `email()` handler is inert, and the new tables stay empty.
+- **Sending stays on Resend.**
+  The Cloudflare path is deployed but off in production; stored bounce and complaint events will be few or none until it is switched on.
+- **The daily retention job runs and finds nothing to purge.**
+
+### Not in this release
+
+- The production sending switch to Cloudflare (#1895) waits on the sending-limit increase and a soak on staging.
+- The receiving cutover (#1899) and retiring Resend (#1900) follow separately.
+- The website's Mail tab ships in the website's own release.
 
 ## 0.10.23 - 2026-10-23
 

@@ -9,7 +9,7 @@
  * checked only by the first production runs: that `check-runs` honors `check_name`, `app_id` and
  * `filter=latest` as the stand-in does (measured on 2026-10-25 against `nm000527#1`, read only),
  * that the App's token reads `mergeable_state` as an administrator does, and that GitHub names the
- * App's pull request author `nemar-publish-bot[bot]` with id 283755542.
+ * App's pull request author `nemar-bot[bot]` with id 283755542.
  *
  * Each fact is flipped alone, at its source (a GitHub answer or a row), and must give its own hold
  * word; every way of not knowing a fact (404, 500, a timeout, a shape, no row) must hold.

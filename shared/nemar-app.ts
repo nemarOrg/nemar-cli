@@ -1,5 +1,5 @@
 /**
- * The NEMAR GitHub App (`nemar-publish-bot`) and its bot user, named once, here, and re-exported by
+ * The NEMAR GitHub App (`nemar-bot`) and its bot user, named once, here, and re-exported by
  * the Worker's `backend/src/services/github/branch-protection.ts`, where every Worker import of
  * them reads them from. They live in `shared/` because the machine-clean rule of the automatic
  * re-pull (`shared/repull-machine-clean.ts`, ADR 0111, decision 7) is pure and reads the bot's
@@ -11,7 +11,12 @@
  * without a person, so a test pins each one.
  *
  * Measured on 2026-10-24 with `GET /users/nemar-publish-bot%5Bbot%5D` (id 283755542, type `Bot`)
- * and `GET /apps/nemar-publish-bot` (id 3679074).
+ * and `GET /apps/nemar-publish-bot` (id 3679074). The App was then renamed to `nemar-bot`, and on
+ * 2026-10-26 `GET /users/nemar-bot%5Bbot%5D` answered the same user id and type,
+ * `GET /apps/nemar-bot` the same App id, and the old login answered 404. A rename keeps both ids
+ * and frees the old name for anyone to register, which is why every comparison of the login
+ * compares the id too: a later rename refuses the App's pull requests until the login here follows
+ * it, and never admits whoever takes the old name.
  */
 
 /**
@@ -21,7 +26,7 @@
 export const NEMAR_APP_ID = 3679074;
 
 /** The login GitHub gives the author of a pull request the App opens. */
-export const NEMAR_APP_BOT_LOGIN = "nemar-publish-bot[bot]";
+export const NEMAR_APP_BOT_LOGIN = "nemar-bot[bot]";
 
 /** That author's numeric user id, which is not the App's id. */
 export const NEMAR_APP_BOT_USER_ID = 283755542;

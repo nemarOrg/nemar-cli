@@ -286,7 +286,7 @@ export const DOCS_GRANTS_PURGE_SQL = "DELETE FROM docs_grants WHERE user_id = ?"
  * need it: a role demotion, `finalizeRevocation` and the tombstone cascade.
  * Those same three paths also run `mailReleaseStatements`
  * (`services/ticket-assignment.ts`) in the same batch, which drops the person's support
- * tickets, away window and queue references; key revocation alone does not, because the
+ * tickets, away window, read markers and queue references; key revocation alone does not, because the
  * person is still an admin. A new path that removes an admin needs both sets.
  *
  * The by-id routes also run it when their revoke changed nothing (a

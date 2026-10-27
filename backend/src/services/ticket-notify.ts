@@ -47,6 +47,7 @@ interface TicketRow {
   status: string;
   assignee_user_id: number | null;
   subject: string;
+  filtered: string | null;
 }
 
 interface Candidate {
@@ -132,7 +133,7 @@ category is on for your account; change it with <code>nemar admin email-preferen
 async function loadTicket(db: D1Database, ticketId: number): Promise<TicketRow | null> {
   return db
     .prepare(
-      `SELECT id, ref, queue_tag, restricted, excluded_user_id, status, assignee_user_id, subject
+      `SELECT id, ref, queue_tag, restricted, excluded_user_id, status, assignee_user_id, subject, filtered
          FROM mail_tickets WHERE id = ?`,
     )
     .bind(ticketId)
@@ -140,7 +141,9 @@ async function loadTicket(db: D1Database, ticketId: number): Promise<TicketRow |
 }
 
 /**
- * Tell the people who can act that a ticket exists. Spam and closed tickets notify nobody.
+ * Tell the people who can act that a ticket exists. Spam and closed tickets notify nobody, nor
+ * does a filtered ticket (ADR 0113) or one in a quiet queue (`mail_queues.notify = 0`); an
+ * escalation is a human act and is announced regardless ({@link notifyTicketEscalated}).
  * Returns how many mails were handed to the provider.
  */
 export async function notifyTicketCreated(
@@ -152,6 +155,12 @@ export async function notifyTicketCreated(
     if (!isAdminNotificationAllowed(env)) return 0;
     const ticket = await loadTicket(db, ticketId);
     if (!ticket || ticket.status === "spam" || ticket.status === "closed") return 0;
+    if (ticket.filtered !== null) return 0;
+    const queue = await db
+      .prepare("SELECT notify FROM mail_queues WHERE tag = ?")
+      .bind(ticket.queue_tag)
+      .first<{ notify: number }>();
+    if (queue !== null && queue.notify === 0) return 0;
     const people = await recipients(db, ticket, "assignee_or_pool");
     if (people.length === 0) return 0;
     const assigned = ticket.assignee_user_id !== null;

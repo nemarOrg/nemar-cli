@@ -498,7 +498,7 @@ describe("the pull request is the recorded one, opened by the App", () => {
   test("the App is its login AND its numeric id AND its type", () => {
     expect(
       holdOf((f) => {
-        pr(f).authorLogin = "nemar-publish-bot";
+        pr(f).authorLogin = "nemar-bot";
       }),
     ).toBe("pr-not-app");
     expect(

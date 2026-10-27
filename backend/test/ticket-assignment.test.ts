@@ -80,9 +80,11 @@ describe("migration 0102", () => {
         [ref, status],
       );
     expect(() => ins("bogus", "raaaaaaaaa")).toThrow();
-    expect(() => ins("open", "short")).toThrow(); // ref must be ten characters
-    expect(() => ins("open", "UPPERCASE2")).toThrow(); // and lowercase base32
+    expect(() => ins("open", "short")).toThrow(); // neither ten characters nor three words
+    expect(() => ins("open", "UPPERCASE2")).toThrow(); // and lowercase
     expect(() => ins("open", "aaaaaaaaa1")).toThrow(); // 1 is not in the base32 alphabet
+    expect(() => ins("open", "amber-falcon")).toThrow(); // two words are not three
+    expect(() => ins("open", "amber-falcon-river")).not.toThrow(); // three are
     expect(() =>
       db.run(
         "INSERT INTO mail_tickets (ref, queue_tag, requester_email) VALUES ('baaaaaaaaa', '', 'a@example.com')",

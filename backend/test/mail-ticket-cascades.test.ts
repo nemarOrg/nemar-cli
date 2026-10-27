@@ -87,6 +87,16 @@ function seedWorld(targetRole: "admin" | "owner"): World {
     "INSERT INTO mail_availability (user_id, away_from, backup_user_id) VALUES (?, '2026-10-01', ?)",
     [other, target],
   );
+  for (const [u, t] of [
+    [target, world.openTicket],
+    [target, world.othersTicket],
+    [other, world.othersTicket],
+  ]) {
+    db.run("INSERT INTO mail_ticket_reads (user_id, ticket_id, read_message_id) VALUES (?, ?, 1)", [
+      u,
+      t,
+    ]);
+  }
   db.run("UPDATE mail_queues SET assignee_user_id = ?, backup_user_id = ? WHERE tag = '*'", [
     target,
     target,
@@ -120,6 +130,10 @@ const events = (id: number) =>
       "SELECT kind FROM mail_ticket_events WHERE ticket_id = ? AND kind = 'unassigned'",
     )
     .all(id).length;
+const readsOf = (id: number) =>
+  db
+    .query<{ n: number }, [number]>("SELECT COUNT(*) AS n FROM mail_ticket_reads WHERE user_id = ?")
+    .get(id)?.n;
 const availabilityOf = (id: number) =>
   db
     .query<{ backup_user_id: number | null }, [number]>(
@@ -138,6 +152,9 @@ function expectFullyReleased(w: World) {
   expect(assignee(w.othersTicket)).toBe(w.other);
   expect(availabilityOf(w.target)).toBeNull();
   expect(availabilityOf(w.other)?.backup_user_id).toBeNull();
+  // Read markers go with the person; another admin's stay.
+  expect(readsOf(w.target)).toBe(0);
+  expect(readsOf(w.other)).toBe(1);
   for (const tag of ["*", "security"]) {
     expect(queueRow(tag)?.assignee_user_id).toBeNull();
     expect(queueRow(tag)?.backup_user_id).toBeNull();
@@ -184,6 +201,8 @@ describe("role demotion", () => {
     expect(JSON.parse(queueRow("rr")?.rr_members ?? "[]")).toEqual([w.other, w.target, 999]);
     expect(availabilityOf(w.target)).not.toBeNull();
     expect(availabilityOf(w.other)?.backup_user_id).toBe(w.target);
+    // Still an admin: their read markers stay.
+    expect(readsOf(w.target)).toBe(2);
   });
 
   test("a promotion releases nothing", async () => {

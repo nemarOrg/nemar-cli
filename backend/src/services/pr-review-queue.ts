@@ -159,14 +159,17 @@ export function plainRef(input: unknown, max = 60): string {
 
 /**
  * A stored author login as it is shown. The NEMAR App's bot keeps its own name,
- * `nemar-publish-bot[bot]`, brackets included: its automatic re-pull pull request is the one bot's
+ * `nemar-bot[bot]`, brackets included: its automatic re-pull pull request is the one bot's
  * the review takes (ADR 0111 narrows ADR 0092's "not bots" for that class), the review stores it
  * under that name, and the label is plain text, where brackets are harmless. Every other login is
- * reduced as {@link plainRef} reduces it. Only that exact constant passes through, so nothing an
- * author wrote reaches the label unreduced.
+ * reduced as {@link plainRef} reduces it. Only that exact constant passes through, and only beside
+ * the bot's numeric id, as {@link restAuthorLabel} requires of GitHub's record, so nothing an
+ * author wrote reaches the label unreduced and a login the App gave up is not shown as the App's.
  */
-export function loginLabel(login: unknown): string {
-  return login === NEMAR_APP_BOT_LOGIN ? NEMAR_APP_BOT_LOGIN : plainRef(login, 39);
+export function loginLabel(login: unknown, authorId: unknown): string {
+  return login === NEMAR_APP_BOT_LOGIN && authorId === NEMAR_APP_BOT_USER_ID
+    ? NEMAR_APP_BOT_LOGIN
+    : plainRef(login, 39);
 }
 
 /**
@@ -1402,7 +1405,7 @@ export async function readPrReviewDetail(
           head_sha: row.head_sha,
           verdict: own.verdict,
           detail: own.detail,
-          author_login: loginLabel(row.author_login),
+          author_login: loginLabel(row.author_login, row.author_id),
           author_id: row.author_id,
           from_fork: row.from_fork === 1,
           created_at: row.created_at,
@@ -1438,7 +1441,12 @@ export async function readPrReviewDetail(
   const authorLogin = row?.author_login ?? livePr?.author_login ?? null;
   const author =
     authorId !== null && authorLogin !== null
-      ? await standingFor(db, loginLabel(authorLogin), authorId, row ? "history" : "github")
+      ? await standingFor(
+          db,
+          loginLabel(authorLogin, authorId),
+          authorId,
+          row ? "history" : "github",
+        )
       : null;
 
   return {

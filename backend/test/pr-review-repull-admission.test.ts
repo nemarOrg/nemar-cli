@@ -26,6 +26,7 @@ import { adminRoutes } from "../src/routes/admin";
 import webhooks from "../src/routes/webhooks";
 import { __resetRateLimitStateForTests } from "../src/services/github/transport";
 import { readPullRequestEvent } from "../src/services/pr-review";
+import { plainRef } from "../src/services/pr-review-queue";
 import { startRepullPullRequestReview } from "../src/services/pr-review-start";
 import { hashApiKey } from "../src/services/token";
 import { getRepull } from "../src/services/upstream-repull";
@@ -366,6 +367,41 @@ describe("the review queue shows the App's pull request under the App's name", (
     const d = await detail();
     expect(d.live?.author_login).toBe("(unknown)");
   });
+
+  test("a bot that only carries the App's id is not shown as the App", async () => {
+    pulls[`${DS}#7`] = appPull({ user: { ...APP, login: "nemar-bot2[bot]" } });
+    const d = await detail();
+    expect(d.live?.author_login).toBe("(unknown)");
+  });
+
+  // A stored review is named as GitHub's record is: the App's login AND its numeric id, because a
+  // rename frees the App's old login for anyone to register. Each half alone is another author's,
+  // reduced as any other login is.
+  const storeReview = (authorId: number, authorLogin: string) =>
+    db.run(
+      `INSERT INTO pr_reviews (dataset_id, pr_number, head_sha, author_id, author_login, state,
+                               detail, decided_at)
+       VALUES (?, 7, ?, ?, ?, 'errored', 'model_unavailable', datetime('now'))`,
+      [DS, HEAD, authorId, authorLogin],
+    );
+
+  test("a stored review under the App's login with another id is not shown as the App", async () => {
+    storeReview(1, NEMAR_APP_BOT_LOGIN);
+    const d = await detail();
+    expect(d.review).toMatchObject({
+      author_login: plainRef(NEMAR_APP_BOT_LOGIN, 39),
+      author_id: 1,
+    });
+    expect(d.review?.author_login).not.toBe(NEMAR_APP_BOT_LOGIN);
+    expect(d.author).toMatchObject({ login: plainRef(NEMAR_APP_BOT_LOGIN, 39), author_id: 1 });
+  });
+
+  test("a stored review under the App's id with another login is not shown as the App", async () => {
+    storeReview(NEMAR_APP_BOT_USER_ID, "someone");
+    const d = await detail();
+    expect(d.review).toMatchObject({ author_login: "someone", author_id: NEMAR_APP_BOT_USER_ID });
+    expect(d.author).toMatchObject({ login: "someone", author_id: NEMAR_APP_BOT_USER_ID });
+  });
 });
 
 describe("the start refuses everything but the App's recorded pull request", () => {
@@ -396,7 +432,7 @@ describe("the start refuses everything but the App's recorded pull request", () 
     [
       "another login with the App's id and type",
       () => {
-        pulls[`${DS}#7`] = appPull({ user: { ...APP, login: "nemar-publish-bot2[bot]" } });
+        pulls[`${DS}#7`] = appPull({ user: { ...APP, login: "nemar-bot2[bot]" } });
       },
       "not_app_author",
     ],
@@ -574,9 +610,7 @@ describe("nothing else about bot authors changes", () => {
     expect(reason(appPull({ headRepo: null }))).toBe("bot_author");
     expect(reason(appPull({ user: { ...APP, id: 1 } }))).toBe("bot_author");
     expect(reason(appPull({ user: { ...APP, type: "User" } }))).toBe("bot_author");
-    expect(reason(appPull({ user: { ...APP, login: "nemar-publish-bot2[bot]" } }))).toBe(
-      "bot_author",
-    );
+    expect(reason(appPull({ user: { ...APP, login: "nemar-bot2[bot]" } }))).toBe("bot_author");
     expect(reason(appPull({ user: { login: "dependabot[bot]", id: 49699333, type: "Bot" } }))).toBe(
       "bot_author",
     );

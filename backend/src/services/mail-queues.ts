@@ -27,6 +27,7 @@ const MAX_RR_MEMBERS = 50;
 
 interface QueueRowWithEscalation extends MailQueueRow {
   escalation_user_id: number | null;
+  notify: number;
 }
 
 function toQueue(row: QueueRowWithEscalation, open: number): MailQueue {
@@ -39,6 +40,7 @@ function toQueue(row: QueueRowWithEscalation, open: number): MailQueue {
     rr_members: parseRrMembers(row.rr_members),
     escalation_user_id: row.escalation_user_id,
     open_tickets: open,
+    notify: row.notify !== 0,
   };
 }
 
@@ -139,6 +141,7 @@ export async function putQueue(
     req.escalation_user_id !== undefined
       ? req.escalation_user_id
       : (existing?.escalation_user_id ?? null);
+  const notify = req.notify !== undefined ? req.notify : existing ? existing.notify !== 0 : true;
   const storedMembers = existing ? parseRrMembers(existing.rr_members) : [];
   let members = req.rr_members !== undefined ? req.rr_members : storedMembers;
   members = [...new Set(members)];
@@ -162,8 +165,8 @@ export async function putQueue(
   await db
     .prepare(
       `INSERT INTO mail_queues (tag, restricted, strategy, assignee_user_id, backup_user_id,
-          rr_members, rr_cursor, escalation_user_id, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, 0, ?, datetime('now'))
+          rr_members, rr_cursor, escalation_user_id, notify, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, datetime('now'))
        ON CONFLICT(tag) DO UPDATE SET
          restricted = excluded.restricted,
          strategy = excluded.strategy,
@@ -172,6 +175,7 @@ export async function putQueue(
          rr_members = excluded.rr_members,
          rr_cursor = CASE WHEN ? = 1 THEN 0 ELSE mail_queues.rr_cursor END,
          escalation_user_id = excluded.escalation_user_id,
+         notify = excluded.notify,
          updated_at = datetime('now')`,
     )
     .bind(
@@ -182,6 +186,7 @@ export async function putQueue(
       backup,
       JSON.stringify(members),
       escalation,
+      notify ? 1 : 0,
       membersChanged ? 1 : 0,
     )
     .run();
