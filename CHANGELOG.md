@@ -81,7 +81,7 @@ It sets no Worker variable or secret: the four re-pull switches and caps are abs
 
 ### Production behavior changes
 
-- **Every version in the data plane's landing JavaScript Object Notation (JSON) and the page bundle's `landing.data.versions` carries `mirror`:** `true` for an N.0.0 of an `on` dataset whose upstream tag is recorded, `false` for every other dataset and version, `null` for an N.0.0 whose tag is unknown or not yet examined.
+- **Every version in the data plane's landing JavaScript Object Notation (JSON) and the page bundle's `landing.data.versions` carries `mirror`:** `true` for an N.0.0 of an `on` dataset whose upstream tag is recorded, `false` for every other dataset and version, `null` for an N.0.0 of an `on` dataset whose tag is unknown or not yet examined.
   The tag itself is not on the public wire.
   `GET /datasets/:id/versions` (owner, collaborators, administrators) also carries `source_version` and `source_version_basis`.
 - **`nemar dataset release` and `nemar dataset update --bump major` refuse a major version of a mirror** (an `on` id, or a row recorded as an OpenNeuro import), exit 1 before anything is cloned, and point at `nemar admin repull plan`.
