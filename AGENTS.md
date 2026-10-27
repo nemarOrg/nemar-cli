@@ -168,7 +168,9 @@ contributor back, which ADR 0107 settled).
 0093 (`nemar admin pr-reviews` lists the open dataset pull requests with the automated review: a verdict
 belongs to the commit it read, an approval is the administrator's OWN act from their machine with their
 own GitHub login and no Worker code path approves, a failing, running or unreadable review needs
-`--force`, an administrator merges by three paths only: `pr-reviews approve --merge` and a `y` in
+`--force`, NEMAR's tools merge by three paths only (the GitHub merge button is bound by none of
+this, and a re-pull merged there is recorded afterwards as a merge outside NEMAR's tools):
+`pr-reviews approve --merge` and a `y` in
 `nemar admin pr-reviews next`, both of which read GitHub's state before approving and need
 `clean`, and, for an upstream re-pull's pull request only, `nemar admin repull merge`, which
 approves nothing; a re-pull's pull request merges through one gate all three share, which reads
@@ -176,8 +178,9 @@ the record, the pull request from and into `nemarDatasets/<dataset_id>` itself (
 `main`, the review, the identifier screen and GitHub's `clean` (or, with
 `--bids-failure-reason` on a re-pull an administrator opened, `unstable` over a failed BIDS
 validation, never `blocked`), then claims the daily merge cap; ADR 0111 narrows the merge for one
-class, a machine-clean automatic re-pull pull request, which the Worker merges when
-`AUTO_REPULL_MERGE_ENABLED` is on and approves nothing; each Worker lists only the datasets it
+class, a machine-clean automatic re-pull pull request, which the Worker merges only in production,
+when `AUTO_REPULL_ENABLED` and `AUTO_REPULL_MERGE_ENABLED` are both exactly `"1"`
+(`autoRepullMergeEnabled`), and approves nothing; each Worker lists only the datasets it
 owns, and an administrator runs a finished review again only with `start --redo`, which never
 supersedes a running one).
 0094 (the upload save step skips re-reading annexed content only once recorded annexed bytes reach
