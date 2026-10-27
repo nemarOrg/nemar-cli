@@ -114,7 +114,7 @@ The runbooks are [freshness](https://docs.nemar.org/admin/operations/upstream-fr
   Only the first production merge, under a cap of 1, shows whether the App's token reads `mergeable_state` as an administrator does and whether the dataset workflows tag the App's squash.
 - ADR 0107's review may never pass a re-pull diff; until one passes, an administrator merges each re-pull.
 - A re-pull with corrections mints two version DOIs, N.0.0 and N.0.1.
-- The ADR 0111 amendment of 2026-10-27 lists what only the canary, the first two re-pulls and the first Worker merge can verify.
+- The ADR 0111 amendment of 2026-10-27 lists, under "Not yet verified", what only the canary, the first two re-pulls, the first unattended run, the first Worker merge and the release with its first weeks can show.
 
 ## 0.10.25 - 2026-10-26
 

@@ -2175,25 +2175,42 @@ Phase 8 moves nothing to verified.
 Its checks read the code at `1abf9286` and a few public records, and it ran no re-pull, no canary and no Worker merge.
 Two items of the "Not yet verified" list near the top of this record are closed by earlier amendments: where `source_version` is inserted (the Phase 2 amendment), and the ruleset half of the App's merge (the Phase 7g amendment).
 The Phase 7e amendment corrects the item about the review.
-These remain:
+These remain, grouped by what shows them.
+The "Checked only against stand-ins" section of each earlier amendment holds the same items in its own words, and this list holds all of them.
 
-- Whether the App's own token reads `mergeable_state` as an administrator does, that GitHub merges the App's squash at the screened head with the message it is sent, and that the dataset workflows tag that squash and mint its DOI as they tag any merge to `main`.
-  Only the first production merge shows them, and it runs with `REPULL_DAILY_MERGE_CAP` set to `"1"`.
-- That a signed cross-account `copy-object` and `upload-part-copy` of a public versioned object honor `?versionId=` and `--copy-source-if-match` and name the copied version, that upstream's bucket answers from `us-east-1`, and whether NEMAR's bucket locks a copy by default retention.
-  The canary (`scripts/repull-canary.ts`) checks them; a multipart copy over 5 GiB in 4 GiB parts is first met in a real re-pull.
-- Whether the standard edits are recognized on the early rewritten imports `on003645` and `on004362`, and what their plans count as unexplained paths: the owner's review of their dry-run plans.
-- Whether ADR 0107's review can ever pass a re-pull diff.
-  The App's pull request is reviewed now, but ADR 0109 fails a changed `CHANGES` line and holds a replaced recording, both normal in a re-pull; until one passes, no re-pull is machine clean and an administrator merges each.
-- Which relation the first re-pull's DOI record carries (above).
-- Whether OpenNeuro writes S3 before it pushes to GitHub, whether the object at a path lags the pinned `versionId`, and that upstream's `.log.rmet` records a `versionId` per key.
-- Whether the installation token is accepted for the raw files of `OpenNeuroDatasets` (if it is not, every probe reads `stale_unverified`).
-- Whether the central `run-identifier-screen` workflow posts a re-pull screen's report to its callback.
-- What GitHub answers to the reads the release and the merge make (the tag's commit, the comparison words, a squash-merged pull request's `head` and `merge_commit_sha`).
-  Only production shows these last three.
-- How soon enrichment commits to a release branch after a push, which the settle rule of the Phase 7d amendment records and only production shows.
-- What the weekly report's re-pull section reads on production data, and the first week a switch is on.
-- That the `mirror` field reaches production as the pages say.
-  After the release, `curl -s -H 'Accept: application/json' https://data.nemar.org/<id>/ | jq '[.versions[].mirror]'` shows it on a mirror, and `null` is expected until the backfill has run.
+- The canary (`scripts/repull-canary.ts`) and the first copy:
+  - That a signed cross-account `copy-object` and `upload-part-copy` of a public versioned object honor `?versionId=` and `--copy-source-if-match` and name the copied version, that upstream's bucket answers from `us-east-1`, and whether NEMAR's bucket locks a copy by default retention (Phase 6d).
+  - That a multipart copy over 5 GiB in 4 GiB parts, and the CLI's retries and its ten-minute bound per copy call, behave as they do against the stand-in (Phase 6d).
+  - That `aws s3 sync` and `list-objects-v2` answer the uploads as the stand-in does (Phase 6c), that the real bucket answers HEAD, PutObjectRetention and GetObjectRetention on a copied object's version as the stand-in does, including what it answers a credential without the lock permission (Phase 6f), and that it lists the keys N.0.1 replays as the stand-in does (Phase 6g).
+  - An anonymous ranged GET of `openneuro.org` at `?versionId=` was measured once, for one object of `ds004362`, while Phase 6 was planned (Phase 6c).
+- The first two re-pulls by hand:
+  - Whether the standard edits are recognized on the early rewritten imports `on003645` and `on004362`, and what their plans count as unexplained paths: the owner's review of their dry-run plans.
+  - Which relation the first re-pull's DOI record carries (above).
+  - Whether OpenNeuro writes S3 before it pushes to GitHub, whether the object at a path lags the pinned `versionId`, and that upstream's `.log.rmet` records a `versionId` per key.
+  - What GitHub answers to the reads the release and the merge make: the tag's commit, the comparison words, a squash-merged pull request's `head` and `merge_commit_sha` (Phase 6e), the `mergeable_state` words for a re-pull pull request, how soon its `head.sha` follows a push, and whether a leased forced push to a release branch of a dataset repository is accepted (Phase 6f).
+  - How GitHub opens and lists a pull request, the head's repository and the answer to a second one on the same branch included (Phase 6d), and lists open pull requests as the release-pr check reads them (Phase 6c).
+  - That GitHub opens a second release pull request on a repository whose first one merged and squash-merges it with the message it is sent, lists a branch's pull requests by its `head` filter, closes one, deletes a branch, and reports a merged pull request's state when it is read by number after a close (Phase 6g).
+  - That the dataset workflows tag the squash merge of a re-pull as they tag other merges to `main` (Phase 6f), and tag `v<N.0.1>` and mint its DOI as they do any patch release (Phase 6g).
+  - Whether the central `run-identifier-screen` workflow posts a re-pull screen's report to its callback (Phase 6e).
+  - On a staging rehearsal, that the dev bucket answers the plan's anonymous read of its `annex-uuid` marker, and that a rehearsal plan establishes the lineage the fixture's never-examined version rows need at create (Phase 6g).
+- The first unattended run:
+  - That GitHub answers the dispatch with 204 and runs the workflow, that the runner masks the token and the AWS session as the workflow asks, that the App token GitHub mints for one repository pushes the release branch and opens the pull request, and how GitHub refuses one past its hour (Phases 7c and 7d).
+  - How long a real copy takes against the estimate, that `GetSessionToken` takes the import's pair and its session copies as the import's own keys do, that Ubuntu's git-annex reads what the planner reads, and that the plan's anonymous clones of `OpenNeuroDatasets` hold up from a runner, since the App token is never sent there (Phase 7d).
+  - Whether the installation token is accepted for the raw files of `OpenNeuroDatasets`; if it is not, every probe reads `stale_unverified` (Phase 7c).
+  - That a run reaches the callback at the API host and that the token survives the dispatch payload and the run's environment unchanged (Phase 7b), that a resumed run takes up the record its dispatch names (Phase 7f), and that a 5xx can follow a queued event, which is assumed in the safe direction (Phase 7c).
+  - How soon enrichment commits to a release branch after a push, which the settle rule of the Phase 7d amendment records and only production shows.
+  - That the finish run records the release and the lock from a runner (Phase 7g).
+- The first Worker merge, which runs with `REPULL_DAILY_MERGE_CAP` set to `"1"`:
+  - Whether the App's own token reads `mergeable_state` as an administrator does, that GitHub merges the App's squash at the screened head with the message it is sent and refuses a head that moved, and that the dataset workflows tag that squash and mint its DOI as they tag any merge to `main` (Phases 7a, 7e and 7g).
+  - That GitHub names the author of the App's pull request `nemar-bot[bot]`, id 283755542, type `Bot` (the Phase 7e amendment, as the rename amendment restates it), that `check-runs` honors its filters on a mirror as it did on `nm000527`, that the screen and the review start on the App's pull request and the review's check and comment are published on it, and that the review workflow claims and reports on a pull request a bot opened (Phases 7e and 7f).
+  - That GitHub answers a send it refuses for the Worker's credential or rate with a status other than 404 and 422, and that the tick's real cost on the 30-minute tick is the one measured (Phase 7f).
+  - That an unprotected mirror whose BIDS validation failed reads `unstable`, and not `blocked`, for an administrator's merge over it (Phase 7g).
+  - Whether ADR 0107's review can ever pass a re-pull diff.
+    The App's pull request is reviewed now, but ADR 0109 fails a changed `CHANGES` line and holds a replaced recording, both normal in a re-pull; until one passes, no re-pull is machine clean and an administrator merges each.
+- The release and the first weeks:
+  - What the weekly report's re-pull section reads on production data, that every merge's claim is in the audit log as the attribution assumes, and the first week a switch is on (Phase 7h).
+  - That the `mirror` field reaches production as the pages say.
+    After the release, `curl -s -H 'Accept: application/json' https://data.nemar.org/<id>/ | jq '[.versions[].mirror]'` shows it on a mirror, and `null` is expected until the backfill has run.
 
 ### Left open for the owner, unchanged
 
