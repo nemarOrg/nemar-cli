@@ -98,7 +98,6 @@ import {
   assertAutomaticCounts,
   assertAutomaticPlan,
   planCopySeconds,
-  planHandoffDir,
   readPlanHandoff,
   tokenHourRefusal,
 } from "./automatic.js";
@@ -569,8 +568,7 @@ async function execute(
     }
 
     // The planner's clones: made again here for an administrator's run, or a dispatched run's own
-    // plan step's, kept beside its plan file.
-    const plannerRoot = opts.automatic ? planHandoffDir(opts.planPath) : paths.plan;
+    // plan step's, kept beside its plan file, which the command that ran this removes.
     let planned: PlanToPrepare;
     try {
       if (opts.automatic) {
@@ -599,7 +597,7 @@ async function execute(
       }
     } catch (err) {
       // Refused before anything was prepared: leave no empty directory behind it.
-      removeQuietly(plannerRoot, opts.out);
+      removeQuietly(paths.plan, opts.out);
       removeIfEmpty(paths.root);
       removeIfEmpty(dirname(paths.root));
       throw err;
@@ -671,7 +669,7 @@ async function execute(
         ...(settled ? { settled } : {}),
       };
     } finally {
-      if (!opts.keepWorkdir) removeQuietly(plannerRoot, opts.out);
+      if (!opts.keepWorkdir) removeQuietly(paths.plan, opts.out);
     }
   } finally {
     release();

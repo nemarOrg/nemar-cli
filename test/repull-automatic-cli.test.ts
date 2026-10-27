@@ -73,6 +73,7 @@ import {
   existsSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   renameSync,
   rmSync,
   writeFileSync,
@@ -565,6 +566,9 @@ describe.skipIf(!awsInstalled)("an automatic run opens its pull request", () => 
       /^repull-auto: quiet suppressed=\d+ token_age_s=\d+ plan_s=\d+ run_s=\d+$/m,
     );
     expect(dispatchRow(c.id).status).toBe("started");
+    // The planning scratch is gone; only the plan file and its handoff are left for the execute.
+    expect(readdirSync(runner).filter((n) => n.startsWith(".planning-"))).toEqual([]);
+    expect(existsSync(join(runner, "plan.json.planner", "upstream.git"))).toBe(true);
     // The plan never left the runner, and nothing was written but the report.
     expect(readFileSync(join(runner, "plan.json"), "utf8")).toContain('"dataset": "on099999"');
     expect(w.apiWrites).toEqual(["POST /webhooks/repull-state"]);
@@ -610,6 +614,9 @@ describe.skipIf(!awsInstalled)("an automatic run opens its pull request", () => 
     expect(w.apiWrites).toEqual(["POST /webhooks/repull-state", "POST /webhooks/repull-state"]);
     expect(ghWrites()).toEqual([]);
     expect(s3Writes()).toEqual([]);
+    // A plan it does not take leaves no clones behind: no handoff, no planning scratch.
+    expect(existsSync(join(runner, "plan.json.planner"))).toBe(false);
+    expect(readdirSync(runner).filter((n) => n.startsWith(".planning-"))).toEqual([]);
   });
 
   test("a resume of a record left at prepared, before its copy, plans to its digest and opens", async () => {
@@ -808,6 +815,42 @@ describe.skipIf(!awsInstalled)("an automatic run opens its pull request", () => 
     expect(w.gh.seen.filter((s) => s.token === APP_TOKEN && s.method !== "GET")).toEqual([]);
   });
 
+  test("a record taken up past prepared leaves no handoff behind", async () => {
+    const c = await claimOpen();
+    writeEvent(c);
+    expect((await auto(planArgs(c))).exitCode).toBe(0);
+    // The record of this very plan is taken through its copy, and is the automatic path's; its
+    // first run failed, and a resume dispatch names it.
+    const admin = await w.cli(
+      ["repull", "execute", join(runner, "plan.json"), "--until", "copied", "--yes"],
+      {},
+      undefined,
+      SOURCE_ENTRY,
+    );
+    expect(admin.exitCode, admin.all).toBe(0);
+    w.db().run("UPDATE upstream_repulls SET origin = 'automatic'");
+    w.db().run(
+      "UPDATE upstream_repull_dispatches SET status = 'failed', code = 'runner-failed', nonce = NULL WHERE id = ?",
+      [c.id],
+    );
+    const [row] = repullRows();
+    const resume = await claimOpenDispatch(w.bindings(), {
+      datasetId: w.fx.datasetId,
+      upstreamDs: UPSTREAM_ID,
+      fromTag: TAG_A,
+      toTag: TAG_B,
+      repullId: row?.id ?? 0,
+    });
+    if (!("id" in resume)) throw new Error(`nothing was claimed: ${JSON.stringify(resume)}`);
+    writeEvent(resume, { repullId: row?.id ?? 0 });
+    expect(existsSync(join(runner, "plan.json.planner"))).toBe(true);
+    const exec = await auto(executeArgs(resume));
+    expect(exec.exitCode, exec.all).toBe(0);
+    expectQuiet(exec, resume, "opened");
+    expect(repullRows()).toMatchObject([{ id: row?.id, status: "pr_open" }]);
+    expect(existsSync(join(runner, "plan.json.planner"))).toBe(false);
+  });
+
   test("a copy the estimate puts past the App token's hour is refused at plan time", async () => {
     const c = await claimOpen();
     writeEvent(c);
@@ -855,6 +898,8 @@ describe.skipIf(!awsInstalled)("an automatic run opens its pull request", () => 
     expect(repullRows()).toEqual([]);
     expect(ghWrites()).toEqual([]);
     expect(s3Writes()).toEqual([]);
+    // The plan step's handoff is for this run only: gone however the execute ended.
+    expect(existsSync(join(runner, "plan.json.planner"))).toBe(false);
   });
 
   /**

@@ -55,6 +55,7 @@ import {
   keepPlanHandoff,
   optionRefused,
   planCopySeconds,
+  planHandoffDir,
   reportDispatch,
   tokenHourRefusal,
   tokenOnArgvRefusal,
@@ -114,6 +115,8 @@ interface Spec {
   /** Whether this command is the run's first, which reports `started`. */
   reportsStart: boolean;
   body(ctx: AutomaticContext): Promise<Outcome>;
+  /** What no later command reads, removed however this one ended. */
+  cleanup?: () => void;
 }
 
 /**
@@ -162,6 +165,18 @@ function end(sink: AutomaticSink, outcome: Outcome, startedMs: number): void {
 
 /** One automatic run of a command; see the module comment. */
 async function runAutomatic(spec: Spec): Promise<void> {
+  try {
+    await runOnce(spec);
+  } finally {
+    try {
+      spec.cleanup?.();
+    } catch {
+      // A runner's temporary directory: nothing the run reports depends on it.
+    }
+  }
+}
+
+async function runOnce(spec: Spec): Promise<void> {
   const startedMs = Date.now();
   const sink = installAutomaticQuiet();
   markReportedExit();
@@ -427,6 +442,7 @@ export function automaticExecute(
     option,
     datasetOf: () => peekPlan(planFile).datasetId,
     reportsStart: false,
+    cleanup: () => rmSync(planHandoffDir(planFile), { recursive: true, force: true }),
     async body(ctx) {
       refuseOptions([
         ["--json", options.json === true],
