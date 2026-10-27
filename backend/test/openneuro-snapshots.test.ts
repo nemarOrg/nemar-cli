@@ -287,6 +287,38 @@ describe("snapshotGraphqlUrl: the override is a test seam, not a production sett
       ]).toEqual([value, value]);
     }
   });
+
+  test("in production the override is honored for an http loopback URL and for nothing else, whatever the protocol", () => {
+    // Every protocol against every host: the fence is the pair, and a URL that is loopback in one
+    // coordinate and not in the other is refused. A Worker cannot reach a loopback address, so
+    // `http` there changes nothing; `https`, `ws`, `wss`, `ftp` and `file` on a loopback host are
+    // not what the suites use and are refused, as is every protocol on a host that is not one.
+    const loopbackHosts = ["127.0.0.1", "localhost", "[::1]"];
+    const otherHosts = ["openneuro.example.invalid", "192.0.2.1", "[2001:db8::1]", "127.0.0.2"];
+    for (const protocol of ["http", "https", "ws", "wss", "ftp", "file"]) {
+      for (const host of [...loopbackHosts, ...otherHosts]) {
+        const value = `${protocol}://${host}:43210/crn/graphql`;
+        const honored = protocol === "http" && loopbackHosts.includes(host);
+        expect([
+          value,
+          snapshotGraphqlUrl({ ENVIRONMENT: "production", OPENNEURO_GRAPHQL_URL: value }),
+        ]).toEqual([value, honored ? value : OPENNEURO_GRAPHQL_URL]);
+      }
+    }
+    // The same without a port, and with the spelling a URL parser folds (`HTTP`, `LOCALHOST`).
+    for (const value of ["http://127.0.0.1/x", "http://localhost/x", "HTTP://LOCALHOST:1/x"]) {
+      expect([
+        value,
+        snapshotGraphqlUrl({ ENVIRONMENT: "production", OPENNEURO_GRAPHQL_URL: value }),
+      ]).toEqual([value, value]);
+    }
+    for (const value of ["https://127.0.0.1/x", "https://localhost/x", "https://[::1]/x"]) {
+      expect([
+        value,
+        snapshotGraphqlUrl({ ENVIRONMENT: "production", OPENNEURO_GRAPHQL_URL: value }),
+      ]).toEqual([value, OPENNEURO_GRAPHQL_URL]);
+    }
+  });
 });
 
 /**
@@ -328,6 +360,21 @@ describe("readUpstreamSnapshots posts where snapshotGraphqlUrl says", () => {
     expect(value.errors).toEqual([]);
   });
 
+  test("production posts to OpenNeuro's own host when the override is http on a host that is not loopback", async () => {
+    // The host is half of the fence, as the protocol is the other half.
+    standin.reset();
+    const { hosts } = await withHostsRouted(() =>
+      readUpstreamSnapshots(
+        {
+          ENVIRONMENT: "production",
+          OPENNEURO_GRAPHQL_URL: "http://openneuro.example.invalid/crn/graphql",
+        },
+        [...RECORDED_IDS],
+      ),
+    );
+    expect(hosts).toEqual(["openneuro.org"]);
+  });
+
   test("an unknown environment posts to OpenNeuro's own host as production does", async () => {
     const { hosts } = await withHostsRouted(() =>
       readUpstreamSnapshots({ OPENNEURO_GRAPHQL_URL: ELSEWHERE }, [...RECORDED_IDS]),
@@ -344,6 +391,24 @@ describe("readUpstreamSnapshots posts where snapshotGraphqlUrl says", () => {
     expect(hosts).toEqual(["openneuro.example.invalid"]);
     expect(standin.log).toHaveLength(0);
     expect(value.errors[0]).toContain("599");
+  });
+
+  test("production posts to OpenNeuro's own host when a loopback override is not http", async () => {
+    // The protocol is part of the fence: the stand-in's port over https, or over a protocol the
+    // reader never speaks, is not the stand-in, and the post goes to OpenNeuro's own host.
+    const port = new URL(standin.url).port;
+    for (const protocol of ["https", "ws", "ftp"]) {
+      const { hosts } = await withHostsRouted(() =>
+        readUpstreamSnapshots(
+          {
+            ENVIRONMENT: "production",
+            OPENNEURO_GRAPHQL_URL: `${protocol}://127.0.0.1:${port}/crn/graphql`,
+          },
+          [...RECORDED_IDS],
+        ),
+      );
+      expect([protocol, hosts]).toEqual([protocol, ["openneuro.org"]]);
+    }
   });
 
   test("production reaches a loopback stand-in, as the suites that run the scheduler need", async () => {
