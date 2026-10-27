@@ -74,6 +74,7 @@ import {
 } from "./helpers/repull-github-standin";
 import { type Row, rowAt } from "./helpers/repull-rows";
 import { type CapturedEmail, withFakeResend } from "./helpers/resend";
+import { insideOneUtcDay } from "./helpers/utc-day";
 
 const DS = "on098811";
 const HEAD = "0123456789abcdef0123456789abcdef01234567";
@@ -96,6 +97,8 @@ afterAll(() => gh.stop());
 
 beforeEach(async () => {
   db = freshDb();
+  // The day caps count a UTC day on the database's clock, and no claim takes a clock.
+  await insideOneUtcDay(db);
   db.run(
     `INSERT INTO users (username, email, password_hash, status, role, email_verified)
      VALUES ('mergeadmin', 'mergeadmin@example.org', 'x', 'approved', 'admin', 1)`,
