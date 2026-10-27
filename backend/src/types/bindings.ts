@@ -330,7 +330,9 @@ export interface Bindings {
   // only when it is exactly "1" AND ENVIRONMENT is exactly "production"; unset, "true" and anything
   // else are off. AUTO_REPULL_MERGE_ENABLED acts only while AUTO_REPULL_ENABLED is also on.
   // Deliberately absent from every vars block in wrangler-sccn.toml: the owner turns them on in a
-  // reviewed change, never in the dashboard alone (the next deploy drops a dashboard-only value).
+  // reviewed change, never in the dashboard or as a Worker secret. The Worker reads them from its
+  // environment, so a secret of the same name would turn them on too, survive a deploy and not show
+  // in the file; a dashboard-only variable is dropped by the next deploy.
   AUTO_REPULL_ENABLED?: string; // "1" lets the Worker open and advance re-pulls (production only)
   AUTO_REPULL_MERGE_ENABLED?: string; // "1" lets the Worker merge them (needs AUTO_REPULL_ENABLED)
   // Re-pull dispatches claimed to open a re-pull in a UTC day. Absent: 2. "0" to "20": that many.
