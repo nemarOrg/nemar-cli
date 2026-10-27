@@ -29,7 +29,7 @@ It sets no Worker variable or secret: the four re-pull switches and caps are abs
 - **Phase 3 (#1909): an import is pinned to an upstream snapshot tag, never the mirror's default HEAD (ADR 0111 decision 10).**
   The auto-import dispatches the tag discovery found (`client_payload.openneuro_tag`, also in its `auto_import_dispatch` audit row), `nemar admin import-openneuro --tag <tag>` names one for a single dataset, and with neither, prepare asks OpenNeuro's GraphQL for `latestSnapshot.tag` when it runs, which is what a retry gets: the retry engine dispatches no tag.
   The clone's branch is reset to `refs/tags/<tag>` before anything else happens.
-  When an explicit tag is not OpenNeuro's latest, prepare warns: the import's copy still takes the object currently at each upstream path (only a re-pull's copy pins the object version).
+  When an explicit tag is not OpenNeuro's latest, prepare warns: the import's copy still takes the object currently at each upstream path (a re-pull's copy pins the object version).
   A tag not yet on the GitHub mirror, or a latest tag OpenNeuro cannot name, refuses with `[openneuro-mirror-lag]` before the dataset record is created.
   The classifier calls it `mirror_lag`; recovery quarantines it as `mirror_lag` rather than `not_found_dataset`, sends no mail and files no issue; the retry engine retries it and, once its 14-day window has passed, parks it as `mirror_lag` and files its one admin issue.
   A re-import of a released mirror whose upstream moved refuses with `[openneuro-upstream-moved]` before any reset, Simple Storage Service (S3) setup or push (#993); moving a released mirror is a re-pull's job.

@@ -1478,7 +1478,7 @@ async function prepareImportSteps(
   if (pinned.latestTag !== null && !sameUpstreamTag(pinned.latestTag, pinned.tag)) {
     console.log(
       chalk.yellow(
-        `  Warning: importing ${pinned.tag}, but OpenNeuro's latest is ${pinned.latestTag}. The copy takes the object currently at each upstream path (only a re-pull's copy pins the object version, ADR 0111 decision 8), so a recording that changed between the two without changing size would be copied with the newer bytes.`,
+        `  Warning: importing ${pinned.tag}, but OpenNeuro's latest is ${pinned.latestTag}. The copy takes the object currently at each upstream path (a re-pull's copy pins the object version, ADR 0111 decision 8), so a recording that changed between the two without changing size would be copied with the newer bytes.`,
       ),
     );
   }
