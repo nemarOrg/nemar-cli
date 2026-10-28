@@ -28,7 +28,12 @@ import {
   toWireRow,
 } from "../shared/upstream-staleness";
 
-import { type DeltaMeasurement, renderMeasurement, totalsOf } from "../src/lib/upstream-measure";
+import {
+  type DeltaMeasurement,
+  measureStaleMirrors,
+  renderMeasurement,
+  totalsOf,
+} from "../src/lib/upstream-measure";
 
 const FILES = join(import.meta.dir, "fixtures/openneuro-snapshot-files");
 
@@ -476,7 +481,7 @@ describe("totalsOf and renderMeasurement", () => {
   });
 
   test("the catch-up takes whole days: three re-pulls at a cap of two are two days", () => {
-    const t = totalsOf([measured("on000001", delta()), measured("on000002", delta())], 3, 3);
+    const t = totalsOf([measured("on000001", delta()), measured("on000002", delta())], 3, 3, 2);
     expect(t.catch_up_days).toBe(2);
     expect(t.not_measured).toBe(1);
     expect(t.bytes_to_copy).toBeNull();
@@ -490,6 +495,7 @@ describe("totalsOf and renderMeasurement", () => {
       ],
       2,
       2,
+      2,
     );
     expect(t.bytes_to_copy).toBeNull();
     expect(t.bytes_to_copy_known).toBe(500);
@@ -498,7 +504,7 @@ describe("totalsOf and renderMeasurement", () => {
   });
 
   test("an unknown delta contributes nothing to the file counts and is counted", () => {
-    const t = totalsOf([measured("on000001", delta()), measured("on000002", null)], 2, 2);
+    const t = totalsOf([measured("on000001", delta()), measured("on000002", null)], 2, 2, 2);
     expect(t.delta_unknown).toBe(1);
     expect(t.measured).toBe(1);
     expect([t.files_added, t.files_changed, t.files_deleted]).toEqual([1, 2, 3]);
@@ -513,7 +519,8 @@ describe("totalsOf and renderMeasurement", () => {
         scope: "fleet",
         complete: true,
         deltas,
-        totals: totalsOf(deltas, 1, 1),
+        totals: totalsOf(deltas, 1, 1, 2),
+        open_cap: { value: 2, source: "default" },
         doi_volume: estimateRepullDoiVolume([], Date.now()),
       },
       10,
@@ -535,7 +542,8 @@ describe("totalsOf and renderMeasurement", () => {
         scope: "fleet",
         complete: false,
         deltas,
-        totals: totalsOf(deltas, 2, 2),
+        totals: totalsOf(deltas, 2, 2, 2),
+        open_cap: { value: 2, source: "default" },
         doi_volume: volume,
       },
       10,
@@ -544,5 +552,73 @@ describe("totalsOf and renderMeasurement", () => {
     expect(lines).toContain("size unknown");
     expect(lines).toContain("delta unknown: OpenNeuro GraphQL answered HTTP 503");
     expect(lines).toContain("at least: not every delta was read");
+  });
+});
+
+// ----------------------------------------------------------------------------
+// The open cap behind the catch-up estimate
+// ----------------------------------------------------------------------------
+
+describe("the open cap behind the catch-up estimate", () => {
+  // Built: stale mirrors that carry upstream data, so the DOI estimate counts one catch-up re-pull
+  // each. `limit: 0` reads nothing from OpenNeuro (the same as `upstream-measure.test.ts`), so
+  // `measureStaleMirrors` runs end to end with no network. The expected day counts are quoted,
+  // never recomputed by the code under test: ceil(3 / 1) = 3, ceil(3 / 2) = 2.
+  const stale = (id: string): UpstreamStatusRow => ({
+    dataset_id: id,
+    ds: `ds${id.slice(2)}`,
+    visibility: "public",
+    state: "stale_ready",
+    anomaly: null,
+    reason: "x",
+    recorded: { version: "1.0.0", tag: "1.0.0", basis: "doi" },
+    upstream: { latest_tag: "1.0.1", latest_created: null, snapshots: [] },
+    import_status: "complete",
+    probably_stale: null,
+  });
+  const rows = ["on000001", "on000002", "on000003"].map(stale);
+
+  test("the catch-up divides by the cap the Worker reports, and by the default only when none was passed", async () => {
+    const reported = await measureStaleMirrors(rows, { limit: 0, openCap: 1 });
+    expect(reported.doi_volume.catch_up).toBe(3);
+    expect(reported.open_cap).toEqual({ value: 1, source: "worker" });
+    expect(reported.totals.catch_up_days).toBe(3);
+    const reportedLines = renderMeasurement(reported, 10);
+    expect(reportedLines).toContain(
+      "  At the open cap the Worker reports (1) the catch-up takes 3 day(s).",
+    );
+
+    const fallback = await measureStaleMirrors(rows, { limit: 0 });
+    expect(fallback.doi_volume.catch_up).toBe(3);
+    expect(fallback.open_cap).toEqual({ value: 2, source: "default" });
+    expect(fallback.totals.catch_up_days).toBe(2);
+    const fallbackLines = renderMeasurement(fallback, 10);
+    expect(fallbackLines).toContain(
+      "  At the default open cap (2; the Worker's cap could not be read) the catch-up takes 2 day(s).",
+    );
+
+    // The old line printed `REPULL_DAILY_OPEN_CAP=2` for everyone, whatever the Worker had set.
+    for (const lines of [reportedLines, fallbackLines]) {
+      expect(lines.join("\n")).not.toContain("REPULL_DAILY_OPEN_CAP=");
+    }
+  });
+
+  test("a cap of 0 opens nothing: the catch-up has no day count, and never prints Infinity or NaN", async () => {
+    // The Worker reports 0 for `REPULL_DAILY_OPEN_CAP = "0"` and for a binding it cannot read.
+    const stopped = await measureStaleMirrors(rows, { limit: 0, openCap: 0 });
+    expect(stopped.open_cap).toEqual({ value: 0, source: "worker" });
+    expect(stopped.totals.catch_up_days).toBeNull();
+    const text = renderMeasurement(stopped, 10).join("\n");
+    expect(text).toContain(
+      "  At the open cap the Worker reports (0) no re-pull is opened, so the catch-up never finishes.",
+    );
+    expect(text).not.toMatch(/Infinity|NaN/);
+
+    // With nothing to catch up, a cap of 0 leaves no work undone: a real zero, not a missing one.
+    const nothing = await measureStaleMirrors([], { limit: 0, openCap: 0 });
+    expect(nothing.totals.catch_up_days).toBe(0);
+    expect(renderMeasurement(nothing, 10)).toContain(
+      "  At the open cap the Worker reports (0) the catch-up takes 0 day(s).",
+    );
   });
 });

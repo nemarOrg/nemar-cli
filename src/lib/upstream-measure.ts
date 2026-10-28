@@ -46,7 +46,8 @@ export const MEASURE_PROGRESS_EVERY = 10;
 
 /**
  * ADR 0111's `REPULL_DAILY_OPEN_CAP` default: the re-pull pull requests the automatic path opens
- * in a day. The catch-up estimate divides by it; the owner may set another cap later.
+ * in a day. The catch-up estimate divides by the cap the Worker reports (`MeasureOptions.openCap`)
+ * and falls back to this default when the CLI could not read it.
  */
 export const REPULL_DAILY_OPEN_CAP = 2;
 
@@ -98,8 +99,12 @@ export interface MeasurementTotals {
   bytes_to_copy_known: number;
   /** Mirrors this total does not cover, so it is never read as the whole fleet. */
   not_comparable: NotComparable;
-  /** ceil(catch_up / REPULL_DAILY_OPEN_CAP). */
-  catch_up_days: number;
+  /**
+   * ceil(catch_up / the open cap in `Measurement.open_cap`), in whole days. Null when that cap is 0
+   * and there is a catch-up to do: nothing is opened, so it never finishes, and a division by zero
+   * is not a number of days.
+   */
+  catch_up_days: number | null;
 }
 
 export interface Measurement {
@@ -114,6 +119,12 @@ export interface Measurement {
   complete: boolean;
   deltas: DeltaMeasurement[];
   totals: MeasurementTotals;
+  /**
+   * The daily open cap `totals.catch_up_days` divides by, and where it came from: `worker` when the
+   * caller passed the cap the Worker reports, `default` when it did not and
+   * {@link REPULL_DAILY_OPEN_CAP} stands in.
+   */
+  open_cap: { value: number; source: "worker" | "default" };
   doi_volume: DoiVolume;
 }
 
@@ -127,6 +138,12 @@ export interface MeasureOptions {
   now?: () => number;
   /** What the staleness pass covered; default the whole fleet. */
   scope?: PassScope;
+  /**
+   * The daily open cap the catch-up estimate divides by: the one the Worker reports at
+   * `GET /admin/repulls/switches`. Default {@link REPULL_DAILY_OPEN_CAP}, and the measurement then
+   * says the cap is the default.
+   */
+  openCap?: number;
   /** Called every {@link MEASURE_PROGRESS_EVERY} mirrors with a plain line. */
   onProgress?: (line: string) => void;
   /** Stop after this many consecutive failed reads. Default {@link MEASURE_MAX_CONSECUTIVE_FAILURES}. */
@@ -140,10 +157,23 @@ export function staleRowsOf(rows: readonly UpstreamStatusRow[]): UpstreamStatusR
     .sort((a, b) => (a.dataset_id < b.dataset_id ? -1 : a.dataset_id > b.dataset_id ? 1 : 0));
 }
 
+/**
+ * Whole days to open `catchUp` re-pulls at `openCap` a day. Null when the cap is 0 and there is
+ * work to do: the Worker reads 0 for a cap set to 0 and for one it cannot read, and opens nothing
+ * then, so the catch-up never finishes. Dividing would give Infinity (NaN when there is nothing to
+ * catch up), which prints as a word and serializes as a bare null.
+ */
+function catchUpDaysOf(catchUp: number, openCap: number): number | null {
+  if (catchUp === 0) return 0;
+  return openCap > 0 ? Math.ceil(catchUp / openCap) : null;
+}
+
+/** Add up the deltas; `openCap` is the daily open cap that `catch_up_days` divides by. */
 export function totalsOf(
   deltas: readonly DeltaMeasurement[],
   stale: number,
   catchUp: number,
+  openCap: number,
   notComparable: NotComparable = {
     unknown: 0,
     probably_stale: 0,
@@ -191,7 +221,7 @@ export function totalsOf(
     bytes_to_copy: unknown > 0 || notMeasured > 0 || bytesUnknown ? null : bytesKnown,
     bytes_to_copy_known: bytesKnown,
     not_comparable: notComparable,
-    catch_up_days: Math.ceil(catchUp / REPULL_DAILY_OPEN_CAP),
+    catch_up_days: catchUpDaysOf(catchUp, openCap),
   };
 }
 
@@ -248,7 +278,11 @@ export async function measureStaleMirrors(
   }
   const doiVolume = estimateRepullDoiVolume(rows, startedAt);
   const counts = countUpstreamStates(rows);
-  const totals = totalsOf(deltas, stale.length, doiVolume.catch_up, {
+  const openCap: Measurement["open_cap"] = {
+    value: options.openCap ?? REPULL_DAILY_OPEN_CAP,
+    source: options.openCap === undefined ? "default" : "worker",
+  };
+  const totals = totalsOf(deltas, stale.length, doiVolume.catch_up, openCap.value, {
     unknown: counts.states.unknown,
     probably_stale: counts.probably_stale,
     not_examined: counts.states.not_examined,
@@ -266,6 +300,7 @@ export async function measureStaleMirrors(
     complete: totals.bytes_to_copy !== null,
     deltas,
     totals,
+    open_cap: openCap,
     doi_volume: doiVolume,
   };
 }
@@ -321,6 +356,21 @@ function leftOutLine(v: DoiVolume): string | null {
   return parts.length === 0 ? null : `  DOI estimate left out: ${parts.join(", ")}.`;
 }
 
+/** The catch-up estimate, naming the cap it divides by and whether the Worker reported that cap. */
+function catchUpLine(m: Measurement): string {
+  const { value, source } = m.open_cap;
+  const cap =
+    source === "worker"
+      ? `At the open cap the Worker reports (${value})`
+      : `At the default open cap (${value}; the Worker's cap could not be read)`;
+  const days = m.totals.catch_up_days;
+  const result =
+    days === null
+      ? "no re-pull is opened, so the catch-up never finishes"
+      : `the catch-up takes ${days} day(s)`;
+  return `  ${cap} ${result}.`;
+}
+
 /** The human block, as lines; `list` bounds the per-mirror lines. */
 export function renderMeasurement(m: Measurement, list: number): string[] {
   const t = m.totals;
@@ -355,9 +405,7 @@ export function renderMeasurement(m: Measurement, list: number): string[] {
       `  ${v.snapshots_with_unreadable_dates} snapshot(s) had an unreadable creation date and are left out of those figures.`,
     );
   }
-  lines.push(
-    `  At REPULL_DAILY_OPEN_CAP=${REPULL_DAILY_OPEN_CAP} the catch-up takes ${t.catch_up_days} day(s).`,
-  );
+  lines.push(catchUpLine(m));
   if (m.deltas.length > 0) {
     lines.push("");
     for (const d of m.deltas.slice(0, list)) {

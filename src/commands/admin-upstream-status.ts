@@ -26,6 +26,10 @@
  * `measurement` is null with the reason, and the exit code is the pass's own (1 or 2). A delta that
  * could not be read is a 2 as well, and an unknown is never a zero. `NEMAR_OPENNEURO_GRAPHQL_URL`
  * moves the OpenNeuro endpoint (for tests).
+ *
+ * The catch-up estimate divides by the open cap the Worker reports (`GET /admin/repulls/switches`),
+ * read just before the measurement starts. If that read fails for any reason the estimate uses the
+ * default cap and says so; it never changes the exit code.
  */
 
 import chalk from "chalk";
@@ -33,6 +37,7 @@ import { Command } from "commander";
 import type { UpstreamStatusPage } from "../../shared/upstream-staleness.js";
 import { upstreamStatus } from "../lib/api/admin.js";
 import { errorDetail } from "../lib/api/errors.js";
+import { getRepullSwitches } from "../lib/api/repull.js";
 import { requireAuth } from "../lib/cli-output.js";
 import { markReportedExit } from "../lib/debug-log.js";
 import {
@@ -54,6 +59,23 @@ const DATASET_RE = /^on\d{6}$/;
 function positiveInt(text: string | undefined, fallback: number): number | null {
   if (text === undefined) return fallback;
   return /^[0-9]+$/.test(text) && Number.parseInt(text, 10) >= 1 ? Number.parseInt(text, 10) : null;
+}
+
+/**
+ * The daily open cap the Worker reports, or undefined when it cannot be read: not an administrator,
+ * a backend that predates the route, a network error, a body of another shape, or a cap the Worker
+ * itself reports as unreadable (it reads 0 then, and unknown is never a zero). Each of these leaves
+ * the estimate on its default, and none of them fails the command.
+ */
+async function workerOpenCap(): Promise<number | undefined> {
+  try {
+    const { switches } = await getRepullSwitches();
+    const { value, source } = switches.open_cap;
+    if (source === "unreadable") return undefined;
+    return Number.isInteger(value) && value >= 0 ? value : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export const upstreamStatusCommand = new Command("upstream-status")
@@ -160,10 +182,14 @@ export const upstreamStatusCommand = new Command("upstream-status")
         measurementSkipped = "the pass failed before it finished";
       }
       if (options.measure && measurementSkipped === null) {
+        // The Worker's own cap, so the catch-up estimate matches what it will open; undefined when
+        // it cannot be read, and the measurement then says it used the default.
+        const openCap = await workerOpenCap();
         measurement = await measureStaleMirrors(summary.rows, {
           limit: measureLimit ?? undefined,
           graphqlUrl: process.env.NEMAR_OPENNEURO_GRAPHQL_URL,
           scope,
+          openCap,
           onProgress: (line) => console.error(line),
         });
         // A delta that could not be read is a pass that could not see: exit 2, never a zero.
