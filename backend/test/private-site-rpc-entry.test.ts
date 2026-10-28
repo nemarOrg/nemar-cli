@@ -159,6 +159,90 @@ describe("src/worker.ts in workerd", () => {
     ).toEqual({ ok: false, error: "invalid_credential" });
   });
 
+  test("describeAccounts answers through the binding, in the order asked, and refuses through it", async () => {
+    const credential = { kind: "api_key", value: API_KEY };
+    const absent = userId + 1_000_000;
+    expect(await call("describeAccounts", { credential, userIds: [absent, userId] })).toEqual({
+      ok: true,
+      accounts: [
+        { userId: absent, state: "gone" },
+        {
+          userId,
+          state: "active",
+          username: "rpcentry",
+          givenName: null,
+          familyName: null,
+          orcid: null,
+        },
+      ],
+    });
+    expect(await call("describeAccounts", { credential, userIds: [] })).toEqual({
+      ok: false,
+      error: "invalid_request",
+    });
+    expect(
+      await call("describeAccounts", {
+        credential: { kind: "api_key", value: `${API_KEY.slice(0, -1)}x` },
+        userIds: [userId],
+      }),
+    ).toEqual({ ok: false, error: "invalid_credential" });
+  });
+
+  test("describeAccounts reads D1's own flags and takes 100 ids in one statement", async () => {
+    // What a bun test cannot show: the flags come back from D1's binding as the
+    // integers the rules compare with, and 100 bound ids are one statement.
+    const insert = (
+      name: string,
+      status: string,
+      orcid: string,
+      verified: number,
+      conflict: number,
+    ) =>
+      d1
+        .prepare(
+          `INSERT INTO users (username, email, password_hash, status, role, signup_source, email_verified,
+                              given_name, family_name, orcid, orcid_verified, identity_conflict, account_kind)
+           VALUES (?, ?, 'x', ?, 'member', 'web', 1, 'Given', 'Family', ?, ?, ?, 'person')`,
+        )
+        .bind(name, `${name}@nemar.test`, status, orcid, verified, conflict)
+        .run();
+    const idOf = async (name: string) =>
+      (
+        await d1
+          .prepare("SELECT id FROM users WHERE username = ?")
+          .bind(name)
+          .first<{ id: number }>()
+      )?.id ?? 0;
+
+    const ORCID = "0000-0002-1825-0097";
+    await insert("described-canonical", "approved", ORCID, 1, 0);
+    await insert("described-duplicate", "verified", ORCID, 1, 1);
+    await insert("described-unverified", "verified", "0000-0001-9000-0002", 0, 0);
+    await insert("described-pending", "pending", "0000-0001-9000-0003", 1, 0);
+    const named = [
+      await idOf("described-canonical"),
+      await idOf("described-duplicate"),
+      await idOf("described-unverified"),
+      await idOf("described-pending"),
+    ];
+    const absent = Array.from({ length: 96 }, (_, i) => 2_000_000 + i);
+    const result = (await call("describeAccounts", {
+      credential: { kind: "api_key", value: API_KEY },
+      userIds: [...named, ...absent],
+    })) as { ok: boolean; accounts: { userId: number; state: string; orcid?: string | null }[] };
+
+    expect(result.ok).toBe(true);
+    expect(result.accounts).toHaveLength(100);
+    expect(result.accounts.map((a) => a.userId)).toEqual([...named, ...absent]);
+    expect(result.accounts.slice(0, 4)).toEqual([
+      expect.objectContaining({ state: "active", orcid: ORCID }),
+      expect.objectContaining({ state: "active", orcid: null }),
+      expect.objectContaining({ state: "active", orcid: null }),
+      { userId: named[3], state: "inactive" },
+    ]);
+    expect(result.accounts.slice(4).every((a) => a.state === "gone")).toBe(true);
+  });
+
   test("the whole handoff: HTTP grant, then exchange, resolve and sign-out over the binding", async () => {
     const granted = await apiFetch("/auth/private/grant", GRANT_REQUEST);
     expect(granted.status).toBe(200);
