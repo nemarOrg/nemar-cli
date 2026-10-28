@@ -67,7 +67,9 @@
  *     MUST NOT switch over the errors exhaustively without a default.
  *   - The private site is operated by NEMAR, in the same Cloudflare account.
  *     It MUST NOT log, persist or forward an API key a visitor presents to it;
- *     `resolvePrincipal` is the only thing it may do with one.
+ *     `resolvePrincipal` and `describeAccounts` are the only things it may do
+ *     with one (`describeAccounts` takes the visitor's own credential, which it
+ *     resolves the same way, ADR 0115).
  */
 
 /** The entrypoint a caller's service binding names (`entrypoint = ...`). */
@@ -252,6 +254,72 @@ export type RevokePrivateSessionResult =
   | { readonly ok: true }
   | { readonly ok: false; readonly error: "unavailable" };
 
+/** The most account ids one `describeAccounts` call may name. It is also the
+ *  most values D1 binds to one statement, so a call is always one read. */
+export const DESCRIBE_ACCOUNTS_MAX = 100;
+
+/**
+ * Ask for the public face of accounts the caller names by user id, for example
+ * the members of a list a visitor may read, so a page can show people and not
+ * numbers (ADR 0115).
+ *
+ * `credential` is the visitor's own, resolved exactly as `resolvePrincipal`
+ * resolves it: only a live, active account can ask, and a refusal comes back
+ * unchanged. The ids name WHO TO DESCRIBE and never confer authority (ADR 0078,
+ * rule 1). `userIds` holds 1 to {@link DESCRIBE_ACCOUNTS_MAX} positive safe
+ * integers, none twice; anything else is `invalid_request`.
+ *
+ * A caller names only accounts it already has a reason of its own to show, such
+ * as the members of a list the visitor is allowed to read, and passes no id a
+ * visitor typed in.
+ */
+export interface DescribeAccountsRequest {
+  readonly credential: PrincipalCredential;
+  readonly userIds: readonly number[];
+}
+
+/**
+ * What one named account looks like from outside, at the moment of the call.
+ *   - `active`: the account may authenticate (ADR 0040). `username`,
+ *     `givenName` and `familyName` are `null` where none is stored. `orcid` is
+ *     the ORCID iD only when it is the iD the account signs in with AND no other
+ *     live account claims it (`identity_conflict`, ADR 0043); in every other
+ *     case it is `null`, so a duplicate never shows an iD another account holds.
+ *   - `inactive`: the account exists and is not active YET (its email is
+ *     unverified). Nothing else is said of it.
+ *   - `gone`: the account was revoked or deleted, or never existed. One answer
+ *     for all three, and nothing else is said of it.
+ *
+ * Never the email, the role, the status or any other field. A caller MUST NOT
+ * cache or persist an AccountDescription, or anything derived from it, across
+ * requests: a name, a username, an iD or a state changes, and a cached copy
+ * would keep showing the old one (ADR 0078, rule 6, as ADR 0115 reads it). A
+ * caller MAY keep a user id as a key, of a membership or a grant for example.
+ */
+export type AccountDescription =
+  | {
+      readonly userId: number;
+      readonly state: "active";
+      readonly username: string | null;
+      readonly givenName: string | null;
+      readonly familyName: string | null;
+      readonly orcid: string | null;
+    }
+  | { readonly userId: number; readonly state: "inactive" }
+  | { readonly userId: number; readonly state: "gone" };
+
+/** The credential refusals of {@link PrincipalRefusal}, unchanged, plus
+ *  `invalid_request`: the request is not an object, or `userIds` is not an array
+ *  of 1 to {@link DESCRIBE_ACCOUNTS_MAX} distinct positive safe integers. A
+ *  caller treats a code it does not know as a refusal, as everywhere else. */
+export type DescribeAccountsRefusal = PrincipalRefusal | "invalid_request";
+
+/** On success, exactly one entry for each requested id, in the request's
+ *  order. */
+export type DescribeAccountsResult =
+  | { readonly ok: true; readonly accounts: readonly AccountDescription[] }
+  | { readonly ok: false; readonly error: DescribeAccountsRefusal };
+
 /**
  * The methods `NemarApiRpc` exposes. A caller types its binding with this
  * interface; the class in this repository implements it, so the two cannot
@@ -261,4 +329,5 @@ export interface NemarApiRpcContract {
   resolvePrincipal(credential: PrincipalCredential): Promise<ResolvePrincipalResult>;
   exchangePrivateGrant(request: ExchangePrivateGrantRequest): Promise<ExchangePrivateGrantResult>;
   revokePrivateSession(request: RevokePrivateSessionRequest): Promise<RevokePrivateSessionResult>;
+  describeAccounts(request: DescribeAccountsRequest): Promise<DescribeAccountsResult>;
 }

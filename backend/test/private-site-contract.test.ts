@@ -37,6 +37,7 @@ describe("the contract as text", () => {
       PRIVATE_AUTHORIZE_PATH: "/auth/private/authorize",
       PRIVATE_AUTHORIZE_STATE_PARAM: "state",
       PRIVATE_CALLBACK_PATH: "/__auth/callback",
+      DESCRIBE_ACCOUNTS_MAX: 100,
     });
   });
 
@@ -44,6 +45,13 @@ describe("the contract as text", () => {
     for (const [name, value] of Object.entries(constantsAsText())) {
       expect({ name, value: (contract as Record<string, unknown>)[name] }).toEqual({ name, value });
     }
+  });
+
+  test("the describeAccounts bound is D1's own limit on bound values", () => {
+    // One call is one SELECT with one bound value per id, and D1 binds at most
+    // 100 per statement, so a larger bound would turn a call into several reads
+    // or a fault. A caller reads this constant as text to size its batches.
+    expect(contract.DESCRIBE_ACCOUNTS_MAX).toBe(100);
   });
 
   test("the TTL literals mean what their comments say", () => {

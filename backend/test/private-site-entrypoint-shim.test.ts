@@ -2,10 +2,11 @@
  * What `rpc/entrypoint.ts` must hand on, read as text (ADR 0078).
  *
  * `NemarApiRpc` is a thin shim, and the one thing in it no behavioral test can
- * see is that it passes `this.ctx` to the two methods that start a background
- * write. Both finish a session read with a `last_used_at` touch handed to
- * `ctx.waitUntil`; the function each calls is tested under bun with a context it
- * is given, but local workerd completes a floating write whether or not the
+ * see is that it passes `this.ctx` to the three methods that start a background
+ * write. Each finishes a session read with a `last_used_at` touch handed to
+ * `ctx.waitUntil` (`describeAccounts` does it through `resolvePrincipal`, for the
+ * caller's own credential); the function each calls is tested under bun with a
+ * context it is given, but local workerd completes a floating write whether or not the
  * class hands the context over (`private-site-rpc-entry.test.ts` says so). So
  * dropping `this.ctx` would leave the touch floating, and a method that has
  * returned can cancel a floating write in production, with every test green.
@@ -27,6 +28,10 @@ describe("NemarApiRpc hands this.ctx to the methods that write in the background
 
   test("exchangePrivateGrant passes it", () => {
     expect(SOURCE).toContain("return exchangePrivateGrant(this.env, request, this.ctx);");
+  });
+
+  test("describeAccounts passes it, for the caller's own credential", () => {
+    expect(SOURCE).toContain("return describeAccounts(this.env, request, this.ctx);");
   });
 
   test("revokePrivateSession takes none: it has no background write to hand over", () => {
