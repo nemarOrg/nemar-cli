@@ -1,6 +1,6 @@
 # ADR 0115: A caller may ask for the public face of accounts it names, and nothing more
 
-**Status:** proposed
+**Status:** accepted
 **Date:** 2026-10-28
 **Owner:** Seyed Yahya Shirazi
 
@@ -55,8 +55,7 @@ the private site uses a key a visitor presents for `resolvePrincipal` and `descr
 `describeAccounts` takes the visitor's own credential, resolves it as `resolvePrincipal` does, and does nothing else with it; the rest of the rule stands.
 This widens the bound from one use of a key to two, which is a change to the rule and not only a clarification of it.
 
-**Neither takes effect until this ADR is accepted.**
-Until then ADR 0078 reads as written, and its Amendment block points here as pending.
+Both are in force through this ADR, which the owner accepted on 2026-10-28, and ADR 0078's Amendment block points here.
 
 ## Consequences
 
