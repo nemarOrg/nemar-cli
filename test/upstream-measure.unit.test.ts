@@ -30,7 +30,9 @@ import {
 
 import {
   type DeltaMeasurement,
+  type Measurement,
   measureStaleMirrors,
+  openCapFromReading,
   renderMeasurement,
   totalsOf,
 } from "../src/lib/upstream-measure";
@@ -559,6 +561,71 @@ describe("totalsOf and renderMeasurement", () => {
 // The open cap behind the catch-up estimate
 // ----------------------------------------------------------------------------
 
+describe("openCapFromReading", () => {
+  // Built: `open_cap` bodies in the wire shape of `RepullCapReading`
+  // (shared/repull-observability.ts), plus shapes a real Worker does not send today but an older
+  // or a newer one could. The expected readings are quoted from the rule, never recomputed by the
+  // code under test: `set` and `default` are a cap the Worker will use, `unreadable` reads 0.
+  test("a cap the Worker set, or defaulted for an absent binding, is the Worker's cap", () => {
+    expect(openCapFromReading({ value: 2, source: "set" })).toEqual({ value: 2, source: "worker" });
+    expect(openCapFromReading({ value: 2, source: "default" })).toEqual({
+      value: 2,
+      source: "worker",
+    });
+  });
+
+  test("a cap set to 0 on purpose is the Worker's cap of 0, not an unreadable one", () => {
+    expect(openCapFromReading({ value: 0, source: "set" })).toEqual({ value: 0, source: "worker" });
+  });
+
+  test("an unreadable cap reads 0, whatever value comes with it", () => {
+    expect(openCapFromReading({ value: 0, source: "unreadable" })).toEqual({
+      value: 0,
+      source: "unreadable",
+    });
+    // A stray number must never become a number of days.
+    for (const value of [2, 20, -1, 1.5, "two", null]) {
+      expect(openCapFromReading({ value, source: "unreadable" })).toEqual({
+        value: 0,
+        source: "unreadable",
+      });
+    }
+    expect(openCapFromReading({ source: "unreadable" })).toEqual({
+      value: 0,
+      source: "unreadable",
+    });
+  });
+
+  test("a value that is not an integer of at least 0 is no reading", () => {
+    expect(openCapFromReading({ value: "two", source: "set" })).toBeUndefined();
+    expect(openCapFromReading({ value: 1.5, source: "set" })).toBeUndefined();
+    expect(openCapFromReading({ value: -1, source: "set" })).toBeUndefined();
+    // The same under the other source the CLI accepts, and for values that are not counts at all.
+    for (const value of ["2", 1.5, -1, null, true, [], {}, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(openCapFromReading({ value, source: "default" })).toBeUndefined();
+    }
+    expect(openCapFromReading({ source: "set" })).toBeUndefined();
+  });
+
+  test("a source this CLI does not know is no reading, whatever the value", () => {
+    expect(openCapFromReading({ value: 2, source: "bogus" })).toBeUndefined();
+    // Exact words only: no case folding, no trimming, and `worker` is this CLI's word, not the
+    // Worker's.
+    for (const source of ["Set", "SET", " set", "worker", "", null, 2]) {
+      expect(openCapFromReading({ value: 2, source })).toBeUndefined();
+    }
+    expect(openCapFromReading({ value: 2 })).toBeUndefined();
+  });
+
+  test("anything that is not an object with a source and a value is no reading", () => {
+    expect(openCapFromReading(null)).toBeUndefined();
+    expect(openCapFromReading({})).toBeUndefined();
+    for (const reading of [undefined, "set", 2, true, []]) {
+      expect(openCapFromReading(reading)).toBeUndefined();
+    }
+  });
+});
+
 describe("the open cap behind the catch-up estimate", () => {
   // Built: stale mirrors that carry upstream data, so the DOI estimate counts one catch-up re-pull
   // each. `limit: 0` reads nothing from OpenNeuro (the same as `upstream-measure.test.ts`), so
@@ -578,8 +645,15 @@ describe("the open cap behind the catch-up estimate", () => {
   });
   const rows = ["on000001", "on000002", "on000003"].map(stale);
 
+  /** The lines of the human block that name the open cap: the catch-up estimate, and only it. */
+  const capLines = (m: Measurement): string[] =>
+    renderMeasurement(m, 10).filter((line) => line.includes("open cap"));
+
   test("the catch-up divides by the cap the Worker reports, and by the default only when none was passed", async () => {
-    const reported = await measureStaleMirrors(rows, { limit: 0, openCap: 1 });
+    const reported = await measureStaleMirrors(rows, {
+      limit: 0,
+      openCap: { value: 1, source: "worker" },
+    });
     expect(reported.doi_volume.catch_up).toBe(3);
     expect(reported.open_cap).toEqual({ value: 1, source: "worker" });
     expect(reported.totals.catch_up_days).toBe(3);
@@ -603,22 +677,72 @@ describe("the open cap behind the catch-up estimate", () => {
     }
   });
 
-  test("a cap of 0 opens nothing: the catch-up has no day count, and never prints Infinity or NaN", async () => {
-    // The Worker reports 0 for `REPULL_DAILY_OPEN_CAP = "0"` and for a binding it cannot read.
-    const stopped = await measureStaleMirrors(rows, { limit: 0, openCap: 0 });
+  test("a cap set to 0 opens nothing: the catch-up has no day count, and never prints Infinity or NaN", async () => {
+    // The Worker reports `REPULL_DAILY_OPEN_CAP = "0"` as a cap it read (`set`, value 0): the
+    // owner stopped the automatic path on purpose.
+    const stopped = await measureStaleMirrors(rows, {
+      limit: 0,
+      openCap: { value: 0, source: "worker" },
+    });
+    expect(stopped.doi_volume.catch_up).toBe(3);
     expect(stopped.open_cap).toEqual({ value: 0, source: "worker" });
     expect(stopped.totals.catch_up_days).toBeNull();
-    const text = renderMeasurement(stopped, 10).join("\n");
-    expect(text).toContain(
-      "  At the open cap the Worker reports (0) no re-pull is opened, so the catch-up never finishes.",
-    );
-    expect(text).not.toMatch(/Infinity|NaN/);
+    expect(capLines(stopped)).toEqual([
+      "  At the open cap the Worker reports (0), so no automatic re-pull is opened and the catch-up never finishes.",
+    ]);
+    expect(renderMeasurement(stopped, 10).join("\n")).not.toMatch(/Infinity|NaN/);
 
     // With nothing to catch up, a cap of 0 leaves no work undone: a real zero, not a missing one.
-    const nothing = await measureStaleMirrors([], { limit: 0, openCap: 0 });
+    const nothing = await measureStaleMirrors([], {
+      limit: 0,
+      openCap: { value: 0, source: "worker" },
+    });
     expect(nothing.totals.catch_up_days).toBe(0);
     expect(renderMeasurement(nothing, 10)).toContain(
       "  At the open cap the Worker reports (0) the catch-up takes 0 day(s).",
     );
+  });
+
+  test("a cap the Worker cannot read is never a number of days: its own line, and null in the JSON", async () => {
+    // A malformed binding reads 0 in the Worker and is reported as `unreadable`. That is the
+    // Worker's answer, not a failed read, so the estimate must not fall back to the default of 2:
+    // nothing is opened until the binding is fixed.
+    const broken = await measureStaleMirrors(rows, {
+      limit: 0,
+      openCap: { value: 0, source: "unreadable" },
+    });
+    expect(broken.doi_volume.catch_up).toBe(3);
+    expect(broken.open_cap).toEqual({ value: 0, source: "unreadable" });
+    expect(broken.totals.catch_up_days).toBeNull();
+    expect(capLines(broken)).toEqual([
+      "  The Worker cannot read its open cap (its binding is malformed, so it reads 0), so no automatic re-pull is opened and the catch-up never finishes until the binding is fixed.",
+    ]);
+    const text = renderMeasurement(broken, 10).join("\n");
+    expect(text).not.toContain("default open cap");
+    expect(text).not.toMatch(/Infinity|NaN/);
+    // On the wire it is an explicit null: a missing key, or a NaN, would be a different claim.
+    const wire = JSON.parse(JSON.stringify(broken));
+    expect(wire.totals.catch_up_days).toBeNull();
+    expect(wire.open_cap).toEqual({ value: 0, source: "unreadable" });
+  });
+
+  test("a cap the Worker cannot read changes nothing when there is nothing to catch up, and claims no catch-up that never finishes", async () => {
+    // No stale mirror: the catch-up is 0 re-pulls, so `catch_up_days` is a real 0 (not null) and an
+    // unreadable cap holds nothing back for this estimate. The measurement still records the cap
+    // as unreadable, and the line still says the Worker cannot read it.
+    const nothing = await measureStaleMirrors([], {
+      limit: 0,
+      openCap: { value: 0, source: "unreadable" },
+    });
+    expect(nothing.doi_volume.catch_up).toBe(0);
+    expect(nothing.open_cap).toEqual({ value: 0, source: "unreadable" });
+    expect(nothing.totals.catch_up_days).toBe(0);
+    expect(capLines(nothing)).toEqual([
+      "  The Worker cannot read its open cap (its binding is malformed, so it reads 0), which changes nothing for this estimate, because there is nothing to catch up.",
+    ]);
+    const text = renderMeasurement(nothing, 10).join("\n");
+    expect(text).not.toContain("never finishes");
+    expect(text).not.toContain("until the binding is fixed");
+    expect(text).not.toMatch(/Infinity|NaN/);
   });
 });

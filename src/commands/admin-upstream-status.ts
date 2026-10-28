@@ -28,8 +28,11 @@
  * moves the OpenNeuro endpoint (for tests).
  *
  * The catch-up estimate divides by the open cap the Worker reports (`GET /admin/repulls/switches`),
- * read just before the measurement starts. If that read fails for any reason the estimate uses the
- * default cap and says so; it never changes the exit code.
+ * read just before the measurement starts. A cap the Worker says it cannot read (its binding is
+ * malformed, so it reads 0) is its answer, not a failed read: the estimate says no automatic
+ * re-pull is opened and the catch-up never finishes until the binding is fixed. If the call fails,
+ * or the reading is not one this CLI knows, the estimate uses the default cap, says so, and warns
+ * on stderr (so `--json` stays clean); neither changes the exit code.
  */
 
 import chalk from "chalk";
@@ -42,7 +45,9 @@ import { requireAuth } from "../lib/cli-output.js";
 import { markReportedExit } from "../lib/debug-log.js";
 import {
   type Measurement,
+  type OpenCapReading,
   measureStaleMirrors,
+  openCapFromReading,
   renderMeasurement,
 } from "../lib/upstream-measure.js";
 import {
@@ -62,20 +67,34 @@ function positiveInt(text: string | undefined, fallback: number): number | null 
 }
 
 /**
- * The daily open cap the Worker reports, or undefined when it cannot be read: not an administrator,
- * a backend that predates the route, a network error, a body of another shape, or a cap the Worker
- * itself reports as unreadable (it reads 0 then, and unknown is never a zero). Each of these leaves
- * the estimate on its default, and none of them fails the command.
+ * The daily open cap the Worker reports, as a reading, or undefined when there is none to use. The
+ * call can fail (not an administrator, a backend that predates the route, a network error, a body
+ * of another shape), or it can succeed with a reading this CLI does not know. Each leaves the
+ * estimate on its default, warns on stderr (never stdout, so `--json` stays one document), and
+ * fails nothing. A cap the Worker reports as unreadable is NOT either of these: it reads 0, the
+ * honest answer is "never, until the binding is fixed", and it comes back as a reading.
  */
-async function workerOpenCap(): Promise<number | undefined> {
+async function workerOpenCap(): Promise<OpenCapReading | undefined> {
+  let reading: OpenCapReading | undefined;
   try {
     const { switches } = await getRepullSwitches();
-    const { value, source } = switches.open_cap;
-    if (source === "unreadable") return undefined;
-    return Number.isInteger(value) && value >= 0 ? value : undefined;
-  } catch {
+    reading = openCapFromReading(switches.open_cap);
+  } catch (err) {
+    console.error(
+      chalk.yellow(
+        `Warning: the Worker's open cap could not be read (${errorDetail(err)}); the estimate uses the default.`,
+      ),
+    );
     return undefined;
   }
+  if (reading === undefined) {
+    console.error(
+      chalk.yellow(
+        "Warning: the Worker's open cap reading is not one this CLI knows; the estimate uses the default.",
+      ),
+    );
+  }
+  return reading;
 }
 
 export const upstreamStatusCommand = new Command("upstream-status")
@@ -182,8 +201,10 @@ export const upstreamStatusCommand = new Command("upstream-status")
         measurementSkipped = "the pass failed before it finished";
       }
       if (options.measure && measurementSkipped === null) {
-        // The Worker's own cap, so the catch-up estimate matches what it will open; undefined when
-        // it cannot be read, and the measurement then says it used the default.
+        // The Worker's own cap, so the catch-up estimate matches what it will open. Undefined when
+        // there is no reading to use (the call failed, or the reading is not one this CLI knows),
+        // and the measurement then says it used the default; a cap the Worker cannot read is a
+        // reading, not an absence.
         const openCap = await workerOpenCap();
         measurement = await measureStaleMirrors(summary.rows, {
           limit: measureLimit ?? undefined,
