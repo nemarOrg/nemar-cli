@@ -30,8 +30,9 @@ import type { Bindings } from "../types/bindings";
 
 /**
  * `REPULL_DAILY_OPEN_CAP` when the binding is absent: dispatches claimed to open a re-pull in a UTC
- * day. The cap bounds dispatches; pull requests follow only under the timing ADR 0111 pins
- * (Phase 7b, "The open cap"), in upstream-repull-scheduler.ts and upstream-repull-advance.ts.
+ * day. The cap bounds dispatches, not pull requests: ADR 0111's Phase 7b ("The open cap") defers
+ * the timing that makes the two the same, and `RESUME_WINDOW_UTC` (upstream-repull-advance.ts)
+ * and `opensTheSameUtcDay` (shared/repull-state.ts) pin it.
  */
 export const REPULL_OPEN_CAP_DEFAULT = 2;
 /** `REPULL_DAILY_MERGE_CAP` when the binding is absent: re-pull merges claimed in a UTC day. */
