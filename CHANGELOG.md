@@ -13,7 +13,7 @@ what merged, and this file says what it meant.
 Newest first. Dates are the tag's publication date, UTC. Backfilled from 0.9.16 onward;
 earlier releases are described only by their generated notes.
 
-## Unreleased
+## 0.10.26 - 2026-10-28
 
 An OpenNeuro mirror can be moved to a newer upstream snapshot as its next major version, through a reviewed pull request that an administrator drives by hand or, once the owner turns it on, the automatic path drives (epic #1046; Architecture Decision Record (ADR) 0111).
 The release has four migrations, 0104, 0105, 0106 and 0112, each of which adds a column, a table or an index and drops nothing.
