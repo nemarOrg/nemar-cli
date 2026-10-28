@@ -9,9 +9,11 @@
  * out of it is what keeps every rule testable under bun, and keeping it out of
  * `index.ts` is what keeps the test files that import `index.ts` loading.
  * `backend/test/private-site-rpc-entry.test.ts` exercises its export and each
- * method in workerd. That the class hands `this.ctx` to the session read is
- * proven only one level down, by the bun test of the function it calls: local
- * workerd finishes the floating write with or without it.
+ * method in workerd. That the class hands `this.ctx` to the session read
+ * (`resolvePrincipal`, `exchangePrivateGrant` and `describeAccounts`, which
+ * resolves the caller's credential the same way) is proven only one level down,
+ * by the bun test of the function it calls: local workerd finishes the floating
+ * write with or without it.
  *
  * What a caller must know is in ADR 0078 and `shared/contract/private-site.ts`:
  * refusals are values and faults throw; the HTTP middleware (CORS, rate limit,
@@ -23,6 +25,8 @@
 
 import { WorkerEntrypoint } from "cloudflare:workers";
 import type {
+  DescribeAccountsRequest,
+  DescribeAccountsResult,
   ExchangePrivateGrantRequest,
   ExchangePrivateGrantResult,
   NemarApiRpcContract,
@@ -32,6 +36,7 @@ import type {
   RevokePrivateSessionResult,
 } from "../../../shared/contract/private-site.js";
 import type { Bindings } from "../types/bindings";
+import { describeAccounts } from "./accounts";
 import { resolvePrincipal } from "./principal";
 import { exchangePrivateGrant, revokePrivateSession } from "./private-session";
 
@@ -46,5 +51,9 @@ export class NemarApiRpc extends WorkerEntrypoint<Bindings> implements NemarApiR
 
   revokePrivateSession(request: RevokePrivateSessionRequest): Promise<RevokePrivateSessionResult> {
     return revokePrivateSession(this.env, request);
+  }
+
+  describeAccounts(request: DescribeAccountsRequest): Promise<DescribeAccountsResult> {
+    return describeAccounts(this.env, request, this.ctx);
   }
 }

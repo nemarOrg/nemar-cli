@@ -23,10 +23,14 @@ import { Hono } from "hono";
 import { logger } from "hono/logger";
 import { DOCS_SESSION_HEADER } from "../../shared/contract/docs-auth.js";
 import {
+  type AccountDescription,
+  DESCRIBE_ACCOUNTS_MAX,
+  type DescribeAccountsResult,
   type ExchangePrivateGrantResult,
   PRIVATE_SESSION_TTL_SECONDS,
   type Principal,
 } from "../../shared/contract/private-site.js";
+import { tombstoneUserStatement } from "../src/db/user-tombstone";
 import worker from "../src/index";
 import { authMiddleware } from "../src/middleware/auth";
 import { maintenanceMode } from "../src/middleware/maintenance";
@@ -34,6 +38,7 @@ import { __resetRateLimitLogsForTests } from "../src/middleware/rateLimit";
 import { authDocsRoutes } from "../src/routes/auth-docs";
 import { authPrivateRoutes } from "../src/routes/auth-private";
 import { authWebRoutes } from "../src/routes/auth-web";
+import { describeAccounts } from "../src/rpc/accounts";
 import { resolvePrincipal } from "../src/rpc/principal";
 import { exchangePrivateGrant, revokePrivateSession } from "../src/rpc/private-session";
 import { hashGrantCode } from "../src/services/docs-auth";
@@ -928,6 +933,610 @@ describe("a private session is not a session anywhere else", () => {
 });
 
 // --------------------------------------------------------------------------
+// describeAccounts
+// --------------------------------------------------------------------------
+
+describe("describeAccounts", () => {
+  const CALLER_KEY = "nm_describe-accounts-caller-key-0123456789ab";
+
+  interface AccountSeed {
+    status?: string;
+    role?: string;
+    username?: string | null;
+    givenName?: string | null;
+    familyName?: string | null;
+    orcid?: string | null;
+    orcidVerified?: boolean;
+    identityConflict?: boolean;
+    accountKind?: string;
+  }
+
+  let described = 0;
+
+  /**
+   * An account whose every column the answer reads is chosen here (`null` is a
+   * value, `undefined` takes the default); the rest of the row is as a signup
+   * leaves it. Returns the id and the email, so a test can look for the email in
+   * an answer that must not hold it.
+   */
+  function seedAccount(opts: AccountSeed = {}): { id: number; email: string } {
+    described += 1;
+    const email = `described-${described}@nemar.test`;
+    db.run(
+      `INSERT INTO users (username, email, password_hash, status, role, signup_source, email_verified,
+                          given_name, family_name, orcid, orcid_verified, identity_conflict, account_kind)
+       VALUES (?, ?, 'x', ?, ?, 'web', 1, ?, ?, ?, ?, ?, ?)`,
+      [
+        opts.username === undefined ? `described${described}` : opts.username,
+        email,
+        opts.status ?? "verified",
+        opts.role ?? "member",
+        opts.givenName === undefined ? `Given${described}` : opts.givenName,
+        opts.familyName === undefined ? `Family${described}` : opts.familyName,
+        opts.orcid === undefined
+          ? `0000-0001-9000-${String(described).padStart(4, "0")}`
+          : opts.orcid,
+        opts.orcidVerified === false ? 0 : 1,
+        opts.identityConflict ? 1 : 0,
+        opts.accountKind ?? "person",
+      ],
+    );
+    const row = db
+      .query<{ id: number }, [string]>("SELECT id FROM users WHERE email = ?")
+      .get(email);
+    if (!row) throw new Error("seed failed");
+    return { id: row.id, email };
+  }
+
+  // The caller: a live, active account with an API key, seeded before each test
+  // (the top-level `beforeEach` has already given the test a fresh database).
+  let callerId: number;
+  beforeEach(async () => {
+    callerId = seedUser("describe-caller@nemar.test");
+    await seedApiKey(callerId, CALLER_KEY);
+  });
+  const callerKey = { kind: "api_key", value: CALLER_KEY } as const;
+
+  /** The method under test, for any credential and any `userIds`. */
+  function askWith(credential: unknown, userIds: unknown, extra: Partial<Bindings> = {}) {
+    return describeAccounts(env(extra), { credential, userIds });
+  }
+  const ask = (userIds: unknown) => askWith(callerKey, userIds);
+
+  function accountsOf(result: DescribeAccountsResult): readonly AccountDescription[] {
+    if (!result.ok) throw new Error(`refused: ${result.error}`);
+    return result.accounts;
+  }
+
+  const INVALID_REQUEST = { ok: false, error: "invalid_request" } as const;
+
+  // ------------------------------------------------------------------------
+  // The four states, and the order of the answer
+  // ------------------------------------------------------------------------
+
+  test("each state, one entry per id, in the order asked", async () => {
+    const approved = seedAccount({
+      status: "approved",
+      username: "ada",
+      givenName: "Ada",
+      familyName: "Lovelace",
+      orcid: "0000-0002-1825-0097",
+    });
+    const verified = seedAccount({
+      status: "verified",
+      username: null,
+      givenName: null,
+      familyName: null,
+      orcid: null,
+      orcidVerified: false,
+    });
+    const pending = seedAccount({ status: "pending" });
+    const revoked = seedAccount({ status: "revoked" });
+    const absent = 999_999;
+
+    const ids = [revoked.id, absent, approved.id, pending.id, verified.id];
+    expect(await ask(ids)).toEqual({
+      ok: true,
+      accounts: [
+        { userId: revoked.id, state: "gone" },
+        { userId: absent, state: "gone" },
+        {
+          userId: approved.id,
+          state: "active",
+          username: "ada",
+          givenName: "Ada",
+          familyName: "Lovelace",
+          orcid: "0000-0002-1825-0097",
+        },
+        { userId: pending.id, state: "inactive" },
+        {
+          userId: verified.id,
+          state: "active",
+          username: null,
+          givenName: null,
+          familyName: null,
+          orcid: null,
+        },
+      ],
+    });
+
+    // The order is the request's, not the table's or the status's.
+    const reversed = [...ids].reverse();
+    expect(accountsOf(await ask(reversed)).map((a) => a.userId)).toEqual(reversed);
+  });
+
+  test("the caller may name its own account, and is described like any other", async () => {
+    const result = accountsOf(await ask([callerId]));
+    expect(result).toEqual([
+      {
+        userId: callerId,
+        state: "active",
+        username: "describe-caller",
+        givenName: "Ada",
+        familyName: "Lovelace",
+        orcid: db
+          .query<{ orcid: string }, [number]>("SELECT orcid FROM users WHERE id = ?")
+          .get(callerId)?.orcid,
+      },
+    ]);
+  });
+
+  test("a deleted account is gone, however it was deleted", async () => {
+    const tombstoned = seedAccount({ status: "approved" });
+    await tombstoneUserStatement(realD1(db), tombstoned.id).run();
+    // A row that carries a deletion stamp and still a live status: the rule every
+    // sign-in applies is `deleted_at IS NULL`, so this one is gone too.
+    const stamped = seedAccount({ status: "approved" });
+    db.run("UPDATE users SET deleted_at = datetime('now') WHERE id = ?", [stamped.id]);
+
+    expect(accountsOf(await ask([tombstoned.id, stamped.id]))).toEqual([
+      { userId: tombstoned.id, state: "gone" },
+      { userId: stamped.id, state: "gone" },
+    ]);
+  });
+
+  test("an entry holds exactly the fields of its state, and no answer holds anything else", async () => {
+    const seeded = [
+      seedAccount({ status: "approved", role: "owner", accountKind: "service" }),
+      seedAccount({ status: "verified", role: "admin", accountKind: "test" }),
+      seedAccount({ status: "pending" }),
+      seedAccount({ status: "revoked" }),
+    ];
+    const result = await ask([...seeded.map((a) => a.id), callerId]);
+
+    const ACTIVE_KEYS = ["familyName", "givenName", "orcid", "state", "userId", "username"];
+    expect(accountsOf(result).map((entry) => Object.keys(entry).sort())).toEqual([
+      ACTIVE_KEYS,
+      ACTIVE_KEYS,
+      ["state", "userId"],
+      ["state", "userId"],
+      ACTIVE_KEYS,
+    ]);
+    expect(Object.keys(result).sort()).toEqual(["accounts", "ok"]);
+
+    // Not an email address, and none of the other things a row says about its
+    // account: its role, its status, its kind.
+    const text = JSON.stringify(result);
+    for (const { email } of seeded) expect(text).not.toContain(email);
+    for (const word of [
+      "@",
+      "nemar.test",
+      "owner",
+      "admin",
+      "member",
+      "approved",
+      "verified",
+      "pending",
+      "revoked",
+      "service",
+      "person",
+    ]) {
+      expect({ word, found: text.includes(word) }).toEqual({ word, found: false });
+    }
+  });
+
+  // ------------------------------------------------------------------------
+  // The ORCID iD: shown only when verified and canonical
+  // ------------------------------------------------------------------------
+
+  describe("the ORCID iD", () => {
+    const IID = "0000-0002-1825-0097";
+    const orcidOf = async (opts: AccountSeed) => {
+      const { id } = seedAccount(opts);
+      const [entry] = accountsOf(await ask([id]));
+      if (entry?.state !== "active") throw new Error("not active");
+      return entry.orcid;
+    };
+
+    test("a verified iD on a canonical account is shown as stored", async () => {
+      expect(await orcidOf({ orcid: IID, orcidVerified: true })).toBe(IID);
+    });
+
+    test("an unverified iD is not shown, though the account holds it", async () => {
+      expect(await orcidOf({ orcid: IID, orcidVerified: false })).toBeNull();
+    });
+
+    test("an account with no iD has none to show, verified flag or not", async () => {
+      expect(await orcidOf({ orcid: null, orcidVerified: false })).toBeNull();
+      expect(await orcidOf({ orcid: null, orcidVerified: true })).toBeNull();
+    });
+
+    test("a blank stored iD is none", async () => {
+      expect(await orcidOf({ orcid: "   ", orcidVerified: true })).toBeNull();
+    });
+
+    test("the non-canonical duplicate (identity_conflict) does not show an iD another account holds", async () => {
+      // ADR 0043: the flagged row keeps the iD in its column and keeps signing in.
+      // Reading the column without the flag would show the canonical holder's iD
+      // on a second account, which is the wrong person's.
+      const canonical = seedAccount({ orcid: IID, orcidVerified: true });
+      const duplicate = seedAccount({
+        orcid: IID,
+        orcidVerified: true,
+        identityConflict: true,
+        username: "twin",
+        givenName: "Twin",
+        familyName: "Account",
+      });
+      expect(accountsOf(await ask([canonical.id, duplicate.id]))).toEqual([
+        expect.objectContaining({ userId: canonical.id, state: "active", orcid: IID }),
+        // The flagged row loses its claim on the iD and nothing else.
+        {
+          userId: duplicate.id,
+          state: "active",
+          username: "twin",
+          givenName: "Twin",
+          familyName: "Account",
+          orcid: null,
+        },
+      ]);
+    });
+
+    test("the flag hides the iD even when the account is the only one that holds it", async () => {
+      // The flag is one column for the iD, the email and the GitHub handle, so a
+      // row flagged for an email collision hides its iD too: the safe direction.
+      expect(await orcidOf({ orcid: IID, orcidVerified: true, identityConflict: true })).toBeNull();
+    });
+
+    test("a conflict flag value nobody expects hides the iD", async () => {
+      const { id } = seedAccount({ orcid: IID, orcidVerified: true });
+      db.run("UPDATE users SET identity_conflict = 2 WHERE id = ?", [id]);
+      const [entry] = accountsOf(await ask([id]));
+      expect(entry).toMatchObject({ state: "active", orcid: null });
+    });
+
+    test("a verified flag value nobody expects hides the iD", async () => {
+      // `orcid_verified` has no CHECK, so 2 can be stored. Only 1 is "verified":
+      // `flag()` is true for 1 and for nothing else, where a looser test such as
+      // `> 0` or a truthiness check would show the iD.
+      for (const unexpected of [2, -1]) {
+        const { id } = seedAccount({ orcid: `0000-0001-9100-000${unexpected + 1}` });
+        db.run("UPDATE users SET orcid_verified = ? WHERE id = ?", [unexpected, id]);
+        const [entry] = accountsOf(await ask([id]));
+        expect(entry).toMatchObject({ state: "active", orcid: null });
+      }
+    });
+
+    test("a pending or revoked account never shows one, whatever its flags say", async () => {
+      const pending = seedAccount({ status: "pending", orcid: IID, orcidVerified: true });
+      expect(accountsOf(await ask([pending.id]))).toEqual([
+        { userId: pending.id, state: "inactive" },
+      ]);
+    });
+  });
+
+  // ------------------------------------------------------------------------
+  // The request
+  // ------------------------------------------------------------------------
+
+  describe("the request", () => {
+    test("one id is answered", async () => {
+      const { id } = seedAccount();
+      expect(accountsOf(await ask([id]))).toHaveLength(1);
+    });
+
+    test(`${DESCRIBE_ACCOUNTS_MAX} ids are answered, in one read, in the order asked`, async () => {
+      // Real accounts of each state and ids with no row, so the 100 binds of the
+      // one SELECT reach rows of every kind.
+      const STATUSES = ["approved", "pending", "revoked"] as const;
+      const ids = Array.from({ length: DESCRIBE_ACCOUNTS_MAX }, (_, i) =>
+        i % 5 === 4 ? 500_000 + i : seedAccount({ status: STATUSES[i % 3] }).id,
+      );
+      expect(new Set(ids).size).toBe(DESCRIBE_ACCOUNTS_MAX);
+
+      const accounts = accountsOf(await ask(ids));
+      expect(accounts.map((a) => a.userId)).toEqual(ids);
+      expect(new Set(accounts.map((a) => a.state))).toEqual(
+        new Set(["active", "inactive", "gone"]),
+      );
+    });
+
+    const holey = new Array<number>(2);
+    holey[0] = 1;
+
+    for (const [what, userIds] of [
+      ["an empty array", []],
+      ["101 ids", Array.from({ length: DESCRIBE_ACCOUNTS_MAX + 1 }, (_, i) => i + 1)],
+      ["a fraction", [1.5]],
+      ["a numeric string", ["7"]],
+      ["NaN", [Number.NaN]],
+      ["Infinity", [Number.POSITIVE_INFINITY]],
+      ["a null id", [null]],
+      ["an undefined id", [undefined]],
+      ["a boolean id", [true]],
+      ["a bigint id", [7n]],
+      ["an id past the safe range", [2 ** 53]],
+      ["zero", [0]],
+      ["a negative id", [-1]],
+      ["negative zero", [-0]],
+      ["a bad id among good ones", [1, 2, "3", 4]],
+      ["a hole in the array", holey],
+      ["an id twice", [5, 5]],
+      ["an id twice, apart", [5, 6, 5]],
+      ["an object that is not an array", { 0: 1, length: 1 }],
+      ["a string instead of an array", "1"],
+      ["a number instead of an array", 1],
+      ["a typed array", new Uint32Array([1])],
+      ["null instead of an array", null],
+      ["no userIds at all", undefined],
+    ] as const) {
+      test(`${what} is invalid_request`, async () => {
+        expect(await ask(userIds)).toEqual(INVALID_REQUEST);
+      });
+    }
+
+    for (const [what, request] of [
+      ["null", null],
+      ["undefined", undefined],
+      ["a number", 42],
+      ["a string", "request"],
+      ["a boolean", true],
+      ["an array", [{ credential: callerKey, userIds: [1] }]],
+      // The fields are on it, and it is still not a request.
+      [
+        "an array that carries the fields",
+        Object.assign([], { credential: callerKey, userIds: [1] }),
+      ],
+      ["an object with no userIds", { credential: callerKey }],
+    ] as const) {
+      test(`a request that is ${what} is invalid_request, not a throw`, async () => {
+        expect(await describeAccounts(env(), request)).toEqual(INVALID_REQUEST);
+      });
+    }
+
+    test("a field the contract does not name yet is ignored, as an additive contract needs", async () => {
+      const { id } = seedAccount();
+      const result = await describeAccounts(env(), {
+        credential: callerKey,
+        userIds: [id],
+        aFutureOptionalField: true,
+      });
+      expect(accountsOf(result)).toHaveLength(1);
+    });
+
+    test("the shape is judged before the credential, and costs no credential lookup", async () => {
+      // A bad shape with a worthless credential is the shape's refusal, and with
+      // a live key it does not even touch the key's `last_used_at`.
+      expect(await askWith("not a credential", [])).toEqual(INVALID_REQUEST);
+      expect(await askWith(callerKey, [])).toEqual(INVALID_REQUEST);
+      const touched = () =>
+        db
+          .query<{ last_used_at: string | null }, [number]>(
+            "SELECT last_used_at FROM tokens WHERE user_id = ?",
+          )
+          .get(callerId)?.last_used_at;
+      expect(touched()).toBeNull();
+      // A request that is answered is the one that looks the credential up.
+      expect((await ask([callerId])).ok).toBe(true);
+      expect(touched()).not.toBeNull();
+    });
+  });
+
+  // ------------------------------------------------------------------------
+  // The caller's credential: resolved by resolvePrincipal, refusals unchanged
+  // ------------------------------------------------------------------------
+
+  describe("the caller's credential", () => {
+    test("a live session of the private site is a credential", async () => {
+      const target = seedAccount({ status: "approved" });
+      const session = await signInToPrivate(callerId);
+      expect(accountsOf(await askWith({ kind: "session", value: session }, [target.id]))).toEqual([
+        expect.objectContaining({ userId: target.id, state: "active" }),
+      ]);
+    });
+
+    for (const [what, credential] of [
+      ["missing", undefined],
+      ["null", null],
+      ["a string", CALLER_KEY],
+      ["an empty object", {}],
+      ["of a kind nobody defined", { kind: "cookie", value: CALLER_KEY }],
+      ["an api_key with no value", { kind: "api_key" }],
+      ["an api_key with an empty value", { kind: "api_key", value: "" }],
+      ["an api_key that is not a string", { kind: "api_key", value: 42 }],
+      ["an api_key longer than any credential", { kind: "api_key", value: "k".repeat(513) }],
+      ["a key no account holds", { kind: "api_key", value: `${CALLER_KEY.slice(0, -1)}x` }],
+    ] as const) {
+      test(`a credential that is ${what} is invalid_credential`, async () => {
+        expect(await askWith(credential, [callerId])).toEqual({
+          ok: false,
+          error: "invalid_credential",
+        });
+      });
+    }
+
+    test("a revoked key is invalid_credential", async () => {
+      db.run("UPDATE tokens SET revoked_at = datetime('now') WHERE user_id = ?", [callerId]);
+      expect(await ask([callerId])).toEqual({ ok: false, error: "invalid_credential" });
+    });
+
+    test("an expired key is invalid_credential", async () => {
+      db.run("UPDATE tokens SET expires_at = datetime('now', '-1 second') WHERE user_id = ?", [
+        callerId,
+      ]);
+      expect(await ask([callerId])).toEqual({ ok: false, error: "invalid_credential" });
+    });
+
+    test("a key on an account that is not active yet is inactive_account", async () => {
+      db.run("UPDATE users SET status = 'pending', email_verified = 0 WHERE id = ?", [callerId]);
+      expect(await ask([callerId])).toEqual({ ok: false, error: "inactive_account" });
+    });
+
+    test("a key on a revoked account is invalid_credential, as resolvePrincipal answers it", async () => {
+      db.run("UPDATE users SET status = 'revoked' WHERE id = ?", [callerId]);
+      expect(await ask([callerId])).toEqual({ ok: false, error: "invalid_credential" });
+    });
+
+    test("an account whose role cannot be read is unresolved_account", async () => {
+      db.run("UPDATE users SET role = 'superuser' WHERE id = ?", [callerId]);
+      expect(await ask([callerId])).toEqual({ ok: false, error: "unresolved_account" });
+    });
+
+    test("a session whose account dropped to pending stops being a credential", async () => {
+      const session = await signInToPrivate(callerId);
+      db.run("UPDATE users SET status = 'pending', email_verified = 0 WHERE id = ?", [callerId]);
+      expect(await askWith({ kind: "session", value: session }, [callerId])).toEqual({
+        ok: false,
+        error: "inactive_account",
+      });
+    });
+
+    test("an app session value, a docs session value and an ended session are not credentials", async () => {
+      const app = await appSession(callerId);
+      const docs = await docsSession(seedUser("describe-docs@nemar.test", { role: "admin" }));
+      const ended = await signInToPrivate(callerId);
+      await revokePrivateSession(env(), { value: ended });
+      for (const value of [app, docs, ended]) {
+        expect(await askWith({ kind: "session", value }, [callerId])).toEqual({
+          ok: false,
+          error: "invalid_credential",
+        });
+      }
+    });
+
+    test("a refusal is exactly what resolvePrincipal says of the same credential", async () => {
+      // "Passed through unchanged", asserted against the resolver itself, for the
+      // four refusals it can give.
+      const pending = seedUser("describe-pending@nemar.test", { status: "pending" });
+      const odd = seedUser("describe-odd@nemar.test", { role: "superuser" });
+      await seedApiKey(pending, "nm_describe-pending-key-0123456789abcdef");
+      await seedApiKey(odd, "nm_describe-odd-role-key-0123456789abcdef");
+      for (const credential of [
+        { kind: "api_key", value: "nm_describe-pending-key-0123456789abcdef" },
+        { kind: "api_key", value: "nm_describe-odd-role-key-0123456789abcdef" },
+        { kind: "api_key", value: "nm_describe-nobody-0123456789abcdef012345" },
+        null,
+      ]) {
+        const resolved = await resolvePrincipal(env(), credential);
+        expect(resolved.ok).toBe(false);
+        expect(await askWith(credential, [callerId])).toEqual(resolved);
+      }
+    });
+
+    test("a caller with no live credential learns nothing about any id", async () => {
+      // The method must not turn the binding into a directory for a caller that
+      // holds no live credential: the answer is the same for an id that exists
+      // and one that does not.
+      const real = seedAccount({ status: "approved" });
+      const bad = { kind: "api_key", value: "nm_describe-no-such-key-0123456789abcdef" };
+      const forReal = await askWith(bad, [real.id]);
+      const forNobody = await askWith(bad, [888_888]);
+      expect(forReal).toEqual({ ok: false, error: "invalid_credential" });
+      expect(forNobody).toEqual(forReal);
+    });
+
+    test("hands the session touch to waitUntil when given a context", async () => {
+      const session = await signInToPrivate(callerId);
+      const pending: Promise<unknown>[] = [];
+      const result = await describeAccounts(
+        env(),
+        { credential: { kind: "session", value: session }, userIds: [callerId] },
+        { waitUntil: (p) => pending.push(p) },
+      );
+      expect(result.ok).toBe(true);
+      expect(pending).toHaveLength(1);
+      await Promise.all(pending);
+    });
+  });
+
+  // ------------------------------------------------------------------------
+  // Maintenance mode, faults and logs
+  // ------------------------------------------------------------------------
+
+  describe("maintenance mode", () => {
+    test("full answers unavailable before anything else is looked at", async () => {
+      const { id } = seedAccount();
+      const full = { MAINTENANCE_MODE: "full" } as Partial<Bindings>;
+      // A good request, a bad shape and a bad credential are all `unavailable`.
+      expect(await askWith(callerKey, [id], full)).toEqual({ ok: false, error: "unavailable" });
+      expect(await askWith(callerKey, [], full)).toEqual({ ok: false, error: "unavailable" });
+      expect(await askWith("nope", [id], full)).toEqual({ ok: false, error: "unavailable" });
+      expect(await describeAccounts(env(full), null)).toEqual({ ok: false, error: "unavailable" });
+    });
+
+    test("read-only keeps answering, as a GET is served", async () => {
+      const { id } = seedAccount();
+      const result = await askWith(callerKey, [id], { MAINTENANCE_MODE: "read-only" });
+      expect(accountsOf(result)).toHaveLength(1);
+    });
+  });
+
+  test("a fault of the database throws; it is not a refusal", async () => {
+    // A real fault, not a stand-in: the column only this method reads is renamed
+    // underneath it, so the credential still resolves and the SELECT fails.
+    const { id } = seedAccount();
+    db.run("ALTER TABLE users RENAME COLUMN identity_conflict TO identity_conflict_renamed");
+    await expect(ask([id])).rejects.toThrow(/identity_conflict/);
+  });
+
+  test("no log line names an account or a credential", async () => {
+    const named = seedAccount({
+      status: "approved",
+      username: "loggedname",
+      givenName: "Loggedgiven",
+      familyName: "Loggedfamily",
+      orcid: "0000-0003-1234-5679",
+    });
+    const session = await signInToPrivate(callerId);
+    const methods = ["log", "info", "warn", "error", "debug"] as const;
+    const lines: string[] = [];
+    const spies = methods.map((method) =>
+      spyOn(console, method).mockImplementation((...args: unknown[]) => {
+        lines.push(
+          args.map((a) => (typeof a === "string" ? a : (JSON.stringify(a) ?? String(a)))).join(" "),
+        );
+      }),
+    );
+    try {
+      console.error("capture-canary");
+      await ask([named.id, 777_777]);
+      await askWith({ kind: "session", value: session }, [named.id]);
+      await askWith({ kind: "api_key", value: "nm_describe-logging-bad-key-0123456789ab" }, [
+        named.id,
+      ]);
+      await ask([]);
+      await askWith(callerKey, [named.id], { MAINTENANCE_MODE: "full" });
+    } finally {
+      for (const spy of spies) spy.mockRestore();
+    }
+    expect(lines).toContain("capture-canary");
+    for (const secret of [
+      CALLER_KEY,
+      session,
+      named.email,
+      "loggedname",
+      "Loggedgiven",
+      "Loggedfamily",
+      "0000-0003-1234-5679",
+    ]) {
+      expect(lines.filter((line) => line.includes(secret))).toEqual([]);
+    }
+    // Nothing is written at all, not even a line that carries no secret.
+    expect(lines).toEqual(["capture-canary"]);
+  });
+});
+
+// --------------------------------------------------------------------------
 // Maintenance mode: the entrypoint answers as the HTTP API would
 // --------------------------------------------------------------------------
 
@@ -961,16 +1570,23 @@ describe("maintenance mode on every method", () => {
         await exchangePrivateGrant(e, { code, state: STATE, userAgent: null, clientIp: null }),
       ),
       revoke: outcome(await revokePrivateSession(e, { value: session })),
+      describeAccounts: outcome(
+        await describeAccounts(e, {
+          credential: { kind: "api_key", value: key },
+          userIds: [userId],
+        }),
+      ),
     };
   }
 
-  test("full refuses all three, and writes nothing", async () => {
+  test("full refuses every method, and writes nothing", async () => {
     const got = await answers("full");
     expect(got).toMatchObject({
       resolveSession: "unavailable",
       resolveKey: "unavailable",
       exchange: "unavailable",
       revoke: "unavailable",
+      describeAccounts: "unavailable",
     });
     // No key touch, no new session, no revocation.
     const token = db
@@ -983,13 +1599,14 @@ describe("maintenance mode on every method", () => {
     expect(privateRows(got.userId)[0]?.revoked_at).toBeNull();
   });
 
-  test("read-only keeps resolvePrincipal answering and refuses the two writes", async () => {
+  test("read-only keeps the two reads answering and refuses the two writes", async () => {
     const got = await answers("read-only");
     expect(got).toMatchObject({
       resolveSession: "ok",
       resolveKey: "ok",
       exchange: "unavailable",
       revoke: "unavailable",
+      describeAccounts: "ok",
     });
     expect(privateRows(got.userId)).toHaveLength(1);
   });
@@ -1003,6 +1620,7 @@ describe("maintenance mode on every method", () => {
         resolveKey: "ok",
         exchange: "ok",
         revoke: "ok",
+        describeAccounts: "ok",
       });
     });
   }
@@ -1026,6 +1644,7 @@ describe("maintenance mode on every method", () => {
         write: got.exchange === "unavailable",
       }).toEqual({ mode, read: getRefused, write: postRefused });
       expect(got.resolveSession === "unavailable").toBe(getRefused);
+      expect(got.describeAccounts === "unavailable").toBe(getRefused);
       expect(got.revoke === "unavailable").toBe(postRefused);
     }
   });
