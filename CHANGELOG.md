@@ -123,8 +123,9 @@ It sets no Worker variable or secret: the four re-pull switches and caps are abs
   `deleteDatasetCascade` removes the dataset's re-pull rows, their screens and their dispatches, so a dataset deleted and re-created under the same id is not blocked by a stale open re-pull, and its re-pull history goes with it.
   Those rows are also the ledger that the daily open and merge caps, the 30-day spacing and gate G4 are read from, so a delete gives back that UTC day's cap units and resets the spacing; deleting `on003645` or `on004362` returns the scheduler to `waiting-for-manual-run`.
 - **`nemar admin upstream-status --measure` estimates the days to re-pull every stale mirror at the open cap the Worker reports.**
-  When that cap cannot be read (the route fails, or the Worker reports the cap as unreadable, as it does for a malformed `REPULL_DAILY_OPEN_CAP`), the estimate uses the default cap of 2 and says so.
-  A cap of 0 prints that no re-pull is opened, so the catch-up never finishes, and `--json` gives `catch_up_days: null`.
+  When the Worker reports its cap as unreadable (a malformed `REPULL_DAILY_OPEN_CAP`), it opens no automatic re-pull, so any catch-up never finishes until the binding is fixed; a cap of 0 set on purpose gives the same answer.
+  Either way `--json` gives `catch_up_days: null` for such a catch-up.
+  Only when the Worker cannot be asked at all does the estimate use the default cap of 2, and it says so, with a warning on stderr.
 
 ### Deploy coupling
 
