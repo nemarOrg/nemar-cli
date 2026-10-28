@@ -125,7 +125,7 @@ It sets no Worker variable or secret: the four re-pull switches and caps are abs
 - **`nemar admin upstream-status --measure` estimates the days to re-pull every stale mirror at the open cap the Worker reports.**
   When the Worker reports its cap as unreadable (a malformed `REPULL_DAILY_OPEN_CAP`), it opens no automatic re-pull, so any catch-up never finishes until the binding is fixed; a cap of 0 set on purpose gives the same answer.
   Either way `--json` gives `catch_up_days: null` for such a catch-up.
-  Only when the Worker cannot be asked at all does the estimate use the default cap of 2, and it says so, with a warning on stderr.
+  Only when the Worker's reading cannot be used (the call fails, or the answer does not parse) does the estimate use the default cap of 2, and it says so, with a warning on stderr.
 
 ### Deploy coupling
 
