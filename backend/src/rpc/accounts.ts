@@ -37,13 +37,17 @@
  * `read-only` keeps answering, as a `GET` does.
  *
  * Refusals are values; faults throw (ADR 0078, rule 2). A D1 error is not
- * caught here, and nothing is logged: no line names an account or a credential.
+ * caught here, and this module logs nothing. The one line a call can still print
+ * is the one `parseRole` already logs for the caller's own unreadable role, when
+ * `resolvePrincipal` meets it (ADR 0115, Consequences).
  */
 
 import {
   type AccountDescription,
   DESCRIBE_ACCOUNTS_MAX,
+  type DescribeAccountsRefusal,
   type DescribeAccountsResult,
+  type PrincipalRefusal,
 } from "../../../shared/contract/private-site.js";
 import { flag } from "../db/flag";
 import { maintenanceRefuses } from "../middleware/maintenance";
@@ -51,6 +55,21 @@ import { isActiveAccountStatus } from "../services/account-tier";
 import type { BackgroundContext } from "../services/web-session";
 import type { Bindings } from "../types/bindings";
 import { resolvePrincipal } from "./principal";
+
+/**
+ * Compile-time drift guards between the contract's two spelled-out refusal
+ * unions and `PrincipalRefusal`, in both directions, as `principal.ts` does for
+ * roles: the contract spells the literals out because other repositories read it
+ * as text, so a literal added to one union and not the others fails the
+ * typecheck here instead of reaching a caller. A refusal of `resolvePrincipal`
+ * is passed through unchanged below, which these keep honest.
+ */
+type Same<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
+type ResultError = Extract<DescribeAccountsResult, { ok: false }>["error"];
+const refusalUnionsMatch: [
+  Same<DescribeAccountsRefusal, PrincipalRefusal | "invalid_request">,
+  Same<ResultError, DescribeAccountsRefusal>,
+] = [true, true];
 
 const INVALID_REQUEST: DescribeAccountsResult = { ok: false, error: "invalid_request" };
 

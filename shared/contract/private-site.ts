@@ -280,8 +280,11 @@ export interface DescribeAccountsRequest {
 
 /**
  * What one named account looks like from outside, at the moment of the call.
- *   - `active`: the account may authenticate (ADR 0040). `username`,
- *     `givenName` and `familyName` are `null` where none is stored. `orcid` is
+ *   - `active`: the account has an active status (`verified` or `approved`, ADR
+ *     0040). That is not a promise that `resolvePrincipal` would resolve it: an
+ *     account whose stored role cannot be read is `active` here and
+ *     `unresolved_account` there. `username`, `givenName` and `familyName` are
+ *     `null` where none is stored. `orcid` is
  *     the ORCID iD only when it is the iD the account signs in with AND no other
  *     live account claims it (`identity_conflict`, ADR 0043); in every other
  *     case it is `null`, so a duplicate never shows an iD another account holds.
@@ -308,17 +311,38 @@ export type AccountDescription =
   | { readonly userId: number; readonly state: "inactive" }
   | { readonly userId: number; readonly state: "gone" };
 
-/** The credential refusals of {@link PrincipalRefusal}, unchanged, plus
- *  `invalid_request`: the request is not an object, or `userIds` is not an array
- *  of 1 to {@link DESCRIBE_ACCOUNTS_MAX} distinct positive safe integers. A
- *  caller treats a code it does not know as a refusal, as everywhere else. */
-export type DescribeAccountsRefusal = PrincipalRefusal | "invalid_request";
+/**
+ * The four refusals of {@link PrincipalRefusal}, unchanged, plus
+ * `invalid_request`: the request is not an object, or `userIds` is not an array
+ * of 1 to {@link DESCRIBE_ACCOUNTS_MAX} distinct positive safe integers (an id
+ * twice is a refusal of the whole request, never a quiet repair). A caller
+ * treats a code it does not know as a refusal, as everywhere else.
+ *
+ * Spelled out here and in the result below, as this file spells every union,
+ * because other repositories read it as text; `backend/src/rpc/accounts.ts`
+ * holds a compile-time guard that they equal `PrincipalRefusal` plus
+ * `invalid_request`.
+ */
+export type DescribeAccountsRefusal =
+  | "invalid_credential"
+  | "inactive_account"
+  | "unresolved_account"
+  | "unavailable"
+  | "invalid_request";
 
 /** On success, exactly one entry for each requested id, in the request's
  *  order. */
 export type DescribeAccountsResult =
   | { readonly ok: true; readonly accounts: readonly AccountDescription[] }
-  | { readonly ok: false; readonly error: DescribeAccountsRefusal };
+  | {
+      readonly ok: false;
+      readonly error:
+        | "invalid_credential"
+        | "inactive_account"
+        | "unresolved_account"
+        | "unavailable"
+        | "invalid_request";
+    };
 
 /**
  * The methods `NemarApiRpc` exposes. A caller types its binding with this

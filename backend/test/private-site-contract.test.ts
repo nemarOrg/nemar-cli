@@ -54,6 +54,35 @@ describe("the contract as text", () => {
     expect(contract.DESCRIBE_ACCOUNTS_MAX).toBe(100);
   });
 
+  test("a text reader finds every describeAccounts refusal spelled out in both unions", () => {
+    // The other two parties read this file as text, so a union that names
+    // another union (`PrincipalRefusal | "invalid_request"`) shows them one
+    // literal. Each declaration runs to the blank line after it.
+    const declaration = (name: string): string => {
+      const start = TEXT.indexOf(`export type ${name} =`);
+      expect(start).toBeGreaterThan(-1);
+      return TEXT.slice(start, TEXT.indexOf("\n\n", start));
+    };
+    for (const name of ["DescribeAccountsRefusal", "DescribeAccountsResult"]) {
+      const text = declaration(name);
+      for (const literal of [
+        "invalid_credential",
+        "inactive_account",
+        "unresolved_account",
+        "unavailable",
+        "invalid_request",
+      ]) {
+        expect({ name, literal, spelled: text.includes(`"${literal}"`) }).toEqual({
+          name,
+          literal,
+          spelled: true,
+        });
+      }
+      expect(text).not.toContain("PrincipalRefusal");
+    }
+    expect(declaration("DescribeAccountsResult")).not.toContain("DescribeAccountsRefusal");
+  });
+
   test("the TTL literals mean what their comments say", () => {
     expect(contract.PRIVATE_SESSION_TTL_SECONDS).toBe(8 * 60 * 60);
     expect(contract.PRIVATE_GRANT_TTL_SECONDS).toBe(60);
