@@ -378,7 +378,7 @@ The review workflow's `timeout-minutes` is 50 in `nemarDatasets/.github` and in 
   Before this, a sidecar edit made the same way in every subject filled the 40-file budget and left the rest unread, so `no_degradation` could not pass.
   The match is exact, so a change that differs in one byte, or names its own subject, is shown on its own, and a symlink or an executable is never one with a regular file; at most 500 files' diffs are examined, and, once the patches are full, the search stops early when the content pass is short of time, leaving the rest unread.
 
-## 0.10.20 - 2026-10-19
+## 0.10.20 - 2026-10-20
 
 The Zarr conversion that runs on `hallu` now pins biosigIO 1.2.13 and types the failures caused by missing companion data.
 This release requeues nothing and leaves `ZARR_ENGINE_VERSION` at `3`. A dataset's stores are rebuilt when that dataset next runs: the drain rebuilds every recording with `--clean`, and a biosigIO change makes a published index non-current, so a pending retry round also rebuilds. A recording that converts again gets the new verdicts.
@@ -1162,7 +1162,7 @@ Deploy coupling.
 - Owner edits of an account's email and GitHub handle (ADR 0096, still proposed) do not end the old
   holder's keys and sessions, and the handle is not checked against GitHub.
 
-## 0.10.15 - 2026-10-07
+## 0.10.15 - 2026-10-08
 
 Epic #1610: identifier screening and an in-place scrub of published datasets. A third party
 reported that EDF and BDF headers in a published dataset carried name-like strings and a date.
@@ -2567,7 +2567,7 @@ the same change. Before this release the data plane answers that URL with a 302 
 host, and a CSP applies to a redirect target, so shipping the website first would break the
 README panel on every dataset page in production.
 
-## 0.10.3 - 2026-09-10
+## 0.10.3 - 2026-09-11
 
 ### Security
 
