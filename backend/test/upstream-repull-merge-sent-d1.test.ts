@@ -16,7 +16,12 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { Miniflare } from "miniflare";
 import { SYSTEM_USER_ID } from "../src/lib/constants";
-import { WORKER_MERGES_MAX, WORKER_MERGE_SENT_SQL } from "../src/services/upstream-repull-merge";
+import {
+  WORKER_MERGES_MAX,
+  WORKER_MERGE_ACTION,
+  WORKER_MERGE_ANSWER_ACTION,
+  WORKER_MERGE_SENT_SQL,
+} from "../src/services/upstream-repull-merge";
 import { HELD_CLAIM_MAX_AGE_MINUTES } from "../src/services/upstream-repull-verified";
 import { applyMigrations, migrationFiles } from "./helpers/miniflare-d1";
 import { type Row, SHA, rowAt } from "./helpers/repull-rows";
@@ -136,6 +141,7 @@ async function send(claim: Claim, over: Partial<Send> = {}): Promise<number> {
 }
 
 interface AuditRow {
+  id: number;
   user_id: number | null;
   action: string;
   resource_type: string | null;
@@ -149,7 +155,8 @@ async function auditRows(): Promise<AuditRow[]> {
   return (
     await d1
       .prepare(
-        `SELECT user_id, action, resource_type, resource_id, typeof(resource_id) AS id_type, details
+        `SELECT id, user_id, action, resource_type, resource_id, typeof(resource_id) AS id_type,
+                details
            FROM audit_log ORDER BY id`,
       )
       .all<AuditRow>()
@@ -160,6 +167,53 @@ async function auditRows(): Promise<AuditRow[]> {
 async function expectNothingRecorded(claim: Claim, over: Partial<Send> = {}): Promise<void> {
   expect(await send(claim, over)).toBe(0);
   expect(await auditRows()).toEqual([]);
+}
+
+/**
+ * Audit rows the bound's count must not take, as many of each kind as the bound, so a count that
+ * took any one kind would refuse the first send. Each kind differs from the rows the count is
+ * meant to take in one column alone: the merges of another re-pull (`resource_id`), the answers
+ * to this re-pull's merges (`action`), and this re-pull's id with the merge action under another
+ * kind of resource (`resource_type`). Returns the id of the last row seeded, so the rows after it
+ * are the ones the statement wrote.
+ */
+async function seedDecoys(claim: Claim): Promise<number> {
+  const kinds = [
+    { action: WORKER_MERGE_ACTION, type: "upstream_repull", id: String(claim.id + 1) },
+    { action: WORKER_MERGE_ANSWER_ACTION, type: "upstream_repull", id: String(claim.id) },
+    { action: WORKER_MERGE_ACTION, type: "dataset", id: String(claim.id) },
+  ];
+  for (const kind of kinds) {
+    for (let attempt = 1; attempt <= WORKER_MERGES_MAX; attempt++) {
+      await d1
+        .prepare(
+          `INSERT INTO audit_log (user_id, action, resource_type, resource_id, details)
+           VALUES (?, ?, ?, ?, ?)`,
+        )
+        .bind(
+          SYSTEM_USER_ID,
+          kind.action,
+          kind.type,
+          kind.id,
+          JSON.stringify({
+            dataset_id: DATASET,
+            pr: "n0",
+            sha: SHA,
+            claimed_at: claim.claimedAt,
+            attempt,
+          }),
+        )
+        .run();
+    }
+  }
+  const last = await d1.prepare("SELECT MAX(id) AS id FROM audit_log").first<{ id: number }>();
+  if (!last) throw new Error("D1 returned no audit rows after the decoys were seeded");
+  return last.id;
+}
+
+/** The rows the statement wrote: every audit row after `id`, the last decoy. */
+async function rowsAfter(id: number): Promise<AuditRow[]> {
+  return (await auditRows()).filter((r) => r.id > id);
 }
 
 describe("a send the row's claim allows, on D1", () => {
@@ -221,17 +275,20 @@ describe("a send the statement does not record, on D1", () => {
     await expectNothingRecorded(claim);
   });
 
-  test(`a send past the bound of ${WORKER_MERGES_MAX} records nothing (COUNT(*) < ?8)`, async () => {
+  test(`a send past the bound of ${WORKER_MERGES_MAX} records nothing, counting only this re-pull's merge rows (COUNT(*) < ?8)`, async () => {
     const claim = await seedClaim();
+    // The log already holds the bound's count of look-alike rows of three kinds (`seedDecoys`).
+    // None is this re-pull's merge, so none may count toward the bound or take a send's place.
+    const lastDecoy = await seedDecoys(claim);
     // The sends up to the bound are each recorded: the first as a send, the rest as sends again.
     for (let attempt = 1; attempt <= WORKER_MERGES_MAX; attempt++) {
       const young = attempt === 1 ? 0 : 1;
       expect([attempt, await send(claim, { attempt, young })]).toEqual([attempt, 1]);
     }
-    expect(await auditRows()).toHaveLength(WORKER_MERGES_MAX);
-    // The next is refused, and the rows the statement counted are still the only ones.
+    expect(await rowsAfter(lastDecoy)).toHaveLength(WORKER_MERGES_MAX);
+    // The next is refused, and the rows the statement counted are still the only ones it wrote.
     expect(await send(claim, { attempt: WORKER_MERGES_MAX + 1, young: 1 })).toBe(0);
-    const rows = await auditRows();
+    const rows = await rowsAfter(lastDecoy);
     expect(rows.map((r) => JSON.parse(String(r.details)).attempt)).toEqual(
       Array.from({ length: WORKER_MERGES_MAX }, (_, i) => i + 1),
     );
