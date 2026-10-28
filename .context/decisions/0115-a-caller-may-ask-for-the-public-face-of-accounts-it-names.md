@@ -28,7 +28,8 @@ The contract is `shared/contract/private-site.ts` (additive, ADR 0078 rule 5); t
    and a caller with no live credential gets the same answer whether an id exists or not,
    so the method does not turn the binding into an account directory for a caller that has none.
 2. **One entry for each id asked, in the order asked, in one of three states.**
-   `active` (the account may authenticate): `username`, `givenName`, `familyName` and `orcid`, each `null` where none is stored.
+   `active` (an active status, `verified` or `approved`, ADR 0040): `username`, `givenName`, `familyName` and `orcid`, each `null` where none is stored.
+   An account with an active status and a stored role that cannot be read is `active` here and `unresolved_account` to `resolvePrincipal`: this method says what the status is, not whether a credential would resolve.
    `inactive` (a `pending` account, whose email is not verified yet) and `gone` (revoked, deleted, or never there, one answer for all three) carry the id and the state alone.
    The entry is built field by field, so no email, role, status, account kind or later column can reach a caller.
 3. **The ORCID iD is shown only when it is verified and canonical.**
@@ -39,9 +40,10 @@ The contract is `shared/contract/private-site.ts` (additive, ADR 0078 rule 5); t
 4. **The request is bounded, and refused as a value.**
    `userIds` is 1 to `DESCRIBE_ACCOUNTS_MAX` (100) positive safe integers, none twice; anything else, and a request that is not an object, is `invalid_request`.
    The bound is D1's limit on bound values, so a call is always one SELECT.
+   An id named twice refuses the whole request and is not quietly merged: a duplicate is a bug in the caller, a repair would hide it, and the caller has every id once to dedupe (a list of members holds each account once).
    The shape is judged before the credential: its rules are in the contract, they say nothing about any account, and a malformed request costs no credential lookup.
 5. **The other rules of ADR 0078 apply as for `resolvePrincipal`.**
-   Maintenance mode is mirrored as a read (`full` answers `unavailable`, `read-only` keeps answering), faults throw, and nothing logged names an account or a credential.
+   Maintenance mode is mirrored as a read (`full` answers `unavailable`, `read-only` keeps answering), faults throw, and nothing logged names an account or a credential, except the line `parseRole` already logs for the caller's own unreadable role (see Consequences).
 
 **This clarifies ADR 0078 rule 6.**
 A caller may keep a user id as a key, of a membership or a grant for example, because an id is not derived from an account's state.
@@ -51,6 +53,10 @@ a rename, a revocation or an iD that stops being canonical reaches the caller on
 **This amends the sentence of ADR 0078 rule 7 that names the one use of a key:**
 the private site uses a key a visitor presents for `resolvePrincipal` and `describeAccounts`, and for nothing else.
 `describeAccounts` takes the visitor's own credential, resolves it as `resolvePrincipal` does, and does nothing else with it; the rest of the rule stands.
+This widens the bound from one use of a key to two, which is a change to the rule and not only a clarification of it.
+
+**Neither takes effect until this ADR is accepted.**
+Until then ADR 0078 reads as written, and its Amendment block points here as pending.
 
 ## Consequences
 
@@ -62,7 +68,7 @@ the private site uses a key a visitor presents for `resolvePrincipal` and `descr
   What comes back is a profile's public fields, never the email, and `inactive` against `gone` says only that an id names an account that is not active yet, which is little beyond what a sequential id already says.
   There is no rate limit here (rule 3); a bound on how fast a visitor can ask is the caller's.
 - A duplicate account flagged under ADR 0043 shows no iD until the flag clears, and a legitimate account flagged for an email collision loses its iD in this answer until an administrator clears it.
-- `active` means a status in `ACTIVE_ACCOUNT_STATUSES`, the one definition ADR 0040 gave, so this method and the credential check cannot disagree about who may authenticate.
+- `active` means a status in `ACTIVE_ACCOUNT_STATUSES`, the one definition ADR 0040 gave, so this method and the credential check cannot disagree about which statuses are active.
   The one SELECT is of other accounts and shares no code with the readers behind a credential, so a column added to `users` later reaches no caller until `accounts.ts` is changed to say so.
 - `resolvePrincipal` already logs a line that names the account (`parseRole`) when a stored role cannot be read, and `describeAccounts` inherits it when the caller's own role is the unreadable one.
   The method adds no line of its own.
