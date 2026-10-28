@@ -79,6 +79,7 @@ It sets no Worker variable or secret: the four re-pull switches and caps are abs
 - **Carried from `dev` by the epic's two syncs (#1979, #1981).**
   The GitHub App is `nemar-bot`, renamed from `nemar-publish-bot` (#1975); #1979 follows the rename in the epic, and the checks compare the numeric id as well as the login.
   A dataset held on an authenticated data host can be read with the CLI's own git-annex special remote, `git-annex-remote-nemar`, and its credential helper, `nemar auth git-credential`, and the API key goes only to origins on the CLI's own list (#1978; ADR 0114 is still proposed, so this ships ahead of its acceptance).
+  `nemar dataset clone` also asks each listed data host when a signed-in user's lookup answers 404 or 400, and `--host` names the one host to read from. ADR 0107, which other entries here rely on, is also proposed.
 
 ### Production behavior changes
 
@@ -120,8 +121,10 @@ It sets no Worker variable or secret: the four re-pull switches and caps are abs
   The production Worker's identity holds `s3:GetObjectRetention`, so an object that is already locked still passes.
 - **Deleting a dataset also deletes its re-pull records.**
   `deleteDatasetCascade` removes the dataset's re-pull rows, their screens and their dispatches, so a dataset deleted and re-created under the same id is not blocked by a stale open re-pull, and its re-pull history goes with it.
-- **`nemar admin upstream-status --measure` estimates the catch-up at the open cap the Worker reports.**
-  When the Worker's switches cannot be read, the estimate uses the default cap of 2 and says so.
+  Those rows are also the ledger that the daily open and merge caps, the 30-day spacing and gate G4 are read from, so a delete gives back that UTC day's cap units and resets the spacing; deleting `on003645` or `on004362` returns the scheduler to `waiting-for-manual-run`.
+- **`nemar admin upstream-status --measure` estimates the days to re-pull every stale mirror at the open cap the Worker reports.**
+  When that cap cannot be read (the route fails, or the Worker reports the cap as unreadable, as it does for a malformed `REPULL_DAILY_OPEN_CAP`), the estimate uses the default cap of 2 and says so.
+  A cap of 0 prints that no re-pull is opened, so the catch-up never finishes, and `--json` gives `catch_up_days: null`.
 
 ### Deploy coupling
 
