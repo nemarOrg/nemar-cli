@@ -78,7 +78,8 @@ It sets no Worker variable or secret: the four re-pull switches and caps are abs
   ADR 0111 gains its final amendment, and `dataPlaneVersionListingSchema` in `shared/contract/data-plane.ts` types `mirror` as an optional boolean that may be `null`, so a listing whose `mirror` is any other value fails the CLI's read.
 - **Carried from `dev` by the epic's two syncs (#1979, #1981).**
   The GitHub App is `nemar-bot`, renamed from `nemar-publish-bot` (#1975); #1979 follows the rename in the epic, and the checks compare the numeric id as well as the login.
-  A dataset held on an authenticated data host can be read with the CLI's own git-annex special remote, `git-annex-remote-nemar`, and its credential helper, `nemar auth git-credential`, and the API key goes only to origins on the CLI's own list (#1978, ADR 0114, proposed).
+  A dataset held on an authenticated data host can be read with the CLI's own git-annex special remote, `git-annex-remote-nemar`, and its credential helper, `nemar auth git-credential`, and the API key goes only to origins on the CLI's own list (#1978; ADR 0114 is still proposed, so this ships ahead of its acceptance).
+  `nemar dataset clone` also asks each listed data host when a signed-in user's lookup answers 404 or 400, and `--host` names the one host to read from. ADR 0107, which other entries here rely on, is also proposed.
 
 ### Production behavior changes
 
@@ -114,6 +115,17 @@ It sets no Worker variable or secret: the four re-pull switches and caps are abs
 - The production daily tick runs the re-pull scheduler and the dispatch watchdog, and the 30-minute tick runs the advance tick.
   While the switches are absent they dispatch, advance and merge nothing; they only stamp their own rows.
 - New tracking-issue labels `mirror-lag` and `upstream-moved` on `nemarDatasets/.github`; GitHub creates a label the first time an issue carries it.
+- **The publication Object Lock step reads a 403 back before it counts an object as locked.**
+  A 403 from the retention write used to count as already locked, with no read-back.
+  Now the object's retention is read with `GetObjectRetention`, and the object counts as locked only under GOVERNANCE or COMPLIANCE retention at least 50 years out; any other answer fails the step.
+  The production Worker's identity holds `s3:GetObjectRetention`, so an object that is already locked still passes.
+- **Deleting a dataset also deletes its re-pull records.**
+  `deleteDatasetCascade` removes the dataset's re-pull rows, their screens and their dispatches, so a dataset deleted and re-created under the same id is not blocked by a stale open re-pull, and its re-pull history goes with it.
+  Those rows are also the ledger that the daily open and merge caps, the 30-day spacing and gate G4 are read from, so a delete gives back that UTC day's cap units and resets the spacing; deleting `on003645` or `on004362` returns the scheduler to `waiting-for-manual-run`.
+- **`nemar admin upstream-status --measure` estimates the days to re-pull every stale mirror at the open cap the Worker reports.**
+  When the Worker reports its cap as unreadable (a malformed `REPULL_DAILY_OPEN_CAP`), it opens no automatic re-pull, so any catch-up never finishes until the binding is fixed; a cap of 0 set on purpose gives the same answer.
+  Either way `--json` gives `catch_up_days: null` for such a catch-up.
+  Only when the Worker's reading cannot be used (the call fails, or the answer does not parse) does the estimate use the default cap of 2, and it says so, with a warning on stderr.
 
 ### Deploy coupling
 

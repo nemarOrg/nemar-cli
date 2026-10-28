@@ -46,9 +46,45 @@ export const MEASURE_PROGRESS_EVERY = 10;
 
 /**
  * ADR 0111's `REPULL_DAILY_OPEN_CAP` default: the re-pull pull requests the automatic path opens
- * in a day. The catch-up estimate divides by it; the owner may set another cap later.
+ * in a day. The catch-up estimate divides by the cap the Worker reports (`MeasureOptions.openCap`)
+ * and falls back to this default only when the CLI has no reading to use: the call failed, or the
+ * reading is not one {@link openCapFromReading} knows. A cap the Worker says it cannot read is not
+ * such a case; it is a reading ({@link OpenCapReading}), and it reads 0.
  */
 export const REPULL_DAILY_OPEN_CAP = 2;
+
+/**
+ * The open cap the catch-up estimate divides by, as the Worker reports it. `worker` is a cap the
+ * Worker read (set, or its own default for an absent binding). `unreadable` is a binding the
+ * Worker cannot parse: it reads 0, so no automatic re-pull is opened and the catch-up never
+ * finishes until the binding is fixed; `value` is 0 then.
+ */
+export interface OpenCapReading {
+  value: number;
+  source: "worker" | "unreadable";
+}
+
+/**
+ * One `open_cap` as `GET /admin/repulls/switches` reports it (`RepullCapReading` in
+ * shared/repull-observability.ts), checked rather than trusted: the body crossed the wire, and this
+ * CLI may be older or newer than the Worker.
+ *
+ * `unreadable` is `{ value: 0, source: "unreadable" }` whatever `value` says, because the Worker
+ * reads 0 for it and a stray number must never become a number of days. `set` and `default` are
+ * both a cap the Worker will use, so they come back as `worker`, provided `value` is an integer of
+ * at least 0. Anything else (not an object, another source word, a `value` that is not a count)
+ * is undefined: the caller falls back to {@link REPULL_DAILY_OPEN_CAP} and says so.
+ */
+export function openCapFromReading(reading: unknown): OpenCapReading | undefined {
+  if (typeof reading !== "object" || reading === null) return undefined;
+  const { source, value } = reading as { source?: unknown; value?: unknown };
+  if (source === "unreadable") return { value: 0, source: "unreadable" };
+  if (source !== "set" && source !== "default") return undefined;
+  if (typeof value === "number" && Number.isInteger(value) && value >= 0) {
+    return { value, source: "worker" };
+  }
+  return undefined;
+}
 
 export interface DeltaMeasurement {
   dataset_id: string;
@@ -98,8 +134,12 @@ export interface MeasurementTotals {
   bytes_to_copy_known: number;
   /** Mirrors this total does not cover, so it is never read as the whole fleet. */
   not_comparable: NotComparable;
-  /** ceil(catch_up / REPULL_DAILY_OPEN_CAP). */
-  catch_up_days: number;
+  /**
+   * ceil(catch_up / the open cap in `Measurement.open_cap`), in whole days. Null when that cap is 0
+   * (set to 0, or unreadable, which reads 0) and there is a catch-up to do: no automatic re-pull is
+   * opened, so it never finishes, and a division by zero is not a number of days.
+   */
+  catch_up_days: number | null;
 }
 
 export interface Measurement {
@@ -114,6 +154,13 @@ export interface Measurement {
   complete: boolean;
   deltas: DeltaMeasurement[];
   totals: MeasurementTotals;
+  /**
+   * The daily open cap `totals.catch_up_days` divides by, and where it came from: `worker` when
+   * the Worker reports a cap it reads, `unreadable` when it reports that its binding is malformed
+   * (it reads 0), `default` when the caller had no reading and {@link REPULL_DAILY_OPEN_CAP}
+   * stands in.
+   */
+  open_cap: { value: number; source: "worker" | "unreadable" | "default" };
   doi_volume: DoiVolume;
 }
 
@@ -127,6 +174,13 @@ export interface MeasureOptions {
   now?: () => number;
   /** What the staleness pass covered; default the whole fleet. */
   scope?: PassScope;
+  /**
+   * The daily open cap the catch-up estimate divides by: the reading of the one the Worker reports
+   * at `GET /admin/repulls/switches` ({@link openCapFromReading}). Absent when the caller has no
+   * reading; the estimate then divides by {@link REPULL_DAILY_OPEN_CAP} and the measurement says
+   * the cap is the default.
+   */
+  openCap?: OpenCapReading;
   /** Called every {@link MEASURE_PROGRESS_EVERY} mirrors with a plain line. */
   onProgress?: (line: string) => void;
   /** Stop after this many consecutive failed reads. Default {@link MEASURE_MAX_CONSECUTIVE_FAILURES}. */
@@ -140,10 +194,23 @@ export function staleRowsOf(rows: readonly UpstreamStatusRow[]): UpstreamStatusR
     .sort((a, b) => (a.dataset_id < b.dataset_id ? -1 : a.dataset_id > b.dataset_id ? 1 : 0));
 }
 
+/**
+ * Whole days to open `catchUp` re-pulls at `openCap` a day. Null when the cap is 0 and there is
+ * work to do: the Worker reads 0 for a cap set to 0 and for one it cannot read, and opens no
+ * automatic re-pull then, so the catch-up never finishes. Dividing would give Infinity (NaN when
+ * there is nothing to catch up), which prints as a word and serializes as a bare null.
+ */
+function catchUpDaysOf(catchUp: number, openCap: number): number | null {
+  if (catchUp === 0) return 0;
+  return openCap > 0 ? Math.ceil(catchUp / openCap) : null;
+}
+
+/** Add up the deltas; `openCap` is the daily open cap that `catch_up_days` divides by. */
 export function totalsOf(
   deltas: readonly DeltaMeasurement[],
   stale: number,
   catchUp: number,
+  openCap: number,
   notComparable: NotComparable = {
     unknown: 0,
     probably_stale: 0,
@@ -191,7 +258,7 @@ export function totalsOf(
     bytes_to_copy: unknown > 0 || notMeasured > 0 || bytesUnknown ? null : bytesKnown,
     bytes_to_copy_known: bytesKnown,
     not_comparable: notComparable,
-    catch_up_days: Math.ceil(catchUp / REPULL_DAILY_OPEN_CAP),
+    catch_up_days: catchUpDaysOf(catchUp, openCap),
   };
 }
 
@@ -248,7 +315,11 @@ export async function measureStaleMirrors(
   }
   const doiVolume = estimateRepullDoiVolume(rows, startedAt);
   const counts = countUpstreamStates(rows);
-  const totals = totalsOf(deltas, stale.length, doiVolume.catch_up, {
+  const openCap: Measurement["open_cap"] =
+    options.openCap === undefined
+      ? { value: REPULL_DAILY_OPEN_CAP, source: "default" }
+      : { value: options.openCap.value, source: options.openCap.source };
+  const totals = totalsOf(deltas, stale.length, doiVolume.catch_up, openCap.value, {
     unknown: counts.states.unknown,
     probably_stale: counts.probably_stale,
     not_examined: counts.states.not_examined,
@@ -266,6 +337,7 @@ export async function measureStaleMirrors(
     complete: totals.bytes_to_copy !== null,
     deltas,
     totals,
+    open_cap: openCap,
     doi_volume: doiVolume,
   };
 }
@@ -321,6 +393,32 @@ function leftOutLine(v: DoiVolume): string | null {
   return parts.length === 0 ? null : `  DOI estimate left out: ${parts.join(", ")}.`;
 }
 
+/**
+ * The catch-up estimate, naming the cap it divides by and where that cap came from. A cap of 0,
+ * set or unreadable, opens no AUTOMATIC re-pull (ADR 0111: the open cap bounds only the automatic
+ * path), so with a catch-up to do the line says "never", not a number of days. An unreadable cap is
+ * the Worker's own answer and says what to fix; it is not the default. With no catch-up (0 days)
+ * there is nothing for the cap to hold back, so the unreadable line says it changes nothing for
+ * this estimate and does not claim a catch-up that never finishes.
+ */
+function catchUpLine(m: Measurement): string {
+  const { value, source } = m.open_cap;
+  const days = m.totals.catch_up_days;
+  const never = "so no automatic re-pull is opened and the catch-up never finishes";
+  if (source === "unreadable") {
+    const unreadable =
+      "The Worker cannot read its open cap (its binding is malformed, so it reads 0)";
+    return days === 0
+      ? `  ${unreadable}, which changes nothing for this estimate, because there is nothing to catch up.`
+      : `  ${unreadable}, ${never} until the binding is fixed.`;
+  }
+  const cap =
+    source === "worker"
+      ? `At the open cap the Worker reports (${value})`
+      : `At the default open cap (${value}; the Worker's cap could not be read)`;
+  return days === null ? `  ${cap}, ${never}.` : `  ${cap} the catch-up takes ${days} day(s).`;
+}
+
 /** The human block, as lines; `list` bounds the per-mirror lines. */
 export function renderMeasurement(m: Measurement, list: number): string[] {
   const t = m.totals;
@@ -355,9 +453,7 @@ export function renderMeasurement(m: Measurement, list: number): string[] {
       `  ${v.snapshots_with_unreadable_dates} snapshot(s) had an unreadable creation date and are left out of those figures.`,
     );
   }
-  lines.push(
-    `  At REPULL_DAILY_OPEN_CAP=${REPULL_DAILY_OPEN_CAP} the catch-up takes ${t.catch_up_days} day(s).`,
-  );
+  lines.push(catchUpLine(m));
   if (m.deltas.length > 0) {
     lines.push("");
     for (const d of m.deltas.slice(0, list)) {

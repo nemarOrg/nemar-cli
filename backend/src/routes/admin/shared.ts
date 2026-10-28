@@ -1,6 +1,7 @@
 // Shared plumbing for the routes/admin/* domain files (#903, epic #902).
 
 import type { Hono } from "hono";
+import { testS3EndpointOverride } from "../../services/environment";
 import type { Bindings, Variables } from "../../types/bindings";
 
 /**
@@ -18,9 +19,9 @@ export function getS3Config(env: Bindings) {
     region: env.AWS_REGION,
     accessKeyId: env.AWS_ACCESS_KEY_ID,
     secretAccessKey: env.AWS_SECRET_ACCESS_KEY,
-    // Test-only origin override (#1514), unset in every deployment; mirrors
-    // routes/data.ts's s3OptionsFromEnv so every admin S3 call can be driven
-    // by a local Bun.serve stand-in at its real route, not just data.ts's.
-    endpointUrl: env.S3_ENDPOINT_URL,
+    // Test-only origin override (#1514), fenced by testS3EndpointOverride: honored only in a
+    // recognized non-production environment, so a stray S3_ENDPOINT_URL on the production Worker
+    // cannot redirect an admin S3 call, the publication Object Lock step included.
+    endpointUrl: testS3EndpointOverride(env),
   };
 }

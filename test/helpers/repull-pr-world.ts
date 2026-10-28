@@ -12,7 +12,9 @@
  * `main` the way GitHub does with the message it is sent, and the tag and comparison reads the
  * Worker's release route makes. No mocks. The Worker runs as `production` against stand-ins only,
  * because an `on` dataset is re-pulled only there and its identifier screen is bound to the row;
- * nothing it reaches is a real service.
+ * nothing it reaches is a real service. Production ignores `S3_ENDPOINT_URL` (the fence in
+ * `testS3EndpointOverride`), so the Worker addresses the AWS host as it does there, and the world
+ * sends that request to the S3 stand-in at the fetch boundary (`withS3Standin`).
  *
  * The world is made once (`execute` to `pr_open`, about thirty seconds) and every test starts from a
  * snapshot of it: the origin's and upstream's refs, the bucket, the database, GitHub's pull requests.
@@ -194,6 +196,56 @@ function withWorkerdMd5(): () => void {
   };
 }
 
+/** `<bucket>.s3[.<region>].amazonaws.com`: the bucket is the host's leading labels. */
+const AWS_S3_VIRTUAL_HOSTED = /^(.+)\.s3(?:\.[a-z0-9-]+)?\.amazonaws\.com$/;
+/** `s3[.<region>].amazonaws.com`: the bucket is the first segment of the path. */
+const AWS_S3_PATH_STYLE = /^s3(?:\.[a-z0-9-]+)?\.amazonaws\.com$/;
+
+/**
+ * Where a request to `href` goes in the world: the stand-in's own address (`/<bucket>/<key>`) for
+ * a request to an AWS S3 host in either form, `null` for a host that is not AWS's, and a throw for
+ * an AWS host that is not S3, because the world has no stand-in for any other AWS service and a
+ * request there would be a real one.
+ */
+function s3StandinAddress(href: string, standin: string): string | null {
+  let url: URL;
+  try {
+    url = new URL(href);
+  } catch {
+    return null;
+  }
+  const host = url.hostname.toLowerCase();
+  if (!host.endsWith(".amazonaws.com")) return null;
+  const bucket = AWS_S3_VIRTUAL_HOSTED.exec(host)?.[1];
+  if (bucket) return `${standin}/${bucket}${url.pathname}${url.search}`;
+  if (AWS_S3_PATH_STYLE.test(host)) return `${standin}${url.pathname}${url.search}`;
+  throw new Error(`the re-pull world has a stand-in for S3 only, and ${host} is not S3`);
+}
+
+/**
+ * The Worker reaches S3 at `<bucket>.s3.<region>.amazonaws.com`, as it does in production: its
+ * `S3_ENDPOINT_URL` override is honored only outside production (`testS3EndpointOverride`), and
+ * this world runs it as `production`, so no binding can point it at the stand-in. The world
+ * reaches the stand-in where the network begins instead, the way
+ * backend/test/availability-report-never-creates-main.test.ts does: a request this process makes
+ * to an AWS S3 host is sent to the stand-in with the headers and body the Worker signed, one to
+ * any other AWS host is refused, and every other request passes on untouched. Only the network is
+ * replaced; the Worker builds, signs and reads each request itself, and the stand-in answers.
+ * The returned function puts the real `fetch` back, so no other test in the process sees this.
+ */
+function withS3Standin(standin: string): () => void {
+  const real = globalThis.fetch;
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const href = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    const address = s3StandinAddress(href, standin);
+    if (address === null) return real(input, init);
+    return real(new Request(address, new Request(input, init)));
+  }) as typeof fetch;
+  return () => {
+    globalThis.fetch = real;
+  };
+}
+
 export async function startRepullWorld(
   opts: {
     datasetId?: string;
@@ -290,7 +342,6 @@ export async function startRepullWorld(
       AWS_REGION: REGION,
       AWS_ACCESS_KEY_ID: "AKIAREPULLWORLD00001",
       AWS_SECRET_ACCESS_KEY: "repull-world-worker-secret",
-      S3_ENDPOINT_URL: `${s3.url}/nemar`,
       ...workerEnv,
     }) as Bindings;
   const apiServer = Bun.serve({
@@ -584,6 +635,7 @@ export async function startRepullWorld(
       );
     },
     stop() {
+      restoreFetch();
       restoreDigest();
       (globalThis as { NEMAR_GITHUB_API_URL?: string }).NEMAR_GITHUB_API_URL = undefined;
       apiServer.stop(true);
@@ -595,6 +647,11 @@ export async function startRepullWorld(
       rmSync(configDir, { recursive: true, force: true });
     },
   };
+  // The fetch rewrite goes in last, after everything that can throw, so a world that fails to
+  // start never leaves it installed for the rest of the process; `stop()` puts the real fetch
+  // back. Setup makes the Worker call no S3: the one S3 route these suites use is s3-lock, which
+  // a test reaches through the finished world.
+  const restoreFetch = withS3Standin(s3.url);
   return world;
 }
 

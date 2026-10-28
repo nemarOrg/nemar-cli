@@ -15,9 +15,15 @@
  * `listObjectPages` (services/s3.ts) gained an `endpointUrl` override seam in
  * this same change (it was the one S3 function in that file with no such
  * seam, per the docstring `mergeObjectSizesPage` used to carry), and
- * `getS3Config` (routes/admin/shared.ts) now forwards `env.S3_ENDPOINT_URL`
- * into it -- both needed before this test could exist at all. A real
- * `Bun.serve()` stands in for the bucket's LIST endpoint; no mocks.
+ * `getS3Config` (routes/admin/shared.ts) forwards `env.S3_ENDPOINT_URL` into
+ * it only in a recognized non-production environment (`testS3EndpointOverride`)
+ * -- both needed before this test could exist at all. A real `Bun.serve()`
+ * stands in for the bucket's LIST endpoint; no mocks.
+ *
+ * The last block pins that fence at this route. Under ENVIRONMENT "production"
+ * the same override is ignored: the LIST addresses the AWS host, which a second
+ * real `Bun.serve()` stands in for at the network boundary, and the override's
+ * fake receives nothing. Under "development" the override's fake answers.
  */
 
 import type { Database } from "bun:sqlite";
@@ -34,25 +40,33 @@ installWorkersTimingSafeEqual();
 
 const ADMIN_KEY = "archive-sweep-s3-admin-key-0123456789abcdef0123";
 
+/** A single-page ListBucketResult holding `contents`, as S3 answers a LIST. */
+function listing(contents: string): Response {
+  const xml = `<?xml version="1.0" encoding="UTF-8"?><ListBucketResult>${contents}<IsTruncated>false</IsTruncated></ListBucketResult>`;
+  return new Response(xml, { status: 200 });
+}
+
 /** The LIST fake: returns a single-page ListBucketResult, with or without a zip. */
 let server: Server;
 let zipsByDataset: Map<string, number>;
+/** Every request the fake received, path and query, since the test began. */
+let received: string[] = [];
 
 beforeAll(() => {
   server = Bun.serve({
     port: 0,
     fetch(req) {
       const url = new URL(req.url);
+      received.push(`${url.pathname}${url.search}`);
       const prefix = url.searchParams.get("prefix") ?? "";
       // prefix is "<id>/archives/"
       const datasetId = prefix.split("/")[0];
       const size = zipsByDataset.get(datasetId ?? "");
-      const contents =
+      return listing(
         size === undefined
           ? ""
-          : `<Contents><Key>${datasetId}/archives/v1.0.0.zip</Key><Size>${size}</Size></Contents>`;
-      const xml = `<?xml version="1.0" encoding="UTF-8"?><ListBucketResult>${contents}<IsTruncated>false</IsTruncated></ListBucketResult>`;
-      return new Response(xml, { status: 200 });
+          : `<Contents><Key>${datasetId}/archives/v1.0.0.zip</Key><Size>${size}</Size></Contents>`,
+      );
     },
   });
 });
@@ -68,7 +82,7 @@ afterEach(() => {
 let db: Database;
 let app: Hono<{ Bindings: Bindings; Variables: Variables }>;
 
-function env(): Bindings {
+function env(over: Partial<Bindings> = {}): Bindings {
   return {
     DB: realD1(db),
     ENVIRONMENT: "development",
@@ -77,6 +91,7 @@ function env(): Bindings {
     AWS_ACCESS_KEY_ID: "test-access-key",
     AWS_SECRET_ACCESS_KEY: "test-secret-key",
     S3_ENDPOINT_URL: `http://127.0.0.1:${server.port}`,
+    ...over,
   } as Bindings;
 }
 
@@ -94,11 +109,11 @@ async function seedAdmin(): Promise<void> {
   );
 }
 
-function post(): Promise<Response> {
+function post(over: Partial<Bindings> = {}): Promise<Response> {
   return app.request(
     "/admin/datasets/archive-sweep",
     { method: "POST", headers: { Authorization: `Bearer ${ADMIN_KEY}` } },
-    env(),
+    env(over),
   );
 }
 
@@ -135,6 +150,7 @@ function rowState(id: string): {
 beforeEach(async () => {
   db = freshDb();
   zipsByDataset = new Map();
+  received = [];
   app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
   app.route("/admin", adminRoutes);
   db.run(
@@ -230,5 +246,113 @@ describe("POST /admin/datasets/archive-sweep: real S3 LIST, ready/skip/absent (#
     expect(body.skipped).toBe(2);
     expect(body.absent).toBe(1);
     expect(body.errors).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// S3_ENDPOINT_URL reaches this route outside production only
+// ---------------------------------------------------------------------------
+
+describe("POST /admin/datasets/archive-sweep: S3_ENDPOINT_URL is honored outside production only", () => {
+  const realFetch = globalThis.fetch;
+  /**
+   * The size of the zip the AWS host's fake reports for every dataset. The override's fake never
+   * holds it, so a row's `archive_size` says which of the two fakes answered.
+   */
+  const AWS_ZIP_SIZE = 4096;
+  /** The AWS host's fake: a second real server, answering every LIST with a zip of AWS_ZIP_SIZE. */
+  let awsServer: Server;
+  /** Every request the AWS host's fake received, path and query, since the test began. */
+  let awsReceived: string[] = [];
+  /** The AWS host of each request the route addressed to one, in order. */
+  let aws: string[];
+
+  beforeAll(() => {
+    awsServer = Bun.serve({
+      port: 0,
+      fetch(req) {
+        const url = new URL(req.url);
+        awsReceived.push(`${url.pathname}${url.search}`);
+        const datasetId = (url.searchParams.get("prefix") ?? "").split("/")[0];
+        return listing(
+          `<Contents><Key>${datasetId}/archives/v1.0.0.zip</Key><Size>${AWS_ZIP_SIZE}</Size></Contents>`,
+        );
+      },
+    });
+  });
+
+  afterAll(() => {
+    awsServer.stop(true);
+  });
+
+  beforeEach(() => {
+    aws = [];
+    awsReceived = [];
+    // The network boundary, observed. A request the route addresses to an AWS host is recorded
+    // and sent to the AWS host's fake instead, so the real host is never reached; any other
+    // request goes out as it was. The route still builds, signs and reads each request itself:
+    // only where an AWS-addressed request lands differs.
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = new Request(input, init);
+      const url = new URL(request.url);
+      if (!url.hostname.endsWith(".amazonaws.com")) return realFetch(request);
+      aws.push(url.hostname);
+      return realFetch(
+        new Request(`http://127.0.0.1:${awsServer.port}${url.pathname}${url.search}`, request),
+      );
+    }) as typeof fetch;
+  });
+
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+  });
+
+  test("production with S3_ENDPOINT_URL set: the LIST reaches the AWS host's fake and the override's fake receives nothing", async () => {
+    seedDataset("nm000010", { fileSize: 5 * 1024 * 1024 * 1024, totalFiles: 200 });
+    // The override's fake holds a zip for it too, of another size: a LIST that reached it would
+    // leave archive_size at 2048.
+    zipsByDataset.set("nm000010", 2048);
+
+    const res = await post({ ENVIRONMENT: "production" });
+    const body = (await res.json()) as {
+      checked: number;
+      ready: number;
+      absent: number;
+      errors: unknown[];
+    };
+
+    expect(res.status).toBe(200);
+    // One candidate, one LIST page, addressed to the bucket's AWS host: the override was ignored.
+    expect(aws).toEqual(["nemar.s3.us-east-2.amazonaws.com"]);
+    expect(awsReceived).toHaveLength(1);
+    expect(awsReceived[0]).toContain("list-type=2");
+    expect(received).toEqual([]);
+    // The answer came from the AWS host's fake, not from the override's zip.
+    expect(body).toMatchObject({ checked: 1, ready: 1, absent: 0, errors: [] });
+    expect(rowState("nm000010").archive_size).toBe(AWS_ZIP_SIZE);
+  });
+
+  // The positive control: without it, "the override's fake received nothing" would also hold if
+  // the route never listed anything.
+  test("development with the same S3_ENDPOINT_URL: the LIST reaches the override's fake and no AWS host", async () => {
+    seedDataset("nm000010", { fileSize: 5 * 1024 * 1024 * 1024, totalFiles: 200 });
+    zipsByDataset.set("nm000010", 2048);
+
+    const res = await post({ ENVIRONMENT: "development" });
+    const body = (await res.json()) as {
+      checked: number;
+      ready: number;
+      absent: number;
+      errors: unknown[];
+    };
+
+    expect(res.status).toBe(200);
+    expect(aws).toEqual([]);
+    expect(awsReceived).toEqual([]);
+    expect(received).toHaveLength(1);
+    expect(received[0]).toContain("list-type=2");
+    // The override's zip was read.
+    expect(body).toMatchObject({ checked: 1, ready: 1, absent: 0, errors: [] });
+    expect(rowState("nm000010").archive_size).toBe(2048);
   });
 });

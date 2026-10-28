@@ -36,19 +36,36 @@ interface StatusServer {
   url: string;
   requests: URL[];
   methods: string[];
+  /** Calls to GET /admin/repulls/switches: kept apart, so they never take a page or count in `requests`. */
+  switchRequests: URL[];
   stop: () => void;
 }
 
-/** Serves `pages` in order to successive upstream-status calls (the last one repeats). */
-function startServer(pages: Page[]): StatusServer {
+/**
+ * Serves `pages` in order to successive upstream-status calls (the last one repeats). `--measure`
+ * also reads the Worker's open cap at GET /admin/repulls/switches: that route answers `switches`
+ * when it is given, and the API's own 404 (a backend that predates the route) when it is not.
+ */
+function startServer(pages: Page[], switches?: Page): StatusServer {
   const requests: URL[] = [];
   const methods: string[] = [];
+  const switchRequests: URL[] = [];
   const server = Bun.serve({
     port: 0,
     fetch(req) {
       const url = new URL(req.url);
       if (url.pathname === "/notices") return Response.json({ notices: [] });
       if (url.pathname === "/datasets/facets") return Response.json({});
+      if (url.pathname === "/admin/repulls/switches") {
+        switchRequests.push(url);
+        if (switches === undefined) {
+          return Response.json(
+            { error: "Not Found", message: "Route GET /admin/repulls/switches not found" },
+            { status: 404 },
+          );
+        }
+        return Response.json(switches.body, { status: switches.status ?? 200 });
+      }
       requests.push(url);
       methods.push(req.method);
       const page = pages[Math.min(requests.length - 1, pages.length - 1)] as Page;
@@ -59,6 +76,7 @@ function startServer(pages: Page[]): StatusServer {
     url: `http://localhost:${server.port}`,
     requests,
     methods,
+    switchRequests,
     stop: () => server.stop(true),
   };
 }
@@ -685,6 +703,10 @@ describe("nemar admin upstream-status --measure", () => {
       expect(out.measurement.scope).toBe("fleet");
       expect(out.measurement.complete).toBe(true);
       expect(out.measurement_skipped).toBeNull();
+      // This stand-in has no switches route (a 404), so the estimate uses the default cap, says so
+      // in the measurement, and warns on stderr (never into the JSON on stdout).
+      expect(out.measurement.open_cap).toEqual({ value: 2, source: "default" });
+      expect(json.stderr).toContain("Warning: the Worker's open cap could not be read (");
       expect(out.measurement.doi_volume.catch_up).toBe(2);
       expect(out.measurement.deltas.map((d: { dataset_id: string }) => d.dataset_id)).toEqual([
         "on002893",
@@ -703,7 +725,12 @@ describe("nemar admin upstream-status --measure", () => {
       expect(human.stdout).toContain("Bytes to copy: 3431782003 (3.2 GiB)");
       expect(human.stdout).toContain("Scope: the whole fleet; only stale mirrors are measured");
       expect(human.stdout).toContain("Not covered by these totals (never measured, not zero)");
-      expect(human.stdout).toContain("REPULL_DAILY_OPEN_CAP=2 the catch-up takes 1 day(s)");
+      expect(human.stdout).toContain(
+        "At the default open cap (2; the Worker's cap could not be read) the catch-up takes 1 day(s).",
+      );
+      expect(human.stdout).not.toContain("REPULL_DAILY_OPEN_CAP=");
+      expect(human.stdout).not.toContain("Warning:");
+      expect(human.stderr).toContain("Warning: the Worker's open cap could not be read (");
       expect(human.stdout).toContain("upstream's between the two tags, not NEMAR's tree");
       expect(human.stdout).toContain("a declaration, not a tree comparison");
       expect(human.stdout).toContain("nemar admin repull plan");
@@ -714,6 +741,156 @@ describe("nemar admin upstream-status --measure", () => {
       files.stop();
     }
   }, 30_000);
+
+  // The Worker's answer to GET /admin/repulls/switches, in the wire shape of
+  // shared/repull-observability.ts (`RepullSwitchesReport`). `value` and `source` are loose on
+  // purpose, so a case can send a word or a value this CLI does not know.
+  const switchesReply = (value: unknown, source: string): Page => ({
+    body: {
+      switches: {
+        environment_is_production: true,
+        auto_repull_enabled: true,
+        auto_repull_merge_enabled: false,
+        open_cap: { value, source },
+        merge_cap: { value: 5, source: "default" },
+      },
+      scheduler: null,
+    },
+  });
+
+  test("the open cap the Worker reports sets the catch-up estimate", async () => {
+    seedAuthenticatedConfig();
+    const files = startOpenNeuroFilesStandin();
+    // Two stale mirrors are two re-pulls: ceil(2 / 1) = 2 days at a cap of 1, and ceil(2 / 2) = 1 day
+    // at a cap of 2, whether the Worker set it or defaulted it. A cap of 0, set on purpose or
+    // unreadable (a malformed binding reads 0), opens no automatic re-pull: no day count, a null in
+    // the JSON, and a line that says so. An unreadable cap is the Worker's answer and must never
+    // fall back to the default of 2, which would promise a finish that cannot happen.
+    const cases = [
+      {
+        reply: switchesReply(1, "set"),
+        open_cap: { value: 1, source: "worker" },
+        days: 2,
+        line: "  At the open cap the Worker reports (1) the catch-up takes 2 day(s).",
+      },
+      {
+        reply: switchesReply(2, "default"),
+        open_cap: { value: 2, source: "worker" },
+        days: 1,
+        line: "  At the open cap the Worker reports (2) the catch-up takes 1 day(s).",
+      },
+      {
+        reply: switchesReply(0, "set"),
+        open_cap: { value: 0, source: "worker" },
+        days: null,
+        line: "  At the open cap the Worker reports (0), so no automatic re-pull is opened and the catch-up never finishes.",
+      },
+      {
+        reply: switchesReply(0, "unreadable"),
+        open_cap: { value: 0, source: "unreadable" },
+        days: null,
+        line: "  The Worker cannot read its open cap (its binding is malformed, so it reads 0), so no automatic re-pull is opened and the catch-up never finishes until the binding is fixed.",
+      },
+    ];
+    try {
+      const env = { NEMAR_OPENNEURO_GRAPHQL_URL: files.url };
+      for (const c of cases) {
+        const server = startServer([{ body: page([META, DATA]) }], c.reply);
+        try {
+          const json = await runCli(
+            ["admin", "upstream-status", "--measure", "--json"],
+            server.url,
+            env,
+          );
+          expect(json.exitCode).toBe(0);
+          const m = JSON.parse(json.stdout).measurement;
+          expect(m.open_cap).toEqual(c.open_cap);
+          expect(m.totals.catch_up_days).toBe(c.days);
+          // A reading the CLI understands is not a warning, whatever it says about the cap.
+          expect(json.stderr).not.toContain("Warning:");
+
+          const human = await runCli(["admin", "upstream-status", "--measure"], server.url, env);
+          expect(human.exitCode).toBe(0);
+          expect(human.stdout).toContain(c.line);
+          expect(human.stdout).not.toContain("default open cap");
+          expect(human.stdout).not.toMatch(/Infinity|NaN/);
+          expect(human.stderr).not.toContain("Warning:");
+          // One read of the switches per run, kept apart from the pages: two runs, two of each.
+          expect(server.switchRequests.length).toBe(2);
+          expect(server.requests.length).toBe(2);
+        } finally {
+          server.stop();
+        }
+      }
+    } finally {
+      files.stop();
+    }
+  }, 60_000);
+
+  test("a switches read that fails, or that this CLI does not know, leaves the default cap, warns on stderr and changes no exit code", async () => {
+    seedAuthenticatedConfig();
+    const files = startOpenNeuroFilesStandin();
+    // The warning lines, quoted. A failed call names why in parentheses; an unknown reading says
+    // so.
+    const failedRead =
+      /^Warning: the Worker's open cap could not be read \(.+\); the estimate uses the default\.$/m;
+    const unknownReading =
+      "Warning: the Worker's open cap reading is not one this CLI knows; the estimate uses the default.";
+    // The call fails: a refusal, and a 200 whose body has no `switches` (so reading its `open_cap`
+    // throws). Neither may fail the command.
+    const failedCalls: Page[] = [{ status: 500, body: { error: "boom" } }, { body: {} }];
+    // The call succeeds with a reading this CLI cannot use: a source it does not know, and values
+    // that are not a count. The default stands in for each, and the CLI says so.
+    const unknownReadings: Page[] = [
+      switchesReply(2, "bogus"),
+      switchesReply("two", "set"),
+      switchesReply(-1, "set"),
+      switchesReply(1.5, "default"),
+    ];
+    try {
+      const env = { NEMAR_OPENNEURO_GRAPHQL_URL: files.url };
+      for (const reply of [...failedCalls, ...unknownReadings]) {
+        const failed = failedCalls.includes(reply);
+        const server = startServer([{ body: page([META, DATA]) }], reply);
+        try {
+          const result = await runCli(
+            ["admin", "upstream-status", "--measure", "--json"],
+            server.url,
+            env,
+          );
+          expect(result.exitCode).toBe(0);
+          // The JSON on stdout stays one clean document: the warning goes to stderr, once.
+          const m = JSON.parse(result.stdout).measurement;
+          expect(m.open_cap).toEqual({ value: 2, source: "default" });
+          expect(m.totals.catch_up_days).toBe(1);
+          expect(result.stdout).not.toContain("Warning:");
+          if (failed) expect(result.stderr).toMatch(failedRead);
+          else expect(result.stderr).toContain(unknownReading);
+          expect(result.stderr.match(/Warning:/g)?.length).toBe(1);
+          expect(server.switchRequests.length).toBe(1);
+        } finally {
+          server.stop();
+        }
+      }
+
+      // The exit code stays the pass's own: a delta that cannot be read is still a 2.
+      files.failDataset("ds003082", 503);
+      const server = startServer([{ body: page([META, DATA]) }], failedCalls[0]);
+      try {
+        const result = await runCli(["admin", "upstream-status", "--measure"], server.url, env);
+        expect(result.exitCode).toBe(2);
+        expect(result.stdout).toContain(
+          "At the default open cap (2; the Worker's cap could not be read)",
+        );
+        expect(result.stdout).not.toContain("Warning:");
+        expect(result.stderr).toMatch(failedRead);
+      } finally {
+        server.stop();
+      }
+    } finally {
+      files.stop();
+    }
+  }, 60_000);
 
   test("a listing that cannot be read is an unknown delta, null bytes, an at-least sum, exit 2", async () => {
     seedAuthenticatedConfig();
@@ -909,6 +1086,8 @@ describe("nemar admin upstream-status --measure", () => {
       expect(human.exitCode).toBe(2);
       expect(human.stdout).toContain("Not measured: the pass did not finish cleanly");
       expect(files.requests.length).toBe(0);
+      // Nothing is measured, so nothing asks the Worker for its cap.
+      expect(server.switchRequests.length).toBe(0);
     } finally {
       server.stop();
       files.stop();
@@ -1088,6 +1267,7 @@ describe("nemar admin upstream-status --measure", () => {
       expect(result.exitCode).toBe(0);
       expect(JSON.parse(result.stdout)).not.toHaveProperty("measurement");
       expect(files.requests.length).toBe(0);
+      expect(server.switchRequests.length).toBe(0);
     } finally {
       server.stop();
       files.stop();
@@ -1130,6 +1310,7 @@ describe("nemar admin upstream-status --measure", () => {
       expect(result.exitCode).toBe(1);
       expect(JSON.parse(result.stdout).measurement).toBeNull();
       expect(files.requests.length).toBe(0);
+      expect(server.switchRequests.length).toBe(0);
     } finally {
       server.stop();
       files.stop();
