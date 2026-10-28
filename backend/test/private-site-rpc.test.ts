@@ -1198,11 +1198,23 @@ describe("describeAccounts", () => {
       expect(await orcidOf({ orcid: IID, orcidVerified: true, identityConflict: true })).toBeNull();
     });
 
-    test("a flag value nobody expects hides the iD", async () => {
+    test("a conflict flag value nobody expects hides the iD", async () => {
       const { id } = seedAccount({ orcid: IID, orcidVerified: true });
       db.run("UPDATE users SET identity_conflict = 2 WHERE id = ?", [id]);
       const [entry] = accountsOf(await ask([id]));
       expect(entry).toMatchObject({ state: "active", orcid: null });
+    });
+
+    test("a verified flag value nobody expects hides the iD", async () => {
+      // `orcid_verified` has no CHECK, so 2 can be stored. Only 1 is "verified":
+      // `flag()` is true for 1 and for nothing else, where a looser test such as
+      // `> 0` or a truthiness check would show the iD.
+      for (const unexpected of [2, -1]) {
+        const { id } = seedAccount({ orcid: `0000-0001-9100-000${unexpected + 1}` });
+        db.run("UPDATE users SET orcid_verified = ? WHERE id = ?", [unexpected, id]);
+        const [entry] = accountsOf(await ask([id]));
+        expect(entry).toMatchObject({ state: "active", orcid: null });
+      }
     });
 
     test("a pending or revoked account never shows one, whatever its flags say", async () => {
