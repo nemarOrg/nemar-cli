@@ -3,7 +3,7 @@
  * and 7).
  *
  * The automatic path runs a re-pull unattended: the Worker claims a dispatch here, sends it to a
- * central workflow (a later slice), and the run presents the dispatch's token twice, at the
+ * central workflow (`.github/dataset-workflows/run-upstream-repull.yml`), and the run presents the dispatch's token twice, at the
  * automatic create (`POST /admin/repulls`, the only way a record is written with
  * `origin = 'automatic'`) and at its report callback (`POST /webhooks/repull-state`). The table is
  * `upstream_repull_dispatches` (migration 0112); its words are `shared/repull-state.ts`.

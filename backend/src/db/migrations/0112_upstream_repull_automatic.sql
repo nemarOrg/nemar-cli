@@ -83,7 +83,7 @@ CREATE INDEX upstream_repull_dispatches_repull ON upstream_repull_dispatches (re
 
 -- The scheduler's one row: where the next daily scan starts (`scan_after`, a dataset id, '' for
 -- the start of the fleet), when it last ran, what it concluded (a fixed word), and when the
--- advance tick last ran. Written by later slices; the row exists from here so they only update it.
+-- advance tick last ran. The scheduler and the advance tick (upstream-repull-scheduler.ts and upstream-repull-advance.ts) only update it; this migration creates the row.
 CREATE TABLE upstream_repull_scheduler (
   id INTEGER PRIMARY KEY CHECK (id = 1),
   scan_after TEXT NOT NULL DEFAULT '',
