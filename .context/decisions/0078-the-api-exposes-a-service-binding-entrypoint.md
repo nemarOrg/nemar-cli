@@ -150,3 +150,12 @@ Seven rules bind every method, now and later:
 - Cloudflare, "RPC (WorkerEntrypoint)", <https://developers.cloudflare.com/workers/runtime-apis/bindings/service-bindings/rpc/>,
   read 2026-09-30: an entrypoint's public methods "can then be directly called by other Workers on your Cloudflare account
   that declare a binding to this Worker", which is rule 4.
+
+## Amendment 2026-10-28 (ADR 0115): a fourth method, and two clarifications
+
+The verdict stands, and the first surface is now four methods: ADR 0115 adds `describeAccounts`, which tells a caller the public face of accounts it names by user id.
+It takes the visitor's own credential and resolves it with `resolvePrincipal`, so rule 1 holds: the ids are the subject of the read, never its authority.
+
+- **Rule 6** also covers what `describeAccounts` answers: a caller must not cache or persist a name, a username, an ORCID iD or a state.
+  A caller may keep a user id as a key, of a membership or a grant for example.
+- **Rule 7**'s sentence that names the one use of a key now reads: `resolvePrincipal` and `describeAccounts` are the only things the private site does with one.
