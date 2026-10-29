@@ -523,6 +523,19 @@ export async function acceptRepullMerge(
     );
   }
   const scanner = needed && change.kind === "scrub-append" ? change.scanner : null;
+  // A line on `main` that names the merge before NEMAR recorded its acceptance is not NEMAR's:
+  // NEMAR writes only after it records. Refused before anything is written, never overwritten.
+  if (needed) {
+    const onMain = await readLedger(env, row, "main");
+    if (!onMain.ok) return { ...onMain.refusal, row };
+    if (onMain.value && acceptedMergesOf(onMain.value.text).includes(body.merge_sha)) {
+      return refusal(
+        "attestation-conflict",
+        "The ledger on main already names this merge in a line NEMAR did not write; nothing was accepted or written, and an administrator looks.",
+        row,
+      );
+    }
+  }
 
   const results = await db.batch([
     db

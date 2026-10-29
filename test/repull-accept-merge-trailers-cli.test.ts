@@ -46,6 +46,7 @@ import { which } from "bun";
 import type { LedgerEntry } from "../scripts/scrub/contract";
 import { isAnnexRef, ledgerChecks } from "../scripts/scrub/git/git-lib";
 import { validateLedgerEntry } from "../scripts/scrub/ledger";
+import { mergeAcceptanceLine } from "../shared/repull-merge-acceptance";
 import { gitIn } from "./helpers/repull-fixture";
 import {
   ADMIN_ID,
@@ -274,6 +275,12 @@ describe.skipIf(!awsInstalled)("a merge made outside the gate", () => {
     expect(released.status).toBe(409);
     expect(((await released.json()) as { code: string }).code).toBe("acceptance-unattested");
 
+    // Recorded once: the same request for another merge commit is refused.
+    const parent = (await gitIn(w.fx.originRepo, ["rev-parse", `${merge}^`])).trim();
+    expect(await acceptRoute({ pr: "n0", merge_sha: parent, reason: REASON })).toEqual({
+      status: 409,
+      code: "merge-mismatch",
+    });
     // The next run needs no reason: the acceptance is recorded, and its line is written once.
     w.setLedgerWriteFault(null);
     const second = await resume();
@@ -479,6 +486,29 @@ describe.skipIf(!awsInstalled)("a merge made outside the gate", () => {
     expect(run.all).toContain("attestation-unseen");
     expect(w.row()).toMatchObject({ status: "merged", tag_sha: null });
     expect(await mainHead()).toBe(merge);
+  });
+
+  test("a line on main already naming the merge is not NEMAR's: refused, nothing written", async () => {
+    await w.restore(mergedOnGitHub);
+    const merge = await mainHead();
+    await tagged();
+    const ledger = await gitIn(w.fx.originRepo, ["show", `${merge}:${LEDGER}`]);
+    const handMade = `${mergeAcceptanceLine({
+      dataset: w.fx.datasetId,
+      version: "2.0.0",
+      mergeSha: merge,
+      planDigest: w.row().plan_digest,
+      scanner: "identifier-scan@abcdef1",
+      at: "2026-10-01T00:00:00.000Z",
+    })}\n`;
+    const main = await w.commitOnto("refs/heads/main", LEDGER, `${ledger}${handMade}`, "By hand");
+    const run = await accepting();
+    expect(run.exitCode, run.all).toBe(1);
+    expect(run.all).toContain("attestation-conflict");
+    expect(acceptances()).toEqual([]);
+    expect(w.ledgerWrites()).toBe(0);
+    expect(await mainHead()).toBe(main);
+    expect(w.row().status).toBe("merged");
   });
 
   test("a reason outside 10 to 500 characters is a usage error, before anything is read", async () => {
