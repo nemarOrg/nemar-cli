@@ -123,7 +123,12 @@ export async function readLedger(
   return { ok: true, value: { text, sha: b.sha } };
 }
 
-/** GitHub's comparison of `base...head` (`head` may be `main`): its fields, or null for a 404. */
+/**
+ * GitHub's comparison of `base...head` (`head` may be `main`): its fields, or null for a 404, which
+ * is GitHub's answer for two commits with no common history or one it does not have. Every other
+ * answer that is not a 200, a 422 included ("the diff is taking too long to generate"), is unread,
+ * never an absence.
+ */
 async function compare(
   env: Bindings,
   row: RepullRow,
@@ -132,10 +137,11 @@ async function compare(
 ): Promise<Read<Record<string, unknown> | null>> {
   const read = await githubRead(env, row.dataset_id, `/compare/${base}...${head}`);
   if (!read.ok) return read;
-  if (read.status !== 200) return { ok: true, value: null };
-  return isObject(read.body)
-    ? { ok: true, value: read.body }
-    : { ok: false, refusal: unreadable("a comparison", "its shape") };
+  if (read.status === 404) return { ok: true, value: null };
+  if (read.status !== 200 || !isObject(read.body)) {
+    return { ok: false, refusal: unreadable("a comparison", `HTTP ${read.status}`) };
+  }
+  return { ok: true, value: read.body };
 }
 
 /**

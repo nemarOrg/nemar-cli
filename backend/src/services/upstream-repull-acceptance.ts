@@ -59,13 +59,14 @@ import {
   ACKNOWLEDGMENT_MIN_LENGTH,
 } from "../../../shared/publication-limits.js";
 import {
-  type LedgerChange,
+  type LedgerWord,
   type TreeEntry,
   acceptedMergesOf,
   changesBesideLedger,
   ledgerChange,
   ledgerLines,
   ledgerTimeOf,
+  ledgerWordOf,
   mergeAcceptanceLine,
   nemarTreeOf,
   sameOutsideNemar,
@@ -137,7 +138,7 @@ export interface AcceptanceEvidence {
   parent: string;
   parent_moved_by_enrichment: boolean;
   tree: string;
-  ledger: "untouched" | "scrub-lines" | "repull-scrub-lines";
+  ledger: LedgerWord;
 }
 
 export interface AcceptResult {
@@ -193,11 +194,18 @@ const unread = (r: { refusal: RepullRefusal }, row: RepullRow): RepullRefusal =>
   row,
 });
 
-/** The words the evidence gives for what the merge did to the ledger. */
-function ledgerWord(change: LedgerChange): AcceptanceEvidence["ledger"] {
-  if (change.kind === "none") return "untouched";
-  return change.kind === "scrub-append" && change.repull ? "repull-scrub-lines" : "scrub-lines";
-}
+/**
+ * A read's refusal once the acceptance is recorded: it says so, and that the line was not written
+ * (a read's own words say nothing was recorded, which is no longer so).
+ */
+const unreadAfterRecord = (r: { refusal: RepullRefusal }, row: RepullRow): RepullRefusal => {
+  const why = /\(([^)]*)\)/.exec(r.refusal.message)?.[1] ?? "no answer";
+  return {
+    ...r.refusal,
+    row,
+    message: `The acceptance is recorded, and GitHub could not be read (${why}), so its ledger line was not written; ask again, which writes it once.`,
+  };
+};
 
 /**
  * Whether the merge changed any path but the ledger against its parent: the root trees outside
@@ -509,7 +517,7 @@ export async function acceptRepullMerge(
       parent,
       parent_moved_by_enrichment: parent !== base,
       tree: merge.value.tree,
-      ledger: ledgerWord(change),
+      ledger: ledgerWordOf(change),
     },
     false,
   );
@@ -575,7 +583,7 @@ async function attest(
 
   for (let attempt = 1; attempt <= 3; attempt++) {
     const current = await readLedger(env, row, "main");
-    if (!current.ok) return unread(current, row);
+    if (!current.ok) return unreadAfterRecord(current, row);
     if (current.value === null) {
       return refusal(
         "ledger-missing-on-main",
@@ -598,7 +606,7 @@ async function attest(
     // Written only while `main` still holds the merge, the first time and on every retry: a line
     // naming an id a rewritten history no longer holds would fail the proof on a clean dataset.
     const onMain = await mergeOnMain(env, row, acceptance.merge_sha);
-    if (!onMain.ok) return unread(onMain, row);
+    if (!onMain.ok) return unreadAfterRecord(onMain, row);
     if (!onMain.value) {
       return refusal(
         "merge-not-on-main",
