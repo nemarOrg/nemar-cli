@@ -692,6 +692,7 @@ describe.skipIf(!awsInstalled)("a merge made outside the gate", () => {
     const run = await accepting();
     expect(run.exitCode, run.all).toBe(1);
     expect(run.all).toContain("merge-not-squash");
+    expect(acceptRequests()).toHaveLength(1); // refused by the CLI, before any reason was sent
     expect(await acceptRoute({ pr: "n0", merge_sha: merge, reason: REASON })).toEqual({
       status: 409,
       code: "merge-not-squash",
@@ -899,6 +900,46 @@ describe.skipIf(!awsInstalled)("a merge made outside the gate", () => {
       code: "merge-parent-foreign",
     });
     await nothingWritten(merge);
+  });
+
+  test("a base that shares no history with the merge's parent is not enrichment: merge-parent-foreign", async () => {
+    await w.restore(mergedOnGitHub);
+    const merge = await mainHead();
+    await tagged();
+    expect((await resume()).exitCode).toBe(3);
+    // A root commit of its own, as a record whose base were another repository's.
+    const empty = (
+      await runCommand(["git", "hash-object", "-t", "tree", "-w", "--stdin"], {
+        cwd: w.fx.originRepo,
+        stdin: "",
+      })
+    ).stdout.trim();
+    const root = (
+      await runCommand(["git", "commit-tree", empty, "-m", "unrelated"], {
+        cwd: w.fx.originRepo,
+        env: GIT_ID,
+      })
+    ).stdout.trim();
+    w.db().run("UPDATE upstream_repulls SET base_sha = ?", [root]);
+    expect(await acceptRoute({ pr: "n0", merge_sha: merge, reason: REASON })).toEqual({
+      status: 409,
+      code: "merge-parent-foreign",
+    });
+    await nothingWritten(merge);
+  });
+
+  test("a main whose ledger is gone: ledger-missing-on-main, before anything is recorded", async () => {
+    await w.restore(mergedOnGitHub);
+    const merge = await mainHead();
+    await tagged();
+    const main = await commitFiles("refs/heads/main", { [LEDGER]: null }, "remove the ledger");
+    const run = await accepting();
+    expect(run.exitCode, run.all).toBe(1);
+    expect(run.all).toContain("ledger-missing-on-main");
+    expect(acceptances()).toEqual([]);
+    expect(w.ledgerWrites()).toBe(0);
+    expect(await mainHead()).toBe(main);
+    expect(merge).not.toBe(main);
   });
 
   test("a record that is not merged yet is not accepted by the Worker: bad-transition", async () => {
