@@ -414,9 +414,16 @@ describe("the record's own pull request at the recorded head is waived", () => {
     expect(reviews()).toEqual([
       expect.objectContaining({ id, state: "reported", verdict: "fail", edit_restarts: 0 }),
     ]);
-    // Its own check run is updated in place each time, never a new one.
-    expect(checkOutcomes().every((c) => c.path === "/check-runs/77")).toBe(true);
-    expect(checkOutcomes().every((c) => c.conclusion === "skipped")).toBe(true);
+    // Its own check run is updated in place each time, never a new one: four deliveries, four
+    // updates of run 77 to the waiver.
+    expect(checkOutcomes()).toEqual(
+      Array.from({ length: 4 }, () => ({
+        method: "PATCH",
+        path: "/check-runs/77",
+        conclusion: "skipped",
+        title: WAIVED_TITLE,
+      })),
+    );
   });
 
   test("N.0.1's pull request at its recorded head is waived", async () => {

@@ -232,7 +232,6 @@ function refusal(raw: unknown): string {
   return "accepted";
 }
 
-/** Every outcome a review can come to, one of each shape, so a new conclusion is seen by all of them. */
 /**
  * A failing review of an upstream re-pull's head, as one that ran before NEMAR recorded the head
  * would read: a contributor-protection blocker, a fact the platform found, and a steering flag.
@@ -260,6 +259,7 @@ function failingAdvice(): PrReviewReport {
   });
 }
 
+/** Every outcome a review can come to, one of each shape, so a new conclusion is seen by all of them. */
 function everyOutcome(): ReviewOutcome[] {
   const unknownCriteria = {
     no_degradation: "unknown",

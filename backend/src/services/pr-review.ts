@@ -105,9 +105,8 @@
  * exempt pull request's check, or a re-pull's waived one, that could not be published, which has
  * no row for the watchdog to retry from. Redelivery of a reviewed commit is safe because (dataset,
  * pull request, commit) is unique; redelivery of an exempt or waived commit is safe because a
- * second `skipped` check is harmless. A
- * redelivered edit starts the review again, which supersedes the first, costs one more run and
- * counts toward the cap.
+ * second `skipped` check is harmless. A redelivered edit starts the review again, which
+ * supersedes the first, costs one more run and counts toward the cap.
  */
 
 import { isOwnDatasetRepo } from "../../../shared/nemar-app.js";

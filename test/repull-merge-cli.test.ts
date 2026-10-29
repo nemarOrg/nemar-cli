@@ -9,8 +9,9 @@
  * The properties, each with a test that fails when its line is changed:
  *  - the merge is a squash at the screened `sha`, sent after the claim, with a message whose last
  *    paragraph is both of the re-pull commit's trailers as git reads them, and is recorded;
- *  - a cap that is used up sends no merge; a `main` moved by a commit enrichment does not make, a
- *    state that is not `clean`, and a review that is still running are refused before the claim;
+ *  - a cap that is used up sends no merge; a `main` moved by a commit enrichment does not make and
+ *    a state that is not `clean` are refused before the claim, while a review of the re-pull's own
+ *    head, running or failed, is waived (ADR 0116) and needs no `--force`;
  *  - a pull request whose head or base repository is not `nemarDatasets/<dataset_id>` (a fork's, a
  *    deleted fork's, another base) is refused before the claim, the name compared without case;
  *  - a squash message without both trailers as its last paragraph is refused at the gate;

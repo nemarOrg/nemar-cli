@@ -2736,8 +2736,9 @@ describe("an upstream re-pull's own pull request at the recorded head is waived 
   test("it reads waived over a review of that head that failed, is yours to merge, and nothing else is waived", async () => {
     seedReview({ ds: "nm000201", n: 1, state: "reported", verdict: "fail", authorId: 700 });
     seedRecord("nm000201", 1, SHA_A);
-    // The same record's number from a fork, another record's dataset, a head the record does not
-    // hold, and a branch that merely names a release with no record: each keeps its own word.
+    // A branch that merely names a release with no record, a head the record does not hold, a
+    // dataset with no record, and a record at a status that waives nothing: each keeps its own
+    // word (a fork is the next test).
     seedRecord("nm000203", 3, "b".repeat(40));
     seedRecord("nm000205", 5, SHA_A, "abandoned");
     nodes(
