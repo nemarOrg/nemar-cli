@@ -143,13 +143,14 @@ import {
   errorClassName,
   triggerUpstreamRepullRun,
 } from "./github/dispatch.js";
+import { publishRecordedRepullHead } from "./pr-review.js";
 import { autoRepullEnabled, isExactProduction } from "./repull-switches.js";
 import {
   REFUSED_FOR_THE_DISPATCH,
   claimOpenDispatch,
   markDispatchSendFailed,
 } from "./upstream-repull-dispatch.js";
-import { gatherMachineCleanFacts } from "./upstream-repull-facts.js";
+import { gatherMachineCleanFacts, readReviewCheck } from "./upstream-repull-facts.js";
 import {
   type WorkerMergeOutcome,
   finishAfterMerge,
@@ -365,6 +366,13 @@ export interface AdvanceTickResult {
   notDue: number;
   /** Identifier screens dispatched. */
   screensStarted: number;
+  /**
+   * Waived checks published again for a recorded head GitHub holds back (`not-clean`) while its
+   * review check is not the waiver (ADR 0116), and those whose publish failed or whose pull request
+   * could not be read, each an error-level line.
+   */
+  waiversPublished: number;
+  waiversFailed: number;
   /** Rows moved `pr_open -> gates_clear`. */
   gatesCleared: number;
   /** Stalled rows whose resume GitHub took. */
@@ -764,6 +772,19 @@ async function startGateWork(
       screen = "error";
     }
   }
+  // Everything else holds and GitHub still holds the pull request back: when the head's review check
+  // is not the waiver (a review that failed before the head was recorded, or a publish the record's
+  // transition could not make), publish the waiver again (ADR 0116). Read only then, so a tick that
+  // is not waiting on GitHub's word asks GitHub nothing more.
+  const now = machineClean({ ...facts, screen });
+  if (!now.clean && now.hold === "not-clean" && facts.review === "waived") {
+    const check = await readReviewCheck(env, row.dataset_id, head);
+    if (check.status !== "completed" || check.conclusion !== "skipped") {
+      const answer = await publishRecordedRepullHead(env, row, "n0");
+      if (answer === "waived") r.waiversPublished++;
+      else if (answer === "failed" || answer.startsWith("not_read")) r.waiversFailed++;
+    }
+  }
   return { ...facts, screen };
 }
 
@@ -923,6 +944,8 @@ export async function runRepullAdvanceCron(
     running: 0,
     notDue: 0,
     screensStarted: 0,
+    waiversPublished: 0,
+    waiversFailed: 0,
     gatesCleared: 0,
     resumed: 0,
     unconfirmed: 0,
@@ -998,9 +1021,11 @@ export function repullAdvanceLogLine(
     r.mergeUnknown > 0 ||
     r.mergeRefused > 0 ||
     r.finishUnconfirmed > 0 ||
+    r.waiversFailed > 0 ||
     Object.keys(r.refused).length > 0;
   const acted =
     r.screensStarted +
+    r.waiversPublished +
     r.gatesCleared +
     r.resumed +
     r.mergesSent +
@@ -1019,6 +1044,8 @@ export function repullAdvanceLogLine(
     `running=${r.running}`,
     `not_due=${r.notDue}`,
     `screens=${r.screensStarted}`,
+    `waivers=${r.waiversPublished}`,
+    `waivers_failed=${r.waiversFailed}`,
     `gates_cleared=${r.gatesCleared}`,
     `resumed=${r.resumed}`,
     `unconfirmed=${r.unconfirmed}`,

@@ -991,6 +991,65 @@ describe("the gates of an automatic pull request", () => {
     expect(reviews()).toEqual([]);
   });
 
+  describe("a waived head GitHub still holds back gets its waived check again (ADR 0116)", () => {
+    const reviewRun = (conclusion: string): CheckRunAnswer => ({
+      id: 50,
+      name: "NEMAR PR Review",
+      status: "completed",
+      conclusion,
+      app_id: NEMAR_APP_ID,
+    });
+    const checkWrites = () => gh.writes.filter((w) => w.includes("/check-runs"));
+
+    test("a review check that failed is replaced by the waiver, counted and logged", async () => {
+      const id = openRow();
+      markScreen(id, "clean");
+      gh.checkRuns[`${DS}@${HEAD}`] = [...greenRuns(), reviewRun("failure")];
+      gh.pulls[`${DS}#7`] = appPull(DS, { mergeable_state: "unstable" });
+      const r = await tick();
+      expect(r).toMatchObject({ waiversPublished: 1, waiversFailed: 0, gatesCleared: 0 });
+      expect(rowOf(id).hold_reason).toBe("not-clean");
+      expect(checkWrites()).toEqual([`POST /repos/nemarDatasets/${DS}/check-runs`]);
+      expect(repullAdvanceLogLine(r)?.line).toContain("waivers=1");
+      expect(dispatched("run-pr-review")).toEqual([]);
+    });
+
+    test("a review check that already says the waiver is left alone", async () => {
+      const id = openRow();
+      markScreen(id, "clean");
+      gh.checkRuns[`${DS}@${HEAD}`] = [...greenRuns(), reviewRun("skipped")];
+      gh.pulls[`${DS}#7`] = appPull(DS, { mergeable_state: "unstable" });
+      const r = await tick();
+      expect(r).toMatchObject({ waiversPublished: 0, waiversFailed: 0 });
+      expect(rowOf(id).hold_reason).toBe("not-clean");
+      expect(checkWrites()).toEqual([]);
+    });
+
+    test("a hold before GitHub's word asks nothing about the review check", async () => {
+      const id = openRow();
+      markScreen(id, "review");
+      gh.checkRuns[`${DS}@${HEAD}`] = [...greenRuns(), reviewRun("failure")];
+      gh.pulls[`${DS}#7`] = appPull(DS, { mergeable_state: "unstable" });
+      const r = await tick();
+      expect(r).toMatchObject({ waiversPublished: 0 });
+      expect(rowOf(id).hold_reason).toBe("screen-acknowledge");
+      expect(checkWrites()).toEqual([]);
+    });
+
+    test("a waiver GitHub will not take is counted as failed, and the line is an error", async () => {
+      const id = openRow();
+      markScreen(id, "clean");
+      gh.checkRuns[`${DS}@${HEAD}`] = [...greenRuns(), reviewRun("failure")];
+      gh.pulls[`${DS}#7`] = appPull(DS, { mergeable_state: "unstable" });
+      gh.writeStatus = 422;
+      const r = await tick();
+      expect(rowOf(id).hold_reason).toBe("not-clean");
+      expect(r).toMatchObject({ waiversPublished: 0, waiversFailed: 1 });
+      expect(repullAdvanceLogLine(r)).toMatchObject({ level: "error" });
+      expect(repullAdvanceLogLine(r)?.line).toContain("waivers_failed=1");
+    });
+  });
+
   test("a clean row whose edge the record refuses writes nothing, and says so", async () => {
     const id = openRow();
     markScreen(id, "clean");
@@ -1107,7 +1166,7 @@ describe("the log line", () => {
     const r = await tick();
     expect(repullAdvanceLogLine(r)).toEqual({
       level: "info",
-      line: "[repull-advance] examined=1 running=0 not_due=0 screens=0 gates_cleared=0 resumed=0 unconfirmed=0 merges=0 merged=0 merge_unknown=0 merge_refused=0 claims_released=0 finishes=0 finish_unconfirmed=0 holds_changed=1 held=main-moved:1 refused=none",
+      line: "[repull-advance] examined=1 running=0 not_due=0 screens=0 waivers=0 waivers_failed=0 gates_cleared=0 resumed=0 unconfirmed=0 merges=0 merged=0 merge_unknown=0 merge_refused=0 claims_released=0 finishes=0 finish_unconfirmed=0 holds_changed=1 held=main-moved:1 refused=none",
     });
     expect(repullAdvanceLogLine(await tick())).toBeNull();
   });

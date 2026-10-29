@@ -46,7 +46,7 @@
 
 import { VERSION_CHECK_NAME } from "../../../shared/dataset-checks.js";
 import { isScreenState, screenGate } from "../../../shared/identifier-screen-report.js";
-import { verdictOf } from "../../../shared/pr-review.js";
+import { PR_REVIEW_CHECK_NAME, verdictOf } from "../../../shared/pr-review.js";
 import { checkFactOf } from "../../../shared/repull-bids-override.js";
 import {
   type CheckFact,
@@ -165,6 +165,19 @@ async function readCheck(
   const read = await githubRead(env, datasetId, `/commits/${sha}/check-runs?${query}`);
   if (!read.ok || read.status !== 200) return UNREADABLE_CHECK;
   return checkFactOf(read.body, name, sha);
+}
+
+/**
+ * The App's latest `NEMAR PR Review` run at `sha` (ADR 0116): read by the advance tick only for a
+ * recorded head GitHub holds back, to tell whether its check already says the waiver.
+ */
+export async function readReviewCheck(
+  env: Bindings,
+  datasetId: string,
+  sha: string,
+): Promise<CheckFact> {
+  if (!SHA_RE.test(sha)) return UNREADABLE_CHECK;
+  return readCheck(env, datasetId, sha, PR_REVIEW_CHECK_NAME);
 }
 
 /** BIDS validation and `version-check` at `sha`, the App's own runs, by the dataset's names. */
