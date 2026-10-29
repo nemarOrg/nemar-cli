@@ -20,6 +20,7 @@ import {
   LEDGER_REPO_PATH,
   MERGE_ACCEPTED_ACTION,
   MERGE_ACCEPTED_VERIFICATION,
+  SCANNER_RE,
   SCRUB_LEDGER_ACTIONS,
 } from "../../shared/repull-merge-acceptance";
 import { DIGEST_RE, SHA_RE } from "../../shared/repull-state";
@@ -109,8 +110,8 @@ const PROOF_SUFFIX = /\+proof-([0-9a-f]{16})$/;
 /** The verification word a deletion line must carry: the authoritative listing, and its proof. */
 export const DELETION_VERIFICATION = "authoritative-listing-empty";
 
-/** `identifier-scan@<commit>`: a code revision, never text a person typed. */
-const SCANNER = /^identifier-scan@[0-9a-f]{7,40}$/;
+/** `identifier-scan@<commit>`: a code revision, never text a person typed (one definition, shared). */
+const SCANNER = SCANNER_RE;
 /** A GitHub handle: the operator, not a participant. */
 const ACTOR = /^[a-z0-9][a-z0-9-]{0,38}$/i;
 const DATASET = /^(nm|xx|on)\d{6}$/;

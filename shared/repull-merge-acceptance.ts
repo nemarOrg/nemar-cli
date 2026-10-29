@@ -163,6 +163,15 @@ export function ledgerChange(before: string | null, after: string | null): Ledge
   return { kind: "scrub-append", repull, scanner };
 }
 
+/** What a merge did to the ledger, in the words the acceptance's evidence and output use. */
+export type LedgerWord = "untouched" | "scrub-lines" | "repull-scrub-lines";
+
+/** The one mapping of a {@link LedgerChange} that is not `other` to its word. */
+export function ledgerWordOf(change: Exclude<LedgerChange, { kind: "other" }>): LedgerWord {
+  if (change.kind === "none") return "untouched";
+  return change.repull ? "repull-scrub-lines" : "scrub-lines";
+}
+
 /**
  * The commits the acceptance lines of a ledger's text name, in order, each once. A line that does
  * not parse names nothing here; the ledger's own validation (`ledger-invalid`) refuses it.
