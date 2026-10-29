@@ -227,8 +227,8 @@ draw a bounded pool from the lexical, semantic and name/authors/tasks legs, a cr
 a dataset is kept on its approval, or when both legs found it and it is not strongly rejected, or when
 every informative word is in its name, authors or tasks; `count` of a phrase is the number judged relevant
 and `reranked` marks it, a single word is not cut, a word in over 25% of datasets does not drive a match,
-the vector and the cross-encoder read one text so the vectors are rebuilt on deploy, a word no dataset
-contains is corrected and reported as `corrected_query`, and every failure serves the fused list).
+the vector and the cross-encoder read one text so the admin reindex rebuilds the vectors after deploy, a word no dataset
+contains is corrected and reported as `corrected_query`, a modality the query names lists its datasets first, filters never change which datasets are relevant, and every model failure serves the fused list).
 
 **Account copy and the profile-gap matrix are declared once, in
 [`shared/contract/account-copy.ts`](shared/contract/account-copy.ts) and
