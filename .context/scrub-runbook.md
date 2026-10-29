@@ -423,6 +423,16 @@ rm -rf $W/check
    The delete is outward-facing, so it is done under the maintainer's go for this dataset (item 1), and each one is recorded in `go.txt` as above; the SHA recreates the ref, from `main`'s own history, if that is ever needed before step 9.
    If step 0 has already run, clone again after the deletions (`rm -rf $W/clone $W/original.bundle`, then step 0) and plan the git history again (step 2), both before step 7: the snapshot of step 7 must come from a clone that never knew the branch.
 
+8. **The ledger names no merge a re-pull accepted.**
+   A re-pull merged outside NEMAR's gate and accepted (`nemar admin repull resume --accept-merge-trailers`) leaves a `repull-merge-accepted` line on `main` that names the merge commit by its id (ADR 0111, the amendment of 2026-10-29).
+   The rewrite gives that commit a new id, so step 14 would then fail closed (`ledger-commit-not-alone`, `ledger-acceptance-unmatched`), and an acceptance cannot be made again for the rewritten commit.
+
+   ```bash
+   gh api "repos/nemarDatasets/$D/contents/.nemar/corrections.jsonl" --jq .content | base64 -d | grep -c '"action":"repull-merge-accepted"'   # must print 0
+   ```
+
+   **If it prints more than 0, STOP and ask the owner**: such a dataset is not rewritten until the owner decides how its acceptance is carried through the rewrite.
+
 ## Steps
 
 ### Step 0: Clone
