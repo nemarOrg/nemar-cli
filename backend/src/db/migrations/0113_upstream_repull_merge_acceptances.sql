@@ -25,10 +25,12 @@
 --     does not need it for fails the proof on its own).
 --   * `scanner`: the `scanner` of the `repull-scrubbed` line the merge appended, which the
 --     attestation carries, so the line is the same bytes every time it is written; set exactly when
---     the attestation is needed.
---   * `attested_at`: when the Worker saw the attestation on `main`; `attestation_sha` the commit
---     that wrote it, when the Worker made it (a retry that finds the line already there records the
---     time with no commit). The release is refused while an attestation is needed and not seen.
+--     the attestation is needed, and of the ledger's own shape (`identifier-scan@` and 7 to 40 hex
+--     digits), so a stored acceptance can always build its line.
+--   * `attested_at`: when the Worker last wrote the attestation, or first saw it on `main`;
+--     `attestation_sha` the commit that wrote it, when the Worker made it (a retry that finds the
+--     line already there records the time with no commit). The release reads `main` itself, not
+--     these columns, before it records anything.
 --
 -- Every CHECK term is TRUE or FALSE, never NULL (a CHECK passes on NULL). The foreign key cascades
 -- on D1, which enforces foreign keys; `deleteDatasetCascade` also deletes these rows explicitly,
@@ -43,7 +45,8 @@ CREATE TABLE upstream_repull_merge_acceptances (
   accepted_by INTEGER NOT NULL,
   accepted_at TEXT NOT NULL DEFAULT (datetime('now')),
   attestation_needed INTEGER NOT NULL CHECK (attestation_needed IN (0, 1)),
-  scanner TEXT CHECK (scanner IS NULL OR scanner GLOB 'identifier-scan@[0-9a-f]*'),
+  scanner TEXT CHECK (scanner IS NULL OR (length(scanner) BETWEEN 23 AND 56
+    AND substr(scanner, 1, 16) = 'identifier-scan@' AND substr(scanner, 17) NOT GLOB '*[^0-9a-f]*')),
   attestation_sha TEXT CHECK (attestation_sha IS NULL OR
     (length(attestation_sha) = 40 AND attestation_sha NOT GLOB '*[^0-9a-f]*')),
   attested_at TEXT,

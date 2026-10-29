@@ -199,6 +199,8 @@ describe("every row holds what it should", () => {
     ["a needed attestation without its scanner", { scanner: null }],
     ["a scanner without a needed attestation", { attestation_needed: 0 }],
     ["a scanner that is not one", { scanner: "anything" }],
+    ["a scanner of too few hex digits", { scanner: "identifier-scan@abcdef" }],
+    ["a scanner that is not hex", { scanner: "identifier-scan@abcdefg" }],
     ["needed outside 0 and 1", { attestation_needed: 2 }],
     [
       "a time seen for an attestation not needed",
