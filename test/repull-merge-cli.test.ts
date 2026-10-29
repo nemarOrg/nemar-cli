@@ -180,21 +180,25 @@ describe.skipIf(!awsInstalled)("the merge", () => {
     expect(merges()).toEqual([]);
   });
 
-  test("the review is read at the merge: one still running needs --force", async () => {
+  test("the review of the re-pull's own head is waived at the merge: one still running or failed needs no --force", async () => {
     const head = await toGates();
-    // A stored pass reset to running on the same head (`pr-reviews start --redo`).
+    // A review of the head that ran before NEMAR recorded it, and failed, as the contributor review
+    // fails an upstream delta; then one restarted on the same head. Neither holds the merge (ADR
+    // 0116), and the confirmation says why instead.
     seedReview(w.db(), {
       ds: w.fx.datasetId,
       n: w.row().pr_number as number,
       sha: head,
-      state: "dispatched",
+      state: "reported",
+      verdict: "fail",
     });
-    const refused = await merge();
-    expect(refused.exitCode, refused.all).toBe(1);
-    expect(refused.all).toContain("(review)");
-    expect(w.row().merge_claim_sha).toBeNull();
-    const forced = await merge(["--force"]);
-    expect(forced.exitCode, forced.all).toBe(0);
+    w.db().run(
+      "UPDATE pr_reviews SET state = 'dispatched', verdict = NULL, report = NULL, decided_at = NULL, created_at = datetime('now')",
+    );
+    const run = await merge();
+    expect(run.exitCode, run.all).toBe(0);
+    expect(run.all).toContain("The automated review is waived for this commit");
+    expect(run.all).not.toContain("(review)");
     expect(w.row().status).toBe("merged");
   });
 
@@ -354,7 +358,7 @@ describe.skipIf(!awsInstalled)("the gate's own checks, before the claim", () => 
     expect(w.row().merge_claim_sha).toBeNull();
   });
 
-  test("the review is read again at the merge: a pass reset to running after the gate's read is refused", async () => {
+  test("the review is read again at the merge, and a pass reset to running after the gate's read does not hold a waived head", async () => {
     const head = await toGates();
     seedReview(w.db(), {
       ds: w.fx.datasetId,
@@ -377,13 +381,12 @@ describe.skipIf(!awsInstalled)("the gate's own checks, before the claim", () => 
         }
       }
     });
-    const before = transitions();
     const run = await merge();
-    expect(run.exitCode, run.all).toBe(1);
-    expect(run.all).toContain("(review)");
+    // Read twice, at the gate and again at the merge, and waived both times (ADR 0116).
     expect(reads).toBe(2);
-    expect(transitions()).toBe(before);
-    expect(merges()).toEqual([]);
+    expect(run.exitCode, run.all).toBe(0);
+    expect(run.all).toContain("The automated review is waived for this commit");
+    expect(merges()).toHaveLength(1);
   });
 });
 

@@ -117,6 +117,8 @@ import type { Bindings } from "../types/bindings.js";
 import { isValidDatasetId } from "./datasetId.js";
 import { isScreenExempt, readStoredReport } from "./identifier-screen-stored.js";
 import { resolveImportError } from "./import-error.js";
+import { ownedHere } from "./pr-review-queue.js";
+import { publishRecordedRepullHead } from "./pr-review.js";
 import {
   REPULL_CAP_MAX,
   autoRepullEnabled,
@@ -1051,7 +1053,36 @@ export async function transitionRepull(
   const prepared = await prepareTransition(env, admin, row, t, opts);
   if (isRefusal(prepared)) return prepared;
   const done = await commitTransition(env.DB, prepared);
-  return isRefusal(done) ? done : { row: done.row };
+  if (isRefusal(done)) return done;
+  // A head the edge recorded for an open pull request (the pull request opened, enrichment's move
+  // recorded, a commit made again on a moved `main`) is now waived from the review (ADR 0116), and
+  // its check says so now, not on the next delivery. Best effort: the edge has happened.
+  const recorded = recordedHeadOf(row, done.row);
+  if (recorded !== null && ownedHere(env, done.row.dataset_id)) {
+    const waived = await publishRecordedRepullHead(env, done.row, recorded);
+    // Fixed words and the record's id: why a recorded head's check was not waived now.
+    if (waived !== "waived") {
+      console.info(
+        `[upstream-repull] re-pull ${id}: the recorded head was not waived now (${waived})`,
+      );
+    }
+  }
+  return { row: done.row };
+}
+
+/**
+ * Which of the record's pull requests an edge recorded a new head for, or null: the record is now
+ * at the status in which that pull request is open and its head screened (`pr_open`,
+ * `patch_synthesized`), with a head, and it came there from another status or its head changed. A
+ * self-edge that records only why a step failed carries the same head and is not one.
+ */
+export function recordedHeadOf(before: RepullRow, after: RepullRow): RepullPullRequest | null {
+  for (const pr of REPULL_PULL_REQUESTS) {
+    const cols = PULL_REQUEST_COLUMNS[pr];
+    if (after.status !== cols.open || after[cols.head] === null) continue;
+    if (before.status !== cols.open || before[cols.head] !== after[cols.head]) return pr;
+  }
+  return null;
 }
 
 /**

@@ -55,7 +55,8 @@ export interface CheckRunInput {
   /**
    * `null` publishes an `in_progress` check for a review that is running; any other value is a
    * `completed` check carrying that conclusion. `skipped` is sent for an exempt pull request
-   * (ADR 0107) and for nothing else: `conclusionOf` is the only thing that chooses it.
+   * (ADR 0107) and an upstream re-pull's waived one (ADR 0116), and for nothing else:
+   * `conclusionOf` is the only thing that chooses it.
    */
   conclusion: CheckConclusion | null;
   title: string;

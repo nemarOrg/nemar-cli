@@ -358,7 +358,34 @@ describe("unknown is never clean", () => {
     ).toBe("screen-rerun");
   });
 
-  test("every review fact but `pass` holds", () => {
+  test("a review waived for the record's own head passes, and nothing else about the rule moves (ADR 0116)", () => {
+    expect(
+      holdOf((f) => {
+        f.review = "waived";
+      }),
+    ).toBe("clean");
+    // The waiver is the review's rule alone: every gate before and after it still holds.
+    expect(
+      holdOf((f) => {
+        f.review = "waived";
+        f.screen = "acknowledge";
+      }),
+    ).toBe("screen-acknowledge");
+    expect(
+      holdOf((f) => {
+        f.review = "waived";
+        f.checks.bids = { status: "completed", conclusion: "failure" };
+      }),
+    ).toBe("bids-failed");
+    expect(
+      holdOf((f) => {
+        f.review = "waived";
+        pr(f).mergeableState = "unstable";
+      }),
+    ).toBe("not-clean");
+  });
+
+  test("every review fact but `pass` and `waived` holds", () => {
     const facts: ReviewFact[] = [
       "fail",
       "uncertain",

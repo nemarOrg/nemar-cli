@@ -23,11 +23,12 @@
  *    `upstream-repull-screen.ts` reads it (its state at read time, `screenGate`, and the stored
  *    report naming that head), but stricter than the screen's own gate: an acknowledgment never
  *    passes here, whoever recorded it, because it needs a person (ADR 0086).
- *  - The review: the `pr_reviews` row of that head, read as ADR 0093's detail view reads it, the
- *    stricter of the stored verdict and the one its stored report re-derives through
- *    `outcomeOfRow`. It is read again at every stage, and a pass is never carried between stages;
- *    an administrator's `--redo` resets passes on other pull requests, and none can touch this
- *    class, whose review only the Worker starts.
+ *  - The review: waived (ADR 0116) when GitHub's pull request, just read, is the record's at the
+ *    head the stage is about, by the rule the review itself asks (`shared/repull-review-waiver.ts`),
+ *    and then no row is read. Otherwise the `pr_reviews` row of that head, read as ADR 0093's
+ *    detail view reads it, the stricter of the stored verdict and the one its stored report
+ *    re-derives through `outcomeOfRow`. Either is read again at every stage, and nothing is
+ *    carried between stages.
  *
  * UNKNOWN IS NEVER CLEAN. A GitHub answer that is not 200 (404 included), a timeout, a throttle,
  * a shape this does not recognize and a database read that throws each read as `unreadable` (or,
@@ -45,6 +46,7 @@
 
 import { VERSION_CHECK_NAME } from "../../../shared/dataset-checks.js";
 import { isScreenState, screenGate } from "../../../shared/identifier-screen-report.js";
+import { isOwnDatasetRepo } from "../../../shared/nemar-app.js";
 import { verdictOf } from "../../../shared/pr-review.js";
 import { checkFactOf } from "../../../shared/repull-bids-override.js";
 import {
@@ -58,6 +60,7 @@ import {
   type ScreenFact,
   machineClean,
 } from "../../../shared/repull-machine-clean.js";
+import { repullReviewWaiver } from "../../../shared/repull-review-waiver.js";
 import { type HoldReason, type RepullRow, SHA_RE } from "../../../shared/repull-state.js";
 import type { Bindings } from "../types/bindings.js";
 import { NEMAR_APP_ID, deriveContexts } from "./github/branch-protection.js";
@@ -419,7 +422,34 @@ export async function gatherMachineCleanFacts(
   facts.checks = checks;
   if (sha !== null) {
     facts.screen = await readScreenFact(env.DB, row, sha);
-    facts.review = await readReviewFact(env.DB, row.dataset_id, row.pr_number, sha);
+    facts.review = reviewWaivedAt(row, pr, sha)
+      ? "waived"
+      : await readReviewFact(env.DB, row.dataset_id, row.pr_number, sha);
   }
   return facts;
+}
+
+/**
+ * Whether the review of `sha` is waived (ADR 0116): GitHub's pull request, as just read, is the
+ * record's at `sha`, by the rule the review itself asks (`shared/repull-review-waiver.ts`). Then
+ * the review's row is not read, because nothing it holds could change the answer: the review does
+ * not apply to the head. A pull request that could not be read, or is at another head, is not
+ * waived, and the row is read as before.
+ */
+export function reviewWaivedAt(
+  row: RepullRow,
+  pr: PullRequestFact | "unreadable",
+  sha: string,
+): boolean {
+  if (pr === "unreadable" || pr.headSha !== sha) return false;
+  return repullReviewWaiver(row, {
+    datasetId: row.dataset_id,
+    prNumber: pr.number,
+    headSha: pr.headSha,
+    ownRepository:
+      isOwnDatasetRepo(pr.headRepo, row.dataset_id) &&
+      isOwnDatasetRepo(pr.baseRepo, row.dataset_id),
+    headRef: pr.headRef,
+    baseRef: pr.baseRef,
+  }).waived;
 }
