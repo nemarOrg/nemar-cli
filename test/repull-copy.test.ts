@@ -215,6 +215,8 @@ describe.skipIf(!awsInstalled)("the pinned copy", () => {
       `${PREFIX}${a.key}`,
       "--copy-source",
       `openneuro.org/${a.object}`,
+      "--tagging-directive",
+      "REPLACE",
     ]);
     expect(Buffer.from(destBytes(a.key) as Uint8Array).equals(Buffer.from(a.bytes))).toBe(false);
     // The guard refuses that call before it is made.
@@ -229,8 +231,37 @@ describe.skipIf(!awsInstalled)("the pinned copy", () => {
         `openneuro.org/${a.object}`,
         "--copy-source-if-match",
         '"x"',
+        "--tagging-directive",
+        "REPLACE",
       ]),
     ).rejects.toThrow("copy-source-unversioned");
+  });
+
+  test("a copy across buckets needs the tagging directive: upstream's bucket denies the tag read", async () => {
+    // Measured against the real buckets on 2026-10-29: a plain copy-object from upstream's bucket
+    // answered AccessDenied for every object, with or without the condition, because the default
+    // directive (COPY) reads the source's tags. The stand-in answers the same, so a copy that
+    // dropped the flag would fail here as it failed there.
+    const a = upstream("sub-01/eeg/sub-01_task-rest_eeg.edf", 2000, 2);
+    const raw = runners(false);
+    const plain = [
+      "--bucket",
+      "nemar",
+      "--key",
+      `${PREFIX}${a.key}`,
+      "--copy-source",
+      `openneuro.org/${a.object}?versionId=${a.version}`,
+      "--copy-source-if-match",
+      '"x"',
+    ];
+    await expect(raw.dest.api("copy-object", plain)).rejects.toThrow("CopyObject:access-denied");
+    expect(s3.calls("CopyObject").map((c) => c.status)).toEqual([403]);
+    // The guard refuses the same call before it is made, so the real bucket is never asked.
+    const guarded = runners();
+    await expect(guarded.dest.api("copy-object", plain)).rejects.toThrow(
+      "copy-without-tagging-replace",
+    );
+    expect(s3.calls("CopyObject")).toHaveLength(1);
   });
 
   test("multipart above the single-copy bound sends the version id in every part's source and completes", async () => {
