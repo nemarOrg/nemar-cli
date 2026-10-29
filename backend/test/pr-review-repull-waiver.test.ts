@@ -951,6 +951,33 @@ describe("a refused update of the existing check is replaced by a new check (ADR
   });
 });
 
+describe("a waiver the sweep cannot decide is an attempt that failed", () => {
+  test("five undecided publishes end abandoned, never counted as republished", async () => {
+    const id = Number(
+      db
+        .query(
+          `INSERT INTO pr_reviews (dataset_id, pr_number, head_sha, author_id, author_login, state,
+                                   nonce, check_run_id, created_at)
+           VALUES (?, 7, ?, ?, ?, 'dispatched', 'n-1', 77, '2026-10-01 00:00:00')`,
+        )
+        .run(DS, HEAD, ADMIN_GH_ID, ADMIN_GH).lastInsertRowid,
+    );
+    Reflect.deleteProperty(pulls, `${DS}#7`);
+    await storePrReviewResult(env(), id, DS, "n-1", {
+      kind: "reported",
+      report: parseStoredPrReviewReport(failingReport()),
+    });
+    const results: Array<{ republished: number; abandoned: number }> = [];
+    for (let n = 0; n < 5; n++) {
+      db.run("UPDATE pr_reviews SET decided_at = datetime('now', '-10 minutes')");
+      results.push(await sweepStalePrReviews(env()));
+    }
+    expect(results.map((r) => r.republished)).toEqual([0, 0, 0, 0, 0]);
+    expect(results.map((r) => r.abandoned)).toEqual([0, 0, 0, 0, 1]);
+    expect(reviews()[0]).toMatchObject({ published_at: null, publish_attempts: 5 });
+  });
+});
+
 describe("which edges record a head (the transition's trigger)", () => {
   const at = (status: RepullStatus, over: Row = {}) =>
     rowAt(status, { dataset_id: DS, head_sha: HEAD, ...over }) as unknown as RepullRow;

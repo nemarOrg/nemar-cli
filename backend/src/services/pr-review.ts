@@ -782,6 +782,19 @@ export async function publishOutcome(
   return false;
 }
 
+/** Whether a row is marked as shown on GitHub. A read that fails is not a stamp. */
+async function isStamped(db: Db, id: number): Promise<boolean> {
+  try {
+    const row = await db
+      .prepare("SELECT published_at FROM pr_reviews WHERE id = ?")
+      .bind(id)
+      .first<{ published_at: string | null }>();
+    return row?.published_at != null;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Record that a row's result reached GitHub, and only for the row as it was published: the same
  * state and decision time. A row that moved on since is not stamped, so its new result still waits
@@ -2220,7 +2233,11 @@ export async function sweepStalePrReviews(env: Bindings): Promise<PrReviewSweepR
         const row = await readRow(db, id);
         const outcome = row ? outcomeOfRow(row) : null;
         if (!row || !outcome) continue;
-        const published = await publishOutcome(env, row, outcome);
+        // Published means stamped: a check that reached GitHub while an upstream re-pull's waiver
+        // of its head could not be decided (ADR 0116) is left unstamped, and is an attempt that
+        // failed, which counts toward the bound like any other.
+        const published =
+          (await publishOutcome(env, row, outcome)) && (await isStamped(db, row.id));
         if (published) {
           result.republished++;
         } else if (publish_attempts + 1 >= PUBLISH_MAX_ATTEMPTS) {
