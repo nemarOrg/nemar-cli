@@ -491,6 +491,59 @@ describe.skipIf(!awsInstalled)("N.0.1", () => {
     expect(String(w.row().last_error)).toContain("merge-trailers");
   });
 
+  test("N.0.1 merged with GitHub's button is accepted on evidence, writes no ledger line, and completes", async () => {
+    await patchGates();
+    // GitHub's own merge button: its message, none of the re-pull's trailers.
+    const merge = await w.mergeOnGitHub({ pr: "n1" });
+    await w.tagMain("2.0.1");
+    w.insertVersionRow("2.0.1");
+    const refused = await resume();
+    expect(refused.exitCode, refused.all).toBe(3);
+    expect(refused.all).toContain("merge-trailers");
+    expect(refused.all).toContain("--accept-merge-trailers");
+    expect(w.row()).toMatchObject({ status: "patch_merged", patch_merge_sha: merge });
+    const reason = "N.0.1 was merged on GitHub's page; its tree was read and is the gated head";
+    const run = await resume(["--accept-merge-trailers", reason]);
+    expect(run.exitCode, run.all).toBe(0);
+    expect(run.all).toContain(
+      `is GitHub's squash merge of pull request #${w.row().patch_pr_number} (release/v2.0.1`,
+    );
+    expect(run.all).toContain("its tree is the re-pull's gated N.0.1 head");
+    expect(run.all).toContain("it does not touch the privacy ledger");
+    // The Worker's own reading says the same, in the same words.
+    expect(run.all).toContain("; the merge does not touch the privacy ledger;");
+    expect(run.all).toContain("needs no line for it, and none was written");
+    expect(w.row()).toMatchObject({ status: "complete", last_error: null });
+    // Recorded with its reason, and no ledger line: N.0.1's merge does not touch the ledger, and a
+    // line naming a commit the proof does not need it for would fail the proof on its own.
+    expect(
+      w
+        .db()
+        .query(
+          "SELECT pr, merge_sha, reason, attestation_needed, attested_at FROM upstream_repull_merge_acceptances",
+        )
+        .all(),
+    ).toEqual([{ pr: "n1", merge_sha: merge, reason, attestation_needed: 0, attested_at: null }]);
+    expect(w.ledgerWrites()).toBe(0);
+    expect(await mainHead()).toBe(merge);
+  });
+
+  test("N.0.1 merged with GitHub's button before its gates is not accepted: tree-anchor-missing", async () => {
+    await patchOpen();
+    const merge = await w.mergeOnGitHub({ pr: "n1" });
+    await w.tagMain("2.0.1");
+    w.insertVersionRow("2.0.1");
+    const run = await resume([
+      "--accept-merge-trailers",
+      "N.0.1 was merged on GitHub's page before its screen and gates ran",
+    ]);
+    expect(run.exitCode, run.all).toBe(1);
+    expect(run.all).toContain("tree-anchor-missing");
+    expect(w.row()).toMatchObject({ status: "patch_merged", patch_merge_sha: merge });
+    expect(w.db().query("SELECT * FROM upstream_repull_merge_acceptances").all()).toEqual([]);
+    expect(w.ledgerWrites()).toBe(0);
+  });
+
   test("a tag whose tree is not N.0.1's gated head stays patch_merged: patch-tree-mismatch", async () => {
     await patchGates();
     const merged = await w.cli(["repull", "merge", w.fx.datasetId, "--yes"]);

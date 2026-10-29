@@ -57,6 +57,53 @@ import {
 } from "./repull-fixture";
 
 const CLI_ENTRY = join(import.meta.dir, "..", "..", "src", "index.ts");
+/** The privacy ledger's path in a dataset repository (ADR 0085). */
+const LEDGER = ".nemar/corrections.jsonl";
+
+/**
+ * Commit `content` at `path` onto `ref` of the bare repository `repo`, as a writer's push does: one
+ * commit whose parent is the ref's commit, the rest of the tree as it was. Returns the commit and
+ * the blob it wrote.
+ */
+async function commitFile(
+  repo: string,
+  ref: string,
+  path: string,
+  content: string,
+  message: string,
+  who = "t",
+): Promise<{ commit: string; blob: string }> {
+  const before = (await gitIn(repo, ["rev-parse", ref])).trim();
+  const blob = (
+    await runCommand(["git", "hash-object", "-w", "--stdin"], { cwd: repo, stdin: content })
+  ).stdout.trim();
+  const index = mkdtempSync(join(tmpdir(), "nemar-repull-world-index-"));
+  const env = { GIT_INDEX_FILE: join(index, "index") };
+  try {
+    await runCommand(["git", "read-tree", ref], { cwd: repo, env });
+    await runCommand(["git", "update-index", "--add", "--cacheinfo", `100644,${blob},${path}`], {
+      cwd: repo,
+      env,
+    });
+    const tree = (await runCommand(["git", "write-tree"], { cwd: repo, env })).stdout.trim();
+    const commit = (
+      await runCommand(["git", "commit-tree", tree, "-p", before, "-m", message], {
+        cwd: repo,
+        env: {
+          ...env,
+          GIT_AUTHOR_NAME: who,
+          GIT_AUTHOR_EMAIL: `${who}@t`,
+          GIT_COMMITTER_NAME: who,
+          GIT_COMMITTER_EMAIL: `${who}@t`,
+        },
+      })
+    ).stdout.trim();
+    await gitIn(repo, ["update-ref", ref, commit, before]);
+    return { commit, blob };
+  } finally {
+    rmSync(index, { recursive: true, force: true });
+  }
+}
 const REPO_ROOT = join(import.meta.dir, "..", "..");
 const REGION = "us-east-2";
 export const ADMIN_KEY = "repull-world-admin-key-0123456789abcdef0123456789ab";
@@ -146,6 +193,24 @@ export interface RepullWorld {
   reportScreen(sha: string, status?: string): Promise<void>;
   /** Commit one file onto a ref of the bare origin, as another writer's push. */
   commitOnto(ref: string, path: string, content: string, message?: string): Promise<string>;
+  /**
+   * Merge one of the world's pull requests the way GitHub's own merge button does, outside
+   * NEMAR's gate: a squash with GitHub's message (`title`, and `message` as its body, empty by
+   * default), so the squash commit carries none of the re-pull's trailers. N.0.0's pull request
+   * unless `pr` says N.0.1's. Returns the merge commit.
+   */
+  mergeOnGitHub(opts?: { pr?: "n0" | "n1"; title?: string; message?: string }): Promise<string>;
+  /** How many writes of the privacy ledger GitHub's Contents API took since the last restore. */
+  ledgerWrites(): number;
+  /** Answer reads of the ledger on `main` with this instead, until set to null. */
+  setLedgerReadFault(fault: (() => Response) | null): void;
+  /** Answer GitHub's comparisons of a commit with `main` with this HTTP status, until set to null. */
+  setMainCompareFault(status: number | null): void;
+  /**
+   * Answer the writes of the ledger with this instead of making them, until set to null (or until
+   * the fault returns null, when the write is made as GitHub makes it).
+   */
+  setLedgerWriteFault(fault: (() => Response | null | Promise<Response | null>) | null): void;
   /** What the dataset workflow does on a merge to `main`: tag `v<version>` at `main`'s head. */
   tagMain(version: string): Promise<string>;
   /** What the version DOI's callback writes: the version row, with a DOI and its upstream tag. */
@@ -272,6 +337,10 @@ export async function startRepullWorld(
   let apiOverride: ((req: Request) => Response | null) | null = null;
   let apiAfter: ((req: Request) => Response | null) | null = null;
   let mergeMessageSuffix = "";
+  let ledgerWrites = 0;
+  let ledgerWriteFault: (() => Response | null | Promise<Response | null>) | null = null;
+  let ledgerReadFault: (() => Response) | null = null;
+  let mainCompareFault: number | null = null;
   const workerEnv: Partial<Bindings> = {};
   const configDir = mkdtempSync(join(tmpdir(), "nemar-repull-world-"));
 
@@ -288,19 +357,135 @@ export async function startRepullWorld(
     const origin = origins.get(dataset);
     return origin ? rev(origin, `refs/tags/${tag}^{commit}`) : null;
   };
-  gh.compareCommits = async (dataset, base, head) => {
+  // GitHub's comparison of `base...head` (`head` may be `main`): its word, the commits each side
+  // has, and the files changed from the merge base. Two commits with no common history are what
+  // GitHub answers 404 for ("No common ancestor"), and so does this.
+  gh.compareCommits = async (dataset, base, rawHead) => {
     const origin = origins.get(dataset);
     if (!origin) return null;
-    if (base === head) return "identical";
+    if (rawHead === "main" && mainCompareFault !== null) return mainCompareFault;
+    const head = rawHead === "main" ? await rev(origin, "refs/heads/main") : rawHead;
+    if (
+      !head ||
+      !(await rev(origin, `${base}^{commit}`)) ||
+      !(await rev(origin, `${head}^{commit}`))
+    ) {
+      return null;
+    }
+    const common = await runCommand(["git", "merge-base", base, head], { cwd: origin });
+    if (common.exitCode !== 0) return null;
     const isAncestor = async (a: string, b: string) =>
       (await runCommand(["git", "merge-base", "--is-ancestor", a, b], { cwd: origin })).exitCode ===
       0;
-    if (await isAncestor(base, head)) return "ahead";
-    if (await isAncestor(head, base)) return "behind";
-    return "diverged";
+    const status =
+      base === head
+        ? "identical"
+        : (await isAncestor(base, head))
+          ? "ahead"
+          : (await isAncestor(head, base))
+            ? "behind"
+            : "diverged";
+    // GitHub's own fields: the commits each side has, and the files changed from the merge base.
+    const count = async (range: string) =>
+      Number((await gitIn(origin, ["rev-list", "--count", range])).trim());
+    const mergeBase = common.stdout.trim();
+    const words: Record<string, string> = { A: "added", M: "modified", D: "removed" };
+    const files = (
+      await gitIn(origin, ["diff", "--no-renames", "--name-status", "-z", mergeBase, head])
+    )
+      .split("\0")
+      .filter(Boolean)
+      .reduce<Array<{ filename: string; status: string }>>((out, field, i, all) => {
+        if (i % 2 === 0) {
+          out.push({ filename: all[i + 1] as string, status: words[field] ?? "changed" });
+        }
+        return out;
+      }, []);
+    return {
+      status,
+      ahead_by: await count(`${base}..${head}`),
+      behind_by: await count(`${head}..${base}`),
+      files,
+    };
+  };
+  // The Git Data reads and the Contents read and write of the privacy ledger, as GitHub answers
+  // them, from and to the bare origin: what the Worker's acceptance of a merge made without its
+  // trailers reads and writes (ADR 0111, the amendment of 2026-10-29). Any other path falls through.
+  gh.gitData = async (dataset, r) => {
+    const origin = origins.get(dataset);
+    if (!origin) return null;
+    const commit = /^git\/commits\/([0-9a-f]{40})$/.exec(r.path);
+    if (r.method === "GET" && commit) {
+      const sha = commit[1] as string;
+      if ((await rev(origin, `${sha}^{commit}`)) !== sha) {
+        return Response.json({ message: "Not Found" }, { status: 404 });
+      }
+      const [, ...parents] = (await gitIn(origin, ["rev-list", "--parents", "-n", "1", sha]))
+        .trim()
+        .split(" ");
+      return Response.json({
+        sha,
+        tree: { sha: (await gitIn(origin, ["rev-parse", `${sha}^{tree}`])).trim() },
+        parents: parents.map((p) => ({ sha: p })),
+        message: await gitIn(origin, ["log", "-1", "--format=%B", sha]),
+      });
+    }
+    const tree = /^git\/trees\/([0-9a-f]{40})$/.exec(r.path);
+    if (r.method === "GET" && tree) {
+      const sha = tree[1] as string;
+      const listed = await runCommand(["git", "ls-tree", "-z", sha], { cwd: origin });
+      if (listed.exitCode !== 0) return Response.json({ message: "Not Found" }, { status: 404 });
+      return Response.json({
+        sha,
+        truncated: false,
+        tree: listed.stdout
+          .split("\0")
+          .filter(Boolean)
+          .map((e) => {
+            const [meta, path] = e.split("\t") as [string, string];
+            const [mode, type, oid] = meta.split(" ") as [string, string, string];
+            return { path, mode, type, sha: oid };
+          }),
+      });
+    }
+    if (r.path !== `contents/${LEDGER}`) return null;
+    if (r.method === "GET") {
+      const ref = r.query.get("ref") ?? "main";
+      if (ref === "main" && ledgerReadFault) return ledgerReadFault();
+      const at = /^[0-9a-f]{40}$/.test(ref) ? ref : `refs/heads/${ref}`;
+      const blob = await rev(origin, `${at}:${LEDGER}`);
+      if (!blob) return Response.json({ message: "Not Found" }, { status: 404 });
+      const bytes = (await runCommand(["git", "cat-file", "blob", blob], { cwd: origin })).stdout;
+      return Response.json({
+        type: "file",
+        path: LEDGER,
+        sha: blob,
+        encoding: "base64",
+        content: Buffer.from(bytes, "utf8").toString("base64"),
+      });
+    }
+    if (r.method === "PUT") {
+      ledgerWrites += 1;
+      const faulted = ledgerWriteFault ? await ledgerWriteFault() : null;
+      if (faulted) return faulted;
+      const b = r.body as { content?: string; sha?: string; branch?: string; message?: string };
+      const branch = `refs/heads/${b.branch ?? "main"}`;
+      const head = await rev(origin, branch);
+      const current = head ? await rev(origin, `${head}:${LEDGER}`) : null;
+      if (!head || (current ?? undefined) !== b.sha) {
+        return Response.json({ message: `${LEDGER} does not match ${b.sha}` }, { status: 409 });
+      }
+      const text = Buffer.from(b.content ?? "", "base64").toString("utf8");
+      const made = await commitFile(origin, branch, LEDGER, text, b.message ?? "", "nemarAdmin");
+      return Response.json({ content: { sha: made.blob }, commit: { sha: made.commit } });
+    }
+    return null;
   };
   // GitHub's squash merge: one commit on `main` holding the head's tree, with the title and the
-  // message the merge was sent (GitHub's own default lists the commits as bullets instead).
+  // message the merge was sent (GitHub's own default lists the commits as bullets instead). A
+  // simplification: GitHub's squash is a three-way merge of the head onto `main`, which is the
+  // head's tree only while `main` is the pull request's base; a suite that moves `main` first and
+  // needs the three-way result builds it itself.
   gh.onMerge = async (dataset, number, body) => {
     const origin = origins.get(dataset);
     const p = gh.pulls[`${dataset}#${number}`];
@@ -553,6 +738,10 @@ export async function startRepullWorld(
       apiOverride = null;
       apiAfter = null;
       mergeMessageSuffix = "";
+      ledgerWrites = 0;
+      ledgerWriteFault = null;
+      ledgerReadFault = null;
+      mainCompareFault = null;
       for (const k of Object.keys(workerEnv)) delete (workerEnv as Record<string, unknown>)[k];
       for (const purpose of ["resume", "merge", "settle"]) {
         rmSync(join(configDir, "repull", fx.datasetId, purpose), { recursive: true, force: true });
@@ -590,37 +779,48 @@ export async function startRepullWorld(
       if (!stored.stored) throw new Error("the screen's report was not stored");
     },
     async commitOnto(ref, path, content, message = "a later commit") {
-      const repo = fx.originRepo;
-      const before = (await gitIn(repo, ["rev-parse", ref])).trim();
-      const blob = (
-        await runCommand(["git", "hash-object", "-w", "--stdin"], { cwd: repo, stdin: content })
-      ).stdout.trim();
-      const index = mkdtempSync(join(tmpdir(), "nemar-repull-world-index-"));
-      const env = { GIT_INDEX_FILE: join(index, "index") };
-      try {
-        await runCommand(["git", "read-tree", ref], { cwd: repo, env });
-        await runCommand(
-          ["git", "update-index", "--add", "--cacheinfo", `100644,${blob},${path}`],
-          { cwd: repo, env },
-        );
-        const tree = (await runCommand(["git", "write-tree"], { cwd: repo, env })).stdout.trim();
-        const commit = (
-          await runCommand(["git", "commit-tree", tree, "-p", before, "-m", message], {
-            cwd: repo,
-            env: {
-              ...env,
-              GIT_AUTHOR_NAME: "t",
-              GIT_AUTHOR_EMAIL: "t@t",
-              GIT_COMMITTER_NAME: "t",
-              GIT_COMMITTER_EMAIL: "t@t",
-            },
-          })
-        ).stdout.trim();
-        await gitIn(repo, ["update-ref", ref, commit]);
-        return commit;
-      } finally {
-        rmSync(index, { recursive: true, force: true });
-      }
+      return (await commitFile(fx.originRepo, ref, path, content, message)).commit;
+    },
+    async mergeOnGitHub(o = {}) {
+      const row = db
+        .query(
+          "SELECT pr_number, patch_pr_number, to_version, patch_version FROM upstream_repulls ORDER BY id DESC LIMIT 1",
+        )
+        .get() as {
+        pr_number: number;
+        patch_pr_number: number | null;
+        to_version: string;
+        patch_version: string | null;
+      };
+      const n1 = o.pr === "n1";
+      const number = n1 ? (row.patch_pr_number as number) : row.pr_number;
+      const version = n1 ? row.patch_version : row.to_version;
+      const res = await fetch(
+        `${gh.url}/repos/nemarDatasets/${fx.datasetId}/pulls/${number}/merge`,
+        {
+          method: "PUT",
+          headers: { Authorization: `Bearer ${ADMIN_TOKEN}`, "Content-Type": "application/json" },
+          body: JSON.stringify({
+            merge_method: "squash",
+            commit_title: o.title ?? `Release v${version} (#${number})`,
+            commit_message: o.message ?? "",
+          }),
+        },
+      );
+      const answer = (await res.json()) as { merged?: boolean; sha?: string };
+      if (!answer.merged || !answer.sha)
+        throw new Error(`GitHub's merge did not merge: ${res.status}`);
+      return answer.sha;
+    },
+    ledgerWrites: () => ledgerWrites,
+    setLedgerReadFault: (fault) => {
+      ledgerReadFault = fault;
+    },
+    setMainCompareFault: (status) => {
+      mainCompareFault = status;
+    },
+    setLedgerWriteFault: (fault) => {
+      ledgerWriteFault = fault;
     },
     async tagMain(version) {
       const repo = fx.originRepo;

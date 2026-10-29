@@ -141,6 +141,18 @@ describe("ledger-cli append refuses the words only a scrub writes", () => {
     },
     SLOW,
   );
+
+  test(
+    "repull-merge-accepted cannot be typed either, and nothing is appended",
+    async () => {
+      const file = join(work(), "ledger.jsonl");
+      const typed = await append(file, "repull-merge-accepted");
+      expect(typed.exitCode, typed.all).toBe(3);
+      expect(typed.stderr).toContain("action-written-by-nemar-only");
+      expect(existsSync(file)).toBe(false);
+    },
+    SLOW,
+  );
 });
 
 describe("ledger-cli file modes", () => {

@@ -30,6 +30,7 @@ Phase 8 itself documents the epic, fixes the website's contract for the `mirror`
 Upstream's bucket does not let us read an object's tags and the default directive reads them, so a plain copy answered AccessDenied for every object the canary tried; the multipart copy, which carries no tags, was unaffected.
 The copy and the canary send the flag, and the write guard refuses a `copy-object` without it.
 ADR 0063 records the same denial for the content-recovery copy.*
+*Annotated 2026-10-29: and by the amendment of that date (#1996): a re-pull merged outside NEMAR's gate is accepted on evidence the CLI and the Worker each read, and the privacy ledger names the accepted merge in a line NEMAR writes, which the fresh-clone proof reads.*
 
 ## Context
 
@@ -70,6 +71,7 @@ Everything in this section is designed and not yet built.
 - The standard edits are re-applied as functions, never merged as text: the README rename and DOI badge, the `.nemar/` line in `.bidsignore`, ADR 0060's annex policy, moving git-resident data into the annex, ADR 0089's scrub with its provenance sentence, and ADR 0091's date normalization.
 - A change recorded in the dataset's privacy ledger (`.nemar/corrections.jsonl`, ADR 0085) is a standard edit: N.0.0 carries it, and a plan that would revert one refuses.
   A ledger line whose `action` is other than `import-scrubbed` (the importer's own line, which the delta scrub re-applies as a function) is a recorded correction.
+  *Annotated 2026-10-29: neither `repull-scrubbed` (the Phase 6b amendment) nor `repull-merge-accepted` (the amendment of 2026-10-29) is one.*
   The ledger holds counts and no per-file list (ADR 0036), so a plan cannot tell which unexplained paths a recorded correction made, and it refuses rather than revert one: the refusal applies to a dataset whose ledger holds at least one recorded correction, to any plan for it with an unexplained path, and it has no override.
   This keeps ADR 0085's promise that a re-pull is scrubbed again and does not reintroduce what was corrected.
 - Base is upstream at `from_tag`, theirs is upstream at `to_tag`, and ours is NEMAR `main`.
@@ -908,12 +910,15 @@ Decision 1 says a ledger line whose `action` is other than `import-scrubbed` is 
 Read literally, the re-pull's own delta scrub would then record a correction on every dataset it scrubs, and the next plan of that dataset would refuse any unexplained path.
 The delta scrub writes its own word, `repull-scrubbed`, before the one commit, so no history NEMAR pushes holds what it replaced (decision 9).
 The rule, corrected: a recorded correction is a line whose `action` is neither `import-scrubbed` nor `repull-scrubbed`.
+*Annotated 2026-10-29: nor `repull-merge-accepted` (the amendment of 2026-10-29).*
 A `repull-scrubbed` line holds nothing: a re-import's history hold (ADR 0089) still reads `import-scrubbed` lines only.
 ADR 0085's fresh-clone proof tolerates a commit that appends `repull-scrubbed` lines beside other files, as it tolerates the importer's, because the re-pull's commit is one commit; without that, every re-pulled dataset would fail `ledger-commit-not-alone` for good.
 It does so only when that commit carries decision 2's `Upstream-Snapshot:` and `Repull-Plan:` trailers, as git reads trailers (the message's last paragraph), and edits no earlier line, so the merge that lands N.0.0 on `main` must end its commit message with both.
 GitHub's default squash message lists each commit of the pull request as a bullet, so the re-pull commit's trailers end up mid-message; the proof reads no trailers in such a merge and fails the dataset with `ledger-commit-not-alone`.
 Phase 6f writes the squash message itself so that it ends with both trailers.
+*Annotated 2026-10-29: a squash merge made without them, with GitHub's own button, passes the proof only when a `repull-merge-accepted` line, which NEMAR's Worker writes after an administrator accepted the merge on evidence, names it (the amendment of 2026-10-29).*
 Neither scrub word can be typed: `ledger-cli.ts append` refuses `import-scrubbed` and `repull-scrubbed`, which only the scrub that wrote them, in the commit that carries what it scrubbed, may write.
+*Annotated 2026-10-29: nor can `repull-merge-accepted`, which only NEMAR's Worker writes (`action-written-by-nemar-only`).*
 Decision 10's retarget of an unreleased import still refuses any line but the importer's own, `repull-scrubbed` included.
 A re-pull needs a released mirror, which the guard refuses before that rule runs, so the line should never meet it; if it does, dropping a record of a scrub is not the retarget's to decide, which is the safe direction.
 
@@ -1557,6 +1562,7 @@ Not on an edge that ends the record, so giving up stays possible on a dataset th
 From `merged`, resume first reads back the squash commit GitHub wrote on `main`: its message must carry the re-pull commit's two trailers as its last paragraph, as git reads them.
 The gate checked the message it sent; this checks the one committed, because a host that appends a paragraph of its own (a `Co-authored-by:` line, say) would push them out of the last paragraph and the privacy ledger's fresh-clone proof would then fail the dataset.
 A message that does not is `merge-trailers`, recorded, and the record stays `merged`, loudly: the version may already be tagged and minted, and only an administrator decides what follows.
+*Annotated 2026-10-29: built by the amendment of that date: resume waits for the tag and the version row first, then `nemar admin repull resume <id> --accept-merge-trailers "<reason>"` accepts the merge once the CLI and then the Worker have read that it is the record's own squash merge, and the release goes on as for a gated merge.*
 Then resume waits for the tag `v<N.0.0>` on NEMAR's origin and for the version row, compares the tagged tree with the recorded synthesized tree outside `.nemar/**` and `.github/**`, and records the release through the Worker's verified route with that comparison as `tree_verified`, which alone upgrades the version's lineage; the Worker re-arms the dataset's four sweep stamps in the same batch.
 A tag on another commit leaves the record `merged` with the error recorded, through a new `merged` self-edge that records only an error, as `planned`'s does: still resumable, and never `failed`, which would end a record whose merge minted a DOI.
 Nothing here mints; the existing DOI tooling repairs a mint that failed.
@@ -2310,3 +2316,121 @@ Earlier text is annotated, in a note that begins "Annotated 2026-10-27", where t
   The ref is still the canonical tag `v<N.N.N>`, never `vv1.0.0`.
   The rows of one version in both spellings are read once and each recorded from that read, the write stays on the row's own spelling, and the cursor carries that spelling, which the route takes back.
   Any other spelling, `vv1.0.0` and `V1.0.0` among them, is still never a candidate.
+
+## Amendment 2026-10-29 (#1996): a merge made outside the gate is accepted on evidence, and the ledger names it
+
+The first production re-pull of a mirror was merged with GitHub's own merge button instead of NEMAR's gate.
+Its squash commit carries GitHub's one-line message and none of the re-pull's trailers, the tag was pushed on it, and the record stopped at `merged` with `merge-trailers`, as the Phase 6f amendment built it to.
+That amendment left what follows to "an administrator", with no command to do it, and a merge outside the gate will happen again.
+This amendment builds the way past it and says why it takes the shape it does.
+The decision text above is unchanged.
+Earlier text is annotated, in a note that begins "Annotated 2026-10-29", where this amendment changes what it says.
+
+### What was wrong
+
+- The privacy ledger's fresh-clone proof (ADR 0085, `ledger-commit-not-alone`) accepts a commit that appends a `repull-scrubbed` line beside other files only when the commit carries both trailers as git reads them (the Phase 6b amendment).
+  A squash merge made outside the gate does not, so the dataset fails the proof for good, and the release refuses it (`merge-trailers`) so as not to complete a record over a dataset that fails it.
+- Rewriting `main` to put the trailers back is not a repair: the tag, the version DOI it may have minted and every public clone name the commit.
+- Nothing else in the record or the repository could say that the merge is the re-pull's own, so the record had no way to finish, and its open row blocked every later re-pull of the dataset.
+
+### The acceptance is earned by evidence
+
+- `nemar admin repull resume <id> --accept-merge-trailers "<reason>"` accepts the merge, with a reason of 10 to 500 characters, the publication path's rule that `--acknowledge-identifier-screen` and `--accept-tag-tree` take.
+- The release waits for the tag and the version row first, as for any merge, so NEMAR's ledger line never lands on `main` before the dataset workflow tags the merge.
+- The reason is never enough.
+  Before anything is sent, `resume` reads, with the administrator's own GitHub token and from NEMAR's origin, in this order: the record is one an administrator opened (`accept-automatic`); its pull request on GitHub is merged, from the record's release branch into `main` of the dataset's own repository, with the record's merge commit (`pr-foreign`, `merge-mismatch`); the merge commit has one parent (`merge-not-squash`), which is the record's base or an enrichment-shaped descendant of it (`merge-parent-foreign`, by the same `enrichmentOnlySince` the rest of the re-pull reads `main` with); the merged head is the recorded head or an enrichment-shaped descendant of it (`merge-head-foreign`); the merge's tree is the record's commit outside `.nemar/**` and `.github/**` (`merge-tree-mismatch`), by the very comparison the release makes for the tag (`tagTreeVersus`), N.0.0's synthesized commit and N.0.1's gated head; and the merge changed the privacy ledger by appending a scrub's lines only, or not at all (`merge-ledger-foreign`).
+  It prints what it verified, line by line, before it asks the Worker.
+- Then the Worker reads all of it again, on GitHub, with its own credential, before it records anything, through `POST /admin/repulls/:id/merge-trailers/accept`: the record at `merged` or `patch_merged` with the named merge commit, opened by an administrator and by this administrator (`accept-not-yours`, which only the Worker can check); the pull request through `readRecordedPullRequest` (its own word for another branch or repository is `pull-request-mismatch`, as at the verified merge); the merged head (`merge-head-foreign`); the merge commit's one parent and its root tree, compared with the recorded tree by the top-level entries outside `.nemar` and `.github`, whose equal object ids are equal contents; and the ledger at the merge and at its parent through the Contents API.
+  Before it records anything it also checks that, when the proof needs the line, the merge's `repull-scrubbed` line names a `scanner` a ledger line can carry (`merge-ledger-foreign`, so a stored acceptance can always build its line); that `main` still holds the merge, by GitHub's comparison of the merge with `main` (`merge-not-on-main`); and that `main`'s ledger exists (`ledger-missing-on-main`) and names the merge in no line yet, since NEMAR writes only after it records (`attestation-conflict`).
+  The Worker reads "moved by enrichment only" from GitHub's comparison, which names paths: every path a file under `.nemar/` other than the ledger, `.bidsignore` or the root `participants.tsv`, added or modified, in at most 20 commits, and fewer than the 300 files GitHub lists.
+  That is a weaker reading than the CLI's, which reads each commit's content.
+  Both must pass through `resume`; the route itself is an administrator's, and a direct call to it gets the Worker's reading alone, against the record's own `synth_tree`, `head_sha` and `base_sha`.
+  That is the trust boundary: the Worker does not take the caller's word for anything it can read on GitHub, and it relies on the record for what the record already says.
+- One rule for exit codes, on a first acceptance and on every later run alike: a refusal on the evidence, or on what `main` holds, writes nothing, not even the step's error, and exits 1, because running again does not change it; a GitHub or a NEMAR API that could not be read, or a line not yet written or not yet seen on `main`, exits 3.
+- The acceptance is recorded once, with its reason, the administrator and the time, in `upstream_repull_merge_acceptances` (migration 0113, keyed by the record and the pull request) and in an audit row (`repull_merge_trailers_accepted`).
+  A later `resume` finds it and goes on with no flag; a second acceptance of the same merge is a replay, and of another merge is refused.
+- After it, `resume` goes on exactly as for a gated merge: the lineage for N.0.0, the sweep stamps, the lock of the objects the copy wrote, N.0.1 or `complete`.
+  The output says what this run verified, what the Worker read, and what was accepted, with the reason; a later run says plainly that the merge was accepted earlier, by whom, when and on what reason.
+  A run given the flag that does not reach a merge's release, whether it ends normally or stops on a refusal, says the flag changed nothing.
+- The automatic path is not widened: an automatic record is refused (`accept-automatic`) by the CLI and by the Worker, and a dispatched finish refuses the flag, because the Worker writes the automatic path's merges with the trailers, and an automatic record merged outside the gate is an administrator's to look at, not to accept.
+
+### The evidence a fresh clone reads is one ledger line, written by NEMAR
+
+The choice this amendment had to make is where the proof finds that one trailer-less commit is accepted, so that a fresh clone with no database can tell, and nothing else is loosened.
+It is one line in the privacy ledger itself, `repull-merge-accepted`, appended to `.nemar/corrections.jsonl` on `main` in a commit of its own, after the merge, by NEMAR's Worker.
+The line names the accepted merge commit by its full id (`commit`) and the record's plan digest (`plan`), carries the version as a tag, empty counts, the `scanner` of the `repull-scrubbed` line the merge appended, the verification `squash-merge-verified`, and the re-pull's fixed actor `nemar-repull`, and nothing else (`shared/repull-merge-acceptance.ts`).
+
+Why the ledger, and not the other places a fact could live:
+
+- **A git note or another ref.** A clone does not fetch notes or a ref outside `refs/heads` and `refs/tags` unless asked, so a fresh clone would not see it, and the proof would have to know to ask.
+  A ref is also moved or deleted by anyone with push access, carries no history, and has nothing like the ledger's validation.
+- **A file of its own under `.nemar/`.** A fresh clone sees it, but it would be a second record beside the ledger with none of the ledger's rules: no closed vocabulary, no validation at every tip, no word that the ledger's command line refuses to type, and nothing that keeps it append-only.
+  The ledger already is the record of what NEMAR did to a dataset, and this is one more thing NEMAR did.
+- **An allowlist handed to the proof from NEMAR's database.** The proof is the one check of a dataset's history that needs no database, and it runs where the database is not reachable; a list from it would make the proof's answer depend on a row a fresh clone cannot see.
+- **The reason in the line.** The reason is free text an administrator types, and the ledger refuses free text by design (ADR 0085, ADR 0036): a line in a public repository is the one place a value must never reach.
+  The reason stays in NEMAR's database and in the audit row.
+- **A line that names the scrub line it vouches for, rather than the commit.** It would survive a history rewrite, since the ledger's text does, but an identical line appended in a second commit would be vouched for too.
+  A full commit id vouches for exactly one commit.
+
+The proof's rule (`ledgerChecks` in `scripts/scrub/git/git-lib.ts`), as amended:
+
+- A commit that touches the ledger and other files, appends scrub lines only, edits no line before them, appends a `repull-scrubbed` line, and does not carry both trailers, is accepted only when the ledger at a branch tip (`refs/heads/`, `refs/remotes/`, the tips `ledger-invalid` reads) holds a valid `repull-merge-accepted` line naming it in full, and the commit is in that tip's first-parent history.
+  A tag never vouches: it is pushed on the merge, before NEMAR can name it.
+- Every commit an acceptance line names must be vouched for by some branch tip, its line there and the commit a re-pull's merge in that tip's first-parent history, or the proof fails with a reason of its own, `ledger-acceptance-unmatched`, counted once per named commit whichever tips carry the line: a forged or an unrelated id, a commit every tip that names it reaches only through a merge's second parent, a commit that appends no `repull-scrubbed` line, one that touches only the ledger.
+  So a line never widens the rule for any commit but the one it names, and a missing line leaves that commit `ledger-commit-not-alone`, as before.
+- Two readings are deliberate.
+  A line naming a re-pull's merge that does carry its trailers, as the proof reads them, is matched: that commit passes on its own, so the line changes nothing.
+  The Worker cannot read trailers as git does, and `resume` holds a merge to its record's own trailer values, stricter than the proof's patterns, so a merge whose trailers carry other values is accepted, and the line written for it must not fail the proof.
+  And a named commit is counted unmatched once, whichever tips carry its line, and only when no tip vouches for it; this keeps a branch that brought `main` in through a second parent (GitHub's "Update branch") from being counted a second time for `main`'s line, but such a branch still fails the proof, on its own merge commit, which appends the scrub's line and the acceptance beside the merge's files (`ledger-commit-not-alone`, as before); the scrub runbook deletes merged branches before the clone.
+- The line is validated like every other (`ledger-invalid`): `commit` must be 40 lowercase hex digits and `plan` a `sha256:` digest, both present on this word and on no other, with exactly one version and the verification `squash-merge-verified`, which no other word may carry; a tip whose ledger does not validate vouches for nothing.
+- The commit that carries the line must touch the ledger only: written beside another file, it is a ledger commit that is not alone.
+- `verify: ok` says `ledgerAcceptances=N`, the merges without their trailers a line vouched for, when there is one; a line naming a merge that carries its trailers is matched and not counted there.
+- What the proof does not prove, as for the scrub's words: that NEMAR wrote the line.
+  Nothing in a clone tells NEMAR's commit from one made by hand with the same line; the bound is the same one the scrub's words have.
+  `ledger-cli.ts append` refuses the word (`action-written-by-nemar-only`), and the line holds only fixed words and hex.
+
+### Who writes the line, and how
+
+- The Worker writes it, with the credential enrichment already commits `.nemar/` files to `main` with, through the Contents API, as `nemarAdmin` like every backend commit on a dataset, with a fixed message that names no dataset.
+  No new secret, no workflow and no ruleset change is needed.
+  A person does not write it: the CLI never pushes the line.
+- The write is leased on the ledger blob the Worker read: GitHub refuses it when another writer changed the ledger in between, and the Worker reads again, so nothing appended in between is dropped.
+  The new text is the read text and one line; the line is a function of the stored acceptance, so a write whose answer was lost is found on the next request and not written twice.
+  A line on `main` that already names the merge before the acceptance is recorded is not NEMAR's, since NEMAR writes only after it records, so the acceptance is refused (`attestation-conflict`) with nothing written; one that is not NEMAR's bytes and appears between the record and the write is refused the same way, the acceptance stays recorded without its line, and the release waits for an administrator.
+  Neither is ever overwritten.
+- Every request, a later run's replay included, reads `main`'s ledger first: a line already there is seen and not written again, and a missing one (a write whose answer was lost, a GitHub that answered a write it did not make, a line reverted) is written once more, and only when, just before the write, GitHub's comparison says `main` still holds the merge (`merge-not-on-main` otherwise, nothing written).
+  The residual: the write is leased on the ledger's blob, not on `main`'s head (the Contents API has no compare-and-swap on a branch head), so a rewrite of `main` that lands between that comparison and the write, and leaves the ledger's blob as it was, is not caught by the write itself; the line would then name an id the rewritten history does not hold, and the fresh-clone proof fails closed on it (`ledger-acceptance-unmatched`).
+- The line is written only when the proof needs it: when the merge appends a `repull-scrubbed` line beside other files.
+  A merge that does not touch the ledger (N.0.1's never does, since it replays no `.nemar/` path, and N.0.0's does not when its scrub changed nothing) is accepted with no line, because a line naming a commit the proof does not need it for fails the proof on its own.
+- The release is refused by the Worker unless it reads the needed line on `main` itself when the release is recorded (`acceptance-unattested`), whatever a caller or a stored flag says, and `resume` reads the line back from NEMAR's origin before it goes on (`attestation-unseen`, which the next run takes up).
+- The commit is accepted where the re-pull reads `main` after N.0.0's merge, and nowhere else: N.0.1 is made on a `main` that holds it (`checkMain` with `acceptances`, and `findPatchCommit`), as a fourth shape beside enrichment's three, a commit whose only change appends valid acceptance lines to the ledger and edits none before them.
+  Before a merge no acceptance belongs on `main`, so the gates, the merge gate and the re-synthesis still refuse one, and a release branch never takes one, since a pull request that carried such a line would land it beside the re-pull's files, which the proof refuses.
+  The `.nemar/**` rule of the Phase 6c amendment is unchanged: a line that lands between a plan and its execution makes the plan stale, which cannot happen while the record that wrote it is the dataset's one open record.
+- A push to `main` that touches only the ledger runs the repository's BIDS validation shim and nothing else, as the scrub runbook says of its own ledger commit (step 13, "What a push sets off"); that is read from the runbook, not observed for this commit.
+
+### What the line is not
+
+- It is not a recorded correction (decision 1, as the Phase 6b amendment corrected it): it changes no byte of the dataset.
+  The rule, corrected again: a recorded correction is a line whose word is none of `import-scrubbed`, `repull-scrubbed` and `repull-merge-accepted` (`TOOL_ACTIONS` in `scripts/scrub/ledger.ts`, which the plan and N.0.1's ledger check read).
+- It holds nothing: a re-import's history hold (ADR 0089) still reads `import-scrubbed` lines only.
+
+### Limits, and what is left open for the owner
+
+- **A history rewrite re-ids the commit, and re-accepting it is not supported.**
+  ADR 0085's rewrite gives every commit a new id, and the ledger's text is carried over unchanged, so after a rewrite of a dataset with an accepted merge the line names an id the history no longer holds.
+  The proof then fails closed, as it does for a forged id (`ledger-commit-not-alone` and `ledger-acceptance-unmatched`, tested on a forged id, not on a rewrite), and step 14 of the scrub runbook stops.
+  An acceptance cannot be made again for the rewritten commit: it is taken only while the record is at `merged`, and the record is complete by then; the ledger's command line refuses the word; and a line a person appends is what the proof cannot tell from NEMAR's.
+  The decision, recorded here for the owner: before a rewrite, the administrator checks the dataset's ledger for `repull-merge-accepted` (the scrub runbook says how), and a dataset that has one is not rewritten until the owner decides between translating the line through the rewrite's commit map (a tool not built) and another path.
+- **An automatic record merged outside the gate stays at `merged`.**
+  Nothing accepts it; it keeps the dataset's next re-pull blocked until an administrator decides, which this amendment does not build.
+- **An N.0.1 merged before its gates were recorded** has no gated head to compare with, so its acceptance is refused (`tree-anchor-missing`), and its release could not compare the tag either.
+- **The release's own tag check** (the Phase 6e amendment) still reads only that the tag contains the merge; the acceptance's order (the tag first) is what keeps the line after the tag, and that the dataset workflow tags the squash merge and not a later head of `main` is the open item it was.
+- **The Worker still takes `resume`'s word that a merge carries its trailers** when no acceptance is recorded, as before: it cannot read trailers as git reads them.
+  What it checks itself is every acceptance, and the line before a release.
+- **On the mirror that prompted this**, `resume --accept-merge-trailers` is the way on; this amendment does not run it, and what the evidence reads there is seen only when the administrator runs it.
+
+### Checked only against stand-ins
+
+The suites drive the real `resume` (`test/repull-accept-merge-trailers-cli.test.ts`; N.0.1 over NEMAR's acceptance commit in `test/repull-accept-merge-trailers-patch-cli.test.ts`; an N.0.1 merged outside the gate, after and before its gates, in `test/repull-patch-cli.test.ts`; the dispatched finish in `test/repull-automatic-cli.test.ts`), the plan over a ledger holding the word (`test/repull-plan.test.ts`), the real Worker routes over bun:sqlite, the real `git` and `git-annex`, and the proof's own rule on a fresh clone of the origin the Worker wrote to, and the proof's rule through `git-scrub verify --fresh-clone` on hand-made histories (`test/scrub/git/fresh-clone.test.ts`).
+GitHub is the suites' stand-in, answering from and writing to the bare origin, so these are what only production can show: that the Contents API takes the write leased on the blob's `sha` and answers a stale one with 409 or a 422 that says it does not match; that GitHub's comparison lists the files as the stand-in does, compares a commit with `main` by name, and answers 404 for two commits with no common history; and that the Git Data API answers a commit's parents and a tree's entries as the stand-in does.
+The stand-in's squash also takes the head's tree, where GitHub's is a three-way merge onto `main`; the two differ only when `main` moved since the pull request's base, which the suites that move `main` read for the parent and the tree, not for what GitHub would merge.

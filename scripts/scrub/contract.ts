@@ -483,12 +483,19 @@ export interface LedgerEntry {
     // The importer's prepare step scrubbed the tree before its first push (ADR 0089).
     | "import-scrubbed"
     // An upstream re-pull's delta scrub, before its one commit (ADR 0111).
-    | "repull-scrubbed";
+    | "repull-scrubbed"
+    // NEMAR's Worker accepted a re-pull's squash merge made without its trailers (ADR 0111, the
+    // amendment of 2026-10-29), in a commit of its own after the merge.
+    | "repull-merge-accepted";
   versions: string[];
   counts: Record<string, number>;
   scanner: string;
   verification: string;
   actor: string;
+  /** `repull-merge-accepted` only, and always there: the accepted merge commit, in full. */
+  commit?: string;
+  /** `repull-merge-accepted` only, and always there: the record's plan digest. */
+  plan?: string;
 }
 
 function isObject(x: unknown): x is Record<string, unknown> {

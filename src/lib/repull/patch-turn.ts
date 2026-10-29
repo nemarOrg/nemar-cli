@@ -208,11 +208,13 @@ async function makePatch(
       `NEMAR's nemar-s3 is not at ${ctx.datasetId}/objects/, where the keys N.0.1 replays are read.`,
     );
   }
-  // `main`: the N.0.0 merge, or an enrichment-shaped descendant of it.
+  // `main`: the N.0.0 merge, or an enrichment-shaped descendant of it, NEMAR's acceptance of that
+  // merge included when it was made without its trailers.
   const main = await checkMain({
     work: scratch.dir,
     baseSha: row.merge_sha as string,
     env: scratch.env,
+    acceptances: true,
   });
   const ref = releaseRefOf(version);
   const existing = (await originRefs(scratch, [ref])).get(ref);

@@ -10,8 +10,11 @@ import { HttpError } from "../retry";
 import { GITHUB_API, ORG_NAME, ghHeaders } from "./shared";
 import { githubFetchWithRetry } from "./transport";
 
-/** Identity used for all backend-initiated commits and tags on dataset repos. */
-const NEMAR_COMMITTER = { name: "nemarAdmin", email: "nemarAdmin@osc.earth" };
+/**
+ * Identity used for all backend-initiated commits and tags on dataset repos. Exported for the
+ * re-pull acceptance's ledger write (`upstream-repull-acceptance-github.ts`), not by the barrel.
+ */
+export const NEMAR_COMMITTER = { name: "nemarAdmin", email: "nemarAdmin@osc.earth" };
 
 /**
  * Detect a GitHub Contents-API stale-SHA conflict on an update PUT. When the

@@ -274,6 +274,53 @@ export async function recordRepullReleased(
   );
 }
 
+/** An administrator's acceptance of a merge made without its trailers, as the Worker records it. */
+export interface RepullMergeAcceptance {
+  repull_id: number;
+  pr: "n0" | "n1";
+  merge_sha: string;
+  reason: string;
+  accepted_by: number;
+  accepted_at: string;
+  attestation_needed: 0 | 1;
+  scanner: string | null;
+  attestation_sha: string | null;
+  attested_at: string | null;
+}
+
+/** What the Worker read on GitHub before it accepted (null on a replay). */
+export interface RepullAcceptanceEvidence {
+  pull_request: number;
+  merged_head: string;
+  head_moved_by_enrichment: boolean;
+  parent: string;
+  parent_moved_by_enrichment: boolean;
+  tree: string;
+  ledger: "untouched" | "scrub-lines" | "repull-scrub-lines";
+}
+
+/**
+ * Accept the record's merge made without its trailers (ADR 0111, the amendment of 2026-10-29): the
+ * Worker reads the merge on GitHub, records the acceptance and appends the ledger line that names
+ * it to `main`. Without `reason` it only replays an acceptance already recorded, writing the line
+ * when it is not there yet (`merge-trailers-not-accepted` when none is recorded).
+ */
+export async function acceptRepullMergeTrailers(
+  id: number,
+  body: { pr: "n0" | "n1"; merge_sha: string; reason?: string },
+): Promise<{
+  acceptance: RepullMergeAcceptance;
+  evidence: RepullAcceptanceEvidence | null;
+  attestation_line: string | null;
+  replayed: boolean;
+}> {
+  return request(
+    `/admin/repulls/${id}/merge-trailers/accept`,
+    { method: "POST", body: JSON.stringify(body) },
+    true,
+  );
+}
+
 /** The closed word of a `/admin/repulls` refusal (`rawBody.code`), or undefined. */
 export function repullErrorCode(err: unknown): string | undefined {
   if (!(err instanceof ApiError)) return undefined;

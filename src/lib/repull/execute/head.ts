@@ -16,9 +16,21 @@
  *  - `.bidsignore` changed to exactly what `withBidsignoreEntry` makes of it with `.nemar/`;
  *  - a root `participants.tsv` added that is, byte for byte, the placeholder of that commit's
  *    subjects (`buildPlaceholderParticipantsTsv(enumerateBidsSubjects(tree))`).
+ * On `main` only (`acceptances`), one more shape, which is NEMAR's and not enrichment's: a commit
+ * whose ONLY change is the privacy ledger, with nothing before its new lines edited and every new
+ * line a valid acceptance of a re-pull merge made without its trailers (`repull-merge-accepted`,
+ * ADR 0111, the amendment of 2026-10-29), which the Worker writes on `main` after the merge. Never
+ * on a release branch: a pull request that carried such a line would land it beside the re-pull's
+ * files, which the privacy ledger's fresh-clone proof refuses.
  * The commits must already be in the working clone (the caller fetches the ref).
  */
 
+import { MERGE_ACCEPTED_ACTION, parseLedgerText } from "../../../../scripts/scrub/ledger.js";
+import {
+  ENRICHMENT_MAX_COMMITS,
+  LEDGER_REPO_PATH,
+  ledgerLines,
+} from "../../../../shared/repull-merge-acceptance.js";
 import {
   NEMAR_BIDSIGNORE_ENTRY,
   withBidsignoreEntry,
@@ -36,13 +48,13 @@ export type HeadVerdict =
 /** What a caller learns of a head: accepted, someone else's, or not readable from this clone. */
 export type HeadCheck = "ok" | "foreign" | "unreadable";
 
-/** More commits than enrichment ever makes between two of our own writes is not enrichment. */
-export const ENRICHMENT_MAX_COMMITS = 20;
+/** More commits than enrichment ever makes between two of our own writes is not enrichment (shared). */
+export { ENRICHMENT_MAX_COMMITS };
 
 /** The depth a fetch of a moved ref needs for {@link enrichmentOnlySince} to reach `from`. */
 export const MOVED_REF_FETCH_DEPTH = ENRICHMENT_MAX_COMMITS + 2;
 
-const LEDGER = ".nemar/corrections.jsonl";
+const LEDGER = LEDGER_REPO_PATH;
 
 interface Change {
   srcMode: string;
@@ -132,13 +144,39 @@ async function isEnrichment(work: string, commit: string, c: Change): Promise<bo
 }
 
 /**
+ * Whether one change, the commit's only one, appends acceptance lines to the privacy ledger and
+ * nothing else: the earlier lines kept as they were, every new line a valid ledger line whose word
+ * is `repull-merge-accepted`. A line that does not validate, or of any other word, is not this.
+ */
+async function isAcceptanceAppend(work: string, c: Change): Promise<boolean> {
+  if (c.path !== LEDGER || c.dstMode !== "100644" || (c.status !== "A" && c.status !== "M")) {
+    return false;
+  }
+  const before = c.status === "A" ? "" : await blob(work, c.srcOid);
+  const after = await blob(work, c.dstOid);
+  if (before === null || after === null) return false;
+  const was = ledgerLines(before);
+  const now = ledgerLines(after);
+  if (now.length <= was.length || was.some((l, i) => l !== now[i])) return false;
+  try {
+    return parseLedgerText(now.slice(was.length).join("\n")).every(
+      (e) => e.action === MERGE_ACCEPTED_ACTION,
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Ok when `to` is `from`, or descends from it by enrichment-shaped commits only (see the module
- * comment); `head-foreign` when it does not; `unreadable` when the clone cannot tell.
+ * comment); `head-foreign` when it does not; `unreadable` when the clone cannot tell. With
+ * `acceptances`, for a check of `main` only, a commit of NEMAR's acceptance lines counts too.
  */
 export async function enrichmentOnlySince(
   work: string,
   from: string,
   to: string,
+  opts: { acceptances?: boolean } = {},
 ): Promise<HeadVerdict> {
   if (from === to) return { ok: true, head: to, commits: 0 };
   const ancestor = await git(work, ["merge-base", "--is-ancestor", from, to], { ok: true });
@@ -168,6 +206,13 @@ export async function enrichmentOnlySince(
     const changes = await changesOf(work, parents[0] as string, commit as string);
     if (changes === null) {
       return { ok: false, code: "unreadable", detail: "a commit's changes could not be read" };
+    }
+    if (
+      opts.acceptances &&
+      changes.length === 1 &&
+      (await isAcceptanceAppend(work, changes[0] as Change))
+    ) {
+      continue;
     }
     for (const c of changes) {
       if (!(await isEnrichment(work, commit as string, c))) {

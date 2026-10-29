@@ -14,7 +14,9 @@
  *    tools only (ADR 0111, Consequences). It is recorded from the open status too, for a pull
  *    request merged before its gates were (both counts then say so).
  *  - released: the version row exists with a DOI, the tag `v<version>` names the commit the
- *    caller reports, and that commit contains the merge. In the same batch, and only when the
+ *    caller reports, and that commit contains the merge; a merge an administrator accepted without
+ *    its trailers also needs the ledger line that names it, read on `main` now by the Worker
+ *    (`acceptance-unattested`, `upstream-repull-acceptance.ts`). In the same batch, and only when the
  *    edge applies: the version's lineage when the caller verified the tagged tree (N.0.0 only,
  *    decision 4), and the dataset's hed, channel-montage, data and availability stamps are
  *    re-armed (decision 2), so each sweep reads the new version again.
@@ -51,6 +53,7 @@ import {
   DATA_CHECKED_AT_PATH,
   HED_CHECKED_AT_PATH,
 } from "./sweep-stamps.js";
+import { attestationOnMain, readAcceptance } from "./upstream-repull-acceptance.js";
 import {
   githubRead,
   isObject,
@@ -546,6 +549,23 @@ export async function recordRepullReleased(
   }
   const version = row[cols.version] as string;
   const mergeSha = row[cols.mergeSha] as string;
+  // A merge accepted without its trailers is released only once the Worker itself reads, on
+  // `main`, the ledger line that names it (ADR 0111, the amendment of 2026-10-29): the line is what
+  // lets a fresh clone pass the privacy ledger's proof, so a release without it would leave the
+  // dataset failing that proof. Read now, never taken from the acceptance's stored flag.
+  const acceptance = await readAcceptance(db, id, body.pr);
+  if (acceptance) {
+    const seen = await attestationOnMain(env, row, acceptance);
+    if (!seen.ok) return { ...seen.refusal, row };
+    if (!seen.value) {
+      return {
+        status: 409,
+        code: "acceptance-unattested",
+        message: `The merge of re-pull #${id} was accepted without its trailers, and the ledger line that names it is not on main; resume writes it first.`,
+        row,
+      };
+    }
+  }
   const versionRow = await db
     .prepare(RELEASED_VERSION_SQL)
     .bind(row.dataset_id, version, version)
