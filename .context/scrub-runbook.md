@@ -427,9 +427,16 @@ rm -rf $W/check
    A re-pull merged outside NEMAR's gate and accepted (`nemar admin repull resume --accept-merge-trailers`) leaves a `repull-merge-accepted` line on `main` that names the merge commit by its id (ADR 0111, the amendment of 2026-10-29).
    The rewrite gives that commit a new id, so step 14 would then fail closed (`ledger-commit-not-alone`, `ledger-acceptance-unmatched`), and an acceptance cannot be made again for the rewritten commit.
 
+   The check fails closed: a read that does not succeed stops it, and the raw media type serves a ledger of any size (the default JSON answer leaves `content` empty past 1 MB).
+
    ```bash
-   gh api "repos/nemarDatasets/$D/contents/.nemar/corrections.jsonl" --jq .content | base64 -d | grep -c '"action":"repull-merge-accepted"'   # must print 0
+   set -o pipefail
+   gh api -H 'Accept: application/vnd.github.raw+json' "repos/nemarDatasets/$D/contents/.nemar/corrections.jsonl" > $W/ledger-main.jsonl   # any failure stops here
+   test -s $W/ledger-main.jsonl                                                                                                     # read, and not empty
+   N=$(grep -c '"action":"repull-merge-accepted"' $W/ledger-main.jsonl || true); echo "$N"                                     # must print 0
    ```
+
+   A 404 there means the dataset has no ledger on `main`, so it has no acceptance either; any other failure is not an answer, and the check is run again.
 
    **If it prints more than 0, STOP and ask the owner**: such a dataset is not rewritten until the owner decides how its acceptance is carried through the rewrite.
 
@@ -993,7 +1000,7 @@ rm -rf $W/fresh
 A fresh clone needs no `git annex init`: the pushed `git-annex` branch is read from `refs/remotes/origin/git-annex`.
 It checks, over every ref: no old key anywhere, but the upstream checksums of the provenance file under the same rule as step 7 (`provenance-unannotated`, and the same two counts on the line and in the proof); every EDF and BDF key is new or planned clean; no dropped path; JSON blanked and structural edits applied; appended text once at the end; the tag names equal the plan's `tags`, plus any named with `--allow-tag` (`tag-names-not-plan`, `allowed-tag-missing`); every commit that touches `.nemar/corrections.jsonl` touches nothing else (`ledger-commit-not-alone`), except a scrub's own commit, which appends only scrub lines beside the files it scrubbed and edits no earlier line: the importer's `import-scrubbed` (ADR 0089), or an upstream re-pull's `repull-scrubbed`, whose commit must also carry the `Upstream-Snapshot:` and `Repull-Plan:` trailers (ADR 0111; verify cannot tell either commit from one made by hand, it only bounds what such a commit may do to the ledger and what it must say of itself), or, without the trailers, is named in full by a `repull-merge-accepted` line in the ledger at a branch tip whose first-parent history holds it (ADR 0111's amendment of 2026-10-29); the ledger at every head tip is valid for this dataset (`ledger-invalid`); every `repull-merge-accepted` line names such a commit and nothing else (`ledger-acceptance-unmatched`); and in the pushed `git-annex` branch, no old key is held anywhere (`annex-old-key-held`), every old key is dead (`annex-old-key-not-dead`) and every new key is recorded present (`annex-new-key-unregistered`; `annex-branch-missing` if the branch was not pushed).
 It does not compare commit counts, tip paths or annex refs, so the ledger commit of step 13 is tolerated.
-Exit 0 prints `verify: ok mode=fresh-clone <counts>` (step 7's counts and `ledgerCommits`; `allowedTags=N` too, only when `--allow-tag` was given; `ledgerAcceptances=N`, only when a `repull-merge-accepted` line vouched for a commit) and writes `$W/git-verified.json` in mode `fresh-clone` (overwriting step 7's), which steps 15a and 15b require, with this same `keymap.json` and `plan.json`.
+Exit 0 prints `verify: ok mode=fresh-clone <counts>` (step 7's counts and `ledgerCommits`; `allowedTags=N` too, only when `--allow-tag` was given; `ledgerAcceptances=N`, only when a `repull-merge-accepted` line vouched for a re-pull merge made without its trailers, and counting those merges only) and writes `$W/git-verified.json` in mode `fresh-clone` (overwriting step 7's), which steps 15a and 15b require, with this same `keymap.json` and `plan.json`.
 Its `provenanceHashesKept` and `provenanceBlobsKept` must equal step 7's: the pushed history is the one verified there.
 Exit 4 prints `verify: FAIL reason=... count=...` for each reason and removes any earlier proof.
 The reasons in this mode: `tag-names-not-plan`, `allowed-tag-missing`, `old-key-present`, `old-key-in-message`, `provenance-unannotated`, `provenance-too-large`, `dropped-path-present`, `blank-key-not-empty`, `json-ops-not-applied`, `json-unparseable`, `append-missing`, `append-duplicated`, `edf-key-unaccounted`, `edf-path-not-a-pointer`, `ledger-commit-not-alone`, `ledger-invalid`, `ledger-acceptance-unmatched`, `annex-branch-missing`, `annex-old-key-held`, `annex-old-key-not-dead`, `annex-new-key-unregistered`.

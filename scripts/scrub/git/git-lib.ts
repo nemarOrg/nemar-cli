@@ -1456,9 +1456,13 @@ async function scrubLedgerCommitKind(
  * Two readings are deliberate. A line naming a re-pull's merge that does carry its trailers is
  * matched, not unmatched: that commit passes on its own, so the line changes nothing, and the
  * Worker, which cannot read trailers as git does, may write it for a merge whose trailers carry
- * other values than the record's. And a line is matched when ANY tip vouches for its commit, so a
- * branch that brought `main` in through a second parent (GitHub's "Update branch") does not fail
- * for carrying `main`'s line.
+ * other values than the record's. And a named commit is counted unmatched once, and only when no
+ * tip vouches for it, so a branch that brought `main` in through a second parent (GitHub's "Update
+ * branch") is not counted a second time for `main`'s line. Such a branch still FAILS the proof, on
+ * its own merge commit, which appends the scrub's line and the acceptance beside the merge's files
+ * (`ledger-commit-not-alone`); the scrub runbook deletes merged branches before the clone. The
+ * `accepted` count is of merges without their trailers a line vouched for, never of a matched line
+ * naming a merge that carries them.
  *
  * What this does NOT prove, as for the scrub's words: that NEMAR wrote the line. Nothing in a
  * clone tells NEMAR's commit from one made by hand with the same line; the word cannot be typed at
