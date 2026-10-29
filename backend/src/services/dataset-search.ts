@@ -14,6 +14,11 @@ import {
   buildDatasetFilterClauses,
   buildFtsMatch,
 } from "./dataset-filters";
+import {
+  DATASET_SUMMARY_SELECT_SQL,
+  type DatasetSummaryRow,
+  buildDatasetSummaryText,
+} from "./dataset-summary-text";
 
 const EMBEDDING_MODEL = "@cf/baai/bge-small-en-v1.5";
 
@@ -78,29 +83,15 @@ export interface SearchResult {
   snippet?: string;
 }
 
-export interface DatasetEmbedRow {
-  name?: string | null;
-  modalities?: string | null;
-  tasks?: string | null;
-  authors?: string | null;
-  readme?: string | null;
-}
+export type DatasetEmbedRow = DatasetSummaryRow;
 
 /**
- * Build the embedding text for a `datasets` row -- the single embed-text
- * builder (#646); reembedDatasetVector is the only writer of dataset vectors.
+ * The embedding text for a `datasets` row -- the single embed-text builder
+ * (#646); reembedDatasetVector is the only writer of dataset vectors. It is
+ * the same text the reranker reads; see dataset-summary-text.ts for why it is
+ * the abstract and keywords, not the README.
  */
-export function buildDatasetEmbedText(row: DatasetEmbedRow): string {
-  return [
-    row.name ?? "",
-    row.modalities ? `Modalities: ${row.modalities}` : "",
-    row.tasks ? `Tasks: ${row.tasks}` : "",
-    row.authors ? `Authors: ${row.authors}` : "",
-    row.readme ? row.readme.slice(0, 1000) : "",
-  ]
-    .filter(Boolean)
-    .join("\n");
-}
+export const buildDatasetEmbedText = buildDatasetSummaryText;
 
 /**
  * Re-embed a single dataset's Vectorize vector from its current `datasets`
@@ -126,14 +117,14 @@ export async function reembedDatasetVector(
   }
   try {
     const row = await db
-      .prepare("SELECT name, modalities, tasks, authors, readme FROM datasets WHERE dataset_id = ?")
+      .prepare(`SELECT ${DATASET_SUMMARY_SELECT_SQL} FROM datasets d WHERE d.dataset_id = ?`)
       .bind(datasetId)
       .first<DatasetEmbedRow>();
     if (!row) {
       console.warn(`[reembed] No datasets row for ${datasetId}, skipping`);
       return false;
     }
-    const text = buildDatasetEmbedText(row);
+    const text = buildDatasetSummaryText(row);
     if (!text.trim()) {
       console.warn(`[reembed] Empty embed text for ${datasetId} (all fields blank), skipping`);
       return false;
