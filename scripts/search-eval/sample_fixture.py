@@ -87,6 +87,9 @@ FORCED = {
         "nm000177",
     ],
     "author-query": ["on001787", "on001971", "on002578", "on002680"],
+    # the only datasets that use the word in their name, abstract or tasks; without them the
+    # sample cannot tell 'simulation' from a typo of 'stimulation'
+    "simulation": ["nm000390", "on007720", "nm000207"],
     "adhd": ["on005863", "on006018", "nm000256", "nm000255", "on005512", "on006260"],
 }
 
