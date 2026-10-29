@@ -935,15 +935,23 @@ export interface DatasetSearchEnvelope {
  * `semanticSearchHydrated(..., limit * 2)` calls and `count: filtered.length`
  * taken from that limit-derived window), not in any individual query.
  *
- * Combines three strategies:
+ * Combines these strategies:
  *  - Exact dataset-ID lookup (nm###### / on###### managed mirrors / ds######
  *    legacy or OpenNeuro source) via D1, since embeddings and the FTS index
  *    (name/description/authors/tasks/modalities/readme) do not cover the id, so
  *    a literal id query would otherwise miss -- notably every `on######` mirror,
  *    whose NEMAR-assigned id appears in none of its OpenNeuro-sourced text.
- *  - Vectorize semantic similarity (when `ai`/`vectorize` are provided).
- *  - D1 LIKE/FTS text search as a fallback, also used to backfill semantic
- *    results when Vectorize returns no hits.
+ *  - A phrase (two or more content words) with AI and Vectorize bound is
+ *    answered by relevance, not reach: {@link searchByRelevance} gathers a
+ *    bounded pool, has a cross-encoder judge it, and returns only what it keeps
+ *    (`reranked: true`; ADR 0116). Any failure there falls through to:
+ *  - Vectorize semantic similarity (when `ai`/`vectorize` are provided),
+ *    fused with FTS5 lexical search by reciprocal-rank fusion.
+ *  - D1 FTS text search alone, also used to backfill semantic results when
+ *    Vectorize returns no hits.
+ *  Before any of these, {@link analyzeQuery} drops words found in most
+ *  datasets from the lexical query and replaces a word no dataset contains by a
+ *  catalog word one typo away (`corrected_query`).
  *
  * `modality`/`has_hed` filter in SQL, pushed into every tier (including the
  * exact-id lookup) via `filters`, rather than being re-applied in JS on the

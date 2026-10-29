@@ -2796,10 +2796,17 @@ searchCommand
     "after",
     `
 Description:
-  Performs semantic search across the NEMAR dataset catalog. Unlike
-  --search on the list command (which uses exact text matching), this
-  uses AI embeddings to find conceptually similar datasets. The free-text
-  query is always the <query> argument -- this command has no --search flag.
+  Searches the NEMAR dataset catalog by meaning. Unlike --search on the list
+  command (which uses exact text matching), this uses AI embeddings and a
+  relevance judgment to find datasets that answer what you describe. The
+  free-text query is always the <query> argument -- this command has no
+  --search flag.
+
+  Describe what you want in a few words. A phrase returns only the datasets
+  judged to answer it, so a short list is a real answer, not a gap; a single
+  word lists every dataset that mentions it. Words found in most datasets
+  ("study", "eeg") do not decide a match. A word no dataset contains is
+  replaced by a catalog word one typo away, and the command says so.
 
   Accepts the same license/author/task/doi/complete/recent filters and facet
   flags (--subjects, --age, --source, ...) as 'nemar dataset list --help'.
