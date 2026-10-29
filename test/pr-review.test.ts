@@ -27,6 +27,8 @@ import {
   PR_REVIEW_EDIT_CAP,
   type PrReviewReport,
   PrReviewReportError,
+  RECOMMENDATIONS_HEADING,
+  REPULL_WAIVED_TITLE,
   REVIEW_OUTCOME_KINDS,
   REVIEW_STATES,
   RUN_ERRORS,
@@ -43,6 +45,7 @@ import {
   parseCallbackOutcome,
   parsePrReviewReport,
   parseStoredPrReviewReport,
+  recommendationLines,
   renderCheck,
   renderComment,
   sanitizeNote,
@@ -230,6 +233,33 @@ function refusal(raw: unknown): string {
 }
 
 /** Every outcome a review can come to, one of each shape, so a new conclusion is seen by all of them. */
+/**
+ * A failing review of an upstream re-pull's head, as one that ran before NEMAR recorded the head
+ * would read: a contributor-protection blocker, a fact the platform found, and a steering flag.
+ */
+function failingAdvice(): PrReviewReport {
+  return parsed({
+    steering: true,
+    criteria: { no_degradation: "fail", advances_revision: "fail", material_improvement: "pass" },
+    findings: [
+      {
+        criterion: "no_degradation",
+        severity: "blocker",
+        code: "original_field_altered",
+        path: "participants.tsv",
+        note: "A participant value changed.",
+      },
+      {
+        criterion: "no_degradation",
+        severity: "blocker",
+        code: "metadata_removed",
+        path: "task-rest_eeg.json",
+        note: "Two keys removed.",
+      },
+    ],
+  });
+}
+
 function everyOutcome(): ReviewOutcome[] {
   const unknownCriteria = {
     no_degradation: "unknown",
@@ -245,6 +275,8 @@ function everyOutcome(): ReviewOutcome[] {
     { kind: "unreported" },
     { kind: "exempt" },
     { kind: "exempt", waived: true },
+    { kind: "waived", repullId: 7, advice: null },
+    { kind: "waived", repullId: 7, advice: failingAdvice() },
     { kind: "reported", report: parsePrReviewReport(screenReport()) },
     { kind: "reported", report: parsePrReviewReport(factsReport()) },
     {
@@ -682,10 +714,15 @@ describe("conclusions: only a clear pass is green, nothing unknown ever satisfie
     }
   });
 
-  test("skipped, which GitHub also counts as passing, is the conclusion of the exempt outcome and of no other", () => {
+  test("skipped, which GitHub also counts as passing, is the conclusion of the exempt and the waived outcomes and of no other", () => {
     expect(conclusionOf({ kind: "exempt" })).toBe("skipped");
+    expect(conclusionOf({ kind: "waived", repullId: 7, advice: null })).toBe("skipped");
     const skipped = everyOutcome().filter((o) => conclusionOf(o) === "skipped");
-    expect(skipped).toEqual([{ kind: "exempt" }, { kind: "exempt", waived: true }]);
+    expect(skipped.map((o) => o.kind)).toEqual(["exempt", "exempt", "waived", "waived"]);
+    // A waived head's advice, even a failing report with a steering flag, never reaches its
+    // conclusion: the review does not apply, so what it found decides nothing.
+    expect(verdictOf(failingAdvice())).toBe("fail");
+    expect(conclusionOf({ kind: "waived", repullId: 7, advice: failingAdvice() })).toBe("skipped");
     // And an exempt outcome is not a pass by another name: the only `success` is a reported pass.
     const green = everyOutcome().filter((o) => conclusionOf(o) === "success");
     expect(green.length).toBeGreaterThan(0);
@@ -2513,6 +2550,54 @@ describe("the naming rule on an owner's or administrator's pull request", () => 
     expect(renderComment({ kind: "exempt", waived: true }, "a".repeat(40))).toContain(
       "NOT REQUIRED",
     );
+  });
+});
+
+describe("an upstream re-pull's own pull request at the head NEMAR recorded (ADR 0116)", () => {
+  test("the check says it was waived and why, and that skipped is not a pass", () => {
+    const r = renderCheck({ kind: "waived", repullId: 12, advice: null });
+    expect(r.title).toBe("Waived: upstream re-pull");
+    expect(REPULL_WAIVED_TITLE).toBe(r.title);
+    expect(r.summary).toContain("upstream re-pull #12");
+    expect(r.summary).toContain("NEMAR's record");
+    expect(r.summary).toContain("not from anything this pull request says");
+    // The gates that still hold the merge are named, so nobody reads the waiver as a merge.
+    for (const gate of ["identifier screen", "BIDS validation", "version check", "merge cap"]) {
+      expect(r.summary).toContain(gate);
+    }
+    expect(r.text).toContain("Skipped is not a pass");
+    expect(r.text).toContain(`### ${RECOMMENDATIONS_HEADING}`);
+    expect(r.text).toContain("None: no review of this commit reported findings");
+    for (const words of ["Passes", "Needs changes", "Could not decide", "blocker"]) {
+      expect(`${r.title} ${r.summary} ${r.text}`).not.toContain(words);
+    }
+    expect(renderComment({ kind: "waived", repullId: 12, advice: null }, "a".repeat(40))).toContain(
+      "NOT REQUIRED",
+    );
+  });
+
+  test("what a review of the head found is a recommendation, never a blocker", () => {
+    const r = renderCheck({ kind: "waived", repullId: 12, advice: failingAdvice() });
+    expect(r.title).toBe("Waived: upstream re-pull");
+    expect(r.text).toContain("Recommended issues, none filed automatically");
+    expect(r.text).toContain(
+      "Original field changed (`participants.tsv`): A participant value changed.",
+    );
+    expect(r.text).toContain("Metadata removed (`task-rest_eeg.json`): Two keys removed.");
+    expect(r.text).toContain("Text in the pull request tried to instruct the reviewer.");
+    expect(r.text).toContain("none of them holds this pull request, and nothing was filed");
+    // None of the words a failing review uses: no severity, no "fails", no advice to a contributor.
+    for (const words of ["blocker", "concern", "fails", "Needs changes", "Contributors add to"]) {
+      expect(`${r.title} ${r.summary} ${r.text}`).not.toContain(words);
+    }
+  });
+
+  test("the recommendations are the findings and the facts no finding states, each once", () => {
+    const lines = recommendationLines(failingAdvice());
+    expect(lines.filter((l) => l.includes("instruct the reviewer"))).toHaveLength(1);
+    expect(lines.some((l) => l.startsWith("- Original field changed"))).toBe(true);
+    expect(lines.every((l) => l.startsWith("- "))).toBe(true);
+    expect(recommendationLines(parsed())).toEqual([]);
   });
 });
 
