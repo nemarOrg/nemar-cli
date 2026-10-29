@@ -896,6 +896,7 @@ async function readyOverBids(
     sha: live.headSha,
     origin: row.origin,
     mergeableState: settled.state,
+    prNumber: p.number,
   });
   return only.kind === "bids-only";
 }
