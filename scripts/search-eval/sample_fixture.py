@@ -24,11 +24,68 @@ README_CHARS = 1200
 
 FORCED = {
     # bilingual / speech, and the driving, BCI and study-heavy datasets the old OR-of-words search returned for it
-    "bilingual": ["nm000241", "nm000365", "on004718", "on005345", "on005946", "on004015", "nm000228", "nm000259"],
-    "driving": ["on004118", "on004120", "on004122", "on004105", "on004123", "on004121", "on004119", "on004106", "nm000275", "on004657"],
-    "study-and-performance": ["nm000200", "nm000340", "nm000176", "nm000197", "nm000338", "nm000323", "on004395", "on004602", "on004865", "nm000314", "nm000335", "nm000184", "nm000262"],
-    "sleep": ["nm000111", "nm000185", "nm000225", "on005555", "on004348", "on005185", "on005178", "nm000481", "nm000360", "on005207", "on003768"],
-    "motor-imagery": ["nm000245", "nm000347", "nm000348", "nm000329", "nm000318", "nm000270", "nm000250", "nm000316", "nm000295", "nm000177"],
+    "bilingual": [
+        "nm000241",
+        "nm000365",
+        "on004718",
+        "on005345",
+        "on005946",
+        "on004015",
+        "nm000228",
+        "nm000259",
+    ],
+    "driving": [
+        "on004118",
+        "on004120",
+        "on004122",
+        "on004105",
+        "on004123",
+        "on004121",
+        "on004119",
+        "on004106",
+        "nm000275",
+        "on004657",
+    ],
+    "study-and-performance": [
+        "nm000200",
+        "nm000340",
+        "nm000176",
+        "nm000197",
+        "nm000338",
+        "nm000323",
+        "on004395",
+        "on004602",
+        "on004865",
+        "nm000314",
+        "nm000335",
+        "nm000184",
+        "nm000262",
+    ],
+    "sleep": [
+        "nm000111",
+        "nm000185",
+        "nm000225",
+        "on005555",
+        "on004348",
+        "on005185",
+        "on005178",
+        "nm000481",
+        "nm000360",
+        "on005207",
+        "on003768",
+    ],
+    "motor-imagery": [
+        "nm000245",
+        "nm000347",
+        "nm000348",
+        "nm000329",
+        "nm000318",
+        "nm000270",
+        "nm000250",
+        "nm000316",
+        "nm000295",
+        "nm000177",
+    ],
     "author-query": ["on001787", "on001971", "on002578", "on002680"],
     "adhd": ["on005863", "on006018", "nm000256", "nm000255", "on005512", "on006260"],
 }
@@ -46,7 +103,9 @@ def main(corpus_path: Path, out_path: Path) -> None:
     chosen = sorted(set(forced) | set(rest[: SIZE - len(set(forced))]))
     sample = [{**by_id[i], "readme": by_id[i]["readme"][:README_CHARS]} for i in chosen]
     out_path.write_text(json.dumps(sample, indent=1, ensure_ascii=False) + "\n")
-    print(f"{len(sample)} datasets, {out_path.stat().st_size // 1024} KiB -> {out_path}")
+    print(
+        f"{len(sample)} datasets, {out_path.stat().st_size // 1024} KiB -> {out_path}"
+    )
 
 
 if __name__ == "__main__":

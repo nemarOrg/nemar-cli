@@ -41,13 +41,25 @@ def main(out_dir: Path) -> None:
     def detail(dataset_id: str) -> dict:
         d = get(f"/datasets/{dataset_id}")["dataset"]
         try:
-            keywords = [k["term"] for k in json.loads(d.get("enrichment_json") or "{}").get("keywords", []) if isinstance(k, dict) and "term" in k]
+            keywords = [
+                k["term"]
+                for k in json.loads(d.get("enrichment_json") or "{}").get(
+                    "keywords", []
+                )
+                if isinstance(k, dict) and "term" in k
+            ]
         except (ValueError, AttributeError):
             keywords = []
         return {
-            "id": d["dataset_id"], "name": d.get("name") or "", "description": d.get("description") or "",
-            "authors": d.get("authors") or "", "tasks": d.get("tasks") or "", "modalities": d.get("modalities") or "",
-            "readme": d.get("readme") or "", "keywords": keywords, "subject_count": d.get("subject_count"),
+            "id": d["dataset_id"],
+            "name": d.get("name") or "",
+            "description": d.get("description") or "",
+            "authors": d.get("authors") or "",
+            "tasks": d.get("tasks") or "",
+            "modalities": d.get("modalities") or "",
+            "readme": d.get("readme") or "",
+            "keywords": keywords,
+            "subject_count": d.get("subject_count"),
         }
 
     with ThreadPoolExecutor(max_workers=8) as pool:

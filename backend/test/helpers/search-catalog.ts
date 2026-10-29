@@ -31,12 +31,17 @@ export const sampleById = new Map(catalogSample.map((r) => [r.id, r]));
 
 /** Insert the whole sample as public, active, managed datasets. */
 export function seedCatalogSample(db: Database): void {
+  seedCatalogRows(db, catalogSample);
+}
+
+/** Insert `rows` (the shape scripts/search-eval/fetch_corpus.py writes) as public, active, managed datasets. */
+export function seedCatalogRows(db: Database, rows: CatalogSampleRow[]): void {
   const insert = db.query(
     `INSERT INTO datasets (dataset_id, name, description, authors, tasks, modalities, readme,
                            enrichment_json, subject_count, owner_user_id, status, visibility, is_sandbox)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, -1, 'active', 'public', 0)`,
   );
-  for (const r of catalogSample) {
+  for (const r of rows) {
     insert.run(
       r.id,
       r.name,
