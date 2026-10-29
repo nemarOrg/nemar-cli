@@ -187,6 +187,17 @@ describe("every row holds what it should", () => {
       expect(
         await insertRow(e, TABLE, acceptance(third, { attested_at: "2026-10-29" })),
       ).toBeNull();
+      // The scanner's bounds, 7 and 40 hex digits, are both inside.
+      const fourth = await repull(e, { dataset_id: "xx090126" });
+      const scanner40 = `identifier-scan@${"a".repeat(40)}`;
+      expect(await insertRow(e, TABLE, acceptance(fourth, { scanner: scanner40 }))).toBeNull();
+      expect(
+        await insertRow(
+          e,
+          TABLE,
+          acceptance(fourth, { pr: "n1", scanner: "identifier-scan@abcdef1" }),
+        ),
+      ).toBeNull();
     },
   );
 
@@ -200,6 +211,8 @@ describe("every row holds what it should", () => {
     ["a scanner without a needed attestation", { attestation_needed: 0 }],
     ["a scanner that is not one", { scanner: "anything" }],
     ["a scanner of too few hex digits", { scanner: "identifier-scan@abcdef" }],
+    ["a scanner of too many hex digits", { scanner: `identifier-scan@${"a".repeat(41)}` }],
+    ["a scanner in upper case", { scanner: "identifier-scan@ABCDEF1" }],
     ["a scanner that is not hex", { scanner: "identifier-scan@abcdefg" }],
     ["needed outside 0 and 1", { attestation_needed: 2 }],
     [

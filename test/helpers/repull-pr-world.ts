@@ -202,6 +202,10 @@ export interface RepullWorld {
   mergeOnGitHub(opts?: { pr?: "n0" | "n1"; title?: string; message?: string }): Promise<string>;
   /** How many writes of the privacy ledger GitHub's Contents API took since the last restore. */
   ledgerWrites(): number;
+  /** Answer reads of the ledger on `main` with this instead, until set to null. */
+  setLedgerReadFault(fault: (() => Response) | null): void;
+  /** Answer GitHub's comparisons of a commit with `main` with this HTTP status, until set to null. */
+  setMainCompareFault(status: number | null): void;
   /**
    * Answer the writes of the ledger with this instead of making them, until set to null (or until
    * the fault returns null, when the write is made as GitHub makes it).
@@ -335,6 +339,8 @@ export async function startRepullWorld(
   let mergeMessageSuffix = "";
   let ledgerWrites = 0;
   let ledgerWriteFault: (() => Response | null | Promise<Response | null>) | null = null;
+  let ledgerReadFault: (() => Response) | null = null;
+  let mainCompareFault: number | null = null;
   const workerEnv: Partial<Bindings> = {};
   const configDir = mkdtempSync(join(tmpdir(), "nemar-repull-world-"));
 
@@ -357,6 +363,7 @@ export async function startRepullWorld(
   gh.compareCommits = async (dataset, base, rawHead) => {
     const origin = origins.get(dataset);
     if (!origin) return null;
+    if (rawHead === "main" && mainCompareFault !== null) return mainCompareFault;
     const head = rawHead === "main" ? await rev(origin, "refs/heads/main") : rawHead;
     if (
       !head ||
@@ -444,6 +451,7 @@ export async function startRepullWorld(
     if (r.path !== `contents/${LEDGER}`) return null;
     if (r.method === "GET") {
       const ref = r.query.get("ref") ?? "main";
+      if (ref === "main" && ledgerReadFault) return ledgerReadFault();
       const at = /^[0-9a-f]{40}$/.test(ref) ? ref : `refs/heads/${ref}`;
       const blob = await rev(origin, `${at}:${LEDGER}`);
       if (!blob) return Response.json({ message: "Not Found" }, { status: 404 });
@@ -732,6 +740,8 @@ export async function startRepullWorld(
       mergeMessageSuffix = "";
       ledgerWrites = 0;
       ledgerWriteFault = null;
+      ledgerReadFault = null;
+      mainCompareFault = null;
       for (const k of Object.keys(workerEnv)) delete (workerEnv as Record<string, unknown>)[k];
       for (const purpose of ["resume", "merge", "settle"]) {
         rmSync(join(configDir, "repull", fx.datasetId, purpose), { recursive: true, force: true });
@@ -803,6 +813,12 @@ export async function startRepullWorld(
       return answer.sha;
     },
     ledgerWrites: () => ledgerWrites,
+    setLedgerReadFault: (fault) => {
+      ledgerReadFault = fault;
+    },
+    setMainCompareFault: (status) => {
+      mainCompareFault = status;
+    },
     setLedgerWriteFault: (fault) => {
       ledgerWriteFault = fault;
     },

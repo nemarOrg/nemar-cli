@@ -510,6 +510,8 @@ describe.skipIf(!awsInstalled)("N.0.1", () => {
     );
     expect(run.all).toContain("its tree is the re-pull's gated N.0.1 head");
     expect(run.all).toContain("it does not touch the privacy ledger");
+    // The Worker's own reading says the same, in the same words.
+    expect(run.all).toContain("; the merge does not touch the privacy ledger;");
     expect(run.all).toContain("needs no line for it, and none was written");
     expect(w.row()).toMatchObject({ status: "complete", last_error: null });
     // Recorded with its reason, and no ledger line: N.0.1's merge does not touch the ledger, and a

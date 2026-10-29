@@ -171,10 +171,14 @@ export interface GitHubStandin {
   /**
    * GitHub's comparison of `base...head`: its word (`identical`, `ahead`, ...), or the fields a
    * suite reads from a real repository (`status`, `ahead_by`, `behind_by`, `files`), or null for
-   * 404.
+   * 404, or another HTTP status to answer with (GitHub's 422 for a diff too long to generate).
    */
   compareCommits:
-    | ((dataset: string, base: string, head: string) => Promise<string | CompareAnswer | null>)
+    | ((
+        dataset: string,
+        base: string,
+        head: string,
+      ) => Promise<string | CompareAnswer | number | null>)
     | null;
   /**
    * The Git Data and Contents reads and the one Contents write a suite answers from its bare
@@ -340,6 +344,9 @@ export function startGitHubStandin(): GitHubStandin {
           compare[3] as string,
         );
         if (word === null) return Response.json({ message: "Not Found" }, { status: 404 });
+        if (typeof word === "number") {
+          return Response.json({ message: "the comparison could not be made" }, { status: word });
+        }
         return Response.json(typeof word === "string" ? { status: word } : word);
       }
       const data = url.pathname.match(
