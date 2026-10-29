@@ -34,6 +34,19 @@ import {
   WEEKLY_NEUROBAGEL_CHECKS,
   weeklyAttention,
 } from "../../../shared/contract/weekly-attention.js";
+import {
+  type RepullCapReading,
+  type RepullSchedulerRow,
+  type RepullWeekFacts,
+  type WordCounts,
+  type WordList,
+  publicWord,
+} from "../../../shared/repull-observability.js";
+import {
+  UPSTREAM_STATES,
+  type UpstreamFleetSummary,
+  type UpstreamState,
+} from "../../../shared/upstream-staleness.js";
 
 export type { NeurobagelWeekly };
 
@@ -224,6 +237,21 @@ export interface WeeklySummaryFacts {
    */
   neurobagelFindings: number | null;
 
+  /**
+   * The upstream freshness pass (epic #1046 phase 4b): counts by state over the managed mirrors,
+   * no dataset named. `null` when the pass did not run or failed: unknown, not zero. Stale is
+   * reported, not attention (ADR 0053); blindness is (see `gatherUpstream`).
+   */
+  upstream: UpstreamFleetSummary | null;
+
+  /**
+   * The upstream re-pulls' week (epic #1046 phase 7, ADR 0111): the switches in force, the
+   * scheduler's last tick, the dispatches and merges counted, and the reasons a person should
+   * look. Counts and fixed words, no dataset named: the report is filed on a public-facing
+   * repository. `null` when the read failed: unknown, not zero, and a failed part is listed.
+   */
+  repulls: RepullWeekFacts | null;
+
   /** Anything that went wrong producing this report. Listed, never swallowed. */
   errors: { stage: string; error: string }[];
 }
@@ -304,6 +332,14 @@ export function buildWeeklySummaryBody(f: WeeklySummaryFacts, nowIso: string): s
     "",
     `Datasets outstanding (nothing is working on them): ${count(f.outstanding)}`,
     "",
+    "## Upstream freshness",
+    "",
+    ...upstreamSection(f.upstream),
+    "",
+    "## Upstream re-pulls",
+    "",
+    ...repullSection(f.repulls),
+    "",
     "## Dispatch liveness",
     "",
     "| | |",
@@ -370,6 +406,165 @@ export function buildWeeklySummaryBody(f: WeeklySummaryFacts, nowIso: string): s
     "",
     "Posted weekly by the import summary job whether or not anything is wrong (nemarOrg/nemar-cli#1312), because a report that only appears when something breaks cannot tell a healthy week from a broken reporter. Last week's summary is closed automatically when this one is filed; its content stays readable.",
   ].join("\n");
+}
+
+/** The plain label of each upstream state, in the order the section lists them. */
+const UPSTREAM_LABELS: Record<UpstreamState, string> = {
+  current: "At upstream's latest snapshot",
+  stale_ready: "Behind upstream, new tag on the GitHub mirror",
+  mirror_lag: "Behind upstream, new tag not on the GitHub mirror yet",
+  stale_unverified: "Behind upstream, GitHub mirror not checked",
+  anomaly: "Upstream and NEMAR disagree",
+  unknown: "Tag unknown (not compared)",
+  not_examined: "Tag never examined",
+  unpublished: "No NEMAR version yet",
+  in_progress: "Import running",
+  parked: "Parked",
+  unchecked: "Could not be compared (OpenNeuro unavailable)",
+};
+
+/**
+ * The upstream freshness section: counts only, rendered through {@link count}, no dataset named
+ * (the report is filed on a public-facing repository). `null` is unknown, never zero, and an
+ * unknown-tag mirror is said to be NOT compared, so it is never read as verified clean.
+ */
+function upstreamSection(u: UpstreamFleetSummary | null): string[] {
+  if (u === null) {
+    return [
+      "The upstream freshness pass did not run or failed, so none of its numbers are available. This is **unknown**, not zero.",
+    ];
+  }
+  // Compared with upstream: a verdict from OpenNeuro's snapshot list. An anomaly counts unless it
+  // is a source id mismatch, which is settled from NEMAR's own row before OpenNeuro is asked.
+  const compared =
+    u.counts.states.current +
+    u.counts.stale +
+    u.counts.states.anomaly -
+    u.counts.anomalies.source_id_mismatch;
+  return [
+    `Examined ${count(u.examined)} of ${count(u.population)} managed OpenNeuro mirrors (${count(u.withdrawn)} withdrawn and ${count(u.excluded_unmanaged)} other rows left out); ${count(compared)} of them were compared with upstream.${u.truncated ? " **The pass did not reach every mirror.**" : ""}`,
+    "",
+    "| state | mirrors |",
+    "|---|---|",
+    ...UPSTREAM_STATES.map((s) => `| ${UPSTREAM_LABELS[s]} | ${count(u.counts.states[s])} |`),
+    "",
+    `Stale in total: ${count(u.counts.stale)}. Tag unknown and probably stale by date: ${count(u.counts.probably_stale)} (display only, not counted as stale).`,
+    "",
+    "A stale mirror is reported, not an alarm: being behind upstream is an expected state, not a fault. Mirrors with an unknown tag, never examined, with no version yet, with an import running or parked, and those whose source id does not match were not compared.",
+    "",
+    'How the three "Behind upstream" rows divide depends on the 25 GitHub checks one weekly pass makes; it is not a fleet-wide proportion.',
+    "",
+    "Names and reasons: `nemar admin upstream-status`.",
+  ];
+}
+
+/** The shape SQLite's `datetime()` writes, which is the only shape of a stamp the report prints. */
+const SQLITE_TIME_RE = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
+
+/**
+ * When a tick last ran, or that nothing has stamped it yet (which is not the same as unknown). The
+ * stamp is a text column that checks nothing about its content, and this report is filed on a
+ * public-facing repository, so a value that is not a time as SQLite writes one is not printed at
+ * all: it is said to be unreadable.
+ */
+function ranText(what: string, at: string | null): string {
+  if (at === null) return `${what} has no recorded run`;
+  return SQLITE_TIME_RE.test(at)
+    ? `${what} last ran ${at} UTC`
+    : `${what} has a recorded run that could not be read`;
+}
+
+/** A cap as the Worker reads it; an unreadable one is said to read 0, which stops the work. */
+function capText(c: RepullCapReading): string {
+  return c.source === "unreadable"
+    ? "**unreadable**, so it reads 0"
+    : `${count(c.value)} (${c.source === "set" ? "set" : "the default"})`;
+}
+
+/** The scheduler's stamps in a sentence; a row the report could not find is unknown, not "never". */
+function schedulerText(s: RepullSchedulerRow | null): string {
+  if (s === null) {
+    return "The scheduler's row could not be found, so when it last ran is **unknown**, not never.";
+  }
+  // The outcome is a word like any other: printed only from its closed list (`publicWord`).
+  const outcome =
+    s.last_outcome === null ? "" : ` and concluded \`${publicWord(s.last_outcome, "outcome")}\``;
+  return `${ranText("The scheduler's daily tick", s.last_tick_at)}${outcome}. ${ranText("The advance tick", s.last_advance_at)}.`;
+}
+
+/**
+ * A table of fixed words and their counts, or nothing when there are none. Every word goes through
+ * {@link publicWord} for the list it belongs to and the counts of the words that come to the same
+ * one are added, because the report is filed on a public-facing repository: a fact that holds a
+ * dataset id where a word should be prints as `other`, whoever made the fact.
+ */
+function wordTable(title: string, words: WordCounts, list: WordList): string[] {
+  const printable: WordCounts = {};
+  for (const [word, n] of Object.entries(words)) {
+    const printed = publicWord(word, list);
+    printable[printed] = (printable[printed] ?? 0) + n;
+  }
+  const rows = Object.entries(printable).sort(([a], [b]) => a.localeCompare(b));
+  if (rows.length === 0) return [];
+  return [
+    "",
+    `${title}:`,
+    "",
+    "| word | count |",
+    "|---|---|",
+    ...rows.map(([word, n]) => `| \`${word}\` | ${count(n)} |`),
+  ];
+}
+
+/**
+ * The upstream re-pulls' section (epic #1046 phase 7, ADR 0111): counts only, rendered through
+ * {@link count}, no dataset named, and present every week whether or not any work was done (ADR
+ * 0054: a quiet week with the switches off is a true zero, and a missing section would read as
+ * "nothing to report"). `null` is unknown, never zero. What raises attention is decided by
+ * `repullAttention` and reaches the headline through the shared rule, not here.
+ */
+function repullSection(r: RepullWeekFacts | null): string[] {
+  // `== null`: an absent field is unknown too, as in the log line, never a render that throws.
+  if (r == null) {
+    return [
+      "The upstream re-pull counts could not be read, so none of their numbers are available. This is **unknown**, not zero.",
+    ];
+  }
+  const on = (v: boolean) => (v ? "**on**" : "off");
+  const s = r.switches;
+  const d = r.dispatches;
+  return [
+    `Open switch (\`AUTO_REPULL_ENABLED\`): ${on(s.auto_repull_enabled)}. Merge switch (\`AUTO_REPULL_MERGE_ENABLED\`): ${on(s.auto_repull_merge_enabled)}.${s.environment_is_production ? "" : " This is not the production Worker, so neither switch is honored."} Daily open cap: ${capText(s.open_cap)}. Daily merge cap: ${capText(s.merge_cap)}.`,
+    "",
+    schedulerText(r.scheduler),
+    "",
+    "| | |",
+    "|---|---|",
+    `| Dispatches sent this week | ${count(d.sent)} |`,
+    `| Opened a pull request | ${count(d.by_status.opened)} |`,
+    `| Finished after a merge | ${count(d.by_status.finished)} |`,
+    `| Refused by the run | ${count(d.by_status.refused)} |`,
+    `| Failed in the run | ${count(d.by_status.failed)} |`,
+    `| Not reported in time | ${count(d.by_status.unreported)} |`,
+    `| Not accepted by GitHub | ${count(d.by_status.dispatch_failed)} |`,
+    `| Still running | ${count(d.by_status.dispatched + d.by_status.started)} |`,
+    `| Open automatic re-pulls now | ${count(r.open_automatic.total)} |`,
+    `| Of those, held | ${count(r.open_automatic.held)} |`,
+    `| Claims to merge held over an hour | ${count(r.held_claims)} |`,
+    `| Re-pulls that ended failed this week | ${count(r.ended_failed)} |`,
+    `| Merged by the Worker | ${count(r.merged.worker)} |`,
+    `| Merged by an administrator | ${count(r.merged.administrator)} |`,
+    `| Merged outside NEMAR's tools | ${count(r.merged.outside_tool)} |`,
+    `| Merged, claim not in the audit log | ${count(r.merged.unattributed)} |`,
+    ...wordTable("Refused by the run, by word", d.by_word.refused, "code"),
+    ...wordTable("Failed in the run, by word", d.by_word.failed, "code"),
+    ...wordTable("Not accepted by GitHub, by word", d.by_word.dispatch_failed, "code"),
+    ...wordTable("Held automatic re-pulls, by word", r.open_automatic.holds, "hold"),
+    "",
+    "A dispatch is counted in the week it was sent, in the state it has when this report is made. A switch that is off, a re-pull waiting on a gate (the identifier screen, the review, BIDS validation) and a run's refusal are expected and are not an alarm. What asks for attention is a scheduler that stopped while a switch is on, a scheduler that waits for the two first re-pulls to be run by hand while a switch is on, a dispatch nobody answered or that GitHub did not accept, a claim to merge held for an hour, a re-pull that ended failed, a re-pull that used all its resumes or all its finish runs, and a cap that cannot be read; every other hold is counted in its table and does not ask.",
+    "",
+    "Names and reasons: `nemar admin repull auto`.",
+  ];
 }
 
 /**
@@ -441,6 +636,11 @@ export function weeklySummaryLogLine(f: WeeklySummaryFacts, issue: number | null
     `closed=${count(f.issuesClosed)} relabelled=${count(f.issuesRelabelled)} ` +
     `neurobagel=${f.neurobagel === null ? "unknown" : f.neurobagel.latest.overall} ` +
     `neurobagel_findings=${count(f.neurobagelFindings)} ` +
+    `upstream_stale=${f.upstream === null ? "unknown" : count(f.upstream.counts.stale)} ` +
+    `upstream_unchecked=${f.upstream === null ? "unknown" : count(f.upstream.counts.states.unchecked)} ` +
+    `repull_dispatched=${f.repulls == null ? "unknown" : count(f.repulls.dispatches.sent)} ` +
+    `repull_merged_worker=${f.repulls == null ? "unknown" : count(f.repulls.merged.worker)} ` +
+    `repull_unreported=${f.repulls == null ? "unknown" : count(f.repulls.dispatches.by_status.unreported)} ` +
     `issue=${issue === null ? "none" : `#${issue}`} errors=${f.errors.length}`
   );
 }

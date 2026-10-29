@@ -13,6 +13,7 @@ import {
 } from "../../../shared/contract/index.js";
 import type { UploaderPreflight } from "../../../shared/identifier-screen-report.js";
 import { request } from "./client.js";
+import { ApiError, isRouteNotFound } from "./errors.js";
 
 /** ORCID identifier format: XXXX-XXXX-XXXX-XXXX (last char may be X) */
 export const ORCID_REGEX = /^\d{4}-\d{4}-\d{4}-\d{3}[\dX]$/;
@@ -472,6 +473,23 @@ export interface VersionInfo {
   doi: string;
   provider: "ezid" | "zenodo";
   created_at: string;
+  /**
+   * The upstream tag this version mirrors (ADR 0111), or null. Optional on the wire: an older
+   * backend omits it, and an absent field means "unrecorded", never "unknown".
+   */
+  source_version?: string | null;
+  /**
+   * How `source_version` is known: `doi` (the version's own description declares it),
+   * `lineage` (a re-pull plan compared the tree), or `unknown` (examined, no single tag).
+   * Null with a null `source_version` means the version was never examined.
+   */
+  source_version_basis?: "doi" | "lineage" | "unknown" | null;
+  /**
+   * Is this version a mirror of an OpenNeuro snapshot (ADR 0111, decision 5)? `true`: an N.0.0 of an
+   * OpenNeuro mirror whose upstream tag is known. `false`: not a mirror. `null`: an N.0.0 of a
+   * mirror whose tag is unknown or never examined; unknown is not "no". Absent: an older backend.
+   */
+  mirror?: boolean | null;
 }
 
 export interface VersionHistoryResponse {
@@ -485,6 +503,27 @@ export interface VersionHistoryResponse {
  */
 export async function getVersionHistory(datasetId: string): Promise<VersionHistoryResponse> {
   return request<VersionHistoryResponse>(`/datasets/${datasetId}/versions`, {}, true);
+}
+
+/**
+ * Whether a dataset has released a version: any `dataset_versions` row, read through
+ * `GET /datasets/:id/versions` (ADR 0111 decision 10, the import's upstream-moved guard). A dataset
+ * the backend does not have has released nothing, so its 404 is `false`. Any other failure --
+ * including a backend with no such route, which answers 404 with its route-not-found body --
+ * throws: not knowing must never read as "unreleased", because "unreleased" is what lets an import
+ * move a dataset to a new upstream tag.
+ */
+export async function hasReleasedVersion(datasetId: string): Promise<boolean> {
+  try {
+    const history = await getVersionHistory(datasetId);
+    if (!Array.isArray(history.versions)) {
+      throw new Error(`GET /datasets/${datasetId}/versions answered without a versions list`);
+    }
+    return history.versions.length > 0;
+  } catch (err) {
+    if (err instanceof ApiError && err.statusCode === 404 && !isRouteNotFound(err)) return false;
+    throw err;
+  }
 }
 
 export interface FileInfo {

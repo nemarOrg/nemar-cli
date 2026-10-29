@@ -32,6 +32,12 @@
  * looks. Guessing is what produced the misleading labels in the first place.
  */
 
+import {
+  NEMAR_ANNEX_UUID_CONFLICT_MARKER,
+  OPENNEURO_MIRROR_LAG_MARKER,
+  OPENNEURO_UPSTREAM_MOVED_MARKER,
+} from "../../../shared/import-markers.js";
+
 /** Marker the import CLI emits for an OpenNeuro-side fetch failure. Duplicated
  *  from import-recovery.ts on purpose -- see the note there; importing it would
  *  couple this pure module to the recovery service. */
@@ -50,6 +56,8 @@ export type ImportFailureCause =
   | "upstream_inaccessible"
   | "data_unavailable"
   | "identifier_scrub"
+  | "mirror_lag"
+  | "upstream_moved"
   | "auth_invalid"
   | "annex_uuid_conflict"
   | "branch_protection"
@@ -58,6 +66,15 @@ export type ImportFailureCause =
   | "rate_limit"
   | "timeout"
   | "unknown";
+
+function escapeRegExp(literal: string): string {
+  return literal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** A rule that matches one marker literally: `[` and `]` are a character class in a regex. */
+function literalMatch(marker: string): RegExp {
+  return new RegExp(escapeRegExp(marker));
+}
 
 export interface ClassifiedImportFailure {
   cause: ImportFailureCause;
@@ -109,6 +126,23 @@ const RULES: {
     match: /\[nemar-identifier-scrub\]/,
   },
   {
+    // The tag pin's refusals (ADR 0111 decision 10). Both are deliberate signals the CLI prints
+    // before Step 2 (mirror lag) or before any reset or push (upstream moved), so nothing else in
+    // the message can be more specific.
+    cause: "mirror_lag",
+    label: "mirror-lag",
+    summary:
+      "The upstream snapshot tag being imported is not on OpenNeuro's GitHub mirror yet, or OpenNeuro could not say which tag is its latest, so the import refused before creating anything (ADR 0111). This is usually minutes of lag after a new snapshot. The retry engine retries it and parks it as `mirror_lag` once its 14-day window has passed; a tag still missing then needs OpenNeuro to push it to github.com/OpenNeuroDatasets/<ds>.",
+    match: literalMatch(OPENNEURO_MIRROR_LAG_MARKER),
+  },
+  {
+    cause: "upstream_moved",
+    label: "upstream-moved",
+    summary:
+      "The dataset has released a version that mirrors one upstream tag, and the import was at another. A released mirror moves to a newer snapshot through an upstream re-pull (ADR 0111), never by re-importing, so nothing was reset, copied or pushed. To repair the released version's data at the tag it mirrors, run the command the refusal line names, `nemar admin import-openneuro <ds> --tag <recorded tag>`, which passes the guard; the retry engine dispatches no tag, so it never does this by itself.",
+    match: literalMatch(OPENNEURO_UPSTREAM_MOVED_MARKER),
+  },
+  {
     cause: "auth_invalid",
     label: "auth-invalid",
     summary:
@@ -119,8 +153,12 @@ const RULES: {
     cause: "annex_uuid_conflict",
     label: "annex-uuid-conflict",
     summary:
-      "The S3 prefix already carries an annex-uuid from an earlier import attempt, so initialising the special remote conflicts. Affects re-imports only. See nemarOrg/nemar-cli#1320.",
-    match: /annex-uuid file indicates it is used by a different special remote/i,
+      "The S3 prefix already carries an annex-uuid that the dataset's git-annex branch does not record as nemar-s3, so initialising the special remote conflicts and every retry would too. Affects re-imports only. The preflight's refusal names both uuids: when the branch records none, the bucket's marker was left by a lost attempt and can be removed (`aws s3 rm s3://nemar/<id>/objects/annex-uuid`; the objects are key-addressed and stay), then prepare re-run; when it records a different uuid, delete nothing and reconcile per nemarOrg/nemar-cli#1320. The retry engine parks it, so after the bucket marker is fixed an operator restarts the import by hand (`nemar admin import retry <id>`, then `nemar admin import-openneuro <ds>`).",
+    // git-annex's own wording, from before the preflight existed, and the preflight's marker.
+    match: new RegExp(
+      `annex-uuid file indicates it is used by a different special remote|${escapeRegExp(NEMAR_ANNEX_UUID_CONFLICT_MARKER)}`,
+      "i",
+    ),
   },
   {
     cause: "branch_protection",

@@ -67,7 +67,12 @@ import {
 } from "../../services/publication-review-gate";
 import { publicationReviewSummaries } from "../../services/publication-review-view";
 import { errorMessage } from "../../services/repo-metadata";
-import { applyObjectLockBatch } from "../../services/s3";
+import {
+  LOCKABLE_KEY_RE,
+  OBJECT_LOCK_BATCH_SIZE,
+  applyObjectLockBatch,
+  lockObjectKeys,
+} from "../../services/s3";
 import { getS3Config } from "./shared";
 import type { AdminRouter } from "./shared";
 
@@ -1197,11 +1202,20 @@ export function registerPublishRoutes(admin: AdminRouter): void {
    *
    * Streamed via S3 ListObjectsV2 continuation tokens — see
    * `applyObjectLockBatch` for the per-invocation subrequest contract.
+   *
+   * With `objects` (at most `OBJECT_LOCK_BATCH_SIZE` annex keys), it locks exactly those objects
+   * under `<id>/objects/`, at their current versions, and names each version it locked
+   * (`lockObjectKeys`): an upstream re-pull's release locks what its copy and uploads wrote, not
+   * the whole prefix (ADR 0111, decision 8). Either way a 403 counts as locked only when the
+   * object's retention, read back, is a lock this route sets.
    */
   admin.post("/datasets/:id/s3-lock", async (c) => {
     const datasetId = c.req.param("id");
     const db = c.env.DB;
-    const body = (await c.req.json().catch(() => ({}))) as { continuation_token?: string };
+    const body = (await c.req.json().catch(() => ({}))) as {
+      continuation_token?: string;
+      objects?: unknown;
+    };
 
     const dataset = await db
       .prepare("SELECT dataset_id FROM datasets WHERE dataset_id = ?")
@@ -1210,6 +1224,37 @@ export function registerPublishRoutes(admin: AdminRouter): void {
 
     if (!dataset) {
       return c.json({ error: "Dataset not found" }, 404);
+    }
+
+    if (body.objects !== undefined) {
+      const objects = body.objects;
+      if (
+        !Array.isArray(objects) ||
+        objects.length === 0 ||
+        objects.length > OBJECT_LOCK_BATCH_SIZE ||
+        body.continuation_token !== undefined ||
+        !objects.every((k) => typeof k === "string" && LOCKABLE_KEY_RE.test(k) && !k.includes(".."))
+      ) {
+        return c.json(
+          {
+            error: `objects must be 1 to ${OBJECT_LOCK_BATCH_SIZE} annex keys, without a continuation_token`,
+          },
+          400,
+        );
+      }
+      try {
+        const result = await lockObjectKeys(getS3Config(c.env), datasetId, objects as string[]);
+        return c.json({
+          message: result.failed.length === 0 ? "Objects locked" : "Some objects failed",
+          dataset_id: datasetId,
+          locked: result.locked,
+          failed: result.failed,
+          objects: result.objects,
+          hasMore: false,
+        });
+      } catch (err) {
+        return c.json({ error: `S3 lock failed: ${errorMessage(err)}` }, 500);
+      }
     }
 
     try {

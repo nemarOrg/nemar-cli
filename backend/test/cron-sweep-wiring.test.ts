@@ -128,6 +128,23 @@ const SWEEP_WIRING: Record<
   // production on its own. It deliberately ignores PUBLICATION_REVIEW_ENABLED, so switching
   // the review off does not strand a request whose mail waits on a review already in flight.
   sweepPublicationReviews: "tick-prod-only",
+  // ADR 0111, the Phase 7b slice: the automatic re-pull's dispatch watchdog. It ends a live
+  // dispatch that said nothing in eight hours, so its dataset's one live slot is not held for
+  // good. It is production-only, reads no switch (turning them off must not strand a live row) and
+  // refuses outside exact production on its own; it is absent from DEV_CRON_ALLOWLIST because
+  // only the production Worker makes dispatch rows.
+  sweepUnreportedDispatches: "prod-only",
+  // ADR 0111, the Phase 7c slice: the automatic re-pull's scheduler. It dispatches the central
+  // re-pull workflow against the shared nemarDatasets org, so it is production-only and absent
+  // from DEV_CRON_ALLOWLIST; it also refuses outside exact production on its own, and acts only
+  // while AUTO_REPULL_ENABLED is exactly "1".
+  runRepullSchedulerCron: "prod-only",
+  // ADR 0111, the Phase 7f and 7g slices: the automatic re-pull's advance tick. It reads and acts
+  // on the automatic re-pulls' pull requests in the shared nemarDatasets org every 30 minutes, and
+  // merges a machine-clean one there, so it rides that tick's production guard and is absent from
+  // DEV_CRON_ALLOWLIST; it also refuses outside exact production on its own, and while
+  // AUTO_REPULL_ENABLED is not "1" only resolves a held claim and finishes a merged re-pull.
+  runRepullAdvanceCron: "tick-prod-only",
   sweepBlockedBidsValidationRequests: "all-envs",
   // #1789: tombstones the live integration tests' accounts. It runs ONLY outside production,
   // from a section of scheduledCleanup (`cleanUpLiveTestAccounts`); the dedicated block at the
@@ -390,6 +407,14 @@ describe("every sweep service is declared and driven", () => {
         // be dangerous. Do not read this comment as evidence that it would.
         // #1167 review, finding 3.
         expect(callCount(allCode, name)).toBe(callCount(prodOnlyCode, name));
+      });
+
+      test(`${name} is NOT in DEV_CRON_ALLOWLIST`, () => {
+        // The allowlist is the declared set of daily jobs safe on the dev worker; a prod-only
+        // job named there would be a declaration that contradicts its call site (#1913).
+        const allowlist = /DEV_CRON_ALLOWLIST[^;]*;/s.exec(allCode)?.[0] ?? "";
+        expect(allowlist).toContain("DEV_CRON_ALLOWLIST");
+        expect(allowlist).not.toContain(`"${name}"`);
       });
     }
   }

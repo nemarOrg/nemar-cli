@@ -549,6 +549,11 @@ jobs:
     timeout-minutes: 30
     needs: changes
     if: needs.changes.outputs.scrub_suites == 'true'
+    # A missing tool fails instead of skipping (test/scrub/helpers/require-tools.ts). This job
+    # installs git-annex ("Install git-annex"), Python and uv ("Setup Python", "Setup uv"); the aws
+    # CLI comes with the runner image; "Tool versions" names each before a suite runs.
+    env:
+      NEMAR_REQUIRE_SCRUB_TOOLS: "1"
     strategy:
       # Every shard reports, so one red shard does not hide a second one.
       fail-fast: false
@@ -647,7 +652,6 @@ jobs:
       - name: Scrub toolchain and scanner suites (shard ${{ matrix.shard }}/${{ strategy.job-total }})
         shell: bash
         env:
-          NEMAR_REQUIRE_SCRUB_TOOLS: "1"
           SHARD_INDEX: ${{ strategy.job-index }}
           SHARD_TOTAL: ${{ strategy.job-total }}
           SHARD_LABEL: ${{ matrix.shard }}
@@ -870,6 +874,12 @@ jobs:
     # filter to `lint` alone left the index test still skipped on an ADR-only PR,
     # which is the gap it was added to close.
     if: needs.changes.outputs.unit_pure_due == 'true'
+    # A missing tool fails instead of skipping (test/scrub/helpers/require-tools.ts,
+    # test/helpers/in-german.ts). This job installs git-annex ("Install git-annex"), the German
+    # locale ("Install the German locale"), Python and uv ("Setup Python", "Setup uv"); the aws CLI
+    # comes with the runner image; "Tool versions" names each before a suite runs.
+    env:
+      NEMAR_REQUIRE_SCRUB_TOOLS: "1"
     strategy:
       # Every shard reports, so one red shard does not hide a second one.
       fail-fast: false
@@ -896,6 +906,39 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y git-annex
+
+      # test/import-annex-uuid-preflight.test.ts and test/import-upstream-moved-guard.test.ts run git
+      # in German, to show an outcome is read from a status and not from git's message. Without the
+      # de_DE.UTF-8 locale git speaks English and those cases assert nothing, so under this job's
+      # NEMAR_REQUIRE_SCRUB_TOOLS=1 they fail instead (test/helpers/in-german.ts). The language pack
+      # generates the locale and carries git's German catalog; the mirror was updated just above.
+      - name: Install the German locale
+        timeout-minutes: 10
+        run: sudo apt-get install -y language-pack-de-base
+
+      # test/identifier-scrub.test.ts and test/identifier-dates.test.ts read files back through
+      # an independent EDF reader run by uv. Without uv here those cases skipped, and a skip
+      # reports green; the same Python and uv as scrub-tools-shard.
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v5
+
+      # Under this job's NEMAR_REQUIRE_SCRUB_TOOLS=1 a suite that needs a tool fails instead of
+      # skipping (test/scrub/helpers/require-tools.ts). The aws CLI comes with the runner image and
+      # no step installs it, so this step names every tool the pure suites need and fails here, by
+      # name, when one is missing.
+      - name: Tool versions
+        shell: bash
+        run: |
+          git --version
+          git annex version --raw && echo
+          uv --version
+          aws --version
+          locale -a | grep -ix 'de_DE.utf8'
 
       - name: Install dependencies
         run: bun install
@@ -949,16 +992,17 @@ jobs:
           sparse-checkout-cone-mode: false
           ref: staging
 
-      # The deployed copies of onboard-openneuro.yml, run-pr-review.yml and
-      # run-publication-review.yml, for the same reason and with the same shape
-      # (#1309). All three are authored in this repo beside the code they invoke,
-      # then deployed by copying them whole into nemarDatasets/.github -- and the
-      # first pair (onboard-openneuro.yml and run-pr-review.yml) had already drifted by one merged
-      # PR before anyone noticed, because nothing compared them. `main`, not a
+      # The deployed copies of onboard-openneuro.yml, run-pr-review.yml,
+      # run-publication-review.yml and run-upstream-repull.yml, for the same reason
+      # and with the same shape (#1309). All four are authored in this repo beside
+      # the code they invoke, then deployed by copying them whole into
+      # nemarDatasets/.github -- and the first pair (onboard-openneuro.yml and
+      # run-pr-review.yml) had already drifted by one merged PR before anyone
+      # noticed, because nothing compared them. `main`, not a
       # pre-release branch: that repo has no release train, so what is on main is
       # what runs.
       #
-      # nemarDatasets/.github is PUBLIC, so no token is needed. Sparse, non-cone, three
+      # nemarDatasets/.github is PUBLIC, so no token is needed. Sparse, non-cone, four
       # files (non-cone mode takes file paths, one per line). They land in
       # dataset-workflows-live/ at the repo root, which the unit-pure file glob does
       # not reach, so they cannot be mistaken for test files. A workflow added to
@@ -972,6 +1016,7 @@ jobs:
             .github/workflows/onboard-openneuro.yml
             .github/workflows/run-pr-review.yml
             .github/workflows/run-publication-review.yml
+            .github/workflows/run-upstream-repull.yml
           sparse-checkout-cone-mode: false
           ref: main
 
@@ -1033,6 +1078,7 @@ jobs:
           NEMAR_DATASET_WORKFLOW_LIVE: dataset-workflows-live/.github/workflows/onboard-openneuro.yml
           NEMAR_PR_REVIEW_WORKFLOW_LIVE: dataset-workflows-live/.github/workflows/run-pr-review.yml
           NEMAR_PUBLICATION_REVIEW_WORKFLOW_LIVE: dataset-workflows-live/.github/workflows/run-publication-review.yml
+          NEMAR_REPULL_WORKFLOW_LIVE: dataset-workflows-live/.github/workflows/run-upstream-repull.yml
           # Empty on a fork, where the checkout above is skipped, so the guard
           # skips VISIBLY instead of failing on a checkout that could never have
           # worked. On any run from this repository it is set, and a missing
@@ -1220,8 +1266,10 @@ jobs:
   # required, and nightly-tests.yml provides scheduled hard coverage + issue.
   integration-dev:
     runs-on: ubuntu-latest
-    # p95 11.5 min (42 green runs to 2026-10-13), so twice that.
-    timeout-minutes: 24
+    # The tests took about 16 min before Phases 6g and 7d (2026-10-25) and project to about
+    # 30 min on current runners with their re-pull world suites (the 6g and 7d runs of
+    # 2026-10-26). The cap is 35 min, a margin over that, the owner's choice.
+    timeout-minutes: 35
     needs: changes
     if: needs.changes.outputs.cli == 'true' || needs.changes.outputs.tests == 'true' || needs.changes.outputs.backend == 'true' || needs.changes.outputs.shared == 'true'
     env:
@@ -1230,6 +1278,10 @@ jobs:
       TEST_OWNER_API_KEY: ${{ secrets.TEST_OWNER_API_KEY }}
       TEST_USER_API_KEY: ${{ secrets.TEST_USER_API_KEY }}
       TEST_BYPASS_TOKEN: ${{ secrets.TEST_BYPASS_TOKEN }}
+      # A missing tool fails instead of skipping (test/scrub/helpers/require-tools.ts). The live
+      # suites need git-annex ("Install git-annex") and the aws CLI (the runner image's), which
+      # "Tool versions" names; none of them needs uv or the German locale.
+      NEMAR_REQUIRE_SCRUB_TOOLS: "1"
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -1251,6 +1303,16 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y git-annex
+
+      # Under this job's NEMAR_REQUIRE_SCRUB_TOOLS=1 the live suites that drive the real aws CLI
+      # against a loopback S3 stand-in fail instead of skipping. The aws CLI comes with the runner
+      # image and no step installs it, so name it here and fail by name when it is missing.
+      - name: Tool versions
+        shell: bash
+        run: |
+          git --version
+          git annex version --raw && echo
+          aws --version
 
       - name: Install dependencies
         run: bun install

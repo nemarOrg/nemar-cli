@@ -214,8 +214,16 @@ if ! bun run build > /dev/null 2>&1; then
   exit 1
 fi
 
-# Ensure built file is executable
-chmod +x dist/index.js
+# Ensure built files are executable
+chmod +x dist/index.js dist/git-annex-remote-nemar.js
+
+# The second executable: git-annex starts it and it speaks first, so with nothing on stdin it
+# prints its protocol version and exits.
+if ! REMOTE_HELLO=$(./dist/git-annex-remote-nemar.js < /dev/null 2>&1) || [ "$REMOTE_HELLO" != "VERSION 1" ]; then
+  echo "Error: Built git-annex-remote-nemar did not answer 'VERSION 1' (got: $REMOTE_HELLO)"
+  restore_versions
+  exit 1
+fi
 
 # Verify version is correct in build
 if ! BUILD_VERSION=$(./dist/index.js --version 2>&1); then

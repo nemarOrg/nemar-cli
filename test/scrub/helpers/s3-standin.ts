@@ -42,12 +42,25 @@
  *    ConditionalRequestConflict S3 documents for a conflicting write in flight is not modeled; a
  *    test injects it as a fault.
  *  - GetObjectRetention (404 NoSuchObjectLockConfiguration when a version has none).
+ *  - PutObjectRetention (`PUT /<bucket>/<key>?retention`, the Worker's s3-lock route): needs
+ *    `Content-MD5` or an `x-amz-checksum-*` header and a `<Retention>` body; sets the current (or
+ *    the named) version's mode and date. Shortening a lock, or loosening COMPLIANCE, is 403
+ *    AccessDenied unless it is GOVERNANCE with the bypass header (and `denyBypass` is off), as S3
+ *    documents; extending one is allowed. ASSUMED from the documentation, not measured: what the
+ *    real bucket answers is the canary's and the first production release's to show.
  *  - ListMultipartUploads (one page, by prefix).
  *  - Multipart: CreateMultipartUpload (keeps the lock and encryption headers), UploadPart,
  *    UploadPartCopy (`x-amz-copy-source` with an optional `?versionId=`, a byte range, and
  *    `x-amz-copy-source-if-match`, 412 on mismatch), CompleteMultipartUpload (validates the part
  *    list and, as S3 does, refuses any non-final part under 5 MiB with EntityTooSmall; the object
  *    ETag is the multipart form `<md5 of the md5s>-<parts>`), AbortMultipartUpload.
+ *  - CopyObject (a PUT with `x-amz-copy-source` and no part number), across buckets: the source
+ *    `<bucket>/<key>` with an optional `?versionId=`, `x-amz-copy-source-if-match` (412 on
+ *    mismatch), a new version at the destination holding the source version's bytes, its ETag the
+ *    MD5 of those bytes (a single-part object), and the source's version id echoed in
+ *    `x-amz-copy-source-version-id`. ASSUMED, not measured: that real S3 answers a signed
+ *    cross-account copy of a public versioned object this way, which only the re-pull canary
+ *    (`scripts/repull-canary.ts`) checks against the real buckets.
  *
  * Every request is logged by operation so a test asserts on what the real CLI sent. Faults and
  * hooks are injected explicitly by the test that needs them. Test-only helpers that S3 has no
@@ -66,10 +79,12 @@ export type StandinOp =
   | "HeadObject"
   | "GetObject"
   | "GetObjectRetention"
+  | "PutObjectRetention"
   | "PutObject"
   | "CreateMultipartUpload"
   | "UploadPart"
   | "UploadPartCopy"
+  | "CopyObject"
   | "CompleteMultipartUpload"
   | "AbortMultipartUpload"
   | "ListMultipartUploads"
@@ -112,6 +127,8 @@ export interface StandinLogEntry {
   method?: string;
   /** A DeleteObjects request: what it named, in order, and whether it asked for the bypass. */
   items?: Array<{ key: string; versionId: string | null }>;
+  /** A CopyObject or UploadPartCopy request: its `x-amz-copy-source` header, as sent. */
+  copySource?: string;
 }
 
 export interface Fault {
@@ -179,8 +196,9 @@ export interface S3Standin {
   /** Operators without s3:BypassGovernanceRetention: the bypass header is refused too. */
   setDenyBypass(deny: boolean): void;
   /**
-   * An endpoint that ignores `If-Match` on PutObject and GetObject, as one without conditional
-   * writes would: the request succeeds whatever ETag it names. What a canary must catch.
+   * An endpoint that ignores `If-Match` on PutObject and GetObject, and
+   * `x-amz-copy-source-if-match` on CopyObject and UploadPartCopy, as one without conditional
+   * requests would: the request succeeds whatever ETag it names. What a canary must catch.
    */
   setIgnoreIfMatch(ignore: boolean): void;
   /** Entries per ListObjectVersions / ListObjectsV2 page. */
@@ -195,6 +213,21 @@ export interface S3Standin {
    * half way, with the client's output file already open.
    */
   stallBodyNext(opts: { keyPrefix: string; bytes: number; ms: number }): void;
+  /**
+   * Hold the next `times` calls of `op` (only CopyObject honors it) before they take effect: until
+   * `releaseHolds()` ends them, the client goes away, or `ms` passes. A copy that hangs.
+   * `holding()` counts the calls held now.
+   */
+  holdNext(op: StandinOp, ms: number, times?: number): void;
+  holding(): number;
+  /** End every call held now, each then taking effect unless its client went away; how many. */
+  releaseHolds(): number;
+  /**
+   * How CopyObject and UploadPartCopy treat a source's `?versionId=`: honored (`honor`, as S3
+   * documents); ignored, the current version copied and named (`ignore`); or ignored while the
+   * answer names the version asked for (`lie`). What the canary exists to catch on a real endpoint.
+   */
+  setCopySourceVersionMode(mode: "honor" | "ignore" | "lie"): void;
   inject(op: StandinOp, fault: Fault): void;
   clearFaults(): void;
   /** Run `fn` just before the Nth call (1-based) of `op` is handled. */
@@ -280,6 +313,48 @@ export function startS3Standin(options: { region?: string } = {}): S3Standin {
   let omitVersionIdMarker = false;
   const stalls: Array<{ method: string; ms: number; times: number }> = [];
   const bodyStalls: Array<{ keyPrefix: string; bytes: number; ms: number }> = [];
+  const holds: Array<{ op: StandinOp; ms: number; times: number }> = [];
+  let held = 0;
+  /** How each call held now ends early, for `releaseHolds()`. */
+  const releasers = new Set<() => void>();
+  /** Wait out a hold of `op`, if one is set: until it is released, the client goes away, or `ms`. */
+  const holdFor = async (op: StandinOp, req: Request): Promise<void> => {
+    const h = holds.find((x) => x.op === op && x.times > 0);
+    if (!h) return;
+    h.times -= 1;
+    held += 1;
+    let release: (() => void) | undefined;
+    try {
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, h.ms);
+        release = () => {
+          clearTimeout(timer);
+          resolve();
+        };
+        releasers.add(release);
+        req.signal.addEventListener("abort", release);
+      });
+    } finally {
+      if (release) releasers.delete(release);
+      held -= 1;
+    }
+  };
+  let copyMode: "honor" | "ignore" | "lie" = "honor";
+  /** The source version a copy reads: the named one, or the current one when the mode ignores it. */
+  const copyVersion = (named: string | null) => (copyMode === "honor" ? named : null);
+  /** The source version a copy says it read: the true one, or the named one when the mode lies. */
+  const reportedVersion = (named: string | null, used: string) =>
+    copyMode === "lie" && named ? named : used;
+  /** `<bucket>/<key>` and its version id from an `x-amz-copy-source` header. */
+  const parseCopySource = (copySource: string) => {
+    const qm = copySource.indexOf("?");
+    const srcPath = decodeURIComponent(qm === -1 ? copySource : copySource.slice(0, qm));
+    const version =
+      qm === -1 ? null : new URLSearchParams(copySource.slice(qm + 1)).get("versionId");
+    const trimmed = srcPath.replace(/^\//, "");
+    const slash = trimmed.indexOf("/");
+    return { bucket: trimmed.slice(0, slash), key: trimmed.slice(slash + 1), version };
+  };
 
   const slot = (bucket: string, key: string) => `${bucket}/${key}`;
   const versionsOf = (bucket: string, key: string) => store.get(slot(bucket, key)) ?? [];
@@ -571,6 +646,43 @@ export function startS3Standin(options: { region?: string } = {}): S3Standin {
         return new Response(null, { status: 200, headers });
       }
 
+      // ---- PutObjectRetention ----
+      if (req.method === "PUT" && q.has("retention")) {
+        const fault = enter("PutObjectRetention", key);
+        if (fault) return fail("PutObjectRetention", fault);
+        const text = await req.text();
+        const mode = /<Mode>([A-Z]+)<\/Mode>/.exec(text)?.[1];
+        const until = /<RetainUntilDate>([^<]+)<\/RetainUntilDate>/.exec(text)?.[1];
+        const summed =
+          req.headers.has("content-md5") ||
+          [...req.headers.keys()].some((h) => h.toLowerCase().startsWith("x-amz-checksum-"));
+        if (!summed) {
+          record({ op: "PutObjectRetention", key, status: 400, versionId });
+          return s3Error("InvalidRequest", 400, "Content-MD5 or a checksum is required");
+        }
+        if (!mode || !until || Number.isNaN(Date.parse(until))) {
+          record({ op: "PutObjectRetention", key, status: 400, versionId });
+          return s3Error("MalformedXML", 400);
+        }
+        const v = pick(bucket, key, versionId);
+        if (!v || v.deleteMarker) {
+          record({ op: "PutObjectRetention", key, status: 404, versionId });
+          return s3Error("NoSuchKey", 404);
+        }
+        const next = { mode, until: new Date(until) };
+        const bypass = req.headers.get("x-amz-bypass-governance-retention") === "true";
+        const loosens =
+          v.lock !== undefined &&
+          (next.until < v.lock.until || (v.lock.mode === "COMPLIANCE" && mode !== "COMPLIANCE"));
+        if (loosens && !(v.lock?.mode === "GOVERNANCE" && bypass && !denyBypass)) {
+          record({ op: "PutObjectRetention", key, status: 403, versionId, bypass });
+          return s3Error("AccessDenied", 403);
+        }
+        v.lock = next;
+        record({ op: "PutObjectRetention", key, status: 200, versionId, bypass });
+        return new Response(null, { status: 200 });
+      }
+
       // ---- GetObjectRetention ----
       if (req.method === "GET" && q.has("retention")) {
         const fault = enter("GetObjectRetention", key);
@@ -710,6 +822,7 @@ export function startS3Standin(options: { region?: string } = {}): S3Standin {
             partNumber,
             range: rangeHeader,
             ifMatch,
+            copySource,
           };
           if (fault) {
             record({ ...base, status: fault.status });
@@ -719,20 +832,13 @@ export function startS3Standin(options: { region?: string } = {}): S3Standin {
             record({ ...base, status: 404 });
             return s3Error("NoSuchUpload", 404);
           }
-          const qm = copySource.indexOf("?");
-          const srcPath = decodeURIComponent(qm === -1 ? copySource : copySource.slice(0, qm));
-          const srcVersion =
-            qm === -1 ? null : new URLSearchParams(copySource.slice(qm + 1)).get("versionId");
-          const slash = srcPath.replace(/^\//, "").indexOf("/");
-          const trimmed = srcPath.replace(/^\//, "");
-          const srcBucket = trimmed.slice(0, slash);
-          const srcKey = trimmed.slice(slash + 1);
-          const src = pick(srcBucket, srcKey, srcVersion);
+          const parsed = parseCopySource(copySource);
+          const src = pick(parsed.bucket, parsed.key, copyVersion(parsed.version));
           if (!src || src.deleteMarker) {
             record({ ...base, status: 404 });
             return s3Error("NoSuchKey", 404);
           }
-          if (ifMatch && ifMatch !== src.etag) {
+          if (ifMatch && !ignoreIfMatch && ifMatch !== src.etag) {
             record({ ...base, status: 412 });
             return s3Error("PreconditionFailed", 412);
           }
@@ -748,6 +854,8 @@ export function startS3Standin(options: { region?: string } = {}): S3Standin {
           record({ ...base, status: 200, size: data.length });
           return xml(
             `<CopyPartResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><LastModified>${new Date().toISOString()}</LastModified><ETag>${xmlEscape(etag)}</ETag></CopyPartResult>`,
+            200,
+            { "x-amz-copy-source-version-id": reportedVersion(parsed.version, src.versionId) },
           );
         }
         const body = new Uint8Array(await req.arrayBuffer());
@@ -851,6 +959,59 @@ export function startS3Standin(options: { region?: string } = {}): S3Standin {
         const existed = uploads.delete(q.get("uploadId") ?? "");
         record({ op: "AbortMultipartUpload", key, status: existed ? 204 : 404 });
         return existed ? new Response(null, { status: 204 }) : s3Error("NoSuchUpload", 404);
+      }
+
+      // ---- CopyObject (a PUT with a copy source and no part number) ----
+      if (req.method === "PUT" && req.headers.has("x-amz-copy-source")) {
+        const copySource = req.headers.get("x-amz-copy-source") as string;
+        const ifMatch = req.headers.get("x-amz-copy-source-if-match") ?? undefined;
+        const parsed = parseCopySource(copySource);
+        const base = {
+          op: "CopyObject" as const,
+          key,
+          ifMatch,
+          copySource,
+          versionId: parsed.version,
+        };
+        const fault = enter("CopyObject", key);
+        if (fault) {
+          record({ ...base, status: fault.status });
+          return s3Error(fault.code, fault.status, `induced ${fault.code} (test)`);
+        }
+        await holdFor("CopyObject", req);
+        if (req.signal.aborted) {
+          record({ ...base, status: 499 });
+          return new Response(null, { status: 499 });
+        }
+        const src = pick(parsed.bucket, parsed.key, copyVersion(parsed.version));
+        if (!src || src.deleteMarker) {
+          record({ ...base, status: 404 });
+          return s3Error(parsed.version ? "NoSuchVersion" : "NoSuchKey", 404);
+        }
+        if (ifMatch && !ignoreIfMatch && ifMatch !== src.etag) {
+          record({ ...base, status: 412 });
+          return s3Error("PreconditionFailed", 412);
+        }
+        const data = src.data.slice();
+        const etag = `"${md5hex(data)}"`;
+        const lastModified = new Date().toISOString();
+        const id = push(bucket, key, {
+          versionId: nextVersionId(),
+          deleteMarker: false,
+          data,
+          etag,
+          lastModified,
+          contentType: src.contentType,
+        });
+        record({ ...base, status: 200, size: data.length });
+        return xml(
+          `<CopyObjectResult><LastModified>${lastModified}</LastModified><ETag>${xmlEscape(etag)}</ETag></CopyObjectResult>`,
+          200,
+          {
+            "x-amz-version-id": id,
+            "x-amz-copy-source-version-id": reportedVersion(parsed.version, src.versionId),
+          },
+        );
       }
 
       // ---- PutObject ----
@@ -1062,6 +1223,8 @@ export function startS3Standin(options: { region?: string } = {}): S3Standin {
       pageSize = 1000;
       stalls.length = 0;
       bodyStalls.length = 0;
+      holds.length = 0;
+      copyMode = "honor";
     },
     openUploads: () => uploads.size,
     setDenyBypass(deny) {
@@ -1081,6 +1244,18 @@ export function startS3Standin(options: { region?: string } = {}): S3Standin {
     },
     stallBodyNext(opts) {
       bodyStalls.push(opts);
+    },
+    holdNext(op, ms, times = 1) {
+      holds.push({ op, ms, times });
+    },
+    holding: () => held,
+    releaseHolds() {
+      const now = [...releasers];
+      for (const release of now) release();
+      return now.length;
+    },
+    setCopySourceVersionMode(mode) {
+      copyMode = mode;
     },
     inject(op, fault) {
       const list = faults.get(op) ?? [];

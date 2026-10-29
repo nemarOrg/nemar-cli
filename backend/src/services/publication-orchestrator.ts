@@ -32,6 +32,7 @@ import {
   ACKNOWLEDGMENT_MIN_LENGTH,
 } from "../../../shared/publication-limits.js";
 import { REASON_CODES } from "../../../shared/publication-review.js";
+import { selectPublishReadmes } from "../../../shared/standard-edits/readme.js";
 import {
   AUDIT_IF_PREVIOUS_CHANGED_SQL,
   type AuditLogEntry,
@@ -111,6 +112,7 @@ import {
   uploadManifest,
   waitForPublicPropagation,
 } from "./s3";
+import { INSERT_DATASET_VERSION_SQL, columnsFromDescription } from "./source-snapshot";
 import { ZARR_REQUEUE_AT_PATH } from "./sweep-stamps";
 import {
   OWNER_NAME_MISSING_MESSAGE,
@@ -1316,7 +1318,8 @@ async function stepUpdateMetadata(c: ApproveStepContext): Promise<RespondOutcome
       if (isRespond(descResult)) return descResult;
       const datasetDesc = descResult;
 
-      // The rule lives in doi.ts so the #1386 repair applies the same edit.
+      // The rule lives in shared/standard-edits/description.ts (re-exported by doi.ts), so the
+      // #1386 repair and the upstream re-pull's planner apply the same edit. Never copy it here.
       const applied = applyConceptDoiToDescription(datasetDesc, conceptDoi);
       if (applied.preservedSourceDoi) {
         console.log(
@@ -1379,16 +1382,11 @@ async function stepUpdateReadme(c: ApproveStepContext): Promise<RespondOutcome |
       const doiBadge = buildDoiBadge(conceptDoi);
 
       const tree = await getTreeAtRef(repoName, "main", pat);
-      // Find all README variants in the repo
-      const readmeCandidates = ["README.md", "README.rst", "README.txt", "README"];
-      const foundReadmes: { path: string; sha: string }[] = [];
-      for (const candidate of readmeCandidates) {
-        const found = tree.find((f) => f.path === candidate);
-        if (found) foundReadmes.push(found);
-      }
-
-      // Use the best available README for content (prefer README.md, then others in order)
-      const contentSource = foundReadmes[0];
+      // Find the root README variants, and the one whose content becomes README.md
+      // (README.md first, then the others in order). The rule is shared with the
+      // upstream re-pull's planner (ADR 0111), which has to recognize this edit.
+      const readmes = selectPublishReadmes(tree);
+      const contentSource = readmes.contentSource;
       let readmeContent = "";
       if (contentSource) {
         readmeContent = await getBlobContent(repoName, contentSource.sha, pat);
@@ -1413,8 +1411,7 @@ async function stepUpdateReadme(c: ApproveStepContext): Promise<RespondOutcome |
       }
 
       // Delete any non-.md README files (handles both fresh rename and resume after partial run)
-      for (const readme of foundReadmes) {
-        if (readme.path === "README.md") continue;
+      for (const readme of readmes.remove) {
         await deleteRepoFile(
           repoName,
           readme.path,
@@ -1839,11 +1836,21 @@ async function stepVersionDoi(c: ApproveStepContext): Promise<RespondOutcome | u
                   .run();
               }
 
+              const snapshot = columnsFromDescription(
+                datasetId,
+                repoMeta.bidsDescription,
+                repoMeta.warnings,
+              );
               await db
-                .prepare(
-                  "INSERT OR IGNORE INTO dataset_versions (dataset_id, version, doi, provider) VALUES (?, ?, ?, 'ezid')",
+                .prepare(INSERT_DATASET_VERSION_SQL)
+                .bind(
+                  datasetId,
+                  version,
+                  result.doi,
+                  "ezid",
+                  snapshot.source_version,
+                  snapshot.source_version_basis,
                 )
-                .bind(datasetId, version, result.doi)
                 .run();
             } catch (err) {
               dbError = errorMessage(err);
@@ -1912,8 +1919,11 @@ async function stepS3Lock(c: ApproveStepContext): Promise<RespondOutcome | undef
   // batchSize keys via max-keys) plus up to batchSize PutObjectRetention
   // calls — bounded subrequest cost regardless of dataset size. The CLI
   // re-invokes with the returned `s3_lock_continuation_token` until
-  // `hasMore` is false. Idempotent: 403 = already-locked = counted as
-  // success, so retries on the same token are safe.
+  // `hasMore` is false. Idempotent: an object already under the lock this
+  // route sets counts as locked, so retries on the same token are safe. A
+  // 403 counts only when the retention read-back shows that lock, because S3
+  // answers 403 for a credential without the permission too (lockOneObject
+  // in s3.ts).
   //
   // The previous offset-based approach paginated the entire dataset on
   // every call (full LIST + 40-PUT slice), which compounded across
@@ -1965,7 +1975,8 @@ async function stepS3Lock(c: ApproveStepContext): Promise<RespondOutcome | undef
             step_results: stepResults,
             details: lockResult,
             // Echo the same token the caller sent so the CLI's retry
-            // replays this exact batch (idempotent: 403=already-locked).
+            // replays this exact batch (idempotent: an object already under
+            // this route's lock counts as locked).
             // Without this echo, the CLI would lose its place and
             // re-stream from page 1 on retry.
             s3_lock_continuation_token: body.s3_lock_continuation_token,

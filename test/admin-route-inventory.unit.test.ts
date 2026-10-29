@@ -195,6 +195,34 @@ const EXPECTED_ENTRIES: Record<string, number> = {
   "POST /datasets/zarr-fidelity-sweep": 1,
   "POST /datasets/anonymity-sweep": 1,
 
+  // Upstream snapshot backfill (epic #1046 phase 2, #1908; ADR 0111): dry run by default.
+  "POST /datasets/upstream-backfill": 1,
+
+  // Upstream staleness report (epic #1046 phase 4a, #1910; ADR 0111): read-only.
+  "GET /upstream-status": 1,
+
+  // The record of an upstream re-pull (epic #1046 phase 6, #1912; ADR 0111): create and
+  // transition carry a zod validator beside the handler; the two reads are the handler alone.
+  "POST /repulls": 2,
+  "GET /repulls": 1,
+  // The automatic re-pull's switches (epic #1046 phase 7, #1913): a handler alone, registered
+  // BEFORE `GET /repulls/:id`, which would otherwise answer 400 for "switches".
+  "GET /repulls/switches": 1,
+  // The automatic path's dispatches (epic #1046 phase 7h): a handler alone, before `:id` for the
+  // same reason.
+  "GET /repulls/dispatches": 1,
+  "GET /repulls/:id": 1,
+  "POST /repulls/:id/transition": 2,
+  // The re-pull's screen and its verified facts (epic #1046 phase 6, #1912; ADR 0111): every write
+  // carries a zod validator beside the handler; the screens read is the handler alone.
+  "GET /repulls/:id/screens": 1,
+  "POST /repulls/:id/screen": 2,
+  "POST /repulls/:id/screen/acknowledge": 2,
+  "POST /repulls/:id/merge-claim/release": 2,
+  "POST /repulls/:id/merge-claim/check": 2,
+  "POST /repulls/:id/merged": 2,
+  "POST /repulls/:id/released": 2,
+
   // Import coverage sweep (issue #1311, epic #1306 phase 3)
   "POST /imports/coverage-sweep": 1,
 
@@ -255,8 +283,30 @@ describe("admin route inventory", () => {
     expect(dup).toBeLessThan(byUsername);
   });
 
+  // `GET /repulls/switches` is reachable only registered before `GET /repulls/:id`, for the reason
+  // the duplicate report above gives: `:id` would match "switches" first and answer 400.
+  test("GET /repulls/switches is registered before GET /repulls/:id", () => {
+    const paths = adminRoutes.routes.map((r) => `${r.method} ${r.path}`);
+    const switches = paths.indexOf("GET /repulls/switches");
+    const byId = paths.indexOf("GET /repulls/:id");
+    expect(switches).toBeGreaterThanOrEqual(0);
+    expect(byId).toBeGreaterThanOrEqual(0);
+    expect(switches).toBeLessThan(byId);
+  });
+
+  // The same for `GET /repulls/dispatches`: both patterns match it, the router takes the first
+  // handler in registration order, and `:id` would answer 400 `invalid-id` for "dispatches".
+  test("GET /repulls/dispatches is registered before GET /repulls/:id", () => {
+    const paths = adminRoutes.routes.map((r) => `${r.method} ${r.path}`);
+    const dispatches = paths.indexOf("GET /repulls/dispatches");
+    const byId = paths.indexOf("GET /repulls/:id");
+    expect(dispatches).toBeGreaterThanOrEqual(0);
+    expect(byId).toBeGreaterThanOrEqual(0);
+    expect(dispatches).toBeLessThan(byId);
+  });
+
   test("entry total is pinned", () => {
-    expect(adminRoutes.routes.length).toBe(175);
+    expect(adminRoutes.routes.length).toBe(198);
   });
 
   // The count pin above can't see a SWAP of the router-level middleware

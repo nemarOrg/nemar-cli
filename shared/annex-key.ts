@@ -62,7 +62,8 @@ function sizeOfFields(fields: string): number | null {
  * tolerant of a following `-m<mtime>` (`WORM-s5-m17--x` -> 5). The twin of
  * `annex_key_size` in `scripts/zarr/generate_zarr.py`. Null when the key has no
  * `--` or no size field. Used for chunk geometry, where the size has to be known
- * to know how many chunks to expect.
+ * to know how many chunks to expect, and for the bytes a snapshot delta would copy
+ * (`summarizeSnapshotDelta`), where a name that looks like a size must not be read as one.
  */
 export function annexKeyFieldSize(key: string): number | null {
   const parts = splitKey(key);

@@ -179,6 +179,19 @@ export async function deleteDatasetCascade(
         )
         .bind(datasetId),
       db.prepare("DELETE FROM user_s3_permissions WHERE s3_prefix = ?").bind(datasetId),
+      // The record of an upstream re-pull has no foreign key to `datasets` (migration 0105), so it
+      // is deleted here, its screens first (migration 0106): their foreign key cascades on D1, but
+      // the delete does not rely on the pragma. Placed after the indexed results above so their
+      // positions do not move. The automatic path's dispatches (migration 0112) have no foreign
+      // key either, and some have no re-pull row at all (a run refused before its create), so they
+      // go by dataset, before the re-pull rows.
+      db
+        .prepare(
+          "DELETE FROM upstream_repull_screens WHERE repull_id IN (SELECT id FROM upstream_repulls WHERE dataset_id = ?)",
+        )
+        .bind(datasetId),
+      db.prepare("DELETE FROM upstream_repull_dispatches WHERE dataset_id = ?").bind(datasetId),
+      db.prepare("DELETE FROM upstream_repulls WHERE dataset_id = ?").bind(datasetId),
       db.prepare("DELETE FROM datasets WHERE dataset_id = ?").bind(datasetId),
     ]);
 

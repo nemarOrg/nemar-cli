@@ -66,6 +66,15 @@
  * cap is asked after the gate, so a contributor an administrator has blocked is declined and not
  * told "too many edits", and a declined restart is not counted.
  *
+ * **A bot's pull request is not reviewed, except the NEMAR App's automatic re-pull pull request**
+ * (ADR 0092 says "not bots"; ADR 0111 narrows that for this one class). A delivery from GitHub of a
+ * bot's pull request, the App's included, is skipped as `bot_author`, and so is an administrator's
+ * start of one. Only the Worker's own start of the review of an automatic re-pull record
+ * (`startRepullPullRequestReview` in `pr-review-start.ts`) admits it, and only when the author is
+ * the App by login, numeric id and type, from the release branch the record names, in the
+ * dataset's own repository. The App has no NEMAR account, so it is never exempt, and the review
+ * runs on it as on anyone's.
+ *
  * **A publish is checked against the row once GitHub has answered** ({@link publishOutcome}): a slow
  * write that lands after a newer result must not leave the older one on the pull request.
  *
@@ -113,6 +122,11 @@ import type { Bindings } from "../types/bindings.js";
 import { isValidDatasetId } from "./datasetId.js";
 import { isNonProductionEnv } from "./environment.js";
 import { getDatasetsToken, getDatasetsTokenWithRefresher } from "./github-auth.js";
+import {
+  NEMAR_APP_BOT_LOGIN,
+  NEMAR_APP_BOT_TYPE,
+  NEMAR_APP_BOT_USER_ID,
+} from "./github/branch-protection.js";
 import { signPrReviewCallbackToken } from "./github/callback-tokens.js";
 import { approvalDispatchEnvironment, triggerPrReviewRun } from "./github/dispatch.js";
 import { upsertReviewCheckRun, upsertReviewComment } from "./github/pr-review-api.js";
@@ -304,13 +318,56 @@ function changesWhatTheReviewReads(changes: unknown): boolean {
 }
 
 /**
+ * How a delivery is read. Only the Worker's own start of an automatic re-pull's review sets it
+ * (`startRepullPullRequestReview`); the webhook and an administrator's start never do.
+ */
+export interface IntakeOptions {
+  /**
+   * Admit the NEMAR App's automatic re-pull pull request from this release branch: the one bot
+   * author the review takes (ADR 0111 narrows ADR 0092's "not bots" for this class only).
+   */
+  admitRepullBot?: { branch: string };
+}
+
+/**
+ * Whether this bot-authored delivery is the one class the review admits: the NEMAR App's own pull
+ * request (its login, its numeric id and its type all match; a user who registers a similar name,
+ * or another App's bot, does not), from the release branch the re-pull record names, in the
+ * dataset's own repository (never a fork), and only when the Worker's start asked for it.
+ */
+function isAdmittedRepullBot(
+  opts: IntakeOptions,
+  user: Record<string, unknown>,
+  head: Record<string, unknown>,
+  repo: Record<string, unknown>,
+): boolean {
+  const admit = opts.admitRepullBot;
+  if (!admit || typeof admit.branch !== "string" || admit.branch === "") return false;
+  const headRepo = rec(head.repo);
+  return (
+    user.login === NEMAR_APP_BOT_LOGIN &&
+    user.id === NEMAR_APP_BOT_USER_ID &&
+    user.type === NEMAR_APP_BOT_TYPE &&
+    head.ref === admit.branch &&
+    typeof headRepo?.full_name === "string" &&
+    typeof repo.full_name === "string" &&
+    headRepo.full_name.toLowerCase() === repo.full_name.toLowerCase()
+  );
+}
+
+/**
  * Read a `pull_request` delivery. Everything in it is attacker-influenced (the title, the branch
  * names, the fork's name). Only ids, the head and base commits, the base branch and fixed-shape
  * logins are read, each checked against the shape it must have, and the title, which only the
  * naming rule reads (see {@link PrIntake.title}). For an edit, the keys of `changes` are looked at
  * and what they hold, the text from before the edit, is not.
+ *
+ * A bot's pull request is not reviewed (`bot_author`, ADR 0092), with one exception: the NEMAR
+ * App's automatic re-pull pull request, when the Worker's own start names its release branch
+ * ({@link IntakeOptions.admitRepullBot}; ADR 0111, the Phase 7 amendment). A delivery from GitHub
+ * never carries that option, so the App's pull request is reviewed only when the Worker starts it.
  */
-export function readPullRequestEvent(payload: unknown): IntakeResult {
+export function readPullRequestEvent(payload: unknown, opts: IntakeOptions = {}): IntakeResult {
   const p = rec(payload);
   const pr = rec(p?.pull_request);
   const repo = rec(p?.repository);
@@ -358,10 +415,13 @@ export function readPullRequestEvent(payload: unknown): IntakeResult {
   ) {
     return { ok: false, reason: "malformed" };
   }
-  if (user.type === "Bot" || user.login.endsWith("[bot]")) {
+  const bot = user.type === "Bot" || user.login.endsWith("[bot]");
+  if (bot && !isAdmittedRepullBot(opts, user, head, repo)) {
     return { ok: false, reason: "bot_author" };
   }
-  if (!LOGIN.test(user.login)) return { ok: false, reason: "malformed" };
+  // The admitted App's login is `name[bot]`, which is not a person's login shape; it was matched
+  // exactly above.
+  if (!bot && !LOGIN.test(user.login)) return { ok: false, reason: "malformed" };
 
   // A deleted fork leaves `head.repo` null; that is a fork. Same-repo branches name the base repo.
   const headRepo = rec(head.repo);
@@ -861,6 +921,14 @@ export interface PrReviewOptions {
    * the exemption apply as to any start.
    */
   redo?: boolean;
+  /**
+   * The Worker's own start of an automatic re-pull's review (`startRepullPullRequestReview`): admit
+   * the NEMAR App's pull request from this release branch, which the intake otherwise skips as a
+   * bot's ({@link IntakeOptions}). Nothing else is different: the App has no NEMAR account, so it
+   * is never exempt, and the gate, a block, the per-commit row and every later rule apply as to
+   * anyone's pull request. The webhook never sets it.
+   */
+  admitRepullBot?: { branch: string };
 }
 
 /**
@@ -1033,7 +1101,7 @@ export async function handlePullRequestEvent(
   options: PrReviewOptions = {},
 ): Promise<PrReviewResponse> {
   if (env.PR_REVIEW_ENABLED !== "1") return no("pr_review_disabled");
-  const intake = readPullRequestEvent(payload);
+  const intake = readPullRequestEvent(payload, { admitRepullBot: options.admitRepullBot });
   if (!intake.ok) return no(intake.reason);
   const pr = intake.pr;
   const db = env.DB;

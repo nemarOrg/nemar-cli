@@ -51,13 +51,17 @@ import {
   IMPORT_SCRUB_REFUSALS,
   ImportScrubRefused,
   MAX_SCANS_TABLE_BYTES,
+  assertCopiedRecordingsRead,
   httpUpstreamReader,
+  pinnedObjectUrl,
   prepareImportedTreeForCopy,
   restrictManifestToTree,
+  scrubImportedTree,
   setTopLevelString,
 } from "../src/lib/import-scrub";
 import type { ImportManifestItem } from "../src/lib/s3-server-copy";
 import { scanLocalDataset } from "../src/lib/upload/identifier-preflight";
+import { type S3Standin, startS3Standin } from "./scrub/helpers/s3-standin";
 
 const NEMAR_ID = "on999999";
 const UPSTREAM_ID = "ds999999";
@@ -1596,4 +1600,507 @@ describe("the ledger names the rules it ran under", () => {
     }
     expect(IMPORT_SCANNER_ID).toBe(`identifier-scan@${hash.digest("hex").slice(0, 16)}`);
   });
+});
+
+// ---------------------------------------------------------------------------------------
+// An upstream re-pull's delta scrub (ADR 0111): a scope, and a source named per key
+// ---------------------------------------------------------------------------------------
+
+const OUT_EDF = "sub-04/eeg/sub-04_task-rest_eeg.edf";
+const OUT_JSON = "sub-04/eeg/sub-04_task-rest_eeg.json";
+const IN_SCANS = "sub-01/sub-01_scans.tsv";
+const OUT_SCANS = "sub-04/sub-04_scans.tsv";
+const PROVENANCE = "sourcedata/sourcedata_provenance.json";
+const PROVENANCE_README = "sourcedata/README_sourcedata_provenance.md";
+
+/** The provenance pair, as an upstream that ships one has it. */
+function provenanceFixtures(json = `{\n  "files": []\n}\n`): Fixture[] {
+  return [
+    { path: PROVENANCE, bytes: text(json) },
+    { path: PROVENANCE_README, bytes: text("# Provenance\n") },
+  ];
+}
+
+/** A tree in which every rule the scrub runs has work both inside and outside a re-pull's scope. */
+function deltaFixtures(): Fixture[] {
+  const sidecar = text(
+    `{\n  "TaskName": "rest",\n  "Acq": {\n    "PatientName": "${GIVEN} ${SURNAME}"\n  }\n}\n`,
+  );
+  return [
+    {
+      path: "dataset_description.json",
+      bytes: text(`{"Name": "fixture", "BIDSVersion": "1.9.0"}\n`),
+    },
+    { path: FLAGGED_ANNEXED, bytes: edfBytes(FLAGGED_PATIENT, 4000, 21) },
+    { path: CLEAN_ANNEXED, bytes: edfBytes("X X X X", 4000, 22, YEAR_ONLY) },
+    { path: OUT_EDF, bytes: edfBytes(FLAGGED_PATIENT, 4000, 23) },
+    { path: SIDECAR, bytes: sidecar },
+    { path: OUT_JSON, bytes: sidecar },
+    { path: IN_SCANS, bytes: text(SCANS_TEXT) },
+    { path: OUT_SCANS, bytes: text(SCANS_TEXT) },
+  ];
+}
+
+/** `scrubImportedTree` as an upstream re-pull calls it: no whereis map, a first import's dates. */
+function scrubDelta(clone: string, over: Partial<Parameters<typeof scrubImportedTree>[0]> = {}) {
+  return scrubImportedTree({
+    datasetPath: clone,
+    nemarId: NEMAR_ID,
+    keyUrlMap: new Map(),
+    unannexedData: [],
+    reimport: false,
+    skipData: false,
+    reader: httpUpstreamReader({ baseUrl, retryDelayMs: 1 }),
+    upload: inheritUpload,
+    remoteName: "nemar-s3",
+    bucket: "nemar",
+    now: FIXED_NOW,
+    actor: "fixture-actor",
+    ...over,
+  });
+}
+
+const upstreamS3 = (path: string) => ({
+  kind: "s3" as const,
+  ref: { bucket: "openneuro.org", key: `${UPSTREAM_ID}/${path}` },
+});
+
+describe("an upstream re-pull scrubs its delta paths only (ADR 0111)", () => {
+  test("nothing outside the scope is read or changed, and a held key is counted, not read", async () => {
+    const files = deltaFixtures();
+    const upstream = await buildUpstream(files);
+    const { clone } = await cloneForImport(upstream);
+    const flaggedKey = await keyAt(clone, FLAGGED_ANNEXED);
+    const heldKey = await keyAt(clone, CLEAN_ANNEXED);
+    const outKey = await keyAt(clone, OUT_EDF);
+    const asked: string[] = [];
+
+    const result = await scrubDelta(clone, {
+      scope: new Set([FLAGGED_ANNEXED, CLEAN_ANNEXED, SIDECAR, IN_SCANS]),
+      sourceOf: (key) => {
+        asked.push(key);
+        if (key === flaggedKey) return upstreamS3(FLAGGED_ANNEXED);
+        return key === heldKey ? "held" : null;
+      },
+    });
+
+    // Only the scope's recordings are asked about, and only the flagged one is read.
+    expect(asked).toEqual([flaggedKey, heldKey]);
+    expect(new Set(requests.map((r) => r.path))).toEqual(
+      new Set([`${BUCKET_PATH}/${FLAGGED_ANNEXED}`]),
+    );
+    expect((await keyAt(clone, FLAGGED_ANNEXED)) === flaggedKey).toBe(false);
+    expect(result.replacedKeys).toEqual(new Set([flaggedKey]));
+    expect(await keyAt(clone, CLEAN_ANNEXED)).toBe(heldKey);
+    expect(await keyAt(clone, OUT_EDF)).toBe(outKey);
+
+    // In scope the rules ran; outside it every byte is as upstream wrote it.
+    const original = (p: string) => Buffer.from(fixtureBytes(files, p)).toString("utf8");
+    expect(readFileSync(join(clone, SIDECAR), "utf8")).not.toBe(original(SIDECAR));
+    expect(readFileSync(join(clone, OUT_JSON), "utf8")).toBe(original(OUT_JSON));
+    expect(readFileSync(join(clone, IN_SCANS), "utf8")).toBe(
+      SCANS_TEXT.replace("2023-03-14T", "2023-01-01T"),
+    );
+    expect(readFileSync(join(clone, OUT_SCANS), "utf8")).toBe(SCANS_TEXT);
+    // Read means the header was judged by this run: the flagged key, and nothing held or outside.
+    expect(result.headerReadKeys).toEqual(new Set([flaggedKey]));
+
+    expect(result.counts).toMatchObject({
+      recordings: 2,
+      headers_read: 1,
+      headers_not_read_nemar_held: 1,
+      headers_not_read_no_source: 0,
+      headers_scrubbed: 1,
+      json_files_read: 1,
+      json_files_blanked: 1,
+      scans_tables_read: 1,
+      scans_tables_normalized: 1,
+    });
+
+    // The scrub's commit carries the scope's changes and nothing else.
+    const committed = (await run(["git", "show", "--name-only", "--format=", "HEAD"], clone))
+      .split("\n")
+      .filter(Boolean)
+      .sort();
+    expect(committed).toEqual(
+      [".nemar/corrections.jsonl", FLAGGED_ANNEXED, IN_SCANS, SIDECAR].sort(),
+    );
+  }, 120_000);
+
+  test("a key with no source is counted and never read", async () => {
+    const upstream = await buildUpstream(deltaFixtures());
+    const { clone } = await cloneForImport(upstream);
+    const result = await scrubDelta(clone, {
+      scope: new Set([FLAGGED_ANNEXED, CLEAN_ANNEXED]),
+      sourceOf: () => null,
+    });
+    expect(requests).toEqual([]);
+    expect(result.counts).toMatchObject({
+      recordings: 2,
+      headers_read: 0,
+      headers_not_read_no_source: 2,
+      headers_not_read_nemar_held: 0,
+    });
+    expect(result.headerReadKeys).toEqual(new Set());
+    expect(result.committed).toBe(false);
+  }, 120_000);
+
+  test("a held key the scrub did not read cannot be copied: the closing check refuses it", async () => {
+    const upstream = await buildUpstream(deltaFixtures());
+    const { clone } = await cloneForImport(upstream);
+    const heldKey = await keyAt(clone, CLEAN_ANNEXED);
+    const result = await scrubDelta(clone, {
+      scope: new Set([CLEAN_ANNEXED]),
+      sourceOf: () => "held",
+    });
+    expect(result.headerReadKeys.has(heldKey)).toBe(false);
+    const item: ImportManifestItem = {
+      key: heldKey,
+      sourceUrl: null,
+      source: null,
+      destUri: `s3://nemar/${NEMAR_ID}/objects/${heldKey}`,
+    };
+    const err = await refusal(
+      Promise.resolve().then(() =>
+        assertCopiedRecordingsRead(
+          [item],
+          new Map([[CLEAN_ANNEXED, heldKey]]),
+          result.headerReadKeys,
+        ),
+      ),
+    );
+    expect(err.code).toBe("header-unreadable");
+  }, 120_000);
+
+  test("a changed path the scope does not name refuses before anything is read", async () => {
+    // The scrub reads only its scope, so a path the caller changed and left out would reach the
+    // commit unread. Staged or not, either refuses.
+    for (const stage of [false, true]) {
+      const upstream = await buildUpstream(deltaFixtures());
+      const { clone } = await cloneForImport(upstream);
+      writeFileSync(join(clone, OUT_JSON), `{"TaskName": "changed by the caller"}\n`);
+      if (stage) {
+        await run(["git", "-c", "annex.largefiles=nothing", "add", OUT_JSON], clone);
+      }
+      const head = (await run(["git", "rev-parse", "HEAD"], clone)).trim();
+      const err = await refusal(
+        scrubDelta(clone, {
+          scope: new Set([FLAGGED_ANNEXED, SIDECAR]),
+          sourceOf: () => null,
+        }),
+      );
+      expect(err.code, `staged: ${stage}`).toBe("scope-incomplete");
+      expect(err.message).toContain("1 path(s) changed since HEAD, or untracked");
+      expectNoSecret(err.message);
+      expect((await run(["git", "rev-parse", "HEAD"], clone)).trim()).toBe(head);
+      // The same change inside the scope is the caller's delta, and the scrub reads it.
+      const ok = await scrubDelta(clone, {
+        scope: new Set([FLAGGED_ANNEXED, SIDECAR, OUT_JSON]),
+        sourceOf: () => null,
+      });
+      expect(ok.counts.json_files_read).toBe(2);
+    }
+  }, 180_000);
+
+  test("an untracked path the scope does not name refuses too; in the scope it is the caller's", async () => {
+    // git diff sees tracked paths only, and a later `git add` would take this one.
+    const upstream = await buildUpstream(deltaFixtures());
+    const { clone } = await cloneForImport(upstream);
+    const added = "sub-05/eeg/sub-05_task-rest_eeg.json";
+    mkdirSync(dirname(join(clone, added)), { recursive: true });
+    writeFileSync(join(clone, added), `{"TaskName": "added by the caller"}\n`);
+    const err = await refusal(
+      scrubDelta(clone, { scope: new Set([SIDECAR]), sourceOf: () => null }),
+    );
+    expect(err.code).toBe("scope-incomplete");
+    expect(err.message).toContain("1 path(s)");
+    const ok = await scrubDelta(clone, { scope: new Set([SIDECAR, added]), sourceOf: () => null });
+    expect(ok.counts.json_values_blanked).toBe(1);
+  }, 120_000);
+});
+
+describe("a re-pull's header scrub never leaves a provenance file without its sentence", () => {
+  const flaggedSource = async (clone: string) => {
+    const flaggedKey = await keyAt(clone, FLAGGED_ANNEXED);
+    return (key: string) => (key === flaggedKey ? upstreamS3(FLAGGED_ANNEXED) : null);
+  };
+
+  test("a provenance file outside the scope refuses before a byte is downloaded", async () => {
+    const upstream = await buildUpstream([...deltaFixtures(), ...provenanceFixtures()]);
+    const { clone } = await cloneForImport(upstream);
+    const head = (await run(["git", "rev-parse", "HEAD"], clone)).trim();
+    const err = await refusal(
+      scrubDelta(clone, {
+        // The JSON is in scope and its README is not: one file left out is enough.
+        scope: new Set([FLAGGED_ANNEXED, PROVENANCE]),
+        sourceOf: await flaggedSource(clone),
+      }),
+    );
+    expect(err.code).toBe("provenance-out-of-scope");
+    expect(err.message).toContain("1 provenance file(s)");
+    // The header was read to decide; nothing was downloaded, written or committed.
+    expect(requests.every((r) => r.range !== null)).toBe(true);
+    expect((await run(["git", "rev-parse", "HEAD"], clone)).trim()).toBe(head);
+    expect(readFileSync(join(clone, PROVENANCE), "utf8")).toBe(`{\n  "files": []\n}\n`);
+  }, 120_000);
+
+  test("a date-only recording is a header change too, so it refuses on the same rule", async () => {
+    // A date set to 1 January carries ADR 0091's sentence in the same file. The refusal counts the
+    // planned change, the safe side, before the recording is downloaded.
+    const datedOnly = "sub-05/eeg/sub-05_task-rest_eeg.edf";
+    const upstream = await buildUpstream([
+      ...deltaFixtures(),
+      { path: datedOnly, bytes: edfBytes("X X X X", 4000, 31) },
+      ...provenanceFixtures(),
+    ]);
+    const { clone } = await cloneForImport(upstream);
+    const key = await keyAt(clone, datedOnly);
+    const err = await refusal(
+      scrubDelta(clone, {
+        scope: new Set([datedOnly]),
+        sourceOf: (k) => (k === key ? upstreamS3(datedOnly) : null),
+      }),
+    );
+    expect(err.code).toBe("provenance-out-of-scope");
+    expect(err.message).toContain("2 provenance file(s)");
+    expect(requests.every((r) => r.range !== null)).toBe(true);
+  }, 120_000);
+
+  test("with no header to change, a provenance file outside the scope is not the scrub's", async () => {
+    const upstream = await buildUpstream([...deltaFixtures(), ...provenanceFixtures()]);
+    const { clone } = await cloneForImport(upstream);
+    const result = await scrubDelta(clone, { scope: new Set([SIDECAR]), sourceOf: () => null });
+    expect(result.counts).toMatchObject({ json_values_blanked: 1, headers_scrubbed: 0 });
+    expect(result.counts.provenance_annotated).toBe(0);
+  }, 120_000);
+
+  test("in the scope, both files get the sentence", async () => {
+    const upstream = await buildUpstream([...deltaFixtures(), ...provenanceFixtures()]);
+    const { clone } = await cloneForImport(upstream);
+    const result = await scrubDelta(clone, {
+      scope: new Set([FLAGGED_ANNEXED, PROVENANCE, PROVENANCE_README]),
+      sourceOf: await flaggedSource(clone),
+    });
+    expect(result.counts).toMatchObject({
+      headers_scrubbed: 1,
+      provenance_annotated: 1,
+      provenance_readme_annotated: 1,
+      provenance_not_annotated: 0,
+      provenance_malformed: 0,
+    });
+    const doc = JSON.parse(readFileSync(join(clone, PROVENANCE), "utf8"));
+    expect(doc[PROVENANCE_NOTE_KEY]).toBe(provenanceNote("2026-10-06", "scrubbed-and-dates-set"));
+  }, 120_000);
+
+  test("a provenance file that is not a JSON object is counted as malformed, not as out of scope", async () => {
+    const upstream = await buildUpstream([...deltaFixtures(), ...provenanceFixtures("[1, 2]\n")]);
+    const { clone } = await cloneForImport(upstream);
+    const result = await scrubDelta(clone, {
+      scope: new Set([FLAGGED_ANNEXED, PROVENANCE, PROVENANCE_README]),
+      sourceOf: await flaggedSource(clone),
+    });
+    expect(result.counts).toMatchObject({
+      headers_scrubbed: 1,
+      provenance_annotated: 0,
+      provenance_malformed: 1,
+      provenance_not_annotated: 0,
+    });
+    expect(readFileSync(join(clone, PROVENANCE), "utf8")).toBe("[1, 2]\n");
+  }, 120_000);
+});
+
+describe("assertCopiedRecordingsRead", () => {
+  const item = (key: string, origin?: "local"): ImportManifestItem => ({
+    key,
+    sourceUrl: null,
+    source: null,
+    destUri: `s3://nemar/${NEMAR_ID}/objects/${key}`,
+    ...(origin ? { origin } : {}),
+  });
+  const tree = new Map([
+    [FLAGGED_ANNEXED, "SHA256E-s10--a.edf"],
+    ["sub-01/eeg/sub-01_task-rest_eeg.set", "MD5E-s10--b.set"],
+  ]);
+
+  test("an upstream recording whose header was not read refuses; a read one passes", () => {
+    expect(() => assertCopiedRecordingsRead([item("SHA256E-s10--a.edf")], tree, new Set())).toThrow(
+      ImportScrubRefused,
+    );
+    expect(() =>
+      assertCopiedRecordingsRead(
+        [item("SHA256E-s10--a.edf")],
+        tree,
+        new Set(["SHA256E-s10--a.edf"]),
+      ),
+    ).not.toThrow();
+  });
+
+  test("a local upload and a key at a path that is not a recording are not the check's", () => {
+    expect(() =>
+      assertCopiedRecordingsRead(
+        [item("SHA256E-s10--a.edf", "local"), item("MD5E-s10--b.set")],
+        tree,
+        new Set(),
+      ),
+    ).not.toThrow();
+  });
+});
+
+describe("a pinned source is read at its version, never at the path's current object", () => {
+  // The S3 stand-in serves versions the way S3 does: a GET without `versionId` answers the path's
+  // current object, one with it answers that version.
+  let s3: S3Standin;
+  beforeAll(() => {
+    s3 = startS3Standin();
+  });
+  afterAll(() => s3.stop());
+
+  test("the URL encodes every segment and keeps the version", () => {
+    expect(
+      pinnedObjectUrl({
+        kind: "pinned",
+        bucket: "openneuro.org",
+        object: "ds004362/sub-096/eeg/sub-096_task-motion_run-3_eeg.set",
+        versionId: "6HN1nZuZnD7w.cd7JNcryB74XQAMV9Wn",
+      }),
+    ).toBe(
+      "https://s3.amazonaws.com/openneuro.org/ds004362/sub-096/eeg/sub-096_task-motion_run-3_eeg.set?versionId=6HN1nZuZnD7w.cd7JNcryB74XQAMV9Wn",
+    );
+    expect(
+      pinnedObjectUrl({
+        kind: "pinned",
+        bucket: "openneuro.org",
+        object: "ds000001/sub 01/a+b#c.edf",
+        versionId: "a+b/c=",
+        region: "us-west-2",
+      }),
+    ).toBe(
+      "https://s3.us-west-2.amazonaws.com/openneuro.org/ds000001/sub%2001/a%2Bb%23c.edf?versionId=a%2Bb%2Fc%3D",
+    );
+  });
+
+  test("the header read and the download both name the version, while a newer object is current", async () => {
+    const files = deltaFixtures();
+    const upstream = await buildUpstream(files);
+    const { clone, store } = await cloneForImport(upstream);
+    const flaggedKey = await keyAt(clone, FLAGGED_ANNEXED);
+    const object = `${UPSTREAM_ID}/${FLAGGED_ANNEXED}`;
+    const original = fixtureBytes(files, FLAGGED_ANNEXED);
+    const pinned = s3.putObject("openneuro.org", object, original);
+    // A later upstream snapshot rewrote the path with another recording of another size.
+    s3.putObject("openneuro.org", object, edfBytes(FLAGGED_PATIENT, 5000, 99));
+
+    const result = await scrubDelta(clone, {
+      scope: new Set([FLAGGED_ANNEXED]),
+      reader: httpUpstreamReader({ baseUrl: s3.url, retryDelayMs: 1 }),
+      sourceOf: (key) =>
+        key === flaggedKey
+          ? { kind: "pinned", bucket: "openneuro.org", object, versionId: pinned }
+          : null,
+    });
+
+    expect(result.counts).toMatchObject({
+      headers_read: 1,
+      headers_scrubbed: 1,
+      bytes_downloaded: original.length,
+    });
+    const stored = storedBytes(store, await keyAt(clone, FLAGGED_ANNEXED));
+    expect(Buffer.from(stored.subarray(EDF_HEADER_BYTES))).toEqual(
+      Buffer.from(original.subarray(EDF_HEADER_BYTES)),
+    );
+    const gets = s3.calls("GetObject").filter((c) => c.key === object);
+    // One ranged header read and one whole download, each at the pinned version.
+    expect(gets.map((g) => [g.status, g.versionId])).toEqual([
+      [206, pinned],
+      [200, pinned],
+    ]);
+  }, 120_000);
+
+  test("a pinned version that is gone refuses as http-404, never falling back to the current object", async () => {
+    const files = deltaFixtures();
+    const upstream = await buildUpstream(files);
+    const { clone } = await cloneForImport(upstream);
+    const flaggedKey = await keyAt(clone, FLAGGED_ANNEXED);
+    const object = `${UPSTREAM_ID}/gone/${FLAGGED_ANNEXED}`;
+    const original = fixtureBytes(files, FLAGGED_ANNEXED);
+    const pinned = s3.putObject("openneuro.org", object, original);
+    // The current object at the path is the very bytes the key names, so a read that dropped the
+    // version would succeed; only the pinned version is gone.
+    s3.putObject("openneuro.org", object, original);
+    s3.dropVersion("openneuro.org", object, pinned);
+
+    const err = await refusal(
+      scrubDelta(clone, {
+        scope: new Set([FLAGGED_ANNEXED]),
+        reader: httpUpstreamReader({ baseUrl: s3.url, retryDelayMs: 1 }),
+        sourceOf: (key) =>
+          key === flaggedKey
+            ? { kind: "pinned", bucket: "openneuro.org", object, versionId: pinned }
+            : null,
+      }),
+    );
+    expect(err.code).toBe("header-unreadable");
+    expect(err.message).toContain("http-404 x1");
+    const gets = s3.calls("GetObject").filter((c) => c.key === object);
+    expect(gets.length).toBeGreaterThan(0);
+    expect(gets.every((g) => g.status === 404)).toBe(true);
+  }, 120_000);
+});
+
+describe("a re-pull's ledger line is its own word (ADR 0111)", () => {
+  test("ledgerAction writes repull-scrubbed, under the ledger's own guard", async () => {
+    const upstream = await buildUpstream(deltaFixtures());
+    const { clone } = await cloneForImport(upstream);
+    const flaggedKey = await keyAt(clone, FLAGGED_ANNEXED);
+    await scrubDelta(clone, {
+      scope: new Set([FLAGGED_ANNEXED, SIDECAR]),
+      sourceOf: (key) => (key === flaggedKey ? upstreamS3(FLAGGED_ANNEXED) : null),
+      ledgerAction: "repull-scrubbed",
+    });
+    const lines = readLedger(join(clone, ".nemar/corrections.jsonl"));
+    expect(lines.map((l) => l.action)).toEqual(["repull-scrubbed"]);
+    expect(lines[0]?.counts).toMatchObject({ headers_scrubbed: 1, json_values_blanked: 1 });
+  }, 120_000);
+
+  test("a repull-scrubbed line holds no history on a re-import; the importer's own line does", async () => {
+    // A re-pull scrubs before its one commit, so nothing it pushed holds an original (ADR 0111,
+    // decision 9); an import's line that blanked JSON is a hold, because the import pushed
+    // upstream's history (ADR 0089).
+    const files = baseFixtures().filter((f) => f.path !== FLAGGED_ANNEXED && f.path !== SIDECAR);
+    const holds: boolean[] = [];
+    for (const action of ["repull-scrubbed", "import-scrubbed"] as const) {
+      const upstream = await buildUpstream(files);
+      const nemarRepo = await bareRepo();
+      const first = await cloneForImport(upstream);
+      await prepare(first.clone, await upstreamView(first.clone));
+      const ledger = join(first.clone, ".nemar/corrections.jsonl");
+      mkdirSync(dirname(ledger), { recursive: true });
+      writeFileSync(
+        ledger,
+        `${JSON.stringify({
+          version: 1,
+          at: FIXED_NOW.toISOString(),
+          dataset: NEMAR_ID,
+          action,
+          versions: [],
+          counts: { json_values_blanked: 2, git_held_recordings_scrubbed: 0 },
+          scanner: IMPORT_SCANNER_ID,
+          verification: "scanner-clean+payload-identical",
+          actor: "fixture-actor",
+        })}\n`,
+      );
+      await run(
+        ["git", "-c", "annex.largefiles=nothing", "add", ".nemar/corrections.jsonl"],
+        first.clone,
+      );
+      await run(["git", "commit", "-qm", "ledger"], first.clone);
+      await run(["git", "remote", "add", "nemar", nemarRepo], first.clone);
+      await run(["git", "push", "-q", "nemar", "main", "git-annex"], first.clone);
+      const again = await reimportClone(upstream, nemarRepo);
+      holds.push(
+        (await prepare(again.clone, again.view, { reimport: true })).privacy.historyHoldsOriginals,
+      );
+    }
+    expect(holds).toEqual([false, true]);
+  }, 240_000);
 });

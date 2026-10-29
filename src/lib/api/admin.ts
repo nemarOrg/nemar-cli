@@ -75,7 +75,13 @@ import type {
 } from "../../../shared/contract/pr-review-admin.js";
 import type { BackfillNameOutcome } from "../../../shared/contract/publication.js";
 import type { NeurobagelWeekly } from "../../../shared/contract/weekly-attention.js";
+import type { RepullWeekFacts } from "../../../shared/repull-observability.js";
+import type {
+  UpstreamFleetSummary,
+  UpstreamStatusPage,
+} from "../../../shared/upstream-staleness.js";
 import { request } from "./client.js";
+import { ApiError } from "./errors.js";
 
 // ============================================================================
 // Admin
@@ -833,6 +839,11 @@ export async function createExemplar(opts: {
    * `nm` id.
    */
   anonymous?: true;
+  /**
+   * A mirror rehearsal fixture (ADR 0111): the OpenNeuro `ds` the `on` source mirrors; the row then
+   * records `source = 'openneuro'` and that `ds`, as a re-pull reads it.
+   */
+  mirror?: string;
 }): Promise<CreateExemplarResponse> {
   return request<CreateExemplarResponse>(
     "/admin/datasets/exemplar",
@@ -1937,6 +1948,107 @@ export async function zarrFidelitySweep(options?: {
 }
 
 // ============================================================================
+// Upstream snapshot backfill (epic #1046 phase 2, #1908; ADR 0111)
+// ============================================================================
+
+/** One call of `POST /admin/datasets/upstream-backfill`. A 502 carries this same body with
+ *  `ok: false` (every read failed, or a suspect credential); {@link upstreamBackfill} returns
+ *  it instead of throwing so the cursor to resume from is not lost. */
+export interface UpstreamBackfillResponse {
+  ok: boolean;
+  execute: boolean;
+  scanned: number;
+  /** Rows written (execute) or that would be (dry run). */
+  recorded: { doi: number; unknown: number };
+  /** Rows whose read failed: nothing was written for them. */
+  not_examined: number;
+  unparseable: number;
+  absent: number;
+  skipped_existing: number;
+  errors: {
+    dataset_id: string;
+    version: string;
+    error: string;
+    /** `transient` is fixed by a rerun; `needs_admin` (absent at the tag and at main) is not. */
+    kind?: "transient" | "needs_admin";
+  }[];
+  suspect_credential: boolean;
+  /** Pass as `after` for the next call; null when the pass is done. */
+  next_cursor: string | null;
+  remaining: number;
+  /** Every on###### version row by state, as the database now holds it. */
+  counts: { doi: number; lineage: number; unknown: number; not_examined: number };
+  unknown_samples: { dataset_id: string; version: string; reason: string }[];
+  error?: string;
+}
+
+/** Examine one bounded batch (server default 25, max 50) of version rows that were never
+ *  examined. A dry run unless `execute` is true. */
+export async function upstreamBackfill(options?: {
+  execute?: boolean;
+  limit?: number;
+  after?: string;
+}): Promise<UpstreamBackfillResponse> {
+  const params = new URLSearchParams();
+  if (options?.execute) params.set("execute", "1");
+  if (options?.limit != null) params.set("limit", String(options.limit));
+  if (options?.after) params.set("after", options.after);
+  const query = params.toString() ? `?${params.toString()}` : "";
+  try {
+    return await request<UpstreamBackfillResponse>(
+      `/admin/datasets/upstream-backfill${query}`,
+      { method: "POST", headers: { "Content-Type": "application/json" } },
+      true,
+    );
+  } catch (err) {
+    const body = err instanceof ApiError && err.statusCode === 502 ? err.rawBody : undefined;
+    if (body && typeof body === "object" && "execute" in body && "counts" in body) {
+      return { ...(body as UpstreamBackfillResponse), ok: false };
+    }
+    throw err;
+  }
+}
+
+// ============================================================================
+// Upstream staleness report (epic #1046 phase 4, #1910; ADR 0111)
+// ============================================================================
+
+export type { UpstreamStatusPage };
+
+/**
+ * Examine one page (server default and maximum 100) of the managed OpenNeuro mirrors.
+ *
+ * A 502 carries a page body with `ok: false` (rows needed an OpenNeuro verdict and every one ended
+ * `unchecked`); this returns it, with `ok` forced false, instead of throwing. Any other failure
+ * throws. A 200 is NOT proof that every mirror was compared: read `errors` and the `unchecked`
+ * count too.
+ */
+export async function upstreamStatus(options?: {
+  limit?: number;
+  after?: string;
+  dataset?: string;
+}): Promise<UpstreamStatusPage> {
+  const params = new URLSearchParams();
+  if (options?.limit != null) params.set("limit", String(options.limit));
+  if (options?.after) params.set("after", options.after);
+  if (options?.dataset) params.set("dataset", options.dataset);
+  const query = params.toString() ? `?${params.toString()}` : "";
+  try {
+    return await request<UpstreamStatusPage>(
+      `/admin/upstream-status${query}`,
+      { method: "GET" },
+      true,
+    );
+  } catch (err) {
+    const body = err instanceof ApiError && err.statusCode === 502 ? err.rawBody : undefined;
+    if (body && typeof body === "object" && "rows" in body && "counts" in body) {
+      return { ...(body as UpstreamStatusPage), ok: false };
+    }
+    throw err;
+  }
+}
+
+// ============================================================================
 // Import-failure issue triage (#1310, epic #1306)
 // ============================================================================
 
@@ -2161,6 +2273,13 @@ export interface WeeklySummaryResponse {
     neurobagel: NeurobagelWeekly | null;
     /** Findings that need a person, as a count with no kind; null when it could not be counted. */
     neurobagelFindings: number | null;
+    /** The upstream freshness pass as counts; null when it did not run or failed, and absent
+     *  from an older backend, which is also unknown. Never rendered as zero. */
+    upstream?: UpstreamFleetSummary | null;
+    /** The upstream re-pulls' week (switches, scheduler, dispatches, merges, why to look) as counts
+     *  and fixed words; null when it could not be read, and absent from an older backend, which is
+     *  also unknown. Never rendered as zero. */
+    repulls?: RepullWeekFacts | null;
     errors: { stage: string; error: string }[];
   } | null;
   issue: { number: number | null; action: "created" | "would-create" | "already-filed" } | null;

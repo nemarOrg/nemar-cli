@@ -114,6 +114,12 @@ import {
   cleanUpLiveTestAccounts,
 } from "./services/test-account-sweep";
 import { purgeExpiredTickets } from "./services/ticket-retention";
+import { repullAdvanceLogLine, runRepullAdvanceCron } from "./services/upstream-repull-advance";
+import { sweepUnreportedDispatches } from "./services/upstream-repull-dispatch";
+import {
+  repullSchedulerLogLine,
+  runRepullSchedulerCron,
+} from "./services/upstream-repull-scheduler";
 import { publishZarrCatalog } from "./services/zarr-catalog";
 import { runZarrFidelitySweep } from "./services/zarr-fidelity-sweep";
 import type { Bindings, Variables } from "./types/bindings";
@@ -1113,6 +1119,35 @@ export default {
               ),
             ),
         );
+        // #1913 (epic #1046 phases 7f and 7g, ADR 0111): the automatic re-pull's advance tick. It
+        // reads the open automatic re-pulls, a few of each kind a tick in rotation, and takes each
+        // one step on: it dispatches the identifier screen and starts the review of an open pull
+        // request's head, writes pr_open -> gates_clear for one machine clean, merges a
+        // machine-clean one at gates_clear (the Worker's one merge path, under the daily merge cap
+        // and only while AUTO_REPULL_MERGE_ENABLED and AUTO_REPULL_ENABLED are both "1"), resolves a
+        // claim to merge from GitHub, dispatches the central workflow again to resume a run that
+        // stalled before its pull request opened or to finish one that merged, and records why each
+        // row waits where it is. PRODUCTION-ONLY, and deliberately NOT in DEV_CRON_ALLOWLIST: it
+        // reads and acts on pull requests in the shared nemarDatasets org, merges into it and
+        // dispatches against it. It also refuses outside exact production on its own; while
+        // AUTO_REPULL_ENABLED is not "1" it merges, gates and resumes nothing, and only resolves a
+        // held claim and finishes a merged re-pull, so no minted DOI is stranded. It never reads an
+        // administrator's re-pull, and sends no mail. One log line, only when it changed
+        // something, was refused or failed.
+        ctx.waitUntil(
+          runRepullAdvanceCron(env)
+            .then((r) => {
+              const log = r ? repullAdvanceLogLine(r) : null;
+              if (log?.level === "error") console.error(log.line);
+              else if (log) console.log(log.line);
+            })
+            .catch((err) =>
+              console.error(
+                "[repull-advance] tick failed:",
+                err instanceof Error ? (err.stack ?? err.message) : err,
+              ),
+            ),
+        );
       }
       return;
     }
@@ -1187,6 +1222,43 @@ export default {
       // from ENVIRONMENT, so a real 10.82901 DOI on a mirror row resolves to
       // production EZID credentials regardless of which worker is running.
       ctx.waitUntil(reconcileReservedVersionDois(env));
+      // #1913 (epic #1046 phase 7b, ADR 0111): end the automatic re-pull's live dispatches that
+      // said nothing within eight hours as `unreported`, so a dead run does not hold its dataset's
+      // one live slot. PROD-ONLY, and deliberately NOT in DEV_CRON_ALLOWLIST: it writes the
+      // dispatch table, whose rows only the production Worker makes. It reads no switch (turning
+      // them off must not strand a live row) and refuses outside exact production on its own.
+      ctx.waitUntil(
+        sweepUnreportedDispatches(env).catch((err) =>
+          console.error(
+            "[repull-dispatch] watchdog failed:",
+            err instanceof Error ? (err.stack ?? err.message) : err,
+          ),
+        ),
+      );
+      // #1913 (epic #1046 phase 7c, ADR 0111): the automatic re-pull's scheduler. It reads the
+      // staleness report from where its last tick stopped, takes `stale_ready` mirrors only, and
+      // dispatches the central re-pull workflow for at most REPULL_DAILY_OPEN_CAP of them a day,
+      // each through the dispatch record's capped claim. PRODUCTION-ONLY, and deliberately NOT in
+      // DEV_CRON_ALLOWLIST: it dispatches GitHub work against the shared nemarDatasets org. It also
+      // refuses outside exact production on its own, does nothing while AUTO_REPULL_ENABLED is not
+      // "1", and dispatches nothing until a re-pull has been run by hand to `complete`. It sends no
+      // mail; one log line per tick, at error level when it could not see or could not send.
+      ctx.waitUntil(
+        runRepullSchedulerCron(env)
+          .then((r) => {
+            if (!r) return;
+            const { level, line } = repullSchedulerLogLine(r);
+            if (level === "error") console.error(line);
+            else if (level === "warn") console.warn(line);
+            else console.log(line);
+          })
+          .catch((err) =>
+            console.error(
+              "[repull-scheduler] tick failed:",
+              err instanceof Error ? (err.stack ?? err.message) : err,
+            ),
+          ),
+      );
       // #969 (epic #967 Phase 2): reclassify falsely-complete imports, retry
       // incomplete/failed/quarantined ones, and blocklist + report ones whose
       // OpenNeuro source stays inaccessible. PROD-ONLY: dispatches GitHub work
