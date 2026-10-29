@@ -7,15 +7,17 @@
  * datasets; the cases that matter as much as the corrections are the ones it must leave alone.
  */
 
-import { beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { searchDatasetsTool } from "../backend/src/mcp/tools/search-datasets";
 import { executeDatasetSearch } from "../backend/src/services/dataset-search";
 import { analyzeQuery } from "../backend/src/services/search-query";
+import { resetRerankSuspension } from "../backend/src/services/search-rerank";
 import {
   MIN_CORRECTABLE_LENGTH,
   VOCABULARY_TTL_MS,
   buildVocabulary,
   editDistance,
+  loadCatalogVocabulary,
   loadVocabulary,
   resetVocabularyCache,
   suggestCorrection,
@@ -30,7 +32,11 @@ function sampleDb() {
   return { db, d1: realD1(db) };
 }
 
-beforeEach(resetVocabularyCache);
+beforeEach(() => {
+  resetVocabularyCache();
+  resetRerankSuspension();
+});
+afterEach(resetRerankSuspension);
 
 describe("editDistance", () => {
   test("counts an insertion, a deletion, a substitution and a swap of neighbors as one edit each", () => {
@@ -217,9 +223,9 @@ describe("the vocabulary", () => {
   test("is reused within its lifetime and rebuilt after it", async () => {
     const { d1 } = sampleDb();
     const t0 = 1_000_000;
-    const first = loadVocabulary(d1, t0);
-    expect(loadVocabulary(d1, t0 + VOCABULARY_TTL_MS - 1)).toBe(first);
-    expect(loadVocabulary(d1, t0 + VOCABULARY_TTL_MS)).not.toBe(first);
+    const first = loadCatalogVocabulary(d1, t0);
+    expect(loadCatalogVocabulary(d1, t0 + VOCABULARY_TTL_MS - 1)).toBe(first);
+    expect(loadCatalogVocabulary(d1, t0 + VOCABULARY_TTL_MS)).not.toBe(first);
   });
 
   test("a failed build is not remembered", async () => {

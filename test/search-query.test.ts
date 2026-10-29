@@ -111,8 +111,8 @@ describe("analyzeQuery", () => {
 
   test("a query of only generic words keeps all of them, so it still searches", async () => {
     const { d1 } = sampleDb();
-    const a = await analyzeQuery(d1, "eeg study");
-    expect(a.informative).toEqual(["eeg", "study"]);
+    const a = await analyzeQuery(d1, "study task");
+    expect(a.informative).toEqual(["study", "task"]);
   });
 
   test("one content word is not a phrase, whatever function words surround it", async () => {

@@ -18,8 +18,8 @@
  * word is informative", which is the behavior before this module existed.
  */
 
-import { PUBLIC_SEARCHABLE_SQL } from "./dataset-filters";
-import { correctMisspellings } from "./search-spelling";
+import { PUBLIC_SEARCHABLE_SQL, foldDiacritics } from "./dataset-filters";
+import { correctMisspellings, loadModalityTokens } from "./search-spelling";
 
 /** A word in more than this share of public datasets does not discriminate. */
 export const GENERIC_DF_MAX = 0.25;
@@ -45,18 +45,27 @@ export const STOPWORDS: ReadonlySet<string> = new Set(
   ).split(" "),
 );
 
-/** Lowercased alphanumeric words of at least two characters: the lexical leg's own tokenizer. */
+/** A word longer than this is not a word; it is dropped so one request cannot build an unbounded query. */
+export const MAX_TOKEN_LENGTH = 40;
+
+/**
+ * Lowercased alphanumeric words of two to {@link MAX_TOKEN_LENGTH} characters,
+ * accents folded: the lexical leg's own tokenizer (see `buildFtsMatch`).
+ */
 export function queryTokens(query: string): string[] {
-  return query
+  return foldDiacritics(query)
     .toLowerCase()
     .split(/[^a-z0-9]+/i)
-    .filter((t) => t.length >= 2);
+    .filter((t) => t.length >= 2 && t.length <= MAX_TOKEN_LENGTH);
 }
 
-/** The words that are not function words; every word when nothing else is left ("the"). */
+/**
+ * The words that are not function words, each once, in order; every word when
+ * nothing else is left ("the"). A repeated word ("sleep sleep") is one word.
+ */
 export function contentTokens(tokens: string[]): string[] {
   const content = tokens.filter((t) => !STOPWORDS.has(t));
-  return (content.length > 0 ? content : tokens).slice(0, MAX_QUERY_TERMS);
+  return [...new Set(content.length > 0 ? content : tokens)].slice(0, MAX_QUERY_TERMS);
 }
 
 export interface TermFrequencies {
@@ -116,7 +125,7 @@ export function informativeTokens(content: string[], frequencies: TermFrequencie
 }
 
 export interface QueryAnalysis {
-  /** The words the query is made of, function words removed, misspellings corrected. */
+  /** The words the query is made of, each once, function words removed, misspellings corrected. */
   content: string[];
   /** The content words that discriminate; what the lexical leg and the reranker are asked. */
   informative: string[];
@@ -126,8 +135,15 @@ export interface QueryAnalysis {
   semanticQuery: string;
   /** The text the cross-encoder is asked about. */
   rerankQuery: string;
-  /** More than one content word: a phrase, which gets a relevance cutoff; one word does not. */
+  /** More than one distinct content word: a phrase, which gets a relevance cutoff; one word does not. */
   isPhrase: boolean;
+  /**
+   * Modality tokens the query names ("eeg" in "sleep eeg") that the catalog
+   * uses. They are removed from the words that drive matching, because a
+   * modality is an attribute and not a topic, and are used to list datasets
+   * with that modality first. Empty when the query is nothing but modalities.
+   */
+  modalityBoost: string[];
   /**
    * The query as searched, present only when a word that matches no dataset
    * was replaced by a catalog word one typo away (see search-spelling.ts).
@@ -151,28 +167,45 @@ async function tryTermFrequencies(
   }
 }
 
+/** `text` with each key of `fixes` replaced, as a whole word, case-insensitively. */
+function applyFixes(text: string, fixes: Map<string, string>): string {
+  let out = text;
+  for (const [typo, fix] of fixes) out = out.replace(new RegExp(`\\b${typo}\\b`, "gi"), fix);
+  return out;
+}
+
 /** Analyze `query`. Never throws. */
 export async function analyzeQuery(db: D1Database, query: string): Promise<QueryAnalysis> {
   const trimmed = query.trim();
-  const allTokens = queryTokens(trimmed);
-  let content = contentTokens(allTokens);
+  let content = contentTokens(queryTokens(trimmed));
   let semanticQuery = trimmed;
   let correctedQuery: string | undefined;
 
   let frequencies = await tryTermFrequencies(db, content);
-  if (frequencies && frequencies.corpusSize > 0) {
+  // A catalog too small to measure cannot say a word is a typo either: in eight
+  // fixture datasets nearly every word is "unseen".
+  if (frequencies && frequencies.corpusSize >= MIN_CORPUS_FOR_DF) {
     // A word that matches no public dataset at all is a typo or a word the catalog lacks.
     const unseen = content.filter((t) => frequencies?.ratios.get(t) === 0);
     const fixes =
       unseen.length > 0 ? await correctMisspellings(db, unseen) : new Map<string, string>();
     if (fixes.size > 0) {
-      content = content.map((t) => fixes.get(t) ?? t);
-      semanticQuery = allTokens.map((t) => fixes.get(t) ?? t).join(" ");
+      content = [...new Set(content.map((t) => fixes.get(t) ?? t))];
+      semanticQuery = applyFixes(foldDiacritics(trimmed), fixes);
       correctedQuery = semanticQuery;
       frequencies = (await tryTermFrequencies(db, content)) ?? frequencies;
     }
   }
-  const informative = frequencies ? informativeTokens(content, frequencies) : content;
+
+  // A modality named in the query is an attribute to prefer, not a topic to match.
+  // When it is all the query says, it stays the query.
+  const catalogModalities = content.length > 1 ? await loadModalityTokens(db) : new Set<string>();
+  const named = content.filter((t) => catalogModalities.has(t));
+  const topical = content.filter((t) => !catalogModalities.has(t));
+  const modalityBoost = topical.length > 0 ? named : [];
+  const matching = topical.length > 0 ? topical : content;
+
+  const informative = frequencies ? informativeTokens(matching, frequencies) : matching;
   // Punctuation-only input has no words; hand it through untouched so the
   // lexical leg reports its usual "nothing to match".
   const lexicalQuery = informative.length > 0 ? informative.join(" ") : trimmed;
@@ -183,6 +216,7 @@ export async function analyzeQuery(db: D1Database, query: string): Promise<Query
     semanticQuery,
     rerankQuery: lexicalQuery,
     isPhrase: content.length > 1,
+    modalityBoost,
     ...(correctedQuery !== undefined ? { correctedQuery } : {}),
   };
 }

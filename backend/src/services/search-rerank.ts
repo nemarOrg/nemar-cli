@@ -38,18 +38,23 @@
  * | Rule                                    | Tuning: prec / cover / rows | Held-out: prec / cover / rows |
  * |-----------------------------------------|-----------------------------|-------------------------------|
  * | shipped before: fused list, up to 325   | 0.27 / 0.98 / 221           | 0.20 / 0.91 / 201             |
- * | fused pool of 60, no cutoff             | 0.54 / 0.94 / 42            | 0.41 / 0.97 / 44              |
- * | cut on best score only (>=0.05, >=20%)  | 0.93 / 0.56 / 14            | 0.80 / 0.30 / 6               |
- * | this rule                               | 0.88 / 0.73 / 17            | 0.89 / 0.63 / 12              |
+ * | fused pool of 60, no cutoff             | 0.54 / 0.93 / 43            | 0.41 / 0.97 / 44              |
+ * | cut on best score only (>=0.05, >=20%)  | 0.93 / 0.55 / 13            | 0.80 / 0.30 / 6               |
+ * | this rule                               | 0.89 / 0.73 / 17            | 0.89 / 0.63 / 12              |
+ *
+ * "This rule" is the whole shipped pipeline (informative words, modality words
+ * set aside, the literal leg and its clause), as calibrate.py runs it; it also
+ * checks that its constants are the ones in this file.
  *
  * Best-score-only is the rule this one replaced: it wins on tuning precision
- * and loses on held-out coverage by half. Neighboring parameter values land
- * within 0.01 of each other in F1, so these constants are a plateau, not a
- * point. The truth sets are regexes over the same fields the cross-encoder
+ * and loses on held-out coverage by half. In a parameter scan done while
+ * choosing the constants, neighboring values scored within about 0.01 of each
+ * other in F1, so they are a plateau and not a point; that scan is not part of
+ * the script. The truth sets are regexes over the same fields the cross-encoder
  * reads, so the benchmark flatters the cross-encoder; the held-out gap between
  * "this rule" and "best score only" is the part that does not depend on that.
- * `scripts/search-eval/` reproduces the table: rerun it when the catalog grows
- * by a few hundred datasets or the model changes.
+ * `scripts/search-eval/calibrate.py` reproduces the table: rerun it when the
+ * catalog grows by a few hundred datasets or the model changes.
  */
 
 /** Workers AI cross-encoder; reads a query and a candidate together. */
@@ -60,8 +65,14 @@ export const RERANK_TIMEOUT_MS = 4000;
 
 /** Candidates taken from each retrieval leg. Both legs' top this many count as "found". */
 export const LEG_SIZE = 30;
-/** Most candidates (before literal matches are added) a single rerank call is given. */
+/**
+ * Most candidates the fused lexical and semantic legs give one rerank call.
+ * Literal name/author/task matches (at most {@link LEG_SIZE}) are added to
+ * them, so a call carries at most 3 * LEG_SIZE documents.
+ */
 export const RERANK_POOL_MAX = 2 * LEG_SIZE;
+/** After a rerank failure or timeout, phrase searches skip the cross-encoder for this long. */
+export const RERANK_SUSPEND_MS = 30_000;
 
 /** A candidate the cross-encoder endorses on its own needs at least this probability... */
 export const ENDORSE_MIN = 0.1;
@@ -110,20 +121,47 @@ export function selectRelevant(candidates: RelevanceCandidate[]): RelevantDatase
 
 const logistic = (x: number) => 1 / (1 + Math.exp(-x));
 
+let suspendedUntil = 0;
+
+/**
+ * Whether the cross-encoder is being skipped because it just failed. A hung
+ * `ai.run` cannot be cancelled and is billed anyway, so without this every
+ * phrase request during an outage would wait out the full timeout.
+ */
+export function rerankSuspended(now = Date.now()): boolean {
+  return now < suspendedUntil;
+}
+
+/** Skip the cross-encoder for {@link RERANK_SUSPEND_MS}. */
+export function suspendRerank(now = Date.now()): void {
+  suspendedUntil = now + RERANK_SUSPEND_MS;
+}
+
+/** Test seam: forget a suspension. */
+export function resetRerankSuspension(): void {
+  suspendedUntil = 0;
+}
+
 let loggedScoreScale = false;
+/** Fewer scores than this are read as logits however they fall: a few logits can all be in [0, 1]. */
+const MIN_SCORES_TO_READ_PROBABILITIES = 10;
+/** The scale is logged once per isolate, from a call big enough to be representative. */
+const MIN_SCORES_TO_LOG_SCALE = 20;
 
 /**
  * Cloudflare documents the model's `score` as a raw value that "can be mapped
- * to a float value in [0,1] by sigmoid function", i.e. a logit. If every score
- * already lies in [0,1] they are taken as probabilities: a logit set that
- * small would be all near zero, and a second sigmoid on probabilities would
- * squeeze everything into 0.5..0.73, which the rule above would read as
- * "everything is relevant". The scale actually seen is logged once per
- * isolate so a deploy can confirm which reading is true.
+ * to a float value in [0,1] by sigmoid function", i.e. a logit. If at least
+ * {@link MIN_SCORES_TO_READ_PROBABILITIES} scores all lie in [0,1] they are
+ * taken as probabilities: a logit set that large would include the strongly
+ * negative scores irrelevant candidates get, and a second sigmoid on
+ * probabilities would squeeze everything into 0.5..0.73, which the rule above
+ * would read as "everything is relevant". The scale actually seen is logged
+ * once per isolate so a deploy can confirm which reading is true.
  */
 export function normalizeRerankScores(raw: number[]): number[] {
-  const alreadyProbabilities = raw.length > 0 && raw.every((s) => s >= 0 && s <= 1);
-  if (!loggedScoreScale) {
+  const alreadyProbabilities =
+    raw.length >= MIN_SCORES_TO_READ_PROBABILITIES && raw.every((s) => s >= 0 && s <= 1);
+  if (!loggedScoreScale && raw.length >= MIN_SCORES_TO_LOG_SCALE) {
     loggedScoreScale = true;
     console.log(
       `[search] rerank raw scores: min=${Math.min(...raw)} max=${Math.max(...raw)} n=${raw.length}, read as ${
@@ -194,5 +232,11 @@ export async function rerankScores(
       `rerank answered for ${raw.filter((s) => s !== undefined).length} of ${texts.length} candidates`,
     );
   }
-  return normalizeRerankScores(raw as number[]);
+  const scores = raw as number[];
+  // A model that scores every candidate identically has not judged them: all zeros
+  // would otherwise become an empty "reranked" answer.
+  if (scores.length > 1 && scores.every((x) => x === scores[0])) {
+    throw new Error("rerank gave every candidate the same score");
+  }
+  return normalizeRerankScores(scores);
 }

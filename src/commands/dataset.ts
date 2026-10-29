@@ -2804,8 +2804,9 @@ Description:
 
   Describe what you want in a few words. A phrase returns only the datasets
   judged to answer it, so a short list is a real answer, not a gap; a single
-  word lists every dataset that mentions it. Words found in most datasets
-  ("study", "eeg") do not decide a match. A word no dataset contains is
+  word lists the datasets that mention it (up to 300). Words found in over a
+  quarter of datasets ("study") do not decide a match, and a modality you
+  name ("sleep eeg") puts datasets with that modality first. A word no dataset contains is
   replaced by a catalog word one typo away, and the command says so.
 
   Accepts the same license/author/task/doi/complete/recent filters and facet
@@ -2858,6 +2859,10 @@ Examples:
       // vocabulary and treatment as the list command's `response.warning`.
       if (response.warning) {
         console.log(theme.warn(`\n⚠ ${response.warning}`));
+      }
+
+      if (response.modality_boost?.length) {
+        console.log(theme.muted(`\nListing ${response.modality_boost.join(", ")} datasets first.`));
       }
 
       // A word no dataset contains was replaced by a catalog word one typo away

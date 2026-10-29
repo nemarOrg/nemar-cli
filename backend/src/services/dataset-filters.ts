@@ -46,6 +46,16 @@ export const PUBLISHED_AT_SQL = "COALESCE(d.first_published_at, d.publish_date, 
 export const PUBLIC_SEARCHABLE_SQL = `d.status = 'active' AND d.visibility = 'public'
   AND (d.is_sandbox = 0 OR d.is_sandbox IS NULL OR d.is_exemplar = 1)`;
 
+/**
+ * `s` with accents removed ("Sébastien" -> "Sebastien"). `datasets_fts` uses
+ * the default unicode61 tokenizer, which folds diacritics, so it indexes
+ * "sebastien"; splitting "Sébastien" on non-ASCII letters would query "bastien"
+ * and match nothing.
+ */
+export function foldDiacritics(s: string): string {
+  return s.normalize("NFD").replace(/\p{M}/gu, "");
+}
+
 /** Build an injection-safe FTS5 MATCH expression: tokenize to alphanumerics
  *  (dropping all FTS5 operator chars), quote each token and prefix-match it,
  *  OR them for recall. Returns null when there is nothing to match. Lives
@@ -53,7 +63,7 @@ export const PUBLIC_SEARCHABLE_SQL = `d.status = 'active' AND d.visibility = 'pu
  *  dataset-search.ts -- the whole point of the #1145 move was to let
  *  dataset-search.ts depend on this file, not the other way around. */
 export function buildFtsMatch(query: string): string | null {
-  const tokens = query
+  const tokens = foldDiacritics(query)
     .toLowerCase()
     .split(/[^a-z0-9]+/i)
     .filter((t) => t.length >= 2);

@@ -11,7 +11,7 @@
  * backend/test/helpers/search-models.ts); the model runs are recorded, the code around them is real.
  */
 
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { parseFacetFilters } from "../backend/src/services/dataset-facets";
 import { executeDatasetSearch } from "../backend/src/services/dataset-search";
 import {
@@ -22,11 +22,16 @@ import {
   normalizeRerankScores,
   rerankScores,
   resetRerankScaleLog,
+  resetRerankSuspension,
   selectRelevant,
 } from "../backend/src/services/search-rerank";
 import { freshDb, realD1 } from "../backend/test/helpers/d1";
 import { seedCatalogSample } from "../backend/test/helpers/search-catalog";
 import { type RecordedModelOptions, recordedModels } from "../backend/test/helpers/search-models";
+
+// The suspension is per-process state: a test that fails the reranker must not leave it on for the next file.
+beforeEach(resetRerankSuspension);
+afterEach(resetRerankSuspension);
 
 function sampleDb() {
   const db = freshDb();
@@ -38,6 +43,9 @@ async function search(
   d1: D1Database,
   query: string,
   options: RecordedModelOptions & {
+    /** The query is expected NOT to be answered by relevance (a single word). */
+    fused?: boolean;
+    minScore?: number;
     limit?: number;
     offset?: number;
     filters?: Parameters<typeof executeDatasetSearch>[3]["filters"];
@@ -49,8 +57,14 @@ async function search(
     filters: options.filters ?? {},
     limit: options.limit ?? 50,
     offset: options.offset ?? 0,
-    minScore: 0.6,
+    minScore: options.minScore ?? 0.6,
   });
+  // The recorded models throw on anything they have no record of, and the search turns a model
+  // failure into the fused list: so unless the test injects a failure or asks for a single word,
+  // "the reranker really ran" has to be asserted here, or half the suite would pass without it.
+  if (!options.rerankFails && !options.embeddingFails && !options.fused) {
+    expect(envelope.reranked).toBe(true);
+  }
   return { envelope, models };
 }
 
@@ -125,6 +139,8 @@ describe("a clear topical phrase", () => {
     const { d1 } = sampleDb();
     const { envelope } = await search(d1, "driving simulation and fatigue");
     const scores = envelope.results.map((r) => r.score);
+    // A fusion score tops out near 0.033; a judged probability for the best driving dataset is near 1.
+    expect(scores[0]).toBeGreaterThan(0.9);
     for (const score of scores) {
       expect(score).toBeGreaterThan(0);
       expect(score).toBeLessThanOrEqual(1);
@@ -162,7 +178,7 @@ describe("evidence the cross-encoder was never shown", () => {
 describe("what is not a phrase is not cut", () => {
   test("one content word is searched as before: no cross-encoder call, no relevance cutoff", async () => {
     const { d1 } = sampleDb();
-    const { envelope, models } = await search(d1, "sleep");
+    const { envelope, models } = await search(d1, "sleep", { fused: true });
     expect(models.calls.rerank).toHaveLength(0);
     expect(envelope.reranked).toBeUndefined();
     expect(envelope.count).toBeGreaterThanOrEqual(10);
@@ -326,12 +342,20 @@ describe("normalizeRerankScores", () => {
     expect(high).toBeCloseTo(0.99753, 4);
   });
 
-  test("scores already in [0,1] are probabilities and are not squeezed a second time", () => {
-    expect(normalizeRerankScores([0.02, 0.4, 0.97])).toEqual([0.02, 0.4, 0.97]);
+  const tenInUnit = [0.02, 0.4, 0.97, 0.1, 0.2, 0.3, 0.5, 0.6, 0.7, 0.8];
+
+  test("ten or more scores all in [0,1] are probabilities and are not squeezed a second time", () => {
+    expect(normalizeRerankScores(tenInUnit)).toEqual(tenInUnit);
+  });
+
+  test("a few scores that happen to lie in [0,1] are still logits: nine is too few to tell", () => {
+    const nine = tenInUnit.slice(0, 9);
+    expect(normalizeRerankScores(nine)[2]).toBeCloseTo(1 / (1 + Math.exp(-0.97)), 6);
   });
 
   test("one score outside [0,1] makes the set logits", () => {
-    expect(normalizeRerankScores([0.4, 0.97, -3])[2]).toBeCloseTo(0.0474, 3);
+    const withNegative = [...tenInUnit.slice(0, 9), -3];
+    expect(normalizeRerankScores(withNegative)[9]).toBeCloseTo(0.0474, 3);
   });
 
   test("logs the scale it read, once", () => {
@@ -340,8 +364,9 @@ describe("normalizeRerankScores", () => {
     const log = console.log;
     console.log = (...args: unknown[]) => lines.push(args.join(" "));
     try {
-      normalizeRerankScores([-4, 2]);
-      normalizeRerankScores([-4, 2]);
+      const twenty = Array.from({ length: 20 }, (_, i) => i - 10);
+      normalizeRerankScores(twenty);
+      normalizeRerankScores(twenty);
     } finally {
       console.log = log;
     }
@@ -376,7 +401,7 @@ describe("rerankScores", () => {
         seen = input;
         return {
           response: [
-            { id: 0, score: 0 },
+            { id: 0, score: 1 },
             { id: 1, score: 0 },
           ],
         };

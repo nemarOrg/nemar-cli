@@ -114,30 +114,81 @@ export function suggestCorrection(term: string, vocabulary: Vocabulary): string 
   return best?.word ?? null;
 }
 
-let cached: { builtAt: number; vocabulary: Promise<Vocabulary> } | undefined;
+/** What the catalog's own text and modality lists contain, read together and cached together. */
+export interface CatalogVocabulary {
+  words: Vocabulary;
+  /** Every modality token some public dataset lists, lowercase (`eeg`, `ieeg`, `meg`, ...). */
+  modalities: Set<string>;
+}
+
+/** The catalog vocabulary of `rows`. */
+export function buildCatalogVocabulary(
+  rows: Array<{
+    name?: string | null;
+    description?: string | null;
+    tasks?: string | null;
+    modalities?: string | null;
+  }>,
+): CatalogVocabulary {
+  const modalities = new Set<string>();
+  for (const row of rows) {
+    for (const token of (row.modalities ?? "").split(",")) {
+      const t = token.trim().toLowerCase();
+      if (t) modalities.add(t);
+    }
+  }
+  return { words: buildVocabulary(rows), modalities };
+}
+
+let cached: { builtAt: number; vocabulary: Promise<CatalogVocabulary> } | undefined;
 
 /** Test seam: forget the cached vocabulary. */
 export function resetVocabularyCache(): void {
   cached = undefined;
 }
 
-/** The catalog's vocabulary, reused for {@link VOCABULARY_TTL_MS}. A failed build is not cached. */
-export function loadVocabulary(db: D1Database, now = Date.now()): Promise<Vocabulary> {
+/** The catalog vocabulary, reused for {@link VOCABULARY_TTL_MS}. A failed build is not cached. */
+export function loadCatalogVocabulary(
+  db: D1Database,
+  now = Date.now(),
+): Promise<CatalogVocabulary> {
   if (cached && now - cached.builtAt < VOCABULARY_TTL_MS) return cached.vocabulary;
   // An async function, so a failure thrown while preparing the statement is a rejection too.
   const vocabulary = (async () => {
     const { results } = await db
       .prepare(
-        `SELECT d.name, d.description, d.tasks FROM datasets d WHERE ${PUBLIC_SEARCHABLE_SQL}`,
+        `SELECT d.name, d.description, d.tasks, d.modalities FROM datasets d WHERE ${PUBLIC_SEARCHABLE_SQL}`,
       )
-      .all<{ name: string | null; description: string | null; tasks: string | null }>();
-    return buildVocabulary(results ?? []);
+      .all<{
+        name: string | null;
+        description: string | null;
+        tasks: string | null;
+        modalities: string | null;
+      }>();
+    return buildCatalogVocabulary(results ?? []);
   })();
   cached = { builtAt: now, vocabulary };
   vocabulary.catch(() => {
     if (cached?.vocabulary === vocabulary) cached = undefined;
   });
   return vocabulary;
+}
+
+/** The words of the catalog's text. */
+export async function loadVocabulary(db: D1Database, now = Date.now()): Promise<Vocabulary> {
+  return (await loadCatalogVocabulary(db, now)).words;
+}
+
+/** The modality tokens the catalog uses; empty when the catalog cannot be read. Never throws. */
+export async function loadModalityTokens(db: D1Database): Promise<Set<string>> {
+  try {
+    return (await loadCatalogVocabulary(db)).modalities;
+  } catch (err) {
+    console.warn(
+      `[search] modality vocabulary unavailable: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return new Set();
+  }
 }
 
 /** `terms` that are one typo from a catalog word, mapped to that word. Never throws. */

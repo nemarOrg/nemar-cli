@@ -1,7 +1,7 @@
 // The two network calls of the relevance path, answered from recorded model output.
 //
-// `scripts/search-eval/model_outputs.py` ran the open BAAI weights that Workers AI serves
-// (`bge-small-en-v1.5` for embeddings, `bge-reranker-base` for relevance) over the exact
+// `scripts/search-eval/model_outputs.py` ran the open BAAI weights that Workers AI is believed
+// to serve (`bge-small-en-v1.5` for embeddings, `bge-reranker-base` for relevance) over the exact
 // texts the production builder produces for the fixture catalog, and recorded what they said.
 // These bindings replay it. They stand in for two external services at the network edge, the
 // same category .rules/testing.md allows for HTTP response fixtures; everything between them --
