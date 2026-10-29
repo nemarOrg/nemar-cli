@@ -128,16 +128,16 @@ with your own GitHub token (GH_TOKEN, else \`gh auth token\`). It never merges.
                merge-main-moved) takes the record back to pr_open, where the commit is made again.
   merged       the merge commit GitHub wrote must end with the re-pull commit's two trailers
                (merge-trailers otherwise: a merge made outside NEMAR's gate, with GitHub's own
-               button, say). --accept-merge-trailers "<reason>" accepts such a merge, on a re-pull
-               you opened, only once this run and then the Worker have read that it is the squash
-               merge of the record's own pull request, at its recorded head (or one enrichment
-               moved), on the record's base (or one enrichment moved), with the re-pull's tree
-               outside .nemar/ and .github/; the Worker records your reason and, when the merge
-               appended the delta scrub's ledger line, appends to the ledger on main one line
-               naming the merge, which the privacy ledger's fresh-clone proof reads. Then it
-               waits for the tag v<N.0.0> and the version row (its DOI), compares the
-               tagged tree with the re-pull's commit, and records the release (the Worker reads
-               the tag and the version row itself). N.0.1's tagged tree must be its gated head
+               button, say). It waits for the tag v<N.0.0> and the version row (its DOI) first.
+               Then --accept-merge-trailers "<reason>" accepts a merge without its trailers, on a
+               re-pull you opened, only once this run and then the Worker have read that it is
+               the squash merge of the record's own pull request, at its recorded head (or one
+               enrichment moved), on the record's base (or one enrichment moved), with the
+               re-pull's tree outside .nemar/ and .github/; the Worker records your reason and,
+               when the merge appended the delta scrub's ledger line, appends to the ledger on
+               main one line naming the merge, which the privacy ledger's fresh-clone proof reads.
+               Then it compares the tagged tree with the re-pull's commit and records the release
+               (the Worker reads the tag, the version row and that line itself). N.0.1's tagged tree must be its gated head
                outside .nemar/ and .github/ (patch-tree-mismatch otherwise): read the difference,
                then --accept-tag-tree "<reason>" records the release.
   released     locks the objects the copy and the uploads wrote (and no other object under the

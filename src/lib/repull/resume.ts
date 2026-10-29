@@ -180,14 +180,14 @@ async function resume(opts: ResumeOptions): Promise<ResumeResult> {
     );
   }
   try {
-    const result = await walk(ctx, open);
+    return await walk(ctx, open);
+  } finally {
+    // Said whether the run returned or stopped on a refusal.
     if (opts.acceptMergeTrailers && !ctx.mergeTrailersRead) {
       opts.out(
-        `--accept-merge-trailers changed nothing: re-pull #${open.id} did not reach a merge's release in this run (it is ${result.row?.status ?? open.status}), where a merge's trailers are read.`,
+        `--accept-merge-trailers changed nothing: re-pull #${open.id} did not reach a merge's release in this run, where a merge's trailers are read.`,
       );
     }
-    return result;
-  } finally {
     (scratch as OriginScratch | null)?.close();
     release();
   }

@@ -39,9 +39,11 @@
 import { NEMAR_DATASETS_ORG, isOwnDatasetRepo } from "../../../shared/nemar-app.js";
 import {
   LEDGER_REPO_PATH,
+  type LedgerWord,
   acceptedMergesOf,
   ledgerChange,
   ledgerLines,
+  ledgerWordOf,
 } from "../../../shared/repull-merge-acceptance.js";
 import {
   PULL_REQUEST_COLUMNS,
@@ -77,16 +79,25 @@ function denied(code: string, message: string): ExecuteRefused {
 const TRANSIENT_WORDS = new Set(["github-unreadable", "attestation-unwritten"]);
 
 /**
+ * HTTP statuses of an answer that carries no word of the Worker's and that a later run may see
+ * differently: 0, the API client's status for a connection or an answer lost on the way (`client.ts`),
+ * a timeout and a rate limit. Any 5xx is such an answer too.
+ */
+const TRANSIENT_STATUSES = new Set([0, 408, 429]);
+
+/**
  * The Worker's answer to an acceptance request as this step's refusal, one rule for every path:
- * its word kept, its message kept whole after `prefix`, resumable (exit 3) only when a later run
- * may clear it.
+ * its word kept, its message kept whole after `prefix`, resumable (exit 3) when a later run may
+ * clear it: a transient word, or no word and an API that could not be read.
  */
 export function acceptanceRefusal(err: unknown, prefix: string): ExecuteRefused {
   const code = repullErrorCode(err);
   const msg = err instanceof Error ? err.message : String(err);
   const transient =
     code === undefined
-      ? !(err instanceof ApiError) || err.statusCode >= 500
+      ? !(err instanceof ApiError) ||
+        TRANSIENT_STATUSES.has(err.statusCode) ||
+        err.statusCode >= 500
       : TRANSIENT_WORDS.has(code);
   const failure = new ExecuteRefused(
     code ?? (err instanceof ApiError ? "record-refused" : "api-unreadable"),
@@ -278,12 +289,7 @@ async function verifyLocally(
     parent,
     parentMoved: parent !== base,
     anchor,
-    ledger:
-      change.kind === "none"
-        ? "untouched"
-        : change.kind === "scrub-append" && change.repull
-          ? "repull-scrub-lines"
-          : "scrub-lines",
+    ledger: ledgerWordOf(change),
   };
 }
 
@@ -297,21 +303,24 @@ function verifiedLines(row: RepullRow, pr: RepullPullRequest, v: Verified): stri
     `  - it is GitHub's squash merge of pull request #${v.number} (${v.branch} into main of ${NEMAR_DATASETS_ORG}/${row.dataset_id}), merged at ${short(v.mergedHead)}, ${v.headMoved ? `which enrichment moved the recorded head ${short(recordedHead)} to` : "the recorded head"};`,
     `  - its one parent ${short(v.parent)} is ${v.parentMoved ? `the record's base ${short(base)} moved by enrichment only` : "the record's base"};`,
     `  - its tree is the re-pull's ${pr === "n0" ? "commit" : "gated N.0.1 head"} ${short(v.anchor)} outside .nemar/ and .github/;`,
-    `  - ${
-      v.ledger === "untouched"
-        ? "it does not touch the privacy ledger"
-        : v.ledger === "scrub-lines"
-          ? "it appends only a scrub's lines to the privacy ledger"
-          : "it appends the delta scrub's repull-scrubbed line to the privacy ledger and edits no line before it"
-    };`,
+    `  - it ${ledgerPhrase(v.ledger)};`,
     "  - the re-pull is one an administrator opened.",
     "Asking the Worker to read it again on GitHub and to record your acceptance.",
   ];
 }
 
-/** What the Worker read on GitHub, in one line. */
+/** What a merge did to the privacy ledger, in the words this run and the Worker's line both use. */
+function ledgerPhrase(word: LedgerWord): string {
+  return word === "untouched"
+    ? "does not touch the privacy ledger"
+    : word === "scrub-lines"
+      ? "appends only a scrub's lines to the privacy ledger"
+      : "appends the delta scrub's repull-scrubbed line to the privacy ledger and edits no line before it";
+}
+
+/** What the Worker read on GitHub, every field of its evidence, in one line. */
 function workerLine(e: RepullAcceptanceEvidence): string {
-  return `The Worker read the same on GitHub with its own credential: pull request #${e.pull_request} merged at ${short(e.merged_head)}${e.head_moved_by_enrichment ? " (moved by enrichment)" : ""}, parent ${short(e.parent)}${e.parent_moved_by_enrichment ? " (moved by enrichment)" : ""}, tree ${short(e.tree)} as the re-pull's outside .nemar/ and .github/, the ledger ${e.ledger === "untouched" ? "untouched" : e.ledger === "scrub-lines" ? "appended a scrub's lines" : "appended the repull-scrubbed line"}, and the re-pull is yours.`;
+  return `The Worker read on GitHub with its own credential: pull request #${e.pull_request} merged at ${short(e.merged_head)}${e.head_moved_by_enrichment ? " (moved by enrichment)" : ""}, parent ${short(e.parent)}${e.parent_moved_by_enrichment ? " (moved by enrichment)" : ""}, tree ${short(e.tree)}, the re-pull's outside .nemar/ and .github/; the merge ${ledgerPhrase(e.ledger)}; and the re-pull is yours.`;
 }
 
 /** The acceptance's ledger line, read back from `main` on NEMAR's origin. */
@@ -340,12 +349,7 @@ async function assertLineOnMain(
 }
 
 /** What the acceptance's ledger line came to, in one sentence. */
-function lineSentence(
-  row: RepullRow,
-  merge: string,
-  a: RepullMergeAcceptance,
-  line: string | null,
-) {
+function lineSentence(merge: string, a: RepullMergeAcceptance, line: string | null): string {
   return line === null
     ? `The merge appends no repull-scrubbed line beside other files, so the privacy ledger's fresh-clone proof needs no line for it, and none was written.`
     : `The line that names ${short(merge)} is on main in ${LEDGER_REPO_PATH}${a.attestation_sha ? ` (commit ${short(a.attestation_sha)})` : ""}, so the privacy ledger's fresh-clone proof reads the merge as the re-pull's own.`;
@@ -369,9 +373,11 @@ export async function recordedAcceptance(
     replay = await acceptRepullMergeTrailers(row.id, { pr, merge_sha: merge });
   } catch (err) {
     if (repullErrorCode(err) === "merge-trailers-not-accepted") return false;
+    // Whether an acceptance is recorded is the Worker's to say: its own words say so when one is
+    // (they begin "The acceptance is recorded"), and an answer that was lost says nothing.
     throw acceptanceRefusal(
       err,
-      `The merge commit ${short(merge)} carries no trailers (${problem}); its acceptance recorded earlier stands, and the Worker answered`,
+      `The merge commit ${short(merge)} carries no trailers (${problem}); asked for an acceptance recorded earlier, the Worker answered`,
     );
   }
   const a = replay.acceptance;
@@ -381,7 +387,7 @@ export async function recordedAcceptance(
   ctx.opts.out(
     `The merge commit ${short(merge)} on main carries no trailers (${problem}); it was accepted earlier, by administrator #${a.accepted_by} at ${a.accepted_at}, on the reason: ${a.reason}`,
   );
-  ctx.opts.out(lineSentence(row, merge, a, replay.attestation_line));
+  ctx.opts.out(lineSentence(merge, a, replay.attestation_line));
   if (ctx.opts.acceptMergeTrailers) {
     ctx.opts.out("It is accepted once; --accept-merge-trailers changes nothing now.");
   }
@@ -418,5 +424,5 @@ export async function acceptMergeNow(
   if (answer.attestation_line !== null) {
     await assertLineOnMain(scratch, merge, answer.attestation_line);
   }
-  out(lineSentence(row, merge, answer.acceptance, answer.attestation_line));
+  out(lineSentence(merge, answer.acceptance, answer.attestation_line));
 }
