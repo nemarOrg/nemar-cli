@@ -38,13 +38,19 @@ An administrator account whose GitHub login does not match, or whose `admin` rol
    No row is written, nothing is dispatched and no model is called.
    It is decided before the exemption, a block and any restart of a stored review, so no delivery, edit, reopening or administrator's start (a `--redo` included) runs the review of such a head; each answers `repull_waived`.
    A head a review already touched keeps its row as the history of that run, and its own check run is updated in place to the waiver, with the comment saying the same; a head with no row gets a new check run and no comment, as an exempt one does.
-   A check that does not reach GitHub is thrown, so the webhook answers 500 and the delivery can be redelivered, and an administrator's start says so.
+   When GitHub refuses that update for a reason about the run (any 4xx but a refused credential or a throttle), a NEW run of the same name is posted on the same commit instead, which GitHub and NEMAR's own readers take as the latest of the name, so correcting a failed check does not rest on GitHub letting a completed run's conclusion change.
+   A check that does not reach GitHub either way is thrown, so the webhook answers 500 and the delivery can be redelivered, an administrator's start says so, and no audit row is written.
+   Every write of the waiver inside a request (a delivery, a start, the record's transition) is bounded to a few seconds.
    Each waiver writes an audit row, `pr_review_waived`, with the record, the head, which pull request and what caused it; the queue never reads it.
 3. **A head NEMAR has not recorded yet is reviewed, and the waiver follows the record.**
    The Worker cannot tell enrichment's commit from a stranger's at delivery time, so a head enrichment moved is reviewed until a NEMAR tool records the move.
    Then the record's own transition publishes the waiver for that head at once (best effort, after the edge is written, and only once GitHub shows the pull request at that head), and every later publish of that head's review, the callback of a review still running included and the watchdog's, publishes the waiver instead of the review's verdict.
    A stored review holds no branch, so such a publish reads GitHub's record of the pull request before it waives, and decides on the same facts the intake does; a pull request GitHub cannot show is not waived, the review's own verdict is published (unknown is never a waiver), and the row is left unpublished so the watchdog's republish sweep decides again.
+   That sweep counts such a publish as a failed attempt, so it tries five times, about two and a half hours on the 30-minute tick, and then logs that it gave up (`abandoned`); after that the check stays as the review left it until an administrator's start of the pull request, which `resume` names.
    A branch GitHub does not name is read as the empty string, which no record's branch is.
+   For the App's pull request, which no delivery reviews, the advance tick publishes the waiver again when everything but GitHub's word holds (`not-clean`) and the App's latest review check at the head is not the waiver, and counts and logs it (`waivers=`, `waivers_failed=`).
+   That is at most one publish per row per 30-minute tick, for as long as the hold lasts, and each failure is an error-level line, so a waiver GitHub keeps refusing is seen rather than given up on.
+   The record's transition never publishes for a draft, a closed or merged pull request, a fork, a dataset the review may not read, a dataset the other environment's Worker owns, or while the review is switched off.
 4. **`skipped` is the conclusion of exactly two outcomes: `exempt` and `waived`.**
    Neither is a review that ran, so neither hides an unknown.
    Not `success`, which reads as a pass, and not `neutral`, which ADR 0092 keeps out of the vocabulary.
@@ -71,27 +77,34 @@ An administrator account whose GitHub login does not match, or whose `admin` rol
 - A fork is reviewed even at a recorded number, and a record of another dataset or at another status (planned, merged, abandoned, superseded, complete, failed) waives nothing.
 - A commit pushed onto a re-pull's release branch by anyone with write access is reviewed, because the record does not hold it; `resume` then refuses it (`head-foreign`), and every merge gate merges only the screened head.
 - An edit of a waived pull request's title or body changes nothing that gates: the squash message is built by the gate.
+- **What it can get: a file under `.nemar/` it writes onto the release branch.** The enrichment-only rule (`enrichmentOnlySince`) checks what a commit changes, never who made it: any regular file under `.nemar/` other than the privacy ledger passes it, so `resume` or the automatic run's settle records such a head and it is waived, where before this decision it needed a review that passed (which no re-pull got).
+  Checking who made the commit would be no guard: enrichment's commits carry plain git identities (`nemar-bot <nemar-bot@users.noreply.github.com>` from the central workflow, `nemarAdmin <nemarAdmin@osc.earth>` from the Worker's contents writes), which anyone with push access can write, and the one authenticated identity, the sender of each push delivery, is not recorded.
+  What still holds such a head: the identifier screen of the head, BIDS validation (`.nemar/` is ignored by it), the administrator's own merge confirmation, and push access itself, which only the dataset's collaborators and NEMAR hold.
+  Whether to add a test on who made each commit to the enrichment-only rule, once the change to that rule in flight elsewhere lands, is the owner's decision.
+- **A check run belongs to a commit, not a pull request.** Another pull request at the same commit, a fork's say, shows the same waived check, and its own review (it is not the record's, so it is reviewed) can post a failing run beside it.
+  The merge gates read the Worker's verdict for the record's own pull request, not the check, so they are not misled; GitHub's `clean` reads the checks, so such a run can hold the re-pull at `unstable` until the waiver is published again (an administrator's start, or the tick), which makes it the newest run of the name.
 - An administrator can record a head through the transition route; that is inside the administrators' trust boundary, as their own pull requests are exempt and an organization administrator can merge in the GitHub UI.
 
 ## Consequences
 
 - A re-pull no longer needs a hand merge: `resume` records the gates once GitHub reports `clean`, and the merge gates accept the waiver.
-- A head enrichment moves still costs one review run before it is recorded, which the screen bounds and the volume line counts; in exchange no stranger's commit is ever waived.
+- A head enrichment moves still costs one review run before it is recorded, which the screen bounds and the volume line counts; in exchange a commit the record does not hold is never waived (the `.nemar/` residual above is the one way a commit someone else made can come to be held).
 - The administrator's tally of an administrator's account can count a failed review of a re-pull head that was later waived. It decides nothing (ADR 0107).
-- An existing failed check on a recorded head is corrected by `nemar admin pr-reviews start <dataset> <pr>`, with or without `--redo`, which updates that check run in place; `resume` names the review check when it is why GitHub reports `unstable`.
+- An existing failed check on a recorded head is corrected by `nemar admin pr-reviews start <dataset> <pr>`, with or without `--redo`, which updates that check run in place or, if GitHub refuses that, posts a new one; `resume` names the review check, or any other check that is why GitHub reports `unstable`.
 - The advance tick no longer reads the review's row for a recorded head or starts a review, so a tick costs less.
   Measured over five rows, as the Phase 7f and 7g amendments measured them: at `pr_open`, 62 D1 statements and 25 GitHub requests when each starts its screen (the most), 32 and 20 while each waits, 47 and 25 when each is cleared; past the gates, 32 and 20 while each waits at the merge and 77 and 35 when each is merged.
   `upstream-repull-advance.test.ts` and `upstream-repull-worker-merge.test.ts` pin them; the earlier figures in ADR 0111 are history.
 - A publish of a stored review that a record could waive costs one more GitHub read, of the pull request, so the waiver is decided on its branch and repositories as the intake decides it.
-- The record's transition answers only after its waiver is published, so a transition that records a head waits for GitHub: one read of the pull request (10 seconds at most) and the check and comment writes. The edge is written first, and a waiver that is not published is logged by the record's id and a fixed word.
+- The record's transition answers only after its waiver is published, so a transition that records a head waits for GitHub: one read of the pull request (10 seconds at most) and bounded writes (5 seconds each for the check, a new run if the update is refused, and the comment). The edge is written first, and a waiver that is not published is logged by the record's id and a fixed word.
 - An installed CLI older than this change reads the verdict `waived` as one it does not know, which needs `--force`: the safe direction, cured by an upgrade.
 
 ## Not yet verified
 
-Measured against stand-ins only; GitHub's own behavior is assumed from its documentation until the first re-pull after the deploy:
-that GitHub reports a pull request `clean` when its one check that is not `success` is a `skipped` one;
-that GitHub accepts a PATCH of a completed check run from `failure` to `skipped`, which correcting an existing failed check rests on (ADR 0107 lists the related move back to `in_progress` as unverified);
-and that the record's transition reaches GitHub within the time the CLI waits for it.
+Measured against stand-ins only, and not verified against GitHub until the first re-pull after the deploy:
+that GitHub reports a pull request `clean` when its one check that is not `success` is a `skipped` one (its documentation says a required check treats `skipped` as passing, and says nothing of `mergeable_state` for a check that is not required);
+and that GitHub accepts a PATCH of a completed check run from `failure` to `skipped` (its documentation forbids only `stale`).
+The second does not decide the fix: a refused update is followed by a new run of the same name.
+That the newest run of a name is the one that counts is what this repository's own readers do (`othersNotPassing` and `checkFactOf` take the highest id of a name and App); that GitHub's `mergeable_state` reads it the same way is the same unverified rule ADR 0107 lists for the exempt check.
 
 ## Alternatives considered
 
