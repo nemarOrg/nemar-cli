@@ -17,6 +17,7 @@ import {
   buildDatasetEmbedText,
   reembedDatasetVector,
 } from "../backend/src/services/dataset-search";
+import { buildDatasetSummaryText } from "../backend/src/services/dataset-summary-text";
 
 // Real-engine D1 shim: each method runs against the underlying bun:sqlite DB.
 // Not a mock — there are no canned return values; every result comes from
@@ -147,29 +148,32 @@ describe("writeDatasetCatalogFields", () => {
 });
 
 describe("buildDatasetEmbedText", () => {
-  test("joins all present fields with labels", () => {
+  // The text itself is specified in test/dataset-summary-text.test.ts; this pins
+  // that the embedding builder IS that builder, so the vector and the reranker
+  // can never read different texts for one dataset.
+  test("is the shared summary-text builder", () => {
+    expect(buildDatasetEmbedText).toBe(buildDatasetSummaryText);
+  });
+
+  test("joins the abstract, keywords, modalities and tasks, one per line", () => {
     expect(
       buildDatasetEmbedText({
         name: "Motor Imagery EEG",
+        description:
+          "Left and right hand motor imagery in 20 participants, recorded with a cap. ".repeat(4),
+        keywords_json: JSON.stringify([{ term: "motor imagery" }, { term: "BCI" }]),
         modalities: "eeg",
         tasks: "rest",
-        authors: "Ada, Alan",
-        readme: "Body text",
       }),
-    ).toBe("Motor Imagery EEG\nModalities: eeg\nTasks: rest\nAuthors: Ada, Alan\nBody text");
+    ).toMatch(
+      /^Motor Imagery EEG\nLeft and right hand.*\nKeywords: motor imagery, BCI\nModalities: eeg\nTasks: rest$/s,
+    );
   });
 
   test("omits empty/null parts", () => {
-    expect(
-      buildDatasetEmbedText({ name: "Only Name", modalities: null, tasks: "", authors: undefined }),
-    ).toBe("Only Name");
-  });
-
-  test("slices readme to 1000 chars", () => {
-    const t = buildDatasetEmbedText({ name: "N", readme: "y".repeat(5000) });
-    // "N\n" + 1000 y's
-    expect(t.length).toBe(2 + 1000);
-    expect(t.startsWith("N\n")).toBe(true);
+    expect(buildDatasetEmbedText({ name: "Only Name", modalities: null, tasks: "" })).toBe(
+      "Only Name",
+    );
   });
 });
 
