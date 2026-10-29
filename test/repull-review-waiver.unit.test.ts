@@ -13,6 +13,7 @@ import { describe, expect, test } from "bun:test";
 import {
   WAIVER_ANY_STATUS,
   WAIVER_STATUSES,
+  type WaiverMiss,
   type WaiverRecord,
   type WaiverSubject,
   repullReviewWaiver,
@@ -92,7 +93,7 @@ describe("the waiver of an open re-pull's own pull request", () => {
   });
 
   test("the statuses that waive are exactly the open pull request's, of each", () => {
-    expect([...WAIVER_ANY_STATUS].sort()).toEqual(
+    expect([...WAIVER_ANY_STATUS].sort() as string[]).toEqual(
       ["gates_clear", "patch_gates_clear", "patch_synthesized", "pr_open"].sort(),
     );
     expect(WAIVER_STATUSES.n0).toEqual(["pr_open", "gates_clear"]);
@@ -101,7 +102,7 @@ describe("the waiver of an open re-pull's own pull request", () => {
 });
 
 describe("everything else is reviewed, each for its own reason", () => {
-  const cases: Array<[string, Partial<WaiverRecord>, Partial<WaiverSubject>, string]> = [
+  const cases: Array<[string, Partial<WaiverRecord>, Partial<WaiverSubject>, WaiverMiss]> = [
     ["a record of another dataset", { dataset_id: "on004363" }, {}, "other-dataset"],
     [
       "a pull request that merely names its branch like the release, at another number",

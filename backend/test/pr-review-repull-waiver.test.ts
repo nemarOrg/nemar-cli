@@ -18,7 +18,6 @@
 
 import type { Database } from "bun:sqlite";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
-import type { Server } from "bun";
 import { Hono } from "hono";
 import { NEMAR_APP_BOT_LOGIN, NEMAR_APP_BOT_USER_ID } from "../../shared/nemar-app";
 import { parseStoredPrReviewReport } from "../../shared/pr-review";
@@ -55,7 +54,7 @@ interface Recorded {
   body: Record<string, unknown> | null;
 }
 
-let server: Server;
+let server: ReturnType<typeof Bun.serve>;
 let calls: Recorded[] = [];
 /** What GitHub answers for `GET /repos/nemarDatasets/<ds>/pulls/<n>`. */
 let pulls: Record<string, Record<string, unknown>> = {};
