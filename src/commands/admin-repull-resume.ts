@@ -126,8 +126,16 @@ with your own GitHub token (GH_TOKEN, else \`gh auth token\`). It never merges.
                GitHub says did not merge expires once it is 30 minutes old. A main enrichment
                moved outside .nemar/ and .github/ since the gates (the merge refuses it,
                merge-main-moved) takes the record back to pr_open, where the commit is made again.
-  merged       the merge commit GitHub wrote must end with the re-pull commit's two trailers;
-               then it waits for the tag v<N.0.0> and the version row (its DOI), compares the
+  merged       the merge commit GitHub wrote must end with the re-pull commit's two trailers
+               (merge-trailers otherwise: a merge made outside NEMAR's gate, with GitHub's own
+               button, say). --accept-merge-trailers "<reason>" accepts such a merge, on a re-pull
+               you opened, only once this run and then the Worker have read that it is the squash
+               merge of the record's own pull request, at its recorded head (or one enrichment
+               moved), on the record's base (or one enrichment moved), with the re-pull's tree
+               outside .nemar/ and .github/; the Worker records your reason and, when the merge
+               appended the delta scrub's ledger line, appends to the ledger on main one line
+               naming the merge, which the privacy ledger's fresh-clone proof reads. Then it
+               waits for the tag v<N.0.0> and the version row (its DOI), compares the
                tagged tree with the re-pull's commit, and records the release (the Worker reads
                the tag and the version row itself). N.0.1's tagged tree must be its gated head
                outside .nemar/ and .github/ (patch-tree-mismatch otherwise): read the difference,
@@ -201,6 +209,11 @@ export const resumeCommand = new Command("resume")
     "Your reason for recording N.0.1's release when its tag's tree is not its gated head (patch-tree-mismatch)",
     parseReason,
   )
+  .option(
+    "--accept-merge-trailers <reason>",
+    "Your reason for accepting a merge made without the re-pull's trailers (merge-trailers), once it is shown to be this re-pull's own",
+    parseReason,
+  )
   .option("-y, --yes", "Do not ask before pushing (a re-synthesis, or N.0.1)")
   .option("--json", "Print the record as JSON")
   .option("--automatic-dispatch <id>", "The central workflow's finish of a merged re-pull")
@@ -215,6 +228,7 @@ export const resumeCommand = new Command("resume")
         takeOurs: string[];
         keepUpstream?: boolean;
         acceptTagTree?: string;
+        acceptMergeTrailers?: string;
         yes?: boolean;
         json?: boolean;
         automaticDispatch?: string;
@@ -240,6 +254,9 @@ export const resumeCommand = new Command("resume")
           takeOurs: options.takeOurs,
           keepUpstream: options.keepUpstream === true,
           ...(options.acceptTagTree ? { acceptTagTree: options.acceptTagTree } : {}),
+          ...(options.acceptMergeTrailers
+            ? { acceptMergeTrailers: options.acceptMergeTrailers }
+            : {}),
           ...(options.yes
             ? {}
             : {

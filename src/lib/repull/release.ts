@@ -9,7 +9,8 @@
  *   merged        the squash commit GitHub wrote on `main` is read back from origin: its message
  *   patch_merged  must end with both of the re-pull commit's trailers as git reads them
  *                 (`merge-trailers` otherwise, the record left where it is, loudly), because the
- *                 privacy ledger's fresh-clone proof reads them there; then wait (bounded) for
+ *                 privacy ledger's fresh-clone proof reads them there, unless an administrator
+ *                 accepted the merge on evidence (`acceptance.ts`); then wait (bounded) for
  *                 `refs/tags/v<version>` on NEMAR's origin and for the version row; for N.0.0 the
  *                 tagged tree is compared with the recorded synthesized tree outside `.nemar/**`
  *                 and `.github/**` (the caller's `tree_verified`, which the Worker records as the
@@ -54,6 +55,7 @@ import { lockS3Objects } from "../api/data.js";
 import { getVersionHistory } from "../api/datasets.js";
 import { ApiError } from "../api/errors.js";
 import { recordRepullReleased, repullErrorCode, transitionRepull } from "../api/repull.js";
+import { acceptOrRefuseMerge } from "./acceptance.js";
 import { stagingManifestKey } from "./execute/copy.js";
 import { MOVED_REF_FETCH_DEPTH } from "./execute/head.js";
 import { type OriginScratch, fetchInto, originRefs } from "./execute/origin.js";
@@ -91,9 +93,10 @@ async function outsideNemar(dir: string, commit: string): Promise<string | null>
 /**
  * Whether the tagged tree is `pr`'s commit's (N.0.0's synthesized commit, N.0.1's gated head)
  * outside `.nemar/**` and `.github/**`, read from origin: the tag's commit and that commit (by id,
- * else from the release branch or the pull request's own ref).
+ * else from the release branch or the pull request's own ref). The acceptance of a merge made
+ * without its trailers asks the same of the merge commit (`acceptance.ts`), so it is one comparison.
  */
-async function tagTreeVersus(
+export async function tagTreeVersus(
   scratch: OriginScratch,
   row: RepullRow,
   tagSha: string,
@@ -193,8 +196,9 @@ async function versionRowExists(datasetId: string, version: string): Promise<boo
  * that appends a paragraph, a `Co-authored-by:` line of its own, would push them out of the last
  * paragraph, and the privacy ledger's fresh-clone proof would then fail the dataset). A message
  * that does not is `merge-trailers`, recorded on the row, which stays `merged`: the version may
- * already be tagged and minted, and only an administrator can decide what follows. Unread is not
- * a pass.
+ * already be tagged and minted. The one way past it is an administrator's acceptance, earned by
+ * evidence (`--accept-merge-trailers`, `acceptance.ts`; ADR 0111, the amendment of 2026-10-29),
+ * after which this goes on as for a gated merge. Unread is not a pass.
  */
 async function assertMergeTrailers(
   ctx: ResumeContext,
@@ -220,12 +224,23 @@ async function assertMergeTrailers(
     raw.exitCode !== 0 || split < 0
       ? "its message could not be read"
       : await trailersProblem(raw.stdout.slice(split + 2), row);
-  if (problem) {
+  if (!problem) {
+    if (ctx.opts.acceptMergeTrailers) {
+      ctx.opts.out(
+        `The merge commit ${merge.slice(0, 12)} carries the re-pull's trailers; --accept-merge-trailers changes nothing.`,
+      );
+    }
+    return;
+  }
+  if (raw.exitCode !== 0 || split < 0) {
     throw await fail(
       "merge-trailers",
-      `The merge commit ${merge.slice(0, 12)} on main does not end with the re-pull commit's two trailers (${problem}), so the privacy ledger's fresh-clone proof would not read it as the re-pull's commit. The record stays ${row.status}; an administrator decides what follows.`,
+      `The message of the merge commit ${merge.slice(0, 12)} could not be read, so its trailers were not read; nothing was recorded past ${row.status}.`,
     );
   }
+  await acceptOrRefuseMerge(ctx, scratch, row, pr, problem, (message) =>
+    fail("merge-trailers", message),
+  );
 }
 
 /** At `merged` or `patch_merged`: the tag and the version row, waited for, then the release recorded. */

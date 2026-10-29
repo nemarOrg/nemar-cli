@@ -71,6 +71,13 @@ export interface ResumeOptions {
    */
   acceptTagTree?: string;
   /**
+   * The administrator's reason for accepting a merge whose squash commit does not carry the
+   * re-pull's trailers (`--accept-merge-trailers`): the one way past `merge-trailers`, and only once
+   * the merge is shown to be this re-pull's own squash merge (`acceptance.ts`; ADR 0111, the
+   * amendment of 2026-10-29). Recorded by the Worker, never written to the ledger.
+   */
+  acceptMergeTrailers?: string;
+  /**
    * Asked before the release branch is re-synthesized onto a moved `main` and force-pushed with a
    * lease; false stops with nothing pushed (`declined`). Absent: it proceeds (the command passes
    * one unless `--yes`).
