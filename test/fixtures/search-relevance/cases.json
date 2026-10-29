@@ -5,5 +5,7 @@
   {"semantic": "motor imagery brain-computer interface", "rerank": "motor imagery computer interface"},
   {"semantic": "arnaud delorme", "rerank": "arnaud delorme"},
   {"semantic": "children with ADHD", "rerank": "children adhd"},
-  {"semantic": "sleep", "rerank": "sleep"}
+  {"semantic": "sleep", "rerank": "sleep"},
+  {"semantic": "sleep eeg", "rerank": "sleep"},
+  {"semantic": "sleep ieeg", "rerank": "sleep"}
 ]

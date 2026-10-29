@@ -9,9 +9,15 @@
         test/fixtures/search-relevance/cases.json \
         test/fixtures/search-relevance/model-outputs.json
 
-Cloudflare's `@cf/baai/bge-small-en-v1.5` and `@cf/baai/bge-reranker-base` serve the open
-BAAI weights of the same names, so the numbers recorded here are what those models say about
-these exact texts. The tests replay them in place of the two network calls (the search code
+A new case in cases.json needs both strings: `semantic` is the text that is embedded and
+`rerank` the text the cross-encoder is asked about. Get them from the production analysis:
+`bun scripts/search-eval/dump-texts.ts --analyze "your query"` prints them as `semantic` and
+`rerank`.
+
+Cloudflare's `@cf/baai/bge-small-en-v1.5` and `@cf/baai/bge-reranker-base` are believed, not
+verified, to serve the open BAAI weights of the same names (precision and quantization are
+Cloudflare's), so the numbers recorded here are what those weights say about these exact
+texts. The tests replay them in place of the two network calls (the search code
 around them -- fusion, the cutoff, hydration, counting -- runs for real). Embedding uses mean
 pooling, which is what the Workers AI binding does when `pooling` is not passed. Reranker
 scores are recorded as raw logits, because that is what Cloudflare documents the binding as

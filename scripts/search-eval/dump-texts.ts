@@ -10,21 +10,47 @@
  * query analysis makes of each: the words the lexical leg and the reranker are
  * given.
  *
+ *   bun scripts/search-eval/dump-texts.ts --constants   # the constants calibrate.py must match
  *   bun scripts/search-eval/dump-texts.ts --analyze "bilingual performance study" "arnaud delorme"
  */
 
 import { readFileSync } from "node:fs";
+import { FTS_BM25_WEIGHTS } from "../../backend/src/services/dataset-search";
 import {
   DATASET_SUMMARY_SELECT_SQL,
   buildDatasetSummaryText,
 } from "../../backend/src/services/dataset-summary-text";
-import { analyzeQuery } from "../../backend/src/services/search-query";
+import { GENERIC_DF_MAX, STOPWORDS, analyzeQuery } from "../../backend/src/services/search-query";
+import {
+  AGREE_MIN,
+  ENDORSE_MIN,
+  ENDORSE_RELATIVE,
+  LEG_SIZE,
+  LITERAL_SCORE,
+} from "../../backend/src/services/search-rerank";
 import { freshDb, realD1 } from "../../backend/test/helpers/d1";
 import {
   type CatalogSampleRow,
   seedCatalogRows,
   seedCatalogSample,
 } from "../../backend/test/helpers/search-catalog";
+
+if (process.argv[2] === "--constants") {
+  // What calibrate.py has to agree with: the constants the search ships with.
+  console.log(
+    JSON.stringify({
+      stopwords: [...STOPWORDS].sort(),
+      genericDfMax: GENERIC_DF_MAX,
+      legSize: LEG_SIZE,
+      bm25Weights: [...FTS_BM25_WEIGHTS],
+      endorseMin: ENDORSE_MIN,
+      endorseRelative: ENDORSE_RELATIVE,
+      agreeMin: AGREE_MIN,
+      literalScore: LITERAL_SCORE,
+    }),
+  );
+  process.exit(0);
+}
 
 const db = freshDb();
 const corpusFlag = process.argv.indexOf("--corpus");

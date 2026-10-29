@@ -15,6 +15,7 @@ frequencies close to the full catalog's. READMEs are cut to 1200 characters.
 
 import json
 import random
+import re
 import sys
 from pathlib import Path
 
@@ -94,6 +95,18 @@ FORCED = {
 }
 
 
+EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+
+
+def redact(row: dict) -> dict:
+    """A copy of `row` with every email address replaced: READMEs and byline fields carry
+    researchers' addresses, and a committed fixture has no business keeping them."""
+    return {
+        k: EMAIL.sub("redacted@example.org", v) if isinstance(v, str) else v
+        for k, v in row.items()
+    }
+
+
 def main(corpus_path: Path, out_path: Path) -> None:
     rows = json.loads(corpus_path.read_text())
     by_id = {r["id"]: r for r in rows}
@@ -104,7 +117,10 @@ def main(corpus_path: Path, out_path: Path) -> None:
     rest = sorted(set(by_id) - set(forced))
     random.Random(SEED).shuffle(rest)
     chosen = sorted(set(forced) | set(rest[: SIZE - len(set(forced))]))
-    sample = [{**by_id[i], "readme": by_id[i]["readme"][:README_CHARS]} for i in chosen]
+    sample = [
+        redact({**by_id[i], "readme": by_id[i]["readme"][:README_CHARS]})
+        for i in chosen
+    ]
     out_path.write_text(json.dumps(sample, indent=1, ensure_ascii=False) + "\n")
     print(
         f"{len(sample)} datasets, {out_path.stat().st_size // 1024} KiB -> {out_path}"

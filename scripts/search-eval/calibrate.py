@@ -6,7 +6,8 @@
 
     uv run scripts/search-eval/fetch_corpus.py /tmp/eval
     bun scripts/search-eval/dump-texts.ts --corpus /tmp/eval/corpus.json > /tmp/eval/texts.json
-    uv run scripts/search-eval/calibrate.py /tmp/eval/corpus.json /tmp/eval/texts.json
+    bun scripts/search-eval/dump-texts.ts --constants > /tmp/eval/constants.json
+    uv run scripts/search-eval/calibrate.py /tmp/eval/corpus.json /tmp/eval/texts.json /tmp/eval/constants.json
 
 It replays the search pipeline on the whole public catalog with the open BAAI weights that
 Workers AI serves, for 37 queries: 22 that were used to choose the cutoff rule and 15 that were
@@ -134,7 +135,7 @@ STOPWORDS = {
 GENERIC_DF_MAX = 0.25
 LEG_SIZE = 30
 BM25_WEIGHTS = (10, 5, 1, 4, 1, 1)
-ENDORSE_MIN, ENDORSE_RELATIVE, AGREE_MIN = 0.10, 0.20, 0.005
+ENDORSE_MIN, ENDORSE_RELATIVE, AGREE_MIN, LITERAL_SCORE = 0.10, 0.20, 0.005, 0.5
 
 
 def tokens(query: str) -> list[str]:
@@ -161,7 +162,30 @@ def old_embedding_text(r: dict) -> str:
     return "\n".join(p for p in parts if p)
 
 
-def main(corpus_path: Path, texts_path: Path) -> None:
+def check_constants(path: Path) -> None:
+    """Fail if the constants above are not the ones the TypeScript ships with."""
+    ts = json.loads(path.read_text())
+    mine = {
+        "stopwords": sorted(STOPWORDS),
+        "genericDfMax": GENERIC_DF_MAX,
+        "legSize": LEG_SIZE,
+        "bm25Weights": list(BM25_WEIGHTS),
+        "endorseMin": ENDORSE_MIN,
+        "endorseRelative": ENDORSE_RELATIVE,
+        "agreeMin": AGREE_MIN,
+        "literalScore": LITERAL_SCORE,
+    }
+    drift = {k: (mine[k], ts[k]) for k in mine if mine[k] != ts[k]}
+    if drift:
+        sys.exit(f"calibrate.py has drifted from the TypeScript constants: {drift}")
+    print("constants match the TypeScript")
+
+
+def main(
+    corpus_path: Path, texts_path: Path, constants_path: Path | None = None
+) -> None:
+    if constants_path:
+        check_constants(constants_path)
     rows = json.loads(corpus_path.read_text())
     new_texts = json.loads(texts_path.read_text())
     ids = [r["id"] for r in rows]
@@ -209,10 +233,33 @@ def main(corpus_path: Path, texts_path: Path) -> None:
             / n
         )
 
+    modality_tokens = {
+        m.strip().lower() for r in rows for m in r["modalities"].split(",") if m.strip()
+    }
+
     def informative(query: str) -> list[str]:
-        content = [t for t in tokens(query) if t not in STOPWORDS] or tokens(query)
+        words = tokens(query)
+        content = list(dict.fromkeys(t for t in words if t not in STOPWORDS)) or list(
+            dict.fromkeys(words)
+        )
+        # A modality named next to a topic is an attribute to prefer, not a word to match.
+        topical = [t for t in content if t not in modality_tokens]
+        content = topical or content
         kept = [t for t in content if document_frequency(t) <= GENERIC_DF_MAX]
         return kept or content
+
+    def literal(terms: list[str]) -> list[int]:
+        """Datasets whose name, authors or tasks hold every informative word."""
+        match = (
+            "{name authors tasks} : (" + " AND ".join(f'"{t}"*' for t in terms) + ")"
+        )
+        return [
+            x[0]
+            for x in db.execute(
+                f"SELECT rowid FROM f WHERE f MATCH ? ORDER BY bm25(f,{','.join(map(str, BM25_WEIGHTS))}) LIMIT ?",
+                (match, LEG_SIZE),
+            )
+        ]
 
     def lexical(terms: list[str], limit: int, weights=BM25_WEIGHTS) -> list[int]:
         order = f"bm25(f,{','.join(map(str, weights))})" if weights else "bm25(f)"
@@ -293,22 +340,30 @@ def main(corpus_path: Path, texts_path: Path) -> None:
         ]
         lex = lexical(terms, LEG_SIZE)
         pool = rrf(semantic, lex)[: 2 * LEG_SIZE]
+        literal_ids = set(literal(terms))
+        pool += [i for i in sorted(literal_ids) if i not in pool]
         p = reranker.predict(
             [(" ".join(terms), new_texts[ids[i]]) for i in pool],
             batch_size=16,
             show_progress_bar=False,
         )
-        return pool, [float(x) for x in p], set(semantic) & set(lex)
+        return pool, [float(x) for x in p], set(semantic) & set(lex), literal_ids
 
-    def this_rule(pool, p, both):
+    def this_rule(pool, p, both, literal_ids):
         floor = max(ENDORSE_MIN, ENDORSE_RELATIVE * max(p))
+        score = [
+            max(x, LITERAL_SCORE) if pool[j] in literal_ids else x
+            for j, x in enumerate(p)
+        ]
         return [
             pool[j]
-            for j in sorted(range(len(pool)), key=lambda j: -p[j])
-            if p[j] >= floor or (pool[j] in both and p[j] >= AGREE_MIN)
+            for j in sorted(range(len(pool)), key=lambda j: -score[j])
+            if pool[j] in literal_ids
+            or p[j] >= floor
+            or (pool[j] in both and p[j] >= AGREE_MIN)
         ]
 
-    def best_score_only(pool, p, _both):
+    def best_score_only(pool, p, _both, _literal):
         floor = max(0.05, 0.2 * max(p))
         return [
             pool[j]
@@ -321,12 +376,12 @@ def main(corpus_path: Path, texts_path: Path) -> None:
         for q in qs:
             if not truths[q]:
                 continue
-            pool, p, both = pool_and_scores(q)
+            pool, p, both, literal_ids = pool_and_scores(q)
             for name, keep in (
                 ("shipped before", shipped_before(q)),
                 ("fused pool, no cutoff", pool),
-                ("best score only", best_score_only(pool, p, both)),
-                ("this rule", this_rule(pool, p, both)),
+                ("best score only", best_score_only(pool, p, both, literal_ids)),
+                ("this rule", this_rule(pool, p, both, literal_ids)),
             ):
                 hit = sum(1 for i in keep if i in truths[q])
                 results[group].setdefault(name, []).append(
@@ -349,4 +404,8 @@ def main(corpus_path: Path, texts_path: Path) -> None:
 
 
 if __name__ == "__main__":
-    main(Path(sys.argv[1]), Path(sys.argv[2]))
+    main(
+        Path(sys.argv[1]),
+        Path(sys.argv[2]),
+        Path(sys.argv[3]) if len(sys.argv) > 3 else None,
+    )
