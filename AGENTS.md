@@ -221,7 +221,14 @@ re-sent under its key),
 remote and credential helper: the API key goes only to origins on the CLI's own list and nothing a repository holds can
 add one, `git-annex-remote-nemar` refuses a configured host that is not listed and never carries
 the key across a redirect to another origin, and the generic web remote with a header command is
-refused because it would send the key to any URL a writer registered).
+refused because it would send the key to any URL a writer registered),
+0116 (PROPOSED; a phrase search returns the datasets judged to answer it: two or more content words
+draw a bounded pool from the lexical, semantic and name/authors/tasks legs, a cross-encoder scores it, and
+a dataset is kept on its approval, or when both legs found it and it is not strongly rejected, or when
+every informative word is in its name, authors or tasks; `count` of a phrase is the number judged relevant
+and `reranked` marks it, a single word is not cut, a word in over 25% of datasets does not drive a match,
+the vector and the cross-encoder read one text so the vectors are rebuilt on deploy, a word no dataset
+contains is corrected and reported as `corrected_query`, and every failure serves the fused list).
 
 **Account copy and the profile-gap matrix are declared once, in
 [`shared/contract/account-copy.ts`](shared/contract/account-copy.ts) and
