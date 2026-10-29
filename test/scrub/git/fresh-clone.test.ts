@@ -469,20 +469,43 @@ SUITE("verify --fresh-clone: the pushed repository (I1, I11)", () => {
     expect(invalidOut.out).toContain("reason=ledger-invalid");
     expect(invalidOut.out).toContain("reason=ledger-commit-not-alone count=1");
 
-    // A line naming a re-pull merge that does carry its trailers: that merge passes on its own, and
-    // the line, which vouches for a commit that needs no acceptance, fails the proof.
+    // A line naming a re-pull merge that does carry its trailers (as the proof reads them, here
+    // with another plan's digest than the line's): that merge passes on its own, and the line,
+    // which the Worker cannot tell from a needed one, changes nothing and is matched.
     const trailed = fresh();
     const withTrailers = commit(
       trailed,
       (b) => `${b}${repullLine}`,
-      `Release v1.1.0 (#7)\n\nUpstream-Snapshot: ds000001@1.0.1\nRepull-Plan: ${plan}`,
+      `Release v1.1.0 (#7)\n\nUpstream-Snapshot: ds000001@1.0.1\nRepull-Plan: sha256:${"c".repeat(64)}`,
       { "repulled-alongside.txt": "the re-pull's delta" },
     );
     commit(trailed, (b) => `${b}${acceptance(withTrailers)}`, "Record the acceptance");
     const trailedOut = await verifyFresh(trailed);
-    expect(trailedOut.code, trailedOut.out).toBe(4);
-    expect(trailedOut.out).toContain("reason=ledger-acceptance-unmatched count=1");
-    expect(trailedOut.out).not.toContain("ledger-commit-not-alone");
+    expect(trailedOut.code, trailedOut.out).toBe(0);
+    // It vouched for nothing that needed it.
+    expect(trailedOut.out).not.toContain("ledgerAcceptances");
+
+    // A branch that brought main in through a second parent (GitHub's "Update branch") carries
+    // main's line naming a merge it holds only through that parent: the line is matched, because
+    // main's tip vouches for it, and is not counted against the branch. (The branch's merge commit
+    // appends the scrub's line and the acceptance beside the merge's files, which the rule refuses
+    // as before; the runbook deletes merged branches before the clone.)
+    const updated = fresh();
+    git(updated, "branch", "feature");
+    const merged = commit(updated, (b) => `${b}${repullLine}`, "Release v1.1.0 (#7)", {
+      "repulled-alongside.txt": "the re-pull's delta",
+    });
+    commit(updated, (b) => `${b}${acceptance(merged)}`, "Record the acceptance");
+    git(updated, "checkout", "-q", "feature");
+    write(updated, "feature-only.txt", "work on the branch");
+    git(updated, "add", ".");
+    git(updated, "commit", "-q", "-m", "work on the branch");
+    git(updated, "merge", "-q", "--no-ff", "-m", "Merge main into feature", "main");
+    git(updated, "checkout", "-q", "main");
+    const updatedOut = await verifyFresh(updated);
+    expect(updatedOut.code, updatedOut.out).toBe(4);
+    expect(updatedOut.out).not.toContain("ledger-acceptance-unmatched");
+    expect(updatedOut.out).toContain("reason=ledger-commit-not-alone count=1");
   }, 300_000);
 
   test("a ledger that is not a valid ledger of this dataset fails", async () => {

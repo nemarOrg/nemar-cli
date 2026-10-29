@@ -20,6 +20,7 @@ import { dirname, join } from "node:path";
 import { canonical } from "../../../shared/identifier-scan";
 import { PROVENANCE_NOTE_KEY, PROVENANCE_PATH } from "../../../shared/privacy-correction-text";
 import {
+  LEDGER_REPO_PATH,
   acceptedMergesOf,
   ledgerChange,
   ledgerLines,
@@ -677,7 +678,7 @@ export type VerifyReason =
   | "annex-new-key-unregistered";
 
 /** The one path a commit made after the rewrite may add, and the only one it may touch. */
-export const LEDGER_PATH = ".nemar/corrections.jsonl";
+export const LEDGER_PATH = LEDGER_REPO_PATH;
 
 /**
  * The provenance file of a dataset that mirrors upstream recordings under `sourcedata/`: a JSON
@@ -1394,15 +1395,15 @@ export const REPULL_PLAN_TRAILER = /^Repull-Plan: sha256:[0-9a-f]{64}$/m;
 
 /**
  * What a commit that touches the ledger and other files is, to the proof:
- *  - `scrub`: a scrub's own commit. Every line it adds to the ledger is a scrub's (`import-scrubbed`
- *    from the importer, ADR 0089, or `repull-scrubbed` from an upstream re-pull's delta scrub, ADR
- *    0111), it edits nothing before them, and a commit that adds a `repull-scrubbed` line carries
- *    the re-pull commit's `Upstream-Snapshot:` and `Repull-Plan:` trailers. Each scrub commits its
- *    line in the SAME commit as the files it scrubbed, so a dataset imported or re-pulled that way
- *    would otherwise fail `ledger-commit-not-alone` for good.
- *  - `repull-untrailered`: the same, a `repull-scrubbed` line among the added ones, but without
- *    both trailers as git reads them: a re-pull's squash merge made outside NEMAR's gate. It passes
- *    only when an acceptance line names it (see {@link ledgerChecks}).
+ *  - `scrub`: the importer's own commit (ADR 0089). Every line it adds to the ledger is
+ *    `import-scrubbed`, and it edits nothing before them. The importer commits its line in the SAME
+ *    commit as the files it scrubbed, so a dataset imported that way would otherwise fail
+ *    `ledger-commit-not-alone` for good.
+ *  - `repull`: an upstream re-pull's own commit (ADR 0111): the same, with a `repull-scrubbed`
+ *    line among the added ones, and the re-pull commit's `Upstream-Snapshot:` and `Repull-Plan:`
+ *    trailers as git reads them (the message's last paragraph).
+ *  - `repull-untrailered`: the same without both trailers: a re-pull's squash merge made outside
+ *    NEMAR's gate. It passes only when an acceptance line names it (see {@link ledgerChecks}).
  *  - `other`: anything else (a line that is not an append, one of another action, one that does
  *    not parse).
  *
@@ -1416,7 +1417,7 @@ export const REPULL_PLAN_TRAILER = /^Repull-Plan: sha256:[0-9a-f]{64}$/m;
 async function scrubLedgerCommitKind(
   repo: string,
   sha: string,
-): Promise<"scrub" | "repull-untrailered" | "other"> {
+): Promise<"scrub" | "repull" | "repull-untrailered" | "other"> {
   const text = async (rev: string): Promise<string | null> => {
     const r = await gitRaw(repo, ["cat-file", "blob", `${rev}:${LEDGER_PATH}`]);
     return r.exitCode === 0 ? r.stdout.toString("utf8") : null;
@@ -1429,29 +1430,35 @@ async function scrubLedgerCommitKind(
   if (trailers.exitCode !== 0) return "other";
   const said = trailers.stdout.toString("utf8");
   return UPSTREAM_SNAPSHOT_TRAILER.test(said) && REPULL_PLAN_TRAILER.test(said)
-    ? "scrub"
+    ? "repull"
     : "repull-untrailered";
 }
 
 /**
  * The commits that touch {@link LEDGER_PATH}: how many there are, how many touch anything else
  * too (a scrub's own commit excepted, see {@link scrubLedgerCommitKind}), at how many head tips
- * the ledger is not a valid ledger of `dataset`, and how many acceptance lines name no commit
- * they may vouch for.
+ * the ledger is not a valid ledger of `dataset`, and how many commits the acceptance lines name
+ * that no line may vouch for.
  *
  * An acceptance (`repull-merge-accepted`, ADR 0111, the amendment of 2026-10-29) is a ledger line
  * NEMAR's Worker appends, in a commit of its own on `main`, after an administrator accepted a
- * re-pull's squash merge made without its trailers. It vouches for exactly the commit it names, and
- * only where it can be read: a commit `repull-untrailered` passes when the ledger at a branch tip
- * (`refs/heads/`, `refs/remotes/`, the tips `ledger-invalid` reads) holds a line naming it in full
- * and that commit is in the tip's first-parent history. A tag never vouches: it is pushed on the
- * merge, before NEMAR can name it. Every acceptance line must vouch for such a commit, or it is
- * counted `ledger-acceptance-unmatched`: one that names a commit the tip's first-parent history
- * does not hold (a forged or an unrelated id, or one reached only through a merge's second
- * parent), or a commit that is not a re-pull's merge without trailers (a commit that adds no
- * `repull-scrubbed` line, one that does carry the trailers, one that touches only the ledger).
- * So an acceptance never widens the rule for any commit but the one it names, and a missing one
- * leaves that commit `ledger-commit-not-alone`, as before.
+ * re-pull's squash merge made without its trailers. A line at a branch tip (`refs/heads/`,
+ * `refs/remotes/`, the tips `ledger-invalid` reads) vouches for the commit it names in full when
+ * that commit is a re-pull's merge (a `repull-scrubbed` line beside other files, with or without
+ * its trailers) in that tip's first-parent history. A commit `repull-untrailered` passes only when
+ * some tip vouches for it; a tag never does, since it is pushed on the merge before NEMAR can name
+ * it. A named commit that no tip vouches for is `ledger-acceptance-unmatched`, counted once
+ * whichever tips carry the line: a forged or an unrelated id, one reached from every tip that names
+ * it only through a merge's second parent, a commit that adds no `repull-scrubbed` line or touches
+ * only the ledger. So a line never widens the rule for any commit but the one it names, and a
+ * missing one leaves that commit `ledger-commit-not-alone`, as before.
+ *
+ * Two readings are deliberate. A line naming a re-pull's merge that does carry its trailers is
+ * matched, not unmatched: that commit passes on its own, so the line changes nothing, and the
+ * Worker, which cannot read trailers as git does, may write it for a merge whose trailers carry
+ * other values than the record's. And a line is matched when ANY tip vouches for its commit, so a
+ * branch that brought `main` in through a second parent (GitHub's "Update branch") does not fail
+ * for carrying `main`'s line.
  *
  * What this does NOT prove, as for the scrub's words: that NEMAR wrote the line. Nothing in a
  * clone tells NEMAR's commit from one made by hand with the same line; the word cannot be typed at
@@ -1479,6 +1486,7 @@ export async function ledgerChecks(
   );
   let commits = 0;
   let notAlone = 0;
+  const repullMerges = new Set<string>();
   const untrailered = new Set<string>();
   const seen = new Set<string>();
   for (const block of out.split("\0").slice(1)) {
@@ -1490,11 +1498,12 @@ export async function ledgerChecks(
     commits++;
     if (!paths.some((p) => p !== LEDGER_PATH)) continue;
     const kind = await scrubLedgerCommitKind(repo, sha);
+    if (kind === "repull" || kind === "repull-untrailered") repullMerges.add(sha);
     if (kind === "repull-untrailered") untrailered.add(sha);
     else if (kind === "other") notAlone++;
   }
   let invalid = 0;
-  let unmatched = 0;
+  const named = new Set<string>();
   const vouched = new Set<string>();
   for (const ref of scanRefs.filter(
     (r) => r.startsWith("refs/heads/") || r.startsWith("refs/remotes/"),
@@ -1511,18 +1520,24 @@ export async function ledgerChecks(
       invalid++;
       continue;
     }
-    const named = acceptedMergesOf(text);
-    if (named.length === 0) continue;
+    const lines = acceptedMergesOf(text);
+    if (lines.length === 0) continue;
     const history = new Set(
       (await git(repo, ["rev-list", "--first-parent", ref])).split("\n").filter(Boolean),
     );
-    for (const commit of named) {
-      if (untrailered.has(commit) && history.has(commit)) vouched.add(commit);
-      else unmatched++;
+    for (const commit of lines) {
+      named.add(commit);
+      if (repullMerges.has(commit) && history.has(commit)) vouched.add(commit);
     }
   }
   notAlone += [...untrailered].filter((c) => !vouched.has(c)).length;
-  return { commits, notAlone, invalid, unmatched, accepted: vouched.size };
+  return {
+    commits,
+    notAlone,
+    invalid,
+    unmatched: [...named].filter((c) => !vouched.has(c)).length,
+    accepted: [...untrailered].filter((c) => vouched.has(c)).length,
+  };
 }
 
 /** git-annex's `hashdirlower` for a key: the `abc/def/` its location log lives under. */
