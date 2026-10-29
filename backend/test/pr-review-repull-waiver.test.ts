@@ -26,6 +26,7 @@ import { adminRoutes } from "../src/routes/admin";
 import webhooks from "../src/routes/webhooks";
 import { __resetRateLimitStateForTests } from "../src/services/github/transport";
 import { storePrReviewResult, sweepStalePrReviews } from "../src/services/pr-review";
+import { plainRef } from "../src/services/pr-review-queue";
 import {
   REPULL_WAIVER_RECORDS_SQL,
   readWaiverRecords,
@@ -1151,6 +1152,76 @@ describe("a waiver the sweep cannot decide is an attempt that failed", () => {
     expect(results.map((r) => r.republished)).toEqual([0, 0, 0, 0, 0]);
     expect(results.map((r) => r.abandoned)).toEqual([0, 0, 0, 0, 1]);
     expect(reviews()[0]).toMatchObject({ published_at: null, publish_attempts: 5 });
+  });
+});
+
+describe("the queue names the App's pull request by the App's name, and only the App's", () => {
+  const APP = { login: NEMAR_APP_BOT_LOGIN, id: NEMAR_APP_BOT_USER_ID, type: "Bot" };
+  const detail = async () => {
+    const res = await app.request(
+      `/admin/pr-reviews/${DS}/7`,
+      { headers: { Authorization: `Bearer ${ADMIN_KEY}` } },
+      env(),
+    );
+    expect(res.status).toBe(200);
+    return (await res.json()) as {
+      review: { author_login: string; author_id: number } | null;
+      live: { author_login: string; author_id: number | null } | null;
+      author: { login: string; author_id: number } | null;
+    };
+  };
+  const storeReview = (authorId: number, authorLogin: string) =>
+    db.run(
+      `INSERT INTO pr_reviews (dataset_id, pr_number, head_sha, author_id, author_login, state,
+                               detail, decided_at)
+       VALUES (?, 7, ?, ?, ?, 'errored', 'model_unavailable', datetime('now'))`,
+      [DS, HEAD, authorId, authorLogin],
+    );
+
+  test("a stored review, GitHub's record and the author's standing all name the App", async () => {
+    storeReview(NEMAR_APP_BOT_USER_ID, NEMAR_APP_BOT_LOGIN);
+    pulls[`${DS}#7`] = pull({ user: APP });
+    const d = await detail();
+    expect(d.review).toMatchObject({
+      author_login: NEMAR_APP_BOT_LOGIN,
+      author_id: NEMAR_APP_BOT_USER_ID,
+    });
+    expect(d.live).toMatchObject({
+      author_login: NEMAR_APP_BOT_LOGIN,
+      author_id: NEMAR_APP_BOT_USER_ID,
+    });
+    expect(d.author).toMatchObject({
+      login: NEMAR_APP_BOT_LOGIN,
+      author_id: NEMAR_APP_BOT_USER_ID,
+    });
+  });
+
+  test("a bot that only borrows the App's login is not shown as the App", async () => {
+    pulls[`${DS}#7`] = pull({ user: { ...APP, id: 1 } });
+    expect((await detail()).live?.author_login).toBe("(unknown)");
+  });
+
+  test("a bot that only carries the App's id is not shown as the App", async () => {
+    pulls[`${DS}#7`] = pull({ user: { ...APP, login: "nemar-bot2[bot]" } });
+    expect((await detail()).live?.author_login).toBe("(unknown)");
+  });
+
+  test("a stored review under the App's login with another id is not shown as the App", async () => {
+    storeReview(1, NEMAR_APP_BOT_LOGIN);
+    const d = await detail();
+    expect(d.review).toMatchObject({
+      author_login: plainRef(NEMAR_APP_BOT_LOGIN, 39),
+      author_id: 1,
+    });
+    expect(d.review?.author_login).not.toBe(NEMAR_APP_BOT_LOGIN);
+    expect(d.author).toMatchObject({ login: plainRef(NEMAR_APP_BOT_LOGIN, 39), author_id: 1 });
+  });
+
+  test("a stored review under the App's id with another login is not shown as the App", async () => {
+    storeReview(NEMAR_APP_BOT_USER_ID, "someone");
+    const d = await detail();
+    expect(d.review).toMatchObject({ author_login: "someone", author_id: NEMAR_APP_BOT_USER_ID });
+    expect(d.author).toMatchObject({ login: "someone", author_id: NEMAR_APP_BOT_USER_ID });
   });
 });
 

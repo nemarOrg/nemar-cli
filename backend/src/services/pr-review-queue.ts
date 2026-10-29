@@ -166,12 +166,13 @@ export function plainRef(input: unknown, max = 60): string {
 
 /**
  * A stored author login as it is shown. The NEMAR App's bot keeps its own name,
- * `nemar-bot[bot]`, brackets included: its automatic re-pull pull request is the one bot's
- * the review takes (ADR 0111 narrows ADR 0092's "not bots" for that class), the review stores it
- * under that name, and the label is plain text, where brackets are harmless. Every other login is
- * reduced as {@link plainRef} reduces it. Only that exact constant passes through, and only beside
- * the bot's numeric id, as {@link restAuthorLabel} requires of GitHub's record, so nothing an
- * author wrote reaches the label unreduced and a login the App gave up is not shown as the App's.
+ * `nemar-bot[bot]`, brackets included: its automatic re-pull pull request is shown in the queue
+ * (waived at its recorded head, ADR 0116, and reviewed under that name by the rows ADR 0111's
+ * Phase 7e start wrote before that), and the label is plain text, where brackets are harmless.
+ * Every other login is reduced as {@link plainRef} reduces it. Only that exact constant passes
+ * through, and only beside the bot's numeric id, as {@link restAuthorLabel} requires of GitHub's
+ * record, so nothing an author wrote reaches the label unreduced and a login the App gave up is
+ * not shown as the App's.
  */
 export function loginLabel(login: unknown, authorId: unknown): string {
   return login === NEMAR_APP_BOT_LOGIN && authorId === NEMAR_APP_BOT_USER_ID
