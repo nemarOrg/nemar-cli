@@ -20,6 +20,11 @@ import { dirname, join } from "node:path";
 import { canonical } from "../../../shared/identifier-scan";
 import { PROVENANCE_NOTE_KEY, PROVENANCE_PATH } from "../../../shared/privacy-correction-text";
 import {
+  acceptedMergesOf,
+  ledgerChange,
+  ledgerLines,
+} from "../../../shared/repull-merge-acceptance";
+import {
   ANNEX_KEY,
   ContractError,
   type GitPlanFile,
@@ -665,6 +670,7 @@ export type VerifyReason =
   | "allowed-tag-missing"
   | "ledger-commit-not-alone"
   | "ledger-invalid"
+  | "ledger-acceptance-unmatched"
   | "annex-branch-missing"
   | "annex-old-key-held"
   | "annex-old-key-not-dead"
@@ -1360,7 +1366,10 @@ export async function verifyRewrite(opts: VerifyOptions): Promise<VerifyResult> 
     const ledger = await ledgerChecks(repo, scanRefs, plan.dataset);
     fail("ledger-commit-not-alone", ledger.notAlone);
     fail("ledger-invalid", ledger.invalid);
+    fail("ledger-acceptance-unmatched", ledger.unmatched);
     counts.ledgerCommits = ledger.commits;
+    // Said only when there is one, as `allowedTags` is: the line of a dataset with none is unchanged.
+    if (ledger.accepted > 0) counts.ledgerAcceptances = ledger.accepted;
     const annexRef = "refs/remotes/origin/git-annex";
     if (!byName.has(annexRef)) {
       fail("annex-branch-missing", 1);
@@ -1384,14 +1393,18 @@ export const UPSTREAM_SNAPSHOT_TRAILER = /^Upstream-Snapshot: ds\d{6}@[0-9A-Za-z
 export const REPULL_PLAN_TRAILER = /^Repull-Plan: sha256:[0-9a-f]{64}$/m;
 
 /**
- * Whether a commit that touches the ledger and other files is a scrub's own commit: every line it
- * adds to the ledger is a scrub's (`import-scrubbed` from the importer, ADR 0089, or
- * `repull-scrubbed` from an upstream re-pull's delta scrub, ADR 0111), it edits nothing before
- * them, and a commit that adds a `repull-scrubbed` line carries the re-pull commit's
- * `Upstream-Snapshot:` and `Repull-Plan:` trailers. Each scrub commits its line in the SAME
- * commit as the files it scrubbed, so a dataset imported or re-pulled that way would otherwise
- * fail `ledger-commit-not-alone` for good. Anything else (a line that is not an append, one of
- * another action, one that does not parse, a re-pull line without both trailers) is not that.
+ * What a commit that touches the ledger and other files is, to the proof:
+ *  - `scrub`: a scrub's own commit. Every line it adds to the ledger is a scrub's (`import-scrubbed`
+ *    from the importer, ADR 0089, or `repull-scrubbed` from an upstream re-pull's delta scrub, ADR
+ *    0111), it edits nothing before them, and a commit that adds a `repull-scrubbed` line carries
+ *    the re-pull commit's `Upstream-Snapshot:` and `Repull-Plan:` trailers. Each scrub commits its
+ *    line in the SAME commit as the files it scrubbed, so a dataset imported or re-pulled that way
+ *    would otherwise fail `ledger-commit-not-alone` for good.
+ *  - `repull-untrailered`: the same, a `repull-scrubbed` line among the added ones, but without
+ *    both trailers as git reads them: a re-pull's squash merge made outside NEMAR's gate. It passes
+ *    only when an acceptance line names it (see {@link ledgerChecks}).
+ *  - `other`: anything else (a line that is not an append, one of another action, one that does
+ *    not parse).
  *
  * What this does NOT prove: that the other files in the commit are the scrub's. Nothing in the
  * repository tells the scrub's commit from one made by hand with the same line and trailers, so
@@ -1400,43 +1413,65 @@ export const REPULL_PLAN_TRAILER = /^Repull-Plan: sha256:[0-9a-f]{64}$/m;
  * line (`ledger-cli.ts`), and the lines themselves are validated for this dataset at every head
  * tip (`ledger-invalid`).
  */
-async function isScrubLedgerCommit(repo: string, sha: string): Promise<boolean> {
-  const lines = async (rev: string): Promise<string[] | undefined> => {
+async function scrubLedgerCommitKind(
+  repo: string,
+  sha: string,
+): Promise<"scrub" | "repull-untrailered" | "other"> {
+  const text = async (rev: string): Promise<string | null> => {
     const r = await gitRaw(repo, ["cat-file", "blob", `${rev}:${LEDGER_PATH}`]);
-    if (r.exitCode !== 0) return undefined;
-    return r.stdout
-      .toString("utf8")
-      .split("\n")
-      .filter((l) => l.trim() !== "");
+    return r.exitCode === 0 ? r.stdout.toString("utf8") : null;
   };
-  const now = await lines(sha);
   // A first commit, or a parent with no ledger, appends everything.
-  const before = (await lines(`${sha}^`)) ?? [];
-  if (!now || now.length <= before.length || before.some((l, i) => l !== now[i])) return false;
-  let actions: unknown[];
-  try {
-    actions = now.slice(before.length).map((l) => (JSON.parse(l) as { action?: unknown }).action);
-  } catch {
-    return false;
-  }
-  if (!actions.every((a) => a === "import-scrubbed" || a === "repull-scrubbed")) return false;
-  if (!actions.includes("repull-scrubbed")) return true;
+  const change = ledgerChange(await text(`${sha}^`), await text(sha));
+  if (change.kind !== "scrub-append") return "other";
+  if (!change.repull) return "scrub";
   const trailers = await gitRaw(repo, ["show", "-s", "--format=%(trailers:only,unfold)", sha]);
-  if (trailers.exitCode !== 0) return false;
-  const text = trailers.stdout.toString("utf8");
-  return UPSTREAM_SNAPSHOT_TRAILER.test(text) && REPULL_PLAN_TRAILER.test(text);
+  if (trailers.exitCode !== 0) return "other";
+  const said = trailers.stdout.toString("utf8");
+  return UPSTREAM_SNAPSHOT_TRAILER.test(said) && REPULL_PLAN_TRAILER.test(said)
+    ? "scrub"
+    : "repull-untrailered";
 }
 
 /**
  * The commits that touch {@link LEDGER_PATH}: how many there are, how many touch anything else
- * too (a scrub's own commit excepted, see {@link isScrubLedgerCommit}), and at how many head
- * tips the ledger is not a valid ledger of `dataset`.
+ * too (a scrub's own commit excepted, see {@link scrubLedgerCommitKind}), at how many head tips
+ * the ledger is not a valid ledger of `dataset`, and how many acceptance lines name no commit
+ * they may vouch for.
+ *
+ * An acceptance (`repull-merge-accepted`, ADR 0111, the amendment of 2026-10-29) is a ledger line
+ * NEMAR's Worker appends, in a commit of its own on `main`, after an administrator accepted a
+ * re-pull's squash merge made without its trailers. It vouches for exactly the commit it names, and
+ * only where it can be read: a commit `repull-untrailered` passes when the ledger at a branch tip
+ * (`refs/heads/`, `refs/remotes/`, the tips `ledger-invalid` reads) holds a line naming it in full
+ * and that commit is in the tip's first-parent history. A tag never vouches: it is pushed on the
+ * merge, before NEMAR can name it. Every acceptance line must vouch for such a commit, or it is
+ * counted `ledger-acceptance-unmatched`: one that names a commit the tip's first-parent history
+ * does not hold (a forged or an unrelated id, or one reached only through a merge's second
+ * parent), or a commit that is not a re-pull's merge without trailers (a commit that adds no
+ * `repull-scrubbed` line, one that does carry the trailers, one that touches only the ledger).
+ * So an acceptance never widens the rule for any commit but the one it names, and a missing one
+ * leaves that commit `ledger-commit-not-alone`, as before.
+ *
+ * What this does NOT prove, as for the scrub's words: that NEMAR wrote the line. Nothing in a
+ * clone tells NEMAR's commit from one made by hand with the same line; the word cannot be typed at
+ * the ledger's command line, and the line is validated like every other (`ledger-invalid`).
+ *
+ * Exported so the re-pull's suites run this very rule on the repository the re-pull and the
+ * Worker's acceptance built (`test/repull-accept-merge-trailers-cli.test.ts`); `verifyRewrite` is
+ * its caller in `fresh-clone` mode.
  */
-async function ledgerChecks(
+export async function ledgerChecks(
   repo: string,
   scanRefs: string[],
   dataset: string,
-): Promise<{ commits: number; notAlone: number; invalid: number }> {
+): Promise<{
+  commits: number;
+  notAlone: number;
+  invalid: number;
+  unmatched: number;
+  accepted: number;
+}> {
   const out = await git(
     repo,
     ["log", "--stdin", "--no-renames", "--format=%x00%H", "--name-only", "-m", "--first-parent"],
@@ -1444,6 +1479,7 @@ async function ledgerChecks(
   );
   let commits = 0;
   let notAlone = 0;
+  const untrailered = new Set<string>();
   const seen = new Set<string>();
   for (const block of out.split("\0").slice(1)) {
     const [sha, ...rest] = block.split("\n");
@@ -1452,30 +1488,41 @@ async function ledgerChecks(
     const paths = rest.filter((p) => p !== "");
     if (!paths.includes(LEDGER_PATH)) continue;
     commits++;
-    if (paths.some((p) => p !== LEDGER_PATH) && !(await isScrubLedgerCommit(repo, sha))) {
-      notAlone++;
-    }
+    if (!paths.some((p) => p !== LEDGER_PATH)) continue;
+    const kind = await scrubLedgerCommitKind(repo, sha);
+    if (kind === "repull-untrailered") untrailered.add(sha);
+    else if (kind === "other") notAlone++;
   }
   let invalid = 0;
+  let unmatched = 0;
+  const vouched = new Set<string>();
   for (const ref of scanRefs.filter(
     (r) => r.startsWith("refs/heads/") || r.startsWith("refs/remotes/"),
   )) {
     const r = await gitRaw(repo, ["cat-file", "blob", `${ref}:${LEDGER_PATH}`]);
     if (r.exitCode !== 0) continue; // no ledger at this tip
+    const text = r.stdout.toString("utf8");
     try {
-      const lines = r.stdout
-        .toString("utf8")
-        .split("\n")
-        .filter((l) => l.trim() !== "");
-      for (const line of lines) {
+      for (const line of ledgerLines(text)) {
         const entry = validateLedgerEntry(JSON.parse(line) as LedgerEntry);
         if (entry.dataset !== dataset) throw new Error("other dataset");
       }
     } catch {
       invalid++;
+      continue;
+    }
+    const named = acceptedMergesOf(text);
+    if (named.length === 0) continue;
+    const history = new Set(
+      (await git(repo, ["rev-list", "--first-parent", ref])).split("\n").filter(Boolean),
+    );
+    for (const commit of named) {
+      if (untrailered.has(commit) && history.has(commit)) vouched.add(commit);
+      else unmatched++;
     }
   }
-  return { commits, notAlone, invalid };
+  notAlone += [...untrailered].filter((c) => !vouched.has(c)).length;
+  return { commits, notAlone, invalid, unmatched, accepted: vouched.size };
 }
 
 /** git-annex's `hashdirlower` for a key: the `abc/def/` its location log lives under. */
