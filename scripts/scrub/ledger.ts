@@ -16,7 +16,13 @@
 
 import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
+import {
+  MERGE_ACCEPTED_ACTION,
+  MERGE_ACCEPTED_VERIFICATION,
+} from "../../shared/repull-merge-acceptance";
 import { type LedgerEntry, VERSION_TAG } from "./contract";
+
+export { MERGE_ACCEPTED_ACTION, MERGE_ACCEPTED_VERIFICATION };
 
 /** Where the ledger lives in the dataset repository, after the rewrite. */
 export const LEDGER_REPO_PATH = ".nemar/corrections.jsonl";
@@ -48,6 +54,11 @@ const ACTIONS: ReadonlySet<LedgerEntry["action"]> = new Set([
   // Written by an upstream re-pull's delta scrub before the commit, so no history holds the
   // original (ADR 0111, decision 9): it holds nothing, and it is not a recorded correction.
   "repull-scrubbed",
+  // Written by NEMAR's Worker after an administrator accepted a re-pull's squash merge made
+  // without its trailers (ADR 0111, the amendment of 2026-10-29): it names that merge commit, so
+  // the fresh-clone proof reads it as the re-pull's own. It changes no byte of the dataset, so it
+  // is not a recorded correction either.
+  MERGE_ACCEPTED_ACTION,
 ]);
 
 /**
@@ -62,6 +73,22 @@ export const SCRUB_ACTIONS: ReadonlySet<LedgerEntry["action"]> = new Set([
 ]);
 
 /**
+ * Every action a NEMAR tool writes and no operator may type: the two scrubs' and the Worker's
+ * acceptance of a merge made without its trailers. None of them is a recorded correction (ADR
+ * 0111, decision 1, as corrected by its Phase 6b amendment and the amendment of 2026-10-29), so a
+ * re-pull plan counts every other line and none of these.
+ */
+export const TOOL_ACTIONS: ReadonlySet<LedgerEntry["action"]> = new Set([
+  ...SCRUB_ACTIONS,
+  MERGE_ACCEPTED_ACTION,
+]);
+
+/** A full commit id, which an acceptance line names: hex only, so it can carry no value. */
+const COMMIT_ID = /^[0-9a-f]{40}$/;
+/** A plan digest, which an acceptance line names: hex only, as above. */
+const PLAN_DIGEST = /^sha256:[0-9a-f]{64}$/;
+
+/**
  * What a verification may say, from a closed list. A free-text field is the one place a stray
  * value could slip in, so there is none: the strongest claim is the longest phrase.
  */
@@ -73,6 +100,7 @@ const VERIFICATIONS: ReadonlySet<string> = new Set([
   "scanner-clean+payload-identical+rehash-ok",
   "public-surface-clean",
   "authoritative-listing-empty",
+  MERGE_ACCEPTED_VERIFICATION,
 ]);
 /**
  * A verification may end with `+proof-<16 hex>`: the first 16 hex digits of the sha256 of the
@@ -130,6 +158,23 @@ export function validateLedgerEntry(entry: LedgerEntry): LedgerEntry {
   if (deletion !== (base === DELETION_VERIFICATION) || deletion !== proofed) {
     throw new LedgerRefused("verification");
   }
+  // The same pairing for an accepted merge: its word is said only by that action, which says it
+  // always, and which alone names a commit and a plan (each exactly, in hex).
+  const accepted = entry.action === MERGE_ACCEPTED_ACTION;
+  if (accepted !== (entry.verification === MERGE_ACCEPTED_VERIFICATION)) {
+    throw new LedgerRefused("verification");
+  }
+  if (accepted) {
+    if (typeof entry.commit !== "string" || !COMMIT_ID.test(entry.commit)) {
+      throw new LedgerRefused("commit");
+    }
+    if (typeof entry.plan !== "string" || !PLAN_DIGEST.test(entry.plan)) {
+      throw new LedgerRefused("plan");
+    }
+    if (entry.versions.length !== 1) throw new LedgerRefused("versions");
+  } else if (entry.commit !== undefined || entry.plan !== undefined) {
+    throw new LedgerRefused("extra-field");
+  }
   if (typeof entry.actor !== "string" || !ACTOR.test(entry.actor)) throw new LedgerRefused("actor");
   const allowed = new Set([
     "version",
@@ -141,6 +186,7 @@ export function validateLedgerEntry(entry: LedgerEntry): LedgerEntry {
     "scanner",
     "verification",
     "actor",
+    ...(accepted ? ["commit", "plan"] : []),
   ]);
   for (const key of Object.keys(entry))
     if (!allowed.has(key)) throw new LedgerRefused("extra-field");

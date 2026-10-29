@@ -1,0 +1,200 @@
+/**
+ * A re-pull's squash merge made without its trailers, accepted on evidence (ADR 0111, the
+ * amendment of 2026-10-29). Pure, so the administrator's `resume` (`src/lib/repull/acceptance.ts`),
+ * the Worker's route (`backend/src/services/upstream-repull-acceptance.ts`), the ledger's validator
+ * (`scripts/scrub/ledger.ts`) and its fresh-clone proof (`scripts/scrub/git/git-lib.ts`) read one
+ * definition.
+ *
+ * The merge gate writes the squash message so that its last paragraph is the re-pull commit's
+ * trailers, because the privacy ledger's fresh-clone proof (ADR 0085) reads a commit that appends
+ * a `repull-scrubbed` line beside other files as the re-pull's own only when it carries them. A
+ * merge made outside the gate (GitHub's merge button) carries GitHub's message instead, and the
+ * proof would fail the dataset for good. Rewriting `main` is not a repair: the tag, a minted DOI
+ * and public clones name the commit.
+ *
+ * So the acceptance is evidence in the repository itself: one ledger line, written by NEMAR in a
+ * commit of its own on `main` after the merge, that names the accepted merge commit by its full
+ * id. The proof accepts a commit that appends a `repull-scrubbed` line without the trailers only
+ * when such a line, in the ledger at a branch tip whose first-parent history holds that commit,
+ * names exactly it; a line that names anything else fails the proof on its own. The line holds
+ * fixed words and two hex ids, never the administrator's reason, which is free text and stays in
+ * NEMAR's database: the ledger refuses free text by design (ADR 0085, ADR 0036).
+ */
+
+/** The ledger's path in a dataset repository (ADR 0085). */
+export const LEDGER_REPO_PATH = ".nemar/corrections.jsonl";
+
+/** The ledger word of an accepted merge: written by NEMAR's Worker only, never typed. */
+export const MERGE_ACCEPTED_ACTION = "repull-merge-accepted";
+
+/**
+ * The verification word an acceptance line carries, and no other line may: the Worker read the
+ * merge, its pull request, its tree and its parent on GitHub before it wrote the line.
+ */
+export const MERGE_ACCEPTED_VERIFICATION = "squash-merge-verified";
+
+/** The fixed actor of every line a re-pull writes: the delta scrub's, and the acceptance's. */
+export const REPULL_LEDGER_ACTOR = "nemar-repull";
+
+/** The two words a scrub writes in the same commit as what it scrubbed (ADR 0089, ADR 0111). */
+export const SCRUB_LEDGER_ACTIONS: readonly string[] = ["import-scrubbed", "repull-scrubbed"];
+
+const SHA_RE = /^[0-9a-f]{40}$/;
+const DIGEST_RE = /^sha256:[0-9a-f]{64}$/;
+const SCANNER_RE = /^identifier-scan@[0-9a-f]{7,40}$/;
+const VERSION_RE = /^\d+\.\d+\.\d+$/;
+
+/** What an acceptance line says. */
+export interface MergeAcceptanceFacts {
+  dataset: string;
+  /** The version the merge released, bare (`2.0.0`); the line names it as a tag. */
+  version: string;
+  /** The accepted squash merge commit, in full. */
+  mergeSha: string;
+  /** The record's plan digest (`sha256:<64 hex>`): which reviewed plan the merge carried. */
+  planDigest: string;
+  /** The `scanner` of the `repull-scrubbed` line the merge appended, carried over unchanged. */
+  scanner: string;
+  /** When the acceptance was recorded, as an ISO 8601 time. */
+  at: string;
+}
+
+/**
+ * The acceptance line, without its newline, its keys in the ledger's order. A function of the
+ * stored acceptance, so writing it again gives the same bytes, which is how a retried write finds
+ * the line it already wrote. Throws on a value that is not of its shape.
+ */
+export function mergeAcceptanceLine(f: MergeAcceptanceFacts): string {
+  if (!SHA_RE.test(f.mergeSha)) throw new Error("the merge commit is not a full commit id");
+  if (!DIGEST_RE.test(f.planDigest)) throw new Error("the plan digest is not sha256: and 64 hex");
+  if (!SCANNER_RE.test(f.scanner)) throw new Error("the scanner is not identifier-scan@<hex>");
+  if (!VERSION_RE.test(f.version)) throw new Error("the version is not N.N.N");
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3})?Z$/.test(f.at)) {
+    throw new Error("the time is not an ISO 8601 UTC time");
+  }
+  return JSON.stringify({
+    version: 1,
+    at: f.at,
+    dataset: f.dataset,
+    action: MERGE_ACCEPTED_ACTION,
+    versions: [`v${f.version}`],
+    counts: {},
+    scanner: f.scanner,
+    verification: MERGE_ACCEPTED_VERIFICATION,
+    actor: REPULL_LEDGER_ACTOR,
+    commit: f.mergeSha,
+    plan: f.planDigest,
+  });
+}
+
+/** D1's `datetime('now')` (`YYYY-MM-DD HH:MM:SS`, UTC) as the ISO time a ledger line carries. */
+export function ledgerTimeOf(d1Time: string): string {
+  const m = /^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})$/.exec(d1Time);
+  if (!m) throw new Error("not a D1 time");
+  return `${m[1]}T${m[2]}.000Z`;
+}
+
+/** The non-blank lines of a ledger's text, as the proof splits them. */
+export function ledgerLines(text: string): string[] {
+  return text.split("\n").filter((l) => l.trim() !== "");
+}
+
+function parsed(line: string): Record<string, unknown> | null {
+  try {
+    const v = JSON.parse(line) as unknown;
+    return typeof v === "object" && v !== null && !Array.isArray(v)
+      ? (v as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * What a commit did to the ledger, from its parent's text and its own (null for no ledger):
+ *  - `none`: the same lines;
+ *  - `scrub-append`: lines appended after the parent's, every one a scrub's word, nothing before
+ *    them edited, with whether one is `repull-scrubbed` and that line's `scanner`;
+ *  - `other`: anything else (a removal, an edit, a line of another word or one that does not parse).
+ * The proof's own rule for a scrub's commit (`isScrubLedgerCommit`), read from two texts.
+ */
+export type LedgerChange =
+  | { kind: "none" }
+  | { kind: "scrub-append"; repull: boolean; scanner: string | null }
+  | { kind: "other" };
+
+export function ledgerChange(before: string | null, after: string | null): LedgerChange {
+  const was = ledgerLines(before ?? "");
+  const now = ledgerLines(after ?? "");
+  if (after === null && before === null) return { kind: "none" };
+  if (after === null) return { kind: "other" };
+  if (now.length === was.length && was.every((l, i) => l === now[i])) return { kind: "none" };
+  if (now.length <= was.length || was.some((l, i) => l !== now[i])) return { kind: "other" };
+  let repull = false;
+  let scanner: string | null = null;
+  for (const line of now.slice(was.length)) {
+    const entry = parsed(line);
+    const action = entry?.action;
+    if (typeof action !== "string" || !SCRUB_LEDGER_ACTIONS.includes(action)) {
+      return { kind: "other" };
+    }
+    if (action === "repull-scrubbed") {
+      repull = true;
+      scanner = typeof entry?.scanner === "string" ? entry.scanner : null;
+    }
+  }
+  return { kind: "scrub-append", repull, scanner };
+}
+
+/**
+ * The commits the acceptance lines of a ledger's text name, in order, each once. A line that does
+ * not parse names nothing here; the ledger's own validation (`ledger-invalid`) refuses it.
+ */
+export function acceptedMergesOf(text: string): string[] {
+  const out: string[] = [];
+  for (const line of ledgerLines(text)) {
+    const entry = parsed(line);
+    if (entry?.action !== MERGE_ACCEPTED_ACTION) continue;
+    if (typeof entry.commit === "string" && !out.includes(entry.commit)) out.push(entry.commit);
+  }
+  return out;
+}
+
+/** One entry of a git tree, as GitHub's trees API and `git ls-tree` name it. */
+export interface TreeEntry {
+  path: string;
+  mode: string;
+  type: string;
+  sha: string;
+}
+
+/** The top-level directories NEMAR owns, which a re-pull's tree comparisons leave out. */
+const NEMAR_OWNED = new Set([".nemar", ".github"]);
+
+/**
+ * Whether two root trees are the same outside `.nemar/**` and `.github/**`: every top-level entry
+ * but those two directories has the same name, mode, type and object. Equal subtree objects are
+ * equal contents, so the top level decides the whole tree, the comparison the release makes for
+ * the tag (`release.ts`), read from two GitHub tree answers instead of a clone.
+ */
+export function sameOutsideNemar(a: readonly TreeEntry[], b: readonly TreeEntry[]): boolean {
+  const key = (e: TreeEntry) => `${e.mode} ${e.type} ${e.sha} ${e.path}`;
+  const outside = (t: readonly TreeEntry[]) =>
+    t
+      .filter((e) => !(e.type === "tree" && NEMAR_OWNED.has(e.path)))
+      .map(key)
+      .sort();
+  const x = outside(a);
+  const y = outside(b);
+  return x.length === y.length && x.every((k, i) => k === y[i]);
+}
+
+/**
+ * A path enrichment writes, by its name: a file under `.nemar/` other than the ledger, `.bidsignore`
+ * and a root `participants.tsv`. The Worker's reading of "moved by enrichment only", from GitHub's
+ * comparison, which names paths; the CLI reads each commit's content too (`execute/head.ts`).
+ */
+export function isEnrichmentPath(path: string): boolean {
+  if (path === LEDGER_REPO_PATH) return false;
+  return path.startsWith(".nemar/") || path === ".bidsignore" || path === "participants.tsv";
+}
