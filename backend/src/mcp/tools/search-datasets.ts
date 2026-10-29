@@ -375,6 +375,14 @@ export async function searchDatasetsTool(
     truncated = envelope.truncated;
     const notes: string[] = [];
     if (envelope.warning) notes.push(envelope.warning);
+    if (envelope.modality_boost?.length) {
+      notes.push(`Datasets with modality ${envelope.modality_boost.join(", ")} are listed first.`);
+    }
+    if (envelope.corrected_query) {
+      notes.push(
+        `No dataset contains a word of the query as typed; searched for "${envelope.corrected_query}" instead.`,
+      );
+    }
     if (merged.unresolvedIds.length > 0) {
       console.warn(`[search_datasets] no catalog row for: ${merged.unresolvedIds.join(", ")}`);
       notes.push(
