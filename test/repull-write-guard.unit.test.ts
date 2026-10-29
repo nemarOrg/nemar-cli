@@ -347,24 +347,52 @@ describe("S3 calls", () => {
     ]) {
       expect(refusedAws("copy-object", [...base, ...extra])).toBe("option-not-allowed");
     }
-    // The tagging directive is allowed on copy-object only, and only as REPLACE with no tags.
-    expect(
-      refusedAws("copy-object", [...base, "--tagging-directive", "REPLACE", "--tagging", "k=v"]),
-    ).toBe("option-not-allowed");
+    // On copy-object the tagging directive is required and is only ever REPLACE.
     expect(refusedAws("copy-object", [...base])).toBe("copy-without-tagging-replace");
     expect(refusedAws("copy-object", [...base, "--tagging-directive", "COPY"])).toBe(
       "copy-without-tagging-replace",
     );
-    expect(
-      refusedAws("head-object", [
-        "--bucket",
-        "nemar",
-        "--key",
-        KEY,
-        "--tagging-directive",
-        "REPLACE",
-      ]),
-    ).toBe("option-not-allowed");
+    // On every other operation, with otherwise valid arguments, it is an unlisted option: the
+    // control row first proves each argument list passes without it.
+    const elsewhere: [string, string[]][] = [
+      ["head-object", ["--bucket", "nemar", "--key", KEY]],
+      ["create-multipart-upload", ["--bucket", "nemar", "--key", KEY]],
+      [
+        "upload-part-copy",
+        [
+          "--bucket",
+          "nemar",
+          "--key",
+          KEY,
+          "--upload-id",
+          "up-1",
+          "--part-number",
+          "1",
+          "--copy-source",
+          SRC,
+          "--copy-source-range",
+          "bytes=0-99",
+          "--copy-source-if-match",
+          '"e"',
+        ],
+      ],
+      [
+        "complete-multipart-upload",
+        ["--bucket", "nemar", "--key", KEY, "--upload-id", "up-1", "--multipart-upload", "{}"],
+      ],
+      ["abort-multipart-upload", ["--bucket", "nemar", "--key", KEY, "--upload-id", "up-1"]],
+      [
+        "put-object",
+        ["--bucket", "nemar", "--key", AWS.stagingKey, "--body", "/tmp/x", "--content-type", "a/b"],
+      ],
+      ["delete-object", ["--bucket", "nemar", "--key", KEY, "--version-id", "v1"]],
+    ];
+    for (const [op, args] of elsewhere) {
+      expect(() => assertRepullAws(op, args, AWS)).not.toThrow();
+      expect(refusedAws(op, [...args, "--tagging-directive", "REPLACE"])).toBe(
+        "option-not-allowed",
+      );
+    }
     // A flag with no value (the bare bypass switch) is refused as malformed, never passed on.
     expect(refusedAws("copy-object", [...base, "--bypass-governance-retention"])).toBe(
       "argument-without-value",

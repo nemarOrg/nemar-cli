@@ -24,9 +24,12 @@
  * `--bypass-governance-retention`, never a `--metadata-directive`, never a lock or ACL option:
  * every call's options are an allowlist. The one directive allowed is `--tagging-directive
  * REPLACE` on a `copy-object`, and a `copy-object` without it is refused: the default reads the
- * source's tags, which upstream's bucket does not allow, so such a copy could not succeed. The canary's own calls (a scratch prefix, its copies
- * deleted again by version id, the prefix listed by version and its open multipart uploads listed)
- * are allowed only in canary mode. The one write outside the canary that is not a copy is
+ * source's tags, which upstream's bucket does not allow (ADR 0063 records the same denial), so
+ * such a copy could not succeed.
+ *
+ * The canary's own calls (a scratch prefix, its copies deleted again by version id, the prefix
+ * listed by version and its open multipart uploads listed) are allowed only in canary mode. The
+ * one write outside the canary that is not a copy is
  * `delete-object` by version id under the destination prefix, which removes a copy S3 reported as
  * made from another version than the pinned one (never the staging key).
  *

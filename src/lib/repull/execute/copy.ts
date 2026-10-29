@@ -10,12 +10,13 @@
  * declares no size is skipped only when the destination already holds the pinned object's size,
  * and is otherwise copied; the headed size is the one checked, never zero. Then one `copy-object`
  * with `--copy-source <bucket>/<object>?versionId=<v>`, `--copy-source-if-match` on that
- * version's ETag and `--tagging-directive REPLACE` (the default, COPY, reads the source's tags,
- * which upstream's bucket does not let us read: measured on 2026-10-29, every plain copy-object
- * from it answered AccessDenied, with or without the condition, while the multipart copy, which
- * carries no tags, succeeded; the copy then holds no tags), or above {@link SINGLE_COPY_MAX} a
- * multipart upload whose every part is copied
- * from the same version under the same condition (any failure aborts it). S3 must name the pinned
+ * version's ETag and `--tagging-directive REPLACE`, or above {@link SINGLE_COPY_MAX} a multipart
+ * upload whose every part is copied from the same version under the same condition (any failure
+ * aborts it). The directive is there because the default, COPY, reads the source's tags, which
+ * upstream's bucket does not let us read: on 2026-10-29 every plain copy-object from it that the
+ * canary tried answered AccessDenied, with or without the condition, while the multipart copy,
+ * which carries no tags, succeeded (the same denial is recorded for the content-recovery copy in
+ * ADR 0063). The copy holds no tags. S3 must name the pinned
  * version as the one it copied from (`CopySourceVersionId`), for the copy and for every part: any
  * other answer, or none, is `pin-version-mismatch`, a single copy that already landed is deleted
  * by its version id, and a multipart upload is aborted. The destination is headed after, and must

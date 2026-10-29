@@ -26,6 +26,10 @@ It runs only on a `repository_dispatch` of the type `run-upstream-repull`, which
 The owner's switches and gates G4 and G5 remain.*
 *Annotated 2026-10-27: and by the Phase 8 amendment (#1914): the Decision section is built, and what that amendment lists under "Not yet verified" is unobserved, not unbuilt; what remains is the owner's act and the epic's release.
 Phase 8 itself documents the epic, fixes the website's contract for the `mirror` flag and records the order in which the pieces reach production.*
+*Annotated 2026-10-29: the production canary's first run found that the single `copy-object` of decision 8 needs `--tagging-directive REPLACE` (#1991).
+Upstream's bucket does not let us read an object's tags and the default directive reads them, so a plain copy answered AccessDenied for every object the canary tried; the multipart copy, which carries no tags, was unaffected.
+The copy and the canary send the flag, and the write guard refuses a `copy-object` without it.
+ADR 0063 records the same denial for the content-recovery copy.*
 
 ## Context
 
@@ -1307,7 +1311,7 @@ The copy manifest is rebuilt from the synthesized commit and the plan, of which 
 It is written to `<id>/staging/repull-<to_tag>.json` before the first copy, as decision 8 says, because an abandoned attempt's orphans are read from it.
 Each key it copies is skipped when the bucket holds it at the size the key declares, and copied again at any other size (#967).
 Otherwise upstream's object is headed at the pinned version: a version upstream no longer serves is `pin-absent`, another size than the key declares is `pin-size-mismatch`, and an answer for another version, or for none, is `pin-version-mismatch` (unknown is never success); a key that declares no size is skipped only when the destination holds the pinned object's size, and otherwise copied, its pinned size being the one checked, never zero.
-The copy is one server-side `copy-object` with `?versionId=` on the source and `--copy-source-if-match` on that version's ETag, or, above S3's 5 GiB single-copy limit, a multipart upload whose parts are each copied from the same version under the same condition, aborted when any part fails.
+The copy is one server-side `copy-object` with `?versionId=` on the source, `--copy-source-if-match` on that version's ETag and `--tagging-directive REPLACE` (the default reads the source's tags, which upstream's bucket does not let us read; the copy holds none), or, above S3's 5 GiB single-copy limit, a multipart upload whose parts are each copied from the same version under the same condition, aborted when any part fails.
 S3 must name the pinned version as the one it copied from (`CopySourceVersionId`), for the copy and for every part; any other answer, or none, is `pin-version-mismatch`, a single copy that already landed is deleted by its version id (a rerun would otherwise skip it at the declared size), and a multipart upload is aborted.
 An abort that fails leaves the upload open, and the refusal names the count and the upload ids.
 An endpoint that ignores the version and says so is refused here; one that ignores both the version and the ETag condition and says it copied the pinned version can only be shown up by the canary, which compares the copy's ETag.
@@ -1376,7 +1380,7 @@ It never locks and never bypasses a lock, so a bucket whose default retention lo
 ### Checked only against stand-ins
 
 The suites drive the real `git`, `git-annex` and `aws` CLI, but S3 and GitHub are stand-ins, and these are what only the canary and the first production runs can check:
-that a signed cross-account `copy-object` and `upload-part-copy` of a public versioned object honor `?versionId=` and `--copy-source-if-match` and name the copied version (`x-amz-copy-source-version-id`) as the stand-in does;
+that a signed cross-account `copy-object` and `upload-part-copy` of a public versioned object honor `?versionId=` and `--copy-source-if-match` and name the copied version (`x-amz-copy-source-version-id`) as the stand-in does (the first canary run, 2026-10-29, found that the single `copy-object` also needs `--tagging-directive REPLACE`, which the stand-in now requires);
 that a multipart copy over 5 GiB in 4 GiB parts, and the CLI's retries and its ten-minute bound per copy call, behave as they do here;
 that upstream's bucket answers from `us-east-1`, which the copy assumes;
 whether NEMAR's bucket locks a copy by default retention;
@@ -2203,7 +2207,7 @@ These remain, grouped by what shows them.
 The "Checked only against stand-ins" section of each earlier amendment holds the same items in its own words, and this list holds all of them.
 
 - The canary (`scripts/repull-canary.ts`) and the first copy:
-  - That a signed cross-account `copy-object` and `upload-part-copy` of a public versioned object honor `?versionId=` and `--copy-source-if-match` and name the copied version, that upstream's bucket answers from `us-east-1`, and whether NEMAR's bucket locks a copy by default retention (Phase 6d).
+  - That a signed cross-account `copy-object` and `upload-part-copy` of a public versioned object honor `?versionId=` and `--copy-source-if-match` and name the copied version (the first canary run, 2026-10-29, found that the single `copy-object` also needs `--tagging-directive REPLACE`), that upstream's bucket answers from `us-east-1`, and whether NEMAR's bucket locks a copy by default retention (Phase 6d).
   - That a multipart copy over 5 GiB in 4 GiB parts, and the CLI's retries and its ten-minute bound per copy call, behave as they do against the stand-in (Phase 6d).
   - That `aws s3 sync` and `list-objects-v2` answer the uploads as the stand-in does (Phase 6c), that the real bucket answers HEAD, PutObjectRetention and GetObjectRetention on a copied object's version as the stand-in does, including what it answers a credential without the lock permission (Phase 6f), and that it lists the keys N.0.1 replays as the stand-in does (Phase 6g).
   - An anonymous ranged GET of `openneuro.org` at `?versionId=` was measured once, for one object of `ds004362`, while Phase 6 was planned (Phase 6c).

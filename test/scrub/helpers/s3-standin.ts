@@ -981,9 +981,11 @@ export function startS3Standin(options: { region?: string } = {}): S3Standin {
           record({ ...base, status: fault.status });
           return s3Error(fault.code, fault.status, `induced ${fault.code} (test)`);
         }
-        // Measured against the real buckets on 2026-10-29: across buckets, the default tagging
-        // directive (COPY) reads the source's tags, which upstream's bucket does not allow the
-        // caller to read, so S3 answers AccessDenied whatever else the request carries.
+        // Modeled on what the canary saw against the real buckets on 2026-10-29: across buckets,
+        // the default tagging directive (COPY) reads the source's tags, which upstream's bucket
+        // does not allow the caller to read, and every plain copy it tried answered AccessDenied,
+        // with or without the if-match condition. Where real S3 puts this check relative to its
+        // 404 and 412 answers was not measured; here it comes first.
         if (parsed.bucket !== bucket && req.headers.get("x-amz-tagging-directive") !== "REPLACE") {
           record({ ...base, status: 403 });
           return s3Error("AccessDenied", 403);
