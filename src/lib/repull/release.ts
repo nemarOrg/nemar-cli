@@ -55,7 +55,7 @@ import { lockS3Objects } from "../api/data.js";
 import { getVersionHistory } from "../api/datasets.js";
 import { ApiError } from "../api/errors.js";
 import { recordRepullReleased, repullErrorCode, transitionRepull } from "../api/repull.js";
-import { acceptOrRefuseMerge } from "./acceptance.js";
+import { acceptMergeNow, recordedAcceptance } from "./acceptance.js";
 import { stagingManifestKey } from "./execute/copy.js";
 import { MOVED_REF_FETCH_DEPTH } from "./execute/head.js";
 import { type OriginScratch, fetchInto, originRefs } from "./execute/origin.js";
@@ -194,24 +194,22 @@ async function versionRowExists(datasetId: string, version: string): Promise<boo
  * The squash commit GitHub wrote must end with the re-pull commit's two trailers as git reads
  * them: the gate checked the message it sent, and this checks the one GitHub committed (a host
  * that appends a paragraph, a `Co-authored-by:` line of its own, would push them out of the last
- * paragraph, and the privacy ledger's fresh-clone proof would then fail the dataset). A message
- * that does not is `merge-trailers`, recorded on the row, which stays `merged`: the version may
- * already be tagged and minted. The one way past it is an administrator's acceptance, earned by
- * evidence (`--accept-merge-trailers`, `acceptance.ts`; ADR 0111, the amendment of 2026-10-29),
- * after which this goes on as for a gated merge. Unread is not a pass.
+ * paragraph, and the privacy ledger's fresh-clone proof would then fail the dataset). Returns why
+ * it does not, or null when it does. A message that does not is `merge-trailers`, recorded on the
+ * row, which stays `merged`: the version may already be tagged and minted. The one way past it is
+ * an administrator's acceptance, earned by evidence (`--accept-merge-trailers`, `acceptance.ts`;
+ * ADR 0111, the amendment of 2026-10-29), after which the release goes on as for a gated merge.
+ * Unread is not a pass.
  */
-async function assertMergeTrailers(
+async function mergeTrailersProblem(
   ctx: ResumeContext,
   scratch: OriginScratch,
   row: RepullRow,
   pr: RepullPullRequest,
-): Promise<void> {
+  fail: (code: string, message: string) => Promise<ExecuteRefused>,
+): Promise<string | null> {
   const merge = row[PULL_REQUEST_COLUMNS[pr].mergeSha] as string;
-  const fail = async (code: string, message: string) => {
-    const failure = refused(code, message);
-    await recordStepError(row, resumeErrorWords("release", failure), ctx.opts.out);
-    return failure;
-  };
+  ctx.mergeTrailersRead = true;
   if (!(await fetchInto(scratch, merge, 1))) {
     throw await fail(
       "merge-unreadable",
@@ -220,30 +218,27 @@ async function assertMergeTrailers(
   }
   const raw = await git(scratch.dir, ["cat-file", "commit", merge], { ok: true });
   const split = raw.stdout.indexOf("\n\n");
-  const problem =
-    raw.exitCode !== 0 || split < 0
-      ? "its message could not be read"
-      : await trailersProblem(raw.stdout.slice(split + 2), row);
-  if (!problem) {
-    if (ctx.opts.acceptMergeTrailers) {
-      ctx.opts.out(
-        `The merge commit ${merge.slice(0, 12)} carries the re-pull's trailers; --accept-merge-trailers changes nothing.`,
-      );
-    }
-    return;
-  }
   if (raw.exitCode !== 0 || split < 0) {
     throw await fail(
       "merge-trailers",
       `The message of the merge commit ${merge.slice(0, 12)} could not be read, so its trailers were not read; nothing was recorded past ${row.status}.`,
     );
   }
-  await acceptOrRefuseMerge(ctx, scratch, row, pr, problem, (message) =>
-    fail("merge-trailers", message),
-  );
+  const problem = await trailersProblem(raw.stdout.slice(split + 2), row);
+  if (problem === null && ctx.opts.acceptMergeTrailers) {
+    ctx.opts.out(
+      `The merge commit ${merge.slice(0, 12)} carries the re-pull's trailers; --accept-merge-trailers changes nothing.`,
+    );
+  }
+  return problem;
 }
 
-/** At `merged` or `patch_merged`: the tag and the version row, waited for, then the release recorded. */
+/**
+ * At `merged` or `patch_merged`: the merge's trailers (or an acceptance recorded earlier), the tag
+ * and the version row, waited for, then the acceptance a merge without its trailers needs, then the
+ * release recorded. The acceptance comes after the tag, so NEMAR's ledger line never lands on
+ * `main` before the dataset workflow tags the merge.
+ */
 export async function releaseTurn(
   ctx: ResumeContext,
   row: RepullRow,
@@ -251,8 +246,24 @@ export async function releaseTurn(
 ): Promise<Turn> {
   const version = row[PULL_REQUEST_COLUMNS[pr].version] as string;
   const tag = `refs/tags/v${version}`;
+  const merge = row[PULL_REQUEST_COLUMNS[pr].mergeSha] as string;
   const scratch = await ctx.origin();
-  await assertMergeTrailers(ctx, scratch, row, pr);
+  const fail = async (code: string, message: string) => {
+    const failure = refused(code, message);
+    await recordStepError(row, resumeErrorWords("release", failure), ctx.opts.out);
+    return failure;
+  };
+  const problem = await mergeTrailersProblem(ctx, scratch, row, pr, fail);
+  let accepted = false;
+  if (problem !== null) {
+    accepted = await recordedAcceptance(ctx, scratch, row, pr, problem);
+    if (!accepted && !ctx.opts.acceptMergeTrailers) {
+      throw await fail(
+        "merge-trailers",
+        `The merge commit ${merge.slice(0, 12)} on main does not end with the re-pull commit's two trailers (${problem}), so the privacy ledger's fresh-clone proof would not read it as the re-pull's commit. The record stays ${row.status}. If it was merged outside NEMAR's gate (GitHub's merge button, say), read what it holds, then run nemar admin repull resume ${row.dataset_id} --accept-merge-trailers "<reason>", which accepts it only once it is shown to be this re-pull's own squash merge.`,
+      );
+    }
+  }
   let tagSha: string | undefined;
   try {
     tagSha = (await originRefs(scratch, [tag])).get(tag);
@@ -270,6 +281,9 @@ export async function releaseTurn(
     throw apiRefused(err, "The dataset's versions could not be read");
   }
   if (!minted) return { kind: "wait", row, waitingFor: `the version row of v${version} (its DOI)` };
+  if (problem !== null && !accepted) {
+    await acceptMergeNow(ctx, scratch, row, pr, problem, ctx.opts.acceptMergeTrailers as string);
+  }
 
   // Lineage is N.0.0's alone: N.0.1 carries NEMAR's corrections, so its tree is not upstream's,
   // and its tagged tree must be its gated head's instead.

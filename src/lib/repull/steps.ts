@@ -108,6 +108,11 @@ export interface ResumeContext {
   origin(): Promise<OriginScratch>;
   /** Heads this run replaced by a re-synthesis: GitHub may still name one for a moment. */
   replaced: Set<string>;
+  /**
+   * Set once this run read a merge commit's trailers (`release.ts`), which is the only place
+   * `--accept-merge-trailers` is used: a run that never got there says the flag changed nothing.
+   */
+  mergeTrailersRead?: boolean;
   sleep(ms: number): Promise<void>;
 }
 
