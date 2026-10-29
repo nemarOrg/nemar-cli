@@ -265,6 +265,9 @@ export interface DatasetSearchResponse {
   truncated?: boolean;
   method: "semantic" | "text" | "text_fallback" | "exact_id" | "unavailable";
   min_score?: number;
+  /** True when a phrase's results were cut by a relevance judgment: `count` is the number judged
+   *  to answer the query and each `score` is that probability (0..1). Absent otherwise. */
+  reranked?: true;
   /** Set only when the backend's exact-count query failed and `count` fell
    *  back to a page-derived lower bound (review round 3 I1). */
   warning?: string;

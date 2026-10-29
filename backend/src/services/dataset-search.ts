@@ -19,7 +19,8 @@ import {
   type DatasetSummaryRow,
   buildDatasetSummaryText,
 } from "./dataset-summary-text";
-import { analyzeQuery } from "./search-query";
+import { type QueryAnalysis, analyzeQuery } from "./search-query";
+import { LEG_SIZE, RERANK_POOL_MAX, rerankScores, selectRelevant } from "./search-rerank";
 
 const EMBEDDING_MODEL = "@cf/baai/bge-small-en-v1.5";
 
@@ -469,9 +470,10 @@ export async function semanticSearchHydrated(
  * Per-column bm25 weights for `datasets_fts(name, description, authors, tasks,
  * modalities, readme)`, in that order. A word in the title or the abstract says
  * what a dataset is about; the same word in a long README is usually passing
- * mention. Unweighted, a dataset that says "study" forty times in its README
- * outranked one named for the topic. Measured on 23 queries: R-precision of
- * the lexical leg 0.797 unweighted, 0.814 with these weights.
+ * mention. Unweighted, a dataset that says "driving" in a long README can
+ * outrank one named for it. Measured on 37 queries (scripts/search-eval/
+ * calibrate.py): R-precision of the lexical leg 0.817 unweighted, 0.842 with
+ * these weights.
  */
 export const FTS_BM25_WEIGHTS = [10, 5, 1, 4, 1, 1] as const;
 const FTS_BM25 = `bm25(datasets_fts, ${FTS_BM25_WEIGHTS.join(", ")})`;
@@ -486,6 +488,16 @@ export async function ftsSearch(
 ): Promise<SearchResult[]> {
   const match = buildFtsMatch(query);
   if (!match) return [];
+  return ftsSearchByMatch(db, match, limit, filters);
+}
+
+/** {@link ftsSearch} for a match expression the caller has already built. */
+async function ftsSearchByMatch(
+  db: D1Database,
+  match: string,
+  limit: number,
+  filters: DatasetFilterOptions,
+): Promise<SearchResult[]> {
   const params: (string | number)[] = [match];
   const filterClauses = buildDatasetFilterClauses(params, filters);
   const results = await db
@@ -504,6 +516,37 @@ export async function ftsSearch(
     .bind(...params, limit)
     .all<HydrateRow & { snippet: string | null }>();
   return (results.results || []).map((row) => toResult(row, 1.0, row.snippet || undefined));
+}
+
+/**
+ * Datasets whose name, authors or tasks contain EVERY one of `terms` (prefix
+ * match, any order). The user's words are literally in the dataset's title or
+ * byline, which is evidence a cross-encoder that never reads authors cannot
+ * weigh, so these datasets are exempt from its verdict (see search-rerank.ts).
+ * `terms` are alphanumeric tokens (see `queryTokens`), safe to quote.
+ */
+export async function literalMatchSearch(
+  db: D1Database,
+  terms: string[],
+  limit: number,
+  filters: DatasetFilterOptions = {},
+): Promise<SearchResult[]> {
+  if (terms.length === 0) return [];
+  const match = `{name authors tasks} : (${terms.map((t) => `"${t}"*`).join(" AND ")})`;
+  return ftsSearchByMatch(db, match, limit, filters);
+}
+
+/** The text each dataset is judged as (see dataset-summary-text.ts), by dataset id. */
+async function fetchSummaryTexts(db: D1Database, ids: string[]): Promise<Map<string, string>> {
+  if (ids.length === 0) return new Map();
+  const { results } = await db
+    .prepare(
+      `SELECT d.dataset_id AS id, ${DATASET_SUMMARY_SELECT_SQL}
+       FROM datasets d WHERE ${DATASET_ID_IN_JSON_LIST}`,
+    )
+    .bind(datasetIdListParam(ids))
+    .all<DatasetSummaryRow & { id: string }>();
+  return new Map((results ?? []).map((row) => [row.id, buildDatasetSummaryText(row)]));
 }
 
 /**
@@ -708,6 +751,123 @@ export function rrfFuse(semantic: SearchResult[], lexical: SearchResult[], k = 6
     .sort((a, b) => b.score - a.score);
 }
 
+type EnvelopeBuilder = (
+  rows: SearchResult[],
+  method: string,
+  count: number,
+  warning?: string,
+  excludedUnknown?: ExcludedUnknownResult,
+) => DatasetSearchEnvelope;
+
+/**
+ * A phrase answered by relevance rather than by reach (see search-rerank.ts for
+ * why and for the measurements).
+ *
+ * Gathers at most {@link LEG_SIZE} candidates from each of the lexical,
+ * semantic and literal (name/authors/tasks) legs, has the cross-encoder judge
+ * the pool, and returns only the datasets {@link selectRelevant} keeps, best
+ * first. The pool is gathered with every facet's unknown rows INCLUDED and the
+ * request's facet filters applied afterwards, so the relevance verdict does not
+ * depend on the filters and `excluded_unknown` can still say how many relevant
+ * datasets the default unknown-excluded policy hides (ADR 0005). A request with
+ * a facet active draws twice as many candidates per leg, because the filter
+ * removes some of them after the draw.
+ *
+ * Returns `null` when the semantic tier or the reranker is unavailable, so the
+ * caller serves the fused list instead (ADR 0005: partial data still serves).
+ * A failure that is not one of those (a SQL or filter bug) propagates.
+ */
+async function searchByRelevance(
+  db: D1Database,
+  ai: Ai,
+  vectorize: VectorizeIndex,
+  analysis: QueryAnalysis,
+  filters: DatasetFilterOptions,
+  buildEnvelope: EnvelopeBuilder,
+): Promise<DatasetSearchEnvelope | null> {
+  const legSize = isAnyFacetActive(filters.facets) ? 2 * LEG_SIZE : LEG_SIZE;
+  const widened: DatasetFilterOptions = { ...filters, includeUnknown: true };
+
+  let lexical: SearchResult[];
+  let literal: SearchResult[];
+  let semantic: SearchResult[];
+  try {
+    [lexical, literal, semantic] = await Promise.all([
+      ftsSearch(db, analysis.lexicalQuery, legSize, widened),
+      literalMatchSearch(db, analysis.informative, LEG_SIZE, widened),
+      semanticSearchHydrated(ai, vectorize, db, analysis.semanticQuery, SEMANTIC_TOPK, widened),
+    ]);
+  } catch (err) {
+    if (!(err instanceof Error) || !err.message.startsWith("[embedding]")) throw err;
+    console.error("[search] semantic tier failed, serving the fused list:", err);
+    return null;
+  }
+  semantic = semantic.slice(0, legSize);
+
+  const pool = rrfFuse(semantic, lexical).slice(0, 2 * legSize);
+  const inPool = new Set(pool.map((r) => r.id));
+  for (const r of literal) if (!inPool.has(r.id)) pool.push(r);
+  if (pool.length === 0) return buildEnvelope([], "semantic", 0);
+
+  const lexicalIds = new Set(lexical.map((r) => r.id));
+  const semanticIds = new Set(semantic.map((r) => r.id));
+  const literalIds = new Set(literal.map((r) => r.id));
+
+  const started = Date.now();
+  let probabilities: number[];
+  try {
+    const texts = await fetchSummaryTexts(
+      db,
+      pool.map((r) => r.id),
+    );
+    probabilities = await rerankScores(
+      ai,
+      analysis.rerankQuery,
+      pool.map((r) => texts.get(r.id) || r.name || r.id),
+    );
+  } catch (err) {
+    console.error(
+      `[search] rerank unavailable, serving the fused list: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return null;
+  }
+
+  const kept = selectRelevant(
+    pool.map((r, i) => ({
+      id: r.id,
+      p: probabilities[i] ?? 0,
+      foundByBothLegs: lexicalIds.has(r.id) && semanticIds.has(r.id),
+      literalMatch: literalIds.has(r.id),
+    })),
+  );
+  console.log(
+    `[search] relevance: pool=${pool.length} kept=${kept.length} rerank_ms=${Date.now() - started}`,
+  );
+
+  const keptIds = kept.map((k) => k.id);
+  const scoreById = new Map(kept.map((k) => [k.id, Math.round(k.score * 1000) / 1000]));
+  const snippetById = new Map(pool.flatMap((r) => (r.snippet ? [[r.id, r.snippet] as const] : [])));
+  // The request's own filters, unknown rows excluded, are applied here.
+  const hydrated = await hydrateDatasetsByIds(db, keptIds, filters);
+  const results = hydrated.map((r) => ({
+    ...r,
+    score: scoreById.get(r.id) ?? 0,
+    ...(snippetById.has(r.id) ? { snippet: snippetById.get(r.id) } : {}),
+  }));
+  const excludedUnknown = await computeExcludedUnknownCount(
+    db,
+    null,
+    keptIds,
+    filters,
+    results.length,
+    true,
+  );
+  return {
+    ...buildEnvelope(results, "semantic", results.length, undefined, excludedUnknown),
+    reranked: true,
+  };
+}
+
 /** Options for {@link executeDatasetSearch}. HTTP-layer concerns (parsing
  *  query-string values, defaulting) are the caller's job; `limit`/`offset`/
  *  `minScore` are expected to already be validated (e.g. via
@@ -738,6 +898,12 @@ export interface DatasetSearchEnvelope {
   truncated: boolean;
   method: string;
   min_score: number;
+  /** True when the result list was cut by a cross-encoder relevance judgment
+   *  (a phrase query with AI and Vectorize bound). Then `count` is the number
+   *  of datasets judged to answer the query, `results[].score` is that judged
+   *  probability (0..1), and `min_score` (a cosine floor) was not applied.
+   *  Absent otherwise. */
+  reranked?: true;
   warning?: string;
   /** D4/ADR 0005: rows hidden by the default unknown-excluded facet policy
    *  (see {@link computeExcludedUnknownCount}). Absent when no facet is
@@ -874,6 +1040,17 @@ export async function executeDatasetSearch(
     // drive the lexical leg ("study" is in 59% of the catalog and must not
     // decide a match); the caller's own words drive the embedding.
     const analysis = await analyzeQuery(db, trimmed);
+    if (analysis.isPhrase && ai && vectorize) {
+      const byRelevance = await searchByRelevance(
+        db,
+        ai,
+        vectorize,
+        analysis,
+        filters,
+        buildEnvelope,
+      );
+      if (byRelevance) return byRelevance;
+    }
     const ftsMatch = buildFtsMatch(analysis.lexicalQuery);
     // Tier-specific log so a failure here is distinguishable from the
     // semantic/hydration tiers; re-throw so the outer catch still degrades.

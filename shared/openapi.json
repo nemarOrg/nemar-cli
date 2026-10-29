@@ -1171,6 +1171,12 @@
           "min_score": {
             "type": "number"
           },
+          "reranked": {
+            "type": "boolean",
+            "enum": [
+              true
+            ]
+          },
           "warning": {
             "type": "string"
           },

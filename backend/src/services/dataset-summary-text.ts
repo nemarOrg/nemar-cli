@@ -11,13 +11,13 @@
  * README files open with a DOI badge and a link (`[![DOI](https://img.shields.io/...`),
  * so the first 1000 characters the old builder embedded were mostly markup,
  * while the abstract and keywords, which say what the dataset is about, were
- * never embedded at all. On a topical benchmark (23 queries, each with a truth
+ * never embedded at all. On a topical benchmark (37 queries, each with a truth
  * set read off the dataset's own name, description, keywords and tasks) the
- * R-precision of the semantic leg went from 0.596 to 0.685 with this text, and
- * adding the cleaned README on top made it worse (0.646). That benchmark reads
- * the same fields this text is made of, so it favors the new text by
- * construction; the argument that does not depend on it is the badge noise.
- * A README excerpt is used only when the abstract is too thin to stand on.
+ * R-precision of the semantic leg went from 0.621 to 0.708 with this text. That
+ * benchmark reads the same fields this text is made of, so it favors the new
+ * text by construction; the argument that does not depend on it is the badge
+ * noise. `scripts/search-eval/calibrate.py` reproduces the numbers. A README
+ * excerpt is used only when the abstract is too thin to stand on.
  */
 
 /** A description shorter than this is topped up with a cleaned README excerpt. */
