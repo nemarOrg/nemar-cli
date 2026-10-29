@@ -2796,10 +2796,18 @@ searchCommand
     "after",
     `
 Description:
-  Performs semantic search across the NEMAR dataset catalog. Unlike
-  --search on the list command (which uses exact text matching), this
-  uses AI embeddings to find conceptually similar datasets. The free-text
-  query is always the <query> argument -- this command has no --search flag.
+  Searches the NEMAR dataset catalog by meaning. Unlike --search on the list
+  command (which uses exact text matching), this uses AI embeddings and a
+  relevance judgment to find datasets that answer what you describe. The
+  free-text query is always the <query> argument -- this command has no
+  --search flag.
+
+  Describe what you want in a few words. A phrase returns only the datasets
+  judged to answer it, so a short list is a real answer, not a gap; a single
+  word lists the datasets that mention it (up to 300). Words found in over a
+  quarter of datasets ("study") do not decide a match, and a modality you
+  name ("sleep eeg") puts datasets with that modality first. A word no dataset contains is
+  replaced by a catalog word one typo away, and the command says so.
 
   Accepts the same license/author/task/doi/complete/recent filters and facet
   flags (--subjects, --age, --source, ...) as 'nemar dataset list --help'.
@@ -2851,6 +2859,19 @@ Examples:
       // vocabulary and treatment as the list command's `response.warning`.
       if (response.warning) {
         console.log(theme.warn(`\n⚠ ${response.warning}`));
+      }
+
+      if (response.modality_boost?.length) {
+        console.log(theme.muted(`\nListing ${response.modality_boost.join(", ")} datasets first.`));
+      }
+
+      // A word no dataset contains was replaced by a catalog word one typo away
+      // (backend search-spelling.ts). Say what was searched, so a wrong guess
+      // is visible rather than a mystery.
+      if (response.corrected_query) {
+        console.log(
+          theme.muted(`\nShowing results for "${response.corrected_query}" instead of "${query}".`),
+        );
       }
 
       // Epic #1144 phase 4 (#1148), D5: same stderr-only, count-gated,

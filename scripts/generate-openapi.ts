@@ -218,7 +218,9 @@ const searchQuerySchema = z.object({
     .min(0)
     .max(1)
     .optional()
-    .describe("Minimum semantic similarity score, 0-1. Default 0.6."),
+    .describe(
+      "Minimum semantic similarity score, 0-1. Default 0.6. Applies to single-word searches and to the fused fallback; a phrase answered by relevance (response `reranked: true`) ignores it.",
+    ),
   ...LEGACY_FILTER_PARAMS,
   ...FACET_QUERY_PARAMS,
 });
@@ -360,7 +362,10 @@ export function buildOpenApiDocument(): OpenAPIObject {
     summary: "Hybrid dataset search (exact id, semantic, full text)",
     description:
       "Combines exact dataset-id lookup, Vectorize semantic similarity (when configured), " +
-      "and D1 FTS5 text search. Shares the same filter table as GET /datasets, minus " +
+      "and D1 FTS5 text search. A phrase of two or more content words is judged for relevance " +
+      "and returns only the datasets judged to answer it (`reranked: true`); a single word is " +
+      "not cut. A misspelled word is corrected and reported as `corrected_query`; a modality " +
+      "named in the query lists its datasets first (`modality_boost`). Shares the same filter table as GET /datasets, minus " +
       "`search` (the free text here is `q` instead).",
     tags: ["Datasets"],
     request: { query: searchQuerySchema },
