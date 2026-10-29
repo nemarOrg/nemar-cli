@@ -136,6 +136,7 @@ import {
   type WaiverVerdict,
   repullReviewWaiver,
   repullReviewWaiverOf,
+  subjectOfPull,
 } from "../../../shared/repull-review-waiver.js";
 import {
   PULL_REQUEST_COLUMNS,
@@ -1172,14 +1173,10 @@ async function waiverOfRow(env: Bindings, row: ReviewRow): Promise<Waived | null
       );
       return "undecided";
     }
+    const subject = subjectOfPull(row.datasetId, row.prNumber, row.headSha, live);
     const verdict = repullReviewWaiverOf(records, {
-      ...identity,
-      ownRepository:
-        identity.ownRepository &&
-        isOwnDatasetRepo(live.headRepo, row.datasetId) &&
-        isOwnDatasetRepo(live.baseRepo, row.datasetId),
-      headRef: live.headRef,
-      baseRef: live.baseRef,
+      ...subject,
+      ownRepository: subject.ownRepository && identity.ownRepository,
     });
     return verdict.waived ? verdict : null;
   } catch (err) {

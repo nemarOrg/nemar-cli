@@ -36,6 +36,7 @@
  * rule and the tests all ask the same function.
  */
 
+import { isOwnDatasetRepo } from "./nemar-app.js";
 import {
   PULL_REQUEST_COLUMNS,
   REPULL_PULL_REQUESTS,
@@ -106,6 +107,38 @@ export type WaiverVerdict =
   | { waived: false; why: WaiverMiss };
 
 const miss = (why: WaiverMiss): WaiverVerdict => ({ waived: false, why });
+
+/** GitHub's own record of a pull request, in the fields the rule reads of it. */
+export interface PullFacts {
+  /** The head's repository, `owner/name`, or null where GitHub names none (a deleted fork's). */
+  headRepo: string | null;
+  baseRepo: string;
+  headRef: string;
+  baseRef: string;
+}
+
+/**
+ * The rule's subject for pull request `prNumber` of `datasetId` at `headSha`, from GitHub's record
+ * of it: from and into the dataset's own repository (`isOwnDatasetRepo`, the one rule for that),
+ * its branch and its base. The callers that read GitHub's REST record of the pull request all build
+ * the subject here.
+ */
+export function subjectOfPull(
+  datasetId: string,
+  prNumber: number,
+  headSha: string,
+  pull: PullFacts,
+): WaiverSubject {
+  return {
+    datasetId,
+    prNumber,
+    headSha,
+    ownRepository:
+      isOwnDatasetRepo(pull.headRepo, datasetId) && isOwnDatasetRepo(pull.baseRepo, datasetId),
+    headRef: pull.headRef,
+    baseRef: pull.baseRef,
+  };
+}
 
 /** The rule (see the module comment), for one record: the first condition that fails is the answer. */
 export function repullReviewWaiver(record: WaiverRecord, s: WaiverSubject): WaiverVerdict {

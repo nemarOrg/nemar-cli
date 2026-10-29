@@ -46,7 +46,6 @@
 
 import { VERSION_CHECK_NAME } from "../../../shared/dataset-checks.js";
 import { isScreenState, screenGate } from "../../../shared/identifier-screen-report.js";
-import { isOwnDatasetRepo } from "../../../shared/nemar-app.js";
 import { verdictOf } from "../../../shared/pr-review.js";
 import { checkFactOf } from "../../../shared/repull-bids-override.js";
 import {
@@ -60,7 +59,7 @@ import {
   type ScreenFact,
   machineClean,
 } from "../../../shared/repull-machine-clean.js";
-import { repullReviewWaiver } from "../../../shared/repull-review-waiver.js";
+import { repullReviewWaiver, subjectOfPull } from "../../../shared/repull-review-waiver.js";
 import { type HoldReason, type RepullRow, SHA_RE } from "../../../shared/repull-state.js";
 import type { Bindings } from "../types/bindings.js";
 import { NEMAR_APP_ID, deriveContexts } from "./github/branch-protection.js";
@@ -442,14 +441,5 @@ export function reviewWaivedAt(
   sha: string,
 ): boolean {
   if (pr === "unreadable" || pr.headSha !== sha) return false;
-  return repullReviewWaiver(row, {
-    datasetId: row.dataset_id,
-    prNumber: pr.number,
-    headSha: pr.headSha,
-    ownRepository:
-      isOwnDatasetRepo(pr.headRepo, row.dataset_id) &&
-      isOwnDatasetRepo(pr.baseRepo, row.dataset_id),
-    headRef: pr.headRef,
-    baseRef: pr.baseRef,
-  }).waived;
+  return repullReviewWaiver(row, subjectOfPull(row.dataset_id, pr.number, pr.headSha, pr)).waived;
 }
