@@ -1,9 +1,21 @@
 /**
  * A re-pull's squash merge made without its trailers, accepted on evidence (ADR 0111, the
- * amendment of 2026-10-29). Pure, so the administrator's `resume` (`src/lib/repull/acceptance.ts`),
- * the Worker's route (`backend/src/services/upstream-repull-acceptance.ts`), the ledger's validator
- * (`scripts/scrub/ledger.ts`) and its fresh-clone proof (`scripts/scrub/git/git-lib.ts`) read one
- * definition.
+ * amendment of 2026-10-29). Pure, and the one definition of each rule below:
+ *  - the ledger's words and fixed values a re-pull writes (`LEDGER_REPO_PATH`,
+ *    `SCRUB_LEDGER_ACTIONS`, `MERGE_ACCEPTED_ACTION`, `MERGE_ACCEPTED_VERIFICATION`,
+ *    `REPULL_LEDGER_ACTOR`), which the ledger's validator (`scripts/scrub/ledger.ts`), the delta
+ *    scrub, the Worker and the CLI import;
+ *  - the acceptance line (`mergeAcceptanceLine`), built by the Worker and validated by the ledger;
+ *  - what a commit did to the ledger (`ledgerChange`) and which commits a ledger's acceptance lines
+ *    name (`acceptedMergesOf`), read by the fresh-clone proof (`scripts/scrub/git/git-lib.ts`), the
+ *    Worker and the CLI;
+ *  - enrichment's bound of commits (`ENRICHMENT_MAX_COMMITS`), read by the CLI's shape check
+ *    (`src/lib/repull/execute/head.ts`) and the Worker.
+ * Two readings stay apart on purpose, because they read different things: the Worker compares two
+ * root trees from GitHub's answers (`sameOutsideNemar`) and reads "moved by enrichment only" from
+ * GitHub's comparison, which names paths (`isEnrichmentPath`), while the CLI reads git objects in a
+ * clone, compares every entry (`outsideNemar` in `release.ts`) and reads each enrichment commit's
+ * content (`isEnrichment` in `execute/head.ts`). Both must agree for `resume` to go on.
  *
  * The merge gate writes the squash message so that its last paragraph is the re-pull commit's
  * trailers, because the privacy ledger's fresh-clone proof (ADR 0085) reads a commit that appends
@@ -15,11 +27,13 @@
  * So the acceptance is evidence in the repository itself: one ledger line, written by NEMAR in a
  * commit of its own on `main` after the merge, that names the accepted merge commit by its full
  * id. The proof accepts a commit that appends a `repull-scrubbed` line without the trailers only
- * when such a line, in the ledger at a branch tip whose first-parent history holds that commit,
- * names exactly it; a line that names anything else fails the proof on its own. The line holds
- * fixed words and two hex ids, never the administrator's reason, which is free text and stays in
- * NEMAR's database: the ledger refuses free text by design (ADR 0085, ADR 0036).
+ * when a branch tip whose first-parent history holds it carries such a line naming exactly it; a
+ * line that names anything but a re-pull's merge in such a history fails the proof on its own.
+ * The line holds fixed words and two hex ids, never the administrator's reason, which is free text
+ * and stays in NEMAR's database: the ledger refuses free text by design (ADR 0085, ADR 0036).
  */
+
+import { DIGEST_RE, SHA_RE } from "./repull-state.js";
 
 /** The ledger's path in a dataset repository (ADR 0085). */
 export const LEDGER_REPO_PATH = ".nemar/corrections.jsonl";
@@ -37,11 +51,14 @@ export const MERGE_ACCEPTED_VERIFICATION = "squash-merge-verified";
 export const REPULL_LEDGER_ACTOR = "nemar-repull";
 
 /** The two words a scrub writes in the same commit as what it scrubbed (ADR 0089, ADR 0111). */
-export const SCRUB_LEDGER_ACTIONS: readonly string[] = ["import-scrubbed", "repull-scrubbed"];
+export const SCRUB_LEDGER_ACTIONS = ["import-scrubbed", "repull-scrubbed"] as const;
 
-const SHA_RE = /^[0-9a-f]{40}$/;
-const DIGEST_RE = /^sha256:[0-9a-f]{64}$/;
-const SCANNER_RE = /^identifier-scan@[0-9a-f]{7,40}$/;
+/** More commits than enrichment ever makes between two of NEMAR's own writes is not enrichment. */
+export const ENRICHMENT_MAX_COMMITS = 20;
+
+/** A scanner revision as a ledger line names it (`scripts/scrub/ledger.ts`). */
+export const SCANNER_RE = /^identifier-scan@[0-9a-f]{7,40}$/;
+
 const VERSION_RE = /^\d+\.\d+\.\d+$/;
 
 /** What an acceptance line says. */
@@ -116,7 +133,8 @@ function parsed(line: string): Record<string, unknown> | null {
  *  - `scrub-append`: lines appended after the parent's, every one a scrub's word, nothing before
  *    them edited, with whether one is `repull-scrubbed` and that line's `scanner`;
  *  - `other`: anything else (a removal, an edit, a line of another word or one that does not parse).
- * The proof's own rule for a scrub's commit (`isScrubLedgerCommit`), read from two texts.
+ * The proof's own rule for a scrub's commit (`scrubLedgerCommitKind` in `git-lib.ts`), read from two
+ * texts.
  */
 export type LedgerChange =
   | { kind: "none" }
@@ -132,12 +150,11 @@ export function ledgerChange(before: string | null, after: string | null): Ledge
   if (now.length <= was.length || was.some((l, i) => l !== now[i])) return { kind: "other" };
   let repull = false;
   let scanner: string | null = null;
+  const words: readonly string[] = SCRUB_LEDGER_ACTIONS;
   for (const line of now.slice(was.length)) {
     const entry = parsed(line);
     const action = entry?.action;
-    if (typeof action !== "string" || !SCRUB_LEDGER_ACTIONS.includes(action)) {
-      return { kind: "other" };
-    }
+    if (typeof action !== "string" || !words.includes(action)) return { kind: "other" };
     if (action === "repull-scrubbed") {
       repull = true;
       scanner = typeof entry?.scanner === "string" ? entry.scanner : null;
@@ -171,6 +188,20 @@ export interface TreeEntry {
 /** The top-level directories NEMAR owns, which a re-pull's tree comparisons leave out. */
 const NEMAR_OWNED = new Set([".nemar", ".github"]);
 
+const entryKey = (e: TreeEntry) => `${e.mode} ${e.type} ${e.sha} ${e.path}`;
+
+/** A tree's entries but those `skip` says to leave out, as sorted keys. */
+function keysOf(t: readonly TreeEntry[], skip: (e: TreeEntry) => boolean): string[] {
+  return t
+    .filter((e) => !skip(e))
+    .map(entryKey)
+    .sort();
+}
+
+function sameKeys(a: string[], b: string[]): boolean {
+  return a.length === b.length && a.every((k, i) => k === b[i]);
+}
+
 /**
  * Whether two root trees are the same outside `.nemar/**` and `.github/**`: every top-level entry
  * but those two directories has the same name, mode, type and object. Equal subtree objects are
@@ -178,15 +209,31 @@ const NEMAR_OWNED = new Set([".nemar", ".github"]);
  * the tag (`release.ts`), read from two GitHub tree answers instead of a clone.
  */
 export function sameOutsideNemar(a: readonly TreeEntry[], b: readonly TreeEntry[]): boolean {
-  const key = (e: TreeEntry) => `${e.mode} ${e.type} ${e.sha} ${e.path}`;
-  const outside = (t: readonly TreeEntry[]) =>
-    t
-      .filter((e) => !(e.type === "tree" && NEMAR_OWNED.has(e.path)))
-      .map(key)
-      .sort();
-  const x = outside(a);
-  const y = outside(b);
-  return x.length === y.length && x.every((k, i) => k === y[i]);
+  const skip = (e: TreeEntry) => e.type === "tree" && NEMAR_OWNED.has(e.path);
+  return sameKeys(keysOf(a, skip), keysOf(b, skip));
+}
+
+/** The `.nemar` directory's object in a root tree, or null when the tree has none. */
+export function nemarTreeOf(root: readonly TreeEntry[]): string | null {
+  return root.find((e) => e.path === ".nemar" && e.type === "tree")?.sha ?? null;
+}
+
+/**
+ * Whether a commit changed any path but the ledger, from its parent's root tree and its own, and
+ * each one's `.nemar` entries (null for a root with no `.nemar` directory, which has none). The
+ * caller reads the two `.nemar` trees only when the roots differ in `.nemar` alone.
+ */
+export function changesBesideLedger(
+  parentRoot: readonly TreeEntry[],
+  mergeRoot: readonly TreeEntry[],
+  parentNemar: readonly TreeEntry[] | null,
+  mergeNemar: readonly TreeEntry[] | null,
+): boolean {
+  const notNemar = (e: TreeEntry) => e.path === ".nemar" && e.type === "tree";
+  if (!sameKeys(keysOf(parentRoot, notNemar), keysOf(mergeRoot, notNemar))) return true;
+  const ledger = LEDGER_REPO_PATH.slice(".nemar/".length);
+  const notLedger = (e: TreeEntry) => e.path === ledger;
+  return !sameKeys(keysOf(parentNemar ?? [], notLedger), keysOf(mergeNemar ?? [], notLedger));
 }
 
 /**

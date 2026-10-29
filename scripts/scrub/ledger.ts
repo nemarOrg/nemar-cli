@@ -17,15 +17,16 @@
 import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
 import {
+  LEDGER_REPO_PATH,
   MERGE_ACCEPTED_ACTION,
   MERGE_ACCEPTED_VERIFICATION,
+  SCRUB_LEDGER_ACTIONS,
 } from "../../shared/repull-merge-acceptance";
+import { DIGEST_RE, SHA_RE } from "../../shared/repull-state";
 import { type LedgerEntry, VERSION_TAG } from "./contract";
 
-export { MERGE_ACCEPTED_ACTION, MERGE_ACCEPTED_VERIFICATION };
-
-/** Where the ledger lives in the dataset repository, after the rewrite. */
-export const LEDGER_REPO_PATH = ".nemar/corrections.jsonl";
+/** Where the ledger lives in the dataset repository, after the rewrite (one definition, shared). */
+export { LEDGER_REPO_PATH, MERGE_ACCEPTED_ACTION, MERGE_ACCEPTED_VERIFICATION };
 
 /** Where it lives in the bucket: next to the dataset's other objects, not under `objects/`. */
 export function ledgerS3Key(dataset: string): string {
@@ -67,10 +68,7 @@ const ACTIONS: ReadonlySet<LedgerEntry["action"]> = new Set([
  * (`ledger-cli.ts` refuses both), a re-pull plan does not count them as recorded corrections,
  * and ADR 0085's fresh-clone proof tolerates their commits under its own rule (`git-lib.ts`).
  */
-export const SCRUB_ACTIONS: ReadonlySet<LedgerEntry["action"]> = new Set([
-  "import-scrubbed",
-  "repull-scrubbed",
-]);
+export const SCRUB_ACTIONS: ReadonlySet<LedgerEntry["action"]> = new Set(SCRUB_LEDGER_ACTIONS);
 
 /**
  * Every action a NEMAR tool writes and no operator may type: the two scrubs' and the Worker's
@@ -83,10 +81,9 @@ export const TOOL_ACTIONS: ReadonlySet<LedgerEntry["action"]> = new Set([
   MERGE_ACCEPTED_ACTION,
 ]);
 
-/** A full commit id, which an acceptance line names: hex only, so it can carry no value. */
-const COMMIT_ID = /^[0-9a-f]{40}$/;
-/** A plan digest, which an acceptance line names: hex only, as above. */
-const PLAN_DIGEST = /^sha256:[0-9a-f]{64}$/;
+/** A full commit id and a plan digest, which an acceptance line names: hex only, so neither can carry a value. */
+const COMMIT_ID = SHA_RE;
+const PLAN_DIGEST = DIGEST_RE;
 
 /**
  * What a verification may say, from a closed list. A free-text field is the one place a stray

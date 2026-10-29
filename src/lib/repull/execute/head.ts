@@ -26,7 +26,11 @@
  */
 
 import { MERGE_ACCEPTED_ACTION, parseLedgerText } from "../../../../scripts/scrub/ledger.js";
-import { ledgerLines } from "../../../../shared/repull-merge-acceptance.js";
+import {
+  ENRICHMENT_MAX_COMMITS,
+  LEDGER_REPO_PATH,
+  ledgerLines,
+} from "../../../../shared/repull-merge-acceptance.js";
 import {
   NEMAR_BIDSIGNORE_ENTRY,
   withBidsignoreEntry,
@@ -44,13 +48,13 @@ export type HeadVerdict =
 /** What a caller learns of a head: accepted, someone else's, or not readable from this clone. */
 export type HeadCheck = "ok" | "foreign" | "unreadable";
 
-/** More commits than enrichment ever makes between two of our own writes is not enrichment. */
-export const ENRICHMENT_MAX_COMMITS = 20;
+/** More commits than enrichment ever makes between two of our own writes is not enrichment (shared). */
+export { ENRICHMENT_MAX_COMMITS };
 
 /** The depth a fetch of a moved ref needs for {@link enrichmentOnlySince} to reach `from`. */
 export const MOVED_REF_FETCH_DEPTH = ENRICHMENT_MAX_COMMITS + 2;
 
-const LEDGER = ".nemar/corrections.jsonl";
+const LEDGER = LEDGER_REPO_PATH;
 
 interface Change {
   srcMode: string;
