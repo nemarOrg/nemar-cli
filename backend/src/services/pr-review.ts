@@ -109,7 +109,6 @@
  * supersedes the first, costs one more run and counts toward the cap.
  */
 
-import { isOwnDatasetRepo } from "../../../shared/nemar-app.js";
 import {
   type AuthorOverride,
   type AuthorTally,
@@ -1349,16 +1348,12 @@ export async function publishRecordedRepullHead(
     if (!read.ok) return `not_read:${read.refusal.code}`;
     const live = read.facts;
     if (live.state !== "open" || live.merged) return "not_open";
-    const verdict = repullReviewWaiver(record, {
-      datasetId: record.dataset_id,
-      prNumber: number,
-      headSha: live.headSha,
-      ownRepository:
-        isOwnDatasetRepo(live.headRepo, record.dataset_id) &&
-        isOwnDatasetRepo(live.baseRepo, record.dataset_id),
-      headRef: live.headRef,
-      baseRef: live.baseRef,
-    });
+    // A draft is not taken up by the review's intake either.
+    if (live.draft) return "draft";
+    const verdict = repullReviewWaiver(
+      record,
+      subjectOfPull(record.dataset_id, number, live.headSha, live),
+    );
     if (!verdict.waived) return `not_waived:${verdict.why}`;
     await publishWaived(
       env,

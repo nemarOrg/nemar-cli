@@ -951,6 +951,111 @@ describe("a refused update of the existing check is replaced by a new check (ADR
   });
 });
 
+describe("the publish the record's transition makes is fenced", () => {
+  const transition = (over: Partial<Bindings> = {}) =>
+    app.request(
+      `/admin/repulls/${repullId}/transition`,
+      {
+        method: "POST",
+        headers: { Authorization: `Bearer ${ADMIN_KEY}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          from: "pr_open",
+          to: "pr_open",
+          fields: { branch: BRANCH, pr_number: 7, head_sha: HEAD },
+        }),
+      },
+      env(over),
+    );
+  beforeEach(() => {
+    db.run("UPDATE upstream_repulls SET head_sha = ?", [SYNTH]);
+  });
+
+  test("the control: the recorded head is waived", async () => {
+    expect((await transition()).status).toBe(200);
+    expect(checkOutcomes().map((c) => c.title)).toEqual([WAIVED_TITLE]);
+  });
+
+  const fences: Array<[string, () => void, Partial<Bindings>]> = [
+    ["while the review is switched off", () => {}, { PR_REVIEW_ENABLED: undefined }],
+    [
+      "for a dataset the review may not read",
+      () => db.run("UPDATE datasets SET first_published_at = NULL"),
+      {},
+    ],
+    [
+      "for a pull request GitHub shows closed",
+      () => {
+        pulls[`${DS}#7`] = { ...pull(), state: "closed" };
+      },
+      {},
+    ],
+    [
+      "for a pull request GitHub shows merged",
+      () => {
+        pulls[`${DS}#7`] = { ...pull(), state: "closed", merged: true };
+      },
+      {},
+    ],
+    [
+      "for a draft",
+      () => {
+        pulls[`${DS}#7`] = { ...pull(), draft: true };
+      },
+      {},
+    ],
+    [
+      "for a fork's pull request at the record's number",
+      () => {
+        pulls[`${DS}#7`] = pull({ headRepo: `contributor/${DS}` });
+      },
+      {},
+    ],
+  ];
+  for (const [name, flip, over] of fences) {
+    test(`nothing is posted ${name}, and the edge stands`, async () => {
+      flip();
+      expect((await transition(over)).status).toBe(200);
+      expect(checkWrites()).toEqual([]);
+      expect(waiverAudits()).toEqual([]);
+      expect(
+        (db.query("SELECT head_sha FROM upstream_repulls").get() as { head_sha: string }).head_sha,
+      ).toBe(HEAD);
+    });
+  }
+
+  test("a dev Worker posts nothing on a repository the production Worker owns", async () => {
+    // A production sandbox `xx` dataset: the dev Worker may record its re-pull (the record's own
+    // fence allows `xx` outside production) but does not own it, and the organization is shared.
+    db.run("DELETE FROM upstream_repulls");
+    mirror("xx000123");
+    repullId = seedRepull("pr_open", {
+      dataset_id: "xx000123",
+      upstream_ds: "ds000123",
+      branch: BRANCH,
+      pr_number: 7,
+      head_sha: SYNTH,
+    });
+    pulls["xx000123#7"] = pull({ ds: "xx000123" });
+    const res = await transition({ ENVIRONMENT: "staging" });
+    expect(res.status).toBe(200);
+    expect(checkWrites()).toEqual([]);
+    expect(waiverAudits()).toEqual([]);
+  });
+});
+
+describe("a bot's pull request is waived only on a dataset the review may read", () => {
+  test("the App's recorded pull request on a dataset that is not reviewable stays a bot's", async () => {
+    const APP = { login: NEMAR_APP_BOT_LOGIN, id: NEMAR_APP_BOT_USER_ID, type: "Bot" };
+    db.run("UPDATE upstream_repulls SET origin = 'automatic'");
+    db.run("UPDATE datasets SET first_published_at = NULL");
+    pulls[`${DS}#7`] = pull({ user: APP });
+    expect(await deliver("synchronize", pull({ user: APP }))).toMatchObject({
+      reason: "bot_author",
+    });
+    expect(checkWrites()).toEqual([]);
+  });
+});
+
 describe("a waiver the sweep cannot decide is an attempt that failed", () => {
   test("five undecided publishes end abandoned, never counted as republished", async () => {
     const id = Number(
