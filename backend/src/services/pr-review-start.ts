@@ -216,7 +216,7 @@ export async function startPullRequestReview(
       throw new QueueError(
         502,
         "github_unavailable",
-        "GitHub would not take the waived check for this pull request, an upstream re-pull's at the head NEMAR recorded, so its check is as it was. Try again in a moment.",
+        "GitHub would not take the waived check for this pull request, an upstream re-pull's at the head NEMAR recorded, neither as an update of its check nor as a new check, so its check is as it was and nothing was recorded. Try again in a moment; if GitHub keeps refusing, look at the App's permission to write checks on the repository.",
       );
     }
     throw err;

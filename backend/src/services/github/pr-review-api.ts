@@ -66,12 +66,29 @@ export interface CheckRunInput {
   refresh?: () => Promise<string>;
   /** Bounded for use inside a webhook request. */
   quick?: boolean;
+  /**
+   * When GitHub refuses the update of the existing run for a reason about the run (any 4xx but a
+   * refused credential, 401 or 403, and a throttle, 429), create a NEW run of the same name on the
+   * same commit instead of failing. Set for an upstream re-pull's waiver alone (ADR 0116): whether
+   * GitHub lets a completed run's conclusion be changed is not verified, and a new run of a name is
+   * the one GitHub and NEMAR's own readers take as the latest.
+   */
+  newRunOnRefusal?: boolean;
+}
+
+/**
+ * A refusal of the update that a new run can stand in for: a 4xx about the run itself. A refused
+ * credential, a missing permission and a throttle would refuse the create the same way.
+ */
+function newRunCanReplace(status: number): boolean {
+  return status >= 400 && status < 500 && status !== 401 && status !== 403 && status !== 429;
 }
 
 /**
  * Create or update the review's check-run and return its id. A 404 on update (the run was
  * deleted, or belongs to another installation) falls through to a create, so a stale id in the
- * database never strands a result.
+ * database never strands a result; with `newRunOnRefusal`, so does any other refusal of the
+ * update that a new run can stand in for ({@link newRunCanReplace}).
  */
 export async function upsertReviewCheckRun(input: CheckRunInput): Promise<number> {
   const output = {
@@ -102,7 +119,9 @@ export async function upsertReviewCheckRun(input: CheckRunInput): Promise<number
       options,
     );
     if (res.ok) return input.checkRunId;
-    if (res.status !== 404) throw new Error(`check-run update refused: HTTP ${res.status}`);
+    const replace =
+      res.status === 404 || (input.newRunOnRefusal === true && newRunCanReplace(res.status));
+    if (!replace) throw new Error(`check-run update refused: HTTP ${res.status}`);
   }
 
   const res = await githubFetchWithRetry(
@@ -138,12 +157,15 @@ export interface ReviewCommentInput {
   body: string;
   /** Mints a fresh token after a 401. */
   refresh?: () => Promise<string>;
+  /** Bounded for use inside a request, as a quick check-run write is. */
+  quick?: boolean;
 }
 
 /** Create or edit the pull request's one review comment and return its id. */
 export async function upsertReviewComment(input: ReviewCommentInput): Promise<number> {
   const body = clip(input.body, COMMENT_MAX);
-  const options = callOptions(input.refresh, false);
+  const options = callOptions(input.refresh, input.quick);
+  const signal = input.quick ? { signal: AbortSignal.timeout(QUICK_TIMEOUT_MS) } : {};
   if (input.commentId !== null) {
     const res = await githubFetchWithRetry(
       `${GITHUB_API()}/repos/${ORG_NAME}/${input.repo}/issues/comments/${input.commentId}`,
@@ -151,6 +173,7 @@ export async function upsertReviewComment(input: ReviewCommentInput): Promise<nu
         method: "PATCH",
         headers: { ...ghHeaders(input.token), "Content-Type": "application/json" },
         body: JSON.stringify({ body }),
+        ...signal,
       },
       options,
     );
@@ -163,6 +186,7 @@ export async function upsertReviewComment(input: ReviewCommentInput): Promise<nu
       method: "POST",
       headers: { ...ghHeaders(input.token), "Content-Type": "application/json" },
       body: JSON.stringify({ body }),
+      ...signal,
     },
     options,
   );

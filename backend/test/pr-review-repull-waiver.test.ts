@@ -61,6 +61,8 @@ let pulls: Record<string, Record<string, unknown>> = {};
 let nextId = 5000;
 /** An HTTP status every check-run write is answered with instead of success, or null. */
 let checkRunFailure: number | null = null;
+/** A status the update of an existing check run is answered with, refusing it; null takes it. */
+let checkPatchFailure: number | null = null;
 
 beforeAll(() => {
   server = Bun.serve({
@@ -76,6 +78,9 @@ beforeAll(() => {
       if (permission) return permission;
       if (isNamingPath(url.pathname)) {
         return (await namingResponse(url, {})) ?? new Response("{}", { status: 404 });
+      }
+      if (checkPatchFailure !== null && /\/check-runs\/\d+$/.test(url.pathname)) {
+        return new Response("{}", { status: checkPatchFailure, headers: { "Retry-After": "0" } });
       }
       if (checkRunFailure !== null && /\/check-runs(\/\d+)?$/.test(url.pathname)) {
         return new Response("{}", { status: checkRunFailure, headers: { "Retry-After": "0" } });
@@ -186,6 +191,7 @@ afterEach(async () => {
   calls = [];
   pulls = {};
   checkRunFailure = null;
+  checkPatchFailure = null;
   __resetRateLimitStateForTests();
 });
 
@@ -876,6 +882,72 @@ describe("a review of the head that reports after the head was recorded publishe
     expect(checkOutcomes()).toEqual([
       { method: "PATCH", path: "/check-runs/77", conclusion: "failure", title: "Needs changes" },
     ]);
+  });
+});
+
+describe("a refused update of the existing check is replaced by a new check (ADR 0116)", () => {
+  const start = async (qs: string) =>
+    (
+      await app.request(
+        `/admin/pr-reviews/${DS}/7/start${qs}`,
+        { method: "POST", headers: { Authorization: `Bearer ${ADMIN_KEY}` } },
+        env(),
+      )
+    ).json();
+  const paths: Array<[string, () => Promise<unknown>]> = [
+    ["a delivery", () => deliver("synchronize", pull())],
+    ["an administrator's start", () => start("")],
+    ["an administrator's start --redo", () => start("?redo=1")],
+  ];
+  for (const [name, go] of paths) {
+    test(`${name}: GitHub refuses the update (422), so a new skipped run is posted and recorded`, async () => {
+      const id = seedFailedReview();
+      checkPatchFailure = 422;
+      expect(await go()).toMatchObject({ dispatched: false, reason: "repull_waived" });
+      expect(checkOutcomes()).toEqual([
+        { method: "PATCH", path: "/check-runs/77", conclusion: "skipped", title: WAIVED_TITLE },
+        { method: "POST", path: "/check-runs", conclusion: "skipped", title: WAIVED_TITLE },
+      ]);
+      const row = reviews()[0] as { check_run_id: number; verdict: string };
+      expect(row.check_run_id).not.toBe(77);
+      expect(row.verdict).toBe("fail");
+      expect(waiverAudits()).toHaveLength(1);
+      expect(waiverAudits()[0]?.details).toMatchObject({ review_id: id });
+      expect(dispatches()).toEqual([]);
+    });
+  }
+
+  test("a refused credential is not replaced: the start answers 502 and records nothing", async () => {
+    seedFailedReview();
+    checkPatchFailure = 403;
+    const res = await app.request(
+      `/admin/pr-reviews/${DS}/7/start`,
+      { method: "POST", headers: { Authorization: `Bearer ${ADMIN_KEY}` } },
+      env(),
+    );
+    expect(res.status).toBe(502);
+    expect(checkOutcomes().map((c) => c.method)).toEqual(["PATCH"]);
+    expect(waiverAudits()).toEqual([]);
+  });
+
+  test("an ordinary review's refused update is not replaced by a new run", async () => {
+    // Only the waiver posts a new run over a refused update; a review's result keeps its run.
+    db.run("UPDATE upstream_repulls SET head_sha = ?", [SYNTH]);
+    const id = Number(
+      db
+        .query(
+          `INSERT INTO pr_reviews (dataset_id, pr_number, head_sha, author_id, author_login, state,
+                                   nonce, check_run_id, created_at)
+           VALUES (?, 7, ?, ?, ?, 'dispatched', 'n-1', 77, '2026-10-01 00:00:00')`,
+        )
+        .run(DS, HEAD, ADMIN_GH_ID, ADMIN_GH).lastInsertRowid,
+    );
+    checkPatchFailure = 422;
+    await storePrReviewResult(env(), id, DS, "n-1", {
+      kind: "reported",
+      report: parseStoredPrReviewReport(failingReport()),
+    });
+    expect(checkOutcomes().map((c) => c.method)).toEqual(["PATCH"]);
   });
 });
 

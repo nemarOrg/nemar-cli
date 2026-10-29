@@ -731,7 +731,7 @@ export async function publishOutcome(
   env: Bindings,
   row: ReviewRow,
   outcome: StoredOutcome | "running",
-  opts: { commentOnly?: boolean; waiver?: Waived | null } = {},
+  opts: { commentOnly?: boolean; waiver?: Waived | null; quick?: boolean } = {},
 ): Promise<boolean> {
   let token: string;
   let refresh: () => Promise<string>;
@@ -811,7 +811,7 @@ async function publishRound(
   { token, refresh }: { token: string; refresh: () => Promise<string> },
   row: ReviewRow,
   stored: StoredOutcome | "running",
-  opts: { commentOnly?: boolean; waiver: Waived | null },
+  opts: { commentOnly?: boolean; waiver: Waived | null; quick?: boolean },
 ): Promise<{ checked: boolean; acknowledged: boolean }> {
   let checked = false;
   let commented = false;
@@ -832,7 +832,9 @@ async function publishRound(
       const id = await upsertReviewCheckRun({
         token,
         refresh,
-        quick: outcome === "running",
+        quick: outcome === "running" || opts.quick === true,
+        // A waiver that GitHub will not write over the old run is posted as a new run (ADR 0116).
+        newRunOnRefusal: opts.waiver !== null,
         repo: row.datasetId,
         headSha: row.headSha,
         checkRunId: row.checkRunId,
@@ -868,6 +870,7 @@ async function publishRound(
         prNumber: row.prNumber,
         commentId,
         body: renderComment(outcome, row.headSha),
+        quick: opts.quick === true,
       });
       commented = true;
       if (id !== row.commentId) {
@@ -1224,7 +1227,11 @@ async function publishWaived(
   if (row) {
     // The waived head is the pull request's current one, which is what `seen_at` says.
     await db.prepare(`UPDATE pr_reviews SET seen_at = ${NOW_MS} WHERE id = ?`).bind(row.id).run();
-    checked = await publishOutcome(env, row, outcomeOfRow(row) ?? "running", { waiver });
+    // Inside a request (a delivery, a start, the record's transition): every write is bounded.
+    checked = await publishOutcome(env, row, outcomeOfRow(row) ?? "running", {
+      waiver,
+      quick: true,
+    });
   } else {
     checked = await postWaivedCheck(env, target, waiver);
   }
