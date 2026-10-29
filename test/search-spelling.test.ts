@@ -15,9 +15,10 @@ import { resetRerankSuspension } from "../backend/src/services/search-rerank";
 import {
   MIN_CORRECTABLE_LENGTH,
   VOCABULARY_TTL_MS,
+  buildModalityTokens,
   buildVocabulary,
   editDistance,
-  loadCatalogVocabulary,
+  loadModalityTokens,
   loadVocabulary,
   resetVocabularyCache,
   suggestCorrection,
@@ -223,9 +224,9 @@ describe("the vocabulary", () => {
   test("is reused within its lifetime and rebuilt after it", async () => {
     const { d1 } = sampleDb();
     const t0 = 1_000_000;
-    const first = loadCatalogVocabulary(d1, t0);
-    expect(loadCatalogVocabulary(d1, t0 + VOCABULARY_TTL_MS - 1)).toBe(first);
-    expect(loadCatalogVocabulary(d1, t0 + VOCABULARY_TTL_MS)).not.toBe(first);
+    const first = loadVocabulary(d1, t0);
+    expect(loadVocabulary(d1, t0 + VOCABULARY_TTL_MS - 1)).toBe(first);
+    expect(loadVocabulary(d1, t0 + VOCABULARY_TTL_MS)).not.toBe(first);
   });
 
   test("a failed build is not remembered", async () => {
@@ -278,5 +279,51 @@ describe("the MCP search_datasets tool says what it searched for", () => {
     expect(output.results.map((r) => r.dataset_id)).toContain("nm000241");
     expect(output.count).toBeLessThanOrEqual(5);
     expect(output.note).toContain('searched for "bilingual performance study" instead');
+  });
+});
+
+describe("the modality tokens", () => {
+  test("come from the distinct modality lists, whole tokens, lowercase", () => {
+    expect(
+      [
+        ...buildModalityTokens([
+          { modalities: "EEG, beh" },
+          { modalities: "ieeg" },
+          { modalities: null },
+          { modalities: " ," },
+        ]),
+      ].sort(),
+    ).toEqual(["beh", "eeg", "ieeg"]);
+  });
+
+  test("are read without touching any dataset's description", async () => {
+    const { db } = sampleDb();
+    const real = realD1(db);
+    const statements: string[] = [];
+    const watching = {
+      prepare(sql: string) {
+        statements.push(sql);
+        return real.prepare(sql);
+      },
+    } as unknown as D1Database;
+    const tokens = await loadModalityTokens(watching);
+    expect(tokens.has("eeg")).toBe(true);
+    expect(tokens.has("ieeg")).toBe(true);
+    expect(statements).toHaveLength(1);
+    expect(statements[0]).not.toContain("description");
+  });
+
+  test("are reused within the vocabulary's lifetime, and a failed read is neither cached nor fatal", async () => {
+    const { d1 } = sampleDb();
+    const t0 = 2_000_000;
+    const first = await loadModalityTokens(d1, t0);
+    const again = await loadModalityTokens(d1, t0 + VOCABULARY_TTL_MS - 1);
+    expect(again).toBe(first);
+
+    resetVocabularyCache();
+    const broken = freshDb();
+    broken.exec("DROP TABLE datasets");
+    expect((await loadModalityTokens(realD1(broken), 5)).size).toBe(0);
+    expect((await loadModalityTokens(d1, 6)).has("eeg")).toBe(true);
   });
 });

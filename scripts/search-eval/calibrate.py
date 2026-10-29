@@ -186,6 +186,11 @@ def main(
 ) -> None:
     if constants_path:
         check_constants(constants_path)
+    else:
+        print(
+            "WARNING: constants not checked against the TypeScript; pass the output of "
+            "`bun scripts/search-eval/dump-texts.ts --constants` as the third argument"
+        )
     rows = json.loads(corpus_path.read_text())
     new_texts = json.loads(texts_path.read_text())
     ids = [r["id"] for r in rows]

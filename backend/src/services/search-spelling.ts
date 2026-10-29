@@ -114,58 +114,29 @@ export function suggestCorrection(term: string, vocabulary: Vocabulary): string 
   return best?.word ?? null;
 }
 
-/** What the catalog's own text and modality lists contain, read together and cached together. */
-export interface CatalogVocabulary {
-  words: Vocabulary;
-  /** Every modality token some public dataset lists, lowercase (`eeg`, `ieeg`, `meg`, ...). */
-  modalities: Set<string>;
-}
+let cached: { builtAt: number; vocabulary: Promise<Vocabulary> } | undefined;
 
-/** The catalog vocabulary of `rows`. */
-export function buildCatalogVocabulary(
-  rows: Array<{
-    name?: string | null;
-    description?: string | null;
-    tasks?: string | null;
-    modalities?: string | null;
-  }>,
-): CatalogVocabulary {
-  const modalities = new Set<string>();
-  for (const row of rows) {
-    for (const token of (row.modalities ?? "").split(",")) {
-      const t = token.trim().toLowerCase();
-      if (t) modalities.add(t);
-    }
-  }
-  return { words: buildVocabulary(rows), modalities };
-}
-
-let cached: { builtAt: number; vocabulary: Promise<CatalogVocabulary> } | undefined;
-
-/** Test seam: forget the cached vocabulary. */
+/** Test seam: forget the cached vocabularies. */
 export function resetVocabularyCache(): void {
   cached = undefined;
+  cachedModalities = undefined;
 }
 
-/** The catalog vocabulary, reused for {@link VOCABULARY_TTL_MS}. A failed build is not cached. */
-export function loadCatalogVocabulary(
-  db: D1Database,
-  now = Date.now(),
-): Promise<CatalogVocabulary> {
+/**
+ * The catalog's vocabulary, reused for {@link VOCABULARY_TTL_MS}. A failed build is not cached.
+ * Built only when a query holds a word no dataset contains: it reads every public dataset's
+ * text, which a request that needs no correction must not pay for.
+ */
+export function loadVocabulary(db: D1Database, now = Date.now()): Promise<Vocabulary> {
   if (cached && now - cached.builtAt < VOCABULARY_TTL_MS) return cached.vocabulary;
   // An async function, so a failure thrown while preparing the statement is a rejection too.
   const vocabulary = (async () => {
     const { results } = await db
       .prepare(
-        `SELECT d.name, d.description, d.tasks, d.modalities FROM datasets d WHERE ${PUBLIC_SEARCHABLE_SQL}`,
+        `SELECT d.name, d.description, d.tasks FROM datasets d WHERE ${PUBLIC_SEARCHABLE_SQL}`,
       )
-      .all<{
-        name: string | null;
-        description: string | null;
-        tasks: string | null;
-        modalities: string | null;
-      }>();
-    return buildCatalogVocabulary(results ?? []);
+      .all<{ name: string | null; description: string | null; tasks: string | null }>();
+    return buildVocabulary(results ?? []);
   })();
   cached = { builtAt: now, vocabulary };
   vocabulary.catch(() => {
@@ -174,16 +145,43 @@ export function loadCatalogVocabulary(
   return vocabulary;
 }
 
-/** The words of the catalog's text. */
-export async function loadVocabulary(db: D1Database, now = Date.now()): Promise<Vocabulary> {
-  return (await loadCatalogVocabulary(db, now)).words;
+/** Every modality token a list of `modalities` values holds, lowercase. */
+export function buildModalityTokens(rows: Array<{ modalities?: string | null }>): Set<string> {
+  const tokens = new Set<string>();
+  for (const row of rows) {
+    for (const token of (row.modalities ?? "").split(",")) {
+      const t = token.trim().toLowerCase();
+      if (t) tokens.add(t);
+    }
+  }
+  return tokens;
 }
 
-/** The modality tokens the catalog uses; empty when the catalog cannot be read. Never throws. */
-export async function loadModalityTokens(db: D1Database): Promise<Set<string>> {
+let cachedModalities: { builtAt: number; tokens: Promise<Set<string>> } | undefined;
+
+/**
+ * The modality tokens some public dataset lists (`eeg`, `ieeg`, `meg`, ...), cached like the
+ * vocabulary but from its own query: the DISTINCT lists are a handful of short strings, so a
+ * query that names no unseen word never reads descriptions to learn them.
+ * Empty when the catalog cannot be read (and not cached then). Never throws.
+ */
+export async function loadModalityTokens(db: D1Database, now = Date.now()): Promise<Set<string>> {
+  if (cachedModalities && now - cachedModalities.builtAt < VOCABULARY_TTL_MS) {
+    return cachedModalities.tokens.catch(() => new Set<string>());
+  }
+  const tokens = (async () => {
+    const { results } = await db
+      .prepare(
+        `SELECT DISTINCT d.modalities FROM datasets d WHERE d.modalities IS NOT NULL AND ${PUBLIC_SEARCHABLE_SQL}`,
+      )
+      .all<{ modalities: string | null }>();
+    return buildModalityTokens(results ?? []);
+  })();
+  cachedModalities = { builtAt: now, tokens };
   try {
-    return (await loadCatalogVocabulary(db)).modalities;
+    return await tokens;
   } catch (err) {
+    if (cachedModalities?.tokens === tokens) cachedModalities = undefined;
     console.warn(
       `[search] modality vocabulary unavailable: ${err instanceof Error ? err.message : String(err)}`,
     );
