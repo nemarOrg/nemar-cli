@@ -26,6 +26,10 @@ import { adminRoutes } from "../src/routes/admin";
 import webhooks from "../src/routes/webhooks";
 import { __resetRateLimitStateForTests } from "../src/services/github/transport";
 import { storePrReviewResult, sweepStalePrReviews } from "../src/services/pr-review";
+import {
+  REPULL_WAIVER_RECORDS_SQL,
+  readWaiverRecords,
+} from "../src/services/pr-review-repull-waiver";
 import { hashApiKey } from "../src/services/token";
 import { recordedHeadOf } from "../src/services/upstream-repull";
 import type { Bindings, Variables } from "../src/types/bindings";
@@ -652,14 +656,16 @@ describe("everything else is reviewed as before", () => {
   for (const status of [
     "abandoned",
     "superseded",
+    "failed",
     "merged",
     "released",
     "complete",
-    "planned",
+    "patch_declined",
   ] as const) {
-    test(`a record at ${status}: reviewed`, async () => {
+    test(`a record at ${status}, naming this pull request at this head: reviewed`, async () => {
       db.run("DELETE FROM upstream_repulls");
-      seedRepull(status, ["planned"].includes(status) ? {} : { head_sha: HEAD });
+      // The pull request's own columns are named, so only the status can be why it is reviewed.
+      seedRepull(status, { branch: BRANCH, pr_number: 7, head_sha: HEAD });
       const r = await deliver(
         "synchronize",
         pull({ user: { login: "contributor", id: 501, type: "User" } }),
@@ -948,6 +954,71 @@ describe("a refused update of the existing check is replaced by a new check (ADR
       report: parseStoredPrReviewReport(failingReport()),
     });
     expect(checkOutcomes().map((c) => c.method)).toEqual(["PATCH"]);
+  });
+});
+
+describe("the waiver is decided before a block on the author", () => {
+  test("a blocked author's re-pull pull request at its recorded head is waived, not declined", async () => {
+    db.run(
+      `INSERT INTO pr_review_overrides (author_id, author_login, mode, reason, set_by)
+       VALUES (?, ?, 'block', 'Hold this author', ?)`,
+      [ADMIN_GH_ID, ADMIN_GH, adminId],
+    );
+    expect(await deliver("synchronize", pull())).toMatchObject({ reason: "repull_waived" });
+    // The control: the same author at a head the record does not hold is declined.
+    pulls[`${DS}#7`] = pull({ sha: OTHER });
+    expect(await deliver("synchronize", pull({ sha: OTHER }))).toMatchObject({
+      reason: "contributor_paused",
+    });
+  });
+});
+
+describe("the records that can waive are read by their status", () => {
+  const STATUSES = [
+    "planned",
+    "prepared",
+    "copied",
+    "registered",
+    "pr_open",
+    "gates_clear",
+    "merged",
+    "released",
+    "patch_synthesized",
+    "patch_gates_clear",
+    "patch_merged",
+    "patch_released",
+    "complete",
+    "abandoned",
+    "failed",
+    "superseded",
+    "patch_declined",
+  ] as const;
+  const dsOf = (k: number) => `on${String(100000 + k)}`;
+
+  test("the record queries return the open pull requests' statuses and no other", async () => {
+    db.run("DELETE FROM upstream_repulls");
+    STATUSES.forEach((status, k) => {
+      const before = ["planned", "prepared", "copied", "registered"].includes(status);
+      seedRepull(status, {
+        dataset_id: dsOf(k),
+        ...(before ? {} : { branch: BRANCH, pr_number: 7, head_sha: HEAD }),
+      });
+    });
+    const one = STATUSES.filter(
+      (_, k) => db.query(REPULL_WAIVER_RECORDS_SQL).all(dsOf(k), 7, 7).length > 0,
+    );
+    // Every status in which either of a record's pull requests is open; the rule then asks which.
+    expect(one).toEqual(["pr_open", "gates_clear", "patch_synthesized", "patch_gates_clear"]);
+    const many = await readWaiverRecords(
+      realD1(db),
+      STATUSES.map((_, k) => dsOf(k)),
+    );
+    expect(
+      [...many.values()]
+        .flat()
+        .map((r) => r.status)
+        .sort(),
+    ).toEqual(["gates_clear", "patch_gates_clear", "patch_synthesized", "pr_open"]);
   });
 });
 
