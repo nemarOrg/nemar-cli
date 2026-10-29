@@ -173,6 +173,7 @@ A re-pull pull request is machine clean when all of these hold:
 - the identifier screen, dispatched with `ref=<head sha>` and a callback bound to the re-pull row, says `clear`: never `unchecked`, never `rerun`, and never `acknowledge`, which needs a person (ADR 0086);
 - BIDS validation and `version-check` are green;
 - an ADR 0107 review is stored for that head and its verdict is `pass`; any other verdict, or none, is not machine clean, because unknown is never treated as clean (ADR 0053, ADR 0054), and this holds even where the review's ruleset is only a shadow check;
+  *Annotated 2026-10-29: superseded by [ADR 0116](0116-an-upstream-re-pulls-own-pull-request-is-waived-from-the-review-by-nemars-record.md): the review is waived for the record's own pull request at the head the record holds, which machine clean reads as `waived` and passes; the Worker's start of that review (the Phase 7e and Phase 7f amendments) is retired.*
 - the pull request's head equals the screened SHA;
 - the daily merge cap is not exhausted, and its claim is made before the merge is sent.
 
@@ -1440,6 +1441,8 @@ One annotation is added to earlier text, on the sentence of "Not yet verified" t
 
 ### The review of the App's pull request (corrects "Not yet verified")
 
+*Annotated 2026-10-29: retired by [ADR 0116](0116-an-upstream-re-pulls-own-pull-request-is-waived-from-the-review-by-nemars-record.md). The App's pull request is waived at its recorded head, `startRepullPullRequestReview` and the intake's `admitRepullBot` are removed, and a delivery or a start of the App's pull request is a bot's (`bot_author`) as ADR 0092 says.*
+
 - "Not yet verified" says the App is not exempt, so the review runs.
   As the code stood, that was false: the review's intake skipped every bot's pull request (`bot_author`), as ADR 0092 says ("not drafts, not bots"), so no review row could exist for the App's pull request and none could be machine clean.
 - The correction admits exactly one class, the App's automatic re-pull pull request, and only when the Worker itself starts its review from the record (`startRepullPullRequestReview` in `backend/src/services/pr-review-start.ts`).
@@ -1628,6 +1631,8 @@ Five annotations are added to earlier text: on the record's header, on the openi
 
 ### What the gates wait for
 
+*Annotated 2026-10-29: the review half of this section is retired by [ADR 0116](0116-an-upstream-re-pulls-own-pull-request-is-waived-from-the-review-by-nemars-record.md). The tick starts the screen only; the review of the recorded head is waived, so machine clean reads it as `waived` and no review is started or read.*
+
 - The tick starts the screen of the head only once every rule before the screen holds: the switches, the record, the dataset, the recorded pull request opened by the App at the recorded head, `main` unmoved, and both checks green.
   So no screen run is spent on a pull request the Worker would not take on anyway, and a pull request whose BIDS validation failed waits for an administrator, who may dispatch its screen by hand.
 - The identifier screen is dispatched for the head (the 6e slice's start, `ref` the head, `request_id` 0, its callback bound to the row) when the head has no verdict: no screen, a screen that errored or one that never reported.
@@ -1660,6 +1665,8 @@ Five annotations are added to earlier text: on the record's header, on the openi
 - No GitHub token, no callback secret and a recorded tag that is not a tag each stop the resume before a claim, with their own error words.
 
 ### What a tick costs
+
+*Annotated 2026-10-29: superseded by the figures in [ADR 0116](0116-an-upstream-re-pulls-own-pull-request-is-waived-from-the-review-by-nemars-record.md), Consequences: no review is started or read, so five rows at `pr_open` cost 62, 32 and 47 statements, and past the gates 32 and 77.*
 
 Measured over five rows at `pr_open`, the most a tick reads of that kind: 67 D1 statements and 25 GitHub requests when each starts its screen, 37 and 20 while each waits, 82 and 35 when each starts its review, the most, and 52 and 25 when each is cleared; a resume is eight statements and one dispatch, and the tick itself two statements.
 Add one request to mint the App's installation token on a cold isolate when the App's credential is configured; the suites use a personal token, so the figures leave it out.
