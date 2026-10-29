@@ -9,6 +9,7 @@ import { describe, expect, test } from "bun:test";
 import {
   type TreeEntry,
   acceptedMergesOf,
+  changesBesideLedger,
   isEnrichmentPath,
   ledgerChange,
   ledgerTimeOf,
@@ -102,6 +103,59 @@ describe("sameOutsideNemar: two root trees outside .nemar/ and .github/", () => 
     expect(sameOutsideNemar(tree, [...tree.slice(0, 2), entry(".nemar", "3".repeat(40))])).toBe(
       false,
     );
+  });
+});
+
+describe("changesBesideLedger: whether a commit changed a path but the ledger", () => {
+  const e = (path: string, sha: string, type = "blob", mode = "100644"): TreeEntry => ({
+    path,
+    mode,
+    type,
+    sha,
+  });
+  const ledger = (sha: string) => e("corrections.jsonl", sha);
+  const readme = e("README.md", "1".repeat(40));
+
+  test("a parent with no .nemar and a merge that adds only the ledger changed nothing else", () => {
+    const parent = [readme];
+    const merge = [readme, e(".nemar", "2".repeat(40), "tree", "040000")];
+    expect(changesBesideLedger(parent, merge, null, [ledger("3".repeat(40))])).toBe(false);
+    // And with another file beside the ledger in the new .nemar, it did.
+    expect(
+      changesBesideLedger(parent, merge, null, [
+        ledger("3".repeat(40)),
+        e("metadata.json", "4".repeat(40)),
+      ]),
+    ).toBe(true);
+  });
+
+  test("a change outside .nemar, or under .nemar beside the ledger, is a change; the ledger alone is not", () => {
+    const nemarA = e(".nemar", "5".repeat(40), "tree", "040000");
+    const nemarB = e(".nemar", "6".repeat(40), "tree", "040000");
+    const meta = e("metadata.json", "7".repeat(40));
+    expect(
+      changesBesideLedger([readme, nemarA], [e("README.md", "8".repeat(40)), nemarA], null, null),
+    ).toBe(true);
+    expect(
+      changesBesideLedger(
+        [readme, nemarA],
+        [readme, nemarB],
+        [meta, ledger("a".repeat(40))],
+        [meta, ledger("b".repeat(40))],
+      ),
+    ).toBe(false);
+    expect(
+      changesBesideLedger(
+        [readme, nemarA],
+        [readme, nemarB],
+        [meta, ledger("a".repeat(40))],
+        [e("metadata.json", "9".repeat(40)), ledger("b".repeat(40))],
+      ),
+    ).toBe(true);
+    // A .nemar removed with something beside the ledger in it is a change.
+    expect(
+      changesBesideLedger([readme, nemarA], [readme], [meta, ledger("a".repeat(40))], null),
+    ).toBe(true);
   });
 });
 

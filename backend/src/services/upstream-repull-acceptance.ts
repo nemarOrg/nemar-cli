@@ -12,14 +12,15 @@
  * acceptance is earned by what the Worker reads on GitHub with its own credential, never by the
  * reason or by the caller's word. In this order, the first that does not hold refuses with its
  * word and writes nothing:
- *  1. The record at `merged` (`n0`) or `patch_merged` (`n1`), its merge commit the one named
- *     (`merge-mismatch`); a record an administrator opened (`accept-automatic`: the automatic
- *     path's merges are the Worker's, written with the trailers), and opened by this administrator
- *     (`accept-not-yours`).
+ *  1. The record at `merged` (`n0`) or `patch_merged` (`n1`) (`bad-transition`), its merge commit
+ *     the one named (`merge-mismatch`); a record an administrator opened (`accept-automatic`: the
+ *     automatic path's merges are the Worker's, written with the trailers), and opened by this
+ *     administrator (`accept-not-yours`).
  *  2. The recorded pull request, read on GitHub: the record's number, its release branch into
- *     `main` of the dataset's own repository (`readRecordedPullRequest`), merged, with GitHub's
- *     merge commit the record's (`merge-mismatch`), at the recorded head or one GitHub's comparison
- *     shows moved from it only on paths enrichment writes (`merge-head-foreign`).
+ *     `main` of the dataset's own repository (`readRecordedPullRequest`, `pull-request-mismatch`),
+ *     merged, with GitHub's merge commit the record's (`merge-mismatch`), at the recorded head or
+ *     one GitHub's comparison shows moved from it only on paths enrichment writes
+ *     (`merge-head-foreign`).
  *  3. The merge commit, read on GitHub: one parent (`merge-not-squash`), which is the record's base
  *     or a descendant of it moved only on paths enrichment writes (`merge-parent-foreign`).
  *  4. Its tree, the same as the record's commit outside `.nemar/**` and `.github/**`: N.0.0's
@@ -27,20 +28,26 @@
  *     N.0.1 merged before its gates were recorded, which the release cannot compare either), the
  *     comparison the release makes for the tag, read from the two root trees.
  *  5. What it did to the privacy ledger: nothing, or appended scrub lines and edited none before
- *     them (`merge-ledger-foreign` otherwise, which the proof refuses whatever is accepted).
+ *     them; and, when the proof needs the line, a `repull-scrubbed` line whose `scanner` a ledger
+ *     line can carry (`merge-ledger-foreign` otherwise).
+ *  6. `main` still holds the merge (`merge-not-on-main`); and, when the line is needed, a ledger
+ *     on `main` (`ledger-missing-on-main`) that names the merge in no line yet, since NEMAR writes
+ *     only after it records (`attestation-conflict`).
  * Then the acceptance is recorded with its reason (one row, `upstream_repull_merge_acceptances`,
  * and an audit row, `repull_merge_trailers_accepted`), once: a second request for the same merge
- * replays it and writes no second row, its reason not needed.
+ * replays it and writes no second row, its reason not needed; for another merge it is refused.
  *
  * THE ATTESTATION. When the merge appended a `repull-scrubbed` line beside other files, the one
  * shape the proof needs it for, the Worker appends to the ledger on `main` one line naming the
  * merge commit (`shared/repull-merge-acceptance.ts`), in a commit of its own through the Contents
- * API, leased on the ledger blob it read, so a line another writer appended in between is never
- * dropped: GitHub refuses the write and it is read again. The line is a function of the stored
- * acceptance, so a write whose answer was lost is found on the next request and not written twice.
- * The release is refused until the line is seen on `main` (`acceptance-unattested`, in
- * `upstream-repull-verified.ts`). A line on `main` naming this merge that is not NEMAR's bytes is
- * `attestation-conflict`, never overwritten.
+ * API (`upstream-repull-acceptance-github.ts`), leased on the ledger blob it read, so a line another
+ * writer appended in between is never dropped: GitHub refuses the write and it is read again.
+ * Every request, a replay included, reads `main`'s ledger first: a line already there is seen and
+ * not written again; a missing one is written, once more, only while `main` still holds the merge.
+ * The line is a function of the stored acceptance, so a write whose answer was lost is found, and
+ * a line on `main` naming this merge that is not NEMAR's bytes is `attestation-conflict`, never
+ * overwritten. The release is refused until the Worker reads the line on `main` itself
+ * (`acceptance-unattested`, `upstream-repull-verified.ts`).
  *
  * Nothing here moves the record, merges, tags or mails anyone. The reason never leaves NEMAR's
  * database: the ledger refuses free text by design (ADR 0085, ADR 0036).
@@ -52,14 +59,15 @@ import {
   ACKNOWLEDGMENT_MIN_LENGTH,
 } from "../../../shared/publication-limits.js";
 import {
-  LEDGER_REPO_PATH,
+  type LedgerChange,
   type TreeEntry,
   acceptedMergesOf,
-  isEnrichmentPath,
+  changesBesideLedger,
   ledgerChange,
   ledgerLines,
   ledgerTimeOf,
   mergeAcceptanceLine,
+  nemarTreeOf,
   sameOutsideNemar,
 } from "../../../shared/repull-merge-acceptance.js";
 import {
@@ -71,26 +79,19 @@ import {
 } from "../../../shared/repull-state.js";
 import { AUDIT_IF_PREVIOUS_CHANGED_SQL, auditLogParams } from "../db/audit-log.js";
 import type { Bindings } from "../types/bindings.js";
-import { getDatasetsTokenWithRefresher } from "./github-auth.js";
-import { GITHUB_API, ORG_NAME, ghHeaders } from "./github/shared.js";
-import { githubFetchWithRetry } from "./github/transport.js";
 import {
-  githubRead,
-  isObject,
-  readRecordedPullRequest,
-  unreadable,
-} from "./upstream-repull-github.js";
+  type Read,
+  mergeOnMain,
+  movedByEnrichmentOnly,
+  putLedger,
+  readCommit,
+  readLedger,
+  readTree,
+} from "./upstream-repull-acceptance-github.js";
+import { readRecordedPullRequest, unreadable } from "./upstream-repull-github.js";
 import { type RepullRefusal, envFenceRefusal, getRepull } from "./upstream-repull.js";
 
-/** The most commits enrichment makes between two of NEMAR's own writes (`execute/head.ts`). */
-const ENRICHMENT_MAX_COMMITS = 20;
-
-/** The identity of the attestation's commit: the one every backend commit on a dataset carries. */
-const NEMAR_COMMITTER = { name: "nemarAdmin", email: "nemarAdmin@osc.earth" };
-
-/** The attestation commit's message: fixed words, nothing about the dataset. */
-export const ATTESTATION_MESSAGE =
-  "Record the acceptance of a re-pull merge made without its trailers";
+export { ATTESTATION_MESSAGE } from "./upstream-repull-acceptance-github.js";
 
 export const acceptMergeSchema = z
   .object({
@@ -128,7 +129,7 @@ export interface MergeAcceptance {
   attested_at: string | null;
 }
 
-/** What the Worker read before it accepted; the CLI prints it. */
+/** What the Worker read on GitHub before it accepted; the CLI prints it beside its own reading. */
 export interface AcceptanceEvidence {
   pull_request: number;
   merged_head: string;
@@ -164,6 +165,16 @@ const INSERT_ACCEPTANCE_SQL = (
                    WHERE id = ?1 AND status = ?2 AND revision = ?3 AND ${mergeColumn} = ?4)
       AND NOT EXISTS (SELECT 1 FROM upstream_repull_merge_acceptances WHERE repull_id = ?1 AND pr = ?5)`;
 
+/** The line was written now: its commit and the time. */
+const MARK_WRITTEN_SQL = `UPDATE upstream_repull_merge_acceptances
+   SET attestation_sha = ?3, attested_at = datetime('now')
+ WHERE repull_id = ?1 AND pr = ?2 AND attestation_needed = 1`;
+
+/** The line was found on `main`: the first time it was seen, the commit left as it was. */
+const MARK_SEEN_SQL = `UPDATE upstream_repull_merge_acceptances
+   SET attested_at = COALESCE(attested_at, datetime('now'))
+ WHERE repull_id = ?1 AND pr = ?2 AND attestation_needed = 1`;
+
 export async function readAcceptance(
   db: D1Database,
   repullId: number,
@@ -172,176 +183,50 @@ export async function readAcceptance(
   return db.prepare(ACCEPTANCE_SQL).bind(repullId, pr).first<MergeAcceptance>();
 }
 
-// ----------------------------------------------------------------------------
-// GitHub reads
-// ----------------------------------------------------------------------------
-
-type Read<T> = { ok: true; value: T } | { ok: false; refusal: RepullRefusal };
-
-/** A commit as the Git Data API answers it: its tree and its parents. */
-async function readCommit(
-  env: Bindings,
-  row: RepullRow,
-  sha: string,
-): Promise<Read<{ tree: string; parents: string[] } | null>> {
-  const read = await githubRead(env, row.dataset_id, `/git/commits/${sha}`);
-  if (!read.ok) return read;
-  if (read.status !== 200) return { ok: true, value: null };
-  const b = read.body;
-  const tree = isObject(b) && isObject(b.tree) ? b.tree.sha : null;
-  const parents = isObject(b) && Array.isArray(b.parents) ? b.parents : null;
-  if (typeof tree !== "string" || !SHA_RE.test(tree) || parents === null) {
-    return { ok: false, refusal: unreadable(`commit ${sha.slice(0, 12)}`, "its shape") };
-  }
-  const ids = parents.map((p) => (isObject(p) ? p.sha : null));
-  if (!ids.every((p): p is string => typeof p === "string" && SHA_RE.test(p))) {
-    return { ok: false, refusal: unreadable(`commit ${sha.slice(0, 12)}`, "its parents") };
-  }
-  return { ok: true, value: { tree, parents: ids } };
+function refusal(code: string, message: string, row?: RepullRow): RepullRefusal {
+  return { status: 409, code, message, ...(row ? { row } : {}) };
 }
 
-/** A tree's own entries (not recursive), as the Git Data API answers them. */
-async function readTree(
-  env: Bindings,
-  row: RepullRow,
-  sha: string,
-): Promise<Read<TreeEntry[] | null>> {
-  const read = await githubRead(env, row.dataset_id, `/git/trees/${sha}`);
-  if (!read.ok) return read;
-  if (read.status !== 200) return { ok: true, value: null };
-  const b = read.body;
-  if (!isObject(b) || !Array.isArray(b.tree) || b.truncated === true) {
-    return { ok: false, refusal: unreadable(`tree ${sha.slice(0, 12)}`, "its shape") };
-  }
-  const entries: TreeEntry[] = [];
-  for (const e of b.tree) {
-    if (
-      !isObject(e) ||
-      typeof e.path !== "string" ||
-      typeof e.mode !== "string" ||
-      typeof e.type !== "string" ||
-      typeof e.sha !== "string"
-    ) {
-      return { ok: false, refusal: unreadable(`tree ${sha.slice(0, 12)}`, "an entry") };
-    }
-    entries.push({ path: e.path, mode: e.mode, type: e.type, sha: e.sha });
-  }
-  return { ok: true, value: entries };
-}
+/** A read's refusal, about this row. */
+const unread = (r: { refusal: RepullRefusal }, row: RepullRow): RepullRefusal => ({
+  ...r.refusal,
+  row,
+});
 
-/** The ledger at `ref` (a commit id or `main`): its text and blob id, or null when there is none. */
-async function readLedger(
-  env: Bindings,
-  row: RepullRow,
-  ref: string,
-): Promise<Read<{ text: string; sha: string } | null>> {
-  const read = await githubRead(
-    env,
-    row.dataset_id,
-    `/contents/${LEDGER_REPO_PATH}?ref=${encodeURIComponent(ref)}`,
-  );
-  if (!read.ok) return read;
-  if (read.status === 404) return { ok: true, value: null };
-  const b = read.body;
-  if (
-    read.status !== 200 ||
-    !isObject(b) ||
-    b.type !== "file" ||
-    b.encoding !== "base64" ||
-    typeof b.content !== "string" ||
-    typeof b.sha !== "string"
-  ) {
-    return { ok: false, refusal: unreadable(`the ledger at ${ref.slice(0, 12)}`, "its shape") };
-  }
-  const bytes = Uint8Array.from(atob(b.content.replace(/\s/g, "")), (c) => c.charCodeAt(0));
-  let text: string;
-  try {
-    // `ignoreBOM: true` keeps a byte-order mark in the text, so the bytes compared and extended
-    // are the bytes on `main`.
-    text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
-  } catch {
-    return { ok: false, refusal: unreadable(`the ledger at ${ref.slice(0, 12)}`, "not UTF-8") };
-  }
-  return { ok: true, value: { text, sha: b.sha } };
-}
-
-/**
- * Whether `to` is `from`, or descends from it with every path GitHub's comparison names one
- * enrichment writes (`isEnrichmentPath`), added or modified, in at most enrichment's bound of
- * commits. The Worker's reading of "moved by enrichment only": GitHub names paths, not what was
- * written, and the CLI reads each commit's content as well. Unread is a refusal, never a yes.
- */
-async function movedByEnrichmentOnly(
-  env: Bindings,
-  row: RepullRow,
-  from: string,
-  to: string,
-): Promise<Read<boolean>> {
-  if (from === to) return { ok: true, value: true };
-  const read = await githubRead(env, row.dataset_id, `/compare/${from}...${to}`);
-  if (!read.ok) return read;
-  if (read.status !== 200) return { ok: true, value: false };
-  const b = read.body;
-  if (!isObject(b) || b.status !== "ahead") return { ok: true, value: false };
-  const ahead = b.ahead_by;
-  const files = b.files;
-  if (typeof ahead !== "number" || !Array.isArray(files)) {
-    return { ok: false, refusal: unreadable("a comparison", "its shape") };
-  }
-  // GitHub lists at most 300 files: a longer list is not all of them, and is not enrichment.
-  if (ahead > ENRICHMENT_MAX_COMMITS || files.length >= 300) return { ok: true, value: false };
-  return {
-    ok: true,
-    value: files.every(
-      (f) =>
-        isObject(f) &&
-        typeof f.filename === "string" &&
-        (f.status === "added" || f.status === "modified") &&
-        isEnrichmentPath(f.filename),
-    ),
-  };
+/** The words the evidence gives for what the merge did to the ledger. */
+function ledgerWord(change: LedgerChange): AcceptanceEvidence["ledger"] {
+  if (change.kind === "none") return "untouched";
+  return change.kind === "scrub-append" && change.repull ? "repull-scrub-lines" : "scrub-lines";
 }
 
 /**
  * Whether the merge changed any path but the ledger against its parent: the root trees outside
- * `.nemar`, then, when only `.nemar` differs, its entries but the ledger.
+ * `.nemar`, then, when only `.nemar` differs, its entries but the ledger (a root without `.nemar`
+ * has none).
  */
-async function changesBesideLedger(
+async function besideLedger(
   env: Bindings,
   row: RepullRow,
-  parentTree: TreeEntry[],
-  mergeTree: TreeEntry[],
+  parentRoot: TreeEntry[],
+  mergeRoot: TreeEntry[],
 ): Promise<Read<boolean>> {
-  const key = (e: TreeEntry) => `${e.mode} ${e.type} ${e.sha} ${e.path}`;
-  const rest = (t: TreeEntry[], skip: string) =>
-    t
-      .filter((e) => e.path !== skip)
-      .map(key)
-      .sort()
-      .join("\n");
-  if (rest(parentTree, ".nemar") !== rest(mergeTree, ".nemar")) return { ok: true, value: true };
-  const sub = (t: TreeEntry[]) => t.find((e) => e.path === ".nemar" && e.type === "tree")?.sha;
-  const a = sub(parentTree);
-  const b = sub(mergeTree);
-  if (a === b) return { ok: true, value: false };
-  if (a === undefined || b === undefined) return { ok: true, value: true };
-  const left = await readTree(env, row, a);
-  if (!left.ok) return left;
-  const right = await readTree(env, row, b);
-  if (!right.ok) return right;
-  if (left.value === null || right.value === null) {
-    return { ok: false, refusal: unreadable("the .nemar tree", "not found") };
-  }
-  const ledgerName = LEDGER_REPO_PATH.slice(".nemar/".length);
-  return { ok: true, value: rest(left.value, ledgerName) !== rest(right.value, ledgerName) };
-}
-
-// ----------------------------------------------------------------------------
-// The acceptance
-// ----------------------------------------------------------------------------
-
-function refusal(code: string, message: string, row?: RepullRow): RepullRefusal {
-  return { status: 409, code, message, ...(row ? { row } : {}) };
+  const sub = async (root: TreeEntry[]): Promise<Read<TreeEntry[] | null>> => {
+    const sha = nemarTreeOf(root);
+    if (sha === null) return { ok: true, value: null };
+    const t = await readTree(env, row, sha);
+    if (!t.ok) return t;
+    return t.value === null
+      ? { ok: false, refusal: unreadable("the .nemar tree", "not found") }
+      : t;
+  };
+  // Outside `.nemar` the roots decide alone; an equal `.nemar` object is no change in it.
+  if (changesBesideLedger(parentRoot, mergeRoot, null, null)) return { ok: true, value: true };
+  if (nemarTreeOf(parentRoot) === nemarTreeOf(mergeRoot)) return { ok: true, value: false };
+  const a = await sub(parentRoot);
+  if (!a.ok) return a;
+  const b = await sub(mergeRoot);
+  if (!b.ok) return b;
+  return { ok: true, value: changesBesideLedger(parentRoot, mergeRoot, a.value, b.value) };
 }
 
 /** Accept the merge (see the module comment), or replay an acceptance already recorded. */
@@ -376,6 +261,8 @@ export async function acceptRepullMerge(
       row,
     );
   }
+
+  // 1. The record.
   if (row.status !== cols.merged) {
     return refusal(
       "bad-transition",
@@ -421,7 +308,7 @@ export async function acceptRepullMerge(
   }
   const recordedHead = row[cols.head] as string;
   const head = await movedByEnrichmentOnly(env, row, recordedHead, facts.headSha);
-  if (!head.ok) return { ...head.refusal, row };
+  if (!head.ok) return unread(head, row);
   if (!head.value) {
     return refusal(
       "merge-head-foreign",
@@ -432,7 +319,7 @@ export async function acceptRepullMerge(
 
   // 3. The merge commit: one parent, the base or an enrichment-moved descendant of it.
   const merge = await readCommit(env, row, body.merge_sha);
-  if (!merge.ok) return { ...merge.refusal, row };
+  if (!merge.ok) return unread(merge, row);
   if (merge.value === null) {
     return { ...unreadable(`commit ${body.merge_sha.slice(0, 12)}`, "not found"), row };
   }
@@ -446,7 +333,7 @@ export async function acceptRepullMerge(
   const parent = merge.value.parents[0] as string;
   const base = (body.pr === "n0" ? row.base_sha : row.patch_base_sha) as string;
   const parentOk = await movedByEnrichmentOnly(env, row, base, parent);
-  if (!parentOk.ok) return { ...parentOk.refusal, row };
+  if (!parentOk.ok) return unread(parentOk, row);
   if (!parentOk.value) {
     return refusal(
       "merge-parent-foreign",
@@ -463,7 +350,7 @@ export async function acceptRepullMerge(
     anchorTree = null;
   } else {
     const gated = await readCommit(env, row, row.patch_gates_sha);
-    if (!gated.ok) return { ...gated.refusal, row };
+    if (!gated.ok) return unread(gated, row);
     anchorTree = gated.value?.tree ?? null;
   }
   if (anchorTree === null) {
@@ -474,9 +361,9 @@ export async function acceptRepullMerge(
     );
   }
   const mergedTree = await readTree(env, row, merge.value.tree);
-  if (!mergedTree.ok) return { ...mergedTree.refusal, row };
+  if (!mergedTree.ok) return unread(mergedTree, row);
   const recordedTree = await readTree(env, row, anchorTree);
-  if (!recordedTree.ok) return { ...recordedTree.refusal, row };
+  if (!recordedTree.ok) return unread(recordedTree, row);
   if (mergedTree.value === null || recordedTree.value === null) {
     return { ...unreadable("a tree", "not found"), row };
   }
@@ -488,11 +375,11 @@ export async function acceptRepullMerge(
     );
   }
 
-  // 5. The ledger: what the merge did to it decides whether the proof needs an attestation.
+  // 5. The ledger: what the merge did to it decides whether the proof needs a line.
   const before = await readLedger(env, row, parent);
-  if (!before.ok) return { ...before.refusal, row };
+  if (!before.ok) return unread(before, row);
   const after = await readLedger(env, row, body.merge_sha);
-  if (!after.ok) return { ...after.refusal, row };
+  if (!after.ok) return unread(after, row);
   const change = ledgerChange(before.value?.text ?? null, after.value?.text ?? null);
   if (change.kind === "other") {
     return refusal(
@@ -502,33 +389,62 @@ export async function acceptRepullMerge(
     );
   }
   let needed = false;
+  let scanner: string | null = null;
   if (change.kind === "scrub-append" && change.repull) {
-    const parentTree = await readCommit(env, row, parent);
-    if (!parentTree.ok) return { ...parentTree.refusal, row };
-    const parentEntries = parentTree.value
-      ? await readTree(env, row, parentTree.value.tree)
+    const parentCommit = await readCommit(env, row, parent);
+    if (!parentCommit.ok) return unread(parentCommit, row);
+    const parentRoot = parentCommit.value
+      ? await readTree(env, row, parentCommit.value.tree)
       : ({ ok: true, value: null } as const);
-    if (!parentEntries.ok) return { ...parentEntries.refusal, row };
-    if (parentEntries.value === null)
-      return { ...unreadable("the parent's tree", "not found"), row };
-    const beside = await changesBesideLedger(env, row, parentEntries.value, mergedTree.value);
-    if (!beside.ok) return { ...beside.refusal, row };
+    if (!parentRoot.ok) return unread(parentRoot, row);
+    if (parentRoot.value === null) return { ...unreadable("the parent's tree", "not found"), row };
+    const beside = await besideLedger(env, row, parentRoot.value, mergedTree.value);
+    if (!beside.ok) return unread(beside, row);
     needed = beside.value;
+    scanner = change.scanner;
   }
-  if (needed && (change.kind !== "scrub-append" || change.scanner === null)) {
+  // The line must be one the ledger takes before anything is recorded, or no request could ever
+  // write it and the release would wait for it for good.
+  if (needed) {
+    try {
+      mergeAcceptanceLine({
+        dataset: row.dataset_id,
+        version: row[cols.version] as string,
+        mergeSha: body.merge_sha,
+        planDigest: row.plan_digest,
+        scanner: scanner ?? "",
+        at: "2000-01-01T00:00:00.000Z",
+      });
+    } catch {
+      return refusal(
+        "merge-ledger-foreign",
+        "The merge commit's repull-scrubbed line names no scanner a ledger line can carry, so no acceptance line could be written for it.",
+        row,
+      );
+    }
+  }
+
+  // 6. `main`: it holds the merge, and, when a line is needed, a ledger that names it in no line.
+  const onMain = await mergeOnMain(env, row, body.merge_sha);
+  if (!onMain.ok) return unread(onMain, row);
+  if (!onMain.value) {
     return refusal(
-      "merge-ledger-foreign",
-      "The merge commit's repull-scrubbed line names no scanner.",
+      "merge-not-on-main",
+      `NEMAR's main no longer holds the merge commit ${body.merge_sha.slice(0, 12)} (rewritten or force-pushed past it), so nothing was accepted or written.`,
       row,
     );
   }
-  const scanner = needed && change.kind === "scrub-append" ? change.scanner : null;
-  // A line on `main` that names the merge before NEMAR recorded its acceptance is not NEMAR's:
-  // NEMAR writes only after it records. Refused before anything is written, never overwritten.
   if (needed) {
-    const onMain = await readLedger(env, row, "main");
-    if (!onMain.ok) return { ...onMain.refusal, row };
-    if (onMain.value && acceptedMergesOf(onMain.value.text).includes(body.merge_sha)) {
+    const ledger = await readLedger(env, row, "main");
+    if (!ledger.ok) return unread(ledger, row);
+    if (ledger.value === null) {
+      return refusal(
+        "ledger-missing-on-main",
+        "The privacy ledger is not on main, so an acceptance line would have no ledger to extend; nothing was accepted or written.",
+        row,
+      );
+    }
+    if (acceptedMergesOf(ledger.value.text).includes(body.merge_sha)) {
       return refusal(
         "attestation-conflict",
         "The ledger on main already names this merge in a line NEMAR did not write; nothing was accepted or written, and an administrator looks.",
@@ -549,7 +465,7 @@ export async function acceptRepullMerge(
         body.reason,
         admin.id,
         needed ? 1 : 0,
-        scanner,
+        needed ? scanner : null,
       ),
     db.prepare(AUDIT_IF_PREVIOUS_CHANGED_SQL).bind(
       ...auditLogParams({
@@ -593,12 +509,7 @@ export async function acceptRepullMerge(
       parent,
       parent_moved_by_enrichment: parent !== base,
       tree: merge.value.tree,
-      ledger:
-        change.kind === "none"
-          ? "untouched"
-          : change.kind === "scrub-append" && change.repull
-            ? "repull-scrub-lines"
-            : "scrub-lines",
+      ledger: ledgerWord(change),
     },
     false,
   );
@@ -621,11 +532,30 @@ export function attestationLineOf(row: RepullRow, a: MergeAcceptance): string | 
   });
 }
 
-const MARK_ATTESTED_SQL = `UPDATE upstream_repull_merge_acceptances
-   SET attestation_sha = ?3, attested_at = datetime('now')
- WHERE repull_id = ?1 AND pr = ?2 AND attestation_needed = 1 AND attested_at IS NULL`;
+/**
+ * Whether the acceptance's line is on `main` now, read by the Worker: the release's own check
+ * (`upstream-repull-verified.ts`), so a release never rests on a flag alone. True when none is
+ * needed.
+ */
+export async function attestationOnMain(
+  env: Bindings,
+  row: RepullRow,
+  a: MergeAcceptance,
+): Promise<Read<boolean>> {
+  const line = attestationLineOf(row, a);
+  if (line === null) return { ok: true, value: true };
+  const ledger = await readLedger(env, row, "main");
+  if (!ledger.ok) return ledger;
+  return {
+    ok: true,
+    value: ledger.value !== null && ledgerLines(ledger.value.text).includes(line),
+  };
+}
 
-/** The ledger line on `main`, written when it is not there yet; then the acceptance's answer. */
+/**
+ * The ledger line on `main`, read first and written when it is not there yet (see the module
+ * comment); then the acceptance's answer.
+ */
 async function attest(
   env: Bindings,
   row: RepullRow,
@@ -635,41 +565,53 @@ async function attest(
   replayed: boolean,
 ): Promise<AcceptResult | RepullRefusal> {
   const line = attestationLineOf(row, acceptance);
-  const done = async (sha: string | null): Promise<AcceptResult> => {
-    if (acceptance.attested_at === null && line !== null) {
-      await env.DB.prepare(MARK_ATTESTED_SQL).bind(row.id, pr, sha).run();
-    }
-    return {
-      acceptance: (await readAcceptance(env.DB, row.id, pr)) ?? acceptance,
-      evidence,
-      attestation_line: line,
-      replayed,
-    };
-  };
-  if (line === null || acceptance.attested_at !== null) return done(acceptance.attestation_sha);
+  const answer = async (): Promise<AcceptResult> => ({
+    acceptance: (await readAcceptance(env.DB, row.id, pr)) ?? acceptance,
+    evidence,
+    attestation_line: line,
+    replayed,
+  });
+  if (line === null) return answer();
 
   for (let attempt = 1; attempt <= 3; attempt++) {
     const current = await readLedger(env, row, "main");
-    if (!current.ok) return { ...current.refusal, row };
+    if (!current.ok) return unread(current, row);
     if (current.value === null) {
       return refusal(
         "ledger-missing-on-main",
-        "The privacy ledger is not on main, so the acceptance has no ledger to extend; nothing was written.",
+        "The acceptance is recorded, and the privacy ledger is not on main, so its line has no ledger to extend; nothing was written.",
         row,
       );
     }
     const { text, sha } = current.value;
     if (acceptedMergesOf(text).includes(acceptance.merge_sha)) {
-      if (ledgerLines(text).includes(line)) return done(null);
+      if (!ledgerLines(text).includes(line)) {
+        return refusal(
+          "attestation-conflict",
+          "The acceptance is recorded, and the ledger on main names this merge in a line that is not NEMAR's acceptance as recorded; nothing was written, and an administrator looks.",
+          row,
+        );
+      }
+      await env.DB.prepare(MARK_SEEN_SQL).bind(row.id, pr).run();
+      return answer();
+    }
+    // Written only while `main` still holds the merge, the first time and on every retry: a line
+    // naming an id a rewritten history no longer holds would fail the proof on a clean dataset.
+    const onMain = await mergeOnMain(env, row, acceptance.merge_sha);
+    if (!onMain.ok) return unread(onMain, row);
+    if (!onMain.value) {
       return refusal(
-        "attestation-conflict",
-        "The ledger on main already names this merge in a line that is not NEMAR's acceptance as recorded; nothing was written, and an administrator looks.",
+        "merge-not-on-main",
+        `The acceptance is recorded, and NEMAR's main no longer holds the merge commit ${acceptance.merge_sha.slice(0, 12)}, so its line is not written.`,
         row,
       );
     }
     const next = `${text}${text === "" || text.endsWith("\n") ? "" : "\n"}${line}\n`;
     const written = await putLedger(env, row, next, sha);
-    if (written.kind === "written") return done(written.commit);
+    if (written.kind === "written") {
+      await env.DB.prepare(MARK_WRITTEN_SQL).bind(row.id, pr, written.commit).run();
+      return answer();
+    }
     if (written.kind === "conflict") continue;
     return {
       status: 502,
@@ -682,65 +624,7 @@ async function attest(
     status: 409,
     code: "attestation-unwritten",
     message:
-      "The ledger on main kept moving while the acceptance's line was written; ask again, which writes it once.",
+      "The acceptance is recorded, and the ledger on main kept moving while its line was written; ask again, which writes it once.",
     row,
   };
-}
-
-/**
- * One Contents API write of the ledger on `main`, leased on the blob `sha` it was read at: GitHub
- * refuses it (409, or a 422 saying the sha does not match) when another writer changed the ledger
- * in between, so nothing that writer appended is dropped. Sent once; a caller that lost the
- * answer reads the ledger again and finds the line.
- */
-async function putLedger(
-  env: Bindings,
-  row: RepullRow,
-  text: string,
-  sha: string,
-): Promise<
-  { kind: "written"; commit: string } | { kind: "conflict" } | { kind: "failed"; why: string }
-> {
-  const bytes = new TextEncoder().encode(text);
-  let binary = "";
-  for (const b of bytes) binary += String.fromCharCode(b);
-  let res: Response;
-  try {
-    const { token, refresh } = await getDatasetsTokenWithRefresher(env);
-    res = await githubFetchWithRetry(
-      `${GITHUB_API()}/repos/${ORG_NAME}/${row.dataset_id}/contents/${LEDGER_REPO_PATH}`,
-      {
-        method: "PUT",
-        headers: { ...ghHeaders(token), "Content-Type": "application/json" },
-        body: JSON.stringify({
-          message: ATTESTATION_MESSAGE,
-          content: btoa(binary),
-          sha,
-          branch: "main",
-          committer: NEMAR_COMMITTER,
-          author: NEMAR_COMMITTER,
-        }),
-        signal: AbortSignal.timeout(10_000),
-      },
-      { kind: "interactive", maxAttempts: 1, refreshTokenOn401: refresh },
-    );
-  } catch (err) {
-    return { kind: "failed", why: err instanceof Error ? err.name : "no answer" };
-  }
-  const answer = await res.text().catch(() => "");
-  if (res.status === 409 || (res.status === 422 && /does not match/i.test(answer))) {
-    return { kind: "conflict" };
-  }
-  if (res.status !== 200 && res.status !== 201)
-    return { kind: "failed", why: `HTTP ${res.status}` };
-  let commit: unknown = null;
-  try {
-    const body = JSON.parse(answer) as unknown;
-    commit = isObject(body) && isObject(body.commit) ? body.commit.sha : null;
-  } catch {
-    commit = null;
-  }
-  return typeof commit === "string" && SHA_RE.test(commit)
-    ? { kind: "written", commit }
-    : { kind: "failed", why: "an answer that names no commit" };
 }
