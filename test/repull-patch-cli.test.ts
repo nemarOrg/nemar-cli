@@ -526,6 +526,22 @@ describe.skipIf(!awsInstalled)("N.0.1", () => {
     expect(await mainHead()).toBe(merge);
   });
 
+  test("N.0.1 merged with GitHub's button before its gates is not accepted: tree-anchor-missing", async () => {
+    await patchOpen();
+    const merge = await w.mergeOnGitHub({ pr: "n1" });
+    await w.tagMain("2.0.1");
+    w.insertVersionRow("2.0.1");
+    const run = await resume([
+      "--accept-merge-trailers",
+      "N.0.1 was merged on GitHub's page before its screen and gates ran",
+    ]);
+    expect(run.exitCode, run.all).toBe(1);
+    expect(run.all).toContain("tree-anchor-missing");
+    expect(w.row()).toMatchObject({ status: "patch_merged", patch_merge_sha: merge });
+    expect(w.db().query("SELECT * FROM upstream_repull_merge_acceptances").all()).toEqual([]);
+    expect(w.ledgerWrites()).toBe(0);
+  });
+
   test("a tag whose tree is not N.0.1's gated head stays patch_merged: patch-tree-mismatch", async () => {
     await patchGates();
     const merged = await w.cli(["repull", "merge", w.fx.datasetId, "--yes"]);
