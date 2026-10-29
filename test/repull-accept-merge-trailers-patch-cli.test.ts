@@ -55,7 +55,7 @@ beforeAll(async () => {
   // Accepted, released and locked; then it waits for a decision on the plan's conflict.
   const run = await resume(["--accept-merge-trailers", REASON]);
   expect(run.exitCode, run.all).toBe(3);
-  expect(run.all).toContain(`the line that names ${merge.slice(0, 12)}`);
+  expect(run.all).toContain(`The line that names ${merge.slice(0, 12)} is on main`);
   expect(w.row().status).toBe("released");
   expect(JSON.parse(w.row().counts).locked).toBeGreaterThan(0);
   attestation = await mainHead();

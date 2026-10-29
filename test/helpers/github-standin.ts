@@ -331,7 +331,7 @@ export function startGitHubStandin(): GitHubStandin {
           : Response.json({ sha });
       }
       const compare = url.pathname.match(
-        /^\/repos\/nemarDatasets\/([^/]+)\/compare\/([0-9a-f]{40})\.\.\.([0-9a-f]{40})$/,
+        /^\/repos\/nemarDatasets\/([^/]+)\/compare\/([0-9a-f]{40})\.\.\.([0-9a-f]{40}|main)$/,
       );
       if (req.method === "GET" && compare && state.compareCommits) {
         const word = await state.compareCommits(

@@ -47,6 +47,8 @@ import type { LedgerEntry } from "../scripts/scrub/contract";
 import { isAnnexRef, ledgerChecks } from "../scripts/scrub/git/git-lib";
 import { validateLedgerEntry } from "../scripts/scrub/ledger";
 import { mergeAcceptanceLine } from "../shared/repull-merge-acceptance";
+import { runCommand } from "../src/lib/git-annex/run-command";
+import { WORKER_TOKEN } from "./helpers/github-standin";
 import { gitIn } from "./helpers/repull-fixture";
 import {
   ADMIN_ID,
@@ -54,6 +56,7 @@ import {
   type RepullWorld,
   type WorldPoint,
   enrichedMetadata,
+  prKey,
   startRepullWorld,
 } from "./helpers/repull-pr-world";
 import { toolOrFail } from "./scrub/helpers/require-tools";
@@ -143,6 +146,57 @@ async function proof() {
  */
 const acceptRequests = () => w.apiWrites.filter((p) => p.endsWith("/merge-trailers/accept"));
 
+const GIT_ID = {
+  GIT_AUTHOR_NAME: "t",
+  GIT_AUTHOR_EMAIL: "t@t",
+  GIT_COMMITTER_NAME: "t",
+  GIT_COMMITTER_EMAIL: "t@t",
+};
+
+/** One commit of several files onto a ref of the bare origin (null removes a file). */
+async function commitFiles(
+  ref: string,
+  files: Record<string, string | null>,
+  message: string,
+): Promise<string> {
+  const repo = w.fx.originRepo;
+  const before = (await gitIn(repo, ["rev-parse", ref])).trim();
+  const dir = mkdtempSync(join(tmpdir(), "nemar-accept-index-"));
+  const env = { ...GIT_ID, GIT_INDEX_FILE: join(dir, "index") };
+  const run = async (args: string[], stdin?: string) => {
+    const r = await runCommand(["git", ...args], {
+      cwd: repo,
+      env,
+      ...(stdin === undefined ? {} : { stdin }),
+    });
+    if (r.exitCode !== 0) throw new Error(`git ${args[0]} failed: ${r.stderr}`);
+    return r.stdout.trim();
+  };
+  try {
+    await run(["read-tree", ref]);
+    for (const [path, content] of Object.entries(files)) {
+      // A bare repository has no work tree, so a removal goes through --index-info (mode 0).
+      if (content === null) {
+        await run(["update-index", "--index-info"], `0 ${"0".repeat(40)}\t${path}\n`);
+        continue;
+      }
+      const blob = await run(["hash-object", "-w", "--stdin"], content);
+      await run(["update-index", "--add", "--cacheinfo", `100644,${blob},${path}`]);
+    }
+    const tree = (await runCommand(["git", "write-tree"], { cwd: repo, env })).stdout.trim();
+    const commit = (
+      await runCommand(["git", "commit-tree", tree, "-p", before, "-m", message], {
+        cwd: repo,
+        env,
+      })
+    ).stdout.trim();
+    await gitIn(repo, ["update-ref", ref, commit, before]);
+    return commit;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 /** Nothing written: no acceptance, no ledger write, `main` where it was. */
 async function nothingWritten(main: string): Promise<void> {
   expect(acceptances()).toEqual([]);
@@ -181,15 +235,22 @@ describe.skipIf(!awsInstalled)("a merge made outside the gate", () => {
     expect(run.exitCode, run.all).toBe(0);
     // What was verified, and what was accepted, in plain words.
     expect(run.all).toContain("does not end with the re-pull commit's two trailers");
-    expect(run.all).toContain("Verified before it was accepted");
+    expect(run.all).toContain("Verified by this run");
+    expect(run.all).toContain("The Worker read the same on GitHub with its own credential");
+    // What this run verified is said before the Worker is asked.
+    expect(run.all.indexOf("Verified by this run")).toBeLessThan(
+      run.all.indexOf("The Worker read the same"),
+    );
     expect(run.all).toContain(`is GitHub's squash merge of pull request #${w.row().pr_number}`);
     expect(run.all).toContain("the recorded head");
     expect(run.all).toContain("its one parent");
     expect(run.all).toContain("is the record's base");
     expect(run.all).toContain("its tree is the re-pull's commit");
     expect(run.all).toContain("repull-scrubbed");
-    expect(run.all).toContain(`Accepted on your reason: ${REASON}`);
-    expect(run.all).toContain(`the line that names ${merge.slice(0, 12)}`);
+    expect(run.all).toContain(
+      `Accepted on your reason, and recorded on re-pull #${w.row().id}: ${REASON}`,
+    );
+    expect(run.all).toContain(`The line that names ${merge.slice(0, 12)} is on main`);
     expect(run.all).toContain("is complete");
 
     // The record went on as for a gated merge: released at the tag, lineage, the lock, complete.
@@ -285,7 +346,8 @@ describe.skipIf(!awsInstalled)("a merge made outside the gate", () => {
     w.setLedgerWriteFault(null);
     const second = await resume();
     expect(second.exitCode, second.all).toBe(0);
-    expect(second.all).toContain("accepted it at");
+    expect(second.all).toContain(`it was accepted earlier, by administrator #${ADMIN_ID}`);
+    expect(second.all).toContain(`on the reason: ${REASON}`);
     expect(w.row().status).toBe("complete");
     expect(acceptances()).toHaveLength(1);
     expect(w.ledgerWrites()).toBe(2);
@@ -486,6 +548,24 @@ describe.skipIf(!awsInstalled)("a merge made outside the gate", () => {
     expect(run.all).toContain("attestation-unseen");
     expect(w.row()).toMatchObject({ status: "merged", tag_sha: null });
     expect(await mainHead()).toBe(merge);
+    // The Worker refuses the release while the line is not on main, whatever its own flag says.
+    const released = await fetch(`${w.apiUrl}/admin/repulls/${w.row().id}/released`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${ADMIN_KEY}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ pr: "n0", tag_sha: merge, tree_verified: true }),
+    });
+    expect(((await released.json()) as { code: string }).code).toBe("acceptance-unattested");
+    // The next run reads main again, finds no line and writes it, once; the record completes.
+    w.setLedgerWriteFault(null);
+    const second = await resume();
+    expect(second.exitCode, second.all).toBe(0);
+    expect(w.row().status).toBe("complete");
+    expect(w.ledgerWrites()).toBe(2);
+    const ledger = await gitIn(w.fx.originRepo, ["show", `refs/heads/main:${LEDGER}`]);
+    expect(ledger.split("\n").filter((l) => l.includes("repull-merge-accepted"))).toHaveLength(1);
+    // A third finds nothing open and writes nothing.
+    expect((await resume()).exitCode).toBe(1);
+    expect(w.ledgerWrites()).toBe(2);
   });
 
   test("a line on main already naming the merge is not NEMAR's: refused, nothing written", async () => {
@@ -509,6 +589,327 @@ describe.skipIf(!awsInstalled)("a merge made outside the gate", () => {
     expect(w.ledgerWrites()).toBe(0);
     expect(await mainHead()).toBe(main);
     expect(w.row().status).toBe("merged");
+  });
+
+  test("trailers the proof reads with values not the record's: accepted, and the line it writes changes nothing", async () => {
+    await w.restore(gated);
+    const plan = `sha256:${"c".repeat(64)}`;
+    await w.mergeOnGitHub({
+      message: `Upstream-Snapshot: ds099999@1.1.0\nRepull-Plan: ${plan}`,
+    });
+    await tagged();
+    const run = await accepting();
+    expect(run.exitCode, run.all).toBe(0);
+    expect(run.all).toContain("is not the re-pull's own");
+    expect(w.row().status).toBe("complete");
+    // The merge passes the proof on its own trailers, and the line naming it is matched, not
+    // counted against the dataset.
+    expect(await proof()).toMatchObject({ notAlone: 0, unmatched: 0, invalid: 0, accepted: 0 });
+  });
+
+  test("the acceptance waits for the tag, so NEMAR's line never lands on main before it", async () => {
+    await w.restore(mergedOnGitHub);
+    const merge = await mainHead();
+    const early = await accepting();
+    expect(early.exitCode, early.all).toBe(3);
+    expect(early.all).toContain("the tag v2.0.0");
+    expect(acceptances()).toEqual([]);
+    expect(w.ledgerWrites()).toBe(0);
+    await tagged();
+    const run = await accepting();
+    expect(run.exitCode, run.all).toBe(0);
+    expect(w.row()).toMatchObject({ status: "complete", tag_sha: merge });
+  });
+
+  test("--accept-merge-trailers on a record that does not need it says it changes nothing", async () => {
+    await w.restore(gated);
+    const ready = await accepting();
+    expect(ready.exitCode, ready.all).toBe(0);
+    expect(ready.all).toContain("--accept-merge-trailers changed nothing");
+    // A merge through NEMAR's gate carries its trailers.
+    const merged = await w.cli(["repull", "merge", w.fx.datasetId, "--yes"]);
+    expect(merged.exitCode, merged.all).toBe(0);
+    await tagged();
+    const run = await accepting();
+    expect(run.exitCode, run.all).toBe(0);
+    expect(run.all).toContain(
+      "carries the re-pull's trailers; --accept-merge-trailers changes nothing",
+    );
+    expect(acceptances()).toEqual([]);
+  });
+
+  test("a pull request that is not the record's branch of its own repository: pr-foreign, by the CLI", async () => {
+    await w.restore(mergedOnGitHub);
+    const merge = await mainHead();
+    await tagged();
+    expect((await resume()).exitCode).toBe(3);
+    const pull = w.gh.pulls[prKey(w)];
+    if (!pull) throw new Error("no pull request");
+    pull.headRepo = "someone/fork";
+    const run = await accepting();
+    expect(run.exitCode, run.all).toBe(1);
+    expect(run.all).toContain("pr-foreign");
+    expect(acceptRequests()).toHaveLength(2); // the first run's question and this one's; no reason sent
+    await nothingWritten(merge);
+  });
+
+  test("GitHub naming another merge commit than the record's: merge-mismatch, by the CLI and by the Worker", async () => {
+    await w.restore(mergedOnGitHub);
+    const merge = await mainHead();
+    await tagged();
+    expect((await resume()).exitCode).toBe(3);
+    const pull = w.gh.pulls[prKey(w)];
+    if (!pull) throw new Error("no pull request");
+    pull.mergeCommitSha = "e".repeat(40);
+    const run = await accepting();
+    expect(run.exitCode, run.all).toBe(1);
+    expect(run.all).toContain("merge-mismatch");
+    expect(acceptRequests()).toHaveLength(2);
+    expect(await acceptRoute({ pr: "n0", merge_sha: merge, reason: REASON })).toEqual({
+      status: 409,
+      code: "merge-mismatch",
+    });
+    await nothingWritten(merge);
+  });
+
+  test("a merge commit with two parents: merge-not-squash, by the CLI and by the Worker", async () => {
+    await w.restore(gated);
+    const origin = w.fx.originRepo;
+    const head = w.row().head_sha as string;
+    const main = await mainHead();
+    const tree = (await gitIn(origin, ["rev-parse", `${head}^{tree}`])).trim();
+    const merge = (
+      await runCommand(
+        ["git", "commit-tree", tree, "-p", main, "-p", head, "-m", "Merge pull request"],
+        { cwd: origin, env: GIT_ID },
+      )
+    ).stdout.trim();
+    await gitIn(origin, ["update-ref", "refs/heads/main", merge, main]);
+    const pull = w.gh.pulls[prKey(w)];
+    if (!pull) throw new Error("no pull request");
+    Object.assign(pull, { merged: true, state: "closed", mergeCommitSha: merge });
+    await tagged();
+    const run = await accepting();
+    expect(run.exitCode, run.all).toBe(1);
+    expect(run.all).toContain("merge-not-squash");
+    expect(await acceptRoute({ pr: "n0", merge_sha: merge, reason: REASON })).toEqual({
+      status: 409,
+      code: "merge-not-squash",
+    });
+    await nothingWritten(merge);
+  });
+
+  test("a merge that edits an earlier ledger line: merge-ledger-foreign, by the CLI and by the Worker", async () => {
+    await w.restore(gated);
+    const branch = `refs/heads/${w.row().branch}`;
+    const ledger = await gitIn(w.fx.originRepo, ["show", `${branch}:${LEDGER}`]);
+    const [first, ...rest] = ledger.split("\n");
+    const edited = [first?.replace('"version":1', '"version":1 '), ...rest].join("\n");
+    const head = await w.commitOnto(branch, LEDGER, edited, "edit the ledger");
+    const merge = await w.mergeOnGitHub();
+    await tagged();
+    expect((await resume()).exitCode).toBe(3);
+    // The record's head, as if the edit were the re-pull's own: only the ledger check is left.
+    w.db().run("UPDATE upstream_repulls SET head_sha = ?", [head]);
+    const run = await accepting();
+    expect(run.exitCode, run.all).toBe(1);
+    expect(run.all).toContain("merge-ledger-foreign");
+    expect(acceptRequests()).toHaveLength(2);
+    expect(await acceptRoute({ pr: "n0", merge_sha: merge, reason: REASON })).toEqual({
+      status: 409,
+      code: "merge-ledger-foreign",
+    });
+    await nothingWritten(merge);
+  });
+
+  test("a repull-scrubbed line whose scanner no ledger line can carry is refused before anything is recorded", async () => {
+    await w.restore(gated);
+    const branch = `refs/heads/${w.row().branch}`;
+    const ledger = await gitIn(w.fx.originRepo, ["show", `${branch}:${LEDGER}`]);
+    const lines = ledger.split("\n").filter(Boolean);
+    const last = JSON.parse(lines.at(-1) as string);
+    expect(last.action).toBe("repull-scrubbed");
+    lines[lines.length - 1] = JSON.stringify({ ...last, scanner: "identifier-scan@xyz" });
+    const head = await w.commitOnto(branch, LEDGER, `${lines.join("\n")}\n`, "a bad scanner");
+    const merge = await w.mergeOnGitHub();
+    await tagged();
+    expect((await resume()).exitCode).toBe(3);
+    w.db().run("UPDATE upstream_repulls SET head_sha = ?", [head]);
+    const run = await accepting();
+    expect(run.exitCode, run.all).toBe(1);
+    expect(run.all).toContain("merge-ledger-foreign");
+    expect(run.all).toContain("names no scanner a ledger line can carry");
+    await nothingWritten(merge);
+  });
+
+  test("main that no longer holds the merge: merge-not-on-main, before the acceptance and before a later write", async () => {
+    await w.restore(mergedOnGitHub);
+    const merge = await mainHead();
+    await tagged();
+    const parent = (await gitIn(w.fx.originRepo, ["rev-parse", `${merge}^`])).trim();
+    // main rewritten past the merge, before anything was accepted.
+    await gitIn(w.fx.originRepo, ["update-ref", "refs/heads/main", parent, merge]);
+    const before = await accepting();
+    expect(before.exitCode, before.all).toBe(1);
+    expect(before.all).toContain("merge-not-on-main");
+    expect(acceptances()).toEqual([]);
+    expect(w.ledgerWrites()).toBe(0);
+
+    // Accepted, its first write lost, then main rewritten: the next run writes no line naming an id
+    // the history no longer holds.
+    await w.restore(mergedOnGitHub);
+    await tagged();
+    w.setLedgerWriteFault(() => Response.json({ message: "Server Error" }, { status: 502 }));
+    expect((await accepting()).exitCode).toBe(3);
+    expect(acceptances()).toHaveLength(1);
+    w.setLedgerWriteFault(null);
+    await gitIn(w.fx.originRepo, ["update-ref", "refs/heads/main", parent, merge]);
+    const later = await resume();
+    expect(later.exitCode, later.all).toBe(1);
+    expect(later.all).toContain("merge-not-on-main");
+    expect(later.all).toContain("its acceptance recorded earlier stands");
+    expect(w.ledgerWrites()).toBe(1);
+    expect(await mainHead()).toBe(parent);
+  });
+
+  test("a partial failure says what this run verified and that the acceptance is recorded, without contradiction", async () => {
+    await w.restore(mergedOnGitHub);
+    await tagged();
+    w.setLedgerWriteFault(() => Response.json({ message: "Server Error" }, { status: 502 }));
+    const run = await accepting();
+    expect(run.exitCode, run.all).toBe(3);
+    expect(run.all).toContain("Verified by this run");
+    expect(run.all).toContain("The Worker answered: The acceptance is recorded");
+    expect(run.all).not.toContain("did not accept");
+  });
+
+  test("a later run meeting a line it did not write: attestation-conflict, exit 1 as on a first acceptance", async () => {
+    await w.restore(mergedOnGitHub);
+    const merge = await mainHead();
+    await tagged();
+    w.setLedgerWriteFault(() => Response.json({ message: "Server Error" }, { status: 502 }));
+    expect((await accepting()).exitCode).toBe(3);
+    w.setLedgerWriteFault(null);
+    const ledger = await gitIn(w.fx.originRepo, ["show", `${merge}:${LEDGER}`]);
+    const handMade = `${mergeAcceptanceLine({
+      dataset: w.fx.datasetId,
+      version: "2.0.0",
+      mergeSha: merge,
+      planDigest: w.row().plan_digest as string,
+      scanner: "identifier-scan@abcdef1",
+      at: "2026-10-01T00:00:00.000Z",
+    })}\n`;
+    await w.commitOnto("refs/heads/main", LEDGER, `${ledger}${handMade}`, "By hand");
+    const run = await resume();
+    expect(run.exitCode, run.all).toBe(1);
+    expect(run.all).toContain("attestation-conflict");
+    expect(run.all).toContain("its acceptance recorded earlier stands");
+    expect(w.ledgerWrites()).toBe(1);
+  });
+
+  test("a ledger write GitHub refuses with a 422 that says the blob moved is read again and made once", async () => {
+    await w.restore(mergedOnGitHub);
+    await tagged();
+    let once = true;
+    w.setLedgerWriteFault(() => {
+      if (!once) return null;
+      once = false;
+      return Response.json(
+        { message: ".nemar/corrections.jsonl does not match 0123456789" },
+        { status: 422 },
+      );
+    });
+    const run = await accepting();
+    expect(run.exitCode, run.all).toBe(0);
+    expect(w.ledgerWrites()).toBe(2);
+    expect(w.row().status).toBe("complete");
+  });
+
+  test("a GitHub that cannot be read exits 3, for the CLI's reading and for the Worker's, and nothing is written", async () => {
+    await w.restore(mergedOnGitHub);
+    const merge = await mainHead();
+    await tagged();
+    expect((await resume()).exitCode).toBe(3);
+    const pull = w.gh.pulls[prKey(w)];
+    if (!pull) throw new Error("no pull request");
+    pull.adminReadsAfterFirst = { status: 503 };
+    const cli = await accepting();
+    expect(cli.exitCode, cli.all).toBe(3);
+    expect(cli.all).toContain("github-unreadable");
+    await nothingWritten(merge);
+    pull.adminReadsAfterFirst = undefined;
+    w.gh.expiredTokens.add(WORKER_TOKEN);
+    const worker = await accepting();
+    expect(worker.exitCode, worker.all).toBe(3);
+    expect(worker.all).toContain("github-unreadable");
+    await nothingWritten(merge);
+  });
+
+  test("the Worker's own reading of enrichment: more than 20 commits, 300 files or a removal is not enrichment", async () => {
+    const meta = (rev: string, n: number) =>
+      enrichedMetadata(w.fx.originRepo, rev, `2026-10-25T00:00:${String(n).padStart(2, "0")}Z`);
+    // 21 enrichment commits on main: more than enrichment ever makes.
+    await w.restore(gated);
+    for (let i = 0; i < 21; i++) {
+      await w.commitOnto(
+        "refs/heads/main",
+        ".nemar/metadata.json",
+        await meta("refs/heads/main", i),
+        "Update NEMAR metadata",
+      );
+    }
+    let merge = await w.mergeOnGitHub();
+    await tagged();
+    expect((await resume()).exitCode).toBe(3);
+    expect(await acceptRoute({ pr: "n0", merge_sha: merge, reason: REASON })).toEqual({
+      status: 409,
+      code: "merge-parent-foreign",
+    });
+    await nothingWritten(merge);
+
+    // 300 files under .nemar/ in one commit: GitHub's comparison lists at most 300, so not all.
+    await w.restore(gated);
+    const many: Record<string, string | null> = {};
+    for (let i = 0; i < 300; i++) many[`.nemar/extra-${i}.json`] = `{"i":${i}}\n`;
+    await commitFiles("refs/heads/main", many, "Update NEMAR metadata");
+    merge = await w.mergeOnGitHub();
+    await tagged();
+    const run = await accepting();
+    expect(run.exitCode, run.all).toBe(1);
+    expect(run.all).toContain("merge-parent-foreign");
+    expect(acceptRequests()).toHaveLength(2); // the CLI's shape check took it; the Worker did not
+    await nothingWritten(merge);
+
+    // A file under .nemar/ removed: enrichment adds and changes, never removes.
+    await w.restore(gated);
+    const removed = await commitFiles(
+      "refs/heads/main",
+      { ".nemar/metadata.json": null },
+      "remove metadata",
+    );
+    const gone = await runCommand(["git", "cat-file", "-e", `${removed}:.nemar/metadata.json`], {
+      cwd: w.fx.originRepo,
+    });
+    expect(gone.exitCode).not.toBe(0);
+    merge = await w.mergeOnGitHub();
+    await tagged();
+    expect((await resume()).exitCode).toBe(3);
+    expect(await acceptRoute({ pr: "n0", merge_sha: merge, reason: REASON })).toEqual({
+      status: 409,
+      code: "merge-parent-foreign",
+    });
+    await nothingWritten(merge);
+  });
+
+  test("a record that is not merged yet is not accepted by the Worker: bad-transition", async () => {
+    await w.restore(mergedOnGitHub);
+    const merge = await mainHead();
+    expect(w.row().status).toBe("gates_clear");
+    expect(await acceptRoute({ pr: "n0", merge_sha: merge, reason: REASON })).toEqual({
+      status: 409,
+      code: "bad-transition",
+    });
+    expect(acceptances()).toEqual([]);
   });
 
   test("a reason outside 10 to 500 characters is a usage error, before anything is read", async () => {

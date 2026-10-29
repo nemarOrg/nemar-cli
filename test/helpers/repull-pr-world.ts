@@ -351,12 +351,22 @@ export async function startRepullWorld(
     const origin = origins.get(dataset);
     return origin ? rev(origin, `refs/tags/${tag}^{commit}`) : null;
   };
-  gh.compareCommits = async (dataset, base, head) => {
+  // GitHub's comparison of `base...head` (`head` may be `main`): its word, the commits each side
+  // has, and the files changed from the merge base. Two commits with no common history are what
+  // GitHub answers 404 for ("No common ancestor"), and so does this.
+  gh.compareCommits = async (dataset, base, rawHead) => {
     const origin = origins.get(dataset);
     if (!origin) return null;
-    if (!(await rev(origin, `${base}^{commit}`)) || !(await rev(origin, `${head}^{commit}`))) {
+    const head = rawHead === "main" ? await rev(origin, "refs/heads/main") : rawHead;
+    if (
+      !head ||
+      !(await rev(origin, `${base}^{commit}`)) ||
+      !(await rev(origin, `${head}^{commit}`))
+    ) {
       return null;
     }
+    const common = await runCommand(["git", "merge-base", base, head], { cwd: origin });
+    if (common.exitCode !== 0) return null;
     const isAncestor = async (a: string, b: string) =>
       (await runCommand(["git", "merge-base", "--is-ancestor", a, b], { cwd: origin })).exitCode ===
       0;
@@ -371,7 +381,7 @@ export async function startRepullWorld(
     // GitHub's own fields: the commits each side has, and the files changed from the merge base.
     const count = async (range: string) =>
       Number((await gitIn(origin, ["rev-list", "--count", range])).trim());
-    const mergeBase = (await gitIn(origin, ["merge-base", base, head])).trim();
+    const mergeBase = common.stdout.trim();
     const words: Record<string, string> = { A: "added", M: "modified", D: "removed" };
     const files = (
       await gitIn(origin, ["diff", "--no-renames", "--name-status", "-z", mergeBase, head])
@@ -464,7 +474,10 @@ export async function startRepullWorld(
     return null;
   };
   // GitHub's squash merge: one commit on `main` holding the head's tree, with the title and the
-  // message the merge was sent (GitHub's own default lists the commits as bullets instead).
+  // message the merge was sent (GitHub's own default lists the commits as bullets instead). A
+  // simplification: GitHub's squash is a three-way merge of the head onto `main`, which is the
+  // head's tree only while `main` is the pull request's base; a suite that moves `main` first and
+  // needs the three-way result builds it itself.
   gh.onMerge = async (dataset, number, body) => {
     const origin = origins.get(dataset);
     const p = gh.pulls[`${dataset}#${number}`];
