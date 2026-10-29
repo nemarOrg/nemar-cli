@@ -423,6 +423,9 @@ export const datasetSearchEnvelopeSchema = z
     // the number judged to answer the query, each `score` is that probability, and `min_score` (a
     // cosine floor) was not applied. Absent for an exact-id hit, a single word, or a degraded answer.
     reranked: z.literal(true).optional(),
+    // The query as searched, present only when a word that matches no dataset was replaced by a
+    // catalog word one typo away ("bilinugual" -> "bilingual"). A client should say so.
+    corrected_query: z.string().optional(),
     warning: z.string().optional(),
     // Epic #1144 phase 3 (#1147), D4/ADR 0005: see datasetListEnvelopeSchema's
     // `excluded_unknown` for the exact semantics -- identical field, mirrored

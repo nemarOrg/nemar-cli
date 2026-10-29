@@ -39,6 +39,13 @@ import { ZARR_VERIFY_STATUS_PATH } from "./sweep-stamps";
  */
 export const PUBLISHED_AT_SQL = "COALESCE(d.first_published_at, d.publish_date, d.created_at)";
 
+/**
+ * The visibility predicate every search tier applies to `datasets d`: active,
+ * public, and not a sandbox dataset (except the curated exemplar fleet).
+ */
+export const PUBLIC_SEARCHABLE_SQL = `d.status = 'active' AND d.visibility = 'public'
+  AND (d.is_sandbox = 0 OR d.is_sandbox IS NULL OR d.is_exemplar = 1)`;
+
 /** Build an injection-safe FTS5 MATCH expression: tokenize to alphanumerics
  *  (dropping all FTS5 operator chars), quote each token and prefix-match it,
  *  OR them for recall. Returns null when there is nothing to match. Lives

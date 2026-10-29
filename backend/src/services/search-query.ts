@@ -18,6 +18,9 @@
  * word is informative", which is the behavior before this module existed.
  */
 
+import { PUBLIC_SEARCHABLE_SQL } from "./dataset-filters";
+import { correctMisspellings } from "./search-spelling";
+
 /** A word in more than this share of public datasets does not discriminate. */
 export const GENERIC_DF_MAX = 0.25;
 /**
@@ -28,10 +31,6 @@ export const GENERIC_DF_MAX = 0.25;
 export const MIN_CORPUS_FOR_DF = 100;
 /** Content words past this many are ignored, so the frequency query stays small. */
 export const MAX_QUERY_TERMS = 16;
-
-/** The same visibility predicate every search tier applies to `datasets d`. */
-export const PUBLIC_SEARCHABLE_SQL = `d.status = 'active' AND d.visibility = 'public'
-  AND (d.is_sandbox = 0 OR d.is_sandbox IS NULL OR d.is_exemplar = 1)`;
 
 /**
  * English function words, plus verbs that only frame a request ("using",
@@ -117,36 +116,63 @@ export function informativeTokens(content: string[], frequencies: TermFrequencie
 }
 
 export interface QueryAnalysis {
-  /** The words the query is made of, function words removed. */
+  /** The words the query is made of, function words removed, misspellings corrected. */
   content: string[];
   /** The content words that discriminate; what the lexical leg and the reranker are asked. */
   informative: string[];
   /** The text the lexical leg is given (it tokenizes and ORs it itself). */
   lexicalQuery: string;
-  /** The text that is embedded: the caller's own words, unless a misspelling was corrected. */
+  /** The text that is embedded: the caller's own words, with misspellings corrected. */
   semanticQuery: string;
   /** The text the cross-encoder is asked about. */
   rerankQuery: string;
   /** More than one content word: a phrase, which gets a relevance cutoff; one word does not. */
   isPhrase: boolean;
+  /**
+   * The query as searched, present only when a word that matches no dataset
+   * was replaced by a catalog word one typo away (see search-spelling.ts).
+   */
+  correctedQuery?: string;
+}
+
+async function tryTermFrequencies(
+  db: D1Database,
+  terms: string[],
+): Promise<TermFrequencies | undefined> {
+  try {
+    return await termFrequencies(db, terms);
+  } catch (err) {
+    console.warn(
+      `[search] term frequencies unavailable, keeping every word: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+    return undefined;
+  }
 }
 
 /** Analyze `query`. Never throws. */
 export async function analyzeQuery(db: D1Database, query: string): Promise<QueryAnalysis> {
   const trimmed = query.trim();
-  const content = contentTokens(queryTokens(trimmed));
-  let informative = content;
-  if (content.length > 1) {
-    try {
-      informative = informativeTokens(content, await termFrequencies(db, content));
-    } catch (err) {
-      console.warn(
-        `[search] term frequencies unavailable, keeping every word: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      );
+  const allTokens = queryTokens(trimmed);
+  let content = contentTokens(allTokens);
+  let semanticQuery = trimmed;
+  let correctedQuery: string | undefined;
+
+  let frequencies = await tryTermFrequencies(db, content);
+  if (frequencies && frequencies.corpusSize > 0) {
+    // A word that matches no public dataset at all is a typo or a word the catalog lacks.
+    const unseen = content.filter((t) => frequencies?.ratios.get(t) === 0);
+    const fixes =
+      unseen.length > 0 ? await correctMisspellings(db, unseen) : new Map<string, string>();
+    if (fixes.size > 0) {
+      content = content.map((t) => fixes.get(t) ?? t);
+      semanticQuery = allTokens.map((t) => fixes.get(t) ?? t).join(" ");
+      correctedQuery = semanticQuery;
+      frequencies = (await tryTermFrequencies(db, content)) ?? frequencies;
     }
   }
+  const informative = frequencies ? informativeTokens(content, frequencies) : content;
   // Punctuation-only input has no words; hand it through untouched so the
   // lexical leg reports its usual "nothing to match".
   const lexicalQuery = informative.length > 0 ? informative.join(" ") : trimmed;
@@ -154,8 +180,9 @@ export async function analyzeQuery(db: D1Database, query: string): Promise<Query
     content,
     informative,
     lexicalQuery,
-    semanticQuery: trimmed,
+    semanticQuery,
     rerankQuery: lexicalQuery,
     isPhrase: content.length > 1,
+    ...(correctedQuery !== undefined ? { correctedQuery } : {}),
   };
 }

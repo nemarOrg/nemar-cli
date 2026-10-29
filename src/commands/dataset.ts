@@ -2853,6 +2853,15 @@ Examples:
         console.log(theme.warn(`\n⚠ ${response.warning}`));
       }
 
+      // A word no dataset contains was replaced by a catalog word one typo away
+      // (backend search-spelling.ts). Say what was searched, so a wrong guess
+      // is visible rather than a mystery.
+      if (response.corrected_query) {
+        console.log(
+          theme.muted(`\nShowing results for "${response.corrected_query}" instead of "${query}".`),
+        );
+      }
+
       // Epic #1144 phase 4 (#1148), D5: same stderr-only, count-gated,
       // always-attributed note as the list command.
       if (response.excluded_unknown !== undefined && response.excluded_unknown > 0) {

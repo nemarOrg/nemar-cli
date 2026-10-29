@@ -268,6 +268,9 @@ export interface DatasetSearchResponse {
   /** True when a phrase's results were cut by a relevance judgment: `count` is the number judged
    *  to answer the query and each `score` is that probability (0..1). Absent otherwise. */
   reranked?: true;
+  /** The query as searched, present only when a word that matches no dataset was replaced by a
+   *  catalog word one typo away. The CLI says so before the results. */
+  corrected_query?: string;
   /** Set only when the backend's exact-count query failed and `count` fell
    *  back to a page-derived lower bound (review round 3 I1). */
   warning?: string;

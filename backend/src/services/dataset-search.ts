@@ -904,6 +904,10 @@ export interface DatasetSearchEnvelope {
    *  probability (0..1), and `min_score` (a cosine floor) was not applied.
    *  Absent otherwise. */
   reranked?: true;
+  /** The query as searched, present only when a word that matches no dataset
+   *  was replaced by a catalog word one typo away ("bilinugual" ->
+   *  "bilingual"). Clients should say so ("Showing results for ..."). */
+  corrected_query?: string;
   warning?: string;
   /** D4/ADR 0005: rows hidden by the default unknown-excluded facet policy
    *  (see {@link computeExcludedUnknownCount}). Absent when no facet is
@@ -998,6 +1002,7 @@ export async function executeDatasetSearch(
   // deduped) pool, and for a query with fewer true matches than any ceiling.
   // `truncated` (#1145 review S1) is the derived signal a caller would
   // otherwise have to reconstruct by hand from `count`/`candidate_ceiling`.
+  let correctedQuery: string | undefined;
   const buildEnvelope = (
     rows: SearchResult[],
     method: string,
@@ -1016,6 +1021,7 @@ export async function executeDatasetSearch(
       truncated: count > rows.length,
       method,
       min_score: minScore,
+      ...(correctedQuery !== undefined ? { corrected_query: correctedQuery } : {}),
       ...(warning !== undefined ? { warning } : {}),
       ...(excludedUnknown !== undefined
         ? {
@@ -1040,6 +1046,7 @@ export async function executeDatasetSearch(
     // drive the lexical leg ("study" is in 59% of the catalog and must not
     // decide a match); the caller's own words drive the embedding.
     const analysis = await analyzeQuery(db, trimmed);
+    correctedQuery = analysis.correctedQuery;
     if (analysis.isPhrase && ai && vectorize) {
       const byRelevance = await searchByRelevance(
         db,
