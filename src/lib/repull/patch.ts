@@ -560,7 +560,7 @@ export async function findPatchCommit(args: {
       message !== null &&
       new RegExp(`^${PATCH_TRAILER}: corrections=\\d+$`, "m").test(message) &&
       (await trailersProblem(message, row)) === null &&
-      (await enrichmentOnlySince(dir, row.merge_sha as string, parent)).ok &&
+      (await enrichmentOnlySince(dir, row.merge_sha as string, parent, { acceptances: true })).ok &&
       (await enrichmentOnlySince(dir, candidate, args.head)).ok
     ) {
       return { commit: candidate, parent };

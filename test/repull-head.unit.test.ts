@@ -13,6 +13,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { mergeAcceptanceLine } from "../shared/repull-merge-acceptance";
 import { NEMAR_BIDSIGNORE_ENTRY, withBidsignoreEntry } from "../shared/standard-edits/bidsignore";
 import {
   buildPlaceholderParticipantsTsv,
@@ -125,6 +126,96 @@ describe("the head is the re-pull's: the three shapes enrichment writes", () => 
   test("a root participants.tsv that is, byte for byte, the placeholder of the commit's subjects is accepted", async () => {
     const head = commit(() => put("participants.tsv", placeholder()));
     expect((await verdict(head)).ok).toBe(true);
+  });
+});
+
+describe("main past N.0.0's merge: NEMAR's acceptance of a merge made without its trailers", () => {
+  const plan = `sha256:${"a".repeat(64)}`;
+  const scrubLine = `${JSON.stringify({
+    version: 1,
+    at: "2026-10-08T00:00:00.000Z",
+    dataset: "on099999",
+    action: "repull-scrubbed",
+    versions: [],
+    counts: { json_values_blanked: 1 },
+    scanner: "identifier-scan@abcdef1",
+    verification: "scanner-clean",
+    actor: "nemar-repull",
+  })}\n`;
+  const acceptanceOf = (merge: string) =>
+    `${mergeAcceptanceLine({
+      dataset: "on099999",
+      version: "2.0.0",
+      mergeSha: merge,
+      planDigest: plan,
+      scanner: "identifier-scan@abcdef1",
+      at: "2026-10-29T12:00:00.000Z",
+    })}\n`;
+  /** The merge: the scrub's line beside a file of the delta. Then main's ledger as it stands. */
+  const merged = () =>
+    commit(() => {
+      put(".nemar/corrections.jsonl", scrubLine);
+      put("sub-03/eeg/sub-03_task-a_eeg.edf", "data\n");
+    });
+
+  test("a commit of its own appending the acceptance line is accepted on main only", async () => {
+    const merge = merged();
+    const attested = commit(() =>
+      put(".nemar/corrections.jsonl", `${scrubLine}${acceptanceOf(merge)}`),
+    );
+    expect(await enrichmentOnlySince(repo, merge, attested, { acceptances: true })).toEqual({
+      ok: true,
+      head: attested,
+      commits: 1,
+    });
+    // Beneath enrichment too, as main moves on after it.
+    const enriched = commit(() => put(".nemar/metadata.json", '{"a":1}\n'));
+    expect((await enrichmentOnlySince(repo, merge, enriched, { acceptances: true })).ok).toBe(true);
+    // Never on a release branch, where the check is made without it.
+    foreign(await enrichmentOnlySince(repo, merge, attested));
+  });
+
+  test("the acceptance beside another file, an edited earlier line, another word or an invalid line is foreign", async () => {
+    const cases: Array<[string, () => void]> = [
+      [
+        "beside another file",
+        () => {
+          put(".nemar/corrections.jsonl", `${scrubLine}${acceptanceOf("0".repeat(40))}`);
+          put(".nemar/metadata.json", "{}\n");
+        },
+      ],
+      [
+        "an earlier line edited",
+        () =>
+          put(
+            ".nemar/corrections.jsonl",
+            `${scrubLine.replace("json_values_blanked", "headers_scrubbed")}${acceptanceOf("0".repeat(40))}`,
+          ),
+      ],
+      [
+        "another word",
+        () =>
+          put(
+            ".nemar/corrections.jsonl",
+            `${scrubLine}${scrubLine.replace("2026-10-08", "2026-10-09")}`,
+          ),
+      ],
+      [
+        "an invalid acceptance line",
+        () =>
+          put(
+            ".nemar/corrections.jsonl",
+            `${scrubLine}${acceptanceOf("0".repeat(40)).replace("0".repeat(40), "0".repeat(12))}`,
+          ),
+      ],
+    ];
+    for (const [label, change] of cases) {
+      g(repo, "reset", "-q", "--hard", base);
+      const merge = merged();
+      const head = commit(change);
+      const v = await enrichmentOnlySince(repo, merge, head, { acceptances: true });
+      expect(v.ok, label).toBe(false);
+    }
   });
 });
 
