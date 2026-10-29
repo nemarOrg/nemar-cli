@@ -27,7 +27,7 @@
  *   the row says in `detail`, so the list shows it waits for a fix or for `allow --admin`. Which
  *   authors are exempt is `isReviewExempt`'s to say, asked once per dataset and login for the
  *   length of one request, a few at a time and within a time budget, and never kept.
- * - **An upstream re-pull's own pull request at the head NEMAR recorded is `waived`** (ADR 0116),
+ * - **An upstream re-pull's own pull request at the head NEMAR recorded is `waived`** (ADR 0117),
  *   decided from the open `upstream_repulls` records read for the request and GitHub's facts about
  *   the pull request, by the one rule the review itself asks (`shared/repull-review-waiver.ts`). It
  *   wins over a review of that head (whose findings are then recommendations) and over `exempt`,
@@ -167,7 +167,7 @@ export function plainRef(input: unknown, max = 60): string {
 /**
  * A stored author login as it is shown. The NEMAR App's bot keeps its own name,
  * `nemar-bot[bot]`, brackets included: its automatic re-pull pull request is shown in the queue
- * (waived at its recorded head, ADR 0116, and reviewed under that name by the rows ADR 0111's
+ * (waived at its recorded head, ADR 0117, and reviewed under that name by the rows ADR 0111's
  * Phase 7e start wrote before that), and the label is plain text, where brackets are harmless.
  * Every other login is reduced as {@link plainRef} reduces it. Only that exact constant passes
  * through, and only beside the bot's numeric id, as {@link restAuthorLabel} requires of GitHub's
@@ -354,7 +354,7 @@ export interface OpenPullRequest {
   headLabel: string;
   /**
    * The head branch exactly as GitHub names it, or the empty string when it names none, which no
-   * record's branch is: compared with an upstream re-pull's recorded branch (ADR 0116) and never
+   * record's branch is: compared with an upstream re-pull's recorded branch (ADR 0117) and never
    * shown (`headLabel` is what is shown).
    */
   headRef: string;
@@ -851,7 +851,7 @@ async function loadReviews(db: D1Database, datasetIds: readonly string[]): Promi
 
 /**
  * Verdicts an administrator can act on: approve a pass, merge an upstream re-pull's waived pull
- * request through the re-pull's gate (ADR 0116; the gate says when it waits for `resume`), or review
+ * request through the re-pull's gate (ADR 0117; the gate says when it waits for `resume`), or review
  * by hand what the automation could not or did not decide. A fail is the author's to fix and an
  * in-progress review is waiting on the machine, so neither is yours yet, and an exempt pull request
  * is not reviewed at all, so there is no review for a person to read (when the naming rule holds
@@ -1172,7 +1172,7 @@ export async function buildQueue(env: Bindings, filters: QueueFilters): Promise<
   });
   const datasetIds = [...new Set(mine.map((pr) => pr.datasetId))];
   const reviews = await loadReviews(env.DB, datasetIds);
-  // The open upstream re-pull records that could waive one of these pull requests (ADR 0116).
+  // The open upstream re-pull records that could waive one of these pull requests (ADR 0117).
   const waivers = await readWaiverRecords(env.DB, datasetIds);
   const exempt = exemptionLookup(env);
 
@@ -1453,7 +1453,7 @@ export async function readPrReviewDetail(
       : null;
   let effective = classify(row && derived ? { ...row, ...derived } : null, head);
   // The same words as the list gives, on the same terms (see `buildQueue`). First an upstream
-  // re-pull's own pull request at the head NEMAR recorded (ADR 0116), which wins over the review of
+  // re-pull's own pull request at the head NEMAR recorded (ADR 0117), which wins over the review of
   // that head and over the exemption; it needs GitHub's record of the pull request, so a pull
   // request GitHub could not show is not waived here (unknown is never a waiver). Then an owner's or
   // administrator's pull request with no review of its current commit.

@@ -97,7 +97,7 @@ export async function readNothingElseFails(a: BidsOnlyAsk): Promise<BidsOnlyRead
  * null when nothing else is read as not passing. Then BIDS validation is not why GitHub reports
  * `unstable`, and saying it "has not completed with failure" would send an administrator after the
  * wrong check: what does not pass is named instead. When the review check is among it, the words
- * say an upstream re-pull's own head is waived from that review (ADR 0116) and name the start that
+ * say an upstream re-pull's own head is waived from that review (ADR 0117) and name the start that
  * publishes the waiver over a review that failed before NEMAR recorded the head.
  */
 function othersWords(read: HeadChecks, a: BidsOnlyAsk): string | null {

@@ -23,7 +23,7 @@
  *    `upstream-repull-screen.ts` reads it (its state at read time, `screenGate`, and the stored
  *    report naming that head), but stricter than the screen's own gate: an acknowledgment never
  *    passes here, whoever recorded it, because it needs a person (ADR 0086).
- *  - The review: waived (ADR 0116) when GitHub's pull request, just read, is the record's at the
+ *  - The review: waived (ADR 0117) when GitHub's pull request, just read, is the record's at the
  *    head the stage is about, by the rule the review itself asks (`shared/repull-review-waiver.ts`),
  *    and then no row is read. Otherwise the `pr_reviews` row of that head, read as ADR 0093's
  *    detail view reads it, the stricter of the stored verdict and the one its stored report
@@ -168,7 +168,7 @@ async function readCheck(
 }
 
 /**
- * The App's latest `NEMAR PR Review` run at `sha` (ADR 0116): read by the advance tick only for a
+ * The App's latest `NEMAR PR Review` run at `sha` (ADR 0117): read by the advance tick only for a
  * recorded head GitHub holds back, to tell whether its check already says the waiver.
  */
 export async function readReviewCheck(
@@ -442,7 +442,7 @@ export async function gatherMachineCleanFacts(
 }
 
 /**
- * Whether the review of `sha` is waived (ADR 0116): GitHub's pull request, as just read, is the
+ * Whether the review of `sha` is waived (ADR 0117): GitHub's pull request, as just read, is the
  * record's at `sha`, by the rule the review itself asks (`shared/repull-review-waiver.ts`). Then
  * the review's row is not read, because nothing it holds could change the answer: the review does
  * not apply to the head. A pull request that could not be read, or is at another head, is not

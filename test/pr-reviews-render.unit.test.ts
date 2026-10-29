@@ -1188,7 +1188,7 @@ describe("start --redo wording", () => {
   });
 });
 
-describe("an upstream re-pull's waived pull request (ADR 0116)", () => {
+describe("an upstream re-pull's waived pull request (ADR 0117)", () => {
   const report = parseStoredPrReviewReport({
     v: 1,
     model: "claude-haiku-5-5",

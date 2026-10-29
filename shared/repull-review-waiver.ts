@@ -1,5 +1,5 @@
 /**
- * Whether the dataset pull-request review is waived for a pull request at a head (ADR 0116): it is
+ * Whether the dataset pull-request review is waived for a pull request at a head (ADR 0117): it is
  * the pull request of an open upstream re-pull record, at the head NEMAR's own tools recorded for
  * it.
  *

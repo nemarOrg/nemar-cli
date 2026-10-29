@@ -23,7 +23,7 @@
  * comment are published by the same code that publishes them for a delivery.
  *
  * A bot's pull request is not reviewed through the administrator's start either (`bot_author`).
- * An upstream re-pull's own pull request at the head NEMAR recorded is waived (ADR 0116): a start of
+ * An upstream re-pull's own pull request at the head NEMAR recorded is waived (ADR 0117): a start of
  * it, a `redo` included, publishes the waived check and starts nothing (`repull_waived`), which is
  * how an administrator corrects a check a review of that head failed before NEMAR recorded the head.
  * The NEMAR App's automatic re-pull pull request, which the Worker used to review on its own

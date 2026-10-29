@@ -1,5 +1,5 @@
 /**
- * The waiver of the review for an upstream re-pull's own pull request (ADR 0116), through the real
+ * The waiver of the review for an upstream re-pull's own pull request (ADR 0117), through the real
  * entry points: the webhook route, the administrator's start and detail routes, the re-pull
  * record's transition route, the review's callback store and its watchdog.
  *
@@ -892,7 +892,7 @@ describe("a review of the head that reports after the head was recorded publishe
   });
 });
 
-describe("a refused update of the existing check is replaced by a new check (ADR 0116)", () => {
+describe("a refused update of the existing check is replaced by a new check (ADR 0117)", () => {
   const start = async (qs: string) =>
     (
       await app.request(

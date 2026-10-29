@@ -70,10 +70,10 @@
  * bot's pull request, the NEMAR App's included, is skipped as `bot_author`, and so is an
  * administrator's start of one. The App's automatic re-pull pull request, which ADR 0111's Phase 7e
  * amendment admitted to the review through the Worker's own start, is waived at its recorded head
- * instead (ADR 0116, which retires that start), and its waived check is published by the record's
+ * instead (ADR 0117, which retires that start), and its waived check is published by the record's
  * transition.
  *
- * **An upstream re-pull's own pull request is waived at the head NEMAR recorded** (ADR 0116). The
+ * **An upstream re-pull's own pull request is waived at the head NEMAR recorded** (ADR 0117). The
  * pull request of an open `upstream_repulls` record, from and into the dataset's own repository,
  * from the record's release branch, at the head the record holds, is answered with one `skipped`
  * check titled "Waived: upstream re-pull" and nothing else: no row, no dispatch, no model call
@@ -276,7 +276,7 @@ export interface PrIntake {
   fromFork: boolean;
   /**
    * The head branch GitHub names, or the empty string when it names none, which no record's branch
-   * is. Read for one purpose: the upstream re-pull's waiver (ADR 0116), which compares it with the
+   * is. Read for one purpose: the upstream re-pull's waiver (ADR 0117), which compares it with the
    * branch NEMAR's record holds and never takes it as a reason by itself. Never shown, stored or
    * logged.
    */
@@ -329,7 +329,7 @@ export type IntakeResult =
   /**
    * `waiverSubject` is set for a bot's pull request alone: the facts of it the upstream re-pull's
    * waiver reads, so the one bot pull request NEMAR's record names is answered with its waiver
-   * (ADR 0116) while every bot's pull request stays unreviewed.
+   * (ADR 0117) while every bot's pull request stays unreviewed.
    */
   | { ok: false; reason: IntakeSkip; waiverSubject?: WaiverSubject };
 
@@ -361,7 +361,7 @@ function changesWhatTheReviewReads(changes: unknown): boolean {
  *
  * A bot's pull request is not reviewed (`bot_author`, ADR 0092), the NEMAR App's included. The
  * answer carries what the re-pull waiver reads of it (`waiverSubject`), because the App's automatic
- * re-pull pull request is waived at the head its record holds (ADR 0116): its check is published
+ * re-pull pull request is waived at the head its record holds (ADR 0117): its check is published
  * when the record's own transition records that head, and again by a delivery or an
  * administrator's start of it.
  */
@@ -717,7 +717,7 @@ function sameStanding(a: ReviewRow, b: ReviewRow): boolean {
  * this: the callback's store, the refusal, the running check, a decline and the sweep itself.
  *
  * **A head an upstream re-pull's record holds is published as waived, whatever its row says**
- * (ADR 0116). The records are read first, and GitHub's record of the pull request when one of them
+ * (ADR 0117). The records are read first, and GitHub's record of the pull request when one of them
  * could waive the row ({@link waiverOfRow}, unless the caller already decided): when the rule waives
  * this head, every round publishes the waiver, with the row's own report, if it has one, as
  * recommendations. So a review that was dispatched before NEMAR recorded the head, and reports
@@ -845,7 +845,7 @@ async function publishRound(
         token,
         refresh,
         quick: outcome === "running" || opts.quick === true,
-        // A waiver that GitHub will not write over the old run is posted as a new run (ADR 0116).
+        // A waiver that GitHub will not write over the old run is posted as a new run (ADR 0117).
         newRunOnRefusal: opts.waiver !== null,
         repo: row.datasetId,
         headSha: row.headSha,
@@ -972,7 +972,7 @@ export interface PrReviewOptions {
   redo?: boolean;
   /**
    * The administrator who started it, for the audit row of a waiver the start publishes (an upstream
-   * re-pull's own pull request, ADR 0116). Meaningful only with `adminStart`.
+   * re-pull's own pull request, ADR 0117). Meaningful only with `adminStart`.
    */
   adminUserId?: number;
 }
@@ -1137,7 +1137,7 @@ async function publishExempt(env: Bindings, pr: PrIntake): Promise<PrReviewRespo
 }
 
 // ---------------------------------------------------------------------------------------------
-// An upstream re-pull's own pull request (ADR 0116)
+// An upstream re-pull's own pull request (ADR 0117)
 // ---------------------------------------------------------------------------------------------
 
 /** The waiver of one head: which record holds it, and as which of the record's pull requests. */
@@ -1217,7 +1217,7 @@ export class WaiverCheckNotPublished extends Error {
 export type WaiverTrigger = "delivery" | "admin_start" | "recorded";
 
 /**
- * Publish the waiver of one head (ADR 0116) and nothing else: no row, no dispatch, no model call.
+ * Publish the waiver of one head (ADR 0117) and nothing else: no row, no dispatch, no model call.
  * A head a review has touched (it ran before NEMAR recorded the head) has its own check run, which
  * is updated in place to the waiver, and its comment, which then says the same with the review's
  * findings as recommendations; the row keeps what the review said. A head with no row gets a NEW
@@ -1319,7 +1319,7 @@ function waiverSubjectOf(pr: PrIntake): WaiverSubject {
 
 /**
  * Publish the waiver of the head an upstream re-pull's record has just recorded for one of its pull
- * requests (ADR 0116): the record's own transition calls this once its edge is written, so a head
+ * requests (ADR 0117): the record's own transition calls this once its edge is written, so a head
  * enrichment moved, whose review may already have run and failed, shows the waiver as soon as a
  * NEMAR tool records the move, and the automatic path's pull request, which no delivery reviews,
  * carries the waived check too. The caller has applied the dev/production ownership fence.
@@ -1403,7 +1403,7 @@ export async function handlePullRequestEvent(
   if (!intake.ok) {
     // A bot's pull request is never reviewed. The one NEMAR's record names, an upstream re-pull's
     // own at its recorded head (the NEMAR App's automatic one), is answered with its waiver, so a
-    // delivery or an administrator's start can publish it again (ADR 0116); any other stays a bot's.
+    // delivery or an administrator's start can publish it again (ADR 0117); any other stays a bot's.
     if (intake.waiverSubject !== undefined) {
       const waived = await waiveBotPullRequest(env, intake.waiverSubject, options);
       if (waived !== null) return waived;
@@ -1428,7 +1428,7 @@ export async function handlePullRequestEvent(
   if (reviewable === "unknown") return no("unknown_dataset");
   if (reviewable === "not_reviewable") return no("dataset_not_reviewable");
 
-  // An upstream re-pull's own pull request at the head NEMAR recorded is waived (ADR 0116), before
+  // An upstream re-pull's own pull request at the head NEMAR recorded is waived (ADR 0117), before
   // anything else is asked: the exemption, a block, a row to restart. Nothing a delivery or an
   // administrator's start (a redo included) can do runs the review of such a head; its check is
   // published as waived, over whatever an earlier review of it said.
@@ -2229,7 +2229,7 @@ export async function sweepStalePrReviews(env: Bindings): Promise<PrReviewSweepR
         const outcome = row ? outcomeOfRow(row) : null;
         if (!row || !outcome) continue;
         // Published means stamped: a check that reached GitHub while an upstream re-pull's waiver
-        // of its head could not be decided (ADR 0116) is left unstamped, and is an attempt that
+        // of its head could not be decided (ADR 0117) is left unstamped, and is an attempt that
         // failed, which counts toward the bound like any other.
         const published =
           (await publishOutcome(env, row, outcome)) && (await isStamped(db, row.id));

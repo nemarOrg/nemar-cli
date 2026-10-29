@@ -4,7 +4,7 @@
  *
  * Real engine only: bun:sqlite behind realD1 with every migration applied, the real record, its
  * transitions, the machine-clean facts and rule, the screen bound to the row and the ADR 0107
- * waiver of the review of the record's own head (ADR 0116). A `Bun.serve()` stand-in for api.github.com (`helpers/repull-github-standin.ts`,
+ * waiver of the review of the record's own head (ADR 0117). A `Bun.serve()` stand-in for api.github.com (`helpers/repull-github-standin.ts`,
  * through NEMAR_GITHUB_API_URL) answers the pull request, `main`, the check runs, the review's check
  * and comment writes and every dispatch, and records each request; no dataset id here is asked of
  * the real GitHub. The happy paths run against the stand-in as well, as in every re-pull suite: the
@@ -20,7 +20,7 @@
  *  - an administrator's row is never read, and a tick reads at most five rows of each kind, in two
  *    rotations, every stalled row inside the resume window;
  *  - the screen of the head is started once every rule before the screen holds, at most three
- *    times a head, and no review is ever started: the record's own head is waived (ADR 0116);
+ *    times a head, and no review is ever started: the record's own head is waived (ADR 0117);
  *  - only a clean verdict writes `pr_open -> gates_clear`, as the system user, with the head, and a
  *    refused edge holds `gates-refused`;
  *  - a stalled row is resumed inside the window, once quiet, under the open cap and within three
@@ -778,7 +778,7 @@ describe("the gates of an automatic pull request", () => {
     expect(gh.dispatches).toHaveLength(1);
 
     // Once the screen is clear the gates clear on that tick: the review of the record's own head
-    // is waived (ADR 0116), so no model call is made and no review row is written, ever.
+    // is waived (ADR 0117), so no model call is made and no review row is written, ever.
     markScreen(id, "clean");
     const cleared = await tick();
     expect(cleared).toMatchObject({ screensStarted: 0, gatesCleared: 1 });
@@ -991,7 +991,7 @@ describe("the gates of an automatic pull request", () => {
     expect(reviews()).toEqual([]);
   });
 
-  describe("a waived head GitHub still holds back gets its waived check again (ADR 0116)", () => {
+  describe("a waived head GitHub still holds back gets its waived check again (ADR 0117)", () => {
     const reviewRun = (conclusion: string): CheckRunAnswer => ({
       id: 50,
       name: "NEMAR PR Review",
@@ -1781,7 +1781,7 @@ describe("what a tick costs", () => {
     // Each waits on it: the facts are read again, and nothing is written.
     seen.push(await measure());
     // Each screen is clear and each is clean (the review of the record's own head is waived, ADR
-    // 0116, so no review is started or read), and the record's own transition reads its live head
+    // 0117, so no review is started or read), and the record's own transition reads its live head
     // before it writes.
     ids.forEach((id, k) => markScreen(id, "clean", datasets[k]));
     seen.push(await measure());

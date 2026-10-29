@@ -51,7 +51,7 @@ export type { OverrideMode, ReviewState };
  *    over this word, because a push by someone who is not exempt IS reviewed, and a review of
  *    another commit is never carried over to this one.
  *  - `waived`: the pull request is an open upstream re-pull's, at the head NEMAR's tools recorded
- *    for it (ADR 0116), so the review does not apply and its check is posted as `skipped` with a
+ *    for it (ADR 0117), so the review does not apply and its check is posted as `skipped` with a
  *    title that says it was waived. Decided from NEMAR's record of the re-pull and the pull request
  *    as GitHub names it, read again for every list and detail and never stored. It wins over a
  *    review of the current commit, whose findings are then recommendations only, and over `exempt`.
@@ -257,7 +257,7 @@ export interface QueueResponse {
  * posted as failed), `naming_unchecked` (exempt, and the dataset name could not be read, whatever
  * the title says, so the check needs a person), `exempt_naming_waived` (exempt, and an administrator waived the naming rule
  * for this commit), `repull_waived` (it is an open upstream re-pull's pull request at the head
- * NEMAR recorded, so the review is waived and its check was posted as skipped, ADR 0116; nothing is
+ * NEMAR recorded, so the review is waived and its check was posted as skipped, ADR 0117; nothing is
  * started, a `redo` included), `draft`, `not_open`, `not_main`, `bot_author`, `dataset_not_reviewable`,
  * `review_running` (a redo found the review still running and left it alone),
  * `pr_review_disabled`, ...). `review_id` is null when no review row exists for it.

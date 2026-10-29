@@ -780,7 +780,7 @@ describe("the Worker merges, and resolves a claim on, only an automatic record a
   test("the credential is read before the claim: when it fails, nothing is claimed and nothing is sent", async () => {
     const id = ready();
     // The datasets credential goes away at the facts' last read (the screen; the review of the
-    // record's own head is waived and not read, ADR 0116), after GitHub was read with it, and comes
+    // record's own head is waived and not read, ADR 0117), after GitHub was read with it, and comes
     // back at the claim's own read of the dataset, before the claim reads GitHub. So a claim made
     // before the credential was read would succeed, and be stranded with nothing sent: only the
     // order this test pins keeps the record unclaimed.
@@ -1577,7 +1577,7 @@ describe("what the merge costs a tick", () => {
     const finishing = await measure();
     // Per row: six statements and four requests to wait (the record, the merges, the dataset, the
     // screen, the hold and its audit row; the pull request, `main`, two checks; the review of the
-    // record's own head is waived and not read, ADR 0116); fifteen and seven to merge (the same
+    // record's own head is waived and not read, ADR 0117); fifteen and seven to merge (the same
     // four reads and four requests, the claim's five
     // statements and its read of the live head, the merge's audit row, the merge, its answer, and
     // the verified route's four statements and its read of the merge); eight and one to dispatch a

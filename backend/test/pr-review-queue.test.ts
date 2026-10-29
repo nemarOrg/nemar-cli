@@ -2717,7 +2717,7 @@ describe("an owner's or administrator's pull request is exempt (ADR 0107)", () =
   });
 });
 
-describe("an upstream re-pull's own pull request at the recorded head is waived (ADR 0116)", () => {
+describe("an upstream re-pull's own pull request at the recorded head is waived (ADR 0117)", () => {
   const RELEASE = "release/v2.0.0";
   /** An open re-pull record of `ds` naming pull request #`n` from the release branch at `sha`. */
   function seedRecord(ds: string, n: number, sha: string, status = "pr_open") {

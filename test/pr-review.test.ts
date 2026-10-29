@@ -2553,7 +2553,7 @@ describe("the naming rule on an owner's or administrator's pull request", () => 
   });
 });
 
-describe("an upstream re-pull's own pull request at the head NEMAR recorded (ADR 0116)", () => {
+describe("an upstream re-pull's own pull request at the head NEMAR recorded (ADR 0117)", () => {
   test("the check says it was waived and why, and that skipped is not a pass", () => {
     const r = renderCheck({ kind: "waived", repullId: 12, advice: null });
     expect(r.title).toBe("Waived: upstream re-pull");

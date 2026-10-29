@@ -795,7 +795,7 @@ describe("a record that cannot be read is never clean", () => {
   test("a review table that cannot be read is review-unreadable, and the waived head never reads it", async () => {
     db.run("DROP TABLE pr_reviews");
     expect(await readReviewFact(realD1(db), DS, 7, HEAD)).toBe("unreadable");
-    // The record's own head is waived (ADR 0116): its review's row is not read at all.
+    // The record's own head is waived (ADR 0117): its review's row is not read at all.
     expect((await decide()).hold).toBe("clean");
   });
 
@@ -900,7 +900,7 @@ describe("the review, read as the stricter of its two verdicts where the head is
   });
 });
 
-describe("the review of the record's own head is waived (ADR 0116)", () => {
+describe("the review of the record's own head is waived (ADR 0117)", () => {
   /** A database that refuses every read of the review's rows, so a read of them fails the test. */
   function noReviewReads(): D1Database {
     const real = realD1(db);

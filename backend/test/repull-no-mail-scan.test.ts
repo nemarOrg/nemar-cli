@@ -31,7 +31,7 @@ const ROOTS = [
   // The facts the machine-clean rule reads: they read the review's rows through `pr-review.ts`.
   `${SRC}/services/upstream-repull-facts.ts`,
   // The administrator's start of a review, which publishes a re-pull pull request's waiver (ADR
-  // 0116), and the waiver's reader of the record.
+  // 0117), and the waiver's reader of the record.
   `${SRC}/services/pr-review-start.ts`,
   `${SRC}/services/pr-review-repull-waiver.ts`,
   // The advance tick that holds, gates and resumes the automatic re-pulls.

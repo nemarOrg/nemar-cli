@@ -412,7 +412,7 @@ export function reportLines(outcome: ReviewOutcome): string[] {
 
 /**
  * What `show` says of an upstream re-pull's own pull request at the commit NEMAR recorded (ADR
- * 0116): the review is waived and why, which gates still hold the merge, and, when a review of this
+ * 0117): the review is waived and why, which gates still hold the merge, and, when a review of this
  * very commit ran before NEMAR recorded it, what it found, as recommendations and never as a
  * verdict. Its stored report is read with the shared rules, as `reportLines` reads one.
  */

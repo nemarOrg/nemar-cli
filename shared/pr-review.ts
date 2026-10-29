@@ -37,7 +37,7 @@
  * GitHub, which is why `neutral` appears nowhere in {@link conclusionOf}, and `skipped` for exactly
  * two outcomes, `exempt` and `waived`: a pull request opened by a NEMAR owner or administrator is
  * not reviewed at all, so there is no unknown in it to hide (ADR 0107), and neither is an upstream
- * re-pull's pull request at the head NEMAR's record holds (ADR 0116), whose content is upstream's.
+ * re-pull's pull request at the head NEMAR's record holds (ADR 0117), whose content is upstream's.
  * The naming rule still applies to an owner's pull request: a title or a dataset name that breaks
  * the rule is a `naming` outcome, which fails.
  *
@@ -1093,7 +1093,7 @@ export type ReviewOutcome =
    */
   | { kind: "naming"; facts: NamingFacts }
   /**
-   * Not reviewed, by NEMAR's record (ADR 0116): the pull request of an open upstream re-pull, at
+   * Not reviewed, by NEMAR's record (ADR 0117): the pull request of an open upstream re-pull, at
    * the head NEMAR's tools recorded for it (`shared/repull-review-waiver.ts`). A mirror's content
    * is upstream's, so the review, which protects a dataset from a contributor's change, has no
    * contributor to judge. `advice` is the report of a review of this head that ran before the head
@@ -1157,7 +1157,7 @@ export function factsStop(
  *
  * `skipped` is the conclusion of exactly two outcomes, the two nobody is asked to review, and of no
  * other: `exempt` (an owner's or administrator's pull request, ADR 0107) and `waived` (an upstream
- * re-pull's pull request at the head NEMAR recorded, ADR 0116). A required check accepts it, which
+ * re-pull's pull request at the head NEMAR recorded, ADR 0117). A required check accepts it, which
  * is the point (a pull request nobody is asked to review must not be held by a review that does not
  * apply to it), and it is safe only because it is never what a review that ran, failed or could not
  * decide says: a waived outcome's advice, even a failing report, never reaches its conclusion. An
@@ -1229,7 +1229,7 @@ const EXEMPT_COPY = {
 } as const;
 
 /**
- * What an upstream re-pull's pull request is told at the head NEMAR recorded (ADR 0116). It says
+ * What an upstream re-pull's pull request is told at the head NEMAR recorded (ADR 0117). It says
  * the review is waived and why, that the decision is NEMAR's record and not anything the pull request
  * says, which gates still hold its merge, and that skipped is not a pass. The recommendations follow
  * in the text ({@link recommendationLines}).
@@ -1538,7 +1538,7 @@ export function findingLines(report: PrReviewReport): string[] {
 }
 
 /**
- * The findings of a review of a waived head (ADR 0116), as things to consider filing, never as
+ * The findings of a review of a waived head (ADR 0117), as things to consider filing, never as
  * blockers: no severity, no word that the review fails, and nothing about what a contributor should
  * do instead. The model's findings first, then the facts the platform found that no finding states.
  * Empty when the review found nothing. Its words are fixed or sanitized like every other line here.
@@ -1562,7 +1562,7 @@ export function recommendationLines(report: PrReviewReport): string[] {
   return out;
 }
 
-/** The check of an upstream re-pull's pull request at the head NEMAR recorded (ADR 0116). */
+/** The check of an upstream re-pull's pull request at the head NEMAR recorded (ADR 0117). */
 function renderRepullWaived(outcome: Extract<ReviewOutcome, { kind: "waived" }>): RenderedCheck {
   const lines = outcome.advice === null ? [] : recommendationLines(outcome.advice);
   return {

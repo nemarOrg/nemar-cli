@@ -1,5 +1,5 @@
 /**
- * The upstream re-pull's review waiver, as the Worker reads it (ADR 0116): the open re-pull records
+ * The upstream re-pull's review waiver, as the Worker reads it (ADR 0117): the open re-pull records
  * of a dataset that could waive a pull request, read from `upstream_repulls` (migration 0105) and
  * judged by the one rule in `shared/repull-review-waiver.ts`.
  *

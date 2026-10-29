@@ -11,7 +11,7 @@
  *    paragraph is both of the re-pull commit's trailers as git reads them, and is recorded;
  *  - a cap that is used up sends no merge; a `main` moved by a commit enrichment does not make and
  *    a state that is not `clean` are refused before the claim, while a review of the re-pull's own
- *    head, running or failed, is waived (ADR 0116) and needs no `--force`;
+ *    head, running or failed, is waived (ADR 0117) and needs no `--force`;
  *  - a pull request whose head or base repository is not `nemarDatasets/<dataset_id>` (a fork's, a
  *    deleted fork's, another base) is refused before the claim, the name compared without case;
  *  - a squash message without both trailers as its last paragraph is refused at the gate;
@@ -185,7 +185,7 @@ describe.skipIf(!awsInstalled)("the merge", () => {
     const head = await toGates();
     // A review of the head that ran before NEMAR recorded it, and failed, as the contributor review
     // fails an upstream delta; then one restarted on the same head. Neither holds the merge (ADR
-    // 0116), and the confirmation says why instead.
+    // 0117), and the confirmation says why instead.
     seedReview(w.db(), {
       ds: w.fx.datasetId,
       n: w.row().pr_number as number,
@@ -383,7 +383,7 @@ describe.skipIf(!awsInstalled)("the gate's own checks, before the claim", () => 
       }
     });
     const run = await merge();
-    // Read twice, at the gate and again at the merge, and waived both times (ADR 0116).
+    // Read twice, at the gate and again at the merge, and waived both times (ADR 0117).
     expect(reads).toBe(2);
     expect(run.exitCode, run.all).toBe(0);
     expect(run.all).toContain("The automated review is waived for this commit");

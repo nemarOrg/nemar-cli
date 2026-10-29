@@ -1,4 +1,4 @@
-# ADR 0116: An upstream re-pull's own pull request is waived from the review by NEMAR's record
+# ADR 0117: An upstream re-pull's own pull request is waived from the review by NEMAR's record
 
 **Status:** proposed
 **Date:** 2026-10-29

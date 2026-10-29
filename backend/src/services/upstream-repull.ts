@@ -1055,7 +1055,7 @@ export async function transitionRepull(
   const done = await commitTransition(env.DB, prepared);
   if (isRefusal(done)) return done;
   // A head the edge recorded for an open pull request (the pull request opened, enrichment's move
-  // recorded, a commit made again on a moved `main`) is now waived from the review (ADR 0116), and
+  // recorded, a commit made again on a moved `main`) is now waived from the review (ADR 0117), and
   // its check says so now, not on the next delivery. Best effort: the edge has happened.
   const recorded = recordedHeadOf(row, done.row);
   if (recorded !== null && ownedHere(env, done.row.dataset_id)) {

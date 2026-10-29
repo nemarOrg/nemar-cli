@@ -1,5 +1,5 @@
 /**
- * The upstream re-pull's review waiver (ADR 0116): the one pure rule the Worker's review, its queue
+ * The upstream re-pull's review waiver (ADR 0117): the one pure rule the Worker's review, its queue
  * and the machine-clean facts ask whether a pull request at a head is an open re-pull's own, at the
  * head NEMAR's tools recorded for it.
  *

@@ -358,7 +358,7 @@ describe("unknown is never clean", () => {
     ).toBe("screen-rerun");
   });
 
-  test("a review waived for the record's own head passes, and nothing else about the rule moves (ADR 0116)", () => {
+  test("a review waived for the record's own head passes, and nothing else about the rule moves (ADR 0117)", () => {
     expect(
       holdOf((f) => {
         f.review = "waived";

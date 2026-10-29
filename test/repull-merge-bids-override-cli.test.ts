@@ -464,7 +464,7 @@ describe.skipIf(!awsInstalled)("the override in the normal order: resume, then t
     });
   }
 
-  test("unstable only because the review check fails: resume names that check and the start that publishes the waiver (ADR 0116)", async () => {
+  test("unstable only because the review check fails: resume names that check and the start that publishes the waiver (ADR 0117)", async () => {
     const head = w.row().head_sha as string;
     // BIDS validation and version-check pass; the review the contributor rules failed is the one
     // check that does not, which is what a re-pull's head showed before the waiver existed.

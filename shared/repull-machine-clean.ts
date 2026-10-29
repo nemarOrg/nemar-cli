@@ -34,7 +34,7 @@
  *  9. The identifier screen bound to the record says `clear` for that head: never `acknowledge`,
  *     which needs a person and is never machine clean even once a person gave it, never
  *     `unchecked` and never "run it again".
- * 10. The ADR 0107 review is waived for that head (ADR 0116): the pull request and the head are the
+ * 10. The ADR 0107 review is waived for that head (ADR 0117): the pull request and the head are the
  *     record's, which `shared/repull-review-waiver.ts` decides, so the review does not apply and no
  *     model is asked. Where that rule does not hold, a stored review of that head whose verdict is
  *     `pass` still passes, read as the stricter of the stored verdict and the one its stored report
@@ -92,7 +92,7 @@ export type ScreenFact =
   | "unreadable";
 
 /**
- * The ADR 0107 review of the head: `waived` when the record's own rule waives it (ADR 0116), else as
+ * The ADR 0107 review of the head: `waived` when the record's own rule waives it (ADR 0117), else as
  * read from `pr_reviews`: a verdict (`pass`, `fail`, `uncertain`), a review still `running`, one
  * that ended without a verdict (`error`, `declined`, `unreported`), `exempt` (a pull request nobody
  * reviews), `absent` (no review of that head) or `unreadable`.

@@ -546,7 +546,7 @@ export function registerGithubWebhookRoutes(webhooks: WebhookRouter): void {
     // retry a failed delivery, but it lists it as failed in the App's delivery log, where it can
     // be redelivered; answering 200 would leave a pull request with no check and no trace. That
     // includes an exempt pull request's `skipped` check, and an upstream re-pull's waived one
-    // (ADR 0116), that GitHub would not take: neither has a row for the watchdog to retry from.
+    // (ADR 0117), that GitHub would not take: neither has a row for the watchdog to retry from.
     // Redelivering is safe because (dataset, pull request, commit) is unique for a reviewed
     // commit, and a second `skipped` check on an exempt or waived commit is harmless. A review
     // that fails AFTER it was recorded is a check that needs a person, not a failure of the

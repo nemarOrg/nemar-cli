@@ -67,7 +67,7 @@
  * an administrator can dispatch it again by hand. A verdict that asks for a person is not run again
  * here: it never passes machine clean, and the same commit would be asked the same question.
  * Nothing starts the ADR 0107 review: the recorded head of the App's pull request is waived from it
- * (ADR 0116), so machine clean reads `waived` and no model is asked (ADR 0116 retires the Phase 7f
+ * (ADR 0117), so machine clean reads `waived` and no model is asked (ADR 0117 retires the Phase 7f
  * start of that review).
  *
  * HOLDS. A hold is an observation, never a transition: a fixed word (`REPULL_HOLD_REASONS`) and
@@ -107,7 +107,7 @@
  * COST on the 30-minute tick, which shares one subrequest allowance with every job on it, measured
  * over five rows at `pr_open` (`upstream-repull-advance.test.ts` pins it): 62 D1 statements and 25
  * GitHub requests when each starts its screen (the most), 32 and 20 while each waits, and 47 and 25
- * when each is cleared, with no review started or read (ADR 0116); a stalled row's resume is eight
+ * when each is cleared, with no review started or read (ADR 0117); a stalled row's resume is eight
  * statements and one dispatch, and the tick itself two statements (the list of rows, the stamp).
  * Past the gates (`upstream-repull-worker-merge.test.ts` pins it), a row that waits at the merge is
  * six statements and four requests, one merged fifteen and seven, and a finish dispatched eight
@@ -368,7 +368,7 @@ export interface AdvanceTickResult {
   screensStarted: number;
   /**
    * Waived checks published again for a recorded head GitHub holds back (`not-clean`) while its
-   * review check is not the waiver (ADR 0116), and those whose publish failed or whose pull request
+   * review check is not the waiver (ADR 0117), and those whose publish failed or whose pull request
    * could not be read, each an error-level line.
    */
   waiversPublished: number;
@@ -774,7 +774,7 @@ async function startGateWork(
   }
   // Everything else holds and GitHub still holds the pull request back: when the head's review check
   // is not the waiver (a review that failed before the head was recorded, or a publish the record's
-  // transition could not make), publish the waiver again (ADR 0116). Read only then, so a tick that
+  // transition could not make), publish the waiver again (ADR 0117). Read only then, so a tick that
   // is not waiting on GitHub's word asks GitHub nothing more.
   const now = machineClean({ ...facts, screen });
   if (!now.clean && now.hold === "not-clean" && facts.review === "waived") {

@@ -251,7 +251,7 @@ describe("what the review's verdict allows", () => {
     );
   });
 
-  test("an upstream re-pull's waived head is allowed without --force, says why, and is not a pass (ADR 0116)", () => {
+  test("an upstream re-pull's waived head is allowed without --force, says why, and is not a pass (ADR 0117)", () => {
     const gate = approvalGate({ verdict: "waived", staleVerdict: null });
     expect(gate.kind).toBe("confirm");
     if (gate.kind === "confirm") {

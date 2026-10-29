@@ -55,7 +55,7 @@ export interface CheckRunInput {
   /**
    * `null` publishes an `in_progress` check for a review that is running; any other value is a
    * `completed` check carrying that conclusion. `skipped` is sent for an exempt pull request
-   * (ADR 0107) and an upstream re-pull's waived one (ADR 0116), and for nothing else:
+   * (ADR 0107) and an upstream re-pull's waived one (ADR 0117), and for nothing else:
    * `conclusionOf` is the only thing that chooses it.
    */
   conclusion: CheckConclusion | null;
@@ -69,7 +69,7 @@ export interface CheckRunInput {
   /**
    * When GitHub refuses the update of the existing run for a reason about the run (any 4xx but a
    * refused credential, 401 or 403, and a throttle, 429), create a NEW run of the same name on the
-   * same commit instead of failing. Set for an upstream re-pull's waiver alone (ADR 0116): whether
+   * same commit instead of failing. Set for an upstream re-pull's waiver alone (ADR 0117): whether
    * GitHub lets a completed run's conclusion be changed is not verified, and a new run of a name is
    * the one GitHub and NEMAR's own readers take as the latest.
    */

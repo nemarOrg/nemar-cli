@@ -521,7 +521,7 @@ export function approvalGate(input: {
         }`,
       };
     case "waived":
-      // Allowing, with no --force (ADR 0116): NEMAR's record says this commit is an upstream
+      // Allowing, with no --force (ADR 0117): NEMAR's record says this commit is an upstream
       // re-pull's own head, whose content is upstream's. Not a pass either, so it is said, and the
       // gates that still hold the merge (the identifier screen, BIDS validation, the version check,
       // the merge cap) are the re-pull's gate's to read, not this verdict's.
