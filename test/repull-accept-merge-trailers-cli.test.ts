@@ -497,7 +497,7 @@ describe.skipIf(!awsInstalled)("a merge made outside the gate", () => {
       dataset: w.fx.datasetId,
       version: "2.0.0",
       mergeSha: merge,
-      planDigest: w.row().plan_digest,
+      planDigest: w.row().plan_digest as string,
       scanner: "identifier-scan@abcdef1",
       at: "2026-10-01T00:00:00.000Z",
     })}\n`;

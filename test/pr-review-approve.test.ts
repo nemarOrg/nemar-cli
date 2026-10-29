@@ -408,7 +408,21 @@ describe("reading the pull request", () => {
         baseRepo: "nemarDatasets/nm000201",
         authorLogin: "alice",
         mergeableState: "blocked",
+        // No merge yet, so no merge commit: a re-pull's acceptance reads it only once merged.
+        mergeCommitSha: null,
       },
+    });
+    // Merged: GitHub's merge commit, the one a re-pull's acceptance checks the record against.
+    gh.pulls["nm000201#8"] = {
+      sha: SHA_A,
+      merged: true,
+      state: "closed",
+      mergeCommitSha: "c".repeat(40),
+    };
+    const merged = await fetchPullRequest(ADMIN_TOKEN, "nm000201", 8, base());
+    expect(merged).toMatchObject({
+      ok: true,
+      value: { state: "merged", mergeCommitSha: "c".repeat(40) },
     });
   });
 

@@ -220,6 +220,7 @@ const MODULE_EXPORTS: Record<string, string[]> = {
   ],
   notices: ["NOTICE_LEVELS", "createNotice", "deleteNotice", "getNotices", "listAdminNotices"],
   repull: [
+    "acceptRepullMergeTrailers",
     "acknowledgeRepullScreen",
     "checkRepullMergeClaim",
     "createRepull",
@@ -353,6 +354,7 @@ const POST_SPLIT_ADDITIONS = [
   "recordRepullMerged", // #1912 phase 6f: POST /admin/repulls/:id/merged
   "recordRepullReleased", // #1912 phase 6f: POST /admin/repulls/:id/released
   "checkRepullMergeClaim", // #1912 phase 6f: POST /admin/repulls/:id/merge-claim/check
+  "acceptRepullMergeTrailers", // #1996, ADR 0111 2026-10-29: POST /admin/repulls/:id/merge-trailers/accept
   "getRepullSwitches", // #1913 phase 7h: GET /admin/repulls/switches
   "listRepullDispatches", // #1913 phase 7h: GET /admin/repulls/dispatches
   "lockS3Objects", // #1912 phase 6f: POST /admin/datasets/:id/s3-lock with an explicit list
