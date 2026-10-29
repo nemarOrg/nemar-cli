@@ -50,6 +50,12 @@ export type { OverrideMode, ReviewState };
  *    cannot check it; this list does not verify that. A review of the current commit still wins
  *    over this word, because a push by someone who is not exempt IS reviewed, and a review of
  *    another commit is never carried over to this one.
+ *  - `waived`: the pull request is an open upstream re-pull's, at the head NEMAR's tools recorded
+ *    for it (ADR 0116), so the review does not apply and its check is posted as `skipped` with a
+ *    title that says it was waived. Decided from NEMAR's record of the re-pull and the pull request
+ *    as GitHub names it, read again for every list and detail and never stored. It wins over a
+ *    review of the current commit, whose findings are then recommendations only, and over `exempt`.
+ *    A merge gate takes it as allowing, without `--force`.
  */
 export const QUEUE_VERDICTS = [
   "pass",
@@ -59,19 +65,23 @@ export const QUEUE_VERDICTS = [
   "in_progress",
   "could_not_decide",
   "exempt",
+  "waived",
 ] as const;
 export type QueueVerdict = (typeof QUEUE_VERDICTS)[number];
 
-/**
- * A verdict a STORED review can have: every word but `exempt`, which is about a pull request with
- * no review of its current commit and is never what a row says. The queue and the detail view may
- * say `exempt`; a review record and a history item may not.
- */
-export type StoredVerdict = Exclude<QueueVerdict, "exempt">;
+/** The queue words that are about a pull request nobody is asked to review, which no row ever says. */
+const UNSTORED_VERDICTS: readonly QueueVerdict[] = ["exempt", "waived"];
 
-/** Every {@link StoredVerdict}: the queue's own words but `exempt`, so a word added there is counted too. */
+/**
+ * A verdict a STORED review can have: every word but `exempt` and `waived`, which are about a pull
+ * request that is not reviewed and are never what a row says. The queue and the detail view may say
+ * them; a review record and a history item may not.
+ */
+export type StoredVerdict = Exclude<QueueVerdict, "exempt" | "waived">;
+
+/** Every {@link StoredVerdict}: the queue's own words but the unstored ones, so a word added there is counted too. */
 export const STORED_VERDICTS: readonly StoredVerdict[] = QUEUE_VERDICTS.filter(
-  (v): v is StoredVerdict => v !== "exempt",
+  (v): v is StoredVerdict => !UNSTORED_VERDICTS.includes(v),
 );
 
 /** A verdict that means the review READ a commit and concluded something about it. */
@@ -246,7 +256,9 @@ export interface QueueResponse {
  * author is exempt, and the naming rule refused its title or its new dataset name, so its check was
  * posted as failed), `naming_unchecked` (exempt, and the dataset name could not be read, whatever
  * the title says, so the check needs a person), `exempt_naming_waived` (exempt, and an administrator waived the naming rule
- * for this commit), `draft`, `not_open`, `not_main`, `bot_author`, `dataset_not_reviewable`,
+ * for this commit), `repull_waived` (it is an open upstream re-pull's pull request at the head
+ * NEMAR recorded, so the review is waived and its check was posted as skipped, ADR 0116; nothing is
+ * started, a `redo` included), `draft`, `not_open`, `not_main`, `bot_author`, `dataset_not_reviewable`,
  * `review_running` (a redo found the review still running and left it alone),
  * `pr_review_disabled`, ...). `review_id` is null when no review row exists for it.
  */

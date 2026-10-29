@@ -27,6 +27,7 @@ import {
   conclusionOf,
   renderCheck,
 } from "../../shared/pr-review";
+import type { RepullStatus } from "../../shared/repull-state";
 import { adminRoutes } from "../src/routes/admin";
 import {
   __resetRateLimitStateForTests,
@@ -65,6 +66,7 @@ import {
   seedReview as seedReviewRow,
   versionOk,
 } from "./helpers/pr-queue-fixtures";
+import { rowAt } from "./helpers/repull-rows";
 
 const ADMIN_KEY = "queue-admin-key-0123456789abcdef0123456789abcdef";
 const MEMBER_KEY = "queue-member-key-0123456789abcdef0123456789abcdef";
@@ -2712,5 +2714,74 @@ describe("an owner's or administrator's pull request is exempt (ADR 0107)", () =
       verdict: "uncertain",
       review_current: true,
     });
+  });
+});
+
+describe("an upstream re-pull's own pull request at the recorded head is waived (ADR 0116)", () => {
+  const RELEASE = "release/v2.0.0";
+  /** An open re-pull record of `ds` naming pull request #`n` from the release branch at `sha`. */
+  function seedRecord(ds: string, n: number, sha: string, status = "pr_open") {
+    const row = rowAt(status as RepullStatus, {
+      dataset_id: ds,
+      pr_number: n,
+      head_sha: sha,
+      branch: RELEASE,
+    });
+    const cols = Object.keys(row);
+    db.query(
+      `INSERT INTO upstream_repulls (${cols.join(", ")}) VALUES (${cols.map(() => "?").join(", ")})`,
+    ).run(...(cols.map((c) => row[c]) as never[]));
+  }
+
+  test("it reads waived over a review of that head that failed, is yours to merge, and nothing else is waived", async () => {
+    seedReview({ ds: "nm000201", n: 1, state: "reported", verdict: "fail", authorId: 700 });
+    seedRecord("nm000201", 1, SHA_A);
+    // The same record's number from a fork, another record's dataset, a head the record does not
+    // hold, and a branch that merely names a release with no record: each keeps its own word.
+    seedRecord("nm000203", 3, "b".repeat(40));
+    seedRecord("nm000205", 5, SHA_A, "abandoned");
+    nodes(
+      { ds: "nm000201", n: 1, branch: RELEASE, author: "stranger", authorId: 700 },
+      { ds: "nm000202", n: 2, branch: "release/v9.0.0", author: "stranger", authorId: 700 },
+      { ds: "nm000203", n: 3, branch: RELEASE, author: "stranger", authorId: 700 },
+      { ds: "nm000204", n: 1, branch: RELEASE, author: "stranger", authorId: 700 },
+      { ds: "nm000205", n: 5, branch: RELEASE, author: "stranger", authorId: 700 },
+    );
+    const { body } = await queue();
+    const by = Object.fromEntries(body.entries.map((e) => [e.dataset_id, e]));
+    expect(by.nm000201).toMatchObject({
+      verdict: "waived",
+      detail: null,
+      needs_you: true,
+      reviewed_sha: SHA_A,
+      review_current: true,
+    });
+    for (const ds of ["nm000202", "nm000203", "nm000204", "nm000205"]) {
+      expect(by[ds]?.verdict, ds).toBe("not_reviewed");
+    }
+    // The filter knows the word.
+    const only = await queue("?verdict=waived");
+    expect(only.body.entries.map((e) => e.dataset_id)).toEqual(["nm000201"]);
+  });
+
+  test("the record's number and head from another branch is not waived, and an exempt author's waived one reads waived", async () => {
+    seedRecord("nm000201", 1, SHA_A);
+    seedRecord("nm000202", 2, SHA_A);
+    nodes(
+      { ds: "nm000201", n: 1, branch: "release/v3.0.0", author: "stranger", authorId: 700 },
+      { ds: "nm000202", n: 2, branch: RELEASE, author: "queueadmin-gh", authorId: 4001 },
+    );
+    const { body } = await queue();
+    const by = Object.fromEntries(body.entries.map((e) => [e.dataset_id, e]));
+    expect(by.nm000201?.verdict).toBe("not_reviewed");
+    // The waiver wins over the exemption of an owner or administrator.
+    expect(by.nm000202?.verdict).toBe("waived");
+  });
+
+  test("a fork's pull request at the record's number and head is not waived", async () => {
+    seedRecord("nm000201", 1, SHA_A);
+    nodes({ ds: "nm000201", n: 1, branch: RELEASE, forkOwner: "stranger", authorId: 700 });
+    const { body } = await queue();
+    expect(body.entries[0]?.verdict).toBe("not_reviewed");
   });
 });
