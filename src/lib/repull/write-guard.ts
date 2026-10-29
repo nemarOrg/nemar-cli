@@ -22,7 +22,9 @@
  * key, and may copy only from the upstream bucket, under the dataset's own `ds/`, at a version id:
  * a copy source without `?versionId=` is refused, so nothing is ever copied by path. Never
  * `--bypass-governance-retention`, never a `--metadata-directive`, never a lock or ACL option:
- * every call's options are an allowlist. The canary's own calls (a scratch prefix, its copies
+ * every call's options are an allowlist. The one directive allowed is `--tagging-directive
+ * REPLACE` on a `copy-object`, and a `copy-object` without it is refused: the default reads the
+ * source's tags, which upstream's bucket does not allow, so such a copy could not succeed. The canary's own calls (a scratch prefix, its copies
  * deleted again by version id, the prefix listed by version and its open multipart uploads listed)
  * are allowed only in canary mode. The one write outside the canary that is not a copy is
  * `delete-object` by version id under the destination prefix, which removes a copy S3 reported as
@@ -152,7 +154,13 @@ function parseArgs(args: readonly string[]): Map<string, string> {
 
 const ALLOWED: Record<string, readonly string[]> = {
   "head-object": ["--bucket", "--key", "--version-id"],
-  "copy-object": ["--bucket", "--key", "--copy-source", "--copy-source-if-match"],
+  "copy-object": [
+    "--bucket",
+    "--key",
+    "--copy-source",
+    "--copy-source-if-match",
+    "--tagging-directive",
+  ],
   "create-multipart-upload": ["--bucket", "--key"],
   "upload-part-copy": [
     "--bucket",
@@ -275,6 +283,11 @@ export function assertRepullAws(op: string, args: readonly string[], ctx: AwsGua
     if (op === "copy-object" || op === "upload-part-copy") {
       assertCopySource(a.get("--copy-source"), ctx);
       if (!a.get("--copy-source-if-match")) throw new RepullWriteRefused("copy-without-if-match");
+    }
+    // The default tagging directive (COPY) reads the source's tags, which upstream's bucket
+    // denies; the one value allowed makes the copy carry none, and no tag can be set beside it.
+    if (op === "copy-object" && a.get("--tagging-directive") !== "REPLACE") {
+      throw new RepullWriteRefused("copy-without-tagging-replace");
     }
     if (op === "upload-part-copy") {
       const n = Number(a.get("--part-number"));
