@@ -574,6 +574,7 @@ async function gatesTurn(ctx: ResumeContext, row: RepullRow, pr: RepullPullReque
           sha: p.head,
           origin: row.origin,
           mergeableState: state,
+          prNumber: p.number,
         })
       : null;
   if (state !== "clean" && overBids?.kind !== "bids-only") {

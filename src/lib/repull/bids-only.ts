@@ -14,6 +14,7 @@
  *    facts itself and refuses in its own words.
  */
 
+import { PR_REVIEW_CHECK_NAME } from "../../../shared/pr-review.js";
 import {
   type BidsOnlyFault,
   type HeadChecks,
@@ -40,6 +41,8 @@ export interface BidsOnlyAsk {
   origin: string;
   /** GitHub's `mergeable_state`, as read for that head. */
   mergeableState: string;
+  /** The pull request's number, for the command a waived review check names; absent, it is not named. */
+  prNumber?: number;
 }
 
 /** Every check run and commit status of the head, or why they could not be read. */
@@ -73,7 +76,7 @@ export async function readBidsOnly(a: BidsOnlyAsk): Promise<BidsOnlyRead> {
   if ("unreadable" in read) return { kind: "unreadable", why: read.unreadable };
   const fault = bidsOnlyFault({ ...read, origin: a.origin, mergeableState: a.mergeableState });
   if (fault === null) return { kind: "bids-only" };
-  const why = faultWords(fault, a);
+  const why = faultWords(fault, a, read);
   return fault.fault === "unreadable" ? { kind: "unreadable", why } : { kind: "not", why };
 }
 
@@ -89,9 +92,34 @@ export async function readNothingElseFails(a: BidsOnlyAsk): Promise<BidsOnlyRead
   return { kind: "not", why: faultWords({ fault: "others", others }, a) };
 }
 
-/** Why the head is not BIDS validation's failure alone, in words. */
-function faultWords(f: BidsOnlyFault, a: BidsOnlyAsk): string {
+/**
+ * The words for a head where the review check is among what does not pass and BIDS validation has
+ * not failed, or null when that is not so (ADR 0116). Then BIDS validation is not why GitHub reports
+ * `unstable`, and saying it "has not completed with failure" would send an administrator after the
+ * wrong check: the review is, and an upstream re-pull's own head is waived from it, which an
+ * administrator's start of the review publishes when a review of the head failed before NEMAR
+ * recorded it.
+ */
+function reviewCheckWords(read: HeadChecks, a: BidsOnlyAsk): string | null {
+  const others = othersNotPassing(read);
+  if (others === "unreadable" || !others.includes(PR_REVIEW_CHECK_NAME)) return null;
   const head = a.sha.slice(0, 12);
+  const what =
+    others.length === 1
+      ? `the ${PR_REVIEW_CHECK_NAME} check of ${head} is the one check that does not pass, and BIDS validation has not failed`
+      : `checks of ${head} do not pass (${others.map((n) => sanitizeNote(n, 60) || "unnamed").join(", ")}), the ${PR_REVIEW_CHECK_NAME} check among them, and BIDS validation has not failed`;
+  const start = `nemar admin pr-reviews start ${a.datasetId} ${a.prNumber ?? "<pr>"}`;
+  return `${what}. The review is waived for an upstream re-pull's own head; if that check still reads as a review that failed, run ${start} to publish the waiver, then resume again`;
+}
+
+/** Why the head is not BIDS validation's failure alone, in words. */
+function faultWords(f: BidsOnlyFault, a: BidsOnlyAsk, read?: HeadChecks): string {
+  const head = a.sha.slice(0, 12);
+  // Only where BIDS validation did not fail: a `version-check` fault is read after a failed one.
+  if (f.fault === "bids" && read !== undefined) {
+    const review = reviewCheckWords(read, a);
+    if (review !== null) return review;
+  }
   switch (f.fault) {
     case "unreadable":
       return `the checks of ${head} could not be read (GitHub's answer is not complete, or not of its shape)`;
