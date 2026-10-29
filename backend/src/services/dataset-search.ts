@@ -19,6 +19,7 @@ import {
   type DatasetSummaryRow,
   buildDatasetSummaryText,
 } from "./dataset-summary-text";
+import { analyzeQuery } from "./search-query";
 
 const EMBEDDING_MODEL = "@cf/baai/bge-small-en-v1.5";
 
@@ -464,7 +465,18 @@ export async function semanticSearchHydrated(
   return hydrated.map((r) => ({ ...r, score: scoreById.get(r.id) ?? 0 }));
 }
 
-/** FTS5 lexical search over `datasets_fts` (bm25 ranking + readme snippet),
+/**
+ * Per-column bm25 weights for `datasets_fts(name, description, authors, tasks,
+ * modalities, readme)`, in that order. A word in the title or the abstract says
+ * what a dataset is about; the same word in a long README is usually passing
+ * mention. Unweighted, a dataset that says "study" forty times in its README
+ * outranked one named for the topic. Measured on 23 queries: R-precision of
+ * the lexical leg 0.797 unweighted, 0.814 with these weights.
+ */
+export const FTS_BM25_WEIGHTS = [10, 5, 1, 4, 1, 1] as const;
+const FTS_BM25 = `bm25(datasets_fts, ${FTS_BM25_WEIGHTS.join(", ")})`;
+
+/** FTS5 lexical search over `datasets_fts` (column-weighted bm25 ranking + readme snippet),
  *  hydrating display fields from the joined `datasets` row. */
 export async function ftsSearch(
   db: D1Database,
@@ -486,7 +498,7 @@ export async function ftsSearch(
        WHERE datasets_fts MATCH ?
          AND d.status = 'active' AND (d.is_sandbox = 0 OR d.is_sandbox IS NULL OR d.is_exemplar = 1)
          AND d.visibility = 'public'${filterClauses}
-       ORDER BY bm25(datasets_fts)
+       ORDER BY ${FTS_BM25}
        LIMIT ?`,
     )
     .bind(...params, limit)
@@ -858,20 +870,27 @@ export async function executeDatasetSearch(
       const idHit = await lookupDatasetById(db, trimmed.toLowerCase(), filters);
       if (idHit) return buildEnvelope([idHit], "exact_id", 1);
     }
-    const ftsMatch = buildFtsMatch(trimmed);
+    // What the query is made of: the words that discriminate between datasets
+    // drive the lexical leg ("study" is in 59% of the catalog and must not
+    // decide a match); the caller's own words drive the embedding.
+    const analysis = await analyzeQuery(db, trimmed);
+    const ftsMatch = buildFtsMatch(analysis.lexicalQuery);
     // Tier-specific log so a failure here is distinguishable from the
     // semantic/hydration tiers; re-throw so the outer catch still degrades.
     // Fetches a fixed SEARCH_CANDIDATE_CEILING candidates regardless of
     // `limit`, so the population `count` describes doesn't shrink at small
     // page sizes.
-    const lexical = await ftsSearch(db, trimmed, SEARCH_CANDIDATE_CEILING, filters).catch(
-      (ftsErr) => {
-        console.error(
-          `[search] FTS tier failed: ${ftsErr instanceof Error ? ftsErr.message : String(ftsErr)}`,
-        );
-        throw ftsErr;
-      },
-    );
+    const lexical = await ftsSearch(
+      db,
+      analysis.lexicalQuery,
+      SEARCH_CANDIDATE_CEILING,
+      filters,
+    ).catch((ftsErr) => {
+      console.error(
+        `[search] FTS tier failed: ${ftsErr instanceof Error ? ftsErr.message : String(ftsErr)}`,
+      );
+      throw ftsErr;
+    });
     if (!ai || !vectorize) {
       const page = lexical.slice(offset, offset + limit);
       const { count, warning } = await countSearchMatchesSafely(
@@ -895,7 +914,14 @@ export async function executeDatasetSearch(
     try {
       // Fixed SEMANTIC_TOPK (also Vectorize's returnMetadata:'none' topK
       // ceiling), not `limit * 2`.
-      semantic = await semanticSearchHydrated(ai, vectorize, db, trimmed, SEMANTIC_TOPK, filters);
+      semantic = await semanticSearchHydrated(
+        ai,
+        vectorize,
+        db,
+        analysis.semanticQuery,
+        SEMANTIC_TOPK,
+        filters,
+      );
     } catch (embErr) {
       const embMsg = embErr instanceof Error ? embErr.message : String(embErr);
       if (!embMsg.startsWith("[embedding]")) {
