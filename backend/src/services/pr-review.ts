@@ -148,7 +148,11 @@ import { isNonProductionEnv } from "./environment.js";
 import { getDatasetsToken, getDatasetsTokenWithRefresher } from "./github-auth.js";
 import { signPrReviewCallbackToken } from "./github/callback-tokens.js";
 import { approvalDispatchEnvironment, triggerPrReviewRun } from "./github/dispatch.js";
-import { upsertReviewCheckRun, upsertReviewComment } from "./github/pr-review-api.js";
+import {
+  CheckRunWriteRefused,
+  upsertReviewCheckRun,
+  upsertReviewComment,
+} from "./github/pr-review-api.js";
 import { ORG_NAME } from "./github/shared.js";
 import { isReviewExempt } from "./pr-review-exemption.js";
 import {
@@ -730,7 +734,13 @@ export async function publishOutcome(
   env: Bindings,
   row: ReviewRow,
   outcome: StoredOutcome | "running",
-  opts: { commentOnly?: boolean; waiver?: Waived | null; quick?: boolean } = {},
+  opts: {
+    commentOnly?: boolean;
+    waiver?: Waived | null;
+    quick?: boolean;
+    /** Told why a check write failed, the last time one did. */
+    onCheckFailure?: (err: unknown) => void;
+  } = {},
 ): Promise<boolean> {
   let token: string;
   let refresh: () => Promise<string>;
@@ -823,7 +833,12 @@ async function publishRound(
   { token, refresh }: { token: string; refresh: () => Promise<string> },
   row: ReviewRow,
   stored: StoredOutcome | "running",
-  opts: { commentOnly?: boolean; waiver: Waived | null; quick?: boolean },
+  opts: {
+    commentOnly?: boolean;
+    waiver: Waived | null;
+    quick?: boolean;
+    onCheckFailure?: (err: unknown) => void;
+  },
 ): Promise<{ checked: boolean; acknowledged: boolean }> {
   let checked = false;
   let commented = false;
@@ -868,6 +883,7 @@ async function publishRound(
       }
     } catch (err) {
       console.error(`[pr-review] review ${row.id}: check-run not published (${errName(err)})`);
+      opts.onCheckFailure?.(err);
     }
   }
 
@@ -1207,10 +1223,24 @@ async function waiverOfRow(env: Bindings, row: ReviewRow): Promise<Waived | null
  * start turns it into a sentence.
  */
 export class WaiverCheckNotPublished extends Error {
-  constructor() {
+  constructor(readonly failure: WaiverCheckFailure) {
     super("waived check not published");
     this.name = "WaiverCheckNotPublished";
   }
+}
+
+/**
+ * Why a waived check did not reach GitHub: a refusal of one write, with GitHub's status (see
+ * {@link CheckRunWriteRefused}), or no answer (a timeout, a network failure, no token to write with).
+ */
+export type WaiverCheckFailure =
+  | { kind: "refused"; write: CheckRunWriteRefused["write"]; status: number }
+  | { kind: "unanswered" };
+
+function waiverCheckFailureOf(err: unknown): WaiverCheckFailure {
+  return err instanceof CheckRunWriteRefused
+    ? { kind: "refused", write: err.write, status: err.status }
+    : { kind: "unanswered" };
 }
 
 /** What caused a waiver to be published, for its audit row and its log line. Fixed words. */
@@ -1236,6 +1266,10 @@ async function publishWaived(
   const where = `${target.datasetId}#${target.prNumber}`;
   const row = await readRowByKey(db, target.datasetId, target.prNumber, target.headSha);
   let checked: boolean;
+  let failure: unknown = null;
+  const onCheckFailure = (err: unknown) => {
+    failure = err;
+  };
   if (row) {
     // The waived head is the pull request's current one, which is what `seen_at` says.
     await db.prepare(`UPDATE pr_reviews SET seen_at = ${NOW_MS} WHERE id = ?`).bind(row.id).run();
@@ -1243,13 +1277,14 @@ async function publishWaived(
     checked = await publishOutcome(env, row, outcomeOfRow(row) ?? "running", {
       waiver,
       quick: true,
+      onCheckFailure,
     });
   } else {
-    checked = await postWaivedCheck(env, target, waiver);
+    checked = await postWaivedCheck(env, target, waiver, onCheckFailure);
   }
   if (!checked) {
     console.error(`[pr-review] ${where}: the waived check was not published`);
-    throw new WaiverCheckNotPublished();
+    throw new WaiverCheckNotPublished(waiverCheckFailureOf(failure));
   }
   try {
     await auditLogStatement(db, {
@@ -1281,6 +1316,7 @@ async function postWaivedCheck(
   env: Bindings,
   target: { datasetId: string; headSha: string },
   waiver: Waived,
+  onCheckFailure: (err: unknown) => void,
 ): Promise<boolean> {
   const outcome = waivedOutcome(waiver, "running");
   try {
@@ -1300,6 +1336,7 @@ async function postWaivedCheck(
     console.error(
       `[pr-review] ${target.datasetId}: waived check not posted for ${target.headSha.slice(0, 7)} (${errName(err)})`,
     );
+    onCheckFailure(err);
     return false;
   }
 }

@@ -924,16 +924,61 @@ describe("a refused update of the existing check is replaced by a new check (ADR
     });
   }
 
-  test("a refused credential is not replaced: the start answers 502 and records nothing", async () => {
-    seedFailedReview();
-    checkPatchFailure = 403;
-    const res = await app.request(
+  const startRaw = () =>
+    app.request(
       `/admin/pr-reviews/${DS}/7/start`,
       { method: "POST", headers: { Authorization: `Bearer ${ADMIN_KEY}` } },
       env(),
     );
+
+  // A refusal that is not about the run: a credential (401, 403), a throttle (429) and GitHub's own
+  // error (500). GitHub would refuse a new run the same way, so none is posted, and the start says
+  // which it was. A 401 is tried once more with a fresh token, a 429 and a 500 once more as a
+  // transient failure: every write is still the update of run 77.
+  for (const status of [401, 403, 429, 500]) {
+    test(`an update refused with ${status} is not replaced: the start answers 502, names it, and records nothing`, async () => {
+      seedFailedReview();
+      checkPatchFailure = status;
+      const res = await startRaw();
+      expect(res.status).toBe(502);
+      const said = ((await res.json()) as { error: string }).error;
+      expect(said).toContain(`GitHub refused the update of its check (HTTP ${status})`);
+      expect(said).toContain("so no new check was posted");
+      expect(said).toContain(
+        status === 401 || status === 403
+          ? "Look at the App's credential and its permission to write checks"
+          : "Try again in a moment.",
+      );
+      const writes = checkOutcomes().map((c) => `${c.method} ${c.path}`);
+      expect(writes.length).toBeGreaterThan(0);
+      expect(new Set(writes)).toEqual(new Set(["PATCH /check-runs/77"]));
+      expect(waiverAudits()).toEqual([]);
+      expect(reviews()[0]).toMatchObject({ check_run_id: 77 });
+    });
+  }
+
+  test("an update and the new run both refused: the start says the new run was refused too", async () => {
+    seedFailedReview();
+    checkRunFailure = 422;
+    const res = await startRaw();
     expect(res.status).toBe(502);
-    expect(checkOutcomes().map((c) => c.method)).toEqual(["PATCH"]);
+    const said = ((await res.json()) as { error: string }).error;
+    expect(said).toContain(
+      "GitHub refused the update of its check, and then the new check posted in its place (HTTP 422)",
+    );
+    expect(said).toContain("Its check is as it was and nothing was recorded.");
+    expect(checkOutcomes().map((c) => c.method)).toEqual(["PATCH", "POST"]);
+    expect(waiverAudits()).toEqual([]);
+  });
+
+  test("a first run refused, where no review touched the head: the start says the new check was refused", async () => {
+    checkRunFailure = 422;
+    const res = await startRaw();
+    expect(res.status).toBe(502);
+    expect(((await res.json()) as { error: string }).error).toContain(
+      "GitHub refused the new check (HTTP 422).",
+    );
+    expect(checkOutcomes().map((c) => c.method)).toEqual(["POST"]);
     expect(waiverAudits()).toEqual([]);
   });
 

@@ -40,6 +40,7 @@ import { githubFetchWithRetry } from "./github/transport.js";
 import { QueueError, environmentName, ownedHere } from "./pr-review-queue.js";
 import {
   ExemptCheckNotPublished,
+  type WaiverCheckFailure,
   WaiverCheckNotPublished,
   handlePullRequestEvent,
   reviewableDataset,
@@ -213,11 +214,7 @@ export async function startPullRequestReview(
       );
     }
     if (err instanceof WaiverCheckNotPublished) {
-      throw new QueueError(
-        502,
-        "github_unavailable",
-        "GitHub would not take the waived check for this pull request, an upstream re-pull's at the head NEMAR recorded, neither as an update of its check nor as a new check, so its check is as it was and nothing was recorded. Try again in a moment; if GitHub keeps refusing, look at the App's permission to write checks on the repository.",
-      );
+      throw new QueueError(502, "github_unavailable", waiverNotPublishedWords(err.failure));
     }
     throw err;
   }
@@ -256,4 +253,28 @@ export async function startPullRequestReview(
     }
   }
   return answer;
+}
+
+/**
+ * What an administrator's start says when the waived check did not reach GitHub, by what happened:
+ * an update refused for a reason not about the run (a credential, a throttle, GitHub's own error),
+ * so no new run was posted; a new run refused after the update was; a first run refused; or no
+ * answer at all.
+ */
+export function waiverNotPublishedWords(f: WaiverCheckFailure): string {
+  const lead =
+    "GitHub would not take the waived check for this pull request, an upstream re-pull's at the head NEMAR recorded";
+  const why =
+    f.kind === "unanswered"
+      ? "GitHub did not answer in time, could not be reached, or the Worker had no token to write with"
+      : f.write === "update"
+        ? `GitHub refused the update of its check (HTTP ${f.status}) for a reason that is not about the check run itself, so no new check was posted`
+        : f.write === "new-run"
+          ? `GitHub refused the update of its check, and then the new check posted in its place (HTTP ${f.status})`
+          : `GitHub refused the new check (HTTP ${f.status})`;
+  const credential = f.kind === "refused" && (f.status === 401 || f.status === 403);
+  const next = credential
+    ? "Look at the App's credential and its permission to write checks on the repository, then try again."
+    : "Try again in a moment.";
+  return `${lead}: ${why}. Its check is as it was and nothing was recorded. ${next}`;
 }

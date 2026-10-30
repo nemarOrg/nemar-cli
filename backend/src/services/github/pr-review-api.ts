@@ -46,6 +46,21 @@ function callOptions(refresh: (() => Promise<string>) | undefined, quick: boolea
   };
 }
 
+/**
+ * GitHub answered a check-run write with a refusal: `update` of the existing run (and no new run was
+ * tried, see {@link newRunCanReplace}), `create` of a first run, or `new-run`, the run posted after
+ * the update was refused.
+ */
+export class CheckRunWriteRefused extends Error {
+  constructor(
+    readonly write: "update" | "create" | "new-run",
+    readonly status: number,
+  ) {
+    super(`check-run ${write} refused: HTTP ${status}`);
+    this.name = "CheckRunWriteRefused";
+  }
+}
+
 export interface CheckRunInput {
   token: string;
   repo: string;
@@ -121,7 +136,7 @@ export async function upsertReviewCheckRun(input: CheckRunInput): Promise<number
     if (res.ok) return input.checkRunId;
     const replace =
       res.status === 404 || (input.newRunOnRefusal === true && newRunCanReplace(res.status));
-    if (!replace) throw new Error(`check-run update refused: HTTP ${res.status}`);
+    if (!replace) throw new CheckRunWriteRefused("update", res.status);
   }
 
   const res = await githubFetchWithRetry(
@@ -140,7 +155,9 @@ export async function upsertReviewCheckRun(input: CheckRunInput): Promise<number
     },
     options,
   );
-  if (!res.ok) throw new Error(`check-run create refused: HTTP ${res.status}`);
+  if (!res.ok) {
+    throw new CheckRunWriteRefused(input.checkRunId === null ? "create" : "new-run", res.status);
+  }
   const body = (await res.json()) as { id?: unknown };
   if (typeof body.id !== "number" || !Number.isSafeInteger(body.id)) {
     throw new Error("check-run create returned no id");
