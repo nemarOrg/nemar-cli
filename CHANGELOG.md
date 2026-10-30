@@ -15,7 +15,7 @@ earlier releases are described only by their generated notes.
 
 ## 0.10.27 - 2026-10-29
 
-The first production re-pulls found three faults that this release fixes, and the release carries the phrase-search rework with them.
+The production canary and the first production re-pulls found three faults that this release fixes, and the release carries the phrase-search rework with them.
 A re-pull's S3 copy no longer fails on the upstream bucket's tag denial; a re-pull merged outside NEMAR's tools can be accepted on evidence instead of stranding the record; and a re-pull's own pull request is no longer failed by the automated review of contributor changes.
 Search stops answering a phrase with most of the catalog (ADR 0116).
 The release has one migration, 0113, which creates one table and changes nothing that exists.
@@ -24,26 +24,28 @@ It sets no Worker variable or secret, and the four re-pull switches and caps sta
 ### Changed
 
 - **A re-pull's single-object S3 copy sends `--tagging-directive REPLACE` (#1991, #1992).**
-  Upstream's bucket denies reading an object's tags, and a plain cross-bucket `copy-object` reads them, so every key at or below the single-copy bound failed at the copy step.
+  Upstream's bucket denies reading the tags of its newer, tagged objects (ADR 0063), and a plain cross-bucket `copy-object` reads them, so the canary's first run failed at the copy step with an access denial, and a re-pull of such an object would have failed there.
   The write guard now refuses a `copy-object` that does not carry exactly `REPLACE`, and the production canary and the S3 stand-in follow the real buckets.
   The multipart path carries no tags and is unchanged.
 - **A re-pull merged outside NEMAR's tools can be accepted on evidence (#1996, #1997; ADR 0111, amendment of 2026-10-29).**
   The merge gate writes a re-pull's squash message so that its last paragraph holds the commit's trailers, because the privacy ledger's fresh-clone proof reads the merge as the re-pull's own commit only then.
   A merge made with GitHub's button has no trailers, the release refuses it as `merge-trailers`, and the record used to stay at `merged` for good.
-  `nemar admin repull resume <id> --accept-merge-trailers "<reason>"` (10 to 500 characters, recorded for the administrator who gives it) now verifies, from GitHub, that the merge is the squash merge of the record's own pull request, that its tree is the record's commit outside `.nemar/` and `.github/`, and that its parent is the record's base or a descendant that enrichment moved.
+  `nemar admin repull resume <dataset> --accept-merge-trailers "<reason>"` (10 to 500 characters, recorded for the administrator who gives it) now verifies, from GitHub, that the merge is the squash merge of the record's own pull request, that its tree is the record's commit outside `.nemar/` and `.github/`, and that its parent is the record's base or a descendant that enrichment moved.
   The Worker repeats every check with its own credential at the new route `POST /admin/repulls/:id/merge-trailers/accept`, records the acceptance in `upstream_repull_merge_acceptances` (migration 0113), and, when the merge appended a `repull-scrubbed` line beside other files, appends one `repull-merge-accepted` line to `.nemar/corrections.jsonl` on `main`.
   The line holds the full merge commit id, the plan digest, the version, the scanner and a fixed verification word, and never the reason.
   The fresh-clone proof vouches for exactly that commit when it is a first-parent commit of a tip and not carried only by a tag.
+  Only the administrator who opened the re-pull can accept its merge (`accept-not-yours`), and a re-pull the automatic path opened is never accepted (`accept-automatic`); the release's `merge-trailers` refusal now says so instead of advising the flag, and a Worker that has no acceptance route is named as such.
   A lost, timed-out or rate-limited answer exits 3 (run it again); a refusal exits 1.
   The runbook gains the check an administrator runs before any history rewrite.
 - **A re-pull's own pull request is waived from the automated review (#1998, #2000; ADR 0117).**
   The review judges a change by contributor-protection rules, and a re-pull's pull request is upstream's delta built by the platform, so it failed, GitHub read the pull request as `unstable`, and `nemar admin repull resume` waited for `clean` while `merge --force` answered `not-ready`.
-  One pure rule decides the waiver from NEMAR's own record: an open record of the same dataset names the pull request as its N.0.0 or N.0.1, in the dataset's own repository, from the record's branch into `main`, at the record's head, with the record at `pr_open`, `gates_clear` or a `patch_*` state.
+  One pure rule decides the waiver from NEMAR's own record: an open record of the same dataset names the pull request as its N.0.0 or N.0.1, in the dataset's own repository, from the record's branch into `main`, at the record's head, with the record at `pr_open`, `gates_clear`, `patch_synthesized` or `patch_gates_clear`.
   The Worker posts one `skipped` check run titled "Waived: upstream re-pull" and writes a `pr_review_waived` audit row; it creates no review row, dispatches no workflow and calls no model.
   The waiver is decided before the administrator exemption, a block or a restart.
   The queue shows a derived verdict `waived`, offers it for merge and leaves it out of `start --all`; `approvalGate` returns `confirm`, so no `--force` is needed.
   The Worker's own review of the App's re-pull pull request is retired.
-  An existing failed check is updated in place, and a new run is posted when GitHub refuses the update; the tick republishes a waiver GitHub holds back, and the sweep gives up on one after five tries, about two and a half hours.
+  An existing failed check is updated in place, and a new run is posted when GitHub refuses the update; on the automatic path the tick republishes a waiver GitHub holds back for an N.0.0 pull request, and the 30-minute sweep retries stored review rows and gives up on one after five tries, about two and a half hours.
+  A waiver with no stored row that fails to publish is retried by neither; an administrator's `nemar admin pr-reviews start` or a webhook redelivery publishes it.
   Findings the review would have raised are listed as recommended issues, none filed automatically.
 - **Phrase search is judged for relevance (#1999; ADR 0116, proposed).**
   A phrase of two or more content words draws at most 30 candidates from each of the lexical, semantic and name/authors/tasks legs, and `@cf/baai/bge-reranker-base` on Workers AI scores the pool; a dataset is kept when the cross-encoder endorses it, or both retrieval legs found it and the cross-encoder does not strongly reject it, or every informative query word is literally in its name, authors or tasks.
@@ -61,7 +63,7 @@ It sets no Worker variable or secret, and the four re-pull switches and caps sta
 - **A re-pull pull request no longer gets the automated review.**
   An existing `NEMAR PR Review` failure on a re-pull's pull request clears with `nemar admin pr-reviews start <dataset> <pr>`, which updates the check in place or posts a new run; the automatic path's tick does the same on its own.
 - **`nemar admin repull resume` names the review check when it waits on a pull request that is not `clean`, and says which other check does not pass.**
-- **The privacy-correction runbook gains step 8.**
+- **The privacy-correction runbook gains item 8 under "Before each dataset".**
   It checks that the ledger names no merge a re-pull accepted before any history rewrite, because the rewrite gives that merge a new id and the proof would then fail closed.
 
 ### Deploy coupling
@@ -74,12 +76,14 @@ It sets no Worker variable or secret, and the four re-pull switches and caps sta
 
 None of these is done by the release.
 
-1. Rebuild the search vectors: `POST /admin/vectorize/reindex-all` until `has_more` is false (500 datasets per call).
+1. Rebuild the search vectors: `POST /admin/vectorize/reindex-all` with the body `{"after": "<last_id of the previous answer>"}` (200 datasets per call; `limit` goes to 500) until `has_more` is false, and read `failed` in each answer.
+   Without `after` every call re-reads the first page.
+   Whether 500 per call stays inside the Worker's subrequest limit is not established, so use the default if a call reports failures.
    Until it finishes the semantic leg searches README-based vectors, which work with lower recall.
 2. In the first deploy's Worker logs, find `[search] rerank raw scores: ... read as logits` and a sane `rerank_ms`.
    Workers AI latency and the score scale were never measured live.
-3. For a re-pull that is waiting on the review check, run `nemar admin pr-reviews start <dataset> <pr>`, then `nemar admin repull resume <id>`, then `nemar admin repull merge <id>` (the merge mints a version DOI and needs the administrator's go).
-4. For a re-pull merged outside NEMAR's tools, run `nemar admin repull resume <id> --accept-merge-trailers "<reason>"` once the tag exists on `main`, then confirm the release locked the copied objects and the version DOI resolves.
+3. For a re-pull that is waiting on the review check, run `nemar admin pr-reviews start <dataset> <pr>`, then `nemar admin repull resume <dataset>`, then `nemar admin repull merge <dataset>` (the merge mints a version DOI and needs the administrator's go).
+4. For a re-pull merged outside NEMAR's tools, run `nemar admin repull resume <dataset> --accept-merge-trailers "<reason>"` once the tag exists on `main`, then confirm the release locked the copied objects and the version DOI resolves.
 5. Run the fleet backfill, `nemar admin upstream-backfill`, as a dry run and then with `--execute`, after the first re-pulls finish.
 
 ### Known limits
@@ -92,7 +96,9 @@ None of these is done by the release.
 - The accept path was tested against a GitHub stand-in only; its first production use is the check.
 - The waiver cannot tell a human-written `.nemar/` file from an enrichment file on a re-pull's branch, because commit identities are forgeable and the push sender is not recorded.
   The identifier screen, the BIDS check, the administrator's confirmation and push access to the branch are the mitigations; whether to add a filename allowlist is the owner's decision.
-- An administrator-origin record whose waiver was abandoned after five tries needs `nemar admin pr-reviews start` by hand.
+- An administrator-origin record whose waiver was abandoned after five tries, or never had a stored row, needs `nemar admin pr-reviews start` by hand.
+- A re-pull the automatic path opened and that is merged with GitHub's button stays at `merged`, and no command moves it on: the Worker's own merge carries the trailers, so only the button can cause it, and the acceptance is refused for it (`accept-automatic`).
+  Only the administrator who opened a re-pull can accept its merge (`accept-not-yours`).
 - A plan made before its record exists changes digest once the record is created, because creating it writes the version row's lineage and the plan's `from_tag_basis` then reads `version-row`; a `resume` with the original plan stops as `plan-stale`, and the way on is `abandon`, a fresh `plan`, then `execute` (#1994, open).
 - The phrase search's calibration truth sets read the same fields the cross-encoder reads, so its benchmark favors the cross-encoder; the held-out gap is the part that does not.
 
