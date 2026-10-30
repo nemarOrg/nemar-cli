@@ -92,6 +92,16 @@ const TRANSIENT_STATUSES = new Set([0, 408, 429]);
  */
 export function acceptanceRefusal(err: unknown, prefix: string): ExecuteRefused {
   const code = repullErrorCode(err);
+  // A 404 or 405 with none of the Worker's words is a Worker that has no acceptance route at all
+  // (one older than this release), not a record it could not find; running again changes nothing.
+  if (code === undefined && err instanceof ApiError && [404, 405].includes(err.statusCode)) {
+    const failure = new ExecuteRefused(
+      "accept-route-missing",
+      `${prefix}: this Worker has no acceptance route (it is older than the CLI), so nothing was sent that acts.`,
+    );
+    failure.resumable = false;
+    return failure;
+  }
   const msg = err instanceof Error ? err.message : String(err);
   const transient =
     code === undefined
