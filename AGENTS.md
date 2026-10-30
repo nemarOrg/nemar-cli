@@ -228,7 +228,14 @@ a dataset is kept on its approval, or when both legs found it and it is not stro
 every informative word is in its name, authors or tasks; `count` of a phrase is the number judged relevant
 and `reranked` marks it, a single word is not cut, a word in over 25% of datasets does not drive a match,
 the vector and the cross-encoder read one text so the admin reindex rebuilds the vectors after deploy, a word no dataset
-contains is corrected and reported as `corrected_query`, a modality the query names lists its datasets first, filters never change which datasets are relevant, and every model failure serves the fused list).
+contains is corrected and reported as `corrected_query`, a modality the query names lists its datasets first, filters never change which datasets are relevant, and every model failure serves the fused list),
+0117 (PROPOSED; an upstream re-pull's own pull request is waived from the automated review by NEMAR's record:
+one pure rule (`shared/repull-review-waiver.ts`) names the pull request of an open record, from and into the
+dataset's own repository, from the record's release branch, at the head NEMAR's tools recorded, and it gets one
+`skipped` check titled "Waived: upstream re-pull" with no review row, dispatch or model call, decided before
+the administrator exemption or a block; the queue verdict is `waived` and the merge needs no `--force`, the
+Worker's own review of the App's re-pull pull request is retired, and what the rule cannot tell, such as a
+human-written `.nemar/` file on the branch, is listed in the ADR).
 
 **Account copy and the profile-gap matrix are declared once, in
 [`shared/contract/account-copy.ts`](shared/contract/account-copy.ts) and
