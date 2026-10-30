@@ -1756,7 +1756,7 @@ describe("what a tick costs", () => {
   // The 30-minute tick shares one invocation's subrequest allowance with every job on it, so the
   // advance tick's own use is counted here from the code as it runs: every D1 statement prepared
   // (a batch's statements each count) and every request to GitHub. Five rows, the most a tick reads.
-  test("five rows starting their screens, waiting on them, and clearing", async () => {
+  test("five rows starting their screens, waiting on them, held by GitHub, and clearing", async () => {
     let statements = 0;
     const base = realD1(db);
     const counting = {
@@ -1780,14 +1780,37 @@ describe("what a tick costs", () => {
     seen.push(await measure());
     // Each waits on it: the facts are read again, and nothing is written.
     seen.push(await measure());
-    // Each screen is clear and each is clean (the review of the record's own head is waived, ADR
-    // 0117, so no review is started or read), and the record's own transition reads its live head
-    // before it writes.
+    // Each screen is clear, and GitHub holds each back (`unstable`) over a review check that failed
+    // before the head was recorded: the tick reads that check and publishes the waiver again, a
+    // read of the pull request and a new run each (ADR 0117).
     ids.forEach((id, k) => markScreen(id, "clean", datasets[k]));
+    const reviewRun = (conclusion: string): CheckRunAnswer => ({
+      id: 50,
+      name: "NEMAR PR Review",
+      status: "completed",
+      conclusion,
+      app_id: NEMAR_APP_ID,
+    });
+    const held = (conclusion: string) => {
+      for (const ds of datasets) {
+        gh.pulls[`${ds}#7`] = appPull(ds, { mergeable_state: "unstable" });
+        gh.checkRuns[`${ds}@${HEAD}`] = [...greenRuns(), reviewRun(conclusion)];
+      }
+    };
+    held("failure");
+    seen.push(await measure());
+    // Still held, and the check already says the waiver: the check is read, and nothing more.
+    held("skipped");
+    seen.push(await measure());
+    // Each is clean (the review of the record's own head is waived, so no review is started or
+    // read), and the record's own transition reads its live head before it writes.
+    datasets.forEach(githubClean);
     seen.push(await measure());
     expect(seen).toEqual([
       { d1: 62, github: 25 },
       { d1: 32, github: 20 },
+      { d1: 47, github: 35 },
+      { d1: 32, github: 25 },
       { d1: 47, github: 25 },
     ]);
     expect(ids.every((id) => rowOf(id).status === "gates_clear")).toBe(true);
