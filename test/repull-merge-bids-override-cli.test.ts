@@ -512,6 +512,8 @@ describe.skipIf(!awsInstalled)("the override in the normal order: resume, then t
     expect(run.all).toContain(
       `run nemar admin pr-reviews start ${w.fx.datasetId} ${w.row().pr_number} to publish the waiver, then run this command again`,
     );
+    // The waiver is a 0.10.27 Worker's; the hint does not claim one from an older Worker.
+    expect(run.all).toContain("an older Worker does not publish the waiver");
     expect(w.row()).toMatchObject({ status: "pr_open", gates_sha: null });
   });
 
