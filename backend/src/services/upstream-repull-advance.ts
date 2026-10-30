@@ -775,9 +775,11 @@ async function startGateWork(
   // Everything else holds and GitHub still holds the pull request back: when the head's review check
   // is not the waiver (a review that failed before the head was recorded, or a publish the record's
   // transition could not make), publish the waiver again (ADR 0117). Read only then, so a tick that
-  // is not waiting on GitHub's word asks GitHub nothing more.
+  // is not waiting on GitHub's word asks GitHub nothing more. `not-clean` is the rule's last hold:
+  // the review step passed, and the pull request was the record's at its head, which is when the
+  // review is waived; `publishRecordedRepullHead` decides the waiver again before it writes.
   const now = machineClean({ ...facts, screen });
-  if (!now.clean && now.hold === "not-clean" && facts.review === "waived") {
+  if (!now.clean && now.hold === "not-clean") {
     const check = await readReviewCheck(env, row.dataset_id, head);
     if (check.status !== "completed" || check.conclusion !== "skipped") {
       const answer = await publishRecordedRepullHead(env, row, "n0");
