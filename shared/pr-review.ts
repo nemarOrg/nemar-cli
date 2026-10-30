@@ -35,9 +35,11 @@
  * **Unknown is never green** (ADR 0053, ADR 0054, ADR 0086). Anything that is not a clear pass maps to a
  * conclusion that does not satisfy a required check: `neutral` and `skipped` DO satisfy one on
  * GitHub, which is why `neutral` appears nowhere in {@link conclusionOf}, and `skipped` for exactly
- * one outcome, `exempt`: a pull request opened by a NEMAR owner or administrator is not reviewed at
- * all, so there is no unknown in it to hide (ADR 0107). The naming rule still applies to it: a title
- * or a dataset name that breaks the rule is a `naming` outcome, which fails.
+ * two outcomes, `exempt` and `waived`: a pull request opened by a NEMAR owner or administrator is
+ * not reviewed at all, so there is no unknown in it to hide (ADR 0107), and neither is an upstream
+ * re-pull's pull request at the head NEMAR's record holds (ADR 0117), whose content is upstream's.
+ * The naming rule still applies to an owner's pull request: a title or a dataset name that breaks
+ * the rule is a `naming` outcome, which fails.
  *
  * The parser throws a fixed-word {@link PrReviewReportError}; it never quotes its input.
  */
@@ -1089,16 +1091,28 @@ export type ReviewOutcome =
    * An owner's or administrator's pull request that the naming rule refuses, or could not check:
    * the review does not run for them, and the rule runs first. Published, never stored.
    */
-  | { kind: "naming"; facts: NamingFacts };
+  | { kind: "naming"; facts: NamingFacts }
+  /**
+   * Not reviewed, by NEMAR's record (ADR 0117): the pull request of an open upstream re-pull, at
+   * the head NEMAR's tools recorded for it (`shared/repull-review-waiver.ts`). A mirror's content
+   * is upstream's, so the review, which protects a dataset from a contributor's change, has no
+   * contributor to judge. `advice` is the report of a review of this head that ran before the head
+   * was recorded, whose findings are shown as recommendations and never decide anything; null when
+   * no review of the head reported. Published, never stored.
+   */
+  | { kind: "waived"; repullId: number; advice: PrReviewReport | null };
 
 /** An outcome a `pr_reviews` row can stand for: every outcome but the ones never stored. */
-export type StoredOutcome = Exclude<ReviewOutcome, { kind: "exempt" } | { kind: "naming" }>;
+export type StoredOutcome = Exclude<
+  ReviewOutcome,
+  { kind: "exempt" } | { kind: "naming" } | { kind: "waived" }
+>;
 
 /**
  * Every kind of outcome, from a record keyed by the union's own tags, so that adding a kind to
  * {@link ReviewOutcome} without listing it here is a compile error. The tests build one outcome
  * of each kind and check them against this list, so a new kind cannot slip past the rule that only
- * `exempt` is `skipped`.
+ * `exempt` and `waived` are `skipped`.
  */
 const OUTCOME_KINDS: Record<ReviewOutcome["kind"], true> = {
   reported: true,
@@ -1107,6 +1121,7 @@ const OUTCOME_KINDS: Record<ReviewOutcome["kind"], true> = {
   unreported: true,
   exempt: true,
   naming: true,
+  waived: true,
 };
 export const REVIEW_OUTCOME_KINDS = Object.keys(OUTCOME_KINDS) as ReviewOutcome["kind"][];
 
@@ -1140,16 +1155,19 @@ export function factsStop(
  * it as passing for a required check, and it tells a person to look. `neutral` is deliberately
  * unused, because a required check accepts it as a pass.
  *
- * `skipped` is the conclusion of exactly one outcome, `exempt`, and of no other: a required check
- * accepts it, which is the point (a pull request nobody is asked to review must not be held by a
- * review that does not apply to it), and it is safe only because it is never what a review that
- * ran, failed or could not decide says. An owner's pull request that the naming rule refuses is a
- * `failure`; one whose name could not be checked needs a person, whatever else the rule found: a
- * waiver covers only what the rule found, so while the name cannot be read nothing can be waived,
- * and a `failure` would offer the administrator a waiver that is then refused.
+ * `skipped` is the conclusion of exactly two outcomes, the two nobody is asked to review, and of no
+ * other: `exempt` (an owner's or administrator's pull request, ADR 0107) and `waived` (an upstream
+ * re-pull's pull request at the head NEMAR recorded, ADR 0117). A required check accepts it, which
+ * is the point (a pull request nobody is asked to review must not be held by a review that does not
+ * apply to it), and it is safe only because it is never what a review that ran, failed or could not
+ * decide says: a waived outcome's advice, even a failing report, never reaches its conclusion. An
+ * owner's pull request that the naming rule refuses is a `failure`; one whose name could not be
+ * checked needs a person, whatever else the rule found: a waiver covers only what the rule found,
+ * so while the name cannot be read nothing can be waived, and a `failure` would offer the
+ * administrator a waiver that is then refused.
  */
 export function conclusionOf(outcome: ReviewOutcome): CheckConclusion {
-  if (outcome.kind === "exempt") return "skipped";
+  if (outcome.kind === "exempt" || outcome.kind === "waived") return "skipped";
   if (outcome.kind === "naming") {
     const { facts } = outcome;
     return facts.name !== "unchecked" && namingRefused(facts) ? "failure" : "action_required";
@@ -1209,6 +1227,34 @@ const EXEMPT_COPY = {
     "The automated review did not run on this pull request. NEMAR owners and administrators are not reviewed, and may merge without it. The title and the dataset name were checked against the naming rule, and nothing was found.",
   text: "Skipped is not a pass. It says the review is not required here, not that this change was reviewed. A pull request opened by anyone else is reviewed.",
 } as const;
+
+/**
+ * What an upstream re-pull's pull request is told at the head NEMAR recorded (ADR 0117). It says
+ * the review is waived and why, that the decision is NEMAR's record and not anything the pull request
+ * says, which gates still hold its merge, and that skipped is not a pass. The recommendations follow
+ * in the text ({@link recommendationLines}).
+ */
+export const REPULL_WAIVED_TITLE = "Waived: upstream re-pull";
+
+const REPULL_WAIVED_SUMMARY = (repullId: number) =>
+  `The automated review does not apply to this commit. It is the head NEMAR's own tools recorded for the pull request of upstream re-pull #${repullId}, decided from NEMAR's record of the re-pull and not from anything this pull request says. A mirror's content is upstream's: upstream is its author and wins every conflict, so the review, which protects a dataset from a contributor's change, has no contributor to judge here. The identifier screen, BIDS validation, the version check and the daily merge cap still gate the merge.`;
+
+const REPULL_WAIVED_TEXT =
+  "Skipped is not a pass. It says the review is waived for this commit, not that this change was reviewed. A commit NEMAR has not recorded for the re-pull is reviewed as any other pull request is.";
+
+/** The heading of the recommendations, in the check and the comment. */
+export const RECOMMENDATIONS_HEADING = "Recommended issues, none filed automatically";
+
+/** No review of the waived commit reported: none ran on it once it was waived, and none before. */
+const NO_REVIEW_RAN =
+  "None: no review of this commit reported findings. No review runs on it, because it is waived.";
+
+/** A review of the commit ran before NEMAR recorded it, and found nothing. */
+const NOTHING_FOUND =
+  "None: the review of this commit that ran before NEMAR recorded it found nothing.";
+
+const RECOMMENDATIONS_FOOT =
+  "Each line is something to consider raising with the upstream dataset's authors, or correcting in NEMAR's own patch release; none of them holds this pull request, and nothing was filed.";
 
 const WAIVED_COPY = {
   title: "Not required: opened by a NEMAR owner or administrator (naming rule waived)",
@@ -1491,6 +1537,46 @@ export function findingLines(report: PrReviewReport): string[] {
   return details;
 }
 
+/**
+ * The findings of a review of a waived head (ADR 0117), as things to consider filing, never as
+ * blockers: no severity, no word that the review fails, and nothing about what a contributor should
+ * do instead. The model's findings first, then the facts the platform found that no finding states.
+ * Empty when the review found nothing. Its words are fixed or sanitized like every other line here.
+ */
+export function recommendationLines(report: PrReviewReport): string[] {
+  const labelOf = (code: FindingCode): string =>
+    (CODE_LABEL as Record<string, string | undefined>)[code] ?? `Unknown finding (${code})`;
+  const { notes } = factsOf(report);
+  const out: string[] = [];
+  if (report.steering) out.push(`- ${CODE_LABEL.steering_attempt}.`);
+  for (const f of report.findings) {
+    if (f.code === "steering_attempt") continue;
+    const where = f.path ? ` (\`${f.path}\`)` : "";
+    const note = f.note ? `: ${f.note}` : "";
+    out.push(`- ${labelOf(f.code)}${where}${note}`);
+  }
+  for (const n of notes) {
+    if (report.findings.some((f) => f.criterion === n.criterion && f.code === n.code)) continue;
+    out.push(`- ${labelOf(n.code)}: ${factSource(n.code)}.`);
+  }
+  return out;
+}
+
+/** The check of an upstream re-pull's pull request at the head NEMAR recorded (ADR 0117). */
+function renderRepullWaived(outcome: Extract<ReviewOutcome, { kind: "waived" }>): RenderedCheck {
+  const lines = outcome.advice === null ? [] : recommendationLines(outcome.advice);
+  return {
+    title: REPULL_WAIVED_TITLE,
+    summary: REPULL_WAIVED_SUMMARY(outcome.repullId),
+    text: [
+      REPULL_WAIVED_TEXT,
+      `### ${RECOMMENDATIONS_HEADING}`,
+      lines.length > 0 ? lines.join("\n") : outcome.advice === null ? NO_REVIEW_RAN : NOTHING_FOUND,
+      ...(lines.length > 0 ? [RECOMMENDATIONS_FOOT] : []),
+    ].join("\n\n"),
+  };
+}
+
 /** What the naming rule says to an author, sentence by sentence. Empty when it found nothing. */
 export function namingLines(report: PrReviewReport): string[] {
   if (report.v !== REPORT_VERSION) return [];
@@ -1570,6 +1656,7 @@ function modelLine(report: PrReviewReport): string {
 /** Render the check-run's title, summary and detail from an outcome. Pure; no input is quoted raw. */
 export function renderCheck(outcome: ReviewOutcome): RenderedCheck {
   if (outcome.kind === "exempt") return outcome.waived ? { ...WAIVED_COPY } : { ...EXEMPT_COPY };
+  if (outcome.kind === "waived") return renderRepullWaived(outcome);
   if (outcome.kind === "naming") return renderNaming(outcome.facts);
   if (outcome.kind === "declined") {
     return {

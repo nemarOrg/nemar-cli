@@ -59,23 +59,16 @@
  *
  * WHAT THE GATES WAIT FOR, and when the tick starts it. Only once every rule before the screen holds
  * (the switches, the record, the dataset, the recorded pull request opened by the App at the
- * recorded head, `main` unmoved, and both checks green), so neither a screen run nor a model call is
- * spent on a pull request the Worker would not take on anyway:
- *  - the identifier screen of the head (`startRepullScreen`, `ref` the head, `request_id` 0), when
- *    the head has no verdict (no screen, a screen that errored, or one that never reported), at most
- *    {@link AUTOMATIC_SCREENS_MAX} times for one head, counted from the screen's own audit rows, so a
- *    workflow that always fails is not run again on every tick; past that an administrator can
- *    dispatch it again by hand. A verdict that asks for a person is not run again here: it never
- *    passes machine clean, and the same commit would be asked the same question;
- *  - the ADR 0107 review of the head (`startRepullPullRequestReview`, the one start that admits the
- *    App's pull request), when the head has none, or its dispatch failed (GitHub never ran it) at
- *    least {@link REVIEW_RETRY_MINUTES} minutes ago, and only once the screen of the head is
- *    `clear`, so on a later tick than the screen: a screen still out may yet block or ask for a
- *    person, and one that errored, blocks or asks for a person means this head is not machine clean
- *    now, so a review would be a model call spent on a head that may never pass. When the review's
- *    own start declines (the review switched off, a dataset it may not read, GitHub unreadable,
- *    another author or head), its reason is counted and logged, so a row held `review-absent` says
- *    why.
+ * recorded head, `main` unmoved, and both checks green), so no screen run is spent on a pull request
+ * the Worker would not take on anyway: the identifier screen of the head (`startRepullScreen`, `ref`
+ * the head, `request_id` 0), when the head has no verdict (no screen, a screen that errored, or one
+ * that never reported), at most {@link AUTOMATIC_SCREENS_MAX} times for one head, counted from the
+ * screen's own audit rows, so a workflow that always fails is not run again on every tick; past that
+ * an administrator can dispatch it again by hand. A verdict that asks for a person is not run again
+ * here: it never passes machine clean, and the same commit would be asked the same question.
+ * Nothing starts the ADR 0107 review: the recorded head of the App's pull request is waived from it
+ * (ADR 0117), so machine clean reads `waived` and no model is asked (ADR 0117 retires the Phase 7f
+ * start of that review).
  *
  * HOLDS. A hold is an observation, never a transition: a fixed word (`REPULL_HOLD_REASONS`) and
  * since when, on the row (`hold_reason`, `hold_since`). Writing one does not move the row, does not
@@ -112,13 +105,13 @@
  * production tick that could list its rows stamps `upstream_repull_scheduler.last_advance_at`.
  *
  * COST on the 30-minute tick, which shares one subrequest allowance with every job on it, measured
- * over five rows at `pr_open` (`upstream-repull-advance.test.ts` pins it): 67 D1 statements and 25
- * GitHub requests when each starts its screen, 37 and 20 while each waits, 82 and 35 when each
- * starts its review (the most), 52 and 25 when each is cleared; a stalled row's resume is eight
+ * over five rows at `pr_open` (`upstream-repull-advance.test.ts` pins it): 62 D1 statements and 25
+ * GitHub requests when each starts its screen (the most), 32 and 20 while each waits, and 47 and 25
+ * when each is cleared, with no review started or read (ADR 0117); a stalled row's resume is eight
  * statements and one dispatch, and the tick itself two statements (the list of rows, the stamp).
  * Past the gates (`upstream-repull-worker-merge.test.ts` pins it), a row that waits at the merge is
- * seven statements and four requests, one merged sixteen and seven, and a finish dispatched eight
- * and one, so five merges on one tick are 82 and 35. Plus one request to mint the App's
+ * six statements and four requests, one merged fifteen and seven, and a finish dispatched eight
+ * and one, so five merges on one tick are 77 and 35. Plus one request to mint the App's
  * installation token on a cold isolate, when the App's credential is configured: the suites use a
  * personal token, so the figures leave it out.
  *
@@ -150,14 +143,14 @@ import {
   errorClassName,
   triggerUpstreamRepullRun,
 } from "./github/dispatch.js";
-import { startRepullPullRequestReview } from "./pr-review-start.js";
+import { publishRecordedRepullHead } from "./pr-review.js";
 import { autoRepullEnabled, isExactProduction } from "./repull-switches.js";
 import {
   REFUSED_FOR_THE_DISPATCH,
   claimOpenDispatch,
   markDispatchSendFailed,
 } from "./upstream-repull-dispatch.js";
-import { gatherMachineCleanFacts } from "./upstream-repull-facts.js";
+import { gatherMachineCleanFacts, readReviewCheck } from "./upstream-repull-facts.js";
 import {
   type WorkerMergeOutcome,
   finishAfterMerge,
@@ -245,9 +238,6 @@ const BEFORE_PULL_REQUEST: ReadonlySet<HoldReason> = new Set(
 /** How many times the tick dispatches the identifier screen of one head, at most. */
 export const AUTOMATIC_SCREENS_MAX = 3;
 
-/** How long a review whose dispatch failed waits before the tick asks for it again. */
-export const REVIEW_RETRY_MINUTES = 60;
-
 /**
  * The hold words that mean every rule before the screen holds: the screen's, the review's and
  * GitHub's own `not-clean`, the last three rules of machine clean. Only then is gate work started.
@@ -316,16 +306,6 @@ export const SCREEN_DISPATCHES_SQL = `SELECT COUNT(*) AS n FROM audit_log
     AND resource_id = ?1 AND json_extract(details, '$.pr') = 'n0'
     AND json_extract(details, '$.sha') = ?2`;
 
-/**
- * Whether the review of one head is one whose dispatch failed (GitHub never ran it) long enough ago
- * to ask again: `?1` the dataset, `?2` the pull request, `?3` the head. The review's own start tries
- * such a review again, and nothing else it has.
- */
-export const REVIEW_RETRYABLE_SQL = `SELECT COUNT(*) AS n FROM pr_reviews
-  WHERE dataset_id = ?1 AND pr_number = ?2 AND head_sha = ?3
-    AND state = 'errored' AND detail = 'dispatch_failed'
-    AND decided_at < datetime('now', '-${REVIEW_RETRY_MINUTES} minutes')`;
-
 /** The tick ran: the scheduler's row says when, for the observability slice. */
 export const ADVANCE_STAMP_SQL =
   "UPDATE upstream_repull_scheduler SET last_advance_at = datetime('now') WHERE id = 1";
@@ -386,10 +366,13 @@ export interface AdvanceTickResult {
   notDue: number;
   /** Identifier screens dispatched. */
   screensStarted: number;
-  /** ADR 0107 reviews dispatched. */
-  reviewsStarted: number;
-  /** Reviews the review's own start declined to dispatch, by its reason (`pr_review_disabled`, ...). */
-  reviewRefused: Record<string, number>;
+  /**
+   * Waived checks published again for a recorded head GitHub holds back (`not-clean`) while its
+   * review check is not the waiver (ADR 0117), and those whose publish failed or whose pull request
+   * could not be read, each an error-level line.
+   */
+  waiversPublished: number;
+  waiversFailed: number;
   /** Rows moved `pr_open -> gates_clear`. */
   gatesCleared: number;
   /** Stalled rows whose resume GitHub took. */
@@ -762,22 +745,10 @@ async function screenDispatches(db: D1Database, id: number, head: string): Promi
   return n;
 }
 
-/** Whether the review of `head` failed to dispatch long enough ago to be asked for again. */
-async function reviewRetryable(db: D1Database, row: RepullRow, head: string): Promise<boolean> {
-  const n = (
-    await db
-      .prepare(REVIEW_RETRYABLE_SQL)
-      .bind(row.dataset_id, row.pr_number, head)
-      .first<{ n: number }>()
-  )?.n;
-  if (typeof n !== "number") throw new Error("the review could not be read");
-  return n > 0;
-}
-
 /**
  * Start what the gates of `row`'s head wait for (see the module comment), and return the facts as
- * they now are: a screen or a review this started is on its way. Called only once every rule before
- * the screen holds, so the head is the recorded one and the pull request the App's.
+ * they now are: a screen this started is on its way. Called only once every rule before the screen
+ * holds, so the head is the recorded one and the pull request the App's, whose review is waived.
  */
 async function startGateWork(
   t: Tick,
@@ -801,21 +772,22 @@ async function startGateWork(
       screen = "error";
     }
   }
-  let review = facts.review;
-  // Only behind a clear screen: one still out, errored, blocking or asking for a person is not.
-  if (
-    facts.screen === "clear" &&
-    (review === "absent" || (review === "error" && (await reviewRetryable(env.DB, row, head))))
-  ) {
-    const started = await startRepullPullRequestReview(env, row);
-    if (started.dispatched) {
-      r.reviewsStarted++;
-      review = "running";
-    } else {
-      r.reviewRefused[started.reason] = (r.reviewRefused[started.reason] ?? 0) + 1;
+  // Everything else holds and GitHub still holds the pull request back: when the head's review check
+  // is not the waiver (a review that failed before the head was recorded, or a publish the record's
+  // transition could not make), publish the waiver again (ADR 0117). Read only then, so a tick that
+  // is not waiting on GitHub's word asks GitHub nothing more. `not-clean` is the rule's last hold:
+  // the review step passed, and the pull request was the record's at its head, which is when the
+  // review is waived; `publishRecordedRepullHead` decides the waiver again before it writes.
+  const now = machineClean({ ...facts, screen });
+  if (!now.clean && now.hold === "not-clean") {
+    const check = await readReviewCheck(env, row.dataset_id, head);
+    if (check.status !== "completed" || check.conclusion !== "skipped") {
+      const answer = await publishRecordedRepullHead(env, row, "n0");
+      if (answer === "waived") r.waiversPublished++;
+      else if (answer === "failed" || answer.startsWith("not_read")) r.waiversFailed++;
     }
   }
-  return { ...facts, screen, review };
+  return { ...facts, screen };
 }
 
 /**
@@ -974,8 +946,8 @@ export async function runRepullAdvanceCron(
     running: 0,
     notDue: 0,
     screensStarted: 0,
-    reviewsStarted: 0,
-    reviewRefused: {},
+    waiversPublished: 0,
+    waiversFailed: 0,
     gatesCleared: 0,
     resumed: 0,
     unconfirmed: 0,
@@ -1051,10 +1023,11 @@ export function repullAdvanceLogLine(
     r.mergeUnknown > 0 ||
     r.mergeRefused > 0 ||
     r.finishUnconfirmed > 0 ||
+    r.waiversFailed > 0 ||
     Object.keys(r.refused).length > 0;
   const acted =
     r.screensStarted +
-    r.reviewsStarted +
+    r.waiversPublished +
     r.gatesCleared +
     r.resumed +
     r.mergesSent +
@@ -1062,8 +1035,7 @@ export function repullAdvanceLogLine(
     r.claimsReleased +
     r.finishes +
     r.holdsChanged;
-  const declined = Object.keys(r.refused).length + Object.keys(r.reviewRefused).length;
-  if (!failed && acted === 0 && declined === 0) return null;
+  if (!failed && acted === 0) return null;
   const words = (counts: Record<string, number>) =>
     Object.entries(counts)
       .sort(([a], [b]) => a.localeCompare(b))
@@ -1074,8 +1046,8 @@ export function repullAdvanceLogLine(
     `running=${r.running}`,
     `not_due=${r.notDue}`,
     `screens=${r.screensStarted}`,
-    `reviews=${r.reviewsStarted}`,
-    `review_refused=${words(r.reviewRefused)}`,
+    `waivers=${r.waiversPublished}`,
+    `waivers_failed=${r.waiversFailed}`,
     `gates_cleared=${r.gatesCleared}`,
     `resumed=${r.resumed}`,
     `unconfirmed=${r.unconfirmed}`,

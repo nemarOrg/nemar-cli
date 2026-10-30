@@ -26,24 +26,46 @@ import { githubFetchWithRetry } from "./transport";
 const CHECK_TEXT_MAX = 60_000;
 /** A comment may hold 65536 characters. */
 const COMMENT_MAX = 60_000;
-/** The most a "quick" call may take, in all, before it is abandoned. */
+/**
+ * The most one "quick" write may take before it is abandoned: one signal per call, shared by the
+ * update of a check run and the new run posted when the update is refused.
+ */
 const QUICK_TIMEOUT_MS = 5_000;
+/** The longest wait before a quick call's one retry, whatever GitHub's `Retry-After` asks. */
+const QUICK_RETRY_WAIT_MS = 1_000;
 
 function clip(s: string, max: number): string {
   return s.length <= max ? s : `${s.slice(0, max - 40).trimEnd()}\n\n(Output shortened.)`;
 }
 
 /**
- * Fetch options for one call. A quick call is for the webhook's own request, which GitHub answers
- * within ten seconds: it fails fast on a nearly exhausted rate limit instead of sleeping, tries
- * twice, and is abandoned after a few seconds.
+ * Fetch options for one call. A quick call is for a request someone is waiting on (the webhook's,
+ * which GitHub answers within ten seconds, an administrator's start, the record's transition): it
+ * fails fast on a nearly exhausted rate limit instead of sleeping, tries twice with at most
+ * {@link QUICK_RETRY_WAIT_MS} between, and is abandoned {@link QUICK_TIMEOUT_MS} after it starts, so
+ * one call takes about six seconds at most. A token refresh after a 401 is outside that bound.
  */
 function callOptions(refresh: (() => Promise<string>) | undefined, quick: boolean | undefined) {
   return {
     kind: quick ? ("interactive" as const) : ("background" as const),
-    ...(quick ? { maxAttempts: 2 } : {}),
+    ...(quick ? { maxAttempts: 2, maxThrottleMs: QUICK_RETRY_WAIT_MS } : {}),
     ...(refresh ? { refreshTokenOn401: refresh } : {}),
   };
+}
+
+/**
+ * GitHub answered a check-run write with a refusal: `update` of the existing run (and no new run was
+ * tried, see {@link newRunCanReplace}), `create` of a first run, or `new-run`, the run posted after
+ * the update was refused.
+ */
+export class CheckRunWriteRefused extends Error {
+  constructor(
+    readonly write: "update" | "create" | "new-run",
+    readonly status: number,
+  ) {
+    super(`check-run ${write} refused: HTTP ${status}`);
+    this.name = "CheckRunWriteRefused";
+  }
 }
 
 export interface CheckRunInput {
@@ -55,7 +77,8 @@ export interface CheckRunInput {
   /**
    * `null` publishes an `in_progress` check for a review that is running; any other value is a
    * `completed` check carrying that conclusion. `skipped` is sent for an exempt pull request
-   * (ADR 0107) and for nothing else: `conclusionOf` is the only thing that chooses it.
+   * (ADR 0107) and an upstream re-pull's waived one (ADR 0117), and for nothing else:
+   * `conclusionOf` is the only thing that chooses it.
    */
   conclusion: CheckConclusion | null;
   title: string;
@@ -65,12 +88,29 @@ export interface CheckRunInput {
   refresh?: () => Promise<string>;
   /** Bounded for use inside a webhook request. */
   quick?: boolean;
+  /**
+   * When GitHub refuses the update of the existing run for a reason about the run (any 4xx but a
+   * refused credential, 401 or 403, and a throttle, 429), create a NEW run of the same name on the
+   * same commit instead of failing. Set for an upstream re-pull's waiver alone (ADR 0117): whether
+   * GitHub lets a completed run's conclusion be changed is not verified, and a new run of a name is
+   * the one GitHub and NEMAR's own readers take as the latest.
+   */
+  newRunOnRefusal?: boolean;
+}
+
+/**
+ * A refusal of the update that a new run can stand in for: a 4xx about the run itself. A refused
+ * credential, a missing permission and a throttle would refuse the create the same way.
+ */
+function newRunCanReplace(status: number): boolean {
+  return status >= 400 && status < 500 && status !== 401 && status !== 403 && status !== 429;
 }
 
 /**
  * Create or update the review's check-run and return its id. A 404 on update (the run was
  * deleted, or belongs to another installation) falls through to a create, so a stale id in the
- * database never strands a result.
+ * database never strands a result; with `newRunOnRefusal`, so does any other refusal of the
+ * update that a new run can stand in for ({@link newRunCanReplace}).
  */
 export async function upsertReviewCheckRun(input: CheckRunInput): Promise<number> {
   const output = {
@@ -101,7 +141,9 @@ export async function upsertReviewCheckRun(input: CheckRunInput): Promise<number
       options,
     );
     if (res.ok) return input.checkRunId;
-    if (res.status !== 404) throw new Error(`check-run update refused: HTTP ${res.status}`);
+    const replace =
+      res.status === 404 || (input.newRunOnRefusal === true && newRunCanReplace(res.status));
+    if (!replace) throw new CheckRunWriteRefused("update", res.status);
   }
 
   const res = await githubFetchWithRetry(
@@ -120,7 +162,9 @@ export async function upsertReviewCheckRun(input: CheckRunInput): Promise<number
     },
     options,
   );
-  if (!res.ok) throw new Error(`check-run create refused: HTTP ${res.status}`);
+  if (!res.ok) {
+    throw new CheckRunWriteRefused(input.checkRunId === null ? "create" : "new-run", res.status);
+  }
   const body = (await res.json()) as { id?: unknown };
   if (typeof body.id !== "number" || !Number.isSafeInteger(body.id)) {
     throw new Error("check-run create returned no id");
@@ -137,12 +181,15 @@ export interface ReviewCommentInput {
   body: string;
   /** Mints a fresh token after a 401. */
   refresh?: () => Promise<string>;
+  /** Bounded for use inside a request, as a quick check-run write is. */
+  quick?: boolean;
 }
 
 /** Create or edit the pull request's one review comment and return its id. */
 export async function upsertReviewComment(input: ReviewCommentInput): Promise<number> {
   const body = clip(input.body, COMMENT_MAX);
-  const options = callOptions(input.refresh, false);
+  const options = callOptions(input.refresh, input.quick);
+  const signal = input.quick ? { signal: AbortSignal.timeout(QUICK_TIMEOUT_MS) } : {};
   if (input.commentId !== null) {
     const res = await githubFetchWithRetry(
       `${GITHUB_API()}/repos/${ORG_NAME}/${input.repo}/issues/comments/${input.commentId}`,
@@ -150,6 +197,7 @@ export async function upsertReviewComment(input: ReviewCommentInput): Promise<nu
         method: "PATCH",
         headers: { ...ghHeaders(input.token), "Content-Type": "application/json" },
         body: JSON.stringify({ body }),
+        ...signal,
       },
       options,
     );
@@ -162,6 +210,7 @@ export async function upsertReviewComment(input: ReviewCommentInput): Promise<nu
       method: "POST",
       headers: { ...ghHeaders(input.token), "Content-Type": "application/json" },
       body: JSON.stringify({ body }),
+      ...signal,
     },
     options,
   );

@@ -29,6 +29,7 @@ import {
   gatherMachineCleanFacts,
   readReviewFact,
   readScreenFact,
+  reviewWaivedAt,
 } from "../src/services/upstream-repull-facts";
 import { __setRepullGitHubReadTimeoutForTests } from "../src/services/upstream-repull-github";
 import type { Bindings } from "../src/types/bindings";
@@ -606,44 +607,6 @@ describe("each fact, flipped alone at its source, holds with its own word", () =
       () => markScreen("clean", { reportHead: OTHER }),
       "screen-unreadable",
     ],
-    ["the head was never reviewed", () => db.run("DELETE FROM pr_reviews"), "review-absent"],
-    [
-      "the review is running",
-      () =>
-        db.run(
-          "UPDATE pr_reviews SET state = 'dispatched', verdict = NULL, report = NULL, decided_at = NULL",
-        ),
-      "review-running",
-    ],
-    [
-      "the review failed",
-      () =>
-        db.run(
-          `UPDATE pr_reviews SET verdict = 'fail', report = '${JSON.stringify(goodReport({ no_degradation: "fail" }))}'`,
-        ),
-      "review-not-pass",
-    ],
-    [
-      "the review could not decide",
-      () =>
-        db.run(
-          "UPDATE pr_reviews SET state = 'errored', detail = 'model_unavailable', verdict = NULL, report = NULL",
-        ),
-      "review-not-pass",
-    ],
-    [
-      "the review was declined",
-      () =>
-        db.run(
-          "UPDATE pr_reviews SET state = 'declined', detail = 'contributor_paused', verdict = NULL, report = NULL",
-        ),
-      "review-not-pass",
-    ],
-    [
-      "the review never reported",
-      () => db.run("UPDATE pr_reviews SET state = 'unreported', verdict = NULL, report = NULL"),
-      "review-not-pass",
-    ],
     [
       "GitHub has not computed mergeability",
       () => {
@@ -829,9 +792,11 @@ describe("a record that cannot be read is never clean", () => {
     expect((await decide()).hold).toBe("screen-unreadable");
   });
 
-  test("a review table that cannot be read holds review-unreadable", async () => {
+  test("a review table that cannot be read is review-unreadable, and the waived head never reads it", async () => {
     db.run("DROP TABLE pr_reviews");
-    expect((await decide()).hold).toBe("review-unreadable");
+    expect(await readReviewFact(realD1(db), DS, 7, HEAD)).toBe("unreadable");
+    // The record's own head is waived (ADR 0117): its review's row is not read at all.
+    expect((await decide()).hold).toBe("clean");
   });
 
   test("a dataset that cannot be read holds as anonymous, and GitHub is asked nothing", async () => {
@@ -859,7 +824,7 @@ describe("a record that cannot be read is never clean", () => {
     // A pass with a report that re-derives a pass: only the state is wrong.
     unchecked(() => db.run("UPDATE pr_reviews SET state = 'foo'"));
     expect(await readReviewFact(realD1(db), DS, 7, HEAD)).toBe("unreadable");
-    expect((await decide()).hold).toBe("review-unreadable");
+    expect((await decide()).hold).toBe("clean");
   });
 });
 
@@ -898,7 +863,7 @@ describe("the check runs are the App's own, the latest of each", () => {
   });
 });
 
-describe("the review, read as the stricter of its two verdicts", () => {
+describe("the review, read as the stricter of its two verdicts where the head is not waived", () => {
   const fact = () => readReviewFact(realD1(db), DS, 7, HEAD);
 
   test("a stored pass whose report re-derives a fail is a fail", async () => {
@@ -906,7 +871,6 @@ describe("the review, read as the stricter of its two verdicts", () => {
       JSON.stringify(goodReport({ no_degradation: "fail" })),
     ]);
     expect(await fact()).toBe("fail");
-    expect((await decide()).hold).toBe("review-not-pass");
   });
 
   test("a stored fail whose report re-derives a pass is a fail", async () => {
@@ -917,7 +881,6 @@ describe("the review, read as the stricter of its two verdicts", () => {
   test("a stored report that no longer parses is an error, not a pass", async () => {
     db.run(`UPDATE pr_reviews SET report = '{"v":99}'`);
     expect(await fact()).toBe("error");
-    expect((await decide()).hold).toBe("review-not-pass");
   });
 
   test("a review of another head, or of another pull request, is no review of this one", async () => {
@@ -928,12 +891,109 @@ describe("the review, read as the stricter of its two verdicts", () => {
   });
 
   test("a pass reset between two decisions is read as it is now", async () => {
-    expect((await decide()).hold).toBe("clean");
-    // What `nemar admin pr-reviews start --redo` writes when it restarts a reported review.
+    expect(await fact()).toBe("pass");
+    // What a restart of a reported review writes.
     db.run(
       "UPDATE pr_reviews SET state = 'dispatched', verdict = NULL, report = NULL, decided_at = NULL, nonce = 'n2'",
     );
-    expect((await decide()).hold).toBe("review-running");
+    expect(await fact()).toBe("running");
+  });
+});
+
+describe("the review of the record's own head is waived (ADR 0117)", () => {
+  /** A database that refuses every read of the review's rows, so a read of them fails the test. */
+  function noReviewReads(): D1Database {
+    const real = realD1(db);
+    return {
+      ...real,
+      prepare(sql: string) {
+        if (sql.includes("FROM pr_reviews")) throw new Error("the review's row was read");
+        return real.prepare(sql);
+      },
+      batch: real.batch.bind(real),
+    } as unknown as D1Database;
+  }
+
+  const rows: Array<[string, () => void]> = [
+    ["no review of the head", () => db.run("DELETE FROM pr_reviews")],
+    [
+      "a review still running",
+      () =>
+        db.run(
+          "UPDATE pr_reviews SET state = 'dispatched', verdict = NULL, report = NULL, decided_at = NULL",
+        ),
+    ],
+    [
+      "a review that failed, as the contributor review fails an upstream delta",
+      () =>
+        db.run(
+          `UPDATE pr_reviews SET verdict = 'fail', report = '${JSON.stringify(goodReport({ no_degradation: "fail" }))}'`,
+        ),
+    ],
+    [
+      "a review that could not decide",
+      () =>
+        db.run(
+          "UPDATE pr_reviews SET state = 'errored', detail = 'model_unavailable', verdict = NULL, report = NULL",
+        ),
+    ],
+    [
+      "a review that was declined",
+      () =>
+        db.run(
+          "UPDATE pr_reviews SET state = 'declined', detail = 'contributor_paused', verdict = NULL, report = NULL",
+        ),
+    ],
+    [
+      "a review that never reported",
+      () => db.run("UPDATE pr_reviews SET state = 'unreported', verdict = NULL, report = NULL"),
+    ],
+  ];
+  for (const [name, flip] of rows) {
+    test(`${name}: waived, clean, and the review's row is not read`, async () => {
+      flip();
+      const row = await getRepull(realD1(db), repullId);
+      const facts = await gatherMachineCleanFacts(
+        { ...env(), DB: noReviewReads() },
+        row as NonNullable<typeof row>,
+        "gates",
+      );
+      expect(facts.review).toBe("waived");
+      const v = machineClean(facts);
+      expect(v.clean ? "clean" : v.hold).toBe("clean");
+    });
+  }
+
+  test("a pull request that is not the record's at the head is not waived, and its row is read", async () => {
+    const row = await getRepull(realD1(db), repullId);
+    if (!row) throw new Error("no record");
+    const pr = {
+      state: "open" as const,
+      merged: false,
+      draft: false,
+      number: 7,
+      authorLogin: NEMAR_APP_BOT_LOGIN,
+      authorId: NEMAR_APP_BOT_USER_ID,
+      authorType: "Bot",
+      headRef: "release/v2.0.0",
+      headSha: HEAD,
+      headRepo: `nemarDatasets/${DS}`,
+      baseRepo: `nemarDatasets/${DS}`,
+      baseRef: "main",
+      mergeableState: "clean",
+    };
+    expect(reviewWaivedAt(row, pr, HEAD)).toBe(true);
+    // Each fact GitHub gives, flipped alone.
+    expect(reviewWaivedAt(row, "unreadable", HEAD)).toBe(false);
+    expect(reviewWaivedAt(row, pr, OTHER)).toBe(false);
+    expect(reviewWaivedAt(row, { ...pr, headSha: OTHER }, OTHER)).toBe(false);
+    expect(reviewWaivedAt(row, { ...pr, number: 8 }, HEAD)).toBe(false);
+    expect(reviewWaivedAt(row, { ...pr, headRef: "release/v9.0.0" }, HEAD)).toBe(false);
+    expect(reviewWaivedAt(row, { ...pr, baseRef: "dev" }, HEAD)).toBe(false);
+    expect(reviewWaivedAt(row, { ...pr, headRepo: `someone/${DS}` }, HEAD)).toBe(false);
+    expect(reviewWaivedAt(row, { ...pr, headRepo: null }, HEAD)).toBe(false);
+    expect(reviewWaivedAt({ ...row, status: "abandoned" }, pr, HEAD)).toBe(false);
+    expect(reviewWaivedAt({ ...row, dataset_id: "on004363" }, pr, HEAD)).toBe(false);
   });
 });
 

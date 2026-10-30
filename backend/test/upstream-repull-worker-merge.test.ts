@@ -47,7 +47,6 @@ import {
   repullAdvanceLogLine,
   runRepullAdvanceCron,
 } from "../src/services/upstream-repull-advance";
-import { REVIEW_OF_HEAD_SQL } from "../src/services/upstream-repull-facts";
 import {
   CLAIM_OWNER_SQL,
   FINISH_DISPATCHES_MAX,
@@ -62,6 +61,7 @@ import {
   reconcileWorkerClaim,
   workerMergeRepull,
 } from "../src/services/upstream-repull-merge";
+import { REPULL_SCREEN_SQL } from "../src/services/upstream-repull-screen";
 import type { Bindings } from "../src/types/bindings";
 import { freshDb, interceptingD1, realD1 } from "./helpers/d1";
 import { seedReview } from "./helpers/pr-queue-fixtures";
@@ -779,16 +779,17 @@ describe("the Worker merges, and resolves a claim on, only an automatic record a
 
   test("the credential is read before the claim: when it fails, nothing is claimed and nothing is sent", async () => {
     const id = ready();
-    // The datasets credential goes away at the facts' last read (the review), after GitHub was read
-    // with it, and comes back at the claim's own read of the dataset, before the claim reads
-    // GitHub. So a claim made before the credential was read would succeed, and be stranded with
-    // nothing sent: only the order this test pins keeps the record unclaimed.
-    let reviews = 0;
+    // The datasets credential goes away at the facts' last read (the screen; the review of the
+    // record's own head is waived and not read, ADR 0117), after GitHub was read with it, and comes
+    // back at the claim's own read of the dataset, before the claim reads GitHub. So a claim made
+    // before the credential was read would succeed, and be stranded with nothing sent: only the
+    // order this test pins keeps the record unclaimed.
+    let screensRead = 0;
     let facts = 0;
     const bindings = env(
       {},
       interceptingD1(realD1(db), (sql) => {
-        if (sql === REVIEW_OF_HEAD_SQL && ++reviews === 1) {
+        if (sql === REPULL_SCREEN_SQL && ++screensRead === 1) {
           Reflect.deleteProperty(bindings, "GITHUB_ADMIN_PAT");
         }
         if (sql === CREATE_FACTS_SQL && ++facts === 2) {
@@ -799,7 +800,7 @@ describe("the Worker merges, and resolves a claim on, only an automatic record a
     const row = await getRepull(realD1(db), id);
     const o = await workerMergeRepull(bindings, row as NonNullable<typeof row>);
     expect(o).toMatchObject({ kind: "held", hold: "pr-unreadable", sent: false });
-    expect({ reviews, facts }).toEqual({ reviews: 1, facts: 1 });
+    expect({ screensRead, facts }).toEqual({ screensRead: 1, facts: 1 });
     expect(rowOf(id)).toMatchObject({
       status: "gates_clear",
       merge_claim_sha: null,
@@ -1058,7 +1059,12 @@ describe("a merge whose answer was lost is resolved from GitHub on a later tick"
         gh.mainRefs[DS] = OTHER;
       },
     ],
-    ["the review now fails", () => review(DS, "fail")],
+    [
+      "GitHub now reports it unstable",
+      () => {
+        gh.pulls[`${DS}#7`] = appPull(DS, { mergeable_state: "unstable" });
+      },
+    ],
     [
       "BIDS validation now fails",
       () => {
@@ -1559,27 +1565,27 @@ describe("what the merge costs a tick", () => {
       await tick(env({}, counting));
       return { d1: statements, github: gh.requests.length };
     };
-    // Each waits: its review was reset to running on the same head.
-    db.run("UPDATE pr_reviews SET state = 'dispatched', verdict = NULL, report = NULL");
+    // Each waits: GitHub has not computed its mergeable state yet.
+    for (const ds of datasets) gh.pulls[`${ds}#7`] = appPull(ds, { mergeable_state: null });
     const waiting = await measure();
     // Each is clean now, and is claimed, merged and recorded.
-    db.run("DELETE FROM pr_reviews");
-    for (const ds of datasets) review(ds);
+    for (const ds of datasets) githubClean(ds);
     const merging = await measure();
     expect(ids.every((id) => rowOf(id).status === "merged")).toBe(true);
     // Each version is minted, and each finish run is dispatched.
     for (const ds of datasets) versionRow(ds, "2.0.0");
     const finishing = await measure();
-    // Per row: seven statements and four requests to wait (the record, the merges, the dataset,
-    // the screen, the review, the hold and its audit row; the pull request, `main`, two checks);
-    // sixteen and seven to merge (the same five reads and four requests, the claim's five
+    // Per row: six statements and four requests to wait (the record, the merges, the dataset, the
+    // screen, the hold and its audit row; the pull request, `main`, two checks; the review of the
+    // record's own head is waived and not read, ADR 0117); fifteen and seven to merge (the same
+    // four reads and four requests, the claim's five
     // statements and its read of the live head, the merge's audit row, the merge, its answer, and
     // the verified route's four statements and its read of the merge); eight and one to dispatch a
     // finish (the record, its dispatches, the version, the claim's two and its read-back, the hold
     // and its audit row; the dispatch). Two for the tick.
     expect({ waiting, merging, finishing }).toEqual({
-      waiting: { d1: 37, github: 20 },
-      merging: { d1: 82, github: 35 },
+      waiting: { d1: 32, github: 20 },
+      merging: { d1: 77, github: 35 },
       finishing: { d1: 42, github: 5 },
     });
     expect(ids.every((id) => finishDispatches(id).length === 1)).toBe(true);

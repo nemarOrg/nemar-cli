@@ -175,6 +175,7 @@ A re-pull pull request is machine clean when all of these hold:
 - the identifier screen, dispatched with `ref=<head sha>` and a callback bound to the re-pull row, says `clear`: never `unchecked`, never `rerun`, and never `acknowledge`, which needs a person (ADR 0086);
 - BIDS validation and `version-check` are green;
 - an ADR 0107 review is stored for that head and its verdict is `pass`; any other verdict, or none, is not machine clean, because unknown is never treated as clean (ADR 0053, ADR 0054), and this holds even where the review's ruleset is only a shadow check;
+  *Annotated 2026-10-29: superseded by [ADR 0117](0117-an-upstream-re-pulls-own-pull-request-is-waived-from-the-review-by-nemars-record.md): the review is waived for the record's own pull request at the head the record holds, which machine clean reads as `waived` and passes; the Worker's start of that review (the Phase 7e and Phase 7f amendments) is retired.*
 - the pull request's head equals the screened SHA;
 - the daily merge cap is not exhausted, and its claim is made before the merge is sent.
 
@@ -277,6 +278,7 @@ ADR 0086 exempts `xx` from the identifier screen, so an `xx` re-pull never has a
 - Whether ADR 0107's review can ever pass a re-pull diff.
   The App is not exempt, so the review runs, and ADR 0109 fails a changed `CHANGES` line and holds a replaced recording, both normal in a re-pull; until a re-pull's review passes, none is machine clean.
   *Annotated 2026-10-25: corrected by the Phase 7e amendment: the review's intake skipped every bot's pull request, so it did not run; it now runs on the App's automatic re-pull pull request when the Worker starts it, and on no other bot's.*
+  *Annotated 2026-10-29: moot since [ADR 0117](0117-an-upstream-re-pulls-own-pull-request-is-waived-from-the-review-by-nemars-record.md): the review is waived for a re-pull's own pull request at its recorded head, so machine clean no longer waits for a pass.*
 - Whether enrichment commits on the release branch move its head after the screen read it.
   *Annotated 2026-10-25: the Phase 7d amendment's settle records enrichment's moves of an automatic run's release head before the run reports it, and a later move holds the pull request; how soon enrichment commits is seen only in production.*
 - Whether OpenNeuro writes S3 before it pushes to GitHub, and whether the object at a path lags the pinned `versionId`.
@@ -1176,6 +1178,7 @@ What later slices use from here.
 
 - The hold words, the content refusals that end the automatic path for a tag, and the prefix of every error the automatic path records on a re-pull row, `[auto:`, which is not the preparation's `[prepare:`, so a `prepared` self-edge never clears one (the Phase 6c amendment's rule).
 - An administrator can now reset a stored review pass on the same head (`nemar admin pr-reviews start --redo`), so the slices that read the review for machine clean read it at each stage, the gates and the merge, and never carry one stage's reading to the next.
+  *Annotated 2026-10-29: for this class the review is waived at the recorded head ([ADR 0117](0117-an-upstream-re-pulls-own-pull-request-is-waived-from-the-review-by-nemars-record.md)): machine clean reads `waived`, and no stored pass, or its reset, changes it.*
 
 Every statement here was run on bun:sqlite and on Miniflare's D1.
 Not checked here, and left to the later slices' canary and the first production run: that a run reaches the callback at the API host, and that the token survives the dispatch payload and the run's environment unchanged.
@@ -1404,6 +1407,7 @@ One annotation is added to earlier text, on the sentence of "Not yet verified" t
 - The rule is one pure function, `machineClean` in `shared/repull-machine-clean.ts`, of facts read at decision time, and it answers clean or the word of the first rule that does not hold.
   The gates and the merge each gather their own facts (`gatherMachineCleanFacts` in `backend/src/services/upstream-repull-facts.ts`) and nothing is carried from one stage to the next.
   A pass is never carried between stages; an administrator's `--redo` resets passes on other pull requests, and none can touch this class, whose review only the Worker starts (below).
+  *Annotated 2026-10-29: the review rule now reads `waived` for the record's own head ([ADR 0117](0117-an-upstream-re-pulls-own-pull-request-is-waived-from-the-review-by-nemars-record.md)), so no review row is read and a `--redo` reaches nothing here.*
 - The rules, in their order:
   exact production and the open switch, and at the merge the merge switch;
   a record the automatic path made, of an `on` dataset;
@@ -1416,6 +1420,7 @@ One annotation is added to earlier text, on the sentence of "Not yet verified" t
   the screen;
   the review;
   and GitHub's `clean`, where `unknown`, null and every other state wait.
+  *Annotated 2026-10-29: the review is waived at the recorded head ([ADR 0117](0117-an-upstream-re-pulls-own-pull-request-is-waived-from-the-review-by-nemars-record.md)); a stored pass still passes where the rule does not waive.*
 - The facts come from GitHub's record of the pull request, `git/ref/heads/main` and the check runs, read with the Worker's own credential; from the record; from the dataset row and its import, read by the statement the create reads; from the screen bound to the record; and from the review row of the head.
 - Unknown is never clean.
   A GitHub answer that is not 200 (a 404 included), a timeout, a throttle and an answer of another shape read as unreadable, and each holds, as do a missing screen, a missing review and any value outside the declared ones.
@@ -1441,9 +1446,12 @@ One annotation is added to earlier text, on the sentence of "Not yet verified" t
 - The screen is read as its own gate reads it, a run past its report deadline included, but `acknowledge` never passes here, whoever recorded the reason, because machine clean needs `clear`.
   A clear verdict whose stored report does not name the head is unreadable, and no screen of the head is read as one to dispatch.
 - The review is read as ADR 0093's detail view reads it: the stricter of the stored verdict and the one its stored report re-derives, so either can lower it and neither can raise it.
+  *Annotated 2026-10-29: read only where the rule does not waive the head ([ADR 0117](0117-an-upstream-re-pulls-own-pull-request-is-waived-from-the-review-by-nemars-record.md)), which for the record's own head at its recorded commit it always does.*
   A stored report that no longer parses is an error unless the column says `fail`.
 
 ### The review of the App's pull request (corrects "Not yet verified")
+
+*Annotated 2026-10-29: retired by [ADR 0117](0117-an-upstream-re-pulls-own-pull-request-is-waived-from-the-review-by-nemars-record.md). The App's pull request is waived at its recorded head, `startRepullPullRequestReview` and the intake's `admitRepullBot` are removed, and a delivery or a start of the App's pull request is a bot's (`bot_author`) as ADR 0092 says.*
 
 - "Not yet verified" says the App is not exempt, so the review runs.
   As the code stood, that was false: the review's intake skipped every bot's pull request (`bot_author`), as ADR 0092 says ("not drafts, not bots"), so no review row could exist for the App's pull request and none could be machine clean.
@@ -1476,6 +1484,7 @@ that GitHub names the author of the App's pull request `nemar-publish-bot[bot]`,
 that the App's token reads `mergeable_state` as an administrator does;
 that `check-runs` honors its filters on a mirror as it did on `nm000527`;
 and that the review workflow claims and reports on a pull request a bot opened as it does on any other.
+*Annotated 2026-10-29: moot: no review runs on the App's pull request since [ADR 0117](0117-an-upstream-re-pulls-own-pull-request-is-waived-from-the-review-by-nemars-record.md); what the first runs check instead is that its waived check is published.*
 
 ## Amendment 2026-10-25 (#1912): Phase 6f takes a re-pull past its pull request, merges it through one gate, and records the release
 
@@ -1525,6 +1534,7 @@ Every merge of a re-pull pull request by a NEMAR tool, `nemar admin repull merge
 Before anything is written it reads, in order: the record at `gates_clear`; the dataset not anonymous; the live pull request open, not a draft, the record's release branch into `main`, at the screened head; `main` the base or moved by enrichment only; the ADR 0107 review of that head, with one that failed, is running or cannot be read needing `--force` as `approve` does; the identifier screen of that head; GitHub's state `clean`; and the squash message.
 The gate writes the squash message itself: the title `Release v<N.0.0> (#<pull request>)` and a body whose last paragraph is the re-pull commit's two trailers, checked with `git interpret-trailers` against the privacy ledger proof's own patterns, so the merge on `main` is read as the re-pull's commit (the Phase 6b amendment's requirement); a message that would not carry both is refused at the gate (`message`).
 Then the review is read once more, at the merge and never carried over, since an administrator can reset a stored pass on the same head (`start --redo`), and the administrator confirms (one version DOI that cannot be withdrawn).
+*Annotated 2026-10-29: the review read here is `waived` for the record's own head at the screened commit ([ADR 0117](0117-an-upstream-re-pulls-own-pull-request-is-waived-from-the-review-by-nemars-record.md)), so it needs no `--force` and a reset of a stored pass changes nothing.*
 Then, holding the record's lock, the one `resume` and `execute` take, so no resume expires the claim or moves the head while the merge is out, one unit of the day's merge cap is claimed from the Worker, the squash merge is sent with the screened `sha` (so GitHub refuses a head that moved after the gate's last read, which the Phase 6e amendment relies on), and the merge is recorded through the verified route.
 A claim whose answer is lost (no answer, or a 5xx a gateway may send after the Worker wrote) may be held, and the gate says so and exits 3, never "nothing was claimed".
 
@@ -1611,6 +1621,7 @@ Five annotations are added to earlier text: on the record's header, on the openi
 - Each production tick that could list its rows stamps the scheduler's row with when it ran (`last_advance_at`), for the observability slice; one that could not list them stamps nothing.
 - It sends no mail.
   Its one log line, in counts and fixed words, is written only when it changed something, a review's start or a clean row's edge was refused, or something failed; a row whose step threw is logged by the record's id and its error's class, never its dataset or a message, and the next row is taken up.
+  *Annotated 2026-10-29: the tick starts no review since [ADR 0117](0117-an-upstream-re-pulls-own-pull-request-is-waived-from-the-review-by-nemars-record.md); the line counts `waivers=` and `waivers_failed=` instead of `reviews=` and `review_refused=`.*
 
 ### A hold is an observation
 
@@ -1633,6 +1644,8 @@ Five annotations are added to earlier text: on the record's header, on the openi
 - A clean row whose edge the transition refuses holds `gates-refused`, and the tick's log line is an error with the refusal's code on every tick it happens: the rule and the record disagree, which should not happen, and is seen when it does.
 
 ### What the gates wait for
+
+*Annotated 2026-10-29: the review half of this section is retired by [ADR 0117](0117-an-upstream-re-pulls-own-pull-request-is-waived-from-the-review-by-nemars-record.md). The tick starts the screen only; the review of the recorded head is waived, so machine clean reads it as `waived` and no review is started or read.*
 
 - The tick starts the screen of the head only once every rule before the screen holds: the switches, the record, the dataset, the recorded pull request opened by the App at the recorded head, `main` unmoved, and both checks green.
   So no screen run is spent on a pull request the Worker would not take on anyway, and a pull request whose BIDS validation failed waits for an administrator, who may dispatch its screen by hand.
@@ -1667,6 +1680,8 @@ Five annotations are added to earlier text: on the record's header, on the openi
 
 ### What a tick costs
 
+*Annotated 2026-10-29: superseded by the figures in [ADR 0117](0117-an-upstream-re-pulls-own-pull-request-is-waived-from-the-review-by-nemars-record.md), Consequences: no review is started or read, so five rows at `pr_open` cost 62, 32 and 47 statements, and past the gates 32 and 77.*
+
 Measured over five rows at `pr_open`, the most a tick reads of that kind: 67 D1 statements and 25 GitHub requests when each starts its screen, 37 and 20 while each waits, 82 and 35 when each starts its review, the most, and 52 and 25 when each is cleared; a resume is eight statements and one dispatch, and the tick itself two statements.
 Add one request to mint the App's installation token on a cold isolate when the App's credential is configured; the suites use a personal token, so the figures leave it out.
 The first design estimated about 45 in all; a tick that starts five rows' reviews and resumes five stalled rows costs more than three times that, within the shared allowance of 1,000 but no longer a small part of it, and a test pins each figure.
@@ -1675,6 +1690,7 @@ The first design estimated about 45 in all; a tick that starts five rows' review
 
 GitHub is a stand-in in the suites, and the unattended run is not built yet, so these are what only the first production runs can check:
 that the screen and the review start on the App's pull request as they do on the stand-in;
+*Annotated 2026-10-29: the review half is moot since [ADR 0117](0117-an-upstream-re-pulls-own-pull-request-is-waived-from-the-review-by-nemars-record.md): only the screen starts, and the App's pull request gets the waived check.*
 that the review's check and comment are published on a pull request the App opened;
 that a resumed run takes up the record its dispatch names (the unattended run's slice);
 that GitHub answers a send it refuses for the Worker's credential or rate with a status other than 404 and 422, which is what keeps such a send from spending a resume;
@@ -2239,10 +2255,12 @@ The "Checked only against stand-ins" section of each earlier amendment holds the
 - The first Worker merge, which runs with `REPULL_DAILY_MERGE_CAP` set to `"1"`:
   - Whether the App's own token reads `mergeable_state` as an administrator does, that GitHub merges the App's squash at the screened head with the message it is sent and refuses a head that moved, and that the dataset workflows tag that squash and mint its DOI as they tag any merge to `main` (Phases 7a, 7e and 7g).
   - That GitHub names the author of the App's pull request `nemar-bot[bot]`, id 283755542, type `Bot` (the Phase 7e amendment, as the rename amendment restates it), that `check-runs` honors its filters on a mirror as it did on `nm000527`, that the screen and the review start on the App's pull request and the review's check and comment are published on it, and that the review workflow claims and reports on a pull request a bot opened (Phases 7e and 7f).
+    *Annotated 2026-10-29: the review half of this item is moot since [ADR 0117](0117-an-upstream-re-pulls-own-pull-request-is-waived-from-the-review-by-nemars-record.md): no review starts on the App's pull request, and the first run checks instead that its waived check is published and GitHub then reports it `clean`.*
   - That GitHub answers a send it refuses for the Worker's credential or rate with a status other than 404 and 422, and that the tick's real cost on the 30-minute tick is the one measured (Phase 7f).
   - That an unprotected mirror whose Brain Imaging Data Structure (BIDS) validation failed reads `unstable`, and not `blocked`, for an administrator's merge over it (Phase 7g).
   - Whether ADR 0107's review can ever pass a re-pull diff.
     The App's pull request is reviewed now, but ADR 0109 fails a changed `CHANGES` line and holds a replaced recording, both normal in a re-pull; until one passes, no re-pull is machine clean and an administrator merges each.
+    *Annotated 2026-10-29: moot since [ADR 0117](0117-an-upstream-re-pulls-own-pull-request-is-waived-from-the-review-by-nemars-record.md): the review of a re-pull's own pull request is waived at its recorded head, and machine clean no longer needs a pass.*
 - The release and the first weeks:
   - What the weekly report's re-pull section reads on production data, that every merge's claim is in the audit log as the attribution assumes, and the first week a switch is on (Phase 7h).
   - That the `mirror` field reaches production as the pages say.

@@ -38,6 +38,7 @@ import {
   tokenText,
   verdictText,
   volumeLines,
+  waivedLines,
   waiverLines,
 } from "../src/commands/admin-pr-reviews";
 
@@ -1184,5 +1185,112 @@ describe("start --redo wording", () => {
         redo: true,
       }),
     ).toBe("started again");
+  });
+});
+
+describe("an upstream re-pull's waived pull request (ADR 0117)", () => {
+  const report = parseStoredPrReviewReport({
+    v: 1,
+    model: "claude-haiku-5-5",
+    criteria: { no_degradation: "fail", advances_revision: "pass", material_improvement: "pass" },
+    findings: [
+      {
+        criterion: "no_degradation",
+        severity: "blocker",
+        code: "metadata_removed",
+        path: "task-rest_eeg.json",
+        note: "Two keys removed.",
+      },
+    ],
+    summary: "Removes keys.",
+    steering: false,
+    evidence: {
+      files_changed: 1,
+      files_read: 1,
+      truncated: false,
+      version_before: "1.0.0",
+      version_after: "2.0.0",
+      subjects_before: 2,
+      subjects_after: 2,
+      areas: {
+        dataset_description: { added: 0, modified: 0, removed: 0 },
+        readme_and_changes: { added: 0, modified: 0, removed: 0 },
+        participants: { added: 0, modified: 0, removed: 0 },
+        sidecars: { added: 0, modified: 1, removed: 0 },
+        recordings: { added: 0, modified: 0, removed: 0 },
+        derivatives: { added: 0, modified: 0, removed: 0 },
+        sourcedata: { added: 0, modified: 0, removed: 0 },
+        code: { added: 0, modified: 0, removed: 0 },
+        other: { added: 0, modified: 0, removed: 0 },
+      },
+      listed: [{ status: "modified", path: "task-rest_eeg.json" }],
+    },
+  });
+  const review = (outcome: unknown) =>
+    ({
+      id: 1,
+      head_sha: "a".repeat(40),
+      verdict: "fail",
+      detail: null,
+      author_login: "admin-gh",
+      author_id: 602,
+      from_fork: false,
+      created_at: "2026-10-29 00:00:00",
+      decided_at: "2026-10-29 00:00:00",
+      outcome,
+    }) as never;
+
+  test("a waived pull request is left out of start --all, with --redo or without", () => {
+    const entries = [{ draft: false, verdict: "waived" as const, detail: null }];
+    expect(splitStartCandidates(entries, false).todo).toEqual([]);
+    expect(splitStartCandidates(entries, true).todo).toEqual([]);
+  });
+
+  test("the list says waived, and the start's answer says why nothing was started", () => {
+    expect(verdictText({ verdict: "waived", detail: null, review_current: true })).toBe(
+      "waived (upstream re-pull)",
+    );
+    const answer: StartReviewResponse = {
+      environment: "production",
+      dispatched: false,
+      reason: "repull_waived",
+      review_id: 1,
+      author_login: null,
+    };
+    expect(notStartedText(answer)).toContain("upstream re-pull's own pull request");
+  });
+
+  test("show says the review is waived and lists what a review of the commit found as recommendations", () => {
+    const lines = waivedLines({
+      verdict: "waived",
+      detail: null,
+      review_current: true,
+      review: review({ kind: "reported", report }),
+    })
+      .join("\n")
+      .replace(ANSI, "");
+    expect(lines).toContain("waived (upstream re-pull)");
+    expect(lines).toContain("Waived: upstream re-pull");
+    expect(lines).toContain("Recommended issues, none filed automatically");
+    expect(lines).toContain("Metadata removed (`task-rest_eeg.json`): Two keys removed.");
+    expect(lines).not.toContain("blocker");
+    expect(lines).not.toContain("Needs changes");
+  });
+
+  test("a review of another commit, or none, is not shown as this commit's recommendations", () => {
+    const other = waivedLines({
+      verdict: "waived",
+      detail: null,
+      review_current: false,
+      review: review({ kind: "reported", report }),
+    }).join("\n");
+    expect(other).not.toContain("Recommended issues");
+    const none = waivedLines({
+      verdict: "waived",
+      detail: null,
+      review_current: null,
+      review: null,
+    });
+    expect(none.join("\n")).toContain("no automated review applies");
   });
 });

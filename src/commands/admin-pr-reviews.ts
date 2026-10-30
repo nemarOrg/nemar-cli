@@ -37,12 +37,15 @@ import {
 } from "../../shared/contract/pr-review-admin.js";
 import {
   type NamingFacts,
+  RECOMMENDATIONS_HEADING,
+  REPULL_WAIVED_TITLE,
   type ReviewEvidence,
   type ReviewOutcome,
   factsOf,
   factsStop,
   findingLines,
   namingLines,
+  recommendationLines,
   renderCheck,
   verdictOf,
 } from "../../shared/pr-review.js";
@@ -143,6 +146,7 @@ const VERDICT_WORD: Record<QueueVerdict, string> = {
   in_progress: "in progress",
   could_not_decide: "could not decide",
   exempt: "exempt (owner or admin)",
+  waived: "waived (upstream re-pull)",
 };
 
 /** A verdict as a word. One a newer server invents is shown as itself, never as a pass. */
@@ -163,6 +167,7 @@ function verdictColor(v: string): (s: string) => string {
       return chalk.cyan;
     case "not_reviewed":
     case "exempt":
+    case "waived":
       return chalk.dim;
     default:
       return chalk.yellow;
@@ -403,6 +408,50 @@ export function reportLines(outcome: ReviewOutcome): string[] {
       ),
     ];
   }
+}
+
+/**
+ * What `show` says of an upstream re-pull's own pull request at the commit NEMAR recorded (ADR
+ * 0117): the review is waived and why, which gates still hold the merge, and, when a review of this
+ * very commit ran before NEMAR recorded it, what it found, as recommendations and never as a
+ * verdict. Its stored report is read with the shared rules, as `reportLines` reads one.
+ */
+export function waivedLines(
+  d: Pick<PrReviewDetail, "verdict" | "detail" | "review_current" | "review">,
+): string[] {
+  const out = [
+    `  Review:    ${verdictColor(d.verdict)(verdictText({ verdict: d.verdict, detail: d.detail, review_current: d.review_current }))}`,
+    chalk.dim(
+      `             This commit is an upstream re-pull's own head, as NEMAR's record of the re-pull holds it, so no automated review applies: a mirror's content is upstream's. Its check is posted as skipped and titled "${REPULL_WAIVED_TITLE}"; this view does not verify that it was.`,
+    ),
+    chalk.dim(
+      "             The identifier screen, BIDS validation, the version check and the merge cap still gate the merge: nemar admin repull resume <dataset>, then nemar admin repull merge <dataset>.",
+    ),
+  ];
+  const outcome = d.review_current === true ? (d.review?.outcome ?? null) : null;
+  if (outcome?.kind !== "reported") return out;
+  let lines: string[];
+  try {
+    lines = recommendationLines(outcome.report);
+  } catch (err) {
+    dlog(
+      `pr-reviews: the stored report could not be read for recommendations (${errorDetail(err)})`,
+    );
+    return [
+      ...out,
+      chalk.yellow(
+        "             A review of this commit is on record, but this version of the CLI could not read it. Update it, or read the check on the pull request.",
+      ),
+    ];
+  }
+  return [
+    ...out,
+    "",
+    chalk.bold(
+      `${RECOMMENDATIONS_HEADING} (from a review of this commit that ran before NEMAR recorded it):`,
+    ),
+    ...(lines.length > 0 ? lines.map((l) => terminalize(l)) : ["None: that review found nothing."]),
+  ];
 }
 
 /**
@@ -649,8 +698,17 @@ REVIEW column (the automated review of the pull request's CURRENT commit):
                     when the name could not be read ("naming rule not checked: start once, else fix
                     the file": a start asks GitHub again, and a file with no readable Name has to be
                     fixed and pushed; nothing is waivable until the name is read)
+  waived (upstream re-pull)
+                    an upstream re-pull's own pull request, at the commit NEMAR's record holds for
+                    it, so the review does not apply: a mirror's content is upstream's (its check
+                    is posted as skipped, titled "Waived: upstream re-pull", which this list does
+                    not verify). It is yours to merge: the identifier screen, BIDS validation, the
+                    version check and the merge cap still gate it, through 'nemar admin repull
+                    resume' and then 'nemar admin repull merge' (or y in next). A commit NEMAR has
+                    not recorded for the re-pull is reviewed as any other
 A verdict is never carried over to a commit it did not read. '*' marks the pull requests you can
-act on now: a pass to approve, or one nobody has decided for you (drafts are never marked).
+act on now: a pass to approve, a waived re-pull to merge through its gate, or one nobody has
+decided for you (drafts are never marked).
 
 APPROVING is YOUR act, made with your own GitHub login from this machine, never as the NEMAR
 App. It uses GH_TOKEN if set, otherwise the token 'gh' holds, checks it belongs to a person and to
@@ -885,6 +943,8 @@ prReviewsCommand
           ),
         );
       }
+    } else if (d.verdict === "waived") {
+      for (const l of waivedLines(d)) console.log(l);
     } else if (!d.review) {
       console.log(`  Review:    ${color("not reviewed")}`);
       console.log(
@@ -931,8 +991,8 @@ prReviewsCommand
       }
     }
 
-    // An exempt pull request is not held to the author's record, so the record is not shown beside it.
-    if (d.author && d.verdict !== "exempt") {
+    // An exempt or waived pull request is not held to the author's record, so it is not shown beside it.
+    if (d.author && d.verdict !== "exempt" && d.verdict !== "waived") {
       console.log();
       for (const l of standingLines(d.author)) console.log(l);
     }
@@ -1149,6 +1209,8 @@ const NOT_STARTED: Record<string, string> = {
     "its author is a NEMAR owner or administrator, and the naming rule refused its title or its new dataset name, so its check failed",
   naming_unchecked:
     "its author is a NEMAR owner or administrator, and its dataset name could not be read to check the naming rule, so its check needs a person",
+  repull_waived:
+    "it is an upstream re-pull's own pull request at the commit NEMAR recorded, so the review is waived and its check was posted as skipped, titled Waived: upstream re-pull",
   draft: "it is a draft",
   not_open: "it is not open any more",
   not_main: "it does not target main",
@@ -2226,6 +2288,9 @@ function noReportWhy(a: {
   if (a.verdict === "in_progress") return "The review is still running.";
   if (a.verdict === "exempt") {
     return "A NEMAR owner or administrator opened this pull request, so it is not reviewed.";
+  }
+  if (a.verdict === "waived") {
+    return "This commit is an upstream re-pull's own head, so the review is waived; what a review of it found is shown as recommendations.";
   }
   if (a.verdict === "not_reviewed") return "This commit has not been reviewed.";
   return "A review of this commit is on record, but its report could not be read.";

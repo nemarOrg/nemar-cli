@@ -580,6 +580,7 @@ async function gatesTurn(ctx: ResumeContext, row: RepullRow, pr: RepullPullReque
           sha: p.head,
           origin: row.origin,
           mergeableState: state,
+          prNumber: p.number,
         })
       : null;
   if (state !== "clean" && overBids?.kind !== "bids-only") {
@@ -901,6 +902,7 @@ async function readyOverBids(
     sha: live.headSha,
     origin: row.origin,
     mergeableState: settled.state,
+    prNumber: p.number,
   });
   return only.kind === "bids-only";
 }

@@ -464,6 +464,85 @@ describe.skipIf(!awsInstalled)("the override in the normal order: resume, then t
     });
   }
 
+  test("unstable only because the review check fails: resume names that check and the start that publishes the waiver (ADR 0117)", async () => {
+    const head = w.row().head_sha as string;
+    // BIDS validation and version-check pass; the review the contributor rules failed is the one
+    // check that does not, which is what a re-pull's head showed before the waiver existed.
+    bidsFailed(head, { bids: ["completed", "success"] });
+    w.gh.checkRuns[`${w.fx.datasetId}@${head}`]?.push({
+      id: 35,
+      name: "NEMAR PR Review",
+      status: "completed",
+      conclusion: "failure",
+      app_id: NEMAR_APP_ID,
+    });
+    expect((await resume()).exitCode).toBe(3);
+    await w.reportScreen(head, "clean");
+    const run = await resume();
+    expect(run.exitCode, run.all).toBe(3);
+    expect(run.all).toContain("it reports 'unstable'");
+    expect(run.all).toContain(
+      `BIDS validation of ${head.slice(0, 12)} has not failed; what does not pass there is: NEMAR PR Review`,
+    );
+    expect(run.all).toContain(
+      `nemar admin pr-reviews start ${w.fx.datasetId} ${w.row().pr_number}`,
+    );
+    // Not the words that sent an administrator after BIDS validation, which passed.
+    expect(run.all).not.toContain("has not completed with failure");
+    expect(w.row()).toMatchObject({ status: "pr_open", gates_sha: null });
+  });
+
+  test("BIDS validation and the review check both fail: resume names the review check and the start that publishes the waiver (ADR 0117)", async () => {
+    const head = w.row().head_sha as string;
+    bidsFailed(head);
+    w.gh.checkRuns[`${w.fx.datasetId}@${head}`]?.push({
+      id: 35,
+      name: "NEMAR PR Review",
+      status: "completed",
+      conclusion: "failure",
+      app_id: NEMAR_APP_ID,
+    });
+    expect((await resume()).exitCode).toBe(3);
+    await w.reportScreen(head, "clean");
+    const run = await resume();
+    expect(run.exitCode, run.all).toBe(3);
+    expect(run.all).toContain(
+      `another check of ${head.slice(0, 12)} does not pass (NEMAR PR Review)`,
+    );
+    expect(run.all).toContain(
+      `run nemar admin pr-reviews start ${w.fx.datasetId} ${w.row().pr_number} to publish the waiver, then run this command again`,
+    );
+    expect(w.row()).toMatchObject({ status: "pr_open", gates_sha: null });
+  });
+
+  test("BIDS validation and another check fail: resume names that check, and no start", async () => {
+    const head = w.row().head_sha as string;
+    bidsFailed(head);
+    otherFailing(head);
+    expect((await resume()).exitCode).toBe(3);
+    await w.reportScreen(head, "clean");
+    const run = await resume();
+    expect(run.exitCode, run.all).toBe(3);
+    expect(run.all).toContain(`another check of ${head.slice(0, 12)} does not pass (lint)`);
+    expect(run.all).not.toContain("pr-reviews start");
+  });
+
+  test("unstable because a check other than BIDS validation fails: resume names that check, not BIDS validation", async () => {
+    const head = w.row().head_sha as string;
+    bidsFailed(head, { bids: ["completed", "success"] });
+    w.gh.statuses[`${w.fx.datasetId}@${head}`] = [{ context: "ci/external", state: "failure" }];
+    expect((await resume()).exitCode).toBe(3);
+    await w.reportScreen(head, "clean");
+    const run = await resume();
+    expect(run.exitCode, run.all).toBe(3);
+    expect(run.all).toContain(
+      `BIDS validation of ${head.slice(0, 12)} has not failed; what does not pass there is: ci/external`,
+    );
+    expect(run.all).not.toContain("has not completed with failure");
+    // No review check fails, so the waiver is not named.
+    expect(run.all).not.toContain("pr-reviews start");
+  });
+
   test("clean is gated as before: no read of the checks, and the ordinary merge is named", async () => {
     const head = w.row().head_sha as string;
     expect((await resume()).exitCode).toBe(3);

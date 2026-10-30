@@ -529,6 +529,16 @@ export function approvalGate(input: {
             : ` An earlier commit of it was reviewed and read ${input.staleVerdict}.`
         }`,
       };
+    case "waived":
+      // Allowing, with no --force (ADR 0117): NEMAR's record says this commit is an upstream
+      // re-pull's own head, whose content is upstream's. Not a pass either, so it is said, and the
+      // gates that still hold the merge (the identifier screen, BIDS validation, the version check,
+      // the merge cap) are the re-pull's gate's to read, not this verdict's.
+      return {
+        kind: "confirm",
+        warning:
+          "The automated review is waived for this commit: NEMAR's record says it is an upstream re-pull's own head, and a mirror's content is upstream's. What a review of it found, if anything, is a recommendation and holds nothing.",
+      };
   }
 }
 

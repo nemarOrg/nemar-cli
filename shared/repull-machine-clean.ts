@@ -34,8 +34,11 @@
  *  9. The identifier screen bound to the record says `clear` for that head: never `acknowledge`,
  *     which needs a person and is never machine clean even once a person gave it, never
  *     `unchecked` and never "run it again".
- * 10. An ADR 0107 review is stored for that head and its verdict is `pass`, read as the stricter of
- *     the stored verdict and the one its stored report re-derives.
+ * 10. The ADR 0107 review is waived for that head (ADR 0117): the pull request and the head are the
+ *     record's, which `shared/repull-review-waiver.ts` decides, so the review does not apply and no
+ *     model is asked. Where that rule does not hold, a stored review of that head whose verdict is
+ *     `pass` still passes, read as the stricter of the stored verdict and the one its stored report
+ *     re-derives, and anything else holds.
  * 11. GitHub reports the pull request `clean`; `unknown`, null and every other state wait.
  *
  * The daily merge cap is not a fact read here: it is claimed by the statement that records the
@@ -89,12 +92,13 @@ export type ScreenFact =
   | "unreadable";
 
 /**
- * The ADR 0107 review of the head, as read from `pr_reviews`: a verdict (`pass`, `fail`,
- * `uncertain`), a review still `running`, one that ended without a verdict (`error`, `declined`,
- * `unreported`), `exempt` (a pull request nobody reviews), `absent` (no review of that head) or
- * `unreadable`.
+ * The ADR 0107 review of the head: `waived` when the record's own rule waives it (ADR 0117), else as
+ * read from `pr_reviews`: a verdict (`pass`, `fail`, `uncertain`), a review still `running`, one
+ * that ended without a verdict (`error`, `declined`, `unreported`), `exempt` (a pull request nobody
+ * reviews), `absent` (no review of that head) or `unreadable`.
  */
 export type ReviewFact =
+  | "waived"
   | "pass"
   | "fail"
   | "uncertain"
@@ -220,8 +224,12 @@ const SCREEN_HOLDS: Readonly<Record<ScreenFact, HoldReason | null>> = {
   exempt: "screen-exempt",
 };
 
-/** What each review fact holds as; `pass` alone is null. Every verdict but `pass` is not a pass. */
+/**
+ * What each review fact holds as; `waived` and `pass` alone are null. Every verdict but `pass` is
+ * not a pass, and `waived` is not a pass either: it says the review does not apply to the head.
+ */
 const REVIEW_HOLDS: Readonly<Record<ReviewFact, HoldReason | null>> = {
+  waived: null,
   pass: null,
   absent: "review-absent",
   running: "review-running",

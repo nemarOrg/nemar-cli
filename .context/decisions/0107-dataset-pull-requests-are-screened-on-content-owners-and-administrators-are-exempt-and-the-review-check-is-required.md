@@ -72,6 +72,7 @@ And the review only ever sees a pull request's text and metadata, so a count of 
 - **`skipped` does not break "unknown is never green" (ADR 0092, ADR 0053, ADR 0086).**
   GitHub counts `skipped` as passing for a required check, which is why ADR 0092 kept it out of `conclusionOf`.
   It is now the conclusion of exactly one outcome, `exempt`, and of no other, and a test pins that.
+  *Annotated 2026-10-29: partially superseded by [ADR 0117](0117-an-upstream-re-pulls-own-pull-request-is-waived-from-the-review-by-nemars-record.md): `skipped` is now the conclusion of exactly two outcomes, `exempt` and `waived` (an upstream re-pull's own pull request at the head NEMAR recorded), and the queue gains the verdict `waived`.*
   An exempt pull request has no unknown in it: nothing was asked of a review.
   A review that ran and could not decide is still `action_required`.
 
