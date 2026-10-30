@@ -77,38 +77,36 @@ export interface TermFrequencies {
 
 /**
  * Document frequency of each word among public datasets, in ONE statement
- * (two bound parameters per word). Counts through `datasets_fts` with the
+ * (one bound parameter per word). Counts through `datasets_fts` with the
  * lexical leg's own prefix match, so "what the filter calls common" and "what
  * the lexical leg would match" are the same population.
+ *
+ * One row of scalar subqueries, not SELECTs joined by UNION ALL: D1 refuses a
+ * compound SELECT of more than five terms ("too many terms in compound
+ * SELECT"), which bun:sqlite does not, so a phrase of five or more words
+ * failed here and lost its generic-word dropping and typo correction.
  */
 export async function termFrequencies(db: D1Database, terms: string[]): Promise<TermFrequencies> {
   const unique = [...new Set(terms)];
-  const selects = [
-    `SELECT NULL AS tok, COUNT(*) AS n FROM datasets d WHERE ${PUBLIC_SEARCHABLE_SQL}`,
-  ];
+  const columns = [`(SELECT COUNT(*) FROM datasets d WHERE ${PUBLIC_SEARCHABLE_SQL}) AS n`];
   const params: string[] = [];
-  for (const term of unique) {
-    selects.push(
-      `SELECT ? AS tok, COUNT(*) AS n FROM datasets d
-       WHERE ${PUBLIC_SEARCHABLE_SQL}
-         AND d.id IN (SELECT rowid FROM datasets_fts WHERE datasets_fts MATCH ?)`,
+  unique.forEach((term, i) => {
+    columns.push(
+      `(SELECT COUNT(*) FROM datasets d
+         WHERE ${PUBLIC_SEARCHABLE_SQL}
+           AND d.id IN (SELECT rowid FROM datasets_fts WHERE datasets_fts MATCH ?)) AS c${i}`,
     );
-    params.push(term, `"${term}"*`);
-  }
-  const { results } = await db
-    .prepare(selects.join(" UNION ALL "))
+    params.push(`"${term}"*`);
+  });
+  const row = await db
+    .prepare(`SELECT ${columns.join(", ")}`)
     .bind(...params)
-    .all<{ tok: string | null; n: number }>();
-  let corpusSize = 0;
-  const counts = new Map<string, number>();
-  for (const row of results ?? []) {
-    if (row.tok === null) corpusSize = row.n;
-    else counts.set(row.tok, row.n);
-  }
+    .first<Record<string, number>>();
+  const corpusSize = row?.n ?? 0;
   const ratios = new Map<string, number>();
-  for (const term of unique) {
-    ratios.set(term, corpusSize > 0 ? (counts.get(term) ?? 0) / corpusSize : 0);
-  }
+  unique.forEach((term, i) => {
+    ratios.set(term, corpusSize > 0 ? (row?.[`c${i}`] ?? 0) / corpusSize : 0);
+  });
   return { corpusSize, ratios };
 }
 
