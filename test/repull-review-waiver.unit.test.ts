@@ -21,7 +21,7 @@ import {
 } from "../shared/repull-review-waiver";
 import { REPULL_STATUSES, type RepullStatus } from "../shared/repull-state";
 
-const DS = "on004362";
+const DS = "on098861";
 const HEAD = "0123456789abcdef0123456789abcdef01234567";
 const PATCH_HEAD = "abcdefabcdefabcdefabcdefabcdefabcdefabcd";
 const OTHER = "fedcba9876543210fedcba9876543210fedcba98";
@@ -103,7 +103,7 @@ describe("the waiver of an open re-pull's own pull request", () => {
 
 describe("everything else is reviewed, each for its own reason", () => {
   const cases: Array<[string, Partial<WaiverRecord>, Partial<WaiverSubject>, WaiverMiss]> = [
-    ["a record of another dataset", { dataset_id: "on004363" }, {}, "other-dataset"],
+    ["a record of another dataset", { dataset_id: "on098862" }, {}, "other-dataset"],
     [
       "a pull request that merely names its branch like the release, at another number",
       {},

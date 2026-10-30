@@ -41,7 +41,7 @@ import { goodReport } from "./helpers/pr-queue-fixtures";
 import { type Row, rowAt } from "./helpers/repull-rows";
 import { type CapturedEmail, withFakeResend } from "./helpers/resend";
 
-const DS = "on004362";
+const DS = "on098861";
 const SYNTH = "1111111111111111111111111111111111111111";
 const HEAD = "0123456789abcdef0123456789abcdef01234567";
 const OTHER = "fedcba9876543210fedcba9876543210fedcba98";
@@ -213,7 +213,7 @@ afterEach(async () => {
 function seedRepull(status: RepullStatus, over: Row = {}): number {
   const row = rowAt(status, {
     dataset_id: DS,
-    upstream_ds: "ds004362",
+    upstream_ds: "ds098861",
     origin: "administrator",
     actor_user_id: adminId,
     ...over,
@@ -698,8 +698,8 @@ describe("everything else is reviewed as before", () => {
 
   test("a record of another dataset waives nothing here", async () => {
     db.run("DELETE FROM upstream_repulls");
-    mirror("on004363");
-    seedRepull("pr_open", { dataset_id: "on004363", upstream_ds: "ds004363", head_sha: HEAD });
+    mirror("on098862");
+    seedRepull("pr_open", { dataset_id: "on098862", upstream_ds: "ds098862", head_sha: HEAD });
     const r = await deliver(
       "synchronize",
       pull({ user: { login: "contributor", id: 501, type: "User" } }),
