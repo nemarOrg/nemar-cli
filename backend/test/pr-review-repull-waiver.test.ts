@@ -68,6 +68,9 @@ let nextId = 5000;
 let checkRunFailure: number | null = null;
 /** A status the update of an existing check run is answered with, refusing it; null takes it. */
 let checkPatchFailure: number | null = null;
+/** A check-run write, by method, that GitHub never answers (until the test ends), or null. */
+let checkHang: "PATCH" | "POST" | null = null;
+let releaseHangs: Array<() => void> = [];
 
 beforeAll(() => {
   server = Bun.serve({
@@ -83,6 +86,10 @@ beforeAll(() => {
       if (permission) return permission;
       if (isNamingPath(url.pathname)) {
         return (await namingResponse(url, {})) ?? new Response("{}", { status: 404 });
+      }
+      if (checkHang === req.method && /\/check-runs(\/\d+)?$/.test(url.pathname)) {
+        await new Promise<void>((release) => releaseHangs.push(release));
+        return new Response("{}", { status: 504 });
       }
       if (checkPatchFailure !== null && /\/check-runs\/\d+$/.test(url.pathname)) {
         return new Response("{}", { status: checkPatchFailure, headers: { "Retry-After": "0" } });
@@ -197,6 +204,9 @@ afterEach(async () => {
   pulls = {};
   checkRunFailure = null;
   checkPatchFailure = null;
+  checkHang = null;
+  for (const release of releaseHangs) release();
+  releaseHangs = [];
   __resetRateLimitStateForTests();
 });
 
@@ -253,13 +263,25 @@ function pull(
 
 const ENRICHMENT = { login: NEMAR_APP_BOT_LOGIN, type: "Bot" };
 
-/** A `pull_request` delivery, signed as GitHub signs it. */
+/** A `pull_request` delivery, signed as GitHub signs it, answered 200. */
 async function deliver(
   action: string,
   pr: Record<string, unknown>,
   sender: Record<string, unknown> = ENRICHMENT,
   extra: Record<string, unknown> = {},
 ) {
+  const res = await deliverRaw(action, pr, sender, extra);
+  expect(res.status).toBe(200);
+  return (await res.json()) as { dispatched: boolean; reason: string; review_id?: number };
+}
+
+/** A `pull_request` delivery, signed as GitHub signs it, and the Worker's answer as it came. */
+async function deliverRaw(
+  action: string,
+  pr: Record<string, unknown>,
+  sender: Record<string, unknown> = ENRICHMENT,
+  extra: Record<string, unknown> = {},
+): Promise<Response> {
   const base = pr.base as { repo: unknown };
   const body = JSON.stringify({
     action,
@@ -278,7 +300,7 @@ async function deliver(
     ["sign"],
   );
   const sig = await crypto.subtle.sign("HMAC", key, enc.encode(body));
-  const res = await app.request(
+  return app.request(
     "/webhooks/github",
     {
       method: "POST",
@@ -294,8 +316,6 @@ async function deliver(
     },
     env(),
   );
-  expect(res.status).toBe(200);
-  return (await res.json()) as { dispatched: boolean; reason: string; review_id?: number };
 }
 
 const reviews = () =>
@@ -1001,6 +1021,44 @@ describe("a refused update of the existing check is replaced by a new check (ADR
     });
     expect(checkOutcomes().map((c) => c.method)).toEqual(["PATCH"]);
   });
+});
+
+describe("a waived check GitHub does not answer is abandoned within the bound (ADR 0117)", () => {
+  // One write is abandoned five seconds after it starts, and its one retry, after at most a second,
+  // is refused at once by the spent signal: about six seconds, well inside the 20 a hung write
+  // would exceed.
+  test("the update of a reviewed head's run: the delivery answers 500 in about six seconds, and nothing is recorded", async () => {
+    seedFailedReview();
+    checkHang = "PATCH";
+    const t0 = performance.now();
+    const res = await deliverRaw("synchronize", pull());
+    const took = performance.now() - t0;
+    expect(res.status).toBe(500);
+    expect(took).toBeLessThan(8_000);
+    // A write that got no answer is not a refusal about the run: no new run is posted.
+    expect(checkOutcomes().map((c) => `${c.method} ${c.path}`)).toEqual(["PATCH /check-runs/77"]);
+    expect(waiverAudits()).toEqual([]);
+    expect(reviews()[0]).toMatchObject({ check_run_id: 77, verdict: "fail" });
+  }, 20_000);
+
+  test("the first run of a head no review touched: the start answers 502 in about six seconds, saying GitHub did not answer", async () => {
+    checkHang = "POST";
+    const t0 = performance.now();
+    const res = await app.request(
+      `/admin/pr-reviews/${DS}/7/start`,
+      { method: "POST", headers: { Authorization: `Bearer ${ADMIN_KEY}` } },
+      env(),
+    );
+    const took = performance.now() - t0;
+    expect(res.status).toBe(502);
+    expect(took).toBeLessThan(8_000);
+    expect(((await res.json()) as { error: string }).error).toContain(
+      "GitHub did not answer in time, could not be reached, or the Worker had no token to write with.",
+    );
+    expect(checkOutcomes().map((c) => `${c.method} ${c.path}`)).toEqual(["POST /check-runs"]);
+    expect(waiverAudits()).toEqual([]);
+    expect(reviews()).toEqual([]);
+  }, 20_000);
 });
 
 describe("the waiver is decided before a block on the author", () => {

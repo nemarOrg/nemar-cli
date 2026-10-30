@@ -26,22 +26,29 @@ import { githubFetchWithRetry } from "./transport";
 const CHECK_TEXT_MAX = 60_000;
 /** A comment may hold 65536 characters. */
 const COMMENT_MAX = 60_000;
-/** The most a "quick" call may take, in all, before it is abandoned. */
+/**
+ * The most one "quick" write may take before it is abandoned: one signal per call, shared by the
+ * update of a check run and the new run posted when the update is refused.
+ */
 const QUICK_TIMEOUT_MS = 5_000;
+/** The longest wait before a quick call's one retry, whatever GitHub's `Retry-After` asks. */
+const QUICK_RETRY_WAIT_MS = 1_000;
 
 function clip(s: string, max: number): string {
   return s.length <= max ? s : `${s.slice(0, max - 40).trimEnd()}\n\n(Output shortened.)`;
 }
 
 /**
- * Fetch options for one call. A quick call is for the webhook's own request, which GitHub answers
- * within ten seconds: it fails fast on a nearly exhausted rate limit instead of sleeping, tries
- * twice, and is abandoned after a few seconds.
+ * Fetch options for one call. A quick call is for a request someone is waiting on (the webhook's,
+ * which GitHub answers within ten seconds, an administrator's start, the record's transition): it
+ * fails fast on a nearly exhausted rate limit instead of sleeping, tries twice with at most
+ * {@link QUICK_RETRY_WAIT_MS} between, and is abandoned {@link QUICK_TIMEOUT_MS} after it starts, so
+ * one call takes about six seconds at most. A token refresh after a 401 is outside that bound.
  */
 function callOptions(refresh: (() => Promise<string>) | undefined, quick: boolean | undefined) {
   return {
     kind: quick ? ("interactive" as const) : ("background" as const),
-    ...(quick ? { maxAttempts: 2 } : {}),
+    ...(quick ? { maxAttempts: 2, maxThrottleMs: QUICK_RETRY_WAIT_MS } : {}),
     ...(refresh ? { refreshTokenOn401: refresh } : {}),
   };
 }
