@@ -105,10 +105,18 @@ function othersWords(read: HeadChecks, a: BidsOnlyAsk): string | null {
   if (others === "unreadable" || others.length === 0) return null;
   const head = a.sha.slice(0, 12);
   const names = others.map((n) => sanitizeNote(n, 60) || "unnamed").join(", ");
-  const what = `BIDS validation of ${head} has not failed; what does not pass there is: ${names}`;
-  if (!others.includes(PR_REVIEW_CHECK_NAME)) return what;
+  return `BIDS validation of ${head} has not failed; what does not pass there is: ${names}${waiverHint(others, a)}`;
+}
+
+/**
+ * When the review check is among what does not pass: that an upstream re-pull's own head is waived
+ * from it (ADR 0117), and the start that publishes the waiver over a review that failed before
+ * NEMAR recorded the head. Empty otherwise.
+ */
+function waiverHint(others: readonly string[], a: BidsOnlyAsk): string {
+  if (!others.includes(PR_REVIEW_CHECK_NAME)) return "";
   const start = `nemar admin pr-reviews start ${a.datasetId} ${a.prNumber}`;
-  return `${what}. The ${PR_REVIEW_CHECK_NAME} check is waived for an upstream re-pull's own head; if that check still reads as a review that failed, run ${start} to publish the waiver, then resume again`;
+  return `. The ${PR_REVIEW_CHECK_NAME} check is waived for an upstream re-pull's own head; if that check still reads as a review that failed, run ${start} to publish the waiver, then run this command again`;
 }
 
 /** Why the head is not BIDS validation's failure alone, in words. */
@@ -133,6 +141,6 @@ function faultWords(f: BidsOnlyFault, a: BidsOnlyAsk, read?: HeadChecks): string
     case "version-check":
       return `version-check of ${head} has not completed with success`;
     case "others":
-      return `another check of ${head} does not pass (${f.others.map((n) => sanitizeNote(n, 60) || "unnamed").join(", ")})`;
+      return `another check of ${head} does not pass (${f.others.map((n) => sanitizeNote(n, 60) || "unnamed").join(", ")})${waiverHint(f.others, a)}`;
   }
 }
