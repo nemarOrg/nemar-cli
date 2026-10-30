@@ -28,6 +28,7 @@ import {
   presentIn,
   readLocationLogsAt,
 } from "../../../../scripts/scrub/git/git-lib.js";
+import { REPULL_LEDGER_ACTOR } from "../../../../shared/repull-merge-acceptance.js";
 import { runCommand } from "../../git-annex/run-command.js";
 import { listAnnexedKeys } from "../../git-annex/transfer.js";
 import { type UploadStrategy, normalizeUnannexedData } from "../../import-normalize.js";
@@ -57,7 +58,7 @@ function fromScrub(err: ImportScrubRefused): ExecuteRefused {
 }
 
 /** The ledger line's actor: fixed, so a re-preparation by another administrator writes the same line. */
-export const REPULL_SCRUB_ACTOR = "nemar-repull";
+export const REPULL_SCRUB_ACTOR = REPULL_LEDGER_ACTOR;
 
 /** The special remote a re-pull registers its uploads against (the one the plan checked). */
 export const NEMAR_REMOTE_NAME = S3_REMOTE_NAME;

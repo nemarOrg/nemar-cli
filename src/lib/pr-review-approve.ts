@@ -252,6 +252,11 @@ export interface PullRequestFacts {
   authorLogin: string;
   /** GitHub's own mergeability verdict, which already weighs every required check and review. */
   mergeableState: string;
+  /**
+   * The commit GitHub's merge wrote (`merge_commit_sha`), or null when it names none: a re-pull's
+   * acceptance of a merge made without its trailers reads it (`lib/repull/acceptance.ts`).
+   */
+  mergeCommitSha: string | null;
 }
 
 export type FetchResult<T> = { ok: true; value: T } | { ok: false; status: number; reason: string };
@@ -315,6 +320,10 @@ export async function fetchPullRequest(
       baseRepo: repoName(baseInfo?.repo),
       authorLogin: typeof user?.login === "string" ? user.login : "",
       mergeableState: typeof body?.mergeable_state === "string" ? body.mergeable_state : "unknown",
+      mergeCommitSha:
+        typeof body?.merge_commit_sha === "string" && /^[0-9a-f]{40}$/.test(body.merge_commit_sha)
+          ? body.merge_commit_sha
+          : null,
     },
   };
 }

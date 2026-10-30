@@ -31,7 +31,7 @@
 
 import { join } from "node:path";
 import { isDead, presentIn, readLocationLogsAt } from "../../../scripts/scrub/git/git-lib.js";
-import { LEDGER_REPO_PATH, SCRUB_ACTIONS, parseLedgerText } from "../../../scripts/scrub/ledger.js";
+import { LEDGER_REPO_PATH, TOOL_ACTIONS, parseLedgerText } from "../../../scripts/scrub/ledger.js";
 import { isKeyPresentAtDeclaredSize } from "../../../shared/annex-key.js";
 import {
   type CanonicalJsonValue,
@@ -217,7 +217,8 @@ export function hasReplay(s: PatchSelection): boolean {
 
 /**
  * The privacy ledger on `main`, read in the scratch repository: its recorded corrections (every
- * line that is not a scrub's own) must be none, as the plan said (`patch-ledger`). A ledger that
+ * line that is not a tool's own: a scrub's, or the acceptance of a merge made without its
+ * trailers) must be none, as the plan said (`patch-ledger`). A ledger that
  * does not parse refuses the same way: unknown is never none.
  */
 async function assertLedgerOnMain(dir: string, main: string): Promise<void> {
@@ -225,7 +226,7 @@ async function assertLedgerOnMain(dir: string, main: string): Promise<void> {
   if (text === null) return;
   let recorded: number;
   try {
-    recorded = parseLedgerText(text).filter((l) => !SCRUB_ACTIONS.has(l.action)).length;
+    recorded = parseLedgerText(text).filter((l) => !TOOL_ACTIONS.has(l.action)).length;
   } catch {
     recorded = -1;
   }
@@ -559,7 +560,7 @@ export async function findPatchCommit(args: {
       message !== null &&
       new RegExp(`^${PATCH_TRAILER}: corrections=\\d+$`, "m").test(message) &&
       (await trailersProblem(message, row)) === null &&
-      (await enrichmentOnlySince(dir, row.merge_sha as string, parent)).ok &&
+      (await enrichmentOnlySince(dir, row.merge_sha as string, parent, { acceptances: true })).ok &&
       (await enrichmentOnlySince(dir, candidate, args.head)).ok
     ) {
       return { commit: candidate, parent };

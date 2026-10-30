@@ -221,6 +221,9 @@ const EXPECTED_ENTRIES: Record<string, number> = {
   "POST /repulls/:id/merge-claim/release": 2,
   "POST /repulls/:id/merge-claim/check": 2,
   "POST /repulls/:id/merged": 2,
+  // ADR 0111, the amendment of 2026-10-29 (#1996): the acceptance of a merge made without its
+  // trailers, its body validated like the merged and released routes'.
+  "POST /repulls/:id/merge-trailers/accept": 2,
   "POST /repulls/:id/released": 2,
 
   // Import coverage sweep (issue #1311, epic #1306 phase 3)
@@ -306,7 +309,7 @@ describe("admin route inventory", () => {
   });
 
   test("entry total is pinned", () => {
-    expect(adminRoutes.routes.length).toBe(198);
+    expect(adminRoutes.routes.length).toBe(200);
   });
 
   // The count pin above can't see a SWAP of the router-level middleware

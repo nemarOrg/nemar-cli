@@ -72,7 +72,8 @@ async function fetchRef(
 
 /**
  * Whether `head`, a commit origin names, is `from` or an enrichment-shaped descendant of it; the
- * commits are fetched from `ref` when the clone does not hold them.
+ * commits are fetched from `ref` when the clone does not hold them. `acceptances` also takes
+ * NEMAR's commit of acceptance lines (`execute/head.ts`), for a check of `main` past N.0.0's merge.
  */
 export async function acceptsHead(args: {
   work: string;
@@ -80,22 +81,28 @@ export async function acceptsHead(args: {
   head: string;
   ref: string;
   env: Record<string, string> | undefined;
+  acceptances?: boolean;
 }): Promise<HeadCheck> {
   if (args.head === args.from) return "ok";
   await fetchRef(args.work, args.ref, args.env);
-  const verdict = await enrichmentOnlySince(args.work, args.from, args.head);
+  const verdict = await enrichmentOnlySince(args.work, args.from, args.head, {
+    acceptances: args.acceptances === true,
+  });
   if (verdict.ok) return "ok";
   return verdict.code === "unreadable" ? "unreadable" : "foreign";
 }
 
 /**
  * Refuse unless origin's `main` is `baseSha` or an enrichment-shaped descendant of it. Returns
- * origin's `main`.
+ * origin's `main`. `acceptances` is for `main` past N.0.0's merge only, where NEMAR may have
+ * appended the acceptance of that merge (ADR 0111, the amendment of 2026-10-29); before a merge no
+ * acceptance belongs on `main`, so the checks there stay as they were.
  */
 export async function checkMain(args: {
   work: string;
   baseSha: string;
   env: Record<string, string> | undefined;
+  acceptances?: boolean;
 }): Promise<string> {
   const heads = await remoteHeads(args.work, ["refs/heads/main"], args.env);
   const main = heads.get("refs/heads/main");
@@ -106,6 +113,7 @@ export async function checkMain(args: {
     head: main,
     ref: "refs/heads/main",
     env: args.env,
+    acceptances: args.acceptances === true,
   });
   if (verdict === "unreadable") {
     throw new ExecuteRefused(

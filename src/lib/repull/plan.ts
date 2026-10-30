@@ -28,7 +28,7 @@ import {
   presentIn,
   readLocationLogsAt,
 } from "../../../scripts/scrub/git/git-lib.js";
-import { LEDGER_REPO_PATH, SCRUB_ACTIONS, parseLedgerText } from "../../../scripts/scrub/ledger.js";
+import { LEDGER_REPO_PATH, TOOL_ACTIONS, parseLedgerText } from "../../../scripts/scrub/ledger.js";
 import { isKeyPresentAtDeclaredSize } from "../../../shared/annex-key.js";
 import type { CanonicalJsonValue } from "../../../shared/neurobagel/canonical-json.js";
 import { type SourceVersionRow, openNeuroSourceId } from "../../../shared/source-snapshot.js";
@@ -859,9 +859,10 @@ async function readLedger(
     return {
       status: "ok",
       lines: lines.length,
-      // A scrub's own line is re-applied as a function; every other line is a recorded correction
-      // (ADR 0111, decision 1, as the Phase 6b amendment corrects it).
-      recordedCorrections: lines.filter((l) => !SCRUB_ACTIONS.has(l.action)).length,
+      // A scrub's own line is re-applied as a function, and an acceptance of a merge made without
+      // its trailers changes no byte; every other line is a recorded correction (ADR 0111,
+      // decision 1, as the Phase 6b amendment and the amendment of 2026-10-29 correct it).
+      recordedCorrections: lines.filter((l) => !TOOL_ACTIONS.has(l.action)).length,
       error: null,
     };
   } catch (err) {
