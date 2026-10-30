@@ -116,7 +116,7 @@ function othersWords(read: HeadChecks, a: BidsOnlyAsk): string | null {
 function waiverHint(others: readonly string[], a: BidsOnlyAsk): string {
   if (!others.includes(PR_REVIEW_CHECK_NAME)) return "";
   const start = `nemar admin pr-reviews start ${a.datasetId} ${a.prNumber}`;
-  return `. The ${PR_REVIEW_CHECK_NAME} check is waived for an upstream re-pull's own head; if that check still reads as a review that failed, run ${start} to publish the waiver, then run this command again`;
+  return `. A Worker at 0.10.27 or later waives the ${PR_REVIEW_CHECK_NAME} check for an upstream re-pull's own head (an older Worker does not publish the waiver); if that check still reads as a review that failed, run ${start} to publish the waiver, then run this command again`;
 }
 
 /** Why the head is not BIDS validation's failure alone, in words. */

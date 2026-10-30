@@ -489,6 +489,42 @@ describe.skipIf(!awsInstalled)("a merge made outside the gate", () => {
     await nothingWritten(merge);
   });
 
+  test("the release does not advise a flag the Worker would refuse on a record the automatic path opened", async () => {
+    await w.restore(mergedOnGitHub);
+    const merge = await mainHead();
+    await tagged();
+    w.db().run("UPDATE upstream_repulls SET origin = 'automatic'");
+    const run = await resume();
+    expect(run.exitCode, run.all).toBe(3);
+    expect(run.all).toContain("merge-trailers");
+    expect(run.all).toContain("no command moves this record on");
+    expect(run.all).not.toContain("--accept-merge-trailers");
+    await nothingWritten(merge);
+    // An administrator's record is still told the way.
+    w.db().run("UPDATE upstream_repulls SET origin = 'administrator'");
+    const told = await resume();
+    expect(told.all).toContain('--accept-merge-trailers "<reason>"');
+    expect(told.all).toContain("only for the administrator who opened the re-pull");
+  });
+
+  test("a Worker with no acceptance route is named as such, and nothing is written", async () => {
+    await w.restore(mergedOnGitHub);
+    const merge = await mainHead();
+    await tagged();
+    expect((await resume()).exitCode).toBe(3);
+    w.setApiOverride((req) =>
+      req.method === "POST" && new URL(req.url).pathname.endsWith("/merge-trailers/accept")
+        ? Response.json({ error: "Not found" }, { status: 404 })
+        : null,
+    );
+    const run = await accepting();
+    w.setApiOverride(null);
+    expect(run.exitCode, run.all).toBe(1);
+    expect(run.all).toContain("this Worker has no acceptance route");
+    expect(run.all).not.toContain("Invalid response from server");
+    await nothingWritten(merge);
+  });
+
   test("the Worker takes only the record's merge commit, and a reason only for a first acceptance", async () => {
     await w.restore(mergedOnGitHub);
     const merge = await mainHead();

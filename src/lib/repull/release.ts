@@ -258,9 +258,15 @@ export async function releaseTurn(
   if (problem !== null) {
     accepted = await recordedAcceptance(ctx, scratch, row, pr, problem);
     if (!accepted && !ctx.opts.acceptMergeTrailers) {
+      // Only an administrator-opened record can be accepted (ADR 0111, the amendment of
+      // 2026-10-29); the flag would be refused as `accept-automatic` on any other.
+      const way =
+        row.origin === "administrator"
+          ? `If it was merged outside NEMAR's gate (GitHub's merge button, say), read what it holds, then run nemar admin repull resume ${row.dataset_id} --accept-merge-trailers "<reason>", which accepts it only once it is shown to be this re-pull's own squash merge, and only for the administrator who opened the re-pull.`
+          : "The automatic path opened this re-pull, and the Worker merges its pull requests with the trailers, so a merge made another way is not accepted and no command moves this record on; tell the owner.";
       throw await fail(
         "merge-trailers",
-        `The merge commit ${merge.slice(0, 12)} on main does not end with the re-pull commit's two trailers (${problem}), so the privacy ledger's fresh-clone proof would not read it as the re-pull's commit. The record stays ${row.status}. If it was merged outside NEMAR's gate (GitHub's merge button, say), read what it holds, then run nemar admin repull resume ${row.dataset_id} --accept-merge-trailers "<reason>", which accepts it only once it is shown to be this re-pull's own squash merge.`,
+        `The merge commit ${merge.slice(0, 12)} on main does not end with the re-pull commit's two trailers (${problem}), so the privacy ledger's fresh-clone proof would not read it as the re-pull's commit. The record stays ${row.status}. ${way}`,
       );
     }
   }
