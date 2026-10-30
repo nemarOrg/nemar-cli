@@ -265,6 +265,15 @@ export interface DatasetSearchResponse {
   truncated?: boolean;
   method: "semantic" | "text" | "text_fallback" | "exact_id" | "unavailable";
   min_score?: number;
+  /** True when a phrase's results were cut by a relevance judgment: `count` is the number judged
+   *  to answer the query and each `score` is the judged probability (0..1; a name or author match
+   *  is floored at 0.5). Absent otherwise. */
+  reranked?: true;
+  /** The query as searched, present only when a word that matches no dataset was replaced by a
+   *  catalog word one typo away. The CLI says so before the results. */
+  corrected_query?: string;
+  /** Modalities the query named, whose datasets are listed first (a preference, not a filter). */
+  modality_boost?: string[];
   /** Set only when the backend's exact-count query failed and `count` fell
    *  back to a page-derived lower bound (review round 3 I1). */
   warning?: string;

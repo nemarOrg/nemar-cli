@@ -215,6 +215,11 @@ export interface FixtureOptions {
   recordedCorrection?: boolean;
   /** Append the line an earlier re-pull's delta scrub writes (`repull-scrubbed`) to NEMAR's ledger. */
   repullScrubbedLine?: boolean;
+  /**
+   * Append the line NEMAR's Worker writes when an administrator accepted a re-pull merge made
+   * without its trailers (`repull-merge-accepted`, ADR 0111, the amendment of 2026-10-29).
+   */
+  mergeAcceptedLine?: boolean;
   /** Leave out NEMAR's contributor edits, so nothing is unexplained. */
   noContributorEdits?: boolean;
   /** What the bucket's `annex-uuid` marker says; the `nemar-s3` UUID by default, null for none. */
@@ -756,6 +761,21 @@ async function build(
       scanner: IMPORT_SCANNER_ID,
       verification: "scanner-clean+payload-identical",
       actor: "fixture-actor",
+    });
+  }
+  if (opts.mergeAcceptedLine) {
+    appendLedger(join(clone, ".nemar/corrections.jsonl"), {
+      version: 1,
+      at: "2026-10-29T12:00:00.000Z",
+      dataset: id,
+      action: "repull-merge-accepted",
+      versions: ["v1.0.0"],
+      counts: {},
+      scanner: IMPORT_SCANNER_ID,
+      verification: "squash-merge-verified",
+      actor: "nemar-repull",
+      commit: "0".repeat(40),
+      plan: `sha256:${"0".repeat(64)}`,
     });
   }
   if (opts.changes) {

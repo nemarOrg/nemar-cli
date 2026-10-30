@@ -512,6 +512,8 @@ export function automaticExecute(
 export interface AutomaticResumeOptions {
   waitMinutes: number;
   acknowledgeIdentifierScreen?: string;
+  /** An administrator's act alone: a finish never accepts a merge made without its trailers. */
+  acceptMergeTrailers?: string;
   yes?: boolean;
   json?: boolean;
 }
@@ -533,6 +535,7 @@ export function automaticFinish(
       refuseOptions([
         ["--json", options.json === true],
         ["--acknowledge-identifier-screen", options.acknowledgeIdentifierScreen !== undefined],
+        ["--accept-merge-trailers", options.acceptMergeTrailers !== undefined],
       ]);
       if (!options.yes) throw optionRefused("--yes", "required");
       const repullId = ctx.dispatch.repullId as number;

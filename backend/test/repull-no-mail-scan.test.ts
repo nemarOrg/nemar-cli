@@ -30,8 +30,10 @@ const ROOTS = [
   `${SRC}/services/upstream-repull-scheduler.ts`,
   // The facts the machine-clean rule reads: they read the review's rows through `pr-review.ts`.
   `${SRC}/services/upstream-repull-facts.ts`,
-  // The Worker's start of the review of the App's re-pull pull request (ADR 0111, decision 7).
+  // The administrator's start of a review, which publishes a re-pull pull request's waiver (ADR
+  // 0117), and the waiver's reader of the record.
   `${SRC}/services/pr-review-start.ts`,
+  `${SRC}/services/pr-review-repull-waiver.ts`,
   // The advance tick that holds, gates and resumes the automatic re-pulls.
   `${SRC}/services/upstream-repull-advance.ts`,
   // The Worker's merge of an automatic re-pull, the one Worker path that merges a pull request.

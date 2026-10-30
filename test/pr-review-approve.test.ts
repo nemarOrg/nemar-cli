@@ -251,6 +251,25 @@ describe("what the review's verdict allows", () => {
     );
   });
 
+  test("an upstream re-pull's waived head is allowed without --force, says why, and is not a pass (ADR 0117)", () => {
+    const gate = approvalGate({ verdict: "waived", staleVerdict: null });
+    expect(gate.kind).toBe("confirm");
+    if (gate.kind === "confirm") {
+      expect(gate.warning).toContain("waived for this commit");
+      expect(gate.warning).toContain("upstream re-pull's own head");
+      expect(gate.warning).toContain("a recommendation and holds nothing");
+    }
+    // An unreadable answer still beats it, and a Worker's word is read as this commit's only.
+    expect(approvalGate({ verdict: "waived", staleVerdict: null, unread: "down" }).kind).toBe(
+      "needs_force",
+    );
+    const read = reviewForApproval({ verdict: "waived", head_sha: "a".repeat(40) }, "a".repeat(40));
+    expect(read).toMatchObject({ ok: true, verdict: "waived" });
+    expect(
+      reviewForApproval({ verdict: "waived", head_sha: "b".repeat(40) }, "a".repeat(40)).ok,
+    ).toBe(false);
+  });
+
   test("an exempt pull request says what an earlier commit's review concluded, because that change is still in it", () => {
     const gate = approvalGate({ verdict: "exempt", staleVerdict: "fail" });
     expect(gate.kind).toBe("confirm");
@@ -408,7 +427,21 @@ describe("reading the pull request", () => {
         baseRepo: "nemarDatasets/nm000201",
         authorLogin: "alice",
         mergeableState: "blocked",
+        // No merge yet, so no merge commit: a re-pull's acceptance reads it only once merged.
+        mergeCommitSha: null,
       },
+    });
+    // Merged: GitHub's merge commit, the one a re-pull's acceptance checks the record against.
+    gh.pulls["nm000201#8"] = {
+      sha: SHA_A,
+      merged: true,
+      state: "closed",
+      mergeCommitSha: "c".repeat(40),
+    };
+    const merged = await fetchPullRequest(ADMIN_TOKEN, "nm000201", 8, base());
+    expect(merged).toMatchObject({
+      ok: true,
+      value: { state: "merged", mergeCommitSha: "c".repeat(40) },
     });
   });
 

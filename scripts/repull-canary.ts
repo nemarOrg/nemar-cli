@@ -111,7 +111,7 @@ export function canaryCalls(args: CanaryArgs): string[] {
   return [
     `head-object ${UPSTREAM_BUCKET}/${args.single.object} --version-id ${args.single.version}`,
     `head-object ${UPSTREAM_BUCKET}/${args.multipart.object} --version-id ${args.multipart.version}`,
-    `copy-object ${args.bucket}/${k.single} --copy-source ${src(args.single)} --copy-source-if-match <its ETag>`,
+    `copy-object ${args.bucket}/${k.single} --copy-source ${src(args.single)} --copy-source-if-match <its ETag> --tagging-directive REPLACE`,
     `create-multipart-upload ${args.bucket}/${k.multipart}`,
     `upload-part-copy x N (5 MiB parts) --copy-source ${src(args.multipart)} --copy-source-if-match <its ETag>`,
     `complete-multipart-upload ${args.bucket}/${k.multipart}`,
@@ -239,6 +239,8 @@ export async function runCanary(
           copySource(args.single),
           "--copy-source-if-match",
           one.etag,
+          "--tagging-directive",
+          "REPLACE",
         ],
         { slow: true },
       );

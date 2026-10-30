@@ -22,6 +22,7 @@ import {
   readSnapshot,
   verifyRewrite,
 } from "../../../scripts/scrub/git/git-lib";
+import { mergeAcceptanceLine } from "../../../shared/repull-merge-acceptance";
 import {
   HAVE_ANNEX,
   HAVE_REWRITE_TOOLS,
@@ -345,6 +346,166 @@ SUITE("verify --fresh-clone: the pushed repository (I1, I11)", () => {
       expect(bad.code, `${label}: ${bad.out}`).toBe(4);
       expect(bad.out, label).toContain("reason=ledger-commit-not-alone");
     }
+  }, 300_000);
+
+  test("an accepted merge without trailers passes only when a line on a branch names exactly it (ADR 0111, 2026-10-29)", async () => {
+    // A re-pull's squash merge made with GitHub's own button: the delta scrub's line beside the
+    // re-pull's files, and GitHub's message, with no trailers. Then NEMAR's acceptance: one line
+    // naming that commit, in a commit of its own that touches only the ledger.
+    const repullLine = LEDGER_LINE.replace("history-rewritten", "repull-scrubbed");
+    const plan = `sha256:${"b".repeat(64)}`;
+    const acceptance = (commit: string) =>
+      `${mergeAcceptanceLine({
+        dataset: DATASET,
+        version: "1.1.0",
+        mergeSha: commit,
+        planDigest: plan,
+        scanner: "identifier-scan@abcdef1",
+        at: "2026-10-29T12:00:00.000Z",
+      })}\n`;
+    const ledgerOf = (repo: string) => {
+      const file = join(repo, ".nemar", "corrections.jsonl");
+      return existsSync(file) ? readFileSync(file, "utf8") : "";
+    };
+    /** Commit the ledger as `ledger(before)` beside `others` with `message`; the new commit. */
+    const commit = (
+      repo: string,
+      ledger: (before: string) => string,
+      message: string,
+      others: Record<string, string> = {},
+    ) => {
+      write(repo, ".nemar/corrections.jsonl", ledger(ledgerOf(repo)));
+      for (const [path, text] of Object.entries(others)) write(repo, path, text);
+      git(repo, "add", ".");
+      git(repo, "commit", "-q", "-m", message);
+      return git(repo, "rev-parse", "HEAD").trim();
+    };
+    /** The squash merge made outside the gate, on a fresh clone's main; the clone and the commit. */
+    const mergedOutsideGate = () => {
+      const repo = fresh();
+      const merge = commit(repo, (b) => `${b}${repullLine}`, "Release v1.1.0 (#7)", {
+        "repulled-alongside.txt": "the re-pull's delta",
+      });
+      return { repo, merge };
+    };
+
+    // Without the acceptance the merge is a ledger commit beside other files, as before.
+    const none = mergedOutsideGate();
+    const before = await verifyFresh(none.repo);
+    expect(before.code, before.out).toBe(4);
+    expect(before.out).toContain("reason=ledger-commit-not-alone count=1");
+
+    // With the line naming it, in a commit of its own, it passes, and the line says so.
+    const ok = mergedOutsideGate();
+    commit(ok.repo, (b) => `${b}${acceptance(ok.merge)}`, "Record the acceptance");
+    const passed = await verifyFresh(ok.repo);
+    expect(passed.code, passed.out).toBe(0);
+    expect(counts(passed.out, "verify: ok")).toMatchObject({ ledgerAcceptances: 1 });
+
+    // A forged id, and an unrelated commit's id: the merge is not vouched for, and the line itself
+    // names nothing it may vouch for.
+    for (const [label, named] of [
+      ["a forged id", () => "c".repeat(40)],
+      ["an unrelated commit", (repo: string) => git(repo, "rev-parse", "HEAD~2").trim()],
+    ] as const) {
+      const bad = mergedOutsideGate();
+      commit(bad.repo, (b) => `${b}${acceptance(named(bad.repo))}`, "Record the acceptance");
+      const r = await verifyFresh(bad.repo);
+      expect(r.code, `${label}: ${r.out}`).toBe(4);
+      expect(r.out, label).toContain("reason=ledger-commit-not-alone count=1");
+      expect(r.out, label).toContain("reason=ledger-acceptance-unmatched count=1");
+    }
+
+    // A line naming a commit that appends no repull-scrubbed line (the importer's line beside its
+    // files, which passes on its own): the line is unmatched, so the proof fails.
+    const imported = fresh();
+    const importCommit = commit(
+      imported,
+      (b) => `${b}${LEDGER_LINE.replace("history-rewritten", "import-scrubbed")}`,
+      "import scrub",
+      { "scrubbed-alongside.txt": "the import's files" },
+    );
+    commit(imported, (b) => `${b}${acceptance(importCommit)}`, "Record the acceptance");
+    const notRepull = await verifyFresh(imported);
+    expect(notRepull.code, notRepull.out).toBe(4);
+    expect(notRepull.out).toContain("reason=ledger-acceptance-unmatched count=1");
+    expect(notRepull.out).not.toContain("ledger-commit-not-alone");
+
+    // A merge reached from main only through a merge commit's second parent is not a first-parent
+    // commit of main, although it is one of the branch it was made on: the line on main naming it
+    // is unmatched, and neither it nor the merge commit that brought it in is vouched for.
+    const side = fresh();
+    git(side, "checkout", "-q", "-b", "feature");
+    const sideMerge = commit(side, (b) => `${b}${repullLine}`, "Release v1.1.0 (#7)", {
+      "repulled-alongside.txt": "the re-pull's delta",
+    });
+    git(side, "checkout", "-q", "main");
+    git(side, "merge", "-q", "--no-ff", "-m", "Merge feature", "feature");
+    commit(side, (b) => `${b}${acceptance(sideMerge)}`, "Record the acceptance");
+    const secondParent = await verifyFresh(side);
+    expect(secondParent.code, secondParent.out).toBe(4);
+    expect(secondParent.out).toContain("reason=ledger-acceptance-unmatched count=1");
+    expect(secondParent.out).toContain("reason=ledger-commit-not-alone count=2");
+
+    // The line written beside another file is not NEMAR's commit of its own: that commit fails.
+    const beside = mergedOutsideGate();
+    commit(beside.repo, (b) => `${b}${acceptance(beside.merge)}`, "Record the acceptance", {
+      "README-extra": "written beside the acceptance",
+    });
+    const besideOut = await verifyFresh(beside.repo);
+    expect(besideOut.code, besideOut.out).toBe(4);
+    expect(besideOut.out).toContain("reason=ledger-commit-not-alone count=1");
+
+    // A line of the right word that is not a valid line (a short id) is ledger-invalid, and vouches
+    // for nothing.
+    const invalid = mergedOutsideGate();
+    commit(
+      invalid.repo,
+      (b) => `${b}${acceptance(invalid.merge).replace(invalid.merge, invalid.merge.slice(0, 12))}`,
+      "Record the acceptance",
+    );
+    const invalidOut = await verifyFresh(invalid.repo);
+    expect(invalidOut.code, invalidOut.out).toBe(4);
+    expect(invalidOut.out).toContain("reason=ledger-invalid");
+    expect(invalidOut.out).toContain("reason=ledger-commit-not-alone count=1");
+
+    // A line naming a re-pull merge that does carry its trailers (as the proof reads them, here
+    // with another plan's digest than the line's): that merge passes on its own, and the line,
+    // which the Worker cannot tell from a needed one, changes nothing and is matched.
+    const trailed = fresh();
+    const withTrailers = commit(
+      trailed,
+      (b) => `${b}${repullLine}`,
+      `Release v1.1.0 (#7)\n\nUpstream-Snapshot: ds000001@1.0.1\nRepull-Plan: sha256:${"c".repeat(64)}`,
+      { "repulled-alongside.txt": "the re-pull's delta" },
+    );
+    commit(trailed, (b) => `${b}${acceptance(withTrailers)}`, "Record the acceptance");
+    const trailedOut = await verifyFresh(trailed);
+    expect(trailedOut.code, trailedOut.out).toBe(0);
+    // It vouched for nothing that needed it.
+    expect(trailedOut.out).not.toContain("ledgerAcceptances");
+
+    // A branch that brought main in through a second parent (GitHub's "Update branch") carries
+    // main's line naming a merge it holds only through that parent: the line is matched, because
+    // main's tip vouches for it, and is not counted against the branch. (The branch's merge commit
+    // appends the scrub's line and the acceptance beside the merge's files, which the rule refuses
+    // as before; the runbook deletes merged branches before the clone.)
+    const updated = fresh();
+    git(updated, "branch", "feature");
+    const merged = commit(updated, (b) => `${b}${repullLine}`, "Release v1.1.0 (#7)", {
+      "repulled-alongside.txt": "the re-pull's delta",
+    });
+    commit(updated, (b) => `${b}${acceptance(merged)}`, "Record the acceptance");
+    git(updated, "checkout", "-q", "feature");
+    write(updated, "feature-only.txt", "work on the branch");
+    git(updated, "add", ".");
+    git(updated, "commit", "-q", "-m", "work on the branch");
+    git(updated, "merge", "-q", "--no-ff", "-m", "Merge main into feature", "main");
+    git(updated, "checkout", "-q", "main");
+    const updatedOut = await verifyFresh(updated);
+    expect(updatedOut.code, updatedOut.out).toBe(4);
+    expect(updatedOut.out).not.toContain("ledger-acceptance-unmatched");
+    expect(updatedOut.out).toContain("reason=ledger-commit-not-alone count=1");
   }, 300_000);
 
   test("a ledger that is not a valid ledger of this dataset fails", async () => {

@@ -14,6 +14,7 @@
  *    facts itself and refuses in its own words.
  */
 
+import { PR_REVIEW_CHECK_NAME } from "../../../shared/pr-review.js";
 import {
   type BidsOnlyFault,
   type HeadChecks,
@@ -40,6 +41,8 @@ export interface BidsOnlyAsk {
   origin: string;
   /** GitHub's `mergeable_state`, as read for that head. */
   mergeableState: string;
+  /** The pull request's number, for the command a waived review check names. */
+  prNumber: number;
 }
 
 /** Every check run and commit status of the head, or why they could not be read. */
@@ -73,7 +76,7 @@ export async function readBidsOnly(a: BidsOnlyAsk): Promise<BidsOnlyRead> {
   if ("unreadable" in read) return { kind: "unreadable", why: read.unreadable };
   const fault = bidsOnlyFault({ ...read, origin: a.origin, mergeableState: a.mergeableState });
   if (fault === null) return { kind: "bids-only" };
-  const why = faultWords(fault, a);
+  const why = faultWords(fault, a, read);
   return fault.fault === "unreadable" ? { kind: "unreadable", why } : { kind: "not", why };
 }
 
@@ -89,9 +92,41 @@ export async function readNothingElseFails(a: BidsOnlyAsk): Promise<BidsOnlyRead
   return { kind: "not", why: faultWords({ fault: "others", others }, a) };
 }
 
-/** Why the head is not BIDS validation's failure alone, in words. */
-function faultWords(f: BidsOnlyFault, a: BidsOnlyAsk): string {
+/**
+ * The words for a head where BIDS validation has not failed and something else does not pass, or
+ * null when nothing else is read as not passing. Then BIDS validation is not why GitHub reports
+ * `unstable`, and saying it "has not completed with failure" would send an administrator after the
+ * wrong check: what does not pass is named instead. When the review check is among it, the words
+ * say an upstream re-pull's own head is waived from that review (ADR 0117) and name the start that
+ * publishes the waiver over a review that failed before NEMAR recorded the head.
+ */
+function othersWords(read: HeadChecks, a: BidsOnlyAsk): string | null {
+  const others = othersNotPassing(read);
+  if (others === "unreadable" || others.length === 0) return null;
   const head = a.sha.slice(0, 12);
+  const names = others.map((n) => sanitizeNote(n, 60) || "unnamed").join(", ");
+  return `BIDS validation of ${head} has not failed; what does not pass there is: ${names}${waiverHint(others, a)}`;
+}
+
+/**
+ * When the review check is among what does not pass: that an upstream re-pull's own head is waived
+ * from it (ADR 0117), and the start that publishes the waiver over a review that failed before
+ * NEMAR recorded the head. Empty otherwise.
+ */
+function waiverHint(others: readonly string[], a: BidsOnlyAsk): string {
+  if (!others.includes(PR_REVIEW_CHECK_NAME)) return "";
+  const start = `nemar admin pr-reviews start ${a.datasetId} ${a.prNumber}`;
+  return `. A Worker at 0.10.27 or later waives the ${PR_REVIEW_CHECK_NAME} check for an upstream re-pull's own head (an older Worker does not publish the waiver); if that check still reads as a review that failed, run ${start} to publish the waiver, then run this command again`;
+}
+
+/** Why the head is not BIDS validation's failure alone, in words. */
+function faultWords(f: BidsOnlyFault, a: BidsOnlyAsk, read?: HeadChecks): string {
+  const head = a.sha.slice(0, 12);
+  // Only where BIDS validation did not fail: a `version-check` fault is read after a failed one.
+  if (f.fault === "bids" && read !== undefined) {
+    const others = othersWords(read, a);
+    if (others !== null) return others;
+  }
   switch (f.fault) {
     case "unreadable":
       return `the checks of ${head} could not be read (GitHub's answer is not complete, or not of its shape)`;
@@ -106,6 +141,6 @@ function faultWords(f: BidsOnlyFault, a: BidsOnlyAsk): string {
     case "version-check":
       return `version-check of ${head} has not completed with success`;
     case "others":
-      return `another check of ${head} does not pass (${f.others.map((n) => sanitizeNote(n, 60) || "unnamed").join(", ")})`;
+      return `another check of ${head} does not pass (${f.others.map((n) => sanitizeNote(n, 60) || "unnamed").join(", ")})${waiverHint(f.others, a)}`;
   }
 }

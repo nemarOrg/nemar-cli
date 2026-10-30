@@ -184,10 +184,16 @@ export async function deleteDatasetCascade(
       // the delete does not rely on the pragma. Placed after the indexed results above so their
       // positions do not move. The automatic path's dispatches (migration 0112) have no foreign
       // key either, and some have no re-pull row at all (a run refused before its create), so they
-      // go by dataset, before the re-pull rows.
+      // go by dataset, before the re-pull rows. An administrator's acceptance of a merge made
+      // without its trailers (migration 0113) goes with its re-pull the way a screen does.
       db
         .prepare(
           "DELETE FROM upstream_repull_screens WHERE repull_id IN (SELECT id FROM upstream_repulls WHERE dataset_id = ?)",
+        )
+        .bind(datasetId),
+      db
+        .prepare(
+          "DELETE FROM upstream_repull_merge_acceptances WHERE repull_id IN (SELECT id FROM upstream_repulls WHERE dataset_id = ?)",
         )
         .bind(datasetId),
       db.prepare("DELETE FROM upstream_repull_dispatches WHERE dataset_id = ?").bind(datasetId),

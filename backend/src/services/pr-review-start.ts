@@ -23,32 +23,28 @@
  * comment are published by the same code that publishes them for a delivery.
  *
  * A bot's pull request is not reviewed through the administrator's start either (`bot_author`).
- * The one bot pull request that is reviewed, the NEMAR App's automatic re-pull pull request, is
- * started by the Worker itself, from the re-pull record, through
- * {@link startRepullPullRequestReview} (ADR 0111 narrows ADR 0092's "not bots" for that class).
+ * An upstream re-pull's own pull request at the head NEMAR recorded is waived (ADR 0117): a start of
+ * it, a `redo` included, publishes the waived check and starts nothing (`repull_waived`), which is
+ * how an administrator corrects a check a review of that head failed before NEMAR recorded the head.
+ * The NEMAR App's automatic re-pull pull request, which the Worker used to review on its own
+ * (ADR 0111, the Phase 7e amendment), is waived at its recorded head and reviewed by no one.
  */
 
 import type { StartReviewResponse } from "../../../shared/contract/pr-review-admin.js";
 import { sanitizeNote } from "../../../shared/pr-review.js";
-import type { RepullRow } from "../../../shared/repull-state.js";
 import { auditLogStatement } from "../db/audit-log.js";
 import type { Bindings } from "../types/bindings.js";
 import { getDatasetsTokenWithRefresher } from "./github-auth.js";
-import {
-  NEMAR_APP_BOT_LOGIN,
-  NEMAR_APP_BOT_TYPE,
-  NEMAR_APP_BOT_USER_ID,
-} from "./github/branch-protection.js";
 import { GITHUB_API, ORG_NAME, ghHeaders } from "./github/shared.js";
 import { githubFetchWithRetry } from "./github/transport.js";
 import { QueueError, environmentName, ownedHere } from "./pr-review-queue.js";
 import {
   ExemptCheckNotPublished,
-  type PrReviewResponse,
+  type WaiverCheckFailure,
+  WaiverCheckNotPublished,
   handlePullRequestEvent,
   reviewableDataset,
 } from "./pr-review.js";
-import { autoRepullEnabled, isExactProduction } from "./repull-switches.js";
 
 /** A GitHub login's shape; anything else is not echoed back. */
 const LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
@@ -204,7 +200,7 @@ export async function startPullRequestReview(
       // The shape a `pull_request` delivery has: GitHub's own record of the pull request, and the
       // repository it targets. `synchronize` is only the delivery's name for "take it up".
       { action: "synchronize", pull_request: pull, repository: base?.repo },
-      { adminStart: true, redo },
+      { adminStart: true, redo, adminUserId },
     );
   } catch (err) {
     // The author is exempt and GitHub would not take the check the naming rule decided on (skipped,
@@ -216,6 +212,9 @@ export async function startPullRequestReview(
         "github_unavailable",
         "GitHub would not take the check for this pull request, whose author is exempt from the review, so nothing was posted. Try again in a moment.",
       );
+    }
+    if (err instanceof WaiverCheckNotPublished) {
+      throw new QueueError(502, "github_unavailable", waiverNotPublishedWords(err.failure));
     }
     throw err;
   }
@@ -256,124 +255,26 @@ export async function startPullRequestReview(
   return answer;
 }
 
-/** An automatic re-pull record's dataset: only an `on` mirror is re-pulled automatically. */
-const ON_DATASET = /^on\d{6}$/;
-
-/** The answer of a start that started nothing, in the review's own words. */
-const notStarted = (reason: string): PrReviewResponse => ({ ok: true, dispatched: false, reason });
-
 /**
- * Review the NEMAR App's automatic re-pull pull request: the Worker's own start, for the advance
- * tick of the automatic path (epic #1046 phase 7, #1913; ADR 0111, decision 7, which needs an
- * ADR 0107 review that passes before the Worker may merge one).
- *
- * Called by the advance tick (`upstream-repull-advance.ts`), and by nothing else.
- *
- * The App's pull request is a bot's, which the review's intake skips (ADR 0092: "not bots"). This
- * is the one way it is admitted, so it is narrow on purpose (ADR 0111 narrows ADR 0092 for this
- * class only). Its gates, in order, each with the answer it starts nothing with:
- *  - exact production (`not_production`) and the open switch (`auto_repull_off`), as every
- *    automatic job;
- *  - a dataset this Worker owns (`not_owned_here`); outside the dev Worker's own ids, which are
- *    never `on` mirrors, that is every dataset;
- *  - an automatic record of an `on` dataset (`not_automatic`), at `pr_open` with its branch, number
- *    and head recorded (`not_pr_open`);
- *  - the review switched on (`pr_review_disabled`) and a dataset the review may read: a live,
- *    named, published one (`unknown_dataset`, `dataset_not_reviewable`);
- *  - and on GitHub, the recorded pull request (`github_unreadable` when it cannot be read),
- *    authored by the App by login, numeric id and type (`not_app_author`), at the recorded head
- *    (`head_moved`).
- * The intake then admits it only from the recorded release branch and the dataset's own
- * repository; any other is the intake's `bot_author`.
- *
- * Nothing about the pull request comes from the caller: the Worker reads it from GitHub, shapes it
- * as the `pull_request` delivery it would have been, as an administrator's start does, and hands
- * it to the one gate every delivery goes through, so every other rule of the review applies
- * unchanged (the reviewable dataset, a block, the per-commit row, the edit cap). It is not an
- * administrator's start: a commit whose review ended without a verdict is not started again by
- * it, and a delivery GitHub sends for the App's pull request is still skipped. The App has no
- * NEMAR account, so it is never exempt.
- *
- * GitHub is not asked anything outside exact production, with the switch off, or for a record or
- * a dataset that cannot be reviewed. A start that dispatched writes an audit row with no user, as
- * the dispatch record's claims and its watchdog do (the advance tick's own rows, its holds, its
- * gates edge and the screens it dispatches, name the system user); a row that could not be written
- * is logged and does not undo or block the review, so the answer says nothing about it, by design
- * (the review's own row is the record that matters). Mails nobody.
+ * What an administrator's start says when the waived check did not reach GitHub, by what happened:
+ * an update refused for a reason not about the run (a credential, a throttle, GitHub's own error),
+ * so no new run was posted; a new run refused after the update was; a first run refused; or no
+ * answer at all.
  */
-export async function startRepullPullRequestReview(
-  env: Bindings,
-  row: RepullRow,
-): Promise<PrReviewResponse> {
-  if (!isExactProduction(env)) return notStarted("not_production");
-  if (!autoRepullEnabled(env)) return notStarted("auto_repull_off");
-  if (!ownedHere(env, row.dataset_id)) return notStarted("not_owned_here");
-  if (row.origin !== "automatic" || !ON_DATASET.test(row.dataset_id)) {
-    return notStarted("not_automatic");
-  }
-  if (
-    row.status !== "pr_open" ||
-    row.branch === null ||
-    row.pr_number === null ||
-    row.head_sha === null
-  ) {
-    return notStarted("not_pr_open");
-  }
-  if (env.PR_REVIEW_ENABLED !== "1") return notStarted("pr_review_disabled");
-  const reviewable = await reviewableDataset(env.DB, row.dataset_id);
-  if (reviewable !== "reviewable") {
-    return notStarted(reviewable === "unknown" ? "unknown_dataset" : "dataset_not_reviewable");
-  }
-
-  const where = `${row.dataset_id}#${row.pr_number}`;
-  let pull: Record<string, unknown>;
-  try {
-    pull = await readPullRequest(env, row.dataset_id, row.pr_number, "no review was started");
-  } catch (err) {
-    if (!(err instanceof QueueError)) throw err;
-    console.warn(
-      `[pr-review-start] ${where}: the re-pull's pull request was not read (${err.code})`,
-    );
-    return notStarted("github_unreadable");
-  }
-  const user = pull.user as { login?: unknown; id?: unknown; type?: unknown } | null | undefined;
-  if (
-    user?.login !== NEMAR_APP_BOT_LOGIN ||
-    user.id !== NEMAR_APP_BOT_USER_ID ||
-    user.type !== NEMAR_APP_BOT_TYPE
-  ) {
-    return notStarted("not_app_author");
-  }
-  const head = (pull.head as { sha?: unknown } | null | undefined)?.sha;
-  if (head !== row.head_sha) return notStarted("head_moved");
-
-  const base = pull.base as { repo?: unknown } | null | undefined;
-  const result = await handlePullRequestEvent(
-    env,
-    // The shape a `pull_request` delivery has, as the administrator's start builds it.
-    { action: "synchronize", pull_request: pull, repository: base?.repo },
-    { admitRepullBot: { branch: row.branch } },
-  );
-  if (result.dispatched) {
-    try {
-      await auditLogStatement(env.DB, {
-        userId: null,
-        action: "pr_review_started",
-        resourceType: "pr_review",
-        resourceId: where,
-        details: JSON.stringify({
-          head_sha: row.head_sha,
-          reason: result.reason,
-          review_id: result.review_id ?? null,
-          repull_id: row.id,
-          automatic: true,
-        }),
-      }).run();
-    } catch (err) {
-      console.error(
-        `[pr-review-start] ${where}: review ${result.review_id} started, audit row not written (${said(err)})`,
-      );
-    }
-  }
-  return result;
+export function waiverNotPublishedWords(f: WaiverCheckFailure): string {
+  const lead =
+    "GitHub would not take the waived check for this pull request, an upstream re-pull's at the head NEMAR recorded";
+  const why =
+    f.kind === "unanswered"
+      ? "GitHub did not answer in time, could not be reached, or the Worker had no token to write with"
+      : f.write === "update"
+        ? `GitHub refused the update of its check (HTTP ${f.status}) for a reason that is not about the check run itself, so no new check was posted`
+        : f.write === "new-run"
+          ? `GitHub refused the update of its check, and then the new check posted in its place (HTTP ${f.status})`
+          : `GitHub refused the new check (HTTP ${f.status})`;
+  const credential = f.kind === "refused" && (f.status === 401 || f.status === 403);
+  const next = credential
+    ? "Look at the App's credential and its permission to write checks on the repository, then try again."
+    : "Try again in a moment.";
+  return `${lead}: ${why}. Its check is as it was and nothing was recorded. ${next}`;
 }

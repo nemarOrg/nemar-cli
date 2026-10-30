@@ -27,6 +27,11 @@
  *   the row says in `detail`, so the list shows it waits for a fix or for `allow --admin`. Which
  *   authors are exempt is `isReviewExempt`'s to say, asked once per dataset and login for the
  *   length of one request, a few at a time and within a time budget, and never kept.
+ * - **An upstream re-pull's own pull request at the head NEMAR recorded is `waived`** (ADR 0117),
+ *   decided from the open `upstream_repulls` records read for the request and GitHub's facts about
+ *   the pull request, by the one rule the review itself asks (`shared/repull-review-waiver.ts`). It
+ *   wins over a review of that head (whose findings are then recommendations) and over `exempt`,
+ *   and, like `exempt`, it is not stored and not verified against the check GitHub shows.
  * - **Overrides are keyed by GitHub's numeric id**, because a login can be renamed and reused.
  */
 
@@ -68,6 +73,7 @@ import {
   standingOf,
   verdictOf,
 } from "../../../shared/pr-review.js";
+import { repullReviewWaiverOf } from "../../../shared/repull-review-waiver.js";
 import { auditLogStatement } from "../db/audit-log.js";
 import type { Bindings } from "../types/bindings.js";
 import { isDevOwnedDatasetId, isValidDatasetId } from "./datasetId.js";
@@ -81,6 +87,7 @@ import {
 import { GITHUB_API, ORG_NAME, ghHeaders } from "./github/shared.js";
 import { githubFetchWithRetry } from "./github/transport.js";
 import { isReviewExempt } from "./pr-review-exemption.js";
+import { readRepullWaiver, readWaiverRecords } from "./pr-review-repull-waiver.js";
 import {
   PR_REVIEW_DEADLINE_MINUTES,
   outcomeOfRow,
@@ -159,12 +166,13 @@ export function plainRef(input: unknown, max = 60): string {
 
 /**
  * A stored author login as it is shown. The NEMAR App's bot keeps its own name,
- * `nemar-bot[bot]`, brackets included: its automatic re-pull pull request is the one bot's
- * the review takes (ADR 0111 narrows ADR 0092's "not bots" for that class), the review stores it
- * under that name, and the label is plain text, where brackets are harmless. Every other login is
- * reduced as {@link plainRef} reduces it. Only that exact constant passes through, and only beside
- * the bot's numeric id, as {@link restAuthorLabel} requires of GitHub's record, so nothing an
- * author wrote reaches the label unreduced and a login the App gave up is not shown as the App's.
+ * `nemar-bot[bot]`, brackets included: its automatic re-pull pull request is shown in the queue
+ * (waived at its recorded head, ADR 0117, and reviewed under that name by the rows ADR 0111's
+ * Phase 7e start wrote before that), and the label is plain text, where brackets are harmless.
+ * Every other login is reduced as {@link plainRef} reduces it. Only that exact constant passes
+ * through, and only beside the bot's numeric id, as {@link restAuthorLabel} requires of GitHub's
+ * record, so nothing an author wrote reaches the label unreduced and a login the App gave up is
+ * not shown as the App's.
  */
 export function loginLabel(login: unknown, authorId: unknown): string {
   return login === NEMAR_APP_BOT_LOGIN && authorId === NEMAR_APP_BOT_USER_ID
@@ -344,6 +352,12 @@ export interface OpenPullRequest {
   headSha: string;
   fromFork: boolean;
   headLabel: string;
+  /**
+   * The head branch exactly as GitHub names it, or the empty string when it names none, which no
+   * record's branch is: compared with an upstream re-pull's recorded branch (ADR 0117) and never
+   * shown (`headLabel` is what is shown).
+   */
+  headRef: string;
   authorLogin: string;
   authorId: number | null;
   bids: CheckState;
@@ -494,6 +508,7 @@ function readOpenPullRequest(node: unknown): { pr: OpenPullRequest } | { skip: S
       headSha: n.headRefOid,
       fromFork,
       headLabel,
+      headRef: typeof n.headRefName === "string" ? n.headRefName : "",
       authorLogin,
       authorId,
       // The names and the App pin come from branch protection, the one place that knows which check
@@ -835,14 +850,16 @@ async function loadReviews(db: D1Database, datasetIds: readonly string[]): Promi
 // ---------------------------------------------------------------------------------------------
 
 /**
- * Verdicts an administrator can act on: approve a pass, or review by hand what the automation
- * could not or did not decide. A fail is the author's to fix and an in-progress review is waiting
- * on the machine, so neither is yours yet, and an exempt pull request is not reviewed at all, so
- * there is no review for a person to read (when the naming rule holds one, its row says so in
- * `detail`, and the author's fix or an `allow --admin` is what releases it).
+ * Verdicts an administrator can act on: approve a pass, merge an upstream re-pull's waived pull
+ * request through the re-pull's gate (ADR 0117; the gate says when it waits for `resume`), or review
+ * by hand what the automation could not or did not decide. A fail is the author's to fix and an
+ * in-progress review is waiting on the machine, so neither is yours yet, and an exempt pull request
+ * is not reviewed at all, so there is no review for a person to read (when the naming rule holds
+ * one, its row says so in `detail`, and the author's fix or an `allow --admin` is what releases it).
  */
 const NEEDS_YOU: ReadonlySet<QueueVerdict> = new Set([
   "pass",
+  "waived",
   "uncertain",
   "could_not_decide",
   "not_reviewed",
@@ -861,6 +878,8 @@ const VERDICT_RANK: Record<QueueVerdict, number> = {
   in_progress: 4,
   fail: 5,
   exempt: 6,
+  // Merged through its own gate, as a pass is approved: first with it.
+  waived: 0,
 };
 
 function checkRank(e: Pick<QueueEntry, "bids" | "version">): number {
@@ -1151,7 +1170,10 @@ export async function buildQueue(env: Bindings, filters: QueueFilters): Promise<
     if (!owned) skipped.not_owned_here++;
     return owned;
   });
-  const reviews = await loadReviews(env.DB, [...new Set(mine.map((pr) => pr.datasetId))]);
+  const datasetIds = [...new Set(mine.map((pr) => pr.datasetId))];
+  const reviews = await loadReviews(env.DB, datasetIds);
+  // The open upstream re-pull records that could waive one of these pull requests (ADR 0117).
+  const waivers = await readWaiverRecords(env.DB, datasetIds);
   const exempt = exemptionLookup(env);
 
   const staged = mine.map((pr) => {
@@ -1162,10 +1184,20 @@ export async function buildQueue(env: Bindings, filters: QueueFilters): Promise<
       reviews.newest.get(`${pr.datasetId}#${pr.prNumber}`) ??
       null;
     const base = classify(row, pr.headSha);
+    // An upstream re-pull's own pull request at the head NEMAR recorded, whatever a review of it
+    // said: the search reads only pull requests into `main`.
+    const waived = repullReviewWaiverOf(waivers.get(pr.datasetId) ?? [], {
+      datasetId: pr.datasetId,
+      prNumber: pr.prNumber,
+      headSha: pr.headSha,
+      ownRepository: !pr.fromFork,
+      headRef: pr.headRef,
+      baseRef: "main",
+    }).waived;
     // An exempt pull request has no review of its current commit, by design. A bot or a ghost
-    // (no GitHub user id) is never an owner or administrator.
-    const mayBeExempt = base.review_current !== true && pr.authorId !== null;
-    return { pr, base, mayBeExempt };
+    // (no GitHub user id) is never an owner or administrator, and a waived one is not asked about.
+    const mayBeExempt = !waived && base.review_current !== true && pr.authorId !== null;
+    return { pr, base, mayBeExempt, waived };
   });
   await exempt.warm(
     staged
@@ -1174,11 +1206,12 @@ export async function buildQueue(env: Bindings, filters: QueueFilters): Promise<
   );
 
   const all: QueueEntry[] = [];
-  for (const { pr, base, mayBeExempt } of staged) {
+  for (const { pr, base, mayBeExempt, waived } of staged) {
     // An exempt row says when the naming rule holds it (its check failed, or asks for a person), so
     // the list shows it waits on a fix or an `allow --admin`; otherwise it carries no detail.
-    const classified: Classified =
-      mayBeExempt && exempt.known(pr.datasetId, pr.authorLogin)
+    const classified: Classified = waived
+      ? { ...base, verdict: "waived", detail: null }
+      : mayBeExempt && exempt.known(pr.datasetId, pr.authorLogin)
         ? { ...base, verdict: "exempt", detail: pr.namingHold }
         : base;
     const verdictAndDraft = { verdict: classified.verdict, draft: pr.draft };
@@ -1222,7 +1255,11 @@ export function pullUrl(datasetId: string, prNumber: number): string {
 // ---------------------------------------------------------------------------------------------
 
 type LiveRead =
-  | { kind: "found"; pr: LivePullRequest }
+  /**
+   * `headRef` is the head branch exactly as GitHub names it, for the re-pull waiver alone, or the
+   * empty string when it names none, which no record's branch is.
+   */
+  | { kind: "found"; pr: LivePullRequest; headRef: string }
   | { kind: "missing" }
   | { kind: "unreadable" };
 
@@ -1266,6 +1303,7 @@ export async function fetchLivePullRequest(
     const branch = plainRef(head.ref) || "(unknown)";
     return {
       kind: "found",
+      headRef: typeof head.ref === "string" ? head.ref : "",
       pr: {
         state: p.merged === true ? "merged" : p.state === "open" ? "open" : "closed",
         draft: p.draft === true,
@@ -1414,9 +1452,27 @@ export async function readPrReviewDetail(
         }
       : null;
   let effective = classify(row && derived ? { ...row, ...derived } : null, head);
-  // The same word as the list gives, on the same terms (see `buildQueue`): an owner's or
+  // The same words as the list gives, on the same terms (see `buildQueue`). First an upstream
+  // re-pull's own pull request at the head NEMAR recorded (ADR 0117), which wins over the review of
+  // that head and over the exemption; it needs GitHub's record of the pull request, so a pull
+  // request GitHub could not show is not waived here (unknown is never a waiver). Then an owner's or
   // administrator's pull request with no review of its current commit.
-  if (
+  const waived =
+    head !== null &&
+    live.kind === "found" &&
+    (
+      await readRepullWaiver(db, {
+        datasetId,
+        prNumber,
+        headSha: head,
+        ownRepository: !live.pr.from_fork,
+        headRef: live.headRef,
+        baseRef: live.pr.base_ref,
+      })
+    ).waived;
+  if (waived) {
+    effective = { ...effective, verdict: "waived", detail: null };
+  } else if (
     effective.review_current !== true &&
     livePr !== null &&
     livePr.author_id !== null &&

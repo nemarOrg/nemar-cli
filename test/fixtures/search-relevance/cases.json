@@ -1,0 +1,11 @@
+[
+  {"semantic": "bilingual performance study", "rerank": "bilingual performance"},
+  {"semantic": "driving simulation and fatigue", "rerank": "driving simulation fatigue"},
+  {"semantic": "sleep stage classification during overnight recording", "rerank": "sleep stage classification overnight"},
+  {"semantic": "motor imagery brain-computer interface", "rerank": "motor imagery computer interface"},
+  {"semantic": "arnaud delorme", "rerank": "arnaud delorme"},
+  {"semantic": "children with ADHD", "rerank": "children adhd"},
+  {"semantic": "sleep", "rerank": "sleep"},
+  {"semantic": "sleep eeg", "rerank": "sleep"},
+  {"semantic": "sleep ieeg", "rerank": "sleep"}
+]

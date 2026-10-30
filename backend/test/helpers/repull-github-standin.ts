@@ -110,6 +110,8 @@ export interface RepullGitHub {
   dispatchStatus: number;
   /** The review's check-run and comment writes, as `<METHOD> <path>`. */
   writes: string[];
+  /** A status every check-run and comment write is answered with, refusing it; 0 takes them. */
+  writeStatus: number;
   mainRefs: Record<string, string | number>;
   checkRuns: Record<string, CheckRunAnswer[] | number>;
   checkFiltersIgnored: boolean;
@@ -138,6 +140,7 @@ export function startRepullGitHub(o: { defaultHead?: string | null } = {}): Repu
     dispatches: [],
     dispatchStatus: 204,
     writes: [],
+    writeStatus: 0,
     mainRefs: {},
     checkRuns: {},
     checkFiltersIgnored: false,
@@ -159,6 +162,7 @@ export function startRepullGitHub(o: { defaultHead?: string | null } = {}): Repu
       gh.dispatches = [];
       gh.dispatchStatus = 204;
       gh.writes = [];
+      gh.writeStatus = 0;
       gh.mainRefs = {};
       gh.checkRuns = {};
       gh.checkFiltersIgnored = false;
@@ -204,6 +208,12 @@ export function startRepullGitHub(o: { defaultHead?: string | null } = {}): Repu
         )
       ) {
         gh.writes.push(`${req.method} ${url.pathname}`);
+        if (gh.writeStatus !== 0) {
+          return new Response('{"message":"refused"}', {
+            status: gh.writeStatus,
+            headers: { "Retry-After": "0" },
+          });
+        }
         return json({ id: 9000 + gh.writes.length }, req.method === "POST" ? 201 : 200);
       }
       let m = /^\/repos\/nemarDatasets\/([a-z]{2}\d{6})\/pulls\/(\d+)\/merge$/.exec(url.pathname);

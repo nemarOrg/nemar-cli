@@ -58,9 +58,12 @@
  *    `<bucket>/<key>` with an optional `?versionId=`, `x-amz-copy-source-if-match` (412 on
  *    mismatch), a new version at the destination holding the source version's bytes, its ETag the
  *    MD5 of those bytes (a single-part object), and the source's version id echoed in
- *    `x-amz-copy-source-version-id`. ASSUMED, not measured: that real S3 answers a signed
- *    cross-account copy of a public versioned object this way, which only the re-pull canary
- *    (`scripts/repull-canary.ts`) checks against the real buckets.
+ *    `x-amz-copy-source-version-id`. A copy across buckets without `x-amz-tagging-directive:
+ *    REPLACE` is refused with 403 AccessDenied, as the real buckets did on 2026-10-29 (the default
+ *    directive reads the source's tags, which upstream's bucket does not allow). ASSUMED, not
+ *    measured: the rest of how real S3 answers a signed cross-account copy of a public versioned
+ *    object, which only the re-pull canary (`scripts/repull-canary.ts`) checks against the real
+ *    buckets.
  *
  * Every request is logged by operation so a test asserts on what the real CLI sent. Faults and
  * hooks are injected explicitly by the test that needs them. Test-only helpers that S3 has no
@@ -977,6 +980,15 @@ export function startS3Standin(options: { region?: string } = {}): S3Standin {
         if (fault) {
           record({ ...base, status: fault.status });
           return s3Error(fault.code, fault.status, `induced ${fault.code} (test)`);
+        }
+        // Modeled on what the canary saw against the real buckets on 2026-10-29: across buckets,
+        // the default tagging directive (COPY) reads the source's tags, which upstream's bucket
+        // does not allow the caller to read, and every plain copy it tried answered AccessDenied,
+        // with or without the if-match condition. Where real S3 puts this check relative to its
+        // 404 and 412 answers was not measured; here it comes first.
+        if (parsed.bucket !== bucket && req.headers.get("x-amz-tagging-directive") !== "REPLACE") {
+          record({ ...base, status: 403 });
+          return s3Error("AccessDenied", 403);
         }
         await holdFor("CopyObject", req);
         if (req.signal.aborted) {

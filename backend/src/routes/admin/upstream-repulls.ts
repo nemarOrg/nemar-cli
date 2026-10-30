@@ -26,12 +26,17 @@
  *                                        claim: the claim's age, the dataset fences, the screen
  *                                        for this administrator, the live head (writes nothing)
  *   POST /admin/repulls/:id/merged       record a merge, after reading it on GitHub
+ *   POST /admin/repulls/:id/merge-trailers/accept   accept a squash merge made without its
+ *                                        trailers, after reading it on GitHub, and append the one
+ *                                        ledger line that names it to `main`
  *   POST /admin/repulls/:id/released     record a release, after reading the version row and tag
  *
- * These routes record, verify and refuse. They copy nothing, push nothing, open, merge or close
- * no pull request and send no mail: execution and the merge run on an administrator's machine
- * and report here, the Worker reads GitHub only to verify what it records, and the dev database
- * holds real addresses, so nothing here is allowed to reach a person. A refusal is
+ * These routes record, verify and refuse. They copy nothing, open, merge or close no pull request
+ * and send no mail: execution and the merge run on an administrator's machine and report here, the
+ * Worker reads GitHub to verify what it records, and the dev database holds real addresses, so
+ * nothing here is allowed to reach a person. The one write to a repository is the acceptance's
+ * ledger line, a commit of NEMAR's own on `main` that touches the ledger only, as the scrub
+ * runbook's ledger commit does (ADR 0111, the amendment of 2026-10-29). A refusal is
  * `{ error, code }`, a malformed request included (`invalid-body`, `invalid-query`, `invalid-id`);
  * the codes are the API. Admin role, as every `/admin` route.
  *
@@ -68,6 +73,7 @@ import {
   transitionRepull,
   transitionSchema,
 } from "../../services/upstream-repull";
+import { acceptMergeSchema, acceptRepullMerge } from "../../services/upstream-repull-acceptance";
 import {
   DISPATCH_PAGE_DEFAULT,
   DISPATCH_PAGE_MAX,
@@ -438,6 +444,24 @@ export function registerUpstreamRepullRoutes(admin: AdminRouter): void {
       return c.json({ error: failure("record the merge", err) }, 500);
     }
   });
+
+  admin.post(
+    "/repulls/:id/merge-trailers/accept",
+    zValidator("json", acceptMergeSchema, invalidBody),
+    async (c) => {
+      const id = parseId(c.req.param("id"));
+      if (id === null)
+        return c.json({ error: "the id must be a re-pull id", code: "invalid-id" }, 400);
+      const user = c.get("user");
+      try {
+        const result = await acceptRepullMerge(c.env, { id: user.id }, id, c.req.valid("json"));
+        if (isRefusal(result)) return c.json(refusalBody(result), result.status);
+        return c.json(result);
+      } catch (err) {
+        return c.json({ error: failure("accept the merge", err, "0113") }, 500);
+      }
+    },
+  );
 
   admin.post(
     "/repulls/:id/released",

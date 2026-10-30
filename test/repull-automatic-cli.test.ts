@@ -1568,6 +1568,23 @@ describe.skipIf(!awsInstalled)("a finish", () => {
     expect(ghWrites()).toEqual([]);
   });
 
+  test("a finish does not take --accept-merge-trailers: auto-option, and nothing is touched", async () => {
+    const { row } = await opened();
+    const c = await dispatchFor("finish", row.id);
+    writeEvent(c, { mode: "finish", repullId: row.id });
+    w.apiWrites.length = 0;
+    w.gh.seen.length = 0;
+    const run = await auto([
+      ...finishArgs(c),
+      "--accept-merge-trailers",
+      "a finish is never given an administrator's reason",
+    ]);
+    expect(run.exitCode, run.all).toBe(1);
+    expect(dispatchRow(c.id)).toMatchObject({ status: "refused", code: "auto-option" });
+    expect(repullRows()).toMatchObject([{ status: "pr_open" }]);
+    expect(ghWrites()).toEqual([]);
+  });
+
   test("a finish that refuses for a word the list does not hold is finish-failed", async () => {
     const { row } = await opened();
     const c = await dispatchFor("finish", row.id);

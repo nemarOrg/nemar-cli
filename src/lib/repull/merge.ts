@@ -612,6 +612,7 @@ async function nothingElseFails(
     sha: head,
     origin: row.origin,
     mergeableState: "unstable",
+    prNumber,
   });
   if (only.kind === "bids-only") return null;
   return only.kind === "unreadable"

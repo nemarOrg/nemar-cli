@@ -86,6 +86,14 @@ export interface PullState {
   };
 }
 
+/** A comparison as GitHub answers `compare/<base>...<head>`, the fields a suite needs. */
+export interface CompareAnswer {
+  status: string;
+  ahead_by: number;
+  behind_by: number;
+  files: Array<{ filename: string; status: string }>;
+}
+
 export interface GitHubStandin {
   url: string;
   seen: Seen[];
@@ -160,8 +168,29 @@ export interface GitHubStandin {
   lostMergeAnswers: boolean;
   /** The commit a tag names (`GET .../commits/tags/<tag>`, asked as `vnd.github.sha`), or null. */
   resolveTag: ((dataset: string, tag: string) => Promise<string | null>) | null;
-  /** GitHub's comparison word for `base...head` (`identical`, `ahead`, ...), or null for 404. */
-  compareCommits: ((dataset: string, base: string, head: string) => Promise<string | null>) | null;
+  /**
+   * GitHub's comparison of `base...head`: its word (`identical`, `ahead`, ...), or the fields a
+   * suite reads from a real repository (`status`, `ahead_by`, `behind_by`, `files`), or null for
+   * 404, or another HTTP status to answer with (GitHub's 422 for a diff too long to generate).
+   */
+  compareCommits:
+    | ((
+        dataset: string,
+        base: string,
+        head: string,
+      ) => Promise<string | CompareAnswer | number | null>)
+    | null;
+  /**
+   * The Git Data and Contents reads and the one Contents write a suite answers from its bare
+   * origin (`git/commits/<sha>`, `git/trees/<sha>`, `contents/<path>`): the answer, or null to fall
+   * through to 404. Unset: every such request is a 404.
+   */
+  gitData:
+    | ((
+        dataset: string,
+        req: { method: string; path: string; query: URLSearchParams; body: unknown },
+      ) => Promise<Response | null>)
+    | null;
   /**
    * The check runs of a commit (`GET .../commits/<sha>/check-runs`), keyed `<dataset>@<sha>`,
    * filtered by the query's `check_name` and `app_id` as GitHub filters them: the Worker reads BIDS
@@ -236,6 +265,7 @@ export function startGitHubStandin(): GitHubStandin {
     lostMergeAnswers: false,
     resolveTag: null as GitHubStandin["resolveTag"],
     compareCommits: null as GitHubStandin["compareCommits"],
+    gitData: null as GitHubStandin["gitData"],
     checkRuns: {} as GitHubStandin["checkRuns"],
     statuses: {} as GitHubStandin["statuses"],
     readFaults: {} as GitHubStandin["readFaults"],
@@ -305,7 +335,7 @@ export function startGitHubStandin(): GitHubStandin {
           : Response.json({ sha });
       }
       const compare = url.pathname.match(
-        /^\/repos\/nemarDatasets\/([^/]+)\/compare\/([0-9a-f]{40})\.\.\.([0-9a-f]{40})$/,
+        /^\/repos\/nemarDatasets\/([^/]+)\/compare\/([0-9a-f]{40})\.\.\.([0-9a-f]{40}|main)$/,
       );
       if (req.method === "GET" && compare && state.compareCommits) {
         const word = await state.compareCommits(
@@ -313,9 +343,23 @@ export function startGitHubStandin(): GitHubStandin {
           compare[2] as string,
           compare[3] as string,
         );
-        return word
-          ? Response.json({ status: word })
-          : Response.json({ message: "Not Found" }, { status: 404 });
+        if (word === null) return Response.json({ message: "Not Found" }, { status: 404 });
+        if (typeof word === "number") {
+          return Response.json({ message: "the comparison could not be made" }, { status: word });
+        }
+        return Response.json(typeof word === "string" ? { status: word } : word);
+      }
+      const data = url.pathname.match(
+        /^\/repos\/nemarDatasets\/([^/]+)\/(git\/commits\/[0-9a-f]{40}|git\/trees\/[0-9a-f]{40}|contents\/.+)$/,
+      );
+      if (data && state.gitData) {
+        const answered = await state.gitData(data[1] as string, {
+          method: req.method,
+          path: data[2] as string,
+          query: url.searchParams,
+          body,
+        });
+        if (answered) return answered;
       }
       const runs = url.pathname.match(
         /^\/repos\/nemarDatasets\/([^/]+)\/commits\/([0-9a-f]{40})\/check-runs$/,
@@ -758,6 +802,12 @@ export function startGitHubStandin(): GitHubStandin {
     },
     set compareCommits(v) {
       state.compareCommits = v;
+    },
+    get gitData() {
+      return state.gitData;
+    },
+    set gitData(v) {
+      state.gitData = v;
     },
     set unreadableAnswers(v) {
       state.unreadableAnswers = v;

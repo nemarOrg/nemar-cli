@@ -295,4 +295,51 @@ describe("S3 stand-in", () => {
     },
     SLOW,
   );
+
+  test(
+    "a copy across buckets needs the tagging directive REPLACE; a copy within one bucket does not",
+    async () => {
+      standin = startS3Standin();
+      const upstreamKey = "ds099999/sub-01/eeg/x.edf";
+      const upstreamVersion = standin.putObject("openneuro.org", upstreamKey, bytes(12, 4));
+      const own = "xx090411/objects/own.edf";
+      standin.putObject(BUCKET, own, bytes(9, 5));
+      const dest = "xx090411/objects/copy.edf";
+      await withCtx(standin, async (ctx) => {
+        const across = [
+          "--bucket",
+          BUCKET,
+          "--key",
+          dest,
+          "--copy-source",
+          `openneuro.org/${upstreamKey}?versionId=${upstreamVersion}`,
+        ];
+        // Modeled on the real buckets' answer to the canary: the default directive reads the
+        // source's tags, which upstream's bucket does not allow, so nothing is copied.
+        expect(await code(ctx.aws.api("copy-object", across))).toBe("access-denied");
+        expect(standin.calls("CopyObject").at(-1)?.status).toBe(403);
+        expect(
+          await code(ctx.aws.api("copy-object", [...across, "--tagging-directive", "COPY"])),
+        ).toBe("access-denied");
+        expect(standin.versions(BUCKET, dest).length).toBe(0);
+
+        // REPLACE copies the pinned version.
+        await ctx.aws.api("copy-object", [...across, "--tagging-directive", "REPLACE"]);
+        expect(standin.calls("CopyObject").at(-1)?.status).toBe(200);
+        expect(standin.current(BUCKET, dest)?.data.length).toBe(12);
+
+        // Within one bucket the default directive is fine.
+        await ctx.aws.api("copy-object", [
+          "--bucket",
+          BUCKET,
+          "--key",
+          "xx090411/objects/own-copy.edf",
+          "--copy-source",
+          `${BUCKET}/${own}`,
+        ]);
+        expect(standin.current(BUCKET, "xx090411/objects/own-copy.edf")?.data.length).toBe(9);
+      });
+    },
+    SLOW,
+  );
 });

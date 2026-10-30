@@ -182,6 +182,12 @@ async function resume(opts: ResumeOptions): Promise<ResumeResult> {
   try {
     return await walk(ctx, open);
   } finally {
+    // Said whether the run returned or stopped on a refusal.
+    if (opts.acceptMergeTrailers && !ctx.mergeTrailersRead) {
+      opts.out(
+        `--accept-merge-trailers changed nothing: re-pull #${open.id} did not reach a merge's release in this run, where a merge's trailers are read.`,
+      );
+    }
     (scratch as OriginScratch | null)?.close();
     release();
   }
@@ -574,6 +580,7 @@ async function gatesTurn(ctx: ResumeContext, row: RepullRow, pr: RepullPullReque
           sha: p.head,
           origin: row.origin,
           mergeableState: state,
+          prNumber: p.number,
         })
       : null;
   if (state !== "clean" && overBids?.kind !== "bids-only") {
@@ -895,6 +902,7 @@ async function readyOverBids(
     sha: live.headSha,
     origin: row.origin,
     mergeableState: settled.state,
+    prNumber: p.number,
   });
   return only.kind === "bids-only";
 }
