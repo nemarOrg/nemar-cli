@@ -18,7 +18,7 @@ earlier releases are described only by their generated notes.
 The first production re-pulls found three faults that this release fixes, and the release carries the phrase-search rework with them.
 A re-pull's S3 copy no longer fails on the upstream bucket's tag denial; a re-pull merged outside NEMAR's tools can be accepted on evidence instead of stranding the record; and a re-pull's own pull request is no longer failed by the automated review of contributor changes.
 Search stops answering a phrase with most of the catalog (ADR 0116).
-The release has one migration, 0113, which creates one table and one index and changes nothing that exists.
+The release has one migration, 0113, which creates one table and changes nothing that exists.
 It sets no Worker variable or secret, and the four re-pull switches and caps stay absent from the wrangler configuration.
 
 ### Changed
@@ -66,7 +66,7 @@ It sets no Worker variable or secret, and the four re-pull switches and caps sta
 
 ### Deploy coupling
 
-- The migration is applied by the release's deploy. 0113 is one new table, `upstream_repull_merge_acceptances`, with its index; `deleteDatasetCascade` deletes its rows explicitly.
+- The migration is applied by the release's deploy. 0113 is one new table, `upstream_repull_merge_acceptances`, keyed by its primary key; `deleteDatasetCascade` deletes its rows explicitly.
 - The flag `--accept-merge-trailers` works only against a Worker that has the new route, so install the CLI after the Worker deploys.
 - Search needs no deploy step of its own beyond the vector rebuild below, and the Workers AI binding (`[ai]`) is already in the production configuration.
 
