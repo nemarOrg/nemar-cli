@@ -38,9 +38,12 @@ An administrator account whose GitHub login does not match, or whose `admin` rol
    No row is written, nothing is dispatched and no model is called.
    It is decided before the exemption, a block and any restart of a stored review, so no delivery, edit, reopening or administrator's start (a `--redo` included) runs the review of such a head; each answers `repull_waived`.
    A head a review already touched keeps its row as the history of that run, and its own check run is updated in place to the waiver, with the comment saying the same; a head with no row gets a new check run and no comment, as an exempt one does.
-   When GitHub refuses that update for a reason about the run (any 4xx but a refused credential or a throttle), a NEW run of the same name is posted on the same commit instead, which GitHub and NEMAR's own readers take as the latest of the name, so correcting a failed check does not rest on GitHub letting a completed run's conclusion change.
-   A check that does not reach GitHub either way is thrown, so the webhook answers 500 and the delivery can be redelivered, an administrator's start says so, and no audit row is written.
-   Every write of the waiver inside a request (a delivery, a start, the record's transition) is bounded to a few seconds.
+   When GitHub refuses that update for a reason about the run (any 4xx but 401, 403 and 429; never a 5xx or no answer), a NEW run of the same name is posted on the same commit instead, which GitHub and NEMAR's own readers take as the latest of the name, so correcting a failed check does not rest on GitHub letting a completed run's conclusion change.
+   A check that does not reach GitHub is thrown, so the webhook answers 500 and the delivery can be redelivered, an administrator's start answers 502 saying which write GitHub refused and with what status (or that it did not answer), and no audit row is written.
+   Every write of the waiver inside a request (a delivery, a start, the record's transition) is bounded.
+   Each check-run call has one 5-second signal, shared by the update and the new run posted after a refused update, and each comment call has its own; a call tries at most twice and waits at most a second between, so one call takes about 6 seconds at most.
+   A head with no row gets one check call, about 6 seconds; a head a review touched gets a check call and a comment call in each round of `publishOutcome`, about 12 seconds, and up to three rounds when the row moves while it is published, about 36 seconds at worst.
+   A token refresh after a 401 is outside that bound.
    Each waiver writes an audit row, `pr_review_waived`, with the record, the head, which pull request and what caused it; the queue never reads it.
 3. **A head NEMAR has not recorded yet is reviewed, and the waiver follows the record.**
    The Worker cannot tell enrichment's commit from a stranger's at delivery time, so a head enrichment moved is reviewed until a NEMAR tool records the move.
@@ -80,9 +83,14 @@ An administrator account whose GitHub login does not match, or whose `admin` rol
 - **What it can get: a file under `.nemar/` it writes onto the release branch.** The enrichment-only rule (`enrichmentOnlySince`) checks what a commit changes, never who made it: any regular file under `.nemar/` other than the privacy ledger passes it, so `resume` or the automatic run's settle records such a head and it is waived, where before this decision it needed a review that passed (which no re-pull got).
   Checking who made the commit would be no guard: enrichment's commits carry plain git identities (`nemar-bot <nemar-bot@users.noreply.github.com>` from the central workflow, `nemarAdmin <nemarAdmin@osc.earth>` from the Worker's contents writes), which anyone with push access can write, and the one authenticated identity, the sender of each push delivery, is not recorded.
   What still holds such a head: the identifier screen of the head, BIDS validation (`.nemar/` is ignored by it), the administrator's own merge confirmation, and push access itself, which only the dataset's collaborators and NEMAR hold.
-  Whether to add a test on who made each commit to the enrichment-only rule, once the change to that rule in flight elsewhere lands, is the owner's decision.
+  Whether to add a test on who made each commit to the enrichment-only rule is the owner's decision.
+  The change to that rule that landed beside this one (#1997) added a shape only behind `acceptances`, for `main` (NEMAR's ledger-acceptance commits), and left the release-branch shapes, and so this residual, as they were.
 - **A check run belongs to a commit, not a pull request.** Another pull request at the same commit, a fork's say, shows the same waived check, and its own review (it is not the record's, so it is reviewed) can post a failing run beside it.
   The merge gates read the Worker's verdict for the record's own pull request, not the check, so they are not misled; GitHub's `clean` reads the checks, so such a run can hold the re-pull at `unstable` until the waiver is published again (an administrator's start, or the tick), which makes it the newest run of the name.
+- **A waived check outlives a record that ends while its pull request stays open.** Nothing takes the `skipped` check back, because nothing republishes a review for a head no record holds any more.
+  The queue and the merge gates read the record, so they stop treating the head as waived at once; GitHub keeps showing the check.
+  `nemar admin repull abandon` closes the pull request of the re-pull it ends, so this is left by a record that ended without closing it, an abandon that stopped part way, or a pull request reopened afterwards.
+  The remedy is to close the pull request, which `nemar admin repull abandon` run again does for a record it ended part way; the check belongs to the commit, so a pull request that stays open is judged again only at a new head.
 - An administrator can record a head through the transition route; that is inside the administrators' trust boundary, as their own pull requests are exempt and an organization administrator can merge in the GitHub UI.
 
 ## Consequences
@@ -96,7 +104,7 @@ An administrator account whose GitHub login does not match, or whose `admin` rol
   Measured over five rows, as the Phase 7f and 7g amendments measured them: at `pr_open`, 62 D1 statements and 25 GitHub requests when each starts its screen, 32 and 20 while each waits, 47 and 35 while GitHub holds each back and its waiver is published again (the most GitHub requests), 32 and 25 while GitHub holds each back over a check that already says the waiver, 47 and 25 when each is cleared; past the gates, 32 and 20 while each waits at the merge and 77 and 35 when each is merged.
   `upstream-repull-advance.test.ts` and `upstream-repull-worker-merge.test.ts` pin them; the earlier figures in ADR 0111 are history.
 - A publish of a stored review that a record could waive costs one more GitHub read, of the pull request, so the waiver is decided on its branch and repositories as the intake decides it.
-- The record's transition answers only after its waiver is published, so a transition that records a head waits for GitHub: one read of the pull request (10 seconds at most) and bounded writes (5 seconds each for the check, a new run if the update is refused, and the comment). The edge is written first, and a waiver that is not published is logged by the record's id and a fixed word.
+- The record's transition answers only after its waiver is published, so a transition that records a head waits for GitHub: one read of the pull request (10 seconds at most) and the bounded writes of decision 2 (about 6 seconds for a head with no row, 12 for a head a review touched, 36 at worst), so about 46 seconds at the very worst. The edge is written first, and a waiver that is not published is logged by the record's id and a fixed word.
 - An installed CLI older than this change reads the verdict `waived` as one it does not know, which needs `--force`: the safe direction, cured by an upgrade.
 
 ## Not yet verified
@@ -120,6 +128,7 @@ That the newest run of a name is the one that counts is what this repository's o
 
 - Issue #1998.
 - The rule: `shared/repull-review-waiver.ts`; its readers `backend/src/services/pr-review-repull-waiver.ts`, `backend/src/services/pr-review.ts` (`handlePullRequestEvent`, `publishOutcome`, `publishWaived`, `publishRecordedRepullHead`), `backend/src/services/upstream-repull.ts` (`transitionRepull`, `recordedHeadOf`), `backend/src/services/pr-review-queue.ts`, `backend/src/services/upstream-repull-facts.ts` (`reviewWaivedAt`).
+- The writes: `backend/src/services/github/pr-review-api.ts` (`upsertReviewCheckRun`, `newRunCanReplace`, `CheckRunWriteRefused`), and the start's answer when one fails, `backend/src/services/pr-review-start.ts` (`waiverNotPublishedWords`).
 - The words: `shared/pr-review.ts` (`conclusionOf`, `recommendationLines`, `REPULL_WAIVED_TITLE`), `shared/contract/pr-review-admin.ts` (`waived`), `shared/repull-machine-clean.ts` (`waived`).
-- The CLI: `src/lib/pr-review-approve.ts` (`approvalGate`), `src/commands/admin-pr-reviews.ts` (`waivedLines`), `src/lib/repull/bids-only.ts` (`reviewCheckWords`).
+- The CLI: `src/lib/pr-review-approve.ts` (`approvalGate`), `src/commands/admin-pr-reviews.ts` (`waivedLines`), `src/lib/repull/bids-only.ts` (`othersWords`, `waiverHint`).
 - Tests: `test/repull-review-waiver.unit.test.ts`, `backend/test/pr-review-repull-waiver.test.ts`, `test/pr-review.test.ts`, `test/repull-machine-clean.unit.test.ts`, `backend/test/upstream-repull-facts.test.ts`, `backend/test/upstream-repull-advance.test.ts`, `backend/test/upstream-repull-worker-merge.test.ts`.
