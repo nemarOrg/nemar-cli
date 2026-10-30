@@ -13,6 +13,89 @@ what merged, and this file says what it meant.
 Newest first. Dates are the tag's publication date, UTC. Backfilled from 0.9.16 onward;
 earlier releases are described only by their generated notes.
 
+## 0.10.27 - 2026-10-29
+
+The first production re-pulls found three faults that this release fixes, and the release carries the phrase-search rework with them.
+A re-pull's S3 copy no longer fails on the upstream bucket's tag denial; a re-pull merged outside NEMAR's tools can be accepted on evidence instead of stranding the record; and a re-pull's own pull request is no longer failed by the automated review of contributor changes.
+Search stops answering a phrase with most of the catalog (ADR 0116).
+The release has one migration, 0113, which creates one table and one index and changes nothing that exists.
+It sets no Worker variable or secret, and the four re-pull switches and caps stay absent from the wrangler configuration.
+
+### Changed
+
+- **A re-pull's single-object S3 copy sends `--tagging-directive REPLACE` (#1991, #1992).**
+  Upstream's bucket denies reading an object's tags, and a plain cross-bucket `copy-object` reads them, so every key at or below the single-copy bound failed at the copy step.
+  The write guard now refuses a `copy-object` that does not carry exactly `REPLACE`, and the production canary and the S3 stand-in follow the real buckets.
+  The multipart path carries no tags and is unchanged.
+- **A re-pull merged outside NEMAR's tools can be accepted on evidence (#1996, #1997; ADR 0111, amendment of 2026-10-29).**
+  The merge gate writes a re-pull's squash message so that its last paragraph holds the commit's trailers, because the privacy ledger's fresh-clone proof reads the merge as the re-pull's own commit only then.
+  A merge made with GitHub's button has no trailers, the release refuses it as `merge-trailers`, and the record used to stay at `merged` for good.
+  `nemar admin repull resume <id> --accept-merge-trailers "<reason>"` (10 to 500 characters, recorded for the administrator who gives it) now verifies, from GitHub, that the merge is the squash merge of the record's own pull request, that its tree is the record's commit outside `.nemar/` and `.github/`, and that its parent is the record's base or a descendant that enrichment moved.
+  The Worker repeats every check with its own credential at the new route `POST /admin/repulls/:id/merge-trailers/accept`, records the acceptance in `upstream_repull_merge_acceptances` (migration 0113), and, when the merge appended a `repull-scrubbed` line beside other files, appends one `repull-merge-accepted` line to `.nemar/corrections.jsonl` on `main`.
+  The line holds the full merge commit id, the plan digest, the version, the scanner and a fixed verification word, and never the reason.
+  The fresh-clone proof vouches for exactly that commit when it is a first-parent commit of a tip and not carried only by a tag.
+  A lost, timed-out or rate-limited answer exits 3 (run it again); a refusal exits 1.
+  The runbook gains the check an administrator runs before any history rewrite.
+- **A re-pull's own pull request is waived from the automated review (#1998, #2000; ADR 0117).**
+  The review judges a change by contributor-protection rules, and a re-pull's pull request is upstream's delta built by the platform, so it failed, GitHub read the pull request as `unstable`, and `nemar admin repull resume` waited for `clean` while `merge --force` answered `not-ready`.
+  One pure rule decides the waiver from NEMAR's own record: an open record of the same dataset names the pull request as its N.0.0 or N.0.1, in the dataset's own repository, from the record's branch into `main`, at the record's head, with the record at `pr_open`, `gates_clear` or a `patch_*` state.
+  The Worker posts one `skipped` check run titled "Waived: upstream re-pull" and writes a `pr_review_waived` audit row; it creates no review row, dispatches no workflow and calls no model.
+  The waiver is decided before the administrator exemption, a block or a restart.
+  The queue shows a derived verdict `waived`, offers it for merge and leaves it out of `start --all`; `approvalGate` returns `confirm`, so no `--force` is needed.
+  The Worker's own review of the App's re-pull pull request is retired.
+  An existing failed check is updated in place, and a new run is posted when GitHub refuses the update; the tick republishes a waiver GitHub holds back, and the sweep gives up on one after five tries, about two and a half hours.
+  Findings the review would have raised are listed as recommended issues, none filed automatically.
+- **Phrase search is judged for relevance (#1999; ADR 0116, proposed).**
+  A phrase of two or more content words draws at most 30 candidates from each of the lexical, semantic and name/authors/tasks legs, and `@cf/baai/bge-reranker-base` on Workers AI scores the pool; a dataset is kept when the cross-encoder endorses it, or both retrieval legs found it and the cross-encoder does not strongly reject it, or every informative query word is literally in its name, authors or tasks.
+  Words found in more than 25% of public datasets no longer decide a lexical match, bm25 weights name and description above the README, and the vector and the cross-encoder read one text (name, abstract, keywords, modalities, tasks).
+  A query word that matches no public dataset is replaced by a catalog word one typo away and the response says so (`corrected_query`); a modality named in the query is listed first by whole token (`modality_boost`); filters are applied after relevance.
+  Any model failure, or more than four seconds, serves the fused list as before.
+
+### Production behavior changes
+
+- **Search answers fewer, more relevant datasets for a phrase, and `GET /datasets/search` gains fields.**
+  `reranked: true` marks a cut list; `count` of a phrase is then the number judged relevant and `min_score` is not applied to it.
+  `corrected_query` and `modality_boost` appear when they apply, and the CLI prints "Showing results for ..." and a modality line.
+  The website calls the same endpoint, so its "N results" shows a smaller number.
+  One word is not cut.
+- **A re-pull pull request no longer gets the automated review.**
+  An existing `NEMAR PR Review` failure on a re-pull's pull request clears with `nemar admin pr-reviews start <dataset> <pr>`, which updates the check in place or posts a new run; the automatic path's tick does the same on its own.
+- **`nemar admin repull resume` names the review check when it waits on a pull request that is not `clean`, and says which other check does not pass.**
+- **The privacy-correction runbook gains step 8.**
+  It checks that the ledger names no merge a re-pull accepted before any history rewrite, because the rewrite gives that merge a new id and the proof would then fail closed.
+
+### Deploy coupling
+
+- The migration is applied by the release's deploy. 0113 is one new table, `upstream_repull_merge_acceptances`, with its index; `deleteDatasetCascade` deletes its rows explicitly.
+- The flag `--accept-merge-trailers` works only against a Worker that has the new route, so install the CLI after the Worker deploys.
+- Search needs no deploy step of its own beyond the vector rebuild below, and the Workers AI binding (`[ai]`) is already in the production configuration.
+
+### Owner steps after release
+
+None of these is done by the release.
+
+1. Rebuild the search vectors: `POST /admin/vectorize/reindex-all` until `has_more` is false (500 datasets per call).
+   Until it finishes the semantic leg searches README-based vectors, which work with lower recall.
+2. In the first deploy's Worker logs, find `[search] rerank raw scores: ... read as logits` and a sane `rerank_ms`.
+   Workers AI latency and the score scale were never measured live.
+3. For a re-pull that is waiting on the review check, run `nemar admin pr-reviews start <dataset> <pr>`, then `nemar admin repull resume <id>`, then `nemar admin repull merge <id>` (the merge mints a version DOI and needs the administrator's go).
+4. For a re-pull merged outside NEMAR's tools, run `nemar admin repull resume <id> --accept-merge-trailers "<reason>"` once the tag exists on `main`, then confirm the release locked the copied objects and the version DOI resolves.
+5. Run the fleet backfill, `nemar admin upstream-backfill`, as a dry run and then with `--execute`, after the first re-pulls finish.
+
+### Known limits
+
+- Not verified against GitHub yet: that a `skipped` check leaves a pull request `clean`, and that `mergeable_state` reads the newest run of a check name.
+  The first waiver in production shows both; if GitHub keeps the old failure, the pull request stays `unstable` and the record waits.
+- A stamped `skipped` check stays if the record later ends with the pull request still open; closing the pull request is the remedy.
+- The accept path's ledger write is leased on the ledger blob, not on `main`'s head, so a concurrent push to `main` can make the write retry.
+  The Worker re-reads `main` before every write.
+- The accept path was tested against a GitHub stand-in only; its first production use is the check.
+- The waiver cannot tell a human-written `.nemar/` file from an enrichment file on a re-pull's branch, because commit identities are forgeable and the push sender is not recorded.
+  The identifier screen, the BIDS check, the administrator's confirmation and push access to the branch are the mitigations; whether to add a filename allowlist is the owner's decision.
+- An administrator-origin record whose waiver was abandoned after five tries needs `nemar admin pr-reviews start` by hand.
+- A plan made before its record exists changes digest once the record is created, because creating it writes the version row's lineage and the plan's `from_tag_basis` then reads `version-row`; a `resume` with the original plan stops as `plan-stale`, and the way on is `abandon`, a fresh `plan`, then `execute` (#1994, open).
+- The phrase search's calibration truth sets read the same fields the cross-encoder reads, so its benchmark favors the cross-encoder; the held-out gap is the part that does not.
+
 ## 0.10.26 - 2026-10-28
 
 An OpenNeuro mirror can be moved to a newer upstream snapshot as its next major version, through a reviewed pull request that an administrator drives by hand or, once the owner turns it on, the automatic path drives (epic #1046; Architecture Decision Record (ADR) 0111).
