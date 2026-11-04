@@ -168,14 +168,20 @@ Call these; never write a second statement that moves a total.
 
 - **Tables** (migration `0114_compute_ledger.sql`): `compute_policy` (one immutable row per version), `compute_pools` (holder kind `account|platform|partner`, holder ref, pool `cpu|gpu`, three totals; the four platform pools `pipelines` and `people`, each cpu and gpu, are seeded) and `compute_ledger` (the eight entry kinds, append-only).
   The trigger `compute_ledger_apply` is the one writer of a pool's totals; a test reads every source file and migration for another.
-  A budget (`budget_pool_id`) is a platform pool of the same word as the entry's pool, which a trigger checks.
-  A job has one hold; a hold is closed once.
-- **Service** (`backend/src/services/compute-ledger.ts`, every statement exported as `*_SQL`): `ensurePool`, `holdStatements` and `placeHold` (the one conditional INSERT, with `extraGuards` for phase A3's job-count guards: boolean SQL with plain `?` placeholders and its values, ANDed into the same WHERE), `releaseHold`, `settleProvisional` (a `charge` and any `overrun` in one statement), `settleFinal` (one `adjust`, once per job), `refundJob`, `grantPool`, `adjustPool`, `expireUnused` and `availableMilli` (may be negative).
+  The table itself refuses, under every conflict clause, an entry that would take a total outside 0 to 2^53 - 1, a hold that would take available below 0, and a release or charge that does not close its own hold.
+  An entry on an account or partner pool that spends MUST name the platform `people` pool of the same word as its budget, and an entry on a platform pool names none: pass `budgetPoolId` for the first, `null` for the second, or the table raises.
+  A job has one hold; a hold is closed once; a job's final settlement is one `adjust` entry that carries the job (its charged delta may be 0).
+  Retention and anonymisation of `holder_ref` and `actor_user_id` are phase A7's (#2012), in its own migration with a narrowly scoped exception; nothing here removes a row.
+- **Service** (`backend/src/services/compute-ledger.ts`, every statement exported as `*_SQL`): `ensurePool`, `holdStatements` and `placeHold` (the one conditional INSERT, with `extraGuards` for phase A3's job-count guards: boolean SQL with plain `?` placeholders and its values, ANDed into the same WHERE), `releaseHold`, `settleProvisional` (a `charge` and any `overrun` in one statement), `settleFinal` (one `adjust`, once per job, refused after a refund), `refundJob`, `grantPool`, `adjustPool`, `expireUnused` and `availableMilli` (may be negative).
   Each answers `{ ok: false, code }` for a refusal and writes nothing; `ComputeLedgerError` (`invalid_argument`, `idempotency_conflict`, `pool_not_found`) is thrown for what is not a refusal.
-  The hold's refusals are `insufficient_balance`, `suspended`, `platform_budget_exhausted` (the words of `shared/compute-state.ts`), `guard_refused` (the caller's own guard) and `job_already_held`.
-  Keys the service writes are made of the hold or the job (`hold:<id>:charge`, `job:<id>:final`); a caller's hold key is its own, and an administrator's key is stored behind `grant:` or `adjust:`.
-- **Policy** (`compute-policy.ts`): `getPolicy` (strict, default only when there is no row, `ComputePolicyUnreadable` for a row it cannot parse, which a route answers 503) and `putPolicy` (owner checked in the statement, strict schema, audit in the same batch).
+  The hold's refusals are `insufficient_balance`, `suspended`, `platform_budget_exhausted` and `guard_refused` (the words of `shared/compute-state.ts`).
+  A hold takes no key: its key is the job's (`holdKey(jobId)`), so a hold of the same job again is a replay, or a conflict if it differs.
+  A closing step replayed returns its entry with `replayed: true`; `hold_closed` says which kind closed the hold (`closedBy`).
+  The keys the service writes are `holdKey`, `finalKey` and `refundKey` of the job and `hold:<id>:<step>` of the hold; a caller's key may not start with `job:` or `hold:`; an administrator's route stores its header key behind `adminKey(kind, actorId, key)`.
+- **Policy** (`compute-policy.ts`): `getPolicy` (strict, default only when there is no row, `ComputePolicyUnreadable` for a row it cannot parse, which a route answers 503) and `putPolicy` (owner, not deleted and active, checked in the statement; strict schema; audit in the same batch).
   A new policy key is added as optional.
 - **Routes** (`routes/admin/compute.ts`) and **CLI** (`nemar admin compute policy|pool`): errors are `{ error, code }` with the words and statuses of `shared/contract/compute-admin.ts`, whose response schemas are open.
-  `frozen` has no writer yet: whoever suspends access (phase D) sets it, and a hold reads it.
+  Interim owner rule, easy to loosen: an administrator corrects an account's grant, and only an owner corrects its charge or a platform budget.
+  The budget semantics of a charge correction and of a refund (whether they credit the `people` budget back) are the repository owner's decision; today both move the budget with the pool.
+  `frozen` has no writer yet: whoever suspends access (phase D, A8) sets it, and a hold reads it (the holder's own pool; a frozen budget pool does not refuse a hold).
 - **Not here**: the job table, the job-count guards on a hold (phase A3), the callers of settle (phases A5 and A7), automatic renewal and the default grant at approval (Epic D), mail.

@@ -32,7 +32,7 @@ Tapis has no allocations and no idempotency key, signs no webhook, lets a job's 
    Only the Worker reaches them, through bindings, and no storage credential reaches Tapis, a node or the launcher: uploads go to addresses the Worker signs for one file of one job.
 8. **`COMPUTE_ENABLED` is a dark switch**: exactly `1` and absent from the wrangler configuration. The switch and the test that pins it arrive in phase A4 (issue #2009); every compute cron runs in production only.
 9. **NEMAR reports ACCESS gateway attributes for every tenant job**, once, under a per-account pseudonym that is not the sign-in subject.
-10. **Every compute word is declared once**, in `shared/compute-state.ts` (states, failure, refusal, ledger and cancel words), `shared/contract/compute.ts` (the job specification, partition and rate tables, owner policy and launcher file shapes) and `shared/contract/compute-launch.ts` (the launch specification and the launcher's routes, with their JSON Schema, which `nemarOrg/nemar-process` copies byte for byte).
+10. **Every compute word is declared once**, in `shared/compute-state.ts` (states, failure, refusal, ledger and cancel words), `shared/contract/compute.ts` (the job specification, partition and rate tables, owner policy and launcher file shapes) `shared/contract/compute-launch.ts` (the launch specification and the launcher's routes, with their JSON Schema, which `nemarOrg/nemar-process` copies byte for byte) and `shared/contract/compute-admin.ts` (the allocation routes' error words, request shapes and open response schemas; a module of words and of open schemas only, never of a strict one).
 11. **Two digests, named apart.** `spec_digest` is the job row's: the SHA-256 of the exact bytes of `records/<id>/spec.json`. `launch_spec_digest` is the launcher's: the SHA-256 of the exact raw bytes of the `NEMAR_LAUNCH_SPEC` value, which is ASCII-only JSON, hashed before parsing.
 12. **Responses are open, requests and documents are closed.** The two responses a launcher reads ignore unknown keys, so one that runs for 48 hours survives the Worker adding a key; the job specification, owner policy, launch specification and the launcher's own files refuse them.
 13. **Launcher details are declared and classified, in `shared/compute-state.ts`.**
@@ -76,24 +76,41 @@ What the build settled, each a rule and not a description of today:
 
 1. **The ledger is the only writer of a pool's totals, and the writer is a trigger.**
    `compute_ledger_apply` (AFTER INSERT) adds an entry's granted, held and charged deltas to its pool's row, and its held and charged deltas to the row of its budget pool.
-   "Totals change only if the entry was written" holds by construction, because there is no second statement to forget, and an entry the totals refuse (a stored total may never be negative) is not written either: the entry and the totals are one statement.
-   No code path updates a total, and a test reads every source file and every migration for one.
+   "Totals change only if the entry was written" holds by construction, because there is no second statement to forget.
+   No code path updates a total, and a test reads every source file and every migration for one (quoted, schema-qualified, bracketed and conflict-clause spellings of a write included, each proven by a planted string).
    D1 runs the trigger; if it ever stopped, the design stops with it, and the fallback is not application-side updates.
-2. **A hold is one conditional INSERT.**
+2. **The table refuses what the statement refuses, under every conflict clause.**
+   A conflict clause on the OUTER statement (`INSERT OR IGNORE`, `OR FAIL`, `OR REPLACE`) overrides the clause that applies inside a trigger, so an entry whose totals the pool's CHECKs refused would stay in the ledger while the totals did not move.
+   Three BEFORE INSERT triggers raise ABORT, which no conflict clause overrides: no total of the pool, or of the budget it names, leaves 0 to 2^53 - 1 (`compute_ledger_totals_in_range`); a hold does not take the pool's or the budget's available below 0 (`compute_ledger_hold_fits`); a release or a charge names a hold of the same job, pool, budget and held amount (`compute_ledger_closes_its_hold`).
+   The service's statements say the same as WHERE terms, so a refusal there writes nothing and raises nothing.
+3. **A hold is one conditional INSERT.**
    Its WHERE checks the pool not frozen, the pool's available, the budget pool's available, the key unused and any guard the caller adds, so two holds for the last SU cannot both be written and a refused hold writes nothing.
-   A hold is closed once, by a release or a charge, in one INSERT taken from the hold row itself (the amounts are the hold's); a settlement's charge and its overrun are one statement.
-   A job has one hold.
-3. **Available may be negative; a stored total may not.**
-   An `overrun`, or an adjustment of the grant below what is used, makes available negative and refuses new holds until a grant brings it back; the pool CHECKs refuse a negative total.
-   Every amount is a whole number of milli-SU up to 2^53 - 1, checked before a statement is built and again by `typeof` and range CHECKs.
-4. **A budget is a platform pool of the same word.**
-   A person's or a partner's hold is also counted against the platform `people` pool of the same cpu or gpu word (NEMAR's own pipelines are their own pool, `pipelines`), and a trigger refuses any other budget.
-   A correction of a person's charge moves the budget with it.
-5. **A key is never shared.**
-   An administrator's `Idempotency-Key` is stored behind `grant:` or `adjust:`, and the keys the Worker writes for a job are made of the job or the hold (`hold:<id>:charge`, `job:<id>:final`), so none can collide with another and each step happens once.
-   A key reused for a different request is a conflict, never a replay.
-6. **The policy write is owner-only in the statement, validated strictly, and audited in the same batch; the read fails closed.**
-   `putPolicy` inserts a version only for an account that is an owner in that statement, checks the strict schema, and writes the audit row with it.
+   Freezing applies to the holder's own pool; a frozen budget pool does not refuse a hold.
+   A closing entry is one INSERT taken from the hold row: the HELD side of a charge and the whole of a release are the hold's own amount, so a caller cannot misstate them; the CHARGED figure of a settlement is the caller's, capped at the hold, and what the job used above the hold is an `overrun` entry written by the same statement.
+   A job has one hold, and a hold is closed once.
+4. **Available may be negative; a stored total may not.**
+   An `overrun`, or an adjustment of the grant below what is used, makes available negative and refuses new holds until a grant brings it back.
+   Every amount is a whole number of milli-SU up to 2^53 - 1, checked before a statement is built and again by `typeof` and range CHECKs; a grant or a positive adjustment that would take a total past it is `would_exceed_limit`, and one request moves at most 2^40 milli-SU.
+5. **The budget rule is the table's, and says only this.**
+   A spend on an account or partner pool (a hold, release, charge, refund, overrun, an adjustment of a charge and a job's final settlement) MUST name the platform `people` pool of the same cpu or gpu word as its budget, and an entry on a platform pool names none (`compute_ledger_budget_is_people`, `compute_ledger_budget_required`).
+   NEMAR's own pipelines are their own pool, `pipelines`, and count against nothing else.
+   The triggers do not say what a caller's correction should credit: whether an administrator's charge correction, or a refund, credits the `people` budget back is the repository owner's to decide.
+   Today an adjustment of the charge of an account's pool moves the `people` budget with it, a refund of a job takes its whole charge back from the budget as well, and, as an interim rule that is easy to loosen, correcting an account's charge is the owner's (an administrator corrects a grant).
+6. **A key is never shared, and is compared on everything.**
+   The keys the Worker writes are made of the job (`job:<id>:hold`, `:final`, `:refund`) or the hold (`hold:<id>:charge`), so no caller picks one, and a caller's key may not start with `job:` or `hold:`; an administrator's `Idempotency-Key` is stored behind the kind and the actor (`grant:<actor>:<key>`), so two administrators sending the same key each make their own entry.
+   A key that finds its entry is a replay only if the request is the same on every field (kind, pool, budget, amounts, job and reason); anything else is a conflict, never a replay.
+   A closing step replayed returns its closing entry with `replayed: true` when it is of the requested kind, and `hold_closed` says which kind closed the hold otherwise.
+7. **A job's final settlement happens once, even when it changes nothing, and never after a refund.**
+   It is an `adjust` entry that carries the job and a charged delta that may be 0 (the only adjustment that may be), whose key `job:<id>:final` records that it happened; a job's charge is the sum of `charged_delta_milli` by `job_id` over its charge, overrun, refund and that adjustment.
+   A refund ends a job's charge: a final settlement after one is refused (`refunded`), because it would charge the job again.
+8. **The policy write is owner-only in the statement, validated strictly, and audited in the same batch; the read fails closed.**
+   `putPolicy` inserts a version only for an account that is an owner, not deleted and in an active status, in that statement, checks the strict schema, and writes the audit row with it.
    `getPolicy` parses a stored row with the same strict schema and answers 503 for one it cannot parse; the default applies only when there is no row.
    A new policy key is therefore added as optional.
    The CLI reads the route's answer with an open schema (`shared/contract/compute-admin.ts`) and checks only what `policy set` sends with the strict one.
+9. **What the database cannot prevent, and what guards it instead.**
+   `INSERT OR REPLACE` and `REPLACE INTO` rewrite a conflicting row without firing the append-only DELETE trigger, because recursive triggers cannot be enabled on D1, so only the source scan guards against them.
+   `DROP TABLE` removes the append-only triggers with the table, and a rebuild of `compute_ledger` must copy its rows before it creates `compute_ledger_apply`, or every total doubles.
+**Retention is not decided here.**
+The ledger and the policy are append-only and are never removed by a cascade from the account row.
+Their retention, and the anonymisation of `holder_ref` and `actor_user_id`, are the job of phase A7 (#2012), which adds its own narrowly scoped exception in its own migration.
