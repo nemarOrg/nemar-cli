@@ -74,6 +74,7 @@ import {
   launchSpecFits,
   resultsLauncherKey,
   resultsOutputKey,
+  sifFileNameForDigest,
 } from "../shared/contract/compute-launch";
 import launchSchema from "../shared/contract/compute-launch.schema.json";
 import * as contractIndex from "../shared/contract/index";
@@ -1271,6 +1272,7 @@ describe("the launcher contract", () => {
       OUT: "NEMAR_OUT",
       LOCAL_DATASETS_ROOT: "NEMAR_LOCAL_DATASETS_ROOT",
       HOST_PYTHON: "NEMAR_HOST_PYTHON",
+      SIF_ROOT: "NEMAR_SIF_ROOT",
     });
   });
 
@@ -1416,7 +1418,7 @@ const LAUNCH = {
   image: {
     uri: `docker://ghcr.io/example/runtime@sha256:${HEX_B}`,
     digest: `sha256:${HEX_B}`,
-    sif: "runtime.sif",
+    sif: `${HEX_B}.sif`,
   },
   env: { OMP_NUM_THREADS: "4" },
   resources: { gpus: 0 },
@@ -1495,7 +1497,6 @@ const LAUNCH_CASES: readonly Case[] = [
   ["a hex job token", set(LAUNCH, "job_token", "ab".repeat(32)), true],
   ["a nested entry", set(LAUNCH, "entry", "src/analysis/run.py"), true],
   ["an entry of 240 characters", set(LAUNCH, "entry", `${"a".repeat(237)}.py`), true],
-  ["a sif in a directory", set(LAUNCH, "image.sif", "images/runtime-1.2.sif"), true],
 
   ["an unknown top-level key", { ...LAUNCH, upload: {} }, false],
   // A trailing newline is the one input `$` lets Python's `re` accept and JavaScript's refuse; the
@@ -1515,7 +1516,6 @@ const LAUNCH_CASES: readonly Case[] = [
     set(LAUNCH, "datasets", [{ id: "nm000104\n", version: "1" }]),
     false,
   ],
-  ["a sif with a trailing newline", set(LAUNCH, "image.sif", "runtime.sif\n"), false],
   ["a bundle url", set(LAUNCH, "bundle.url", "https://x.test/b.tar.gz"), false],
   ["an unknown image key", set(LAUNCH, "image.extra", 1), false],
   ["an unknown limits key", set(LAUNCH, "limits.extra", 1), false],
@@ -1541,10 +1541,6 @@ const LAUNCH_CASES: readonly Case[] = [
   ["an entry with a dot segment", set(LAUNCH, "entry", "a/./b.py"), false],
   ["an empty entry", set(LAUNCH, "entry", ""), false],
   ["an entry of 241 characters", set(LAUNCH, "entry", `${"a".repeat(238)}.py`), false],
-  ["a sif with a space", set(LAUNCH, "image.sif", "runtime image.sif"), false],
-  ["a sif with a backslash", set(LAUNCH, "image.sif", "a\\b.sif"), false],
-  ["an empty sif", set(LAUNCH, "image.sif", ""), false],
-  ["a sif of 257 characters", set(LAUNCH, "image.sif", "s".repeat(257)), false],
   ["a bundle digest in capitals", set(LAUNCH, "bundle.sha256", "A".repeat(64)), false],
   ["a short bundle digest", set(LAUNCH, "bundle.sha256", "a".repeat(63)), false],
   ["a zero-size bundle", set(LAUNCH, "bundle.size", 0), false],
@@ -1704,28 +1700,43 @@ const LAUNCH_CASES: readonly Case[] = [
     ),
     false,
   ],
+  // The image file is exactly `<64 lowercase hex>.sif`, a basename relative to NEMAR_SIF_ROOT.
   [
-    "a sif in a directory with dots and plus",
-    set(LAUNCH, "image.sif", "images/rt-1.2+b.sif"),
+    "an image of another digest, with its own sif",
+    set(set(LAUNCH, "image.digest", `sha256:${HEX_A}`), "image.sif", `${HEX_A}.sif`),
     true,
   ],
-  ["a sif that starts with a dot", set(LAUNCH, "image.sif", ".hidden.sif"), true],
-  ["a sif that starts with a dash", set(LAUNCH, "image.sif", "-runtime.sif"), false],
-  ["a sif that is only a dash", set(LAUNCH, "image.sif", "-"), false],
-  ["a sif with a dash after the start", set(LAUNCH, "image.sif", "a-b.sif"), true],
-  ["a sif in a directory that starts with a dash", set(LAUNCH, "image.sif", "dir/-x.sif"), true],
-  ["an absolute sif", set(LAUNCH, "image.sif", "/opt/rt.sif"), false],
-  ["a sif that climbs", set(LAUNCH, "image.sif", "../rt.sif"), false],
-  ["a sif that climbs from inside", set(LAUNCH, "image.sif", "a/../rt.sif"), false],
-  ["a sif that is a dot segment", set(LAUNCH, "image.sif", "a/./rt.sif"), false],
-  ["a sif that is only two dots", set(LAUNCH, "image.sif", ".."), false],
-  ["a sif with an empty segment", set(LAUNCH, "image.sif", "a//rt.sif"), false],
-  ["a sif with a trailing slash", set(LAUNCH, "image.sif", "images/"), false],
-  ["a sif with a control character", set(LAUNCH, "image.sif", "a\u0001b.sif"), false],
-  ["a sif with a newline in it", set(LAUNCH, "image.sif", "a\nb.sif"), false],
-  ["a sif with a DEL", set(LAUNCH, "image.sif", "a\u007fb.sif"), false],
-  ["a sif with a backslash", set(LAUNCH, "image.sif", "a\\b.sif"), false],
-  ["a sif with non-ASCII", set(LAUNCH, "image.sif", "caf\u00e9.sif"), false],
+  ["the old fixed sif name", set(LAUNCH, "image.sif", "runtime.sif"), false],
+  ["a sif in a directory", set(LAUNCH, "image.sif", `images/${HEX_B}.sif`), false],
+  ["a sif with capitals in the hash", set(LAUNCH, "image.sif", `${"B".repeat(64)}.sif`), false],
+  ["a sif of 63 hex digits", set(LAUNCH, "image.sif", `${"b".repeat(63)}.sif`), false],
+  ["a sif of 65 hex digits", set(LAUNCH, "image.sif", `${"b".repeat(65)}.sif`), false],
+  ["a sif with a non-hex digit", set(LAUNCH, "image.sif", `g${"b".repeat(63)}.sif`), false],
+  ["a sif that is only the hash", set(LAUNCH, "image.sif", HEX_B), false],
+  ["a sif with a capital suffix", set(LAUNCH, "image.sif", `${HEX_B}.SIF`), false],
+  ["a sif with a doubled suffix", set(LAUNCH, "image.sif", `${HEX_B}.sif.sif`), false],
+  ["a sif with a longer suffix", set(LAUNCH, "image.sif", `${HEX_B}.sifx`), false],
+  ["a sif whose dot is another character", set(LAUNCH, "image.sif", `${HEX_B}xsif`), false],
+  ["a sif whose dot is a dash", set(LAUNCH, "image.sif", `${HEX_B}-sif`), false],
+  ["a sif with a leading dash", set(LAUNCH, "image.sif", `-${HEX_B}.sif`), false],
+  ["a sif that is only a suffix", set(LAUNCH, "image.sif", ".sif"), false],
+  ["a sif with a trailing newline", set(LAUNCH, "image.sif", `${HEX_B}.sif\n`), false],
+  [
+    "a sif with a newline in the hash",
+    set(LAUNCH, "image.sif", `${"b".repeat(32)}\n${"b".repeat(31)}.sif`),
+    false,
+  ],
+  ["an absolute sif", set(LAUNCH, "image.sif", `/${HEX_B}.sif`), false],
+  ["a sif that climbs", set(LAUNCH, "image.sif", `../${HEX_B}.sif`), false],
+  ["a sif with a backslash", set(LAUNCH, "image.sif", `a\\${"b".repeat(62)}.sif`), false],
+  [
+    "a sif with a control character",
+    set(LAUNCH, "image.sif", `\u0001${"b".repeat(63)}.sif`),
+    false,
+  ],
+  ["a sif with non-ASCII", set(LAUNCH, "image.sif", `${"b".repeat(63)}é.sif`), false],
+  ["an empty sif", set(LAUNCH, "image.sif", ""), false],
+  ["a sif that is a number", set(LAUNCH, "image.sif", 5), false],
   ["no sif", set(LAUNCH, "image.sif", undefined), false],
   ["no args key", set(LAUNCH, "args", undefined), false],
   ["no datasets key", set(LAUNCH, "datasets", undefined), false],
@@ -1766,6 +1777,31 @@ const LAUNCH_CASES: readonly Case[] = [
   ["null", null, false],
 ];
 
+/**
+ * What only zod enforces: a document the JSON Schema accepts and zod refuses, because the rule
+ * compares two fields and a JSON Schema cannot. Listed here on purpose, so that a difference between
+ * the two engines is always a row in this table and never a surprise: `agree` above holds every other
+ * document to one verdict. Each row says which key the zod issue names.
+ */
+const ZOD_ONLY_LAUNCH_CASES: ReadonlyArray<readonly [label: string, doc: unknown, key: string]> = [
+  ["a sif named for another image's digest", set(LAUNCH, "image.sif", `${HEX_A}.sif`), "image.sif"],
+  [
+    "a digest that is not the one the sif is named for",
+    set(LAUNCH, "image.digest", `sha256:${HEX_A}`),
+    "image.sif",
+  ],
+  [
+    "a sif that differs from the digest in its last hex digit",
+    set(LAUNCH, "image.sif", `${"b".repeat(63)}c.sif`),
+    "image.sif",
+  ],
+  [
+    "a sif that differs from the digest in its first hex digit",
+    set(LAUNCH, "image.sif", `c${"b".repeat(63)}.sif`),
+    "image.sif",
+  ],
+];
+
 describe("the launch specification", () => {
   test("the version is nemar.launch-spec.v1 and the runtimes are python and image", () => {
     expect(LAUNCH_SPEC_VERSION).toBe("nemar.launch-spec.v1");
@@ -1780,6 +1816,126 @@ describe("the launch specification", () => {
       (d) => validateRoot(d) as boolean,
       (d) => LaunchSpecSchema.safeParse(d).success,
     );
+  });
+
+  test("the rules only zod enforces are listed, and each is one the JSON Schema accepts", () => {
+    expect(ZOD_ONLY_LAUNCH_CASES.length).toBeGreaterThanOrEqual(4);
+    for (const [label, doc, key] of ZOD_ONLY_LAUNCH_CASES) {
+      expect(validateRoot(doc), `JSON Schema: ${label}`).toBe(true);
+      const refused = LaunchSpecSchema.safeParse(doc);
+      expect(refused.success, `zod: ${label}`).toBe(false);
+      if (refused.success) continue;
+      // One issue, naming the field, and neither value.
+      expect(refused.error.issues, label).toHaveLength(1);
+      expect(refused.error.issues[0].path.join("."), label).toBe(key);
+      expect(refused.error.issues[0].message, label).not.toContain(HEX_A);
+      expect(refused.error.issues[0].message, label).not.toContain(HEX_B);
+    }
+  });
+
+  test("sifFileNameForDigest is the digest's hex plus .sif, and null for anything else", () => {
+    expect(sifFileNameForDigest(`sha256:${HEX_B}`)).toBe(`${HEX_B}.sif`);
+    expect(sifFileNameForDigest(`sha256:${HEX_A}`)).toBe(`${HEX_A}.sif`);
+    expect(sifFileNameForDigest(`sha256:${"0123456789abcdef".repeat(4)}`)).toBe(
+      `${"0123456789abcdef".repeat(4)}.sif`,
+    );
+    for (const bad of [
+      "",
+      HEX_B,
+      `sha256:${"b".repeat(63)}`,
+      `sha256:${"b".repeat(65)}`,
+      `sha256:${"B".repeat(64)}`,
+      `sha256:${HEX_B}\n`,
+      `\nsha256:${HEX_B}`,
+      `sha512:${HEX_B}`,
+      `SHA256:${HEX_B}`,
+      `sha256:g${"b".repeat(63)}`,
+      `sha256: ${HEX_B}`,
+      `docker://x@sha256:${HEX_B}`,
+    ]) {
+      expect(sifFileNameForDigest(bad), JSON.stringify(bad)).toBeNull();
+    }
+    expect(sifFileNameForDigest(5 as never)).toBeNull();
+    // Not a string, though it reads as one: an object, an array of the digest.
+    expect(sifFileNameForDigest({ toString: () => `sha256:${HEX_B}` } as never)).toBeNull();
+    expect(sifFileNameForDigest([`sha256:${HEX_B}`] as never)).toBeNull();
+    expect(sifFileNameForDigest(null as never)).toBeNull();
+    expect(sifFileNameForDigest(undefined as never)).toBeNull();
+  });
+
+  test("the zod rule is the helper: a document is accepted exactly when its sif is the helper's", () => {
+    for (const hex of [HEX_A, HEX_B, "0123456789abcdef".repeat(4)]) {
+      const named = sifFileNameForDigest(`sha256:${hex}`);
+      const doc = set(set(LAUNCH, "image.digest", `sha256:${hex}`), "image.sif", named);
+      expect(LaunchSpecSchema.safeParse(doc).success, hex).toBe(true);
+    }
+  });
+
+  test("a bad digest or a bad sif is named once, by its own issue, and not again by the cross rule", () => {
+    const paths = (doc: unknown) => {
+      const refused = LaunchSpecSchema.safeParse(doc);
+      return refused.success ? [] : refused.error.issues.map((i) => i.path.join("."));
+    };
+    expect(paths(set(LAUNCH, "image.digest", HEX_B))).toEqual(["image.digest"]);
+    expect(paths(set(LAUNCH, "image.sif", "runtime.sif"))).toEqual(["image.sif"]);
+    expect(paths(set(LAUNCH, "image.sif", `${HEX_B}.sif\n`))).toEqual(["image.sif"]);
+    expect(paths(set(LAUNCH, "image.sif", `${HEX_A}.sif`))).toEqual(["image.sif"]);
+    expect(paths(LAUNCH)).toEqual([]);
+  });
+
+  test("a malformed sif and a well-formed sif of another digest are refused for their own reasons", () => {
+    const FORM = "the image file is not <64 lowercase hex>.sif";
+    const NAMED = "the image file is not the one named for the image digest";
+    const messages = (sif: unknown) => {
+      const refused = LaunchSpecSchema.safeParse(set(LAUNCH, "image.sif", sif));
+      return refused.success ? [] : refused.error.issues.map((i) => i.message);
+    };
+    for (const bad of [
+      "runtime.sif",
+      `images/${HEX_B}.sif`,
+      `${"B".repeat(64)}.sif`,
+      `${"b".repeat(63)}.sif`,
+      `${"b".repeat(65)}.sif`,
+      `g${"b".repeat(63)}.sif`,
+      HEX_B,
+      `${HEX_B}.SIF`,
+      `${HEX_B}.sif.sif`,
+      `${HEX_B}.sifx`,
+      `${HEX_B}xsif`,
+      `${HEX_B}-sif`,
+      `-${HEX_B}.sif`,
+      `${HEX_B}.sif\n`,
+      `../${HEX_B}.sif`,
+      ".sif",
+      "",
+    ]) {
+      expect(messages(bad), JSON.stringify(bad)).toEqual([FORM]);
+    }
+    for (const other of [`${HEX_A}.sif`, `${"b".repeat(63)}c.sif`, `c${"b".repeat(63)}.sif`]) {
+      expect(messages(other), other).toEqual([NAMED]);
+    }
+  });
+
+  test("the schema says plainly which rule it cannot express", () => {
+    const sif = (launchSchema as Doc).properties.image.properties.sif;
+    expect(sif.description).toContain("NEMAR_SIF_ROOT");
+    expect(sif.description).toContain("image.digest");
+    expect(sif.description).toContain("cannot express");
+    expect(sif.description).toContain("does not verify");
+    expect(sif.description).toContain("image_missing");
+    // The rule is zod's, and a Worker's, so the schema keeps no cross-field keyword for it.
+    expect(JSON.stringify(sif)).not.toContain("$data");
+  });
+
+  test("encodeLaunchSpec refuses a sif that is not the digest's, and never echoes either", () => {
+    let message = "";
+    try {
+      encodeLaunchSpec(set(LAUNCH, "image.sif", `${HEX_A}.sif`));
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toContain("image.sif");
+    expect(message).not.toContain(HEX_A);
   });
 
   test("encodeLaunchSpec writes JSON the schema accepts, within 64 KiB", () => {
@@ -1985,7 +2141,7 @@ describe("a valid job specification always fits the launch specification", () =>
       bundle: { sha256: hex, size: Number.MAX_SAFE_INTEGER },
       datasets: job.datasets.map((d) => ({ ...d })),
       api_base: `https://${"a".repeat(504)}`,
-      image: { uri: ref, digest: `sha256:${hex}`, sif: "s".repeat(256) },
+      image: { uri: ref, digest: `sha256:${hex}`, sif: `${hex}.sif` },
       env: job.env,
       resources: { gpus: job.gpus },
       limits: { max_files: 1_000_000, max_total_bytes: Number.MAX_SAFE_INTEGER },
@@ -2125,7 +2281,7 @@ describe("a valid job specification always fits the launch specification", () =>
             { id: "nm000104", version: "1.0.2", include: ["sub-01/**/*.set", "sub-02/*"] },
           ],
         }),
-        2119,
+        1931,
       ],
       [
         "an image job with a command and a GPU",
@@ -2138,7 +2294,7 @@ describe("a valid job specification always fits the launch specification", () =>
           gpus: 2,
           minutes: 30,
         }),
-        2012,
+        1824,
       ],
       [
         "a recipe job, which names neither an entry nor a command",
@@ -2150,7 +2306,7 @@ describe("a valid job specification always fits the launch specification", () =>
           partition: "shared",
           minutes: 5,
         }),
-        2016,
+        1828,
       ],
     ];
 
@@ -2215,7 +2371,7 @@ describe("a valid job specification always fits the launch specification", () =>
             image: { ...worst.image, uri: `docker://ghcr.io/${"a".repeat(424)}@sha256:${hex}` },
           },
         ],
-        ["image.sif", { ...worst, image: { ...worst.image, sif: "s".repeat(257) } }],
+        ["image.sif", { ...worst, image: { ...worst.image, sif: `${"f".repeat(65)}.sif` } }],
         ["job_token", { ...worst, job_token: "t".repeat(257) }],
         [
           "bundle.size",
@@ -2278,19 +2434,19 @@ describe("the golden vector nemar-process checks its launcher against", () => {
     image: {
       uri: `docker://ghcr.io/example/runtime@sha256:${"b".repeat(64)}`,
       digest: `sha256:${"b".repeat(64)}`,
-      sif: "runtime.sif",
+      sif: `${"b".repeat(64)}.sif`,
     },
     env: { OMP_NUM_THREADS: "4" },
     resources: { gpus: 0 },
     limits: { max_files: 38000, max_total_bytes: 1073741824 },
     job_token: "t".repeat(43),
   };
-  const GOLDEN_TEXT = String.raw`{"job_id":"job_0123456789abcdef01234567","runtime":"python","entry":"run.py","args":["--label","caf\u00e9 \"q\" \ud83d\ude00"],"bundle":{"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":1234},"datasets":[{"id":"nm000104","version":"1.0.2"}],"api_base":"https://api.example.test","image":{"uri":"docker://ghcr.io/example/runtime@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","sif":"runtime.sif"},"env":{"OMP_NUM_THREADS":"4"},"resources":{"gpus":0},"limits":{"max_files":38000,"max_total_bytes":1073741824},"job_token":"ttttttttttttttttttttttttttttttttttttttttttt"}`;
-  const GOLDEN_SHA256 = "68ef4653b8745eebf16427cd87a01e6d672b8062f8bfef819fcd1d745f0e346a";
+  const GOLDEN_TEXT = String.raw`{"job_id":"job_0123456789abcdef01234567","runtime":"python","entry":"run.py","args":["--label","caf\u00e9 \"q\" \ud83d\ude00"],"bundle":{"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":1234},"datasets":[{"id":"nm000104","version":"1.0.2"}],"api_base":"https://api.example.test","image":{"uri":"docker://ghcr.io/example/runtime@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","sif":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.sif"},"env":{"OMP_NUM_THREADS":"4"},"resources":{"gpus":0},"limits":{"max_files":38000,"max_total_bytes":1073741824},"job_token":"ttttttttttttttttttttttttttttttttttttttttttt"}`;
+  const GOLDEN_SHA256 = "95bc545d3012b4cc91136cd36aab77d8a0eaac67b9d25002e18c84f703eef927";
 
   test("encodeLaunchSpec writes exactly the golden text", () => {
     expect(encodeLaunchSpec(GOLDEN_SPEC)).toBe(GOLDEN_TEXT);
-    expect(GOLDEN_TEXT.length).toBe(708);
+    expect(GOLDEN_TEXT.length).toBe(765);
   });
 
   test("the golden text hashes to the golden digest, and parses back to the specification", () => {
@@ -2928,20 +3084,6 @@ const MAIN_BOUNDS: readonly Bound[] = [
     kind: "max",
     at: 512,
     build: (n) => set(LAUNCH, "image.uri", imageRef(n)),
-  },
-  {
-    label: "image sif length",
-    target: "root",
-    kind: "max",
-    at: 256,
-    build: (n) => set(LAUNCH, "image.sif", "s".repeat(n)),
-  },
-  {
-    label: "image sif length, at least",
-    target: "root",
-    kind: "min",
-    at: 1,
-    build: (n) => set(LAUNCH, "image.sif", "s".repeat(n)),
   },
   {
     label: "env value length",

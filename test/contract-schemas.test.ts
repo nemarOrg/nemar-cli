@@ -716,7 +716,7 @@ describe("old-CLI compatibility: no schema in the contract is strict", () => {
         image: {
           uri: `docker://ghcr.io/example/runtime@sha256:${HEX}`,
           digest: `sha256:${HEX}`,
-          sif: "runtime.sif",
+          sif: `${HEX}.sif`,
         },
         env: {},
         resources: { gpus: 0 },

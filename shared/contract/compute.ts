@@ -432,6 +432,12 @@ export const LAUNCHER_ENV = {
   LOCAL_DATASETS_ROOT: "NEMAR_LOCAL_DATASETS_ROOT",
   /** An optional override of the host Python that runs the launcher. */
   HOST_PYTHON: "NEMAR_HOST_PYTHON",
+  /**
+   * The directory on the node that holds the Singularity image files, set by the Tapis application
+   * definition. The launch specification's `image.sif` is a basename relative to it. REQUIRED: the
+   * launcher has no fallback, and ends `image_missing` when it is unset.
+   */
+  SIF_ROOT: "NEMAR_SIF_ROOT",
 } as const;
 
 /**
@@ -567,9 +573,9 @@ export function launchVariableBytes(spec: {
  * {@link JobSpecSchema} rather than by per-field caps: a non-ASCII character costs six bytes once
  * escaped, so no per-field cap that is generous for ASCII could also be safe for any mix. The
  * variable part may take 48 KiB; the rest of the document, at its own worst case (a 512-character
- * `api_base` and image reference, a 256-character token and `sif`, twenty datasets of 64-character
- * versions, the keys and brackets), is about 4 KiB, which `launchSpecFits` and a test check; the bound leaves
- * the rest of the 64 KiB as slack for a field that grows.
+ * `api_base` and image reference, a 256-character token, the 68-character image file name, twenty
+ * datasets of 64-character versions, the keys and brackets), is under 4 KiB, which `launchSpecFits`
+ * and a test check; the bound leaves the rest of the 64 KiB as slack for a field that grows.
  */
 export const LAUNCH_VARIABLE_BYTES_MAX = 49_152;
 

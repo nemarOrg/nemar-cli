@@ -123,13 +123,9 @@
           "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])"
         },
         "sif": {
-          "description": "The Singularity image file on the node that the launcher runs: a relative path of non-empty segments of letters, digits and ._+-, not starting with '-', with no . or .. segment and no leading or trailing slash.",
+          "description": "The Singularity image file the launcher runs: exactly the basename <64 lowercase hex>.sif, the file name of the SIF built from the image's digest, relative to the directory in the environment variable NEMAR_SIF_ROOT. NEMAR_SIF_ROOT is required: the launcher has no fallback and ends image_missing when it is unset. Cross-field rule this schema cannot express: the 64 hex digits of image.digest followed by .sif must equal this value. NEMAR enforces it where it writes the document (its encoder refuses one that breaks it), so every launch specification it hands the launcher satisfies it. The launcher does not verify the file's content hash: the name is all that ties the file to the digest.",
           "type": "string",
-          "maxLength": 256,
-          "pattern": "^(?!-)[A-Za-z0-9_.+-]+(?:/[A-Za-z0-9_.+-]+)*(?![\\s\\S])",
-          "not": {
-            "pattern": "(?:^|/)\\.\\.?(?:/|$)"
-          }
+          "pattern": "^[0-9a-f]{64}\\.sif(?![\\s\\S])"
         }
       }
     },
