@@ -110,7 +110,7 @@ describe("the keys the ledger writes of itself", () => {
   test("a caller's key can never be one of them: a grant, an adjustment or an expiry that tries is refused", async () => {
     const w = world();
     const { person, job } = await held(w);
-    const taken = [holdKey(job), finalKey(job), refundKey(job), `hold:1:charge`, "job:x"];
+    const taken = [holdKey(job), finalKey(job), refundKey(job), "hold:1:charge", "job:x"];
     for (const idempotencyKey of taken) {
       await expect(
         grantPool(w.d1, { poolId: person.id, amountMilli: 1, actorUserId: 1, idempotencyKey }),
