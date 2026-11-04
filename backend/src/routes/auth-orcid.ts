@@ -27,10 +27,13 @@
  * Unlink needs no browser at all and takes a bearer token directly.
  *
  * Linking is initiated via `GET /auth/orcid/start?mode=link` and completed in
- * the same callback (the callback links to whichever user the session cookie
- * resolves to), so there is no separate `POST /auth/orcid/link` route in the
- * issue's sketch -- the callback covers it. Noted here so the divergence from
- * the issue's 4-route list is intentional, not an omission.
+ * the same callback (in a link flow, the callback links to the user the session
+ * cookie resolves to), so there is no separate `POST /auth/orcid/link` route in
+ * the issue's sketch -- the callback covers it. Noted here so the divergence from
+ * the issue's 4-route list is intentional, not an omission. A plain sign-in
+ * (`mode=login`) never links to a session's account: it signs in the account
+ * the iD names, or starts a sign-up, and always mints a fresh session (ADR 0119
+ * rule 10).
  *
  * Re-linking (#913): Settings' confirm step submits a form POST to
  * `/auth/orcid/start?mode=relink` — POST is the ONLY entry that can mint
@@ -823,6 +826,16 @@ authOrcidRoutes.get("/orcid/callback", webSessionMiddleware, async (c) => {
     // #1269 review). The handoff already refused it once; this is the same
     // rule at the other end, because the two steps are minutes apart and a
     // browser can sign in between them.
+    //
+    // A website flow attaches the iD to the session's account ONLY when it was
+    // started as a link (`link` or `relink` in the state cookie). A plain
+    // sign-in never does, whatever session cookie the browser holds: the
+    // account is the one the iD itself names, or a new one, and the sign-in
+    // mints a fresh session for it below. Two rules rest on that (ADR 0119
+    // rule 10): an iD is never attached to an account by a cookie the person
+    // did not choose to link from, and every completed sign-in ends with a new
+    // session, which is what the authorization endpoint waits for when it
+    // asks for one.
     let actingUserId: number | null = null;
     if (cliState) {
       if (sessionDisagreesWithIntent(c.var.webUser, cliState)) {
@@ -837,14 +850,12 @@ authOrcidRoutes.get("/orcid/callback", webSessionMiddleware, async (c) => {
         return fail("orcid_intent_used", state.next);
       }
       actingUserId = cliUser.id;
-    } else if (c.var.webUser) {
+    } else if ((state.mode === "link" || state.mode === "relink") && c.var.webUser) {
       actingUserId = c.var.webUser.id;
     }
 
-    // An already-authenticated session (or a CLI intent) => link to that user
-    // (regardless of the start mode, so a logged-in user can never
-    // accidentally spawn a duplicate account). The default landing is the
-    // carried `next` (the onboarding gate passes /welcome).
+    // A link flow with a session (or a CLI intent) => link to that user. The
+    // default landing is the carried `next` (Settings passes /settings).
     if (actingUserId !== null) {
       const outcome = decideLinkOutcome(ident?.user_id ?? null, actingUserId);
       if (outcome === "conflict") return fail("orcid_linked_other", state.next);
@@ -902,8 +913,10 @@ authOrcidRoutes.get("/orcid/callback", webSessionMiddleware, async (c) => {
       return fail("orcid_relink_session");
     }
 
-    // No session: sign in the linked account, or hand a brand-new ORCID off to
-    // email collection (ORCID returns no email; users.email is NOT NULL).
+    // A sign-in (or a link with no session): sign in the account the iD names,
+    // with a fresh session whatever cookie the browser already holds, or hand a
+    // brand-new ORCID off to email collection (ORCID returns no email;
+    // users.email is NOT NULL).
     if (ident) {
       const user = await loadActiveUser(c.env, ident.user_id);
       if (!user) return fail("orcid_account");

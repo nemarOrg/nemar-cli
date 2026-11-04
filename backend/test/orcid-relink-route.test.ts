@@ -236,15 +236,23 @@ describe("callback relink wiring (#913)", () => {
     const user = seedUser("relink-refuse@nemar.test", OLD_ID);
     linkIdentity(user.id, OLD_ID);
 
-    for (const mode of ["link", "login"]) {
-      const res = await app.request(
-        callbackReq([stateCookie(mode), await sessionCookie(user.id)]),
-        undefined,
-        env(),
-      );
-      expect(res.status).toBe(302);
-      expect(res.headers.get("Location")).toContain("error=orcid_already_have");
-    }
+    const res = await app.request(
+      callbackReq([stateCookie("link"), await sessionCookie(user.id)]),
+      undefined,
+      env(),
+    );
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toContain("error=orcid_already_have");
+
+    // A plain sign-in never touches the session's account (ADR 0119 rule 10): the finished iD
+    // belongs to nobody, so it is a new sign-up and the account keeps its own iD.
+    const signIn = await app.request(
+      callbackReq([stateCookie("login"), await sessionCookie(user.id)]),
+      undefined,
+      env(),
+    );
+    expect(signIn.status).toBe(302);
+    expect(signIn.headers.get("Location")).toContain("/auth/orcid/complete");
     const ident = db
       .query<{ provider_subject: string }, [number]>(
         "SELECT provider_subject FROM oauth_identities WHERE user_id = ?",
