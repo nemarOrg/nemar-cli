@@ -18,7 +18,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join, relative } from "node:path";
 import {
   ComputeLedgerError,
@@ -87,7 +87,6 @@ async function held(
     budgetPoolId: budget.id,
     amountMilli: o.holdMilli ?? 5000,
     jobId: job,
-    idempotencyKey: `hold-${next()}`,
   });
   return { person, budget, job, hold };
 }
@@ -198,7 +197,6 @@ describe("a hold", () => {
         budgetPoolId: budget.id,
         amountMilli: milli,
         jobId: jobId(next()),
-        idempotencyKey: `hold-${next()}`,
       });
     expect(await second(4001)).toEqual({ ok: false, code: "insufficient_balance" });
     expect((await second(4000)).ok).toBe(true);
@@ -215,7 +213,6 @@ describe("a hold", () => {
       budgetPoolId: null,
       amountMilli: 3000,
       jobId: jobId(next()),
-      idempotencyKey: `hold-${next()}`,
     });
     expect(r.ok).toBe(true);
     expect(availableMilli(await reread(w, pipelines))).toBe(5000);
@@ -231,71 +228,41 @@ describe("a hold", () => {
         budgetPoolId: budget.id,
         amountMilli: 1,
         jobId: jobId(next()),
-        idempotencyKey: `hold-${next()}`,
       }),
     ).rejects.toMatchObject({ code: "pool_not_found" });
     expect(await count(w)).toBe(0);
   });
 
-  test("a second hold of the same job under another key is refused as a held job", async () => {
-    const w = world();
-    const { person, budget, job } = await held(w, { budgetMilli: 50000 });
-    const again = await placeHold(w.d1, {
-      poolId: person.id,
-      budgetPoolId: budget.id,
-      amountMilli: 100,
-      jobId: job,
-      idempotencyKey: `hold-${next()}`,
-    });
-    expect(again).toEqual({ ok: false, code: "job_already_held" });
-    expect(await count(w, "kind = 'hold'")).toBe(1);
-    expect(availableMilli(await reread(w, person))).toBe(95000);
-  });
-
-  test("a replayed key returns the first hold; the same key for another request is a conflict", async () => {
+  test("a hold of the same job again is a replay of the first, and moves no total", async () => {
     const w = world();
     const { person, budget, job, hold } = await held(w, { budgetMilli: 50000, holdMilli: 5000 });
     expect(hold.ok).toBe(true);
     if (!hold.ok) return;
-    const input = {
+    const again = await placeHold(w.d1, {
       poolId: person.id,
       budgetPoolId: budget.id,
       amountMilli: 5000,
       jobId: job,
-      idempotencyKey: hold.entry.idempotency_key,
-    };
-    const replay = await placeHold(w.d1, input);
-    expect(replay).toEqual({ ok: true, replayed: true, entry: hold.entry });
-    for (const other of [
-      { ...input, amountMilli: 5001 },
-      { ...input, jobId: jobId(next()) },
-      { ...input, budgetPoolId: null },
-    ]) {
-      await expect(placeHold(w.d1, other)).rejects.toMatchObject({ code: "idempotency_conflict" });
-    }
+    });
+    expect(again).toEqual({ ok: true, replayed: true, entry: hold.entry });
     expect(await count(w, "kind = 'hold'")).toBe(1);
     expect(availableMilli(await reread(w, person))).toBe(95000);
   });
 
-  test("a key already used by an entry of another kind is a conflict, not a replay", async () => {
+  test("a spend on an account pool that names no budget is refused by the table, and writes nothing", async () => {
     const w = world();
-    const person = await ensurePool(w.d1, "account", "31", "cpu");
-    const budget = await platform(w, "people", "cpu");
-    await grantPool(w.d1, {
-      poolId: person.id,
-      amountMilli: 9000,
-      actorUserId: 1,
-      idempotencyKey: "shared-key",
-    });
+    const person = await ensurePool(w.d1, "account", "32", "cpu");
+    await grant(w, person, 9000);
+    const before = await count(w);
     await expect(
       placeHold(w.d1, {
         poolId: person.id,
-        budgetPoolId: budget.id,
+        budgetPoolId: null,
         amountMilli: 1,
         jobId: jobId(next()),
-        idempotencyKey: "shared-key",
       }),
-    ).rejects.toMatchObject({ code: "idempotency_conflict" });
+    ).rejects.toThrow(/names the platform people budget/);
+    expect(await count(w)).toBe(before);
   });
 
   test("composes into a batch: a statement after it that checks changes() runs only if it was written", async () => {
@@ -317,7 +284,6 @@ describe("a hold", () => {
           budgetPoolId: budget.id,
           amountMilli: amount,
           jobId: jobId(next()),
-          idempotencyKey: `hold-${next()}`,
         }),
         markIfHeld(tag),
       ]);
@@ -347,7 +313,6 @@ describe("a hold", () => {
           budgetPoolId: budget.id,
           amountMilli: 1000,
           jobId: jobId(next()),
-          idempotencyKey: `hold-${next()}`,
           extraGuards: [limitedTo(2, person.id)],
         });
       expect((await place()).ok).toBe(true);
@@ -367,7 +332,6 @@ describe("a hold", () => {
         budgetPoolId: budget.id,
         amountMilli: 1,
         jobId: jobId(next()),
-        idempotencyKey: `hold-${next()}`,
       };
       for (const bad of [
         { sql: "? = ?", binds: [1] },
@@ -405,7 +369,6 @@ describe("a refused hold writes nothing", () => {
         budgetPoolId: budget.id,
         amountMilli: amount,
         jobId: jobId(next()),
-        idempotencyKey: `hold-${next()}`,
         extraGuards: guards as never,
       });
     const before = snapshot(w);
@@ -431,7 +394,6 @@ describe("a refused hold writes nothing", () => {
       budgetPoolId: budget.id,
       amountMilli: amount,
       jobId: jobId(next()),
-      idempotencyKey: `hold-${next()}`,
     });
     // Nothing granted to either: the person is short first.
     expect(await placeHold(w.d1, input(1))).toEqual({ ok: false, code: "insufficient_balance" });
@@ -479,7 +441,6 @@ describe("integer thousandths only", () => {
               budgetPoolId: budget.id,
               amountMilli: amount,
               jobId: jobId(next()),
-              idempotencyKey: `hold-${next()}`,
             }),
         ],
         [
@@ -540,7 +501,6 @@ describe("integer thousandths only", () => {
           budgetPoolId: budget.id,
           amountMilli: 1,
           jobId: jobId(next()),
-          idempotencyKey: `hold-${next()}`,
         }),
       ).rejects.toMatchObject({ code: "invalid_argument" });
       await expect(
@@ -558,7 +518,6 @@ describe("integer thousandths only", () => {
         budgetPoolId: 1.5,
         amountMilli: 1,
         jobId: jobId(next()),
-        idempotencyKey: `hold-${next()}`,
       }),
     ).rejects.toMatchObject({ code: "invalid_argument" });
     await expect(
@@ -582,7 +541,7 @@ describe("integer thousandths only", () => {
     expect(r).toMatchObject({ ok: true, chargedMilli: 0, releasedMilli: 5000, overrunMilli: 0 });
   });
 
-  test("a job id, a key and a reason that the table would refuse are refused first", async () => {
+  test("a job id, a key and a reason that the table would refuse (and a key the ledger writes) are refused first", async () => {
     const w = world();
     const person = await ensurePool(w.d1, "account", "52", "cpu");
     const budget = await platform(w, "people", "cpu");
@@ -592,14 +551,14 @@ describe("integer thousandths only", () => {
         budgetPoolId: budget.id,
         amountMilli: 1,
         jobId: jobId(next()),
-        idempotencyKey: `hold-${next()}`,
         ...over,
       } as never);
     await expect(hold({ jobId: "job_nope" })).rejects.toMatchObject({ code: "invalid_argument" });
-    await expect(hold({ idempotencyKey: "has space" })).rejects.toMatchObject({
-      code: "invalid_argument",
-    });
-    await expect(hold({ idempotencyKey: "" })).rejects.toMatchObject({ code: "invalid_argument" });
+    for (const idempotencyKey of ["has space", "", "k".repeat(129), "job:x", "hold:1:charge"]) {
+      await expect(
+        grantPool(w.d1, { poolId: person.id, amountMilli: 1, actorUserId: 1, idempotencyKey }),
+      ).rejects.toMatchObject({ code: "invalid_argument" });
+    }
     await expect(
       grantPool(w.d1, {
         poolId: person.id,
@@ -631,37 +590,40 @@ describe("a release", () => {
 });
 
 describe("a hold closes once", () => {
-  const settledTwice = async (first: "release" | "settle", second: "release" | "settle") => {
+  /**
+   * Close a hold one way, then try every way of closing it again: the same step is a replay of the
+   * first (it writes nothing), the other step is `hold_closed` and says which closed it, and a
+   * settlement with another figure is `hold_closed` too. Nothing moves in any of them.
+   */
+  const closedTwice = async (first: "release" | "settle") => {
     const w = world();
     const { person, budget, job } = await held(w, { budgetMilli: 50000, holdMilli: 5000 });
-    const run = (which: "release" | "settle") =>
+    const run = (which: "release" | "settle", chargeMilli = 3000) =>
       which === "release"
         ? releaseHold(w.d1, { jobId: job })
-        : settleProvisional(w.d1, { jobId: job, chargeMilli: 3000 });
-    expect((await run(first)).ok).toBe(true);
+        : settleProvisional(w.d1, { jobId: job, chargeMilli });
+    const firstResult = await run(first);
+    expect(firstResult).toMatchObject({ ok: true, replayed: false });
     const entries = await count(w);
     const poolAfter = await reread(w, person);
     const budgetAfter = await reread(w, budget);
-    expect(await run(second)).toEqual({ ok: false, code: "hold_closed" });
-    // A second settle with another figure is no different: it is closed.
-    expect(await settleProvisional(w.d1, { jobId: job, chargeMilli: 99999 })).toEqual({
-      ok: false,
-      code: "hold_closed",
-    });
+    const by = first === "release" ? "released" : "settled";
+    const other = first === "release" ? "settle" : "release";
+    expect(await run(first)).toEqual({ ...(firstResult as object), replayed: true });
+    expect(await run(other)).toEqual({ ok: false, code: "hold_closed", closedBy: by });
+    expect(await run("settle", 99999)).toEqual({ ok: false, code: "hold_closed", closedBy: by });
     expect(await count(w)).toBe(entries);
     expect(await reread(w, person)).toEqual(poolAfter);
     expect(await reread(w, budget)).toEqual(budgetAfter);
     expect(await totalsDisagreements(w.d1)).toEqual([]);
   };
 
-  test("a settle cannot be settled again, or released", async () => {
-    await settledTwice("settle", "settle");
-    await settledTwice("settle", "release");
+  test("a settle is replayed by the same step, and refuses the other", async () => {
+    await closedTwice("settle");
   });
 
-  test("a release cannot be released again, or settled", async () => {
-    await settledTwice("release", "release");
-    await settledTwice("release", "settle");
+  test("a release is replayed by the same step, and refuses the other", async () => {
+    await closedTwice("release");
   });
 
   test("a job that was never held has nothing to close", async () => {
@@ -744,7 +706,6 @@ describe("a provisional settlement", () => {
         budgetPoolId: budget.id,
         amountMilli: 1,
         jobId: jobId(next()),
-        idempotencyKey: `hold-${next()}`,
       }),
     ).toEqual({ ok: false, code: "insufficient_balance" });
     // Until a grant brings it back above zero.
@@ -801,15 +762,15 @@ describe("the final settlement", () => {
     expect(await totalsDisagreements(w.d1)).toEqual([]);
   });
 
-  test("is once per job: a second figure, the same or another, writes nothing", async () => {
+  test("is once per job: another figure writes nothing, and the same figure is a replay", async () => {
     const w = world();
     const { person, job } = await held(w, { budgetMilli: 50000, holdMilli: 5000 });
     await settle(w, job, 3000);
     await settleFinal(w.d1, { jobId: job, finalMilli: 3500 });
     const entries = await count(w);
-    expect(await settleFinal(w.d1, { jobId: job, finalMilli: 3500 })).toEqual({
-      ok: false,
-      code: "already_final",
+    expect(await settleFinal(w.d1, { jobId: job, finalMilli: 3500 })).toMatchObject({
+      ok: true,
+      replayed: true,
     });
     expect(await settleFinal(w.d1, { jobId: job, finalMilli: 9000 })).toEqual({
       ok: false,
@@ -817,19 +778,6 @@ describe("the final settlement", () => {
     });
     expect(await count(w)).toBe(entries);
     expect((await reread(w, person)).charged_milli).toBe(3500);
-  });
-
-  test("a figure equal to the provisional charge is no entry at all", async () => {
-    const w = world();
-    const { job } = await held(w, { budgetMilli: 50000, holdMilli: 5000 });
-    await settle(w, job, 3000);
-    const entries = await count(w);
-    expect(await settleFinal(w.d1, { jobId: job, finalMilli: 3000 })).toEqual({
-      ok: true,
-      deltaMilli: 0,
-      entry: null,
-    });
-    expect(await count(w)).toBe(entries);
   });
 
   test("needs the hold to have been settled: not before, not after a release", async () => {
@@ -852,7 +800,7 @@ describe("the final settlement", () => {
 });
 
 describe("a refund", () => {
-  test("returns the whole charge of a job, an overrun and an adjustment included, once", async () => {
+  test("returns the whole charge of a job, an overrun and an adjustment included, once (a repeat is a replay)", async () => {
     const w = world();
     const { person, budget, job } = await held(w, { budgetMilli: 50000, holdMilli: 5000 });
     await settleProvisional(w.d1, { jobId: job, chargeMilli: 6000 });
@@ -863,7 +811,7 @@ describe("a refund", () => {
     expect([p.charged_milli, availableMilli(p)]).toEqual([0, 100000]);
     expect((await reread(w, budget)).charged_milli).toBe(0);
     const entries = await count(w);
-    expect(await refundJob(w.d1, { jobId: job })).toEqual({ ok: false, code: "already_refunded" });
+    expect(await refundJob(w.d1, { jobId: job })).toMatchObject({ ok: true, replayed: true });
     expect(await count(w)).toBe(entries);
     expect(await totalsDisagreements(w.d1)).toEqual([]);
   });
@@ -985,12 +933,20 @@ describe("a correction the platform budget could not follow", () => {
     const w = world();
     const person = await ensurePool(w.d1, "account", "81", "cpu");
     const budget = await platform(w, "people", "cpu");
-    // The person has 500 charged that the budget never counted (an overrun written without it).
+    // The person has 500 charged, and the owner then took the budget's charge back: the person
+    // holds what the budget no longer does.
     await grant(w, person, 1000);
-    w.db.run(
-      "INSERT INTO compute_ledger (kind, pool_id, charged_delta_milli, job_id, idempotency_key) VALUES ('overrun', ?, 500, ?, 'seed-81')",
-      [person.id, jobId(next())],
-    );
+    const charge = (poolId: number, budgetPoolId: number | null, chargedDeltaMilli: number) =>
+      adjustPool(w.d1, {
+        poolId,
+        budgetPoolId,
+        chargedDeltaMilli,
+        actorUserId: 9,
+        reason: "correction",
+        idempotencyKey: `adjust-${next()}`,
+      });
+    expect((await charge(person.id, budget.id, 500)).ok).toBe(true);
+    expect((await charge(budget.id, null, -500)).ok).toBe(true);
     const before = await count(w);
     expect(
       await adjustPool(w.d1, {
@@ -1063,10 +1019,13 @@ describe("an administrator's grant and adjustment", () => {
   test("an adjustment corrects the grant or the charge, either way, and exactly one of them", async () => {
     const w = world();
     const p = await ensurePool(w.d1, "account", "64", "cpu");
+    const people = await platform(w, "people", "cpu");
     await grant(w, p, 10000);
+    // The charge of an account's pool is counted against the people budget, which the table needs named.
     const adjust = (over: Record<string, unknown>) =>
       adjustPool(w.d1, {
         poolId: p.id,
+        budgetPoolId: over.chargedDeltaMilli === undefined ? null : people.id,
         actorUserId: 9,
         reason: "correction",
         idempotencyKey: `adjust-${next()}`,
@@ -1326,7 +1285,6 @@ describe("a seeded random sequence of every operation", () => {
           budgetPoolId: useBudget ? (p.pool === "cpu" ? budgets.cpu.id : budgets.gpu.id) : null,
           amountMilli: amount(15000),
           jobId: job,
-          idempotencyKey: `hold-${next()}`,
         });
         if (r.ok) {
           tally.holds++;
@@ -1437,8 +1395,57 @@ describe("a seeded random sequence of every operation", () => {
 describe("no path writes a pool's totals except a ledger entry", () => {
   const ROOT = join(import.meta.dir, "..", "..");
   const TOTALS = /\b(granted|held|charged)_milli\b/;
+  const TRIGGER_FILE = "0114_compute_ledger.sql";
 
-  /** Every TypeScript and SQL file the product ships, by relative path. */
+  /**
+   * One table's name as SQL may write it: bare, quoted four ways (double, single, backtick,
+   * bracket) and with a schema in front (`main.`, `"main".`, `main .`).
+   */
+  const table = (name: string) => `(?:[\\w"'\`\\[\\]]+\\s*\\.\\s*)?["'\`\\[]?${name}\\b["'\`\\]]?`;
+  const POOLS = table("compute_pools");
+  const LEDGER = table("compute_ledger");
+  const BODY = "[^;`]{0,2000}";
+  const statement = (verb: string, target: string) =>
+    new RegExp(`${verb}\\s+${target}${BODY}`, "gi");
+
+  /** Every statement of a text that writes one of the two tables in a way nothing may. */
+  function scanText(path: string, text: string): string[] {
+    const offences: string[] = [];
+    const flag = (m: RegExpMatchArray) =>
+      offences.push(`${path}: ${m[0].replace(/\s+/g, " ").slice(0, 90)}`);
+    const trigger = path.endsWith(TRIGGER_FILE);
+    // A total written by an UPDATE of the pools, in any spelling of the table and of the verb;
+    // only the migration's own trigger may.
+    for (const m of text.matchAll(statement("UPDATE(?:\\s+OR\\s+\\w+)?", POOLS))) {
+      if (TOTALS.test(m[0]) && !trigger) flag(m);
+    }
+    // A pool made with a total in it is a write of the total that no entry accounts for.
+    for (const m of text.matchAll(statement("INSERT(?:\\s+OR\\s+\\w+)?\\s+INTO", POOLS))) {
+      if (TOTALS.test(m[0])) flag(m);
+    }
+    // No conflict clause on an INSERT into the ledger: `OR IGNORE` and `OR FAIL` override the
+    // clause inside the trigger, and `OR REPLACE` rewrites a row without the append-only trigger.
+    for (const m of text.matchAll(statement("INSERT\\s+OR\\s+\\w+\\s+INTO", LEDGER))) flag(m);
+    for (const m of text.matchAll(statement("INSERT\\s+OR\\s+REPLACE\\s+INTO", POOLS))) flag(m);
+    // REPLACE on either table, and a delete from either.
+    for (const target of [POOLS, LEDGER]) {
+      for (const m of text.matchAll(statement("REPLACE\\s+INTO", target))) flag(m);
+      for (const m of text.matchAll(statement("DELETE\\s+FROM", target))) flag(m);
+    }
+    // An upsert that updates a total is a write of it too.
+    for (const m of text.matchAll(/ON\s+CONFLICT[^;`]{0,400}?DO\s+UPDATE[^;`]{0,400}/gi)) {
+      if (TOTALS.test(m[0])) flag(m);
+    }
+    return offences;
+  }
+
+  /** The files that name a trigger on the pools: a trigger that writes a total is a writer of it. */
+  function triggersOnPools(text: string): number {
+    const on = new RegExp(`CREATE\\s+(?:TEMP(?:ORARY)?\\s+)?TRIGGER[^;]*?\\bON\\s+${POOLS}`, "gi");
+    return [...text.matchAll(on)].length;
+  }
+
+  /** Every TypeScript, JavaScript and SQL file the product ships, by relative path. */
   function sources(): Array<{ path: string; text: string }> {
     const out: Array<{ path: string; text: string }> = [];
     const walk = (dir: string) => {
@@ -1446,56 +1453,112 @@ describe("no path writes a pool's totals except a ledger entry", () => {
         if (entry.name === "node_modules" || entry.name === ".wrangler") continue;
         const full = join(dir, entry.name);
         if (entry.isDirectory()) walk(full);
-        else if (/\.(ts|tsx|sql|js)$/.test(entry.name)) {
+        else if (/\.(ts|tsx|sql|js|mjs)$/.test(entry.name)) {
           out.push({ path: relative(ROOT, full), text: readFileSync(full, "utf8") });
         }
       }
     };
-    for (const dir of ["backend/src", "src", "shared", "scripts"]) walk(join(ROOT, dir));
+    for (const dir of ["backend/src", "backend/scripts", "src", "shared", "scripts"]) {
+      if (existsSync(join(ROOT, dir))) walk(join(ROOT, dir));
+    }
     return out;
   }
 
-  /** The statements of a file that name the pools or the ledger, as text from the verb to the `;` or backtick. */
-  function statements(text: string): string[] {
-    return [
-      ...text.matchAll(
-        /\b(UPDATE|DELETE\s+FROM|INSERT(?:\s+OR\s+\w+)?\s+INTO|REPLACE\s+INTO)\s+compute_(?:pools|ledger)\b[^;`]*/gi,
-      ),
-    ].map((m) => m[0]);
-  }
-
-  test("the scan reads the files it is meant to, and finds the trigger", () => {
+  test("the scan reads the files it is meant to, and finds the trigger it exempts", () => {
     const all = sources();
     expect(all.length).toBeGreaterThan(200);
-    const migration = all.find((s) => s.path.endsWith("0114_compute_ledger.sql"));
+    const migration = all.find((s) => s.path.endsWith(TRIGGER_FILE));
     expect(migration).toBeDefined();
-    expect(statements(migration?.text ?? "").some((s) => /^UPDATE\s+compute_pools/i.test(s))).toBe(
-      true,
-    );
+    // The trigger's own UPDATE is seen by the scan (so the exemption is what lets it pass) ...
+    expect(scanText("x/other.sql", migration?.text ?? "").length).toBeGreaterThan(0);
+    expect(scanText(`x/${TRIGGER_FILE}`, migration?.text ?? "")).toEqual([]);
+  });
+
+  /** Statements that must each be refused: every spelling the review found past the old scan. */
+  const PLANTED = [
+    "UPDATE compute_pools SET held_milli = 0",
+    "update compute_pools\n   set granted_milli = granted_milli + 1",
+    "UPDATE OR IGNORE compute_pools SET held_milli = 0",
+    "UPDATE OR REPLACE compute_pools SET charged_milli = 1",
+    "UPDATE OR FAIL compute_pools SET charged_milli = 1",
+    "UPDATE main.compute_pools SET granted_milli = 1",
+    'UPDATE "compute_pools" SET granted_milli = 1',
+    "UPDATE [compute_pools] SET granted_milli = 1",
+    "UPDATE `compute_pools` SET held_milli = 1",
+    "UPDATE 'compute_pools' SET held_milli = 1",
+    'UPDATE "main"."compute_pools" SET held_milli = 1',
+    "UPDATE [main].[compute_pools] SET held_milli = 1",
+    "UPDATE main . compute_pools SET held_milli = 1",
+    'UPDATE OR IGNORE main."compute_pools" SET held_milli = 1',
+    "INSERT OR IGNORE INTO compute_ledger (kind) VALUES ('grant')",
+    "INSERT OR FAIL INTO compute_ledger (kind) VALUES ('grant')",
+    "INSERT OR REPLACE INTO compute_ledger (kind) VALUES ('grant')",
+    "INSERT OR ROLLBACK INTO main.compute_ledger (kind) VALUES ('grant')",
+    'INSERT OR IGNORE INTO "compute_ledger" (kind) VALUES (1)',
+    "REPLACE INTO compute_ledger (kind) VALUES ('grant')",
+    "REPLACE INTO compute_pools (id) VALUES (1)",
+    'REPLACE INTO "main"."compute_pools" (id) VALUES (1)',
+    "INSERT OR REPLACE INTO compute_pools (id) VALUES (1)",
+    "DELETE FROM compute_ledger WHERE id = 1",
+    'DELETE FROM "compute_pools"',
+    "DELETE FROM main.compute_pools",
+    "INSERT INTO compute_pools (holder_kind, holder_ref, pool, granted_milli) VALUES (1, 1, 1, 5)",
+    "INSERT INTO compute_pools (holder_kind, holder_ref, pool, charged_milli) VALUES (1, 1, 1, 5)",
+    "INSERT OR IGNORE INTO compute_pools (holder_kind, held_milli) VALUES (1, 5)",
+    "INSERT INTO t (a) VALUES (1) ON CONFLICT (a) DO UPDATE SET granted_milli = 5",
+  ];
+
+  test("every planted spelling of a write is refused (the scan is not blind to a quoted name, a schema or a conflict clause)", () => {
+    for (const planted of PLANTED) {
+      expect([
+        planted,
+        scanText("backend/src/x.ts", `const q = \`${planted}\`;`).length > 0,
+      ]).toEqual([planted, true]);
+      // And in a migration of another number, where even the trigger's own UPDATE is no exemption.
+      expect([
+        planted,
+        scanText("backend/src/db/migrations/0200_x.sql", `${planted};`).length > 0,
+      ]).toEqual([planted, true]);
+    }
+  });
+
+  test("what the service and the trigger legitimately write is not refused", () => {
+    const fine = [
+      "UPDATE compute_pools SET frozen = 1 WHERE id = 1",
+      'UPDATE "compute_pools" SET frozen = 0',
+      "UPDATE compute_pools SET updated_at = datetime('now') WHERE id = 1",
+      "INSERT INTO compute_pools (holder_kind, holder_ref, pool) VALUES ('platform', 'x', 'cpu')",
+      "INSERT INTO compute_pools (holder_kind, holder_ref, pool) VALUES (?1, ?2, ?3) ON CONFLICT (holder_kind, holder_ref, pool) DO NOTHING",
+      "INSERT INTO compute_ledger (kind, pool_id) VALUES ('grant', 1)",
+      "INSERT INTO other_table (granted_milli) VALUES (1)",
+      "UPDATE other_table SET granted_milli = 1",
+      "SELECT held_milli FROM compute_pools",
+      "-- UPDATE compute_pools is described here",
+    ];
+    for (const sql of fine.slice(0, -1)) {
+      expect([sql, scanText("backend/src/x.ts", `const q = \`${sql}\`;`)]).toEqual([sql, []]);
+    }
   });
 
   test("only migration 0114's trigger writes a pool's totals, and nothing deletes or replaces a pool or an entry", () => {
-    const offences: string[] = [];
-    for (const { path, text } of sources()) {
-      for (const s of statements(text)) {
-        const trigger = path.endsWith("0114_compute_ledger.sql");
-        // A pool made with a total in it is a write of the total that no entry accounts for.
-        if (/^INSERT[\s\S]*INTO\s+compute_pools/i.test(s) && TOTALS.test(s)) {
-          offences.push(`${path}: ${s.slice(0, 80)}`);
-        }
-        if (/^UPDATE\s+compute_pools/i.test(s) && TOTALS.test(s) && !trigger) {
-          offences.push(`${path}: ${s.slice(0, 80)}`);
-        }
-        if (/^(DELETE\s+FROM|REPLACE\s+INTO|INSERT\s+OR\s+REPLACE)/i.test(s)) {
-          offences.push(`${path}: ${s.slice(0, 80)}`);
-        }
-      }
-      // An upsert that updates a total is a write of it too.
-      for (const m of text.matchAll(/ON\s+CONFLICT[^;`]*DO\s+UPDATE[^;`]*/gi)) {
-        if (TOTALS.test(m[0])) offences.push(`${path}: ${m[0].slice(0, 80)}`);
-      }
-    }
+    const offences = sources().flatMap(({ path, text }) => scanText(path, text));
     expect(offences).toEqual([]);
+  });
+
+  test("migration 0114 is the only file that creates a trigger on compute_pools", () => {
+    const files = sources().filter((s) => triggersOnPools(s.text) > 0);
+    expect(files.map((f) => f.path)).toEqual([expect.stringContaining(TRIGGER_FILE)]);
+    // The count it sees in the migration is the two it creates, and a planted one is seen.
+    expect(triggersOnPools(files[0]?.text ?? "")).toBe(2);
+    expect(
+      triggersOnPools("CREATE TRIGGER t AFTER INSERT ON compute_pools BEGIN SELECT 1; END;"),
+    ).toBe(1);
+    expect(
+      triggersOnPools(
+        'CREATE TRIGGER t BEFORE UPDATE OF a ON "main"."compute_pools" BEGIN SELECT 1; END;',
+      ),
+    ).toBe(1);
+    expect(triggersOnPools("CREATE TRIGGER t AFTER INSERT ON other BEGIN SELECT 1; END;")).toBe(0);
   });
 
   test("the service's inserts into the pools name no total", () => {

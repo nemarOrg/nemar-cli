@@ -14,7 +14,8 @@
  * operations every pool's totals still equal the sums of its ledger.
  *
  * The ledger is append-only, so nothing can be cleaned up between tests: each test makes its own
- * pools, jobs and keys, and its own platform budget where it needs to know exactly what is left.
+ * pools and jobs; the `people` budget is the one shared pool every account's spend is counted
+ * against (the table says so), so a test that needs to know what is left sets it first.
  */
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
@@ -25,6 +26,7 @@ import {
   availableMilli,
   ensurePool,
   expireUnused,
+  getPool,
   grantPool,
   placeHold,
   refundJob,
@@ -85,12 +87,35 @@ async function grant(pool: PoolRow, amountMilli: number) {
   expect(r.ok).toBe(true);
 }
 
-/** A person with `personMilli` and a platform budget of `budgetMilli` that only this test uses. */
+/**
+ * The shared platform `people` budget, set to have exactly `n` available: by a grant to it when it
+ * has less, and by a hold on a throwaway person when it has more. The table says an account's spend
+ * is counted against this one pool, so a test that needs to know what is left sets it first.
+ */
+async function budgetWith(n: number): Promise<PoolRow> {
+  const budget = await ensurePool(d1, "platform", "people", "cpu");
+  const have = availableMilli((await getPool(d1, budget.id)) as PoolRow);
+  if (have < n) {
+    await grant(budget, n - have);
+  } else if (have > n) {
+    const burner = await ensurePool(d1, "account", String(300000 + next()), "cpu");
+    await grant(burner, have - n);
+    const burn = await placeHold(d1, {
+      poolId: burner.id,
+      budgetPoolId: budget.id,
+      amountMilli: have - n,
+      jobId: jobId(next()),
+    });
+    expect(burn.ok).toBe(true);
+  }
+  return budget;
+}
+
+/** A person with `personMilli` and the platform budget with exactly `budgetMilli` available. */
 async function scene(personMilli: number, budgetMilli: number) {
   const person = await ensurePool(d1, "account", String(300000 + next()), "cpu");
-  const budget = await ensurePool(d1, "platform", `race${next()}`, "cpu");
   if (personMilli > 0) await grant(person, personMilli);
-  if (budgetMilli > 0) await grant(budget, budgetMilli);
+  const budget = await budgetWith(budgetMilli);
   return { person, budget };
 }
 
@@ -98,14 +123,13 @@ function hold(
   person: PoolRow,
   budget: PoolRow,
   amountMilli: number,
-  over: { jobId?: string; idempotencyKey?: string } = {},
+  over: { jobId?: string } = {},
 ): Promise<HoldResult> {
   return placeHold(d1, {
     poolId: person.id,
     budgetPoolId: budget.id,
     amountMilli,
     jobId: over.jobId ?? jobId(next()),
-    idempotencyKey: over.idempotencyKey ?? `race-hold-${next()}`,
   });
 }
 
@@ -126,10 +150,9 @@ describe("two holds for the last SU", () => {
     for (let round = 0; round < 25; round++) {
       const { person, budget } = await scene(1000, 100000);
       const jobs = [jobId(next()), jobId(next())];
-      const keys = [`race-hold-${next()}`, `race-hold-${next()}`];
       const results = await Promise.all([
-        hold(person, budget, 1000, { jobId: jobs[0], idempotencyKey: keys[0] }),
-        hold(person, budget, 1000, { jobId: jobs[1], idempotencyKey: keys[1] }),
+        hold(person, budget, 1000, { jobId: jobs[0] }),
+        hold(person, budget, 1000, { jobId: jobs[1] }),
       ]);
       const winners = results.filter((r) => r.ok);
       const losers = results.filter((r) => !r.ok);
@@ -139,13 +162,14 @@ describe("two holds for the last SU", () => {
       const lost = 1 - won;
       expect(await holdRows(person.id)).toBe(1);
       const stray = await d1
-        .prepare("SELECT COUNT(*) AS n FROM compute_ledger WHERE job_id = ? OR idempotency_key = ?")
-        .bind(jobs[lost], keys[lost])
+        .prepare("SELECT COUNT(*) AS n FROM compute_ledger WHERE job_id = ?")
+        .bind(jobs[lost])
         .first<{ n: number }>();
       expect(stray?.n).toBe(0);
       const t = await poolTotals(d1, person.id);
       expect([t.held_milli, availableMilli(t)]).toEqual([1000, 0]);
-      expect((await poolTotals(d1, budget.id)).held_milli).toBe(1000);
+      // The budget is the shared one: this round set it to 100000 available, and took 1000.
+      expect(availableMilli(await poolTotals(d1, budget.id))).toBe(99000);
     }
     expect(await totalsDisagreements(d1)).toEqual([]);
   });
@@ -178,8 +202,7 @@ describe("two holds for the last SU", () => {
 
 describe("the platform budget", () => {
   test("the last SU of the budget goes to one of two people, and the other is platform_budget_exhausted", async () => {
-    const budget = await ensurePool(d1, "platform", `race${next()}`, "cpu");
-    await grant(budget, 1000);
+    const budget = await budgetWith(1000);
     const a = await ensurePool(d1, "account", String(300000 + next()), "cpu");
     const b = await ensurePool(d1, "account", String(300000 + next()), "cpu");
     await grant(a, 5000);
@@ -190,7 +213,7 @@ describe("the platform budget", () => {
     const loser = results[0]?.ok ? b : a;
     expect(await poolTotals(d1, loser.id)).toMatchObject({ held_milli: 0 });
     expect(await holdRows(loser.id)).toBe(0);
-    expect((await poolTotals(d1, budget.id)).held_milli).toBe(1000);
+    expect(availableMilli(await poolTotals(d1, budget.id))).toBe(0);
     expect(await totalsDisagreements(d1)).toEqual([]);
   });
 
@@ -206,22 +229,37 @@ describe("the platform budget", () => {
   });
 });
 
-describe("a job has one hold", () => {
-  test("a second hold of a job under another key is job_already_held on D1 too, and writes nothing", async () => {
+describe("a job has one hold, and its key is the job's", () => {
+  test("a second request for a job's hold that differs is idempotency_conflict on D1 too, and writes nothing", async () => {
     const { person, budget } = await scene(9000, 100000);
     const job = jobId(next());
     expect((await hold(person, budget, 1000, { jobId: job })).ok).toBe(true);
-    const results = await Promise.all([
-      hold(person, budget, 1000, { jobId: job }),
-      hold(person, budget, 1000, { jobId: job }),
+    const outcomes = await Promise.allSettled([
+      hold(person, budget, 1001, { jobId: job }),
+      hold(person, budget, 999, { jobId: job }),
     ]);
-    expect(results).toEqual([
-      { ok: false, code: "job_already_held" },
-      { ok: false, code: "job_already_held" },
-    ]);
+    for (const o of outcomes) {
+      expect(o.status).toBe("rejected");
+      expect((o as PromiseRejectedResult).reason).toMatchObject({ code: "idempotency_conflict" });
+    }
     expect(await holdRows(person.id)).toBe(1);
     expect((await poolTotals(d1, person.id)).held_milli).toBe(1000);
     expect(await totalsDisagreements(d1)).toEqual([]);
+  });
+
+  test("two concurrent requests for the same hold write one, and both are told so", async () => {
+    for (let round = 0; round < 10; round++) {
+      const { person, budget } = await scene(5000, 100000);
+      const job = jobId(next());
+      const results = await Promise.all([
+        hold(person, budget, 2000, { jobId: job }),
+        hold(person, budget, 2000, { jobId: job }),
+      ]);
+      expect(results.every((r) => r.ok)).toBe(true);
+      expect(results.filter((r) => r.ok && !r.replayed)).toHaveLength(1);
+      expect(await holdRows(person.id)).toBe(1);
+      expect((await poolTotals(d1, person.id)).held_milli).toBe(2000);
+    }
   });
 });
 
@@ -241,16 +279,15 @@ describe("a frozen pool", () => {
   });
 });
 
-describe("a replayed idempotency key", () => {
-  test("returns the first hold and moves no total", async () => {
+describe("a replayed hold or grant", () => {
+  test("a hold replayed by its job returns the first hold and moves no total", async () => {
     const { person, budget } = await scene(5000, 100000);
     const job = jobId(next());
-    const key = `race-hold-${next()}`;
-    const first = await hold(person, budget, 2000, { jobId: job, idempotencyKey: key });
+    const first = await hold(person, budget, 2000, { jobId: job });
     expect(first.ok).toBe(true);
     const totalsBefore = await poolTotals(d1, person.id);
     const budgetBefore = await poolTotals(d1, budget.id);
-    const again = await hold(person, budget, 2000, { jobId: job, idempotencyKey: key });
+    const again = await hold(person, budget, 2000, { jobId: job });
     expect(again.ok && again.replayed).toBe(true);
     if (first.ok && again.ok) expect(again.entry).toEqual(first.entry);
     expect(await poolTotals(d1, person.id)).toEqual(totalsBefore);
@@ -258,32 +295,14 @@ describe("a replayed idempotency key", () => {
     expect(await holdRows(person.id)).toBe(1);
   });
 
-  test("returns the first hold even when the pool could not take it again", async () => {
+  test("a hold replayed is returned even when the pool could not take it again", async () => {
     const { person, budget } = await scene(1000, 100000);
     const job = jobId(next());
-    const key = `race-hold-${next()}`;
-    const first = await hold(person, budget, 1000, { jobId: job, idempotencyKey: key });
-    expect(first.ok).toBe(true);
+    expect((await hold(person, budget, 1000, { jobId: job })).ok).toBe(true);
     // Nothing is left, so a fresh hold of the same size is refused, but the replay is not.
     expect(await hold(person, budget, 1000)).toEqual({ ok: false, code: "insufficient_balance" });
-    const again = await hold(person, budget, 1000, { jobId: job, idempotencyKey: key });
+    const again = await hold(person, budget, 1000, { jobId: job });
     expect(again.ok && again.replayed).toBe(true);
-  });
-
-  test("two concurrent requests with one key write one hold, and both are told so", async () => {
-    for (let round = 0; round < 10; round++) {
-      const { person, budget } = await scene(5000, 100000);
-      const job = jobId(next());
-      const key = `race-hold-${next()}`;
-      const results = await Promise.all([
-        hold(person, budget, 2000, { jobId: job, idempotencyKey: key }),
-        hold(person, budget, 2000, { jobId: job, idempotencyKey: key }),
-      ]);
-      expect(results.every((r) => r.ok)).toBe(true);
-      expect(results.filter((r) => r.ok && !r.replayed)).toHaveLength(1);
-      expect(await holdRows(person.id)).toBe(1);
-      expect((await poolTotals(d1, person.id)).held_milli).toBe(2000);
-    }
   });
 
   test("two concurrent grants with one key grant once", async () => {
@@ -317,7 +336,6 @@ describe("a caller's own guard", () => {
           budgetPoolId: budget.id,
           amountMilli: 1000,
           jobId: jobId(next()),
-          idempotencyKey: `race-hold-${next()}`,
           extraGuards: [limit],
         }),
       ),
@@ -342,7 +360,11 @@ describe("closing a hold", () => {
         settleProvisional(d1, { jobId: job, chargeMilli: 4500 }),
       ]);
       expect(results.filter((r) => r.ok)).toHaveLength(1);
-      expect(results.find((r) => !r.ok)).toEqual({ ok: false, code: "hold_closed" });
+      expect(results.find((r) => !r.ok)).toEqual({
+        ok: false,
+        code: "hold_closed",
+        closedBy: "settled",
+      });
       const t = await poolTotals(d1, person.id);
       expect([t.held_milli, t.charged_milli === 3000 || t.charged_milli === 4500]).toEqual([
         0,
@@ -392,8 +414,7 @@ describe("closing a hold", () => {
 describe("a crowd of mixed concurrent operations", () => {
   test("leaves every pool's totals equal to its ledger's sums, and none negative", async () => {
     const rand = seeded(7);
-    const budget = await ensurePool(d1, "platform", `race${next()}`, "cpu");
-    await grant(budget, 80000);
+    const budget = await budgetWith(80000);
     const people: PoolRow[] = [];
     for (let i = 0; i < 4; i++) {
       const p = await ensurePool(d1, "account", String(300000 + next()), "cpu");

@@ -9,41 +9,61 @@
  * THE RULES, each one deliberate:
  *  - Nothing here writes a total. Every function inserts a ledger entry; the migration's AFTER
  *    INSERT trigger takes its deltas into the pool's row (and its held and charged deltas into the
- *    budget pool's), in the same statement. So the totals can never disagree with the ledger, "only
- *    if the entry was written" needs no second statement, and an entry the totals refuse (a stored
- *    total may not go negative) is not written either. A test reads every source file for a write
- *    of a total that is not the trigger's.
+ *    budget pool's), in the same statement. So the totals can never disagree with the ledger and
+ *    "only if the entry was written" needs no second statement. A test reads every source file for a
+ *    write of a total that is not the trigger's.
+ *  - The table refuses what the statements here refuse. Its BEFORE INSERT triggers refuse an entry
+ *    whose pool or budget totals would leave 0 to 2^53 - 1, a hold that would take available below 0,
+ *    a spend on an account or partner pool that names no `people` budget (or names another), and a
+ *    release or charge that does not close the hold it names, under every conflict clause. The
+ *    statements below say the same as WHERE terms, so that a refusal writes nothing and raises
+ *    nothing; a caller that skips them is refused by the table with an error.
  *  - A hold is ONE conditional INSERT (`HOLD_INSERT_SQL`): the pool not frozen, the pool's
  *    available at least the amount, the budget pool's available at least the amount, the key unused
  *    and any guard the caller adds, all in its WHERE. D1 runs a statement whole, so two holds for the
  *    last SU cannot both be written, and a refused hold writes nothing (ADR 0099; the claim of
  *    upstream-repull-dispatch.ts is the precedent). `meta.changes` is the winner test, and the
- *    reasons are read only after a refusal, to say which one.
+ *    reasons are read only after a refusal, to say which one. Freezing applies to the holder's own
+ *    pool; a frozen budget pool does not refuse a hold.
  *  - A closing entry is one INSERT too, taken from the hold row itself (`RELEASE_INSERT_SQL`,
- *    `SETTLE_INSERT_SQL`): the amounts are the hold's, so a caller cannot misstate them, and the hold
- *    must be open in the same statement, so a hold closes once. A settlement's charge and any
- *    overrun are one statement.
+ *    `SETTLE_INSERT_SQL`): the HELD side and the release are the hold's, so a caller cannot misstate
+ *    them, and the hold must be open in the same statement, so a hold closes once. The CHARGED
+ *    figure of a settlement is the caller's, capped at the hold; what it used above the hold is an
+ *    `overrun` entry written by the same statement.
  *  - The unique indexes are the backstop and the WHERE terms are the ordinary path. A statement that
  *    reached a hold that was already closed, or a step already taken, would be refused by
  *    `compute_ledger_closes_once` or by the unique key, and the caller reads that as closed; the
  *    `NOT EXISTS` terms make the ordinary refusal a statement that writes nothing and raises
  *    nothing, so the two layers answer alike.
  *  - Available is granted minus held minus charged and MAY BE NEGATIVE (an overrun, or an
- *    adjustment of the grant below what is used, is a fact that already happened). It is computed
- *    in BigInt, so it is exact at the largest total. A stored total never is negative.
+ *    adjustment of the grant below what is used, is a fact that already happened). It is computed in
+ *    Number arithmetic over totals that are checked to be safe integers, so it is exact within
+ *    +-(2^53 - 1) and throws beyond; the SQL compares 64-bit integers. A stored total never is
+ *    negative or beyond 2^53 - 1.
  *  - Arithmetic is integer. Every amount is checked to be a safe whole number before a statement is
  *    built (`ComputeLedgerError`, `invalid_argument`), so a fraction, NaN or a number a double
  *    cannot hold exactly never reaches SQL; the table refuses what slips past (`typeof`).
- *  - A retry is safe. Every entry has a unique key; a hold, a grant, an adjustment and an expiry
- *    take the caller's, and the entries the Worker writes for a job take a key made of the job (or
- *    the hold) and the step (`hold:<id>:charge`, `job:<id>:final`), so a step happens once. A key
- *    that finds its entry returns it, and a key reused for a different request is a conflict.
+ *  - A retry is safe, and a key is never shared. Every entry has a unique key. The Worker's own keys
+ *    are made of the job (`job:<id>:hold`, `:final`, `:refund`) or the hold (`hold:<id>:charge`), so
+ *    no caller builds a colliding one (a caller's key may not start with `job:` or `hold:`); a grant,
+ *    an adjustment and an expiry take the caller's, which an administrator's route scopes to the
+ *    actor (`adminKey`). A key that finds its entry returns it only if the request is the same on
+ *    EVERY field (kind, pool, budget, amounts, job and reason), and a key reused for anything else is
+ *    a conflict.
+ *  - A closing step is replayed: the closing entry comes back with `replayed: true` when it is of the
+ *    requested kind, and `hold_closed` says which kind closed the hold otherwise.
  *  - Nothing here mails, calls GitHub or Tapis, or is a cron. The job table and the job-count
  *    guards on a hold are phase A3's: `placeHold` takes a caller's own guards and writes nothing.
  */
 
-import { COMPUTE_WORD_RE, type LedgerEntryKind } from "../../../shared/compute-state.js";
 import {
+  type COMPUTE_LEDGER_REASONS,
+  COMPUTE_WORD_RE,
+  type ComputeRefusalCode,
+  type LedgerEntryKind,
+} from "../../../shared/compute-state.js";
+import {
+  type COMPUTE_PLATFORM_KEYS,
   COMPUTE_POOL_HOLDER_KINDS,
   type ComputePoolHolderKind,
 } from "../../../shared/contract/compute-admin.js";
@@ -53,22 +73,31 @@ import {
   type ComputePool,
 } from "../../../shared/contract/compute.js";
 
-export const POOL_HOLDER_KINDS = COMPUTE_POOL_HOLDER_KINDS;
-export type PoolHolderKind = ComputePoolHolderKind;
-
-/** The largest amount: what a double holds exactly, and what the table's CHECKs allow. */
-export const MAX_MILLI = Number.MAX_SAFE_INTEGER;
-
 /** A ledger key: 1 to 128 letters, digits and `. _ : -`, which is what the table accepts. */
 export const LEDGER_KEY_RE = /^[A-Za-z0-9._:-]{1,128}$/;
+
+/** The keys the ledger writes of itself start with these, so a caller's key may not. */
+const RESERVED_KEY_RE = /^(job|hold):/;
+
+/** The largest a stored total may be: what a double holds exactly, and what the table allows. */
+const TOTAL_MAX = Number.MAX_SAFE_INTEGER;
 
 /** A pool's holder, as the table's CHECK takes it. */
 const HOLDER_REF_RE = /^[A-Za-z0-9_.-]{1,64}$/;
 const ACCOUNT_REF_RE = /^[1-9][0-9]*$/;
 
+/** The reasons the service writes when its caller names none, from the one list of them. */
+const REASON = {
+  grant: "grant",
+  released: "released",
+  refund: "refund",
+  expired: "expired",
+  final: "final_settlement",
+} as const satisfies Record<string, (typeof COMPUTE_LEDGER_REASONS)[number]>;
+
 export interface PoolRow {
   id: number;
-  holder_kind: PoolHolderKind;
+  holder_kind: ComputePoolHolderKind;
   holder_ref: string;
   pool: ComputePool;
   granted_milli: number;
@@ -116,6 +145,27 @@ const invalid = (message: string): never => {
   throw new ComputeLedgerError("invalid_argument", message);
 };
 
+// --- The keys the ledger writes ---------------------------------------------------------------
+
+/** A job's hold: a job has one, so its key is the job's, and no caller picks one. */
+export const holdKey = (jobId: string): string => `job:${jobId}:hold`;
+
+/** A job's final settlement, once. */
+export const finalKey = (jobId: string): string => `job:${jobId}:final`;
+
+/** A job's refund, once. */
+export const refundKey = (jobId: string): string => `job:${jobId}:refund`;
+
+/**
+ * An administrator's key as the ledger stores it: behind the kind of entry and the actor, so two
+ * administrators sending the same key each make their own entry, and no key an administrator sends
+ * is one the ledger writes. 8 to 100 characters of header, an actor id of at most 16 digits and the
+ * two separators fit the table's 128.
+ */
+export function adminKey(kind: "grant" | "adjust", actorId: number, key: string): string {
+  return `${kind}:${positiveId("an actor", actorId)}:${key}`;
+}
+
 // --- Arguments -------------------------------------------------------------------------------
 
 /** A whole number of milli-SU from `min` to the largest a double holds exactly. */
@@ -148,9 +198,13 @@ function jobIdArg(value: unknown): string {
   return value;
 }
 
+/** A key a caller chose: the table's shape, and not one the ledger writes of itself. */
 function keyArg(value: unknown): string {
   if (typeof value !== "string" || !LEDGER_KEY_RE.test(value)) {
     return invalid("an idempotency key is 1 to 128 letters, digits and . _ : -");
+  }
+  if (RESERVED_KEY_RE.test(value)) {
+    return invalid("an idempotency key may not start with job: or hold:, which the ledger writes");
   }
   return value;
 }
@@ -218,11 +272,11 @@ export async function getPool(db: D1Database, id: number): Promise<PoolRow | nul
  */
 export async function ensurePool(
   db: D1Database,
-  holderKind: PoolHolderKind,
+  holderKind: ComputePoolHolderKind,
   holderRef: string,
   pool: ComputePool,
 ): Promise<PoolRow> {
-  if (!(POOL_HOLDER_KINDS as readonly string[]).includes(holderKind)) {
+  if (!(COMPUTE_POOL_HOLDER_KINDS as readonly string[]).includes(holderKind)) {
     return invalid("a pool's holder is an account, the platform or a partner");
   }
   if (!(COMPUTE_POOLS as readonly string[]).includes(pool)) {
@@ -251,8 +305,43 @@ const ENTRY_COLUMNS = `id, kind, pool_id, budget_pool_id, granted_delta_milli, h
 
 export const ENTRY_BY_KEY_SQL = `SELECT ${ENTRY_COLUMNS} FROM compute_ledger WHERE idempotency_key = ?1`;
 
-async function entryByKey(db: D1Database, key: string): Promise<LedgerRow | null> {
+/** The entry that holds a key, or null. */
+export async function findEntryByKey(db: D1Database, key: string): Promise<LedgerRow | null> {
   return db.prepare(ENTRY_BY_KEY_SQL).bind(key).first<LedgerRow>();
+}
+
+/** What a request says it is, field by field; a stored entry must agree on every one named. */
+type RequestFields = Partial<
+  Pick<
+    LedgerRow,
+    | "kind"
+    | "pool_id"
+    | "budget_pool_id"
+    | "granted_delta_milli"
+    | "held_delta_milli"
+    | "charged_delta_milli"
+    | "job_id"
+    | "reason"
+  >
+>;
+
+/**
+ * The entry a key found, as a replay, if the request is the same on every field it names; the key
+ * reused for anything else throws `idempotency_conflict`. The one copy of that rule.
+ */
+function replayOrConflict(
+  entry: LedgerRow,
+  request: RequestFields,
+): { ok: true; replayed: true; entry: LedgerRow } {
+  for (const [field, value] of Object.entries(request) as Array<[keyof RequestFields, unknown]>) {
+    if (entry[field] !== value) {
+      throw new ComputeLedgerError(
+        "idempotency_conflict",
+        "that idempotency key was used for a different request",
+      );
+    }
+  }
+  return { ok: true, replayed: true, entry };
 }
 
 /** The audit row an administrator's entry leaves, written only if the entry before it was. */
@@ -271,6 +360,18 @@ export interface LedgerAudit {
   action: string;
 }
 
+const looksUnique = (err: unknown) => /UNIQUE constraint failed/i.test(String(err));
+
+/** Run a statement that may meet a unique index (a step taken twice): the rows it wrote, 0 if it did. */
+async function runOrZero(statement: D1PreparedStatement): Promise<number> {
+  try {
+    return (await statement.run()).meta?.changes ?? 0;
+  } catch (err) {
+    if (looksUnique(err)) return 0;
+    throw err;
+  }
+}
+
 /** Run an entry's INSERT, with its audit row in the same batch when there is one; the rows it wrote. */
 async function writeEntry(
   db: D1Database,
@@ -284,11 +385,8 @@ async function writeEntry(
     ]);
     return results[0]?.meta?.changes ?? 0;
   }
-  const result = await insert.run();
-  return result.meta?.changes ?? 0;
+  return runOrZero(insert);
 }
-
-const looksUnique = (err: unknown) => /UNIQUE constraint failed/i.test(String(err));
 
 // --- Hold ------------------------------------------------------------------------------------
 
@@ -304,18 +402,18 @@ export interface HoldGuard {
 
 export interface HoldInput {
   poolId: number;
-  /** The platform pool this spend is also counted against, or null for the platform's own pool. */
+  /** The platform `people` pool of the pool's word; null for the platform's own pool. */
   budgetPoolId: number | null;
   amountMilli: number;
   jobId: string;
-  idempotencyKey: string;
   extraGuards?: readonly HoldGuard[];
 }
 
 /**
  * The hold, with no guard of the caller's. `?1` pool, `?2` budget pool (NULL for none), `?3` amount,
- * `?4` job, `?5` key. One INSERT whose WHERE is every condition; it inserts a row or none, and the
- * trigger of migration 0114 takes the held amount into both pools in the same statement.
+ * `?4` job, `?5` key (the job's, `holdKey`). One INSERT whose WHERE is every condition; it inserts a
+ * row or none, and the trigger of migration 0114 takes the held amount into both pools in the same
+ * statement.
  */
 export const HOLD_INSERT_SQL = `INSERT INTO compute_ledger
   (kind, pool_id, budget_pool_id, held_delta_milli, job_id, idempotency_key)
@@ -347,9 +445,8 @@ export function holdStatements(db: D1Database, input: HoldInput): D1PreparedStat
     input.budgetPoolId === null ? null : positiveId("a budget pool", input.budgetPoolId);
   const milli = amount("a hold", input.amountMilli, 1);
   const job = jobIdArg(input.jobId);
-  const key = keyArg(input.idempotencyKey);
   let sql = HOLD_INSERT_SQL;
-  const binds: unknown[] = [poolId, budget, milli, job, key];
+  const binds: unknown[] = [poolId, budget, milli, job, holdKey(job)];
   for (const guard of input.extraGuards ?? []) {
     const { sql: part, count } = numberedGuard(guard.sql, binds.length + 1);
     const values = guard.binds ?? [];
@@ -360,65 +457,41 @@ export function holdStatements(db: D1Database, input: HoldInput): D1PreparedStat
   return [db.prepare(sql).bind(...binds)];
 }
 
-export type HoldRefusal =
-  | "insufficient_balance"
-  | "suspended"
-  | "platform_budget_exhausted"
-  /** The caller's own guard refused it; the caller knows which. */
-  | "guard_refused"
-  /** The job already has a hold, under another key. */
-  | "job_already_held";
+/** Why a hold was refused: three words of the gateway's own vocabulary and the caller's guard. */
+export type HoldRefusal = Extract<
+  ComputeRefusalCode,
+  "insufficient_balance" | "suspended" | "platform_budget_exhausted" | "guard_refused"
+>;
 
 export type HoldResult =
   | { ok: true; replayed: boolean; entry: LedgerRow }
   | { ok: false; code: HoldRefusal };
 
-/** A key that found an entry is a replay only if it is the same hold. */
-function sameHold(entry: LedgerRow, input: HoldInput): boolean {
-  return (
-    entry.kind === "hold" &&
-    entry.pool_id === input.poolId &&
-    entry.budget_pool_id === input.budgetPoolId &&
-    entry.held_delta_milli === input.amountMilli &&
-    entry.job_id === input.jobId
-  );
-}
-
 /**
  * Take a hold, or say why not. One INSERT decides (`HOLD_INSERT_SQL`), and a refusal writes
  * nothing. On a refusal the pool and the budget are read to name the reason, in this order: a
  * frozen pool is `suspended`, a pool without the amount is `insufficient_balance`, a budget without
- * it is `platform_budget_exhausted`, and a refusal none of those explains is the caller's own guard.
- * A replayed key returns the original hold; the same key for another request throws
- * `idempotency_conflict`.
+ * it is `platform_budget_exhausted`; a refusal none of those explains is the caller's own guard when
+ * one was passed, and otherwise `insufficient_balance` (the balance moved between the refusal and
+ * the read). The hold's key is the job's, so a hold of the same job again is a replay of the first
+ * when it is the same request on every field, and `idempotency_conflict` when it is not.
  */
 export async function placeHold(db: D1Database, input: HoldInput): Promise<HoldResult> {
   const [insert] = holdStatements(db, input);
-  let changes: number;
-  try {
-    changes = (await (insert as D1PreparedStatement).run()).meta?.changes ?? 0;
-  } catch (err) {
-    // A second hold of a job under another key meets the one-hold-per-job index.
-    if (looksUnique(err) && /compute_ledger\.job_id/.test(String(err))) {
-      return { ok: false, code: "job_already_held" };
-    }
-    throw err;
-  }
+  const changes = await runOrZero(insert as D1PreparedStatement);
+  const entry = await findEntryByKey(db, holdKey(input.jobId));
   if (changes > 0) {
-    const entry = await entryByKey(db, input.idempotencyKey);
     if (!entry) throw new Error("a hold that was just written could not be read");
     return { ok: true, replayed: false, entry };
   }
-
-  const existing = await entryByKey(db, input.idempotencyKey);
-  if (existing) {
-    if (!sameHold(existing, input)) {
-      throw new ComputeLedgerError(
-        "idempotency_conflict",
-        "that idempotency key was used for a different request",
-      );
-    }
-    return { ok: true, replayed: true, entry: existing };
+  if (entry) {
+    return replayOrConflict(entry, {
+      kind: "hold",
+      pool_id: input.poolId,
+      budget_pool_id: input.budgetPoolId,
+      held_delta_milli: input.amountMilli,
+      job_id: input.jobId,
+    });
   }
 
   const pool = await getPool(db, input.poolId);
@@ -432,24 +505,29 @@ export async function placeHold(db: D1Database, input: HoldInput): Promise<HoldR
       return { ok: false, code: "platform_budget_exhausted" };
     }
   }
-  return { ok: false, code: "guard_refused" };
+  const guarded = (input.extraGuards?.length ?? 0) > 0;
+  return { ok: false, code: guarded ? "guard_refused" : "insufficient_balance" };
 }
 
 // --- Closing a hold --------------------------------------------------------------------------
 
-/** The job's hold, and whether it is still open (nothing closed it). */
-const HOLD_OF_JOB_SQL = `SELECT h.id, h.pool_id, h.budget_pool_id, h.held_delta_milli,
-    EXISTS (SELECT 1 FROM compute_ledger c WHERE c.hold_ref = h.id AND c.kind IN ('release', 'charge'))
-      AS closed
+/**
+ * The job's hold, and which kind of entry closed it (`release` or `charge`), or null while it is
+ * open. `compute_ledger_closes_once` is the index the closing lookup uses.
+ */
+export const HOLD_OF_JOB_SQL = `SELECT h.id AS id,
+    (SELECT c.kind FROM compute_ledger c
+      WHERE c.hold_ref = h.id AND c.kind IN ('release', 'charge')) AS closed_by
   FROM compute_ledger h WHERE h.kind = 'hold' AND h.job_id = ?1`;
 
 interface HoldOfJob {
   id: number;
-  pool_id: number;
-  budget_pool_id: number | null;
-  held_delta_milli: number;
-  closed: number;
+  closed_by: "release" | "charge" | null;
 }
+
+/** The entries that closed a job's hold: the release, or the charge and any overrun, in order. */
+export const CLOSING_ENTRIES_SQL = `SELECT ${ENTRY_COLUMNS} FROM compute_ledger
+  WHERE job_id = ?1 AND kind IN ('release', 'charge', 'overrun') ORDER BY id`;
 
 /**
  * A release, taken from the open hold of the job: `?1` the job, `?2` the reason (or NULL). The
@@ -467,10 +545,10 @@ export const RELEASE_INSERT_SQL = `INSERT INTO compute_ledger
 
 /**
  * A settlement, taken from the open hold of the job: `?1` the job, `?2` what the job used. One
- * INSERT of up to two rows: the `charge` (the hold leaves `held`; what was used, at most the hold,
- * enters `charged`, so the rest of the hold is released by it), and an `overrun` for what was used
- * above the hold. Both read the open hold in this statement, so a hold settles once, and the two
- * rows are written together or not at all.
+ * INSERT of up to two rows: the `charge` (the hold leaves `held`, which is the hold's own amount;
+ * what was used, at most the hold, enters `charged`, so the rest of the hold is released by it), and
+ * an `overrun` for what was used above the hold. Both read the open hold in this statement, so a
+ * hold settles once, and the two rows are written together or not at all.
  */
 export const SETTLE_INSERT_SQL = `INSERT INTO compute_ledger
   (kind, pool_id, budget_pool_id, held_delta_milli, charged_delta_milli, job_id, hold_ref,
@@ -489,47 +567,44 @@ export const SETTLE_INSERT_SQL = `INSERT INTO compute_ledger
      AND NOT EXISTS (SELECT 1 FROM compute_ledger c
                       WHERE c.hold_ref = h.id AND c.kind IN ('release', 'charge'))`;
 
-export type CloseRefusal = "no_hold" | "hold_closed";
+export type CloseRefusal =
+  | { ok: false; code: "no_hold" }
+  /** The hold was closed, by a release (`released`) or by a settlement (`settled`). */
+  | { ok: false; code: "hold_closed"; closedBy: "released" | "settled" };
 
-/** Why a closing statement wrote nothing: the job has no hold, or its hold is closed. */
-async function whyNotClosed(db: D1Database, job: string): Promise<CloseRefusal> {
-  const hold = await db.prepare(HOLD_OF_JOB_SQL).bind(job).first<HoldOfJob>();
-  return hold ? "hold_closed" : "no_hold";
+async function closingEntries(db: D1Database, job: string): Promise<LedgerRow[]> {
+  return (await db.prepare(CLOSING_ENTRIES_SQL).bind(job).all<LedgerRow>()).results;
 }
 
 export type ReleaseResult =
-  | { ok: true; holdId: number; releasedMilli: number }
-  | { ok: false; code: CloseRefusal };
+  | { ok: true; replayed: boolean; holdId: number; releasedMilli: number }
+  | CloseRefusal;
 
 /**
- * Give the job's whole hold back (a job that never started). The hold must be open: one that was
- * released or settled writes nothing and is `hold_closed`; a job with no hold is `no_hold`.
+ * Give the job's whole hold back (a job that never started). A release replayed returns the
+ * release (`replayed: true`); a hold that a settlement closed is `hold_closed` (`closedBy:
+ * 'settled'`); a job with no hold is `no_hold`.
  */
 export async function releaseHold(
   db: D1Database,
   input: { jobId: string; reason?: string },
 ): Promise<ReleaseResult> {
   const job = jobIdArg(input.jobId);
-  const reason = reasonArg(input.reason, "released");
-  let changes: number;
-  try {
-    changes = (await db.prepare(RELEASE_INSERT_SQL).bind(job, reason).run()).meta?.changes ?? 0;
-  } catch (err) {
-    if (looksUnique(err)) return { ok: false, code: "hold_closed" };
-    throw err;
-  }
-  if (changes === 0) return { ok: false, code: await whyNotClosed(db, job) };
-  const entry = await db
-    .prepare(`SELECT ${ENTRY_COLUMNS} FROM compute_ledger WHERE job_id = ?1 AND kind = 'release'`)
-    .bind(job)
-    .first<LedgerRow>();
+  const reason = reasonArg(input.reason, REASON.released);
+  const wrote = (await runOrZero(db.prepare(RELEASE_INSERT_SQL).bind(job, reason))) > 0;
+  const hold = await db.prepare(HOLD_OF_JOB_SQL).bind(job).first<HoldOfJob>();
+  if (!hold) return { ok: false, code: "no_hold" };
+  if (hold.closed_by === "charge") return { ok: false, code: "hold_closed", closedBy: "settled" };
+  if (hold.closed_by === null) throw new Error("a hold that a release found open was not closed");
+  const entry = (await closingEntries(db, job)).find((e) => e.kind === "release");
   if (!entry) throw new Error("a release that was just written could not be read");
-  return { ok: true, holdId: entry.hold_ref as number, releasedMilli: -entry.held_delta_milli };
+  return { ok: true, replayed: !wrote, holdId: hold.id, releasedMilli: -entry.held_delta_milli };
 }
 
 export type SettleResult =
   | {
       ok: true;
+      replayed: boolean;
       holdId: number;
       holdMilli: number;
       /** What entered `charged` through the charge entry: at most the hold. */
@@ -539,13 +614,14 @@ export type SettleResult =
       /** What was used above the hold, written as an `overrun` (available may go negative). */
       overrunMilli: number;
     }
-  | { ok: false; code: CloseRefusal };
+  | CloseRefusal;
 
 /**
  * Settle the job's hold provisionally, from what the job used (`chargeMilli`, 0 or more): one
  * `charge` entry closes the hold and enters at most the hold, the rest of the hold is released, and
  * any excess is an `overrun` entry written in the same statement. Available may then be negative.
- * A hold that was already released or settled writes nothing: `hold_closed`.
+ * A settlement replayed with the same figure returns it (`replayed: true`); another figure for a
+ * settled hold, or any figure for a released one, is `hold_closed` and says which closed it.
  */
 export async function settleProvisional(
   db: D1Database,
@@ -553,30 +629,26 @@ export async function settleProvisional(
 ): Promise<SettleResult> {
   const job = jobIdArg(input.jobId);
   const used = amount("a charge", input.chargeMilli, 0);
-  let changes: number;
-  try {
-    changes = (await db.prepare(SETTLE_INSERT_SQL).bind(job, used).run()).meta?.changes ?? 0;
-  } catch (err) {
-    if (looksUnique(err)) return { ok: false, code: "hold_closed" };
-    throw err;
+  const wrote = (await runOrZero(db.prepare(SETTLE_INSERT_SQL).bind(job, used))) > 0;
+  const hold = await db.prepare(HOLD_OF_JOB_SQL).bind(job).first<HoldOfJob>();
+  if (!hold) return { ok: false, code: "no_hold" };
+  if (hold.closed_by === "release") return { ok: false, code: "hold_closed", closedBy: "released" };
+  if (hold.closed_by === null) {
+    throw new Error("a hold that a settlement found open was not closed");
   }
-  if (changes === 0) return { ok: false, code: await whyNotClosed(db, job) };
-  const rows = (
-    await db
-      .prepare(
-        `SELECT ${ENTRY_COLUMNS} FROM compute_ledger
-          WHERE job_id = ?1 AND kind IN ('charge', 'overrun') ORDER BY id`,
-      )
-      .bind(job)
-      .all<LedgerRow>()
-  ).results;
+  const rows = await closingEntries(db, job);
   const charge = rows.find((r) => r.kind === "charge");
   if (!charge) throw new Error("a settlement that was just written could not be read");
   const overrun = rows.find((r) => r.kind === "overrun")?.charged_delta_milli ?? 0;
+  // A replay is of the same figure: what was charged and what overran are what the caller used.
+  if (!wrote && charge.charged_delta_milli + overrun !== used) {
+    return { ok: false, code: "hold_closed", closedBy: "settled" };
+  }
   const holdMilli = -charge.held_delta_milli;
   return {
     ok: true,
-    holdId: charge.hold_ref as number,
+    replayed: !wrote,
+    holdId: hold.id,
     holdMilli,
     chargedMilli: charge.charged_delta_milli,
     releasedMilli: holdMilli - charge.charged_delta_milli,
@@ -587,22 +659,36 @@ export async function settleProvisional(
 // --- Final settlement and refund -------------------------------------------------------------
 
 /**
- * What a job has been charged on its pool, and whether its hold was settled by a charge: `?1` the
- * job. Read only to say why a final settlement or a refund wrote nothing.
+ * What a job has been charged on its pool, and what happened to it: `?1` the job. `settled` (its
+ * hold was closed by a charge), `refunded` (a refund entry exists) and `total` (the sum of
+ * `charged_delta_milli` by job over its pool: the charge, the overrun, the final settlement and the
+ * refund). Driven from the hold, so every lookup is by the job's index.
  */
-const JOB_CHARGE_SQL = `SELECT
-    EXISTS (SELECT 1 FROM compute_ledger h JOIN compute_ledger c ON c.hold_ref = h.id AND c.kind = 'charge'
-             WHERE h.kind = 'hold' AND h.job_id = ?1) AS settled,
+export const JOB_CHARGE_SQL = `SELECT h.id AS hold_id,
+    EXISTS (SELECT 1 FROM compute_ledger c
+             WHERE c.hold_ref = h.id AND c.kind IN ('release', 'charge')
+               AND c.kind = 'charge') AS settled,
+    EXISTS (SELECT 1 FROM compute_ledger r
+             WHERE r.job_id = h.job_id AND r.kind = 'refund') AS refunded,
     COALESCE((SELECT SUM(e.charged_delta_milli) FROM compute_ledger e
-               JOIN compute_ledger h ON h.kind = 'hold' AND h.job_id = e.job_id AND h.pool_id = e.pool_id
-              WHERE e.job_id = ?1), 0) AS total`;
+               WHERE e.job_id = h.job_id AND e.pool_id = h.pool_id), 0) AS total
+  FROM compute_ledger h WHERE h.kind = 'hold' AND h.job_id = ?1`;
+
+interface JobCharge {
+  hold_id: number;
+  settled: number;
+  refunded: number;
+  total: number;
+}
 
 /**
  * The final settlement: `?1` the job, `?2` the figure Expanse's own accounting gave. One `adjust`
  * entry of the difference between that and everything already charged to the job on its pool (the
- * charge, any overrun, any earlier adjustment or refund), once per job (`job:<id>:final`), and only
- * after the hold was settled by a charge. A difference of 0 writes no entry, and one that would take
- * the pool's or the budget's charged below zero (an administrator already corrected it) writes none.
+ * charge, any overrun, any earlier refund), once per job (`job:<id>:final`), only after the hold was
+ * settled by a charge and never after a refund (a refund ends the job's charge, and a final
+ * settlement after it would charge again). A difference of 0 is still the entry: the key is what
+ * records that the final settlement happened. One that would take the pool's or the budget's
+ * charged below zero (an administrator already corrected it) writes nothing.
  */
 export const FINAL_INSERT_SQL = `INSERT INTO compute_ledger
   (kind, pool_id, budget_pool_id, charged_delta_milli, job_id, reason, idempotency_key)
@@ -613,23 +699,29 @@ export const FINAL_INSERT_SQL = `INSERT INTO compute_ledger
                                  WHERE e.job_id = h.job_id AND e.pool_id = h.pool_id), 0) AS delta
             FROM compute_ledger h
            WHERE h.kind = 'hold' AND h.job_id = ?1
-             AND EXISTS (SELECT 1 FROM compute_ledger c WHERE c.hold_ref = h.id AND c.kind = 'charge')) d
-   WHERE d.delta <> 0
-     AND (SELECT charged_milli FROM compute_pools WHERE id = d.pool_id) + d.delta >= 0
+             AND EXISTS (SELECT 1 FROM compute_ledger c
+                          WHERE c.hold_ref = h.id AND c.kind IN ('release', 'charge')
+                            AND c.kind = 'charge')) d
+   WHERE (SELECT charged_milli FROM compute_pools WHERE id = d.pool_id) + d.delta >= 0
      AND (d.budget_pool_id IS NULL
           OR (SELECT charged_milli FROM compute_pools WHERE id = d.budget_pool_id) + d.delta >= 0)
+     AND NOT EXISTS (SELECT 1 FROM compute_ledger r WHERE r.job_id = d.job_id AND r.kind = 'refund')
      AND NOT EXISTS (SELECT 1 FROM compute_ledger WHERE idempotency_key = 'job:' || d.job_id || ':final')`;
 
 export type FinalResult =
-  | { ok: true; deltaMilli: number; entry: LedgerRow | null }
-  | { ok: false; code: "not_settled" | "already_final" | "would_go_negative" };
+  | { ok: true; replayed: boolean; deltaMilli: number; entry: LedgerRow }
+  | {
+      ok: false;
+      code: "not_settled" | "already_final" | "refunded" | "would_go_negative";
+    };
 
 /**
  * Settle the job finally, to `finalMilli` (Expanse's own figure): an `adjust` of the charged delta
- * that brings the job's whole charge to it, once per job. `not_settled` when the hold was never
- * settled by a charge (open, released or never made); `already_final` when the figure was already
- * settled; a figure equal to the charge so far writes no entry (`deltaMilli` 0, `entry` null); a
- * correction that would take a stored total below zero is `would_go_negative` and writes nothing.
+ * that brings the job's whole charge to it, once per job, even when the figure is the charge
+ * already (an entry of nothing). The same figure again is a replay (`replayed: true`); another is
+ * `already_final`. `not_settled` when the hold was never settled by a charge (open, released or
+ * never made); `refunded` after a refund, whatever the figure; `would_go_negative` when a
+ * correction would take a stored total below zero, and nothing is written.
  */
 export async function settleFinal(
   db: D1Database,
@@ -637,30 +729,23 @@ export async function settleFinal(
 ): Promise<FinalResult> {
   const job = jobIdArg(input.jobId);
   const figure = amount("a final figure", input.finalMilli, 0);
-  const key = `job:${job}:final`;
-  let changes: number;
-  try {
-    changes = (await db.prepare(FINAL_INSERT_SQL).bind(job, figure).run()).meta?.changes ?? 0;
-  } catch (err) {
-    if (looksUnique(err)) return { ok: false, code: "already_final" };
-    throw err;
-  }
+  const changes = await runOrZero(db.prepare(FINAL_INSERT_SQL).bind(job, figure));
+  const entry = await findEntryByKey(db, finalKey(job));
   if (changes > 0) {
-    const entry = await entryByKey(db, key);
     if (!entry) throw new Error("a final settlement that was just written could not be read");
-    return { ok: true, deltaMilli: entry.charged_delta_milli, entry };
+    return { ok: true, replayed: false, deltaMilli: entry.charged_delta_milli, entry };
   }
-  if (await entryByKey(db, key)) return { ok: false, code: "already_final" };
-  const charged = await db
-    .prepare(JOB_CHARGE_SQL)
-    .bind(job)
-    .first<{ settled: number; total: number }>();
-  if (!charged || charged.settled === 0) return { ok: false, code: "not_settled" };
-  // Settled, and the figure is what is already charged: nothing to adjust. Anything else was
-  // refused for the totals it would take below zero.
-  return charged.total === figure
-    ? { ok: true, deltaMilli: 0, entry: null }
-    : { ok: false, code: "would_go_negative" };
+  const charge = await db.prepare(JOB_CHARGE_SQL).bind(job).first<JobCharge>();
+  if (charge?.refunded) return { ok: false, code: "refunded" };
+  if (entry) {
+    // The final settlement happened. It is replayed by its own figure: the charge it made is now
+    // the whole of what the job holds.
+    return charge?.total === figure
+      ? { ok: true, replayed: true, deltaMilli: entry.charged_delta_milli, entry }
+      : { ok: false, code: "already_final" };
+  }
+  if (!charge || !charge.settled) return { ok: false, code: "not_settled" };
+  return { ok: false, code: "would_go_negative" };
 }
 
 /**
@@ -685,57 +770,51 @@ export const REFUND_INSERT_SQL = `INSERT INTO compute_ledger
      AND NOT EXISTS (SELECT 1 FROM compute_ledger WHERE idempotency_key = 'job:' || d.job_id || ':refund')`;
 
 export type RefundResult =
-  | { ok: true; refundedMilli: number; entry: LedgerRow }
-  | { ok: false; code: "nothing_to_refund" | "already_refunded" | "would_go_negative" };
+  | { ok: true; replayed: boolean; refundedMilli: number; entry: LedgerRow }
+  | { ok: false; code: "nothing_to_refund" | "would_go_negative" };
 
 /**
- * Return a job's whole charge to its pool (and its budget), once. `already_refunded` for a second
- * call; `nothing_to_refund` for a job with nothing charged (released, never settled, never held);
- * `would_go_negative` when the pool or its budget no longer holds that much charge.
+ * Return a job's whole charge to its pool (and its budget), once. A refund replayed returns the
+ * refund (`replayed: true`); `nothing_to_refund` for a job with nothing charged (released, never
+ * settled, never held); `would_go_negative` when the pool or its budget no longer holds that much
+ * charge.
  */
 export async function refundJob(
   db: D1Database,
   input: { jobId: string; reason?: string },
 ): Promise<RefundResult> {
   const job = jobIdArg(input.jobId);
-  const reason = reasonArg(input.reason, "refund");
-  const key = `job:${job}:refund`;
-  let changes: number;
-  try {
-    changes = (await db.prepare(REFUND_INSERT_SQL).bind(job, reason).run()).meta?.changes ?? 0;
-  } catch (err) {
-    if (looksUnique(err)) return { ok: false, code: "already_refunded" };
-    throw err;
+  const reason = reasonArg(input.reason, REASON.refund);
+  const changes = await runOrZero(db.prepare(REFUND_INSERT_SQL).bind(job, reason));
+  const entry = await findEntryByKey(db, refundKey(job));
+  if (entry) {
+    return { ok: true, replayed: changes === 0, refundedMilli: -entry.charged_delta_milli, entry };
   }
-  if (changes > 0) {
-    const entry = await entryByKey(db, key);
-    if (!entry) throw new Error("a refund that was just written could not be read");
-    return { ok: true, refundedMilli: -entry.charged_delta_milli, entry };
-  }
-  if (await entryByKey(db, key)) return { ok: false, code: "already_refunded" };
-  const charged = await db
-    .prepare(JOB_CHARGE_SQL)
-    .bind(job)
-    .first<{ settled: number; total: number }>();
-  return (charged?.total ?? 0) > 0
+  const charge = await db.prepare(JOB_CHARGE_SQL).bind(job).first<JobCharge>();
+  return (charge?.total ?? 0) > 0
     ? { ok: false, code: "would_go_negative" }
     : { ok: false, code: "nothing_to_refund" };
 }
 
 // --- Grant, adjustment and expiry ------------------------------------------------------------
 
-/** A grant: `?1` pool, `?2` amount, `?3` actor, `?4` reason, `?5` key. Only if the pool is there and the key unused. */
+/**
+ * A grant: `?1` pool, `?2` amount, `?3` actor, `?4` reason, `?5` key. Only if the pool is there, the
+ * key unused and the granted total stays within 2^53 - 1.
+ */
 export const GRANT_INSERT_SQL = `INSERT INTO compute_ledger
   (kind, pool_id, granted_delta_milli, actor_user_id, reason, idempotency_key)
   SELECT 'grant', p.id, ?2, ?3, ?4, ?5
     FROM compute_pools p
    WHERE p.id = ?1
+     AND p.granted_milli + ?2 <= ${TOTAL_MAX}
      AND NOT EXISTS (SELECT 1 FROM compute_ledger WHERE idempotency_key = ?5)`;
 
 /**
  * An adjustment: `?1` pool, `?2` the budget pool (NULL for none), `?3` the change to granted, `?4`
  * the change to charged, `?5` actor, `?6` reason, `?7` key. Only if the pool is there, the key
- * unused, and no stored total (the pool's, or the budget's charged) would go negative.
+ * unused, and no stored total (the pool's granted or charged, or the budget's charged) would leave
+ * 0 to 2^53 - 1.
  */
 export const ADJUST_INSERT_SQL = `INSERT INTO compute_ledger
   (kind, pool_id, budget_pool_id, granted_delta_milli, charged_delta_milli, actor_user_id, reason,
@@ -743,9 +822,10 @@ export const ADJUST_INSERT_SQL = `INSERT INTO compute_ledger
   SELECT 'adjust', p.id, ?2, ?3, ?4, ?5, ?6, ?7
     FROM compute_pools p
    WHERE p.id = ?1
-     AND p.granted_milli + ?3 >= 0
-     AND p.charged_milli + ?4 >= 0
-     AND (?2 IS NULL OR (SELECT b.charged_milli FROM compute_pools b WHERE b.id = ?2) + ?4 >= 0)
+     AND p.granted_milli + ?3 BETWEEN 0 AND ${TOTAL_MAX}
+     AND p.charged_milli + ?4 BETWEEN 0 AND ${TOTAL_MAX}
+     AND (?2 IS NULL OR (SELECT b.charged_milli FROM compute_pools b WHERE b.id = ?2) + ?4
+                          BETWEEN 0 AND ${TOTAL_MAX})
      AND NOT EXISTS (SELECT 1 FROM compute_ledger WHERE idempotency_key = ?7)`;
 
 /** An expiry of the pool's whole unused balance: `?1` pool, `?2` reason, `?3` key, `?4` actor. */
@@ -759,18 +839,12 @@ export const EXPIRE_INSERT_SQL = `INSERT INTO compute_ledger
 
 export type EntryResult = { ok: true; replayed: boolean; entry: LedgerRow };
 
-const conflict = (): never => {
-  throw new ComputeLedgerError(
-    "idempotency_conflict",
-    "that idempotency key was used for a different request",
-  );
-};
-
 /**
- * Give SU to a pool: one `grant` entry, with who did it and a fixed-word reason (default
- * `grant`). `audit` writes an audit row in the same batch, only if the entry was written. A repeated
- * key returns the entry it made and grants once; the same key for another amount or pool throws
- * `idempotency_conflict`.
+ * Give SU to a pool: one `grant` entry, with who did it and a fixed-word reason (default `grant`).
+ * `audit` writes an audit row in the same batch, only if the entry was written. A repeated key
+ * returns the entry it made and grants once; the same key for another pool, amount or reason throws
+ * `idempotency_conflict`. A grant that would take the granted total past 2^53 - 1 is
+ * `would_exceed_limit` and writes nothing.
  */
 export async function grantPool(
   db: D1Database,
@@ -782,40 +856,51 @@ export async function grantPool(
     idempotencyKey: string;
     audit?: LedgerAudit;
   },
-): Promise<EntryResult> {
+): Promise<EntryResult | { ok: false; code: "would_exceed_limit" }> {
   const poolId = positiveId("a pool", input.poolId);
   const milli = amount("a grant", input.amountMilli, 1);
   const actor = actorArg(input.actorUserId);
-  const reason = reasonArg(input.reason, "grant");
+  const reason = reasonArg(input.reason, REASON.grant);
   const key = keyArg(input.idempotencyKey);
   const changes = await writeEntry(
     db,
     db.prepare(GRANT_INSERT_SQL).bind(poolId, milli, actor, reason, key),
     input.audit,
   );
-  const entry = await entryByKey(db, key);
+  const entry = await findEntryByKey(db, key);
   if (changes > 0) {
     if (!entry) throw new Error("a grant that was just written could not be read");
     return { ok: true, replayed: false, entry };
   }
   if (entry) {
-    if (entry.kind !== "grant" || entry.pool_id !== poolId || entry.granted_delta_milli !== milli) {
-      return conflict();
-    }
-    return { ok: true, replayed: true, entry };
+    return replayOrConflict(entry, {
+      kind: "grant",
+      pool_id: poolId,
+      budget_pool_id: null,
+      granted_delta_milli: milli,
+      held_delta_milli: 0,
+      charged_delta_milli: 0,
+      job_id: null,
+      reason,
+    });
   }
-  throw new ComputeLedgerError("pool_not_found", "no such pool");
+  if (!(await getPool(db, poolId))) throw new ComputeLedgerError("pool_not_found", "no such pool");
+  return { ok: false, code: "would_exceed_limit" };
 }
 
-export type AdjustResult = EntryResult | { ok: false; code: "would_go_negative" };
+export type AdjustResult =
+  | EntryResult
+  | { ok: false; code: "would_go_negative" | "would_exceed_limit" };
 
 /**
  * Correct a pool's grant or its charge, up or down: one `adjust` entry whose delta is on exactly
  * one of them, with who and a fixed-word reason (required). A correction of the charge of an
- * account's or a partner's pool names the platform budget it was counted against (`budgetPoolId`),
- * which follows it; a correction of the grant names none. One that would make a stored total
- * negative (the pool's granted or charged, or the budget's charged) is `would_go_negative` and
- * writes nothing; a grant adjusted below what is used is allowed, and available goes negative.
+ * account's or a partner's pool names the platform `people` budget of its word (`budgetPoolId`),
+ * which follows it (the table refuses one that names none, or another); a correction of the grant
+ * names none. One that would take a stored total below zero (the pool's granted or charged, or the
+ * budget's charged) is `would_go_negative`, and one that would take it past 2^53 - 1 is
+ * `would_exceed_limit`; both write nothing. A grant adjusted below what is used is allowed, and
+ * available goes negative. A budget that is not there is `pool_not_found`.
  */
 export async function adjustPool(
   db: D1Database,
@@ -856,27 +941,37 @@ export async function adjustPool(
     db.prepare(ADJUST_INSERT_SQL).bind(poolId, budget, granted, charged, actor, reason, key),
     input.audit,
   );
-  const entry = await entryByKey(db, key);
+  const entry = await findEntryByKey(db, key);
   if (changes > 0) {
     if (!entry) throw new Error("an adjustment that was just written could not be read");
     return { ok: true, replayed: false, entry };
   }
   if (entry) {
-    if (
-      entry.kind !== "adjust" ||
-      entry.pool_id !== poolId ||
-      entry.budget_pool_id !== budget ||
-      entry.granted_delta_milli !== granted ||
-      entry.charged_delta_milli !== charged
-    ) {
-      return conflict();
-    }
-    return { ok: true, replayed: true, entry };
+    return replayOrConflict(entry, {
+      kind: "adjust",
+      pool_id: poolId,
+      budget_pool_id: budget,
+      granted_delta_milli: granted,
+      held_delta_milli: 0,
+      charged_delta_milli: charged,
+      job_id: null,
+      reason,
+    });
   }
-  if (!(await getPool(db, poolId))) {
-    throw new ComputeLedgerError("pool_not_found", "no such pool");
+  const pool = await getPool(db, poolId);
+  if (!pool) throw new ComputeLedgerError("pool_not_found", "no such pool");
+  const budgetPool = budget === null ? null : await getPool(db, budget);
+  if (budget !== null && !budgetPool) {
+    throw new ComputeLedgerError("pool_not_found", "no such budget pool");
   }
-  return { ok: false, code: "would_go_negative" };
+  const totals = [
+    pool.granted_milli + granted,
+    pool.charged_milli + charged,
+    ...(budgetPool ? [budgetPool.charged_milli + charged] : []),
+  ];
+  return totals.some((t) => t > TOTAL_MAX)
+    ? { ok: false, code: "would_exceed_limit" }
+    : { ok: false, code: "would_go_negative" };
 }
 
 export type ExpireResult =
@@ -887,30 +982,35 @@ export type ExpireResult =
  * Let a pool's unused balance lapse (a renewal): one `expire` entry that takes the whole available
  * balance out of granted. What is held and charged stays, so an open hold still settles. A pool with
  * no positive available (an overrun left it negative) has nothing to take: `nothing_to_expire`. A
- * repeated key returns the entry it made.
+ * repeated key returns the entry it made, if the request is the same pool and reason.
  */
 export async function expireUnused(
   db: D1Database,
   input: { poolId: number; reason?: string; idempotencyKey: string; actorUserId?: number | null },
 ): Promise<ExpireResult> {
   const poolId = positiveId("a pool", input.poolId);
-  const reason = reasonArg(input.reason, "expired");
+  const reason = reasonArg(input.reason, REASON.expired);
   const key = keyArg(input.idempotencyKey);
   const actor = actorArg(input.actorUserId);
-  const changes =
-    (await db.prepare(EXPIRE_INSERT_SQL).bind(poolId, reason, key, actor).run()).meta?.changes ?? 0;
-  const entry = await entryByKey(db, key);
+  const changes = await runOrZero(db.prepare(EXPIRE_INSERT_SQL).bind(poolId, reason, key, actor));
+  const entry = await findEntryByKey(db, key);
   if (changes > 0) {
     if (!entry) throw new Error("an expiry that was just written could not be read");
     return { ok: true, replayed: false, expiredMilli: -entry.granted_delta_milli, entry };
   }
   if (entry) {
-    if (entry.kind !== "expire" || entry.pool_id !== poolId) return conflict();
-    return { ok: true, replayed: true, expiredMilli: -entry.granted_delta_milli, entry };
+    const replay = replayOrConflict(entry, {
+      kind: "expire",
+      pool_id: poolId,
+      budget_pool_id: null,
+      held_delta_milli: 0,
+      charged_delta_milli: 0,
+      job_id: null,
+      reason,
+    });
+    return { ...replay, expiredMilli: -entry.granted_delta_milli };
   }
-  if (!(await getPool(db, poolId))) {
-    throw new ComputeLedgerError("pool_not_found", "no such pool");
-  }
+  if (!(await getPool(db, poolId))) throw new ComputeLedgerError("pool_not_found", "no such pool");
   return { ok: false, code: "nothing_to_expire" };
 }
 
@@ -922,7 +1022,7 @@ export const POOLS_PAGE_SQL = `SELECT ${POOL_COLUMNS} FROM compute_pools
 
 export async function listPools(
   db: D1Database,
-  q: { holderKind?: PoolHolderKind; after?: number; limit: number },
+  q: { holderKind?: ComputePoolHolderKind; after?: number; limit: number },
 ): Promise<{ pools: PoolRow[]; nextAfter: number | null }> {
   const rows = (
     await db
@@ -942,10 +1042,10 @@ export async function accountPools(db: D1Database, accountId: number): Promise<P
   return (await db.prepare(ACCOUNT_POOLS_SQL).bind(String(accountId)).all<PoolRow>()).results;
 }
 
-/** A platform budget's pool of one word, which the migration seeds for `pipelines` and `people`. */
+/** A platform budget's pool of one word, which the migration seeds for every platform key. */
 export async function platformPool(
   db: D1Database,
-  key: string,
+  key: (typeof COMPUTE_PLATFORM_KEYS)[number],
   pool: ComputePool,
 ): Promise<PoolRow | null> {
   return db.prepare(POOL_BY_HOLDER_SQL).bind("platform", key, pool).first<PoolRow>();
