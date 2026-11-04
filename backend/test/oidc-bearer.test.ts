@@ -114,7 +114,7 @@ describe("oidcBearer on a compute-scope route", () => {
       `Bearer ${MEMBER_KEY}`,
       "Bearer ",
       "Basic abc",
-      `Bearer nmo_at_x`,
+      "Bearer nmo_at_x",
     ]) {
       const res = await call("/compute/me", authorization);
       expect({ authorization, status: res.status }).toEqual({ authorization, status: 401 });
