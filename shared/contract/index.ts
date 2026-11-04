@@ -28,3 +28,6 @@ export * from "./mcp.js";
 // Zero-dep literals and types for the private site's session handoff and the
 // service-binding entrypoint its Worker calls (ADR 0078, ADR 0079).
 export * from "./private-site.js";
+// The compute gateway: the job specification, partition and rate tables, owner policy and the
+// launcher's file shapes (epic #2005, ADR 0118). Its words live in `../compute-state.ts`.
+export * from "./compute.js";
