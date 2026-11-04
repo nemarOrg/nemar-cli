@@ -556,6 +556,21 @@ describe("redeeming a code with PKCE", () => {
     expect(tokenRows()).toHaveLength(2);
   });
 
+  test("a second redemption after a rotation revokes the rotated tokens too: they carry the code", async () => {
+    const f = await flow({ scope: "openid offline_access" });
+    const first = (await redeem(h, f.client, f.code)).json as { refresh_token: string };
+    const rotated = await tokenRequest(h, f.client, {
+      grant_type: "refresh_token",
+      refresh_token: first.refresh_token,
+    });
+    expect(rotated.status).toBe(200);
+    const child = rotated.json as { access_token: string; refresh_token: string };
+    expect(tokenRows()).toHaveLength(4);
+    expectOauthError(await redeem(h, f.client, f.code), 400, "invalid_grant");
+    for (const row of tokenRows()) expect(row.revoked_at).not.toBeNull();
+    expect(await userinfoStatus(child.access_token)).toBe(401);
+  });
+
   test("two redemptions in flight together: one claim wins, one set is minted, and it is revoked", async () => {
     const f = await flow({ scope: "openid offline_access" });
     // Hold the first request just after it has read the code and before its batch (it reads the
