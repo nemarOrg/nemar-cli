@@ -31,6 +31,7 @@ import {
   OIDC_SECRET_GRACE_HOURS_MAX,
   OIDC_URI_MAX_LENGTH,
   isMachineOnlyScope,
+  isOidcGrant,
   isOidcScope,
 } from "../../../shared/oidc.js";
 import { isPartnerHost } from "../../../shared/partner-hosts.js";
@@ -39,6 +40,7 @@ import { timingSafeEqual } from "../lib/constant-time.js";
 import type { Bindings } from "../types/bindings.js";
 import { isNemarWebOrigin } from "./cors-origins.js";
 import { isNonProductionEnv } from "./environment.js";
+import { randomHex, toBase64Url } from "./oidc-encoding.js";
 import { hashApiKey } from "./token.js";
 
 // ---------------------------------------------------------------------------------------------
@@ -103,11 +105,6 @@ export interface ClientAuthRow {
 // Identifiers and secrets
 // ---------------------------------------------------------------------------------------------
 
-function randomHex(byteLength: number): string {
-  const bytes = crypto.getRandomValues(new Uint8Array(byteLength));
-  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
-}
-
 /** `oc_` plus 24 lowercase hexadecimal characters (96 random bits). */
 export function generateClientId(): string {
   return `${OIDC_CLIENT_ID_PREFIX}${randomHex(OIDC_CLIENT_ID_HEX_LENGTH / 2)}`;
@@ -115,10 +112,7 @@ export function generateClientId(): string {
 
 /** 256 random bits as 43 unpadded base64url characters. Shown once and stored nowhere. */
 export function generateClientSecret(): string {
-  const bytes = crypto.getRandomValues(new Uint8Array(32));
-  let binary = "";
-  for (const b of bytes) binary += String.fromCharCode(b);
-  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  return toBase64Url(crypto.getRandomValues(new Uint8Array(32)));
 }
 
 /** A SQL timestamp (`YYYY-MM-DD HH:MM:SS`, UTC) as epoch milliseconds; NaN when it is not one. */
@@ -317,7 +311,7 @@ export function validateClientInput(
 
   const seenGrants = new Set<string>();
   for (const grant of input.allowed_grants) {
-    if (!OIDC_GRANTS.includes(grant)) {
+    if (!isOidcGrant(grant)) {
       return refuse(
         "invalid_grant",
         `allowed_grants may hold only: ${OIDC_GRANTS.join(", ")}.`,

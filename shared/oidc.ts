@@ -77,20 +77,35 @@ export function oidcClaimsSupported(): string[] {
 // ---------------------------------------------------------------------------------------------
 
 /** The grants a client may be allowed (ADR 0119 rules 1 and 3). No implicit, no password grant. */
-export const OIDC_GRANTS: readonly string[] = [
-  "authorization_code",
-  "refresh_token",
-  "client_credentials",
-];
+export const OIDC_GRANTS = ["authorization_code", "refresh_token", "client_credentials"] as const;
+export type OidcGrant = (typeof OIDC_GRANTS)[number];
+
+/** True for a string that names a grant of {@link OIDC_GRANTS}, exactly. */
+export function isOidcGrant(value: unknown): value is OidcGrant {
+  return typeof value === "string" && (OIDC_GRANTS as readonly string[]).includes(value);
+}
 
 /** Who may sign in to a client (ADR 0119 rule 7). */
-export const OIDC_SIGN_IN_RULES: readonly string[] = ["active_account", "person_proven_orcid"];
+export const OIDC_SIGN_IN_RULES = ["active_account", "person_proven_orcid"] as const;
+export type OidcSignInRule = (typeof OIDC_SIGN_IN_RULES)[number];
 
-/** Whether a client asks for consent once per set of scopes or on every authorization. */
-export const OIDC_CONSENT_MODES: readonly string[] = ["ask_once", "always"];
+/** True for a string that names a sign-in rule, exactly. */
+export function isOidcSignInRule(value: unknown): value is OidcSignInRule {
+  return typeof value === "string" && (OIDC_SIGN_IN_RULES as readonly string[]).includes(value);
+}
 
-/** A client is `active` until the owner disables it; there is no way back from the CLI. */
-export const OIDC_CLIENT_STATUSES: readonly string[] = ["active", "disabled"];
+/**
+ * How a client that is not first-party is asked for consent: once per set of scopes (`ask_once`, the
+ * default) or on every authorization (`always`). A first-party client skips the screen; no client
+ * with a redirect address outside NEMAR's own origins ever does.
+ */
+export const OIDC_CONSENT_MODES = ["ask_once", "always"] as const;
+export type OidcConsentMode = (typeof OIDC_CONSENT_MODES)[number];
+
+/** True for a string that names a consent mode, exactly. */
+export function isOidcConsentMode(value: unknown): value is OidcConsentMode {
+  return typeof value === "string" && (OIDC_CONSENT_MODES as readonly string[]).includes(value);
+}
 
 /** The most redirect addresses a client may register. */
 export const OIDC_MAX_REDIRECT_URIS = 10;
@@ -100,6 +115,12 @@ export const OIDC_URI_MAX_LENGTH = 2000;
 
 /** The longest client name, in characters. */
 export const OIDC_CLIENT_NAME_MAX_LENGTH = 100;
+
+/**
+ * The most scopes a client may be allowed. The catalogue has ten; the table's CHECK allows this many,
+ * so a new scope needs no migration while the catalogue stays within it (a test pins that).
+ */
+export const OIDC_MAX_ALLOWED_SCOPES = 20;
 
 /** The longest audience identifier, in characters. */
 export const OIDC_AUDIENCE_MAX_LENGTH = 200;
@@ -130,6 +151,16 @@ export function isOidcClientId(value: unknown): value is string {
   return typeof value === "string" && CLIENT_ID_RE.test(value);
 }
 
+/**
+ * Every client secret starts with this, so a secret scanner can find one. Tokens are opaque and a
+ * secret is checked by its hash only, so the prefix is a convention inside the Worker and nothing
+ * else depends on it.
+ */
+export const OIDC_CLIENT_SECRET_PREFIX = "nmo_cs_";
+
+/** Base64url characters after the prefix: 256 random bits, unpadded. */
+export const OIDC_CLIENT_SECRET_BODY_LENGTH = 43;
+
 /** Lowercase hexadecimal characters of a signing key id (64 random bits). */
 export const OIDC_KID_HEX_LENGTH = 16;
 
@@ -147,18 +178,22 @@ export function isOidcKid(value: unknown): value is string {
 /** The one signing algorithm: ECDSA over P-256 with SHA-256. */
 export const OIDC_SIGNING_ALG = "ES256";
 
-/**
- * A key is `next` (published, not yet signing), `current` (signs) or `retired` (published a while
- * longer, so a token signed just before the rotation still verifies). One `next` and one `current`
- * at most, enforced by the table.
- */
-export const OIDC_KEY_STATES: readonly string[] = ["next", "current", "retired"];
-
 /** A `next` key signs only once it has been published this long, unless the owner forces it. */
 export const OIDC_KEY_MIN_NEXT_AGE_HOURS = 24;
 
 /** A retired key stays in the published set this long. */
 export const OIDC_RETIRED_KEY_PUBLISH_DAYS = 7;
+
+/** At most this many retired keys are published, the most recently retired first. */
+export const OIDC_RETIRED_KEY_PUBLISH_MAX = 5;
+
+/**
+ * `keys rotate --force` refuses while the next key is younger than this many minutes, unless the
+ * owner says it is an emergency: a key that has been published for a moment may not be in the key
+ * set a client cached, so a token signed with it can fail verification there for about five minutes
+ * (the key set's `Cache-Control: max-age`).
+ */
+export const OIDC_FORCE_MIN_NEXT_AGE_MINUTES = 6;
 
 /** `OIDC_SECRET` encrypts the private keys at rest: shorter than this and the provider is off. */
 export const OIDC_SECRET_MIN_LENGTH = 32;

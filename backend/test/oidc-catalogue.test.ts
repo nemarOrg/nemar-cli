@@ -18,21 +18,31 @@ import {
   OIDC_AUTHORIZATION_CODE_TTL_SECONDS,
   OIDC_CLIENT_ID_HEX_LENGTH,
   OIDC_CLIENT_ID_PREFIX,
+  OIDC_CLIENT_SECRET_BODY_LENGTH,
+  OIDC_CLIENT_SECRET_PREFIX,
+  OIDC_CONSENT_MODES,
+  OIDC_FORCE_MIN_NEXT_AGE_MINUTES,
   OIDC_GRANTS,
   OIDC_ID_TOKEN_TTL_SECONDS,
   OIDC_KEY_MIN_NEXT_AGE_HOURS,
+  OIDC_MAX_ALLOWED_SCOPES,
   OIDC_REFRESH_GRACE_SECONDS,
   OIDC_REFRESH_TOKEN_ABSOLUTE_SECONDS,
   OIDC_REFRESH_TOKEN_IDLE_SECONDS,
   OIDC_REFRESH_TOKEN_PREFIX,
   OIDC_RETIRED_KEY_PUBLISH_DAYS,
+  OIDC_RETIRED_KEY_PUBLISH_MAX,
   OIDC_SCOPES,
   OIDC_SCOPE_NAMES,
   OIDC_SECRET_MIN_LENGTH,
+  OIDC_SIGN_IN_RULES,
   isMachineOnlyScope,
   isOidcClientId,
+  isOidcConsentMode,
+  isOidcGrant,
   isOidcKid,
   isOidcScope,
+  isOidcSignInRule,
   oidcClaimsSupported,
 } from "../../shared/oidc";
 
@@ -105,6 +115,24 @@ describe("the scope catalogue is the ADR's table", () => {
   test("the grants are the three the ADR allows", () => {
     expect([...OIDC_GRANTS]).toEqual(["authorization_code", "refresh_token", "client_credentials"]);
   });
+
+  test("the sign-in rules and consent modes are the ADR's, and each has a guard that takes only them", () => {
+    expect([...OIDC_SIGN_IN_RULES]).toEqual(["active_account", "person_proven_orcid"]);
+    expect([...OIDC_CONSENT_MODES]).toEqual(["ask_once", "always"]);
+    for (const g of OIDC_GRANTS) expect(isOidcGrant(g)).toBe(true);
+    for (const r of OIDC_SIGN_IN_RULES) expect(isOidcSignInRule(r)).toBe(true);
+    for (const m of OIDC_CONSENT_MODES) expect(isOidcConsentMode(m)).toBe(true);
+    for (const bad of ["implicit", "password", "", "Authorization_Code", 1, null, undefined]) {
+      expect(isOidcGrant(bad)).toBe(false);
+    }
+    for (const bad of ["anyone", "ACTIVE_ACCOUNT", "", 0, null]) expect(isOidcSignInRule(bad)).toBe(false);
+    for (const bad of ["never", "Always", "", false, null]) expect(isOidcConsentMode(bad)).toBe(false);
+  });
+
+  test("the catalogue fits the table's cap on allowed scopes, with headroom for a new scope", () => {
+    expect(OIDC_MAX_ALLOWED_SCOPES).toBe(20);
+    expect(OIDC_SCOPE_NAMES.length).toBeLessThanOrEqual(OIDC_MAX_ALLOWED_SCOPES);
+  });
 });
 
 describe("tokens: prefixes and lifetimes are the ADR's table", () => {
@@ -115,6 +143,16 @@ describe("tokens: prefixes and lifetimes are the ADR's table", () => {
     expect(`${OIDC_ACCESS_TOKEN_PREFIX}x`.startsWith("nm_")).toBe(false);
     expect(`${OIDC_REFRESH_TOKEN_PREFIX}x`.startsWith("nm_")).toBe(false);
     expect(OIDC_ACCESS_TOKEN_PREFIX.startsWith(OIDC_REFRESH_TOKEN_PREFIX)).toBe(false);
+  });
+
+  test("a client secret is nmo_cs_ plus 43 base64url characters (256 bits), and cannot be read as a token or a key", () => {
+    expect(OIDC_CLIENT_SECRET_PREFIX).toBe("nmo_cs_");
+    expect(OIDC_CLIENT_SECRET_BODY_LENGTH).toBe(43);
+    expect(OIDC_CLIENT_SECRET_PREFIX.startsWith("nm_")).toBe(false);
+    for (const other of [OIDC_ACCESS_TOKEN_PREFIX, OIDC_REFRESH_TOKEN_PREFIX]) {
+      expect(OIDC_CLIENT_SECRET_PREFIX.startsWith(other)).toBe(false);
+      expect(other.startsWith(OIDC_CLIENT_SECRET_PREFIX)).toBe(false);
+    }
   });
 
   test("lifetimes, in seconds", () => {
@@ -131,6 +169,11 @@ describe("keys and identifiers", () => {
   test("the rotation rule: a next key is 24 hours old before it signs, a retired key is published 7 days", () => {
     expect(OIDC_KEY_MIN_NEXT_AGE_HOURS).toBe(24);
     expect(OIDC_RETIRED_KEY_PUBLISH_DAYS).toBe(7);
+  });
+
+  test("at most five retired keys are published, and a forced rotation needs a next key 6 minutes old", () => {
+    expect(OIDC_RETIRED_KEY_PUBLISH_MAX).toBe(5);
+    expect(OIDC_FORCE_MIN_NEXT_AGE_MINUTES).toBe(6);
   });
 
   test("OIDC_SECRET must be at least 32 characters", () => {

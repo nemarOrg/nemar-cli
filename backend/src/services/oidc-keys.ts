@@ -41,6 +41,7 @@ import { auditLogStatement } from "../db/audit-log.js";
 import type { Bindings } from "../types/bindings.js";
 import { decrypt, encrypt } from "./encryption.js";
 import { oidcEnabled } from "./oidc-config.js";
+import { randomHex, toBase64Url } from "./oidc-encoding.js";
 
 // ---------------------------------------------------------------------------------------------
 // Errors
@@ -67,22 +68,7 @@ function requireSecret(env: Pick<Bindings, "OIDC_SECRET">): string {
   return env.OIDC_SECRET as string;
 }
 
-// ---------------------------------------------------------------------------------------------
-// Encoding
-// ---------------------------------------------------------------------------------------------
-
-function toBase64Url(bytes: Uint8Array): string {
-  let binary = "";
-  for (const b of bytes) binary += String.fromCharCode(b);
-  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-}
-
 const textBytes = (s: string): Uint8Array => new TextEncoder().encode(s);
-
-function randomHex(byteLength: number): string {
-  const bytes = crypto.getRandomValues(new Uint8Array(byteLength));
-  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
-}
 
 // ---------------------------------------------------------------------------------------------
 // Key generation
