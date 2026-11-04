@@ -23,6 +23,8 @@ import {
   ComputePoolWriteResponseSchema,
   type ComputePoolsResponse,
   ComputePoolsResponseSchema,
+  type ComputeStatusResponse,
+  ComputeStatusResponseSchema,
 } from "../../../shared/contract/compute-admin.js";
 import { request } from "./client.js";
 
@@ -127,4 +129,13 @@ export async function adjustPlatformComputePool(
     body,
     idempotencyKey,
   );
+}
+
+/**
+ * `GET /admin/compute/status` (admin): the switches as the Worker reads them, whether Tapis, the two
+ * compute buckets with their signing secrets and the ACCESS key are configured, and one token mint
+ * and one health call, as booleans and fixed words (epic #2005 phase A4, #2009).
+ */
+export async function getComputeStatus(): Promise<ComputeStatusResponse> {
+  return request("/admin/compute/status", {}, true, ComputeStatusResponseSchema);
 }

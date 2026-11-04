@@ -7,6 +7,7 @@
  *   nemar admin compute pool show [--account <id>|--platform]   pools, in SU (admin)
  *   nemar admin compute pool grant <amount> ...           SU into one pool (admin; a platform budget: owner)
  *   nemar admin compute pool adjust <amount> ...          a correction of its grant (a charge: owner)
+ *   nemar admin compute status [--json]                   the switches, Tapis and storage, as the Worker reads them (admin)
  *
  * Amounts are service units (SU) as plain decimals with at most three places (`12.5`), and are sent
  * as whole thousandths. Every write sends one fresh `Idempotency-Key`, so within one invocation the
@@ -32,6 +33,7 @@ import {
   type ComputePolicyResponse,
   type ComputePoolView,
   type ComputePoolWriteResponse,
+  type ComputeStatusResponse,
   isComputePlatformKey,
 } from "../../shared/contract/compute-admin.js";
 import {
@@ -47,6 +49,7 @@ import {
   adjustPlatformComputePool,
   getAccountComputePools,
   getComputePolicy,
+  getComputeStatus,
   grantAccountComputePool,
   grantPlatformComputePool,
   listComputePools,
@@ -529,9 +532,76 @@ poolCommand
     }
   });
 
+// ---------------------------------------------------------------------------------------------
+// status
+// ---------------------------------------------------------------------------------------------
+
+const STATUS_HELP = `
+Shows what the Worker reads of the compute gateway, so the owner can check it once the secrets are
+set. It changes nothing and prints booleans and fixed words only: never a secret value, an address,
+a tenant name or a username.
+
+  switches   the environment (production, development or other) and the two dark switches, each on
+             only when it is exactly "1" in production or development
+  Tapis      whether it is configured (and the names of what is missing), which credential strategy
+             is chosen, and the result of ONE token mint and ONE health call made now: ok,
+             unconfigured, skipped, or the kind of the error (unauthorized, not_found, rejected,
+             unavailable, invalid_response)
+  storage    whether each compute bucket binding and the signing secrets are set
+  ACCESS key whether the ACCESS gateway-attributes key is set
+
+Admin or owner. --json prints the Worker's answer as it is.
+
+Exit codes:
+  0  shown (a Tapis step that failed is shown as its word and still exits 0).
+  1  the Worker refused (you are not an admin) or the read failed.`;
+
+const yesNo = (value: boolean) => (value ? "yes" : "no");
+const onOff = (value: boolean) => (value ? "on" : "off");
+
+function printStatus(res: ComputeStatusResponse): void {
+  say("Compute gateway status");
+  say(`  environment: ${plain(res.switches.environment)}`);
+  say(`  compute switch: ${onOff(res.switches.compute_enabled)}`);
+  say(`  pipelines dispatch switch: ${onOff(res.switches.pipelines_dispatch_enabled)}`);
+  say("Tapis");
+  if (res.tapis.configured) {
+    say(`  configured: yes (strategy ${plain(res.tapis.strategy ?? "unknown")})`);
+  } else {
+    const problems = res.tapis.problems.map(plain).join(", ");
+    say(`  configured: no${problems ? ` (${problems})` : ""}`);
+  }
+  say(`  token: ${plain(res.tapis.token)}`);
+  say(`  health: ${plain(res.tapis.health)}`);
+  say("Storage");
+  say(`  records binding: ${yesNo(res.storage.records_binding)}`);
+  say(`  results binding: ${yesNo(res.storage.results_binding)}`);
+  say(`  signing secrets: ${yesNo(res.storage.signing_configured)}`);
+  say(`ACCESS key: ${yesNo(res.access.key_configured)}`);
+}
+
+const statusCommand = new Command("status")
+  .description(
+    "Show the compute switches, the Tapis connection and the storage, as the Worker reads them",
+  )
+  .option("--json", "Print the Worker's answer as JSON")
+  .addHelpText("after", STATUS_HELP)
+  .action(async (o: { json?: boolean }) => {
+    const json = o.json === true;
+    if (!requireSignedIn(json)) return;
+    try {
+      const res = await getComputeStatus();
+      if (json) console.log(JSON.stringify(res, null, 2));
+      else printStatus(res);
+    } catch (err) {
+      failWith(err, null, "Could not read the compute status.", undefined, { json });
+    }
+  });
+
 export const computeCommand = new Command("compute").description(
   "The compute gateway: the owner policy and the SU allocation pools (ADR 0118)",
 );
 
 computeCommand.addCommand(policyCommand);
 computeCommand.addCommand(poolCommand);
+computeCommand.addCommand(statusCommand);
