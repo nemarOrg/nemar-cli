@@ -41,7 +41,13 @@ export async function holderOfOidcSubject(
   return row ? { user_id: row.id, deleted: row.deleted_at !== null } : null;
 }
 
-/** The id of the account that holds a subject, or null. See {@link holderOfOidcSubject}. */
+/**
+ * The id of the account that holds a subject, or null. See {@link holderOfOidcSubject}.
+ *
+ * It returns a DELETED account's id too, so it cannot tell a live account from a tombstone. A
+ * phase that authenticates or authorizes by `sub` must use {@link holderOfOidcSubject} and check
+ * `deleted`, never this.
+ */
 export async function userIdForOidcSubject(
   db: D1Database,
   subject: string,

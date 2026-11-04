@@ -1,7 +1,9 @@
 /**
  * Hosts under `nemar.org` that another party runs (epic #2014 phase #2015, ADR 0119, decision 9).
  *
- * Pure and import-free, so the Worker, the website's checks and the tests read one list.
+ * Pure and import-free. The Worker and the tests read this one list; any other repository that
+ * needs it transcribes it (as `shared/contract/account-copy.ts` is transcribed by the website),
+ * and nothing outside this repository reads this file today.
  *
  * The API used to trust every `*.nemar.org` origin: in its cross-origin allow-list and in the
  * origin check on a write that carries the session cookie. A partner subdomain is run by someone
