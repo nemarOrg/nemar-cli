@@ -149,6 +149,21 @@ describe("where they exist", () => {
     expect(h.db.query("SELECT COUNT(*) AS n FROM oidc_signing_keys").get()).toEqual({ n: 0 });
   });
 
+  test("not under the legacy /nemar mount spelled with percent-encoding, for any of them", async () => {
+    // A router decodes the path before it matches, so `/%6eemar/...` reaches the same handlers.
+    for (const mount of ["%6eemar", "%6Eemar", "n%65mar", "%256eemar"]) {
+      for (const [method, path] of oidcRoutes()) {
+        const res = await h.call(method, `/${mount}${path}`, {
+          key: OWNER_KEY,
+          body: method === "POST" ? {} : undefined,
+        });
+        expect(res.status, `${method} /${mount}${path}`).toBe(404);
+      }
+    }
+    expect(h.db.query("SELECT COUNT(*) AS n FROM oidc_signing_keys").get()).toEqual({ n: 0 });
+    expect(h.db.query("SELECT COUNT(*) AS n FROM oidc_clients").get()).toEqual({ n: 0 });
+  });
+
   test("not with the provider off: no secret, or a short one, is 404 to the owner for every route", async () => {
     for (const secret of [undefined, "", "s".repeat(31)]) {
       for (const [method, path] of oidcRoutes()) {

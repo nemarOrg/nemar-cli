@@ -77,6 +77,17 @@ describe("a request is on the surface only on the issuer's host, off the legacy 
     expect(onOidcSurface(env, url)).toBe(expected);
   });
 
+  test.each([
+    "https://api.nemar.org/%6eemar/oauth/jwks",
+    "https://api.nemar.org/%6Eemar/oauth/jwks",
+    "https://api.nemar.org/n%65mar/.well-known/openid-configuration",
+    "https://api.nemar.org/%256eemar/oauth/jwks",
+    "https://api.nemar.org/%25256eemar/oauth/jwks",
+    "https://api.nemar.org/%6eemar",
+  ])("the legacy mount spelled with percent-encoding is off the surface: %s", (url) => {
+    expect(onOidcSurface(env, url)).toBe(false);
+  });
+
   test("a path that only starts with the letters nemar is not the legacy mount", () => {
     expect(onOidcSurface(env, "https://api.nemar.org/nemarx/oauth/jwks")).toBe(true);
   });
@@ -142,6 +153,7 @@ describe("the discovery document is the ADR's", () => {
     expect(doc.backchannel_logout_supported).toBe(true);
     expect(doc.request_parameter_supported).toBe(false);
     expect(doc.request_uri_parameter_supported).toBe(false);
+    expect(doc.response_modes_supported).toEqual(["query"]);
   });
 
   test("the scopes and claims are the catalogue's", () => {

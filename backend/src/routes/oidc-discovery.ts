@@ -48,6 +48,9 @@ export const oidcSurface: MiddlewareHandler<Env> = async (c, next) => {
  */
 const publicDocument: MiddlewareHandler<Env> = async (c, next) => {
   await next();
+  // Only the document itself is public and cacheable: an error from the handler (a key set that could
+  // not be read or built) must never be stored by a cache for five minutes as if it were the answer.
+  if (c.res.status !== 200) return;
   c.res.headers.set("Access-Control-Allow-Origin", "*");
   c.res.headers.set("Cache-Control", "public, max-age=300");
   c.res.headers.delete("Access-Control-Allow-Credentials");

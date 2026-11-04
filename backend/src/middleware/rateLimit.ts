@@ -1545,10 +1545,14 @@ export async function rateLimiter(
 
   // The OpenID Connect discovery document and the signing keys' public set are NOT limited (ADR 0119):
   // the issuer is this host for good, and a client that is refused them in a burst cannot validate a
-  // token. Exactly those two paths, by the one list in shared/oidc.ts, and not their `/nemar` twins
-  // (which answer 404). The key set's one read is kept briefly per database object
-  // (services/oidc-keys.ts), so the exemption does not become a D1 read per request.
-  if (OIDC_PUBLIC_DOCUMENT_PATHS.includes(c.req.path)) {
+  // token. Exactly those two paths, by the one list in shared/oidc.ts, and only a read of them (GET or
+  // HEAD): not their `/nemar` twins (which answer 404), and not another method. The key set's one
+  // read is kept briefly per database object (services/oidc-keys.ts), so the exemption does not
+  // become a D1 read per request.
+  if (
+    OIDC_PUBLIC_DOCUMENT_PATHS.includes(c.req.path) &&
+    (c.req.method === "GET" || c.req.method === "HEAD")
+  ) {
     await next();
     return;
   }

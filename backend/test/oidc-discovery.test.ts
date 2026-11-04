@@ -13,6 +13,7 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 import { rotateSigningKeys } from "../src/services/oidc-keys";
 import type { Bindings } from "../src/types/bindings";
+import { wrapD1 } from "./helpers/d1";
 import { ISSUER, type OidcHarness, startOidcHarness } from "./helpers/oidc-harness";
 import { T0, edge, useRateLimitHarness } from "./helpers/rate-limit-harness";
 
@@ -78,10 +79,16 @@ describe("discovery and the key set are served on the issuer's host", () => {
 
   test("HEAD works, and no method but a read does", async () => {
     expect((await h.call("HEAD", DISCOVERY)).status).toBe(200);
+    expect((await h.call("HEAD", JWKS)).status).toBe(200);
     for (const method of ["POST", "PUT", "DELETE"]) {
       const res = await h.call(method, DISCOVERY, { body: {} });
       expect(res.status, method).toBe(404);
     }
+  });
+
+  test("discovery says it speaks the query response mode and no other", async () => {
+    const res = await h.call("GET", DISCOVERY);
+    expect(res.json?.response_modes_supported).toEqual(["query"]);
   });
 
   test("the issuer is API_BASE_URL, whatever the request or its headers say", async () => {
@@ -145,6 +152,20 @@ describe("and answered 404 everywhere else", () => {
     }
   });
 
+  /** The same legacy mount, spelled so that a router decodes it but a plain string test does not. */
+  const ENCODED_MOUNTS = ["%6eemar", "%6Eemar", "n%65mar", "%256eemar", "%25256eemar"];
+
+  test("under the legacy /nemar mount spelled with percent-encoding, on the issuer's own host", async () => {
+    for (const mount of ENCODED_MOUNTS) {
+      for (const path of [DISCOVERY, JWKS]) {
+        const res = await h.call("GET", `/${mount}${path}`);
+        expect(res.status, `/${mount}${path}`).toBe(404);
+        expect(res.text).not.toContain("issuer");
+        expect(res.text).not.toContain('"keys"');
+      }
+    }
+  });
+
   test("on another hostname", async () => {
     for (const base of [
       "https://api-test.nemar.org",
@@ -197,7 +218,11 @@ describe("a rotation shows in the key set at once, in the isolate that made it",
   test("the new next key is published the moment it exists", async () => {
     const before = (await h.call("GET", JWKS)).json as { keys: Array<{ kid: string }> };
     expect(before.keys).toHaveLength(2);
-    const rotated = await rotateSigningKeys(h.env, { actorId: h.ids.owner, force: true, emergency: true });
+    const rotated = await rotateSigningKeys(h.env, {
+      actorId: h.ids.owner,
+      force: true,
+      emergency: true,
+    });
     expect(rotated.ok).toBe(true);
     const after = (await h.call("GET", JWKS)).json as { keys: Array<{ kid: string }> };
     expect(after.keys).toHaveLength(3);
@@ -219,6 +244,20 @@ describe("exempt from the maintenance mode", () => {
       expect(res.status, `${path} under ${mode}`).toBe(200);
       expect(res.json).not.toHaveProperty("mode");
     }
+  });
+
+  test("the exemption is for a read of those two documents: any other method is under the mode", async () => {
+    for (const mode of ["full", "read-only"] as const) {
+      for (const method of ["POST", "PUT", "DELETE"]) {
+        for (const path of [DISCOVERY, JWKS]) {
+          const res = await h.call(method, path, { body: {}, env: { MAINTENANCE_MODE: mode } });
+          expect(res.status, `${method} ${path} under ${mode}`).toBe(503);
+        }
+      }
+    }
+    // A HEAD is a read.
+    const head = await h.call("HEAD", DISCOVERY, { env: { MAINTENANCE_MODE: "full" } });
+    expect(head.status).toBe(200);
   });
 
   test("the exemption is for those two documents and no other path of the OIDC surface", async () => {
@@ -263,6 +302,27 @@ describe("exempt from the rate limiter", () => {
     expect(await limiter.stored(`ip:${ADDRESS}`)).toBeUndefined();
   });
 
+  test("the exemption is for a read: any other method of those paths is counted", async () => {
+    await exhaust();
+    for (const method of ["POST", "PUT", "DELETE"]) {
+      for (const path of [DISCOVERY, JWKS]) {
+        const res = await h.call(method, path, {
+          headers: edge(ADDRESS),
+          body: {},
+          env: asProduction,
+          bypass: false,
+        });
+        expect(res.status, `${method} ${path}`).toBe(429);
+      }
+    }
+    const head = await h.call("HEAD", DISCOVERY, {
+      headers: edge(ADDRESS),
+      env: asProduction,
+      bypass: false,
+    });
+    expect(head.status).toBe(200);
+  });
+
   test("the exemption is not a way to the rest of the surface", async () => {
     await exhaust();
     const res = await h.call("GET", "/oauth/token", {
@@ -277,5 +337,39 @@ describe("exempt from the rate limiter", () => {
       bypass: false,
     });
     expect(legacy.status).toBe(429);
+  });
+});
+
+describe("a public document is cacheable only when it is the document", () => {
+  const brokenDatabase = () =>
+    wrapD1(h.env.DB, (sql) => {
+      if (sql.includes("oidc_signing_keys")) throw new Error("the database is down");
+    });
+
+  test("a key set that could not be read is a 500 with no public cache header and no open CORS grant", async () => {
+    const res = await h.call("GET", JWKS, { env: { DB: brokenDatabase() } });
+    expect(res.status).toBe(500);
+    expect(res.headers.get("Cache-Control") ?? "").not.toContain("public");
+    expect(res.headers.get("Access-Control-Allow-Origin")).not.toBe("*");
+    expect(res.text).not.toContain('"keys"');
+  });
+
+  test("a current key whose public half is broken is a 500, not a quietly shorter key set", async () => {
+    h.db.run(
+      `UPDATE oidc_signing_keys SET public_jwk = '{"kty":"EC","crv":"P-256","x":"abc"}' WHERE state = 'current'`,
+    );
+    const res = await h.call("GET", JWKS);
+    expect(res.status).toBe(500);
+    expect(res.headers.get("Cache-Control") ?? "").not.toContain("public");
+    expect(res.text).not.toContain('"keys"');
+  });
+
+  test("the answers that are the document carry it", async () => {
+    for (const path of [DISCOVERY, JWKS]) {
+      const res = await h.call("GET", path);
+      expect(res.status).toBe(200);
+      expect(res.headers.get("Cache-Control")).toBe("public, max-age=300");
+      expect(res.headers.get("Access-Control-Allow-Origin")).toBe("*");
+    }
   });
 });

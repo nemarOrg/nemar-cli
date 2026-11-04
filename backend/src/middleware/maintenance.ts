@@ -19,9 +19,12 @@ type MaintenanceContext = Context<{ Bindings: Bindings; Variables: Variables }>;
 
 const READ_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 
+const ALWAYS_ALLOWED_PATHS = new Set(["/", "/health", "/notices"]);
+
 // Discovery and the signing keys' public set live on the API host permanently (ADR 0119): a client that
-// cannot fetch them during maintenance cannot validate a token it was already given.
-const ALWAYS_ALLOWED_PATHS = new Set(["/", "/health", "/notices", ...OIDC_PUBLIC_DOCUMENT_PATHS]);
+// cannot fetch them during maintenance cannot validate a token it was already given. A READ of them:
+// any other method of those paths is under the mode like everything else.
+const PUBLIC_DOCUMENT_READS = new Set(["GET", "HEAD"]);
 
 // Mutating routes that remain open in read-only so admins can still moderate
 // (admin), GitHub webhooks can still deliver (webhooks), and a locked-out
@@ -81,7 +84,10 @@ export async function maintenanceMode(c: MaintenanceContext, next: Next) {
 
   const path = c.req.path;
 
-  if (ALWAYS_ALLOWED_PATHS.has(path)) {
+  if (
+    ALWAYS_ALLOWED_PATHS.has(path) ||
+    (OIDC_PUBLIC_DOCUMENT_PATHS.includes(path) && PUBLIC_DOCUMENT_READS.has(c.req.method))
+  ) {
     await next();
     return;
   }
