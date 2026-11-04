@@ -61,7 +61,7 @@ export interface OidcHarness {
   ): Promise<Answer>;
 }
 
-async function seedUser(
+export async function seedUser(
   db: Database,
   username: string,
   role: string,

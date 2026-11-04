@@ -219,6 +219,16 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "zarrFidelitySweep",
   ],
   notices: ["NOTICE_LEVELS", "createNotice", "deleteNotice", "getNotices", "listAdminNotices"],
+  oidc: [
+    "createOidcClient",
+    "disableOidcClient",
+    "getOidcClient",
+    "listOidcClients",
+    "listOidcKeys",
+    "oidcErrorCode",
+    "rotateOidcClientSecret",
+    "rotateOidcKeys",
+  ],
   repull: [
     "acceptRepullMergeTrailers",
     "acknowledgeRepullScreen",
@@ -357,6 +367,14 @@ const POST_SPLIT_ADDITIONS = [
   "acceptRepullMergeTrailers", // #1996, ADR 0111 2026-10-29: POST /admin/repulls/:id/merge-trailers/accept
   "getRepullSwitches", // #1913 phase 7h: GET /admin/repulls/switches
   "listRepullDispatches", // #1913 phase 7h: GET /admin/repulls/dispatches
+  "createOidcClient", // epic #2014 phase #2016: POST /admin/oidc/clients (shared/contract/oidc-admin.ts)
+  "listOidcClients", // epic #2014 phase #2016: GET /admin/oidc/clients
+  "getOidcClient", // epic #2014 phase #2016: GET /admin/oidc/clients/:client_id
+  "rotateOidcClientSecret", // epic #2014 phase #2016: POST /admin/oidc/clients/:client_id/rotate-secret
+  "disableOidcClient", // epic #2014 phase #2016: POST /admin/oidc/clients/:client_id/disable
+  "listOidcKeys", // epic #2014 phase #2016: GET /admin/oidc/keys
+  "rotateOidcKeys", // epic #2014 phase #2016: POST /admin/oidc/keys/rotate
+  "oidcErrorCode", // epic #2014 phase #2016: the closed word of an /admin/oidc refusal (rawBody.code)
   "lockS3Objects", // #1912 phase 6f: POST /admin/datasets/:id/s3-lock with an explicit list
   "OBJECTS_PER_EXPLICIT_LOCK", // #1912 phase 6f: the explicit lock's batch size
 ];
