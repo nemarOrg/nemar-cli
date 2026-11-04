@@ -133,6 +133,8 @@ Twelve rules inside that, each of which reopens a hole if reversed.
       So a person whose session was read under the legacy name, or who was asked to sign in again, comes back with a new `__Host-` session after one sign-in.
     - A sign-in never attaches the signing-in person's iD to whichever account a session cookie already in the browser names.
       An iD attaches to an existing session's account only in an explicit link flow (`link` or `relink` in the state cookie, or a signed CLI intent), and, while the flag is on, only to a session read under the `__Host-` name, the rule the authorization routes apply to a grant.
+      Only the start route's POST, which checks Origin and requires a session, puts `link` or `relink` in the state cookie; a GET start is always a plain sign-in, so a cross-site navigation cannot arm a link.
+      With the flag off that is a partial fix: a legacy session cookie set from a sibling host can still stand in for the person's own session in a link they start, and what closes it is turning the production flag on.
     - The legacy name stops being read no earlier than 31 days after the production flag is turned on, because every legacy cookie issued before the flag has then passed its 30-day maximum age.
       The date is a later decision (see the not-decided list).
     - Until then the window keeps an exposure open, and it is named here.
