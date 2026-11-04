@@ -45,6 +45,8 @@ import {
   COMPUTE_IMAGE_DIGEST_RE,
   COMPUTE_IMAGE_REF_RE,
   COMPUTE_JOB_ID_RE,
+  COMPUTE_MAX_OUTPUT_FILES,
+  COMPUTE_PATH_SEGMENT,
   COMPUTE_SHA256_RE,
   JOB_ENV_ALLOWLIST,
   type JobSpec,
@@ -86,9 +88,7 @@ const SIF_RE = /^(?!-)[A-Za-z0-9_.+-]+(?:\/[A-Za-z0-9_.+-]+)*$/;
 const TIMESTAMP_RE = /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?Z$/;
 /** Where an upload goes under `jobs/<id>/`: an output, or one of the four launcher files. */
 const UPLOAD_PATH_RE = new RegExp(
-  `^(?:outputs/(?:[^/\\\\\\u0000-\\u001f\\u007f]+/)*[^/\\\\\\u0000-\\u001f\\u007f]+|launcher/(?:${LAUNCHER_FILE_NAMES.map(
-    (n) => n.replace(".", "\\."),
-  ).join("|")}))$`,
+  `^(?:outputs/(?:${COMPUTE_PATH_SEGMENT}/)*${COMPUTE_PATH_SEGMENT}|launcher/(?:${LAUNCHER_FILE_NAMES.map((n) => n.replace(".", "\\.")).join("|")}))$`,
 );
 
 const launchEnvSchema = z
@@ -263,7 +263,7 @@ export const OutputsRequestSchema = z
           })
           .strict(),
       )
-      .max(100_000),
+      .max(COMPUTE_MAX_OUTPUT_FILES),
     launcher: z
       .array(z.object({ name: z.enum(LAUNCHER_FILE_NAMES), size: safeInt(0) }).strict())
       .length(LAUNCHER_FILE_NAMES.length),
@@ -299,7 +299,7 @@ export const OutputsResponseSchema = z
           })
           .passthrough(),
       )
-      .max(100_004),
+      .max(COMPUTE_MAX_OUTPUT_FILES + LAUNCHER_FILE_NAMES.length),
     expires_at: timestampSchema,
   })
   .passthrough();

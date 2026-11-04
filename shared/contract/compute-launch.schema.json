@@ -28,7 +28,6 @@
     "entry": {
       "description": "A path inside the bundle. Exactly one of entry and command is present.",
       "type": "string",
-      "minLength": 1,
       "maxLength": 240,
       "pattern": "^(?:[^/\\\\\\u0000-\\u001f\\u007f]+/)*[^/\\\\\\u0000-\\u001f\\u007f]+(?![\\s\\S])",
       "not": {
@@ -92,7 +91,6 @@
             "maxItems": 64,
             "items": {
               "type": "string",
-              "minLength": 1,
               "maxLength": 256,
               "pattern": "^[^\\\\\\u0000-\\u001f\\u007f]+(?![\\s\\S])",
               "not": {
@@ -127,7 +125,6 @@
         "sif": {
           "description": "The Singularity image file on the node that the launcher runs: a relative path of non-empty segments of letters, digits and ._+-, not starting with '-', with no . or .. segment and no leading or trailing slash.",
           "type": "string",
-          "minLength": 1,
           "maxLength": 256,
           "pattern": "^(?!-)[A-Za-z0-9_.+-]+(?:/[A-Za-z0-9_.+-]+)*(?![\\s\\S])",
           "not": {
@@ -224,7 +221,6 @@
             "properties": {
               "path": {
                 "type": "string",
-                "minLength": 1,
                 "maxLength": 512,
                 "pattern": "^(?:[^/\\\\\\u0000-\\u001f\\u007f]+/)*[^/\\\\\\u0000-\\u001f\\u007f]+(?![\\s\\S])",
                 "not": {
@@ -245,7 +241,6 @@
         },
         "launcher": {
           "type": "array",
-          "minItems": 4,
           "maxItems": 4,
           "items": {
             "type": "object",
@@ -263,10 +258,10 @@
             }
           },
           "allOf": [
-            { "contains": { "required": ["name"], "properties": { "name": { "const": "result.json" } } } },
-            { "contains": { "required": ["name"], "properties": { "name": { "const": "provenance.json" } } } },
-            { "contains": { "required": ["name"], "properties": { "name": { "const": "manifest.json" } } } },
-            { "contains": { "required": ["name"], "properties": { "name": { "const": "launcher.log" } } } }
+            { "contains": { "type": "object", "required": ["name"], "properties": { "name": { "const": "result.json" } } } },
+            { "contains": { "type": "object", "required": ["name"], "properties": { "name": { "const": "provenance.json" } } } },
+            { "contains": { "type": "object", "required": ["name"], "properties": { "name": { "const": "manifest.json" } } } },
+            { "contains": { "type": "object", "required": ["name"], "properties": { "name": { "const": "launcher.log" } } } }
           ]
         }
       }
@@ -372,7 +367,6 @@
             "properties": {
               "path": {
                 "type": "string",
-                "minLength": 1,
                 "maxLength": 512,
                 "pattern": "^(?:[^/\\\\\\u0000-\\u001f\\u007f]+/)*[^/\\\\\\u0000-\\u001f\\u007f]+(?![\\s\\S])",
                 "not": {

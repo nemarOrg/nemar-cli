@@ -94,11 +94,13 @@ const safeInt = computeSafeInt;
 const jobIdSchema = z.string().regex(COMPUTE_JOB_ID_RE);
 const sha256Schema = z.string().regex(COMPUTE_SHA256_RE);
 
-/** A safe relative path of at most `maxLength` characters, as `isSafeComputePath` judges it. */
+/**
+ * A safe relative path of at most `maxLength` characters, as `isSafeComputePath` judges it. It is
+ * never empty: the segment grammar needs at least one character, so there is no separate minimum.
+ */
 export function computePathSchema(maxLength: number) {
   return z
     .string()
-    .min(1)
     .max(maxLength)
     .regex(COMPUTE_PATH_RE)
     .refine((p) => !COMPUTE_DOT_SEGMENT_RE.test(p), {
@@ -107,10 +109,9 @@ export function computePathSchema(maxLength: number) {
 }
 const relativePath = computePathSchema;
 
-/** A dataset include pattern: at most 256 characters that never leave the dataset. */
+/** A dataset include pattern: 1 to 256 characters (the character class needs one) that never leave the dataset. */
 export const computeGlobSchema = z
   .string()
-  .min(1)
   .max(256)
   .regex(COMPUTE_GLOB_CHARS_RE)
   .refine((g) => !COMPUTE_GLOB_ESCAPES_RE.test(g), {
@@ -674,7 +675,7 @@ export const ComputePolicySchema = z
     /** A final charge within this of the provisional one is routine; a larger one is reported. */
     settle: z.object({ toleranceMilli: safeInt(0), tolerancePercent: safeInt(0, 100) }).strict(),
     /** Registries a container image may come from. */
-    registries: z.array(z.string().min(1).max(255).regex(REGISTRY_RE)).max(64),
+    registries: z.array(z.string().max(255).regex(REGISTRY_RE)).max(64),
     bundleLimits: z
       .object({
         maxTotalBytes: safeInt(1),

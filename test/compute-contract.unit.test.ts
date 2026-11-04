@@ -28,6 +28,8 @@ import {
   COMPUTE_MAX_OUTPUT_FILES,
   COMPUTE_PATH_SEGMENT,
   COMPUTE_POOLS,
+  ComputeCeilingSchema,
+  ComputeClientCapsSchema,
   ComputePolicySchema,
   DEFAULT_COMPUTE_POLICY,
   JOB_ENV_ALLOWLIST,
@@ -1294,7 +1296,10 @@ function set(base: Doc, path: string, value: unknown): Doc {
   return doc;
 }
 
-const ajv = new Ajv2020({ strict: false, allErrors: true });
+// Strict, so a mistyped keyword in the schema throws when it compiles instead of being ignored.
+// `strictRequired` stays off: the schema's `required` lists name properties declared in a branch.
+const AJV_OPTIONS = { strict: true, strictRequired: false, allErrors: true } as const;
+const ajv = new Ajv2020(AJV_OPTIONS);
 ajv.addSchema(launchSchema);
 const SCHEMA_ID = (launchSchema as { $id: string }).$id;
 const validateRoot = ajv.getSchema(SCHEMA_ID);
@@ -2274,6 +2279,46 @@ describe("the route shapes in the schema's $defs", () => {
       },
       false,
     ],
+    ...[
+      ["a control character in an output path", "outputs/a\u0001b"],
+      ["a newline in an output path", "outputs/a\nb"],
+      ["a DEL in an output path", "outputs/a\u007fb"],
+      ["a backslash in an output path", "outputs/a\\b"],
+      ["a trailing newline on an output path", "outputs/a\n"],
+      ["an empty segment in an output path", "outputs/a//b"],
+      ["a dot segment in an output path", "outputs/a/./b"],
+      ["a trailing slash on an output path", "outputs/a/"],
+      ["no file after outputs/", "outputs/"],
+      ["a control character in a launcher path", "launcher/res\u0000ult.json"],
+      ["a trailing newline on a launcher path", "launcher/result.json\n"],
+      ["a launcher file in a sub-directory", "launcher/sub/result.json"],
+      ["a launcher file with a different dot", "launcher/resultxjson"],
+    ].map(
+      ([label, path]): Case => [
+        label,
+        {
+          uploads: [{ path, url: "https://r2.example.test/o" }],
+          expires_at: "2026-11-03T13:00:00Z",
+        },
+        false,
+      ],
+    ),
+    [
+      "a non-ASCII output path",
+      {
+        uploads: [{ path: "outputs/caf\u00e9/a", url: "https://r2.example.test/o" }],
+        expires_at: "2026-11-03T13:00:00Z",
+      },
+      true,
+    ],
+    [
+      "a dotted file name that is not a dot segment",
+      {
+        uploads: [{ path: "outputs/..a/b..", url: "https://r2.example.test/o" }],
+        expires_at: "2026-11-03T13:00:00Z",
+      },
+      true,
+    ],
     [
       "an unknown launcher file",
       {
@@ -2466,6 +2511,1007 @@ describe("the launcher's own documents in the schema's $defs", () => {
   });
 });
 
+// --- Every bound, from one table ---------------------------------------------------------------
+
+type BoundTarget =
+  | "root"
+  | "bundle_response"
+  | "outputs_request"
+  | "outputs_response"
+  | "result"
+  | "manifest"
+  | "provenance";
+
+interface Bound {
+  label: string;
+  target: BoundTarget;
+  /** A "max" is valid at `at` and invalid at `at + 1`; a "min" is valid at `at` and invalid at `at - 1`. */
+  kind: "max" | "min";
+  at: number;
+  /** A document in which the quantity under test is `n` and everything else is valid. */
+  build: (n: number) => unknown;
+}
+
+const MAX_SAFE = Number.MAX_SAFE_INTEGER;
+const HASH = "a".repeat(64);
+const TS = "2026-11-03T13:00:00Z";
+const UPLOAD = { path: "outputs/a", url: "https://r2.example.test/o" };
+const OUTPUT = { path: "a", size: 1, sha256: HASH };
+const STAGING = { id: "nm000104", version: "1.0.2", mode: "bind", files: 1, bytes: 1 };
+const REQUEST_BASE = {
+  outputs: [OUTPUT],
+  launcher: LAUNCHER_FILE_NAMES.map((name) => ({ name, size: 1 })),
+};
+const RESULT_BASE = {
+  job_id: JOB_ID,
+  failure_code: null,
+  detail: null,
+  exit_number: 0,
+  entry_exit_code: 0,
+};
+const MANIFEST_BASE = { job_id: JOB_ID, files: [OUTPUT] };
+const PROVENANCE_BASE = {
+  job_id: JOB_ID,
+  launch_spec_digest: HASH,
+  bundle_digest: null,
+  image: { uri: "docker://ghcr.io/example/runtime", digest: `sha256:${HASH}` },
+  runtime_version: "3.12.3",
+  staging: [STAGING],
+  timings: { run: 1 },
+  slurm_job_id: null,
+  entry_exit_code: null,
+};
+/** A command-only launch specification: no entry and no bundle, so `command` can be varied. */
+const COMMAND_BASE = {
+  ...set(set(LAUNCH, "entry", undefined), "bundle", undefined),
+  command: ["c"],
+};
+/** A digest-pinned image reference of exactly `n` characters. */
+const imageRef = (n: number) => `docker://ghcr.io/${"a".repeat(n - 89)}@sha256:${HASH}`;
+
+/**
+ * The one table of every numeric and length bound in the launch schema, as literals. The corpus
+ * below is generated from it and judged by Ajv (on the byte-shared JSON Schema) and by zod, so a
+ * bound that drifts in either one, or in both, fails here on the very pair that straddles it.
+ */
+const MAIN_BOUNDS: readonly Bound[] = [
+  // The launch specification
+  {
+    label: "entry length",
+    target: "root",
+    kind: "max",
+    at: 240,
+    build: (n) => set(LAUNCH, "entry", `${"a".repeat(n - 3)}.py`),
+  },
+  {
+    label: "command items",
+    target: "root",
+    kind: "max",
+    at: 64,
+    build: (n) => ({ ...COMMAND_BASE, command: Array(n).fill("c") }),
+  },
+  {
+    label: "command items, at least",
+    target: "root",
+    kind: "min",
+    at: 1,
+    build: (n) => ({ ...COMMAND_BASE, command: Array(n).fill("c") }),
+  },
+  {
+    label: "command item length",
+    target: "root",
+    kind: "max",
+    at: 1024,
+    build: (n) => ({ ...COMMAND_BASE, command: ["c".repeat(n)] }),
+  },
+  {
+    label: "command item length, at least",
+    target: "root",
+    kind: "min",
+    at: 1,
+    build: (n) => ({ ...COMMAND_BASE, command: ["c".repeat(n)] }),
+  },
+  {
+    label: "arguments",
+    target: "root",
+    kind: "max",
+    at: 64,
+    build: (n) => set(LAUNCH, "args", Array(n).fill("a")),
+  },
+  {
+    label: "argument length",
+    target: "root",
+    kind: "max",
+    at: 1024,
+    build: (n) => set(LAUNCH, "args", ["a".repeat(n)]),
+  },
+  {
+    label: "datasets",
+    target: "root",
+    kind: "max",
+    at: 20,
+    build: (n) => set(LAUNCH, "datasets", Array(n).fill({ id: "nm000104", version: "1" })),
+  },
+  {
+    label: "include patterns",
+    target: "root",
+    kind: "max",
+    at: 64,
+    build: (n) =>
+      set(LAUNCH, "datasets", [{ id: "nm000104", version: "1", include: Array(n).fill("a") }]),
+  },
+  {
+    label: "include pattern length",
+    target: "root",
+    kind: "max",
+    at: 256,
+    build: (n) =>
+      set(LAUNCH, "datasets", [{ id: "nm000104", version: "1", include: ["a".repeat(n)] }]),
+  },
+  {
+    label: "include pattern length, at least",
+    target: "root",
+    kind: "min",
+    at: 1,
+    build: (n) =>
+      set(LAUNCH, "datasets", [{ id: "nm000104", version: "1", include: ["a".repeat(n)] }]),
+  },
+  {
+    label: "dataset version length",
+    target: "root",
+    kind: "max",
+    at: 64,
+    build: (n) => set(LAUNCH, "datasets", [{ id: "nm000104", version: "1".repeat(n) }]),
+  },
+  {
+    label: "dataset version length, at least",
+    target: "root",
+    kind: "min",
+    at: 1,
+    build: (n) => set(LAUNCH, "datasets", [{ id: "nm000104", version: "1".repeat(n) }]),
+  },
+  {
+    label: "api_base length",
+    target: "root",
+    kind: "max",
+    at: 512,
+    build: (n) => set(LAUNCH, "api_base", `https://${"a".repeat(n - 8)}`),
+  },
+  {
+    label: "job_token length, at least",
+    target: "root",
+    kind: "min",
+    at: 16,
+    build: (n) => set(LAUNCH, "job_token", "t".repeat(n)),
+  },
+  {
+    label: "job_token length",
+    target: "root",
+    kind: "max",
+    at: 256,
+    build: (n) => set(LAUNCH, "job_token", "t".repeat(n)),
+  },
+  {
+    label: "image uri length",
+    target: "root",
+    kind: "max",
+    at: 512,
+    build: (n) => set(LAUNCH, "image.uri", imageRef(n)),
+  },
+  {
+    label: "image sif length",
+    target: "root",
+    kind: "max",
+    at: 256,
+    build: (n) => set(LAUNCH, "image.sif", "s".repeat(n)),
+  },
+  {
+    label: "image sif length, at least",
+    target: "root",
+    kind: "min",
+    at: 1,
+    build: (n) => set(LAUNCH, "image.sif", "s".repeat(n)),
+  },
+  {
+    label: "env value length",
+    target: "root",
+    kind: "max",
+    at: 256,
+    build: (n) => set(LAUNCH, "env", { OMP_NUM_THREADS: "x".repeat(n) }),
+  },
+  {
+    label: "gpus",
+    target: "root",
+    kind: "max",
+    at: 8,
+    build: (n) => set(LAUNCH, "resources.gpus", n),
+  },
+  {
+    label: "gpus, at least",
+    target: "root",
+    kind: "min",
+    at: 0,
+    build: (n) => set(LAUNCH, "resources.gpus", n),
+  },
+  {
+    label: "max_files",
+    target: "root",
+    kind: "max",
+    at: 1_000_000,
+    build: (n) => set(LAUNCH, "limits.max_files", n),
+  },
+  {
+    label: "max_files, at least",
+    target: "root",
+    kind: "min",
+    at: 1,
+    build: (n) => set(LAUNCH, "limits.max_files", n),
+  },
+  {
+    label: "max_total_bytes",
+    target: "root",
+    kind: "max",
+    at: MAX_SAFE,
+    build: (n) => set(LAUNCH, "limits.max_total_bytes", n),
+  },
+  {
+    label: "max_total_bytes, at least",
+    target: "root",
+    kind: "min",
+    at: 1,
+    build: (n) => set(LAUNCH, "limits.max_total_bytes", n),
+  },
+  {
+    label: "bundle size",
+    target: "root",
+    kind: "max",
+    at: MAX_SAFE,
+    build: (n) => set(LAUNCH, "bundle.size", n),
+  },
+  {
+    label: "bundle size, at least",
+    target: "root",
+    kind: "min",
+    at: 1,
+    build: (n) => set(LAUNCH, "bundle.size", n),
+  },
+  // The bundle response
+  {
+    label: "bundle url length",
+    target: "bundle_response",
+    kind: "max",
+    at: 4096,
+    build: (n) => ({ url: `https://${"a".repeat(n - 8)}`, expires_at: TS }),
+  },
+  // The outputs request
+  {
+    label: "outputs listed",
+    target: "outputs_request",
+    kind: "max",
+    at: 100_000,
+    build: (n) => ({ ...REQUEST_BASE, outputs: Array(n).fill(OUTPUT) }),
+  },
+  {
+    label: "output path length",
+    target: "outputs_request",
+    kind: "max",
+    at: 512,
+    build: (n) => ({ ...REQUEST_BASE, outputs: [{ ...OUTPUT, path: "a".repeat(n) }] }),
+  },
+  {
+    label: "output size",
+    target: "outputs_request",
+    kind: "max",
+    at: MAX_SAFE,
+    build: (n) => ({ ...REQUEST_BASE, outputs: [{ ...OUTPUT, size: n }] }),
+  },
+  {
+    label: "output size, at least",
+    target: "outputs_request",
+    kind: "min",
+    at: 0,
+    build: (n) => ({ ...REQUEST_BASE, outputs: [{ ...OUTPUT, size: n }] }),
+  },
+  {
+    label: "launcher file size",
+    target: "outputs_request",
+    kind: "max",
+    at: MAX_SAFE,
+    build: (n) => ({
+      ...REQUEST_BASE,
+      launcher: REQUEST_BASE.launcher.map((f, i) => (i === 0 ? { ...f, size: n } : f)),
+    }),
+  },
+  // The outputs response
+  {
+    label: "uploads",
+    target: "outputs_response",
+    kind: "max",
+    at: 100_004,
+    build: (n) => ({ uploads: Array(n).fill(UPLOAD), expires_at: TS }),
+  },
+  {
+    label: "upload path length",
+    target: "outputs_response",
+    kind: "max",
+    at: 600,
+    build: (n) => ({
+      uploads: [{ ...UPLOAD, path: `outputs/${"a".repeat(n - 8)}` }],
+      expires_at: TS,
+    }),
+  },
+  {
+    label: "upload url length",
+    target: "outputs_response",
+    kind: "max",
+    at: 4096,
+    build: (n) => ({
+      uploads: [{ ...UPLOAD, url: `https://${"a".repeat(n - 8)}` }],
+      expires_at: TS,
+    }),
+  },
+  // result.json
+  {
+    label: "result detail length",
+    target: "result",
+    kind: "max",
+    at: 64,
+    build: (n) => ({ ...RESULT_BASE, detail: "a".repeat(n) }),
+  },
+  {
+    label: "result detail length, at least",
+    target: "result",
+    kind: "min",
+    at: 1,
+    build: (n) => ({ ...RESULT_BASE, detail: "a".repeat(n) }),
+  },
+  {
+    label: "entry exit code",
+    target: "result",
+    kind: "max",
+    at: 255,
+    build: (n) => ({ ...RESULT_BASE, entry_exit_code: n }),
+  },
+  {
+    label: "entry exit code, at least",
+    target: "result",
+    kind: "min",
+    at: -255,
+    build: (n) => ({ ...RESULT_BASE, entry_exit_code: n }),
+  },
+  // manifest.json
+  {
+    label: "manifest files",
+    target: "manifest",
+    kind: "max",
+    at: 100_000,
+    build: (n) => ({ ...MANIFEST_BASE, files: Array(n).fill(OUTPUT) }),
+  },
+  {
+    label: "manifest path length",
+    target: "manifest",
+    kind: "max",
+    at: 512,
+    build: (n) => ({ ...MANIFEST_BASE, files: [{ ...OUTPUT, path: "a".repeat(n) }] }),
+  },
+  {
+    label: "manifest size",
+    target: "manifest",
+    kind: "max",
+    at: MAX_SAFE,
+    build: (n) => ({ ...MANIFEST_BASE, files: [{ ...OUTPUT, size: n }] }),
+  },
+  // provenance.json
+  {
+    label: "staging records",
+    target: "provenance",
+    kind: "max",
+    at: 20,
+    build: (n) => ({ ...PROVENANCE_BASE, staging: Array(n).fill(STAGING) }),
+  },
+  {
+    label: "staging files",
+    target: "provenance",
+    kind: "max",
+    at: MAX_SAFE,
+    build: (n) => ({ ...PROVENANCE_BASE, staging: [{ ...STAGING, files: n }] }),
+  },
+  {
+    label: "staging bytes",
+    target: "provenance",
+    kind: "max",
+    at: MAX_SAFE,
+    build: (n) => ({ ...PROVENANCE_BASE, staging: [{ ...STAGING, bytes: n }] }),
+  },
+  {
+    label: "staging version length",
+    target: "provenance",
+    kind: "max",
+    at: 64,
+    build: (n) => ({ ...PROVENANCE_BASE, staging: [{ ...STAGING, version: "1".repeat(n) }] }),
+  },
+  {
+    label: "timings",
+    target: "provenance",
+    kind: "max",
+    at: 16,
+    build: (n) => ({
+      ...PROVENANCE_BASE,
+      timings: Object.fromEntries(Array.from({ length: n }, (_, i) => [`p${i}`, 1])),
+    }),
+  },
+  {
+    label: "timing key length",
+    target: "provenance",
+    kind: "max",
+    at: 64,
+    build: (n) => ({ ...PROVENANCE_BASE, timings: { [`k${"a".repeat(n - 1)}`]: 1 } }),
+  },
+  {
+    label: "slurm_job_id length",
+    target: "provenance",
+    kind: "max",
+    at: 64,
+    build: (n) => ({ ...PROVENANCE_BASE, slurm_job_id: "1".repeat(n) }),
+  },
+  {
+    label: "slurm_job_id length, at least",
+    target: "provenance",
+    kind: "min",
+    at: 1,
+    build: (n) => ({ ...PROVENANCE_BASE, slurm_job_id: "1".repeat(n) }),
+  },
+  {
+    label: "runtime_version length",
+    target: "provenance",
+    kind: "max",
+    at: 128,
+    build: (n) => ({ ...PROVENANCE_BASE, runtime_version: "v".repeat(n) }),
+  },
+  {
+    label: "runtime_version length, at least",
+    target: "provenance",
+    kind: "min",
+    at: 1,
+    build: (n) => ({ ...PROVENANCE_BASE, runtime_version: "v".repeat(n) }),
+  },
+  {
+    label: "provenance image uri length",
+    target: "provenance",
+    kind: "max",
+    at: 512,
+    build: (n) => ({ ...PROVENANCE_BASE, image: { ...PROVENANCE_BASE.image, uri: "u".repeat(n) } }),
+  },
+  {
+    label: "provenance entry exit code",
+    target: "provenance",
+    kind: "max",
+    at: 255,
+    build: (n) => ({ ...PROVENANCE_BASE, entry_exit_code: n }),
+  },
+  {
+    label: "provenance entry exit code, at least",
+    target: "provenance",
+    kind: "min",
+    at: -255,
+    build: (n) => ({ ...PROVENANCE_BASE, entry_exit_code: n }),
+  },
+];
+
+/** The bounds a mutation of each quantifier or keyword in the schema turned out to need. */
+const EXTRA_BOUNDS: readonly Bound[] = [
+  {
+    label: "entry length, at least",
+    target: "root",
+    kind: "min",
+    at: 1,
+    build: (n) => set(LAUNCH, "entry", "a".repeat(n)),
+  },
+  // Every allowlisted environment name has its own entry in the schema, so each one is a bound.
+  ...JOB_ENV_ALLOWLIST.map(
+    (name): Bound => ({
+      label: `env value length (${name})`,
+      target: "root",
+      kind: "max",
+      at: 256,
+      build: (n) => set(LAUNCH, "env", { [name]: "x".repeat(n) }),
+    }),
+  ),
+  {
+    label: "image uri port digits",
+    target: "root",
+    kind: "max",
+    at: 5,
+    build: (n) =>
+      set(LAUNCH, "image.uri", `registry.example.test:${"1".repeat(n)}/team/tool@sha256:${HASH}`),
+  },
+  {
+    label: "image uri port digits, at least",
+    target: "root",
+    kind: "min",
+    at: 1,
+    build: (n) =>
+      set(LAUNCH, "image.uri", `registry.example.test:${"1".repeat(n)}/team/tool@sha256:${HASH}`),
+  },
+  {
+    label: "launcher file size, at least",
+    target: "outputs_request",
+    kind: "min",
+    at: 0,
+    build: (n) => ({
+      ...REQUEST_BASE,
+      launcher: REQUEST_BASE.launcher.map((f, i) => (i === 0 ? { ...f, size: n } : f)),
+    }),
+  },
+  {
+    label: "manifest size, at least",
+    target: "manifest",
+    kind: "min",
+    at: 0,
+    build: (n) => ({ ...MANIFEST_BASE, files: [{ ...OUTPUT, size: n }] }),
+  },
+  {
+    label: "staging files, at least",
+    target: "provenance",
+    kind: "min",
+    at: 0,
+    build: (n) => ({ ...PROVENANCE_BASE, staging: [{ ...STAGING, files: n }] }),
+  },
+  {
+    label: "staging bytes, at least",
+    target: "provenance",
+    kind: "min",
+    at: 0,
+    build: (n) => ({ ...PROVENANCE_BASE, staging: [{ ...STAGING, bytes: n }] }),
+  },
+  {
+    label: "staging version length, at least",
+    target: "provenance",
+    kind: "min",
+    at: 1,
+    build: (n) => ({ ...PROVENANCE_BASE, staging: [{ ...STAGING, version: "1".repeat(n) }] }),
+  },
+  {
+    label: "timing seconds, at least",
+    target: "provenance",
+    kind: "min",
+    at: 0,
+    build: (n) => ({ ...PROVENANCE_BASE, timings: { run: n } }),
+  },
+  {
+    label: "timing key length, at least",
+    target: "provenance",
+    kind: "min",
+    at: 1,
+    build: (n) => ({ ...PROVENANCE_BASE, timings: { ["k".repeat(n)]: 1 } }),
+  },
+  {
+    label: "provenance image uri length, at least",
+    target: "provenance",
+    kind: "min",
+    at: 1,
+    build: (n) => ({ ...PROVENANCE_BASE, image: { ...PROVENANCE_BASE.image, uri: "u".repeat(n) } }),
+  },
+];
+
+const BOUNDS: readonly Bound[] = [...MAIN_BOUNDS, ...EXTRA_BOUNDS];
+
+const zodFor: Record<BoundTarget, (doc: unknown) => boolean> = {
+  root: (d) => LaunchSpecSchema.safeParse(d).success,
+  bundle_response: (d) => BundleResponseSchema.safeParse(d).success,
+  outputs_request: (d) => OutputsRequestSchema.safeParse(d).success,
+  outputs_response: (d) => OutputsResponseSchema.safeParse(d).success,
+  result: (d) => LauncherResultSchema.safeParse(d).success,
+  manifest: (d) => ResultManifestSchema.safeParse(d).success,
+  provenance: (d) => LauncherProvenanceSchema.safeParse(d).success,
+};
+const ajvFor = (target: BoundTarget): ((doc: unknown) => boolean) =>
+  target === "root" ? (d) => validateRoot(d) as boolean : (d) => defValidator(target)(d) as boolean;
+
+describe("every numeric and length bound, from one table, on both sides of its edge", () => {
+  test("the table covers every kind of document and is not small", () => {
+    expect(BOUNDS.length).toBeGreaterThanOrEqual(70);
+    expect(new Set(BOUNDS.map((b) => b.target))).toEqual(
+      new Set([
+        "root",
+        "bundle_response",
+        "outputs_request",
+        "outputs_response",
+        "result",
+        "manifest",
+        "provenance",
+      ]),
+    );
+    expect(new Set(BOUNDS.map((b) => b.label)).size).toBe(BOUNDS.length);
+    expect(BOUNDS.filter((b) => b.kind === "min").length).toBeGreaterThanOrEqual(15);
+  });
+
+  test("the base documents the builders vary are themselves valid", () => {
+    expect(validateRoot(COMMAND_BASE)).toBe(true);
+    expect(LaunchSpecSchema.safeParse(COMMAND_BASE).success).toBe(true);
+    for (const [target, doc] of [
+      ["outputs_request", REQUEST_BASE],
+      ["result", RESULT_BASE],
+      ["manifest", MANIFEST_BASE],
+      ["provenance", PROVENANCE_BASE],
+    ] as const) {
+      expect(ajvFor(target)(doc), target).toBe(true);
+      expect(zodFor[target](doc), target).toBe(true);
+    }
+  });
+
+  for (const bound of BOUNDS) {
+    test(`${bound.target}: ${bound.label} is ${bound.at} ${bound.kind === "max" ? "at most" : "at least"}`, () => {
+      const inside = bound.build(bound.at);
+      const outside = bound.build(bound.kind === "max" ? bound.at + 1 : bound.at - 1);
+      expect(ajvFor(bound.target)(inside), "JSON Schema, at the limit").toBe(true);
+      expect(zodFor[bound.target](inside), "zod, at the limit").toBe(true);
+      expect(ajvFor(bound.target)(outside), "JSON Schema, one past").toBe(false);
+      expect(zodFor[bound.target](outside), "zod, one past").toBe(false);
+    });
+  }
+});
+
+// --- The same, for what only zod holds: the job specification and the owner policy ----------------
+
+interface ZodBound {
+  label: string;
+  kind: "max" | "min";
+  at: number;
+  ok: (doc: unknown) => boolean;
+  build: (n: number) => unknown;
+}
+
+/** The rows for one number that may be bounded below and above, both ends from one place. */
+function numeric(
+  label: string,
+  ok: (doc: unknown) => boolean,
+  build: (n: number) => unknown,
+  min: number | null,
+  max: number | null,
+): ZodBound[] {
+  const rows: ZodBound[] = [];
+  if (min !== null) rows.push({ label: `${label}, at least`, kind: "min", at: min, ok, build });
+  if (max !== null) rows.push({ label, kind: "max", at: max, ok, build });
+  return rows;
+}
+
+const jobOk = (d: unknown) => JobSpecSchema.safeParse(d).success;
+const policyOk = (d: unknown) => ComputePolicySchema.safeParse(d).success;
+const POLICY = JSON.parse(JSON.stringify(DEFAULT_COMPUTE_POLICY)) as Doc;
+const policyWith = (path: string, value: unknown) => set(POLICY, path, value);
+const imageJob = (extra: Record<string, unknown>) => ({
+  name: "tool",
+  runtime: "image",
+  command: ["tool"],
+  partition: "shared",
+  minutes: 30,
+  ...extra,
+});
+const recipeJob = (recipe: string) => ({
+  name: "floor",
+  runtime: "python",
+  recipe,
+  datasets: [{ id: "nm000104", version: "1" }],
+  partition: "shared",
+  minutes: 60,
+});
+const ceilingOk = (d: unknown) => ComputeCeilingSchema.safeParse(d).success;
+const CEILING = { maxNodes: 1, maxCoresPerNode: 1, maxGpusPerNode: 0, maxMinutes: 1 };
+const capsOk = (d: unknown) => ComputeClientCapsSchema.safeParse(d).success;
+
+const ZOD_BOUNDS: readonly ZodBound[] = [
+  // The job specification
+  ...numeric("name length", jobOk, (n) => specWith({ name: "a".repeat(n) }), 1, 80),
+  ...numeric("nodes", jobOk, (n) => specWith({ nodes: n }), 1, 64),
+  ...numeric("cores", jobOk, (n) => specWith({ cores: n }), 1, 256),
+  ...numeric("gpus on a CPU partition", jobOk, (n) => specWith({ gpus: n }), 0, null),
+  ...numeric(
+    "gpus on a GPU partition",
+    jobOk,
+    (n) => specWith({ partition: "gpu", gpus: n }),
+    1,
+    8,
+  ),
+  ...numeric("minutes", jobOk, (n) => specWith({ minutes: n }), 1, 10080),
+  ...numeric("memory_mb", jobOk, (n) => specWith({ memory_mb: n }), 1, 16_777_216),
+  ...numeric("entry length", jobOk, (n) => specWith({ entry: "a".repeat(n) }), 1, null),
+  ...numeric(
+    "entry length, with a suffix",
+    jobOk,
+    (n) => specWith({ entry: `${"a".repeat(n - 3)}.py` }),
+    null,
+    240,
+  ),
+  ...numeric(
+    "bundle size",
+    jobOk,
+    (n) => specWith({ bundle: { size: n, sha256: HEX_A } }),
+    1,
+    MAX_SAFE,
+  ),
+  ...numeric("arguments", jobOk, (n) => specWith({ args: Array(n).fill("a") }), null, 64),
+  ...numeric("argument length", jobOk, (n) => specWith({ args: ["a".repeat(n)] }), null, 1024),
+  ...numeric(
+    "command items",
+    jobOk,
+    (n) => imageJob({ image: imageRef(512), command: Array(n).fill("c") }),
+    1,
+    64,
+  ),
+  ...numeric(
+    "command item length",
+    jobOk,
+    (n) => imageJob({ image: imageRef(512), command: ["c".repeat(n)] }),
+    1,
+    1024,
+  ),
+  ...numeric("image length", jobOk, (n) => imageJob({ image: imageRef(n) }), null, 512),
+  ...numeric("recipe length", jobOk, (n) => recipeJob("a".repeat(n)), 1, 64),
+  ...numeric(
+    "datasets",
+    jobOk,
+    (n) => specWith({ datasets: Array(n).fill({ id: "nm000104", version: "1" }) }),
+    null,
+    20,
+  ),
+  ...numeric(
+    "dataset version length",
+    jobOk,
+    (n) => specWith({ datasets: [{ id: "nm000104", version: "1".repeat(n) }] }),
+    1,
+    64,
+  ),
+  ...numeric(
+    "include patterns",
+    jobOk,
+    (n) => specWith({ datasets: [{ id: "nm000104", version: "1", include: Array(n).fill("a") }] }),
+    null,
+    64,
+  ),
+  ...numeric(
+    "include pattern length",
+    jobOk,
+    (n) => specWith({ datasets: [{ id: "nm000104", version: "1", include: ["a".repeat(n)] }] }),
+    1,
+    256,
+  ),
+  ...JOB_ENV_ALLOWLIST.flatMap((name) =>
+    numeric(
+      `env value length (${name})`,
+      jobOk,
+      (n) => specWith({ env: { [name]: "x".repeat(n) } }),
+      null,
+      256,
+    ),
+  ),
+  // A ceiling and a client's caps
+  ...numeric("ceiling maxNodes", ceilingOk, (n) => ({ ...CEILING, maxNodes: n }), 1, 64),
+  ...numeric(
+    "ceiling maxCoresPerNode",
+    ceilingOk,
+    (n) => ({ ...CEILING, maxCoresPerNode: n }),
+    0,
+    256,
+  ),
+  ...numeric("ceiling maxGpusPerNode", ceilingOk, (n) => ({ ...CEILING, maxGpusPerNode: n }), 0, 8),
+  ...numeric("ceiling maxMinutes", ceilingOk, (n) => ({ ...CEILING, maxMinutes: n }), 1, 10080),
+  ...numeric(
+    "client maxOpenReservations",
+    capsOk,
+    (n) => ({ maxOpenReservations: n, maxReservedMilliPerDay: 1 }),
+    0,
+    100_000,
+  ),
+  ...numeric(
+    "client maxReservedMilliPerDay",
+    capsOk,
+    (n) => ({ maxOpenReservations: 1, maxReservedMilliPerDay: n }),
+    0,
+    MAX_SAFE,
+  ),
+  // The owner policy
+  ...numeric(
+    "default grant, cpu",
+    policyOk,
+    (n) => policyWith("defaultGrantMilli.cpu", n),
+    0,
+    MAX_SAFE,
+  ),
+  ...numeric(
+    "default grant, gpu",
+    policyOk,
+    (n) => policyWith("defaultGrantMilli.gpu", n),
+    0,
+    MAX_SAFE,
+  ),
+  ...numeric(
+    "renewal every days",
+    policyOk,
+    (n) => policyWith("renewal", { enabled: true, everyDays: n }),
+    1,
+    366,
+  ),
+  ...numeric(
+    "maxLiveJobsPerPerson",
+    policyOk,
+    (n) => policyWith("maxLiveJobsPerPerson", n),
+    0,
+    1000,
+  ),
+  ...numeric(
+    "pipelines dailyJobCap",
+    policyOk,
+    (n) => policyWith("pipelines.dailyJobCap", n),
+    0,
+    100_000,
+  ),
+  ...numeric(
+    "pipelines live cpu",
+    policyOk,
+    (n) => policyWith("pipelines.maxLiveJobs.cpu", n),
+    0,
+    1000,
+  ),
+  ...numeric(
+    "pipelines live gpu",
+    policyOk,
+    (n) => policyWith("pipelines.maxLiveJobs.gpu", n),
+    0,
+    1000,
+  ),
+  ...numeric(
+    "reservationWaitMinutes",
+    policyOk,
+    (n) => policyWith("reservationWaitMinutes", n),
+    1,
+    1440,
+  ),
+  ...numeric(
+    "retention recordsYears",
+    policyOk,
+    (n) => policyWith("retention.recordsYears", n),
+    1,
+    30,
+  ),
+  ...numeric("retention logsDays", policyOk, (n) => policyWith("retention.logsDays", n), 1, 3650),
+  ...numeric(
+    "retention resultsDays",
+    policyOk,
+    (n) => policyWith("retention.resultsDays", n),
+    14,
+    365,
+  ),
+  ...numeric(
+    "resultLimits maxJobBytes",
+    policyOk,
+    (n) => policyWith("resultLimits.maxJobBytes", n),
+    1,
+    MAX_SAFE,
+  ),
+  ...numeric(
+    "resultLimits maxFiles",
+    policyOk,
+    (n) => policyWith("resultLimits.maxFiles", n),
+    1,
+    100_000,
+  ),
+  ...numeric(
+    "resultLimits maxStoredBytesPerPerson",
+    policyOk,
+    (n) => policyWith("resultLimits.maxStoredBytesPerPerson", n),
+    1,
+    MAX_SAFE,
+  ),
+  ...numeric(
+    "resultLimits maxStoredBytesTotal",
+    policyOk,
+    (n) => policyWith("resultLimits.maxStoredBytesTotal", n),
+    1,
+    MAX_SAFE,
+  ),
+  ...numeric(
+    "settle toleranceMilli",
+    policyOk,
+    (n) => policyWith("settle.toleranceMilli", n),
+    0,
+    MAX_SAFE,
+  ),
+  ...numeric(
+    "settle tolerancePercent",
+    policyOk,
+    (n) => policyWith("settle.tolerancePercent", n),
+    0,
+    100,
+  ),
+  ...numeric(
+    "bundleLimits maxTotalBytes",
+    policyOk,
+    (n) => policyWith("bundleLimits.maxTotalBytes", n),
+    1,
+    MAX_SAFE,
+  ),
+  ...numeric(
+    "bundleLimits maxFiles",
+    policyOk,
+    (n) => policyWith("bundleLimits.maxFiles", n),
+    1,
+    100_000,
+  ),
+  ...numeric(
+    "bundleLimits maxFileBytes",
+    policyOk,
+    (n) => policyWith("bundleLimits.maxFileBytes", n),
+    1,
+    MAX_SAFE,
+  ),
+  ...numeric(
+    "registries",
+    policyOk,
+    (n) => policyWith("registries", Array(n).fill("ghcr.io")),
+    null,
+    64,
+  ),
+  ...numeric("registry length", policyOk, (n) => policyWith("registries", ["a".repeat(n)]), 1, 255),
+  ...numeric(
+    "registry port digits",
+    policyOk,
+    (n) => policyWith("registries", [`ghcr.io:${"1".repeat(n)}`]),
+    1,
+    5,
+  ),
+  ...numeric(
+    "client id length",
+    policyOk,
+    (n) =>
+      policyWith("clients", {
+        ["c".repeat(n)]: { maxOpenReservations: 1, maxReservedMilliPerDay: 1 },
+      }),
+    1,
+    64,
+  ),
+];
+
+describe("every bound of the job specification and the owner policy, from one table", () => {
+  test("the table is large and its builders produce valid documents at the base", () => {
+    expect(ZOD_BOUNDS.length).toBeGreaterThanOrEqual(95);
+    expect(new Set(ZOD_BOUNDS.map((b) => b.label)).size).toBe(ZOD_BOUNDS.length);
+    expect(jobOk(SPEC)).toBe(true);
+    expect(policyOk(POLICY)).toBe(true);
+    expect(ceilingOk(CEILING)).toBe(true);
+    expect(capsOk({ maxOpenReservations: 1, maxReservedMilliPerDay: 1 })).toBe(true);
+  });
+
+  for (const bound of ZOD_BOUNDS) {
+    test(`${bound.label} is ${bound.at} ${bound.kind === "max" ? "at most" : "at least"}`, () => {
+      expect(bound.ok(bound.build(bound.at)), "at the limit").toBe(true);
+      expect(
+        bound.ok(bound.build(bound.kind === "max" ? bound.at + 1 : bound.at - 1)),
+        "one past",
+      ).toBe(false);
+    });
+  }
+});
+
+describe("the schema compiles strictly, so a mistyped keyword cannot hide", () => {
+  test("a mistyped keyword makes strict compilation throw", () => {
+    const broken = JSON.parse(JSON.stringify(launchSchema));
+    broken.$id = "https://example.test/broken.json";
+    broken.properties.entry.maxLenght = 240;
+    expect(() => new Ajv2020(AJV_OPTIONS).compile(broken)).toThrow(/unknown keyword/);
+    // The real schema, compiled afresh the same way, does not.
+    const again = JSON.parse(JSON.stringify(launchSchema));
+    expect(() => new Ajv2020(AJV_OPTIONS).compile(again)).not.toThrow();
+  });
+
+  test("the default (non-strict) options would have let it through", () => {
+    const broken = JSON.parse(JSON.stringify(launchSchema));
+    broken.$id = "https://example.test/broken-lenient.json";
+    broken.properties.entry.maxLenght = 240;
+    expect(() => new Ajv2020({ strict: false }).compile(broken)).not.toThrow();
+  });
+});
+
 describe("the JSON Schema file read back against the constants it mirrors", () => {
   const schema = launchSchema as Doc;
 
@@ -2586,7 +3632,12 @@ describe("the JSON Schema file read back against the constants it mirrors", () =
         const n = node as Doc;
         if (n.type === "object" && n.properties && n.additionalProperties !== false)
           open.push(where);
-        for (const [k, v] of Object.entries(n)) walk(v, `${where}.${k}`);
+        // A `contains`, `if`, `then` or `not` subschema is a test applied to a document, not an
+        // object a document is made of.
+        for (const [k, v] of Object.entries(n)) {
+          if (["contains", "if", "then", "not"].includes(k)) continue;
+          walk(v, `${where}.${k}`);
+        }
       }
     };
     walk(schema, "$");
