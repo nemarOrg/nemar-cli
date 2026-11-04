@@ -23,6 +23,11 @@
  *    `SETTLE_INSERT_SQL`): the amounts are the hold's, so a caller cannot misstate them, and the hold
  *    must be open in the same statement, so a hold closes once. A settlement's charge and any
  *    overrun are one statement.
+ *  - The unique indexes are the backstop and the WHERE terms are the ordinary path. A statement that
+ *    reached a hold that was already closed, or a step already taken, would be refused by
+ *    `compute_ledger_closes_once` or by the unique key, and the caller reads that as closed; the
+ *    `NOT EXISTS` terms make the ordinary refusal a statement that writes nothing and raises
+ *    nothing, so the two layers answer alike.
  *  - Available is granted minus held minus charged and MAY BE NEGATIVE (an overrun, or an
  *    adjustment of the grant below what is used, is a fact that already happened). It is computed
  *    in BigInt, so it is exact at the largest total. A stored total never is negative.
@@ -167,17 +172,22 @@ function actorArg(value: unknown): number | null {
 
 /**
  * What a pool may still take: granted minus held minus charged. It MAY BE NEGATIVE (an overrun
- * happened, or a grant was adjusted below what is used). BigInt, so it is exact at the largest
- * total, and a total that is not a whole number (which the table never stores) throws.
+ * happened, or a grant was adjusted below what is used). Each total is checked to be a whole
+ * number a double holds exactly (the table never stores another), so each subtraction is exact
+ * while its result is within 2^53, and a result beyond the safe range, which rounding could not
+ * bring back inside it, throws.
  */
 export function availableMilli(
   row: Pick<PoolRow, "granted_milli" | "held_milli" | "charged_milli">,
 ): number {
-  const value = BigInt(row.granted_milli) - BigInt(row.held_milli) - BigInt(row.charged_milli);
-  if (value > BigInt(MAX_MILLI) || value < -BigInt(MAX_MILLI)) {
+  for (const total of [row.granted_milli, row.held_milli, row.charged_milli]) {
+    if (!Number.isSafeInteger(total)) throw new RangeError("a pool's total is a whole number");
+  }
+  const value = row.granted_milli - row.held_milli - row.charged_milli;
+  if (!Number.isSafeInteger(value)) {
     throw new RangeError("available is beyond what a double holds exactly");
   }
-  return Number(value);
+  return value;
 }
 
 // --- Pools -----------------------------------------------------------------------------------
