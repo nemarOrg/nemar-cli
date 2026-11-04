@@ -243,6 +243,7 @@ import {
   resolveWithdrawTargets,
   stillWithdrawn,
 } from "../lib/withdrawn-datasets.js";
+import { computeCommand } from "./admin-compute.js";
 import { mailCommand } from "./admin-mail.js";
 import { prReviewsCommand } from "./admin-pr-reviews.js";
 import { publishCommand } from "./admin-publish.js";
@@ -10497,3 +10498,4 @@ adminCommand.addCommand(neurobagelCommand);
 adminCommand.addCommand(prReviewsCommand);
 adminCommand.addCommand(repullCommand);
 adminCommand.addCommand(mailCommand);
+adminCommand.addCommand(computeCommand);

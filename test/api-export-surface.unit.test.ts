@@ -236,6 +236,17 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "repullErrorCode",
     "transitionRepull",
   ],
+  compute: [
+    "adjustAccountComputePool",
+    "adjustPlatformComputePool",
+    "computeErrorCode",
+    "getAccountComputePools",
+    "getComputePolicy",
+    "grantAccountComputePool",
+    "grantPlatformComputePool",
+    "listComputePools",
+    "putComputePolicy",
+  ],
 };
 
 /** Exported only for sibling api/* modules; never part of the CLI surface. */
@@ -357,6 +368,15 @@ const POST_SPLIT_ADDITIONS = [
   "acceptRepullMergeTrailers", // #1996, ADR 0111 2026-10-29: POST /admin/repulls/:id/merge-trailers/accept
   "getRepullSwitches", // #1913 phase 7h: GET /admin/repulls/switches
   "listRepullDispatches", // #1913 phase 7h: GET /admin/repulls/dispatches
+  "getComputePolicy", // epic #2005 phase A2: GET /admin/compute/policy
+  "putComputePolicy", // epic #2005 phase A2: PUT /admin/compute/policy
+  "listComputePools", // epic #2005 phase A2: GET /admin/compute/pools
+  "getAccountComputePools", // epic #2005 phase A2: GET /admin/compute/pools/by-id/:accountId
+  "grantAccountComputePool", // epic #2005 phase A2: POST /admin/compute/pools/by-id/:accountId/grant
+  "adjustAccountComputePool", // epic #2005 phase A2: POST /admin/compute/pools/by-id/:accountId/adjust
+  "grantPlatformComputePool", // epic #2005 phase A2: POST /admin/compute/pools/platform/:key/grant
+  "adjustPlatformComputePool", // epic #2005 phase A2: POST /admin/compute/pools/platform/:key/adjust
+  "computeErrorCode", // epic #2005 phase A2: the closed word of a /admin/compute refusal (rawBody.code)
   "lockS3Objects", // #1912 phase 6f: POST /admin/datasets/:id/s3-lock with an explicit list
   "OBJECTS_PER_EXPLICIT_LOCK", // #1912 phase 6f: the explicit lock's batch size
 ];
