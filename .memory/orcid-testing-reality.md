@@ -4,7 +4,6 @@ description: ORCID sandbox is unusable; staging uses the production ORCID app; t
 metadata: 
   node_type: memory
   type: project
-  originSessionId: 0b1a7f7c-8b12-457d-ab0a-b7f47c6c0ba3
   modified: 2026-09-06T19:47:09.498Z
 ---
 

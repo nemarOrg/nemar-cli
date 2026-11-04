@@ -4,7 +4,6 @@ description: "Tools needing ambient AWS_ACCESS_KEY_ID get it from `aws configure
 metadata: 
   node_type: memory
   type: reference
-  originSessionId: b7167d72-4f78-48b7-acfe-286ff594c99d
   modified: 2026-09-16T13:38:49.754Z
 ---
 

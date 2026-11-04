@@ -4,7 +4,6 @@ description: "The owner's standing test for bespoke code versus dependencies in 
 metadata: 
   node_type: memory
   type: feedback
-  originSessionId: 04fb8116-c230-4621-896a-325105cbf241
   modified: 2026-09-03T09:14:19.099Z
 ---
 

@@ -4,7 +4,6 @@ description: "No wrangler login on this machine, but the installed `nemar` (~/.b
 metadata: 
   node_type: memory
   type: project
-  originSessionId: 0f33834a-28ae-4fc8-b46d-31227beabe37
   modified: 2026-09-08T12:05:25.053Z
 ---
 

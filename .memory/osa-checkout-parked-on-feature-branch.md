@@ -4,7 +4,6 @@ description: "The local osa checkout sits on an old feature branch; describe OSA
 metadata: 
   node_type: memory
   type: project
-  originSessionId: 9385d577-e7b2-43ad-980d-5e6404097302
   modified: 2026-09-16T21:34:48.086Z
 ---
 

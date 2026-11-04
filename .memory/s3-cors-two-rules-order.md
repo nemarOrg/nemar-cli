@@ -4,7 +4,6 @@ description: The nemar bucket CORS has two ordered rules; the read rule must sta
 metadata: 
   node_type: memory
   type: project
-  originSessionId: 9385d577-e7b2-43ad-980d-5e6404097302
   modified: 2026-09-16T19:45:58.123Z
 ---
 

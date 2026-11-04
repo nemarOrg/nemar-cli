@@ -4,7 +4,6 @@ description: "The owner wants designs that cover 90 percent of cases up front (n
 metadata: 
   node_type: memory
   type: feedback
-  originSessionId: 0b1a7f7c-8b12-457d-ab0a-b7f47c6c0ba3
   modified: 2026-09-06T19:23:46.804Z
 ---
 

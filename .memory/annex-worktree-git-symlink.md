@@ -4,7 +4,6 @@ description: "git-annex rewrites nemar-cli worktree .git files into symlinks, br
 metadata:
   node_type: memory
   type: project
-  originSessionId: 6d7ab320-492c-4e92-a797-7dd4557c2cbf
   modified: 2026-08-23T16:16:50.640Z
 ---
 

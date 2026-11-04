@@ -4,7 +4,6 @@ description: "The owner's CLAUDE.md bans AI coauthor lines and emojis in commits
 metadata: 
   node_type: memory
   type: feedback
-  originSessionId: b7167d72-4f78-48b7-acfe-286ff594c99d
   modified: 2026-09-14T21:41:59.471Z
 ---
 

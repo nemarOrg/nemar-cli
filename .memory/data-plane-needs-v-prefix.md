@@ -4,7 +4,6 @@ description: "Data plane paths need v1.0.0, not 1.0.0; a bare-version 404 is a p
 metadata: 
   node_type: memory
   type: project
-  originSessionId: feb870a5-d2bd-421c-b0db-8061cdd93a33
   modified: 2026-09-18T02:30:11.653Z
 ---
 

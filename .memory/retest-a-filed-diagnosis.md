@@ -4,7 +4,6 @@ description: "An issue's stated cause is a hypothesis; re-measure it before buil
 metadata: 
   node_type: memory
   type: feedback
-  originSessionId: 869097f1-58ff-4901-90ec-79b7838f21cb
   modified: 2026-09-13T21:22:50.500Z
 ---
 
