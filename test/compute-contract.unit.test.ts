@@ -62,6 +62,7 @@ import {
   ResultManifestSchema,
   computeIsWellFormed,
   dataTagForVersion,
+  datasetVersionWithoutTag,
   estimateSuMilli,
   formatSu,
   isSafeComputePath,
@@ -1353,6 +1354,74 @@ describe("the data-plane tag of a dataset version", () => {
   });
 });
 
+describe("the one launch rule a job specification does not enforce: the dataset version tag", () => {
+  // A valid job specification always fits the 64 KiB and is well formed. A dataset version with no
+  // data-plane tag is valid for a job and has no tag, so the Worker and the CLI run launchSpecFits
+  // before the hold and refuse with invalid_spec, naming the field datasetVersionWithoutTag finds.
+  const UNTAGGED = ["1", "1.0", "abc", "V1.0.2", "2.0.0-rc.1", "1.0.2-rc1", "v1", "1.x.2"];
+
+  test("every such version is a valid job and has no tag", () => {
+    for (const version of UNTAGGED) {
+      const job = specWith({ datasets: [{ id: "nm000104", version }] });
+      expect(specRefused(job), `job: ${version}`).toBe(false);
+      expect(dataTagForVersion(version), `tag: ${version}`).toBeNull();
+      expect(launchSpecFits(JobSpecSchema.parse(job)), `fits: ${version}`).toBe(false);
+    }
+  });
+
+  test("datasetVersionWithoutTag names the first dataset whose version has no tag", () => {
+    const at = (versions: string[]) =>
+      datasetVersionWithoutTag(versions.map((version) => ({ id: "nm000104", version })));
+    expect(at(["1"])).toBe("datasets.0.version");
+    expect(at(["1.0.2", "abc"])).toBe("datasets.1.version");
+    expect(at(["v1.0.2", "latest", "1.0.2", "1.0"])).toBe("datasets.3.version");
+    // The first, when there are several.
+    expect(at(["1.0.2", "x", "y", "z"])).toBe("datasets.1.version");
+    expect(at(["x", "y"])).toBe("datasets.0.version");
+    for (const version of UNTAGGED)
+      expect(at(["1.0.2", version]), version).toBe("datasets.1.version");
+  });
+
+  test("it is null when every version has a tag, and when there are no datasets", () => {
+    expect(datasetVersionWithoutTag([])).toBeNull();
+    expect(datasetVersionWithoutTag([{ version: "1.0.2" }])).toBeNull();
+    expect(
+      datasetVersionWithoutTag([
+        { version: "v1.0.2" },
+        { version: "latest" },
+        { version: "0.0.0" },
+      ]),
+    ).toBeNull();
+  });
+
+  test("it is the same answer as launchSpecFits gives, for the tag", () => {
+    for (const version of ["1.0.2", "v1.0.2", "latest", ...UNTAGGED]) {
+      const job = JobSpecSchema.parse(specWith({ datasets: [{ id: "nm000104", version }] }));
+      expect(datasetVersionWithoutTag(job.datasets) === null, version).toBe(launchSpecFits(job));
+    }
+  });
+
+  test("the invariant is stated the same way, and no sentence claims a valid job always becomes a launch specification", () => {
+    const read = (...parts: string[]) =>
+      readFileSync(join(import.meta.dir, "..", ...parts), "utf8")
+        .replace(/\n\s*\*\s?/g, " ")
+        .replace(/\s+/g, " ");
+    const statement =
+      "the dataset version tag is the one launch rule JobSpecSchema does not enforce";
+    for (const text of [
+      read("shared", "contract", "compute.ts"),
+      read("shared", "contract", "compute-launch.ts"),
+      read(".context", "compute-program", "implementation-notes.md"),
+    ]) {
+      expect(text).toContain(statement);
+      expect(text).toContain("must run `launchSpecFits`");
+      expect(text).toContain("BEFORE the hold");
+      expect(text).not.toContain("A valid specification always becomes a launch specification");
+      expect(text).not.toContain("a valid job specification always fits.");
+    }
+  });
+});
+
 describe("isSafeComputePath", () => {
   test("accepts ordinary relative paths and refuses every escape", () => {
     for (const ok of ["a", "a/b", "a b/c.d", "sub-01/eeg/x.set", "..a", "a..b", ".hidden"]) {
@@ -2302,7 +2371,7 @@ describe("the launch specification", () => {
   });
 });
 
-describe("a valid job specification always fits the launch specification", () => {
+describe("a valid job specification always fits the 64 KiB launch specification and is well formed", () => {
   const E = "\u00e9";
   const baseJob = (extra: Record<string, unknown>) => ({ ...SPEC, ...extra });
 

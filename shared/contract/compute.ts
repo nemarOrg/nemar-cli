@@ -112,6 +112,19 @@ export function dataTagForVersion(version: string): string | null {
   return tag.length <= COMPUTE_DATA_TAG_MAX && COMPUTE_DATA_TAG_RE.test(tag) ? tag : null;
 }
 
+/**
+ * The path of the first dataset whose version has no data-plane tag, as `datasets.<i>.version`, or
+ * null when every one has a tag (or there are none). A job specification may carry such a version
+ * (it is valid for a job), so a Worker or a CLI that finds one refuses with `invalid_spec` and names
+ * this field, before the hold. Pure.
+ */
+export function datasetVersionWithoutTag(
+  datasets: ReadonlyArray<{ version: string }>,
+): string | null {
+  const index = datasets.findIndex((d) => dataTagForVersion(d.version) === null);
+  return index < 0 ? null : `datasets.${index}.version`;
+}
+
 const MAX_SAFE = Number.MAX_SAFE_INTEGER;
 
 /** A whole number in [min, max], never beyond what a double holds exactly. */
@@ -632,8 +645,9 @@ export function launchVariableBytes(spec: {
  * escaped, so no per-field cap that is generous for ASCII could also be safe for any mix. The
  * variable part may take 48 KiB; the rest of the document, at its own worst case (a 512-character
  * `api_base` and image reference, a 256-character token, the 68-character image file name, twenty
- * datasets of 64-character versions, the keys and brackets), is under 4 KiB, which `launchSpecFits`
- * and a test check; the bound leaves the rest of the 64 KiB as slack for a field that grows.
+ * datasets of 64-character tags, the keys and brackets), is under 4 KiB, which `launchSpecFits`
+ * and a test check; the bound leaves the rest of the 64 KiB as slack for a field that grows. This
+ * is about size only: whether a dataset version has a tag is {@link datasetVersionWithoutTag}'s.
  */
 export const LAUNCH_VARIABLE_BYTES_MAX = 49_152;
 
@@ -663,10 +677,14 @@ export const LAUNCH_VARIABLE_BYTES_MAX = 49_152;
  * writes (`1.0.2`); the Worker writes the data-plane tag for the launch specification
  * (`dataTagForVersion`).
  *
- * A valid specification always becomes a launch specification a process can use: it fits the 64 KiB
- * (see {@link LAUNCH_VARIABLE_BYTES_MAX}) and every string that reaches a process is well-formed
- * UTF-16 (see {@link computeIsWellFormed}), each refused here, with the field named by its path,
- * rather than after the hold exists.
+ * A valid job specification always fits the 64 KiB launch specification (see
+ * {@link LAUNCH_VARIABLE_BYTES_MAX}) and is well formed: every string that reaches a process is
+ * well-formed UTF-16 (see {@link computeIsWellFormed}), each refused here, with the field named by
+ * its path, rather than after the hold exists; the dataset version tag is the one launch rule
+ * JobSpecSchema does not enforce: a version such as `1.0`, `abc`, `V1.0.2` or `2.0.0-rc.1` is valid
+ * for a job and has no data-plane tag, so the Worker and the CLI must run `launchSpecFits` (and
+ * refuse with `invalid_spec`, naming the field {@link datasetVersionWithoutTag} finds) BEFORE the
+ * hold.
  *
  * Two digests are named apart. `spec_digest` is the JOB ROW's digest of this document: the SHA-256,
  * in lowercase hex, of the exact bytes of `records/<id>/spec.json` (set by phase A3). It is not a

@@ -247,12 +247,14 @@ export function encodeLaunchSpec(spec: unknown): string {
  * Whether a job specification, once a Worker has added everything it supplies, encodes within the
  * 64 KiB the launcher reads, with each dataset version written as its data-plane tag
  * ({@link dataTagForVersion}); a job whose dataset version has no tag is false. The Worker's fields
- * are taken at their worst case (a 512-character
- * `api_base` and image reference, a 256-character token, the 68-character image file name, the
- * largest bundle and limits),
- * so a true answer holds whatever the Worker puts there. A specification that passes
- * `JobSpecSchema` always fits; this is for the Worker to refuse with `invalid_spec`, before it takes
- * a hold, one that was built some other way. Pure; never throws.
+ * are taken at their worst case (a 512-character `api_base` and image reference, a 256-character
+ * token, the 68-character image file name, the largest bundle and limits), so a true answer holds
+ * whatever the Worker puts there.
+ *
+ * A valid job specification always fits the 64 KiB and is well formed; the dataset version tag is
+ * the one launch rule JobSpecSchema does not enforce, so the Worker and the CLI must run
+ * `launchSpecFits` (and refuse with `invalid_spec`, naming the field {@link datasetVersionWithoutTag}
+ * finds) BEFORE the hold. It also catches a specification built some other way. Pure; never throws.
  */
 export function launchSpecFits(job: JobSpec): boolean {
   const hex = "f".repeat(64);
