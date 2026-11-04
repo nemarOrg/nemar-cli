@@ -79,7 +79,7 @@ and are still readable.
 5. Create PR with:
    - Clear title (no issue numbers)
    - Description with "Fixes #123"
-   - Test results
+   - Test results: the targeted tests and quick gates that were run, and what was not run with why (`.rules/testing.md`, "Test cost"); the full suite runs at epic -> `dev`
    - Screenshots if UI changes
 
 ## Git Commands
