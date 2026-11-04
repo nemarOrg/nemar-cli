@@ -45,6 +45,9 @@ const SECRET_NAMES = [
   "TAPIS_PASSWORD",
   "TAPIS_SERVICE_TOKEN",
   "ACCESS_GATEWAY_API_KEY",
+  // Epic #2005 phase A5 (#2010): NEMAR's own runtime image for a `python` job, a digest-pinned
+  // reference the owner sets, like the Tapis names, and never a line of the file.
+  "COMPUTE_RUNTIME_IMAGE",
 ] as const;
 
 /** The dotted path of every key named in `names`, anywhere in the parsed document. */
@@ -82,7 +85,7 @@ describe("backend/wrangler-sccn.toml and the compute switches", () => {
     expect(pathsOfNames(SWITCH_NAMES, config)).toEqual([]);
   });
 
-  test("no Tapis credential, tenant address or ACCESS key is set in any table of the file", () => {
+  test("no Tapis credential, tenant address, ACCESS key or runtime image is set in any table of the file", () => {
     expect(pathsOfNames(SECRET_NAMES, config)).toEqual([]);
   });
 

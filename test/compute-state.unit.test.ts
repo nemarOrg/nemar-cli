@@ -396,11 +396,13 @@ describe("refusal codes", () => {
     // Phase A2 (#2007): a hold the caller's own guard refused. It names no limit of its own
     // because the caller knows which guard it passed; the ledger answers it as one word.
     ["guard_refused", 409],
+    // Phase A5 (#2010): the launcher called `complete` and an object it declared is missing or short.
+    ["results_incomplete", 409],
   ];
 
-  test("the list is the seven of section 6 plus the seventeen the phase names, and the ledger's one", () => {
+  test("the list is the seven of section 6 plus the seventeen the phase names, the ledger's one and the outputs route's", () => {
     expect([...COMPUTE_REFUSAL_CODES] as string[]).toEqual(EXPECTED.map(([c]) => c));
-    expect(COMPUTE_REFUSAL_CODES).toHaveLength(25);
+    expect(COMPUTE_REFUSAL_CODES).toHaveLength(26);
     // The per-job limit refusal is `over_job_limit`; there is no second word for it.
     expect(COMPUTE_REFUSAL_CODES).not.toContain("over_ceiling");
   });

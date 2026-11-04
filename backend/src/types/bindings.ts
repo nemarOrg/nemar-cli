@@ -103,6 +103,11 @@ export interface Bindings {
   /** The key of the ACCESS gateway-attributes API (reporting every tenant job under a pseudonym);
    *  only `GET /admin/compute/status` reads its presence in this phase. */
   ACCESS_GATEWAY_API_KEY?: string;
+  /** NEMAR's own runtime image for a `python` job (epic #2005 phase A5, services/compute-lifecycle.ts):
+   *  a digest-pinned reference, `[docker://]registry/path@sha256:<64 hex>`. Owner-set, like the Tapis
+   *  names, and absent from wrangler-sccn.toml (compute-switches-flag.test.ts pins that). Unset, a
+   *  `python` job stays `created` and is submitted once it is set; an `image` job brings its own. */
+  COMPUTE_RUNTIME_IMAGE?: string;
 
   // Environment variables
   ENVIRONMENT: "production" | "development" | "staging" | "test";

@@ -167,6 +167,15 @@ export interface ComputeJobRow {
   retention_until: string | null;
   legal_hold: number;
   webhook_nonce: string | null;
+  /** Phase A5 (migration 0116): the SHA-256 of the exact `NEMAR_LAUNCH_SPEC` bytes; NULL until submit. */
+  launch_spec_digest: string | null;
+  results_verified_at: string | null;
+  outputs_completed_at: string | null;
+  /** The bytes the job declared to the outputs route, claimed against the results budget. */
+  results_bytes: number | null;
+  result_records_at: string | null;
+  /** 1 when `isPlatformFailure` says NEMAR caused the failure: an information flag, never a ledger write. */
+  platform_failure: number;
 }
 
 export type ComputeJobsEnv = ComputeRecordsEnv;
@@ -314,7 +323,8 @@ const JOB_COLUMNS = `id, account_id, tapis_owner, gateway_user, idempotency_key,
   cores_per_node, memory_mb, gpus, minutes, created_at, submitted_at, remote_submitted_at, started_at,
   ended_at, tapis_synced_at, records_written_at, hold_ledger_id, held_milli, charged_milli,
   settled_provisional_at, settled_final_at, flag_unreserved, flag_unattributed, flag_mismatch,
-  flag_overrun, retention_until, legal_hold, webhook_nonce`;
+  flag_overrun, retention_until, legal_hold, webhook_nonce, launch_spec_digest, results_verified_at,
+  outputs_completed_at, results_bytes, result_records_at, platform_failure`;
 
 export const JOB_BY_ID_SQL = `SELECT ${JOB_COLUMNS} FROM compute_jobs WHERE id = ?1`;
 

@@ -209,11 +209,13 @@ export function launcherExitNumber(code: LauncherFailureCode): number {
 }
 
 /**
- * Failures NEMAR caused, which are refunded automatically (design section 5). Three of them are
- * also launcher codes (a fetch and an upload, by default NEMAR's); the launcher's other four
- * (`entry_not_found`, `runtime_error`, `out_of_memory`, `time_limit`) are by default the
- * submitter's and are charged. A launcher code's `detail` can overrule the default either way: see
- * {@link LAUNCHER_DETAILS} and {@link isPlatformFailure}.
+ * Failures NEMAR caused. This is an ATTRIBUTION, never a billing rule: no failure is refunded
+ * automatically, and consumed service units stay consumed whoever caused the failure (ADR 0118,
+ * amendment of 2026-11-04, #2010); a platform failure is flagged so that an administrator can
+ * compensate it by a manual grant. Three of them are also launcher codes (a fetch and an upload,
+ * by default NEMAR's); the launcher's other four (`entry_not_found`, `runtime_error`,
+ * `out_of_memory`, `time_limit`) are by default the submitter's. A launcher code's `detail` can
+ * overrule the default either way: see {@link LAUNCHER_DETAILS} and {@link isPlatformFailure}.
  */
 export const PLATFORM_FAILURE_CODES = [
   "code_fetch_failed",
@@ -233,7 +235,7 @@ export type PlatformFailureCode = (typeof PLATFORM_FAILURE_CODES)[number];
 
 /**
  * Why NEMAR refused to take a job's results, recorded as the detail of `result_upload_failed`.
- * The submitter caused each, so such a job is charged and never refunded. Each is also a refusal
+ * The submitter caused each, so such a job is not attributed to the platform. Each is also a refusal
  * code, since the outputs route answers with it.
  */
 export const RESULT_REFUSAL_DETAILS = [
@@ -318,9 +320,9 @@ export type LauncherDetail = (typeof LAUNCHER_DETAILS)[LauncherFailureCode][numb
 
 /**
  * The launcher details that are a NEMAR, node, runtime or contract fault, so that the job is
- * refunded, even under `runtime_error`. The rule: a detail is the platform's if and only if a
+ * attributed to the platform, even under `runtime_error`. The rule: a detail is the platform's if and only if a
  * submitter cannot cause it with a valid specification and bundle. Every other word of
- * {@link LAUNCHER_DETAILS} is the submitter's and is charged, even under `code_fetch_failed` and
+ * {@link LAUNCHER_DETAILS} is the submitter's, even under `code_fetch_failed` and
  * `dataset_fetch_failed`: an archive that is unsafe or too large, a selection over the job's own
  * limits or an include pattern that is not a glob, an entry that failed or was terminated, outputs
  * that cannot be read, and the results NEMAR refused for their size or count.
@@ -366,13 +368,14 @@ export const COMPUTE_FAILURE_CODES: readonly ComputeFailureCode[] = [
 ];
 
 /**
- * Whether NEMAR caused a failure, so that its charge is refunded. For a launcher code with a detail
- * that {@link LAUNCHER_DETAILS} declares for that code, the detail decides: a platform detail
+ * Whether NEMAR caused a failure. An information flag for reports and manual compensation: it never
+ * drives a ledger write (no automatic refund exists). For a launcher code with a detail that
+ * {@link LAUNCHER_DETAILS} declares for that code, the detail decides: a platform detail
  * ({@link PLATFORM_LAUNCHER_DETAILS}) is a platform failure even under `runtime_error`, and any
  * other declared detail is the submitter's even under `code_fetch_failed` or
- * `dataset_fetch_failed`, and is charged. With no detail, or one not declared for its code, the
- * code alone decides, as it always did: true for every platform code, false for the rest. A code
- * that is not a failure code is not a platform failure.
+ * `dataset_fetch_failed`. With no detail, or one not declared for its code, the code alone decides,
+ * as it always did: true for every platform code, false for the rest. A code that is not a failure
+ * code is not a platform failure.
  */
 export function isPlatformFailure(code: string, detail?: string | null): boolean {
   if (detail != null && Object.hasOwn(LAUNCHER_DETAILS, code)) {
@@ -387,7 +390,7 @@ export function isPlatformFailure(code: string, detail?: string | null): boolean
 /**
  * Tapis's own termination conditions, from the `Job.condition` enum of its published Jobs
  * specification, sorted into NEMAR's failure codes. Anything not listed is `tapis_error`, which is
- * the safe default: a platform failure, refunded, and looked at.
+ * the safe default: a platform failure, flagged, and looked at.
  */
 const TAPIS_CONDITION_CODE: ReadonlyMap<string, ComputeFailureCode> = new Map<
   string,
@@ -452,6 +455,9 @@ export const COMPUTE_REFUSAL_CODES = [
   // Phase A2 (#2007): a hold the caller's own guard refused (a person's live-job limit, say). The
   // ledger cannot name the guard, so it answers with this word and the caller says which one.
   "guard_refused",
+  // Phase A5 (#2010): the launcher called `complete` and an object it declared is missing or short.
+  // Retryable: the launcher uploads what is missing and asks again.
+  "results_incomplete",
 ] as const;
 
 export type ComputeRefusalCode = (typeof COMPUTE_REFUSAL_CODES)[number];
@@ -491,6 +497,7 @@ export const COMPUTE_REFUSAL_STATUS = {
   job_not_found: 404,
   bad_state: 409,
   guard_refused: 409,
+  results_incomplete: 409,
 } as const satisfies Record<ComputeRefusalCode, number>;
 
 // --- The rest of the vocabulary ----------------------------------------------------------------

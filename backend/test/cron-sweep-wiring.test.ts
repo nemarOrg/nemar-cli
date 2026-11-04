@@ -145,6 +145,15 @@ const SWEEP_WIRING: Record<
   // DEV_CRON_ALLOWLIST; it also refuses outside exact production on its own, and while
   // AUTO_REPULL_ENABLED is not "1" only resolves a held claim and finishes a merged re-pull.
   runRepullAdvanceCron: "tick-prod-only",
+  // Epic #2005 phase A5 (#2010, ADR 0118): the compute gateway's backstop and its cancel retry. The
+  // first reads each live job back from Tapis in rotation, submits a created job, repairs a terminal
+  // one whose settlement or copy is owed and clears expired webhook nonces; the second cancels at
+  // Tapis every job with a recorded cancel. Both act on a Tapis tenant and move the allocation
+  // ledger, so each rides the 30-minute tick's production guard and is absent from
+  // DEV_CRON_ALLOWLIST; each also refuses outside exact production on its own, and neither reads a
+  // switch, so turning compute off never strands a live job.
+  runComputeAdvanceCron: "tick-prod-only",
+  sweepComputeCancellations: "tick-prod-only",
   sweepBlockedBidsValidationRequests: "all-envs",
   // #1789: tombstones the live integration tests' accounts. It runs ONLY outside production,
   // from a section of scheduledCleanup (`cleanUpLiveTestAccounts`); the dedicated block at the

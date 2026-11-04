@@ -295,6 +295,23 @@ async function putOnce(
   return put === null ? settle() : "written";
 }
 
+/**
+ * Write one record or log of a job (`recordKey` or `logKey` builds the key) only if nothing is there:
+ * an object that exists is left exactly as it is, whatever it holds (a copy is retried after a
+ * failure, and a retry never rewrites what the locked bucket already took). True when it wrote.
+ * Phase A5's copy of the launcher's files and the logs into the records.
+ */
+export async function putRecordOnce(
+  env: ComputeRecordsEnv,
+  key: string,
+  bytes: Uint8Array,
+  contentType: string,
+): Promise<boolean> {
+  const bucket = env.COMPUTE_RECORDS;
+  if (!bucket) throw new Error("the records bucket is not bound");
+  return (await putOnce(bucket, key, bytes, contentType, "keep")) === "written";
+}
+
 // --- The identity snapshot and the specification -------------------------------------------------
 
 /** The columns of the `users` row an identity snapshot takes, and nothing else about the person. */

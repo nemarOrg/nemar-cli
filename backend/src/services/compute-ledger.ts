@@ -570,7 +570,7 @@ export const CLOSING_ENTRIES_SQL = `SELECT ${ENTRY_COLUMNS} FROM compute_ledger
  * amount is the hold's, the key is the hold's (`hold:<id>:release`), and the hold must be open in
  * this statement: a hold that was closed, or never made, writes nothing.
  */
-export const RELEASE_INSERT_SQL = `INSERT INTO compute_ledger
+const RELEASE_INSERT_BASE = `INSERT INTO compute_ledger
   (kind, pool_id, budget_pool_id, held_delta_milli, job_id, hold_ref, reason, idempotency_key)
   SELECT 'release', h.pool_id, h.budget_pool_id, -h.held_delta_milli, h.job_id, h.id, ?2,
          'hold:' || h.id || ':release'
@@ -580,28 +580,84 @@ export const RELEASE_INSERT_SQL = `INSERT INTO compute_ledger
                       WHERE c.hold_ref = h.id AND c.kind IN ('release', 'charge'))`;
 
 /**
+ * The release statement with a caller's gate ANDed into its WHERE (a boolean SQL expression with
+ * plain `?` placeholders, numbered here after the statement's own `?1` and `?2`). Phase A5 gates a
+ * release on the job row having just taken its terminal state, so the state change and the release
+ * are one batch (`releaseStatements`). With no gate it is exactly `RELEASE_INSERT_SQL`.
+ */
+export function releaseInsertSql(gate?: string): string {
+  if (gate === undefined) return RELEASE_INSERT_BASE;
+  return `${RELEASE_INSERT_BASE}\n     AND (${numberedGuard(gate, 3).sql})`;
+}
+
+export const RELEASE_INSERT_SQL = releaseInsertSql();
+
+const SETTLE_INSERT_HEAD = `INSERT INTO compute_ledger
+  (kind, pool_id, budget_pool_id, held_delta_milli, charged_delta_milli, job_id, hold_ref,
+   idempotency_key)`;
+
+/**
  * A settlement, taken from the open hold of the job: `?1` the job, `?2` what the job used. One
  * INSERT of up to two rows: the `charge` (the hold leaves `held`, which is the hold's own amount;
  * what was used, at most the hold, enters `charged`, so the rest of the hold is released by it), and
  * an `overrun` for what was used above the hold. Both read the open hold in this statement, so a
- * hold settles once, and the two rows are written together or not at all.
+ * hold settles once, and the two rows are written together or not at all. With a gate (see
+ * `releaseInsertSql`) the gate is ANDed into BOTH of its WHEREs; with none it is exactly
+ * `SETTLE_INSERT_SQL`.
  */
-export const SETTLE_INSERT_SQL = `INSERT INTO compute_ledger
-  (kind, pool_id, budget_pool_id, held_delta_milli, charged_delta_milli, job_id, hold_ref,
-   idempotency_key)
+export function settleInsertSql(gate?: string): string {
+  const and = gate === undefined ? "" : `\n     AND (${numberedGuard(gate, 3).sql})`;
+  return `${SETTLE_INSERT_HEAD}
   SELECT 'charge', h.pool_id, h.budget_pool_id, -h.held_delta_milli,
          MIN(?2, h.held_delta_milli), h.job_id, h.id, 'hold:' || h.id || ':charge'
     FROM compute_ledger h
    WHERE h.kind = 'hold' AND h.job_id = ?1
      AND NOT EXISTS (SELECT 1 FROM compute_ledger c
-                      WHERE c.hold_ref = h.id AND c.kind IN ('release', 'charge'))
+                      WHERE c.hold_ref = h.id AND c.kind IN ('release', 'charge'))${and}
   UNION ALL
   SELECT 'overrun', h.pool_id, h.budget_pool_id, 0, ?2 - h.held_delta_milli, h.job_id, h.id,
          'hold:' || h.id || ':overrun'
     FROM compute_ledger h
    WHERE h.kind = 'hold' AND h.job_id = ?1 AND ?2 > h.held_delta_milli
      AND NOT EXISTS (SELECT 1 FROM compute_ledger c
-                      WHERE c.hold_ref = h.id AND c.kind IN ('release', 'charge'))`;
+                      WHERE c.hold_ref = h.id AND c.kind IN ('release', 'charge'))${and}`;
+}
+
+export const SETTLE_INSERT_SQL = settleInsertSql();
+
+/**
+ * The release of a job's whole hold as a statement for a batch of the caller's own, gated by `gate`
+ * (a job that never started: nothing was consumed, so nothing is charged; this is a release and never
+ * a refund). The gate's values are bound after `?1` the job and `?2` the reason.
+ */
+export function releaseStatements(
+  db: D1Database,
+  input: { jobId: string; reason?: string },
+  gate?: HoldGuard,
+): D1PreparedStatement[] {
+  const job = jobIdArg(input.jobId);
+  const reason = reasonArg(input.reason, REASON.released);
+  const values = gate?.binds ?? [];
+  if (gate !== undefined && values.length !== numberedGuard(gate.sql, 3).count) {
+    invalid("a gate binds one value for each ? it has");
+  }
+  return [db.prepare(releaseInsertSql(gate?.sql)).bind(job, reason, ...values)];
+}
+
+/** The settlement of a job's hold as a statement for a batch of the caller's own, gated by `gate`. */
+export function settleStatements(
+  db: D1Database,
+  input: { jobId: string; chargeMilli: number },
+  gate?: HoldGuard,
+): D1PreparedStatement[] {
+  const job = jobIdArg(input.jobId);
+  const used = amount("a charge", input.chargeMilli, 0);
+  const values = gate?.binds ?? [];
+  if (gate !== undefined && values.length !== numberedGuard(gate.sql, 3).count) {
+    invalid("a gate binds one value for each ? it has");
+  }
+  return [db.prepare(settleInsertSql(gate?.sql)).bind(job, used, ...values)];
+}
 
 export type CloseRefusal =
   | { ok: false; code: "no_hold" }

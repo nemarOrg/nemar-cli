@@ -472,6 +472,8 @@ OPENNEURO_MAINTAINER_EMAIL_ENABLED = "false"
 # - TAPIS_PASSWORD
 # - TAPIS_SERVICE_TOKEN
 # - ACCESS_GATEWAY_API_KEY  (the ACCESS gateway-attributes API key; only its presence is read so far)
+# - COMPUTE_RUNTIME_IMAGE   (epic #2005 phase A5: NEMAR's runtime image for a `python` job, a digest-pinned
+#                           reference; owner-set, and not a line of this file, like the names above)
 # The compute switches COMPUTE_ENABLED and COMPUTE_PIPELINES_DISPATCH_ENABLED are dark: exactly "1" and
 # absent from every table of this file until the owner adds them in a reviewed change that edits
 # backend/test/compute-switches-flag.test.ts. Compute runs only in `production` and `development`.
