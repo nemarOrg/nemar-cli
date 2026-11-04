@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://api.nemar.org/schemas/nemar-launch-spec-v1.json",
+  "$id": "https://github.com/nemarOrg/nemar-cli/shared/contract/compute-launch.schema.json",
   "title": "nemar.launch-spec.v1",
   "description": "The launch specification NEMAR's Worker hands the launcher in the environment variable NEMAR_LAUNCH_SPEC (ASCII-only JSON, at most 65536 bytes: every character at or above U+007F is written as a lowercase \\uXXXX escape, a character outside the Basic Multilingual Plane as two, so the bytes survive Tapis, the shell and the locale), and the shapes the launcher exchanges with the Worker and leaves on the node. Shared byte for byte between nemarOrg/nemar-cli (shared/contract/compute-launch.schema.json) and nemarOrg/nemar-process (launcher/schema/launch-spec.v1.json): whichever merges first writes it, the other copies it. The root validates the launch specification; $defs hold the bundle response, the outputs request and response, and the launcher's result, manifest and provenance documents. Requests and documents are closed (no unknown keys); the two responses (bundle_response, outputs_response) are open, and a reader ignores unknown keys. Exit numbers: 0, and 10 to 16 for the seven launcher failure codes in order. On the node, outputs are at work/outputs/<path> and the launcher directory holds result.json, provenance.json, manifest.json and launcher.log; in the results bucket the same files are jobs/<job_id>/outputs/<path> and jobs/<job_id>/launcher/<file>.",
   "type": "object",
@@ -115,17 +115,24 @@
       "required": ["uri", "digest", "sif"],
       "properties": {
         "uri": {
+          "description": "A digest-pinned reference, optionally docker://-prefixed and lowercase: no leading '-', no control character.",
           "type": "string",
-          "pattern": "^[^\\s]{1,512}(?![\\s\\S])"
+          "maxLength": 512,
+          "pattern": "^(?:docker://)?[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[0-9]{1,5})?(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)+@sha256:[0-9a-f]{64}(?![\\s\\S])"
         },
         "digest": {
           "type": "string",
           "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])"
         },
         "sif": {
-          "description": "The Singularity image file on the node that the launcher runs.",
+          "description": "The Singularity image file on the node that the launcher runs: a relative path of non-empty segments of letters, digits and ._+-, not starting with '-', with no . or .. segment and no leading or trailing slash.",
           "type": "string",
-          "pattern": "^[A-Za-z0-9._/+-]{1,256}(?![\\s\\S])"
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^(?!-)[A-Za-z0-9_.+-]+(?:/[A-Za-z0-9_.+-]+)*(?![\\s\\S])",
+          "not": {
+            "pattern": "(?:^|/)\\.\\.?(?:/|$)"
+          }
         }
       }
     },

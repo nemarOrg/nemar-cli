@@ -1432,6 +1432,152 @@ const LAUNCH_CASES: readonly Case[] = [
   ["no image", set(LAUNCH, "image", undefined), false],
   ["an unpinned image digest", set(LAUNCH, "image.digest", HEX_B), false],
   ["an image uri with a space", set(LAUNCH, "image.uri", "docker://a b"), false],
+  [
+    "an image uri with no prefix",
+    set(
+      LAUNCH,
+      "image.uri",
+      "ghcr.io/example/runtime@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    ),
+    true,
+  ],
+  [
+    "an image uri with a port",
+    set(
+      LAUNCH,
+      "image.uri",
+      "registry.example.test:5000/team/tool@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    ),
+    true,
+  ],
+  [
+    "an image uri with a dotted, dashed path",
+    set(
+      LAUNCH,
+      "image.uri",
+      "docker://ghcr.io/a-b/c_d.e@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    ),
+    true,
+  ],
+  [
+    "an image uri with a leading dash",
+    set(
+      LAUNCH,
+      "image.uri",
+      "-docker://ghcr.io/example/runtime@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    ),
+    false,
+  ],
+  ["an image uri that is an option", set(LAUNCH, "image.uri", "--rm"), false],
+  [
+    "an image uri with a leading dash in the host",
+    set(
+      LAUNCH,
+      "image.uri",
+      "docker://-ghcr.io/example/runtime@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    ),
+    false,
+  ],
+  [
+    "an image uri with a tag and no digest",
+    set(LAUNCH, "image.uri", "docker://ghcr.io/example/runtime:latest"),
+    false,
+  ],
+  [
+    "an image uri with no digest",
+    set(LAUNCH, "image.uri", "docker://ghcr.io/example/runtime"),
+    false,
+  ],
+  [
+    "an image uri with a short digest",
+    set(
+      LAUNCH,
+      "image.uri",
+      "docker://ghcr.io/example/runtime@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    ),
+    false,
+  ],
+  [
+    "an image uri with a capital in the path",
+    set(LAUNCH, "image.uri", `docker://ghcr.io/Example/runtime@sha256:${"b".repeat(64)}`),
+    false,
+  ],
+  [
+    "an image uri in capitals",
+    set(
+      LAUNCH,
+      "image.uri",
+      "docker://GHCR.io/example/runtime@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    ),
+    false,
+  ],
+  [
+    "an image uri with a control character",
+    set(
+      LAUNCH,
+      "image.uri",
+      "docker://ghcr.io/exam\u0001ple/runtime@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    ),
+    false,
+  ],
+  [
+    "an image uri with a newline in it",
+    set(
+      LAUNCH,
+      "image.uri",
+      "docker://ghcr.io/exam\nple/runtime@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    ),
+    false,
+  ],
+  [
+    "an image uri with a trailing newline",
+    set(
+      LAUNCH,
+      "image.uri",
+      "docker://ghcr.io/example/runtime@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n",
+    ),
+    false,
+  ],
+  [
+    "an image uri that is only a host",
+    set(
+      LAUNCH,
+      "image.uri",
+      "ghcr.io@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    ),
+    false,
+  ],
+  [
+    "an image uri with a query",
+    set(
+      LAUNCH,
+      "image.uri",
+      "docker://ghcr.io/example/runtime?x=1@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    ),
+    false,
+  ],
+  [
+    "a sif in a directory with dots and plus",
+    set(LAUNCH, "image.sif", "images/rt-1.2+b.sif"),
+    true,
+  ],
+  ["a sif that starts with a dot", set(LAUNCH, "image.sif", ".hidden.sif"), true],
+  ["a sif that starts with a dash", set(LAUNCH, "image.sif", "-runtime.sif"), false],
+  ["a sif that is only a dash", set(LAUNCH, "image.sif", "-"), false],
+  ["a sif with a dash after the start", set(LAUNCH, "image.sif", "a-b.sif"), true],
+  ["a sif in a directory that starts with a dash", set(LAUNCH, "image.sif", "dir/-x.sif"), true],
+  ["an absolute sif", set(LAUNCH, "image.sif", "/opt/rt.sif"), false],
+  ["a sif that climbs", set(LAUNCH, "image.sif", "../rt.sif"), false],
+  ["a sif that climbs from inside", set(LAUNCH, "image.sif", "a/../rt.sif"), false],
+  ["a sif that is a dot segment", set(LAUNCH, "image.sif", "a/./rt.sif"), false],
+  ["a sif that is only two dots", set(LAUNCH, "image.sif", ".."), false],
+  ["a sif with an empty segment", set(LAUNCH, "image.sif", "a//rt.sif"), false],
+  ["a sif with a trailing slash", set(LAUNCH, "image.sif", "images/"), false],
+  ["a sif with a control character", set(LAUNCH, "image.sif", "a\u0001b.sif"), false],
+  ["a sif with a newline in it", set(LAUNCH, "image.sif", "a\nb.sif"), false],
+  ["a sif with a DEL", set(LAUNCH, "image.sif", "a\u007fb.sif"), false],
+  ["a sif with a backslash", set(LAUNCH, "image.sif", "a\\b.sif"), false],
+  ["a sif with non-ASCII", set(LAUNCH, "image.sif", "caf\u00e9.sif"), false],
   ["no sif", set(LAUNCH, "image.sif", undefined), false],
   ["no args key", set(LAUNCH, "args", undefined), false],
   ["no datasets key", set(LAUNCH, "datasets", undefined), false],
@@ -2327,6 +2473,22 @@ describe("the JSON Schema file read back against the constants it mirrors", () =
     expect(schema.$schema).toBe("https://json-schema.org/draft/2020-12/schema");
     expect(schema.title).toBe(LAUNCH_SPEC_VERSION);
     expect(typeof schema.$id).toBe("string");
+    // The API serves a schema only under its own name (`backend/src/routes/schemas.ts`). An id on
+    // the API host that is not served would be an address that resolves to nothing, so this one
+    // follows the form of the repository's schemas that are not served: the file's GitHub address.
+    const served = [
+      ...readFileSync(join(import.meta.dir, "../backend/src/routes/schemas.ts"), "utf8").matchAll(
+        /^\s+"([a-z0-9.-]+\.json)":/gm,
+      ),
+    ].map((m) => m[1]);
+    expect(served.length).toBeGreaterThan(0);
+    const id = new URL(schema.$id);
+    if (id.hostname === "api.nemar.org") {
+      expect(served).toContain(id.pathname.replace("/schemas/", ""));
+    }
+    expect(schema.$id).toBe(
+      "https://github.com/nemarOrg/nemar-cli/shared/contract/compute-launch.schema.json",
+    );
     const refs: string[] = [];
     const walk = (node: unknown) => {
       if (Array.isArray(node)) return node.forEach(walk);
@@ -2446,6 +2608,19 @@ describe("the JSON Schema file read back against the constants it mirrors", () =
     for (const name of ["outputs_request", "result", "manifest", "provenance"]) {
       expect(schema.$defs[name].additionalProperties, name).toBe(false);
     }
+  });
+});
+
+describe("the contract records what the launcher owes it", () => {
+  test("the clean environment requirement is written where the contract is", () => {
+    const text = readFileSync(
+      join(import.meta.dir, "../shared/contract/compute-launch.ts"),
+      "utf8",
+    );
+    expect(text).toContain("CLEAN ENVIRONMENT");
+    expect(text).toContain("--cleanenv");
+    expect(text).toContain("NEMAR_LAUNCH_SPEC");
+    expect(text).toContain("job_token");
   });
 });
 

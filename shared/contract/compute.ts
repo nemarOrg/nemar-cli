@@ -470,7 +470,7 @@ const RECIPE_NAME_RE = /^[a-z][a-z0-9-]{0,63}$/;
  * An image pinned by digest: `[docker://]registry[:port]/path@sha256:<64 hex>`, lowercase. A tag
  * is not a pin, and the registry must also be one the owner's policy allows (a route's check).
  */
-const IMAGE_REF_RE =
+export const COMPUTE_IMAGE_REF_RE =
   /^(?:docker:\/\/)?[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[0-9]{1,5})?(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)+@sha256:[0-9a-f]{64}$/;
 
 const bundleRefSchema = z.object({ size: safeInt(1), sha256: sha256Schema }).strict();
@@ -573,7 +573,7 @@ export const JobSpecSchema = z
     output_dir: z.literal("outputs").default("outputs"),
     env: computeJobEnvSchema.default({}),
     recipe: z.string().regex(RECIPE_NAME_RE).optional(),
-    image: z.string().max(512).regex(IMAGE_REF_RE).optional(),
+    image: z.string().max(512).regex(COMPUTE_IMAGE_REF_RE).optional(),
   })
   .strict()
   .superRefine((spec, ctx) => {

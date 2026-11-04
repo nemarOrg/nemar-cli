@@ -24,6 +24,11 @@
  * launcher asks the Worker for a presigned address with `job_token`), any storage credential, and
  * the user's identity. The token travels in a header, never a URL.
  *
+ * THE LAUNCHER MUST RUN THE CONTAINER WITH A CLEAN ENVIRONMENT (`--cleanenv`, and only the job's
+ * allowlisted names passed in), so that `NEMAR_LAUNCH_SPEC`, which holds `job_token`, and every
+ * other variable of the launcher's own never reach the user's code. `nemar-process` requires it;
+ * this records the requirement where the contract is.
+ *
  * On the node, under Tapis's output directory: the container's one writable mount is `work/`, with
  * its outputs in `work/outputs/<path>`; the directory `launcher/` is never mounted into it and
  * holds `result.json`, `provenance.json`, `manifest.json` and `launcher.log`. In the results
@@ -38,6 +43,7 @@ import {
   COMPUTE_DATASET_VERSION_RE,
   COMPUTE_DOT_SEGMENT_RE,
   COMPUTE_IMAGE_DIGEST_RE,
+  COMPUTE_IMAGE_REF_RE,
   COMPUTE_JOB_ID_RE,
   COMPUTE_SHA256_RE,
   JOB_ENV_ALLOWLIST,
@@ -70,8 +76,12 @@ const relativePath = computePathSchema;
 const API_BASE_RE = /^https?:\/\/[^\s/?#][^\s?#]*$/;
 const URL_RE = /^https?:\/\/[^\s]+$/;
 const JOB_TOKEN_RE = /^[A-Za-z0-9_-]{16,256}$/;
-const SIF_RE = /^[A-Za-z0-9._/+-]{1,256}$/;
-const IMAGE_URI_RE = /^[^\s]{1,512}$/;
+/**
+ * A Singularity image file on the node: a relative path of non-empty segments of letters, digits and
+ * `._+-`, never starting with `-` (so it cannot read as an option), with no `.` or `..` segment, no
+ * leading or trailing `/` and no control character.
+ */
+const SIF_RE = /^(?!-)[A-Za-z0-9_.+-]+(?:\/[A-Za-z0-9_.+-]+)*$/;
 /** UTC, as the presigning calls write it; the shape is checked, not the calendar. */
 const TIMESTAMP_RE = /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?Z$/;
 /** Where an upload goes under `jobs/<id>/`: an output, or one of the four launcher files. */
@@ -127,10 +137,15 @@ export const LaunchSpecSchema = z
     api_base: z.string().max(512).regex(API_BASE_RE),
     image: z
       .object({
-        uri: z.string().regex(IMAGE_URI_RE),
+        /** A digest-pinned reference, as a job's own `image` is: no leading `-`, no control character. */
+        uri: z.string().max(512).regex(COMPUTE_IMAGE_REF_RE),
         digest: z.string().regex(COMPUTE_IMAGE_DIGEST_RE),
         /** The Singularity image file on the node that the launcher runs. */
-        sif: z.string().regex(SIF_RE),
+        sif: z
+          .string()
+          .max(256)
+          .regex(SIF_RE)
+          .refine((p) => !COMPUTE_DOT_SEGMENT_RE.test(p), { message: "no . or .. segments" }),
       })
       .strict(),
     env: launchEnvSchema,
