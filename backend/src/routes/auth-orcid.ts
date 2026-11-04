@@ -109,11 +109,11 @@ import {
 import { profileRefusal } from "../services/profile";
 import { type UsernameAssignmentSource, autoAssignUsername } from "../services/username-assignment";
 import {
-  buildSessionCookie,
   clientIp,
   isAllowedOrigin,
   issueSession,
   parseCookieHeader,
+  sessionCookieHeaders,
 } from "../services/web-session";
 import type { Bindings, Variables } from "../types/bindings";
 
@@ -921,9 +921,9 @@ authOrcidRoutes.get("/orcid/callback", webSessionMiddleware, async (c) => {
       );
       await touchIdentityLogin(c.env, orcid);
       afterResponse(c, refreshNameThenAssignUsername(c.env, user.id, orcid, "orcid_signin"));
-      const session = buildSessionCookie(cookieIdRaw, { domain, maxAgeSeconds });
+      const session = sessionCookieHeaders(c.env, cookieIdRaw, { maxAgeSeconds });
       const next = state.next !== "/" ? state.next : "/dashboard";
-      return redirect(`${frontend}${next}`, [clearState, session]);
+      return redirect(`${frontend}${next}`, [clearState, ...session]);
     }
 
     if (!c.env.ENCRYPTION_KEY) {
@@ -1128,9 +1128,9 @@ authOrcidRoutes.post("/orcid/finalize", zValidator("json", finalizeSchema), asyn
       "orcid",
     );
     c.header("Set-Cookie", clearPending);
-    c.header("Set-Cookie", buildSessionCookie(cookieIdRaw, { domain, maxAgeSeconds }), {
-      append: true,
-    });
+    for (const cookie of sessionCookieHeaders(c.env, cookieIdRaw, { maxAgeSeconds })) {
+      c.header("Set-Cookie", cookie, { append: true });
+    }
     // Canonical name from ORCID, after the response (best-effort; never blocks
     // signup), and then the username derived from it (#1268, ADR 0045): the
     // INSERT above leaves `username` NULL by design, and onboarding is where

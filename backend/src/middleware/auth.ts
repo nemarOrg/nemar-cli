@@ -20,12 +20,7 @@ import {
   isActiveAccountStatus,
 } from "../services/account-tier";
 import { hashApiKey } from "../services/token";
-import {
-  COOKIE_NAME,
-  hashCookieId,
-  isAllowedOrigin,
-  parseCookieHeader,
-} from "../services/web-session";
+import { hashCookieId, isAllowedOrigin, readSessionCookie } from "../services/web-session";
 import {
   type AuthUser,
   type Bindings,
@@ -55,7 +50,7 @@ type CookieAuthResult =
   | { kind: "inactive"; status: string };
 
 /**
- * Resolve a `nemar_session` cookie to a full AuthUser row.
+ * Resolve the session cookie (either name, through `readSessionCookie`) to a full AuthUser row.
  *
  * The `user` shape mirrors the bearer-token lookup so downstream routes can
  * `c.get("user")` without caring which auth path succeeded.
@@ -70,7 +65,7 @@ type CookieAuthResult =
  */
 async function resolveCookieUser(c: AuthContext): Promise<CookieAuthResult> {
   const cookieHeader = c.req.header("Cookie");
-  const cookieIdRaw = parseCookieHeader(cookieHeader, COOKIE_NAME);
+  const cookieIdRaw = readSessionCookie(cookieHeader);
   if (!cookieIdRaw) return { kind: "unresolved" };
 
   // Wrap the D1 lookup in a try/catch so a transient backend failure

@@ -164,6 +164,12 @@ export interface Bindings {
    *  to app.nemar.org per nemarOrg/website#46; flip this env var at
    *  cutover without redeploying code. */
   WEB_SESSION_COOKIE_DOMAIN?: string;
+  /** "1" issues the app session cookie as `__Host-nemar_session` (host-only, no Domain) and
+   *  clears the legacy `nemar_session`; anything else, or unset, keeps today's header byte for
+   *  byte (ADR 0119 decision 10). READING accepts both names whatever this says. Set in
+   *  `[env.dev.vars]` only: production turns it on after the website's reader and the API have
+   *  both released, which is the owner's act, and a test pins that no other table names it. */
+  HOST_PREFIXED_SESSION_COOKIE?: string;
   /** Sandbox (xx) dataset-ID allocation partition, decimal strings (epic #923).
    *  Prevents repo-name collisions in the shared nemarDatasets org between
    *  prod- and dev/test-created sandbox datasets. Prod sets CEILING="89999"

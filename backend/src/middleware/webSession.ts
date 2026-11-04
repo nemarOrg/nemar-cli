@@ -1,7 +1,8 @@
 /**
  * Web-session middleware (#569).
  *
- * Reads the `nemar_session` cookie, looks up the row, and exposes the
+ * Reads the session cookie (`__Host-nemar_session`, or the legacy `nemar_session`: see
+ * `readSessionCookie`), looks up the row, and exposes the
  * joined user (and the raw cookie value) on the Hono context so the
  * route handler can build the response without re-parsing the cookie.
  *
@@ -13,7 +14,7 @@
  */
 
 import type { Context, Next } from "hono";
-import { COOKIE_NAME, findSessionByCookieId, parseCookieHeader } from "../services/web-session";
+import { findSessionByCookieId, readSessionCookie } from "../services/web-session";
 import type { Bindings, Variables } from "../types/bindings";
 
 type WebSessionContext = Context<{ Bindings: Bindings; Variables: Variables }>;
@@ -27,7 +28,7 @@ type WebSessionContext = Context<{ Bindings: Bindings; Variables: Variables }>;
  */
 export async function webSessionMiddleware(c: WebSessionContext, next: Next) {
   const cookieHeader = c.req.header("Cookie");
-  const cookieIdRaw = parseCookieHeader(cookieHeader, COOKIE_NAME);
+  const cookieIdRaw = readSessionCookie(cookieHeader);
   if (!cookieIdRaw) {
     await next();
     return;

@@ -23,7 +23,21 @@ import { isPartnerHost } from "../../../shared/partner-hosts.js";
 import { flag } from "../db/flag";
 import { type Bindings, type UserRole, parseRole } from "../types/bindings";
 
-export const COOKIE_NAME = "nemar_session";
+/** The app session cookie's name once `HOST_PREFIXED_SESSION_COOKIE` is on (ADR 0119 decision 10).
+ *
+ *  `__Host-` is enforced by the browser: it refuses the cookie unless it is `Secure`, has
+ *  `Path=/` and carries NO `Domain`, and it will not let any other host set one for this host. So
+ *  a page on a sibling `nemar.org` subdomain cannot plant a session cookie of this name for
+ *  `app.nemar.org`, which it can for the legacy name below by setting `Domain=nemar.org`.
+ *
+ *  The cookie stays host-only (ADR 0056): this name never goes through
+ *  `WEB_SESSION_COOKIE_DOMAIN`, and a `Domain` on it would make a browser discard it. */
+export const SESSION_COOKIE_NAME = "__Host-nemar_session";
+
+/** The name every session cookie had before the move. Still READ for as long as the legacy
+ *  window lasts, so a session minted before the flag is a session after it, and still WRITTEN
+ *  (with its `Domain`) while the flag is off. */
+export const LEGACY_SESSION_COOKIE_NAME = "nemar_session";
 
 /** Which host's credential a `web_sessions` row is. `app` is every session the
  *  dashboard issues; `docs` is the short-lived admin credential the docs host
@@ -153,20 +167,75 @@ interface CookieOptions {
   maxAgeSeconds?: number; // Undefined → session cookie (no Max-Age)
 }
 
-/** Build the Set-Cookie value for a freshly issued session.
- *  Flags: HttpOnly, Secure, SameSite=Lax, Path=/. */
-export function buildSessionCookie(value: string, opts: CookieOptions = {}): string {
-  const parts = [`${COOKIE_NAME}=${value}`, "HttpOnly", "Secure", "SameSite=Lax", "Path=/"];
+/** One `Set-Cookie` value. Flags: HttpOnly, Secure, SameSite=Lax, Path=/.
+ *  Private on purpose: callers go through {@link sessionCookieHeaders}, so no route can pick a
+ *  cookie name or a `Domain` for itself. */
+function buildCookie(name: string, value: string, opts: CookieOptions = {}): string {
+  const parts = [`${name}=${value}`, "HttpOnly", "Secure", "SameSite=Lax", "Path=/"];
   if (opts.domain) parts.push(`Domain=${opts.domain}`);
   if (typeof opts.maxAgeSeconds === "number") parts.push(`Max-Age=${opts.maxAgeSeconds}`);
   return parts.join("; ");
 }
 
-/** Build the Set-Cookie value that clears the cookie on logout.
- *  Must match the Domain/Path of the original cookie or browsers won't
- *  evict the right entry. */
-export function buildClearedSessionCookie(domain: string | undefined): string {
-  return buildSessionCookie("", { domain, maxAgeSeconds: 0 });
+/**
+ * Whether sessions are issued under the `__Host-` name. True only for the exact string `"1"`, so
+ * a flag typed `true` or `0` cannot move anyone's cookie by accident.
+ *
+ * Unset is production until the owner sets it: the order of release is the website's reader, then
+ * the API, then this flag, because a reader must exist before a writer (ADR 0119 decision 10).
+ */
+export function hostPrefixedSessionCookie(
+  env: Pick<Bindings, "HOST_PREFIXED_SESSION_COOKIE">,
+): boolean {
+  return env.HOST_PREFIXED_SESSION_COOKIE === "1";
+}
+
+/**
+ * The session cookie out of a request's `Cookie` header, for EVERY reader of it.
+ *
+ * The new name is read first and the legacy one only when the new one is absent. A new cookie
+ * that is present but wrong (empty, expired, revoked) is NOT rescued by a valid legacy one: with
+ * both on the wire the legacy one is, at best, a stale copy and, at worst, planted by a page on a
+ * sibling subdomain, and a request must never end up signed in as whoever planted it because the
+ * real cookie was spoiled. Swapping the order is exactly that bug.
+ *
+ * Two readers exist and both call this: `webSessionMiddleware` and `resolveCookieUser`. Do not
+ * add a third copy of the parse.
+ */
+export function readSessionCookie(header: string | null | undefined): string | null {
+  const current = parseCookieHeader(header, SESSION_COOKIE_NAME);
+  if (current !== null) return current;
+  return parseCookieHeader(header, LEGACY_SESSION_COOKIE_NAME);
+}
+
+/**
+ * Every `Set-Cookie` value that issues, refreshes or (with `value: ""` and `maxAgeSeconds: 0`)
+ * ends a session. The five writers append all of them, in order.
+ *
+ * Flag off: exactly today's one header, byte for byte: the legacy name, with `Domain` when
+ * `WEB_SESSION_COOKIE_DOMAIN` is set.
+ *
+ * Flag on: the new name with `Secure; HttpOnly; SameSite=Lax; Path=/` and no `Domain`, then
+ * clears of the legacy name, with the configured `Domain` and without one. A cookie is identified
+ * by name, domain and path, so a browser holding the legacy cookie under its `Domain` needs that
+ * clear to drop it, and one that holds it host-only needs the other. When no `Domain` is
+ * configured (staging) the two are the same cookie and one clear is sent.
+ */
+export function sessionCookieHeaders(
+  env: Pick<Bindings, "WEB_SESSION_COOKIE_DOMAIN" | "HOST_PREFIXED_SESSION_COOKIE">,
+  value: string,
+  opts: { maxAgeSeconds?: number } = {},
+): string[] {
+  const domain = env.WEB_SESSION_COOKIE_DOMAIN || undefined;
+  if (!hostPrefixedSessionCookie(env)) {
+    return [buildCookie(LEGACY_SESSION_COOKIE_NAME, value, { domain, ...opts })];
+  }
+  const headers = [buildCookie(SESSION_COOKIE_NAME, value, opts)];
+  if (domain) {
+    headers.push(buildCookie(LEGACY_SESSION_COOKIE_NAME, "", { domain, maxAgeSeconds: 0 }));
+  }
+  headers.push(buildCookie(LEGACY_SESSION_COOKIE_NAME, "", { maxAgeSeconds: 0 }));
+  return headers;
 }
 
 export interface WebSessionRow {

@@ -106,12 +106,11 @@ import {
   usernameClaimStatement,
 } from "../services/username-assignment";
 import {
-  buildClearedSessionCookie,
-  buildSessionCookie,
   isAllowedOrigin,
   maybeSlideExpiry,
   prepareSessionInsert,
   revokeSessionStatement,
+  sessionCookieHeaders,
   userIdForCookieId,
 } from "../services/web-session";
 import { type Bindings, type UserRole, type Variables, parseRole } from "../types/bindings";
@@ -713,11 +712,11 @@ authWebRoutes.post("/code/verify", zValidator("json", verifySchema), async (c) =
       });
     }
 
-    const cookie = buildSessionCookie(prepared.cookieIdRaw, {
-      domain: c.env.WEB_SESSION_COOKIE_DOMAIN || undefined,
+    for (const cookie of sessionCookieHeaders(c.env, prepared.cookieIdRaw, {
       maxAgeSeconds: prepared.maxAgeSeconds,
-    });
-    c.header("Set-Cookie", cookie);
+    })) {
+      c.header("Set-Cookie", cookie, { append: true });
+    }
 
     return c.json({ user: publicUser(user) });
   } catch (err) {
@@ -813,7 +812,9 @@ authWebRoutes.post("/logout", webSessionMiddleware, async (c) => {
     );
   }
 
-  c.header("Set-Cookie", buildClearedSessionCookie(c.env.WEB_SESSION_COOKIE_DOMAIN || undefined));
+  for (const cookie of sessionCookieHeaders(c.env, "", { maxAgeSeconds: 0 })) {
+    c.header("Set-Cookie", cookie, { append: true });
+  }
   return c.json({ ok: true });
 });
 
@@ -833,13 +834,11 @@ authWebRoutes.get("/me", webSessionMiddleware, async (c) => {
   // when the wall-clock actually moves.
   const slid = await maybeSlideExpiry(c.env, session);
   if (slid && c.var.webSessionCookieId) {
-    c.header(
-      "Set-Cookie",
-      buildSessionCookie(c.var.webSessionCookieId, {
-        domain: c.env.WEB_SESSION_COOKIE_DOMAIN || undefined,
-        maxAgeSeconds: slid.maxAgeSeconds,
-      }),
-    );
+    for (const cookie of sessionCookieHeaders(c.env, c.var.webSessionCookieId, {
+      maxAgeSeconds: slid.maxAgeSeconds,
+    })) {
+      c.header("Set-Cookie", cookie, { append: true });
+    }
   }
 
   return c.json({ user: publicUser(webUser) });
