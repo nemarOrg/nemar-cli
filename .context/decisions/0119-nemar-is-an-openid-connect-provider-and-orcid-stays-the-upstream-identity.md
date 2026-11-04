@@ -102,7 +102,7 @@ Twelve rules inside that, each of which reopens a hole if reversed.
     The reader tries the new name first and the legacy `nemar_session` second, and an invalid new cookie is **not** rescued by a valid legacy one: a planted legacy cookie must never win over the real one.
     The writer is behind `HOST_PREFIXED_SESSION_COOKIE`.
     Unset, it sends today's header byte for byte.
-    Set to exactly `"1"`, it sends the new name with `Secure; HttpOnly; SameSite=Lax; Path=/` and no `Domain`, followed by two clears of the legacy name, with and without its `Domain`.
+    Set to exactly `"1"`, it sends the new name with `Secure; HttpOnly; SameSite=Lax; Path=/` and no `Domain`, followed by two clears of the legacy name, with and without its `Domain` (one when no `Domain` is configured, as on staging, where they are the same cookie).
     The cookie stays host-only (ADR 0056); the new name never goes through `WEB_SESSION_COOKIE_DOMAIN`.
     The order of release is fixed because a reader must exist before a writer: the website's reader first, then the API, then the flag in production, which is the owner's act.
 11. **The partner uses the `sub` as the username of a person's compute credential, and is never trusted to say who ran a job.**
