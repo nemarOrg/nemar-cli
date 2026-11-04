@@ -66,6 +66,7 @@ import {
   datasetVersionWithoutTag,
   estimateSuMilli,
   formatSu,
+  includePatternProblem,
   isSafeComputePath,
   launchStringBytes,
   launchVariableBytes,
@@ -1468,6 +1469,128 @@ describe("the one launch rule a job specification does not enforce: the dataset 
   });
 });
 
+describe("the include dialect's refused patterns", () => {
+  test("includePatternProblem accepts every pattern the dialect accepts, edges included", () => {
+    for (const ok of [
+      "",
+      "*",
+      "**",
+      "?",
+      "**/x",
+      "a/**/b",
+      "**/*.set",
+      "sub-*/eeg/*.set",
+      "*.set",
+      // An unterminated [ is a literal [.
+      "[",
+      "a[",
+      "[abc",
+      "[!",
+      "[!abc",
+      "x[y",
+      "a/[b",
+      // Classes, and the hyphen at either end or after a range as a literal.
+      "[abc]",
+      "[a-c]",
+      "[!abc]",
+      "[!a-c]",
+      "[0-9a-f]x",
+      "[a-]",
+      "[-a]",
+      "[a-a]",
+      "[--/]",
+      "[a-c-e]",
+      "[a-c-a]",
+      "[cba]",
+      "[zyx]",
+      "[[]",
+      "[a[b]",
+      "[ab]]",
+      // Code points, not UTF-16 units: an astral range is a range.
+      "[\u{1F600}-\u{1F603}]",
+      "[\u{1F600}-\u{1F600}]",
+      "[é-ÿ]",
+    ]) {
+      expect(includePatternProblem(ok), JSON.stringify(ok)).toBeNull();
+    }
+  });
+
+  test("an empty class is refused as empty_class, a [ or [! with a ] straight after it", () => {
+    for (const bad of ["[]", "[!]", "a[]b", "x/[]/y", "[]]", "[]a]", "[!]a]", "*[]", "[a][]"]) {
+      expect(includePatternProblem(bad), JSON.stringify(bad)).toBe("empty_class");
+    }
+  });
+
+  test("an inverted range is refused as inverted_range", () => {
+    for (const bad of [
+      "[z-a]",
+      "[b-a]",
+      "[9-0]",
+      "[!z-a]",
+      "x[a-c][z-a]",
+      "[a-cz-a]",
+      "[xb-a]",
+      "[a-!]",
+      "[\u{1F603}-\u{1F600}]",
+      "[ÿ-é]",
+      "[~- ]",
+    ]) {
+      expect(includePatternProblem(bad), JSON.stringify(bad)).toBe("inverted_range");
+    }
+  });
+
+  test("the first problem found, left to right, is the one named", () => {
+    expect(includePatternProblem("[][z-a]")).toBe("empty_class");
+    expect(includePatternProblem("[z-a][]")).toBe("inverted_range");
+  });
+
+  test("a class ends at the first ], so what follows is a literal or another class", () => {
+    expect(includePatternProblem("[a-c][z-a")).toBeNull(); // the second [ is unterminated
+    expect(includePatternProblem("[a]z-a]")).toBeNull(); // z-a] is outside any class
+    expect(includePatternProblem("[a-c]]")).toBeNull();
+    expect(includePatternProblem("[a-c][b-a]")).toBe("inverted_range");
+  });
+
+  test("a job refuses such a pattern at submit, naming datasets.<i>.include.<j> and never the pattern", () => {
+    const withInclude = (include: string[]) =>
+      specWith({
+        datasets: [
+          { id: "nm000104", version: "1.0.2" },
+          { id: "nm000105", version: "1.0.2", include },
+        ],
+      });
+    const refusal = (include: string[]) => {
+      const refused = JobSpecSchema.safeParse(withInclude(include));
+      return refused.success ? [] : refused.error.issues;
+    };
+    const [empty] = refusal(["ok/*", "x", "ab[]cd"]);
+    expect(refusal(["ok/*", "x", "ab[]cd"])).toHaveLength(1);
+    expect(empty.path).toEqual(["datasets", 1, "include", 2]);
+    expect(empty.message).toContain("empty_class");
+    expect(empty.message).not.toContain("ab[]cd");
+    const [inverted] = refusal(["[z-a]"]);
+    expect(refusal(["[z-a]"])).toHaveLength(1);
+    expect(inverted.path).toEqual(["datasets", 1, "include", 0]);
+    expect(inverted.message).toContain("inverted_range");
+    // Each bad pattern gets its own issue, at its own place.
+    expect(refusal(["[]", "fine", "[z-a]"]).map((i) => i.path.join("."))).toEqual([
+      "datasets.1.include.0",
+      "datasets.1.include.2",
+    ]);
+    for (const ok of ["**/x", "a/**/b", "[", "[!", "[a-]", "[abc", "**"]) {
+      expect(specRefused(withInclude([ok])), ok).toBe(false);
+    }
+  });
+
+  test("the launch specification is as permissive: the launcher alone refuses these, as bad_include", () => {
+    const launch = set(LAUNCH, "datasets", [
+      { id: "nm000104", version: "v1.0.2", include: ["[]", "[z-a]"] },
+    ]);
+    expect(validateRoot(launch)).toBe(true);
+    expect(LaunchSpecSchema.safeParse(launch).success).toBe(true);
+  });
+});
+
 describe("isSafeComputePath", () => {
   test("accepts ordinary relative paths and refuses every escape", () => {
     for (const ok of ["a", "a/b", "a b/c.d", "sub-01/eeg/x.set", "..a", "a..b", ".hidden"]) {
@@ -2861,9 +2984,13 @@ describe("what an entry, a command, args and an include pattern mean is part of 
   test("the include dialect: manifest paths, **, * and ?, classes, case, no escapes, linear time", () => {
     const text = COMPUTE_INCLUDE_DESCRIPTION;
     expect(text).toContain("manifest paths relative to the dataset root");
-    expect(text).toContain("** crosses /");
+    expect(text).toContain("**/ matches zero or more directories (so a/**/b matches a/b)");
+    expect(text).toContain("** elsewhere matches any run of characters including /");
     expect(text).toContain("* and ? stay inside one path segment");
     expect(text).toContain("[abc], [a-c] and [!abc]");
+    expect(text).toContain("an unterminated [ is a literal [");
+    expect(text).toContain("an empty class [] and an inverted range such as [z-a] are refused");
+    expect(text).toContain("bad_include is exactly the set of patterns this dialect refuses");
     expect(text).toContain("case-sensitive");
     expect(text).toContain("no escapes");
     expect(text).toContain("MUST run in time linear");
@@ -2919,9 +3046,14 @@ describe("what an entry, a command, args and an include pattern mean is part of 
       "may carry a leading `./`",
       "links, devices and FIFOs are refused by the launcher",
       "matched against manifest paths relative to the dataset root",
-      "`**` crosses `/`",
+      "`**` followed by `/` matches zero or more directories",
+      "`**` elsewhere matches any run of characters including `/`",
       "`*` and `?` stay inside one path segment",
       "`[abc]`, `[a-c]` and `[!abc]`",
+      "an unterminated `[` is a literal `[`",
+      "an empty class `[]` and an inverted range such as `[z-a]` are refused",
+      "`bad_include` is exactly the set of patterns the dialect refuses",
+      "`includePatternProblem`",
       "case-sensitive",
       "no escapes",
       "linear in the pattern length times the path length",

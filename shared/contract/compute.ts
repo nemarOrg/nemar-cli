@@ -537,7 +537,41 @@ export const COMPUTE_ARGS_DESCRIPTION =
  * matcher's, which must not backtrack.
  */
 export const COMPUTE_INCLUDE_DESCRIPTION =
-  "Patterns that select the dataset's files, matched against manifest paths relative to the dataset root; every file when there are none. The dialect: ** crosses /; * and ? stay inside one path segment; [abc], [a-c] and [!abc] are character classes; matching is case-sensitive; there are no escapes. A matcher MUST run in time linear in the pattern's length times the path's length (no backtracking).";
+  "Patterns that select the dataset's files, matched against manifest paths relative to the dataset root; every file when there are none. The dialect: **/ matches zero or more directories (so a/**/b matches a/b); ** elsewhere matches any run of characters including /; * and ? stay inside one path segment; [abc], [a-c] and [!abc] are character classes; an unterminated [ is a literal [; an empty class [] and an inverted range such as [z-a] are refused, and bad_include is exactly the set of patterns this dialect refuses; matching is case-sensitive; there are no escapes. A matcher MUST run in time linear in the pattern's length times the path's length (no backtracking).";
+
+/**
+ * Why an `include` pattern is refused, or null if the dialect accepts it ({@link
+ * COMPUTE_INCLUDE_DESCRIPTION}): `empty_class` for a `[` (or `[!`) with a `]` straight after it, and
+ * `inverted_range` for a class holding a range whose end is before its start (`[z-a]`), compared by
+ * code point. A `[` with no `]` after it is a literal. The first problem from the left is the one
+ * named. This is exactly the set the launcher refuses as `bad_include`, so `JobSpecSchema` applies
+ * it and a job with such a pattern is refused at submit. Pure.
+ */
+export function includePatternProblem(pattern: string): "empty_class" | "inverted_range" | null {
+  let i = 0;
+  while (i < pattern.length) {
+    if (pattern[i] !== "[") {
+      i++;
+      continue;
+    }
+    const start = pattern[i + 1] === "!" ? i + 2 : i + 1;
+    const end = pattern.indexOf("]", start);
+    // Unterminated: a literal [, and so is any later one, since no ] follows any of them.
+    if (end === -1) return null;
+    if (end === start) return "empty_class";
+    const body = Array.from(pattern.slice(start, end), (c) => c.codePointAt(0) as number);
+    for (let p = 0; p < body.length; ) {
+      if (p + 2 < body.length && body[p + 1] === 0x2d) {
+        if (body[p] > body[p + 2]) return "inverted_range";
+        p += 3;
+      } else {
+        p++;
+      }
+    }
+    i = end + 1;
+  }
+  return null;
+}
 
 export const JOB_RUNTIMES = ["python", "matlab", "image"] as const;
 
@@ -584,6 +618,17 @@ const processText = <T extends z.ZodTypeAny>(schema: T) =>
     message: "a lone surrogate is not text a process argument can carry",
   });
 
+/** A refinement for one include pattern: a pattern the dialect refuses is refused here, by its word. */
+function refuseBadInclude(pattern: string, ctx: z.RefinementCtx): void {
+  const problem = includePatternProblem(pattern);
+  if (problem !== null) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: `an include pattern the dialect refuses: ${problem}`,
+    });
+  }
+}
+
 const bundleRefSchema = z.object({ size: safeInt(1), sha256: sha256Schema }).strict();
 
 const datasetRefSchema = z
@@ -591,7 +636,7 @@ const datasetRefSchema = z
     id: z.string().regex(COMPUTE_DATASET_ID_RE),
     version: z.string().regex(COMPUTE_DATASET_VERSION_RE),
     include: z
-      .array(processText(computeGlobSchema))
+      .array(processText(computeGlobSchema).superRefine(refuseBadInclude))
       .max(64)
       .optional()
       .describe(COMPUTE_INCLUDE_DESCRIPTION),
@@ -676,9 +721,13 @@ export const LAUNCH_VARIABLE_BYTES_MAX = 49_152;
  * devices and FIFOs are refused by the launcher.
  *
  * A dataset's `include` patterns are matched against manifest paths relative to the dataset root
- * ({@link COMPUTE_INCLUDE_DESCRIPTION}): `**` crosses `/`; `*` and `?` stay inside one path segment;
- * `[abc]`, `[a-c]` and `[!abc]` are classes; matching is case-sensitive; there are no escapes; and a
- * matcher must run in time linear in the pattern length times the path length (no backtracking).
+ * ({@link COMPUTE_INCLUDE_DESCRIPTION}): `**` followed by `/` matches zero or more directories; `**`
+ * elsewhere matches any run of characters including `/`; `*` and `?` stay inside one path segment;
+ * `[abc]`, `[a-c]` and `[!abc]` are classes; an unterminated `[` is a literal `[`; an empty class
+ * `[]` and an inverted range such as `[z-a]` are refused (`includePatternProblem`, which this
+ * schema applies, so the launcher's `bad_include` is exactly the set of patterns the dialect
+ * refuses); matching is case-sensitive; there are no escapes; and a matcher must run in time linear
+ * in the pattern length times the path length (no backtracking).
  * There is no cap on how many wildcards a pattern holds. A dataset's `version` is what a person
  * writes (`1.0.2`); the Worker writes the data-plane tag for the launch specification
  * (`dataTagForVersion`).

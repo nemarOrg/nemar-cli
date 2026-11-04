@@ -90,7 +90,7 @@
             "pattern": "^(latest|v[0-9]+\\.[0-9]+\\.[0-9]+)(?![\\s\\S])"
           },
           "include": {
-            "description": "Patterns that select the dataset's files, matched against manifest paths relative to the dataset root; every file when there are none. The dialect: ** crosses /; * and ? stay inside one path segment; [abc], [a-c] and [!abc] are character classes; matching is case-sensitive; there are no escapes. A matcher MUST run in time linear in the pattern's length times the path's length (no backtracking).",
+            "description": "Patterns that select the dataset's files, matched against manifest paths relative to the dataset root; every file when there are none. The dialect: **/ matches zero or more directories (so a/**/b matches a/b); ** elsewhere matches any run of characters including /; * and ? stay inside one path segment; [abc], [a-c] and [!abc] are character classes; an unterminated [ is a literal [; an empty class [] and an inverted range such as [z-a] are refused, and bad_include is exactly the set of patterns this dialect refuses; matching is case-sensitive; there are no escapes. A matcher MUST run in time linear in the pattern's length times the path's length (no backtracking).",
             "type": "array",
             "maxItems": 64,
             "items": {
