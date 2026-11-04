@@ -17,28 +17,56 @@
 -- THE LEDGER IS THE ONLY WRITER OF A POOL'S TOTALS. `compute_ledger_apply` (AFTER INSERT) adds an
 -- entry's three deltas to `pool_id`'s row and its held and charged deltas to `budget_pool_id`'s row.
 -- So a total can never disagree with the ledger, "only if the entry was inserted" holds by
--- construction (there is no second statement to forget), and an entry a total refuses (a CHECK
--- below on the pool) is not written either: the entry and the totals are one statement. No code
--- path updates `granted_milli`, `held_milli` or `charged_milli`; a test reads every source file and
--- every migration for one.
+-- construction (there is no second statement to forget). No code path updates `granted_milli`,
+-- `held_milli` or `charged_milli`; a test reads every source file and every migration for one.
 --
--- WHAT A HOLD IS. A hold is an entry whose WHERE (`HOLD_INSERT_SQL` in services/compute-ledger.ts)
--- checks the pool, its budget and the key in the same statement that inserts it, so two holds for
--- the last SU cannot both be written and a refused hold writes nothing (ADR 0099; the claim of
--- upstream-repull-dispatch.ts is the precedent). A job has one hold. A hold is closed once, by a
--- release or a charge, and the unique index on `hold_ref` is what says so.
+-- THE TABLE REFUSES WHAT THE STATEMENT REFUSES, BEFORE THE ENTRY EXISTS. A pool's CHECKs would
+-- refuse a total out of range when the trigger above updates it, but a conflict clause on the OUTER
+-- statement (`INSERT OR IGNORE`, `OR FAIL`, `OR REPLACE`) overrides the one that applies inside a
+-- trigger, so the entry would stay and the totals would not move. The BEFORE INSERT triggers below
+-- raise ABORT, which no conflict clause overrides, so the entry is refused whole under every one:
+--   * `compute_ledger_totals_in_range`: no total of the pool, or of the budget it names, may leave
+--     0 to 2^53 - 1 (so a refund of more than was charged, an expiry of more than was granted and a
+--     total past the largest exact one are refused);
+--   * `compute_ledger_hold_fits`: a hold may not take the pool's or the budget's available below 0;
+--   * `compute_ledger_closes_its_hold`: a release or a charge names a hold of the same job, pool,
+--     budget and held amount.
+-- A hold is therefore an entry the table itself would refuse unless it fits, and the statement of
+-- services/compute-ledger.ts (`HOLD_INSERT_SQL`) is the same rule, written as a WHERE so that a
+-- refused hold writes nothing and raises nothing (ADR 0099; the claim of upstream-repull-dispatch.ts
+-- is the precedent). A job has one hold. A hold is closed once, by a release or a charge, and the
+-- unique index on `hold_ref` is what says so.
+--
+-- THE BUDGET RULE IS THE TABLE'S, NOT THE CALLER'S. An entry on an account or a partner pool that
+-- moves a budget (a hold, release, charge, refund, overrun, and an adjustment of a charge or a job's
+-- final settlement) MUST name the platform `people` pool of the same cpu or gpu word, and an entry
+-- on a platform pool names NO budget. `compute_ledger_budget_is_people` and
+-- `compute_ledger_budget_required` enforce exactly that, and nothing else: they do not say which
+-- budget a caller's correction should credit (that is a policy question of the owner's).
+--
+-- WHAT THE DATABASE CANNOT PREVENT, which only a reader and the source scan guard:
+--   * `INSERT OR REPLACE` and `REPLACE INTO` rewrite a conflicting row without firing the
+--     append-only DELETE trigger (recursive triggers, which would fire it, cannot be enabled on
+--     D1). Nothing in the source may use either on these tables; a test scans for them.
+--   * `DROP TABLE` removes the append-only triggers with the table. A rebuild of `compute_ledger`
+--     must COPY THE ROWS BEFORE it creates `compute_ledger_apply`, or the copy fires the trigger and
+--     every total doubles; recreate every trigger and index named here afterwards.
 --
 -- NO FOREIGN KEY, to `users` or between these tables, and none that cascades: ledger entries are
 -- never removed by a cascade from the account row (design section 5), so an account's deletion
--- leaves its pools and entries as they are, to follow the retention schedule. The two triggers that
--- stand where a foreign key would (the pool exists; the budget is a platform pool of the same
--- word) are named below. Every CHECK term is TRUE or FALSE, never NULL: a CHECK passes on NULL, so
--- a term that could be NULL would let the row in. Every CHECK is named, so a test can say which
--- one refused a row.
+-- leaves its pools and entries as they are. The ledger and the policy are append-only; their
+-- retention, and the anonymisation of `holder_ref` and `actor_user_id`, are the job of phase A7
+-- (#2012), which adds its own narrowly scoped exception in its own migration. The triggers that
+-- stand where a foreign key would (the pool exists; the budget is the platform people pool of the
+-- same word) are named below. Every CHECK term is TRUE or FALSE, never NULL: a CHECK passes on
+-- NULL, so a term that could be NULL would let the row in. Every CHECK is named, so a test can say
+-- which one refused a row.
 --
 -- SQLite runs BEFORE triggers ahead of the CHECKs, so an entry for a pool that does not exist is
 -- refused by the trigger's message and not by a CHECK: that is why `pool_id` has no CHECK of its
--- own. D1 rejects SQL that bun:sqlite accepts, so every GLOB below is at most 50 characters.
+-- own, and why a trigger's words, not a CHECK's, are what a refusal of a budget, a total or a
+-- closing hold carries. D1 rejects SQL that bun:sqlite accepts, so every GLOB below is at most 50
+-- characters.
 
 -- ---------------------------------------------------------------------------------------------
 -- compute_policy
@@ -150,23 +178,29 @@ INSERT INTO compute_pools (holder_kind, holder_ref, pool) VALUES ('platform', 'p
 --     charge held <= 0, charged >= 0        a hold settled: the hold leaves `held`, what the job
 --                                           used (never more than the hold) enters `charged`
 --     refund charged-                       a charge returned (a failure NEMAR caused)
---     adjust exactly one of granted/charged  a correction, either way (the final figure of a job
---                                           from Expanse's own accounting; an admin's fix)
+--     adjust exactly one of granted/charged, with no job: an admin's correction, either way
+--            granted 0 and any charged, with a job: that job's FINAL SETTLEMENT (Expanse's own
+--            figure), which may be of nothing, because its key `job:<id>:final` is what records
+--            that the final settlement happened, once
 --     overrun charged+                      use beyond the hold; available may go negative
 --     expire granted-                       unused SU that lapse (a renewal)
 --   * `pool_id`: the pool the entry is about; the trigger takes the three deltas into its row. No
 --     CHECK here: `compute_ledger_pool_exists` refuses a pool that does not exist, and runs first.
---   * `budget_pool_id`: the platform pool a spend is also counted against, or NULL. Only a kind that
---     spends may name one (a grant and an expiry may not, nor may an adjustment of the grant); it
---     is a platform pool of the same word as `pool_id` (`compute_ledger_budget_platform`) and not
---     `pool_id` itself. The trigger takes the held and charged deltas into its row, never granted.
+--   * `budget_pool_id`: the platform people pool of the same word a spend on an account or partner
+--     pool is also counted against; NULL on a platform pool's own entries. Only a kind that spends
+--     may name one (a grant and an expiry may not, nor may an adjustment of the grant). The
+--     trigger takes the held and charged deltas into its row, never granted.
 --   * `granted_delta_milli`, `held_delta_milli`, `charged_delta_milli`: the change to each total,
 --     whole milli-SU within +- (2^53 - 1), 0 when the kind does not move it.
 --   * `job_id`: the job (`job_` and 24 lowercase hex digits, COMPUTE_JOB_ID_RE) a hold, release,
---     charge, refund or overrun is about; NULL for a grant, an expiry and an admin's adjustment.
---     A job has one hold (`compute_ledger_one_hold_per_job`).
---   * `hold_ref`: the id of the hold a release or a charge closes (required for both) and an overrun
---     belongs to; NULL otherwise. A hold is closed once (`compute_ledger_closes_once`).
+--     charge, refund or overrun is about, and the job whose final settlement an adjustment is
+--     (that adjustment carries one); NULL for a grant, an expiry and an admin's adjustment. A job
+--     has one hold (`compute_ledger_one_hold_per_job`). A job's charge is the sum of
+--     `charged_delta_milli` by `job_id` over its charge, overrun, refund and final-settlement
+--     adjustment entries.
+--   * `hold_ref`: the id of the hold a release or a charge closes (required for both, and checked
+--     by `compute_ledger_closes_its_hold`) and an overrun belongs to; NULL otherwise. A hold is
+--     closed once (`compute_ledger_closes_once`).
 --   * `reason`: a fixed word, 1 to 64 characters of lowercase letters, digits and `_`
 --     (COMPUTE_WORD_RE, and a test compares the two), never free text.
 --   * `actor_user_id`: the person who did it, or NULL for the Worker's own entries.
@@ -206,22 +240,19 @@ CREATE TABLE compute_ledger (
     WHEN 'release' THEN held_delta_milli < 0 AND granted_delta_milli = 0 AND charged_delta_milli = 0
     WHEN 'charge' THEN held_delta_milli <= 0 AND charged_delta_milli >= 0 AND granted_delta_milli = 0
     WHEN 'refund' THEN charged_delta_milli < 0 AND granted_delta_milli = 0 AND held_delta_milli = 0
-    WHEN 'adjust' THEN held_delta_milli = 0
-      AND (granted_delta_milli <> 0) + (charged_delta_milli <> 0) = 1
+    WHEN 'adjust' THEN held_delta_milli = 0 AND CASE
+      WHEN job_id IS NULL THEN (granted_delta_milli <> 0) + (charged_delta_milli <> 0) = 1
+      ELSE granted_delta_milli = 0 END
     WHEN 'overrun' THEN charged_delta_milli > 0 AND granted_delta_milli = 0 AND held_delta_milli = 0
     WHEN 'expire' THEN granted_delta_milli < 0 AND held_delta_milli = 0 AND charged_delta_milli = 0
     ELSE 0 END),
   CONSTRAINT compute_ledger_job_required CHECK (
     kind NOT IN ('hold', 'release', 'charge', 'refund', 'overrun') OR job_id IS NOT NULL),
-  CONSTRAINT compute_ledger_closing_hold CHECK (
-    kind NOT IN ('release', 'charge') OR hold_ref IS NOT NULL),
   CONSTRAINT compute_ledger_hold_ref_kinds CHECK (
     hold_ref IS NULL OR kind IN ('release', 'charge', 'overrun')),
   CONSTRAINT compute_ledger_budget_kinds CHECK (budget_pool_id IS NULL
     OR kind IN ('hold', 'release', 'charge', 'refund', 'overrun')
-    OR (kind = 'adjust' AND charged_delta_milli <> 0)),
-  CONSTRAINT compute_ledger_budget_distinct CHECK (
-    budget_pool_id IS NULL OR budget_pool_id <> pool_id)
+    OR (kind = 'adjust' AND (charged_delta_milli <> 0 OR job_id IS NOT NULL)))
 );
 
 -- A hold is closed once, by one release or one charge; the entry that finds it closed writes nothing.
@@ -254,16 +285,74 @@ BEGIN
   SELECT RAISE(ABORT, 'a ledger entry names a pool that exists');
 END;
 
--- The budget an entry is counted against is a platform pool of the same word as the entry's pool,
--- so a cpu job is never counted against a gpu budget, and a person's spend is never counted
--- against another person.
-CREATE TRIGGER compute_ledger_budget_platform BEFORE INSERT ON compute_ledger
+-- The budget an entry is counted against is the platform people pool of the same word as the
+-- entry's pool, and an entry on a platform pool names none: a cpu job is never counted against a
+-- gpu budget, a person's spend never against another person or against the pipelines' own budget,
+-- and a pipelines entry never against the people.
+CREATE TRIGGER compute_ledger_budget_is_people BEFORE INSERT ON compute_ledger
 WHEN NEW.budget_pool_id IS NOT NULL AND NOT EXISTS (
   SELECT 1 FROM compute_pools b, compute_pools p
    WHERE b.id = NEW.budget_pool_id AND p.id = NEW.pool_id
-     AND b.holder_kind = 'platform' AND b.pool = p.pool)
+     AND b.holder_kind = 'platform' AND b.holder_ref = 'people' AND b.pool = p.pool
+     AND p.holder_kind <> 'platform')
 BEGIN
-  SELECT RAISE(ABORT, 'a ledger entry''s budget is a platform pool of the same word as its pool');
+  SELECT RAISE(ABORT, 'a ledger entry''s budget is the platform people pool of the same word as its account or partner pool, and a platform pool names none');
+END;
+
+-- The other half: an account or partner pool's spend MUST name that budget, so a caller that
+-- forgot it is refused and the budget's totals cannot fall behind the people's.
+CREATE TRIGGER compute_ledger_budget_required BEFORE INSERT ON compute_ledger
+WHEN NEW.budget_pool_id IS NULL
+  AND (NEW.kind IN ('hold', 'release', 'charge', 'refund', 'overrun')
+       OR (NEW.kind = 'adjust' AND (NEW.charged_delta_milli <> 0 OR NEW.job_id IS NOT NULL)))
+  AND EXISTS (SELECT 1 FROM compute_pools p WHERE p.id = NEW.pool_id AND p.holder_kind <> 'platform')
+BEGIN
+  SELECT RAISE(ABORT, 'a spend on an account or partner pool names the platform people budget');
+END;
+
+-- No total of the pool, or of its budget, leaves 0 to 2^53 - 1. This is the pool's own CHECK said
+-- ahead of the update, as ABORT, so that no conflict clause of the outer statement keeps the entry
+-- while the totals refuse it. A sum that overflows 64 bits becomes a float in SQLite and is out of
+-- range too.
+CREATE TRIGGER compute_ledger_totals_in_range BEFORE INSERT ON compute_ledger
+WHEN EXISTS (
+    SELECT 1 FROM compute_pools p WHERE p.id = NEW.pool_id
+       AND (p.granted_milli + NEW.granted_delta_milli NOT BETWEEN 0 AND 9007199254740991
+            OR p.held_milli + NEW.held_delta_milli NOT BETWEEN 0 AND 9007199254740991
+            OR p.charged_milli + NEW.charged_delta_milli NOT BETWEEN 0 AND 9007199254740991))
+  OR (NEW.budget_pool_id IS NOT NULL AND EXISTS (
+    SELECT 1 FROM compute_pools b WHERE b.id = NEW.budget_pool_id
+       AND (b.held_milli + NEW.held_delta_milli NOT BETWEEN 0 AND 9007199254740991
+            OR b.charged_milli + NEW.charged_delta_milli NOT BETWEEN 0 AND 9007199254740991)))
+BEGIN
+  SELECT RAISE(ABORT, 'a ledger entry would take a total outside 0 to 9007199254740991');
+END;
+
+-- A hold fits: neither the pool's nor the budget's available (granted - held - charged) goes below
+-- 0 by it. Available may be negative for other reasons (an overrun, a grant adjusted down), and
+-- then no hold fits.
+CREATE TRIGGER compute_ledger_hold_fits BEFORE INSERT ON compute_ledger
+WHEN NEW.kind = 'hold' AND (
+    EXISTS (SELECT 1 FROM compute_pools p WHERE p.id = NEW.pool_id
+              AND p.granted_milli - p.held_milli - p.charged_milli < NEW.held_delta_milli)
+    OR (NEW.budget_pool_id IS NOT NULL AND EXISTS (
+          SELECT 1 FROM compute_pools b WHERE b.id = NEW.budget_pool_id
+              AND b.granted_milli - b.held_milli - b.charged_milli < NEW.held_delta_milli)))
+BEGIN
+  SELECT RAISE(ABORT, 'a hold would take available below zero');
+END;
+
+-- A release or a charge closes the hold it names: the same job, pool and budget and the same held
+-- amount (the closing entry's held delta is the hold's, negated). `IS` makes two NULL budgets (a
+-- pipelines hold) equal.
+CREATE TRIGGER compute_ledger_closes_its_hold BEFORE INSERT ON compute_ledger
+WHEN NEW.kind IN ('release', 'charge') AND NOT EXISTS (
+  SELECT 1 FROM compute_ledger h
+   WHERE h.id = NEW.hold_ref AND h.kind = 'hold' AND h.job_id = NEW.job_id
+     AND h.pool_id = NEW.pool_id AND h.budget_pool_id IS NEW.budget_pool_id
+     AND h.held_delta_milli = -NEW.held_delta_milli)
+BEGIN
+  SELECT RAISE(ABORT, 'a release or a charge closes the hold it names: the same job, pool, budget and held amount');
 END;
 
 -- THE ONE WRITER OF A POOL'S TOTALS. A budget pool that is NULL matches no row.

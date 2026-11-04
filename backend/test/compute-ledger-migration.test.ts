@@ -23,6 +23,10 @@ import { join } from "node:path";
 import { COMPUTE_WORD_RE, LEDGER_ENTRY_KINDS } from "../../shared/compute-state";
 import { COMPUTE_JOB_ID_RE, COMPUTE_POOLS } from "../../shared/contract/compute";
 import {
+  COMPUTE_PLATFORM_KEYS,
+  COMPUTE_POOL_HOLDER_KINDS,
+} from "../../shared/contract/compute-admin";
+import {
   type MiniflareD1,
   jobId,
   miniflareD1,
@@ -144,24 +148,6 @@ async function accountPool(
   return row?.id ?? 0;
 }
 
-/** A platform pool of its own (cpu), so a test can read a budget nobody else has touched. */
-async function accountPlatform(e: Engine): Promise<number> {
-  const ref = `bt${next()}`;
-  const err = await insertRow(e, "compute_pools", {
-    holder_kind: "platform",
-    holder_ref: ref,
-    pool: "cpu",
-  });
-  if (err) throw new Error(`could not make a platform pool: ${err}`);
-  const row = (
-    await e.all<{ id: number }>(
-      "SELECT id FROM compute_pools WHERE holder_kind = 'platform' AND holder_ref = ?",
-      ref,
-    )
-  )[0];
-  return row?.id ?? 0;
-}
-
 async function entry(e: Engine, row: Row): Promise<string | null> {
   return insertRow(e, "compute_ledger", { idempotency_key: key(), ...row });
 }
@@ -176,23 +162,104 @@ async function totals(e: Engine, id: number) {
   return [r?.granted_milli, r?.held_milli, r?.charged_milli];
 }
 
-/** A pool with 100000 granted, 5000 held and 10000 charged, so any single entry of a kind applies. */
-async function richPool(e: Engine, pool: "cpu" | "gpu" = "cpu"): Promise<number> {
-  const id = await accountPool(e, pool);
-  expect(await entry(e, { kind: "grant", pool_id: id, granted_delta_milli: 100000 })).toBeNull();
+/**
+ * The platform `people` budget of one word, funded once per engine so that no test is bound by its
+ * size: every spend on an account or partner pool is counted against it (the table says so).
+ */
+const funded = new Set<string>();
+async function budgetOf(e: Engine, word: "cpu" | "gpu"): Promise<number> {
+  const id = await platformPoolId(e.d1, "people", word);
+  const k = `${e.name}:${word}`;
+  if (!funded.has(k)) {
+    funded.add(k);
+    expect(
+      await entry(e, { kind: "grant", pool_id: id, granted_delta_milli: 1_000_000_000_000 }),
+    ).toBeNull();
+  }
+  return id;
+}
+
+/** The platform pipelines pool of one word, funded once per engine, so a refusal is never for want of balance. */
+async function pipelinesOf(e: Engine, word: "cpu" | "gpu"): Promise<number> {
+  const id = await platformPoolId(e.d1, "pipelines", word);
+  const k = `${e.name}:pipelines:${word}`;
+  if (!funded.has(k)) {
+    funded.add(k);
+    expect(
+      await entry(e, { kind: "grant", pool_id: id, granted_delta_milli: 1_000_000_000 }),
+    ).toBeNull();
+  }
+  return id;
+}
+
+/** An open hold of `amount` on `pool`, counted against the budget of its word; its job and entry id. */
+async function openHold(
+  e: Engine,
+  pool: number,
+  word: "cpu" | "gpu",
+  amount = 2000,
+): Promise<{ job: string; hold: number }> {
+  const job = jobId(next());
+  const budget = await budgetOf(e, word);
   expect(
-    await entry(e, { kind: "hold", pool_id: id, held_delta_milli: 5000, job_id: jobId(next()) }),
+    await entry(e, {
+      kind: "hold",
+      pool_id: pool,
+      budget_pool_id: budget,
+      held_delta_milli: amount,
+      job_id: job,
+    }),
   ).toBeNull();
+  const row = (
+    await e.all<{ id: number }>(
+      "SELECT id FROM compute_ledger WHERE job_id = ? AND kind = 'hold'",
+      job,
+    )
+  )[0];
+  return { job, hold: row?.id ?? 0 };
+}
+
+/** A pool with 100000 granted, 5000 held and 10000 charged, the last two counted against the budget. */
+async function richPool(e: Engine, word: "cpu" | "gpu" = "cpu"): Promise<number> {
+  const id = await accountPool(e, word);
+  const budget = await budgetOf(e, word);
+  expect(await entry(e, { kind: "grant", pool_id: id, granted_delta_milli: 100000 })).toBeNull();
+  await openHold(e, id, word, 5000);
   expect(
     await entry(e, {
       kind: "overrun",
       pool_id: id,
+      budget_pool_id: budget,
       charged_delta_milli: 10000,
       job_id: jobId(next()),
     }),
   ).toBeNull();
   return id;
 }
+
+/** What one case of the ledger tests works on: a rich pool, its budget and one open hold of it. */
+interface Ctx {
+  pool: number;
+  budget: number;
+  job: string;
+  hold: number;
+  pipelines: number;
+}
+
+async function ctxFor(e: Engine, word: "cpu" | "gpu" = "cpu"): Promise<Ctx> {
+  const pool = await richPool(e, word);
+  const { job, hold } = await openHold(e, pool, word);
+  return {
+    pool,
+    budget: await budgetOf(e, word),
+    job,
+    hold,
+    pipelines: await pipelinesOf(e, word),
+  };
+}
+
+const RANGE = /outside 0 to 9007199254740991/;
+const IS_PEOPLE = /platform people pool of the same word/;
 
 const NAMED = (name: string) => new RegExp(`CHECK constraint failed: ${name}\\b`);
 const UNIQUE = /UNIQUE constraint failed/;
@@ -210,6 +277,34 @@ describe("the file says the shared words", () => {
     const words = [...(m?.[1] ?? "").matchAll(/'([a-z0-9_]+)'/g)].map((x) => x[1]);
     expect(words).toEqual([...COMPUTE_POOLS]);
   });
+
+  test("the holder kinds are COMPUTE_POOL_HOLDER_KINDS, in its order", () => {
+    const m = /CONSTRAINT compute_pools_holder_kind CHECK \(\s*holder_kind IN\s*\(([^)]*)\)\)/.exec(
+      SQL,
+    );
+    const words = [...(m?.[1] ?? "").matchAll(/'([a-z0-9_]+)'/g)].map((x) => x[1]);
+    expect(words).toEqual([...COMPUTE_POOL_HOLDER_KINDS]);
+  });
+
+  test("the platform pools the file seeds are COMPUTE_PLATFORM_KEYS, each of every pool word", () => {
+    const seeded = [...SQL.matchAll(/VALUES \('platform', '([a-z0-9_]+)', '([a-z]+)'\)/g)].map(
+      (m) => `${m[1]}/${m[2]}`,
+    );
+    const expected = COMPUTE_PLATFORM_KEYS.flatMap((k) => COMPUTE_POOLS.map((w) => `${k}/${w}`));
+    expect([...seeded].sort()).toEqual([...expected].sort());
+  });
+
+  onEveryEngine(
+    "the platform pools in the table are COMPUTE_PLATFORM_KEYS, each of every pool word",
+    async (e) => {
+      const rows = await e.all<{ holder_ref: string; pool: string }>(
+        "SELECT holder_ref, pool FROM compute_pools WHERE holder_kind = 'platform'",
+      );
+      const have = rows.map((r) => `${r.holder_ref}/${r.pool}`).sort();
+      const expected = COMPUTE_PLATFORM_KEYS.flatMap((k) => COMPUTE_POOLS.map((w) => `${k}/${w}`));
+      expect(have).toEqual([...expected].sort());
+    },
+  );
 
   test("no GLOB pattern is longer than D1 takes (50 characters)", () => {
     const patterns = [...SQL.matchAll(/GLOB\s+'([^']*)'/g)].map((m) => m[1] as string);
@@ -257,10 +352,12 @@ describe("the file says the shared words", () => {
       "",
     ];
     const pool = await richPool(e);
+    const budget = await budgetOf(e, "cpu");
     for (const job of samples) {
       const err = await entry(e, {
         kind: "overrun",
         pool_id: pool,
+        budget_pool_id: budget,
         charged_delta_milli: 1,
         job_id: job,
       });
@@ -458,44 +555,80 @@ describe("compute_pools", () => {
 });
 
 describe("compute_ledger: what each kind may carry", () => {
-  /** A valid entry of each kind, laid over with `over`. `n` makes the job and the hold unique. */
-  function valid(kind: string, pool: number, over: Row = {}): Row {
-    const n = next();
-    const job = jobId(n);
+  type Over = Row | ((c: Ctx) => Row);
+
+  /** A valid entry of each kind on the context's pool, laid over with `over`. */
+  function valid(kind: string, c: Ctx, over: Row = {}): Row {
+    const other = jobId(next());
     const base: Record<string, Row> = {
       grant: { granted_delta_milli: 5000 },
-      hold: { held_delta_milli: 2000, job_id: job },
-      release: { held_delta_milli: -2000, job_id: job, hold_ref: n },
-      charge: { held_delta_milli: -2000, charged_delta_milli: 1500, job_id: job, hold_ref: n },
-      refund: { charged_delta_milli: -500, job_id: job },
-      adjust: { charged_delta_milli: 100 },
-      overrun: { charged_delta_milli: 300, job_id: job },
+      hold: { held_delta_milli: 2000, job_id: other, budget_pool_id: c.budget },
+      release: {
+        held_delta_milli: -2000,
+        job_id: c.job,
+        hold_ref: c.hold,
+        budget_pool_id: c.budget,
+      },
+      charge: {
+        held_delta_milli: -2000,
+        charged_delta_milli: 1500,
+        job_id: c.job,
+        hold_ref: c.hold,
+        budget_pool_id: c.budget,
+      },
+      refund: { charged_delta_milli: -500, job_id: other, budget_pool_id: c.budget },
+      adjust: { charged_delta_milli: 100, budget_pool_id: c.budget },
+      overrun: { charged_delta_milli: 300, job_id: other, budget_pool_id: c.budget },
       expire: { granted_delta_milli: -100 },
     };
-    return { kind, pool_id: pool, ...base[kind], ...over };
+    return { kind, pool_id: c.pool, ...base[kind], ...over };
   }
 
   onEveryEngine("a valid entry of every kind is accepted", async (e) => {
-    const pool = await richPool(e);
     for (const kind of LEDGER_ENTRY_KINDS) {
-      expect([kind, await entry(e, valid(kind, pool))]).toEqual([kind, null]);
+      const c = await ctxFor(e);
+      expect([kind, await entry(e, valid(kind, c))]).toEqual([kind, null]);
     }
-    // Both ways of an adjustment, and an adjustment of the grant.
-    expect(await entry(e, valid("adjust", pool, { charged_delta_milli: -100 }))).toBeNull();
+    // Both ways of an adjustment, an adjustment of the grant, and a job's final settlement, which
+    // may be of nothing (the key `job:<id>:final` is what records that it happened).
+    const c = await ctxFor(e);
+    expect(await entry(e, valid("adjust", c, { charged_delta_milli: -100 }))).toBeNull();
     expect(
-      await entry(e, valid("adjust", pool, { charged_delta_milli: 0, granted_delta_milli: 100 })),
+      await entry(
+        e,
+        valid("adjust", c, {
+          charged_delta_milli: 0,
+          granted_delta_milli: 100,
+          budget_pool_id: null,
+        }),
+      ),
     ).toBeNull();
     expect(
-      await entry(e, valid("adjust", pool, { charged_delta_milli: 0, granted_delta_milli: -100 })),
+      await entry(
+        e,
+        valid("adjust", c, {
+          charged_delta_milli: 0,
+          granted_delta_milli: -100,
+          budget_pool_id: null,
+        }),
+      ),
     ).toBeNull();
+    for (const delta of [0, 250, -250]) {
+      expect([
+        delta,
+        await entry(e, valid("adjust", c, { charged_delta_milli: delta, job_id: c.job })),
+      ]).toEqual([delta, null]);
+    }
     expect(await totalsDisagreements(e.d1)).toEqual([]);
   });
 
-  type Case = [string, string, Row, string];
-  /** Stands for the platform pool of the person's word, which only a running engine can name. */
-  const PLATFORM = "platform-pool";
   const D = "compute_ledger_deltas";
-  const cases: Case[] = [
+  const CLOSES = /closes the hold it names/;
+  const BEYOND = /compute_ledger_(granted|charged)_int|outside 0 to 9007199254740991/;
+  // The refusals below name the constraint that refused them. Where a trigger runs first (SQLite
+  // runs BEFORE triggers ahead of the CHECKs), the trigger's own words are the expectation, and
+  // the CHECK behind it is the second layer for the same row.
+  const cases: Array<[string, string, Over, string | RegExp]> = [
     ["a grant that holds", "grant", { held_delta_milli: 1 }, D],
     ["a grant of nothing", "grant", { granted_delta_milli: 0 }, D],
     ["a grant that takes away", "grant", { granted_delta_milli: -1 }, D],
@@ -504,11 +637,11 @@ describe("compute_ledger: what each kind may carry", () => {
     ["a hold of nothing", "hold", { held_delta_milli: 0 }, D],
     ["a hold that gives back", "hold", { held_delta_milli: -1 }, D],
     ["a hold that charges", "hold", { charged_delta_milli: 1 }, D],
-    ["a release that holds", "release", { held_delta_milli: 1 }, D],
-    ["a release of nothing", "release", { held_delta_milli: 0 }, D],
+    ["a release that holds", "release", { held_delta_milli: 1 }, CLOSES],
+    ["a release of nothing", "release", { held_delta_milli: 0 }, CLOSES],
     ["a release that charges", "release", { charged_delta_milli: 1 }, D],
     ["a release that grants", "release", { granted_delta_milli: 1 }, D],
-    ["a charge that holds more", "charge", { held_delta_milli: 1 }, D],
+    ["a charge that holds more", "charge", { held_delta_milli: 1 }, CLOSES],
     ["a charge that refunds", "charge", { charged_delta_milli: -1 }, D],
     ["a charge that grants", "charge", { granted_delta_milli: 1 }, D],
     ["a refund of nothing", "refund", { charged_delta_milli: 0 }, D],
@@ -523,6 +656,18 @@ describe("compute_ledger: what each kind may carry", () => {
       D,
     ],
     ["an adjustment that holds", "adjust", { held_delta_milli: 1 }, D],
+    [
+      "a job's adjustment of the grant",
+      "adjust",
+      (c) => ({ granted_delta_milli: 1, charged_delta_milli: 0, job_id: c.job }),
+      D,
+    ],
+    [
+      "a job's adjustment of the grant and the charge",
+      "adjust",
+      (c) => ({ granted_delta_milli: 1, charged_delta_milli: 5, job_id: c.job }),
+      D,
+    ],
     ["an overrun of nothing", "overrun", { charged_delta_milli: 0 }, D],
     ["an overrun that refunds", "overrun", { charged_delta_milli: -1 }, D],
     ["an overrun that holds", "overrun", { held_delta_milli: 1 }, D],
@@ -533,29 +678,59 @@ describe("compute_ledger: what each kind may carry", () => {
     ["an expiry that charges", "expire", { charged_delta_milli: 1 }, D],
     ["a kind outside the eight", "close", {}, "compute_ledger_kind"],
     ["a hold with no job", "hold", { job_id: null }, "compute_ledger_job_required"],
-    ["a release with no job", "release", { job_id: null }, "compute_ledger_job_required"],
-    ["a charge with no job", "charge", { job_id: null }, "compute_ledger_job_required"],
+    ["a release with no job", "release", { job_id: null }, CLOSES],
+    ["a charge with no job", "charge", { job_id: null }, CLOSES],
     ["a refund with no job", "refund", { job_id: null }, "compute_ledger_job_required"],
     ["an overrun with no job", "overrun", { job_id: null }, "compute_ledger_job_required"],
-    ["a release with no hold", "release", { hold_ref: null }, "compute_ledger_closing_hold"],
-    ["a charge with no hold", "charge", { hold_ref: null }, "compute_ledger_closing_hold"],
-    ["a grant that names a hold", "grant", { hold_ref: 1 }, "compute_ledger_hold_ref_kinds"],
-    ["a hold that names a hold", "hold", { hold_ref: 1 }, "compute_ledger_hold_ref_kinds"],
-    ["a refund that names a hold", "refund", { hold_ref: 1 }, "compute_ledger_hold_ref_kinds"],
-    ["an adjustment that names a hold", "adjust", { hold_ref: 1 }, "compute_ledger_hold_ref_kinds"],
-    ["an expiry that names a hold", "expire", { hold_ref: 1 }, "compute_ledger_hold_ref_kinds"],
-    ["a hold of 0 as its reference", "release", { hold_ref: 0 }, "compute_ledger_hold_ref"],
-    ["a budget on a grant", "grant", { budget_pool_id: PLATFORM }, "compute_ledger_budget_kinds"],
+    ["a release with no hold", "release", { hold_ref: null }, CLOSES],
+    ["a charge with no hold", "charge", { hold_ref: null }, CLOSES],
+    [
+      "a grant that names a hold",
+      "grant",
+      (c) => ({ hold_ref: c.hold }),
+      "compute_ledger_hold_ref_kinds",
+    ],
+    [
+      "a hold that names a hold",
+      "hold",
+      (c) => ({ hold_ref: c.hold }),
+      "compute_ledger_hold_ref_kinds",
+    ],
+    [
+      "a refund that names a hold",
+      "refund",
+      (c) => ({ hold_ref: c.hold }),
+      "compute_ledger_hold_ref_kinds",
+    ],
+    [
+      "an adjustment that names a hold",
+      "adjust",
+      (c) => ({ hold_ref: c.hold }),
+      "compute_ledger_hold_ref_kinds",
+    ],
+    [
+      "an expiry that names a hold",
+      "expire",
+      (c) => ({ hold_ref: c.hold }),
+      "compute_ledger_hold_ref_kinds",
+    ],
+    ["a hold reference of 0", "overrun", { hold_ref: 0 }, "compute_ledger_hold_ref"],
+    [
+      "a budget on a grant",
+      "grant",
+      (c) => ({ budget_pool_id: c.budget }),
+      "compute_ledger_budget_kinds",
+    ],
     [
       "a budget on an expiry",
       "expire",
-      { budget_pool_id: PLATFORM },
+      (c) => ({ budget_pool_id: c.budget }),
       "compute_ledger_budget_kinds",
     ],
     [
       "a budget on an adjustment of the grant",
       "adjust",
-      { charged_delta_milli: 0, granted_delta_milli: 1, budget_pool_id: PLATFORM },
+      (c) => ({ charged_delta_milli: 0, granted_delta_milli: 1, budget_pool_id: c.budget }),
       "compute_ledger_budget_kinds",
     ],
     ["a fractional grant", "grant", { granted_delta_milli: 1.5 }, "compute_ledger_granted_int"],
@@ -571,13 +746,13 @@ describe("compute_ledger: what each kind may carry", () => {
       "a grant beyond what a double holds exactly",
       "grant",
       { granted_delta_milli: "9007199254740992" },
-      "compute_ledger_granted_int",
+      BEYOND,
     ],
     [
       "a charge beyond what a double holds exactly",
       "overrun",
       { charged_delta_milli: "9007199254740992" },
-      "compute_ledger_charged_int",
+      BEYOND,
     ],
     ["a job id in capitals", "hold", { job_id: `job_${"A".repeat(24)}` }, "compute_ledger_job_id"],
     ["a job id one short", "hold", { job_id: `job_${"a".repeat(23)}` }, "compute_ledger_job_id"],
@@ -596,14 +771,13 @@ describe("compute_ledger: what each kind may carry", () => {
       "compute_ledger_key",
     ],
   ];
-  for (const [name, kind, over, constraint] of cases) {
+  for (const [name, kind, over, expected] of cases) {
     onEveryEngine(`${name} is refused`, async (e) => {
-      const pool = await richPool(e);
-      const resolved =
-        over.budget_pool_id === PLATFORM
-          ? { ...over, budget_pool_id: await platformPoolId(e.d1, "people", "cpu") }
-          : over;
-      expect(await entry(e, valid(kind, pool, resolved))).toMatch(NAMED(constraint));
+      const c = await ctxFor(e);
+      const extra = typeof over === "function" ? over(c) : over;
+      expect(await entry(e, valid(kind, c, extra))).toMatch(
+        typeof expected === "string" ? NAMED(expected) : expected,
+      );
     });
   }
 
@@ -637,7 +811,7 @@ describe("compute_ledger: what each kind may carry", () => {
       const big = { kind: "grant", pool_id: pool, granted_delta_milli: 9007199254740991 };
       expect(await entry(e, big)).toBeNull();
       expect(await entry(e, { kind: "grant", pool_id: pool, granted_delta_milli: 1 })).toMatch(
-        NAMED("compute_pools_granted"),
+        RANGE,
       );
       expect(
         (
@@ -650,35 +824,131 @@ describe("compute_ledger: what each kind may carry", () => {
       expect(await totals(e, pool)).toEqual([9007199254740991, 0, 0]);
     },
   );
-
-  onEveryEngine("an entry may carry a budget only if it spends", async (e) => {
-    const person = await richPool(e, "cpu");
-    const budget = await platformPoolId(e.d1, "people", "cpu");
-    // Seed the budget so a release and a refund can apply to it.
-    const bj = jobId(next());
-    expect(
-      await entry(e, { kind: "grant", pool_id: budget, granted_delta_milli: 1000000 }),
-    ).toBeNull();
-    expect(
-      await entry(e, {
-        kind: "hold",
-        pool_id: person,
-        budget_pool_id: budget,
-        held_delta_milli: 10000,
-        job_id: bj,
-      }),
-    ).toBeNull();
-    for (const kind of ["release", "charge", "overrun", "refund"] as const) {
-      const row = valid(kind, person, { budget_pool_id: budget });
-      expect([kind, await entry(e, row)]).toEqual([kind, null]);
-    }
-    expect(await entry(e, valid("hold", person, { budget_pool_id: budget }))).toBeNull();
-    expect(await entry(e, valid("adjust", person, { budget_pool_id: budget }))).toBeNull();
-    expect(await totalsDisagreements(e.d1)).toEqual([]);
-  });
 });
 
-describe("compute_ledger: the pool and the budget it names", () => {
+describe("compute_ledger: the budget an entry names", () => {
+  const NAMES_BUDGET = /names the platform people budget/;
+  const CLOSES = /closes the hold it names/;
+
+  onEveryEngine(
+    "a spend on an account pool names the people budget of its word, and no other",
+    async (e) => {
+      const c = await ctxFor(e);
+      const hold = (over: Row) =>
+        entry(e, {
+          kind: "hold",
+          pool_id: c.pool,
+          held_delta_milli: 1,
+          job_id: jobId(next()),
+          budget_pool_id: c.budget,
+          ...over,
+        });
+      const before = await totals(e, c.pool);
+      expect(await hold({ budget_pool_id: null })).toMatch(NAMES_BUDGET);
+      expect(await hold({ budget_pool_id: c.pipelines })).toMatch(IS_PEOPLE);
+      expect(await hold({ budget_pool_id: await budgetOf(e, "gpu") })).toMatch(IS_PEOPLE);
+      const acct = await accountPool(e, "cpu");
+      expect(
+        await entry(e, { kind: "grant", pool_id: acct, granted_delta_milli: 1000 }),
+      ).toBeNull();
+      expect(await hold({ budget_pool_id: acct })).toMatch(IS_PEOPLE);
+      expect(await hold({ budget_pool_id: 90000000 + next() })).toMatch(IS_PEOPLE);
+      expect(await totals(e, c.pool)).toEqual(before);
+      expect(await hold({})).toBeNull();
+    },
+  );
+
+  onEveryEngine(
+    "a platform pool names no budget, itself and the people budget included",
+    async (e) => {
+      const pipelines = await platformPoolId(e.d1, "pipelines", "gpu");
+      expect(
+        await entry(e, { kind: "grant", pool_id: pipelines, granted_delta_milli: 50000 }),
+      ).toBeNull();
+      const hold = (over: Row) =>
+        entry(e, {
+          kind: "hold",
+          pool_id: pipelines,
+          held_delta_milli: 1,
+          job_id: jobId(next()),
+          ...over,
+        });
+      expect(await hold({ budget_pool_id: await budgetOf(e, "gpu") })).toMatch(IS_PEOPLE);
+      expect(await hold({ budget_pool_id: pipelines })).toMatch(IS_PEOPLE);
+      expect(await hold({ budget_pool_id: await platformPoolId(e.d1, "people", "cpu") })).toMatch(
+        IS_PEOPLE,
+      );
+      expect(await hold({})).toBeNull();
+    },
+  );
+
+  onEveryEngine("a partner pool is held to the same rule as an account's", async (e) => {
+    const ref = `client-${next()}`;
+    expect(
+      await insertRow(e, "compute_pools", { holder_kind: "partner", holder_ref: ref, pool: "cpu" }),
+    ).toBeNull();
+    const partner = (
+      await e.all<{ id: number }>("SELECT id FROM compute_pools WHERE holder_ref = ?", ref)
+    )[0]?.id as number;
+    const budget = await budgetOf(e, "cpu");
+    expect(
+      await entry(e, { kind: "grant", pool_id: partner, granted_delta_milli: 10000 }),
+    ).toBeNull();
+    const hold = (over: Row) =>
+      entry(e, {
+        kind: "hold",
+        pool_id: partner,
+        held_delta_milli: 1,
+        job_id: jobId(next()),
+        budget_pool_id: budget,
+        ...over,
+      });
+    expect(await hold({ budget_pool_id: null })).toMatch(NAMES_BUDGET);
+    expect(await hold({ budget_pool_id: await pipelinesOf(e, "cpu") })).toMatch(IS_PEOPLE);
+    expect(await hold({})).toBeNull();
+  });
+
+  onEveryEngine("every kind that moves a budget names it, and no other kind does", async (e) => {
+    const c = await ctxFor(e);
+    const without = { budget_pool_id: null };
+    const moving: Array<[string, Row, RegExp]> = [
+      ["refund", { kind: "refund", charged_delta_milli: -1, job_id: jobId(next()) }, NAMES_BUDGET],
+      ["overrun", { kind: "overrun", charged_delta_milli: 1, job_id: jobId(next()) }, NAMES_BUDGET],
+      ["adjust of the charge", { kind: "adjust", charged_delta_milli: 1 }, NAMES_BUDGET],
+      [
+        "a job's final settlement of nothing",
+        { kind: "adjust", charged_delta_milli: 0, job_id: c.job },
+        NAMES_BUDGET,
+      ],
+      [
+        "release",
+        { kind: "release", held_delta_milli: -2000, job_id: c.job, hold_ref: c.hold },
+        new RegExp(`${NAMES_BUDGET.source}|${CLOSES.source}`),
+      ],
+      [
+        "charge",
+        {
+          kind: "charge",
+          held_delta_milli: -2000,
+          charged_delta_milli: 1,
+          job_id: c.job,
+          hold_ref: c.hold,
+        },
+        new RegExp(`${NAMES_BUDGET.source}|${CLOSES.source}`),
+      ],
+    ];
+    for (const [name, row, expected] of moving) {
+      expect([name, await entry(e, { pool_id: c.pool, ...row, ...without })]).toEqual([
+        name,
+        expect.stringMatching(expected),
+      ]);
+    }
+    // A grant, an expiry and an adjustment of the grant move no budget, and name none.
+    expect(await entry(e, { kind: "grant", pool_id: c.pool, granted_delta_milli: 1 })).toBeNull();
+    expect(await entry(e, { kind: "expire", pool_id: c.pool, granted_delta_milli: -1 })).toBeNull();
+    expect(await entry(e, { kind: "adjust", pool_id: c.pool, granted_delta_milli: 1 })).toBeNull();
+  });
+
   onEveryEngine("an entry for a pool that does not exist is refused", async (e) => {
     for (const id of [90000000 + next(), 0, -1]) {
       expect(await entry(e, { kind: "grant", pool_id: id, granted_delta_milli: 1 })).toMatch(
@@ -686,44 +956,335 @@ describe("compute_ledger: the pool and the budget it names", () => {
       );
     }
   });
+});
+
+describe("compute_ledger: the table refuses what the statement refuses", () => {
+  const VERBS = ["INSERT", "INSERT OR IGNORE", "INSERT OR FAIL", "INSERT OR REPLACE"];
+  const RANGE_OR_FITS = /outside 0 to 9007199254740991|available below zero/;
+
+  async function insertWith(e: Engine, verb: string, row: Row): Promise<string | null> {
+    const cols = Object.keys(row);
+    return e.run(
+      `${verb} INTO compute_ledger (${cols.join(", ")}) VALUES (${cols.map(() => "?").join(", ")})`,
+      ...cols.map((c) => row[c]),
+    );
+  }
+
+  const written = async (e: Engine, k: string) =>
+    (
+      await e.all<{ n: number }>(
+        "SELECT COUNT(*) AS n FROM compute_ledger WHERE idempotency_key = ?",
+        k,
+      )
+    )[0]?.n;
 
   onEveryEngine(
-    "a budget that does not exist, is not a platform pool or is the other word is refused",
+    "an entry that would take a total outside 0 to 2^53-1 is refused under every conflict clause, and writes nothing",
     async (e) => {
-      const person = await richPool(e, "cpu");
-      const hold = (budget: number) => ({
-        kind: "hold",
-        pool_id: person,
-        budget_pool_id: budget,
-        held_delta_milli: 1,
-        job_id: jobId(next()),
-      });
-      const before = await totals(e, person);
-      expect(await entry(e, hold(90000000 + next()))).toMatch(/platform pool of the same word/);
-      expect(await entry(e, hold(await accountPool(e, "cpu")))).toMatch(
-        /platform pool of the same word/,
-      );
-      expect(await entry(e, hold(await platformPoolId(e.d1, "people", "gpu")))).toMatch(
-        /platform pool of the same word/,
-      );
-      expect(await totals(e, person)).toEqual(before);
-      expect(await entry(e, hold(await platformPoolId(e.d1, "people", "cpu")))).toBeNull();
-      expect(await entry(e, hold(await platformPoolId(e.d1, "pipelines", "cpu")))).toBeNull();
+      for (const verb of VERBS) {
+        const c = await ctxFor(e);
+        const refusals: Array<[string, Row]> = [
+          [
+            "a refund of more than was charged",
+            {
+              kind: "refund",
+              charged_delta_milli: -10001,
+              job_id: jobId(next()),
+              budget_pool_id: c.budget,
+            },
+          ],
+          ["an expiry of more than was granted", { kind: "expire", granted_delta_milli: -100001 }],
+          [
+            "an adjustment of the grant below zero",
+            { kind: "adjust", granted_delta_milli: -100001 },
+          ],
+          [
+            "an adjustment of the charge below zero",
+            { kind: "adjust", charged_delta_milli: -10001, budget_pool_id: c.budget },
+          ],
+          ["a grant above 2^53-1", { kind: "grant", granted_delta_milli: 9007199254740991 }],
+          [
+            "a charge above 2^53-1",
+            {
+              kind: "overrun",
+              charged_delta_milli: 9007199254740991,
+              job_id: jobId(next()),
+              budget_pool_id: c.budget,
+            },
+          ],
+        ];
+        for (const [name, row] of refusals) {
+          const k = key();
+          const before = await totals(e, c.pool);
+          const err = await insertWith(e, verb, { pool_id: c.pool, idempotency_key: k, ...row });
+          expect([verb, name, err]).toEqual([verb, name, expect.stringMatching(RANGE_OR_FITS)]);
+          expect([verb, name, await written(e, k)]).toEqual([verb, name, 0]);
+          expect(await totals(e, c.pool)).toEqual(before);
+        }
+      }
+      expect(await totalsDisagreements(e.d1)).toEqual([]);
     },
   );
 
-  onEveryEngine("an entry cannot be its own budget", async (e) => {
-    const own = await platformPoolId(e.d1, "pipelines", "gpu");
+  onEveryEngine(
+    "a release the pool could not take is refused too (it names no hold that fits)",
+    async (e) => {
+      for (const verb of VERBS) {
+        const c = await ctxFor(e);
+        const k = key();
+        const err = await insertWith(e, verb, {
+          kind: "release",
+          pool_id: c.pool,
+          held_delta_milli: -5000000,
+          job_id: c.job,
+          hold_ref: c.hold,
+          budget_pool_id: c.budget,
+          idempotency_key: k,
+        });
+        expect([verb, err]).toEqual([
+          verb,
+          expect.stringMatching(/closes the hold it names|outside 0 to/),
+        ]);
+        expect(await written(e, k)).toBe(0);
+      }
+    },
+  );
+
+  onEveryEngine("the budget's totals are held to the same range", async (e) => {
+    for (const verb of VERBS) {
+      const c = await ctxFor(e);
+      const [, , budgetCharged] = (await totals(e, c.budget)) as number[];
+      // The person could take it; the budget could not: one statement, so neither is written.
+      const k = key();
+      const before = await totals(e, c.pool);
+      const beforeBudget = await totals(e, c.budget);
+      const err = await insertWith(e, verb, {
+        kind: "adjust",
+        pool_id: c.pool,
+        budget_pool_id: c.budget,
+        charged_delta_milli: 9007199254740991 - (budgetCharged as number) + 1,
+        idempotency_key: k,
+      });
+      expect([verb, err]).toEqual([verb, expect.stringMatching(RANGE)]);
+      expect(await written(e, k)).toBe(0);
+      expect(await totals(e, c.pool)).toEqual(before);
+      expect(await totals(e, c.budget)).toEqual(beforeBudget);
+    }
+  });
+
+  onEveryEngine("a budget that holds less charge than the refund is refused", async (e) => {
+    // The people gpu budget is corrected down by the owner, so the person holds more than it does.
+    const person = await accountPool(e, "gpu");
+    const budget = await budgetOf(e, "gpu");
+    expect(
+      await entry(e, { kind: "grant", pool_id: person, granted_delta_milli: 10000 }),
+    ).toBeNull();
     expect(
       await entry(e, {
-        kind: "hold",
-        pool_id: own,
-        budget_pool_id: own,
-        held_delta_milli: 1,
-        job_id: jobId(next()),
+        kind: "adjust",
+        pool_id: person,
+        budget_pool_id: budget,
+        charged_delta_milli: 500,
       }),
-    ).toMatch(NAMED("compute_ledger_budget_distinct"));
+    ).toBeNull();
+    const [, , charged] = (await totals(e, budget)) as number[];
+    expect(
+      await entry(e, {
+        kind: "adjust",
+        pool_id: budget,
+        charged_delta_milli: -(charged as number),
+      }),
+    ).toBeNull();
+    for (const verb of VERBS) {
+      const k = key();
+      const err = await insertWith(e, verb, {
+        kind: "refund",
+        pool_id: person,
+        budget_pool_id: budget,
+        charged_delta_milli: -500,
+        job_id: jobId(next()),
+        idempotency_key: k,
+      });
+      expect([verb, err]).toEqual([verb, expect.stringMatching(RANGE)]);
+      expect(await written(e, k)).toBe(0);
+    }
+    expect(await totals(e, person)).toEqual([10000, 0, 500]);
+    expect(await totalsDisagreements(e.d1)).toEqual([]);
   });
+
+  onEveryEngine(
+    "a hold that would take available below zero is refused under every conflict clause",
+    async (e) => {
+      for (const verb of VERBS) {
+        const c = await ctxFor(e);
+        const [granted, held, charged] = (await totals(e, c.pool)) as number[];
+        const available = (granted as number) - (held as number) - (charged as number);
+        const k = key();
+        const err = await insertWith(e, verb, {
+          kind: "hold",
+          pool_id: c.pool,
+          budget_pool_id: c.budget,
+          held_delta_milli: available + 1,
+          job_id: jobId(next()),
+          idempotency_key: k,
+        });
+        expect([verb, err]).toEqual([verb, expect.stringMatching(/available below zero/)]);
+        expect(await written(e, k)).toBe(0);
+        // Exactly the available is a hold.
+        const fits = await insertWith(e, verb, {
+          kind: "hold",
+          pool_id: c.pool,
+          budget_pool_id: c.budget,
+          held_delta_milli: available,
+          job_id: jobId(next()),
+          idempotency_key: key(),
+        });
+        expect([verb, fits]).toEqual([verb, null]);
+      }
+      expect(await totalsDisagreements(e.d1)).toEqual([]);
+    },
+  );
+
+  onEveryEngine(
+    "a hold the budget could not cover is refused though the person could",
+    async (e) => {
+      const person = await accountPool(e, "cpu");
+      const budget = await budgetOf(e, "cpu");
+      const [bg, bh, bc] = (await totals(e, budget)) as number[];
+      const need = (bg as number) - (bh as number) - (bc as number) + 1;
+      expect(
+        await entry(e, { kind: "grant", pool_id: person, granted_delta_milli: need }),
+      ).toBeNull();
+      for (const verb of VERBS) {
+        const k = key();
+        const err = await insertWith(e, verb, {
+          kind: "hold",
+          pool_id: person,
+          budget_pool_id: budget,
+          held_delta_milli: need,
+          job_id: jobId(next()),
+          idempotency_key: k,
+        });
+        expect([verb, err]).toEqual([verb, expect.stringMatching(/available below zero/)]);
+        expect(await written(e, k)).toBe(0);
+      }
+      expect(await totals(e, person)).toEqual([need, 0, 0]);
+    },
+  );
+
+  onEveryEngine(
+    "a multi-row INSERT ... SELECT whose second row is refused writes no second row",
+    async (e) => {
+      for (const verb of VERBS) {
+        const c = await ctxFor(e);
+        const [granted, held, charged] = (await totals(e, c.pool)) as number[];
+        const available = (granted as number) - (held as number) - (charged as number);
+        const [k1, k2] = [key(), key()];
+        const [j1, j2] = [jobId(next()), jobId(next())];
+        // Each hold fits alone; together they do not.
+        const err = await e.run(
+          `${verb} INTO compute_ledger (kind, pool_id, budget_pool_id, held_delta_milli, job_id, idempotency_key)
+         SELECT 'hold', ?1, ?2, ?3, ?4, ?5 UNION ALL SELECT 'hold', ?1, ?2, ?3, ?6, ?7`,
+          c.pool,
+          c.budget,
+          available,
+          j1,
+          k1,
+          j2,
+          k2,
+        );
+        expect([verb, err]).toEqual([verb, expect.stringMatching(/available below zero/)]);
+        expect([verb, await written(e, k2)]).toEqual([verb, 0]);
+        // Whatever the clause kept of the first, its totals went with it.
+        expect(await totalsDisagreements(e.d1)).toEqual([]);
+        if (verb !== "INSERT OR FAIL") expect([verb, await written(e, k1)]).toEqual([verb, 0]);
+      }
+    },
+  );
+});
+
+describe("compute_ledger: a release or a charge closes the hold it names", () => {
+  onEveryEngine("it must name a hold of the same job, pool, budget and held amount", async (e) => {
+    const c = await ctxFor(e);
+    const other = await ctxFor(e);
+    const release = (over: Row) =>
+      entry(e, {
+        kind: "release",
+        pool_id: c.pool,
+        held_delta_milli: -2000,
+        job_id: c.job,
+        hold_ref: c.hold,
+        budget_pool_id: c.budget,
+        ...over,
+      });
+    const CLOSES = /closes the hold it names/;
+    expect(await release({ hold_ref: 90000000 + next() })).toMatch(CLOSES);
+    expect(await release({ hold_ref: other.hold })).toMatch(CLOSES); // another job's hold
+    expect(await release({ job_id: other.job })).toMatch(CLOSES); // this hold, another job
+    expect(await release({ held_delta_milli: -1999 })).toMatch(CLOSES); // another amount
+    expect(await release({ pool_id: other.pool })).toMatch(CLOSES); // another pool
+    // The hold's own budget, and none, are two things: a hold counted against the budget is
+    // closed against it.
+    expect(await release({ budget_pool_id: await budgetOf(e, "gpu") })).toMatch(
+      /closes the hold it names|platform people pool/,
+    );
+    // What is not a hold cannot be closed: a grant's id is not a hold's.
+    const grantId = (
+      await e.all<{ id: number }>(
+        "SELECT id FROM compute_ledger WHERE pool_id = ? AND kind = 'grant' ORDER BY id LIMIT 1",
+        c.pool,
+      )
+    )[0]?.id as number;
+    expect(await release({ hold_ref: grantId })).toMatch(CLOSES);
+    expect(await release({})).toBeNull();
+  });
+
+  onEveryEngine(
+    "a charge is closed against its hold the same way, and a hold of no budget by none",
+    async (e) => {
+      const c = await ctxFor(e);
+      const charge = (over: Row) =>
+        entry(e, {
+          kind: "charge",
+          pool_id: c.pool,
+          held_delta_milli: -2000,
+          charged_delta_milli: 700,
+          job_id: c.job,
+          hold_ref: c.hold,
+          budget_pool_id: c.budget,
+          ...over,
+        });
+      const CLOSES = /closes the hold it names/;
+      expect(await charge({ held_delta_milli: -2001 })).toMatch(CLOSES);
+      expect(await charge({ job_id: jobId(next()) })).toMatch(CLOSES);
+      expect(await charge({})).toBeNull();
+      // A pipelines hold names no budget, and its charge names none.
+      const pipelines = await platformPoolId(e.d1, "pipelines", "cpu");
+      expect(
+        await entry(e, { kind: "grant", pool_id: pipelines, granted_delta_milli: 100000 }),
+      ).toBeNull();
+      const job = jobId(next());
+      expect(
+        await entry(e, { kind: "hold", pool_id: pipelines, held_delta_milli: 300, job_id: job }),
+      ).toBeNull();
+      const holdId = (
+        await e.all<{ id: number }>(
+          "SELECT id FROM compute_ledger WHERE job_id = ? AND kind = 'hold'",
+          job,
+        )
+      )[0]?.id as number;
+      expect(
+        await entry(e, {
+          kind: "charge",
+          pool_id: pipelines,
+          held_delta_milli: -300,
+          charged_delta_milli: 300,
+          job_id: job,
+          hold_ref: holdId,
+        }),
+      ).toBeNull();
+    },
+  );
 });
 
 describe("compute_ledger: append-only, and one close per hold", () => {
@@ -757,30 +1318,34 @@ describe("compute_ledger: append-only, and one close per hold", () => {
   onEveryEngine(
     "a hold closes once, by a release or a charge, and a job has one hold",
     async (e) => {
-      const pool = await richPool(e);
-      const n = next();
-      const job = jobId(n);
-      expect(
-        await entry(e, { kind: "hold", pool_id: pool, held_delta_milli: 100, job_id: job }),
-      ).toBeNull();
-      expect(
-        await entry(e, { kind: "hold", pool_id: pool, held_delta_milli: 100, job_id: job }),
-      ).toMatch(UNIQUE);
+      const c = await ctxFor(e);
       const release = {
         kind: "release",
-        pool_id: pool,
-        held_delta_milli: -100,
-        job_id: job,
-        hold_ref: n,
+        pool_id: c.pool,
+        held_delta_milli: -2000,
+        job_id: c.job,
+        hold_ref: c.hold,
+        budget_pool_id: c.budget,
       };
       const charge = {
         kind: "charge",
-        pool_id: pool,
-        held_delta_milli: -100,
-        charged_delta_milli: 50,
-        job_id: job,
-        hold_ref: n,
+        pool_id: c.pool,
+        held_delta_milli: -2000,
+        charged_delta_milli: 1500,
+        job_id: c.job,
+        hold_ref: c.hold,
+        budget_pool_id: c.budget,
       };
+      // A second hold of the job, under another key.
+      expect(
+        await entry(e, {
+          kind: "hold",
+          pool_id: c.pool,
+          held_delta_milli: 100,
+          job_id: c.job,
+          budget_pool_id: c.budget,
+        }),
+      ).toMatch(UNIQUE);
       expect(await entry(e, release)).toBeNull();
       expect(await entry(e, release)).toMatch(UNIQUE);
       expect(await entry(e, charge)).toMatch(UNIQUE);
@@ -788,13 +1353,15 @@ describe("compute_ledger: append-only, and one close per hold", () => {
       expect(
         await entry(e, {
           kind: "overrun",
-          pool_id: pool,
+          pool_id: c.pool,
           charged_delta_milli: 5,
-          job_id: job,
-          hold_ref: n,
+          job_id: c.job,
+          hold_ref: c.hold,
+          budget_pool_id: c.budget,
         }),
       ).toBeNull();
-      expect(await entry(e, { ...charge, hold_ref: n + 5000 })).toBeNull();
+      const second = await openHold(e, c.pool, "cpu");
+      expect(await entry(e, { ...charge, job_id: second.job, hold_ref: second.hold })).toBeNull();
     },
   );
 });
@@ -804,10 +1371,9 @@ describe("the trigger is the one writer of a pool's totals", () => {
     "each kind moves the totals of its pool, and a budget's held and charged",
     async (e) => {
       const person = await accountPool(e, "gpu");
-      const budget = await platformPoolId(e.d1, "people", "gpu");
+      const budget = await budgetOf(e, "gpu");
       const base = (await totals(e, budget)) as number[];
-      const n = next();
-      const job = jobId(n);
+      const job = jobId(next());
       const step = async (row: Row, pool: number[], bud: number[]) => {
         expect(await entry(e, row)).toBeNull();
         expect(await totals(e, person)).toEqual(pool);
@@ -830,6 +1396,12 @@ describe("the trigger is the one writer of a pool's totals", () => {
         [10000, 4000, 0],
         [0, 4000, 0],
       );
+      const holdId = (
+        await e.all<{ id: number }>(
+          "SELECT id FROM compute_ledger WHERE job_id = ? AND kind = 'hold'",
+          job,
+        )
+      )[0]?.id as number;
       await step(
         {
           kind: "charge",
@@ -838,7 +1410,7 @@ describe("the trigger is the one writer of a pool's totals", () => {
           held_delta_milli: -4000,
           charged_delta_milli: 2500,
           job_id: job,
-          hold_ref: n,
+          hold_ref: holdId,
         },
         [10000, 0, 2500],
         [0, 0, 2500],
@@ -856,6 +1428,17 @@ describe("the trigger is the one writer of a pool's totals", () => {
       );
       await step(
         { kind: "adjust", pool_id: person, budget_pool_id: budget, charged_delta_milli: -200 },
+        [10000, 0, 3000],
+        [0, 0, 3000],
+      );
+      await step(
+        {
+          kind: "adjust",
+          pool_id: person,
+          budget_pool_id: budget,
+          charged_delta_milli: 0,
+          job_id: job,
+        },
         [10000, 0, 3000],
         [0, 0, 3000],
       );
@@ -880,68 +1463,6 @@ describe("the trigger is the one writer of a pool's totals", () => {
         [0, 0, 0],
         [0, 0, 0],
       );
-      expect(await totalsDisagreements(e.d1)).toEqual([]);
-    },
-  );
-
-  onEveryEngine(
-    "an entry whose totals would be negative is refused, and is not written either",
-    async (e) => {
-      const pool = await accountPool(e);
-      expect(
-        await entry(e, { kind: "grant", pool_id: pool, granted_delta_milli: 1000 }),
-      ).toBeNull();
-      // Charged 500 on the pool, with no budget, so the budget below holds nothing to take back.
-      expect(
-        await entry(e, {
-          kind: "overrun",
-          pool_id: pool,
-          charged_delta_milli: 500,
-          job_id: jobId(next()),
-        }),
-      ).toBeNull();
-      const count = async () =>
-        (
-          await e.all<{ n: number }>(
-            "SELECT COUNT(*) AS n FROM compute_ledger WHERE pool_id = ?",
-            pool,
-          )
-        )[0]?.n;
-      const before = await count();
-      // A refund of more than was charged, an expiry of more than was granted, a release of what was
-      // never held: the pool's own CHECK refuses the total, and the entry goes with it.
-      for (const row of [
-        { kind: "refund", pool_id: pool, charged_delta_milli: -501, job_id: jobId(next()) },
-        { kind: "expire", pool_id: pool, granted_delta_milli: -1001 },
-        {
-          kind: "release",
-          pool_id: pool,
-          held_delta_milli: -1,
-          job_id: jobId(next()),
-          hold_ref: next(),
-        },
-        { kind: "adjust", pool_id: pool, charged_delta_milli: -501 },
-        { kind: "adjust", pool_id: pool, granted_delta_milli: -1001 },
-      ]) {
-        expect([row.kind, await entry(e, row)]).toEqual([
-          row.kind,
-          expect.stringMatching(/CHECK constraint failed/),
-        ]);
-      }
-      // The pool could take it and the budget could not: one statement, so neither is written.
-      const budget = await accountPlatform(e);
-      expect(
-        await entry(e, {
-          kind: "refund",
-          pool_id: pool,
-          budget_pool_id: budget,
-          charged_delta_milli: -500,
-          job_id: jobId(next()),
-        }),
-      ).toMatch(/CHECK constraint failed/);
-      expect(await count()).toBe(before);
-      expect(await totals(e, pool)).toEqual([1000, 0, 500]);
-      expect(await totals(e, budget)).toEqual([0, 0, 0]);
       expect(await totalsDisagreements(e.d1)).toEqual([]);
     },
   );
@@ -997,14 +1518,28 @@ describe("the tables and indexes", () => {
     ).map((r) => r.name);
     expect(names).toEqual([
       "compute_ledger_apply",
-      "compute_ledger_budget_platform",
+      "compute_ledger_budget_is_people",
+      "compute_ledger_budget_required",
+      "compute_ledger_closes_its_hold",
+      "compute_ledger_hold_fits",
       "compute_ledger_no_delete",
       "compute_ledger_no_update",
       "compute_ledger_pool_exists",
+      "compute_ledger_totals_in_range",
       "compute_policy_no_delete",
       "compute_policy_no_update",
       "compute_pools_identity_fixed",
       "compute_pools_no_delete",
     ]);
+  });
+
+  test("the constraints that are left are the ones the file names", () => {
+    const named = [...SQL.matchAll(/CONSTRAINT (\w+) CHECK/g)].map((m) => m[1]);
+    // `compute_ledger_closing_hold` and `compute_ledger_budget_distinct` are gone: a trigger
+    // answers first for each, so neither could ever be the one that refused a row.
+    expect(named).not.toContain("compute_ledger_closing_hold");
+    expect(named).not.toContain("compute_ledger_budget_distinct");
+    expect(named).toContain("compute_ledger_deltas");
+    expect(named).toContain("compute_ledger_budget_kinds");
   });
 });
