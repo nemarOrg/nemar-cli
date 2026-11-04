@@ -230,6 +230,22 @@ function addressProblem(raw: string, allowLoopbackHttp: boolean): string | null 
   return "is not an https address";
 }
 
+/** The parameters the authorization response appends to a redirect address (RFC 6749, RFC 9207). */
+const RESPONSE_PARAMETERS = ["code", "state", "iss", "error"];
+
+/**
+ * Why a redirect address's own query is not acceptable, or null: it must not already name a
+ * parameter the authorization response appends, or the client would receive two values for it.
+ * Asked of an address `addressProblem` accepted, so it parses.
+ */
+function responseParameterProblem(uri: string): string | null {
+  const query = new URL(uri).searchParams;
+  const named = RESPONSE_PARAMETERS.find((name) => query.has(name));
+  return named
+    ? `already names ${named} in its query, which the authorization response adds`
+    : null;
+}
+
 /**
  * Whether ONE redirect address is a first-party origin (ADR 0119 rule 8). Its own rule, not the
  * cross-origin one: https only (a loopback address outside production may also be http), the host is
@@ -357,7 +373,7 @@ export function validateClientInput(
   }
   const seenUris = new Set<string>();
   for (const [i, uri] of input.redirect_uris.entries()) {
-    const problem = addressProblem(uri, allowLoopbackHttp);
+    const problem = addressProblem(uri, allowLoopbackHttp) ?? responseParameterProblem(uri);
     if (problem) {
       return refuse("invalid_redirect_uri", `redirect_uris[${i}] ${problem}.`, "redirect_uris");
     }
