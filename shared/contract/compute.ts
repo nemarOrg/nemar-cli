@@ -486,6 +486,62 @@ const datasetRefSchema = z
 const argSchema = z.string().max(1024);
 
 /**
+ * The bytes a string takes as a JSON string value in the launch specification, which is ASCII-only
+ * JSON (see `encodeLaunchSpec`): its two quotes, two bytes for a quote, a backslash, \b, \t, \n,
+ * \f or \r, six for any other control character and for every UTF-16 unit from U+007F up (a
+ * character outside the Basic Multilingual Plane is two units, so twelve), one for the rest.
+ */
+export function launchStringBytes(text: string): number {
+  let bytes = 2;
+  for (let i = 0; i < text.length; i++) {
+    const unit = text.charCodeAt(i);
+    if (unit === 0x22 || unit === 0x5c) bytes += 2;
+    else if (unit === 0x08 || unit === 0x09 || unit === 0x0a || unit === 0x0c || unit === 0x0d)
+      bytes += 2;
+    else if (unit < 0x20 || unit >= 0x7f) bytes += 6;
+    else bytes += 1;
+  }
+  return bytes;
+}
+
+/**
+ * What the job's own variable-size fields take in the launch specification: the entry, the command,
+ * the arguments, every dataset include pattern and the environment, each element counted with its
+ * quotes and one separator. Everything else in the document is bounded by its own field cap and is
+ * the fixed part: see {@link LAUNCH_VARIABLE_BYTES_MAX}.
+ */
+export function launchVariableBytes(spec: {
+  entry?: string;
+  command?: readonly string[];
+  args?: readonly string[];
+  datasets?: ReadonlyArray<{ include?: readonly string[] }>;
+  env?: Readonly<Record<string, string | undefined>>;
+}): number {
+  let bytes = 0;
+  if (spec.entry !== undefined) bytes += launchStringBytes(spec.entry) + 1;
+  for (const part of spec.command ?? []) bytes += launchStringBytes(part) + 1;
+  for (const arg of spec.args ?? []) bytes += launchStringBytes(arg) + 1;
+  for (const dataset of spec.datasets ?? []) {
+    for (const pattern of dataset.include ?? []) bytes += launchStringBytes(pattern) + 1;
+  }
+  for (const [name, value] of Object.entries(spec.env ?? {})) {
+    if (value !== undefined) bytes += launchStringBytes(name) + launchStringBytes(value) + 2;
+  }
+  return bytes;
+}
+
+/**
+ * A valid job specification always fits the 64 KiB launch specification, by a bound inside
+ * {@link JobSpecSchema} rather than by per-field caps: a non-ASCII character costs six bytes once
+ * escaped, so no per-field cap that is generous for ASCII could also be safe for any mix. The
+ * variable part may take 48 KiB; the rest of the document, at its own worst case (a 512-character
+ * `api_base` and image reference, a 256-character token and `sif`, twenty datasets of 64-character
+ * versions, the keys and brackets), is about 4 KiB, which `launchSpecFits` and a test check; the bound leaves
+ * the rest of the 64 KiB as slack for a field that grows.
+ */
+export const LAUNCH_VARIABLE_BYTES_MAX = 49_152;
+
+/**
  * One job as every front door states it and the record keeps it. Resources are per node. A script
  * or folder job names an `entry` and the bundle that holds it; an image job names a digest-pinned
  * `image` and a `command` (and may carry a bundle); a recipe job names a `recipe` and needs none
@@ -537,6 +593,13 @@ export const JobSpecSchema = z
     }
     if (spec.entry !== undefined && spec.bundle === undefined) {
       refuse("bundle", "an entry needs the bundle that holds it");
+    }
+    if (launchVariableBytes(spec) > LAUNCH_VARIABLE_BYTES_MAX) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [],
+        message: "the entry, command, arguments, patterns and environment are too large to launch",
+      });
     }
     const pool = PARTITIONS[spec.partition].pool;
     if (pool === "gpu" && spec.gpus < 1) refuse("gpus", "a GPU partition needs at least one GPU");

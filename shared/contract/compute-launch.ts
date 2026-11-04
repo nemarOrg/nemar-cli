@@ -41,6 +41,7 @@ import {
   COMPUTE_JOB_ID_RE,
   COMPUTE_SHA256_RE,
   JOB_ENV_ALLOWLIST,
+  type JobSpec,
   LAUNCHER_FILE_NAMES,
   type LauncherFileName,
   computeEnvValueSchema,
@@ -182,6 +183,40 @@ export function encodeLaunchSpec(spec: unknown): string {
     throw new RangeError("the launch specification is over 64 KiB");
   }
   return text;
+}
+
+/**
+ * Whether a job specification, once a Worker has added everything it supplies, encodes within the
+ * 64 KiB the launcher reads. The Worker's fields are taken at their worst case (a 512-character
+ * `api_base` and image reference, a 256-character `sif` and token, the largest bundle and limits),
+ * so a true answer holds whatever the Worker puts there. A specification that passes
+ * `JobSpecSchema` always fits; this is for the Worker to refuse with `invalid_spec`, before it takes
+ * a hold, one that was built some other way. Pure; never throws.
+ */
+export function launchSpecFits(job: JobSpec): boolean {
+  const hex = "f".repeat(64);
+  const uri = `docker://ghcr.io/${"a".repeat(512 - "docker://ghcr.io/".length - "@sha256:".length - 64)}@sha256:${hex}`;
+  const worst: Record<string, unknown> = {
+    job_id: `job_${"f".repeat(24)}`,
+    runtime: job.runtime === "image" ? "image" : "python",
+    args: job.args,
+    bundle: { sha256: hex, size: Number.MAX_SAFE_INTEGER },
+    datasets: job.datasets.map((d) => ({ id: d.id, version: d.version, include: d.include })),
+    api_base: `https://${"a".repeat(504)}`,
+    image: { uri, digest: `sha256:${hex}`, sif: "s".repeat(256) },
+    env: job.env,
+    resources: { gpus: job.gpus },
+    limits: { max_files: 1_000_000, max_total_bytes: Number.MAX_SAFE_INTEGER },
+    job_token: "t".repeat(256),
+  };
+  if (job.entry !== undefined) worst.entry = job.entry;
+  else worst.command = job.command ?? ["x"];
+  try {
+    encodeLaunchSpec(worst);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 // --- The routes the launcher calls -------------------------------------------------------------

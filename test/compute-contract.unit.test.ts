@@ -32,6 +32,7 @@ import {
   DEFAULT_COMPUTE_POLICY,
   JOB_ENV_ALLOWLIST,
   JOB_RUNTIMES,
+  type JobSpec,
   JobSpecSchema,
   LAUNCHER_DIR,
   LAUNCHER_ENV,
@@ -39,6 +40,7 @@ import {
   LAUNCHER_FILE_NAMES,
   LAUNCHER_OUTPUTS_DIR,
   LAUNCHER_WORK_DIR,
+  LAUNCH_VARIABLE_BYTES_MAX,
   LauncherProvenanceSchema,
   LauncherResultSchema,
   PARTITIONS,
@@ -52,6 +54,8 @@ import {
   estimateSuMilli,
   formatSu,
   isSafeComputePath,
+  launchStringBytes,
+  launchVariableBytes,
   parseSuToMilli,
   suMilliFor,
 } from "../shared/contract/compute";
@@ -64,6 +68,7 @@ import {
   OutputsRequestSchema,
   OutputsResponseSchema,
   encodeLaunchSpec,
+  launchSpecFits,
   resultsLauncherKey,
   resultsOutputKey,
 } from "../shared/contract/compute-launch";
@@ -1573,6 +1578,321 @@ describe("the launch specification", () => {
     );
     expect(LaunchSpecSchema.safeParse(big).success).toBe(true);
     expect(() => encodeLaunchSpec(big)).toThrow(RangeError);
+  });
+});
+
+describe("a valid job specification always fits the launch specification", () => {
+  const E = "\u00e9";
+  const baseJob = (extra: Record<string, unknown>) => ({ ...SPEC, ...extra });
+
+  test("launchStringBytes is exactly what encodeLaunchSpec spends on a string", () => {
+    const empty = encodeLaunchSpec(set(LAUNCH, "args", [])).length;
+    const strings = [
+      "",
+      "plain",
+      '"',
+      "\\",
+      "\b\t\n\f\r",
+      "\u0000\u0001\u001f",
+      "\u007f",
+      E,
+      "\u{1F600}",
+      "\ud800",
+      "\udc00",
+      `a${E}"\\\n~`,
+      E.repeat(50),
+    ];
+    for (let c = 0; c < 0x100; c++) strings.push(String.fromCharCode(c));
+    for (const text of strings) {
+      const spent = encodeLaunchSpec(set(LAUNCH, "args", [text])).length - empty;
+      expect(launchStringBytes(text), JSON.stringify(text)).toBe(spent);
+    }
+  });
+
+  test("launchVariableBytes counts the entry, command, arguments, patterns and environment", () => {
+    expect(launchVariableBytes({})).toBe(0);
+    expect(launchVariableBytes({ entry: "run.py" })).toBe(8 + 1);
+    expect(launchVariableBytes({ command: ["a", "bc"] })).toBe(3 + 1 + 4 + 1);
+    expect(launchVariableBytes({ args: ["x"] })).toBe(3 + 1);
+    expect(
+      launchVariableBytes({ datasets: [{ include: ["a/*"] }, {}, { include: ["b", "c"] }] }),
+    ).toBe(5 + 1 + 3 + 1 + 3 + 1);
+    expect(launchVariableBytes({ env: { OMP_NUM_THREADS: "4", MPLBACKEND: undefined } })).toBe(
+      17 + 3 + 2,
+    );
+    expect(launchVariableBytes({ args: [E] })).toBe(2 + 6 + 1);
+  });
+
+  test("the bound sits exactly at 48 KiB: one byte over is refused with an issue on the document", () => {
+    expect(LAUNCH_VARIABLE_BYTES_MAX).toBe(49_152);
+    const full = Array.from({ length: 47 }, () => "x".repeat(1024));
+    const tailFor = (bytes: number) => {
+      const used = launchVariableBytes({ entry: "run.py", args: full });
+      return "x".repeat(bytes - used - 3);
+    };
+    const at = baseJob({ args: [...full, tailFor(LAUNCH_VARIABLE_BYTES_MAX)] });
+    expect(launchVariableBytes(at)).toBe(LAUNCH_VARIABLE_BYTES_MAX);
+    expect(JobSpecSchema.safeParse(at).success).toBe(true);
+    const over = baseJob({ args: [...full, tailFor(LAUNCH_VARIABLE_BYTES_MAX + 1)] });
+    expect(launchVariableBytes(over)).toBe(LAUNCH_VARIABLE_BYTES_MAX + 1);
+    const refused = JobSpecSchema.safeParse(over);
+    expect(refused.success).toBe(false);
+    if (!refused.success) {
+      expect(refused.error.issues).toHaveLength(1);
+      expect(refused.error.issues[0].path).toEqual([]);
+      expect(refused.error.issues[0].message).not.toContain("xxxx");
+    }
+  });
+
+  test("an escape-heavy specification is over the bound long before it is long", () => {
+    // 6000 characters of e-acute are 36 KB; 9000 are 54 KB and are refused, though under 10 KB raw.
+    const some = Array.from({ length: 6 }, () => E.repeat(1000));
+    expect(specRefused(baseJob({ args: some }))).toBe(false);
+    const more = Array.from({ length: 9 }, () => E.repeat(1000));
+    expect(specRefused(baseJob({ args: more }))).toBe(true);
+    // The same 9000 plain characters are well inside it.
+    expect(specRefused(baseJob({ args: Array.from({ length: 9 }, () => "e".repeat(1000)) }))).toBe(
+      false,
+    );
+  });
+
+  /** The largest n for which build(n) is a valid job specification, by bisection. */
+  function largest(
+    build: (n: number) => Record<string, unknown>,
+    hi: number,
+  ): Record<string, unknown> {
+    let lo = 0;
+    let top = hi;
+    if (JobSpecSchema.safeParse(build(top)).success) return build(top);
+    while (top - lo > 1) {
+      const mid = Math.floor((lo + top) / 2);
+      if (JobSpecSchema.safeParse(build(mid)).success) lo = mid;
+      else top = mid;
+    }
+    return build(lo);
+  }
+  /** n e-acute characters over elements of at most `per` characters. */
+  const spread = (n: number, per: number): string[] => {
+    const out: string[] = [];
+    for (let left = n; left > 0; left -= per) out.push(E.repeat(Math.min(per, left)));
+    return out;
+  };
+
+  /** What a Worker would send, at its worst, written here apart from launchSpecFits. */
+  function workerWorstDoc(job: JobSpec): Record<string, unknown> {
+    const hex = "f".repeat(64);
+    const ref = `docker://ghcr.io/${"a".repeat(423)}@sha256:${hex}`;
+    expect(ref.length).toBe(512);
+    return {
+      job_id: `job_${"f".repeat(24)}`,
+      runtime: job.runtime === "image" ? "image" : "python",
+      ...(job.entry !== undefined ? { entry: job.entry } : { command: job.command ?? ["x"] }),
+      args: job.args,
+      bundle: { sha256: hex, size: Number.MAX_SAFE_INTEGER },
+      datasets: job.datasets.map((d) => ({ ...d })),
+      api_base: `https://${"a".repeat(504)}`,
+      image: { uri: ref, digest: `sha256:${hex}`, sif: "s".repeat(256) },
+      env: job.env,
+      resources: { gpus: job.gpus },
+      limits: { max_files: 1_000_000, max_total_bytes: Number.MAX_SAFE_INTEGER },
+      job_token: "t".repeat(256),
+    };
+  }
+  const workerWorstCase = (job: JobSpec): string => encodeLaunchSpec(workerWorstDoc(job));
+
+  const twentyDatasets = Array.from({ length: 20 }, (_, i) => ({
+    id: `nm0001${String(i).padStart(2, "0")}`,
+    version: `v${"9".repeat(63)}`,
+  }));
+  const imageRef = `docker://ghcr.io/${"a".repeat(423)}@sha256:${"b".repeat(64)}`;
+
+  const WORST: Array<[string, Record<string, unknown>]> = [
+    [
+      "the arguments, full of e-acute",
+      largest((n) => baseJob({ args: spread(n, 1024) }), 64 * 1024),
+    ],
+    [
+      "the arguments, full of quotes",
+      largest(
+        (n) =>
+          baseJob({
+            args: Array.from({ length: Math.ceil(n / 1024) }, () => '"'.repeat(1024)).slice(0, 64),
+          }),
+        64 * 1024,
+      ),
+    ],
+    [
+      "the command of an image job",
+      largest(
+        (n) => ({
+          name: "tool",
+          runtime: "image",
+          image: imageRef,
+          command: spread(n, 1024).slice(0, 64),
+          partition: "shared",
+          minutes: 30,
+        }),
+        64 * 1024,
+      ),
+    ],
+    [
+      "the include patterns of twenty datasets",
+      largest(
+        (n) =>
+          baseJob({
+            datasets: twentyDatasets.map((d, i) => ({
+              ...d,
+              include: i === 0 ? spread(n, 256).slice(0, 64) : [],
+            })),
+          }),
+        64 * 256,
+      ),
+    ],
+    [
+      "twenty datasets, every one with a full set of patterns",
+      largest(
+        (n) =>
+          baseJob({
+            datasets: twentyDatasets.map((d) => ({ ...d, include: spread(n, 256).slice(0, 64) })),
+          }),
+        64 * 256,
+      ),
+    ],
+    ["the entry", baseJob({ entry: E.repeat(240), datasets: twentyDatasets })],
+    [
+      "every environment value, of quotes",
+      baseJob({
+        datasets: twentyDatasets,
+        env: Object.fromEntries(JOB_ENV_ALLOWLIST.map((k) => [k, '"'.repeat(256)])),
+      }),
+    ],
+    [
+      "a bit of everything at once",
+      largest(
+        (n) =>
+          baseJob({
+            entry: E.repeat(240),
+            datasets: twentyDatasets.map((d, i) => ({
+              ...d,
+              include: i < 3 ? spread(n, 256).slice(0, 64) : [],
+            })),
+            args: spread(n, 1024).slice(0, 64),
+            env: Object.fromEntries(JOB_ENV_ALLOWLIST.map((k) => [k, '"'.repeat(256)])),
+          }),
+        64 * 256,
+      ),
+    ],
+  ];
+
+  test("each worst-case valid specification fits, with a kilobyte to spare", () => {
+    expect(WORST.length).toBe(8);
+    for (const [label, doc] of WORST) {
+      const parsed = JobSpecSchema.parse(doc);
+      expect(launchVariableBytes(parsed), label).toBeLessThanOrEqual(LAUNCH_VARIABLE_BYTES_MAX);
+      expect(launchSpecFits(parsed), label).toBe(true);
+      const size = workerWorstCase(parsed).length;
+      expect(size, label).toBeLessThanOrEqual(LAUNCH_SPEC_MAX_BYTES - 1024);
+    }
+  });
+
+  test("the bisected ones really are at the edge, so the worst case is the worst case", () => {
+    for (const [label, doc] of WORST) {
+      if (!label.includes("full of") && !label.includes("command") && !label.includes("patterns"))
+        continue;
+      const parsed = JobSpecSchema.parse(doc);
+      expect(launchVariableBytes(parsed), label).toBeGreaterThan(LAUNCH_VARIABLE_BYTES_MAX - 6200);
+    }
+  });
+
+  test("launchSpecFits is false for a specification that skipped the schema and is too large", () => {
+    const parsed = JobSpecSchema.parse(SPEC);
+    expect(launchSpecFits(parsed)).toBe(true);
+    const big = { ...parsed, args: Array.from({ length: 64 }, () => "x".repeat(1024)) };
+    expect(launchSpecFits(big)).toBe(false);
+    const wide = { ...parsed, args: Array.from({ length: 12 }, () => E.repeat(1024)) };
+    expect(launchSpecFits(wide)).toBe(false);
+    // Anything the launch specification would refuse is also a no.
+    expect(launchSpecFits({ ...parsed, gpus: 99 })).toBe(false);
+    expect(launchSpecFits({ ...parsed, entry: "../x" })).toBe(false);
+  });
+
+  test("launchSpecFits takes every Worker field at its worst case, and counts every job field", () => {
+    // A specification that carries something in every field launchSpecFits has to read.
+    const job = JobSpecSchema.parse({
+      ...SPEC,
+      entry: "analysis/main_pipeline_with_a_long_name.py",
+      env: { OMP_NUM_THREADS: "4" },
+      datasets: [{ id: "nm000104", version: "1.0.2", include: ["sub-01/**/*.set", "sub-02/*"] }],
+    });
+    /** The same document with small Worker fields, as LAUNCH has them. */
+    const smallDoc = (j: JobSpec): Record<string, unknown> => ({
+      job_id: JOB_ID,
+      runtime: "python",
+      entry: j.entry,
+      args: j.args,
+      bundle: { sha256: HEX_A, size: 1234 },
+      datasets: j.datasets.map((d) => ({ ...d })),
+      api_base: "https://api.example.test",
+      image: {
+        uri: `docker://ghcr.io/example/runtime@sha256:${HEX_B}`,
+        digest: `sha256:${HEX_B}`,
+        sif: "runtime.sif",
+      },
+      env: j.env,
+      resources: { gpus: j.gpus },
+      limits: { max_files: 38000, max_total_bytes: 1073741824 },
+      job_token: "t".repeat(43),
+    });
+    // What the Worker's own fields add when they are at their worst: the 512-character api_base and
+    // image reference, the 256-character sif and token, the largest bundle and limits.
+    const plainLength = (doc: Record<string, unknown>) => JSON.stringify(doc).length; // ASCII only
+    const smallWorker = (j: JobSpec) => ({ length: plainLength(smallDoc(j)) });
+    const extra = workerWorstCase(job).length - smallWorker(job).length;
+    expect(extra).toBeGreaterThan(1000);
+    // Arguments no valid specification may carry, sized so the small document is 20 bytes inside
+    // the cap and the worst-case one 20 bytes over it. Dropping ANY one field of the Worker's, or
+    // of the job's, from launchSpecFits' document would make it fit, so each must be there.
+    const target = LAUNCH_SPEC_MAX_BYTES - extra + 20;
+    let args: string[] | null = null;
+    for (let n = 0; n <= 63 && args === null; n++) {
+      const full = Array.from({ length: n }, () => "x".repeat(1024));
+      const tail = target - smallWorker({ ...job, args: [...full, ""] }).length;
+      if (tail >= 0 && tail <= 1024) args = [...full, "x".repeat(tail)];
+    }
+    if (args === null) throw new Error("no arguments reach the target");
+    expect(smallWorker({ ...job, args }).length).toBe(target);
+    expect(plainLength(workerWorstDoc({ ...job, args }))).toBe(LAUNCH_SPEC_MAX_BYTES + 20);
+    expect(launchSpecFits({ ...job, args })).toBe(false);
+    // And 21 bytes fewer, it fits.
+    const lessTail = args.slice(0, -1).concat("x".repeat(args[args.length - 1].length - 21));
+    expect(workerWorstCase({ ...job, args: lessTail }).length).toBe(LAUNCH_SPEC_MAX_BYTES - 1);
+    expect(launchSpecFits({ ...job, args: lessTail })).toBe(true);
+  });
+
+  test("launchSpecFits copes with every shape of job: entry, command, recipe, matlab and image", () => {
+    const hex = "b".repeat(64);
+    const jobs = [
+      SPEC,
+      {
+        name: "t",
+        runtime: "image",
+        image: `ghcr.io/e/t@sha256:${hex}`,
+        command: ["t"],
+        partition: "shared",
+        minutes: 5,
+      },
+      {
+        name: "r",
+        runtime: "python",
+        recipe: "nemar-floor",
+        datasets: [{ id: "nm000104", version: "1" }],
+        partition: "shared",
+        minutes: 5,
+      },
+      { ...SPEC, runtime: "matlab" },
+    ];
+    for (const job of jobs)
+      expect(launchSpecFits(JobSpecSchema.parse(job)), String(job.runtime)).toBe(true);
   });
 });
 
