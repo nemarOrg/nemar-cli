@@ -582,7 +582,7 @@ describe.each(STRATEGIES)("the same client under the %s strategy", (_name, makeE
     const submitted = await submitJob(ctx(env), SUBMIT);
     standin.nonJson("GET /v3/jobs/:uuid", 5);
     const err = await failure(() => getJob(ctx(env), submitted.uuid));
-    expect(err.kind).toBe("invalid_response");
+    expect([err.kind, err.status]).toEqual(["invalid_response", 200]);
     expect(jobCalls("GET /v3/jobs/:uuid")).toHaveLength(1);
   });
 
@@ -731,6 +731,18 @@ describe.each(STRATEGIES)("the same client under the %s strategy", (_name, makeE
     const second = await getTapisToken(env, { owner: OWNER });
     expect(second).not.toBe(first);
     expect(standin.mints().password + standin.mints().service).toBe(2);
+  });
+
+  test("invalidateTapisToken with an empty token never drops a mint in flight", async () => {
+    const env = makeEnv();
+    // The first call has started a mint (its cache entry holds no token yet, ""), and the second must
+    // find it. An empty "refused" token must not match that entry: a later sweep could pass one.
+    const first = getTapisToken(env, { owner: OWNER });
+    invalidateTapisToken(env, OWNER, "");
+    const second = getTapisToken(env, { owner: OWNER });
+    const [a, b] = await Promise.all([first, second]);
+    expect(a).toBe(b);
+    expect(standin.mints().password + standin.mints().service).toBe(1);
   });
 
   test("invalidateTapisToken keeps a token that is not the refused one (compare, then delete)", async () => {
@@ -1461,17 +1473,15 @@ describe("the launch specification's other copies (what Tapis archives, and what
     ]);
   });
 
-  test("every submit tells Tapis not to archive the launch files, and Tapis's record says so", async () => {
+  test("every submit tells Tapis not to archive the launch files (the body that was sent)", async () => {
+    // What is asserted is the request on the wire. Whether Tapis takes the flag from a request is
+    // UNVERIFIED, and the stand-in's own record of it would only echo what it was sent.
     for (const make of [passwordEnv, serviceEnv]) {
       standin.reset();
       __resetTapisTokenCacheForTests();
-      const job = await submitJob(ctx(make()), SUBMIT);
+      await submitJob(ctx(make()), SUBMIT);
       const sent = JSON.parse(jobCalls("POST /v3/jobs/submit")[0]?.body ?? "");
       expect(sent.parameterSet.archiveFilter).toEqual({ includeLaunchFiles: false });
-      const record = standin.jobs.get(job.uuid)?.record.parameterSet as {
-        archiveFilter: { includeLaunchFiles: boolean };
-      };
-      expect(record.archiveFilter.includeLaunchFiles).toBe(false);
     }
   });
 
@@ -1551,7 +1561,8 @@ describe.each(STRATEGIES)(
       standin.fullRecords(true);
       const found = await searchJobsByTag(ctx(env), nemarJobTag(JOB_ID));
       const listed = await listJobs(ctx(env), { listType: "ALL_JOBS", limit: 10, skip: 0 });
-      // The fixture really did serve the whole record, token and address included, for both calls.
+      // The fixture really did serve the whole record (the `parameterSet` with the token, and the
+      // `subscriptions` with the address), for both calls: it notes a job only when the answer holds both.
       expect(standin.fullRecordsServed).toEqual([job.uuid, job.uuid]);
       for (const answer of [found, listed]) {
         expect(answer.map((j) => j.uuid)).toEqual([job.uuid]);
@@ -1613,6 +1624,8 @@ describe.each(STRATEGIES)("a token answer of the wrong shape (%s strategy)", (_n
       standin.respond(mintRouteOf(env), 201, body);
       const err = await failure(() => getTapisToken(env, { owner: OWNER, timeoutMs: 400 }));
       expect(err.kind).toBe("invalid_response");
+      // The status the answer came with is carried (the stand-in answers a mint 201).
+      expect(err.status).toBe(201);
       expect(err.message).not.toContain("tok-x");
       // Nothing was cached: the next call asks again, and gets a real token.
       const token = await getTapisToken(env, { owner: OWNER, timeoutMs: 400 });
@@ -1623,6 +1636,17 @@ describe.each(STRATEGIES)("a token answer of the wrong shape (%s strategy)", (_n
       expect(standin.log.filter((r) => r.headers["x-tapis-token"] === "")).toEqual([]);
     },
   );
+
+  test("a mint answered with something that is not JSON is `invalid_response`, with the status it came with", async () => {
+    const env = makeEnv();
+    standin.nonJson(mintRouteOf(env));
+    const err = await failure(() => getTapisToken(env, { owner: OWNER, timeoutMs: 400 }));
+    expect(err.kind).toBe("invalid_response");
+    // The stand-in's non-JSON page is a 200.
+    expect(err.status).toBe(200);
+    expect(totalMints()).toBe(0);
+    expect(standin.log.filter((r) => r.headers["x-tapis-token"] === "")).toEqual([]);
+  });
 
   test("a call whose token cannot be minted never reaches Tapis's job routes", async () => {
     const env = makeEnv();
@@ -1655,9 +1679,8 @@ describe("a health answer of the wrong shape", () => {
 
   test("a body that is not JSON at all is `invalid_response` as well", async () => {
     standin.nonJson("GET /v3/jobs/healthcheck");
-    expect((await failure(() => tapisHealth(passwordEnv(), { timeoutMs: 400 }))).kind).toBe(
-      "invalid_response",
-    );
+    const err = await failure(() => tapisHealth(passwordEnv(), { timeoutMs: 400 }));
+    expect([err.kind, err.status]).toEqual(["invalid_response", 200]);
   });
 });
 
@@ -1686,7 +1709,7 @@ describe("a call that changes something and fails without a clear answer", () =>
 
     standin.nonJson("POST /v3/jobs/submit");
     const html = await failure(() => submitJob(ctx(env), SUBMIT));
-    expect([html.kind, html.outcomeUnknown]).toEqual(["invalid_response", true]);
+    expect([html.kind, html.status, html.outcomeUnknown]).toEqual(["invalid_response", 200, true]);
   });
 
   test("an answer that says no, or a mint that failed before anything was sent, is NOT unknown", async () => {
@@ -1893,6 +1916,8 @@ describe("bounds that the transport itself enforces", () => {
       downloadOutput(ctx(env), job.uuid, "work/outputs/x.bin", 1000),
     );
     expect(over.kind).toBe("invalid_response");
+    // The status the oversize answer came with is carried.
+    expect(over.status).toBe(200);
     standin.respond("GET /v3/jobs/:uuid/output/download/*", 200, chunked(1));
     expect(await downloadOutput(ctx(env), job.uuid, "work/outputs/x.bin", 1)).toHaveLength(1);
   });

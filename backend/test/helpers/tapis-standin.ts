@@ -56,7 +56,8 @@
  *  - `rejectAllTokens(true)`: every call that needs a token answers 401 even with a fresh one;
  *  - `fullRecords(true)`: the search ignores `select` and the list serves the FULL job record, the
  *    `parameterSet` with the launch specification and the `subscriptions` included, as a tenant that
- *    ignored the request's field list would; `fullRecordsServed` says which jobs it did that for;
+ *    ignored the request's field list would; `fullRecordsServed` says which jobs it really did that for
+ *    (noted only when the answer carries both fields);
  *  - `down()` and `up()`: the server stops listening, and starts again on the same port.
  *
  * Every request is logged with its method, path and query, headers (names lower case), body text and
@@ -352,6 +353,16 @@ export function startTapisStandin(options: TapisStandinOptions = {}): TapisStand
     return out;
   }
 
+  /**
+   * What is about to be sent for a job; it is noted in `fullRecordsServed` only when it really is the
+   * whole record, the `parameterSet` (with the launch specification) and the `subscriptions` in it, so
+   * the note is a fact about the answer and not about the mode that was switched on.
+   */
+  function served<T extends Record<string, unknown>>(job: StandinJob, summary: T): T {
+    if ("parameterSet" in summary && "subscriptions" in summary) fullRecordsServed.push(job.uuid);
+    return summary;
+  }
+
   function listDto(job: StandinJob) {
     const r = job.record;
     return {
@@ -455,7 +466,9 @@ export function startTapisStandin(options: TapisStandinOptions = {}): TapisStand
         appArgs: [],
         logConfig: { stderrFilename: "tapisjob.out", stdoutFilename: "tapisjob.out" },
         envVariables,
-        // Tapis's default is to archive the launch files; a request's `archiveFilter` replaces it.
+        // Tapis's default is to archive the launch files; a request's `archiveFilter` is merged over
+        // that default (ASSUMED, unverified: the documentation says the includes and excludes arrays
+        // are merged and is silent on this flag).
         archiveFilter: {
           excludes: [],
           includes: [],
@@ -670,12 +683,9 @@ export function startTapisStandin(options: TapisStandinOptions = {}): TapisStand
 
       if (route === "GET /v3/jobs/list") {
         const listType = url.searchParams.get("listType") ?? "MY_JOBS";
-        const all = visibleTo(who.username, listType).map((j) => {
-          if (!fullRecordsOn) return listDto(j);
-          fullRecordsServed.push(j.uuid);
-          return j.record;
-        });
-        const { page, limit, skip } = pageOf(all, url);
+        const visible = visibleTo(who.username, listType);
+        const { page: jobsOnPage, limit, skip } = pageOf(visible, url);
+        const page = jobsOnPage.map((j) => served(j, fullRecordsOn ? j.record : listDto(j)));
         return json(
           envelope("JOBS_LIST_RETRIEVED Jobs list retrieved.", page, {
             recordCount: page.length,
@@ -708,10 +718,7 @@ export function startTapisStandin(options: TapisStandinOptions = {}): TapisStand
         return json(
           envelope(
             "JOBS_SEARCH_RESULT_LIST_RETRIEVED Jobs search list retrieved.",
-            page.map((j) => {
-              if (fullRecordsOn) fullRecordsServed.push(j.uuid);
-              return jobSummary(j, fields);
-            }),
+            page.map((j) => served(j, jobSummary(j, fields))),
             {
               recordCount: page.length,
               recordLimit: limit,
