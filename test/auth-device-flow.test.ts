@@ -31,6 +31,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import "./setup";
 import { deleteSeededAccounts, rememberSeededAccount } from "./helpers/seeded-account-teardown";
+import { sessionCookiePair } from "./helpers/session-cookie";
 import { LIVE_TARGET_BLOCKED, TEST_CONFIG } from "./setup";
 
 const API = TEST_CONFIG.apiUrl;
@@ -108,9 +109,9 @@ async function signIn(email: string): Promise<string> {
     { Origin: ORIGIN },
   );
   const setCookie = verify.headers.get("Set-Cookie");
-  const m = setCookie?.match(/nemar_session=([^;]+)/);
+  const m = sessionCookiePair(setCookie);
   if (!m) throw new Error(`sign-in did not set a session cookie for ${email}: ${verify.status}`);
-  return `nemar_session=${m[1]}`;
+  return m;
 }
 
 interface DeviceStartResponse {
