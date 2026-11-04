@@ -58,6 +58,25 @@ export interface Bindings {
    *  reports `unchecked`, never healthy, while it is unset. */
   NEUROBAGEL_FEDERATION_URL?: string;
 
+  // Compute gateway storage (epic #2005 phase A3, ADR 0118 decision 7): two PRIVATE R2 buckets,
+  // reached by the Worker through these bindings and, for the few things a binding cannot do (a
+  // presigned PUT for one file of one job, a presigned GET, a server-side copy), through R2's S3
+  // interface (services/compute-s3.ts). `nemar-compute-records` and `nemar-compute-results` in
+  // production, `...-dev` in [env.dev]. The records bucket is locked by prefix and the results bucket
+  // expires its objects: both are bucket configuration, never code. Optional: with no binding a job
+  // cannot be made (`compute_disabled`).
+  COMPUTE_RECORDS?: R2Bucket;
+  COMPUTE_RESULTS?: R2Bucket;
+  /** The two buckets' names, which a binding hides and the S3 interface needs. Plain variables, set in
+   *  [vars] and in [env.dev.vars] both (variables do not inherit). */
+  COMPUTE_RECORDS_BUCKET_NAME?: string;
+  COMPUTE_RESULTS_BUCKET_NAME?: string;
+  /** Worker SECRETS, set by the owner: one R2 API token per environment (Object Read & Write on its
+   *  two buckets) and the account endpoint, which is never written in this repository. */
+  COMPUTE_R2_ACCESS_KEY_ID?: string;
+  COMPUTE_R2_SECRET_ACCESS_KEY?: string;
+  COMPUTE_R2_S3_ENDPOINT?: string;
+
   // Environment variables
   ENVIRONMENT: "production" | "development" | "staging" | "test";
   API_BASE_URL: string;
