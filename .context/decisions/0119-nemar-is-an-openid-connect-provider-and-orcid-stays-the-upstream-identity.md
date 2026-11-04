@@ -49,8 +49,11 @@ Twelve rules inside that, each of which reopens a hole if reversed.
    `state` is returned unchanged and `nonce` is copied into the ID token.
    The authorization response carries `iss` (RFC 9207), so a client can tell which provider answered.
    `prompt=none` without a NEMAR session answers `login_required` and shows no page; `max_age` older than the session forces a fresh sign-in.
-   Until the client and a redirect address that is exactly one it registered are known, an error is shown on NEMAR's page and the person is sent nowhere; after that, every error is a redirect to that address carrying `error`, `state` and `iss`.
-   A sign-in the authorization page sent the person to satisfies `prompt=login`, `max_age` and an `id_token_hint` for another subject, and is recognized by the session being newer than the moment the person was sent (phase #2017).
+   Until the client and a redirect address that is exactly one it registered are known, an error is shown on NEMAR's page and the person is sent nowhere; after that, every error of the request is a redirect to that address carrying `error`, `state` and `iss`, a response type other than `code` being `unsupported_response_type`.
+   A refusal by the client's sign-in rule is a page that links back to the client with `access_denied`, and a consent the page cannot prove was shown, or a mint that wrote nothing, is an error page.
+   A sign-in the authorization page sent the person to satisfies `prompt=login`, `max_age` and an `id_token_hint` for another subject; it is recognized by a marker the API signs (the moment the person was sent and the client, good for ten minutes) and a session at least that new, and a marker that does not verify counts as absent (phase #2017).
+   Front-channel freshness (`prompt=login`, `max_age`) is a courtesy: what a client relies on is the identity token's `auth_time`, the moment the session behind the code was signed in.
+   `prompt=consent` asks a third-party client's person again; a first-party client ignores it.
    A refresh token is issued only when the client asks for `offline_access` and is allowed it.
    Redeeming an authorization code twice revokes every token already issued from it (RFC 6749, section 4.1.2).
 4. **Tokens.**
@@ -126,6 +129,10 @@ Twelve rules inside that, each of which reopens a hole if reversed.
     - A `__Host-` session cookie is minted only by a sign-in, never by a slide or by any read of a legacy value: with the flag on, the expiry slide re-issues the cookie only for a session read under the `__Host-` name.
     - The authorization and consent page of phase B3 treats a session read under the legacy name as no session, so a delegation is never granted on the cookie a sibling host can set.
       Its two routes answer 404 while `HOST_PREFIXED_SESSION_COOKIE` is off, because no session could approve a grant then and a person sent to sign in would come back to the same answer.
+    - Every completed sign-in mints a fresh session: the ORCID callback's plain sign-in ignores any session cookie already in the browser and signs in the account the iD itself names (or starts a sign-up), and the email-code sign-in always mints one.
+      So a person whose session was read under the legacy name, or who was asked to sign in again, comes back with a new `__Host-` session after one sign-in.
+    - A sign-in never attaches the signing-in person's iD to whichever account a session cookie already in the browser names.
+      An iD attaches to an existing session's account only in an explicit link flow (`link` or `relink` in the state cookie, or a signed CLI intent), and, while the flag is on, only to a session read under the `__Host-` name, the rule the authorization routes apply to a grant.
     - The legacy name stops being read no earlier than 31 days after the production flag is turned on, because every legacy cookie issued before the flag has then passed its 30-day maximum age.
       The date is a later decision (see the not-decided list).
     - Until then the window keeps an exposure open, and it is named here.
