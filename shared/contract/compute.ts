@@ -83,8 +83,10 @@ export const COMPUTE_IMAGE_DIGEST_RE = /^sha256:[0-9a-f]{64}$/;
 /** Two lowercase letters and six digits: `nm000104`, `on000001`, `xx099900`, `ds002718`. */
 export const COMPUTE_DATASET_ID_RE = /^[a-z]{2}[0-9]{6}$/;
 /**
- * A dataset version as a JOB names it: loose, so `1.0.2`, `v1.0.2` and `latest` all pass. The launch
- * specification carries the data-plane tag instead: see {@link dataTagForVersion}.
+ * A dataset version as a job names it (loose, so `1.0.2`, `v1.0.2` and `latest` all pass) and as the
+ * launcher's provenance records it (`staging[].version`: the data-plane tag it fetched, so every tag
+ * {@link dataTagForVersion} returns must fit this, at most 64 characters). The launch specification
+ * carries the data-plane tag instead of the loose form: see {@link dataTagForVersion}.
  */
 export const COMPUTE_DATASET_VERSION_RE = /^[0-9A-Za-z][0-9A-Za-z._+-]{0,63}$/;
 
@@ -96,8 +98,12 @@ export const COMPUTE_DATASET_VERSION_RE = /^[0-9A-Za-z][0-9A-Za-z._+-]{0,63}$/;
  */
 export const COMPUTE_DATA_TAG_RE = /^(?:latest|v[0-9]+\.[0-9]+\.[0-9]+)$/;
 
-/** The longest data-plane tag: `v` and a job version of 64 characters. */
-export const COMPUTE_DATA_TAG_MAX = 65;
+/**
+ * The longest data-plane tag, 64 characters: what a provenance `staging[].version` may hold
+ * ({@link COMPUTE_DATASET_VERSION_RE}), because the launcher records the tag it fetched there and
+ * the Worker parses that file strictly. A bare job version can therefore be at most 63 characters.
+ */
+export const COMPUTE_DATA_TAG_MAX = 64;
 
 /**
  * The data-plane tag for a dataset version as a job names it: `1.0.2` gives `v1.0.2`; `v1.0.2` and

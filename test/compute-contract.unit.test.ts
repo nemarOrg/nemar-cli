@@ -27,6 +27,7 @@ import { LAUNCHER_FAILURE_CODES } from "../shared/compute-state";
 import {
   COMPUTE_ARGS_DESCRIPTION,
   COMPUTE_COMMAND_DESCRIPTION,
+  COMPUTE_DATASET_VERSION_RE,
   COMPUTE_DATA_TAG_MAX,
   COMPUTE_DATA_TAG_RE,
   COMPUTE_ENTRY_DESCRIPTION,
@@ -1253,17 +1254,61 @@ describe("the data-plane tag of a dataset version", () => {
     }
   });
 
-  test("the longest tag is 65 characters, and one more is no tag", () => {
-    const sixtyFive = `v${"9".repeat(60)}.0.0`;
-    expect(sixtyFive.length).toBe(65);
-    expect(dataTagForVersion(sixtyFive)).toBe(sixtyFive);
-    // A bare version of 64 characters (the longest a job may name) gains the v and is 65.
-    const bare = `${"9".repeat(60)}.0.0`;
-    expect(bare.length).toBe(64);
-    expect(dataTagForVersion(bare)).toBe(sixtyFive);
-    expect(dataTagForVersion(`${sixtyFive}0`)).toBeNull();
-    expect(dataTagForVersion(`v${"9".repeat(61)}.0.0`)).toBeNull();
-    expect(dataTagForVersion(`${"9".repeat(61)}.0.0`)).toBeNull();
+  test("the longest tag is 64 characters, and one more is no tag", () => {
+    const sixtyFour = `v${"9".repeat(59)}.0.0`;
+    expect(sixtyFour.length).toBe(64);
+    expect(dataTagForVersion(sixtyFour)).toBe(sixtyFour);
+    // A bare version of 63 characters gains the v and is 64; one of 64 would be 65, which is no tag.
+    const bare = `${"9".repeat(59)}.0.0`;
+    expect(bare.length).toBe(63);
+    expect(dataTagForVersion(bare)).toBe(sixtyFour);
+    const bareSixtyFour = `${"9".repeat(60)}.0.0`;
+    expect(bareSixtyFour.length).toBe(64);
+    expect(dataTagForVersion(bareSixtyFour)).toBeNull();
+    expect(dataTagForVersion(`${sixtyFour}0`)).toBeNull();
+    expect(dataTagForVersion(`v${"9".repeat(60)}.0.0`)).toBeNull();
+    // Such a job version is valid for a job, and is the tag helper's null: see datasetVersionWithoutTag.
+    expect(specRefused(specWith({ datasets: [{ id: "nm000104", version: bareSixtyFour }] }))).toBe(
+      false,
+    );
+    expect(COMPUTE_DATA_TAG_MAX).toBe(64);
+  });
+
+  test("every tag the helper can return is a version the provenance staging record accepts", () => {
+    // The launcher records the tag it fetched in staging[].version, which the Worker parses strictly:
+    // a tag longer than that field allows would make a good run's provenance a refused file.
+    const staged = (version: string) => ({
+      ...PROVENANCE_BASE,
+      staging: [{ ...STAGING, version }],
+    });
+    const tags = new Set<string>(["latest", "v0.0.0", "v1.0.2", "v01.02.03", "v10.200.3000"]);
+    // Every length a tag of the form v<digits>.0.0 can have, from its shortest to its longest, as a
+    // bare job version and as the tag a job may name itself.
+    for (let n = 1; n <= 80; n++) {
+      for (const version of [
+        `${"9".repeat(n)}.0.0`,
+        `v${"9".repeat(n)}.0.0`,
+        `${"9".repeat(n)}.${"8".repeat(n)}.7`,
+      ]) {
+        const tag = dataTagForVersion(version);
+        if (tag !== null) tags.add(tag);
+      }
+    }
+    expect(tags.size).toBeGreaterThan(80);
+    let longest = 0;
+    for (const tag of tags) {
+      expect(tag.length, tag).toBeLessThanOrEqual(COMPUTE_DATA_TAG_MAX);
+      expect(COMPUTE_DATASET_VERSION_RE.test(tag), `pattern: ${tag}`).toBe(true);
+      expect(ajvFor("provenance")(staged(tag)), `JSON Schema: ${tag}`).toBe(true);
+      expect(zodFor.provenance(staged(tag)), `zod: ${tag}`).toBe(true);
+      longest = Math.max(longest, tag.length);
+    }
+    expect(longest).toBe(COMPUTE_DATA_TAG_MAX);
+    // And the field really does stop where the tag does: one character more is refused there.
+    const tooLong = `v${"9".repeat(60)}.0.0`;
+    expect(tooLong.length).toBe(COMPUTE_DATA_TAG_MAX + 1);
+    expect(ajvFor("provenance")(staged(tooLong))).toBe(false);
+    expect(zodFor.provenance(staged(tooLong))).toBe(false);
   });
 
   test("it is idempotent: the tag of a tag is the tag", () => {
@@ -1288,8 +1333,9 @@ describe("the data-plane tag of a dataset version", () => {
       "latest1",
       "",
       "abc",
+      `${"9".repeat(59)}.0.0`,
       `${"9".repeat(60)}.0.0`,
-      `${"9".repeat(61)}.0.0`,
+      `v${"9".repeat(59)}.0.0`,
       `v${"9".repeat(60)}.0.0`,
       "1.0.2\n",
     ];
@@ -1342,7 +1388,7 @@ describe("the data-plane tag of a dataset version", () => {
       const dataPlaneAccepts = version === "latest" || dataPlane.test(version);
       expect(COMPUTE_DATA_TAG_RE.test(version), JSON.stringify(version)).toBe(dataPlaneAccepts);
     }
-    expect(COMPUTE_DATA_TAG_MAX).toBe(65);
+    expect(COMPUTE_DATA_TAG_MAX).toBe(64);
   });
 
   test("a job keeps accepting every version form it accepted before", () => {
@@ -2496,7 +2542,7 @@ describe("a valid job specification always fits the 64 KiB launch specification 
 
   const twentyDatasets = Array.from({ length: 20 }, (_, i) => ({
     id: `nm0001${String(i).padStart(2, "0")}`,
-    version: `${"9".repeat(60)}.0.0`,
+    version: `${"9".repeat(59)}.0.0`,
   }));
   const imageRef = `docker://ghcr.io/${"a".repeat(423)}@sha256:${"b".repeat(64)}`;
 
@@ -3531,7 +3577,7 @@ const MAIN_BOUNDS: readonly Bound[] = [
     label: "dataset version length",
     target: "root",
     kind: "max",
-    at: 65,
+    at: 64,
     // v<digits>.0.0: the tag grows by one digit at a time.
     build: (n) =>
       set(LAUNCH, "datasets", [{ id: "nm000104", version: `v${"9".repeat(n - 5)}.0.0` }]),

@@ -86,7 +86,7 @@
           "version": {
             "description": "The data-plane tag of the dataset version: latest, or v<major>.<minor>.<patch>, exactly what the data plane accepts. A job names a version more loosely (1.0.2); NEMAR's Worker writes the tag (1.0.2 becomes v1.0.2).",
             "type": "string",
-            "maxLength": 65,
+            "maxLength": 64,
             "pattern": "^(latest|v[0-9]+\\.[0-9]+\\.[0-9]+)(?![\\s\\S])"
           },
           "include": {
