@@ -27,7 +27,9 @@ const COMPUTE_ENVIRONMENTS = ["production", "development"] as const;
 /**
  * Whether a binding is the STRING `"1"`, and nothing that merely converts to it. A variable set in the
  * wrangler configuration as a TOML integer arrives as the number 1, and `1 == "1"`, `String(1) === "1"`
- * and `["1"] == "1"` are all true in JavaScript: none of them may turn a dark switch on.
+ * and `["1"] == "1"` are all true in JavaScript: none of them may turn a dark switch on. This is a
+ * refactor with NO change of behaviour (the code was already a strict `=== "1"`); what it adds is a
+ * name for the rule and the tests that pin it against those conversions.
  */
 function isOne(value: unknown): boolean {
   return typeof value === "string" && value === "1";
