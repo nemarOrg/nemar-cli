@@ -24,10 +24,28 @@ export const COMPUTE_POOL_HOLDER_KINDS = ["account", "platform", "partner"] as c
 
 export type ComputePoolHolderKind = (typeof COMPUTE_POOL_HOLDER_KINDS)[number];
 
-/** NEMAR's own two budgets: the pipelines' share and everyone else's. The migration seeds both. */
-export const COMPUTE_PLATFORM_KEYS = ["pipelines", "people"] as const;
+/** NEMAR's own pipelines' share of the platform budget, and the one nobody else's spend is counted against. */
+export const COMPUTE_PIPELINES_BUDGET = "pipelines" as const;
+
+/** Everyone else's share: the budget every account's and partner's spend is counted against. */
+export const COMPUTE_PEOPLE_BUDGET = "people" as const;
+
+/** NEMAR's own two budgets. The migration seeds each of them, for cpu and for gpu. */
+export const COMPUTE_PLATFORM_KEYS = [COMPUTE_PIPELINES_BUDGET, COMPUTE_PEOPLE_BUDGET] as const;
 
 export type ComputePlatformKey = (typeof COMPUTE_PLATFORM_KEYS)[number];
+
+/** Whether a word is the key of one of the platform's budgets. */
+export function isComputePlatformKey(word: string): word is ComputePlatformKey {
+  return (COMPUTE_PLATFORM_KEYS as readonly string[]).includes(word);
+}
+
+/**
+ * The most SU one request may grant or move, in milli-SU: 2^40, about a billion SU, far above any
+ * grant and far below the 2^53 - 1 that a stored total may not pass (a total that would pass it is
+ * refused too, as `would_exceed_limit`).
+ */
+export const COMPUTE_REQUEST_MILLI_MAX = 2 ** 40;
 
 /** Which total an admin's adjustment corrects. */
 export const COMPUTE_ADJUST_TARGETS = ["granted", "charged"] as const;
@@ -55,6 +73,7 @@ export const COMPUTE_ADMIN_ERROR_CODES = [
   "account_not_found",
   "pool_not_found",
   "would_go_negative",
+  "would_exceed_limit",
   "policy_unreadable",
   "internal",
 ] as const;
@@ -72,6 +91,7 @@ export const COMPUTE_ADMIN_ERROR_STATUS = {
   account_not_found: 404,
   pool_not_found: 404,
   would_go_negative: 409,
+  would_exceed_limit: 409,
   policy_unreadable: 503,
   internal: 500,
 } as const satisfies Record<ComputeAdminErrorCode, number>;
