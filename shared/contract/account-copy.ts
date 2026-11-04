@@ -29,7 +29,7 @@
  * 2. *Placeholders are `{name}`, filled by {@link fillCopy}.* A sentence with a
  *    moving part is a template, not a function, so it stays comparable as a
  *    string. The whole placeholder vocabulary is `{label} {blocks} {web} {cli}
- *    {date} {client}`, plus `{reason}` on the CLI-only keys below.
+ *    {date} {client} {redirect_host}`, plus `{reason}` on the CLI-only keys below.
  * 3. *Keys are stable and dotted.* They are the mirroring contract; renaming
  *    one is a change on both sides.
  * 4. *A `cli.` prefix means the website ignores it.* The mirroring is
@@ -233,6 +233,7 @@ export const ACCOUNT_COPY = {
   "oidc.consent.title": "{client} wants to use your NEMAR account",
   "oidc.consent.acts_as_you":
     "If you allow it, {client} can act as you on NEMAR in the ways listed below.",
+  // DRAFT: wording pending the owner (#2017)
   "oidc.consent.compute_spend": "It can also reserve and spend your NEMAR compute time.",
   "oidc.consent.scopes_title": "It is asking to:",
   // One line per scope a person can grant, keyed by the scope's name. The
@@ -248,6 +249,9 @@ export const ACCOUNT_COPY = {
   "oidc.consent.scope.compute.reserve":
     "Reserve compute time, report jobs and release reservations for you",
   "oidc.consent.scope.compute.submit": "Submit compute jobs that NEMAR runs for you",
+  // Where the answer sends the person: the host of the redirect address, so they can see which
+  // site receives the answer before giving it.
+  "oidc.consent.redirect_host": "Either answer sends you to {redirect_host}.",
   "oidc.consent.allow": "Allow",
   "oidc.consent.deny": "Deny",
   // The account may not sign in to this client under its sign-in rule
