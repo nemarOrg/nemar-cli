@@ -7,6 +7,7 @@
  */
 
 import type { Context, Next } from "hono";
+import { OIDC_PUBLIC_DOCUMENT_PATHS } from "../../../shared/oidc.js";
 import type { Bindings, Variables } from "../types/bindings";
 import {
   type ActiveMaintenanceMode,
@@ -18,7 +19,9 @@ type MaintenanceContext = Context<{ Bindings: Bindings; Variables: Variables }>;
 
 const READ_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 
-const ALWAYS_ALLOWED_PATHS = new Set(["/", "/health", "/notices"]);
+// Discovery and the signing keys' public set live on the API host permanently (ADR 0119): a client that
+// cannot fetch them during maintenance cannot validate a token it was already given.
+const ALWAYS_ALLOWED_PATHS = new Set(["/", "/health", "/notices", ...OIDC_PUBLIC_DOCUMENT_PATHS]);
 
 // Mutating routes that remain open in read-only so admins can still moderate
 // (admin), GitHub webhooks can still deliver (webhooks), and a locked-out
