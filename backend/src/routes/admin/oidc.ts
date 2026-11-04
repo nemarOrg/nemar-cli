@@ -152,7 +152,9 @@ export function registerOidcAdminRoutes(admin: AdminRouter): void {
     if (!parsed.ok) return parsed.response;
     const result = await createClient(c.env, parsed.value, c.get("user").id);
     if (!result.ok) {
-      return refusal(c, 400, result.refusal.code, result.refusal.message, {
+      // A name that is taken is a conflict with what exists, not a malformed request.
+      const status = result.refusal.code === "client_name_taken" ? 409 : 400;
+      return refusal(c, status, result.refusal.code, result.refusal.message, {
         ...(result.refusal.field ? { field: result.refusal.field } : {}),
       });
     }

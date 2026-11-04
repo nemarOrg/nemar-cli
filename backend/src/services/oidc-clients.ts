@@ -6,16 +6,20 @@
  * routes (`routes/admin/oidc.ts`), and every refusal is a fixed word (`code`) plus a sentence that
  * names the field and never echoes what was typed.
  *
- * THE SECRET. 256 random bits as unpadded base64url, shown once, in the response that creates or
- * rotates it, and stored only as its SHA-256 (`hashApiKey`). A secret that is this long and this
- * random needs no slow hash: there is nothing to guess. Verification compares in constant time and
- * honours the previous secret until its grace ends. A disabled client authenticates with neither.
+ * THE SECRET. `nmo_cs_` (so a secret scanner can find one) plus 256 random bits as unpadded
+ * base64url, shown once, in the response that creates or rotates it, and stored only as the SHA-256
+ * of the whole string (`hashApiKey`). A secret that is this long and this random needs no slow hash:
+ * there is nothing to guess. Verification compares in constant time and honours the previous secret
+ * until its grace ends. A disabled client authenticates with neither.
  *
- * FIRST-PARTY (ADR 0119 rule 8, as amended): a client is first-party, and so skips the consent
- * screen, only when EVERY redirect address is on a NEMAR web origin (`isNemarWebOrigin`, which a
- * partner host never is). A client with any other redirect address is third-party and always shows
- * the consent page. {@link firstPartyRefusal} is the one rule, exported so authorization asks the
- * same question at every request, as the ADR requires.
+ * FIRST-PARTY (ADR 0119 rule 8): a client is first-party, and so skips the consent screen, only when
+ * EVERY redirect address passes {@link isFirstPartyRedirect}: https, `nemar.org` or a subdomain, not a
+ * partner host, the default port, and a loopback address or a website preview only outside
+ * production. That is its own rule and not the cross-origin one (`isNemarWebOrigin`), which admits
+ * loopback and previews everywhere. A client with any other redirect address is third-party: it never
+ * skips the consent screen, and follows its `consent_mode` (`ask_once` by default, or `always`).
+ * {@link firstPartyRefusal} applies the rule to a registration; the authorization phase asks
+ * {@link isFirstPartyRedirect} again at every request, as the ADR requires.
  */
 
 import type { OidcAdminErrorCode } from "../../../shared/contract/oidc-admin.js";
@@ -24,21 +28,28 @@ import {
   OIDC_CLIENT_ID_HEX_LENGTH,
   OIDC_CLIENT_ID_PREFIX,
   OIDC_CLIENT_NAME_MAX_LENGTH,
+  OIDC_CLIENT_SECRET_PREFIX,
+  OIDC_CONSENT_MODES,
   OIDC_GRANTS,
   OIDC_MAX_INTROSPECTION_AUDIENCES,
   OIDC_MAX_REDIRECT_URIS,
   OIDC_SECRET_GRACE_HOURS_DEFAULT,
   OIDC_SECRET_GRACE_HOURS_MAX,
+  OIDC_SIGN_IN_RULES,
   OIDC_URI_MAX_LENGTH,
+  type OidcConsentMode,
+  type OidcSignInRule,
   isMachineOnlyScope,
+  isOidcConsentMode,
   isOidcGrant,
   isOidcScope,
+  isOidcSignInRule,
 } from "../../../shared/oidc.js";
 import { isPartnerHost } from "../../../shared/partner-hosts.js";
 import { applyEditWithAudit, auditLogStatement } from "../db/audit-log.js";
 import { timingSafeEqual } from "../lib/constant-time.js";
 import type { Bindings } from "../types/bindings.js";
-import { isNemarWebOrigin } from "./cors-origins.js";
+import { isWebsitePagesHost } from "./cors-origins.js";
 import { isNonProductionEnv } from "./environment.js";
 import { randomHex, toBase64Url } from "./oidc-encoding.js";
 import { hashApiKey } from "./token.js";
@@ -53,9 +64,9 @@ export interface ClientInput {
   redirect_uris: string[];
   allowed_scopes: string[];
   allowed_grants: string[];
-  sign_in_rule: string;
+  sign_in_rule: OidcSignInRule;
   first_party?: boolean;
-  consent_mode?: string;
+  consent_mode?: OidcConsentMode;
   backchannel_logout_uri?: string | null;
   audience: string;
   introspection_audiences?: string[];
@@ -110,9 +121,12 @@ export function generateClientId(): string {
   return `${OIDC_CLIENT_ID_PREFIX}${randomHex(OIDC_CLIENT_ID_HEX_LENGTH / 2)}`;
 }
 
-/** 256 random bits as 43 unpadded base64url characters. Shown once and stored nowhere. */
+/**
+ * `nmo_cs_` plus 256 random bits as 43 unpadded base64url characters. Shown once and stored nowhere;
+ * only the hash of the whole string is kept.
+ */
 export function generateClientSecret(): string {
-  return toBase64Url(crypto.getRandomValues(new Uint8Array(32)));
+  return `${OIDC_CLIENT_SECRET_PREFIX}${toBase64Url(crypto.getRandomValues(new Uint8Array(32)))}`;
 }
 
 /** A SQL timestamp (`YYYY-MM-DD HH:MM:SS`, UTC) as epoch milliseconds; NaN when it is not one. */
@@ -168,10 +182,25 @@ function isLoopbackHost(hostname: string): boolean {
   return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]";
 }
 
+/** A dotted IPv4 address or a bracketed IPv6 one, as `URL` writes a host that is a literal address. */
+function isIpLiteral(hostname: string): boolean {
+  return /^\d{1,3}(\.\d{1,3}){3}$/.test(hostname) || hostname.startsWith("[");
+}
+
+/** A host that names the machine itself or no name at all: loopback, `localhost` or any IP literal. */
+function isLocalOrLiteral(hostname: string): boolean {
+  return isLoopbackHost(hostname) || hostname.endsWith(".localhost") || isIpLiteral(hostname);
+}
+
 /**
  * Why an address is not acceptable, or null. Exact addresses only: no wildcard, no fragment, no
  * user information. `https` always; `http` only for a loopback host and only outside production
- * (a developer's machine), never for anything else.
+ * (a developer's machine), never for anything else. And canonical: what is stored must equal what a
+ * browser navigates to (`new URL(raw).href === raw`), so an address cannot be one thing to this
+ * registry and another to the browser that follows it. That one comparison catches a scheme with no
+ * slashes, an upper-case scheme or host, a dot segment however it is spelled, an explicit default
+ * port, a missing path, an ideographic full stop, an internationalised look-alike, and the invisible
+ * and bidirectional format characters, none of which the rules above need to list.
  */
 function addressProblem(raw: string, allowLoopbackHttp: boolean): string | null {
   if (raw.length === 0 || raw.length > OIDC_URI_MAX_LENGTH) {
@@ -189,6 +218,9 @@ function addressProblem(raw: string, allowLoopbackHttp: boolean): string | null 
   }
   if (url.username !== "" || url.password !== "") return "carries user information";
   if (url.hostname === "") return "has no host";
+  if (url.href !== raw) {
+    return "is not in canonical form (write it as a browser would navigate to it: lower-case, a path, no dot segments, no default port)";
+  }
   if (url.protocol === "https:") return null;
   if (url.protocol === "http:") {
     return allowLoopbackHttp && isLoopbackHost(url.hostname)
@@ -199,33 +231,63 @@ function addressProblem(raw: string, allowLoopbackHttp: boolean): string | null 
 }
 
 /**
- * Whether a client may be first-party: every redirect address on a NEMAR web origin. Returns the
- * refusal, or null when it may. A partner host is named as such, because that is the case the rule
- * exists for; any other host that NEMAR does not run is the same refusal in other words.
+ * Whether ONE redirect address is a first-party origin (ADR 0119 rule 8). Its own rule, not the
+ * cross-origin one: https only (a loopback address outside production may also be http), the host is
+ * `nemar.org` or a subdomain of it and not a partner host, the default port only, no user
+ * information. Outside production a loopback address (any port) and a website preview (a Pages project
+ * NEMAR deploys) count as well, so staging and local runs work; in production they never do, because
+ * a client whose redirect is a developer's machine, or a preview any collaborator can deploy, must
+ * not skip consent. An unset or unknown `ENVIRONMENT` is production.
+ *
+ * Exported for the authorization phase, which asks it again at every request.
  */
-export function firstPartyRefusal(redirectUris: readonly string[]): ClientRefusal | null {
+export function isFirstPartyRedirect(uri: string, env: Pick<Bindings, "ENVIRONMENT">): boolean {
+  let url: URL;
+  try {
+    url = new URL(uri);
+  } catch {
+    return false;
+  }
+  if (url.username !== "" || url.password !== "") return false;
+  const host = url.hostname;
+  if (isPartnerHost(host)) return false;
+  const outsideProduction = isNonProductionEnv(env);
+  if (isLoopbackHost(host)) {
+    return outsideProduction && (url.protocol === "http:" || url.protocol === "https:");
+  }
+  if (url.protocol !== "https:" || url.port !== "") return false;
+  if (isWebsitePagesHost(host)) return outsideProduction;
+  return host === "nemar.org" || host.endsWith(".nemar.org");
+}
+
+const THIRD_PARTY =
+  "Register the client without first_party and it is a third-party client: it never skips the consent screen, and follows its consent_mode.";
+
+/**
+ * Whether a client may be first-party: every redirect address passes {@link isFirstPartyRedirect}.
+ * Returns the refusal, or null when it may. A partner host is named as such, because that is the case
+ * the rule exists for; any other address is the same refusal in other words.
+ */
+export function firstPartyRefusal(
+  redirectUris: readonly string[],
+  env: Pick<Bindings, "ENVIRONMENT">,
+): ClientRefusal | null {
   for (const uri of redirectUris) {
-    let host: string;
+    let host = "";
     try {
       host = new URL(uri).hostname;
-    } catch {
+    } catch {}
+    if (host !== "" && isPartnerHost(host)) {
       return refuse(
         "first_party_not_allowed",
-        "A first-party client needs every redirect address on a NEMAR web origin.",
+        `first_party is refused: a redirect address on a partner host cannot be first-party, because a partner must never skip the consent screen. ${THIRD_PARTY}`,
         "first_party",
       );
     }
-    if (isPartnerHost(host)) {
+    if (!isFirstPartyRedirect(uri, env)) {
       return refuse(
         "first_party_not_allowed",
-        "A client with a redirect address on a partner host cannot be first-party: a partner must never skip the consent screen.",
-        "first_party",
-      );
-    }
-    if (!isNemarWebOrigin(host)) {
-      return refuse(
-        "first_party_not_allowed",
-        "A client is first-party only when every redirect address is on a NEMAR web origin; one of these is not, so the client is third-party and shows the consent screen.",
+        `first_party is refused: every redirect address must be an https address on nemar.org or one of its subdomains, on the default port (a loopback address or a website preview only outside production). ${THIRD_PARTY}`,
         "first_party",
       );
     }
@@ -267,6 +329,21 @@ export function validateClientInput(
       "invalid_name",
       `name must be 1 to ${OIDC_CLIENT_NAME_MAX_LENGTH} printable characters.`,
       "name",
+    );
+  }
+
+  if (!isOidcSignInRule(input.sign_in_rule)) {
+    return refuse(
+      "invalid_body",
+      `sign_in_rule must be one of: ${OIDC_SIGN_IN_RULES.join(", ")}.`,
+      "sign_in_rule",
+    );
+  }
+  if (input.consent_mode !== undefined && !isOidcConsentMode(input.consent_mode)) {
+    return refuse(
+      "invalid_body",
+      `consent_mode must be one of: ${OIDC_CONSENT_MODES.join(", ")}.`,
+      "consent_mode",
     );
   }
 
@@ -336,14 +413,71 @@ export function validateClientInput(
     }
   }
 
+  // What a person's consent covers is consistent with how a client may get it (ADR 0119 rule 1):
+  // a scope that is not machine-only is granted by a person at the authorization endpoint, so it
+  // needs the authorization code grant; a refresh token comes only from that flow; and the
+  // offline_access scope and the refresh_token grant come together.
+  if (!seenGrants.has("authorization_code")) {
+    // First, so that its own message is the one given when the grant list is what is wrong.
+    if (seenGrants.has("refresh_token")) {
+      return refuse(
+        "invalid_body",
+        "allowed_grants has refresh_token, which needs the authorization_code grant: a refresh token comes from a person's authorization.",
+        "allowed_grants",
+      );
+    }
+    for (const scope of seenScopes) {
+      if (!isMachineOnlyScope(scope)) {
+        return refuse(
+          "invalid_body",
+          `allowed_scopes names ${scope}, which a person grants and so needs the authorization_code grant: a client with only the client_credentials grant may hold only machine scopes.`,
+          "allowed_scopes",
+        );
+      }
+    }
+  }
+  if (seenScopes.has("offline_access") && !seenGrants.has("refresh_token")) {
+    return refuse(
+      "invalid_body",
+      "allowed_scopes has offline_access, which needs the refresh_token grant.",
+      "allowed_scopes",
+    );
+  }
+  if (seenGrants.has("refresh_token") && !seenScopes.has("offline_access")) {
+    return refuse(
+      "invalid_body",
+      "allowed_grants has refresh_token, which needs the offline_access scope.",
+      "allowed_grants",
+    );
+  }
+
   if (input.backchannel_logout_uri !== undefined && input.backchannel_logout_uri !== null) {
     const uri = input.backchannel_logout_uri;
-    const problem =
-      addressProblem(uri, false) ?? (uri.startsWith("https://") ? null : "is not an https address");
+    // `addressProblem(uri, false)` below already refuses http, because no logout address may be a
+    // loopback one over http. This test stays first, and says so in words of its own, because it is the
+    // rule the table's CHECK enforces (https only): were `addressProblem` ever loosened, an http
+    // address would otherwise reach the table and fail there as a 500 instead of a typed refusal.
+    if (!uri.startsWith("https://")) {
+      return refuse(
+        "invalid_logout_uri",
+        "backchannel_logout_uri must be an https address.",
+        "backchannel_logout_uri",
+      );
+    }
+    const problem = addressProblem(uri, false);
     if (problem) {
       return refuse(
         "invalid_logout_uri",
         `backchannel_logout_uri ${problem}.`,
+        "backchannel_logout_uri",
+      );
+    }
+    // In production NEMAR's server calls this address with a signed token, so it must be a named host:
+    // not the machine itself, and not an IP literal that would aim the call at an internal address.
+    if (!allowLoopbackHttp && isLocalOrLiteral(new URL(uri).hostname)) {
+      return refuse(
+        "invalid_logout_uri",
+        "backchannel_logout_uri must name a host in production, not a loopback or IP address.",
         "backchannel_logout_uri",
       );
     }
@@ -364,7 +498,7 @@ export function validateClientInput(
     if (problem) return problem;
   }
 
-  if (input.first_party === true) return firstPartyRefusal(input.redirect_uris);
+  if (input.first_party === true) return firstPartyRefusal(input.redirect_uris, env);
   return null;
 }
 
@@ -437,6 +571,21 @@ export async function getClientAuthRow(
 // Writing
 // ---------------------------------------------------------------------------------------------
 
+/** Is an active client already called this (ignoring case)? */
+export const NAME_TAKEN_SQL =
+  "SELECT 1 AS taken FROM oidc_clients WHERE name = ? COLLATE NOCASE AND status = 'active'";
+
+/** The active-name index refusing a second client of one name, as SQLite and D1 word it. */
+const NAME_INDEX_RE =
+  /UNIQUE constraint failed: (oidc_clients\.name|index 'oidc_clients_active_name')/;
+
+const nameTaken = (): ClientRefusal =>
+  refuse(
+    "client_name_taken",
+    "An active client already has that name. If this registration was retried after a network error, run `nemar admin oidc clients list` first: the earlier request may have registered the client, and its secret was shown only to that request.",
+    "name",
+  );
+
 export const INSERT_CLIENT_SQL = `INSERT INTO oidc_clients
   (client_id, name, secret_hash, redirect_uris, allowed_scopes, allowed_grants, sign_in_rule,
    first_party, consent_mode, backchannel_logout_uri, audience, introspection_audiences,
@@ -459,17 +608,22 @@ export async function createClient(
   const refusal = validateClientInput(input, env);
   if (refusal) return { ok: false, refusal };
 
+  const db = env.DB;
+  const name = input.name.trim();
+  if (await db.prepare(NAME_TAKEN_SQL).bind(name).first()) {
+    return { ok: false, refusal: nameTaken() };
+  }
+
   const clientId = generateClientId();
   const secret = generateClientSecret();
   const firstParty = input.first_party === true;
   const consentMode = input.consent_mode ?? "ask_once";
-  const db = env.DB;
-  await db.batch([
+  const statements = [
     db
       .prepare(INSERT_CLIENT_SQL)
       .bind(
         clientId,
-        input.name.trim(),
+        name,
         await hashApiKey(secret),
         JSON.stringify(input.redirect_uris),
         JSON.stringify(input.allowed_scopes),
@@ -499,7 +653,17 @@ export async function createClient(
         logout: input.backchannel_logout_uri != null,
       }),
     }),
-  ]);
+  ];
+  try {
+    await db.batch(statements);
+  } catch (err) {
+    // A registration that overlapped another of the same name: the index decided, so it is the same
+    // answer as the check above. Anything else is a defect and is thrown.
+    if (NAME_INDEX_RE.test(err instanceof Error ? err.message : String(err))) {
+      return { ok: false, refusal: nameTaken() };
+    }
+    throw err;
+  }
   const client = await getClient(db, clientId);
   if (!client) throw new Error("the client was written and could not be read back");
   return { ok: true, client, secret };

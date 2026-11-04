@@ -37,6 +37,8 @@ import {
   OIDC_SECRET_GRACE_HOURS_MAX,
   OIDC_SIGN_IN_RULES,
   OIDC_URI_MAX_LENGTH,
+  isOidcConsentMode,
+  isOidcSignInRule,
 } from "../oidc.js";
 
 /** The words an owner route refuses with, in `code`. */
@@ -54,6 +56,7 @@ export const OIDC_ADMIN_ERROR_CODES = [
   "invalid_audience",
   "client_not_found",
   "client_disabled",
+  "client_name_taken",
   "rotation_too_early",
   "rotation_next_too_new",
   "rotation_conflict",
@@ -65,10 +68,15 @@ export const OIDC_ADMIN_ERROR_CODES = [
 
 export type OidcAdminErrorCode = (typeof OIDC_ADMIN_ERROR_CODES)[number];
 
-const oneOf = (words: readonly string[], what: string) =>
-  z
-    .string()
-    .refine((v) => words.includes(v), { message: `${what} must be one of: ${words.join(", ")}` });
+/** A string that must be one of `words`, said without echoing what was sent. */
+const oneOf = <T extends string>(
+  words: readonly T[],
+  guard: (v: unknown) => v is T,
+  what: string,
+) =>
+  z.string().refine((v): v is T => guard(v), {
+    message: `${what} must be one of: ${words.join(", ")}`,
+  });
 
 /** A cap: a whole number, zero or more, or null for none. */
 const cap = z.number().int().min(0).nullable().optional();
@@ -82,9 +90,9 @@ export const oidcClientCreateRequestSchema = z.object({
     .max(OIDC_MAX_REDIRECT_URIS),
   allowed_scopes: z.array(z.string()).min(1).max(OIDC_SCOPE_NAMES.length),
   allowed_grants: z.array(z.string()).min(1).max(OIDC_GRANTS.length),
-  sign_in_rule: oneOf(OIDC_SIGN_IN_RULES, "sign_in_rule"),
+  sign_in_rule: oneOf(OIDC_SIGN_IN_RULES, isOidcSignInRule, "sign_in_rule"),
   first_party: z.boolean().optional(),
-  consent_mode: oneOf(OIDC_CONSENT_MODES, "consent_mode").optional(),
+  consent_mode: oneOf(OIDC_CONSENT_MODES, isOidcConsentMode, "consent_mode").optional(),
   backchannel_logout_uri: z.string().min(1).max(OIDC_URI_MAX_LENGTH).nullable().optional(),
   audience: z.string().min(1).max(OIDC_AUDIENCE_MAX_LENGTH),
   introspection_audiences: z

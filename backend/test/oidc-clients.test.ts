@@ -112,8 +112,8 @@ describe("registering a client", () => {
 
   test("the secret is 256 random bits, is shown here, and the database holds only its hash", async () => {
     const { clientId, secret } = await register();
-    // 32 bytes as unpadded base64url is 43 characters.
-    expect(secret).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    // The prefix a secret scanner looks for, then 32 bytes as unpadded base64url (43 characters).
+    expect(secret).toMatch(/^nmo_cs_[A-Za-z0-9_-]{43}$/);
     const row = clientRow(clientId) as Record<string, unknown>;
     expect(row.secret_hash).toBe(await sha256Hex(secret));
     expect(row.previous_secret_hash).toBeNull();
@@ -467,11 +467,17 @@ describe("first-party: only when every redirect address is on a NEMAR web origin
     });
     expect(String(res.json?.error)).toMatch(/first-party/i);
     expect(String(res.json?.error)).toMatch(/partner/i);
+    expect(String(res.json?.error)).toMatch(/third-party client/);
     const other = await create({
       first_party: true,
       redirect_uris: ["https://client.example.org/cb"],
     });
-    expect(String(other.json?.error)).toMatch(/NEMAR web origin/);
+    expect(String(other.json?.error)).toMatch(/nemar\.org/);
+    expect(String(other.json?.error)).toMatch(/third-party client/);
+    // It says what to do, and does not claim the client will always be asked: a third-party client
+    // follows its consent mode and never skips the screen.
+    expect(String(other.json?.error)).not.toMatch(/always/i);
+    expect(String(other.json?.error)).toMatch(/consent_mode/);
   });
 });
 
@@ -521,7 +527,7 @@ describe("rotating a secret", () => {
     const body = oidcClientRotateResponseSchema.parse(res.json);
     expect(body.grace_hours).toBe(OIDC_SECRET_GRACE_HOURS_DEFAULT);
     expect(body.client_secret).not.toBe(oldSecret);
-    expect(body.client_secret).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(body.client_secret).toMatch(/^nmo_cs_[A-Za-z0-9_-]{43}$/);
 
     const row = clientRow(clientId) as Record<string, unknown>;
     expect(row.secret_hash).toBe(await sha256Hex(body.client_secret));

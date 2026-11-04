@@ -28,6 +28,8 @@ import {
   OIDC_SECRET_GRACE_HOURS_DEFAULT,
   OIDC_SECRET_GRACE_HOURS_MAX,
   OIDC_SIGN_IN_RULES,
+  type OidcConsentMode,
+  type OidcSignInRule,
 } from "../../shared/oidc.js";
 import { failMessage, failWith, requireSignedIn, say } from "../lib/admin-command.js";
 import { isRouteNotFound } from "../lib/api/errors.js";
@@ -284,8 +286,8 @@ interface AddOptions {
   redirectUri: string[];
   scopes: string;
   grants: string;
-  signInRule: string;
-  consentMode?: string;
+  signInRule: OidcSignInRule;
+  consentMode?: OidcConsentMode;
   firstParty?: boolean;
   logoutUri?: string;
   audience: string;

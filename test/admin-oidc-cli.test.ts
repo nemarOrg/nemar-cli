@@ -139,7 +139,7 @@ function addArgs(extra: string[] = []): string[] {
     "--scopes",
     "openid,profile,email",
     "--grants",
-    "authorization_code,refresh_token",
+    "authorization_code",
     "--sign-in-rule",
     "active_account",
     "--audience",
@@ -186,7 +186,7 @@ describe("nemar admin oidc clients add", () => {
     const id = /oc_[0-9a-f]{24}/.exec(r.stdout)?.[0];
     expect(id).toBeDefined();
     expect(r.stdout).toContain("Example client");
-    const secret = /secret[^\n]*:\s*([A-Za-z0-9_-]{43})\b/i.exec(r.stdout)?.[1];
+    const secret = /secret[^\n]*:\s*(nmo_cs_[A-Za-z0-9_-]{43})\b/i.exec(r.stdout)?.[1];
     expect(secret, r.stdout).toBeDefined();
     expect(r.stdout).toMatch(/shown (this )?once/i);
     expect(clientRows()).toHaveLength(1);
@@ -200,14 +200,14 @@ describe("nemar admin oidc clients add", () => {
     signIn(OWNER_KEY);
     // A first-party client needs NEMAR redirect addresses, so this one is refused...
     const refused = await failsBothWays(addArgs(["--first-party"]));
-    expect(refused.json).toContain("first-party");
-    expect(refused.plain).toContain("first-party");
+    expect(refused.json).toContain("first_party");
+    expect(refused.plain).toContain("first_party");
     // ...and a valid one prints pure JSON.
     const ok = await runCli([...addArgs(), "--json"]);
     expect(ok.exitCode, ok.stderr).toBe(0);
     const parsed = JSON.parse(ok.stdout) as AddJson;
     expect(parsed.client.status).toBe("active");
-    expect(parsed.client_secret).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(parsed.client_secret).toMatch(/^nmo_cs_[A-Za-z0-9_-]{43}$/);
     expect(Object.keys(JSON.parse(ok.stdout)).sort()).toEqual(["client", "client_secret"]);
   });
 
@@ -366,7 +366,9 @@ describe("nemar admin oidc clients rotate-secret", () => {
     const a = await addClient();
     const r = await runCli(["clients", "rotate-secret", a.client.client_id, "--grace-hours", "2"]);
     expect(r.exitCode, r.stdout + r.stderr).toBe(0);
-    const fresh = /([A-Za-z0-9_-]{43})\b/.exec(r.stdout.replace(a.client.client_id, ""))?.[1];
+    const fresh = /(nmo_cs_[A-Za-z0-9_-]{43})\b/.exec(
+      r.stdout.replace(a.client.client_id, ""),
+    )?.[1];
     expect(fresh).toBeDefined();
     expect(fresh).not.toBe(a.client_secret);
     expect(r.stdout).toMatch(/shown (this )?once/i);
@@ -393,7 +395,7 @@ describe("nemar admin oidc clients rotate-secret", () => {
     expect(r.exitCode, r.stderr).toBe(0);
     const parsed = JSON.parse(r.stdout) as { client_secret: string; grace_hours: number };
     expect(parsed.grace_hours).toBe(0);
-    expect(parsed.client_secret).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(parsed.client_secret).toMatch(/^nmo_cs_[A-Za-z0-9_-]{43}$/);
     expect((clientRows()[0] as Record<string, unknown>).previous_secret_hash).toBeNull();
   });
 

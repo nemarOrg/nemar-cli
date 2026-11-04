@@ -146,7 +146,7 @@ export function clientBody(over: Record<string, unknown> = {}): Record<string, u
     name: `Example client ${bodyCounter}`,
     redirect_uris: ["https://client.example.org/callback"],
     allowed_scopes: ["openid", "profile", "email"],
-    allowed_grants: ["authorization_code", "refresh_token"],
+    allowed_grants: ["authorization_code"],
     sign_in_rule: "active_account",
     audience: "https://api.example.org",
     ...over,
