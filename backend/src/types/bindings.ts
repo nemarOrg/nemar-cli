@@ -158,17 +158,29 @@ export interface Bindings {
    *  admin account is on DEV_EMAIL_ALLOWLIST, so the recipient fence alone
    *  does not stop admin mail from reaching them. */
   DEV_ADMIN_NOTIFICATIONS?: string;
-  /** Domain attribute for the web-dashboard session cookie (#569).
+  /** Domain attribute for the legacy web-dashboard session cookie (#569) and for the ORCID state
+   *  and pending cookies.
    *  Set to "app.nemar.org" in production and left empty in dev so
    *  the cookie is host-only for *.workers.dev. The dashboard moves
    *  to app.nemar.org per nemarOrg/website#46; flip this env var at
-   *  cutover without redeploying code. */
+   *  cutover without redeploying code.
+   *
+   *  Once `HOST_PREFIXED_SESSION_COOKIE` is on this no longer scopes the SESSION cookie: a
+   *  `__Host-` cookie carries no `Domain`, and a browser refuses one that does. It still scopes
+   *  the ORCID state and pending cookies and the clears of the legacy session cookie. */
   WEB_SESSION_COOKIE_DOMAIN?: string;
   /** "1" issues the app session cookie as `__Host-nemar_session` (host-only, no Domain) and
    *  clears the legacy `nemar_session`; anything else, or unset, keeps today's header byte for
    *  byte (ADR 0119 decision 10). READING accepts both names whatever this says. Set in
    *  `[env.dev.vars]` only: production turns it on after the website's reader and the API have
-   *  both released, which is the owner's act, and a test pins that no other table names it. */
+   *  both released, which is the owner's act, and a test pins that no other table names it.
+   *
+   *  Release notes. The flag is effectively ONE-WAY once people hold a `__Host-` cookie: turned
+   *  off again, the writers send only the legacy header (the flag-off bytes are pinned) and never
+   *  clear a `__Host-nemar_session` the browser holds, and the reader prefers that stale cookie,
+   *  so after a sign-out and a new sign-in the person is unauthenticated until it expires (a
+   *  browser close, or up to 30 days for a remembered session). Reverting needs a clear of the
+   *  `__Host-` cookie shipped first. */
   HOST_PREFIXED_SESSION_COOKIE?: string;
   /** Sandbox (xx) dataset-ID allocation partition, decimal strings (epic #923).
    *  Prevents repo-name collisions in the shared nemarDatasets org between
@@ -445,14 +457,16 @@ export interface Variables {
   // Optional: routes that don't use optionalAuthMiddleware never set this.
   authAttempted?: true;
   /** Set by `authMiddleware`: which credential resolved `user`.
-   *  "token" = Authorization: Bearer (CLI path), "cookie" =
-   *  `nemar_session` (web dashboard path). `cliVersionGuard` uses this
+   *  "token" = Authorization: Bearer (CLI path), "cookie" = the session
+   *  cookie, `__Host-nemar_session` or the legacy `nemar_session` (web
+   *  dashboard path). `cliVersionGuard` uses this
    *  to exempt browser clients, which fetch current site code on every
    *  page load and so cannot be version-stale the way an installed CLI
    *  binary can. */
   authMethod?: "token" | "cookie";
-  /** Set by `webSessionMiddleware` (#569) when a valid `nemar_session`
-   *  cookie resolves to an active row. Distinct from `user` (bearer
+  /** Set by `webSessionMiddleware` (#569) when a valid session cookie
+   *  (`__Host-nemar_session` or the legacy `nemar_session`) resolves to an
+   *  active row. Distinct from `user` (bearer
    *  API token auth) — a single request can carry both in principle,
    *  though in practice the dashboard never sends a bearer header.
    *  `role` is validated against the `UserRole` union at the DB

@@ -52,8 +52,13 @@
  *
  * Host/cookie model: these routes run on api.nemar.org but the browser reaches
  * them through the app.nemar.org same-origin proxy (like /auth/code/*), which
- * mirrors our Set-Cookie. Cookies therefore carry Domain=WEB_SESSION_COOKIE_DOMAIN
- * (app.nemar.org in prod) and the OAuth redirect_uri points at the app host.
+ * mirrors our Set-Cookie. The state and pending cookies therefore carry
+ * Domain=WEB_SESSION_COOKIE_DOMAIN (app.nemar.org in prod), as do the clears of the legacy
+ * session cookie, and the OAuth redirect_uri points at the app host. The two session issuances
+ * (the callback's sign-in and finalize's sign-up) go through `sessionCookieHeaders`: with
+ * `HOST_PREFIXED_SESSION_COOKIE` on they send a host-only `__Host-nemar_session` with NO Domain
+ * (a browser refuses a `__Host-` cookie that has one); with it off they send the legacy cookie
+ * with the Domain, as before (ADR 0119 decision 10).
  */
 
 import { zValidator } from "@hono/zod-validator";
