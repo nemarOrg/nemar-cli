@@ -206,6 +206,25 @@ describe("the platform budget", () => {
   });
 });
 
+describe("a job has one hold", () => {
+  test("a second hold of a job under another key is job_already_held on D1 too, and writes nothing", async () => {
+    const { person, budget } = await scene(9000, 100000);
+    const job = jobId(next());
+    expect((await hold(person, budget, 1000, { jobId: job })).ok).toBe(true);
+    const results = await Promise.all([
+      hold(person, budget, 1000, { jobId: job }),
+      hold(person, budget, 1000, { jobId: job }),
+    ]);
+    expect(results).toEqual([
+      { ok: false, code: "job_already_held" },
+      { ok: false, code: "job_already_held" },
+    ]);
+    expect(await holdRows(person.id)).toBe(1);
+    expect((await poolTotals(d1, person.id)).held_milli).toBe(1000);
+    expect(await totalsDisagreements(d1)).toEqual([]);
+  });
+});
+
 describe("a frozen pool", () => {
   test("is suspended, and writes nothing, until it is thawed", async () => {
     const { person, budget } = await scene(5000, 100000);
