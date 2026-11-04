@@ -180,7 +180,10 @@ export interface Bindings {
    *  gets the same headers plus a clear of it, so the cookie issued while the flag was on is
    *  removed at the next sign-in, sign-out or slide. The clear matters because the reader prefers
    *  a `__Host-` cookie: without it, a person who signs out and in again after the flag is turned
-   *  off would stay signed out until that cookie expires. */
+   *  off would stay signed out until that cookie expires.
+   *
+   *  The OpenID Connect authorization routes (`/auth/oidc/*`) also answer 404 until this is "1"
+   *  and `OIDC_SECRET` is set: set both. Only a `__Host-` session may approve a grant. */
   HOST_PREFIXED_SESSION_COOKIE?: string;
   /** Sandbox (xx) dataset-ID allocation partition, decimal strings (epic #923).
    *  Prevents repo-name collisions in the shared nemarDatasets org between
@@ -211,7 +214,9 @@ export interface Bindings {
    *  encrypted under at rest (epic #2014 phase #2016; ADR 0119). At least 32 characters or the
    *  provider is off: discovery, the key set and the owner routes then answer 404, as if they did
    *  not exist (`services/oidc-config.ts`, `oidcEnabled`). The owner sets it; an agent never does.
-   *  Changing it makes every stored key unreadable, and there is no re-encryption path yet. */
+   *  Changing it makes every stored key unreadable, and there is no re-encryption path yet.
+   *  The authorization routes (`/auth/oidc/*`) also answer 404 until `HOST_PREFIXED_SESSION_COOKIE`
+   *  is "1": set both. */
   OIDC_SECRET?: string;
   /** Prod-only mirror target for dev-OWNED GitHub deliveries (epic #923;
    *  widened from dev-range to dev-owned by #1440, so it now also carries the

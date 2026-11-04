@@ -425,6 +425,7 @@ OPENNEURO_MAINTAINER_EMAIL_ENABLED = "false"
 #                                can be flipped to "true" in any environment.)
 # - OIDC_SECRET           (epic #2014 phase #2016, ADR 0119; encrypts the OpenID Connect provider's private signing keys at rest, at
 #                           least 32 characters. Without it the provider is OFF: discovery, the key set and the owner routes answer 404.
+#                           The authorization routes (/auth/oidc/*) also answer 404 until HOST_PREFIXED_SESSION_COOKIE is "1": set both.
 #                           Set it BEFORE the first key rotation (`nemar admin oidc keys rotate`), and do not change it afterwards: every
 #                           stored key becomes unreadable, and no re-encryption path exists yet. Separate values for production and dev.
 #                           It MUST differ from ENCRYPTION_KEY and should be random, for example `openssl rand -base64 48`.
@@ -699,6 +700,8 @@ WEB_SESSION_COOKIE_DOMAIN = ""
 # before the OIDC provider epic reaches `dev`, or the staging site signs everyone out.
 # Reversible: turned off again, a request that carries a `__Host-nemar_session` also gets a clear
 # of it (ADR 0119, Consequences), so the flag can be switched back off without stranding anyone.
+# The OpenID Connect authorization routes (/auth/oidc/*) answer 404 until this is "1" and
+# OIDC_SECRET is set: set both. Only a `__Host-` session may approve a grant.
 HOST_PREFIXED_SESSION_COOKIE = "1"
 # Centralized manifest workflow flag (#557, relocated to
 # nemarDatasets/.github in #564). Soak on dev is COMPLETE and the flag is "true"

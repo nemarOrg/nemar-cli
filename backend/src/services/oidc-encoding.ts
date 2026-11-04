@@ -1,5 +1,5 @@
 /**
- * The two encoders the OpenID Connect services share (epic #2014 phase #2016): the key service
+ * The encoders the OpenID Connect services share (epic #2014 phases #2016 and #2017): the key service
  * (`oidc-keys.ts`) and the client registry (`oidc-clients.ts`) both make random identifiers and
  * encode bytes for the web, and they do it the same way, in one place.
  */
@@ -15,4 +15,11 @@ export function toBase64Url(bytes: Uint8Array): string {
   let binary = "";
   for (const b of bytes) binary += String.fromCharCode(b);
   return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+/** Base64url (padded or not) back to bytes. Throws on characters outside the alphabet. */
+export function fromBase64Url(value: string): Uint8Array {
+  const b64 = value.replace(/-/g, "+").replace(/_/g, "/");
+  const binary = atob(b64 + "=".repeat((4 - (b64.length % 4)) % 4));
+  return Uint8Array.from(binary, (c) => c.charCodeAt(0));
 }

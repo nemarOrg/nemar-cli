@@ -28,6 +28,7 @@ import { authRoutes } from "./routes/auth";
 import { authDeviceRoutes } from "./routes/auth-device";
 import { authDocsRoutes } from "./routes/auth-docs";
 import { authKeysRoutes } from "./routes/auth-keys";
+import { authOidcRoutes } from "./routes/auth-oidc";
 import { authOrcidRoutes } from "./routes/auth-orcid";
 import { authPrivateRoutes } from "./routes/auth-private";
 import { authWebRoutes } from "./routes/auth-web";
@@ -252,6 +253,11 @@ api.route("/auth", authDocsRoutes);
 // /auth/private/grant. The exchange, the per-request check and sign-out are
 // service-binding methods (ADR 0078), not routes.
 api.route("/auth", authPrivateRoutes);
+// The OpenID Connect authorization endpoint's check and consent (epic #2014 phase #2017, ADR 0119).
+// Same /auth prefix; paths /auth/oidc/authorize and /auth/oidc/consent, called by the website's
+// /oauth/authorize page server-side with its caller marker. 404 until OIDC_SECRET is set AND
+// HOST_PREFIXED_SESSION_COOKIE is "1" (routes/auth-oidc.ts).
+api.route("/auth", authOidcRoutes);
 api.route("/users", userRoutes);
 api.route("/admin", adminRoutes);
 api.route("/datasets", datasetRoutes);

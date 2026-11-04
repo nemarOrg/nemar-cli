@@ -195,8 +195,29 @@ describe("addresses are stored as a browser navigates to them", () => {
     ).toBe(201);
   });
 
+  test("an address whose query already names a parameter the response adds is refused", async () => {
+    // The authorization response appends `code`, `state`, `iss` or `error` to the registered
+    // address; a registered query naming one would give the client two values for it.
+    for (const name of ["code", "state", "iss", "error"]) {
+      for (const query of [`${name}=a`, `x=1&${name}=`, `x=1&${name}`]) {
+        const uri = `https://client.example.org/callback?${query}`;
+        const res = await create({ redirect_uris: ["https://client.example.org/ok", uri] });
+        expect({ uri, status: res.status, code: res.json?.code, field: res.json?.field }).toEqual({
+          uri,
+          status: 400,
+          code: "invalid_redirect_uri",
+          field: "redirect_uris",
+        });
+      }
+    }
+    // A name that merely contains one is fine.
+    expect(
+      (await create({ redirect_uris: ["https://client.example.org/cb?stateful=1"] })).status,
+    ).toBe(201);
+  });
+
   test("the stored address is exactly what was sent", async () => {
-    const uri = "https://client.example.org/callback?state=a";
+    const uri = "https://client.example.org/callback?tenant=a";
     const res = await create({ redirect_uris: [uri] });
     const id = (res.json?.client as { client_id: string }).client_id;
     const row = h.db

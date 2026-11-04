@@ -979,7 +979,9 @@ const AUTH_PATHS = [
   // and this bucket's ten a minute would be shared by everyone signing in at
   // once. It is limited per ACCOUNT instead (`checkPrivateGrantBudget` below,
   // called by the route once the session names the account), and rides the
-  // generic `ip` bucket here.
+  // generic `ip` bucket here. `/auth/oidc/authorize` and `/auth/oidc/consent`
+  // (ADR 0119) are absent for the same reason, and limited per account by
+  // `checkOidcAuthorizeBudget`.
   // NOT an /auth path, and deliberately in this list anyway (ADR 0042, #1253):
   // POST /users/me/upload-access/request spends a live GitHub API call on the
   // shared installation token for every attempt, and a refused one writes
@@ -1895,6 +1897,44 @@ export async function checkPrivateGrantBudget(
 }
 
 /**
+ * Thirty authorization calls a minute per ACCOUNT (ADR 0119): the check and the
+ * consent routes of the OpenID Connect authorization endpoint share it. A person
+ * signing in to a client passes through one check and at most one consent, so
+ * thirty is far above any person and far below what a script driving a stolen
+ * app session could want.
+ */
+const OIDC_AUTHORIZE_MAX_REQUESTS = 30;
+const OIDC_AUTHORIZE_BUCKET_KIND = "oidc-authorize-account";
+
+/**
+ * Count one `POST /auth/oidc/authorize` or `POST /auth/oidc/consent` against its
+ * account's budget, and refuse it once the budget is spent. Modelled on
+ * {@link checkPrivateGrantBudget}, for the same reason: the website calls both
+ * routes server-side, so every person arrives from a few egress addresses and a
+ * per-address bucket would make strangers share one limit. A caller with no
+ * session that may approve a grant spends no account's budget; it rides the
+ * generic bucket the middleware already chose for it.
+ */
+export async function checkOidcAuthorizeBudget(
+  env: Pick<Bindings, "ENVIRONMENT" | "TEST_BYPASS_TOKEN">,
+  request: Request,
+  userId: number,
+  waitUntil: ((work: Promise<unknown>) => void) | undefined,
+): Promise<DataMissBudgetOutcome> {
+  return consumeKeyedBudget(
+    env,
+    request,
+    {
+      kind: OIDC_AUTHORIZE_BUCKET_KIND,
+      key: `user-${userId}`,
+      maxRequests: OIDC_AUTHORIZE_MAX_REQUESTS,
+      caller: callerIdentityOf(request).source,
+    },
+    waitUntil,
+  );
+}
+
+/**
  * The shared core of the keyed budgets a route checks itself, because the
  * key is something only the route knows (whether a request missed the cache,
  * which account a session names). Mirrors `rateLimiter`'s own mechanics: the
@@ -1987,6 +2027,7 @@ export const __limits = {
   DATA_MISS_MAX_REQUESTS,
   NEUROBAGEL_MAX_REQUESTS,
   PRIVATE_GRANT_MAX_REQUESTS,
+  OIDC_AUTHORIZE_MAX_REQUESTS,
   WINDOW_SIZE,
 };
 
