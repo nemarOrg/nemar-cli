@@ -127,3 +127,18 @@ From Tapis v3 documentation and OpenAPI specifications, and the SDSC Expanse use
 - **Auth.** Tokens in `X-Tapis-Token`; no client-credentials grant; `POST /v3/tokens` mints user tokens for a service credential (the Drupal `tapis_auth` pattern); which credential NEMAR gets is a question for the operator.
 - **Expanse SU.** 1 SU = 1 core-hour (2 GB per core) or 1 GPU-hour (92 GB per GPU); charged on reservation with a 1 SU minimum; whole `compute` node 128 per hour, whole `gpu` node 4 per hour; `preempt` 0.8 and not refunded; 48-hour limit except preempt (7 days); per-account concurrency caps (for example 24 running GPUs in `gpu-shared`).
 - **ACCESS attribution.** `POST https://allocations-api.access-ci.org/acdb/gateway/v2/job_attributes` with `jobid`, `submittime`, `xsederesourcename`, `gatewayuser`; `debug` for tests; the key is shown once.
+
+## 6. Words and contracts shipped in phase A1 (ADR 0118)
+
+Import these; never declare a second copy of a word, a number or a state.
+A migration that has to spell a word in a `CHECK` copies it from here and a test compares the two.
+
+- **Words and states.** `shared/compute-state.ts`, import-free: the ten job states and the only edges between them (forward and self-edges, `unreported` reachable from every live state), `stateFromTapisStatus` (an unknown status is null, never guessed), the launcher and platform failure codes with `isPlatformFailure(code, detail)` and `failureCodeFromTapisCondition`, the refusal codes with `COMPUTE_REFUSAL_STATUS` (the one table of HTTP statuses), and the ledger kinds, sources, kinds, job flags and cancel reasons.
+  Every word is snake_case and matches `COMPUTE_WORD_RE`.
+- **Money, specification and policy.** `shared/contract/compute.ts` (zod; re-exported from `shared/contract/index.ts`): `JobSpecSchema`, `PARTITIONS`, `RATE_TABLE_V1`, `estimateSuMilli` (the hold, from a specification), `suMilliFor` (a charge, from Tapis's resources and seconds), `parseSuToMilli`, `formatSu`, `ComputePolicySchema` with the frozen `DEFAULT_COMPUTE_POLICY`, and the shapes of the launcher's own files.
+  Wire keys of a specification are snake_case (`memory_mb`); keys of the policy are camelCase.
+  A partition with a ceiling in the policy is offered to people; one without is for NEMAR's pipelines only.
+- **Launcher.** `shared/contract/compute-launch.ts` and `compute-launch.schema.json`: the launch specification `nemar.launch-spec.v1` (`encodeLaunchSpec` writes it within 64 KiB), the bundle, outputs and outputs-response shapes, the results-bucket keys (`resultsOutputKey`, `resultsLauncherKey`) and, in the schema's `$defs`, `result`, `manifest` and `provenance`.
+  The schema is shared byte for byte with `nemarOrg/nemar-process`; a test here holds it to the zod schema, and whichever repository merges first writes it.
+  In the records bucket the launcher's `manifest.json` is kept as `result-manifest.json`.
+- **Header.** `shared/compute-header.ts`, import-free: `parseJobHeader` for a `# /// nemar` or `% /// nemar` block or a whole `nemar-job.toml` (a small TOML subset, every refusal a fixed code with its line), and `headerToSpecFields`, which maps `memory`, `time` and `id@version` onto specification fields.
