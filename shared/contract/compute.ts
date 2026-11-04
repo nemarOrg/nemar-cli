@@ -137,7 +137,10 @@ export function computePathSchema(maxLength: number) {
 }
 const relativePath = computePathSchema;
 
-/** A dataset include pattern: 1 to 256 characters (the character class needs one) that never leave the dataset. */
+/**
+ * A dataset include pattern: 1 to 256 characters (the character class needs one) that never leave
+ * the dataset. Its dialect, and what a matcher owes, is {@link COMPUTE_INCLUDE_DESCRIPTION}.
+ */
 export const computeGlobSchema = z
   .string()
   .max(256)
@@ -494,6 +497,29 @@ export const computeJobEnvSchema = z.record(z.enum(JOB_ENV_ALLOWLIST), computeEn
 
 // --- The job specification ---------------------------------------------------------------------
 
+// --- What an entry, a command, args and an include pattern mean ---------------------------------
+
+/**
+ * How the launcher runs the code a job names. These four texts are the contract, stated once: zod
+ * carries them as the `description` of the fields of both the job specification and the launch
+ * specification, and `compute-launch.schema.json` carries the same words, which a test holds to
+ * these. Widening any of them is a change to what the launcher does, and so to the shared schema.
+ */
+export const COMPUTE_ENTRY_DESCRIPTION =
+  "A path inside the bundle. With runtime python the launcher runs python /code/<entry> followed by args; with runtime image and an entry it runs /code/<entry> directly, followed by args, which needs the executable bit that the bundle packer must preserve. The runtime image must provide python on its PATH for the python runtime. A bundle archive's member names may carry a leading ./; absolute names, .. segments, links, devices and FIFOs are refused by the launcher.";
+
+export const COMPUTE_COMMAND_DESCRIPTION = "An argument vector, run as given, with args appended.";
+
+export const COMPUTE_ARGS_DESCRIPTION =
+  "Arguments, each as one argument: after python /code/<entry> (runtime python with an entry), after /code/<entry> (runtime image with an entry) or after the command.";
+
+/**
+ * The `include` dialect of a dataset reference. No cap on the number of wildcards: the bound is the
+ * matcher's, which must not backtrack.
+ */
+export const COMPUTE_INCLUDE_DESCRIPTION =
+  "Patterns that select the dataset's files, matched against manifest paths relative to the dataset root; every file when there are none. The dialect: ** crosses /; * and ? stay inside one path segment; [abc], [a-c] and [!abc] are character classes; matching is case-sensitive; there are no escapes. A matcher MUST run in time linear in the pattern's length times the path's length (no backtracking).";
+
 export const JOB_RUNTIMES = ["python", "matlab", "image"] as const;
 
 export type JobRuntime = (typeof JOB_RUNTIMES)[number];
@@ -545,7 +571,11 @@ const datasetRefSchema = z
   .object({
     id: z.string().regex(COMPUTE_DATASET_ID_RE),
     version: z.string().regex(COMPUTE_DATASET_VERSION_RE),
-    include: z.array(processText(computeGlobSchema)).max(64).optional(),
+    include: z
+      .array(processText(computeGlobSchema))
+      .max(64)
+      .optional()
+      .describe(COMPUTE_INCLUDE_DESCRIPTION),
   })
   .strict();
 
@@ -616,6 +646,23 @@ export const LAUNCH_VARIABLE_BYTES_MAX = 49_152;
  * The output directory is `outputs`, which the launcher's layout fixes (`work/outputs/`). `matlab`
  * is a valid specification; a route refuses it as `runtime_unavailable` until it is licensed.
  *
+ * How the code runs, which is the contract the launcher keeps (its texts are
+ * {@link COMPUTE_ENTRY_DESCRIPTION}, {@link COMPUTE_COMMAND_DESCRIPTION} and
+ * {@link COMPUTE_ARGS_DESCRIPTION}): `runtime: python` with an `entry` runs `python /code/<entry>`
+ * followed by `args`; a `command` runs as given with `args` appended; `runtime: image` with an
+ * `entry` is allowed and runs `/code/<entry>` directly, which needs the executable bit that the
+ * bundle packer must preserve; the runtime image must provide `python` on its PATH for the python
+ * runtime. A bundle archive's member names may carry a leading `./`; absolute names, `..`, links,
+ * devices and FIFOs are refused by the launcher.
+ *
+ * A dataset's `include` patterns are matched against manifest paths relative to the dataset root
+ * ({@link COMPUTE_INCLUDE_DESCRIPTION}): `**` crosses `/`; `*` and `?` stay inside one path segment;
+ * `[abc]`, `[a-c]` and `[!abc]` are classes; matching is case-sensitive; there are no escapes; and a
+ * matcher must run in time linear in the pattern length times the path length (no backtracking).
+ * There is no cap on how many wildcards a pattern holds. A dataset's `version` is what a person
+ * writes (`1.0.2`); the Worker writes the data-plane tag for the launch specification
+ * (`dataTagForVersion`).
+ *
  * A valid specification always becomes a launch specification a process can use: it fits the 64 KiB
  * (see {@link LAUNCH_VARIABLE_BYTES_MAX}) and every string that reaches a process is well-formed
  * UTF-16 (see {@link computeIsWellFormed}), each refused here, with the field named by its path,
@@ -630,13 +677,14 @@ export const JobSpecSchema = z
   .object({
     name: z.string().regex(JOB_NAME_RE),
     runtime: z.enum(JOB_RUNTIMES),
-    entry: processText(relativePath(240)).optional(),
+    entry: processText(relativePath(240)).optional().describe(COMPUTE_ENTRY_DESCRIPTION),
     command: z
       .array(processText(z.string().min(1).max(1024)))
       .min(1)
       .max(64)
-      .optional(),
-    args: z.array(argSchema).max(64).default([]),
+      .optional()
+      .describe(COMPUTE_COMMAND_DESCRIPTION),
+    args: z.array(argSchema).max(64).default([]).describe(COMPUTE_ARGS_DESCRIPTION),
     bundle: bundleRefSchema.optional(),
     datasets: z.array(datasetRefSchema).max(20).default([]),
     partition: z.enum(PARTITION_NAMES),

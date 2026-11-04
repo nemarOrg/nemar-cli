@@ -22,10 +22,15 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Ajv2020 } from "ajv/dist/2020";
+import type { z } from "zod";
 import { LAUNCHER_FAILURE_CODES } from "../shared/compute-state";
 import {
+  COMPUTE_ARGS_DESCRIPTION,
+  COMPUTE_COMMAND_DESCRIPTION,
   COMPUTE_DATA_TAG_MAX,
   COMPUTE_DATA_TAG_RE,
+  COMPUTE_ENTRY_DESCRIPTION,
+  COMPUTE_INCLUDE_DESCRIPTION,
   COMPUTE_JOB_ID_RE,
   COMPUTE_MAX_OUTPUT_FILES,
   COMPUTE_PATH_SEGMENT,
@@ -2696,6 +2701,135 @@ describe("a valid job specification always fits the launch specification", () =>
     ];
     for (const job of jobs)
       expect(launchSpecFits(JobSpecSchema.parse(job)), String(job.runtime)).toBe(true);
+  });
+});
+
+describe("what an entry, a command, args and an include pattern mean is part of the contract", () => {
+  const props = (launchSchema as Doc).properties;
+  const includeSchema = props.datasets.items.properties.include;
+  const LAUNCH_ONE = " Exactly one of entry and command is present.";
+  /** The zod object of each schema, behind the refinement that wraps it. */
+  const jobShape = (JobSpecSchema as unknown as { _def: { schema: z.AnyZodObject } })._def.schema
+    .shape;
+  const launchShape = (LaunchSpecSchema as unknown as { _def: { schema: z.AnyZodObject } })._def
+    .schema.shape;
+
+  test("the entry: python /code/<entry>, or /code/<entry> directly for an image", () => {
+    const text = COMPUTE_ENTRY_DESCRIPTION;
+    expect(text).toContain("python /code/<entry>");
+    expect(text).toContain("followed by args");
+    expect(text).toContain("runtime image");
+    expect(text).toContain("/code/<entry> directly");
+    expect(text).toContain("executable bit");
+    expect(text).toContain("bundle packer must preserve");
+    expect(text).toContain("python on its PATH");
+    expect(text).toContain("leading ./");
+    for (const refused of ["absolute names", ".. segments", "links", "devices", "FIFOs"]) {
+      expect(text, refused).toContain(refused);
+    }
+    expect(text).toContain("refused by the launcher");
+  });
+
+  test("the command runs as given with args appended", () => {
+    expect(COMPUTE_COMMAND_DESCRIPTION).toContain("run as given");
+    expect(COMPUTE_COMMAND_DESCRIPTION).toContain("args appended");
+  });
+
+  test("the args follow the entry or the command, each as one argument", () => {
+    const text = COMPUTE_ARGS_DESCRIPTION;
+    expect(text).toContain("python /code/<entry>");
+    expect(text).toContain("after /code/<entry>");
+    expect(text).toContain("after the command");
+    expect(text).toContain("each as one argument");
+  });
+
+  test("the include dialect: manifest paths, **, * and ?, classes, case, no escapes, linear time", () => {
+    const text = COMPUTE_INCLUDE_DESCRIPTION;
+    expect(text).toContain("manifest paths relative to the dataset root");
+    expect(text).toContain("** crosses /");
+    expect(text).toContain("* and ? stay inside one path segment");
+    expect(text).toContain("[abc], [a-c] and [!abc]");
+    expect(text).toContain("case-sensitive");
+    expect(text).toContain("no escapes");
+    expect(text).toContain("MUST run in time linear");
+    expect(text).toContain("pattern's length times the path's length");
+    expect(text).toContain("no backtracking");
+    // And nothing about a limit on wildcards: there is none.
+    expect(text).not.toContain("at most");
+  });
+
+  test("the schema's descriptions are these texts, word for word", () => {
+    expect(props.entry.description).toBe(COMPUTE_ENTRY_DESCRIPTION + LAUNCH_ONE);
+    expect(props.command.description).toBe(COMPUTE_COMMAND_DESCRIPTION + LAUNCH_ONE);
+    expect(props.args.description).toBe(COMPUTE_ARGS_DESCRIPTION);
+    expect(includeSchema.description).toBe(COMPUTE_INCLUDE_DESCRIPTION);
+  });
+
+  test("zod carries the same texts, on the launch specification and on the job specification", () => {
+    expect(launchShape.entry.description).toBe(COMPUTE_ENTRY_DESCRIPTION + LAUNCH_ONE);
+    expect(launchShape.command.description).toBe(COMPUTE_COMMAND_DESCRIPTION + LAUNCH_ONE);
+    expect(launchShape.args.description).toBe(COMPUTE_ARGS_DESCRIPTION);
+    expect(jobShape.entry.description).toBe(COMPUTE_ENTRY_DESCRIPTION);
+    expect(jobShape.command.description).toBe(COMPUTE_COMMAND_DESCRIPTION);
+    expect(jobShape.args.description).toBe(COMPUTE_ARGS_DESCRIPTION);
+    // The element of `datasets`, through the default a job gives it.
+    const include = (shape: z.AnyZodObject["shape"]) => {
+      // biome-ignore lint/suspicious/noExplicitAny: zod's definitions are walked by key
+      let field: any = shape.datasets;
+      while (field._def.innerType) field = field._def.innerType;
+      return field._def.type.shape.include.description;
+    };
+    expect(include(launchShape)).toBe(COMPUTE_INCLUDE_DESCRIPTION);
+    expect(include(jobShape)).toBe(COMPUTE_INCLUDE_DESCRIPTION);
+  });
+
+  test("the job specification's docblock states the same semantics", () => {
+    const source = readFileSync(
+      join(import.meta.dir, "..", "shared", "contract", "compute.ts"),
+      "utf8",
+    );
+    const end = source.indexOf("export const JobSpecSchema = z");
+    expect(end).toBeGreaterThan(0);
+    // The comment's line breaks and asterisks are not part of what it says.
+    const docblock = source
+      .slice(source.lastIndexOf("/**", end), end)
+      .replace(/\n\s*\*\s?/g, " ")
+      .replace(/\s+/g, " ");
+    for (const phrase of [
+      "`runtime: python` with an `entry` runs `python /code/<entry>` followed by `args`",
+      "a `command` runs as given with `args` appended",
+      "`runtime: image` with an `entry` is allowed and runs `/code/<entry>` directly",
+      "executable bit that the bundle packer must preserve",
+      "must provide `python` on its PATH",
+      "may carry a leading `./`",
+      "links, devices and FIFOs are refused by the launcher",
+      "matched against manifest paths relative to the dataset root",
+      "`**` crosses `/`",
+      "`*` and `?` stay inside one path segment",
+      "`[abc]`, `[a-c]` and `[!abc]`",
+      "case-sensitive",
+      "no escapes",
+      "linear in the pattern length times the path length",
+      "`dataTagForVersion`",
+    ]) {
+      expect(docblock, phrase).toContain(phrase);
+    }
+  });
+
+  test("an image job may name an entry: it is a valid job and a valid launch specification", () => {
+    const job = {
+      name: "tool",
+      runtime: "image",
+      image: `ghcr.io/e/t@sha256:${HEX_B}`,
+      entry: "bin/run",
+      bundle: { size: 10, sha256: HEX_A },
+      partition: "shared",
+      minutes: 5,
+    };
+    expect(specRefused(job)).toBe(false);
+    expect(LaunchSpecSchema.safeParse(set(LAUNCH, "runtime", "image")).success).toBe(true);
+    // It still needs the bundle that holds it.
+    expect(specRefused({ ...job, bundle: undefined })).toBe(true);
   });
 });
 

@@ -26,7 +26,7 @@
       "enum": ["python", "image"]
     },
     "entry": {
-      "description": "A path inside the bundle. Exactly one of entry and command is present.",
+      "description": "A path inside the bundle. With runtime python the launcher runs python /code/<entry> followed by args; with runtime image and an entry it runs /code/<entry> directly, followed by args, which needs the executable bit that the bundle packer must preserve. The runtime image must provide python on its PATH for the python runtime. A bundle archive's member names may carry a leading ./; absolute names, .. segments, links, devices and FIFOs are refused by the launcher. Exactly one of entry and command is present.",
       "type": "string",
       "maxLength": 240,
       "pattern": "^(?:[^/\\\\\\u0000-\\u001f\\u007f]+/)*[^/\\\\\\u0000-\\u001f\\u007f]+(?![\\s\\S])",
@@ -35,7 +35,7 @@
       }
     },
     "command": {
-      "description": "An argument vector for an image job, run as given.",
+      "description": "An argument vector, run as given, with args appended. Exactly one of entry and command is present.",
       "type": "array",
       "minItems": 1,
       "maxItems": 64,
@@ -46,6 +46,7 @@
       }
     },
     "args": {
+      "description": "Arguments, each as one argument: after python /code/<entry> (runtime python with an entry), after /code/<entry> (runtime image with an entry) or after the command.",
       "type": "array",
       "maxItems": 64,
       "items": {
@@ -89,6 +90,7 @@
             "pattern": "^(latest|v[0-9]+\\.[0-9]+\\.[0-9]+)(?![\\s\\S])"
           },
           "include": {
+            "description": "Patterns that select the dataset's files, matched against manifest paths relative to the dataset root; every file when there are none. The dialect: ** crosses /; * and ? stay inside one path segment; [abc], [a-c] and [!abc] are character classes; matching is case-sensitive; there are no escapes. A matcher MUST run in time linear in the pattern's length times the path's length (no backtracking).",
             "type": "array",
             "maxItems": 64,
             "items": {

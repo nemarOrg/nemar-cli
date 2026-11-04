@@ -39,12 +39,16 @@
 
 import { z } from "zod";
 import {
+  COMPUTE_ARGS_DESCRIPTION,
+  COMPUTE_COMMAND_DESCRIPTION,
   COMPUTE_DATASET_ID_RE,
   COMPUTE_DATA_TAG_MAX,
   COMPUTE_DATA_TAG_RE,
   COMPUTE_DOT_SEGMENT_RE,
+  COMPUTE_ENTRY_DESCRIPTION,
   COMPUTE_IMAGE_DIGEST_RE,
   COMPUTE_IMAGE_REF_RE,
+  COMPUTE_INCLUDE_DESCRIPTION,
   COMPUTE_JOB_ID_RE,
   COMPUTE_MAX_OUTPUT_FILES,
   COMPUTE_PATH_SEGMENT,
@@ -87,6 +91,8 @@ const JOB_TOKEN_RE = /^[A-Za-z0-9_-]{16,256}$/;
  * {@link sifFileNameForDigest}.
  */
 const SIF_FILE_RE = /^[0-9a-f]{64}\.sif$/;
+/** What the entry and command descriptions add in the launch specification. */
+const EXACTLY_ONE = " Exactly one of entry and command is present.";
 const SIF_FORM_MESSAGE = "the image file is not <64 lowercase hex>.sif";
 const SIF_NAMED_MESSAGE = "the image file is not the one named for the image digest";
 /** UTC, as the presigning calls write it; the shape is checked, not the calendar. */
@@ -117,11 +123,16 @@ export const LaunchSpecSchema = z
     /** The NEMAR job id, which is also the prefix of the job's keys. */
     job_id: z.string().regex(COMPUTE_JOB_ID_RE),
     runtime: z.enum(LAUNCH_RUNTIMES),
-    /** A path inside the bundle. */
-    entry: relativePath(240).optional(),
-    /** An argument vector for an image job, run as given. */
-    command: z.array(z.string().min(1).max(1024)).min(1).max(64).optional(),
-    args: z.array(z.string().max(1024)).max(64),
+    entry: relativePath(240)
+      .optional()
+      .describe(COMPUTE_ENTRY_DESCRIPTION + EXACTLY_ONE),
+    command: z
+      .array(z.string().min(1).max(1024))
+      .min(1)
+      .max(64)
+      .optional()
+      .describe(COMPUTE_COMMAND_DESCRIPTION + EXACTLY_ONE),
+    args: z.array(z.string().max(1024)).max(64).describe(COMPUTE_ARGS_DESCRIPTION),
     /** The archive's own digest and size; the launcher is given no URL and asks the Worker. */
     bundle: z
       .object({ sha256: z.string().regex(COMPUTE_SHA256_RE), size: safeInt(1) })
@@ -134,7 +145,11 @@ export const LaunchSpecSchema = z
             id: z.string().regex(COMPUTE_DATASET_ID_RE),
             /** The data-plane tag: `latest` or `v<major>.<minor>.<patch>`, as `dataTagForVersion` makes it. */
             version: z.string().max(COMPUTE_DATA_TAG_MAX).regex(COMPUTE_DATA_TAG_RE),
-            include: z.array(computeGlobSchema).max(64).optional(),
+            include: z
+              .array(computeGlobSchema)
+              .max(64)
+              .optional()
+              .describe(COMPUTE_INCLUDE_DESCRIPTION),
           })
           .strict(),
       )
