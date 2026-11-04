@@ -175,7 +175,19 @@ The full rules are `AGENTS.md`, `.rules/` and the ADRs; these are the ones this 
 
 - [ ] Send the design page to the SDSC colleague and collect answers to its section 12; ask for the dev and production tenants.
 - [x] The four private Cloudflare R2 buckets exist (created 2026-11-04, location hint western North America; compute storage is R2, not AWS): `nemar-compute-records` and `nemar-compute-results` for production, `nemar-compute-records-dev` and `nemar-compute-results-dev` for dev. Records: bucket lock rules `records/` 2,557 days (7 years) and `logs/` 366 days in production, 1 day each in dev so tests can clean up; lifecycle rules deleting `incoming/` after 2 days and aborting incomplete multipart uploads after 1 day. Results: lifecycle rule deleting objects after 30 days and aborting incomplete multipart uploads after 1 day. Check them with `bunx cfman wrangler --account sccn -- r2 bucket lock list <bucket>` and `... r2 bucket lifecycle list <bucket>`.
-- [ ] Create one R2 API token with Object Read & Write on the four compute buckets (the dashboard's R2 API tokens page; wrangler cannot make one) and store it in Infisical (project `nemar`, folder `/backend/compute`, environments `dev` and `prod`; the folder exists and already holds `COMPUTE_R2_S3_ENDPOINT`) as `COMPUTE_R2_ACCESS_KEY_ID` and `COMPUTE_R2_SECRET_ACCESS_KEY`. Then copy all three into the Worker secrets of production and dev, for example `infisical secrets get COMPUTE_R2_ACCESS_KEY_ID --env prod --path /backend/compute --plain --silent | tr -d '\n' | bunx cfman wrangler --account sccn secret put COMPUTE_R2_ACCESS_KEY_ID -c wrangler-sccn.toml` from `backend/` (add `--env dev` for dev). Later compute secrets (Tapis credentials, the ACCESS attributes key, `OIDC_SECRET`) go in the same folder. No AWS bucket or IAM user is needed for compute.
+- [ ] Create two R2 API tokens in the Cloudflare dashboard (R2, Manage API tokens), each with Object Read & Write: one on `nemar-compute-records` and `nemar-compute-results` for production, one on the two `-dev` buckets for dev, so dev and production never share a credential. Store each pair in Infisical (project `nemar`, folder `/backend/compute`; the folder exists in `dev` and `prod` and already holds `COMPUTE_R2_S3_ENDPOINT`) as `COMPUTE_R2_ACCESS_KEY_ID` and `COMPUTE_R2_SECRET_ACCESS_KEY`, using the web interface so the values never reach shell history. Then copy the three values into the Worker secrets. Two traps: `wrangler secret put` without `--env dev` writes to the production Worker, whatever Infisical environment was read; and a pipe from an `infisical` call that found nothing uploads an empty secret and still reports success, so refuse an empty value:
+
+  ```bash
+  # from nemar-cli/backend; set E=prod (production Worker) or E=dev (dev Worker)
+  for n in COMPUTE_R2_ACCESS_KEY_ID COMPUTE_R2_SECRET_ACCESS_KEY COMPUTE_R2_S3_ENDPOINT; do
+    v=$(infisical secrets get "$n" --env "$E" --path /backend/compute --plain --silent | tr -d '\n')
+    if [ -z "$v" ]; then echo "$n is missing in Infisical $E"; continue; fi
+    if [ "$E" = dev ]; then printf %s "$v" | bunx cfman wrangler --account sccn secret put "$n" -c wrangler-sccn.toml --env dev
+    else printf %s "$v" | bunx cfman wrangler --account sccn secret put "$n" -c wrangler-sccn.toml; fi
+  done; unset v
+  ```
+
+  Later compute secrets (Tapis credentials, the ACCESS attributes key, `OIDC_SECRET`) go in the same folder and are copied the same way. No AWS bucket or IAM user is needed for compute.
 - [ ] Set the Tapis credentials as Worker secrets for dev and production once the tenant exists.
 - [ ] Generate the ACCESS gateway attributes key for the community account and set it as a Worker secret.
 - [ ] Take the policies and the official-request procedure (Epic D, phase 5) to UC San Diego counsel.
