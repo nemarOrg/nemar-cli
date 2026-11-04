@@ -25,10 +25,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import {
-  computeEnabled,
-  computePipelinesDispatchEnabled,
-} from "../src/services/compute-switches";
+import { computeEnabled, computePipelinesDispatchEnabled } from "../src/services/compute-switches";
 import type { Bindings } from "../src/types/bindings";
 
 type VarsBlock = Record<string, unknown>;
@@ -111,7 +108,9 @@ describe("computeEnabled", () => {
   test.each([["true"], [" 1"], ["1 "], ["01"], ["yes"], ["on"], ["0"], [""], ["TRUE"], ["1\n"]])(
     "is false for the switch %p",
     (value) => {
-      expect(computeEnabled(env({ ENVIRONMENT: "production", COMPUTE_ENABLED: value }))).toBe(false);
+      expect(computeEnabled(env({ ENVIRONMENT: "production", COMPUTE_ENABLED: value }))).toBe(
+        false,
+      );
       expect(computeEnabled(env({ ENVIRONMENT: "development", COMPUTE_ENABLED: value }))).toBe(
         false,
       );
@@ -160,7 +159,11 @@ describe("computePipelinesDispatchEnabled", () => {
     ).toBe(true);
     expect(
       computePipelinesDispatchEnabled(
-        env({ ENVIRONMENT: "development", COMPUTE_ENABLED: "1", COMPUTE_PIPELINES_DISPATCH_ENABLED: "1" }),
+        env({
+          ENVIRONMENT: "development",
+          COMPUTE_ENABLED: "1",
+          COMPUTE_PIPELINES_DISPATCH_ENABLED: "1",
+        }),
       ),
     ).toBe(true);
     // Its own switch alone does nothing: turning compute off stops dispatch whatever it says.
@@ -171,27 +174,28 @@ describe("computePipelinesDispatchEnabled", () => {
     ).toBe(false);
     expect(
       computePipelinesDispatchEnabled(
-        env({ ENVIRONMENT: "production", COMPUTE_ENABLED: "true", COMPUTE_PIPELINES_DISPATCH_ENABLED: "1" }),
+        env({
+          ENVIRONMENT: "production",
+          COMPUTE_ENABLED: "true",
+          COMPUTE_PIPELINES_DISPATCH_ENABLED: "1",
+        }),
       ),
     ).toBe(false);
     // Compute alone does not dispatch.
     expect(computePipelinesDispatchEnabled(env(on))).toBe(false);
   });
 
-  test.each([["true"], [" 1"], ["yes"], [""], ["0"]])(
-    "is false for its own switch %p",
-    (value) => {
-      expect(
-        computePipelinesDispatchEnabled(
-          env({
-            ENVIRONMENT: "production",
-            COMPUTE_ENABLED: "1",
-            COMPUTE_PIPELINES_DISPATCH_ENABLED: value,
-          }),
-        ),
-      ).toBe(false);
-    },
-  );
+  test.each([["true"], [" 1"], ["yes"], [""], ["0"]])("is false for its own switch %p", (value) => {
+    expect(
+      computePipelinesDispatchEnabled(
+        env({
+          ENVIRONMENT: "production",
+          COMPUTE_ENABLED: "1",
+          COMPUTE_PIPELINES_DISPATCH_ENABLED: value,
+        }),
+      ),
+    ).toBe(false);
+  });
 
   test("is false outside production and development whatever both switches say", () => {
     for (const environment of [undefined, "staging", "test", "Production"]) {
