@@ -223,7 +223,9 @@ export const DOCS_MINT_CONSUME_SQL = `DELETE FROM docs_grants
 /**
  * Revoke every docs session belonging to one account. Binds: userId.
  *
- * THREE CALLERS: `/auth/logout`, an admin role demotion, and
+ * THREE CALLERS: `/auth/logout` (which runs it once for EACH distinct account behind
+ * every session cookie the request carries, under either name, so it is still one
+ * caller), an admin role demotion, and
  * {@link revokeDocsCredentials} below, which runs after an API key is revoked
  * because a docs session can be minted from a key
  * (`POST /auth/docs/cli-session`). Without it, signing out of nemar.org
@@ -253,7 +255,9 @@ export const DOCS_REVOKE_ALL_SQL = `UPDATE web_sessions
  * still create access, not only the access that exists.
  *
  * FIVE CALLERS, and the count is the point: every path that ends or downgrades
- * this credential runs this statement -- `/auth/logout`, `finalizeRevocation`, a
+ * this credential runs this statement -- `/auth/logout` (once per distinct account
+ * behind every session cookie the request carries, still one caller),
+ * `finalizeRevocation`, a
  * role demotion, the tombstone cascade (`tombstoneUserCascade`, the one
  * function both the owner-only soft delete and the scheduled sweep of
  * live-test accounts run, so it counts once), and {@link revokeDocsCredentials}

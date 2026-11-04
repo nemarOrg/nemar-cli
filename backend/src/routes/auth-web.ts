@@ -746,9 +746,16 @@ authWebRoutes.post("/logout", webSessionMiddleware, async (c) => {
   // legacy one for different sessions during the window).
   const cookieIds = allSessionCookieValues(c.req.header("Cookie"));
 
-  // WHOSE ACCOUNT THIS IS, RESOLVED BEFORE ANYTHING IS REVOKED.
+  // WHOSE ACCOUNTS THESE ARE, RESOLVED BEFORE ANYTHING IS REVOKED, EVERY ONE OF THEM.
   //
-  // Not from `webUser`, because that exists only while the app session is live:
+  // Each carried cookie can belong to a different account, and the app session behind each is
+  // revoked below, so the docs and private-site sessions and grants of EACH account have to end
+  // with it. Following only one account (the first that resolved) leaves the others' app sessions
+  // revoked and the rest of their credentials live, the half-done state the rule that revocation
+  // cascades to every linked credential forbids. A value that names no account is skipped and the
+  // others still cascade; an account named twice is revoked once.
+  //
+  // Not from `webUser` alone, because that exists only while the app session is live:
   // a docs session runs eight hours from its mint and a non-remember app session
   // 24 hours from sign-in, so the windows do not nest, and review found sign-out
   // with a lapsed app cookie answering `ok`, clearing the cookie, and leaving
@@ -757,11 +764,12 @@ authWebRoutes.post("/logout", webSessionMiddleware, async (c) => {
   // And before the revoke, because `userIdForCookieId` keeps `revoked_at IS
   // NULL` -- so that a cookie value which has already been signed out confers
   // nothing, including the power to revoke somebody's later session.
-  let userId = c.var.webUser?.id ?? null;
+  const userIds = new Set<number>();
+  if (c.var.webUser?.id) userIds.add(c.var.webUser.id);
   for (const id of cookieIds) {
-    if (userId) break;
     try {
-      userId = await userIdForCookieId(c.env, id);
+      const resolved = await userIdForCookieId(c.env, id);
+      if (resolved) userIds.add(resolved);
     } catch (err) {
       console.error("[auth-web] /logout: could not resolve account for docs revoke", err);
     }
@@ -792,7 +800,7 @@ authWebRoutes.post("/logout", webSessionMiddleware, async (c) => {
   try {
     const statements = [];
     for (const id of cookieIds) statements.push(await revokeSessionStatement(c.env, id));
-    if (userId) {
+    for (const userId of userIds) {
       statements.push(c.env.DB.prepare(DOCS_REVOKE_ALL_SQL).bind(userId));
       // Outstanding GRANTS die too, not just live sessions. A grant is spendable
       // for 60 seconds by whoever holds the code, and the mint deliberately
@@ -815,7 +823,7 @@ authWebRoutes.post("/logout", webSessionMiddleware, async (c) => {
     // The account id is what an operator needs to finish the job by hand:
     // the batch is all-or-nothing, so nothing of it landed.
     console.error(
-      `[auth-web] /logout: revoke failed for user ${userId ?? "unresolved"}; clearing cookie anyway`,
+      `[auth-web] /logout: revoke failed for user(s) ${[...userIds].join(", ") || "unresolved"}; clearing cookie anyway`,
       err,
     );
   }
