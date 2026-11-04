@@ -11,6 +11,10 @@
  * enumerations are read back against these constants, and a differential corpus is judged by both.
  * Whichever repository's phase merges first writes the file; the other copies it, never edits it.
  *
+ * Like `./compute.ts`, this file is strict on purpose and exempted by name in
+ * `test/contract-schemas.test.ts`: the Worker writes the launch specification, nothing parses it
+ * as a response, and an unknown key is a bug to refuse rather than strip.
+ *
  * What the launch specification does NOT carry, on purpose: a URL for the code bundle (the
  * launcher asks the Worker for a presigned address with `job_token`), any storage credential, and
  * the user's identity. The token travels in a header, never a URL.

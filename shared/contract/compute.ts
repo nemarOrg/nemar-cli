@@ -9,6 +9,12 @@
  * 2 GB of memory per core, or one GPU-hour. Every `*Milli` figure and every `*_milli` column is
  * such an integer; nothing here is, or may become, a floating-point amount.
  *
+ * THESE SCHEMAS ARE STRICT ON PURPOSE (`.strict()`, exempted by name in
+ * `test/contract-schemas.test.ts`): a job specification, an owner policy and the launcher's files
+ * are validated as they come in, or written by the Worker, and a mistyped key must be refused, not
+ * stripped. A schema a released CLI uses to parse a RESPONSE must never be strict (an old CLI
+ * would fail on a newer server's extra key); build that one lenient, in its own file.
+ *
  * NOTHING HERE WAS MEASURED AGAINST THE TENANT YET. The rate table, the `debug` ceilings and the
  * preempt basis below are the design's, unconfirmed with SDSC (design section 12, question 5);
  * each is marked where it is declared and stays marked until the first charge is compared with

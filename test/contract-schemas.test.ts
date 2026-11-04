@@ -10,7 +10,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import {
   NEUROSCHEMA_VERSION,
@@ -622,10 +622,26 @@ describe("old-CLI compatibility: no schema in the contract is strict", () => {
     expect((parsed as Record<string, unknown>).some_future_field).toBe("kept");
   });
 
-  test("no schema file under shared/contract calls .strict()", () => {
+  /**
+   * The compute gateway's documents (epic #2005 phase A1, ADR 0118) are strict ON PURPOSE: a job
+   * specification, an owner policy, a launch specification and the launcher's files are validated
+   * as they come IN, or written by the Worker itself, and a mistyped key in them must be refused
+   * rather than stripped. No released CLI parses them as a response. A schema that a CLI does use
+   * to parse a RESPONSE must still never be strict: build that one lenient, in its own file.
+   */
+  const STRICT_BY_DESIGN = new Set(["compute.ts", "compute-launch.ts"]);
+
+  test("no schema file under shared/contract calls .strict(), but the compute documents", () => {
     const files = readdirSync(CONTRACT_DIR, { recursive: true, encoding: "utf8" })
-      .filter((name) => name.endsWith(".ts"))
+      .filter((name) => name.endsWith(".ts") && !STRICT_BY_DESIGN.has(name))
       .map((name) => join(CONTRACT_DIR, name));
+    // Guards the exemption: a rename must not leave a silent hole, and each exempt file must
+    // really be one that needs it.
+    for (const name of STRICT_BY_DESIGN) {
+      const path = join(CONTRACT_DIR, name);
+      expect(existsSync(path), name).toBe(true);
+      expect(readFileSync(path, "utf8").includes(".strict("), name).toBe(true);
+    }
     // Guards the guard: a mistyped directory would scan nothing and pass.
     expect(files.length).toBeGreaterThan(5);
     const offenders = files.filter((file) => readFileSync(file, "utf8").includes(".strict("));
