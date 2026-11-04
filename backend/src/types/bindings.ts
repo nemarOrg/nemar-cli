@@ -77,6 +77,33 @@ export interface Bindings {
   COMPUTE_R2_SECRET_ACCESS_KEY?: string;
   COMPUTE_R2_S3_ENDPOINT?: string;
 
+  // The compute gateway's two dark switches (epic #2005 phase A4, ADR 0118 decision 8;
+  // services/compute-switches.ts). Each reads as on only when it is exactly "1", and compute only in
+  // exactly `production` or `development` (the dev Worker runs against its own Tapis tenant with its
+  // own credentials; every compute schedule stays production-only). Deliberately absent from every
+  // table of wrangler-sccn.toml, and compute-switches-flag.test.ts pins that: the owner turns them
+  // on in a reviewed change that edits that test. A Worker secret of the same name takes effect too,
+  // so `GET /admin/compute/status` is what says what the Worker reads.
+  COMPUTE_ENABLED?: string; // "1" lets compute run (production or development only)
+  COMPUTE_PIPELINES_DISPATCH_ENABLED?: string; // "1" lets NEMAR's own pipelines dispatch (needs COMPUTE_ENABLED)
+
+  // The Tapis tenant the compute gateway submits to (epic #2005 phase A4, services/tapis/config.ts).
+  // Worker secrets or owner-set variables, NEVER in wrangler-sccn.toml: a tenant name is not public.
+  // Dev and production use SEPARATE tenants' credentials, because dev D1 shares real users and the
+  // GitHub org. TAPIS_AUTH_STRATEGY picks how the Worker authenticates, with no code change:
+  //   "password": the account TAPIS_USERNAME / TAPIS_PASSWORD signs in with the password grant;
+  //   "service": TAPIS_SERVICE_TOKEN (a Tokens API service credential) mints a user token per
+  //              username, and TAPIS_USERNAME is then optional (the user `status` probes with).
+  TAPIS_BASE_URL?: string; // the tenant's base address, https, no path needed
+  TAPIS_TENANT_ID?: string;
+  TAPIS_AUTH_STRATEGY?: string; // "password" | "service"; anything else is unconfigured
+  TAPIS_USERNAME?: string;
+  TAPIS_PASSWORD?: string;
+  TAPIS_SERVICE_TOKEN?: string;
+  /** The key of the ACCESS gateway-attributes API (reporting every tenant job under a pseudonym);
+   *  only `GET /admin/compute/status` reads its presence in this phase. */
+  ACCESS_GATEWAY_API_KEY?: string;
+
   // Environment variables
   ENVIRONMENT: "production" | "development" | "staging" | "test";
   API_BASE_URL: string;

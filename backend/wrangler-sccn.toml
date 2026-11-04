@@ -459,6 +459,22 @@ OPENNEURO_MAINTAINER_EMAIL_ENABLED = "false"
 # - COMPUTE_R2_ACCESS_KEY_ID
 # - COMPUTE_R2_SECRET_ACCESS_KEY
 # - COMPUTE_R2_S3_ENDPOINT
+# Compute gateway Tapis connection (epic #2005 phase A4): Worker secrets or owner-set variables, names
+# only here, never a value, and never in a table of this file (a tenant name is not public;
+# compute-switches-flag.test.ts pins that). Dev and production use SEPARATE credentials, because dev D1
+# shares real users and the GitHub org. TAPIS_AUTH_STRATEGY is `password` (TAPIS_USERNAME and
+# TAPIS_PASSWORD) or `service` (TAPIS_SERVICE_TOKEN; TAPIS_USERNAME optional): selecting one is
+# configuration, not code. `nemar admin compute status` says whether they work.
+# - TAPIS_BASE_URL
+# - TAPIS_TENANT_ID
+# - TAPIS_AUTH_STRATEGY
+# - TAPIS_USERNAME
+# - TAPIS_PASSWORD
+# - TAPIS_SERVICE_TOKEN
+# - ACCESS_GATEWAY_API_KEY  (the ACCESS gateway-attributes API key; only its presence is read so far)
+# The compute switches COMPUTE_ENABLED and COMPUTE_PIPELINES_DISPATCH_ENABLED are dark: exactly "1" and
+# absent from every table of this file until the owner adds them in a reviewed change that edits
+# backend/test/compute-switches-flag.test.ts. Compute runs only in `production` and `development`.
 # GitHub App credentials (epic #432, in soak -- GITHUB_ADMIN_PAT is the active fallback while any of these are unset)
 # - GITHUB_APP_ID                              (GitHub App numeric ID; replaces PAT for API auth once Phase 5 lands)
 # - GITHUB_APP_PRIVATE_KEY                     (PKCS#8 PEM private key for JWT signing)
