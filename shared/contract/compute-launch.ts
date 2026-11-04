@@ -11,9 +11,14 @@
  * enumerations are read back against these constants, and a differential corpus is judged by both.
  * Whichever repository's phase merges first writes the file; the other copies it, never edits it.
  *
- * Like `./compute.ts`, this file is strict on purpose and exempted by name in
- * `test/contract-schemas.test.ts`: the Worker writes the launch specification, nothing parses it
- * as a response, and an unknown key is a bug to refuse rather than strip.
+ * REQUESTS AND DOCUMENTS ARE CLOSED, RESPONSES ARE OPEN. Like `./compute.ts`, this file is strict
+ * on purpose and exempted by name in `test/contract-schemas.test.ts`: the Worker writes the launch
+ * specification and the launcher's own files, and the outputs request is validated as it arrives,
+ * so an unknown key in any of them is a bug to refuse rather than strip. The two RESPONSES the
+ * launcher reads (`BundleResponseSchema`, `OutputsResponseSchema`) are `.passthrough()`: a launcher
+ * can run for 48 hours and must survive the Worker adding a key. Never parse a response with a
+ * strict schema, and never build a response schema from one (`.extend()`, `.pick()`); the
+ * classification test in `test/contract-schemas.test.ts` checks both by behaviour.
  *
  * What the launch specification does NOT carry, on purpose: a URL for the code bundle (the
  * launcher asks the Worker for a presigned address with `job_token`), any storage credential, and
@@ -184,10 +189,13 @@ export function encodeLaunchSpec(spec: unknown): string {
 const urlSchema = z.string().max(4096).regex(URL_RE);
 const timestampSchema = z.string().regex(TIMESTAMP_RE);
 
-/** `POST <api_base>/compute/jobs/<id>/bundle`: a short-lived presigned GET of the job's archive. */
+/**
+ * `POST <api_base>/compute/jobs/<id>/bundle`: a short-lived presigned GET of the job's archive.
+ * A response, so open: a reader ignores keys it does not know.
+ */
 export const BundleResponseSchema = z
   .object({ url: urlSchema, expires_at: timestampSchema })
-  .strict();
+  .passthrough();
 
 /**
  * `POST <api_base>/compute/jobs/<id>/outputs`: every output with its size and checksum, and the
@@ -223,7 +231,8 @@ export const OutputsRequestSchema = z
 
 /**
  * The answer: one presigned PUT address per file, for the path under `jobs/<id>/` (`outputs/...`
- * or `launcher/...`), valid until `expires_at`.
+ * or `launcher/...`), valid until `expires_at`. A response, so open at the top and in each upload:
+ * a reader ignores keys it does not know.
  */
 export const OutputsResponseSchema = z
   .object({
@@ -238,12 +247,12 @@ export const OutputsResponseSchema = z
               .refine((p) => !COMPUTE_DOT_SEGMENT_RE.test(p), { message: "no . or .. segments" }),
             url: urlSchema,
           })
-          .strict(),
+          .passthrough(),
       )
       .max(100_004),
     expires_at: timestampSchema,
   })
-  .strict();
+  .passthrough();
 
 // --- Where the launcher's files live in the results bucket -------------------------------------
 

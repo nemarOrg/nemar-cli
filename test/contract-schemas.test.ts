@@ -12,6 +12,9 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import { z } from "zod";
+import * as computeModule from "../shared/contract/compute";
+import * as launchModule from "../shared/contract/compute-launch";
 import {
   NEUROSCHEMA_VERSION,
   NO_SESSION_KEY,
@@ -628,8 +631,198 @@ describe("old-CLI compatibility: no schema in the contract is strict", () => {
    * as they come IN, or written by the Worker itself, and a mistyped key in them must be refused
    * rather than stripped. No released CLI parses them as a response. A schema that a CLI does use
    * to parse a RESPONSE must still never be strict: build that one lenient, in its own file.
+   *
+   * The two responses the launcher reads (`BundleResponseSchema`, `OutputsResponseSchema`) are in
+   * those files but are OPEN (`.passthrough()`): a launcher that runs for 48 hours must survive the
+   * Worker adding a key. The next two tests keep that line where it is, by behaviour and by import.
    */
   const STRICT_BY_DESIGN = new Set(["compute.ts", "compute-launch.ts"]);
+
+  const HEX = "a".repeat(64);
+  const JOB = "job_0123456789abcdef01234567";
+  const CLOSED = ["strict", "lenient"] as const;
+  /**
+   * Every object schema the two compute files export, a valid document for it, and which side of
+   * the line it is on. Checked BY BEHAVIOUR below: an unknown key is refused by a strict schema and
+   * kept by a lenient one. A new exported object schema that is not in this table fails the test, so
+   * it is classified on purpose rather than by accident.
+   */
+  const CLASSIFIED: Record<string, { side: (typeof CLOSED)[number]; valid: () => unknown }> = {
+    JobSpecSchema: {
+      side: "strict",
+      valid: () => ({
+        name: "x",
+        runtime: "python",
+        entry: "run.py",
+        bundle: { size: 1, sha256: HEX },
+        partition: "shared",
+        minutes: 5,
+      }),
+    },
+    ComputePolicySchema: {
+      side: "strict",
+      valid: () => ({ ...computeModule.DEFAULT_COMPUTE_POLICY }),
+    },
+    ComputeCeilingSchema: {
+      side: "strict",
+      valid: () => ({ maxNodes: 1, maxCoresPerNode: 1, maxGpusPerNode: 0, maxMinutes: 1 }),
+    },
+    ComputeClientCapsSchema: {
+      side: "strict",
+      valid: () => ({ maxOpenReservations: 1, maxReservedMilliPerDay: 1 }),
+    },
+    ResultManifestSchema: { side: "strict", valid: () => ({ job_id: JOB, files: [] }) },
+    LauncherResultSchema: {
+      side: "strict",
+      valid: () => ({
+        job_id: JOB,
+        failure_code: null,
+        detail: null,
+        exit_number: 0,
+        entry_exit_code: 0,
+      }),
+    },
+    LauncherProvenanceSchema: {
+      side: "strict",
+      valid: () => ({
+        job_id: JOB,
+        launch_spec_digest: HEX,
+        bundle_digest: null,
+        image: { uri: "docker://ghcr.io/example/runtime", digest: `sha256:${HEX}` },
+        runtime_version: "3.12",
+        staging: [],
+        timings: {},
+        slurm_job_id: null,
+        entry_exit_code: null,
+      }),
+    },
+    LaunchSpecSchema: {
+      side: "strict",
+      valid: () => ({
+        job_id: JOB,
+        runtime: "python",
+        entry: "run.py",
+        args: [],
+        bundle: { sha256: HEX, size: 1 },
+        datasets: [],
+        api_base: "https://api.example.test",
+        image: {
+          uri: `docker://ghcr.io/example/runtime@sha256:${HEX}`,
+          digest: `sha256:${HEX}`,
+          sif: "runtime.sif",
+        },
+        env: {},
+        resources: { gpus: 0 },
+        limits: { max_files: 1, max_total_bytes: 1 },
+        job_token: "t".repeat(32),
+      }),
+    },
+    OutputsRequestSchema: {
+      side: "strict",
+      valid: () => ({
+        outputs: [],
+        launcher: ["result.json", "provenance.json", "manifest.json", "launcher.log"].map(
+          (name) => ({
+            name,
+            size: 1,
+          }),
+        ),
+      }),
+    },
+    BundleResponseSchema: {
+      side: "lenient",
+      valid: () => ({ url: "https://r2.example.test/b", expires_at: "2026-11-03T12:00:00Z" }),
+    },
+    OutputsResponseSchema: {
+      side: "lenient",
+      valid: () => ({
+        uploads: [{ path: "outputs/a", url: "https://r2.example.test/o" }],
+        expires_at: "2026-11-03T13:00:00Z",
+      }),
+    },
+  };
+
+  /** A zod object schema, possibly wrapped in effects (a `superRefine`). */
+  function isObjectSchema(value: unknown): boolean {
+    let current: unknown = value;
+    while (current instanceof z.ZodType) {
+      const def = current._def as { typeName?: string; schema?: unknown };
+      if (def.typeName === "ZodObject") return true;
+      if (def.typeName !== "ZodEffects") return false;
+      current = def.schema;
+    }
+    return false;
+  }
+
+  test("every object schema the compute files export is classified, and behaves as classified", () => {
+    const exported = Object.entries({ ...computeModule, ...launchModule }).filter(([, value]) =>
+      isObjectSchema(value),
+    );
+    // Guards the guard: the walk found the schemas, not nothing.
+    expect(exported.length).toBeGreaterThanOrEqual(11);
+    expect(exported.map(([name]) => name).sort()).toEqual(Object.keys(CLASSIFIED).sort());
+    for (const [name, schema] of exported) {
+      const { side, valid } = CLASSIFIED[name];
+      const parse = (doc: unknown) => (schema as z.ZodTypeAny).safeParse(doc);
+      expect(parse(valid()).success, `${name}: its valid document`).toBe(true);
+      const withExtra = parse({ ...(valid() as object), zz_unknown_key: 1 });
+      expect(withExtra.success, `${name}: an unknown key`).toBe(side === "lenient");
+    }
+  });
+
+  test("the open responses are open all the way down, and the closed requests closed all the way down", () => {
+    const upload = { path: "outputs/a", url: "https://r2.example.test/o", extra: 1 };
+    expect(
+      launchModule.OutputsResponseSchema.safeParse({
+        uploads: [upload],
+        expires_at: "2026-11-03T13:00:00Z",
+      }).success,
+    ).toBe(true);
+    const request = CLASSIFIED.OutputsRequestSchema.valid() as {
+      outputs: unknown[];
+      launcher: object[];
+    };
+    expect(
+      launchModule.OutputsRequestSchema.safeParse({
+        ...request,
+        outputs: [{ path: "a", size: 1, sha256: HEX, extra: 1 }],
+      }).success,
+    ).toBe(false);
+    expect(
+      launchModule.OutputsRequestSchema.safeParse({
+        ...request,
+        launcher: request.launcher.map((f) => ({ ...f, extra: 1 })),
+      }).success,
+    ).toBe(false);
+  });
+
+  /** The names a response schema must never be built from. */
+  const STRICT_NAMES = Object.entries(CLASSIFIED)
+    .filter(([, c]) => c.side === "strict")
+    .map(([name]) => name);
+
+  test("no other file under shared/contract imports a strict compute schema", () => {
+    expect(STRICT_NAMES).toHaveLength(9);
+    const files = readdirSync(CONTRACT_DIR, { recursive: true, encoding: "utf8" })
+      .filter((name) => name.endsWith(".ts") && !STRICT_BY_DESIGN.has(name))
+      .map((name) => ({ name, text: readFileSync(join(CONTRACT_DIR, name), "utf8") }));
+    expect(files.length).toBeGreaterThan(5);
+    const offenders: string[] = [];
+    const clause =
+      /(?:import|export)\s+(type\s+)?(\{[^}]*\}|\*(?:\s+as\s+\w+)?)\s+from\s+["']([^"']+)["']/g;
+    for (const { name, text } of files) {
+      for (const match of text.matchAll(clause)) {
+        const [, , what, from] = match;
+        if (!/(^|\/)compute(-launch)?(\.js)?$/.test(from)) continue;
+        // index.ts re-exports the contract with `export *`; nothing else may take a namespace.
+        if (name === "index.ts" && what === "*") continue;
+        if (what.startsWith("*") || STRICT_NAMES.some((s) => new RegExp(`\\b${s}\\b`).test(what))) {
+          offenders.push(`${name} -> ${from}`);
+        }
+      }
+    }
+    expect(offenders, "Build a response schema in its own file, from nothing strict.").toEqual([]);
+  });
 
   test("no schema file under shared/contract calls .strict(), but the compute documents", () => {
     const files = readdirSync(CONTRACT_DIR, { recursive: true, encoding: "utf8" })

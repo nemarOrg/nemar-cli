@@ -1666,10 +1666,21 @@ describe("the route shapes in the schema's $defs", () => {
       { url: "https://r2.example.test/b", expires_at: "2026-11-03" },
       false,
     ],
+    // A response is open: a launcher that runs for 48 hours must survive the Worker adding a key.
     [
       "an extra key",
       { url: "https://r2.example.test/b", expires_at: "2026-11-03T12:00:00Z", x: 1 },
-      false,
+      true,
+    ],
+    [
+      "an extra key of any shape",
+      {
+        url: "https://r2.example.test/b",
+        expires_at: "2026-11-03T12:00:00Z",
+        retry_after: { seconds: 5 },
+        notes: ["a"],
+      },
+      true,
     ],
   ];
 
@@ -1763,6 +1774,24 @@ describe("the route shapes in the schema's $defs", () => {
       true,
     ],
     ["no uploads", { uploads: [], expires_at: "2026-11-03T13:00:00Z" }, true],
+    [
+      "an extra key at the top",
+      { uploads: [], expires_at: "2026-11-03T13:00:00Z", request_id: "r1" },
+      true,
+    ],
+    [
+      "an extra key in an upload",
+      {
+        uploads: [{ path: "outputs/a", url: "https://r2.example.test/o", headers: { a: "b" } }],
+        expires_at: "2026-11-03T13:00:00Z",
+      },
+      true,
+    ],
+    [
+      "an upload that lacks a required key, whatever else it has",
+      { uploads: [{ path: "outputs/a", note: 1 }], expires_at: "2026-11-03T13:00:00Z" },
+      false,
+    ],
     [
       "a path under neither directory",
       {
@@ -2060,7 +2089,14 @@ describe("the JSON Schema file read back against the constants it mirrors", () =
     expect(JSON.stringify(schema).split('"pattern"').length).toBeGreaterThan(30);
   });
 
-  test("every object in it is closed", () => {
+  // The three objects a launcher only ever READS: the two responses and each upload in the second.
+  const OPEN_BY_DESIGN = [
+    "$.$defs.bundle_response",
+    "$.$defs.outputs_response",
+    "$.$defs.outputs_response.properties.uploads.items",
+  ];
+
+  test("every object in it is closed, except the three a launcher only reads", () => {
     const open: string[] = [];
     const walk = (node: unknown, where: string) => {
       if (Array.isArray(node)) return node.forEach((n, i) => walk(n, `${where}[${i}]`));
@@ -2072,7 +2108,24 @@ describe("the JSON Schema file read back against the constants it mirrors", () =
       }
     };
     walk(schema, "$");
-    expect(open).toEqual([]);
+    expect(open.sort()).toEqual([...OPEN_BY_DESIGN].sort());
+  });
+
+  test("the three open objects say so, and none of them forbids an unknown key", () => {
+    const at = (path: string): Doc =>
+      path
+        .split(".")
+        .slice(1)
+        .reduce<Doc>((node, key) => node[key], schema);
+    for (const path of OPEN_BY_DESIGN) {
+      const node = at(path);
+      expect(node.additionalProperties, path).toBeUndefined();
+      expect(String(node.description), path).toMatch(/ignores unknown keys/);
+    }
+    // And no closed definition is among them: the requests and documents stay strict.
+    for (const name of ["outputs_request", "result", "manifest", "provenance"]) {
+      expect(schema.$defs[name].additionalProperties, name).toBe(false);
+    }
   });
 });
 
