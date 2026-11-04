@@ -43,6 +43,7 @@ Trust these for how things work today.
 | [validated_workflows.md](https://docs.nemar.org/admin/operations/validated-workflows/) | Workflows proven by prototype, with the gotchas. The git-annex and staging-to-final recipes live here. | private |
 | [release-safety-playbook.md](release-safety-playbook.md) | Environments, promotion path, pre-release checks. | public |
 | [recover-runbook.md](recover-runbook.md) | Recovering 0-byte imports (epic #967 Phase 5). | public |
+| [compute-program/README.md](compute-program/README.md) | The compute program's roadmap and driver playbook: epics #2005, #2014, #2021, nemarOrg/nemar-process#1 and nemarOrg/website#493, the order, the roles and models, the loop for each phase, and when to escalate. [`compute-program/implementation-notes.md`](compute-program/implementation-notes.md) says where each pattern lives in the code. | public |
 | [access_control.md](access_control.md) | How collaborator-based access is implemented. | public |
 | [dataset_workflow.md](dataset_workflow.md) | Dataset lifecycle: IDs, upload, download, versioning. | public |
 | [pr_architecture.md](pr_architecture.md) | PR + staging mechanics. **The branch-protection payload it described is superseded**; see ADR 0001. | public |
