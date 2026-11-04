@@ -20,7 +20,11 @@ import {
   headerToSpecFields,
   parseJobHeader,
 } from "../shared/compute-header";
-import { JobSpecSchema } from "../shared/contract/compute";
+import {
+  COMPUTE_DATASET_ID_RE,
+  COMPUTE_DATASET_VERSION_RE,
+  JobSpecSchema,
+} from "../shared/contract/compute";
 
 /** One header body that uses every key, with each syntax the subset allows. */
 const BODY = [
@@ -840,6 +844,106 @@ describe("headerToSpecFields", () => {
       bundle: { size: 1, sha256: "a".repeat(64) },
     });
     expect(spec.success).toBe(false);
+  });
+});
+
+describe("an unknown kind is refused loudly", () => {
+  test("a kind that is not python, matlab or toml throws RangeError, whatever the text", () => {
+    for (const kind of ["ruby", "", "Python", "PYTHON", "toml ", "constructor", "__proto__"]) {
+      expect(
+        () => parseJobHeader("# /// nemar\n# cores = 4\n# ///\n", kind as never),
+        kind,
+      ).toThrow(RangeError);
+      expect(() => parseJobHeader("", kind as never), kind).toThrow(RangeError);
+    }
+    expect(() => parseJobHeader("x", undefined as never)).toThrow(RangeError);
+    expect(() => parseJobHeader("x", null as never)).toThrow(RangeError);
+  });
+});
+
+describe("the header's own dataset grammar agrees with the contract's", () => {
+  // The header module imports nothing, so it carries its own copy of the dataset id and version
+  // grammar. This is the check that the copy has not drifted from COMPUTE_DATASET_ID_RE and
+  // COMPUTE_DATASET_VERSION_RE, over inputs on both sides of every edge.
+  const IDS = [
+    "nm000104",
+    "on000001",
+    "xx099900",
+    "ds002718",
+    "ab123456",
+    "zz000000",
+    "NM000104",
+    "Nm000104",
+    "nM000104",
+    "n0000104",
+    "nm00010",
+    "nm0001044",
+    "nm00010a",
+    "nm 00104",
+    " nm000104",
+    "nm000104 ",
+    "nm000104\n",
+    "\nnm000104",
+    "n\u00e9000104",
+    "nm00010\u0664",
+    "nm00010\uff14",
+    "",
+    "nm",
+    "123456",
+    "nm-000104",
+    "nm_000104",
+  ];
+  const VERSIONS = [
+    "1",
+    "1.0.2",
+    "v2.0.0",
+    "v2.0.0+build.5",
+    "a",
+    "A",
+    "0",
+    "1-rc.1",
+    "1_2",
+    "1+2",
+    `a${"b".repeat(63)}`,
+    `a${"b".repeat(64)}`,
+    "",
+    ".1",
+    "-1",
+    "_1",
+    "+1",
+    "1 2",
+    " 1",
+    "1 ",
+    "1\n",
+    "\n1",
+    "1@2",
+    "1/2",
+    "..",
+    "1\u00e9",
+    "\u00e91",
+    "1\\2",
+  ];
+
+  test("an id is accepted by the header exactly when the contract's pattern accepts it", () => {
+    for (const id of IDS) {
+      const header = headerToSpecFields({ datasets: [id] }).ok;
+      expect(header, JSON.stringify(id)).toBe(COMPUTE_DATASET_ID_RE.test(id));
+    }
+    expect(IDS.filter((id) => COMPUTE_DATASET_ID_RE.test(id)).length).toBeGreaterThanOrEqual(6);
+    expect(IDS.filter((id) => !COMPUTE_DATASET_ID_RE.test(id)).length).toBeGreaterThanOrEqual(15);
+  });
+
+  test("a version is accepted by the header exactly when the contract's pattern accepts it", () => {
+    for (const version of VERSIONS) {
+      const header = headerToSpecFields({ datasets: [`nm000104@${version}`] }).ok;
+      expect(header, JSON.stringify(version)).toBe(COMPUTE_DATASET_VERSION_RE.test(version));
+    }
+    expect(
+      VERSIONS.filter((v) => COMPUTE_DATASET_VERSION_RE.test(v)).length,
+    ).toBeGreaterThanOrEqual(8);
+    expect(
+      VERSIONS.filter((v) => !COMPUTE_DATASET_VERSION_RE.test(v)).length,
+    ).toBeGreaterThanOrEqual(12);
   });
 });
 

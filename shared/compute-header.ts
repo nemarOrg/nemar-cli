@@ -359,8 +359,15 @@ function byteLength(text: string): number {
  * block), `matlab` (a `% /// nemar` block) or `toml` (a whole `nemar-job.toml`). Returns the
  * fields and the line each was written on, or every error with its physical line, in line order;
  * a header with any error yields no fields at all.
+ *
+ * The 256 KiB cap ({@link HEADER_MAX_BYTES}) applies to the whole input, not to the block: a
+ * caller with a large source file passes a bounded prefix, where the block has to be anyway. A
+ * `kind` that is none of the three throws RangeError rather than reading some other comment style.
  */
 export function parseJobHeader(text: string, kind: HeaderKind): HeaderResult {
+  if (kind !== "python" && kind !== "matlab" && kind !== "toml") {
+    throw new RangeError("unknown header kind");
+  }
   if (byteLength(text) > HEADER_MAX_BYTES) {
     return { ok: false, errors: [{ line: 1, code: "input_too_large" }] };
   }
