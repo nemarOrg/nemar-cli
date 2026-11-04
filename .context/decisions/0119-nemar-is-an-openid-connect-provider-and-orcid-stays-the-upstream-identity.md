@@ -91,7 +91,8 @@ Twelve rules inside that, each of which reopens a hole if reversed.
 8. **Clients are registered by the owner, and by no one else.**
    A client carries a name, exact redirect addresses (no wildcards), allowed scopes and grants, its sign-in rule, its consent mode, its back-channel logout address, and caps on open reservations and on service units reserved per day.
    A client the owner marks first-party skips the consent screen; any other client asks once per set of scopes.
-   **First-party is refused for a client with a partner-host redirect address**, at registration and again at every authorization, so a partner can never skip consent.
+   **A client is first-party only when every one of its redirect addresses is on a NEMAR web origin** (`isNemarWebOrigin`, which a partner host never is, rule 9): first-party is refused for a client with any redirect address on a partner host or on any other host that NEMAR does not run, at registration and again at every authorization, so a partner or a third party can never skip consent.
+   A client with any other redirect address is third-party and always shows the consent page.
    `compute.nemar.org` is not first-party: its consent screen says it can reserve and spend the person's compute time.
 9. **A partner subdomain is not trusted as a NEMAR origin.**
    `shared/partner-hosts.ts` lists the partner hosts (today `compute.nemar.org`) and `isPartnerHost` matches a host or any subdomain of one.
