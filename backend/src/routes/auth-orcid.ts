@@ -917,7 +917,10 @@ authOrcidRoutes.get("/orcid/callback", webSessionMiddleware, async (c) => {
       );
       await touchIdentityLogin(c.env, orcid);
       afterResponse(c, refreshNameThenAssignUsername(c.env, user.id, orcid, "orcid_signin"));
-      const session = sessionCookieHeaders(c.env, cookieIdRaw, { maxAgeSeconds });
+      const session = sessionCookieHeaders(c.env, cookieIdRaw, {
+        maxAgeSeconds,
+        cookieHeader: c.req.header("Cookie"),
+      });
       const next = state.next !== "/" ? state.next : "/dashboard";
       return redirect(`${frontend}${next}`, [...clearState, ...session]);
     }
@@ -1123,7 +1126,10 @@ authOrcidRoutes.post("/orcid/finalize", zValidator("json", finalizeSchema), asyn
       "orcid",
     );
     clearPending();
-    for (const cookie of sessionCookieHeaders(c.env, cookieIdRaw, { maxAgeSeconds })) {
+    for (const cookie of sessionCookieHeaders(c.env, cookieIdRaw, {
+      maxAgeSeconds,
+      cookieHeader: c.req.header("Cookie"),
+    })) {
       c.header("Set-Cookie", cookie, { append: true });
     }
     // Canonical name from ORCID, after the response (best-effort; never blocks

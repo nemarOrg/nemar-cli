@@ -1,25 +1,29 @@
 /**
  * The app session cookie's name (epic #2014 phase #2015, ADR 0119 decision 10).
  *
- * `nemar_session` is host-scoped to `app.nemar.org` by a `Domain` attribute, and nothing stops
- * another `nemar.org` subdomain from planting a cookie of the same name for the whole zone. A
- * `__Host-` cookie cannot carry a `Domain` and the browser refuses to let any other host set it,
- * so the session moves to `__Host-nemar_session`. The move is a window, not a switch: the writer
- * is behind `HOST_PREFIXED_SESSION_COOKIE` and the readers accept both names, so a session minted
- * before the flag is still a session after it.
+ * Every cookie the API trusts to authenticate or link a session is host-only and `__Host-`
+ * prefixed, because a page on a sibling host can set a cookie for the parent domain and cannot
+ * set a `__Host-` one. `nemar_session` is scoped to `app.nemar.org` by a `Domain` attribute, so
+ * the session moves to `__Host-nemar_session`. The move is a window, not a switch: the writer is
+ * behind `HOST_PREFIXED_SESSION_COOKIE` and the readers accept both names, so a session minted
+ * before the flag is still a session after it, and the flag can be turned back off.
  *
- * Everything here goes through the real routes and the real middleware over a real database. Names
- * and attribute strings are literals on purpose: a test that imported the constants would agree
- * with whatever they said.
+ * Everything here goes through the real routes and the real middleware over a real database.
+ * Names and attribute strings are literals on purpose: a test that imported the constants would
+ * agree with whatever they said.
  *
  *   WRITERS (five): `POST /auth/code/verify`, `POST /auth/logout`, the `GET /auth/me` slide,
  *   `GET /auth/orcid/callback` and `POST /auth/orcid/finalize`. With the flag off each sends
- *   today's header byte for byte; with it on each sends the new name with no `Domain`, then the
- *   legacy clears.
+ *   today's header byte for byte (plus a clear of a `__Host-` cookie only when the request
+ *   carried one); with it on each sends the new name with no `Domain`, then the legacy clears.
  *
  *   READERS (two): `webSessionMiddleware` (`/auth/me`) and `resolveCookieUser` inside
  *   `authMiddleware` (`/users/me`). Both take the new name first, fall back to the legacy one only
- *   when the new one is ABSENT, and never rescue an invalid new cookie with a valid legacy one.
+ *   when the new one is ABSENT, never rescue an invalid new cookie with a valid legacy one, and
+ *   treat a header with more than one `__Host-nemar_session` as no session.
+ *
+ *   A `__Host-` cookie is minted only by a sign-in: the expiry slide never mints one from a value
+ *   that was read under the legacy name.
  */
 
 import type { Database } from "bun:sqlite";
@@ -152,6 +156,30 @@ function legacyCleared(domain: string): string {
 
 const HOST_CLEARED = "__Host-nemar_session=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0";
 
+/** The zone's parent domain, which the flag-on writers also clear the legacy cookie for. */
+const PARENT_DOMAIN = "nemar.org";
+
+/** The legacy clears the flag-on writers send, in order, none twice: the configured Domain (when
+ *  there is one), host-only, and the parent domain. */
+function legacyClears(domain: string): string[] {
+  const domains = [...new Set([domain, "", PARENT_DOMAIN])];
+  return domains.map((d) => legacyCleared(d));
+}
+
+/** A `__Host-nemar_session` cookie from before the flag was turned back off. */
+const STALE_HOST_COOKIE = "__Host-nemar_session=a-cookie-from-before-the-flag-went-off";
+
+/** The session cookie a request carries for a given mode: under the new name once the flag is
+ *  on (that is what a browser holds then), under the legacy name otherwise. */
+function sessionCookieFor(mode: Mode, value: string, carry: boolean): string {
+  return carry || mode.flag === "1" ? `__Host-nemar_session=${value}` : `nemar_session=${value}`;
+}
+
+/** Append the stale `__Host-` cookie to a `Cookie` header when the case carries one. */
+function withCarried(carry: boolean, ...parts: string[]): string {
+  return [...parts, ...(carry ? [STALE_HOST_COOKIE] : [])].join("; ");
+}
+
 /** The session cookies of one response, in the order they were sent. Other cookies (the ORCID
  *  state and pending cookies) are not the subject of this file. */
 function sessionCookies(res: Response): string[] {
@@ -190,7 +218,9 @@ interface Writer {
   maxAge: number | undefined;
   /** True when the response clears the session instead of issuing one. */
   clears: boolean;
-  run(mode: Mode): Promise<Response>;
+  /** `carry`: the request also carries a `__Host-nemar_session` cookie, as a browser does that
+   *  was signed in while the flag was on. */
+  run(mode: Mode, carry?: boolean): Promise<Response>;
 }
 
 const THIRTY_DAYS = 30 * 24 * 60 * 60;
@@ -200,14 +230,18 @@ const WRITERS: Writer[] = [
     name: "POST /auth/code/verify",
     maxAge: undefined,
     clears: false,
-    async run(mode) {
+    async run(mode, carry = false) {
       seedWebUser(SIGN_IN_EMAIL);
       await plantCode(mode, SIGN_IN_EMAIL, "123456");
       return app.request(
         "/auth/code/verify",
         {
           method: "POST",
-          headers: { Origin: APP, "content-type": "application/json" },
+          headers: {
+            Origin: APP,
+            "content-type": "application/json",
+            ...(carry ? { Cookie: STALE_HOST_COOKIE } : {}),
+          },
           body: JSON.stringify({ email: SIGN_IN_EMAIL, code: "123456", remember: false }),
         },
         env(mode),
@@ -218,12 +252,18 @@ const WRITERS: Writer[] = [
     name: "POST /auth/logout",
     maxAge: 0,
     clears: true,
-    async run(mode) {
+    async run(mode, carry = false) {
       const id = seedWebUser(SIGN_IN_EMAIL);
       const { cookieIdRaw } = await issueSession(env(mode), id, false, null, null, "orcid");
       return app.request(
         "/auth/logout",
-        { method: "POST", headers: { Origin: APP, Cookie: `nemar_session=${cookieIdRaw}` } },
+        {
+          method: "POST",
+          headers: {
+            Origin: APP,
+            Cookie: withCarried(carry, sessionCookieFor(mode, cookieIdRaw, false)),
+          },
+        },
         env(mode),
       );
     },
@@ -232,14 +272,16 @@ const WRITERS: Writer[] = [
     name: "GET /auth/me (the expiry slide)",
     maxAge: THIRTY_DAYS,
     clears: false,
-    async run(mode) {
+    async run(mode, carry = false) {
       const id = seedWebUser(SIGN_IN_EMAIL);
       const { cookieIdRaw } = await issueSession(env(mode), id, true, null, null, "orcid");
-      // A remember-me session in the last week of its life is the one the slide re-issues.
+      // A remember-me session in the last week of its life is the one the slide re-issues. Under
+      // the new name when the flag is on (the slide re-issues only from a `__Host-` value) or when
+      // the case carries a `__Host-` cookie, under the legacy name otherwise.
       db.run("UPDATE web_sessions SET expires_at = datetime('now', '+1 day')");
       return app.request(
         "/auth/me",
-        { headers: { Cookie: `nemar_session=${cookieIdRaw}` } },
+        { headers: { Cookie: sessionCookieFor(mode, cookieIdRaw, carry) } },
         env(mode),
       );
     },
@@ -248,7 +290,7 @@ const WRITERS: Writer[] = [
     name: "GET /auth/orcid/callback (sign-in)",
     maxAge: undefined,
     clears: false,
-    async run(mode) {
+    async run(mode, carry = false) {
       const id = seedWebUser(SIGN_IN_EMAIL, LINKED_ORCID);
       db.run(
         "INSERT INTO oauth_identities (user_id, provider, provider_subject, display_name) VALUES (?, 'orcid', ?, 'Ada')",
@@ -257,7 +299,10 @@ const WRITERS: Writer[] = [
       return app.request(
         new Request(`${APP}/auth/orcid/callback?state=${CSRF}&code=fake-code`, {
           headers: {
-            Cookie: `__Host-nemar_oauth_state=${encodeState({ csrf: CSRF, mode: "login", next: "/dashboard" })}`,
+            Cookie: withCarried(
+              carry,
+              `__Host-nemar_oauth_state=${encodeState({ csrf: CSRF, mode: "login", next: "/dashboard" })}`,
+            ),
           },
         }),
         undefined,
@@ -269,7 +314,7 @@ const WRITERS: Writer[] = [
     name: "POST /auth/orcid/finalize (sign-up)",
     maxAge: undefined,
     clears: false,
-    async run(mode) {
+    async run(mode, carry = false) {
       const pending = await signPending(
         { orcid: NEW_ORCID, name: "Ada Lovelace", exp: Date.now() + 60_000 },
         ENCRYPTION_KEY,
@@ -280,7 +325,7 @@ const WRITERS: Writer[] = [
           method: "POST",
           headers: {
             Origin: APP,
-            Cookie: `${PENDING_COOKIE_NAME}=${pending}`,
+            Cookie: withCarried(carry, `${PENDING_COOKIE_NAME}=${pending}`),
             "content-type": "application/json",
           },
           body: JSON.stringify({ email: SIGNUP_EMAIL, city: "Cambridge", country: "GB" }),
@@ -315,19 +360,41 @@ describe("the writers, with the flag off", () => {
   }
 });
 
+describe("the writers, with the flag off and a `__Host-` cookie on the request", () => {
+  // Turned back off, the writers would otherwise leave a cookie behind that nothing removes and
+  // that the reader prefers. Only a request that CARRIED one gets the clear; every case in the
+  // describe above carries none and is byte for byte what it was.
+  for (const writer of WRITERS) {
+    for (const domain of [PROD_DOMAIN, ""]) {
+      test(`${writer.name} also clears the \`__Host-\` cookie (Domain ${JSON.stringify(domain)})`, async () => {
+        const res = await writer.run({ flag: undefined, domain }, true);
+        expect(res.status === 200 || res.status === 302).toBe(true);
+        const cookies = sessionCookies(res);
+        if (writer.clears) {
+          expect(cookies).toEqual([legacyCleared(domain), HOST_CLEARED]);
+        } else {
+          expect(cookies).toHaveLength(2);
+          expect(cookies[0]).toMatch(legacyIssued(domain, writer.maxAge));
+          expect(cookies[1]).toBe(HOST_CLEARED);
+        }
+      });
+    }
+  }
+});
+
 describe("the writers, with the flag on", () => {
   for (const writer of WRITERS) {
-    test(`${writer.name} sets the new name with no Domain, then clears the legacy name both ways`, async () => {
+    test(`${writer.name} sets the new name with no Domain, then clears the legacy name for every Domain it could carry`, async () => {
       const res = await writer.run({ flag: "1", domain: PROD_DOMAIN });
       expect(res.status === 200 || res.status === 302).toBe(true);
       const cookies = sessionCookies(res);
       if (writer.clears) {
-        expect(cookies).toEqual([HOST_CLEARED, legacyCleared(PROD_DOMAIN), legacyCleared("")]);
+        expect(cookies).toEqual([HOST_CLEARED, ...legacyClears(PROD_DOMAIN)]);
       } else {
-        expect(cookies).toHaveLength(3);
+        expect(cookies).toHaveLength(4);
         expect(cookies[0]).toMatch(hostIssued(writer.maxAge));
         expect(cookies[0]).not.toContain("Domain");
-        expect(cookies.slice(1)).toEqual([legacyCleared(PROD_DOMAIN), legacyCleared("")]);
+        expect(cookies.slice(1)).toEqual(legacyClears(PROD_DOMAIN));
       }
     });
 
@@ -341,19 +408,23 @@ describe("the writers, with the flag on", () => {
       expect(first).not.toContain("elsewhere.example");
     });
 
-    test(`${writer.name} sends a single legacy clear when no Domain is configured`, async () => {
-      // Staging keeps `WEB_SESSION_COOKIE_DOMAIN` empty, so the two clears are the same cookie:
-      // sending the identical header twice would be noise.
-      const res = await writer.run({ flag: "1", domain: "" });
-      const cookies = sessionCookies(res);
-      if (writer.clears) {
-        expect(cookies).toEqual([HOST_CLEARED, legacyCleared("")]);
-      } else {
-        expect(cookies).toHaveLength(2);
-        expect(cookies[0]).toMatch(hostIssued(writer.maxAge));
-        expect(cookies[1]).toBe(legacyCleared(""));
-      }
-    });
+    for (const domain of ["", PARENT_DOMAIN]) {
+      test(`${writer.name} sends no clear twice (Domain ${JSON.stringify(domain)})`, async () => {
+        // Staging keeps `WEB_SESSION_COOKIE_DOMAIN` empty, so the configured-Domain clear and the
+        // host-only one are the same cookie; a Domain equal to the parent domain is the third.
+        const res = await writer.run({ flag: "1", domain });
+        const cookies = sessionCookies(res);
+        const expectedClears = legacyClears(domain);
+        expect(expectedClears).toHaveLength(2);
+        if (writer.clears) {
+          expect(cookies).toEqual([HOST_CLEARED, ...expectedClears]);
+        } else {
+          expect(cookies).toHaveLength(3);
+          expect(cookies[0]).toMatch(hostIssued(writer.maxAge));
+          expect(cookies.slice(1)).toEqual(expectedClears);
+        }
+      });
+    }
   }
 
   test("a sign-in sets a cookie that signs the same person in on the next request", async () => {
@@ -376,7 +447,10 @@ describe("the writers, with the flag on", () => {
     expect(((await me.json()) as { user: { id: number } }).user.id).toBe(id);
   });
 
-  test("the expiry slide upgrades a legacy-only session to the new name, with the same value", async () => {
+  test("the expiry slide sends no cookie for a session read under the legacy name", async () => {
+    // A `__Host-` cookie is minted only by a sign-in. Re-issuing one from a value that arrived
+    // under the legacy name would turn a value read from the cookie a sibling host can set into
+    // the cookie it cannot.
     const mode: Mode = { flag: "1", domain: PROD_DOMAIN };
     const id = seedWebUser(SIGN_IN_EMAIL);
     const { cookieIdRaw } = await issueSession(env(mode), id, true, null, null, "orcid");
@@ -386,8 +460,52 @@ describe("the writers, with the flag on", () => {
       { headers: { Cookie: `nemar_session=${cookieIdRaw}` } },
       env(mode),
     );
-    const [issued] = sessionCookies(res);
-    expect(issued.split(";")[0]).toBe(`__Host-nemar_session=${cookieIdRaw}`);
+    expect(((await res.json()) as { user: { id: number } }).user.id).toBe(id);
+    expect(sessionCookies(res)).toEqual([]);
+    expect(res.headers.getSetCookie()).toEqual([]);
+    // The row still slid: only the cookie is withheld.
+    const row = db
+      .query<{ later: number }, []>(
+        "SELECT expires_at > datetime('now', '+10 days') AS later FROM web_sessions",
+      )
+      .get();
+    expect(row?.later).toBe(1);
+  });
+
+  test("with a legacy cookie and a `__Host-` one the slide uses the `__Host-` one", async () => {
+    const mode: Mode = { flag: "1", domain: PROD_DOMAIN };
+    const aliceId = seedWebUser("alice@nemar.test");
+    const bobId = seedWebUser("bob@nemar.test");
+    const alice = await issueSession(env(mode), aliceId, true, null, null, "orcid");
+    const bob = await issueSession(env(mode), bobId, true, null, null, "orcid");
+    db.run("UPDATE web_sessions SET expires_at = datetime('now', '+1 day')");
+    for (const header of [
+      `__Host-nemar_session=${alice.cookieIdRaw}; nemar_session=${bob.cookieIdRaw}`,
+      `nemar_session=${bob.cookieIdRaw}; __Host-nemar_session=${alice.cookieIdRaw}`,
+    ]) {
+      db.run("UPDATE web_sessions SET expires_at = datetime('now', '+1 day')");
+      const res = await app.request("/auth/me", { headers: { Cookie: header } }, env(mode));
+      expect(((await res.json()) as { user: { id: number } }).user.id).toBe(aliceId);
+      expect(sessionCookies(res)[0].split(";")[0]).toBe(
+        `__Host-nemar_session=${alice.cookieIdRaw}`,
+      );
+    }
+  });
+
+  test("with the flag off a legacy-read slide re-issues the legacy cookie as it always did", async () => {
+    // No `__Host-` cookie is minted, so nothing about the flag-off bytes changes (the matrix
+    // above pins them); this is the same fact stated as a rule.
+    const mode: Mode = { flag: undefined, domain: PROD_DOMAIN };
+    const id = seedWebUser(SIGN_IN_EMAIL);
+    const { cookieIdRaw } = await issueSession(env(mode), id, true, null, null, "orcid");
+    db.run("UPDATE web_sessions SET expires_at = datetime('now', '+1 day')");
+    const res = await app.request(
+      "/auth/me",
+      { headers: { Cookie: `nemar_session=${cookieIdRaw}` } },
+      env(mode),
+    );
+    expect(sessionCookies(res)).toHaveLength(1);
+    expect(sessionCookies(res)[0]).toMatch(legacyIssued(PROD_DOMAIN, THIRTY_DAYS));
   });
 });
 
@@ -446,9 +564,8 @@ describe("the readers", () => {
   });
 
   test("an invalid new cookie is not rescued by a valid legacy one", async () => {
-    // The planted-cookie case the dual read must not reopen: whoever can plant `nemar_session`
-    // for the zone cannot make it the session by also being able to spoil the real one, and a
-    // browser that holds a real `__Host-` cookie never has it displaced by a legacy one.
+    // A legacy cookie never outranks a `__Host-` one: a browser that holds a `__Host-` cookie
+    // never has it displaced by a legacy one, whatever state the `__Host-` cookie is in.
     const { alice } = await twoSessions();
     expect(
       await whoAmI(`__Host-nemar_session=not-a-live-session; nemar_session=${alice.cookie}`),
@@ -466,6 +583,22 @@ describe("the readers", () => {
     });
   });
 
+  test("a header with more than one `__Host-` cookie is no session, and no legacy cookie rescues it", async () => {
+    const { alice, bob } = await twoSessions();
+    const none = { web: null, api: null };
+    expect(
+      await whoAmI(`__Host-nemar_session=${alice.cookie}; __Host-nemar_session=${alice.cookie}`),
+    ).toEqual(none);
+    expect(
+      await whoAmI(`__Host-nemar_session=${alice.cookie}; __Host-nemar_session=${bob.cookie}`),
+    ).toEqual(none);
+    expect(
+      await whoAmI(
+        `__Host-nemar_session=${alice.cookie}; nemar_session=${bob.cookie}; __Host-nemar_session=${alice.cookie}`,
+      ),
+    ).toEqual(none);
+  });
+
   test("a revoked session behind the new name stays revoked, whatever the legacy cookie holds", async () => {
     const { alice, bob } = await twoSessions();
     db.run("UPDATE web_sessions SET revoked_at = datetime('now') WHERE user_id = ?", [alice.id]);
@@ -475,6 +608,166 @@ describe("the readers", () => {
       web: null,
       api: null,
     });
+  });
+});
+
+/** A browser's cookie jar, reduced to what the sign-in and sign-out responses ask of it: a
+ *  cookie is kept by name and `Domain`, a `Max-Age=0` removes it, and every cookie it holds is sent
+ *  back. `keepHostCookies` models a deployment that never clears a `__Host-` cookie. */
+class Jar {
+  private cookies = new Map<string, { name: string; value: string }>();
+  constructor(private keepHostCookies = false) {}
+
+  absorb(res: Response): void {
+    for (const raw of res.headers.getSetCookie()) {
+      const [pair, ...attrs] = raw.split(";").map((p) => p.trim());
+      const eq = pair.indexOf("=");
+      const name = pair.slice(0, eq);
+      const value = pair.slice(eq + 1);
+      const domain = attrs.find((a) => a.startsWith("Domain="))?.slice("Domain=".length) ?? "";
+      const key = `${name}|${domain}`;
+      if (attrs.includes("Max-Age=0")) {
+        if (!(this.keepHostCookies && name.startsWith("__Host-"))) this.cookies.delete(key);
+      } else {
+        this.cookies.set(key, { name, value });
+      }
+    }
+  }
+
+  header(): string {
+    return [...this.cookies.values()].map((c) => `${c.name}=${c.value}`).join("; ");
+  }
+}
+
+describe("turning the flag back off", () => {
+  const ON: Mode = { flag: "1", domain: PROD_DOMAIN };
+  const OFF: Mode = { flag: undefined, domain: PROD_DOMAIN };
+
+  async function signIn(mode: Mode, jar: Jar, code: string): Promise<void> {
+    await plantCode(mode, SIGN_IN_EMAIL, code);
+    const res = await app.request(
+      "/auth/code/verify",
+      {
+        method: "POST",
+        headers: { Origin: APP, "content-type": "application/json", Cookie: jar.header() },
+        body: JSON.stringify({ email: SIGN_IN_EMAIL, code, remember: false }),
+      },
+      env(mode),
+    );
+    expect(res.status).toBe(200);
+    jar.absorb(res);
+  }
+
+  async function signOut(mode: Mode, jar: Jar): Promise<void> {
+    const res = await app.request(
+      "/auth/logout",
+      { method: "POST", headers: { Origin: APP, Cookie: jar.header() } },
+      env(mode),
+    );
+    expect(res.status).toBe(200);
+    jar.absorb(res);
+  }
+
+  async function whoAmI(mode: Mode, jar: Jar): Promise<number | null> {
+    const res = await app.request("/auth/me", { headers: { Cookie: jar.header() } }, env(mode));
+    return ((await res.json()) as { user: { id: number } | null }).user?.id ?? null;
+  }
+
+  test("flag on, sign in, flag off, sign out, sign in again: the person is authenticated", async () => {
+    const id = seedWebUser(SIGN_IN_EMAIL);
+    const jar = new Jar();
+
+    await signIn(ON, jar, "111111");
+    expect(jar.header()).toContain("__Host-nemar_session=");
+    expect(await whoAmI(ON, jar)).toBe(id);
+
+    // The flag goes back off. The browser still holds the `__Host-` cookie, and the sign-out
+    // that follows must remove it.
+    await signOut(OFF, jar);
+    expect(jar.header()).toBe("");
+
+    await signIn(OFF, jar, "222222");
+    expect(jar.header()).toMatch(/^nemar_session=/);
+    expect(jar.header()).not.toContain("__Host-");
+    expect(await whoAmI(OFF, jar)).toBe(id);
+  });
+
+  test("a browser that is signed in again with the flag off sheds the `__Host-` cookie at sign-in too", async () => {
+    // No sign-out in between: the first response of the flag-off Worker that carries the cookie
+    // removes it, and the new session is the one the reader sees.
+    const id = seedWebUser(SIGN_IN_EMAIL);
+    const jar = new Jar();
+    await signIn(ON, jar, "111111");
+    await signIn(OFF, jar, "222222");
+    expect(jar.header()).not.toContain("__Host-");
+    expect(await whoAmI(OFF, jar)).toBe(id);
+  });
+
+  test("without the clear the same sequence would lock the person out until the cookie expires", async () => {
+    // The control: a jar that never drops a `__Host-` cookie. The stale cookie names a session
+    // the sign-out revoked, the reader prefers it, and the new legacy session is never looked at.
+    seedWebUser(SIGN_IN_EMAIL);
+    const jar = new Jar(true);
+    await signIn(ON, jar, "111111");
+    await signOut(OFF, jar);
+    await signIn(OFF, jar, "222222");
+    expect(jar.header()).toContain("__Host-nemar_session=");
+    expect(jar.header()).toContain("nemar_session=");
+    expect(await whoAmI(OFF, jar)).toBeNull();
+  });
+});
+
+describe("signing out ends every session the request carries", () => {
+  test("a legacy cookie and a `__Host-` cookie for different sessions are both revoked", async () => {
+    const mode: Mode = { flag: "1", domain: PROD_DOMAIN };
+    const id = seedWebUser(SIGN_IN_EMAIL);
+    const a = await issueSession(env(mode), id, false, null, null, "orcid");
+    const b = await issueSession(env(mode), id, false, null, null, "orcid");
+    const res = await app.request(
+      "/auth/logout",
+      {
+        method: "POST",
+        headers: {
+          Origin: APP,
+          Cookie: `__Host-nemar_session=${a.cookieIdRaw}; nemar_session=${b.cookieIdRaw}`,
+        },
+      },
+      env(mode),
+    );
+    expect(res.status).toBe(200);
+    const live = db
+      .query<{ n: number }, []>("SELECT COUNT(*) AS n FROM web_sessions WHERE revoked_at IS NULL")
+      .get();
+    expect(live?.n).toBe(0);
+    // ...and neither cookie signs anyone in afterwards.
+    for (const header of [
+      `__Host-nemar_session=${a.cookieIdRaw}`,
+      `nemar_session=${b.cookieIdRaw}`,
+    ]) {
+      const me = await app.request("/auth/me", { headers: { Cookie: header } }, env(mode));
+      expect(((await me.json()) as { user: unknown }).user).toBeNull();
+    }
+  });
+
+  test("a header that carries the same cookie twice still revokes its session", async () => {
+    const mode: Mode = { flag: undefined, domain: PROD_DOMAIN };
+    const id = seedWebUser(SIGN_IN_EMAIL);
+    const a = await issueSession(env(mode), id, false, null, null, "orcid");
+    await app.request(
+      "/auth/logout",
+      {
+        method: "POST",
+        headers: {
+          Origin: APP,
+          Cookie: `__Host-nemar_session=${a.cookieIdRaw}; __Host-nemar_session=${a.cookieIdRaw}`,
+        },
+      },
+      env(mode),
+    );
+    const live = db
+      .query<{ n: number }, []>("SELECT COUNT(*) AS n FROM web_sessions WHERE revoked_at IS NULL")
+      .get();
+    expect(live?.n).toBe(0);
   });
 });
 

@@ -691,8 +691,8 @@ WEB_SESSION_COOKIE_DOMAIN = ""
 # RELEASE ORDER: this makes the dev Worker issue `__Host-nemar_session` as soon as it deploys, so
 # the website's reader (nemarOrg/website#499) must already be live on the website's `staging`
 # before the OIDC provider epic reaches `dev`, or the staging site signs everyone out.
-# One-way once people hold a `__Host-` cookie: turned off again, the writers never clear it and
-# the reader prefers it (ADR 0119, Consequences). Revert only after a clear has shipped.
+# Reversible: turned off again, a request that carries a `__Host-nemar_session` also gets a clear
+# of it (ADR 0119, Consequences), so the flag can be switched back off without stranding anyone.
 HOST_PREFIXED_SESSION_COOKIE = "1"
 # Centralized manifest workflow flag (#557, relocated to
 # nemarDatasets/.github in #564). Soak on dev is COMPLETE and the flag is "true"

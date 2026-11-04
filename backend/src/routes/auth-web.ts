@@ -106,6 +106,9 @@ import {
   usernameClaimStatement,
 } from "../services/username-assignment";
 import {
+  SESSION_COOKIE_NAME,
+  allSessionCookieValues,
+  hostPrefixedSessionCookie,
   isAllowedOrigin,
   maybeSlideExpiry,
   prepareSessionInsert,
@@ -714,6 +717,7 @@ authWebRoutes.post("/code/verify", zValidator("json", verifySchema), async (c) =
 
     for (const cookie of sessionCookieHeaders(c.env, prepared.cookieIdRaw, {
       maxAgeSeconds: prepared.maxAgeSeconds,
+      cookieHeader: c.req.header("Cookie"),
     })) {
       c.header("Set-Cookie", cookie, { append: true });
     }
@@ -737,7 +741,10 @@ authWebRoutes.post("/logout", webSessionMiddleware, async (c) => {
     return c.json({ error: "Origin not allowed" }, 403);
   }
 
-  const cookieIdRaw = c.var.webSessionCookieId ?? null;
+  // The session behind EVERY session cookie the request carries, under either name, so signing
+  // out ends each session the browser could present (a request can hold a `__Host-` cookie and a
+  // legacy one for different sessions during the window).
+  const cookieIds = allSessionCookieValues(c.req.header("Cookie"));
 
   // WHOSE ACCOUNT THIS IS, RESOLVED BEFORE ANYTHING IS REVOKED.
   //
@@ -751,9 +758,10 @@ authWebRoutes.post("/logout", webSessionMiddleware, async (c) => {
   // NULL` -- so that a cookie value which has already been signed out confers
   // nothing, including the power to revoke somebody's later session.
   let userId = c.var.webUser?.id ?? null;
-  if (!userId) {
+  for (const id of cookieIds) {
+    if (userId) break;
     try {
-      userId = await userIdForCookieId(c.env, cookieIdRaw);
+      userId = await userIdForCookieId(c.env, id);
     } catch (err) {
       console.error("[auth-web] /logout: could not resolve account for docs revoke", err);
     }
@@ -783,7 +791,7 @@ authWebRoutes.post("/logout", webSessionMiddleware, async (c) => {
   // cleared client-side either way.
   try {
     const statements = [];
-    if (cookieIdRaw) statements.push(await revokeSessionStatement(c.env, cookieIdRaw));
+    for (const id of cookieIds) statements.push(await revokeSessionStatement(c.env, id));
     if (userId) {
       statements.push(c.env.DB.prepare(DOCS_REVOKE_ALL_SQL).bind(userId));
       // Outstanding GRANTS die too, not just live sessions. A grant is spendable
@@ -812,7 +820,10 @@ authWebRoutes.post("/logout", webSessionMiddleware, async (c) => {
     );
   }
 
-  for (const cookie of sessionCookieHeaders(c.env, "", { maxAgeSeconds: 0 })) {
+  for (const cookie of sessionCookieHeaders(c.env, "", {
+    maxAgeSeconds: 0,
+    cookieHeader: c.req.header("Cookie"),
+  })) {
     c.header("Set-Cookie", cookie, { append: true });
   }
   return c.json({ ok: true });
@@ -833,9 +844,16 @@ authWebRoutes.get("/me", webSessionMiddleware, async (c) => {
   // dropped below the refresh threshold. Re-issues Set-Cookie only
   // when the wall-clock actually moves.
   const slid = await maybeSlideExpiry(c.env, session);
-  if (slid && c.var.webSessionCookieId) {
+  // A `__Host-` cookie is minted only by a sign-in. With the flag on, a session that was read
+  // under the LEGACY name gets no new cookie here: re-issuing it would turn a value that arrived
+  // on the cookie a sibling host can set into the cookie a sibling host cannot, and keep it.
+  // With the flag off the slide is what it always was, the legacy cookie re-issued unchanged.
+  const mayReissue =
+    !hostPrefixedSessionCookie(c.env) || c.var.webSessionCookieName === SESSION_COOKIE_NAME;
+  if (slid && c.var.webSessionCookieId && mayReissue) {
     for (const cookie of sessionCookieHeaders(c.env, c.var.webSessionCookieId, {
       maxAgeSeconds: slid.maxAgeSeconds,
+      cookieHeader: c.req.header("Cookie"),
     })) {
       c.header("Set-Cookie", cookie, { append: true });
     }

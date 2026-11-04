@@ -175,12 +175,12 @@ export interface Bindings {
    *  `[env.dev.vars]` only: production turns it on after the website's reader and the API have
    *  both released, which is the owner's act, and a test pins that no other table names it.
    *
-   *  Release notes. The flag is effectively ONE-WAY once people hold a `__Host-` cookie: turned
-   *  off again, the writers send only the legacy header (the flag-off bytes are pinned) and never
-   *  clear a `__Host-nemar_session` the browser holds, and the reader prefers that stale cookie,
-   *  so after a sign-out and a new sign-in the person is unauthenticated until it expires (a
-   *  browser close, or up to 30 days for a remembered session). Reverting needs a clear of the
-   *  `__Host-` cookie shipped first. */
+   *  Release notes. The flag is REVERSIBLE. Turned off again, a request that carries no
+   *  `__Host-nemar_session` gets exactly today's headers, byte for byte; a request that carries one
+   *  gets the same headers plus a clear of it, so the cookie issued while the flag was on is
+   *  removed at the next sign-in, sign-out or slide. The clear matters because the reader prefers
+   *  a `__Host-` cookie: without it, a person who signs out and in again after the flag is turned
+   *  off would stay signed out until that cookie expires. */
   HOST_PREFIXED_SESSION_COOKIE?: string;
   /** Sandbox (xx) dataset-ID allocation partition, decimal strings (epic #923).
    *  Prevents repo-name collisions in the shared nemarDatasets org between
@@ -488,4 +488,8 @@ export interface Variables {
    *  need to write a fresh Set-Cookie use this when sliding the
    *  expiry — the value itself is unchanged. */
   webSessionCookieId?: string;
+  /** The name that value was read under (`__Host-nemar_session` or the legacy `nemar_session`).
+   *  The expiry slide re-issues the cookie only from a value read under the `__Host-` name: that
+   *  cookie is minted by a sign-in and never from a legacy value (ADR 0119 decision 10). */
+  webSessionCookieName?: string;
 }

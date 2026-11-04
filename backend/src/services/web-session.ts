@@ -26,9 +26,10 @@ import { type Bindings, type UserRole, parseRole } from "../types/bindings";
 /** The app session cookie's name once `HOST_PREFIXED_SESSION_COOKIE` is on (ADR 0119 decision 10).
  *
  *  `__Host-` is enforced by the browser: it refuses the cookie unless it is `Secure`, has
- *  `Path=/` and carries NO `Domain`, and it will not let any other host set one for this host. So
- *  a page on a sibling `nemar.org` subdomain cannot plant a session cookie of this name for
- *  `app.nemar.org`, which it can for the legacy name below by setting `Domain=nemar.org`.
+ *  `Path=/` and carries NO `Domain`, and it will not let any other host set one for this host.
+ *  The principle: every cookie the API trusts to authenticate or link a session is host-only and
+ *  `__Host-` prefixed, because a page on a sibling host can set a cookie for the parent domain
+ *  (`Domain=nemar.org`), which is how the legacy name below is scoped.
  *
  *  The cookie stays host-only (ADR 0056): this name never goes through
  *  `WEB_SESSION_COOKIE_DOMAIN`, and a `Domain` on it would make a browser discard it. */
@@ -191,50 +192,120 @@ export function hostPrefixedSessionCookie(
 }
 
 /**
- * The session cookie out of a request's `Cookie` header, for EVERY reader of it.
+ * The zone a sibling host can set a cookie for. A cookie set with `Domain=nemar.org` is sent to
+ * every host in the zone, and is not removed by a clear scoped to `app.nemar.org` or to the host
+ * alone, so the flag-on writers clear the legacy name for the parent domain too.
+ */
+const SESSION_PARENT_DOMAIN = "nemar.org";
+
+/** What one pass over a `Cookie` header finds under the two session cookie names. */
+interface SessionCookieScan {
+  /** Every value under `__Host-nemar_session`. A browser sends at most one; more than one means
+   *  the header did not come from a browser that stored it. */
+  host: string[];
+  /** Every value under the legacy `nemar_session`. More than one is normal during the window: a
+   *  host-only and a `Domain` cookie of that name are both sent. */
+  legacy: string[];
+}
+
+/**
+ * The ONE parse of a request's session cookies. Everything below reads this, so no second copy of
+ * the cookie syntax exists: {@link readSessionCookie}, {@link carriesHostSessionCookie} and
+ * {@link allSessionCookieValues}.
+ */
+function scanSessionCookies(header: string | null | undefined): SessionCookieScan {
+  const scan: SessionCookieScan = { host: [], legacy: [] };
+  if (!header) return scan;
+  for (const part of header.split(";")) {
+    const eq = part.indexOf("=");
+    if (eq < 0) continue;
+    const name = part.slice(0, eq).trim();
+    if (name === SESSION_COOKIE_NAME) scan.host.push(part.slice(eq + 1).trim());
+    else if (name === LEGACY_SESSION_COOKIE_NAME) scan.legacy.push(part.slice(eq + 1).trim());
+  }
+  return scan;
+}
+
+/**
+ * The session cookie out of a request's `Cookie` header, for EVERY reader of it, with the name it
+ * was read under.
  *
  * The new name is read first and the legacy one only when the new one is absent. A new cookie
  * that is present but wrong (empty, expired, revoked) is NOT rescued by a valid legacy one: with
- * both on the wire the legacy one is, at best, a stale copy and, at worst, planted by a page on a
- * sibling subdomain, and a request must never end up signed in as whoever planted it because the
- * real cookie was spoiled. Swapping the order is exactly that bug.
+ * both on the wire the legacy one is, at best, a stale copy and, at worst, set by a page on a
+ * sibling subdomain, and a request must never end up signed in as whoever set it because the
+ * real cookie was spoiled. Swapping the order is exactly that bug. A header that carries MORE
+ * THAN ONE `__Host-nemar_session` is no session at all, and is not rescued either.
+ *
+ * The name is returned because what a caller may do depends on it: a `__Host-` cookie is minted
+ * only by a sign-in, so a route that re-issues the cookie (the expiry slide) must never do so
+ * from a value that was read under the legacy name.
  *
  * Two readers exist and both call this: `webSessionMiddleware` and `resolveCookieUser`. Do not
  * add a third copy of the parse.
  */
-export function readSessionCookie(header: string | null | undefined): string | null {
-  const current = parseCookieHeader(header, SESSION_COOKIE_NAME);
-  if (current !== null) return current;
-  return parseCookieHeader(header, LEGACY_SESSION_COOKIE_NAME);
+export function readSessionCookie(
+  header: string | null | undefined,
+): { name: string; value: string } | null {
+  const { host, legacy } = scanSessionCookies(header);
+  if (host.length > 1) return null;
+  if (host.length === 1) return { name: SESSION_COOKIE_NAME, value: host[0] };
+  if (legacy.length > 0) return { name: LEGACY_SESSION_COOKIE_NAME, value: legacy[0] };
+  return null;
+}
+
+/** True when the request carried a `__Host-nemar_session` cookie, whatever its value. The writers
+ *  use it to clear one that is stale (see {@link sessionCookieHeaders}). */
+export function carriesHostSessionCookie(header: string | null | undefined): boolean {
+  return scanSessionCookies(header).host.length > 0;
+}
+
+/** Every distinct non-empty session cookie value the request carries, under either name. Sign-out
+ *  revokes the session behind each, so signing out ends every session the browser could present. */
+export function allSessionCookieValues(header: string | null | undefined): string[] {
+  const { host, legacy } = scanSessionCookies(header);
+  return [...new Set([...host, ...legacy].filter((v) => v !== ""))];
 }
 
 /**
  * Every `Set-Cookie` value that issues, refreshes or (with `value: ""` and `maxAgeSeconds: 0`)
- * ends a session. The five writers append all of them, in order.
+ * ends a session. The five writers append all of them, in order. `cookieHeader` is the request's
+ * own `Cookie` header, which is how a writer says whether the request carried a `__Host-` cookie.
  *
- * Flag off: exactly today's one header, byte for byte: the legacy name, with `Domain` when
- * `WEB_SESSION_COOKIE_DOMAIN` is set.
+ * Flag off, request carried no `__Host-nemar_session`: exactly today's one header, byte for byte:
+ * the legacy name, with `Domain` when `WEB_SESSION_COOKIE_DOMAIN` is set.
+ *
+ * Flag off, request carried one: the same header, then a clear of `__Host-nemar_session` (no
+ * `Domain`). That cookie was issued while the flag was on and nothing else would ever remove it,
+ * and the reader prefers it, so without the clear a person who signs out and in again after the
+ * flag is turned back off stays signed out until it expires. This is what makes the flag
+ * reversible. A request with no such cookie gets nothing extra.
  *
  * Flag on: the new name with `Secure; HttpOnly; SameSite=Lax; Path=/` and no `Domain`, then
- * clears of the legacy name, with the configured `Domain` and without one. A cookie is identified
- * by name, domain and path, so a browser holding the legacy cookie under its `Domain` needs that
- * clear to drop it, and one that holds it host-only needs the other. When no `Domain` is
- * configured (staging) the two are the same cookie and one clear is sent.
+ * clears of the legacy name: with the configured `Domain`, host-only, and with the zone's parent
+ * domain (`nemar.org`), because a cookie is identified by name, domain and path and a sibling
+ * host can set a parent-domain one that no other clear reaches. Duplicates are not sent: staging
+ * leaves the domain empty, so its two are the same cookie.
  */
 export function sessionCookieHeaders(
   env: Pick<Bindings, "WEB_SESSION_COOKIE_DOMAIN" | "HOST_PREFIXED_SESSION_COOKIE">,
   value: string,
-  opts: { maxAgeSeconds?: number } = {},
+  opts: { maxAgeSeconds?: number; cookieHeader?: string | null } = {},
 ): string[] {
   const domain = env.WEB_SESSION_COOKIE_DOMAIN || undefined;
+  const { maxAgeSeconds, cookieHeader } = opts;
   if (!hostPrefixedSessionCookie(env)) {
-    return [buildCookie(LEGACY_SESSION_COOKIE_NAME, value, { domain, ...opts })];
+    const headers = [buildCookie(LEGACY_SESSION_COOKIE_NAME, value, { domain, maxAgeSeconds })];
+    if (carriesHostSessionCookie(cookieHeader)) {
+      headers.push(buildCookie(SESSION_COOKIE_NAME, "", { maxAgeSeconds: 0 }));
+    }
+    return headers;
   }
-  const headers = [buildCookie(SESSION_COOKIE_NAME, value, opts)];
-  if (domain) {
-    headers.push(buildCookie(LEGACY_SESSION_COOKIE_NAME, "", { domain, maxAgeSeconds: 0 }));
+  const headers = [buildCookie(SESSION_COOKIE_NAME, value, { maxAgeSeconds })];
+  const clearDomains = new Set<string | undefined>([domain, undefined, SESSION_PARENT_DOMAIN]);
+  for (const d of clearDomains) {
+    headers.push(buildCookie(LEGACY_SESSION_COOKIE_NAME, "", { domain: d, maxAgeSeconds: 0 }));
   }
-  headers.push(buildCookie(LEGACY_SESSION_COOKIE_NAME, "", { maxAgeSeconds: 0 }));
   return headers;
 }
 

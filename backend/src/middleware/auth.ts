@@ -66,7 +66,7 @@ type CookieAuthResult =
  */
 async function resolveCookieUser(c: AuthContext): Promise<CookieAuthResult> {
   const cookieHeader = c.req.header("Cookie");
-  const cookieIdRaw = readSessionCookie(cookieHeader);
+  const cookieIdRaw = readSessionCookie(cookieHeader)?.value;
   if (!cookieIdRaw) return { kind: "unresolved" };
 
   // Wrap the D1 lookup in a try/catch so a transient backend failure

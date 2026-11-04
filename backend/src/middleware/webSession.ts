@@ -28,18 +28,20 @@ type WebSessionContext = Context<{ Bindings: Bindings; Variables: Variables }>;
  */
 export async function webSessionMiddleware(c: WebSessionContext, next: Next) {
   const cookieHeader = c.req.header("Cookie");
-  const cookieIdRaw = readSessionCookie(cookieHeader);
-  if (!cookieIdRaw) {
+  const found = readSessionCookie(cookieHeader);
+  const cookieIdRaw = found?.value;
+  if (!found || !cookieIdRaw) {
     await next();
     return;
   }
   c.set("webSessionCookieId", cookieIdRaw);
+  c.set("webSessionCookieName", found.name);
 
   try {
-    const found = await findSessionByCookieId(c.env, cookieIdRaw);
-    if (found) {
-      c.set("webUser", found.user);
-      c.set("webSession", found.session);
+    const session = await findSessionByCookieId(c.env, cookieIdRaw);
+    if (session) {
+      c.set("webUser", session.user);
+      c.set("webSession", session.session);
     }
   } catch (err) {
     // Cookie lookup failures are non-fatal: the route treats the user
