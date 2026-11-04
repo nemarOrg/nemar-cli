@@ -95,7 +95,7 @@ Twelve rules inside that, each of which reopens a hole if reversed.
    `compute.nemar.org` is not first-party: its consent screen says it can reserve and spend the person's compute time.
 9. **A partner subdomain is not trusted as a NEMAR origin.**
    `shared/partner-hosts.ts` lists the partner hosts (today `compute.nemar.org`) and `isPartnerHost` matches a host or any subdomain of one.
-   `isNemarWebOrigin` (which the API's cross-origin rule, the zarr host and the Model Context Protocol (MCP) host all use) and `isAllowedOrigin` (the origin check on writes that carry the session cookie) return false for a partner host before they test anything else.
+   `isNemarWebOrigin` (which the API's cross-origin rule, the zarr host and the Model Context Protocol (MCP) host all use) and `isAllowedOrigin` (the origin check of the admin router's cookie-authenticated writes and of the authentication, profile, documentation and private-site routes; other cookie-authenticated writes rely on the website's own origin check and the absence of a cross-origin preflight allowance for the app host, as the Context says) return false for a partner host before they test anything else.
    A partner reaches NEMAR only through OIDC and bearer tokens.
    A client is registered by an owner command, so a partner host is added to the list and released before the owner registers that partner's client.
    The exclusion is not enough on its own, because a partner host's page can still set a cookie for the parent domain: rule 10 is the other half.
