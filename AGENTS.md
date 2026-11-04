@@ -235,7 +235,13 @@ dataset's own repository, from the record's release branch, at the head NEMAR's 
 `skipped` check titled "Waived: upstream re-pull" with no review row, dispatch or model call, decided before
 the administrator exemption or a block; the queue verdict is `waived` and the merge needs no `--force`, the
 Worker's own review of the App's re-pull pull request is retired, and what the rule cannot tell, such as a
-human-written `.nemar/` file on the branch, is listed in the ADR).
+human-written `.nemar/` file on the branch, is listed in the ADR),
+0118 (the compute gateway: a community account runs every job and NEMAR is the record of every tenant job,
+whichever front door submitted it; the ledger is append-only integer thousandths of an Expanse service unit with a
+hold before every submit, settled provisionally from the Tapis record and finally from Expanse's accounting; an
+unreserved partner job is cancelled and charged to the partner pool, never the person; webhooks are hints and NEMAR
+reads the job back; retention is a policy row and storage is two private R2 buckets with no storage credential outside
+the Worker; `COMPUTE_ENABLED` is a dark switch; every compute word is declared once in `shared/compute-state.ts`).
 
 **Account copy and the profile-gap matrix are declared once, in
 [`shared/contract/account-copy.ts`](shared/contract/account-copy.ts) and
