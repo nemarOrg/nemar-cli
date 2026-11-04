@@ -10,8 +10,8 @@
  * that job's own key and no other; an incoming address lives one hour, is issued only for a live job
  * that has not been finalized, and refuses what `assertValidS3Key` refuses and what a manifest may not
  * hold (traversal in any encoding, a count or a size over the owner's limits); `finalizeBundle` and
- * `finalizeSubmittedFiles` copy into the locked records only after the job and its hold are committed
- * (one `CopyObject` per object, none for a refusal, none again for a replay), check each size, write
+ * `finalizeSubmittedFiles` copy into the locked records only after the job's row, which exists only if
+ * its hold does, has been read back (one `CopyObject` per object, none for a refusal, none again for a replay), check each size, write
  * the manifest and mark the records written; a refusal deletes nothing.
  *
  * Miniflare does not enforce bucket lock, so what a lock refuses is not tested; the records are
@@ -39,9 +39,11 @@ import {
   readRecordObject,
   recordKey,
   submittedKey,
+  submittedPathProblem,
   writeIdentitySnapshot,
   writeSpec,
 } from "../src/services/compute-records";
+import { COPY_OBJECT_MAX_BYTES } from "../src/services/compute-s3";
 import type { Bindings } from "../src/types/bindings";
 import {
   type ComputeHarness,
@@ -52,7 +54,7 @@ import {
   bundleJobSpec,
   fundAccount,
   fundPlatform,
-  jobSpec,
+  holdBody,
   seedUser,
   setPolicy,
   sha256Hex,
@@ -123,9 +125,7 @@ async function partnerJob(): Promise<{ accountId: number; id: string }> {
     source: "partner",
     accountId,
     clientId: "client.one",
-    appId: "nemar-launch",
-    appVersion: "1.0.0",
-    spec: jobSpec(),
+    holdBody: holdBody(),
   });
   if (!r.ok) throw new Error(`could not make a job: ${r.code}`);
   return { accountId, id: r.job.id };
@@ -857,6 +857,12 @@ describe("presignIncomingUploads", () => {
       "%252e%252e/x",
       "a/%2e%2e/b",
       "a%2f%2e%2e%2fb",
+      // One stray `%` elsewhere must not switch the check off.
+      "%2e%2e/%",
+      "a/%2e%2e/b%",
+      "%252e%252e/%",
+      "100%/%2e%2e/x",
+      "%2e%2e%ff/../x",
       "a\u0000b",
       "a\nb",
       "x".repeat(513),
@@ -1084,6 +1090,24 @@ describe("finalizeBundle", () => {
       (m) => input(m, manifest(["%2e%2e/etc/passwd", 1])),
       "invalid_spec",
       "files.0.path",
+    ],
+    [
+      "an encoded traversal and a stray percent sign",
+      (m) => input(m, manifest(["%2e%2e/%", 1])),
+      "invalid_spec",
+      "files.0.path",
+    ],
+    [
+      "an encoded traversal inside a path that ends in a stray percent sign",
+      (m) => input(m, manifest(["ok.py", 1], ["a/%2e%2e/b%", 1])),
+      "invalid_spec",
+      "files.1.path",
+    ],
+    [
+      "a double-encoded traversal and a stray percent sign",
+      (m) => input(m, manifest(["ok.py", 1], ["%252e%252e/%", 1])),
+      "invalid_spec",
+      "files.1.path",
     ],
     [
       "an absolute path",
@@ -1424,6 +1448,320 @@ describe("finalizeSubmittedFiles (a partner's own files)", () => {
       await finalizeSubmittedFiles(env, `job_${"bb".repeat(12)}`, { files: declared() }),
     ).toEqual({ ok: false, code: "job_not_found" });
     expect(cp("CopyObject")).toHaveLength(0);
+  });
+});
+
+/** A bucket that delegates to the real one and records which methods were called. */
+function spy(real: R2Bucket): { bucket: R2Bucket; calls: string[] } {
+  const calls: string[] = [];
+  const bucket = {
+    put: (k: string, v: unknown, o?: unknown) => {
+      calls.push("put");
+      return real.put(k, v as ArrayBuffer, o as Parameters<R2Bucket["put"]>[2]);
+    },
+    get: (k: string) => {
+      calls.push("get");
+      return real.get(k);
+    },
+    head: (k: string) => {
+      calls.push("head");
+      return real.head(k);
+    },
+    delete: (k: string) => real.delete(k),
+    list: (o?: Parameters<R2Bucket["list"]>[0]) => {
+      calls.push("list");
+      return real.list(o);
+    },
+  } as unknown as R2Bucket;
+  return { bucket, calls };
+}
+
+const recordsWrittenAt = async (env: Bindings, id: string) =>
+  (
+    await env.DB.prepare("SELECT records_written_at FROM compute_jobs WHERE id = ?")
+      .bind(id)
+      .first<{ records_written_at: string | null }>()
+  )?.records_written_at;
+
+describe("a path that passes the path rule and cannot be a key", () => {
+  // The path rule counts 512 UTF-16 characters; a key may be 1,024 BYTES, and 400 characters of 3 bytes
+  // are 1,200. A lone surrogate is a valid string and is no text a key can carry (encodeURIComponent
+  // throws a raw URIError on it). Both are found BEFORE anything is signed, and answered as the path.
+  const WIDE = "\u3042".repeat(400);
+  const LONE = ["\ud800", "a\udc00b", "ok/\ud83dx"];
+
+  test("both pass the path rule on its own, which is the disagreement", () => {
+    expect(submittedPathProblem(WIDE)).toBeNull();
+    for (const p of LONE) expect([p, submittedPathProblem(p)]).toEqual([p, null]);
+  });
+
+  test("presignIncomingUploads refuses them as invalid_spec naming the path, and signs nothing", async () => {
+    const made = await partnerJob();
+    const before = h.standin.log.length;
+    for (const bad of [WIDE, ...LONE]) {
+      expect([
+        bad.length,
+        await presignIncomingUploads(h.env(), made.id, [
+          { path: "fine.txt", size: 1 },
+          { path: bad, size: 1 },
+        ]),
+      ]).toEqual([bad.length, { ok: false, code: "invalid_spec", field: "files.1.path" }]);
+    }
+    expect(h.standin.log.length).toBe(before);
+  });
+
+  test("the records key is longer than the incoming key, and counts too: 327 wide characters pass one and not the other", async () => {
+    const made = await partnerJob();
+    const path = "\u3042".repeat(327);
+    const bytesOf = (k: string) => new TextEncoder().encode(k).length;
+    expect(bytesOf(incomingKey(made.id, path))).toBeLessThanOrEqual(1024);
+    expect(bytesOf(submittedKey(made.id, path))).toBeGreaterThan(1024);
+    expect(await presignIncomingUploads(h.env(), made.id, [{ path, size: 1 }])).toEqual({
+      ok: false,
+      code: "invalid_spec",
+      field: "files.0.path",
+    });
+    // One character fewer is a key on both sides.
+    const shorter = "\u3042".repeat(325);
+    expect((await presignIncomingUploads(h.env(), made.id, [{ path: shorter, size: 1 }])).ok).toBe(
+      true,
+    );
+  });
+
+  test("finalizeSubmittedFiles refuses them the same way, before any listing or copy", async () => {
+    const made = await partnerJob();
+    const { bucket, calls } = spy(h.records);
+    const env = { ...h.env(), COMPUTE_RECORDS: bucket };
+    for (const bad of [WIDE, ...LONE, "\u3042".repeat(327)]) {
+      expect([
+        bad.length,
+        await finalizeSubmittedFiles(env, made.id, { files: [{ path: bad, size: 1 }] }),
+      ]).toEqual([bad.length, { ok: false, code: "invalid_spec", field: "files.0.path" }]);
+    }
+    expect(calls).toEqual([]);
+    expect(cp("CopyObject")).toHaveLength(0);
+  });
+
+  test("a bundle manifest path builds no key, so it keeps the 512-character rule", async () => {
+    const env = h.env();
+    const made = await bundleJob();
+    await upload(made);
+    const r = await finalizeBundle(env, made.id, {
+      archive: { sha256: made.sha256, size: made.archive.length },
+      files: [
+        { path: WIDE, size: 1 },
+        { path: "\ud800", size: 1 },
+      ],
+    });
+    expect(r).toEqual({ ok: true, replayed: false, files: 2 });
+  });
+
+  test("an owner's read of a submitted file with such a name is no record, and writes no row", async () => {
+    const env = h.env();
+    const owner = await seedUser(env.DB, { role: "owner" });
+    const made = await bundleJob();
+    for (const path of [WIDE, ...LONE, "\u3042".repeat(327)]) {
+      const before = await trace(env.DB);
+      expect([
+        path.length,
+        await readRecordObject(env, env.DB, {
+          actor: { id: owner },
+          jobId: made.id,
+          name: `submitted/${path}`,
+          reason: "audit request 4711",
+        }),
+      ]).toEqual([path.length, { ok: false, code: "invalid_record" }]);
+      expect(await trace(env.DB)).toEqual(before);
+    }
+  });
+});
+
+describe("the finalize guards of the partner form", () => {
+  const FILES = [
+    ["src/run.py", "print('run')"],
+    ["params.json", '{"a":1}'],
+    ["a..b.csv", "1,2"],
+  ] as const;
+  const declared = () => FILES.map(([path, body]) => ({ path, size: bytes(body).length }));
+  async function uploaded() {
+    const made = await partnerJob();
+    for (const [path, body] of FILES) await h.records.put(incomingKey(made.id, path), bytes(body));
+    return made;
+  }
+
+  test("more than the partner cap is bundle_too_many_files, with no listing and no copy", async () => {
+    const made = await partnerJob();
+    const { bucket, calls } = spy(h.records);
+    const env = { ...h.env(), COMPUTE_RECORDS: bucket };
+    expect(PARTNER_FILES_MAX).toBe(500);
+    const many = (n: number) => Array.from({ length: n }, (_, i) => ({ path: `f${i}`, size: 1 }));
+    expect(
+      await finalizeSubmittedFiles(env, made.id, { files: many(PARTNER_FILES_MAX + 1) }),
+    ).toEqual({ ok: false, code: "bundle_too_many_files" });
+    expect(calls).toEqual([]);
+    expect(cp("CopyObject")).toHaveLength(0);
+    // The cap itself is allowed past the count (these were never uploaded, so it stops at the first).
+    expect(await finalizeSubmittedFiles(env, made.id, { files: many(PARTNER_FILES_MAX) })).toEqual({
+      ok: false,
+      code: "bad_state",
+      field: "files.0.path",
+    });
+  });
+
+  test("a destination that already holds another size is bad_state naming that file, and nothing is copied", async () => {
+    const env = h.env();
+    const made = await uploaded();
+    await h.records.put(submittedKey(made.id, "params.json"), bytes("someone else's longer bytes"));
+    expect(await finalizeSubmittedFiles(env, made.id, { files: declared() })).toEqual({
+      ok: false,
+      code: "bad_state",
+      field: "files.1.path",
+    });
+    expect(cp("CopyObject")).toHaveLength(0);
+    expect(await text(h.records, submittedKey(made.id, "params.json"))).toBe(
+      "someone else's longer bytes",
+    );
+    expect((await recordsKeys()).filter((k) => k.endsWith("bundle-manifest.json"))).toEqual([]);
+    expect(await recordsWrittenAt(env, made.id)).toBeNull();
+  });
+
+  test("a different manifest already recorded is bad_state and stays as it was", async () => {
+    const env = h.env();
+    const made = await uploaded();
+    await h.records.put(
+      recordKey(made.id, "bundle-manifest.json"),
+      bytes('{"another":"manifest"}'),
+    );
+    expect(await finalizeSubmittedFiles(env, made.id, { files: declared() })).toEqual({
+      ok: false,
+      code: "bad_state",
+    });
+    expect(await text(h.records, recordKey(made.id, "bundle-manifest.json"))).toBe(
+      '{"another":"manifest"}',
+    );
+    expect(await recordsWrittenAt(env, made.id)).toBeNull();
+  });
+
+  test("the same holds for a bundle: a different manifest already recorded stays, and the job is not written", async () => {
+    const env = h.env();
+    const made = await bundleJob();
+    await upload(made);
+    await h.records.put(
+      recordKey(made.id, "bundle-manifest.json"),
+      bytes('{"another":"manifest"}'),
+    );
+    expect(
+      await finalizeBundle(env, made.id, {
+        archive: { sha256: made.sha256, size: made.archive.length },
+        files: manifest(["run.py", 1]),
+      }),
+    ).toEqual({ ok: false, code: "bad_state" });
+    expect(await text(h.records, recordKey(made.id, "bundle-manifest.json"))).toBe(
+      '{"another":"manifest"}',
+    );
+    expect(await recordsWrittenAt(env, made.id)).toBeNull();
+  });
+});
+
+describe("the create-only conditional write", () => {
+  /** A bucket whose `head` never finds anything: a stale view, as a race between the head and the put would be. */
+  const stale = (real: R2Bucket): R2Bucket =>
+    ({
+      put: (k: string, v: unknown, o?: unknown) =>
+        real.put(k, v as ArrayBuffer, o as Parameters<R2Bucket["put"]>[2]),
+      get: (k: string) => real.get(k),
+      head: async () => null,
+      delete: (k: string) => real.delete(k),
+      list: (o?: Parameters<R2Bucket["list"]>[0]) => real.list(o),
+    }) as unknown as R2Bucket;
+
+  test("refuses to replace a record the head did not see: a different specification is a conflict and the bytes stay", async () => {
+    const id = `job_${"00".repeat(11)}a1`;
+    await h.records.put(recordKey(id, "spec.json"), bytes('{"first":true}'));
+    const env = { ...h.env(), COMPUTE_RECORDS: stale(h.records) };
+    await expect(writeSpec(env, id, '{"second":true}')).rejects.toMatchObject({
+      code: "record_conflict",
+    });
+    expect(await text(h.records, recordKey(id, "spec.json"))).toBe('{"first":true}');
+    // The same text is no conflict, and still writes nothing over it.
+    await writeSpec(env, id, '{"first":true}');
+    expect(await text(h.records, recordKey(id, "spec.json"))).toBe('{"first":true}');
+  });
+
+  test("keeps the first identity snapshot whatever the head says", async () => {
+    const e0 = h.env();
+    const accountId = await seedUser(e0.DB, { given_name: "First" });
+    const id = `job_${"00".repeat(11)}a2`;
+    await h.records.put(recordKey(id, "identity.json"), bytes('{"first":"snapshot"}'));
+    const env = { ...e0, COMPUTE_RECORDS: stale(h.records) };
+    await writeIdentitySnapshot(env, id, accountId);
+    expect(await text(h.records, recordKey(id, "identity.json"))).toBe('{"first":"snapshot"}');
+  });
+});
+
+describe("a copy is bounded by what R2 copies in one request", () => {
+  const GIB = 1024 ** 3;
+  test("the bound is 5 GiB, whatever the owner's limits say", () => {
+    expect(COPY_OBJECT_MAX_BYTES).toBe(5 * GIB);
+  });
+
+  test("an owner's limit above it does not lift it: the job, the address and the finalize all refuse", async () => {
+    const env = h.env();
+    const owner = await seedUser(env.DB, { role: "owner" });
+    await setPolicy(env.DB, owner, {
+      bundleLimits: { maxTotalBytes: 10 * GIB, maxFiles: 2000, maxFileBytes: 8 * GIB },
+    });
+    const sha = "a".repeat(64);
+    const accountId = await seedUser(env.DB);
+    await fundAccount(env.DB, accountId, 100_000);
+    await fundPlatform(env.DB, "people", 1_000_000_000);
+    const base = { source: "cli" as const, accountId, appId: "nemar-launch", appVersion: "1.0.0" };
+    const refused = await createJob(env, {
+      ...base,
+      spec: bundleJobSpec({ size: COPY_OBJECT_MAX_BYTES + 1, sha256: sha }),
+    });
+    expect(refused).toEqual({ ok: false, code: "bundle_too_large" });
+    const exact = await createJob(env, {
+      ...base,
+      spec: bundleJobSpec({ size: COPY_OBJECT_MAX_BYTES, sha256: sha }),
+    });
+    expect(exact.ok).toBe(true);
+    if (!exact.ok) return;
+    expect(
+      await finalizeBundle(env, exact.job.id, {
+        archive: { sha256: sha, size: COPY_OBJECT_MAX_BYTES + 1 },
+        files: manifest(["run.py", 1]),
+      }),
+    ).toEqual({ ok: false, code: "bundle_too_large" });
+    expect(cp("CopyObject")).toHaveLength(0);
+
+    // The address for a bundle is held to the bound on its own, not only because the job was: a job
+    // whose recorded specification names a larger archive (made under no such bound) gets no address.
+    const small = await bundleJob();
+    await h.records.put(
+      recordKey(small.id, "spec.json"),
+      JSON.stringify(bundleJobSpec({ size: COPY_OBJECT_MAX_BYTES + 1, sha256: small.sha256 })),
+    );
+    expect(
+      await presignIncomingUploads(env, small.id, [
+        { path: BUNDLE_ARCHIVE_NAME, size: COPY_OBJECT_MAX_BYTES + 1 },
+      ]),
+    ).toEqual({ ok: false, code: "bundle_too_large" });
+
+    const partner = await partnerJob();
+    for (const [size, ok] of [
+      [COPY_OBJECT_MAX_BYTES + 1, false],
+      [COPY_OBJECT_MAX_BYTES, true],
+    ] as const) {
+      const r = await presignIncomingUploads(env, partner.id, [{ path: "big.bin", size }]);
+      expect([size, r.ok]).toEqual([size, ok]);
+      if (!r.ok) expect(r.code).toBe("bundle_too_large");
+    }
+    expect(
+      await finalizeSubmittedFiles(env, partner.id, {
+        files: [{ path: "big.bin", size: COPY_OBJECT_MAX_BYTES + 1 }],
+      }),
+    ).toEqual({ ok: false, code: "bundle_too_large" });
   });
 });
 

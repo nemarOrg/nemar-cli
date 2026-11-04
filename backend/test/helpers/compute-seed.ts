@@ -155,6 +155,28 @@ export function jobSpec(over: Record<string, unknown> = {}): JobSpec {
   });
 }
 
+/**
+ * A partner's hold body as text, indented on purpose so that it is NOT what `JSON.stringify` of the
+ * parsed body would write: `spec_digest` is the digest of the exact bytes the partner sent.
+ */
+export function holdBody(over: Record<string, unknown> = {}): string {
+  return JSON.stringify(
+    {
+      app_id: "partner-app",
+      app_version: "2.1.0",
+      kind: "batch",
+      partition: "shared",
+      nodes: 1,
+      cores: 4,
+      gpus: 0,
+      minutes: 60,
+      ...over,
+    },
+    null,
+    2,
+  );
+}
+
 export const hex = (n: number) => n.toString(16).padStart(64, "0");
 
 /** A script job with its code bundle: it is uploaded after the job exists. */

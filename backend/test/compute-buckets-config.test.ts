@@ -17,8 +17,8 @@
  */
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { join, relative } from "node:path";
 import {
   COMPUTE_PRESIGN_MAX_SECONDS,
   ComputeS3Error,
@@ -235,5 +235,64 @@ describe("an expiry", () => {
       /^AKTESTKEY\/\d{8}\/auto\/s3\/aws4_request$/,
     );
     expect(put.expires_at).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+  });
+});
+
+describe("the test override of the compute endpoint", () => {
+  // A deployed Worker must never set the global that redirects compute's signed requests: it is read
+  // (services/compute-s3.ts) and set only by a test. Like the S3_ENDPOINT_URL fence, what a stray
+  // assignment in the product would do is send every presigned address somewhere else.
+  const ROOT = join(import.meta.dir, "../..");
+  const ASSIGNMENT = /NEMAR_COMPUTE_S3_URL["'\]]*\s*(?:=(?!=)|:)/;
+
+  test("the scan sees each way of setting it, and not a read or a type", () => {
+    for (const text of [
+      'globalThis.NEMAR_COMPUTE_S3_URL = "http://x"',
+      "(globalThis as { NEMAR_COMPUTE_S3_URL?: string }).NEMAR_COMPUTE_S3_URL = url",
+      'globalThis["NEMAR_COMPUTE_S3_URL"] = url',
+      "NEMAR_COMPUTE_S3_URL=url",
+      "Object.assign(globalThis, { NEMAR_COMPUTE_S3_URL: url })",
+      "Object.defineProperty(globalThis, 'NEMAR_COMPUTE_S3_URL', { value: 1 }); const o = { 'NEMAR_COMPUTE_S3_URL': 1 }",
+    ]) {
+      expect([text, ASSIGNMENT.test(text)]).toEqual([text, true]);
+    }
+    for (const text of [
+      "const o = (globalThis as { NEMAR_COMPUTE_S3_URL?: string }).NEMAR_COMPUTE_S3_URL;",
+      "if (globalThis.NEMAR_COMPUTE_S3_URL === undefined) {}",
+      "if (globalThis.NEMAR_COMPUTE_S3_URL == null) {}",
+    ]) {
+      expect([text, ASSIGNMENT.test(text)]).toEqual([text, false]);
+    }
+  });
+
+  test("no file the product ships sets it", () => {
+    const offences: string[] = [];
+    const walk = (dir: string) => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        if (entry.name === "node_modules" || entry.name === ".wrangler") continue;
+        const full = join(dir, entry.name);
+        if (entry.isDirectory()) walk(full);
+        else if (/\.(ts|tsx|js|mjs)$/.test(entry.name)) {
+          readFileSync(full, "utf8")
+            .split("\n")
+            .forEach((line, i) => {
+              if (ASSIGNMENT.test(line)) offences.push(`${relative(ROOT, full)}:${i + 1}`);
+            });
+        }
+      }
+    };
+    let walked = 0;
+    for (const dir of ["backend/src", "src", "shared", "scripts"]) {
+      if (existsSync(join(ROOT, dir))) {
+        walk(join(ROOT, dir));
+        walked++;
+      }
+    }
+    expect(walked).toBeGreaterThanOrEqual(3);
+    // ... and the file that reads it is among those walked, so the scan is not vacuous.
+    expect(readFileSync(join(ROOT, "backend/src/services/compute-s3.ts"), "utf8")).toContain(
+      "NEMAR_COMPUTE_S3_URL",
+    );
+    expect(offences).toEqual([]);
   });
 });

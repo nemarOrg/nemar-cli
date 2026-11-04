@@ -33,6 +33,7 @@ import {
   JOB_BY_KEY_SQL,
   JOB_INSERT_SQL,
   LIVE_JOBS_GUARD_SQL,
+  PARTNER_HOLD_BODY_MAX_BYTES,
   createJob,
   getJob,
   newGatewayUser,
@@ -47,6 +48,7 @@ import {
   fundPartner,
   fundPlatform,
   hex,
+  holdBody,
   jobSpec,
   roundTripD1,
   seedUser,
@@ -465,12 +467,10 @@ describe("a refused hold leaves no trace", () => {
       await refused(w, accountId, "partition_not_offered", {
         spec: jobSpec({ partition: "gpu-preempt", cores: 4, gpus: 1 }),
       });
-      for (const source of ["web", "partner"] as const) {
-        await refused(w, accountId, "partition_not_offered", {
-          source,
-          spec: jobSpec({ partition: "preempt" }),
-        });
-      }
+      await refused(w, accountId, "partition_not_offered", {
+        source: "web",
+        spec: jobSpec({ partition: "preempt" }),
+      });
     },
   );
 
@@ -686,16 +686,11 @@ describe("the other sources", () => {
     },
   );
 
-  onBoth("a person's source other than the CLI is the same job with another source", async (w) => {
+  onBoth("a person's job from the website is the same job with another source", async (w) => {
     const { accountId } = await person(w);
-    for (const source of ["web", "partner"] as const) {
-      const r = await createJob(
-        w.env(),
-        input(accountId, { source, clientId: source === "partner" ? "client.one" : undefined }),
-      );
-      if (!r.ok) throw new Error(`refused: ${r.code}`);
-      expect(r.job).toMatchObject({ source, account_id: accountId });
-    }
+    const r = await createJob(w.env(), input(accountId, { source: "web" }));
+    if (!r.ok) throw new Error(`refused: ${r.code}`);
+    expect(r.job).toMatchObject({ source: "web", account_id: accountId });
   });
 
   onBoth(
@@ -710,9 +705,7 @@ describe("the other sources", () => {
         accountId: null,
         clientId: client,
         tapisOwner: "some.tapis-user",
-        appId: "nemar-launch",
-        appVersion: "1.0.0",
-        spec: jobSpec(),
+        holdBody: holdBody(),
       });
       if (!r.ok) throw new Error(`refused: ${r.code}`);
       expect(r.job).toMatchObject({
@@ -743,7 +736,7 @@ describe("the other sources", () => {
       code: "invalid_argument",
     });
     await expect(
-      createJob(w.env(), { ...input(null), source: "partner" as const }),
+      createJob(w.env(), { source: "partner" as const, accountId: null, holdBody: holdBody() }),
     ).rejects.toMatchObject({ code: "invalid_argument" });
     await expect(createJob(w.env(), input(0))).rejects.toMatchObject({ code: "invalid_argument" });
     await expect(createJob(w.env(), input(1.5))).rejects.toMatchObject({
@@ -754,6 +747,294 @@ describe("the other sources", () => {
     ).rejects.toMatchObject({
       code: "invalid_argument",
     });
+  });
+});
+
+describe("a partner's hold body", () => {
+  const partnerInput = (
+    accountId: number | null,
+    body: string,
+    over: Record<string, unknown> = {},
+  ) => ({
+    source: "partner" as const,
+    accountId,
+    clientId: "client.one",
+    holdBody: body,
+    ...over,
+  });
+  const sha = async (bytes: Uint8Array) => {
+    const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+    return [...digest].map((b) => b.toString(16).padStart(2, "0")).join("");
+  };
+
+  onBoth(
+    "creates a job whose digest is that of the exact bytes written as spec.json",
+    async (w) => {
+      const { accountId } = await person(w);
+      const text = holdBody();
+      // The text is indented, so it is not what JSON.stringify of the parsed body writes.
+      expect(text).not.toBe(JSON.stringify(JSON.parse(text)));
+      const r = await createJob(w.env(), partnerInput(accountId, text));
+      if (!r.ok) throw new Error(`refused: ${r.code}`);
+      const written = new Uint8Array(
+        (await (await h.records.get(`records/${r.job.id}/spec.json`))?.arrayBuffer()) ??
+          new ArrayBuffer(0),
+      );
+      expect(new TextDecoder().decode(written)).toBe(text);
+      expect(r.job.spec_digest).toBe(await sha(written));
+      expect(r.job.spec_digest).toBe(await sha(new TextEncoder().encode(text)));
+      expect(r.job).toMatchObject({
+        source: "partner",
+        account_id: accountId,
+        app_id: "partner-app",
+        app_version: "2.1.0",
+        kind: "batch",
+        partition: "shared",
+        pool: "cpu",
+        nodes: 1,
+        cores_per_node: 4,
+        memory_mb: null,
+        gpus: 0,
+        minutes: 60,
+        held_milli: FOUR_SU,
+        image_digest: null,
+        client_id: "client.one",
+      });
+      // A batch job waits for its own files; an interactive session is its own record.
+      expect(r.job.records_written_at).toBeNull();
+      const session = await createJob(
+        w.env(),
+        partnerInput(accountId, holdBody({ kind: "interactive" })),
+      );
+      if (!session.ok) throw new Error(`refused: ${session.code}`);
+      expect(session.job).toMatchObject({ kind: "interactive" });
+      expect(session.job.records_written_at).not.toBeNull();
+    },
+  );
+
+  onBoth("is not a job specification: what that schema refuses, a hold body may be", async (w) => {
+    const funded = await seedUser(w.d1);
+    await fundAccount(w.d1, funded, 100_000, "gpu");
+    await fundPlatform(w.d1, "people", 1_000_000_000, "gpu");
+    // No cores on a GPU partition, and no name, runtime or entry: a hold is only the reservation.
+    const r = await createJob(
+      w.env(),
+      partnerInput(
+        funded,
+        holdBody({ partition: "gpu-shared", cores: 0, gpus: 1, memory_mb: 16_000 }),
+      ),
+    );
+    if (!r.ok) throw new Error(`refused: ${r.code}`);
+    expect(r.job).toMatchObject({
+      pool: "gpu",
+      partition: "gpu-shared",
+      cores_per_node: 0,
+      gpus: 1,
+      memory_mb: 16_000,
+    });
+  });
+
+  onBoth(
+    "that is malformed is refused invalid_spec, naming the field, and leaves no trace",
+    async (w) => {
+      const { accountId } = await person(w);
+      const before = { rows: await trace(w.d1), buckets: await bucketKeys() };
+      const cases: Array<[string, string, string | undefined]> = [
+        ["not JSON", "{", undefined],
+        ["an array", "[]", undefined],
+        ["null", "null", undefined],
+        ["a string", '"x"', undefined],
+        ["an unknown key", holdBody({ extra: 1 }), undefined],
+        ["no partition", holdBody({ partition: undefined }), "partition"],
+        ["an unknown partition", holdBody({ partition: "nowhere" }), "partition"],
+        ["no nodes", holdBody({ nodes: undefined }), "nodes"],
+        ["zero nodes", holdBody({ nodes: 0 }), "nodes"],
+        ["a fractional node count", holdBody({ nodes: 1.5 }), "nodes"],
+        ["too many cores", holdBody({ cores: 257 }), "cores"],
+        ["no minutes", holdBody({ minutes: undefined }), "minutes"],
+        ["too many minutes", holdBody({ minutes: 10_081 }), "minutes"],
+        ["a bad kind", holdBody({ kind: "session" }), "kind"],
+        ["a bad app id", holdBody({ app_id: "a b" }), "app_id"],
+        ["a bad app version", holdBody({ app_version: "a/b" }), "app_version"],
+        ["a GPU on a CPU partition", holdBody({ gpus: 1 }), "gpus"],
+        [
+          "no GPU on a GPU partition",
+          holdBody({ partition: "gpu-shared", cores: 0, gpus: 0 }),
+          "gpus",
+        ],
+        // Valid JSON with every field right, only longer than a hold body can be.
+        ["a body over 8 KiB", `${holdBody()}${" ".repeat(PARTNER_HOLD_BODY_MAX_BYTES)}`, undefined],
+      ];
+      for (const [name, text, field] of cases) {
+        const r = await createJob(w.env(), partnerInput(accountId, text));
+        expect([name, r]).toEqual([
+          name,
+          { ok: false, code: "invalid_spec", ...(field ? { field } : {}) },
+        ]);
+      }
+      expect({ rows: await trace(w.d1), buckets: await bucketKeys() }).toEqual(before);
+    },
+  );
+
+  onBoth("takes a body of exactly the most it can be", async (w) => {
+    const { accountId } = await person(w);
+    const base = holdBody();
+    const text = `${base}${" ".repeat(PARTNER_HOLD_BODY_MAX_BYTES - new TextEncoder().encode(base).length)}`;
+    expect(new TextEncoder().encode(text).length).toBe(PARTNER_HOLD_BODY_MAX_BYTES);
+    expect(await createJob(w.env(), partnerInput(accountId, text))).toMatchObject({ ok: true });
+  });
+
+  onBoth(
+    "meets the owner's ceilings and the partitions offered, as a person's job does",
+    async (w) => {
+      const { accountId } = await person(w, 5_000_000);
+      expect(
+        await createJob(w.env(), partnerInput(accountId, holdBody({ cores: 65 }))),
+      ).toMatchObject({
+        ok: false,
+        code: "over_job_limit",
+      });
+      expect(
+        await createJob(w.env(), partnerInput(accountId, holdBody({ partition: "preempt" }))),
+      ).toMatchObject({
+        ok: false,
+        code: "partition_not_offered",
+      });
+      expect(
+        await createJob(w.env(), partnerInput(accountId, holdBody({ cores: 64 }))),
+      ).toMatchObject({ ok: true });
+    },
+  );
+
+  onBoth(
+    "is replayed by its exact bytes: the same text is the same job, another spelling is another request",
+    async (w) => {
+      const { accountId } = await person(w);
+      const key = `key-${Math.random().toString(36).slice(2, 12)}`;
+      const text = holdBody();
+      const first = await createJob(
+        w.env(),
+        partnerInput(accountId, text, { idempotencyKey: key }),
+      );
+      if (!first.ok) throw new Error(`refused: ${first.code}`);
+      const again = await createJob(
+        w.env(),
+        partnerInput(accountId, text, { idempotencyKey: key }),
+      );
+      expect(again).toMatchObject({ ok: true, replayed: true });
+      // The same fields written with other whitespace are other bytes, so another request.
+      const respelled = JSON.stringify(JSON.parse(text));
+      const err = await createJob(
+        w.env(),
+        partnerInput(accountId, respelled, { idempotencyKey: key }),
+      ).catch((e) => e);
+      expect(err).toMatchObject({ code: "idempotency_conflict" });
+    },
+  );
+
+  test("a partner job takes a hold body and no specification, and the others take a specification and no hold body", async () => {
+    const w = worlds()[0] as World;
+    const { accountId } = await person(w);
+    await expect(
+      createJob(w.env(), {
+        source: "partner",
+        accountId,
+        clientId: "c",
+        appId: "a",
+        appVersion: "1",
+        spec: jobSpec(),
+      } as never),
+    ).rejects.toMatchObject({ code: "invalid_argument" });
+    await expect(
+      createJob(w.env(), { ...input(accountId), holdBody: holdBody() } as never),
+    ).rejects.toMatchObject({ code: "invalid_argument" });
+    await expect(
+      createJob(w.env(), { source: "partner", accountId, clientId: "c", holdBody: 5 } as never),
+    ).rejects.toMatchObject({ code: "invalid_argument" });
+  });
+});
+
+describe("an argument the table cannot take", () => {
+  // Each is a programming error and is thrown before anything is written; each pattern is anchored, so
+  // a value that merely CONTAINS a good one (a trailing newline, a space) is not good.
+  const w0 = () => worlds()[0] as World;
+  const bad = (over: Record<string, unknown>) => async () => {
+    const w = w0();
+    const { accountId } = await person(w);
+    const before = await trace(w.d1);
+    await expect(
+      createJob(w.env(), {
+        ...input(accountId, { source: "web" }),
+        ...over,
+      } as never),
+    ).rejects.toMatchObject({ code: "invalid_argument" });
+    expect(await trace(w.d1)).toEqual(before);
+  };
+  const SHAPES = ["", "a b", "a/b", "a\n", " a", "a ", "\u00e9", "a\u0000b"];
+
+  for (const [name, field, limit] of [
+    ["a Tapis owner", "tapisOwner", 128],
+    ["a partner client", "clientId", 64],
+    ["an application id", "appId", 80],
+    ["an application version", "appVersion", 64],
+  ] as const) {
+    for (const value of [...SHAPES, "x".repeat(limit + 1)]) {
+      test(
+        `${name} ${JSON.stringify(value.length > 20 ? `${value.slice(0, 8)}...(${value.length})` : value)} is refused`,
+        bad({ [field]: value }),
+      );
+    }
+  }
+
+  for (const value of ["short", "a b", "a/b", "key\n", "x".repeat(129), "\u00e9".repeat(8)]) {
+    test(
+      `an idempotency key ${JSON.stringify(value.length > 20 ? `${value.slice(0, 8)}...(${value.length})` : value)} is refused`,
+      bad({ idempotencyKey: value }),
+    );
+  }
+
+  test("the longest good value of each is taken", async () => {
+    const w = w0();
+    const { accountId } = await person(w);
+    const r = await createJob(w.env(), {
+      ...input(accountId, { source: "web" }),
+      tapisOwner: "o".repeat(128),
+      clientId: "c".repeat(64),
+      appId: "a".repeat(80),
+      appVersion: "v".repeat(64),
+      idempotencyKey: "k".repeat(128),
+    } as never);
+    expect(r.ok).toBe(true);
+  });
+
+  test("an idempotency key needs an account: a job with none could never be replayed", async () => {
+    const w = w0();
+    await fundPlatform(w.d1, "people", 1_000_000_000);
+    const client = `client-${Math.random().toString(36).slice(2, 10)}`;
+    await fundPartner(w.d1, client, 100_000);
+    const before = await trace(w.d1);
+    // The unique index treats NULL accounts as distinct, so a key here would be stored and never found
+    // (partner replay is keyed by the partner contract's own table, #2024 and #2025).
+    await expect(
+      createJob(w.env(), {
+        source: "partner",
+        accountId: null,
+        clientId: client,
+        holdBody: holdBody(),
+        idempotencyKey: "a-key-of-length-ok",
+      }),
+    ).rejects.toMatchObject({ code: "invalid_argument" });
+    await expect(
+      createJob(w.env(), {
+        source: "pipeline",
+        accountId: null,
+        appId: "nemar-launch",
+        appVersion: "1.0.0",
+        spec: jobSpec({ partition: "large-shared" }),
+        idempotencyKey: "a-key-of-length-ok",
+      }),
+    ).rejects.toMatchObject({ code: "invalid_argument" });
+    expect(await trace(w.d1)).toEqual(before);
   });
 });
 
