@@ -9,11 +9,15 @@
  * on their own; `oidc-authorize-sign-in-loop.test.ts` drives the same callback from the check route.
  *
  *   1. A plain sign-in (`mode=login`) never attaches the finished iD to the account a cookie already
- *      in the browser names, under either cookie name. The account is the one the iD itself names
- *      (signed in with a FRESH session, whatever session the browser held) or a new sign-up.
- *   2. An explicit link (`link` or `relink` in the state cookie, which only this site sets) attaches
- *      the iD to the session's account; while `HOST_PREFIXED_SESSION_COOKIE` is on, only to a session
- *      read under the `__Host-` name.
+ *      in the browser names, under either cookie name and whether `HOST_PREFIXED_SESSION_COOKIE` is
+ *      on or off. The account is the one the iD itself names (signed in with a FRESH session,
+ *      whatever session the browser held) or a new sign-up.
+ *   2. A link is armed only by the POST start, which checks Origin and requires a session; a GET
+ *      start with `mode=link` or `mode=relink` starts a plain sign-in, with the flag on or off.
+ *   3. An explicit link (`link` or `relink` in the state cookie) attaches the iD to the session's
+ *      account; while the flag is on, only to a session read under the `__Host-` name. With the flag
+ *      off a legacy-name session still decides, for a link the POST started: that residual closes
+ *      only when the production flag is on (ADR 0119 rule 10), and a test below states it.
  */
 
 import type { Database } from "bun:sqlite";
@@ -21,7 +25,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:tes
 import type { Server } from "bun";
 import { Hono } from "hono";
 import { authOrcidRoutes } from "../src/routes/auth-orcid";
-import { encodeState } from "../src/services/orcid-auth";
+import { decodeState, encodeState } from "../src/services/orcid-auth";
 import { hashCookieId, issueSession } from "../src/services/web-session";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
@@ -164,42 +168,149 @@ function orcidOf(userId: number): string | null {
   );
 }
 
-describe("a plain sign-in ignores a session cookie already in the browser", () => {
-  for (const name of ["nemar_session", "__Host-nemar_session"]) {
-    test(`an unclaimed iD is not attached to the account a ${name} cookie names`, async () => {
-      const cookieOwner = seedPerson();
-      returnedOrcid = OTHER_ID;
-      const res = await callback("login", "/dashboard", [await session(cookieOwner, name)]);
-      expect(identitiesOf(cookieOwner)).toEqual([]);
-      expect(orcidOf(cookieOwner)).toBeNull();
-      // The iD belongs to nobody yet, so this is a new sign-up: the email step, and no session.
-      expect(res.headers.get("Location")).toStartWith(`${APP}/auth/orcid/complete`);
-      expect(mintedSession(res)).toBeNull();
+/** The start route, as the browser reaches it from Settings. */
+function start(
+  method: "GET" | "POST",
+  mode: "link" | "relink",
+  headers: Record<string, string> = {},
+): Promise<Response> {
+  return app.request(
+    `${APP}/auth/orcid/start?mode=${mode}&next=%2Fsettings`,
+    { method, headers },
+    env(),
+  );
+}
+
+interface Armed {
+  /** The state cookie as the browser sends it back, `name=value`. */
+  cookie: string;
+  state: NonNullable<ReturnType<typeof decodeState>>;
+}
+
+/** The state cookie a start response set, decoded, or null when it set none. */
+function armedState(res: Response): Armed | null {
+  for (const raw of res.headers.getSetCookie()) {
+    const [pair] = raw.split(";");
+    const eq = pair.indexOf("=");
+    const name = pair.slice(0, eq);
+    if (name !== "__Host-nemar_oauth_state" && name !== "nemar_oauth_state") continue;
+    const state = decodeState(pair.slice(eq + 1));
+    if (state) return { cookie: pair, state };
+  }
+  return null;
+}
+
+/** The callback, carrying the state cookie a real start response set. */
+function callbackFrom(armed: Armed, cookies: string[] = []): Promise<Response> {
+  return app.request(
+    `${APP}/auth/orcid/callback?state=${encodeURIComponent(armed.state.csrf)}&code=authcode`,
+    { headers: { Cookie: [armed.cookie, ...cookies].join("; ") } },
+    env(),
+  );
+}
+
+/** The session cookie name sessions are issued under for a flag value. */
+function sessionNameFor(flagValue: string | undefined): string {
+  return flagValue === "1" ? "__Host-nemar_session" : "nemar_session";
+}
+
+const FLAG_STATES = [
+  { flagValue: "1", label: "on" },
+  { flagValue: undefined, label: "off" },
+] as const;
+
+for (const { flagValue, label } of FLAG_STATES) {
+  describe(`a plain sign-in ignores a session cookie already in the browser (flag ${label})`, () => {
+    beforeEach(() => {
+      flag = flagValue;
     });
 
-    test(`an iD that backs another account signs that account in, whatever a ${name} cookie names`, async () => {
-      const cookieOwner = seedPerson();
-      const holder = seedPerson(PERSON_ID);
-      const res = await callback("login", "/dashboard", [await session(cookieOwner, name)]);
-      expect(identitiesOf(cookieOwner)).toEqual([]);
+    for (const name of ["nemar_session", "__Host-nemar_session"]) {
+      test(`an unclaimed iD is not attached to the account a ${name} cookie names`, async () => {
+        const cookieOwner = seedPerson();
+        returnedOrcid = OTHER_ID;
+        const res = await callback("login", "/dashboard", [await session(cookieOwner, name)]);
+        expect(identitiesOf(cookieOwner)).toEqual([]);
+        expect(orcidOf(cookieOwner)).toBeNull();
+        // The iD belongs to nobody yet, so this is a new sign-up: the email step, and no session.
+        expect(res.headers.get("Location")).toStartWith(`${APP}/auth/orcid/complete`);
+        expect(mintedSession(res)).toBeNull();
+      });
+
+      test(`an iD that backs another account signs that account in, whatever a ${name} cookie names`, async () => {
+        const cookieOwner = seedPerson();
+        const holder = seedPerson(PERSON_ID);
+        const res = await callback("login", "/dashboard", [await session(cookieOwner, name)]);
+        expect(identitiesOf(cookieOwner)).toEqual([]);
+        const fresh = mintedSession(res);
+        expect(fresh).not.toBeNull();
+        expect(await accountOf(fresh as string)).toBe(holder);
+      });
+    }
+
+    test("signing in again with a live session for the same account mints a new session", async () => {
+      // What the authorization endpoint waits for when it asks for a fresh sign-in.
+      const person = seedPerson(PERSON_ID);
+      const old = await session(person, sessionNameFor(flagValue));
+      const res = await callback("login", "/oauth/authorize?client_id=x", [old]);
+      expect(res.headers.get("Location")).toBe(`${APP}/oauth/authorize?client_id=x`);
       const fresh = mintedSession(res);
       expect(fresh).not.toBeNull();
-      expect(await accountOf(fresh as string)).toBe(holder);
+      expect(fresh).not.toBe(old);
+      expect(await accountOf(fresh as string)).toBe(person);
     });
-  }
-
-  test("signing in again with a live session for the same account mints a new session", async () => {
-    // What the authorization endpoint waits for when it asks for a fresh sign-in.
-    const person = seedPerson(PERSON_ID);
-    const old = await session(person);
-    const res = await callback("login", "/oauth/authorize?client_id=x", [old]);
-    expect(res.headers.get("Location")).toBe(`${APP}/oauth/authorize?client_id=x`);
-    const fresh = mintedSession(res);
-    expect(fresh).not.toBeNull();
-    expect(fresh).not.toBe(old);
-    expect(await accountOf(fresh as string)).toBe(person);
   });
-});
+
+  describe(`only the POST start arms a link (flag ${label})`, () => {
+    beforeEach(() => {
+      flag = flagValue;
+    });
+
+    test("a GET with mode=link or mode=relink starts a plain sign-in, with or without a session", async () => {
+      const person = seedPerson();
+      const cookie = await session(person, sessionNameFor(flagValue));
+      for (const mode of ["link", "relink"] as const) {
+        for (const headers of [{}, { Cookie: cookie }]) {
+          const res = await start("GET", mode, headers);
+          expect(res.status).toBe(302);
+          expect(res.headers.get("Location")).toContain("/oauth/authorize");
+          expect(armedState(res)?.state.mode).toBe("login");
+        }
+      }
+    });
+
+    test("a POST with this site's Origin and a session arms the link", async () => {
+      const person = seedPerson();
+      const res = await start("POST", "link", {
+        Origin: APP,
+        Cookie: await session(person, sessionNameFor(flagValue)),
+      });
+      expect(res.status).toBe(302);
+      expect(res.headers.get("Location")).toContain("/oauth/authorize");
+      expect(armedState(res)?.state.mode).toBe("link");
+      expect(armedState(res)?.state.next).toBe("/settings");
+    });
+
+    test("a POST from another origin, or with no Origin, is refused and arms nothing", async () => {
+      const person = seedPerson();
+      const cookie = await session(person, sessionNameFor(flagValue));
+      for (const origin of ["https://elsewhere.example", null]) {
+        const headers: Record<string, string> = { Cookie: cookie };
+        if (origin !== null) headers.Origin = origin;
+        const res = await start("POST", "link", headers);
+        expect(res.status).toBe(403);
+        expect(armedState(res)).toBeNull();
+      }
+    });
+
+    test("a POST with no session sends the person to sign in and arms nothing", async () => {
+      const res = await start("POST", "link", { Origin: APP });
+      expect(res.status).toBe(302);
+      expect(res.headers.get("Location")).toContain("/login?error=session_required");
+      expect(armedState(res)).toBeNull();
+    });
+  });
+}
 
 describe("an explicit link attaches the iD to the session's account", () => {
   test("with a __Host- session, the iD is attached", async () => {
@@ -225,12 +336,56 @@ describe("an explicit link attaches the iD to the session's account", () => {
       expect(mintedSession(res)).toBeNull();
     }
   });
+});
 
-  test("with a legacy-name session while the flag is off, the link still works", async () => {
-    flag = undefined;
+describe("start to callback with the flag on", () => {
+  test("a link the POST started attaches for a __Host- session and is refused for a legacy one", async () => {
     const person = seedPerson();
-    const res = await callback("link", "/settings", [await session(person, "nemar_session")]);
+    const hostCookie = await session(person);
+    const armed = armedState(await start("POST", "link", { Origin: APP, Cookie: hostCookie }));
+    expect(armed?.state.mode).toBe("link");
+    expect(errorOf(await callbackFrom(armed as Armed, [hostCookie]))).toBeNull();
+    expect(identitiesOf(person)).toEqual([PERSON_ID]);
+
+    const other = seedPerson();
+    returnedOrcid = OTHER_ID;
+    const legacy = await session(other, "nemar_session");
+    const legacyArmed = armedState(await start("POST", "link", { Origin: APP, Cookie: legacy }));
+    const res = await callbackFrom(legacyArmed as Armed, [legacy]);
+    expect(errorOf(res)).toBe("session_required");
+    expect(identitiesOf(other)).toEqual([]);
+  });
+});
+
+describe("start to callback with the flag off", () => {
+  beforeEach(() => {
+    flag = undefined;
+  });
+
+  test("a link a GET tried to start signs in instead: the iD is not attached to the account a legacy session names", async () => {
+    const cookieOwner = seedPerson();
+    const cookie = await session(cookieOwner, "nemar_session");
+    const armed = armedState(await start("GET", "link", { Cookie: cookie }));
+    expect(armed?.state.mode).toBe("login");
+    const res = await callbackFrom(armed as Armed, [cookie]);
+    expect(identitiesOf(cookieOwner)).toEqual([]);
+    expect(orcidOf(cookieOwner)).toBeNull();
+    // The iD belongs to nobody yet, so this is a new sign-up, not a link.
+    expect(res.headers.get("Location")).toStartWith(`${APP}/auth/orcid/complete`);
+  });
+
+  test("a link the POST started still attaches to the account a legacy session names: the residual the production flag closes", async () => {
+    // ADR 0119 rule 10. With the flag off the legacy name is the only session name there is, so it
+    // decides whose account gains the iD. A cross-site navigation can no longer arm the link, but
+    // nothing at this layer tells the person's own legacy cookie from one another host set; turning
+    // the production flag on is what closes that.
+    const person = seedPerson();
+    const cookie = await session(person, "nemar_session");
+    const armed = armedState(await start("POST", "link", { Origin: APP, Cookie: cookie }));
+    expect(armed?.state.mode).toBe("link");
+    const res = await callbackFrom(armed as Armed, [cookie]);
     expect(errorOf(res)).toBeNull();
     expect(identitiesOf(person)).toEqual([PERSON_ID]);
+    expect(orcidOf(person)).toBe(PERSON_ID);
   });
 });

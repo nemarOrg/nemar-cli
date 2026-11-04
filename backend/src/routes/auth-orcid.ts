@@ -26,24 +26,26 @@
  * -- a row in `orcid_link_intents` (migration 0078) the callback consumes.
  * Unlink needs no browser at all and takes a bearer token directly.
  *
- * Linking is initiated via `GET /auth/orcid/start?mode=link` and completed in
- * the same callback (in a link flow, the callback links to the user the session
- * cookie resolves to), so there is no separate `POST /auth/orcid/link` route in
- * the issue's sketch -- the callback covers it. Noted here so the divergence from
- * the issue's 4-route list is intentional, not an omission. A plain sign-in
- * (`mode=login`) never links to a session's account: it signs in the account
- * the iD names, or starts a sign-up, and always mints a fresh session (ADR 0119
- * rule 10).
+ * Linking is initiated by a form POST to `/auth/orcid/start?mode=link`
+ * (Settings' "Connect your ORCID") and completed in the same callback (in a
+ * link flow, the callback links to the user the session cookie resolves to),
+ * so there is no separate `POST /auth/orcid/link` route in the issue's sketch
+ * -- the callback covers it. Noted here so the divergence from the issue's
+ * 4-route list is intentional, not an omission. A plain sign-in (`mode=login`)
+ * never links to a session's account: it signs in the account the iD names, or
+ * starts a sign-up, and always mints a fresh session (ADR 0119 rule 10).
  *
  * Re-linking (#913): Settings' confirm step submits a form POST to
- * `/auth/orcid/start?mode=relink` — POST is the ONLY entry that can mint
- * relink intent, because it carries an Origin header the route verifies and
- * requires a live session (the same gate as /orcid/unlink). A GET with
- * mode=relink quietly degrades to login: a bare cross-site link rides the
- * victim's ambient cookies, and an unauthenticated GET must never be able
- * to arm an identity swap. The callback then swaps the linked identity when
- * the finished iD is unclaimed; without relink mode a second, different iD
- * is refused (`orcid_already_have`), as before.
+ * `/auth/orcid/start?mode=relink`.
+ *
+ * POST is the ONLY entry that can mint link or relink intent, because it
+ * carries an Origin header the route verifies and requires a live session (the
+ * same gate as /orcid/unlink). A GET with mode=link or mode=relink quietly
+ * degrades to login: a cross-site navigation rides the person's ambient
+ * cookies, and a GET must never be able to choose which account an iD attaches
+ * to or arm an identity swap. The callback then swaps the linked identity when
+ * the finished iD is unclaimed; without relink mode a second, different iD is
+ * refused (`orcid_already_have`), as before.
  *
  * Identity uniqueness (#1254, ADR 0043): an iD backs at most one LIVE account,
  * and "backs" means `users.orcid` OR an `oauth_identities` row -- not just the
@@ -360,20 +362,22 @@ function startOrcidFlow(
 
 authOrcidRoutes.get("/orcid/start", (c) => {
   const url = new URL(c.req.url);
-  const rawMode = url.searchParams.get("mode");
-  // A GET can be forged by a bare cross-site link riding the victim's
-  // ambient cookies, so it may never mint relink intent (#913). mode=relink
-  // here degrades to login: for an account that already has a linked iD the
-  // callback then refuses with orcid_already_have — the pre-#913 behavior.
-  const mode: OauthMode = rawMode === "link" ? "link" : "login";
+  // A GET can be forged by a cross-site navigation riding the person's ambient
+  // cookies, so it never mints link or relink intent (#913, ADR 0119 rule 10):
+  // whatever `mode` says, it starts a plain sign-in, which signs in the account
+  // the iD names (or starts a sign-up) and never attaches the iD to the account
+  // a session cookie names. Only the POST below, which checks Origin and
+  // requires a session, starts a link.
+  const mode: OauthMode = "login";
   return startOrcidFlow(c, mode, safeNextPath(url.searchParams.get("next")));
 });
 
 /**
- * POST variant (#913) — the only entry that can mint mode=relink. The
- * Settings confirm step submits a real form here, so the browser attaches
- * an Origin header; the same-origin check plus the session requirement make
- * relink intent unforgeable by a link click (the /orcid/unlink gate).
+ * POST variant (#913) — the only entry that can mint mode=link or mode=relink.
+ * Settings' Connect button and its relink confirm step submit a real form
+ * here, so the browser attaches an Origin header; the same-origin check plus
+ * the session requirement make link and relink intent unforgeable by a
+ * cross-site navigation (the /orcid/unlink gate).
  * Without them, a crafted GET link plus an ambient ORCID session could
  * silently swap which iD backs the account — see PR #1051's review.
  */
@@ -830,7 +834,8 @@ authOrcidRoutes.get("/orcid/callback", webSessionMiddleware, async (c) => {
     // browser can sign in between them.
     //
     // A website flow attaches the iD to the session's account ONLY when it was
-    // started as a link (`link` or `relink` in the state cookie). A plain
+    // started as a link (`link` or `relink` in the state cookie, which only the
+    // Origin-checked, session-requiring POST start mints). A plain
     // sign-in never does, whatever session cookie the browser holds: the
     // account is the one the iD itself names, or a new one, and the sign-in
     // mints a fresh session for it below. Two rules rest on that (ADR 0119
@@ -855,9 +860,13 @@ authOrcidRoutes.get("/orcid/callback", webSessionMiddleware, async (c) => {
     } else if ((state.mode === "link" || state.mode === "relink") && c.var.webUser) {
       // While sessions are issued under the `__Host-` name, only a session read
       // under it may have an iD attached: the legacy name is one a sibling host
-      // can set, the same rule the authorization routes apply to a grant. With
-      // the flag off the legacy name is the only one there is, and the state
-      // cookie, which only this site sets, shows the link was started here.
+      // can set, the same rule the authorization routes apply to a grant.
+      // With the flag off the legacy name is the only one there is, so this
+      // branch still takes it. The link itself was started by the POST start,
+      // which a cross-site navigation cannot reach, but the session it acts
+      // for may be a legacy cookie a sibling host set rather than the person's
+      // own. That residual closes only when the production flag is on (ADR
+      // 0119 rule 10).
       if (hostPrefixedSessionCookie(c.env) && c.var.webSessionCookieName !== SESSION_COOKIE_NAME) {
         return fail("session_required", `/login?next=${encodeURIComponent(state.next)}`);
       }
